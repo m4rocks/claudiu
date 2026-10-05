@@ -36,13 +36,14 @@ jobs:
           New-Item -ItemType Directory -Force dist/publish | Out-Null
           Copy-Item target/release/claudiu.exe dist/publish/
           vpk pack --packId Claudiu --packVersion "${{ steps.ver.outputs.version }}" --packDir dist/publish --mainExe claudiu.exe --packTitle Claudiu --icon assets/claudiu.ico --outputDir dist/releases
-      - name: Upload
-        run: vpk upload github --repoUrl "${{ github.server_url }}/${{ github.repository }}" --outputDir dist/releases --publish --releaseName "Claudiu ${{ steps.ver.outputs.version }}" --tag "${{ github.ref_name }}" --token "${{ secrets.GITHUB_TOKEN }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: releases-win
+          path: dist/releases
 
   macos:
     # One universal (arm64 + x86_64) build. Unsigned/ad-hoc signed: Gatekeeper will warn until a
     # Developer ID identity is added (vpk --signAppIdentity / --notaryProfile).
-    needs: windows # the Windows job creates the release; this one merges into it
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -74,5 +75,25 @@ jobs:
         run: vpk download github --repoUrl "${{ github.server_url }}/${{ github.repository }}" --token "${{ secrets.GITHUB_TOKEN }}"
       - name: Pack
         run: vpk pack --packId Claudiu --packVersion "${{ steps.ver.outputs.version }}" --packDir dist/publish --mainExe claudiu --packTitle Claudiu --icon dist/claudiu.icns --bundleId com.m4rocks.claudiu --outputDir dist/releases
-      - name: Upload (merge into the release created by the Windows job)
-        run: vpk upload github --repoUrl "${{ github.server_url }}/${{ github.repository }}" --outputDir dist/releases --merge --publish --releaseName "Claudiu ${{ steps.ver.outputs.version }}" --tag "${{ github.ref_name }}" --token "${{ secrets.GITHUB_TOKEN }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: releases-osx
+          path: dist/releases
+
+  publish:
+    # The builds run in parallel; uploading from one job afterwards avoids both racing to create the release.
+    needs: [windows, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.x
+      - name: Install Velopack CLI
+        run: dotnet tool install -g vpk
+      - name: Upload
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          for channel in win osx; do
+            vpk upload github --channel "$channel" --repoUrl "${{ github.server_url }}/${{ github.repository }}" --outputDir "releases-$channel" --merge --publish --releaseName "Claudiu $version" --tag "${{ github.ref_name }}" --token "${{ secrets.GITHUB_TOKEN }}"
+          done
