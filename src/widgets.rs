@@ -170,6 +170,26 @@ pub fn button(
     }
 }
 
+/// A button that can't be pressed right now: dimmed, no hover, no click handler attached by the caller.
+pub fn button_disabled(id: impl Into<SharedString>, label: impl Into<SharedString>) -> Stateful<Div> {
+    button_with(id.into(), label.into(), hsla(0x1b1b1b), hsla(theme::TEXT_FAINT), hsla(0x1b1b1b), false).cursor_default()
+}
+
+/// One half of a split button (`( label | ▾ )`): sits inside a rounded group and only shows a hover fill.
+pub fn segment(id: impl Into<SharedString>, label: impl Into<SharedString>) -> Stateful<Div> {
+    div()
+        .id(id.into())
+        .h_full()
+        .px(px(9.0))
+        .flex()
+        .items_center()
+        .text_size(px(12.0))
+        .text_color(hsla(theme::TEXT))
+        .cursor_pointer()
+        .hover(|s| s.bg(hsla(0x262626)))
+        .child(label.into())
+}
+
 /// Destructive action (end session, quit).
 pub fn danger_button(id: impl Into<SharedString>, label: impl Into<SharedString>) -> Stateful<Div> {
     button_with(

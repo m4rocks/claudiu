@@ -1,11 +1,11 @@
 //! "Commit & Push": stage everything, have Haiku write the message through the user's own `claude` CLI
 //! (`claude -p`, no tools, no session saved), commit, then push. "Pull" is a plain `git pull`; the branch menu
-//! switches branches and creates new ones from origin. The `git` CLI is
+//! switches branches and creates new ones from origin (which `background_fetch` keeps fresh). The `git` CLI is
 //! used rather than libgit2 so the user's hooks, signing, identity, credentials and pull config apply exactly
 //! as for a manual commit.
 
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -22,6 +22,10 @@ line and a few short lines of explanation. Match the style of the recent commits
 /// Stage all changes, commit them with a generated message (when there are any), then push.
 /// Returns a one-line summary for a toast. Blocking.
 pub fn commit_and_push(claude: &Path, cwd: &Path) -> Result<String, String> {
+    // Staging now would commit the conflict markers.
+    if has_unmerged(cwd) {
+        return Err("Resolve the merge conflicts first".into());
+    }
     git(cwd, &["add", "-A"], None)?;
     let diff = git(cwd, &["diff", "--cached", "--stat", "--patch"], None)?;
     let subject = if diff.trim().is_empty() {
@@ -49,17 +53,47 @@ pub fn pull(cwd: &Path) -> Result<String, String> {
     Ok(if out.contains("Already up to date") { "Already up to date".into() } else { "Pulled".into() })
 }
 
+/// A failed git operation; `conflict_in` is set when it stopped on a merge/rebase conflict or a rejected push,
+/// i.e. something Claude can sort out.
+pub struct GitFail {
+    pub msg: String,
+    pub conflict_in: Option<PathBuf>,
+}
+
+impl From<String> for GitFail {
+    fn from(msg: String) -> Self {
+        Self { msg, conflict_in: None }
+    }
+}
+
+/// Tag a pull / commit & push failure as a conflict when the repository has unmerged paths or git says the
+/// branches diverged / the push was rejected. Blocking.
+pub fn classify(cwd: &Path, msg: String) -> GitFail {
+    let rejected = ["[rejected]", "non-fast-forward", "fetch first", "divergent branches", "CONFLICT", "Automatic merge failed"]
+        .iter()
+        .any(|m| msg.contains(m));
+    let conflict = rejected || has_unmerged(cwd);
+    GitFail { msg, conflict_in: conflict.then(|| cwd.to_path_buf()) }
+}
+
+fn has_unmerged(cwd: &Path) -> bool {
+    git(cwd, &["diff", "--name-only", "--diff-filter=U"], None).is_ok_and(|o| !o.trim().is_empty())
+}
+
+/// Fetch origin quietly so branch lists are fresh before the menu is opened. Blocking.
+pub fn background_fetch(cwd: &Path) {
+    if has_origin(cwd) {
+        let _ = git(cwd, &["fetch", "--prune", "--quiet", "origin"], None);
+    }
+}
+
 fn has_origin(cwd: &Path) -> bool {
     git(cwd, &["remote", "get-url", "origin"], None).is_ok()
 }
 
-/// Branches for the branch menu, most recently committed first: origin's (fetched first) plus local ones.
-/// Returns `(branches, current)`. Blocking.
+/// Branches for the branch menu, most recently committed first: origin's (as of the last background fetch)
+/// plus local ones. Returns `(branches, current)`. Blocking.
 pub fn branches(cwd: &Path) -> Result<(Vec<String>, Option<String>), String> {
-    if has_origin(cwd) {
-        // Offline: fall back to the last fetched state rather than failing the menu.
-        let _ = git(cwd, &["fetch", "--prune", "origin"], None);
-    }
     let refs = git(
         cwd,
         &["for-each-ref", "--sort=-committerdate", "--format=%(refname)", "refs/heads", "refs/remotes/origin"],
@@ -208,6 +242,7 @@ mod tests {
         git(&a, &["push", "-q", "origin", "feature"], None).unwrap();
 
         git(root, &["clone", "-q", "remote.git", "b"], None).unwrap();
+        background_fetch(&b);
         let (names, current) = branches(&b).unwrap();
         let default = current.unwrap();
         assert!(names.contains(&"feature".to_string()) && names.contains(&default), "{names:?}");
@@ -240,5 +275,33 @@ mod tests {
         commit_and_push(Path::new("claude-not-needed"), &a).unwrap();
         assert_eq!(pull(&b).unwrap(), "Pulled");
         assert!(b.join("two.txt").exists());
+    }
+
+    #[test]
+    fn pull_conflict_is_classified_and_blocks_commit_and_push() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (root, a, b) = (tmp.path(), tmp.path().join("a"), tmp.path().join("b"));
+        git(root, &["init", "-q", "--bare", "remote.git"], None).unwrap();
+        git(root, &["clone", "-q", "remote.git", "a"], None).unwrap();
+        commit(&a, "f.txt");
+        git(&a, &["push", "-q", "origin", "HEAD"], None).unwrap();
+        git(root, &["clone", "-q", "remote.git", "b"], None).unwrap();
+        for (dir, text) in [(&a, "from a"), (&b, "from b")] {
+            std::fs::write(dir.join("f.txt"), text).unwrap();
+            git(dir, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "edit"], None).unwrap();
+        }
+        git(&a, &["push", "-q", "origin", "HEAD"], None).unwrap();
+
+        // b's push is rejected (remote moved on), and a merge pull conflicts.
+        let rejected = commit_and_push(Path::new("claude-not-needed"), &b).unwrap_err();
+        assert!(classify(&b, rejected).conflict_in.is_some());
+        let failed = git(&b, &["-c", "pull.rebase=false", "pull"], None).unwrap_err();
+        assert!(classify(&b, failed).conflict_in.is_some());
+        assert_eq!(commit_and_push(Path::new("claude-not-needed"), &b).unwrap_err(), "Resolve the merge conflicts first");
+        assert!(classify(&b, "git push failed: unable to access".into()).conflict_in.is_some(), "unmerged paths count");
+
+        let clean = tmp.path().join("clean");
+        git(root, &["clone", "-q", "remote.git", "clean"], None).unwrap();
+        assert!(classify(&clean, "git pull failed: could not resolve host".into()).conflict_in.is_none());
     }
 }

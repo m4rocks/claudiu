@@ -17,8 +17,9 @@ pub const ALLOWED_TOOL: &str = "mcp__claudiu__set_tab_title";
 
 const INSTRUCTIONS: &str = "You are running inside Claudiu, which shows a tab title for this session. Call the \
 set_tab_title tool with a short title (2-5 words, no quotes) once you understand the user's first request. After \
-that, call it again only right after the conversation was compacted (/compact) or cleared (/clear), never otherwise. \
-Don't mention it to the user.";
+that, call it again right after the conversation was compacted (/compact) or cleared (/clear), and whenever the \
+user asks you to rename or retitle this session or tab (use the name they gave). Never otherwise. Don't mention the \
+tool unless the user asked for a rename.";
 
 fn titles_dir() -> PathBuf {
     crate::statusline::data_dir().join("titles")
@@ -58,7 +59,7 @@ fn serve(input: impl BufRead, mut out: impl Write, session: &str, dir: &Path) {
             "ping" => Ok(json!({})),
             "tools/list" => Ok(json!({ "tools": [{
                 "name": "set_tab_title",
-                "description": "Set this session's tab title in Claudiu (2-5 words). Call after the first request, and later only right after /compact or /clear.",
+                "description": "Set this session's tab title in Claudiu (2-5 words). Call after the first request, right after /compact or /clear, and whenever the user asks to rename the session or tab.",
                 "inputSchema": {
                     "type": "object",
                     "properties": { "title": { "type": "string", "description": "Short tab title, 2-5 words" } },
@@ -106,15 +107,17 @@ pub fn prepare(claude_session_id: &str) -> std::io::Result<PathBuf> {
     Ok(path)
 }
 
-/// `(claude session id stem, title)` for every title Claude has set.
-pub fn read_titles() -> Vec<(String, String)> {
+/// `(claude session id stem, title, written at)` for every title Claude has set. The timestamp changes on every
+/// call of the tool, even with an unchanged title, which is how a `/clear` (new Claude session) is noticed.
+pub fn read_titles() -> Vec<(String, String, Option<std::time::SystemTime>)> {
     let Ok(entries) = std::fs::read_dir(titles_dir()) else { return vec![] };
     entries
         .flatten()
         .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("txt"))
         .filter_map(|e| {
             let stem = e.path().file_stem()?.to_string_lossy().into_owned();
-            Some((stem, clean_title(&std::fs::read_to_string(e.path()).ok()?)?))
+            let title = clean_title(&std::fs::read_to_string(e.path()).ok()?)?;
+            Some((stem, title, e.metadata().and_then(|m| m.modified()).ok()))
         })
         .collect()
 }

@@ -13,7 +13,7 @@ use crate::platform::Editor;
 use crate::store::{SessionKind, now};
 use crate::theme::{self, hsla};
 use crate::updater::Status;
-use crate::widgets::{ago, button, clawd, danger_button, icon_button, section_label, short_path};
+use crate::widgets::{ago, button, button_disabled, clawd, danger_button, icon_button, section_label, segment, short_path};
 
 impl Workspace {
     // ------------------------------------------------------------------ top bar
@@ -43,9 +43,9 @@ impl Workspace {
             // "Open in <editor>" plus a ▾ to pick another installed editor (remembered, see Act::OpenEditor).
             if let Some(editor) = self.preferred_editor() {
                 let (t, pick_target) = (target.clone(), target.clone());
-                let open = button("open-in", format!("Open in {}", editor_name(editor)), false)
+                let open = segment("open-in", format!("Open in {}", editor_name(editor)))
                     .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::OpenEditor(editor, t.clone()), window, cx)));
-                let pick = icon_button("open-in-pick", "▾").on_mouse_down(
+                let pick = segment("open-in-pick", "▾").on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |ws, ev: &MouseDownEvent, _w, cx| {
                         let current = ws.preferred_editor();
@@ -63,7 +63,18 @@ impl Workspace {
                         ws.open_menu(ev.position, items, cx);
                     }),
                 );
-                right = right.child(div().flex().items_center().gap(px(2.0)).child(open).child(pick));
+                right = right.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .h(px(26.0))
+                        .rounded(px(6.0))
+                        .overflow_hidden()
+                        .bg(hsla(0x1b1b1b))
+                        .child(open)
+                        .child(div().w(px(1.0)).h(px(14.0)).bg(hsla(0x363636)))
+                        .child(pick),
+                );
             }
             let t = target.clone();
             right = right.child(
@@ -76,15 +87,20 @@ impl Workspace {
         let busy = self.git_busy;
         if let Some(repo) = repo.clone() {
             let pull_repo = repo.clone();
-            right = right
-                .child(
-                    button("commit-push", if busy == Some(GitOp::CommitPush) { "Committing…" } else { "Commit & Push" }, false)
-                        .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::CommitPush(repo.clone()), window, cx))),
-                )
-                .child(
-                    button("pull", if busy == Some(GitOp::Pull) { "Pulling…" } else { "Pull" }, false)
-                        .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::Pull(pull_repo.clone()), window, cx))),
-                );
+            // One git operation at a time: while one runs, both buttons are disabled.
+            let commit = if busy.is_some() {
+                button_disabled("commit-push", if busy == Some(GitOp::CommitPush) { "Committing…" } else { "Commit & Push" })
+            } else {
+                button("commit-push", "Commit & Push", false)
+                    .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::CommitPush(repo.clone()), window, cx)))
+            };
+            let pull = if busy.is_some() {
+                button_disabled("pull", if busy == Some(GitOp::Pull) { "Pulling…" } else { "Pull" })
+            } else {
+                button("pull", "Pull", false)
+                    .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::Pull(pull_repo.clone()), window, cx)))
+            };
+            right = right.child(commit).child(pull);
         }
 
         let title = rec.as_ref().map(|r| r.display_title().to_string()).unwrap_or_else(|| "Claudiu".into());
@@ -501,8 +517,19 @@ impl Workspace {
         )
     }
 
-    fn render_toast(&self) -> Option<AnyElement> {
+    fn render_toast(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let t = self.toast.as_ref()?;
+        let action = t.action.clone().map(|(label, act)| {
+            div().mt(px(8.0)).flex().gap(px(6.0)).child(button("toast-action", label, true).on_click(cx.listener(
+                move |ws, _: &ClickEvent, window, cx| {
+                    ws.toast = None;
+                    ws.act(act.clone(), window, cx);
+                },
+            ))).child(button("toast-dismiss", "Dismiss", false).on_click(cx.listener(|ws, _: &ClickEvent, _w, cx| {
+                ws.toast = None;
+                cx.notify();
+            })))
+        });
         Some(
             deferred(
                 div().absolute().bottom(px(18.0)).right(px(18.0)).child(
@@ -516,7 +543,8 @@ impl Workspace {
                         .border_color(hsla(if t.error { 0x5a2327 } else { 0x2c2c2c }))
                         .text_size(px(12.5))
                         .text_color(hsla(if t.error { theme::DANGER } else { theme::TEXT }))
-                        .child(t.text.clone()),
+                        .child(t.text.clone())
+                        .children(action),
                 ),
             )
             .with_priority(30)
@@ -546,7 +574,7 @@ impl Render for Workspace {
         };
         let menu = self.render_menu(cx);
         let modal = self.render_modal(cx);
-        let toast = self.render_toast();
+        let toast = self.render_toast(cx);
 
         div()
             .id("workspace")

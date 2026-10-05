@@ -443,14 +443,25 @@ impl Workspace {
                         }
                         cx.notify();
                     }))
-                    .on_click(cx.listener(|ws, _: &ClickEvent, window, _cx| window.focus(&ws.search_focus)))
+                    // on_mouse_down, not on_click: GPUI turns Space/Enter on a focused clickable into a click and eats the key.
+                    .on_mouse_down(gpui::MouseButton::Left, cx.listener(|ws, _, window, _cx| window.focus(&ws.search_focus)))
                     .child(div().text_color(hsla(theme::TEXT_FAINT)).child("⌕"))
-                    .child(if self.search.is_empty() {
-                        div().text_color(hsla(theme::TEXT_FAINT)).child("Search sessions and projects")
-                    } else {
-                        div().text_color(hsla(theme::TEXT)).child(self.search.clone())
-                    })
-                    .when(search_focused, |d| d.child(div().w(px(1.0)).h(px(14.0)).bg(hsla(theme::ACCENT)))),
+                    .child({
+                        let cursor = || div().flex_none().w(px(1.0)).h(px(14.0)).bg(hsla(theme::ACCENT));
+                        let empty = self.search.is_empty();
+                        div()
+                            .flex()
+                            .items_center()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .when(search_focused && empty, |d| d.child(cursor()))
+                            .child(if empty {
+                                div().text_color(hsla(theme::TEXT_FAINT)).child("Search sessions and projects")
+                            } else {
+                                div().text_color(hsla(theme::TEXT)).child(self.search.clone())
+                            })
+                            .when(search_focused && !empty, |d| d.child(cursor()))
+                    }),
             )
     }
 

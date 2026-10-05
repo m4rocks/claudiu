@@ -63,6 +63,8 @@ pub enum Act {
     /// Ask for a name, then `CreateBranch`.
     NewBranch(PathBuf),
     CreateBranch(PathBuf, String),
+    /// New Claude session (Sonnet 5.5, medium effort) that resolves a failed pull / push in this repository.
+    FixGitWithClaude(PathBuf),
     AddProject(PathBuf),
     RemoveProject(Id),
     ToggleProject(Id),
@@ -132,12 +134,17 @@ pub struct Live {
     pub _sub: Subscription,
     /// The session name Claude Code was last given (`--name` or `/rename`), so a changed title is sent once.
     pub claude_name: Option<String>,
+    /// When Claude last called the title tool. A later call (e.g. after `/clear`, which starts a nameless
+    /// Claude session) clears `claude_name` so the title is sent again.
+    pub title_stamp: Option<std::time::SystemTime>,
 }
 
 pub struct Toast {
     pub text: String,
     pub error: bool,
     pub serial: u64,
+    /// Button label and what it does; the toast stays up longer so there is time to answer.
+    pub action: Option<(String, Act)>,
 }
 
 pub struct Workspace {
@@ -228,6 +235,7 @@ impl Workspace {
         statusline::cleanup();
         ws.ingest_statusline(cx);
         ws.start_ticker(cx);
+        ws.start_fetch_loop(cx);
         ws.start_activity_poll(window, cx);
         ws.check_updates(cx);
         window.focus(&ws.root_focus);
@@ -392,15 +400,26 @@ impl Workspace {
                 .await;
             let _ = this.update(cx, |ws, cx| {
                 let mut changed = false;
-                for (stem, title) in titles {
-                    if let Some(rec) = ws
+                for (stem, title, stamp) in titles {
+                    let Some(rec) = ws
                         .store
                         .data
                         .sessions
                         .iter_mut()
                         .find(|s| s.claude_id().is_some_and(|id| statusline::safe_file_stem(id) == stem))
-                        && rec.auto_title.as_deref() != Some(title.as_str())
+                    else {
+                        continue;
+                    };
+                    if let Some(l) = ws.live.iter_mut().find(|l| l.id == rec.id)
+                        && l.title_stamp != stamp
                     {
+                        // The first read only records the stamp: a resumed session already got `--name`.
+                        if l.title_stamp.is_some() {
+                            l.claude_name = None;
+                        }
+                        l.title_stamp = stamp;
+                    }
+                    if rec.auto_title.as_deref() != Some(title.as_str()) {
                         rec.auto_title = Some(title);
                         changed = true;
                     }
@@ -589,15 +608,21 @@ impl Workspace {
     // ------------------------------------------------------------------ session lifecycle
 
     pub fn toast(&mut self, text: impl Into<String>, error: bool, cx: &mut Context<Self>) {
+        self.show_toast(text.into(), error, None, cx);
+    }
+
+    fn show_toast(&mut self, text: String, error: bool, action: Option<(String, Act)>, cx: &mut Context<Self>) {
         self.toast_serial += 1;
         let serial = self.toast_serial;
+        let secs = if action.is_some() { 20 } else { 5 };
         self.toast = Some(Toast {
-            text: text.into(),
+            text,
             error,
             serial,
+            action,
         });
         cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(Duration::from_secs(5)).await;
+            cx.background_executor().timer(Duration::from_secs(secs)).await;
             let _ = this.update(cx, |ws, cx| {
                 if ws.toast.as_ref().is_some_and(|t| t.serial == serial) {
                     ws.toast = None;
@@ -610,12 +635,19 @@ impl Workspace {
     }
 
     pub fn new_claude(&mut self, cwd: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        self.new_claude_with(cwd, vec![], window, cx);
+    }
+
+    /// `leading` goes before every other argument: the initial prompt must come ahead of the variadic
+    /// `--allowedTools` / `--mcp-config` flags, or they would swallow it.
+    fn new_claude_with(&mut self, cwd: PathBuf, leading: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(exe) = self.claude_exe.clone() else {
             self.toast("Could not find the `claude` CLI. Install Claude Code, or set its path in state.json (settings.claude_path).", true, cx);
             return;
         };
         let session_id = new_id();
-        let spec = claude::new_session_spec(&exe, &cwd, &session_id);
+        let mut spec = claude::new_session_spec(&exe, &cwd, &session_id);
+        spec.args.splice(0..0, leading);
         let spec = self.with_helpers(spec, &session_id, &cwd);
         let record = SessionRecord {
             id: new_id(),
@@ -733,6 +765,7 @@ impl Workspace {
             view,
             _sub: sub,
             claude_name,
+            title_stamp: None,
         });
         self.place_in_pane(&id, cx);
         self.remember(&id);
@@ -972,19 +1005,33 @@ impl Workspace {
             }
             Act::ImportProject => self.import_project(window, cx),
             Act::CommitPush(cwd) => match self.claude_exe.clone() {
-                Some(exe) => self.run_git(GitOp::CommitPush, move || crate::commit::commit_and_push(&exe, &cwd), cx),
+                Some(exe) => self.run_git(
+                    GitOp::CommitPush,
+                    move || crate::commit::commit_and_push(&exe, &cwd).map_err(|e| crate::commit::classify(&cwd, e)),
+                    cx,
+                ),
                 None => self.toast("Could not find the `claude` CLI.", true, cx),
             },
-            Act::Pull(cwd) => self.run_git(GitOp::Pull, move || crate::commit::pull(&cwd), cx),
+            Act::Pull(cwd) => self.run_git(
+                GitOp::Pull,
+                move || crate::commit::pull(&cwd).map_err(|e| crate::commit::classify(&cwd, e)),
+                cx,
+            ),
             Act::SwitchBranch(cwd, name) => {
-                self.run_git(GitOp::Branch, move || crate::commit::switch_branch(&cwd, &name), cx)
+                self.run_git(GitOp::Branch, move || Ok(crate::commit::switch_branch(&cwd, &name)?), cx)
+            }
+            Act::FixGitWithClaude(cwd) => {
+                let prompt = "Claudiu's Pull or Commit & Push just failed in this repository because of a merge conflict,                     a diverged branch or a rejected push. Run git status, fix it (resolve conflicts keeping the intent of both sides,                     finish the merge or rebase, then push if the push was rejected).                     Ask me whenever a conflict is ambiguous or you are unsure which side to keep.";
+                let args = ["--model", "claude-sonnet-5-5", "--effort", "medium"];
+                let leading = std::iter::once(prompt).chain(args).map(String::from).collect();
+                self.new_claude_with(cwd, leading, window, cx);
             }
             Act::NewBranch(cwd) => {
                 self.modal = Some(Modal::NewBranch { cwd, text: String::new() });
                 window.focus(&self.modal_focus);
             }
             Act::CreateBranch(cwd, name) => {
-                self.run_git(GitOp::Branch, move || crate::commit::create_branch(&cwd, &name), cx)
+                self.run_git(GitOp::Branch, move || Ok(crate::commit::create_branch(&cwd, &name)?), cx)
             }
             Act::AddProject(path) => {
                 let id = self.store.add_project(&path);
@@ -1055,7 +1102,7 @@ impl Workspace {
     fn run_git(
         &mut self,
         op: GitOp,
-        job: impl FnOnce() -> Result<String, String> + Send + 'static,
+        job: impl FnOnce() -> Result<String, crate::commit::GitFail> + Send + 'static,
         cx: &mut Context<Self>,
     ) {
         if self.git_busy.is_some() {
@@ -1072,14 +1119,40 @@ impl Workspace {
                 ws.store.save_if_dirty();
                 match result {
                     Ok(summary) => ws.toast(summary, false, cx),
-                    Err(e) => ws.toast(e, true, cx),
+                    Err(fail) => match fail.conflict_in {
+                        Some(cwd) => {
+                            let what = if op == GitOp::Pull { "Pull" } else { "Commit & Push" };
+                            ws.show_toast(
+                                format!("{what} hit a conflict. Ask Claude to fix it?"),
+                                true,
+                                Some(("Ask Claude".into(), Act::FixGitWithClaude(cwd))),
+                                cx,
+                            );
+                        }
+                        None => ws.toast(fail.msg, true, cx),
+                    },
                 }
             });
         })
         .detach();
     }
 
-    /// Branch menu: fetch origin and list branches off the UI thread, then open the menu at `pos`.
+    /// Fetch origin for the folder in view once a minute so the branch menu opens instantly and the
+    /// remote branches it lists are current. Skipped while another git operation runs.
+    fn start_fetch_loop(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            loop {
+                let Ok(cwd) = this.update(cx, |ws, _| (ws.git_busy.is_none()).then(|| ws.active_cwd())) else { break };
+                if let Some(cwd) = cwd {
+                    cx.background_executor().spawn(async move { crate::commit::background_fetch(&cwd) }).await;
+                }
+                cx.background_executor().timer(Duration::from_secs(60)).await;
+            }
+        })
+        .detach();
+    }
+
+    /// Branch menu: list branches off the UI thread, then open the menu at `pos`.
     pub fn open_branch_menu(&mut self, cwd: PathBuf, pos: Point<Pixels>, cx: &mut Context<Self>) {
         if self.git_busy.is_some() {
             return;

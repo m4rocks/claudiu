@@ -119,7 +119,7 @@ impl TerminalView {
         let cells: Vec<_> = (0..row.len()).map(|c| &row[Column(c)]).collect();
         let Some(start) = cells.iter().position(|c| c.c != ' ') else { return false };
         matches!(cells[start].c, '❯' | '>')
-            && cells[start + 1..].iter().all(|c| c.c == ' ' || c.c == '\0' || c.flags.contains(Flags::DIM))
+            && cells[start + 1..].iter().all(|c| c.c.is_whitespace() || c.c == '\0' || c.flags.contains(Flags::DIM))
     }
 
     /// Type a line into the program as if the user had, then press Enter separately so it isn't taken as a paste.
