@@ -184,17 +184,13 @@ For an existing Claude session, use Claude Code's supported resume mechanisms ra
 
 ## Claude Code configuration
 
-**Claudiu must not modify Claude Code configuration files.**
+Claudiu does not edit Claude Code's settings files itself. Per-process flags and environment variables are the preferred way to integrate, but this is no longer a hard rule (product owner decision): a feature may have Claude Code change its own settings, for example by typing `/model` or `/effort`, which Claude Code saves as the user's default.
 
-Do not install a custom `statusLine` **in any settings file**, modify `settings.json`, rewrite keybindings, or otherwise alter the user's Claude Code setup.
+**Per-process `--settings`:** to read account usage (5-hour / 7-day) and exact context without spending tokens, Claudiu may pass a *per-process* `--settings <file>` containing only a `statusLine` that points back at Claudiu's own executable in a hidden helper mode (`--statusline-tee`). That flag applies to a single session and writes nothing to the user's Claude Code config. The helper must forward to the user's own status line (if any) so their display is unchanged, store only a minimal snapshot (limits, context figures, session id), and never block or fail Claude Code.
 
-**One approved exception (product owner decision):** to read account usage (5-hour / 7-day) and exact context without spending tokens, Claudiu may pass a *per-process* `--settings <file>` containing only a `statusLine` that points back at Claudiu's own executable in a hidden helper mode (`--statusline-tee`). That flag applies to a single session and writes nothing to the user's Claude Code config. The helper must forward to the user's own status line (if any) so their display is unchanged, store only a minimal snapshot (limits, context figures, session id), and never block or fail Claude Code. Do not extend this mechanism to anything else.
-
-**Second approved exception (product owner decision):** the tab-title MCP server. Each Claude session is started with a per-process `--mcp-config <file>` pointing at Claudiu's own executable in a hidden helper mode (`--mcp-title`), plus `--allowedTools mcp__claudiu__set_tab_title` so renaming never prompts. IDE integration is switched off per process through the `CLAUDE_CODE_AUTO_CONNECT_IDE=false` and `CLAUDE_CODE_IDE_SKIP_AUTO_INSTALL=1` environment variables. Nothing is written to the user's Claude Code config. The "Commit & Push" action runs a separate headless `claude -p` (Haiku, no tools, `--setting-sources ""`, no saved session) through the user's own CLI. Do not extend these mechanisms to anything else.
+**Claudiu MCP server:** each Claude session is started with a per-process `--mcp-config <file>` pointing at Claudiu's own executable in a hidden helper mode (`--mcp-title`), plus `--allowedTools mcp__claudiu__set_tab_title` so renaming never prompts. A second tool, `set_model`, is not pre-allowed, so Claude Code's own permission prompt confirms each switch. It writes a request file; once the session is idle with an empty prompt, Claudiu types `/model <name>` and `/effort <level>` into that session's PTY. IDE integration is switched off per process through the `CLAUDE_CODE_AUTO_CONNECT_IDE=false` and `CLAUDE_CODE_IDE_SKIP_AUTO_INSTALL=1` environment variables. Nothing is written to the user's Claude Code config. The "Commit & Push" action runs a separate headless `claude -p` (Haiku, no tools, `--setting-sources ""`, no saved session) through the user's own CLI.
 
 Read supported CLI output/interfaces where possible.
-
-If a future integration requires configuration changes, stop and redesign the integration around a non-invasive mechanism first.
 
 ---
 
@@ -614,14 +610,13 @@ Build in this order unless implementation evidence strongly suggests otherwise:
 2. Keep platform-specific code isolated.
 3. Prefer documented Claude Code interfaces over undocumented internal formats.
 4. Never make direct Anthropic API calls.
-5. Never modify Claude Code configuration.
-6. Never delete Claude Code session data as a side effect of Claudiu actions.
-7. Treat imported external state as reconcileable/stale, not as Claudiu-owned truth.
-8. Avoid blocking the GPUI UI thread with filesystem scans or process I/O.
-9. Use async/background tasks where appropriate and send compact state updates back to GPUI entities.
-10. Write tests around session reconciliation and process lifecycle before adding lots of UI polish.
-11. Favor simple, debuggable code over premature abstraction.
-12. Do not copy Zed source code merely because Zed and GPUI are related; use compatible public crates/APIs and respect their licenses.
+5. Never delete Claude Code session data as a side effect of Claudiu actions.
+6. Treat imported external state as reconcileable/stale, not as Claudiu-owned truth.
+7. Avoid blocking the GPUI UI thread with filesystem scans or process I/O.
+8. Use async/background tasks where appropriate and send compact state updates back to GPUI entities.
+9. Write tests around session reconciliation and process lifecycle before adding lots of UI polish.
+10. Favor simple, debuggable code over premature abstraction.
+11. Do not copy Zed source code merely because Zed and GPUI are related; use compatible public crates/APIs and respect their licenses.
 
 ---
 
@@ -676,7 +671,7 @@ https://code.claude.com/docs/en/sessions
 
 ### Claude Code status / usage information
 
-Claude Code's current status-line mechanism exposes context and, where applicable, Claude.ai rate-limit information such as 5-hour and 7-day utilization/reset data. Claudiu should consume supported/exposed information without altering the user's Claude Code configuration.
+Claude Code's current status-line mechanism exposes context and, where applicable, Claude.ai rate-limit information such as 5-hour and 7-day utilization/reset data. Claudiu should consume supported/exposed information.
 
 Reference:
 https://code.claude.com/docs/en/statusline
@@ -704,7 +699,6 @@ https://code.claude.com/docs/en/statusline
 - Splits are desired if technically practical
 - Projects have editor launchers, including VS Code and Zed
 - Startup should reconcile/import Claude Code sessions so the sidebar stays current
-- Claude Code configuration is **never modified by Claudiu**
 - Claudiu does **not** use the user's Claude subscription directly
 - Claudiu launches the user's normal **`claude` CLI**
 - The product should be portable across **Windows and macOS**
