@@ -1,107 +1,120 @@
 # Claudiu
 
-A native desktop workspace for [Claude Code](https://code.claude.com) sessions, written in Rust with [GPUI](https://gpui.rs).
+A desktop app for juggling [Claude Code](https://code.claude.com) sessions. It's written in Rust with [GPUI](https://gpui.rs), the UI framework behind Zed.
 
-Claudiu does **not** reimplement Claude Code. It runs your real `claude` CLI inside a real pseudo terminal (ConPTY on Windows, Unix PTY on macOS) and renders it faithfully, so every Claude Code feature and shortcut (Alt+P, Shift+Tab, …) behaves exactly as in a normal terminal. Claudiu adds the workspace around it: sessions, projects, history, usage meters.
+I run several Claude sessions at once, across a few repos, and kept losing track of which terminal was which. Claudiu puts them all in one window, with a sidebar for projects and past sessions and a few meters for usage.
 
-> Claudiu owns the workspace/session-management experience. Claude Code owns the agent experience.
+This is a personal project. It does what I need, it has rough edges, and plenty of things you'd expect are missing. Issues and PRs are welcome, but I can't promise I'll get to them quickly.
 
-## Features
+**Disclaimer:** this app was vibe-coded with Claude Code. I've reviewed and tested it thoroughly, but it's still AI-written code, so treat it accordingly.
 
-- **Real terminal**: `alacritty_terminal` emulation, 24-bit color, scrollback, selection, mouse reporting, bracketed paste, alt screen, hyperlinks (Ctrl+click), pixel-exact block/box-drawing glyphs.
-- **Current Session**: every running process (Claude and plain shells). Switching never touches the other PTYs.
-- **Terminal sessions** exist only under CURRENT SESSION while running; they are never saved to project history. Claude sessions are saved and resumable.
-- **Projects**: Git-aware (branch, linked worktrees). Add by button, drag-and-drop a folder, or `claudiu <folder>`.
-- **History**: ended sessions stay in the sidebar. Clicking a past Claude session resumes it immediately via `claude --resume`.
-- **Startup import**: your existing Claude Code sessions are discovered (read-only) and merged into the sidebar, without duplicates.
-- **Splits**: up to four panes, each its own session.
-- **Usage**: per-session context meter, 5-hour and 7-day account meters (see *Known limits*).
-- **Editors**: open a project in VS Code or Zed (auto-detected), reveal in Explorer/Finder, copy path.
-- **Auto-update**: installed copies update themselves from GitHub Releases (Velopack).
+## How it works
+
+Claudiu doesn't reimplement Claude Code. It starts your own `claude` executable in a real pseudo-terminal (ConPTY on Windows, a Unix PTY on macOS) and draws the output with `alacritty_terminal`. Alt+P, Shift+Tab, mouse input and the rest all go straight to Claude Code, because as far as it can tell it's running in a normal terminal.
+
+There's no API key and no login in Claudiu. Authentication stays with Claude Code.
+
+## What you get
+
+- **A real terminal.** 24-bit color, scrollback, selection, mouse reporting, bracketed paste, alt screen, Ctrl+click on links, IME input.
+- **Current Session.** The sidebar lists everything that's running, Claude sessions and plain shells alike. Switching between them never touches the other processes.
+- **Projects.** Git-aware, with branch and linked worktrees. Add one with the button, by dropping a folder on the window, or with `claudiu <folder>`.
+- **History.** Ended Claude sessions stay in the sidebar, and a click resumes one through `claude --resume`. Plain shells aren't saved.
+- **Import on startup.** Your existing Claude Code sessions are found and merged in (read-only, no duplicates).
+- **Splits.** Up to four panes, each its own session.
+- **Usage meters.** Context per session, plus 5-hour and 7-day account limits. See [Usage meters](#usage-meters) for the catch.
+- **Git buttons.** Commit & Push (Haiku writes the message through your own `claude` CLI) and Pull. Branch management too.
+- **Tab titles.** Claude names its own tabs.
+- **Editors.** Open a project in VS Code or Zed, reveal it in Finder or Explorer, copy its path.
+- **Auto-update** from GitHub Releases, for installed copies.
 
 ## Shortcuts
 
-Claudiu-global shortcuts use **Ctrl+Shift** (Cmd+Shift on macOS) so plain Ctrl/Alt chords always reach Claude Code.
+Claudiu's own shortcuts use Ctrl+Shift (Cmd+Shift on macOS), so plain Ctrl and Alt chords always reach Claude Code.
 
 | Shortcut | Action |
 |---|---|
-| Ctrl+Shift+N | New Claude session (in the active session's folder) |
+| Ctrl+Shift+N | New Claude session, in the active session's folder |
 | Ctrl+Shift+T | New shell |
 | Ctrl+Shift+D | Split: new shell beside the current pane |
-| Ctrl+Shift+W | End the focused session immediately |
+| Ctrl+Shift+W | End the focused session (no confirmation) |
 | Ctrl+Tab / Ctrl+Shift+Tab | Next / previous running session |
 | Ctrl+Shift+] | Focus next pane |
 | Ctrl+Shift+B | Toggle sidebar |
 | Ctrl+Shift+F | Search sessions and projects |
-| Ctrl+Shift+O | Add project folder |
+| Ctrl+Shift+O | Add a project folder |
 
-In the terminal: Ctrl+Shift+C / Ctrl+Insert copy, Ctrl+V / Ctrl+Shift+V / Shift+Insert paste, right-click copies a selection or pastes, Shift+PageUp/PageDown/Home/End scroll history. Ctrl+C copies **only while text is selected**; otherwise it is a normal interrupt. On macOS use Cmd+C / Cmd+V.
+Inside the terminal, Ctrl+Shift+C or Ctrl+Insert copies, and Ctrl+V, Ctrl+Shift+V or Shift+Insert pastes. Right-click copies a selection, or pastes if there isn't one. Shift+PageUp/PageDown/Home/End scroll the history. Ctrl+C copies only while text is selected and is a normal interrupt otherwise. On macOS it's Cmd+C and Cmd+V.
 
 ## What Claudiu touches
 
-- **Claude Code's data is read-only.** Claudiu never writes to `~/.claude`, and never edits `settings.json`, keybindings or any Claude Code config. The one thing it adds is a per-process `--settings` status line for usage data (see *Known limits*), which lives only for that session. Hiding a session only removes it from Claudiu's own index.
-- Launch/resume use documented CLI flags only (`--session-id`, `--resume`, `--settings`).
-- Claudiu's own state lives in `%LOCALAPPDATA%\Claudiu\data\state.json` (macOS: `~/Library/Application Support/Claudiu`). Crashes are logged to `crash.log` beside it.
-- Nothing is uploaded anywhere. Terminal contents are never logged. The only network request is the update check (public GitHub Releases API). Disable it by setting `"settings": { "update_url": "" }` in `state.json`.
-- Child processes get a clean terminal environment: other terminals' markers (e.g. `WT_SESSION`) and Claude Code's nested-session markers are removed, `TERM_PROGRAM=Claudiu` is set. A `NO_COLOR` that leaked in from a Claude Code tool shell is dropped; a `NO_COLOR` you set yourself is respected.
+I wanted this to be safe to try on a setup you care about, so:
 
-## Known limits
+- **Claude Code's data is read-only.** Claudiu never writes to `~/.claude` and never edits `settings.json`, keybindings or any other Claude Code config. Hiding a session only removes it from Claudiu's own index.
+- **Two things are passed per process**, and live only as long as that session: a `--settings` file for the status line (see [Usage meters](#usage-meters)) and a `--mcp-config` file for the tab-title tool. Both point back at the Claudiu executable. Nothing lands in your Claude Code config.
+- **IDE auto-connect is switched off** for the sessions Claudiu starts, through environment variables on the child process.
+- **Everything else is documented CLI flags**: `--session-id`, `--resume`, `--settings`, `--mcp-config`, `--allowedTools`.
+- **Claudiu's own state** is in `%LOCALAPPDATA%\Claudiu\data\state.json` on Windows and `~/Library/Application Support/Claudiu` on macOS. Crashes go to `crash.log` next to it.
+- **Nothing is uploaded.** Terminal contents are never logged. The only network request Claudiu makes is the update check against the public GitHub Releases API. To turn it off, set `"settings": { "update_url": "" }` in `state.json`.
+- **Clean environment for children.** Markers from other terminals (like `WT_SESSION`) and Claude Code's nested-session markers are removed, and `TERM_PROGRAM=Claudiu` is set. A `NO_COLOR` that leaked in from a Claude Code tool shell is dropped. One you set yourself is kept.
 
-- **5-hour / 7-day meters and exact context** come from Claude Code's own status-line data, at zero token cost: each Claude session Claudiu starts gets a per-process `--settings` file whose `statusLine` points back at Claudiu (`claudiu --statusline-tee`). Claude Code runs it locally after each response (its docs: the status line "does not consume API tokens"), and Claudiu keeps a tiny snapshot (limits, context figures, session id). Nothing in your Claude Code config files changes, and if you have your own status line, Claudiu forwards to it so your display is unchanged. At launch, so the meters aren't empty before your first message, Claudiu runs one `claude -p "/usage" --no-session-persistence` (once per launch, skipped if a reading from the last 5 minutes exists; Anthropic's cost docs note `/usage` may use a small number of tokens). Limits: Pro/Max accounts only; the live feed covers only sessions started from Claudiu; stale values are labelled with their age.
-- **Context meter** is exact (as reported by Claude Code) once a session has responded; before that, or for sessions resumed outside Claudiu, it is estimated from the transcript (200k window, 1M once exceeded) and marked `~`.
-- Transcript scanning is a best-effort import aid: every field is optional and unparseable lines are skipped; launching/resuming never depends on it.
-- Closing the window or quitting ends running PTYs (Claudiu asks first). Claude sessions stay resumable; keeping live processes across restarts is a future feature.
-- macOS support is implemented but not yet exercised by the author on a Mac.
+## Usage meters
+
+The 5-hour and 7-day meters, and the exact context figure, come from Claude Code's own status-line data. Each Claude session that Claudiu starts gets a per-process `--settings` file whose `statusLine` runs `claudiu --statusline-tee`. Claude Code calls it locally after each response, and per its docs that costs no tokens. Claudiu keeps a tiny snapshot: limits, context figures, session id. If you have your own status line, Claudiu forwards to it, so yours looks the same as before.
+
+So the meters aren't empty at launch, Claudiu also runs one `claude -p "/usage" --no-session-persistence` per launch. It skips this if there's a reading from the last 5 minutes. Anthropic's docs say `/usage` may use a small number of tokens.
+
+Limits of this approach:
+
+- Pro and Max accounts only.
+- The live feed only covers sessions started from Claudiu. Stale values are labelled with their age.
+- Before a session has responded, or for sessions resumed outside Claudiu, context is estimated from the transcript (200k window, 1M once exceeded) and shown with a `~`.
+
+## Known gaps
+
+- **macOS is lightly tested.** It builds, and CI produces an ad-hoc signed universal app, but I mostly developed on Windows. Expect bugs. The build isn't notarized, so Gatekeeper complains on first launch.
+- **Quitting ends running PTYs.** Claude sessions stay resumable, but live processes don't survive a restart. Keeping them alive is something I'd like to do eventually.
+- **Transcript scanning is best-effort.** It's only an import aid. Unparseable lines are skipped, and launching or resuming never depends on it.
+- **The icon is a stand-in.** `scripts/make-icon.ps1` generates a placeholder. Swap in the real Claude Desktop/Clawd artwork if you have it.
 
 ## Building
 
-Requires Rust (stable). On Windows: Visual Studio Build Tools (C++ workload) with the Windows SDK.
+You need stable Rust. On Windows, also Visual Studio Build Tools (C++ workload) and the Windows SDK.
 
-**Dev mode** (fast to compile, console window shows stderr, update checks are inactive):
-
-```powershell
-cargo run                                  # start Claudiu
-cargo run -- C:\path\to\repo               # also register folders as projects
-cargo test                                 # unit tests incl. process lifecycle
+```sh
+cargo run                       # dev build: fast to compile, shows stderr, no update checks
+cargo run -- path/to/repo       # also registers folders as projects
+cargo test                      # unit tests, including process lifecycle
+cargo build --release           # optimized, no console window; the first build takes a few minutes
 ```
 
-**Release build** (optimized, no console window; slower to compile, expect several minutes the first time):
+State lives in the data folder listed above. Delete it to start fresh.
+
+If you launch Claudiu from inside a Claude Code session, it scrubs the inherited Claude and terminal markers before starting children (see [What Claudiu touches](#what-claudiu-touches)).
+
+## Installer and releases
+
+Packaging and updates use [Velopack](https://velopack.io), with GitHub Releases as the update server, so there's nothing to host.
 
 ```powershell
-cargo build --release                      # -> target\release\claudiu.exe
-target\release\claudiu.exe
+dotnet tool install -g vpk      # once; needs the .NET SDK
+scripts\package.ps1             # -> dist\releases\Claudiu-win-Setup.exe
 ```
 
-State is stored in `%LOCALAPPDATA%\Claudiu\data\` (delete the folder to start fresh). If you start Claudiu from inside a Claude Code session, Claudiu scrubs the inherited Claude/terminal environment markers for its children (see *What Claudiu touches*).
+To release, bump `version` in `Cargo.toml`, commit, then `git tag v0.2.0 && git push --tags`. `.github/workflows/release.yml` does the rest: a Windows job, then a macOS job (universal arm64 + x86_64, `.icns` from `scripts/make-icns.sh`), both publishing to the same release. For proper macOS signing, add `vpk --signAppIdentity/--notaryProfile`.
 
-## Installer and updates
+Installed copies check for updates on startup and every 6 hours, download in the background, and restart into the new version when you ask. Dev builds never check. The repo URL defaults to `https://github.com/m4rocks/claudiu` (`src/updater.rs`) and can be overridden with `settings.update_url`.
 
-Packaging and updates use [Velopack](https://velopack.io), with **GitHub Releases as the update server**: there is nothing to host.
-
-```powershell
-dotnet tool install -g vpk        # once (needs the .NET SDK)
-scripts\package.ps1               # -> dist\releases\Claudiu-win-Setup.exe
-```
-
-Releasing (CI does this for you):
-
-1. Bump `version` in `Cargo.toml`, commit.
-2. `git tag v0.2.0 && git push --tags`.
-3. `.github/workflows/release.yml` builds, packs (with delta packages), and publishes the installer and feed to the GitHub Release: a Windows job, then a macOS job (universal arm64 + x86_64, ad-hoc signed, `.icns` generated by `scripts/make-icns.sh`). Both feeds live in the same release. The macOS build is not Developer-ID signed or notarized, so Gatekeeper warns on first launch; add `vpk --signAppIdentity/--notaryProfile` to fix that.
-
-Installed copies check the repository's releases on startup and every 6 hours, show a banner, download in the background, and restart into the new version on request (confirming first if sessions are running). Dev builds and non-installed copies never check. The repository URL defaults to `https://github.com/m4rocks/claudiu` (`src/updater.rs`); override it with `settings.update_url` in `state.json`.
-
-The Windows app icon is generated by `scripts/make-icon.ps1` (`assets/claudiu.ico`). Replace it with the official Claude Desktop/Clawd artwork if you have it.
-
-## Layout
+## Code layout
 
 ```
 src/terminal.rs       PTY + alacritty Term (no UI types)       src/store.rs     persisted state + reconciliation
 src/terminal_view.rs  GPUI renderer + input                    src/claude.rs    discovery, launch specs, read-only import
 src/keys.rs           keystroke -> VT bytes                    src/git.rs       libgit2 repo info
-src/glyphs.rs         block / box-drawing quads                src/platform.rs  OS-specific helpers, editors
-src/app.rs            workspace state & actions                src/updater.rs   Velopack/GitHub updates
+src/glyphs.rs         block / box-drawing quads                src/commit.rs    Commit & Push, Pull
+src/app.rs            workspace state & actions                src/mcp.rs       tab-title MCP helper
+src/platform.rs       OS-specific helpers, editors             src/updater.rs   Velopack/GitHub updates
 src/sidebar.rs, views.rs, widgets.rs, theme.rs                 UI
 ```
 
-See [docs/TESTING.md](docs/TESTING.md) for the manual test checklist.
+The manual test checklist is in [docs/TESTING.md](docs/TESTING.md).
