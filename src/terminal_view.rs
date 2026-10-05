@@ -4,7 +4,7 @@ use std::ops::Range;
 use std::time::{Duration, Instant};
 
 use alacritty_terminal::event::Event as TermEvent;
-use alacritty_terminal::grid::Scroll;
+use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Line, Point as GridPoint, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::cell::Flags;
@@ -19,6 +19,8 @@ use gpui::{
     Pixels, Point, Render, ScrollDelta, ScrollWheelEvent, ShapedLine, StrikethroughStyle, Style,
     TextRun, UTF16Selection, UnderlineStyle, Window, div, fill, outline, point, prelude::*, px, relative, size,
 };
+
+use gpui_kit::component::input;
 
 use crate::glyphs;
 use crate::keys;
@@ -211,6 +213,16 @@ impl TerminalView {
             }
             None => false,
         }
+    }
+
+    fn select_all(&mut self, cx: &mut Context<Self>) {
+        let mut term = self.terminal.term.lock();
+        let (top, bottom, last) = (term.topmost_line(), term.bottommost_line(), term.last_column());
+        let mut sel = Selection::new(SelectionType::Simple, GridPoint::new(top, Column(0)), Side::Left);
+        sel.update(GridPoint::new(bottom, last), Side::Right);
+        term.selection = Some(sel);
+        drop(term);
+        cx.notify();
     }
 
     fn on_key_down(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -581,6 +593,12 @@ impl Render for TerminalView {
             .key_context("Terminal")
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key_down))
+            // The Edit menu dispatches the text input's actions; a focused terminal answers them too.
+            .on_action(cx.listener(|this, _: &input::Copy, _, cx| {
+                this.copy(cx);
+            }))
+            .on_action(cx.listener(|this, _: &input::Paste, _, cx| this.paste(cx)))
+            .on_action(cx.listener(|this, _: &input::SelectAll, _, cx| this.select_all(cx)))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_down(MouseButton::Right, cx.listener(Self::on_mouse_down))
             .on_mouse_down(MouseButton::Middle, cx.listener(Self::on_mouse_down))

@@ -34,6 +34,10 @@ actions!(
         FocusSearch,
         ImportProject,
         FocusNextPane,
+        Quit,
+        HideApp,
+        HideOthers,
+        ShowAllApps,
     ]
 );
 
@@ -497,6 +501,7 @@ impl Workspace {
         }
         spec.env.push(("CLAUDE_CODE_AUTO_CONNECT_IDE".into(), "false".into()));
         spec.env.push(("CLAUDE_CODE_IDE_SKIP_AUTO_INSTALL".into(), "1".into()));
+        (spec.program, spec.args) = platform::through_login_shell(spec.program, spec.args);
         spec
     }
 

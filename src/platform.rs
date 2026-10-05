@@ -21,6 +21,24 @@ pub fn default_shell() -> (String, Vec<String>) {
     }
 }
 
+/// On macOS a GUI-launched app inherits a minimal PATH (no nvm/fnm/Homebrew node), so Claude Code hooks
+/// that call `node` fail. Run the program through the user's login shell so it sees their normal environment.
+/// Other platforms are returned unchanged.
+pub fn through_login_shell(program: String, args: Vec<String>) -> (String, Vec<String>) {
+    #[cfg(target_os = "macos")]
+    {
+        let shell = std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/zsh".into());
+        let script = if shell.ends_with("/fish") { "exec $argv" } else { r#"exec "$@""# };
+        let mut wrapped = vec!["-l".into(), "-i".into(), "-c".into(), script.into(), "claudiu".into(), program];
+        wrapped.extend(args);
+        (shell, wrapped)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        (program, args)
+    }
+}
+
 pub fn shell_label(program: &str) -> String {
     let stem = Path::new(program).file_stem().and_then(|s| s.to_str()).unwrap_or(program);
     match stem.to_ascii_lowercase().as_str() {

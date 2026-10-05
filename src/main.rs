@@ -21,8 +21,53 @@ mod widgets;
 use gpui::{App, Bounds, KeyBinding, TitlebarOptions, WindowBounds, WindowOptions, prelude::*, px, size};
 
 use app::{
-    CloseSession, FocusNextPane, FocusSearch, ImportProject, NewClaude, NewShell, NextSession, PrevSession, SplitPane, ToggleSidebar, Workspace,
+    CloseSession, FocusNextPane, FocusSearch, HideApp, HideOthers, ImportProject, NewClaude, NewShell, NextSession, PrevSession, Quit, ShowAllApps,
+    SplitPane, ToggleSidebar, Workspace,
 };
+
+/// The macOS menu bar. Every item is an existing Claudiu action, so menu, shortcut and sidebar share one code path;
+/// shortcuts shown here come from the keymap bound in `main`.
+#[cfg(target_os = "macos")]
+fn menu_bar() -> Vec<gpui::Menu> {
+    use gpui::{Menu, MenuItem, OsAction, SystemMenuType};
+    use gpui_kit::component::input;
+    vec![
+        Menu::new("Claudiu").items([
+            MenuItem::os_submenu("Services", SystemMenuType::Services),
+            MenuItem::separator(),
+            MenuItem::action("Hide Claudiu", HideApp),
+            MenuItem::action("Hide Others", HideOthers),
+            MenuItem::action("Show All", ShowAllApps),
+            MenuItem::separator(),
+            MenuItem::action("Quit Claudiu", Quit),
+        ]),
+        Menu::new("File").items([
+            MenuItem::action("New Claude Session", NewClaude),
+            MenuItem::action("New Shell", NewShell),
+            MenuItem::separator(),
+            MenuItem::action("Add Project…", ImportProject),
+            MenuItem::separator(),
+            MenuItem::action("Close Session", CloseSession),
+        ]),
+        Menu::new("Edit").items([
+            MenuItem::os_action("Cut", input::Cut, OsAction::Cut),
+            MenuItem::os_action("Copy", input::Copy, OsAction::Copy),
+            MenuItem::os_action("Paste", input::Paste, OsAction::Paste),
+            MenuItem::separator(),
+            MenuItem::os_action("Select All", input::SelectAll, OsAction::SelectAll),
+        ]),
+        Menu::new("View").items([
+            MenuItem::action("Toggle Sidebar", ToggleSidebar),
+            MenuItem::action("Find Sessions", FocusSearch),
+            MenuItem::separator(),
+            MenuItem::action("Next Session", NextSession),
+            MenuItem::action("Previous Session", PrevSession),
+            MenuItem::separator(),
+            MenuItem::action("Split Pane", SplitPane),
+            MenuItem::action("Focus Next Pane", FocusNextPane),
+        ]),
+    ]
+}
 
 /// Write panics to `crash.log` next to the state file: release builds have no console to show them.
 fn install_crash_log() {
@@ -87,6 +132,8 @@ fn main() {
             KeyBinding::new("ctrl-tab", NextSession, None),
             KeyBinding::new("ctrl-shift-tab", PrevSession, None),
         ]);
+        #[cfg(target_os = "macos")]
+        cx.bind_keys([KeyBinding::new("cmd-q", Quit, None), KeyBinding::new("cmd-h", HideApp, None), KeyBinding::new("cmd-alt-h", HideOthers, None)]);
 
         let bounds = Bounds::centered(None, size(px(1280.0), px(800.0)), cx);
         // Opened through gpui_kit so the window gets the component library's Root (text inputs need it).
@@ -102,12 +149,26 @@ fn main() {
         )
         .expect("open window");
 
+        let quit_target = workspace.clone();
         // Closing the window with live sessions asks first instead of silently killing them.
         window
             .update(cx, |_, window, cx| {
                 window.on_window_should_close(cx, move |window, cx| workspace.update(cx, |ws, cx| ws.request_quit(window, cx)));
             })
             .ok();
+
+        // Cmd+Q / the Quit menu item go through the same confirmation as closing the window.
+        cx.on_action(move |_: &Quit, cx| {
+            let quit = window.update(cx, |_, window, cx| quit_target.update(cx, |ws, cx| ws.request_quit(window, cx))).unwrap_or(true);
+            if quit {
+                cx.quit();
+            }
+        });
+        cx.on_action(|_: &HideApp, cx| cx.hide());
+        cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
+        cx.on_action(|_: &ShowAllApps, cx| cx.unhide_other_apps());
+        #[cfg(target_os = "macos")]
+        cx.set_menus(menu_bar());
 
         cx.on_window_closed(|cx, _| {
             if cx.windows().is_empty() {
