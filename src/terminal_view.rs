@@ -114,27 +114,6 @@ impl TerminalView {
         }
     }
 
-    /// Claude Code shows its prompt with nothing typed: the cursor sits on the `❯` line and everything after
-    /// the marker is blank or the dim placeholder. False during dialogs, drafts and output. (Screen heuristic.)
-    pub fn prompt_is_empty(&self) -> bool {
-        let term = self.terminal.term.lock();
-        let row = &term.grid()[term.grid().cursor.point.line];
-        let cells: Vec<_> = (0..row.len()).map(|c| &row[Column(c)]).collect();
-        let Some(start) = cells.iter().position(|c| c.c != ' ') else { return false };
-        matches!(cells[start].c, '❯' | '>')
-            && cells[start + 1..].iter().all(|c| c.c.is_whitespace() || c.c == '\0' || c.flags.contains(Flags::DIM))
-    }
-
-    /// Type a line into the program as if the user had, then press Enter separately so it isn't taken as a paste.
-    pub fn type_line(&mut self, text: &str, cx: &mut Context<Self>) {
-        self.send(text.as_bytes().to_vec(), cx);
-        cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(Duration::from_millis(150)).await;
-            let _ = this.update(cx, |v, cx| v.send(b"\r".to_vec(), cx));
-        })
-        .detach();
-    }
-
     fn handle_event(&mut self, event: TermEvent, cx: &mut Context<Self>) {
         match event {
             TermEvent::Wakeup => {

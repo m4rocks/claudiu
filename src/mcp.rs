@@ -24,11 +24,26 @@ whenever the user asks you to rename or retitle this session or tab (use the nam
 with the same or a near-identical title, and never twice in a row for the same reason (if the user ran /rename \
 themselves, the title is already set; leave it). Don't mention the tool unless the user asked for a rename. \
 Never switch models on your own. Before calling set_model, ask the user with the AskUserQuestion tool which \
-model and effort they want, unless they just named them explicitly. The switch applies from your next request, \
-even while you are still working.";
+model and effort they want, unless they just named them explicitly. The switch applies from your next request; \
+after calling set_model, end your turn and ask the user to confirm before continuing, so the session itself switches.";
 
 fn titles_dir() -> PathBuf {
     crate::statusline::data_dir().join("titles")
+}
+
+/// Where Claudiu puts the Claude Code session name it wants for a session; the mod (`CLAUDIU_NAME_FILE`)
+/// applies it with `/rename`, so nothing is typed into the PTY.
+pub fn name_file(claude_session_id: &str) -> PathBuf {
+    crate::statusline::data_dir().join("names").join(format!("{}.txt", crate::statusline::safe_file_stem(claude_session_id)))
+}
+
+/// Ask the mod for this session name (or none, for a nameless session).
+pub fn write_name(claude_session_id: &str, name: Option<&str>) {
+    let path = name_file(claude_session_id);
+    let _ = match name {
+        Some(name) => crate::statusline::write_atomic(&path, name),
+        None => std::fs::remove_file(&path),
+    };
 }
 
 fn config_dir() -> PathBuf {
@@ -73,7 +88,7 @@ fn serve(input: impl BufRead, mut out: impl Write, session: &str, titles: &Path)
                 },
             }, {
                 "name": "set_model",
-                "description": "Switch this session's model and/or effort from your next request on, even mid-turn. Always ask the user first with the AskUserQuestion tool (which model, which effort) unless they just named them explicitly; never switch on your own. The choice is not saved as the user's default.",
+                "description": "Switch this session's model and/or effort from your next request on, even mid-turn. Always ask the user first with the AskUserQuestion tool (which model, which effort) unless they just named them explicitly; never switch on your own. Claude Code also keeps the choice as the user's default model/effort.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -159,9 +174,9 @@ pub fn read_titles() -> Vec<(String, String, Option<std::time::SystemTime>)> {
         .collect()
 }
 
-/// Directories `statusline::cleanup` prunes: `[per-session MCP configs, titles]` (titles also live in the store).
-pub fn cleanup_dirs() -> [PathBuf; 2] {
-    [config_dir(), titles_dir()]
+/// Directories `statusline::cleanup` prunes: `[per-session MCP configs, titles, names]` (titles also live in the store).
+pub fn cleanup_dirs() -> [PathBuf; 3] {
+    [config_dir(), titles_dir(), crate::statusline::data_dir().join("names")]
 }
 
 #[cfg(test)]

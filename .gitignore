@@ -1,2 +1,4 @@
 /target
 /dist
+/mod/tsconfig.json
+/mod/.claude-plugin/types/

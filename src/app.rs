@@ -371,30 +371,24 @@ impl Workspace {
         if flash {
             platform::request_attention(window);
         }
-        self.sync_claude_names(cx);
+        self.sync_claude_names();
     }
 
     /// Claude Code keeps its own session name (`/resume`, Remote Control, the mobile apps). `--name` covers
-    /// resumes; a running session gets `/rename` typed for it, but only while it is idle with an empty prompt,
-    /// so a draft or a permission dialog never receives the keystrokes.
-    fn sync_claude_names(&mut self, cx: &mut Context<Self>) {
+    /// launches; for a running session the name goes to its name file and the mod runs `/rename` once Claude
+    /// Code is idle. Nothing is typed into the PTY.
+    fn sync_claude_names(&mut self) {
         for l in &mut self.live {
-            let Some(w) = self
+            let Some((cid, w)) = self
                 .store
                 .session(&l.id)
-                .filter(|r| r.claude.is_some())
-                .and_then(|r| r.chosen_title())
-                .filter(|w| l.claude_name.as_deref() != Some(*w))
+                .and_then(|r| Some((r.claude_id()?, r.chosen_title()?)))
+                .filter(|(_, w)| l.claude_name.as_deref() != Some(*w))
             else {
                 continue;
             };
-            let v = l.view.read(cx);
-            if !(v.is_running() && !v.is_working() && v.prompt_is_empty()) {
-                continue;
-            }
             l.claude_name = Some(w.to_string());
-            let line = format!("/rename {w}");
-            l.view.update(cx, |v, cx| v.type_line(&line, cx));
+            mcp::write_name(cid, Some(w));
         }
     }
 
@@ -499,6 +493,7 @@ impl Workspace {
         }
         if let Ok(dir) = mcp::prepare_mod() {
             spec.args.extend(["--plugin-dir".into(), dir.to_string_lossy().into_owned()]);
+            spec.env.push(("CLAUDIU_NAME_FILE".into(), mcp::name_file(claude_session_id).to_string_lossy().into_owned()));
         }
         spec.env.push(("CLAUDE_CODE_AUTO_CONNECT_IDE".into(), "false".into()));
         spec.env.push(("CLAUDE_CODE_IDE_SKIP_AUTO_INSTALL".into(), "1".into()));
@@ -785,6 +780,10 @@ impl Workspace {
             },
         );
         let claude_name = spec.args.iter().position(|a| a == "--name").and_then(|i| spec.args.get(i + 1)).cloned();
+        // The mod reads the launch name first and leaves it alone; a stale file would otherwise rename the session.
+        if let Some(cid) = self.store.session(&id).and_then(|r| r.claude_id()) {
+            mcp::write_name(cid, claude_name.as_deref());
+        }
         self.live.push(Live {
             id: id.clone(),
             view,
