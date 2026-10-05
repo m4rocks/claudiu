@@ -1,0 +1,4 @@
+{
+  "description": "Claudiu session helpers",
+  "modules": ["./register.js"]
+}

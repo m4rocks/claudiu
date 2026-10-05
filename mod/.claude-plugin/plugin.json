@@ -1,0 +1,5 @@
+{
+  "name": "claudiu-mod",
+  "version": "0.1.0",
+  "description": "Applies Claudiu's set_model tool call immediately, even mid-turn"
+}

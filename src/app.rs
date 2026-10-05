@@ -137,8 +137,6 @@ pub struct Live {
     /// When Claude last called the title tool. A later call (e.g. after `/clear`, which starts a nameless
     /// Claude session) clears `claude_name` so the title is sent again.
     pub title_stamp: Option<std::time::SystemTime>,
-    /// `/model` / `/effort` lines Claude asked for through the MCP tool, typed one at a time once the session is idle.
-    pub pending: Vec<String>,
 }
 
 pub struct Toast {
@@ -364,31 +362,25 @@ impl Workspace {
     }
 
     /// Claude Code keeps its own session name (`/resume`, Remote Control, the mobile apps). `--name` covers
-    /// resumes; a running session gets `/rename` typed for it, and the `/model` / `/effort` lines Claude queued
-    /// through the MCP tool, one per call, but only while it is idle with an empty prompt, so a draft or a
-    /// permission dialog never receives the keystrokes.
+    /// resumes; a running session gets `/rename` typed for it, but only while it is idle with an empty prompt,
+    /// so a draft or a permission dialog never receives the keystrokes.
     fn sync_claude_names(&mut self, cx: &mut Context<Self>) {
         for l in &mut self.live {
-            let want = self
+            let Some(w) = self
                 .store
                 .session(&l.id)
                 .filter(|r| r.claude.is_some())
                 .and_then(|r| r.chosen_title())
-                .filter(|w| l.claude_name.as_deref() != Some(*w));
-            if want.is_none() && l.pending.is_empty() {
+                .filter(|w| l.claude_name.as_deref() != Some(*w))
+            else {
                 continue;
-            }
+            };
             let v = l.view.read(cx);
             if !(v.is_running() && !v.is_working() && v.prompt_is_empty()) {
                 continue;
             }
-            let line = match want {
-                Some(w) => {
-                    l.claude_name = Some(w.to_string());
-                    format!("/rename {w}")
-                }
-                None => l.pending.remove(0),
-            };
+            l.claude_name = Some(w.to_string());
+            let line = format!("/rename {w}");
             l.view.update(cx, |v, cx| v.type_line(&line, cx));
         }
     }
@@ -402,35 +394,16 @@ impl Workspace {
     }
 
     /// Pick up what Claude Code's status line (via our per-process tee) wrote: account limits and exact context,
-    /// plus the tab titles and model/effort switches Claude asked for through the MCP tool.
+    /// plus the tab titles Claude chose through the MCP tool.
     /// Costs no tokens; the files are tiny, but the read still happens off the UI thread.
     fn ingest_statusline(&mut self, cx: &mut Context<Self>) {
-        let live_stems: Vec<String> = self
-            .live
-            .iter()
-            .filter_map(|l| self.store.session(&l.id)?.claude_id().map(statusline::safe_file_stem))
-            .collect();
         cx.spawn(async move |this, cx| {
-            let (snaps, titles, requests) = cx
+            let (snaps, titles) = cx
                 .background_executor()
-                .spawn(async move {
-                    (statusline::read_snapshots(&statusline::snapshot_dir()), mcp::read_titles(), mcp::take_model_requests(&live_stems))
-                })
+                .spawn(async move { (statusline::read_snapshots(&statusline::snapshot_dir()), mcp::read_titles()) })
                 .await;
             let _ = this.update(cx, |ws, cx| {
                 let mut changed = false;
-                for (stem, lines) in requests {
-                    let id = ws
-                        .store
-                        .data
-                        .sessions
-                        .iter()
-                        .find(|s| s.claude_id().is_some_and(|id| statusline::safe_file_stem(id) == stem))
-                        .map(|s| s.id.clone());
-                    if let Some(l) = ws.live.iter_mut().find(|l| Some(&l.id) == id.as_ref()) {
-                        l.pending.extend(lines);
-                    }
-                }
                 for (stem, title, stamp) in titles {
                     let Some(rec) = ws
                         .store
@@ -510,6 +483,9 @@ impl Workspace {
         }
         if let Ok(config) = mcp::prepare(claude_session_id) {
             spec.args.extend(["--allowedTools".into(), mcp::ALLOWED_TOOL.into(), "--mcp-config".into(), config.to_string_lossy().into_owned()]);
+        }
+        if let Ok(dir) = mcp::prepare_mod() {
+            spec.args.extend(["--plugin-dir".into(), dir.to_string_lossy().into_owned()]);
         }
         spec.env.push(("CLAUDE_CODE_AUTO_CONNECT_IDE".into(), "false".into()));
         spec.env.push(("CLAUDE_CODE_IDE_SKIP_AUTO_INSTALL".into(), "1".into()));
@@ -797,7 +773,6 @@ impl Workspace {
             _sub: sub,
             claude_name,
             title_stamp: None,
-            pending: vec![],
         });
         self.place_in_pane(&id, cx);
         self.remember(&id);

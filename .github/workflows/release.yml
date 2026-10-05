@@ -16,9 +16,6 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: release-win # restored from the cache ci.yml builds on main; tag caches can't be shared, so don't save
-          save-if: false
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 8.x
@@ -54,9 +51,6 @@ jobs:
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
       - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: release-mac
-          save-if: false
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 8.x

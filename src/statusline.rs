@@ -220,11 +220,10 @@ pub fn cleanup() {
         }
     };
     prune(settings_dir(), 7 * 86_400);
-    let [mcp_configs, titles, requests] = crate::mcp::cleanup_dirs();
+    let [mcp_configs, titles] = crate::mcp::cleanup_dirs();
     prune(mcp_configs, 7 * 86_400);
     // Titles are copied into the store on the next tick, so an old file is only a duplicate.
     prune(titles, 7 * 86_400);
-    prune(requests, 86_400);
     prune(snapshot_dir(), 30 * 86_400);
 }
 
