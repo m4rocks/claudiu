@@ -217,6 +217,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
     fn verbatim_prefix_is_stripped() {
         assert_eq!(clean_path(Path::new(r"\\?\C:\x\y")), PathBuf::from(r"C:\x\y"));
     }
@@ -229,6 +230,7 @@ mod tests {
 
     #[test]
     fn shell_labels() {
+        #[cfg(windows)]
         assert_eq!(shell_label(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"), "PowerShell");
         assert_eq!(shell_label("/bin/zsh"), "zsh");
     }
