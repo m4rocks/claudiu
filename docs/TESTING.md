@@ -63,4 +63,4 @@ Everything below needs eyes and a keyboard. Roughly ordered by risk. `[ ]` = not
 - [ ] `scripts\package.ps1` produces `dist\releases\Claudiu-win-Setup.exe`; install, launch from Start menu, uninstall.
 - [ ] Push a tag (`v0.1.0`), let CI publish; install it. Push `v0.1.1`: the installed app shows "Claudiu 0.1.1 is available", downloads, and "Restart to update" swaps versions (with a confirmation if sessions are running).
 - [ ] A dev build (`cargo run`) never shows an update banner.
-- [ ] macOS: build, run, and the same flows above. The macOS release job is unproven and expected to need tweaks (icon `.icns`, signing).
+- [ ] macOS: build, run, and the same flows above. The macOS release job (universal build, ad-hoc signed, no notarization) has never run: check the Actions log after the first tag, and that the installed app launches past Gatekeeper (right-click → Open).

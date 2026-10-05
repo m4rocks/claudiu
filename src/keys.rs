@@ -44,11 +44,10 @@ pub fn encode(ks: &Keystroke, mode: TermMode) -> Option<Vec<u8>> {
     let app = mode.contains(TermMode::APP_CURSOR);
 
     // AltGr arrives as ctrl+alt with a produced character: it's plain text.
-    if m.control && m.alt {
-        if let Some(text) = ks.key_char.as_ref().filter(|t| !t.is_empty()) {
+    if m.control && m.alt
+        && let Some(text) = ks.key_char.as_ref().filter(|t| !t.is_empty()) {
             return Some(text.clone().into_bytes());
         }
-    }
 
     let alt_prefix = |mut bytes: Vec<u8>| {
         if m.alt {
@@ -121,7 +120,7 @@ pub fn encode(ks: &Keystroke, mode: TermMode) -> Option<Vec<u8>> {
 
     if m.alt {
         let text = match &ks.key_char {
-            Some(t) if !t.is_empty() && t.chars().all(|ch| ch.is_ascii()) => t.clone(),
+            Some(t) if !t.is_empty() && t.is_ascii() => t.clone(),
             _ if m.shift => c.to_uppercase().collect(),
             _ => c.to_string(),
         };

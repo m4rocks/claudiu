@@ -95,11 +95,10 @@ pub fn run_tee() -> i32 {
     let _ = std::io::stdin().read_to_end(&mut input);
     let text = String::from_utf8_lossy(&input).into_owned();
 
-    if let Some(snap) = parse(&text, crate::store::now()) {
-        if let Ok(body) = serde_json::to_string(&snap) {
+    if let Some(snap) = parse(&text, crate::store::now())
+        && let Ok(body) = serde_json::to_string(&snap) {
             let _ = write_atomic(&snapshot_dir().join(format!("{}.json", safe_file_stem(&snap.session_id))), &body);
         }
-    }
 
     // Preserve the user's own status line, if they have one.
     if let Some(cmd) = std::env::var(FORWARD_ENV).ok().filter(|c| !c.trim().is_empty()) {

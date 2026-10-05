@@ -185,11 +185,10 @@ impl Store {
             let _ = fs::create_dir_all(parent);
         }
         let tmp = self.path.with_extension("json.tmp");
-        if let Ok(text) = serde_json::to_string_pretty(&self.data) {
-            if fs::write(&tmp, text).is_ok() && fs::rename(&tmp, &self.path).is_ok() {
+        if let Ok(text) = serde_json::to_string_pretty(&self.data)
+            && fs::write(&tmp, text).is_ok() && fs::rename(&tmp, &self.path).is_ok() {
                 self.dirty = false;
             }
-        }
     }
 
     pub fn project(&self, id: &str) -> Option<&Project> {
@@ -322,11 +321,10 @@ pub fn reconcile(data: &mut Data, external: &[ExternalSession], scan_ok: bool) -
                     rec.title = title.clone();
                 }
                 rec.last_active = rec.last_active.max(ext.last_active);
-                if rec.project_id.is_none() {
-                    if let Some(cwd) = &ext.cwd {
+                if rec.project_id.is_none()
+                    && let Some(cwd) = &ext.cwd {
                         rec.project_id = project_for(&projects, cwd);
                     }
-                }
                 let meta = rec.claude.get_or_insert_with(|| ClaudeMeta { session_id: ext.session_id.clone(), ..Default::default() });
                 meta.external = ExternalState::Present;
                 meta.transcript = Some(ext.transcript.clone());
@@ -402,8 +400,7 @@ mod tests {
 
     #[test]
     fn imports_new_sessions_and_maps_to_deepest_project() {
-        let mut d = Data::default();
-        d.projects = vec![project("outer", "/w"), project("inner", "/w/app")];
+        let mut d = Data { projects: vec![project("outer", "/w"), project("inner", "/w/app")], ..Default::default() };
         let stats = reconcile(&mut d, &[ext("a", "/w/app/src", "T", 10), ext("b", "/other", "U", 5)], true);
         assert_eq!(stats.added, 2);
         assert_eq!(d.sessions[0].project_id.as_deref(), Some("inner"));

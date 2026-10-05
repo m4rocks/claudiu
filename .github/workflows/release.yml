@@ -40,28 +40,39 @@ jobs:
         run: vpk upload github --repoUrl "${{ github.server_url }}/${{ github.repository }}" --outputDir dist/releases --publish --releaseName "Claudiu ${{ steps.ver.outputs.version }}" --tag "${{ github.ref_name }}" --token "${{ secrets.GITHUB_TOKEN }}"
 
   macos:
-    # Not exercised yet: expect to iterate on signing/notarization and the .icns icon.
-    needs: windows
-    continue-on-error: true
+    # One universal (arm64 + x86_64) build. Unsigned/ad-hoc signed: Gatekeeper will warn until a
+    # Developer ID identity is added (vpk --signAppIdentity / --notaryProfile).
+    needs: windows # the Windows job creates the release; this one merges into it
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
       - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 8.x
       - name: Install Velopack CLI
         run: dotnet tool install -g vpk
+      - name: Metal toolchain (GPUI compiles shaders; newer Xcodes ship it as a download)
+        run: xcrun -f metal >/dev/null 2>&1 || xcodebuild -downloadComponent MetalToolchain
       - name: Version from tag
         id: ver
         run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-      - name: Build
-        run: cargo build --release --locked
-      - name: Pack
+      - name: Build (universal)
         run: |
+          cargo build --release --locked --target aarch64-apple-darwin
+          cargo build --release --locked --target x86_64-apple-darwin
           mkdir -p dist/publish
-          cp target/release/claudiu dist/publish/
-          vpk pack --packId Claudiu --packVersion "${{ steps.ver.outputs.version }}" --packDir dist/publish --mainExe claudiu --packTitle Claudiu --outputDir dist/releases
+          lipo -create -output dist/publish/claudiu target/aarch64-apple-darwin/release/claudiu target/x86_64-apple-darwin/release/claudiu
+          codesign --force --sign - dist/publish/claudiu   # lipo invalidates the per-arch signatures
+      - name: Icon
+        run: scripts/make-icns.sh dist/claudiu.icns
+      - name: Fetch previous release (for delta updates)
+        continue-on-error: true
+        run: vpk download github --repoUrl "${{ github.server_url }}/${{ github.repository }}" --token "${{ secrets.GITHUB_TOKEN }}"
+      - name: Pack
+        run: vpk pack --packId Claudiu --packVersion "${{ steps.ver.outputs.version }}" --packDir dist/publish --mainExe claudiu --packTitle Claudiu --icon dist/claudiu.icns --bundleId com.m4rocks.claudiu --outputDir dist/releases
       - name: Upload (merge into the release created by the Windows job)
         run: vpk upload github --repoUrl "${{ github.server_url }}/${{ github.repository }}" --outputDir dist/releases --merge --publish --releaseName "Claudiu ${{ steps.ver.outputs.version }}" --tag "${{ github.ref_name }}" --token "${{ secrets.GITHUB_TOKEN }}"

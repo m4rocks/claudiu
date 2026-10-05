@@ -16,6 +16,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Metal toolchain (macOS; GPUI compiles shaders)
+        if: runner.os == 'macOS'
+        run: xcrun -f metal >/dev/null 2>&1 || xcodebuild -downloadComponent MetalToolchain
       - name: Build
         run: cargo build --locked
       - name: Unit tests (store/reconcile, claude import, git, keys, glyphs, process lifecycle)

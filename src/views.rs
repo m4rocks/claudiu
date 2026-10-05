@@ -262,7 +262,7 @@ impl Workspace {
         };
         let mut recent = div().flex().flex_col().gap(px(2.0)).mt(px(26.0)).w(px(420.0));
         let mut sessions: Vec<_> = self.store.data.sessions.iter().filter(|s| s.kind == SessionKind::Claude && !s.hidden).cloned().collect();
-        sessions.sort_by(|a, b| b.last_active.cmp(&a.last_active));
+        sessions.sort_by_key(|s| std::cmp::Reverse(s.last_active));
         let t = now();
         if !sessions.is_empty() {
             recent = recent.child(div().mb(px(4.0)).child(section_label("RECENT")));

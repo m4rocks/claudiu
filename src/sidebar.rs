@@ -251,7 +251,7 @@ impl Workspace {
                     .filter(|s| s.kind == SessionKind::Claude && s.project_id.as_deref() == Some(p.id.as_str()) && !s.hidden)
                     .cloned()
                     .collect();
-                v.sort_by(|a, b| b.last_active.cmp(&a.last_active));
+                v.sort_by_key(|s| std::cmp::Reverse(s.last_active));
                 v
             };
             let name_match = searching && p.name.to_lowercase().contains(&q);
@@ -298,7 +298,7 @@ impl Workspace {
             .filter(|s| s.kind == SessionKind::Claude && s.project_id.is_none() && !s.hidden && self.matches(&q, s))
             .cloned()
             .collect();
-        others.sort_by(|a, b| b.last_active.cmp(&a.last_active));
+        others.sort_by_key(|s| std::cmp::Reverse(s.last_active));
         if !others.is_empty() {
             let collapsed = self.store.data.layout.other_collapsed && !searching;
             body = body.child(div().h(px(10.0)));

@@ -1,8 +1,8 @@
 //! Small stateless UI pieces shared by sidebar / main view / modals.
 
 use gpui::{
-    div, px, AnyElement, App, ClickEvent, Div, FontWeight, Hsla, InteractiveElement, IntoElement,
-    Keystroke, ParentElement, SharedString, Stateful, Styled, Window,
+    App, Div, FontWeight, Hsla, InteractiveElement, Keystroke, ParentElement, SharedString,
+    Stateful, Styled, div, px,
 };
 
 use crate::theme::{self, hsla};

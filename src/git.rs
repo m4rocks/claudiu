@@ -38,11 +38,10 @@ pub fn detect(path: &Path) -> Option<GitInfo> {
     let main = if is_worktree { Repository::open(repo.commondir()).ok() } else { None };
     let main_repo = main.as_ref().unwrap_or(&repo);
     let mut worktrees: Vec<PathBuf> = Vec::new();
-    if is_worktree {
-        if let Some(wd) = main_repo.workdir() {
+    if is_worktree
+        && let Some(wd) = main_repo.workdir() {
             worktrees.push(normalize(wd));
         }
-    }
     if let Ok(names) = main_repo.worktrees() {
         for name in names.iter().flatten().flatten() {
             if let Ok(wt) = main_repo.find_worktree(name) {

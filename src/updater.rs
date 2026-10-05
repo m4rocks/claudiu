@@ -72,7 +72,7 @@ pub fn check(ws: &mut Workspace, cx: &mut Context<Workspace>) {
         });
         // Re-check periodically while the app stays open.
         cx.background_executor().timer(Duration::from_secs(6 * 3600)).await;
-        let _ = this.update(cx, |ws, cx| check(ws, cx));
+        let _ = this.update(cx, check);
     })
     .detach();
 }

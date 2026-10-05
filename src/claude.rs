@@ -227,13 +227,11 @@ pub fn read_session(path: &Path) -> Option<SessionScan> {
             }
             _ => {}
         }
-        if line.contains("rateLimitType") {
-            if let Some(obj) = find_rate_limit(&v) {
-                if let Some(obs) = limit_from(obj, ts.unwrap_or(modified_fs)) {
+        if line.contains("rateLimitType")
+            && let Some(obj) = find_rate_limit(&v)
+                && let Some(obs) = limit_from(obj, ts.unwrap_or(modified_fs)) {
                     limits.push(obs);
                 }
-            }
-        }
     };
     for line in head.lines() {
         visit(line, false);

@@ -90,7 +90,6 @@ impl Terminal {
             // Arguments may contain spaces (e.g. a settings file path): quote them properly.
             #[cfg(target_os = "windows")]
             escape_args: true,
-            ..Default::default()
         };
         let window_size = WindowSize { num_lines: rows, num_cols: cols, cell_width: 8, cell_height: 16 };
         // alacritty's ConPTY setup asserts on failure; surface that as a normal startup error instead of a crash.
