@@ -1,0 +1,67 @@
+name: release
+
+# Push a tag like v0.2.0 to publish installers and the auto-update feed to GitHub Releases.
+# Installed copies of Claudiu check this repository's releases (Velopack GithubSource) and update themselves.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.x
+      - name: Install Velopack CLI
+        run: dotnet tool install -g vpk
+      - name: Version from tag
+        id: ver
+        shell: bash
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+      - name: Build
+        run: cargo build --release --locked
+      - name: Fetch previous release (for delta updates)
+        continue-on-error: true # none exists for the first release
+        run: vpk download github --repoUrl "${{ github.server_url }}/${{ github.repository }}" --token "${{ secrets.GITHUB_TOKEN }}"
+      - name: Pack
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist/publish | Out-Null
+          Copy-Item target/release/claudiu.exe dist/publish/
+          vpk pack --packId Claudiu --packVersion "${{ steps.ver.outputs.version }}" --packDir dist/publish --mainExe claudiu.exe --packTitle Claudiu --icon assets/claudiu.ico --outputDir dist/releases
+      - name: Upload
+        run: vpk upload github --repoUrl "${{ github.server_url }}/${{ github.repository }}" --outputDir dist/releases --publish --releaseName "Claudiu ${{ steps.ver.outputs.version }}" --tag "${{ github.ref_name }}" --token "${{ secrets.GITHUB_TOKEN }}"
+
+  macos:
+    # Not exercised yet: expect to iterate on signing/notarization and the .icns icon.
+    needs: windows
+    continue-on-error: true
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.x
+      - name: Install Velopack CLI
+        run: dotnet tool install -g vpk
+      - name: Version from tag
+        id: ver
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+      - name: Build
+        run: cargo build --release --locked
+      - name: Pack
+        run: |
+          mkdir -p dist/publish
+          cp target/release/claudiu dist/publish/
+          vpk pack --packId Claudiu --packVersion "${{ steps.ver.outputs.version }}" --packDir dist/publish --mainExe claudiu --packTitle Claudiu --outputDir dist/releases
+      - name: Upload (merge into the release created by the Windows job)
+        run: vpk upload github --repoUrl "${{ github.server_url }}/${{ github.repository }}" --outputDir dist/releases --merge --publish --releaseName "Claudiu ${{ steps.ver.outputs.version }}" --tag "${{ github.ref_name }}" --token "${{ secrets.GITHUB_TOKEN }}"

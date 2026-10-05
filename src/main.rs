@@ -1,0 +1,113 @@
+#![cfg_attr(all(not(debug_assertions), target_os = "windows"), windows_subsystem = "windows")]
+
+mod app;
+mod claude;
+mod git;
+mod glyphs;
+mod keys;
+mod platform;
+mod sidebar;
+mod store;
+mod terminal;
+mod terminal_view;
+mod theme;
+mod statusline;
+mod updater;
+mod usage;
+mod views;
+mod widgets;
+
+use gpui::{App, Application, Bounds, KeyBinding, TitlebarOptions, WindowBounds, WindowOptions, prelude::*, px, size};
+
+use app::{
+    CloseSession, FocusNextPane, FocusSearch, ImportProject, NewClaude, NewShell, NextSession, PrevSession, SplitPane, ToggleSidebar, Workspace,
+};
+
+/// Write panics to `crash.log` next to the state file: release builds have no console to show them.
+fn install_crash_log() {
+    let path = store::Store::default_path().with_file_name("crash.log");
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let report = format!(
+            "[{}] Claudiu {} panicked
+{info}
+{}
+
+",
+            store::now(),
+            env!("CARGO_PKG_VERSION"),
+            std::backtrace::Backtrace::force_capture()
+        );
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            use std::io::Write;
+            let _ = f.write_all(report.as_bytes());
+        }
+        default_hook(info);
+    }));
+}
+
+fn main() {
+    // Hidden helper mode: Claude Code runs this as its status line (see statusline.rs). Keep it instant.
+    if std::env::args().nth(1).as_deref() == Some(statusline::TEE_FLAG) {
+        std::process::exit(statusline::run_tee());
+    }
+    install_crash_log();
+    // Velopack install/update hooks must run before anything else. A no-op for dev builds.
+    velopack::VelopackApp::build().run();
+
+    // TERM=xterm-256color / COLORTERM=truecolor for child processes.
+    alacritty_terminal::tty::setup_env();
+    terminal::prepare_child_env();
+
+    // `claudiu <folder>...` registers folders as projects (also what a shell "open with" would pass).
+    let initial: Vec<std::path::PathBuf> = std::env::args().skip(1).map(std::path::PathBuf::from).filter(|p| p.is_dir()).collect();
+
+    Application::new().run(move |cx: &mut App| {
+        // Claudiu-global shortcuts. Deliberately Ctrl+Shift (Cmd+Shift on macOS) so every plain Ctrl/Alt
+        // chord, e.g. Alt+P, still reaches Claude Code untouched.
+        cx.bind_keys([
+            KeyBinding::new("secondary-shift-n", NewClaude, None),
+            KeyBinding::new("secondary-shift-t", NewShell, None),
+            KeyBinding::new("secondary-shift-w", CloseSession, None),
+            KeyBinding::new("secondary-shift-d", SplitPane, None),
+            KeyBinding::new("secondary-shift-b", ToggleSidebar, None),
+            KeyBinding::new("secondary-shift-f", FocusSearch, None),
+            KeyBinding::new("secondary-shift-o", ImportProject, None),
+            KeyBinding::new("secondary-shift-]", FocusNextPane, None),
+            KeyBinding::new("ctrl-tab", NextSession, None),
+            KeyBinding::new("ctrl-shift-tab", PrevSession, None),
+        ]);
+
+        let bounds = Bounds::centered(None, size(px(1280.0), px(800.0)), cx);
+        let window = cx
+            .open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    window_min_size: Some(size(px(720.0), px(420.0))),
+                    titlebar: Some(TitlebarOptions { title: Some("Claudiu".into()), ..Default::default() }),
+                    ..Default::default()
+                },
+                |window, cx| cx.new(|cx| Workspace::new(window, initial, cx)),
+            )
+            .expect("open window");
+
+        // Closing the window with live sessions asks first instead of silently killing them.
+        let workspace = window.update(cx, |_, _, cx| cx.entity()).expect("workspace");
+        window
+            .update(cx, |_, window, cx| {
+                window.on_window_should_close(cx, move |window, cx| workspace.update(cx, |ws, cx| ws.request_quit(window, cx)));
+            })
+            .ok();
+
+        cx.on_window_closed(|cx| {
+            if cx.windows().is_empty() {
+                cx.quit();
+            }
+        })
+        .detach();
+        cx.activate(true);
+    });
+}

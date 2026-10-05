@@ -1,0 +1,36 @@
+[package]
+name = "claudiu"
+version = "0.1.0"
+edition = "2024"
+description = "A native workspace for Claude Code sessions: real PTYs, projects, and session history"
+repository = "https://github.com/m4rocks/claudiu"
+publish = false
+
+[dependencies]
+alacritty_terminal = "0.26.0"
+anyhow = "1.0.104"
+directories = "6.0.0"
+dunce = "1.0.5"
+futures = "0.3.34"
+git2 = { version = "0.21.0", default-features = false }
+gpui = "0.2.2"
+jiff = "0.2.37"
+regex = "1.13.1"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+time = { version = "0.3.55", features = ["parsing"] }
+uuid = { version = "1.27.0", features = ["v4"] }
+velopack = "1.2.161"
+wait-timeout = "0.2.1"
+which = "8.0.6"
+
+[dev-dependencies]
+tempfile = "3.27.0"
+
+[build-dependencies]
+winresource = "0.1.31"
+
+[profile.release]
+lto = "thin"
+codegen-units = 4
+strip = true
