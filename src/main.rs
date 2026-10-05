@@ -18,7 +18,7 @@ mod updater;
 mod views;
 mod widgets;
 
-use gpui::{App, Application, Bounds, KeyBinding, TitlebarOptions, WindowBounds, WindowOptions, prelude::*, px, size};
+use gpui::{App, Bounds, KeyBinding, TitlebarOptions, WindowBounds, WindowOptions, prelude::*, px, size};
 
 use app::{
     CloseSession, FocusNextPane, FocusSearch, ImportProject, NewClaude, NewShell, NextSession, PrevSession, SplitPane, ToggleSidebar, Workspace,
@@ -70,7 +70,9 @@ fn main() {
     // `claudiu <folder>...` registers folders as projects (also what a shell "open with" would pass).
     let initial: Vec<std::path::PathBuf> = std::env::args().skip(1).map(std::path::PathBuf::from).filter(|p| p.is_dir()).collect();
 
-    Application::new().run(move |cx: &mut App| {
+    gpui_kit::application().run(move |cx: &mut App| {
+        gpui_kit::init(cx);
+        gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, cx);
         // Claudiu-global shortcuts. Deliberately Ctrl+Shift (Cmd+Shift on macOS) so every plain Ctrl/Alt
         // chord, e.g. Alt+P, still reaches Claude Code untouched.
         cx.bind_keys([
@@ -87,27 +89,27 @@ fn main() {
         ]);
 
         let bounds = Bounds::centered(None, size(px(1280.0), px(800.0)), cx);
-        let window = cx
-            .open_window(
-                WindowOptions {
-                    window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    window_min_size: Some(size(px(720.0), px(420.0))),
-                    titlebar: Some(TitlebarOptions { title: Some("Claudiu".into()), ..Default::default() }),
-                    ..Default::default()
-                },
-                |window, cx| cx.new(|cx| Workspace::new(window, initial, cx)),
-            )
-            .expect("open window");
+        // Opened through gpui_kit so the window gets the component library's Root (text inputs need it).
+        let (window, workspace) = gpui_kit::open_window(
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                window_min_size: Some(size(px(720.0), px(420.0))),
+                titlebar: Some(TitlebarOptions { title: Some("Claudiu".into()), ..Default::default() }),
+                ..Default::default()
+            },
+            cx,
+            |window, cx| cx.new(|cx| Workspace::new(window, initial, cx)),
+        )
+        .expect("open window");
 
         // Closing the window with live sessions asks first instead of silently killing them.
-        let workspace = window.update(cx, |_, _, cx| cx.entity()).expect("workspace");
         window
             .update(cx, |_, window, cx| {
                 window.on_window_should_close(cx, move |window, cx| workspace.update(cx, |ws, cx| ws.request_quit(window, cx)));
             })
             .ok();
 
-        cx.on_window_closed(|cx| {
+        cx.on_window_closed(|cx, _| {
             if cx.windows().is_empty() {
                 cx.quit();
             }

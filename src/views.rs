@@ -565,7 +565,7 @@ impl Render for Workspace {
             self.window_title = title;
         }
 
-        let sidebar = self.store.data.layout.sidebar_visible.then(|| self.render_sidebar(window, cx));
+        let sidebar = self.store.data.layout.sidebar_visible.then(|| self.render_sidebar(cx));
         let banner = self.render_update_banner(cx);
         let topbar = self.render_topbar(cx);
         let main: AnyElement = match &self.main {
@@ -608,7 +608,7 @@ impl Render for Workspace {
             }))
             .on_action(cx.listener(|ws, _: &FocusSearch, window, cx| {
                 ws.store.data.layout.sidebar_visible = true;
-                window.focus(&ws.search_focus);
+                ws.search_input.update(cx, |s, cx| s.focus(window, cx));
                 cx.notify();
             }))
             .on_action(cx.listener(|ws, _: &ImportProject, window, cx| ws.act(Act::ImportProject, window, cx)))

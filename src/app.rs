@@ -9,6 +9,7 @@ use gpui::{
     Pixels, Point, Subscription, Window, actions,
 };
 
+use gpui_kit::component::input::{InputEvent, InputState};
 use crate::claude;
 use crate::mcp;
 use crate::platform::{self, Editor};
@@ -160,7 +161,7 @@ pub struct Workspace {
     pub main: Main,
     pub selected: Option<Id>,
     pub search: String,
-    pub search_focus: FocusHandle,
+    pub search_input: Entity<InputState>,
     pub root_focus: FocusHandle,
     pub modal: Option<Modal>,
     pub modal_focus: FocusHandle,
@@ -187,6 +188,17 @@ impl Workspace {
     ) -> Self {
         let store = Store::load(Store::default_path());
         let claude_exe = claude::discover(store.data.settings.claude_path.as_deref());
+        let search_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Search sessions and projects").clean_on_escape());
+        cx.subscribe_in(&search_input, window, |ws: &mut Self, input, ev: &InputEvent, window, cx| {
+            match ev {
+                InputEvent::Change => ws.search = input.read(cx).value().to_string(),
+                InputEvent::PressEnter { .. } => ws.focus_active(window, cx),
+                _ => {}
+            }
+            cx.notify();
+        })
+        .detach();
         let mut ws = Self {
             claude_exe,
             shell: platform::default_shell(),
@@ -198,7 +210,7 @@ impl Workspace {
             main: Main::Home,
             selected: store.data.layout.selected_session.clone(),
             search: String::new(),
-            search_focus: cx.focus_handle(),
+            search_input,
             root_focus: cx.focus_handle(),
             modal: None,
             modal_focus: cx.focus_handle(),
@@ -236,9 +248,10 @@ impl Workspace {
         ws.ingest_statusline(cx);
         ws.start_ticker(cx);
         ws.start_fetch_loop(cx);
+        ws.start_git_watch(cx);
         ws.start_activity_poll(window, cx);
         ws.check_updates(cx);
-        window.focus(&ws.root_focus);
+        window.focus(&ws.root_focus, cx);
         ws
     }
 
@@ -744,6 +757,7 @@ impl Workspace {
             }
         };
         let id = record.id.clone();
+        let loading = record.kind == SessionKind::Claude;
         record.exit_code = None;
         record.last_active = now();
         // Re-resuming: drop the previous (exited) terminal view for this record.
@@ -756,7 +770,11 @@ impl Workspace {
             r.exit_code = None;
             r.last_active = now();
         }
-        let view = cx.new(|cx| TerminalView::new(terminal, rx, cx));
+        let view = cx.new(|cx| {
+            let mut v = TerminalView::new(terminal, rx, cx);
+            v.loading = loading;
+            v
+        });
         let sub_id = id.clone();
         let sub = cx.subscribe_in(
             &view,
@@ -869,10 +887,10 @@ impl Workspace {
     pub fn focus_active(&self, window: &mut Window, cx: &mut Context<Self>) {
         if let (Main::Terminals, Some(id)) = (&self.main, self.panes.get(self.focused))
             && let Some(view) = self.live_view(id) {
-                window.focus(&view.read(cx).focus_handle(cx));
+                window.focus(&view.read(cx).focus_handle(cx), cx);
                 return;
             }
-        window.focus(&self.root_focus);
+        window.focus(&self.root_focus, cx);
     }
 
     fn close_live(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -941,7 +959,7 @@ impl Workspace {
             danger: true,
             act: Act::ConfirmQuit,
         });
-        window.focus(&self.modal_focus);
+        window.focus(&self.modal_focus, cx);
         cx.notify();
         false
     }
@@ -982,7 +1000,7 @@ impl Workspace {
                     .map(|s| s.display_title().to_string())
                     .unwrap_or_default();
                 self.modal = Some(Modal::Rename { id, text });
-                window.focus(&self.modal_focus);
+                window.focus(&self.modal_focus, cx);
             }
             Act::Archive(id, archive) => {
                 if let Some(rec) = self.store.session_mut(&id) {
@@ -1035,7 +1053,7 @@ impl Workspace {
             }
             Act::NewBranch(cwd) => {
                 self.modal = Some(Modal::NewBranch { cwd, text: String::new() });
-                window.focus(&self.modal_focus);
+                window.focus(&self.modal_focus, cx);
             }
             Act::CreateBranch(cwd, name) => {
                 self.run_git(GitOp::Branch, move || Ok(crate::commit::create_branch(&cwd, &name)?), cx)
@@ -1091,7 +1109,7 @@ impl Workspace {
                         danger: true,
                         act: Act::ConfirmInstallUpdate,
                     });
-                    window.focus(&self.modal_focus);
+                    window.focus(&self.modal_focus, cx);
                 } else {
                     crate::updater::install(self, window, cx);
                 }
@@ -1154,6 +1172,38 @@ impl Workspace {
                     cx.background_executor().spawn(async move { crate::commit::background_fetch(&cwd) }).await;
                 }
                 cx.background_executor().timer(Duration::from_secs(60)).await;
+            }
+        })
+        .detach();
+    }
+
+    /// Re-read each project's git info every few seconds, off the UI thread, so the branch badge follows a
+    /// checkout made in a terminal or by Claude, not only Claudiu's own branch actions.
+    fn start_git_watch(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_secs(3)).await;
+                let Ok(paths) = this.update(cx, |ws, _| ws.store.data.projects.iter().map(|p| p.path.clone()).collect::<Vec<_>>())
+                else {
+                    break;
+                };
+                let infos = cx
+                    .background_executor()
+                    .spawn(async move { paths.into_iter().map(|p| { let g = crate::git::detect(&p); (p, g) }).collect::<Vec<_>>() })
+                    .await;
+                let _ = this.update(cx, |ws, cx| {
+                    let mut changed = false;
+                    for (path, git) in infos {
+                        if let Some(p) = ws.store.data.projects.iter_mut().find(|p| p.path == path && p.git != git) {
+                            p.git = git;
+                            changed = true;
+                        }
+                    }
+                    if changed {
+                        ws.store.mark_dirty();
+                        cx.notify();
+                    }
+                });
             }
         })
         .detach();

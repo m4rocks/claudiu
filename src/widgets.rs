@@ -289,6 +289,11 @@ pub fn edit_text(buf: &mut String, ks: &Keystroke, cx: &App) -> bool {
                 buf.pop().is_some()
             }
         }
+        // GPUI on Windows reports Space as a named key with no `key_char`.
+        "space" if !m.control && !m.alt && !m.platform => {
+            buf.push(' ');
+            true
+        }
         _ if !m.control && !m.alt && !m.platform => match ks.key_char.as_deref() {
             Some(t) if !t.chars().any(char::is_control) => {
                 buf.push_str(t);

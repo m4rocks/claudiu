@@ -13,7 +13,7 @@ use alacritty_terminal::vte::ansi::CursorShape;
 use futures::StreamExt;
 use futures::channel::mpsc::UnboundedReceiver;
 use gpui::{
-    App, Bounds, ClipboardItem, Context, Element, ElementId, ElementInputHandler, Entity,
+    Animation, AnimationExt, App, Bounds, ClipboardItem, Context, Element, ElementId, ElementInputHandler, Entity,
     EntityInputHandler, EventEmitter, FocusHandle, Focusable, Font, FontStyle, FontWeight, GlobalElementId, Hsla, InspectorElementId, IntoElement,
     KeyDownEvent, LayoutId, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
     Pixels, Point, Render, ScrollDelta, ScrollWheelEvent, ShapedLine, StrikethroughStyle, Style,
@@ -52,6 +52,8 @@ pub struct TerminalView {
     marked: Option<String>,
     font_family: &'static str,
     font_size: Pixels,
+    /// Show a startup animation until the program first draws something (set for Claude sessions).
+    pub loading: bool,
 }
 
 impl EventEmitter<TerminalEvent> for TerminalView {}
@@ -93,6 +95,7 @@ impl TerminalView {
             marked: None,
             font_family: FONT,
             font_size: px(14.0),
+            loading: false,
         }
     }
 
@@ -366,7 +369,7 @@ impl TerminalView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        window.focus(&self.focus);
+        window.focus(&self.focus, cx);
         let Some((point, side, col, row)) = self.grid_point(event.position) else {
             return;
         };
@@ -588,8 +591,12 @@ async fn pump(
 
 impl Render for TerminalView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.loading && (self.exit_code.is_some() || self.has_content()) {
+            self.loading = false;
+        }
         div()
             .id("terminal")
+            .relative()
             .size_full()
             .bg(theme::hsla(theme::TERMINAL_BG))
             .key_context("Terminal")
@@ -605,7 +612,45 @@ impl Render for TerminalView {
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_scroll_wheel(cx.listener(Self::on_scroll))
             .child(TerminalElement { view: cx.entity() })
+            .when(self.loading, |d| d.child(loading_overlay()))
     }
+}
+
+impl TerminalView {
+    /// Anything visible on screen yet. Startup mode/escape sequences wake us up but draw nothing.
+    fn has_content(&self) -> bool {
+        self.terminal.term.lock().renderable_content().display_iter.any(|c| !matches!(c.c, ' ' | '\0'))
+    }
+}
+
+/// Claude Code's own spinner glyphs, cycling in the accent color, while `claude` boots.
+fn loading_overlay() -> impl IntoElement {
+    // ✳ (U+2733) has an emoji presentation that Windows draws as a green emoji; Claude Code uses `*` there too.
+    #[cfg(target_os = "windows")]
+    const FRAMES: [&str; 6] = ["·", "✢", "*", "✶", "✻", "✽"];
+    #[cfg(not(target_os = "windows"))]
+    const FRAMES: [&str; 6] = ["·", "✢", "✳", "✶", "✻", "✽"];
+    div()
+        .absolute()
+        .inset_0()
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .gap(px(10.0))
+        .bg(theme::hsla(theme::TERMINAL_BG))
+        .child(
+            div().font_family(FONT).text_size(px(28.0)).text_color(theme::hsla(theme::ACCENT)).with_animation(
+                "claude-loading",
+                Animation::new(Duration::from_millis(1200)).repeat(),
+                |d, t| {
+                    // Ping-pong through the frames like Claude Code does.
+                    let i = ((t * 10.0) as usize).min(9);
+                    d.child(FRAMES[if i < 6 { i } else { 10 - i }])
+                },
+            ),
+        )
+        .child(div().text_size(px(12.0)).text_color(theme::hsla(theme::TEXT_FAINT)).child("Starting Claude Code…"))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -973,7 +1018,7 @@ impl Element for TerminalElement {
             window.paint_quad(fill(bounds, color));
         }
         for (origin, line) in pre.lines.drain(..) {
-            let _ = line.paint(origin, pre.line_h, window, cx);
+            let _ = line.paint(origin, pre.line_h, gpui::TextAlign::Left, None, window, cx);
         }
         if let Some((b, shape, _)) = pre.cursor.take() {
             let color = theme::hsla(theme::ACCENT);
@@ -994,7 +1039,7 @@ impl Element for TerminalElement {
         }
         if let Some((origin, line)) = pre.preedit.take() {
             window.paint_quad(fill(Bounds::new(origin, size(line.width, pre.line_h)), theme::hsla(theme::TERMINAL_BG)));
-            let _ = line.paint(origin, pre.line_h, window, cx);
+            let _ = line.paint(origin, pre.line_h, gpui::TextAlign::Left, None, window, cx);
         }
         // Receive typed text / IME input while this terminal has focus.
         let focus = self.view.read(cx).focus.clone();

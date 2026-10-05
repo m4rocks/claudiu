@@ -4,9 +4,10 @@ use std::time::Duration;
 
 use gpui::{
     Animation, AnimationExt, AnyElement, ClickEvent, Context, Div, FontWeight, Hsla, InteractiveElement, IntoElement, MouseButton, MouseDownEvent, ParentElement, Stateful,
-    StatefulInteractiveElement, Styled, Window, div, prelude::FluentBuilder, pulsating_between, px,
+    StatefulInteractiveElement, Styled, div, prelude::FluentBuilder, pulsating_between, px,
 };
 
+use gpui_kit::component::input::Input;
 use crate::app::{Act, Activity, MenuItem, Workspace};
 use crate::store::{ExternalState, Id, Project, SessionKind, SessionRecord, now};
 use crate::theme::{self, hsla};
@@ -226,7 +227,7 @@ impl Workspace {
             })
     }
 
-    pub fn render_sidebar(&mut self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    pub fn render_sidebar(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let q = self.search.trim().to_lowercase();
         let searching = !q.is_empty();
 
@@ -376,15 +377,14 @@ impl Workspace {
             .bg(hsla(theme::SIDEBAR_BG))
             .border_r_1()
             .border_color(hsla(theme::BORDER))
-            .child(self.render_sidebar_header(window, cx))
+            .child(self.render_sidebar_header(cx))
             .child(div().id("sidebar-scroll").flex_1().min_h_0().overflow_y_scroll().pb(px(10.0)).child(body))
             .child(self.render_footer())
     }
 
-    fn render_sidebar_header(&mut self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn render_sidebar_header(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let cwd = self.active_cwd();
         let (cwd_a, cwd_b) = (cwd.clone(), cwd);
-        let search_focused = self.search_focus.is_focused(window);
         div()
             .flex()
             .flex_col()
@@ -415,53 +415,10 @@ impl Workspace {
                     ),
             )
             .child(
-                div()
-                    .id("search")
-                    .track_focus(&self.search_focus)
+                Input::new(&self.search_input)
                     .h(px(28.0))
-                    .px(px(10.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .rounded(px(6.0))
-                    .bg(hsla(0x161616))
-                    .border_1()
-                    .border_color(hsla(if search_focused { 0x3a2a24 } else { 0x1c1c1c }))
-                    .cursor_text()
                     .text_size(px(12.5))
-                    .on_key_down(cx.listener(|ws, ev: &gpui::KeyDownEvent, window, cx| {
-                        let ks = &ev.keystroke;
-                        match ks.key.as_str() {
-                            "escape" => {
-                                ws.search.clear();
-                                ws.focus_active(window, cx);
-                            }
-                            "enter" => ws.focus_active(window, cx),
-                            _ => {
-                                crate::widgets::edit_text(&mut ws.search, ks, cx);
-                            }
-                        }
-                        cx.notify();
-                    }))
-                    // on_mouse_down, not on_click: GPUI turns Space/Enter on a focused clickable into a click and eats the key.
-                    .on_mouse_down(gpui::MouseButton::Left, cx.listener(|ws, _, window, _cx| window.focus(&ws.search_focus)))
-                    .child(div().text_color(hsla(theme::TEXT_FAINT)).child("⌕"))
-                    .child({
-                        let cursor = || div().flex_none().w(px(1.0)).h(px(14.0)).bg(hsla(theme::ACCENT));
-                        let empty = self.search.is_empty();
-                        div()
-                            .flex()
-                            .items_center()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .when(search_focused && empty, |d| d.child(cursor()))
-                            .child(if empty {
-                                div().text_color(hsla(theme::TEXT_FAINT)).child("Search sessions and projects")
-                            } else {
-                                div().text_color(hsla(theme::TEXT)).child(self.search.clone())
-                            })
-                            .when(search_focused && !empty, |d| d.child(cursor()))
-                    }),
+                    .prefix(div().text_color(hsla(theme::TEXT_FAINT)).child("⌕")),
             )
     }
 
