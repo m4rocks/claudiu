@@ -144,6 +144,8 @@ pub struct Workspace {
     pub live: Vec<Live>,
     pub panes: Vec<Id>,
     pub focused: usize,
+    /// Open sessions in the order they were last shown (most recent last); closing one goes back to the previous.
+    recent: Vec<Id>,
     pub split_vertical: bool,
     pub main: Main,
     pub selected: Option<Id>,
@@ -181,6 +183,7 @@ impl Workspace {
             live: vec![],
             panes: vec![],
             focused: 0,
+            recent: vec![],
             split_vertical: false,
             main: Main::Home,
             selected: store.data.layout.selected_session.clone(),
@@ -692,10 +695,11 @@ impl Workspace {
         }
         let view = cx.new(|cx| TerminalView::new(terminal, rx, cx));
         let sub_id = id.clone();
-        let sub = cx.subscribe(
+        let sub = cx.subscribe_in(
             &view,
-            move |ws: &mut Workspace, _view, ev: &TerminalEvent, cx| match ev {
-                TerminalEvent::Exited(code) => ws.on_exit(&sub_id, *code, cx),
+            window,
+            move |ws: &mut Workspace, _view, ev: &TerminalEvent, window, cx| match ev {
+                TerminalEvent::Exited(code) => ws.on_exit(&sub_id, *code, window, cx),
                 TerminalEvent::Bell => {}
             },
         );
@@ -705,6 +709,7 @@ impl Workspace {
             _sub: sub,
         });
         self.place_in_pane(&id, cx);
+        self.remember(&id);
         self.selected = Some(id.clone());
         self.main = Main::Terminals;
         self.persist_layout();
@@ -753,10 +758,21 @@ impl Workspace {
         }
     }
 
-    fn on_exit(&mut self, id: &str, code: Option<i32>, cx: &mut Context<Self>) {
+    fn remember(&mut self, id: &Id) {
+        self.recent.retain(|r| r != id);
+        self.recent.push(id.clone());
+    }
+
+    fn on_exit(&mut self, id: &str, code: Option<i32>, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(rec) = self.store.session_mut(id) {
             rec.exit_code = Some(code.unwrap_or(0));
             rec.last_active = now();
+        }
+        // A shell that exits inside a split has nothing left to show: close its pane.
+        let is_shell = self.store.session(id).is_some_and(|r| r.kind == SessionKind::Shell);
+        if is_shell && self.panes.len() > 1 && self.panes.iter().any(|p| p == id) {
+            self.close_live(id, window, cx);
+            return;
         }
         self.drop_if_empty(id);
         self.store.save_if_dirty();
@@ -769,6 +785,7 @@ impl Workspace {
         self.selected = Some(id.clone());
         if self.live_view(&id).is_some() {
             self.place_in_pane(&id, cx);
+            self.remember(&id);
             self.main = Main::Terminals;
             self.focus_active(window, cx);
             self.persist_layout();
@@ -793,9 +810,29 @@ impl Workspace {
     }
 
     fn close_live(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let was_active = self.active_id().is_some_and(|a| a == id);
+        let current = self.active_id().cloned();
         self.live.retain(|l| l.id != id); // dropping the view drops the Terminal, which closes the PTY
         self.panes.retain(|p| p != id);
-        self.focused = self.focused.min(self.panes.len().saturating_sub(1));
+        self.recent.retain(|r| r != id);
+        // Closing the shown session goes back to the one shown before it; otherwise stay where we are.
+        let target = if was_active {
+            self.recent.iter().rev().find(|r| self.live.iter().any(|l| &l.id == *r)).cloned()
+        } else {
+            current
+        };
+        match target.as_ref().map(|t| (t, self.panes.iter().position(|p| p == t))) {
+            Some((_, Some(pos))) => self.focused = pos,
+            Some((t, None)) if self.panes.is_empty() => {
+                self.panes.push(t.clone());
+                self.focused = 0;
+            }
+            _ => self.focused = self.focused.min(self.panes.len().saturating_sub(1)),
+        }
+        if was_active {
+            self.selected = self.panes.get(self.focused).cloned();
+            self.persist_layout();
+        }
         if let Some(rec) = self.store.session_mut(id) {
             if rec.exit_code.is_none() {
                 rec.exit_code = Some(-1);
@@ -1147,6 +1184,9 @@ impl Workspace {
         if index < self.panes.len() {
             self.focused = index;
             self.selected = self.panes.get(index).cloned();
+            if let Some(id) = self.selected.clone() {
+                self.remember(&id);
+            }
             self.focus_active(window, cx);
             cx.notify();
         }
