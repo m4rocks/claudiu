@@ -1,6 +1,6 @@
 //! GPUI view over a `Terminal`: paints the grid, turns GPUI input into VT input.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use alacritty_terminal::event::Event as TermEvent;
 use alacritty_terminal::grid::Scroll;
@@ -43,6 +43,9 @@ pub struct TerminalView {
     selecting: bool,
     scroll_px: f32,
     pub title: Option<String>,
+    /// Output timing, for `is_working`: when output last arrived and when the current burst began.
+    last_output: Option<Instant>,
+    burst_start: Option<Instant>,
     pub exit_code: Option<Option<i32>>,
     font_family: &'static str,
     font_size: Pixels,
@@ -81,6 +84,8 @@ impl TerminalView {
             selecting: false,
             scroll_px: 0.0,
             title: None,
+            last_output: None,
+            burst_start: None,
             exit_code: None,
             font_family: FONT,
             font_size: px(14.0),
@@ -91,9 +96,27 @@ impl TerminalView {
         self.exit_code.is_none()
     }
 
+    /// Claude Code redraws its spinner continuously while it works and is silent while it waits for you.
+    /// So: output that has kept arriving for a second or more and is still fresh. A single echoed keystroke
+    /// or redraw is a short burst and doesn't count. (Heuristic: no Claude Code hook or config involved.)
+    pub fn is_working(&self) -> bool {
+        const GAP: Duration = Duration::from_millis(1500);
+        match (self.last_output, self.burst_start) {
+            (Some(last), Some(start)) => self.is_running() && last.elapsed() < GAP && last - start >= Duration::from_secs(1),
+            _ => false,
+        }
+    }
+
     fn handle_event(&mut self, event: TermEvent, cx: &mut Context<Self>) {
         match event {
-            TermEvent::Wakeup => cx.notify(),
+            TermEvent::Wakeup => {
+                let t = Instant::now();
+                if self.last_output.is_none_or(|l| t - l > Duration::from_millis(1500)) {
+                    self.burst_start = Some(t);
+                }
+                self.last_output = Some(t);
+                cx.notify()
+            }
             TermEvent::PtyWrite(text) => self.terminal.write(text.into_bytes()),
             TermEvent::Title(title) => self.title = Some(title),
             TermEvent::ResetTitle => self.title = None,

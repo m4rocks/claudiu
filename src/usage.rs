@@ -7,7 +7,7 @@
 //! output yields nothing and the meters keep their last (age-labelled) values.
 
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::Duration;
 
 use jiff::civil;
@@ -26,28 +26,13 @@ pub struct Reading {
 
 /// Run the probe. Blocking (a few seconds): call from a background thread.
 pub fn fetch(claude: &Path, now: Timestamp) -> Result<Reading, String> {
-    let is_script = claude
-        .extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| e.eq_ignore_ascii_case("cmd") || e.eq_ignore_ascii_case("bat"));
-    let mut cmd = if is_script {
-        let mut c = Command::new("cmd.exe");
-        c.arg("/c").arg(claude);
-        c
-    } else {
-        Command::new(claude)
-    };
+    let mut cmd = crate::claude::command(claude);
     cmd.args(["-p", "/usage", "--no-session-persistence"])
         // Neutral folder so nothing project-specific is touched.
         .current_dir(crate::platform::home_dir().unwrap_or_else(std::env::temp_dir))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-    }
     let mut child = cmd.spawn().map_err(|e| format!("could not run claude: {e}"))?;
     if child.wait_timeout(Duration::from_secs(90)).map_err(|e| e.to_string())?.is_none() {
         let _ = child.kill();

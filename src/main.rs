@@ -2,9 +2,11 @@
 
 mod app;
 mod claude;
+mod commit;
 mod git;
 mod glyphs;
 mod keys;
+mod mcp;
 mod platform;
 mod sidebar;
 mod store;
@@ -53,6 +55,10 @@ fn main() {
     // Hidden helper mode: Claude Code runs this as its status line (see statusline.rs). Keep it instant.
     if std::env::args().nth(1).as_deref() == Some(statusline::TEE_FLAG) {
         std::process::exit(statusline::run_tee());
+    }
+    // Hidden helper mode: the MCP server that lets Claude name its own tab (see mcp.rs).
+    if std::env::args().nth(1).as_deref() == Some(mcp::FLAG) {
+        std::process::exit(mcp::run());
     }
     install_crash_log();
     // Velopack install/update hooks must run before anything else. A no-op for dev builds.

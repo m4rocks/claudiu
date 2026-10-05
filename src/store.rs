@@ -63,6 +63,9 @@ pub struct SessionRecord {
     /// Claudiu-only display label; wins over `title` when set.
     #[serde(default)]
     pub custom_title: Option<String>,
+    /// Tab title Claude chose itself through Claudiu's MCP tool (see mcp.rs). Beats `title`, loses to `custom_title`.
+    #[serde(default)]
+    pub auto_title: Option<String>,
     pub cwd: PathBuf,
     pub project_id: Option<Id>,
     pub created_at: i64,
@@ -78,7 +81,7 @@ pub struct SessionRecord {
 
 impl SessionRecord {
     pub fn display_title(&self) -> &str {
-        self.custom_title.as_deref().filter(|t| !t.trim().is_empty()).unwrap_or(&self.title)
+        [&self.custom_title, &self.auto_title].into_iter().flatten().map(|t| t.trim()).find(|t| !t.is_empty()).unwrap_or(&self.title)
     }
 
     pub fn claude_id(&self) -> Option<&str> {
@@ -345,6 +348,7 @@ pub fn reconcile(data: &mut Data, external: &[ExternalSession], scan_ok: bool) -
                     kind: SessionKind::Claude,
                     title: ext.title.clone().unwrap_or_else(|| "Untitled session".into()),
                     custom_title: None,
+                    auto_title: None,
                     project_id: project_for(&projects, &cwd),
                     cwd,
                     created_at: ext.created_at,
@@ -425,6 +429,7 @@ mod tests {
             kind: SessionKind::Claude,
             title: "Claude".into(),
             custom_title: Some("My name".into()),
+            auto_title: None,
             cwd: PathBuf::from("/w"),
             project_id: None,
             created_at: 1,
@@ -471,6 +476,7 @@ mod tests {
             kind: SessionKind::Shell,
             title: "PowerShell".into(),
             custom_title: None,
+            auto_title: None,
             cwd: PathBuf::from("/w"),
             project_id: None,
             created_at: 1,
@@ -509,6 +515,7 @@ mod tests {
                 kind,
                 title: id.into(),
                 custom_title: None,
+                auto_title: None,
                 cwd: PathBuf::from("/w"),
                 project_id: None,
                 created_at: 1,

@@ -64,6 +64,9 @@ impl Workspace {
             );
         }
 
+        // Offered for sessions inside a Git project (the repo is found from the session's own folder).
+        let commit_cwd = project.as_ref().filter(|p| p.git.is_some()).and(cwd.clone());
+        let committing = self.committing;
         let title = rec.as_ref().map(|r| r.display_title().to_string()).unwrap_or_else(|| "Claudiu".into());
         let branch = project.as_ref().and_then(|p| p.git.as_ref()).and_then(|g| g.branch.clone());
         div()
@@ -89,6 +92,12 @@ impl Workspace {
                                 cx.notify();
                             })),
                     )
+                    .when_some(commit_cwd, |d, cwd| {
+                        d.child(
+                            button("commit", if committing { "Committing…" } else { "Commit changes" }, false)
+                                .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::Commit(cwd.clone()), window, cx))),
+                        )
+                    })
                     .child(
                         div()
                             .overflow_hidden()

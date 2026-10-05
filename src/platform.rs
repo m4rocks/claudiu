@@ -57,6 +57,49 @@ pub fn spawn_detached(program: &Path, args: &[&OsStr]) -> std::io::Result<()> {
     cmd.spawn().map(|_| ())
 }
 
+/// Keep a helper process from flashing a console window (Windows only).
+pub fn no_window(cmd: &mut Command) {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    #[cfg(not(target_os = "windows"))]
+    let _ = cmd;
+}
+
+/// Ask the OS to draw attention to the app while it is in the background: taskbar flash (Windows, until the
+/// window is focused) or a dock bounce (macOS). Call only when the window is not active.
+pub fn request_attention(window: &gpui::Window) {
+    let _ = window;
+    #[cfg(target_os = "windows")]
+    {
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        use windows_sys::Win32::UI::WindowsAndMessaging::{FLASHW_TIMERNOFG, FLASHW_TRAY, FLASHWINFO, FlashWindowEx};
+        if let Ok(handle) = HasWindowHandle::window_handle(window)
+            && let RawWindowHandle::Win32(h) = handle.as_raw()
+        {
+            let info = FLASHWINFO {
+                cbSize: size_of::<FLASHWINFO>() as u32,
+                hwnd: h.hwnd.get() as _,
+                dwFlags: FLASHW_TRAY | FLASHW_TIMERNOFG,
+                uCount: 0,
+                dwTimeout: 0,
+            };
+            // SAFETY: `info` is fully initialised and outlives the call; the HWND is our own window.
+            unsafe { FlashWindowEx(&info) };
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use objc2::MainThreadMarker;
+        use objc2_app_kit::{NSApplication, NSRequestUserAttentionType};
+        if let Some(mtm) = MainThreadMarker::new() {
+            NSApplication::sharedApplication(mtm).requestUserAttention(NSRequestUserAttentionType::InformationalRequest);
+        }
+    }
+}
+
 /// Strip the Windows verbatim prefix (`\?\`) so paths compare and display normally.
 pub fn clean_path(path: &Path) -> PathBuf {
     dunce::simplified(path).to_path_buf()

@@ -36,7 +36,7 @@ pub struct Snapshot {
     pub captured_at: i64,
 }
 
-fn data_dir() -> PathBuf {
+pub fn data_dir() -> PathBuf {
     crate::store::Store::default_path().parent().map(Path::to_path_buf).unwrap_or_default()
 }
 
@@ -76,11 +76,11 @@ pub fn parse(json: &str, now: i64) -> Option<Snapshot> {
     })
 }
 
-fn safe_file_stem(id: &str) -> String {
+pub fn safe_file_stem(id: &str) -> String {
     id.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect()
 }
 
-fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
+pub fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
@@ -220,6 +220,8 @@ pub fn cleanup() {
         }
     };
     prune(settings_dir(), 7 * 86_400);
+    let [mcp_configs, _titles] = crate::mcp::cleanup_dirs();
+    prune(mcp_configs, 7 * 86_400);
     prune(snapshot_dir(), 30 * 86_400);
 }
 

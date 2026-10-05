@@ -190,6 +190,8 @@ Do not install a custom `statusLine` **in any settings file**, modify `settings.
 
 **One approved exception (product owner decision):** to read account usage (5-hour / 7-day) and exact context without spending tokens, Claudiu may pass a *per-process* `--settings <file>` containing only a `statusLine` that points back at Claudiu's own executable in a hidden helper mode (`--statusline-tee`). That flag applies to a single session and writes nothing to the user's Claude Code config. The helper must forward to the user's own status line (if any) so their display is unchanged, store only a minimal snapshot (limits, context figures, session id), and never block or fail Claude Code. Do not extend this mechanism to anything else.
 
+**Second approved exception (product owner decision):** the tab-title MCP server. Each Claude session is started with a per-process `--mcp-config <file>` pointing at Claudiu's own executable in a hidden helper mode (`--mcp-title`), plus `--allowedTools mcp__claudiu__set_tab_title` so renaming never prompts. IDE integration is switched off per process through the `CLAUDE_CODE_AUTO_CONNECT_IDE=false` and `CLAUDE_CODE_IDE_SKIP_AUTO_INSTALL=1` environment variables. Nothing is written to the user's Claude Code config. The "Commit changes" action runs a separate headless `claude -p` (Haiku, no tools, `--setting-sources ""`, no saved session) through the user's own CLI. Do not extend these mechanisms to anything else.
+
 Read supported CLI output/interfaces where possible.
 
 If a future integration requires configuration changes, stop and redesign the integration around a non-invasive mechanism first.

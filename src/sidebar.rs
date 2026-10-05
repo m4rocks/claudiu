@@ -1,11 +1,13 @@
 //! Left sidebar: CURRENT SESSION, PROJECTS, other sessions, and the usage meters.
 
+use std::time::Duration;
+
 use gpui::{
-    ClickEvent, Context, Div, FontWeight, Hsla, InteractiveElement, IntoElement, MouseButton, MouseDownEvent, ParentElement, Stateful,
-    StatefulInteractiveElement, Styled, Window, div, prelude::FluentBuilder, px,
+    Animation, AnimationExt, AnyElement, ClickEvent, Context, Div, FontWeight, Hsla, InteractiveElement, IntoElement, MouseButton, MouseDownEvent, ParentElement, Stateful,
+    StatefulInteractiveElement, Styled, Window, div, prelude::FluentBuilder, pulsating_between, px,
 };
 
-use crate::app::{Act, MenuItem, Workspace};
+use crate::app::{Act, Activity, MenuItem, Workspace};
 use crate::platform::Editor;
 use crate::store::{ExternalState, Id, Project, SessionKind, SessionRecord, now};
 use crate::theme::{self, hsla};
@@ -18,6 +20,8 @@ struct Row {
     id: Id,
     glyph: &'static str,
     glyph_color: Hsla,
+    /// The dot is pulsing: the Claude session is working.
+    pulse: bool,
     title: String,
     right: String,
     active: bool,
@@ -47,8 +51,17 @@ impl Workspace {
     }
 
     fn row_for(&self, rec: &SessionRecord, running: bool, with_project: bool) -> Row {
+        let activity = self.activity.get(&rec.id).copied();
         let (glyph, color) = match (rec.kind, running) {
-            (SessionKind::Claude, true) => ("●", hsla(theme::ACCENT)),
+            // Orange only when the session stopped and wants the user; gray otherwise, pulsing while it works.
+            (SessionKind::Claude, true) => (
+                "●",
+                match activity {
+                    Some(Activity::Attention) => hsla(theme::ACCENT),
+                    Some(Activity::Working) => hsla(0xa8a8a8),
+                    None => hsla(0x6b6b6b),
+                },
+            ),
             (SessionKind::Shell, true) => ("$", hsla(theme::OK)),
             (SessionKind::Claude, false) => ("○", hsla(theme::TEXT_FAINT)),
             (SessionKind::Shell, false) => ("$", hsla(theme::TEXT_FAINT)),
@@ -58,6 +71,7 @@ impl Workspace {
             id: rec.id.clone(),
             glyph,
             glyph_color: color,
+            pulse: running && activity == Some(Activity::Working),
             title: rec.display_title().to_string(),
             right: if with_project {
                 let p = self.project_name(rec.project_id.as_ref());
@@ -126,6 +140,17 @@ impl Workspace {
         let click_id = id.clone();
         let menu_id = id.clone();
         let close_id = id.clone();
+        let dot = div().w(px(12.0)).flex_none().text_size(px(11.0)).text_color(row.glyph_color).child(row.glyph);
+        let dot: AnyElement = if row.pulse {
+            dot.with_animation(
+                gpui::SharedString::from(format!("pulse-{}-{}", row.scope, id)),
+                Animation::new(Duration::from_millis(1400)).repeat().with_easing(pulsating_between(0.25, 1.0)),
+                |d, t| d.opacity(t),
+            )
+            .into_any_element()
+        } else {
+            dot.into_any_element()
+        };
         div()
             .id(gpui::SharedString::from(format!("row-{}-{}", row.scope, id)))
             .group("row")
@@ -151,7 +176,7 @@ impl Workspace {
                     }
                 }),
             )
-            .child(div().w(px(12.0)).flex_none().text_size(px(11.0)).text_color(row.glyph_color).child(row.glyph))
+            .child(dot)
             .child(
                 div()
                     .flex_1()

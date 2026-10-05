@@ -10,6 +10,7 @@ use gpui::{
 };
 
 use crate::claude;
+use crate::mcp;
 use crate::platform::{self, Editor};
 use crate::statusline;
 use crate::store::{
@@ -54,6 +55,8 @@ pub enum Act {
     Reveal(PathBuf),
     OpenEditor(Editor, PathBuf),
     ImportProject,
+    /// Stage everything in this folder's repository and commit it with a Haiku-written message.
+    Commit(PathBuf),
     AddProject(PathBuf),
     RemoveProject(Id),
     ToggleProject(Id),
@@ -96,6 +99,15 @@ pub enum Main {
     Terminals,
 }
 
+/// What a running Claude session is doing, as shown by its sidebar dot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Activity {
+    /// Output is streaming (pulsing dot).
+    Working,
+    /// Finished working while the user was looking elsewhere (orange dot).
+    Attention,
+}
+
 pub struct Live {
     pub id: Id,
     pub view: Entity<TerminalView>,
@@ -133,6 +145,9 @@ pub struct Workspace {
     pub update: UpdateState,
     pub scanning: bool,
     pub quitting: bool,
+    /// Sessions that are working or waiting for the user; absent = idle and already seen.
+    pub activity: HashMap<Id, Activity>,
+    pub committing: bool,
 }
 
 impl Workspace {
@@ -170,6 +185,8 @@ impl Workspace {
             update: UpdateState::default(),
             scanning: false,
             quitting: false,
+            activity: HashMap::new(),
+            committing: false,
             store,
         };
         // Everything from a previous run is history until clicked. Keep the highlight only if it still exists.
@@ -189,6 +206,7 @@ impl Workspace {
         ws.ingest_statusline(cx);
         ws.probe_usage_on_launch(cx);
         ws.start_ticker(cx);
+        ws.start_activity_poll(window, cx);
         ws.check_updates(cx);
         window.focus(&ws.root_focus);
         ws
@@ -255,6 +273,56 @@ impl Workspace {
         .detach();
     }
 
+    /// Once a second: derive each Claude session's `Activity` from its terminal output. When one stops working
+    /// while the user isn't looking at it, mark it for attention, and if the whole window is in the
+    /// background as well, flash the taskbar icon / bounce the dock icon.
+    fn start_activity_poll(&mut self, window: &Window, cx: &mut Context<Self>) {
+        cx.spawn_in(window, async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_secs(1)).await;
+                if this.update_in(cx, |ws, window, cx| ws.update_activity(window, cx)).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn update_activity(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let window_active = window.is_window_active();
+        let shown = self.active_id().cloned();
+        let mut next: HashMap<Id, Activity> = HashMap::new();
+        let mut flash = false;
+        for l in &self.live {
+            let is_claude = self.store.session(&l.id).is_some_and(|r| r.kind == SessionKind::Claude);
+            let view = l.view.read(cx);
+            if !is_claude || !view.is_running() {
+                continue;
+            }
+            let viewing = window_active && shown.as_deref() == Some(l.id.as_str());
+            match (view.is_working(), self.activity.get(&l.id)) {
+                (true, _) => {
+                    next.insert(l.id.clone(), Activity::Working);
+                }
+                (false, Some(Activity::Working)) if !viewing => {
+                    flash |= !window_active;
+                    next.insert(l.id.clone(), Activity::Attention);
+                }
+                (false, Some(Activity::Attention)) if !viewing => {
+                    next.insert(l.id.clone(), Activity::Attention);
+                }
+                _ => {}
+            }
+        }
+        if next != self.activity {
+            self.activity = next;
+            cx.notify();
+        }
+        if flash {
+            platform::request_attention(window);
+        }
+    }
+
     fn tick(&mut self, cx: &mut Context<Self>) {
         self.purge_dead_shells();
         self.store.save_if_dirty();
@@ -263,16 +331,30 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Pick up what Claude Code's status line (via our per-process tee) wrote: account limits and exact context.
+    /// Pick up what Claude Code's status line (via our per-process tee) wrote: account limits and exact context,
+    /// plus the tab titles Claude chose through the MCP tool.
     /// Costs no tokens; the files are tiny, but the read still happens off the UI thread.
     fn ingest_statusline(&mut self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
-            let snaps = cx
+            let (snaps, titles) = cx
                 .background_executor()
-                .spawn(async { statusline::read_snapshots(&statusline::snapshot_dir()) })
+                .spawn(async { (statusline::read_snapshots(&statusline::snapshot_dir()), mcp::read_titles()) })
                 .await;
             let _ = this.update(cx, |ws, cx| {
                 let mut changed = false;
+                for (stem, title) in titles {
+                    if let Some(rec) = ws
+                        .store
+                        .data
+                        .sessions
+                        .iter_mut()
+                        .find(|s| s.claude_id().is_some_and(|id| statusline::safe_file_stem(id) == stem))
+                        && rec.auto_title.as_deref() != Some(title.as_str())
+                    {
+                        rec.auto_title = Some(title);
+                        changed = true;
+                    }
+                }
                 for snap in snaps {
                     let (five, seven) = (snap.five_hour.clone(), snap.seven_day.clone());
                     if five.is_some() || seven.is_some() {
@@ -348,8 +430,10 @@ impl Workspace {
         .detach();
     }
 
-    /// Start Claude with Claudiu's per-process status line (`--settings <file>`; nothing in the user's config changes).
-    fn with_statusline(
+    /// Per-process additions to a Claude launch; nothing in the user's Claude Code config changes:
+    /// the status-line tee (`--settings`), the tab-title MCP server (`--mcp-config`, its one tool pre-allowed),
+    /// and IDE integration switched off through environment variables.
+    fn with_helpers(
         &self,
         mut spec: SpawnSpec,
         claude_session_id: &str,
@@ -360,6 +444,11 @@ impl Workspace {
             spec.args.push(path.to_string_lossy().into_owned());
             spec.env.extend(env);
         }
+        if let Ok(config) = mcp::prepare(claude_session_id) {
+            spec.args.extend(["--allowedTools".into(), mcp::ALLOWED_TOOL.into(), "--mcp-config".into(), config.to_string_lossy().into_owned()]);
+        }
+        spec.env.push(("CLAUDE_CODE_AUTO_CONNECT_IDE".into(), "false".into()));
+        spec.env.push(("CLAUDE_CODE_IDE_SKIP_AUTO_INSTALL".into(), "1".into()));
         spec
     }
 
@@ -525,12 +614,13 @@ impl Workspace {
         };
         let session_id = new_id();
         let spec = claude::new_session_spec(&exe, &cwd, &session_id);
-        let spec = self.with_statusline(spec, &session_id, &cwd);
+        let spec = self.with_helpers(spec, &session_id, &cwd);
         let record = SessionRecord {
             id: new_id(),
             kind: SessionKind::Claude,
             title: "New Claude session".into(),
             custom_title: None,
+            auto_title: None,
             project_id: self.store.project_for_cwd(&cwd),
             cwd,
             created_at: now(),
@@ -558,6 +648,7 @@ impl Workspace {
             kind: SessionKind::Shell,
             title: platform::shell_label(&program),
             custom_title: None,
+            auto_title: None,
             project_id: self.store.project_for_cwd(&cwd),
             cwd,
             created_at: now(),
@@ -588,7 +679,7 @@ impl Workspace {
             return;
         };
         let spec = claude::resume_spec(&exe, &rec.cwd, &meta.session_id);
-        let spec = self.with_statusline(spec, &meta.session_id, &rec.cwd);
+        let spec = self.with_helpers(spec, &meta.session_id, &rec.cwd);
         self.start(rec, spec, false, window, cx);
     }
 
@@ -837,6 +928,7 @@ impl Workspace {
                 }
             }
             Act::ImportProject => self.import_project(window, cx),
+            Act::Commit(cwd) => self.commit(cwd, cx),
             Act::AddProject(path) => {
                 let id = self.store.add_project(&path);
                 let _ = id;
@@ -900,6 +992,30 @@ impl Workspace {
         }
         self.store.save_if_dirty();
         cx.notify();
+    }
+
+    /// "Commit changes": runs off the UI thread (see commit.rs) and reports through a toast.
+    fn commit(&mut self, cwd: PathBuf, cx: &mut Context<Self>) {
+        let Some(exe) = self.claude_exe.clone() else {
+            self.toast("Could not find the `claude` CLI.", true, cx);
+            return;
+        };
+        if self.committing {
+            return;
+        }
+        self.committing = true;
+        self.toast("Writing commit message…", false, cx);
+        cx.spawn(async move |this, cx| {
+            let result = cx.background_executor().spawn(async move { crate::commit::run(&exe, &cwd) }).await;
+            let _ = this.update(cx, |ws, cx| {
+                ws.committing = false;
+                match result {
+                    Ok(subject) => ws.toast(format!("Committed: {subject}"), false, cx),
+                    Err(e) => ws.toast(e, true, cx),
+                }
+            });
+        })
+        .detach();
     }
 
     fn import_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {

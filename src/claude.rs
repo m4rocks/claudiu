@@ -39,6 +39,20 @@ fn spec(exe: &Path, cwd: &Path, args: Vec<String>) -> SpawnSpec {
     SpawnSpec { program: exe.to_string_lossy().into_owned(), args, cwd: Some(cwd.to_path_buf()), ..Default::default() }
 }
 
+/// A `claude` command for headless use (`-p`): handles `.cmd` shims and never flashes a console window.
+pub fn command(exe: &Path) -> std::process::Command {
+    let is_script = exe.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("cmd") || e.eq_ignore_ascii_case("bat"));
+    let mut cmd = if is_script {
+        let mut c = std::process::Command::new("cmd.exe");
+        c.arg("/c").arg(exe);
+        c
+    } else {
+        std::process::Command::new(exe)
+    };
+    crate::platform::no_window(&mut cmd);
+    cmd
+}
+
 /// New interactive session. We choose the session id up front so Claudiu knows which transcript is ours.
 pub fn new_session_spec(exe: &Path, cwd: &Path, session_id: &str) -> SpawnSpec {
     spec(exe, cwd, vec!["--session-id".into(), session_id.into()])
