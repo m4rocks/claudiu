@@ -67,7 +67,6 @@ pub enum Act {
     ToggleProject(Id),
     ToggleOther,
     ShowAll(Id),
-    ConfirmQuit,
     ConfirmInstallUpdate,
     Dismiss,
     InstallUpdate,
@@ -849,30 +848,12 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Called by the window's close handler. Returns true when it is fine to close right now.
-    pub fn request_quit(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        if self.quitting {
-            return true;
-        }
-        let running = self.running_count(cx);
-        if running == 0 {
+    /// Called by the window's close handler: save and close right away; running sessions end with the app.
+    pub fn request_quit(&mut self) -> bool {
+        if !self.quitting {
             self.finalize();
-            return true;
         }
-        self.modal = Some(Modal::Confirm {
-            title: "Quit Claudiu?".into(),
-            body: format!(
-                "{running} session{} still running. Quitting ends {} — Claude sessions stay in your history and can be resumed.",
-                if running == 1 { " is" } else { "s are" },
-                if running == 1 { "it" } else { "them" }
-            ),
-            confirm: "Quit and end sessions".into(),
-            danger: true,
-            act: Act::ConfirmQuit,
-        });
-        window.focus(&self.modal_focus);
-        cx.notify();
-        false
+        true
     }
 
     fn finalize(&mut self) {
@@ -988,11 +969,6 @@ impl Workspace {
             }
             Act::ShowAll(id) => {
                 self.show_all.insert(id);
-            }
-            Act::ConfirmQuit => {
-                self.modal = None;
-                self.finalize();
-                cx.quit();
             }
             Act::Dismiss => {
                 self.modal = None;
