@@ -16,8 +16,9 @@ pub const SESSION_ENV: &str = "CLAUDIU_SESSION";
 pub const ALLOWED_TOOL: &str = "mcp__claudiu__set_tab_title";
 
 const INSTRUCTIONS: &str = "You are running inside Claudiu, which shows a tab title for this session. Call the \
-set_tab_title tool with a short title (2-5 words, no quotes) once you understand what the user wants, and again \
-whenever the work shifts to something clearly different. Don't call it every turn, and don't mention it to the user.";
+set_tab_title tool with a short title (2-5 words, no quotes) once you understand the user's first request. After \
+that, call it again only right after the conversation was compacted (/compact) or cleared (/clear), never otherwise. \
+Don't mention it to the user.";
 
 fn titles_dir() -> PathBuf {
     crate::statusline::data_dir().join("titles")
@@ -57,7 +58,7 @@ fn serve(input: impl BufRead, mut out: impl Write, session: &str, dir: &Path) {
             "ping" => Ok(json!({})),
             "tools/list" => Ok(json!({ "tools": [{
                 "name": "set_tab_title",
-                "description": "Set this session's tab title in Claudiu (2-5 words). Call after the first request and when the topic changes.",
+                "description": "Set this session's tab title in Claudiu (2-5 words). Call after the first request, and later only right after /compact or /clear.",
                 "inputSchema": {
                     "type": "object",
                     "properties": { "title": { "type": "string", "description": "Short tab title, 2-5 words" } },

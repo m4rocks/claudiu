@@ -81,7 +81,12 @@ pub struct SessionRecord {
 
 impl SessionRecord {
     pub fn display_title(&self) -> &str {
-        [&self.custom_title, &self.auto_title].into_iter().flatten().map(|t| t.trim()).find(|t| !t.is_empty()).unwrap_or(&self.title)
+        self.chosen_title().unwrap_or(&self.title)
+    }
+
+    /// The name given in Claudiu (manual rename, else Claude's own MCP title); what Claude Code is told to use.
+    pub fn chosen_title(&self) -> Option<&str> {
+        [&self.custom_title, &self.auto_title].into_iter().flatten().map(|t| t.trim()).find(|t| !t.is_empty())
     }
 
     pub fn claude_id(&self) -> Option<&str> {

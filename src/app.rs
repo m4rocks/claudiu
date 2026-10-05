@@ -50,7 +50,8 @@ pub enum Act {
     Resume(Id),
     CloseLive(Id),
     Rename(Id),
-    Hide(Id),
+    /// Hide (true) or restore (false) a session in the sidebar. Archived sessions still turn up in search.
+    Archive(Id, bool),
     CopyText(String),
     Reveal(PathBuf),
     OpenEditor(Editor, PathBuf),
@@ -67,6 +68,7 @@ pub enum Act {
     ToggleProject(Id),
     ToggleOther,
     ShowAll(Id),
+    ConfirmQuit,
     ConfirmInstallUpdate,
     Dismiss,
     InstallUpdate,
@@ -128,6 +130,8 @@ pub struct Live {
     pub id: Id,
     pub view: Entity<TerminalView>,
     pub _sub: Subscription,
+    /// The session name Claude Code was last given (`--name` or `/rename`), so a changed title is sent once.
+    pub claude_name: Option<String>,
 }
 
 pub struct Toast {
@@ -345,6 +349,27 @@ impl Workspace {
         }
         if flash {
             platform::request_attention(window);
+        }
+        self.sync_claude_names(cx);
+    }
+
+    /// Claude Code keeps its own session name (`/resume`, Remote Control, the mobile apps). `--name` covers
+    /// resumes; a running session gets `/rename` typed for it, but only while it is idle with an empty prompt,
+    /// so a draft or a permission dialog never receives the keystrokes.
+    fn sync_claude_names(&mut self, cx: &mut Context<Self>) {
+        for l in &mut self.live {
+            let Some(want) = self.store.session(&l.id).filter(|r| r.claude.is_some()).and_then(|r| r.chosen_title()) else {
+                continue;
+            };
+            if l.claude_name.as_deref() == Some(want) {
+                continue;
+            }
+            let v = l.view.read(cx);
+            if v.is_running() && !v.is_working() && v.prompt_is_empty() {
+                let line = format!("/rename {want}");
+                l.view.update(cx, |v, cx| v.type_line(&line, cx));
+                l.claude_name = Some(want.to_string());
+            }
         }
     }
 
@@ -657,7 +682,7 @@ impl Workspace {
         };
         let mut spec = claude::resume_spec(&exe, &rec.cwd, &meta.session_id);
         // Hand Claudiu's tab title to Claude Code so its own name (prompt box, /resume, Remote Control) matches.
-        if let Some(name) = [&rec.custom_title, &rec.auto_title].into_iter().flatten().map(|t| t.trim()).find(|t| !t.is_empty()) {
+        if let Some(name) = rec.chosen_title() {
             spec.args.extend(["--name".into(), name.into()]);
         }
         let spec = self.with_helpers(spec, &meta.session_id, &rec.cwd);
@@ -702,10 +727,12 @@ impl Workspace {
                 TerminalEvent::Bell => {}
             },
         );
+        let claude_name = spec.args.iter().position(|a| a == "--name").and_then(|i| spec.args.get(i + 1)).cloned();
         self.live.push(Live {
             id: id.clone(),
             view,
             _sub: sub,
+            claude_name,
         });
         self.place_in_pane(&id, cx);
         self.remember(&id);
@@ -848,12 +875,35 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Called by the window's close handler: save and close right away; running sessions end with the app.
-    pub fn request_quit(&mut self) -> bool {
-        if !self.quitting {
-            self.finalize();
+    /// Called by the window's close handler. Returns true when it is fine to close right now: asks first only
+    /// while a Claude session is mid-turn; idle sessions just end with the app.
+    pub fn request_quit(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.quitting {
+            return true;
         }
-        true
+        let working = self.live.iter().filter(|l| {
+            let v = l.view.read(cx);
+            v.is_running() && v.is_working() && self.store.session(&l.id).is_some_and(|r| r.kind == SessionKind::Claude)
+        });
+        let working = working.count();
+        if working == 0 {
+            self.finalize();
+            return true;
+        }
+        self.modal = Some(Modal::Confirm {
+            title: "Quit Claudiu?".into(),
+            body: format!(
+                "{working} Claude session{} still working. Quitting interrupts {} — sessions stay in your history and can be resumed.",
+                if working == 1 { " is" } else { "s are" },
+                if working == 1 { "it" } else { "them" }
+            ),
+            confirm: "Quit anyway".into(),
+            danger: true,
+            act: Act::ConfirmQuit,
+        });
+        window.focus(&self.modal_focus);
+        cx.notify();
+        false
     }
 
     fn finalize(&mut self) {
@@ -894,23 +944,16 @@ impl Workspace {
                 self.modal = Some(Modal::Rename { id, text });
                 window.focus(&self.modal_focus);
             }
-            Act::Hide(id) => {
+            Act::Archive(id, archive) => {
                 if let Some(rec) = self.store.session_mut(&id) {
-                    rec.hidden = true;
+                    rec.hidden = archive;
                 }
-                let still_running = self.is_running(&id, cx);
-                if self.selected.as_deref() == Some(id.as_str()) {
+                if archive && self.selected.as_deref() == Some(id.as_str()) {
                     self.selected = None;
                 }
-                self.toast(
-                    if still_running {
-                        "Hidden from the list. It is still running; end it from Current Session."
-                    } else {
-                        "Removed from Claudiu's list. The Claude transcript was not touched."
-                    },
-                    false,
-                    cx,
-                );
+                if archive {
+                    self.toast("Archived. Search still finds it; the Claude transcript was not touched.", false, cx);
+                }
             }
             Act::CopyText(text) => {
                 cx.write_to_clipboard(ClipboardItem::new_string(text));
@@ -969,6 +1012,11 @@ impl Workspace {
             }
             Act::ShowAll(id) => {
                 self.show_all.insert(id);
+            }
+            Act::ConfirmQuit => {
+                self.modal = None;
+                self.finalize();
+                cx.quit();
             }
             Act::Dismiss => {
                 self.modal = None;

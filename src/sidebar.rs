@@ -28,6 +28,7 @@ struct Row {
     running: bool,
     indent: bool,
     stale: bool,
+    archived: bool,
     /// Which sidebar section renders the row; keeps element ids unique when a session shows in several.
     scope: &'static str,
 }
@@ -87,6 +88,7 @@ impl Workspace {
             running,
             indent: !with_project,
             stale,
+            archived: rec.hidden,
             scope: if with_project { "cur" } else { "prj" },
         }
     }
@@ -110,7 +112,7 @@ impl Workspace {
         if running {
             items.push(item("End session", Act::CloseLive(rec.id.clone()), true, true));
         } else {
-            items.push(item("Hide from list", Act::Hide(rec.id.clone()), true, true));
+            items.push(item(if rec.hidden { "Unarchive" } else { "Archive" }, Act::Archive(rec.id.clone(), !rec.hidden), false, true));
         }
         items
     }
@@ -139,6 +141,7 @@ impl Workspace {
         let click_id = id.clone();
         let menu_id = id.clone();
         let close_id = id.clone();
+        let archive_id = id.clone();
         let dot = div().w(px(12.0)).flex_none().text_size(px(11.0)).text_color(row.glyph_color).child(row.glyph);
         let dot: AnyElement = if row.pulse {
             dot.with_animation(
@@ -196,7 +199,7 @@ impl Workspace {
                     .text_ellipsis()
                     .text_size(px(11.0))
                     .text_color(hsla(if row.stale { theme::WARN } else { theme::TEXT_FAINT }))
-                    .child(if row.stale { "stale".to_string() } else { row.right }),
+                    .child(if row.archived { "archived".to_string() } else if row.stale { "stale".to_string() } else { row.right }),
             )
             .when(row.running, |d| {
                 d.child(
@@ -206,6 +209,18 @@ impl Workspace {
                         .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
                             cx.stop_propagation();
                             ws.act(Act::CloseLive(close_id.clone()), window, cx);
+                        })),
+                )
+            })
+            .when(!row.running, |d| {
+                let archive = !row.archived;
+                d.child(
+                    icon_button(gpui::SharedString::from(format!("archive-{}-{archive_id}", row.scope)), if archive { "⊟" } else { "↺" })
+                        .invisible()
+                        .group_hover("row", |s| s.visible())
+                        .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
+                            cx.stop_propagation();
+                            ws.act(Act::Archive(archive_id.clone(), archive), window, cx);
                         })),
                 )
             })
@@ -272,7 +287,7 @@ impl Workspace {
                     .data
                     .sessions
                     .iter()
-                    .filter(|s| s.kind == SessionKind::Claude && s.project_id.as_deref() == Some(p.id.as_str()) && !s.hidden)
+                    .filter(|s| s.kind == SessionKind::Claude && s.project_id.as_deref() == Some(p.id.as_str()) && (searching || !s.hidden))
                     .cloned()
                     .collect();
                 v.sort_by_key(|s| std::cmp::Reverse(s.last_active));
@@ -319,7 +334,7 @@ impl Workspace {
             .data
             .sessions
             .iter()
-            .filter(|s| s.kind == SessionKind::Claude && s.project_id.is_none() && !s.hidden && self.matches(&q, s))
+            .filter(|s| s.kind == SessionKind::Claude && s.project_id.is_none() && (searching || !s.hidden) && self.matches(&q, s))
             .cloned()
             .collect();
         others.sort_by_key(|s| std::cmp::Reverse(s.last_active));

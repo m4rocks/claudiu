@@ -103,7 +103,7 @@ fn main() {
         let workspace = window.update(cx, |_, _, cx| cx.entity()).expect("workspace");
         window
             .update(cx, |_, window, cx| {
-                window.on_window_should_close(cx, move |_, cx| workspace.update(cx, |ws, _| ws.request_quit()));
+                window.on_window_should_close(cx, move |window, cx| workspace.update(cx, |ws, cx| ws.request_quit(window, cx)));
             })
             .ok();
 
