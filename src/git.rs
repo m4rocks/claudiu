@@ -74,10 +74,15 @@ mod tests {
         repo
     }
 
+    /// CI runners hand out 8.3 temp paths (`RUNNER~1`) while libgit2 reports long ones; compare like with like.
+    fn long_path(p: &Path) -> std::path::PathBuf {
+        dunce::canonicalize(p).unwrap()
+    }
+
     #[test]
     fn plain_repo_from_subfolder() {
         let tmp = tempfile::tempdir().unwrap();
-        let repo_dir = tmp.path().join("proj");
+        let repo_dir = long_path(tmp.path()).join("proj");
         fs::create_dir_all(repo_dir.join("src/deep")).unwrap();
         init_with_commit(&repo_dir);
 
@@ -97,8 +102,8 @@ mod tests {
     #[test]
     fn linked_worktrees_are_discovered_from_both_sides() {
         let tmp = tempfile::tempdir().unwrap();
-        let main_dir = tmp.path().join("main");
-        let wt_dir = tmp.path().join("wt");
+        let main_dir = long_path(tmp.path()).join("main");
+        let wt_dir = long_path(tmp.path()).join("wt");
         fs::create_dir_all(&main_dir).unwrap();
         let repo = init_with_commit(&main_dir);
         repo.worktree("wt", &wt_dir, None).unwrap();

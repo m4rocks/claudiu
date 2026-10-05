@@ -221,7 +221,6 @@ impl Workspace {
         ws.start_scan(cx);
         statusline::cleanup();
         ws.ingest_statusline(cx);
-        ws.probe_usage_on_launch(cx);
         ws.start_ticker(cx);
         ws.start_activity_poll(window, cx);
         ws.check_updates(cx);
@@ -255,7 +254,6 @@ impl Workspace {
                             })
                     });
                 }
-                ws.merge_account(result.five_hour, result.seven_day);
                 ws.store.save_if_dirty();
                 cx.notify();
             });
@@ -419,38 +417,6 @@ impl Workspace {
         .detach();
     }
 
-    /// Once per launch, fill the account meters without waiting for a first message: a single
-    /// `claude -p "/usage"` (see usage.rs). Skipped when we already hold a reading from the last few minutes
-    /// (e.g. the status-line tee delivered one).
-    fn probe_usage_on_launch(&mut self, cx: &mut Context<Self>) {
-        let Some(exe) = self.claude_exe.clone() else {
-            return;
-        };
-        let acct = &self.store.data.account;
-        let newest = [acct.five_hour.as_ref(), acct.seven_day.as_ref()]
-            .into_iter()
-            .flatten()
-            .map(|l| l.seen_at)
-            .max();
-        if newest.is_some_and(|t| now() - t < 300) {
-            return;
-        }
-        cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move { crate::usage::fetch(&exe, jiff::Timestamp::now()) })
-                .await;
-            let _ = this.update(cx, |ws, cx| {
-                if let Ok(reading) = result {
-                    ws.merge_account(reading.five_hour, reading.seven_day);
-                    ws.store.save_if_dirty();
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
-    }
-
     /// Per-process additions to a Claude launch; nothing in the user's Claude Code config changes:
     /// the status-line tee (`--settings`), the tab-title MCP server (`--mcp-config`, its one tool pre-allowed),
     /// and IDE integration switched off through environment variables.
@@ -541,18 +507,6 @@ impl Workspace {
                     if let Some(m) = mtime {
                         ws.transcript_mtimes.insert(id.clone(), m);
                     }
-                    ws.merge_account(
-                        scan.limits
-                            .iter()
-                            .filter(|o| o.kind == "five_hour")
-                            .map(|o| o.limit.clone())
-                            .next_back(),
-                        scan.limits
-                            .iter()
-                            .filter(|o| o.kind == "seven_day")
-                            .map(|o| o.limit.clone())
-                            .next_back(),
-                    );
                     ws.store
                         .reconcile(std::slice::from_ref(&scan.session), false);
                 }
@@ -699,7 +653,11 @@ impl Workspace {
             self.toast("Could not find the `claude` CLI.", true, cx);
             return;
         };
-        let spec = claude::resume_spec(&exe, &rec.cwd, &meta.session_id);
+        let mut spec = claude::resume_spec(&exe, &rec.cwd, &meta.session_id);
+        // Hand Claudiu's tab title to Claude Code so its own name (prompt box, /resume, Remote Control) matches.
+        if let Some(name) = [&rec.custom_title, &rec.auto_title].into_iter().flatten().map(|t| t.trim()).find(|t| !t.is_empty()) {
+            spec.args.extend(["--name".into(), name.into()]);
+        }
         let spec = self.with_helpers(spec, &meta.session_id, &rec.cwd);
         self.start(rec, spec, false, window, cx);
     }

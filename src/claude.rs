@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use crate::platform::{find_executable, home_dir};
-use crate::store::{ExternalSession, RateLimit};
+use crate::store::ExternalSession;
 use crate::terminal::SpawnSpec;
 
 /// Locate the user's `claude` executable: explicit setting, PATH, then well-known install dirs.
@@ -72,13 +72,11 @@ pub struct ScanResult {
     pub sessions: Vec<ExternalSession>,
     /// False when the directory couldn't be read: callers must not conclude anything is gone.
     pub ok: bool,
-    pub five_hour: Option<RateLimit>,
-    pub seven_day: Option<RateLimit>,
 }
 
 /// Scan every transcript under `<home>/projects/*/*.jsonl`. Meant to run on a background thread.
 pub fn scan_all(home: &Path) -> ScanResult {
-    let mut out = ScanResult { sessions: vec![], ok: false, five_hour: None, seven_day: None };
+    let mut out = ScanResult { sessions: vec![], ok: false };
     let Ok(dirs) = fs::read_dir(home.join("projects")) else { return out };
     out.ok = true;
     for dir in dirs.flatten() {
@@ -90,12 +88,6 @@ pub fn scan_all(home: &Path) -> ScanResult {
             }
             if let Some(scan) = read_session(&path) {
                 out.sessions.push(scan.session);
-                for obs in scan.limits {
-                    let slot = if obs.kind == "five_hour" { &mut out.five_hour } else { &mut out.seven_day };
-                    if slot.as_ref().is_none_or(|cur| obs.limit.seen_at >= cur.seen_at) {
-                        *slot = Some(obs.limit);
-                    }
-                }
             }
         }
     }
@@ -108,14 +100,8 @@ pub fn find_transcript(home: &Path, session_id: &str) -> Option<PathBuf> {
     fs::read_dir(home.join("projects")).ok()?.flatten().map(|d| d.path().join(&name)).find(|p| p.is_file())
 }
 
-pub struct LimitObs {
-    pub kind: String,
-    pub limit: RateLimit,
-}
-
 pub struct SessionScan {
     pub session: ExternalSession,
-    pub limits: Vec<LimitObs>,
 }
 
 const HEAD_BYTES: u64 = 128 * 1024;
@@ -167,34 +153,6 @@ fn first_prompt_text(v: &Value) -> Option<String> {
     Some(one_line.chars().take(80).collect())
 }
 
-fn find_rate_limit(v: &Value) -> Option<&Value> {
-    match v {
-        Value::Object(map) => {
-            if map.contains_key("rateLimitType") {
-                return Some(v);
-            }
-            map.values().find_map(find_rate_limit)
-        }
-        Value::Array(a) => a.iter().find_map(find_rate_limit),
-        _ => None,
-    }
-}
-
-fn limit_from(obj: &Value, at: i64) -> Option<LimitObs> {
-    let kind = obj.get("rateLimitType")?.as_str()?.to_string();
-    if kind != "five_hour" && kind != "seven_day" {
-        return None;
-    }
-    let status = obj.get("status").and_then(Value::as_str).unwrap_or("");
-    let utilization = obj
-        .get("utilization")
-        .and_then(Value::as_f64)
-        .map(|u| if u > 1.5 { u / 100.0 } else { u } as f32)
-        .or(if status == "rejected" { Some(1.0) } else { None });
-    let resets_at = obj.get("resetsAt").and_then(Value::as_i64);
-    Some(LimitObs { kind, limit: RateLimit { utilization, resets_at, seen_at: at } })
-}
-
 pub fn read_session(path: &Path) -> Option<SessionScan> {
     let session_id = path.file_stem()?.to_str()?.to_string();
     let (head, tail, whole, created_fs, modified_fs) = read_chunks(path).ok()?;
@@ -206,7 +164,6 @@ pub fn read_session(path: &Path) -> Option<SessionScan> {
     let mut custom_title: Option<String> = None;
     let mut model: Option<String> = None;
     let mut context_tokens: Option<u64> = None;
-    let mut limits: Vec<LimitObs> = Vec::new();
     let mut last_ts: Option<i64> = None;
 
     let mut visit = |line: &str, is_tail: bool| {
@@ -241,11 +198,6 @@ pub fn read_session(path: &Path) -> Option<SessionScan> {
             }
             _ => {}
         }
-        if line.contains("rateLimitType")
-            && let Some(obj) = find_rate_limit(&v)
-                && let Some(obs) = limit_from(obj, ts.unwrap_or(modified_fs)) {
-                    limits.push(obs);
-                }
     };
     for line in head.lines() {
         visit(line, false);
@@ -268,7 +220,6 @@ pub fn read_session(path: &Path) -> Option<SessionScan> {
             context_tokens,
             transcript: path.to_path_buf(),
         },
-        limits,
     })
 }
 
@@ -358,24 +309,6 @@ mod tests {
         assert_eq!(s.title.as_deref(), Some("Tail title"));
         assert_eq!(s.context_tokens, Some(7));
         assert_eq!(s.cwd, Some(PathBuf::from("/w")));
-    }
-
-    #[test]
-    fn rate_limit_observations() {
-        let tmp = tempfile::tempdir().unwrap();
-        let p = write_session(
-            &tmp.path().join("projects/x"),
-            "s3",
-            &[
-                r#"{"type":"system","timestamp":"2026-10-05T12:00:00Z","cwd":"/w","rate_limit_info":{"status":"rejected","resetsAt":1791209400,"rateLimitType":"five_hour"}}"#,
-                r#"{"type":"system","timestamp":"2026-10-05T13:00:00Z","cwd":"/w","x":{"status":"allowed_warning","utilization":0.8,"resetsAt":1791500000,"rateLimitType":"seven_day"}}"#,
-            ],
-        );
-        let scan = read_session(&p).unwrap();
-        assert_eq!(scan.limits.len(), 2);
-        assert_eq!(scan.limits[0].limit.utilization, Some(1.0));
-        assert_eq!(scan.limits[1].limit.utilization, Some(0.8));
-        assert_eq!(scan.limits[1].kind, "seven_day");
     }
 
     #[test]

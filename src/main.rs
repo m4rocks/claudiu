@@ -15,7 +15,6 @@ mod terminal_view;
 mod theme;
 mod statusline;
 mod updater;
-mod usage;
 mod views;
 mod widgets;
 
