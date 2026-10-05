@@ -8,7 +8,6 @@ use gpui::{
 };
 
 use crate::app::{Act, Activity, MenuItem, Workspace};
-use crate::platform::Editor;
 use crate::store::{ExternalState, Id, Project, SessionKind, SessionRecord, now};
 use crate::theme::{self, hsla};
 use crate::widgets::{ago, button, clawd, countdown, divider, icon_button, meter, section_label};
@@ -572,9 +571,4 @@ impl Workspace {
             .child(div().flex().flex_col().gap(px(10.0)).child(div().text_size(px(10.5)).font_weight(FontWeight::SEMIBOLD).text_color(hsla(theme::TEXT_DIM)).child("SESSION"))
                 .child(meter("CONTEXT", ctx_fraction, ctx_caption, None)))
     }
-}
-
-/// Used by the main view's top bar.
-pub fn editor_available(ws: &Workspace, editor: Editor) -> bool {
-    ws.editors.iter().any(|(e, ok)| *e == editor && *ok)
 }

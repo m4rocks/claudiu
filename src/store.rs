@@ -130,6 +130,9 @@ pub struct Settings {
     pub claude_path: Option<PathBuf>,
     /// Update feed base URL. Empty/None disables update checks entirely.
     pub update_url: Option<String>,
+    /// Editor the "Open in" button uses; the last one picked.
+    #[serde(default)]
+    pub editor: Option<crate::platform::Editor>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

@@ -55,8 +55,13 @@ pub enum Act {
     Reveal(PathBuf),
     OpenEditor(Editor, PathBuf),
     ImportProject,
-    /// Stage everything in this folder's repository and commit it with a Haiku-written message.
-    Commit(PathBuf),
+    /// Stage everything in this folder's repository, commit it with a Haiku-written message, push.
+    CommitPush(PathBuf),
+    Pull(PathBuf),
+    SwitchBranch(PathBuf, String),
+    /// Ask for a name, then `CreateBranch`.
+    NewBranch(PathBuf),
+    CreateBranch(PathBuf, String),
     AddProject(PathBuf),
     RemoveProject(Id),
     ToggleProject(Id),
@@ -92,6 +97,10 @@ pub enum Modal {
         id: Id,
         text: String,
     },
+    NewBranch {
+        cwd: PathBuf,
+        text: String,
+    },
 }
 
 pub enum Main {
@@ -106,6 +115,14 @@ pub enum Activity {
     Working,
     /// Finished working while the user was looking elsewhere (orange dot).
     Attention,
+}
+
+/// The git operation running in the background, if any (one at a time).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GitOp {
+    CommitPush,
+    Pull,
+    Branch,
 }
 
 pub struct Live {
@@ -147,7 +164,7 @@ pub struct Workspace {
     pub quitting: bool,
     /// Sessions that are working or waiting for the user; absent = idle and already seen.
     pub activity: HashMap<Id, Activity>,
-    pub committing: bool,
+    pub git_busy: Option<GitOp>,
 }
 
 impl Workspace {
@@ -186,7 +203,7 @@ impl Workspace {
             scanning: false,
             quitting: false,
             activity: HashMap::new(),
-            committing: false,
+            git_busy: None,
             store,
         };
         // Everything from a previous run is history until clicked. Keep the highlight only if it still exists.
@@ -246,19 +263,27 @@ impl Workspace {
         .detach();
     }
 
+    /// Keep the newest reading per window. Returns whether anything changed (the same snapshot is re-read
+    /// every tick, so an unconditional save would rewrite state.json every few seconds).
     fn merge_account(
         &mut self,
         five: Option<crate::store::RateLimit>,
         seven: Option<crate::store::RateLimit>,
-    ) {
+    ) -> bool {
         let acct: &mut AccountUsage = &mut self.store.data.account;
+        let mut changed = false;
         for (slot, new) in [(&mut acct.five_hour, five), (&mut acct.seven_day, seven)] {
             if let Some(new) = new
-                && slot.as_ref().is_none_or(|cur| new.seen_at >= cur.seen_at) {
-                    *slot = Some(new);
-                }
+                && slot.as_ref().is_none_or(|cur| new.seen_at >= cur.seen_at && *cur != new)
+            {
+                *slot = Some(new);
+                changed = true;
+            }
         }
-        self.store.mark_dirty();
+        if changed {
+            self.store.mark_dirty();
+        }
+        changed
     }
 
     fn start_ticker(&mut self, cx: &mut Context<Self>) {
@@ -356,11 +381,7 @@ impl Workspace {
                     }
                 }
                 for snap in snaps {
-                    let (five, seven) = (snap.five_hour.clone(), snap.seven_day.clone());
-                    if five.is_some() || seven.is_some() {
-                        ws.merge_account(five, seven);
-                        changed = true;
-                    }
+                    changed |= ws.merge_account(snap.five_hour.clone(), snap.seven_day.clone());
                     if let Some(rec) = ws
                         .store
                         .data
@@ -901,18 +922,16 @@ impl Workspace {
                 if let Some(rec) = self.store.session_mut(&id) {
                     rec.hidden = true;
                 }
-                if self.is_running(&id, cx) {
-                    self.toast(
-                        "Hidden from the list. It is still running; end it from Current Session.",
-                        false,
-                        cx,
-                    );
-                }
+                let still_running = self.is_running(&id, cx);
                 if self.selected.as_deref() == Some(id.as_str()) {
                     self.selected = None;
                 }
                 self.toast(
-                    "Removed from Claudiu's list. The Claude transcript was not touched.",
+                    if still_running {
+                        "Hidden from the list. It is still running; end it from Current Session."
+                    } else {
+                        "Removed from Claudiu's list. The Claude transcript was not touched."
+                    },
                     false,
                     cx,
                 );
@@ -923,12 +942,31 @@ impl Workspace {
             }
             Act::Reveal(path) => cx.reveal_path(&path),
             Act::OpenEditor(editor, path) => {
+                // The last editor used becomes the "Open in" default.
+                if self.store.data.settings.editor != Some(editor) {
+                    self.store.data.settings.editor = Some(editor);
+                    self.store.mark_dirty();
+                }
                 if let Err(e) = editor.open(&path) {
                     self.toast(e, true, cx);
                 }
             }
             Act::ImportProject => self.import_project(window, cx),
-            Act::Commit(cwd) => self.commit(cwd, cx),
+            Act::CommitPush(cwd) => match self.claude_exe.clone() {
+                Some(exe) => self.run_git(GitOp::CommitPush, move || crate::commit::commit_and_push(&exe, &cwd), cx),
+                None => self.toast("Could not find the `claude` CLI.", true, cx),
+            },
+            Act::Pull(cwd) => self.run_git(GitOp::Pull, move || crate::commit::pull(&cwd), cx),
+            Act::SwitchBranch(cwd, name) => {
+                self.run_git(GitOp::Branch, move || crate::commit::switch_branch(&cwd, &name), cx)
+            }
+            Act::NewBranch(cwd) => {
+                self.modal = Some(Modal::NewBranch { cwd, text: String::new() });
+                window.focus(&self.modal_focus);
+            }
+            Act::CreateBranch(cwd, name) => {
+                self.run_git(GitOp::Branch, move || crate::commit::create_branch(&cwd, &name), cx)
+            }
             Act::AddProject(path) => {
                 let id = self.store.add_project(&path);
                 let _ = id;
@@ -994,28 +1032,97 @@ impl Workspace {
         cx.notify();
     }
 
-    /// "Commit changes": runs off the UI thread (see commit.rs) and reports through a toast.
-    fn commit(&mut self, cwd: PathBuf, cx: &mut Context<Self>) {
-        let Some(exe) = self.claude_exe.clone() else {
-            self.toast("Could not find the `claude` CLI.", true, cx);
-            return;
-        };
-        if self.committing {
+    /// Git actions (see commit.rs): one at a time, off the UI thread, reported through a toast.
+    fn run_git(
+        &mut self,
+        op: GitOp,
+        job: impl FnOnce() -> Result<String, String> + Send + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        if self.git_busy.is_some() {
             return;
         }
-        self.committing = true;
-        self.toast("Writing commit message…", false, cx);
+        self.git_busy = Some(op);
+        cx.notify();
         cx.spawn(async move |this, cx| {
-            let result = cx.background_executor().spawn(async move { crate::commit::run(&exe, &cwd) }).await;
+            let result = cx.background_executor().spawn(async move { job() }).await;
             let _ = this.update(cx, |ws, cx| {
-                ws.committing = false;
+                ws.git_busy = None;
+                // The branch shown in the top bar follows a pull, switch or new branch.
+                ws.store.refresh_git();
+                ws.store.save_if_dirty();
                 match result {
-                    Ok(subject) => ws.toast(format!("Committed: {subject}"), false, cx),
+                    Ok(summary) => ws.toast(summary, false, cx),
                     Err(e) => ws.toast(e, true, cx),
                 }
             });
         })
         .detach();
+    }
+
+    /// Branch menu: fetch origin and list branches off the UI thread, then open the menu at `pos`.
+    pub fn open_branch_menu(&mut self, cwd: PathBuf, pos: Point<Pixels>, cx: &mut Context<Self>) {
+        if self.git_busy.is_some() {
+            return;
+        }
+        self.git_busy = Some(GitOp::Branch);
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let dir = cwd.clone();
+            let result = cx.background_executor().spawn(async move { crate::commit::branches(&dir) }).await;
+            let _ = this.update(cx, |ws, cx| {
+                ws.git_busy = None;
+                match result {
+                    Ok((names, current)) => {
+                        // ponytail: the menu doesn't scroll, so only the most recently used branches are listed.
+                        let mut items: Vec<MenuItem> = names
+                            .into_iter()
+                            .take(15)
+                            .map(|name| MenuItem {
+                                label: format!("{}{name}", if current.as_deref() == Some(name.as_str()) { "✓  " } else { "    " }),
+                                act: Act::SwitchBranch(cwd.clone(), name),
+                                danger: false,
+                                separator_before: false,
+                            })
+                            .collect();
+                        let first = items.is_empty();
+                        items.push(MenuItem { label: "New branch…".into(), act: Act::NewBranch(cwd), danger: false, separator_before: !first });
+                        ws.open_menu(pos, items, cx);
+                    }
+                    Err(e) => ws.toast(e, true, cx),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Enter / OK in a modal.
+    pub fn submit_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let act = match self.modal.take() {
+            Some(Modal::Confirm { act, .. }) => act,
+            Some(Modal::Rename { id, text }) => {
+                let text = text.trim().to_string();
+                if let Some(rec) = self.store.session_mut(&id) {
+                    rec.custom_title = (!text.is_empty()).then_some(text);
+                }
+                Act::Dismiss
+            }
+            Some(Modal::NewBranch { cwd, text }) => {
+                // Spaces aren't allowed in branch names; git reports anything else that is invalid.
+                let name = text.split_whitespace().collect::<Vec<_>>().join("-");
+                if name.is_empty() { Act::Dismiss } else { Act::CreateBranch(cwd, name) }
+            }
+            None => return,
+        };
+        self.focus_active(window, cx);
+        self.act(act, window, cx);
+    }
+
+    /// The editor "Open in" uses: the last one picked if it is still installed, else the first one found.
+    pub fn preferred_editor(&self) -> Option<Editor> {
+        let installed = |e: &Editor| self.editors.iter().any(|(x, ok)| x == e && *ok);
+        self.store.data.settings.editor.filter(installed).or_else(|| Editor::ALL.into_iter().find(installed))
     }
 
     fn import_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {

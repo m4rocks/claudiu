@@ -248,7 +248,7 @@ pub fn short_path(path: &std::path::Path) -> String {
 /// Enter / Escape are left to the caller.
 pub fn edit_text(buf: &mut String, ks: &Keystroke, cx: &App) -> bool {
     let m = &ks.modifiers;
-    if m.control && !m.alt && ks.key == "v" {
+    if (m.control || m.platform) && !m.alt && ks.key == "v" {
         if let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) {
             buf.push_str(&text.replace(['\r', '\n'], " "));
             return true;

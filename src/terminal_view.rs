@@ -1,5 +1,6 @@
 //! GPUI view over a `Terminal`: paints the grid, turns GPUI input into VT input.
 
+use std::ops::Range;
 use std::time::{Duration, Instant};
 
 use alacritty_terminal::event::Event as TermEvent;
@@ -12,11 +13,11 @@ use alacritty_terminal::vte::ansi::CursorShape;
 use futures::StreamExt;
 use futures::channel::mpsc::UnboundedReceiver;
 use gpui::{
-    App, Bounds, ClipboardItem, Context, Element, ElementId, Entity, EventEmitter, FocusHandle,
-    Focusable, Font, FontStyle, FontWeight, GlobalElementId, Hsla, InspectorElementId, IntoElement,
+    App, Bounds, ClipboardItem, Context, Element, ElementId, ElementInputHandler, Entity,
+    EntityInputHandler, EventEmitter, FocusHandle, Focusable, Font, FontStyle, FontWeight, GlobalElementId, Hsla, InspectorElementId, IntoElement,
     KeyDownEvent, LayoutId, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
     Pixels, Point, Render, ScrollDelta, ScrollWheelEvent, ShapedLine, StrikethroughStyle, Style,
-    TextRun, UnderlineStyle, Window, div, fill, outline, point, prelude::*, px, relative, size,
+    TextRun, UTF16Selection, UnderlineStyle, Window, div, fill, outline, point, prelude::*, px, relative, size,
 };
 
 use crate::glyphs;
@@ -47,6 +48,8 @@ pub struct TerminalView {
     last_output: Option<Instant>,
     burst_start: Option<Instant>,
     pub exit_code: Option<Option<i32>>,
+    /// IME composition / dead-key text not yet committed; drawn at the cursor, never sent to the program.
+    marked: Option<String>,
     font_family: &'static str,
     font_size: Pixels,
 }
@@ -87,6 +90,7 @@ impl TerminalView {
             last_output: None,
             burst_start: None,
             exit_code: None,
+            marked: None,
             font_family: FONT,
             font_size: px(14.0),
         }
@@ -220,24 +224,20 @@ impl TerminalView {
         let ctrl_v = !cfg!(target_os = "macos") && m.control && !m.shift && !m.alt && key == "v";
         let mac_copy = m.platform && !m.shift && !m.control && !m.alt && key == "c";
         let mac_paste = m.platform && !m.shift && !m.control && !m.alt && key == "v";
-        if mac_copy {
+        // Every key handled here stops propagation, so the platform doesn't also deliver it as text.
+        if mac_copy || copy_chord {
             self.copy(cx);
+            cx.stop_propagation();
             return;
         }
-        if mac_paste {
+        if mac_paste || paste_chord || ctrl_v {
             self.paste(cx);
-            return;
-        }
-        if copy_chord {
-            self.copy(cx);
-            return;
-        }
-        if paste_chord || ctrl_v {
-            self.paste(cx);
+            cx.stop_propagation();
             return;
         }
         // Ctrl+C with a selection copies (like Windows Terminal); otherwise it is SIGINT as usual.
         if m.control && !m.shift && !m.alt && key == "c" && self.copy(cx) {
+            cx.stop_propagation();
             return;
         }
         if m.shift && !m.control && !m.alt {
@@ -251,14 +251,17 @@ impl TerminalView {
             if let Some(scroll) = scroll {
                 self.terminal.term.lock().scroll_display(scroll);
                 cx.notify();
+                cx.stop_propagation();
                 return;
             }
         }
-        if self.exit_code.is_some() {
+        // Plain text arrives through `EntityInputHandler::replace_text_in_range` (IME, dead keys).
+        if self.exit_code.is_some() || keys::is_text(ks) {
             return;
         }
         if let Some(bytes) = keys::encode(ks, self.mode()) {
             self.send(bytes, cx);
+            cx.stop_propagation();
         }
     }
 
@@ -477,6 +480,64 @@ impl TerminalView {
     }
 }
 
+/// Text input from the platform: typed characters, dead-key results and IME commits. A terminal has no editable
+/// document, so ranges are ignored; only in-progress composition (`marked`) is tracked, to draw it at the cursor.
+impl EntityInputHandler for TerminalView {
+    fn text_for_range(&mut self, _: Range<usize>, _: &mut Option<Range<usize>>, _: &mut Window, _: &mut Context<Self>) -> Option<String> {
+        None
+    }
+
+    fn selected_text_range(&mut self, _: bool, _: &mut Window, _: &mut Context<Self>) -> Option<UTF16Selection> {
+        Some(UTF16Selection { range: 0..0, reversed: false })
+    }
+
+    fn marked_text_range(&self, _: &mut Window, _: &mut Context<Self>) -> Option<Range<usize>> {
+        self.marked.as_ref().map(|t| 0..t.encode_utf16().count())
+    }
+
+    fn unmark_text(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        self.marked = None;
+        cx.notify();
+    }
+
+    fn replace_text_in_range(&mut self, _: Option<Range<usize>>, text: &str, _: &mut Window, cx: &mut Context<Self>) {
+        self.marked = None;
+        if !text.is_empty() && self.is_running() {
+            self.send(text.as_bytes().to_vec(), cx);
+        } else {
+            cx.notify();
+        }
+    }
+
+    fn replace_and_mark_text_in_range(
+        &mut self,
+        _: Option<Range<usize>>,
+        text: &str,
+        _: Option<Range<usize>>,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.marked = (!text.is_empty()).then(|| text.to_string());
+        cx.notify();
+    }
+
+    /// The cursor cell, so the IME candidate window opens next to it.
+    fn bounds_for_range(&mut self, _: Range<usize>, _: Bounds<Pixels>, _: &mut Window, _: &mut Context<Self>) -> Option<Bounds<Pixels>> {
+        let m = self.metrics?;
+        let term = self.terminal.term.lock();
+        let cursor = term.grid().cursor.point;
+        let row = (cursor.line.0 + term.grid().display_offset() as i32).max(0);
+        Some(Bounds::new(
+            point(m.origin.x + m.cell_w * cursor.column.0 as f32, m.origin.y + m.line_h * row as f32),
+            size(m.cell_w, m.line_h),
+        ))
+    }
+
+    fn character_index_for_point(&mut self, _: Point<Pixels>, _: &mut Window, _: &mut Context<Self>) -> Option<usize> {
+        None
+    }
+}
+
 /// Drains terminal events, coalescing bursts so we redraw at most ~120 times a second.
 async fn pump(
     this: gpui::WeakEntity<TerminalView>,
@@ -566,6 +627,8 @@ struct Prepaint {
     lines: Vec<(Point<Pixels>, ShapedLine)>,
     glyph_quads: Vec<(Bounds<Pixels>, Hsla)>,
     cursor: Option<(Bounds<Pixels>, CursorShape, bool)>,
+    /// IME composition text, painted over the grid at the cursor.
+    preedit: Option<(Point<Pixels>, ShapedLine)>,
 }
 
 impl Element for TerminalElement {
@@ -602,9 +665,9 @@ impl Element for TerminalElement {
         window: &mut Window,
         cx: &mut App,
     ) -> Prepaint {
-        let (family, font_size, focused) = {
+        let (family, font_size, focused, marked) = {
             let v = self.view.read(cx);
-            (v.font_family, v.font_size, v.focus.is_focused(window))
+            (v.font_family, v.font_size, v.focus.is_focused(window), v.marked.clone())
         };
         let base_font: Font = gpui::font(family);
         let font_id = window.text_system().resolve_font(&base_font);
@@ -632,6 +695,7 @@ impl Element for TerminalElement {
         let mut batches: Vec<Batch> = Vec::new();
         let mut glyph_quads: Vec<(Bounds<Pixels>, Hsla)> = Vec::new();
         let mut cursor_out = None;
+        let mut preedit_at = None;
 
         {
             let terminal = &self.view.read(cx).terminal;
@@ -787,6 +851,9 @@ impl Element for TerminalElement {
 
             // Cursor (non-block shapes, or hollow when unfocused)
             let cur_row = cursor.point.line.0 + offset;
+            if cur_row >= 0 && cur_row < rows as i32 {
+                preedit_at = Some(cell_origin(cur_row as usize, cursor.point.column.0));
+            }
             if cur_row >= 0
                 && cur_row < rows as i32
                 && cursor.point.column.0 < cols as usize
@@ -842,8 +909,22 @@ impl Element for TerminalElement {
             lines.push((origin, line));
         }
 
+        let preedit = marked.zip(preedit_at).map(|(text, origin)| {
+            let fg = theme::hsla(theme::TEXT);
+            let run = TextRun {
+                len: text.len(),
+                font: base_font.clone(),
+                color: fg,
+                background_color: None,
+                underline: Some(UnderlineStyle { color: Some(fg), thickness: px(1.0), wavy: false }),
+                strikethrough: None,
+            };
+            (origin, window.text_system().shape_line(text.into(), font_size, &[run], None))
+        });
+
         Prepaint {
             bounds,
+            preedit,
             cell_w,
             line_h,
             backgrounds,
@@ -890,6 +971,13 @@ impl Element for TerminalElement {
                 _ => window.paint_quad(outline(b, color, gpui::BorderStyle::Solid)),
             }
         }
+        if let Some((origin, line)) = pre.preedit.take() {
+            window.paint_quad(fill(Bounds::new(origin, size(line.width, pre.line_h)), theme::hsla(theme::TERMINAL_BG)));
+            let _ = line.paint(origin, pre.line_h, window, cx);
+        }
+        // Receive typed text / IME input while this terminal has focus.
+        let focus = self.view.read(cx).focus.clone();
+        window.handle_input(&focus, ElementInputHandler::new(pre.bounds, self.view.clone()), cx);
         let _ = pre.cell_w;
     }
 }

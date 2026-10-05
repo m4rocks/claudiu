@@ -122,7 +122,7 @@ pub fn is_same_or_under(child: &Path, parent: &Path) -> bool {
     c == p || c.starts_with(&format!("{p}/"))
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Editor {
     VsCode,
     Zed,

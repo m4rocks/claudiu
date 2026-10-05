@@ -35,6 +35,16 @@ fn tilde(n: u8, mods: u8) -> Vec<u8> {
     }
 }
 
+/// Keystrokes that only type text (plain or Shift, or AltGr). The terminal leaves these to the platform input
+/// handler, which is what makes IME composition and dead keys work; everything else goes through [`encode`].
+pub fn is_text(ks: &Keystroke) -> bool {
+    let m = &ks.modifiers;
+    let plain = !m.control && !m.alt && !m.platform && !m.function;
+    let altgr = m.control && m.alt && !m.platform && ks.key_char.as_ref().is_some_and(|t| !t.is_empty());
+    // Named keys ("enter", "space", "f5", ...) have multi-character names.
+    (plain || altgr) && ks.key.chars().count() == 1
+}
+
 pub fn encode(ks: &Keystroke, mode: TermMode) -> Option<Vec<u8>> {
     let m = &ks.modifiers;
     if m.platform {
@@ -188,6 +198,17 @@ mod tests {
         assert_eq!(enc(ks("delete", None, |_| {})), b"\x1b[3~");
         assert_eq!(enc(ks("f5", None, |_| {})), b"\x1b[15~");
         assert_eq!(enc(ks("escape", None, |_| {})), [0x1b]);
+    }
+
+    #[test]
+    fn only_text_keys_go_to_the_input_handler() {
+        assert!(is_text(&ks("a", Some("a"), |_| {})));
+        assert!(is_text(&ks("a", Some("A"), |m| m.shift = true)));
+        assert!(is_text(&ks("q", Some("@"), |m| { m.control = true; m.alt = true })), "AltGr");
+        assert!(!is_text(&ks("p", None, |m| m.alt = true)), "Alt+P is a shortcut");
+        assert!(!is_text(&ks("c", None, |m| m.control = true)));
+        assert!(!is_text(&ks("enter", None, |_| {})));
+        assert!(!is_text(&ks("space", Some(" "), |_| {})));
     }
 
     #[test]

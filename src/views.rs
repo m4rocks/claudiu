@@ -6,11 +6,10 @@ use gpui::{
 };
 
 use crate::app::{
-    Act, CloseSession, FocusNextPane, FocusSearch, ImportProject, Main, Modal, NewClaude, NewShell, NextSession, PrevSession, SplitPane,
+    Act, CloseSession, GitOp, MenuItem, FocusNextPane, FocusSearch, ImportProject, Main, Modal, NewClaude, NewShell, NextSession, PrevSession, SplitPane,
     ToggleSidebar, Workspace,
 };
 use crate::platform::Editor;
-use crate::sidebar::editor_available;
 use crate::store::{SessionKind, now};
 use crate::theme::{self, hsla};
 use crate::updater::Status;
@@ -41,32 +40,53 @@ impl Workspace {
         }
         if let Some(path) = cwd.clone() {
             let target = project.as_ref().map(|p| p.path.clone()).unwrap_or(path);
-            for editor in Editor::ALL {
-                if editor_available(self, editor) {
-                    let t = target.clone();
-                    right = right.child(
-                        button(
-                            gpui::SharedString::from(format!("editor-{:?}", editor)),
-                            match editor {
-                                Editor::VsCode => "VS Code",
-                                Editor::Zed => "Zed",
-                            },
-                            false,
-                        )
-                        .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::OpenEditor(editor, t.clone()), window, cx))),
-                    );
-                }
+            // "Open in <editor>" plus a ▾ to pick another installed editor (remembered, see Act::OpenEditor).
+            if let Some(editor) = self.preferred_editor() {
+                let (t, pick_target) = (target.clone(), target.clone());
+                let open = button("open-in", format!("Open in {}", editor_name(editor)), false)
+                    .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::OpenEditor(editor, t.clone()), window, cx)));
+                let pick = icon_button("open-in-pick", "▾").on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |ws, ev: &MouseDownEvent, _w, cx| {
+                        let current = ws.preferred_editor();
+                        let items = ws
+                            .editors
+                            .iter()
+                            .filter(|(_, found)| *found)
+                            .map(|(e, _)| MenuItem {
+                                label: format!("{}{}", if current == Some(*e) { "✓  " } else { "    " }, e.label()),
+                                act: Act::OpenEditor(*e, pick_target.clone()),
+                                danger: false,
+                                separator_before: false,
+                            })
+                            .collect();
+                        ws.open_menu(ev.position, items, cx);
+                    }),
+                );
+                right = right.child(div().flex().items_center().gap(px(2.0)).child(open).child(pick));
             }
             let t = target.clone();
             right = right.child(
-                button("reveal", if cfg!(target_os = "macos") { "Finder" } else { "Folder" }, false)
+                button("reveal", "Open folder", false)
                     .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::Reveal(t.clone()), window, cx))),
             );
         }
+        // Git actions are offered for sessions inside a Git project (the repo is found from the session's own folder).
+        let repo = project.as_ref().filter(|p| p.git.is_some()).and(cwd.clone());
+        let busy = self.git_busy;
+        if let Some(repo) = repo.clone() {
+            let pull_repo = repo.clone();
+            right = right
+                .child(
+                    button("commit-push", if busy == Some(GitOp::CommitPush) { "Committing…" } else { "Commit & Push" }, false)
+                        .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::CommitPush(repo.clone()), window, cx))),
+                )
+                .child(
+                    button("pull", if busy == Some(GitOp::Pull) { "Pulling…" } else { "Pull" }, false)
+                        .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::Pull(pull_repo.clone()), window, cx))),
+                );
+        }
 
-        // Offered for sessions inside a Git project (the repo is found from the session's own folder).
-        let commit_cwd = project.as_ref().filter(|p| p.git.is_some()).and(cwd.clone());
-        let committing = self.committing;
         let title = rec.as_ref().map(|r| r.display_title().to_string()).unwrap_or_else(|| "Claudiu".into());
         let branch = project.as_ref().and_then(|p| p.git.as_ref()).and_then(|g| g.branch.clone());
         div()
@@ -92,12 +112,6 @@ impl Workspace {
                                 cx.notify();
                             })),
                     )
-                    .when_some(commit_cwd, |d, cwd| {
-                        d.child(
-                            button("commit", if committing { "Committing…" } else { "Commit changes" }, false)
-                                .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::Commit(cwd.clone()), window, cx))),
-                        )
-                    })
                     .child(
                         div()
                             .overflow_hidden()
@@ -110,16 +124,26 @@ impl Workspace {
                     .when_some(cwd, |d, p| {
                         d.child(div().text_size(px(11.5)).text_color(hsla(theme::TEXT_FAINT)).child(short_path(&p)))
                     })
-                    .when_some(branch, |d, b| {
+                    .when_some(branch.zip(repo), |d, (b, repo)| {
+                        // Click: switch branch or create one (see Workspace::open_branch_menu).
+                        let label = if busy == Some(GitOp::Branch) { format!("⎇ {b} …") } else { format!("⎇ {b} ▾") };
                         d.child(
                             div()
+                                .id("branch")
+                                .flex_none()
                                 .px(px(7.0))
                                 .py(px(1.0))
                                 .rounded(px(10.0))
                                 .bg(hsla(0x1a1a1a))
                                 .text_size(px(11.0))
                                 .text_color(hsla(theme::TEXT_DIM))
-                                .child(format!("⎇ {b}")),
+                                .cursor_pointer()
+                                .hover(|s| s.bg(hsla(0x262626)).text_color(hsla(theme::TEXT)))
+                                .child(label)
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |ws, ev: &MouseDownEvent, _w, cx| ws.open_branch_menu(repo.clone(), ev.position, cx)),
+                                ),
                         )
                     }),
             )
@@ -397,8 +421,8 @@ impl Workspace {
                 confirm.clone(),
                 *danger,
             ),
-            Modal::Rename { text, .. } => (
-                "Rename session".into(),
+            Modal::Rename { text, .. } | Modal::NewBranch { text, .. } => (
+                if matches!(modal, Modal::NewBranch { .. }) { "New branch" } else { "Rename session" }.into(),
                 div()
                     .h(px(32.0))
                     .px(px(10.0))
@@ -412,7 +436,7 @@ impl Workspace {
                     .child(text.clone())
                     .child(div().w(px(1.0)).h(px(15.0)).ml(px(1.0)).bg(hsla(theme::ACCENT)))
                     .into_any_element(),
-                "Rename".into(),
+                if matches!(modal, Modal::NewBranch { .. }) { "Create" } else { "Rename" }.into(),
                 false,
             ),
         };
@@ -434,18 +458,8 @@ impl Workspace {
                 let key = ev.keystroke.key.as_str();
                 match (key, ws.modal.as_mut()) {
                     ("escape", _) => ws.act(Act::Dismiss, window, cx),
-                    ("enter", Some(Modal::Confirm { act, .. })) => {
-                        let act = act.clone();
-                        ws.act(act, window, cx);
-                    }
-                    ("enter", Some(Modal::Rename { id, text })) => {
-                        let (id, text) = (id.clone(), text.trim().to_string());
-                        if let Some(rec) = ws.store.session_mut(&id) {
-                            rec.custom_title = if text.is_empty() { None } else { Some(text) };
-                        }
-                        ws.act(Act::Dismiss, window, cx);
-                    }
-                    (_, Some(Modal::Rename { text, .. })) => {
+                    ("enter", Some(_)) => ws.submit_modal(window, cx),
+                    (_, Some(Modal::Rename { text, .. } | Modal::NewBranch { text, .. })) => {
                         crate::widgets::edit_text(text, &ev.keystroke, cx);
                         cx.notify();
                     }
@@ -463,22 +477,7 @@ impl Workspace {
                     .child(button("modal-cancel", "Cancel", false).on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::Dismiss, window, cx))))
                     .child({
                         let b = if danger { danger_button("modal-ok", confirm_label) } else { button("modal-ok", confirm_label, true) };
-                        b.on_click(cx.listener(|ws, _: &ClickEvent, window, cx| {
-                            let act = match ws.modal.as_ref() {
-                                Some(Modal::Confirm { act, .. }) => Some(act.clone()),
-                                Some(Modal::Rename { id, text }) => {
-                                    let (id, text) = (id.clone(), text.trim().to_string());
-                                    if let Some(rec) = ws.store.session_mut(&id) {
-                                        rec.custom_title = if text.is_empty() { None } else { Some(text) };
-                                    }
-                                    Some(Act::Dismiss)
-                                }
-                                None => None,
-                            };
-                            if let Some(act) = act {
-                                ws.act(act, window, cx);
-                            }
-                        }))
+                        b.on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.submit_modal(window, cx)))
                     }),
             );
         Some(
@@ -611,5 +610,12 @@ impl Render for Workspace {
             .children(menu)
             .children(modal)
             .children(toast)
+    }
+}
+
+fn editor_name(editor: Editor) -> &'static str {
+    match editor {
+        Editor::VsCode => "VS Code",
+        Editor::Zed => "Zed",
     }
 }

@@ -44,10 +44,11 @@ fn repo_url(ws: &Workspace) -> Option<String> {
 /// Look for a newer release in the background.
 pub fn check(ws: &mut Workspace, cx: &mut Context<Workspace>) {
     let Some(url) = repo_url(ws) else { return };
-    if matches!(ws.update.status, Status::Checking | Status::Downloading) {
+    // Once an update is downloading or downloaded, a re-check would only throw that away.
+    if matches!(ws.update.status, Status::Checking | Status::Downloading | Status::Ready { .. }) {
         return;
     }
-    ws.update.status = Status::Checking;
+    let previous = std::mem::replace(&mut ws.update.status, Status::Checking);
     cx.spawn(async move |this, cx| {
         let result = cx
             .background_executor()
@@ -65,6 +66,8 @@ pub fn check(ws: &mut Workspace, cx: &mut Context<Workspace>) {
                     ws.update.info = Some(*info);
                 }
                 Ok(_) => ws.update.status = Status::UpToDate,
+                // A failed re-check (e.g. offline) keeps an update already offered.
+                Err(_) if matches!(previous, Status::Available { .. }) => ws.update.status = previous,
                 // Not installed via Velopack (dev build / portable): nothing to do, and nothing to show.
                 Err(_) => ws.update.status = Status::Idle,
             }
