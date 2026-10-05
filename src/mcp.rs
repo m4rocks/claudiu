@@ -17,9 +17,11 @@ pub const ALLOWED_TOOL: &str = "mcp__claudiu__set_tab_title";
 
 const INSTRUCTIONS: &str = "You are running inside Claudiu, which shows a tab title for this session. Call the \
 set_tab_title tool with a short title (2-5 words, no quotes) once you understand the user's first request. After \
-that, call it again right after the conversation was compacted (/compact) or cleared (/clear), and whenever the \
-user asks you to rename or retitle this session or tab (use the name they gave). Never otherwise. Don't mention the \
-tool unless the user asked for a rename.";
+that, call it again only when the title no longer fits: the conversation was compacted (/compact) or cleared \
+(/clear), the context or scope changed, or the user moved on to a different task. Also call it whenever the user \
+asks you to rename or retitle this session or tab (use the name they gave). Don't call it again with the same or \
+a near-identical title, and never twice in a row for the same reason (if the user ran /rename themselves, the title \
+is already set; leave it). Don't mention the tool unless the user asked for a rename.";
 
 fn titles_dir() -> PathBuf {
     crate::statusline::data_dir().join("titles")
@@ -59,7 +61,7 @@ fn serve(input: impl BufRead, mut out: impl Write, session: &str, dir: &Path) {
             "ping" => Ok(json!({})),
             "tools/list" => Ok(json!({ "tools": [{
                 "name": "set_tab_title",
-                "description": "Set this session's tab title in Claudiu (2-5 words). Call after the first request, right after /compact or /clear, and whenever the user asks to rename the session or tab.",
+                "description": "Set this session's tab title in Claudiu (2-5 words). Call after the first request, right after /compact or /clear, when the scope or task changes, and whenever the user asks to rename the session or tab. Don't repeat an unchanged title.",
                 "inputSchema": {
                     "type": "object",
                     "properties": { "title": { "type": "string", "description": "Short tab title, 2-5 words" } },
