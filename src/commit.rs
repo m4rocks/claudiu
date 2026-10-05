@@ -295,7 +295,8 @@ mod tests {
         // b's push is rejected (remote moved on), and a merge pull conflicts.
         let rejected = commit_and_push(Path::new("claude-not-needed"), &b).unwrap_err();
         assert!(classify(&b, rejected).conflict_in.is_some());
-        let failed = git(&b, &["-c", "pull.rebase=false", "pull"], None).unwrap_err();
+        // Identity is set because CI runners have none, and git refuses to merge without one.
+        let failed = git(&b, &["-c", "pull.rebase=false", "-c", "user.name=t", "-c", "user.email=t@t", "pull"], None).unwrap_err();
         assert!(classify(&b, failed).conflict_in.is_some());
         assert_eq!(commit_and_push(Path::new("claude-not-needed"), &b).unwrap_err(), "Resolve the merge conflicts first");
         assert!(classify(&b, "git push failed: unable to access".into()).conflict_in.is_some(), "unmerged paths count");

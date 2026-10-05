@@ -1,6 +1,6 @@
 [package]
 name = "claudiu"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 description = "A native workspace for Claude Code sessions: real PTYs, projects, and session history"
 repository = "https://github.com/m4rocks/claudiu"
