@@ -8,11 +8,12 @@ use std::process::{Command, Stdio};
 pub fn default_shell() -> (String, Vec<String>) {
     #[cfg(target_os = "windows")]
     {
-        let program = find_executable("pwsh")
-            .or_else(|| find_executable("powershell"))
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "powershell.exe".into());
-        (program, vec!["-NoLogo".into()])
+        let program = std::env::var("COMSPEC")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .or_else(|| find_executable("cmd").map(|p| p.to_string_lossy().into_owned()))
+            .unwrap_or_else(|| "cmd.exe".into());
+        (program, Vec::new())
     }
     #[cfg(not(target_os = "windows"))]
     {

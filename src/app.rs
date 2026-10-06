@@ -173,6 +173,8 @@ pub struct Workspace {
     pub toast: Option<Toast>,
     pub toast_serial: u64,
     pub show_all: HashSet<Id>,
+    /// Sessions that leave no history once they end (the "fix with Claude" helper).
+    ephemeral: HashSet<Id>,
     pub editors: Vec<(Editor, bool)>,
     pub transcript_mtimes: HashMap<Id, SystemTime>,
     pub window_title: String,
@@ -222,6 +224,7 @@ impl Workspace {
             toast: None,
             toast_serial: 0,
             show_all: HashSet::new(),
+            ephemeral: HashSet::new(),
             editors: Editor::ALL
                 .iter()
                 .map(|e| (*e, e.locate().is_some()))
@@ -825,6 +828,14 @@ impl Workspace {
     /// A Claude session that never produced a transcript (opened and closed without a prompt) has nothing
     /// to resume. Remove Claudiu's own record of it; Claude Code's data is never touched.
     fn drop_if_empty(&mut self, id: &str) {
+        if self.ephemeral.remove(id) {
+            self.store.data.sessions.retain(|s| s.id != id);
+            if self.selected.as_deref() == Some(id) {
+                self.selected = None;
+            }
+            self.store.mark_dirty();
+            return;
+        }
         let Some(rec) = self.store.session(id) else {
             return;
         };
@@ -979,11 +990,12 @@ impl Workspace {
                     rec.last_active = t;
                 }
         }
-        // Terminal sessions are never persisted.
+        // Terminal sessions are never persisted, nor are ephemeral ones.
+        let ephemeral = &self.ephemeral;
         self.store
             .data
             .sessions
-            .retain(|s| s.kind != SessionKind::Shell);
+            .retain(|s| s.kind != SessionKind::Shell && !ephemeral.contains(&s.id));
         self.store.save();
     }
 
@@ -1053,7 +1065,12 @@ impl Workspace {
                 let prompt = "Claudiu's Pull or Commit & Push just failed in this repository because of a merge conflict,                     a diverged branch or a rejected push. Run git status, fix it (resolve conflicts keeping the intent of both sides,                     finish the merge or rebase, then push if the push was rejected).                     Ask me whenever a conflict is ambiguous or you are unsure which side to keep.";
                 let args = ["--model", "claude-sonnet-5-5", "--effort", "medium"];
                 let leading = std::iter::once(prompt).chain(args).map(String::from).collect();
+                let before = self.selected.clone();
                 self.new_claude_with(cwd, leading, window, cx);
+                if self.selected != before
+                    && let Some(id) = self.selected.clone() {
+                        self.ephemeral.insert(id);
+                    }
             }
             Act::NewBranch(cwd) => {
                 self.modal = Some(Modal::NewBranch { cwd, text: String::new() });

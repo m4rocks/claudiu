@@ -1,6 +1,6 @@
 [package]
 name = "claudiu"
-version = "0.2.6"
+version = "0.2.7"
 edition = "2024"
 description = "A native workspace for Claude Code sessions: real PTYs, projects, and session history"
 repository = "https://github.com/m4rocks/claudiu"
@@ -41,3 +41,10 @@ windows-sys = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging"] }
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", features = ["NSApplication"] }
+
+[profile.dev]
+debug = "line-tables-only"
+incremental = true
+
+[profile.dev.package."*"]
+debug = false

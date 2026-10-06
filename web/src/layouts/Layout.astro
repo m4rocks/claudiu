@@ -1,0 +1,22 @@
+---
+import '../styles/global.css';
+
+interface Props {
+  title: string;
+  description: string;
+}
+const { title, description } = Astro.props;
+---
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width" />
+    <link rel="icon" type="image/svg+xml" href="/claudiu.svg" />
+    <meta name="description" content={description} />
+    <title>{title}</title>
+  </head>
+  <body class="h-dvh overflow-hidden bg-ink text-neutral-200 antialiased">
+    <div class="flex h-full flex-col"><slot /></div>
+  </body>
+</html>

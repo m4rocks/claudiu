@@ -132,6 +132,12 @@ fn main() {
             KeyBinding::new("ctrl-tab", NextSession, None),
             KeyBinding::new("ctrl-shift-tab", PrevSession, None),
         ]);
+        // The text-input library binds these globally (focus traversal, copy, select all, ...). A focused
+        // terminal must receive them as plain keys, so unbind them inside the Terminal context.
+        cx.bind_keys(
+            ["tab", "shift-tab", "ctrl-a", "ctrl-c", "ctrl-x", "ctrl-y", "ctrl-z", "ctrl-v"]
+                .map(|k| KeyBinding::new(k, gpui::NoAction, Some("Terminal"))),
+        );
         #[cfg(target_os = "macos")]
         cx.bind_keys([KeyBinding::new("cmd-q", Quit, None), KeyBinding::new("cmd-h", HideApp, None), KeyBinding::new("cmd-alt-h", HideOthers, None)]);
 

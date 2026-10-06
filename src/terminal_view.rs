@@ -192,8 +192,38 @@ impl TerminalView {
     }
 
     pub fn paste(&mut self, cx: &mut Context<Self>) {
-        if let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) {
+        let Some(item) = cx.read_from_clipboard() else {
+            return;
+        };
+        if let Some(text) = item.text().filter(|t| !t.is_empty()) {
             self.paste_text(&text, cx);
+            return;
+        }
+        // An image on the clipboard: Claude Code reads it itself on its image-paste key (Alt+V on Windows,
+        // Ctrl+V elsewhere).
+        if item.entries().iter().any(|e| matches!(e, gpui::ClipboardEntry::Image(_))) {
+            let key: &[u8] = if cfg!(target_os = "windows") { b"\x1bv" } else { b"\x16" };
+            self.send(key.to_vec(), cx);
+        } else if let Some(paths) = item.entries().iter().find_map(|e| match e {
+            gpui::ClipboardEntry::ExternalPaths(p) => Some(p.paths().to_vec()),
+            _ => None,
+        }) {
+            self.paste_paths(&paths, cx);
+        }
+    }
+
+    /// Dropped or copied files: paste their paths (quoted when needed); Claude Code attaches them.
+    pub fn paste_paths(&mut self, paths: &[std::path::PathBuf], cx: &mut Context<Self>) {
+        let text = paths
+            .iter()
+            .map(|p| {
+                let s = p.to_string_lossy();
+                if s.contains(' ') { format!("\"{s}\"") } else { s.into_owned() }
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        if !text.is_empty() {
+            self.paste_text(&format!("{text} "), cx);
         }
     }
 

@@ -619,6 +619,12 @@ impl Render for Workspace {
                 }
             }))
             .on_drop(cx.listener(|ws, paths: &gpui::ExternalPaths, window, cx| {
+                let focused = ws.panes.get(ws.focused).and_then(|id| ws.live_view(id)).cloned();
+                if let (Some(view), Main::Terminals) = (focused, &ws.main) {
+                    // Over a terminal, files go to the session as paths (Claude Code attaches images).
+                    view.update(cx, |v, cx| v.paste_paths(paths.paths(), cx));
+                    return;
+                }
                 for p in paths.paths().iter().filter(|p| p.is_dir()) {
                     ws.act(Act::AddProject(p.clone()), window, cx);
                 }

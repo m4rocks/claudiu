@@ -1,0 +1,6 @@
+@import "tailwindcss";
+
+@theme {
+  --color-claude: #d97757;
+  --color-ink: #0c0c0c;
+}
