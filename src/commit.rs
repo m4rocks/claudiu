@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use wait_timeout::ChildExt;
 
-pub const MODEL: &str = "claude-haiku-4-5-20251001";
+pub const MODEL: &str = "claude-haiku-5-5";
 /// Keeps the prompt small and cheap; the stat summary always covers the whole change.
 const MAX_DIFF_BYTES: usize = 40_000;
 
