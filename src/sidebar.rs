@@ -538,6 +538,18 @@ impl Workspace {
             None => (None, "no Claude session selected".to_string()),
         };
 
+        // Fills with time left; goes red in the last fifth. Expired means the next message re-reads the whole context at full price.
+        let cache = match self.selected_cache() {
+            Some((_, 0, _)) => meter("CACHE", Some(0.0), "expired".into(), None),
+            Some((f, left, ttl)) => {
+                let tone = hsla(if f < 0.2 { theme::DANGER } else { theme::ACCENT });
+                let window = if ttl >= 3600 { "1h" } else { "5m" };
+                let left = if left < 60 { "<1m".to_string() } else { countdown(left) };
+                meter("CACHE", Some(f), format!("{left} left of {window}"), Some(tone))
+            }
+            None => meter("CACHE", None, "no Claude session selected".into(), None),
+        };
+
         div()
             .flex()
             .flex_col()
@@ -552,6 +564,12 @@ impl Workspace {
                 .child(limit("7 DAY", &acct.seven_day)))
             .child(divider())
             .child(div().flex().flex_col().gap(px(10.0)).child(div().text_size(px(10.5)).font_weight(FontWeight::SEMIBOLD).text_color(hsla(theme::TEXT_DIM)).child("SESSION"))
-                .child(meter("CONTEXT", ctx_fraction, ctx_caption, None)))
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(14.0))
+                        .child(cache.flex_1().min_w_0())
+                        .child(meter("CONTEXT", ctx_fraction, ctx_caption, None).flex_1().min_w_0()),
+                ))
     }
 }

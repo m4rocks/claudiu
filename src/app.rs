@@ -1367,6 +1367,18 @@ impl Workspace {
         }
     }
 
+    /// Prompt-cache timer for the selected session: `(remaining fraction, remaining secs, ttl secs)`.
+    /// Every request that reads or writes the cache restarts its TTL, and each one appends to the transcript,
+    /// so the transcript's mtime is when the clock was last reset. Unknown TTL assumes the 5-minute tier.
+    pub fn selected_cache(&self) -> Option<(f32, i64, i64)> {
+        let id = self.selected.as_ref().or(self.active_id())?;
+        let meta = self.store.session(id)?.claude.as_ref()?;
+        let last = self.transcript_mtimes.get(id)?.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs() as i64;
+        let ttl = meta.cache_ttl.unwrap_or(300) as i64;
+        let left = (last + ttl - now()).clamp(0, ttl);
+        Some((left as f32 / ttl as f32, left, ttl))
+    }
+
     /// Context-meter source for the selected session: `(fraction, tokens, exact)`. `exact` means Claude Code
     /// itself reported the percentage (status line); otherwise it is estimated from the transcript.
     pub fn selected_context(&self) -> Option<(f32, u64, bool)> {

@@ -164,6 +164,7 @@ pub fn read_session(path: &Path) -> Option<SessionScan> {
     let mut custom_title: Option<String> = None;
     let mut model: Option<String> = None;
     let mut context_tokens: Option<u64> = None;
+    let mut cache_ttl: Option<u64> = None;
     let mut last_ts: Option<i64> = None;
 
     let mut visit = |line: &str, is_tail: bool| {
@@ -193,6 +194,15 @@ pub fn read_session(path: &Path) -> Option<SessionScan> {
                         if total > 0 {
                             context_tokens = Some(total);
                         }
+                        // The last request that wrote to the cache says which TTL tier this account gets.
+                        if let Some(c) = u.get("cache_creation") {
+                            let n = |k: &str| c.get(k).and_then(Value::as_u64).unwrap_or(0);
+                            if n("ephemeral_1h_input_tokens") > 0 {
+                                cache_ttl = Some(3600);
+                            } else if n("ephemeral_5m_input_tokens") > 0 {
+                                cache_ttl = Some(300);
+                            }
+                        }
                     }
                 }
             }
@@ -218,6 +228,7 @@ pub fn read_session(path: &Path) -> Option<SessionScan> {
             last_active: modified_fs,
             model,
             context_tokens,
+            cache_ttl,
             transcript: path.to_path_buf(),
         },
     })
