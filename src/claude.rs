@@ -68,6 +68,22 @@ pub fn claude_home() -> Option<PathBuf> {
     std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from).or_else(|| home_dir().map(|h| h.join(".claude")))
 }
 
+/// Claude Code's own per-process registry (`sessions/<pid>.json`) says whether each session is `busy`, `idle`
+/// or `waiting`. Read-only; returns session id → status, newest record winning (dead processes leave stale files).
+pub fn session_statuses(home: &Path) -> std::collections::HashMap<String, String> {
+    let mut best: std::collections::HashMap<String, (i64, String)> = Default::default();
+    for entry in fs::read_dir(home.join("sessions")).into_iter().flatten().flatten() {
+        let Ok(text) = fs::read_to_string(entry.path()) else { continue };
+        let Ok(v) = serde_json::from_str::<Value>(&text) else { continue };
+        let (Some(id), Some(status)) = (v.get("sessionId").and_then(Value::as_str), v.get("status").and_then(Value::as_str)) else { continue };
+        let at = v.get("updatedAt").and_then(Value::as_i64).unwrap_or(0);
+        if best.get(id).is_none_or(|(t, _)| at >= *t) {
+            best.insert(id.to_string(), (at, status.to_string()));
+        }
+    }
+    best.into_iter().map(|(k, (_, s))| (k, s)).collect()
+}
+
 pub struct ScanResult {
     pub sessions: Vec<ExternalSession>,
     /// False when the directory couldn't be read: callers must not conclude anything is gone.
@@ -165,6 +181,7 @@ pub fn read_session(path: &Path) -> Option<SessionScan> {
     let mut model: Option<String> = None;
     let mut context_tokens: Option<u64> = None;
     let mut cache_ttl: Option<u64> = None;
+    let mut cache_at: Option<i64> = None;
     let mut last_ts: Option<i64> = None;
 
     let mut visit = |line: &str, is_tail: bool| {
@@ -193,6 +210,10 @@ pub fn read_session(path: &Path) -> Option<SessionScan> {
                         let total = get("input_tokens") + get("cache_creation_input_tokens") + get("cache_read_input_tokens");
                         if total > 0 {
                             context_tokens = Some(total);
+                        }
+                        // Only a response that touched the cache restarted its TTL; user messages and renames don't.
+                        if get("cache_creation_input_tokens") + get("cache_read_input_tokens") > 0 && ts.is_some() {
+                            cache_at = ts;
                         }
                         // The last request that wrote to the cache says which TTL tier this account gets.
                         if let Some(c) = u.get("cache_creation") {
@@ -229,6 +250,7 @@ pub fn read_session(path: &Path) -> Option<SessionScan> {
             model,
             context_tokens,
             cache_ttl,
+            cache_at,
             transcript: path.to_path_buf(),
         },
     })
@@ -279,6 +301,7 @@ mod tests {
         assert_eq!(s.cwd, Some(PathBuf::from(r"C:\w\app")));
         assert_eq!(s.model.as_deref(), Some("claude-sonnet-5-5"));
         assert_eq!(s.context_tokens, Some(50000));
+        assert_eq!(s.cache_at, parse_rfc3339("2026-10-05T14:11:00.000Z"));
         assert_eq!(s.created_at, 1791209453);
     }
 

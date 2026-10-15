@@ -52,6 +52,9 @@ pub struct ClaudeMeta {
     /// Prompt-cache lifetime in seconds (300 or 3600), read from the last cache write in the transcript.
     #[serde(default)]
     pub cache_ttl: Option<u64>,
+    /// Unix time of the last request that read or wrote the prompt cache (the moment its TTL restarted).
+    #[serde(default)]
+    pub cache_at: Option<i64>,
     pub transcript: Option<PathBuf>,
     #[serde(default)]
     pub external: ExternalState,
@@ -309,6 +312,7 @@ pub struct ExternalSession {
     pub model: Option<String>,
     pub context_tokens: Option<u64>,
     pub cache_ttl: Option<u64>,
+    pub cache_at: Option<i64>,
     pub transcript: PathBuf,
 }
 
@@ -351,6 +355,9 @@ pub fn reconcile(data: &mut Data, external: &[ExternalSession], scan_ok: bool) -
                 }
                 if ext.cache_ttl.is_some() {
                     meta.cache_ttl = ext.cache_ttl;
+                }
+                if ext.cache_at.is_some() {
+                    meta.cache_at = ext.cache_at;
                 }
                 if *rec != before {
                     stats.updated += 1;
@@ -410,6 +417,7 @@ mod tests {
             model: Some("claude-sonnet-5-5".into()),
             context_tokens: Some(1000),
             cache_ttl: None,
+            cache_at: None,
             transcript: PathBuf::from(format!("/t/{id}.jsonl")),
         }
     }

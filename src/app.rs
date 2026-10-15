@@ -337,7 +337,11 @@ impl Workspace {
         cx.spawn_in(window, async move |this, cx| {
             loop {
                 cx.background_executor().timer(Duration::from_secs(1)).await;
-                if this.update_in(cx, |ws, window, cx| ws.update_activity(window, cx)).is_err() {
+                let statuses = cx
+                    .background_executor()
+                    .spawn(async { claude::claude_home().map(|h| claude::session_statuses(&h)).unwrap_or_default() })
+                    .await;
+                if this.update_in(cx, |ws, window, cx| ws.update_activity(window, cx, &statuses)).is_err() {
                     break;
                 }
             }
@@ -345,7 +349,9 @@ impl Workspace {
         .detach();
     }
 
-    fn update_activity(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// `statuses` is Claude Code's own busy/idle/waiting per session id; sessions it doesn't list (older Claude
+    /// Code, no registry file) fall back to the terminal-output heuristic.
+    fn update_activity(&mut self, window: &mut Window, cx: &mut Context<Self>, statuses: &HashMap<String, String>) {
         let window_active = window.is_window_active();
         let shown = self.active_id().cloned();
         let mut next: HashMap<Id, Activity> = HashMap::new();
@@ -357,7 +363,9 @@ impl Workspace {
                 continue;
             }
             let viewing = window_active && shown.as_deref() == Some(l.id.as_str());
-            match (view.is_working(), self.activity.get(&l.id)) {
+            let status = self.store.session(&l.id).and_then(|r| statuses.get(r.claude_id()?));
+            let working = status.map_or_else(|| view.is_working(), |s| s == "busy");
+            match (working, self.activity.get(&l.id)) {
                 (true, _) => {
                     next.insert(l.id.clone(), Activity::Working);
                 }
@@ -1368,12 +1376,13 @@ impl Workspace {
     }
 
     /// Prompt-cache timer for the selected session: `(remaining fraction, remaining secs, ttl secs)`.
-    /// Every request that reads or writes the cache restarts its TTL, and each one appends to the transcript,
-    /// so the transcript's mtime is when the clock was last reset. Unknown TTL assumes the 5-minute tier.
+    /// Every request that reads or writes the cache restarts its TTL; that moment is the timestamp of the last
+    /// assistant response that used it (not the transcript's mtime, which user messages and renames also bump).
+    /// Unknown TTL assumes the 5-minute tier.
     pub fn selected_cache(&self) -> Option<(f32, i64, i64)> {
         let id = self.selected.as_ref().or(self.active_id())?;
         let meta = self.store.session(id)?.claude.as_ref()?;
-        let last = self.transcript_mtimes.get(id)?.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs() as i64;
+        let last = meta.cache_at?;
         let ttl = meta.cache_ttl.unwrap_or(300) as i64;
         let left = (last + ttl - now()).clamp(0, ttl);
         Some((left as f32 / ttl as f32, left, ttl))
