@@ -1,7 +1,7 @@
 //! Small stateless UI pieces shared by sidebar / main view / modals.
 
 use gpui::{
-    App, Div, FontWeight, Hsla, InteractiveElement, Keystroke, ParentElement, SharedString,
+    Div, FontWeight, Hsla, InteractiveElement, ParentElement, SharedString,
     Stateful, Styled, div, px,
 };
 
@@ -304,47 +304,6 @@ pub fn short_path(path: &std::path::Path) -> String {
         s = format!("{head}…{tail}");
     }
     s
-}
-
-/// Apply one keystroke to a single-line text buffer. Returns true if the buffer changed.
-/// Enter / Escape are left to the caller.
-pub fn edit_text(buf: &mut String, ks: &Keystroke, cx: &App) -> bool {
-    let m = &ks.modifiers;
-    if (m.control || m.platform) && !m.alt && ks.key == "v" {
-        if let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) {
-            buf.push_str(&text.replace(['\r', '\n'], " "));
-            return true;
-        }
-        return false;
-    }
-    match ks.key.as_str() {
-        "backspace" => {
-            if m.control {
-                while buf.ends_with(' ') {
-                    buf.pop();
-                }
-                while !buf.is_empty() && !buf.ends_with(' ') {
-                    buf.pop();
-                }
-                true
-            } else {
-                buf.pop().is_some()
-            }
-        }
-        // GPUI on Windows reports Space as a named key with no `key_char`.
-        "space" if !m.control && !m.alt && !m.platform => {
-            buf.push(' ');
-            true
-        }
-        _ if !m.control && !m.alt && !m.platform => match ks.key_char.as_deref() {
-            Some(t) if !t.chars().any(char::is_control) => {
-                buf.push_str(t);
-                true
-            }
-            _ => false,
-        },
-        _ => false,
-    }
 }
 
 #[cfg(test)]

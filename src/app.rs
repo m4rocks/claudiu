@@ -105,18 +105,17 @@ pub enum Modal {
     },
     Rename {
         id: Id,
-        text: String,
+        input: Entity<InputState>,
     },
     NewBranch {
         cwd: PathBuf,
-        text: String,
+        input: Entity<InputState>,
     },
-    /// Empty text = use the default. `field`: 0 shell, 1 claude path, 2 update-check toggle.
+    /// Empty text = use the default.
     Settings {
-        shell: String,
-        claude: String,
+        shell: Entity<InputState>,
+        claude: Entity<InputState>,
         updates: bool,
-        field: usize,
     },
 }
 
@@ -711,6 +710,8 @@ impl Workspace {
 
     pub fn new_shell(&mut self, cwd: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         let (program, args) = self.shell.clone();
+        // A session's folder may be gone (temp dirs, deleted worktrees); CreateProcess then fails with "filename syntax is incorrect".
+        let cwd = if cwd.is_dir() { cwd } else { platform::home_dir().unwrap_or(cwd) };
         let spec = SpawnSpec {
             program: program.clone(),
             args,
@@ -772,7 +773,7 @@ impl Workspace {
         let (terminal, rx) = match TerminalView::spawn(&spec) {
             Ok(t) => t,
             Err(e) => {
-                self.toast(format!("Could not start {}: {e}", spec.program), true, cx);
+                self.toast(format!("Could not start {} in {}: {e}", spec.program, spec.cwd.as_deref().unwrap_or(std::path::Path::new(".")).display()), true, cx);
                 return;
             }
         };
@@ -1032,8 +1033,8 @@ impl Workspace {
                     .session(&id)
                     .map(|s| s.display_title().to_string())
                     .unwrap_or_default();
-                self.modal = Some(Modal::Rename { id, text });
-                window.focus(&self.modal_focus, cx);
+                let input = self.modal_input(&text, "", window, cx);
+                self.modal = Some(Modal::Rename { id, input });
             }
             Act::Archive(id, archive) => {
                 if let Some(rec) = self.store.session_mut(&id) {
@@ -1091,17 +1092,19 @@ impl Workspace {
             }
             Act::OpenSettings => {
                 let s = &self.store.data.settings;
-                self.modal = Some(Modal::Settings {
-                    shell: s.shell.clone().unwrap_or_default(),
-                    claude: s.claude_path.as_ref().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default(),
-                    updates: s.update_url.as_deref() != Some(""),
-                    field: 0,
-                });
-                window.focus(&self.modal_focus, cx);
+                let (shell_t, claude_t) = (
+                    s.shell.clone().unwrap_or_default(),
+                    s.claude_path.as_ref().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default(),
+                );
+                let updates = s.update_url.as_deref() != Some("");
+                let claude_hint = self.claude_exe.as_ref().map_or("not found".to_string(), |p| p.to_string_lossy().into_owned());
+                let claude = self.modal_input(&claude_t, &claude_hint, window, cx);
+                let shell = self.modal_input(&shell_t, &platform::default_shell(None).0, window, cx);
+                self.modal = Some(Modal::Settings { shell, claude, updates });
             }
             Act::NewBranch(cwd) => {
-                self.modal = Some(Modal::NewBranch { cwd, text: String::new() });
-                window.focus(&self.modal_focus, cx);
+                let input = self.modal_input("", "", window, cx);
+                self.modal = Some(Modal::NewBranch { cwd, input });
             }
             Act::CreateBranch(cwd, name) => {
                 self.run_git(GitOp::Branch, move || Ok(crate::commit::create_branch(&cwd, &name)?), cx)
@@ -1294,31 +1297,44 @@ impl Workspace {
         .detach();
     }
 
+    /// A single-line field for a dialog, focused, with Enter submitting the dialog.
+    fn modal_input(&mut self, value: &str, placeholder: &str, window: &mut Window, cx: &mut Context<Self>) -> Entity<InputState> {
+        let input = cx.new(|cx| InputState::new(window, cx).default_value(value.to_string()).placeholder(placeholder.to_string()));
+        cx.subscribe_in(&input, window, |ws: &mut Self, _, ev: &InputEvent, window, cx| {
+            if matches!(ev, InputEvent::PressEnter { .. }) {
+                ws.submit_modal(window, cx);
+            }
+        })
+        .detach();
+        input.update(cx, |s, cx| s.focus(window, cx));
+        input
+    }
+
     /// Enter / OK in a modal.
     pub fn submit_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let act = match self.modal.take() {
             Some(Modal::Confirm { act, .. }) => act,
-            Some(Modal::Rename { id, text }) => {
-                let text = text.trim().to_string();
+            Some(Modal::Rename { id, input }) => {
+                let text = input.read(cx).value().trim().to_string();
                 if let Some(rec) = self.store.session_mut(&id) {
                     rec.custom_title = (!text.is_empty()).then_some(text);
                 }
                 Act::Dismiss
             }
-            Some(Modal::NewBranch { cwd, text }) => {
+            Some(Modal::NewBranch { cwd, input }) => {
                 // Spaces aren't allowed in branch names; git reports anything else that is invalid.
-                let name = text.split_whitespace().collect::<Vec<_>>().join("-");
+                let name = input.read(cx).value().split_whitespace().collect::<Vec<_>>().join("-");
                 if name.is_empty() { Act::Dismiss } else { Act::CreateBranch(cwd, name) }
             }
-            Some(Modal::Settings { shell, claude, updates, field }) => {
+            Some(Modal::Settings { shell, claude, updates }) => {
                 let clean = |s: &str| s.trim().trim_matches('"').to_string();
-                let (shell_t, claude_t) = (clean(&shell), clean(&claude));
+                let (shell_t, claude_t) = (clean(shell.read(cx).value().as_ref()), clean(claude.read(cx).value().as_ref()));
                 let bad = [("Shell", &shell_t), ("Claude path", &claude_t)]
                     .into_iter()
                     .find(|(_, t)| !t.is_empty() && platform::resolve_program(t).is_none());
                 if let Some((what, t)) = bad {
                     let msg = format!("{what}: “{t}” is not a file or a program on PATH");
-                    self.modal = Some(Modal::Settings { shell, claude, updates, field });
+                    self.modal = Some(Modal::Settings { shell, claude, updates });
                     self.toast(msg, true, cx);
                     return;
                 }

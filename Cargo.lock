@@ -934,7 +934,7 @@ dependencies = [
 
 [[package]]
 name = "claudiu"
-version = "0.2.10"
+version = "0.2.11"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
