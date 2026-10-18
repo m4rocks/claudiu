@@ -38,6 +38,7 @@ actions!(
         HideApp,
         HideOthers,
         ShowAllApps,
+        OpenSettings,
     ]
 );
 
@@ -61,6 +62,7 @@ pub enum Act {
     Reveal(PathBuf),
     OpenEditor(Editor, PathBuf),
     ImportProject,
+    OpenSettings,
     /// Stage everything in this folder's repository, commit it with a Haiku-written message, push.
     CommitPush(PathBuf),
     Pull(PathBuf),
@@ -108,6 +110,13 @@ pub enum Modal {
     NewBranch {
         cwd: PathBuf,
         text: String,
+    },
+    /// Empty text = use the default. `field`: 0 shell, 1 claude path, 2 update-check toggle.
+    Settings {
+        shell: String,
+        claude: String,
+        updates: bool,
+        field: usize,
     },
 }
 
@@ -207,7 +216,7 @@ impl Workspace {
         .detach();
         let mut ws = Self {
             claude_exe,
-            shell: platform::default_shell(),
+            shell: platform::default_shell(store.data.settings.shell.as_deref()),
             live: vec![],
             panes: vec![],
             focused: 0,
@@ -673,7 +682,7 @@ impl Workspace {
     /// `--allowedTools` / `--mcp-config` flags, or they would swallow it.
     fn new_claude_with(&mut self, cwd: PathBuf, leading: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(exe) = self.claude_exe.clone() else {
-            self.toast("Could not find the `claude` CLI. Install Claude Code, or set its path in state.json (settings.claude_path).", true, cx);
+            self.toast("Could not find the `claude` CLI. Install Claude Code, or set its path in Settings.", true, cx);
             return;
         };
         let session_id = new_id();
@@ -1080,6 +1089,16 @@ impl Workspace {
                         self.ephemeral.insert(id);
                     }
             }
+            Act::OpenSettings => {
+                let s = &self.store.data.settings;
+                self.modal = Some(Modal::Settings {
+                    shell: s.shell.clone().unwrap_or_default(),
+                    claude: s.claude_path.as_ref().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default(),
+                    updates: s.update_url.as_deref() != Some(""),
+                    field: 0,
+                });
+                window.focus(&self.modal_focus, cx);
+            }
             Act::NewBranch(cwd) => {
                 self.modal = Some(Modal::NewBranch { cwd, text: String::new() });
                 window.focus(&self.modal_focus, cx);
@@ -1290,6 +1309,31 @@ impl Workspace {
                 // Spaces aren't allowed in branch names; git reports anything else that is invalid.
                 let name = text.split_whitespace().collect::<Vec<_>>().join("-");
                 if name.is_empty() { Act::Dismiss } else { Act::CreateBranch(cwd, name) }
+            }
+            Some(Modal::Settings { shell, claude, updates, field }) => {
+                let clean = |s: &str| s.trim().trim_matches('"').to_string();
+                let (shell_t, claude_t) = (clean(&shell), clean(&claude));
+                let bad = [("Shell", &shell_t), ("Claude path", &claude_t)]
+                    .into_iter()
+                    .find(|(_, t)| !t.is_empty() && platform::resolve_program(t).is_none());
+                if let Some((what, t)) = bad {
+                    let msg = format!("{what}: “{t}” is not a file or a program on PATH");
+                    self.modal = Some(Modal::Settings { shell, claude, updates, field });
+                    self.toast(msg, true, cx);
+                    return;
+                }
+                let s = &mut self.store.data.settings;
+                s.shell = (!shell_t.is_empty()).then_some(shell_t);
+                s.claude_path = platform::resolve_program(&claude_t);
+                // Only the on/off state is edited here; a custom feed URL survives while checks stay on.
+                if updates == (s.update_url.as_deref() == Some("")) {
+                    s.update_url = (!updates).then(String::new);
+                }
+                self.shell = platform::default_shell(s.shell.as_deref());
+                self.claude_exe = claude::discover(s.claude_path.as_deref());
+                self.store.mark_dirty();
+                self.toast("Settings saved. Open sessions keep their current shell.", false, cx);
+                Act::Dismiss
             }
             None => return,
         };

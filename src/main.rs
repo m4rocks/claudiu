@@ -21,7 +21,7 @@ mod widgets;
 use gpui::{App, Bounds, KeyBinding, TitlebarOptions, WindowBounds, WindowOptions, prelude::*, px, size};
 
 use app::{
-    CloseSession, FocusNextPane, FocusSearch, HideApp, HideOthers, ImportProject, NewClaude, NewShell, NextSession, PrevSession, Quit, ShowAllApps,
+    CloseSession, FocusNextPane, FocusSearch, HideApp, HideOthers, ImportProject, NewClaude, NewShell, NextSession, OpenSettings, PrevSession, Quit, ShowAllApps,
     SplitPane, ToggleSidebar, Workspace,
 };
 
@@ -33,6 +33,8 @@ fn menu_bar() -> Vec<gpui::Menu> {
     use gpui_kit::component::input;
     vec![
         Menu::new("Claudiu").items([
+            MenuItem::action("Settings…", OpenSettings),
+            MenuItem::separator(),
             MenuItem::os_submenu("Services", SystemMenuType::Services),
             MenuItem::separator(),
             MenuItem::action("Hide Claudiu", HideApp),
@@ -128,6 +130,7 @@ fn main() {
             KeyBinding::new("secondary-shift-b", ToggleSidebar, None),
             KeyBinding::new("secondary-shift-f", FocusSearch, None),
             KeyBinding::new("secondary-shift-o", ImportProject, None),
+            KeyBinding::new("secondary-,", OpenSettings, None),
             KeyBinding::new("secondary-shift-]", FocusNextPane, None),
             KeyBinding::new("ctrl-tab", NextSession, None),
             KeyBinding::new("ctrl-shift-tab", PrevSession, None),

@@ -11,7 +11,7 @@ use gpui_kit::component::input::Input;
 use crate::app::{Act, Activity, MenuItem, Workspace};
 use crate::store::{ExternalState, Id, Project, SessionKind, SessionRecord, now};
 use crate::theme::{self, hsla};
-use crate::widgets::{ago, button, clawd, countdown, divider, icon_button, meter, section_label};
+use crate::widgets::{ago, button, clawd, cog, countdown, divider, icon_button, meter, section_label};
 
 const SIDEBAR_W: f32 = 284.0;
 const PROJECT_SESSION_LIMIT: usize = 5;
@@ -399,7 +399,8 @@ impl Workspace {
                     .gap(px(10.0))
                     .px(px(4.0))
                     .child(clawd(24.0))
-                    .child(div().text_size(px(13.0)).font_weight(FontWeight::BOLD).text_color(hsla(theme::TEXT)).child("CLAUDIU")),
+                    .child(div().flex_1().text_size(px(13.0)).font_weight(FontWeight::BOLD).text_color(hsla(theme::TEXT)).child("CLAUDIU"))
+                    .child(icon_button("settings", "").group("settings").child(cog("settings")).on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::OpenSettings, window, cx)))),
             )
             .child(
                 div()

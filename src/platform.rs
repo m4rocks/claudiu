@@ -4,12 +4,13 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-/// Program + args for the user's default interactive shell.
-pub fn default_shell() -> (String, Vec<String>) {
+/// Program + args for new terminals: `custom` if set, else the user's default interactive shell.
+pub fn default_shell(custom: Option<&str>) -> (String, Vec<String>) {
     #[cfg(target_os = "windows")]
     {
-        let program = std::env::var("COMSPEC")
-            .ok()
+        let program = custom
+            .map(String::from)
+            .or_else(|| std::env::var("COMSPEC").ok())
             .filter(|s| !s.is_empty())
             .or_else(|| find_executable("cmd").map(|p| p.to_string_lossy().into_owned()))
             .unwrap_or_else(|| "cmd.exe".into());
@@ -17,7 +18,11 @@ pub fn default_shell() -> (String, Vec<String>) {
     }
     #[cfg(not(target_os = "windows"))]
     {
-        let program = std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/zsh".into());
+        let program = custom
+            .map(String::from)
+            .or_else(|| std::env::var("SHELL").ok())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "/bin/zsh".into());
         (program, vec!["-l".into()])
     }
 }
@@ -60,6 +65,12 @@ pub fn home_dir() -> Option<PathBuf> {
 /// PATH lookup (honors PATHEXT on Windows).
 pub fn find_executable(name: &str) -> Option<PathBuf> {
     which::which(name).ok()
+}
+
+/// A program typed by the user: an existing file, or a name found on PATH.
+pub fn resolve_program(text: &str) -> Option<PathBuf> {
+    let p = Path::new(text);
+    if p.is_file() { Some(p.to_path_buf()) } else { find_executable(text) }
 }
 
 /// Spawn a GUI/helper process fully detached and without flashing a console window.
@@ -227,6 +238,13 @@ fn expand_env(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn typed_programs_resolve_only_when_they_exist() {
+        let exe = std::env::current_exe().unwrap();
+        assert_eq!(resolve_program(exe.to_str().unwrap()), Some(exe));
+        assert_eq!(resolve_program("definitely-not-a-program-xyz"), None);
+    }
 
     #[test]
     fn containment_ignores_separator_style_and_trailing_slash() {

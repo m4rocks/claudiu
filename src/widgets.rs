@@ -217,6 +217,48 @@ pub fn icon_button(id: impl Into<SharedString>, glyph: &'static str) -> Stateful
         .child(glyph)
 }
 
+/// A gear drawn from rectangles (like `clawd`), so it matches the plain glyph icons instead of an emoji.
+/// It brightens with the `group` named `group` being hovered, like `icon_button`'s text does.
+pub fn cog(group: &'static str) -> Div {
+    let tint = |d: Div, rect: (f32, f32, f32, f32)| {
+        d.child(
+            div()
+                .absolute()
+                .left(px(rect.0))
+                .top(px(rect.1))
+                .w(px(rect.2))
+                .h(px(rect.3))
+                .bg(hsla(theme::TEXT_DIM))
+                .group_hover(group, |s| s.bg(hsla(theme::TEXT))),
+        )
+    };
+    let mut root = div().relative().size(px(14.0)).flex_none().child(
+        div()
+            .absolute()
+            .left(px(3.0))
+            .top(px(3.0))
+            .size(px(8.0))
+            .rounded_full()
+            .border_2()
+            .border_color(hsla(theme::TEXT_DIM))
+            .group_hover(group, |s| s.border_color(hsla(theme::TEXT))),
+    );
+    // Four teeth on the axes, four small ones on the diagonals.
+    for rect in [
+        (6.0, 0.0, 2.0, 3.0),
+        (6.0, 11.0, 2.0, 3.0),
+        (0.0, 6.0, 3.0, 2.0),
+        (11.0, 6.0, 3.0, 2.0),
+        (2.0, 2.0, 2.0, 2.0),
+        (10.0, 2.0, 2.0, 2.0),
+        (2.0, 10.0, 2.0, 2.0),
+        (10.0, 10.0, 2.0, 2.0),
+    ] {
+        root = tint(root, rect);
+    }
+    root
+}
+
 pub fn divider() -> Div {
     div().h(px(1.0)).w_full().bg(hsla(theme::BORDER))
 }

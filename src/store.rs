@@ -139,6 +139,9 @@ pub struct Layout {
 pub struct Settings {
     /// Explicit path to the `claude` executable; discovery is used when empty.
     pub claude_path: Option<PathBuf>,
+    /// Program for new terminal sessions (a path or a name on PATH); the platform default shell when empty.
+    #[serde(default)]
+    pub shell: Option<String>,
     /// Update feed base URL. Empty/None disables update checks entirely.
     pub update_url: Option<String>,
     /// Editor the "Open in" button uses; the last one picked.

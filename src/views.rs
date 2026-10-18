@@ -6,7 +6,7 @@ use gpui::{
 };
 
 use crate::app::{
-    Act, CloseSession, GitOp, MenuItem, FocusNextPane, FocusSearch, ImportProject, Main, Modal, NewClaude, NewShell, NextSession, PrevSession, SplitPane,
+    Act, CloseSession, GitOp, MenuItem, FocusNextPane, FocusSearch, ImportProject, Main, Modal, NewClaude, NewShell, NextSession, OpenSettings, PrevSession, SplitPane,
     ToggleSidebar, Workspace,
 };
 use crate::platform::Editor;
@@ -428,6 +428,39 @@ impl Workspace {
         )
     }
 
+    /// One labelled text field of the settings modal; `hint` is the default shown while it is empty.
+    fn settings_field(&self, cx: &mut Context<Self>, idx: usize, label: &str, value: &str, hint: String, active: bool) -> AnyElement {
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(4.0))
+            .child(section_label(label.to_string()))
+            .child(
+                div()
+                    .id(gpui::SharedString::from(format!("settings-field-{idx}")))
+                    .h(px(32.0))
+                    .px(px(10.0))
+                    .flex()
+                    .items_center()
+                    .rounded(px(6.0))
+                    .bg(hsla(0x111111))
+                    .border_1()
+                    .border_color(hsla(if active { 0x3a2a24 } else { 0x242424 }))
+                    .text_size(px(13.0))
+                    .overflow_hidden()
+                    .child(value.to_string())
+                    .when(active, |d| d.child(div().w(px(1.0)).h(px(15.0)).ml(px(1.0)).bg(hsla(theme::ACCENT))))
+                    .when(value.is_empty(), |d| d.child(div().ml(px(2.0)).text_color(hsla(theme::TEXT_FAINT)).child(hint)))
+                    .on_click(cx.listener(move |ws, _: &ClickEvent, _w, cx| {
+                        if let Some(Modal::Settings { field, .. }) = ws.modal.as_mut() {
+                            *field = idx;
+                        }
+                        cx.notify();
+                    })),
+            )
+            .into_any_element()
+    }
+
     fn render_modal(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let modal = self.modal.as_ref()?;
         let (title, body, confirm_label, danger): (String, gpui::AnyElement, String, bool) = match modal {
@@ -437,6 +470,52 @@ impl Workspace {
                 confirm.clone(),
                 *danger,
             ),
+            Modal::Settings { shell, claude, updates, field } => {
+                let claude_hint = self.claude_exe.as_ref().map_or("not found".to_string(), |p| p.to_string_lossy().into_owned());
+                let toggle = |on: bool| if on { "On" } else { "Off" };
+                (
+                    "Settings".into(),
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(10.0))
+                        .child(self.settings_field(cx, 0, "SHELL", shell, crate::platform::default_shell(None).0, *field == 0))
+                        .child(self.settings_field(cx, 1, "CLAUDE CODE PATH", claude, claude_hint, *field == 1))
+                        .child(
+                            div()
+                                .id("settings-updates")
+                                .h(px(32.0))
+                                .px(px(10.0))
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .rounded(px(6.0))
+                                .bg(hsla(0x111111))
+                                .border_1()
+                                .border_color(hsla(if *field == 2 { 0x3a2a24 } else { 0x242424 }))
+                                .text_size(px(13.0))
+                                .cursor_pointer()
+                                .child("Check for updates")
+                                .child(div().text_color(hsla(if *updates { theme::ACCENT } else { theme::TEXT_FAINT })).child(toggle(*updates)))
+                                .on_click(cx.listener(|ws, _: &ClickEvent, _w, cx| {
+                                    if let Some(Modal::Settings { updates, field, .. }) = ws.modal.as_mut() {
+                                        *updates = !*updates;
+                                        *field = 2;
+                                    }
+                                    cx.notify();
+                                })),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(11.5))
+                                .text_color(hsla(theme::TEXT_FAINT))
+                                .child("Empty fields use the default shown in grey. A shell change applies to new terminals; Tab switches field."),
+                        )
+                        .into_any_element(),
+                    "Save".into(),
+                    false,
+                )
+            }
             Modal::Rename { text, .. } | Modal::NewBranch { text, .. } => (
                 if matches!(modal, Modal::NewBranch { .. }) { "New branch" } else { "Rename session" }.into(),
                 div()
@@ -460,7 +539,7 @@ impl Workspace {
             .id("modal-card")
             .occlude()
             .track_focus(&self.modal_focus)
-            .w(px(420.0))
+            .w(px(if matches!(modal, Modal::Settings { .. }) { 520.0 } else { 420.0 }))
             .p(px(20.0))
             .rounded(px(12.0))
             .bg(hsla(0x151515))
@@ -475,6 +554,21 @@ impl Workspace {
                 match (key, ws.modal.as_mut()) {
                     ("escape", _) => ws.act(Act::Dismiss, window, cx),
                     ("enter", Some(_)) => ws.submit_modal(window, cx),
+                    (k, Some(Modal::Settings { shell, claude, updates, field })) => {
+                        match (k, *field) {
+                            ("tab" | "down", _) => *field = (*field + 1) % 3,
+                            ("up", _) => *field = (*field + 2) % 3,
+                            ("space", 2) => *updates = !*updates,
+                            (_, 0) => {
+                                crate::widgets::edit_text(shell, &ev.keystroke, cx);
+                            }
+                            (_, 1) => {
+                                crate::widgets::edit_text(claude, &ev.keystroke, cx);
+                            }
+                            _ => {}
+                        }
+                        cx.notify();
+                    }
                     (_, Some(Modal::Rename { text, .. } | Modal::NewBranch { text, .. })) => {
                         crate::widgets::edit_text(text, &ev.keystroke, cx);
                         cx.notify();
@@ -612,6 +706,7 @@ impl Render for Workspace {
                 cx.notify();
             }))
             .on_action(cx.listener(|ws, _: &ImportProject, window, cx| ws.act(Act::ImportProject, window, cx)))
+            .on_action(cx.listener(|ws, _: &OpenSettings, window, cx| ws.act(Act::OpenSettings, window, cx)))
             .on_action(cx.listener(|ws, _: &FocusNextPane, window, cx| {
                 if !ws.panes.is_empty() {
                     let next = (ws.focused + 1) % ws.panes.len();
