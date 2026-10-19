@@ -95,8 +95,12 @@ pub enum Act {
 
 pub struct MenuItem {
     pub label: String,
+    /// Faint text on the right that is never cut, so a long `label` is shortened with "…" instead.
+    pub hint: Option<String>,
     pub act: Act,
     pub danger: bool,
+    /// Shown greyed out and does nothing when clicked.
+    pub disabled: bool,
     pub separator_before: bool,
 }
 
@@ -1493,13 +1497,15 @@ impl Workspace {
                             .take(15)
                             .map(|name| MenuItem {
                                 label: format!("{}{name}", if current.as_deref() == Some(name.as_str()) { "✓  " } else { "    " }),
+                                hint: None,
+                                disabled: false,
                                 act: Act::SwitchBranch(cwd.clone(), name),
                                 danger: false,
                                 separator_before: false,
                             })
                             .collect();
                         let first = items.is_empty();
-                        items.push(MenuItem { label: "New branch…".into(), act: Act::NewBranch(cwd), danger: false, separator_before: !first });
+                        items.push(MenuItem { label: "New branch…".into(), hint: None, act: Act::NewBranch(cwd), danger: false, disabled: false, separator_before: !first });
                         ws.open_menu(pos, items, cx);
                     }
                     Err(e) => ws.toast(e, true, cx),

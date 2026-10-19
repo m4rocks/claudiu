@@ -96,7 +96,7 @@ impl Workspace {
 
     fn session_menu(&self, rec: &SessionRecord, running: bool) -> Vec<MenuItem> {
         let mut items = vec![];
-        let item = |label: &str, act: Act, danger: bool, sep: bool| MenuItem { label: label.into(), act, danger, separator_before: sep };
+        let item = |label: &str, act: Act, danger: bool, sep: bool| MenuItem { label: label.into(), hint: None, act, danger, disabled: false, separator_before: sep };
         if running {
             items.push(item("Switch to session", Act::Select(rec.id.clone()), false, false));
         } else if rec.kind == SessionKind::Claude {
@@ -119,7 +119,7 @@ impl Workspace {
     }
 
     fn project_menu(&self, p: &Project) -> Vec<MenuItem> {
-        let item = |label: String, act: Act, danger: bool, sep: bool| MenuItem { label, act, danger, separator_before: sep };
+        let item = |label: String, act: Act, danger: bool, sep: bool| MenuItem { label, hint: None, act, danger, disabled: false, separator_before: sep };
         let mut items = vec![
             item("New Claude session here".into(), Act::NewClaude { cwd: p.path.clone() }, false, false),
             item("New shell here".into(), Act::NewShell { cwd: p.path.clone() }, false, false),
@@ -511,24 +511,33 @@ impl Workspace {
             )
     }
 
-    /// Switch account, add one, sign an alt in, or remove the active alt.
+    /// Switch account, add one, or sign in again / remove the active alt (shown greyed out for the main account).
     fn account_menu(&self) -> Vec<MenuItem> {
         let active = self.store.active_account().map(|a| a.id.clone());
-        let item = |label: String, act: Act, danger: bool, sep: bool| MenuItem { label, act, danger, separator_before: sep };
-        let mut items: Vec<MenuItem> = self
-            .store
-            .data
-            .accounts
+        let item = |label: String, hint: Option<String>, act: Act, danger: bool, sep: bool| MenuItem {
+            label,
+            hint,
+            act,
+            danger,
+            disabled: false,
+            separator_before: sep,
+        };
+        let accounts = &self.store.data.accounts;
+        let mut items: Vec<MenuItem> = accounts
             .iter()
             .map(|a| {
                 let mark = if active.as_ref() == Some(&a.id) { "✓  " } else { "    " };
-                item(format!("{mark}{}", account_label(a)), Act::SwitchAccount(a.id.clone()), false, false)
+                item(format!("{mark}{}", a.name()), Some(account_hint(a)), Act::SwitchAccount(a.id.clone()), false, false)
             })
             .collect();
-        items.push(item("Add account…".into(), Act::AddAccount, false, true));
-        if let Some(a) = self.store.active_account().filter(|a| !a.is_main()) {
-            items.push(item("Sign in to this account again…".into(), Act::SignIn(a.id.clone()), false, false));
-            items.push(item("Remove this account…".into(), Act::RemoveAccount(a.id.clone()), true, false));
+        items.push(item("Add account…".into(), None, Act::AddAccount, false, true));
+        let id = active.unwrap_or_default();
+        let main = self.store.active_account().is_none_or(|a| a.is_main());
+        for (label, act, danger) in [
+            ("Sign in to this account again…", Act::SignIn(id.clone()), false),
+            ("Remove this account…", Act::RemoveAccount(id), true),
+        ] {
+            items.push(MenuItem { disabled: main, ..item(label.into(), None, act, danger, false) });
         }
         items
     }
@@ -537,9 +546,7 @@ impl Workspace {
         let acct = self.store.active_account();
         let name = acct.map_or_else(|| "Main account".to_string(), |a| a.name());
         // `Pro · Alt`, so the row says which kind of account is in use.
-        let plan = acct
-            .map(|a| a.plan.as_deref().map_or(kind_label(a).to_string(), |p| format!("{} · {}", plan_label(p), kind_label(a))))
-            .unwrap_or_default();
+        let plan = acct.map(account_hint).unwrap_or_default();
         div()
             .id("account-switcher")
             .flex()
@@ -622,9 +629,9 @@ impl Workspace {
 }
 
 /// `email · Pro (Main)` for the menu.
-fn account_label(a: &crate::store::Account) -> String {
-    let plan = a.plan.as_deref().map(|p| format!(" · {}", plan_label(p))).unwrap_or_default();
-    format!("{}{plan} ({})", a.name(), kind_label(a))
+/// `Pro · Main`, shown right of the email in the account menu.
+fn account_hint(a: &crate::store::Account) -> String {
+    a.plan.as_deref().map_or(kind_label(a).to_string(), |p| format!("{} · {}", plan_label(p), kind_label(a)))
 }
 
 fn kind_label(a: &crate::store::Account) -> &'static str {

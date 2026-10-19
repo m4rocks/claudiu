@@ -56,6 +56,8 @@ impl Workspace {
                             .filter(|(_, found)| *found)
                             .map(|(e, _)| MenuItem {
                                 label: format!("{}{}", if current == Some(*e) { "✓  " } else { "    " }, e.label()),
+                                hint: None,
+                                disabled: false,
                                 act: Act::OpenEditor(*e, pick_target.clone()),
                                 danger: false,
                                 separator_before: false,
@@ -393,21 +395,26 @@ impl Workspace {
             if item.separator_before {
                 card = card.child(div().h(px(1.0)).my(px(4.0)).bg(hsla(theme::BORDER)));
             }
-            card = card.child(
-                div()
-                    .id(gpui::SharedString::from(format!("menu-{i}")))
-                    .h(px(28.0))
-                    .px(px(10.0))
-                    .flex()
-                    .items_center()
-                    .rounded(px(5.0))
-                    .text_size(px(12.5))
-                    .text_color(hsla(if item.danger { theme::DANGER } else { theme::TEXT }))
-                    .cursor_pointer()
+            let color = if item.disabled { theme::TEXT_FAINT } else if item.danger { theme::DANGER } else { theme::TEXT };
+            let row = div()
+                .id(gpui::SharedString::from(format!("menu-{i}")))
+                .h(px(28.0))
+                .px(px(10.0))
+                .flex()
+                .items_center()
+                .rounded(px(5.0))
+                .text_size(px(12.5))
+                .text_color(hsla(color))
+                .gap(px(8.0))
+                .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(item.label.clone()))
+                .children(item.hint.clone().map(|h| div().flex_none().text_size(px(11.0)).text_color(hsla(theme::TEXT_FAINT)).child(h)));
+            card = card.child(if item.disabled {
+                row
+            } else {
+                row.cursor_pointer()
                     .hover(|s| s.bg(hsla(0x252525)))
-                    .child(item.label.clone())
-                    .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(act.clone(), window, cx))),
-            );
+                    .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(act.clone(), window, cx)))
+            });
         }
         let close = |ws: &mut Workspace, _: &MouseDownEvent, _w: &mut Window, cx: &mut Context<Workspace>| {
             ws.menu = None;
