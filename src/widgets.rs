@@ -259,6 +259,25 @@ pub fn cog(group: &'static str) -> Div {
     root
 }
 
+/// Monogram avatar: the first letter of `seed` on a color picked from it, so each account keeps its color.
+pub fn avatar(seed: &str, size: f32) -> Div {
+    const COLORS: [u32; 6] = [theme::ACCENT, 0x61afef, 0x98c379, 0xc678dd, 0xe5c07b, 0x56b6c2];
+    let hash = seed.bytes().fold(0u32, |h, b| h.wrapping_mul(31).wrapping_add(b as u32));
+    let letter = seed.chars().find(|c| c.is_alphanumeric()).map_or('?', |c| c.to_ascii_uppercase());
+    div()
+        .size(px(size))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_full()
+        .bg(hsla(COLORS[hash as usize % COLORS.len()]))
+        .text_size(px(size * 0.55))
+        .font_weight(FontWeight::BOLD)
+        .text_color(hsla(0x17100d))
+        .child(letter.to_string())
+}
+
 pub fn divider() -> Div {
     div().h(px(1.0)).w_full().bg(hsla(theme::BORDER))
 }

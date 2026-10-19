@@ -10,12 +10,13 @@ use gpui::{
 };
 
 use gpui_kit::component::input::{InputEvent, InputState};
+use crate::accounts;
 use crate::claude;
 use crate::mcp;
 use crate::platform::{self, Editor};
 use crate::statusline;
 use crate::store::{
-    AccountUsage, ClaudeMeta, ExternalState, Id, SessionKind, SessionRecord, Store, new_id, now,
+    Account, ClaudeMeta, ExternalState, Id, MAIN_ACCOUNT, SessionKind, SessionRecord, Store, new_id, now,
 };
 use crate::terminal::SpawnSpec;
 use crate::terminal_view::{TerminalEvent, TerminalView};
@@ -81,6 +82,15 @@ pub enum Act {
     ConfirmInstallUpdate,
     Dismiss,
     InstallUpdate,
+    /// New sessions start with this account; running ones keep theirs.
+    SwitchAccount(Id),
+    /// Shows the sharing warning, then `ConfirmAddAccount`.
+    AddAccount,
+    ConfirmAddAccount,
+    /// Run `claude auth login` for an alt account in a terminal tab.
+    SignIn(Id),
+    RemoveAccount(Id),
+    ConfirmRemoveAccount(Id),
 }
 
 pub struct MenuItem {
@@ -183,6 +193,10 @@ pub struct Workspace {
     pub show_all: HashSet<Id>,
     /// Sessions that leave no history once they end (the "fix with Claude" helper).
     ephemeral: HashSet<Id>,
+    /// `claude auth login` tabs; account details are re-read when one ends.
+    logins: HashSet<Id>,
+    /// Account the "switch to a less used account" suggestion was shown for; cleared once its use drops.
+    limit_warned: Option<Id>,
     pub editors: Vec<(Editor, bool)>,
     pub transcript_mtimes: HashMap<Id, SystemTime>,
     pub window_title: String,
@@ -233,6 +247,8 @@ impl Workspace {
             toast_serial: 0,
             show_all: HashSet::new(),
             ephemeral: HashSet::new(),
+            logins: HashSet::new(),
+            limit_warned: None,
             editors: Editor::ALL
                 .iter()
                 .map(|e| (*e, e.locate().is_some()))
@@ -258,9 +274,17 @@ impl Workspace {
             ws.store.add_project(&path);
         }
         ws.store.refresh_git();
+        // Alt folders the list doesn't know (e.g. lost to an older Claudiu rewriting its state) are adopted again.
+        for dir in accounts::folders() {
+            if !ws.store.data.accounts.iter().any(|a| a.dir.as_ref() == Some(&dir)) {
+                ws.store.data.accounts.push(Account { id: new_id(), dir: Some(dir), ..Default::default() });
+                ws.store.mark_dirty();
+            }
+        }
         ws.start_scan(cx);
         statusline::cleanup();
         ws.ingest_statusline(cx);
+        ws.refresh_accounts(cx);
         ws.start_ticker(cx);
         ws.start_fetch_loop(cx);
         ws.start_git_watch(cx);
@@ -307,10 +331,14 @@ impl Workspace {
     /// every tick, so an unconditional save would rewrite state.json every few seconds).
     fn merge_account(
         &mut self,
+        account: &str,
         five: Option<crate::store::RateLimit>,
         seven: Option<crate::store::RateLimit>,
     ) -> bool {
-        let acct: &mut AccountUsage = &mut self.store.data.account;
+        // A removed account's leftover snapshots are ignored.
+        let Some(acct) = self.store.data.accounts.iter_mut().find(|a| a.id == account).map(|a| &mut a.usage) else {
+            return false;
+        };
         let mut changed = false;
         for (slot, new) in [(&mut acct.five_hour, five), (&mut acct.seven_day, seven)] {
             if let Some(new) = new
@@ -420,7 +448,44 @@ impl Workspace {
         self.store.save_if_dirty();
         self.refresh_live(cx);
         self.ingest_statusline(cx);
+        self.suggest_less_used_account(cx);
         cx.notify();
+    }
+
+    /// When the active account's 5-hour or 7-day use reaches 90% and another signed-in account has used less,
+    /// offer to switch to the least used one. Once per crossing; it re-arms after the window resets.
+    fn suggest_less_used_account(&mut self, cx: &mut Context<Self>) {
+        const HIGH: f32 = 0.9;
+        let t = now();
+        let Some(active) = self.store.active_account() else { return };
+        let peak = active.usage.peak(t);
+        if peak < HIGH {
+            self.limit_warned = None;
+            return;
+        }
+        if self.limit_warned.as_ref() == Some(&active.id) {
+            return;
+        }
+        let best = self
+            .store
+            .data
+            .accounts
+            .iter()
+            .filter(|a| a.id != active.id && (a.is_main() || a.email.is_some()))
+            .map(|a| (a, a.usage.peak(t)))
+            .min_by(|x, y| x.1.total_cmp(&y.1))
+            .filter(|(_, p)| *p < peak);
+        let Some((best, best_peak)) = best else { return };
+        let text = format!(
+            "{} has used {:.0}% of a usage limit. {} is at {:.0}%.",
+            active.name(),
+            peak * 100.0,
+            best.name(),
+            best_peak * 100.0
+        );
+        let act = Act::SwitchAccount(best.id.clone());
+        self.limit_warned = Some(active.id.clone());
+        self.show_toast(text, true, Some(("Switch".into(), act)), cx);
     }
 
     /// Pick up what Claude Code's status line (via our per-process tee) wrote: account limits and exact context,
@@ -459,7 +524,8 @@ impl Workspace {
                     }
                 }
                 for snap in snaps {
-                    changed |= ws.merge_account(snap.five_hour.clone(), snap.seven_day.clone());
+                    let account = snap.account.as_deref().unwrap_or(MAIN_ACCOUNT);
+                    changed |= ws.merge_account(account, snap.five_hour.clone(), snap.seven_day.clone());
                     if let Some(rec) = ws
                         .store
                         .data
@@ -520,8 +586,88 @@ impl Workspace {
         }
         spec.env.push(("CLAUDE_CODE_AUTO_CONNECT_IDE".into(), "false".into()));
         spec.env.push(("CLAUDE_CODE_IDE_SKIP_AUTO_INSTALL".into(), "1".into()));
+        if let Some(acct) = self.store.active_account() {
+            spec.env.push((statusline::ACCOUNT_ENV.into(), acct.id.clone()));
+            spec.env.extend(Self::account_env(acct));
+        }
         (spec.program, spec.args) = platform::through_login_shell(spec.program, spec.args);
         spec
+    }
+
+    /// Environment for an alt account (empty for the main one), after linking anything new from the main folder into it.
+    fn account_env(acct: &Account) -> Vec<(String, String)> {
+        let Some(dir) = acct.dir.as_ref() else { return vec![] };
+        if let Some(main) = claude::claude_home() {
+            let _ = std::fs::create_dir_all(dir);
+            let _ = accounts::link_shared(&main, dir);
+        }
+        accounts::env(dir)
+    }
+
+    /// Read each account's email and plan through `claude auth status`, off the UI thread.
+    pub fn refresh_accounts(&mut self, cx: &mut Context<Self>) {
+        let Some(exe) = self.claude_exe.clone() else { return };
+        let jobs: Vec<(Id, Option<PathBuf>)> = self.store.data.accounts.iter().map(|a| (a.id.clone(), a.dir.clone())).collect();
+        cx.spawn(async move |this, cx| {
+            let out = cx
+                .background_executor()
+                .spawn(async move { jobs.into_iter().map(|(id, dir)| (id, accounts::status(&exe, dir.as_deref()))).collect::<Vec<_>>() })
+                .await;
+            let _ = this.update(cx, |ws, cx| {
+                let mut signed_in = vec![];
+                for (id, status) in out {
+                    // No answer (CLI failed to run) keeps what we knew; an answer of "logged out" clears it.
+                    let Some(s) = status else { continue };
+                    let Some(a) = ws.store.data.accounts.iter_mut().find(|a| a.id == id) else { continue };
+                    let (email, plan) = if s.logged_in { (s.email, s.plan) } else { (None, None) };
+                    if a.email != email || a.plan != plan {
+                        if let Some(e) = email.clone().filter(|_| !a.is_main() && a.email != email) {
+                            signed_in.push((a.id.clone(), e));
+                        }
+                        (a.email, a.plan) = (email, plan);
+                        ws.store.mark_dirty();
+                    }
+                }
+                // Warn once, when an alt has just signed in to the main account's login.
+                let main = ws.store.account(MAIN_ACCOUNT).and_then(|a| a.email.clone());
+                if let Some((id, _)) = signed_in.into_iter().find(|(_, e)| Some(e) == main.as_ref()) {
+                    // The login page approves whichever claude.ai account the browser is already signed in to.
+                    let text = "This alt signed in to your main account. Sign out of claude.ai in your browser (or use a private window), then sign in again.";
+                    ws.show_toast(text.into(), true, Some(("Sign in again".into(), Act::SignIn(id))), cx);
+                }
+                ws.store.save_if_dirty();
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// `claude auth login` for an alt account in a terminal tab; account details refresh when it ends.
+    fn sign_in(&mut self, account: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(exe) = self.claude_exe.clone() else {
+            self.toast("Could not find the `claude` CLI.", true, cx);
+            return;
+        };
+        let Some(env) = self.store.account(account).map(Self::account_env).filter(|e| !e.is_empty()) else { return };
+        let cwd = platform::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        let (program, args) = platform::through_login_shell(exe.to_string_lossy().into_owned(), vec!["auth".into(), "login".into()]);
+        let spec = SpawnSpec { program, args, cwd: Some(cwd.clone()), env };
+        let record = SessionRecord {
+            id: new_id(),
+            kind: SessionKind::Shell,
+            title: "Sign in to account".into(),
+            custom_title: None,
+            auto_title: None,
+            project_id: None,
+            cwd,
+            created_at: now(),
+            last_active: now(),
+            exit_code: None,
+            hidden: false,
+            claude: None,
+        };
+        self.logins.insert(record.id.clone());
+        self.start(record, spec, true, window, cx);
     }
 
     /// Terminal sessions live only in CURRENT SESSION: once a shell's process is gone and its pane has been
@@ -881,6 +1027,9 @@ impl Workspace {
     }
 
     fn on_exit(&mut self, id: &str, code: Option<i32>, window: &mut Window, cx: &mut Context<Self>) {
+        if self.logins.remove(id) {
+            self.refresh_accounts(cx);
+        }
         if let Some(rec) = self.store.session_mut(id) {
             rec.exit_code = Some(code.unwrap_or(0));
             rec.last_active = now();
@@ -927,6 +1076,9 @@ impl Workspace {
     }
 
     fn close_live(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.logins.remove(id) {
+            self.refresh_accounts(cx);
+        }
         let was_active = self.active_id().is_some_and(|a| a == id);
         let current = self.active_id().cloned();
         self.live.retain(|l| l.id != id); // dropping the view drops the Terminal, which closes the PTY
@@ -1168,6 +1320,67 @@ impl Workspace {
             Act::ConfirmInstallUpdate => {
                 self.modal = None;
                 crate::updater::install(self, window, cx);
+            }
+            Act::SwitchAccount(id) => {
+                self.store.data.active_account = Some(id);
+                self.store.mark_dirty();
+                self.refresh_accounts(cx);
+                self.toast("Switched. New and resumed sessions use this account; running ones keep theirs.", false, cx);
+            }
+            Act::AddAccount => {
+                self.modal = Some(Modal::Confirm {
+                    title: "Add an account?".into(),
+                    body: "The new account shares your main Claude Code setup: settings, CLAUDE.md, agents, skills, plugins and \
+                           session history. Changes made while using it (like /model) change your main setup too. \
+                           Only the login is kept separate. Claudiu creates this account's folder; your main ~/.claude is not modified."
+                        .into(),
+                    confirm: "Add and sign in".into(),
+                    danger: false,
+                    act: Act::ConfirmAddAccount,
+                });
+                window.focus(&self.modal_focus, cx);
+            }
+            Act::ConfirmAddAccount => {
+                self.modal = None;
+                match claude::claude_home().ok_or_else(|| std::io::Error::other("Claude Code's folder was not found")).and_then(|h| accounts::create(&h)) {
+                    Ok(dir) => {
+                        let id = new_id();
+                        self.store.data.accounts.push(Account { id: id.clone(), dir: Some(dir), ..Default::default() });
+                        self.store.data.active_account = Some(id.clone());
+                        self.store.mark_dirty();
+                        self.sign_in(&id, window, cx);
+                    }
+                    Err(e) => self.toast(format!("Could not create the account folder: {e}"), true, cx),
+                }
+            }
+            Act::SignIn(id) => self.sign_in(&id, window, cx),
+            Act::RemoveAccount(id) => {
+                let name = self.store.account(&id).and_then(|a| a.email.clone()).unwrap_or_else(|| "this account".into());
+                self.modal = Some(Modal::Confirm {
+                    title: format!("Remove {name}?"),
+                    body: "Deletes this account's login from Claudiu. Shared settings and session history stay in your main \
+                           ~/.claude. End its running sessions first."
+                        .into(),
+                    confirm: "Remove".into(),
+                    danger: true,
+                    act: Act::ConfirmRemoveAccount(id),
+                });
+                window.focus(&self.modal_focus, cx);
+            }
+            Act::ConfirmRemoveAccount(id) => {
+                self.modal = None;
+                if let Some(dir) = self.store.account(&id).and_then(|a| a.dir.clone()) {
+                    match accounts::remove(&dir) {
+                        Ok(()) => {
+                            self.store.data.accounts.retain(|a| a.id != id);
+                            if self.store.data.active_account.as_deref() == Some(id.as_str()) {
+                                self.store.data.active_account = None;
+                            }
+                            self.store.mark_dirty();
+                        }
+                        Err(e) => self.toast(format!("Could not remove the account: {e}"), true, cx),
+                    }
+                }
             }
         }
         self.store.save_if_dirty();

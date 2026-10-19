@@ -128,6 +128,51 @@ pub struct AccountUsage {
     pub seven_day: Option<RateLimit>,
 }
 
+impl AccountUsage {
+    /// The higher of the 5-hour and 7-day use that still applies at `now`; a window past its reset counts as 0.
+    pub fn peak(&self, now: i64) -> f32 {
+        [&self.five_hour, &self.seven_day]
+            .into_iter()
+            .flatten()
+            .filter(|l| l.resets_at.is_none_or(|r| r > now))
+            .filter_map(|l| l.utilization)
+            .fold(0.0, f32::max)
+    }
+}
+
+impl Account {
+    pub fn is_main(&self) -> bool {
+        self.dir.is_none()
+    }
+
+    /// Email when known, else which kind of account it is.
+    pub fn name(&self) -> String {
+        match (&self.email, self.is_main()) {
+            (Some(e), _) => e.clone(),
+            (None, true) => "Main account".into(),
+            (None, false) => "Not signed in".into(),
+        }
+    }
+}
+
+/// Id of the main account: the user's normal Claude Code (`~/.claude`).
+pub const MAIN_ACCOUNT: &str = "main";
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Account {
+    pub id: Id,
+    /// Alt account's Claude Code config folder (see accounts.rs); `None` is the main account.
+    #[serde(default)]
+    pub dir: Option<PathBuf>,
+    /// From `claude auth status`; `None` until read, or when signed out.
+    #[serde(default)]
+    pub email: Option<String>,
+    #[serde(default)]
+    pub plan: Option<String>,
+    #[serde(default)]
+    pub usage: AccountUsage,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Layout {
     pub selected_session: Option<Id>,
@@ -154,9 +199,31 @@ pub struct Data {
     pub version: u32,
     pub projects: Vec<Project>,
     pub sessions: Vec<SessionRecord>,
+    /// Usage from before accounts existed; moved into the main account on load. Still written (empty after the
+    /// move) because older Claudiu versions require the field and would set state.json aside without it.
+    #[serde(default)]
     pub account: AccountUsage,
+    /// The main account first, then alts. Kept in `accounts.json`, not state.json: an older Claudiu still
+    /// running would rewrite state.json without them.
+    #[serde(skip)]
+    pub accounts: Vec<Account>,
+    /// Account new sessions start with; the main one when unset.
+    #[serde(skip)]
+    pub active_account: Option<Id>,
     pub layout: Layout,
     pub settings: Settings,
+}
+
+#[derive(Default, Serialize, Deserialize)]
+struct AccountsFile {
+    #[serde(default)]
+    accounts: Vec<Account>,
+    #[serde(default)]
+    active: Option<Id>,
+}
+
+fn accounts_path(state: &Path) -> PathBuf {
+    state.with_file_name("accounts.json")
 }
 
 pub struct Store {
@@ -187,7 +254,28 @@ impl Store {
         }
         // Terminal (shell) sessions are never kept across runs; Claude sessions stay as resumable history.
         data.sessions.retain(|s| s.kind != SessionKind::Shell);
+        if let Ok(text) = fs::read_to_string(accounts_path(&path)) {
+            match serde_json::from_str::<AccountsFile>(&text) {
+                Ok(f) => (data.accounts, data.active_account) = (f.accounts, f.active),
+                Err(_) => {
+                    let _ = fs::rename(accounts_path(&path), accounts_path(&path).with_extension("json.corrupt"));
+                }
+            }
+        }
+        if !data.accounts.iter().any(|a| a.id == MAIN_ACCOUNT) {
+            let usage = std::mem::take(&mut data.account);
+            data.accounts.insert(0, Account { id: MAIN_ACCOUNT.into(), usage, ..Default::default() });
+        }
         Self { path, data, dirty: false }
+    }
+
+    pub fn account(&self, id: &str) -> Option<&Account> {
+        self.data.accounts.iter().find(|a| a.id == id)
+    }
+
+    /// The account new sessions use; falls back to the main one if the chosen alt was removed.
+    pub fn active_account(&self) -> Option<&Account> {
+        self.data.active_account.as_deref().and_then(|id| self.account(id)).or_else(|| self.account(MAIN_ACCOUNT))
     }
 
     pub fn mark_dirty(&mut self) {
@@ -204,11 +292,15 @@ impl Store {
         if let Some(parent) = self.path.parent() {
             let _ = fs::create_dir_all(parent);
         }
-        let tmp = self.path.with_extension("json.tmp");
-        if let Ok(text) = serde_json::to_string_pretty(&self.data)
-            && fs::write(&tmp, text).is_ok() && fs::rename(&tmp, &self.path).is_ok() {
-                self.dirty = false;
-            }
+        let write = |path: &Path, text: serde_json::Result<String>| {
+            let tmp = path.with_extension("json.tmp");
+            text.is_ok_and(|t| fs::write(&tmp, t).is_ok() && fs::rename(&tmp, path).is_ok())
+        };
+        let accounts = AccountsFile { accounts: self.data.accounts.clone(), active: self.data.active_account.clone() };
+        let ok = write(&accounts_path(&self.path), serde_json::to_string_pretty(&accounts));
+        if write(&self.path, serde_json::to_string_pretty(&self.data)) && ok {
+            self.dirty = false;
+        }
     }
 
     pub fn project(&self, id: &str) -> Option<&Project> {
@@ -559,6 +651,30 @@ mod tests {
     }
 
     #[test]
+    fn peak_usage_ignores_windows_that_have_reset() {
+        let lim = |u: f32, reset: Option<i64>| Some(RateLimit { utilization: Some(u), resets_at: reset, seen_at: 0 });
+        let u = AccountUsage { five_hour: lim(0.9, Some(100)), seven_day: lim(0.4, Some(1000)) };
+        assert_eq!(u.peak(50), 0.9);
+        assert_eq!(u.peak(500), 0.4, "the 5-hour window reset");
+        assert_eq!(u.peak(5000), 0.0);
+        assert_eq!(AccountUsage::default().peak(0), 0.0, "unknown counts as unused");
+    }
+
+    #[test]
+    fn usage_from_before_accounts_moves_into_the_main_account() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("s.json");
+        let old = r#"{"version":1,"projects":[],"sessions":[],"account":{"five_hour":{"utilization":0.5,"resets_at":null,"seen_at":3}},
+            "layout":{"selected_session":null,"sidebar_visible":true,"other_collapsed":false},"settings":{"claude_path":null,"update_url":null}}"#;
+        fs::write(&path, old).unwrap();
+        let mut s = Store::load(path.clone());
+        assert_eq!(s.active_account().unwrap().usage.five_hour.as_ref().unwrap().utilization, Some(0.5));
+        s.save();
+        assert!(fs::read_to_string(&path).unwrap().contains("\"account\""), "older versions require the field");
+        assert_eq!(Store::load(path).data.accounts.len(), 1, "migrates once");
+    }
+
+    #[test]
     fn save_load_roundtrip_and_corrupt_file_is_kept() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("s.json");
@@ -571,6 +687,7 @@ mod tests {
         fs::write(&path, "{ not json").unwrap();
         let c = Store::load(path.clone());
         assert!(c.data.projects.is_empty());
+        assert_eq!(c.active_account().map(|a| a.id.as_str()), Some(MAIN_ACCOUNT), "main account always exists");
         assert!(path.with_extension("json.corrupt").exists(), "corrupt state is preserved, not destroyed");
     }
 }

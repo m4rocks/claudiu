@@ -34,7 +34,13 @@ pub struct Snapshot {
     pub context_window: Option<u64>,
     pub model: Option<String>,
     pub captured_at: i64,
+    /// Claudiu account the session ran under (`ACCOUNT_ENV`); `None` (older snapshots) is the main account.
+    #[serde(default)]
+    pub account: Option<String>,
 }
+
+/// Env var naming the Claudiu account a Claude session was launched with, so its limits go to that account.
+pub const ACCOUNT_ENV: &str = "CLAUDIU_ACCOUNT";
 
 pub fn data_dir() -> PathBuf {
     crate::store::Store::default_path().parent().map(Path::to_path_buf).unwrap_or_default()
@@ -73,6 +79,7 @@ pub fn parse(json: &str, now: i64) -> Option<Snapshot> {
             .and_then(Value::as_str)
             .map(str::to_string),
         captured_at: now,
+        account: None,
     })
 }
 
@@ -95,7 +102,7 @@ pub fn run_tee() -> i32 {
     let _ = std::io::stdin().read_to_end(&mut input);
     let text = String::from_utf8_lossy(&input).into_owned();
 
-    if let Some(snap) = parse(&text, crate::store::now())
+    if let Some(snap) = parse(&text, crate::store::now()).map(|s| Snapshot { account: std::env::var(ACCOUNT_ENV).ok(), ..s })
         && let Ok(body) = serde_json::to_string(&snap) {
             let _ = write_atomic(&snapshot_dir().join(format!("{}.json", safe_file_stem(&snap.session_id))), &body);
         }

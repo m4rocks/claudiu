@@ -11,7 +11,7 @@ use gpui_kit::component::input::Input;
 use crate::app::{Act, Activity, MenuItem, Workspace};
 use crate::store::{ExternalState, Id, Project, SessionKind, SessionRecord, now};
 use crate::theme::{self, hsla};
-use crate::widgets::{ago, button, clawd, cog, countdown, divider, icon_button, meter, section_label};
+use crate::widgets::{ago, avatar, button, clawd, cog, countdown, divider, icon_button, meter, section_label};
 
 const SIDEBAR_W: f32 = 284.0;
 const PROJECT_SESSION_LIMIT: usize = 5;
@@ -379,7 +379,7 @@ impl Workspace {
             .border_color(hsla(theme::BORDER))
             .child(self.render_sidebar_header(cx))
             .child(div().id("sidebar-scroll").flex_1().min_h_0().overflow_y_scroll().pb(px(10.0)).child(body))
-            .child(self.render_footer())
+            .child(self.render_footer(cx))
     }
 
     fn render_sidebar_header(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -511,32 +511,85 @@ impl Workspace {
             )
     }
 
-    fn render_footer(&self) -> impl IntoElement + use<> {
-        let t = now();
-        let acct = &self.store.data.account;
+    /// Switch account, add one, sign an alt in, or remove the active alt.
+    fn account_menu(&self) -> Vec<MenuItem> {
+        let active = self.store.active_account().map(|a| a.id.clone());
+        let item = |label: String, act: Act, danger: bool, sep: bool| MenuItem { label, act, danger, separator_before: sep };
+        let mut items: Vec<MenuItem> = self
+            .store
+            .data
+            .accounts
+            .iter()
+            .map(|a| {
+                let mark = if active.as_ref() == Some(&a.id) { "✓  " } else { "    " };
+                item(format!("{mark}{}", account_label(a)), Act::SwitchAccount(a.id.clone()), false, false)
+            })
+            .collect();
+        items.push(item("Add account…".into(), Act::AddAccount, false, true));
+        if let Some(a) = self.store.active_account().filter(|a| !a.is_main()) {
+            items.push(item("Sign in to this account again…".into(), Act::SignIn(a.id.clone()), false, false));
+            items.push(item("Remove this account…".into(), Act::RemoveAccount(a.id.clone()), true, false));
+        }
+        items
+    }
 
+    fn render_account_switcher(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        let acct = self.store.active_account();
+        let name = acct.map_or_else(|| "Main account".to_string(), |a| a.name());
+        // `Pro · Alt`, so the row says which kind of account is in use.
+        let plan = acct
+            .map(|a| a.plan.as_deref().map_or(kind_label(a).to_string(), |p| format!("{} · {}", plan_label(p), kind_label(a))))
+            .unwrap_or_default();
+        div()
+            .id("account-switcher")
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .h(px(28.0))
+            .mx(px(-6.0))
+            .px(px(6.0))
+            .rounded(px(6.0))
+            .cursor_pointer()
+            .hover(|s| s.bg(hsla(theme::ROW_HOVER)))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|ws, ev: &MouseDownEvent, _window, cx| {
+                    let items = ws.account_menu();
+                    ws.open_menu(ev.position, items, cx);
+                }),
+            )
+            .child(avatar(&name, 18.0))
+            .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(12.5)).text_color(hsla(theme::TEXT)).child(name))
+            .child(div().flex_none().text_size(px(10.5)).text_color(hsla(theme::TEXT_FAINT)).child(plan))
+            .child(div().flex_none().text_size(px(9.0)).text_color(hsla(theme::TEXT_FAINT)).child("▾"))
+    }
+
+    fn render_footer(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let t = now();
+        let usage = self.store.active_account().map(|a| a.usage.clone()).unwrap_or_default();
+
+        // Captions are short: two meters share a row.
         let limit = |label: &str, l: &Option<crate::store::RateLimit>| -> Div {
             match l {
                 Some(l) => match (l.resets_at, l.utilization) {
                     (Some(reset), util) if reset > t => {
-                        let age = t - l.seen_at;
-                        let mut caption = format!("resets in {}", countdown(reset - t));
-                        if age > 900 {
-                            caption.push_str(&format!(" · seen {} ago", ago(l.seen_at, t)));
+                        let mut caption = format!("resets {}", countdown(reset - t));
+                        if t - l.seen_at > 900 {
+                            caption.push_str(&format!(" · {} ago", ago(l.seen_at, t)));
                         }
                         meter(label, util, caption, None)
                     }
-                    (Some(_), _) => meter(label, None, "window has reset · usage unknown".into(), None),
+                    (Some(_), _) => meter(label, None, "reset · unknown".into(), None),
                     (None, util) => meter(label, util, format!("seen {} ago", ago(l.seen_at, t)), None),
                 },
-                None => meter(label, None, "appears after your first message".into(), None),
+                None => meter(label, None, "after first message".into(), None),
             }
         };
 
         let (ctx_fraction, ctx_caption) = match self.selected_context() {
             Some((f, tokens, true)) => (Some(f), format!("{}k tokens", tokens / 1000)),
             Some((f, tokens, false)) => (Some(f), format!("~{}k tokens (estimate)", tokens / 1000)),
-            None => (None, "no Claude session selected".to_string()),
+            None => (None, "no session".to_string()),
         };
 
         // Fills with time left; goes red in the last fifth. Expired means the next message re-reads the whole context at full price.
@@ -548,29 +601,38 @@ impl Workspace {
                 let left = if left < 60 { "<1m".to_string() } else { countdown(left) };
                 meter("CACHE", Some(f), format!("{left} left of {window}"), Some(tone))
             }
-            None => meter("CACHE", None, "no Claude session selected".into(), None),
+            None => meter("CACHE", None, "no session".into(), None),
         };
 
+        let pair = |a: Div, b: Div| div().flex().gap(px(14.0)).child(a.flex_1().min_w_0()).child(b.flex_1().min_w_0());
         div()
             .flex()
             .flex_col()
-            .gap(px(12.0))
+            .gap(px(10.0))
             .px(px(18.0))
-            .pt(px(12.0))
-            .pb(px(14.0))
+            .pt(px(8.0))
+            .pb(px(12.0))
             .border_t_1()
             .border_color(hsla(theme::BORDER))
-            .child(div().flex().flex_col().gap(px(10.0)).child(div().text_size(px(10.5)).font_weight(FontWeight::SEMIBOLD).text_color(hsla(theme::TEXT_DIM)).child("ACCOUNT"))
-                .child(limit("5 HOUR", &acct.five_hour))
-                .child(limit("7 DAY", &acct.seven_day)))
+            .child(self.render_account_switcher(cx))
+            .child(pair(limit("5 HOUR", &usage.five_hour), limit("7 DAY", &usage.seven_day)))
             .child(divider())
-            .child(div().flex().flex_col().gap(px(10.0)).child(div().text_size(px(10.5)).font_weight(FontWeight::SEMIBOLD).text_color(hsla(theme::TEXT_DIM)).child("SESSION"))
-                .child(
-                    div()
-                        .flex()
-                        .gap(px(14.0))
-                        .child(cache.flex_1().min_w_0())
-                        .child(meter("CONTEXT", ctx_fraction, ctx_caption, None).flex_1().min_w_0()),
-                ))
+            .child(pair(cache, meter("CONTEXT", ctx_fraction, ctx_caption, None)))
     }
+}
+
+/// `email · Pro (Main)` for the menu.
+fn account_label(a: &crate::store::Account) -> String {
+    let plan = a.plan.as_deref().map(|p| format!(" · {}", plan_label(p))).unwrap_or_default();
+    format!("{}{plan} ({})", a.name(), kind_label(a))
+}
+
+fn kind_label(a: &crate::store::Account) -> &'static str {
+    if a.is_main() { "Main" } else { "Alt" }
+}
+
+/// `pro` → `Pro`.
+fn plan_label(plan: &str) -> String {
+    let mut c = plan.chars();
+    c.next().map_or_else(String::new, |f| f.to_uppercase().chain(c).collect())
 }
