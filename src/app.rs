@@ -197,12 +197,8 @@ pub struct Workspace {
     pub toast: Option<Toast>,
     pub toast_serial: u64,
     pub show_all: HashSet<Id>,
-    /// Project order as last rendered, and how many rows each project moved when it changed.
     /// Projects whose session list is still sliding shut.
     pub closing: HashSet<Id>,
-    pub project_order: Vec<Id>,
-    pub project_moves: HashMap<Id, i32>,
-    pub project_order_gen: u64,
     /// Sessions that leave no history once they end (the "fix with Claude" helper).
     ephemeral: HashSet<Id>,
     /// `claude auth login` tabs; account details are re-read when one ends.
@@ -212,6 +208,18 @@ pub struct Workspace {
     pub editors: Vec<(Editor, bool)>,
     pub transcript_mtimes: HashMap<Id, SystemTime>,
     pub window_title: String,
+    /// The session or project being dragged in the sidebar (dimmed in place while its ghost follows the cursor).
+    pub dragging: Option<Id>,
+    /// Pointer position at the last drag-over check, see `pointer_moved`.
+    /// Sidebar reorder animation: last drawn order, painted project block heights, and the slides in flight.
+    pub prev_current: Vec<Id>,
+    pub prev_projects: Vec<Id>,
+    pub block_heights: std::rc::Rc<std::cell::RefCell<HashMap<Id, f32>>>,
+    pub slides: HashMap<Id, crate::sidebar::Slide>,
+    pub slide_gen: u64,
+    /// When a drag last reordered the sidebar, see `pointer_moved`.
+    pub last_swap: std::time::Instant,
+    pub drag_pos: Option<gpui::Point<gpui::Pixels>>,
     pub update: UpdateState,
     pub scanning: bool,
     pub quitting: bool,
@@ -263,9 +271,6 @@ impl Workspace {
             toast_serial: 0,
             show_all: HashSet::new(),
             closing: HashSet::new(),
-            project_order: vec![],
-            project_moves: HashMap::new(),
-            project_order_gen: 0,
             ephemeral: HashSet::new(),
             logins: HashSet::new(),
             limit_warned: None,
@@ -275,6 +280,14 @@ impl Workspace {
                 .collect(),
             transcript_mtimes: HashMap::new(),
             window_title: String::new(),
+            dragging: None,
+            drag_pos: None,
+            prev_current: Vec::new(),
+            prev_projects: Vec::new(),
+            block_heights: Default::default(),
+            slides: HashMap::new(),
+            slide_gen: 0,
+            last_swap: std::time::Instant::now(),
             update: UpdateState::default(),
             scanning: false,
             quitting: false,

@@ -108,6 +108,7 @@ impl Workspace {
 
         let title = rec.as_ref().map(|r| r.display_title().to_string()).unwrap_or_else(|| "Claudiu".into());
         let branch = project.as_ref().and_then(|p| p.git.as_ref()).and_then(|g| g.branch.clone());
+        // `.occlude()` on both groups: the bar is a Windows drag (HTCAPTION) area, which would otherwise swallow clicks on the buttons inside it.
         // The title bar is the top bar: macOS keeps its traffic lights (over the sidebar, or left of the
         // toggle when the sidebar is hidden), Windows/Linux get min/max/close drawn at the right edge.
         let left_pad = if cfg!(target_os = "macos") && !self.store.data.layout.sidebar_visible { 80.0 } else { 14.0 };
@@ -126,6 +127,7 @@ impl Workspace {
                     .flex_1()
                     .min_w_0()
                     .overflow_hidden()
+                    .occlude()
                     .child(
                         icon_button("toggle-sidebar", "☰")
                             .on_click(cx.listener(|ws, _: &ClickEvent, _w, cx| {
@@ -170,7 +172,7 @@ impl Workspace {
                         )
                     }),
             )
-            .child(right.mr(px(10.0))))
+            .child(right.mr(px(10.0)).occlude()))
     }
 
     fn render_update_banner(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {

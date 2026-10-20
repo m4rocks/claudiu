@@ -1,10 +1,10 @@
 //! Left sidebar: CURRENT SESSION, PROJECTS, other sessions, and the usage meters.
 
-use std::time::Duration;
+use std::{cell::RefCell, collections::HashMap, rc::Rc, time::{Duration, Instant}};
 
 use gpui::{
-    Animation, AnimationExt, AnyElement, ClickEvent, Context, Div, FontWeight, Hsla, InteractiveElement, IntoElement, MouseButton, MouseDownEvent, ParentElement, Stateful,
-    StatefulInteractiveElement, Styled, div, prelude::FluentBuilder, pulsating_between, px,
+    Animation, AnimationExt, AnyElement, AppContext, DragMoveEvent, SharedString, WeakEntity, canvas, ease_out_quint, ClickEvent, Context, Div, FontWeight, Hsla, InteractiveElement, IntoElement, MouseButton, MouseDownEvent, ParentElement, Pixels, Render,
+    Stateful, StatefulInteractiveElement, Styled, Window, div, prelude::FluentBuilder, pulsating_between, px,
 };
 
 use gpui_kit::component::input::Input;
@@ -34,11 +34,105 @@ struct Row {
     scope: &'static str,
 }
 
+/// Drag payloads: a running session row / a project header, dropped onto another of the same kind.
+struct DragSession(Id);
+struct DragProject(Id);
+
+/// The drag view GPUI requires. It draws nothing: the dragged row itself stays in the list (lifted, see
+/// `lifted`) and slides to wherever the cursor is, so it can never leave its list.
+struct DragGhost;
+
+impl Render for DragGhost {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+    }
+}
+
+/// Marks `id` as the item being dragged and builds the (invisible) drag view.
+fn begin_drag(ws: &WeakEntity<Workspace>, id: &Id, cx: &mut gpui::App) -> gpui::Entity<DragGhost> {
+    ws.update(cx, |ws, cx| {
+        ws.dragging = Some(id.clone());
+        ws.drag_pos = None;
+        cx.notify();
+    })
+    .ok();
+    cx.new(|_| DragGhost)
+}
+
+/// Style of the row or header being dragged.
+fn lifted<T: Styled>(el: T) -> T {
+    el.bg(hsla(theme::ROW_ACTIVE)).border_1().border_color(hsla(theme::TEXT_FAINT))
+}
+
+/// Height of a session row plus the gap between rows.
+const ROW_PITCH: f32 = 29.0;
+const SLIDE_MS: u64 = 160;
+
+/// A row or project block that just changed places: it starts `from` px away from its new slot and slides in.
+/// `epoch` makes each reorder a fresh animation.
+#[derive(Clone, Copy)]
+pub struct Slide {
+    from: f32,
+    epoch: u64,
+}
+
+/// True when `new` holds the same items as `prev` in a different order (not an add or remove).
+fn is_reorder(prev: &[Id], new: &[Id]) -> bool {
+    prev != new && prev.len() == new.len() && new.iter().all(|i| prev.contains(i))
+}
+
+/// Wraps `el` in the slide-in animation when `slide` is set.
+fn slid(el: impl IntoElement + gpui::Styled + 'static, id: &Id, slide: Option<Slide>) -> AnyElement {
+    match slide {
+        Some(Slide { from, epoch }) => el
+            .with_animation(
+                SharedString::from(format!("slide-{id}-{epoch}")),
+                Animation::new(Duration::from_millis(SLIDE_MS)).with_easing(ease_out_quint()),
+                move |d, t| d.relative().top(px(from * (1.0 - t))),
+            )
+            .into_any_element(),
+        None => el.into_any_element(),
+    }
+}
+
+/// Records the painted height of its parent (which must be `relative`) under `id`.
+fn measure_height(heights: &Rc<RefCell<HashMap<Id, f32>>>, id: &Id) -> impl IntoElement {
+    let (heights, id) = (heights.clone(), id.clone());
+    canvas(move |b, _, _| {
+            heights.borrow_mut().insert(id, f32::from(b.size.height));
+        }, |_, _, _, _| {})
+        .absolute()
+        .size_full()
+}
+
+/// Moves `v[from]` into the slot of `v[to]`, shifting the items in between.
+fn move_to<T>(v: &mut [T], from: usize, to: usize) {
+    if from < to {
+        v[from..=to].rotate_left(1);
+    } else {
+        v[to..=from].rotate_right(1);
+    }
+}
+
 fn reveal_label() -> &'static str {
     if cfg!(target_os = "macos") { "Reveal in Finder" } else { "Show in Explorer" }
 }
 
 impl Workspace {
+    /// True when the pointer is somewhere new. A list shifting under a still pointer (a session ending, say) makes
+    /// GPUI re-send a move at the same spot; that must not reorder anything.
+    ///
+    /// Also false while the previous swap is still sliding: rows are hit-tested where they are painted, so a row
+    /// mid-slide sits under the pointer and would be swapped straight back (flicker).
+    fn pointer_moved(&mut self, pos: gpui::Point<Pixels>) -> bool {
+        if self.last_swap.elapsed() < Duration::from_millis(SLIDE_MS + 40) {
+            return false;
+        }
+        let moved = self.drag_pos != Some(pos);
+        self.drag_pos = Some(pos);
+        moved
+    }
+
     fn project_name(&self, id: Option<&Id>) -> String {
         id.and_then(|i| self.store.project(i)).map(|p| p.name.clone()).unwrap_or_default()
     }
@@ -135,6 +229,31 @@ impl Workspace {
         items.push(item("Copy path".into(), Act::CopyText(p.path.to_string_lossy().into_owned()), false, false));
         items.push(item("Remove project".into(), Act::RemoveProject(p.id.clone()), true, true));
         items
+    }
+
+    /// A session row you can drag: onto a project header to file it there and, in CURRENT SESSION (`reorder`),
+    /// over other rows to reorder them live.
+    fn session_row(&self, row: Row, reorder: bool, cx: &mut Context<Self>) -> Stateful<Div> {
+        let id = row.id.clone();
+        let ws = cx.entity().downgrade();
+        let this = id.clone();
+        self.render_row(row, cx)
+            .on_drag(DragSession(id.clone()), move |d, _, _, cx| begin_drag(&ws, &d.0, cx))
+            .when(self.dragging.as_ref() == Some(&id), lifted)
+            .when(reorder, |d| {
+                d.on_drag_move(cx.listener(move |ws, ev: &DragMoveEvent<DragSession>, _w, cx| {
+                    let from = ev.drag(cx).0.clone();
+                    if from == this || !ev.bounds.contains(&ev.event.position) || !ws.pointer_moved(ev.event.position) {
+                        return;
+                    }
+                    let at = |id: &Id| ws.live.iter().position(|l| l.id == *id);
+                    if let (Some(from), Some(to)) = (at(&from), at(&this)) {
+                        move_to(&mut ws.live, from, to);
+                        ws.last_swap = Instant::now();
+                        cx.notify();
+                    }
+                }))
+            })
     }
 
     fn render_row(&self, row: Row, cx: &mut Context<Self>) -> Stateful<Div> {
@@ -260,6 +379,9 @@ impl Workspace {
     }
 
     pub fn render_sidebar(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        if self.dragging.is_some() && !cx.has_active_drag() {
+            self.dragging = None;
+        }
         let q = self.search.trim().to_lowercase();
         let searching = !q.is_empty();
 
@@ -294,8 +416,19 @@ impl Workspace {
                 }),
             );
         }
+        let ids: Vec<Id> = current.iter().map(|r| r.id.clone()).collect();
+        if is_reorder(&self.prev_current, &ids) {
+            self.slide_gen += 1;
+            for (new, id) in ids.iter().enumerate() {
+                if let Some(old) = self.prev_current.iter().position(|x| x == id).filter(|&old| old != new && self.dragging.as_ref() != Some(id)) {
+                    self.slides.insert(id.clone(), Slide { from: (old as f32 - new as f32) * ROW_PITCH, epoch: self.slide_gen });
+                }
+            }
+        }
+        self.prev_current = ids;
         for row in current {
-            body = body.child(self.render_row(row, cx));
+            let (id, slide) = (row.id.clone(), self.slides.get(&row.id).copied());
+            body = body.child(slid(self.session_row(row, true, cx), &id, slide));
         }
 
         // ---- PROJECTS
@@ -303,22 +436,7 @@ impl Workspace {
         body = body.child(div().h(px(10.0)));
         body = body.child(self.section_header("PROJECTS", None, Some(add_btn)));
 
-        let mut projects: Vec<Project> = self.store.data.projects.clone();
-        // Most recently used first; a project's activity is its newest session (or when it was added).
-        let activity = |p: &Project| self.store.data.sessions.iter().filter(|s| s.project_id.as_deref() == Some(p.id.as_str())).map(|s| s.last_active).fold(p.added_at, i64::max);
-        projects.sort_by_cached_key(|p| std::cmp::Reverse(activity(p)));
-        let order: Vec<Id> = projects.iter().map(|p| p.id.clone()).collect();
-        if order != self.project_order {
-            // Skip the animation for the first render and for added/removed projects.
-            let same_set = self.project_order.len() == order.len() && order.iter().all(|id| self.project_order.contains(id));
-            self.project_moves = if same_set {
-                order.iter().enumerate().filter_map(|(i, id)| self.project_order.iter().position(|o| o == id).map(|old| (id.clone(), old as i32 - i as i32))).filter(|(_, d)| *d != 0).collect()
-            } else {
-                Default::default()
-            };
-            self.project_order_gen += 1;
-            self.project_order = order;
-        }
+        let projects: Vec<Project> = self.store.data.projects.clone();
         if projects.is_empty() {
             body = body.child(
                 div()
@@ -336,6 +454,26 @@ impl Workspace {
                     ),
             );
         }
+        // Projects that changed places slide from where their block was painted to where it is now.
+        let ids: Vec<Id> = projects.iter().map(|p| p.id.clone()).collect();
+        if !searching && is_reorder(&self.prev_projects, &ids) {
+            let heights = self.block_heights.borrow();
+            let top = |order: &[Id], id: &Id| -> f32 {
+                order.iter().take_while(|x| *x != id).map(|x| heights.get(x).map_or(0.0, |h| h + 2.0)).sum()
+            };
+            let moves: Vec<(Id, f32)> = ids
+                .iter()
+                .filter(|id| self.dragging.as_ref() != Some(*id))
+                .map(|id| (id.clone(), top(&self.prev_projects, id) - top(&ids, id)))
+                .filter(|(_, d)| d.abs() > 0.5)
+                .collect();
+            drop(heights);
+            self.slide_gen += 1;
+            for (id, from) in moves {
+                self.slides.insert(id, Slide { from, epoch: self.slide_gen });
+            }
+        }
+        self.prev_projects = ids;
         for p in projects {
             let sessions: Vec<SessionRecord> = {
                 let mut v: Vec<SessionRecord> = self
@@ -356,14 +494,14 @@ impl Workspace {
             }
             let expanded = searching || !p.collapsed;
             let closing = !expanded && self.closing.contains(&p.id);
-            let mut group = div().flex().flex_col().child(self.render_project_header(&p, sessions.len(), expanded, cx));
+            let mut group = div().relative().flex().flex_col().child(measure_height(&self.block_heights, &p.id)).child(self.render_project_header(&p, sessions.len(), expanded, cx));
             if expanded || closing {
                 let mut kids = div().flex().flex_col();
                 let limit = if searching || self.show_all.contains(&p.id) { usize::MAX } else { PROJECT_SESSION_LIMIT };
                 let hidden_count = matching.len().saturating_sub(limit);
                 for rec in matching.iter().take(limit) {
                     let running = self.is_running(&rec.id, cx);
-                    kids = kids.child(self.render_row(self.row_for(rec, running, false), cx));
+                    kids = kids.child(self.session_row(self.row_for(rec, running, false), false, cx));
                 }
                 if hidden_count > 0 {
                     let pid = p.id.clone();
@@ -398,20 +536,8 @@ impl Workspace {
                     ),
                 );
             }
-            // A project that changed place slides from its old position.
-            let moved = self.project_moves.get(&p.id).copied().unwrap_or(0);
-            if moved != 0 {
-                let from = moved as f32 * 28.0;
-                body = body.child(group.relative().with_animation(
-                    gpui::SharedString::from(format!("move-{}-{}", p.id, self.project_order_gen)),
-                    Animation::new(Duration::from_millis(280)).with_easing(gpui::ease_in_out),
-                    move |d, t| d.top(px(from * (1.0 - t))),
-                ));
-            } else {
-                body = body.child(group);
-            }
+            body = body.child(slid(group, &p.id, self.slides.get(&p.id).copied()));
         }
-
 
         // ---- OTHER SESSIONS (imported, not belonging to a registered project)
         let mut others: Vec<SessionRecord> = self
@@ -446,7 +572,7 @@ impl Workspace {
                     let mut row = self.row_for(rec, running, true);
                     row.indent = false;
                     row.scope = "oth";
-                    body = body.child(self.render_row(row, cx));
+                    body = body.child(self.session_row(row, false, cx));
                 }
             }
         }
@@ -545,6 +671,8 @@ impl Workspace {
     fn render_project_header(&self, p: &Project, session_count: usize, expanded: bool, cx: &mut Context<Self>) -> Stateful<Div> {
         let (toggle_id, menu_id, new_id_) = (p.id.clone(), p.id.clone(), p.path.clone());
         let branch = p.git.as_ref().and_then(|g| g.branch.clone()).unwrap_or_default();
+        let (target, drop_target) = (p.id.clone(), p.id.clone());
+        let ws_weak = cx.entity().downgrade();
         let non_git = p.git.is_none();
         let wt = p.git.as_ref().map(|g| g.worktrees.len()).unwrap_or(0);
         div()
@@ -560,6 +688,37 @@ impl Workspace {
             .rounded(px(6.0))
             .cursor_pointer()
             .hover(|s| s.bg(hsla(theme::ROW_HOVER)))
+            .on_drag(DragProject(p.id.clone()), move |d, _, _, cx| begin_drag(&ws_weak, &d.0, cx))
+            .when(self.dragging.as_ref() == Some(&p.id), lifted)
+            // Other projects slide out of the way as this one is dragged over them.
+            .on_drag_move(cx.listener(move |ws, ev: &DragMoveEvent<DragProject>, _w, cx| {
+                let from = ev.drag(cx).0.clone();
+                if from == target || !ev.bounds.contains(&ev.event.position) || !ws.pointer_moved(ev.event.position) {
+                    return;
+                }
+                let projects = &mut ws.store.data.projects;
+                let at = |id: &Id| projects.iter().position(|p| p.id == *id);
+                if let (Some(from), Some(to)) = (at(&from), at(&target)) {
+                    move_to(projects, from, to);
+                    ws.last_swap = Instant::now();
+                    ws.store.mark_dirty();
+                    cx.notify();
+                }
+            }))
+            // A session dropped here is filed under this project.
+            .drag_over::<DragSession>(|s, _, _, _| s.bg(hsla(theme::ROW_ACTIVE)))
+            .on_drop(cx.listener(move |ws, d: &DragSession, _w, cx| {
+                if ws.store.session(&d.0).is_some_and(|s| s.kind == SessionKind::Claude) {
+                    if let Some(s) = ws.store.session_mut(&d.0) {
+                        s.project_id = Some(drop_target.clone());
+                    }
+                    if let Some(p) = ws.store.data.projects.iter_mut().find(|p| p.id == drop_target) {
+                        p.collapsed = false;
+                    }
+                    ws.store.mark_dirty();
+                    cx.notify();
+                }
+            }))
             .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::ToggleProject(toggle_id.clone()), window, cx)))
             .on_mouse_down(
                 MouseButton::Right,
@@ -742,4 +901,27 @@ fn kind_label(a: &crate::store::Account) -> &'static str {
 fn plan_label(plan: &str) -> String {
     let mut c = plan.chars();
     c.next().map_or_else(String::new, |f| f.to_uppercase().chain(c).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_reorder, move_to};
+
+    #[test]
+    fn moved_item_takes_the_targets_slot() {
+        let mut v = ['a', 'b', 'c', 'd'];
+        move_to(&mut v, 0, 2);
+        assert_eq!(v, ['b', 'c', 'a', 'd']);
+        move_to(&mut v, 3, 1);
+        assert_eq!(v, ['b', 'd', 'c', 'a']);
+    }
+
+    #[test]
+    fn only_same_items_in_a_new_order_is_a_reorder() {
+        let ids = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(is_reorder(&ids(&["a", "b"]), &ids(&["b", "a"])));
+        assert!(!is_reorder(&ids(&["a", "b"]), &ids(&["a", "b"])));
+        assert!(!is_reorder(&ids(&["a", "b"]), &ids(&["a", "c"])));
+        assert!(!is_reorder(&ids(&["a"]), &ids(&["a", "b"])));
+    }
 }
