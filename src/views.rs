@@ -605,6 +605,12 @@ impl Render for Workspace {
         let sidebar = self.store.data.layout.sidebar_visible.then(|| self.render_sidebar(cx));
         let banner = self.render_update_banner(cx);
         let topbar = self.render_topbar(cx);
+        // Terminals that aren't on screen keep running but must not trigger window redraws on every output burst.
+        let showing: &[crate::store::Id] = if matches!(self.main, Main::Terminals) { &self.panes } else { &[] };
+        for l in &self.live {
+            let visible = showing.contains(&l.id);
+            l.view.update(cx, |v, _| v.visible = visible);
+        }
         let main: AnyElement = match &self.main {
             Main::Terminals => self.render_panes(cx).into_any_element(),
             Main::Home => self.render_home(cx).into_any_element(),

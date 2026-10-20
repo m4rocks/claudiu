@@ -56,6 +56,8 @@ pub struct TerminalView {
     font_size: Pixels,
     /// Show a startup animation until the program first draws something (set for Claude sessions).
     pub loading: bool,
+    /// Whether a pane currently shows this terminal (kept up to date by the workspace's render).
+    pub visible: bool,
 }
 
 impl EventEmitter<TerminalEvent> for TerminalView {}
@@ -98,6 +100,7 @@ impl TerminalView {
             font_family: FONT,
             font_size: px(14.0),
             loading: false,
+            visible: true,
         }
     }
 
@@ -124,7 +127,10 @@ impl TerminalView {
                     self.burst_start = Some(t);
                 }
                 self.last_output = Some(t);
-                cx.notify()
+                // Off-screen terminals only record the timing; a notify would redraw the whole window.
+                if self.visible {
+                    cx.notify()
+                }
             }
             TermEvent::PtyWrite(text) => self.terminal.write(text.into_bytes()),
             TermEvent::Title(title) => self.title = Some(title),
@@ -583,7 +589,7 @@ impl EntityInputHandler for TerminalView {
     }
 }
 
-/// Drains terminal events, coalescing bursts so we redraw at most ~120 times a second.
+/// Drains terminal events, coalescing bursts so we redraw at most ~60 times a second.
 async fn pump(
     this: gpui::WeakEntity<TerminalView>,
     mut rx: UnboundedReceiver<TermEvent>,
@@ -605,7 +611,7 @@ async fn pump(
             break;
         }
         cx.background_executor()
-            .timer(Duration::from_millis(8))
+            .timer(Duration::from_millis(16))
             .await;
     }
 }

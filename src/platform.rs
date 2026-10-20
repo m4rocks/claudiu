@@ -45,6 +45,14 @@ pub fn through_login_shell(program: String, args: Vec<String>) -> (String, Vec<S
     }
 }
 
+/// Drop a child process (and, by inheritance, everything it starts) to below-normal CPU priority.
+#[cfg(target_os = "windows")]
+pub fn lower_priority(process: *mut std::ffi::c_void) {
+    use windows_sys::Win32::System::Threading::{BELOW_NORMAL_PRIORITY_CLASS, SetPriorityClass};
+    // SAFETY: `process` is the live handle of the process we just created.
+    unsafe { SetPriorityClass(process, BELOW_NORMAL_PRIORITY_CLASS) };
+}
+
 pub fn shell_label(program: &str) -> String {
     let stem = Path::new(program).file_stem().and_then(|s| s.to_str()).unwrap_or(program);
     match stem.to_ascii_lowercase().as_str() {
