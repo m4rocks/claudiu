@@ -100,6 +100,10 @@ impl SessionRecord {
     }
 }
 
+fn yes() -> bool {
+    true
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Project {
     pub id: Id,
@@ -107,7 +111,7 @@ pub struct Project {
     pub path: PathBuf,
     #[serde(default)]
     pub git: Option<GitInfo>,
-    #[serde(default)]
+    #[serde(default = "yes")]
     pub collapsed: bool,
     pub added_at: i64,
 }
@@ -329,7 +333,7 @@ impl Store {
             return existing.id.clone();
         }
         let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| root.to_string_lossy().into_owned());
-        let project = Project { id: new_id(), name, path: root, git, collapsed: false, added_at: now() };
+        let project = Project { id: new_id(), name, path: root, git, collapsed: true, added_at: now() };
         let id = project.id.clone();
         self.data.projects.push(project);
         self.remap_sessions();

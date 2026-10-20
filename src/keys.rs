@@ -48,6 +48,14 @@ pub fn is_text(ks: &Keystroke) -> bool {
 pub fn encode(ks: &Keystroke, mode: TermMode) -> Option<Vec<u8>> {
     let m = &ks.modifiers;
     if m.platform {
+        // Cmd+Left/Right: line start/end, as in macOS Terminal (Ctrl+A / Ctrl+E).
+        if !m.alt && !m.control && !m.shift {
+            match ks.key.as_str() {
+                "left" => return Some(vec![0x01]),
+                "right" => return Some(vec![0x05]),
+                _ => {}
+            }
+        }
         return None;
     }
     let mods = mod_param(ks);
@@ -66,6 +74,8 @@ pub fn encode(ks: &Keystroke, mode: TermMode) -> Option<Vec<u8>> {
         bytes
     };
 
+    let word_jump = cfg!(target_os = "macos") && m.alt && !m.control && !m.shift;
+
     let named = match ks.key.as_str() {
         "enter" => Some(if m.control {
             b"\n".to_vec()
@@ -81,6 +91,9 @@ pub fn encode(ks: &Keystroke, mode: TermMode) -> Option<Vec<u8>> {
         "space" => Some(if m.control { vec![0] } else { alt_prefix(b" ".to_vec()) }),
         "up" => Some(ss3_or_csi('A', mods, app)),
         "down" => Some(ss3_or_csi('B', mods, app)),
+        // macOS Terminal sends ESC b / ESC f for Option+arrows (word movement in zsh, readline and Claude Code).
+        "right" if word_jump => Some(b"\x1bf".to_vec()),
+        "left" if word_jump => Some(b"\x1bb".to_vec()),
         "right" => Some(ss3_or_csi('C', mods, app)),
         "left" => Some(ss3_or_csi('D', mods, app)),
         "home" => Some(ss3_or_csi('H', mods, app)),
@@ -158,6 +171,19 @@ mod tests {
     fn alt_p_is_esc_p() {
         assert_eq!(enc(ks("p", None, |m| m.alt = true)), b"\x1bp");
         assert_eq!(enc(ks("p", Some("p"), |m| m.alt = true)), b"\x1bp");
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn option_arrows_jump_words() {
+        assert_eq!(enc(ks("left", None, |m| m.alt = true)), b"\x1bb");
+        assert_eq!(enc(ks("right", None, |m| m.alt = true)), b"\x1bf");
+    }
+
+    #[test]
+    fn cmd_arrows_go_to_line_ends() {
+        assert_eq!(enc(ks("left", None, |m| m.platform = true)), [1]);
+        assert_eq!(enc(ks("right", None, |m| m.platform = true)), [5]);
     }
 
     #[test]

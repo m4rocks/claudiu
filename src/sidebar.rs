@@ -8,7 +8,7 @@ use gpui::{
 };
 
 use gpui_kit::component::input::Input;
-use crate::app::{Act, Activity, MenuItem, Workspace};
+use crate::app::{CLOSE_MS, Act, Activity, MenuItem, Workspace};
 use crate::store::{ExternalState, Id, Project, SessionKind, SessionRecord, now};
 use crate::theme::{self, hsla};
 use crate::widgets::{ago, avatar, button, clawd, cog, countdown, divider, icon_button, meter, section_label};
@@ -303,7 +303,22 @@ impl Workspace {
         body = body.child(div().h(px(10.0)));
         body = body.child(self.section_header("PROJECTS", None, Some(add_btn)));
 
-        let projects: Vec<Project> = self.store.data.projects.clone();
+        let mut projects: Vec<Project> = self.store.data.projects.clone();
+        // Most recently used first; a project's activity is its newest session (or when it was added).
+        let activity = |p: &Project| self.store.data.sessions.iter().filter(|s| s.project_id.as_deref() == Some(p.id.as_str())).map(|s| s.last_active).fold(p.added_at, i64::max);
+        projects.sort_by_cached_key(|p| std::cmp::Reverse(activity(p)));
+        let order: Vec<Id> = projects.iter().map(|p| p.id.clone()).collect();
+        if order != self.project_order {
+            // Skip the animation for the first render and for added/removed projects.
+            let same_set = self.project_order.len() == order.len() && order.iter().all(|id| self.project_order.contains(id));
+            self.project_moves = if same_set {
+                order.iter().enumerate().filter_map(|(i, id)| self.project_order.iter().position(|o| o == id).map(|old| (id.clone(), old as i32 - i as i32))).filter(|(_, d)| *d != 0).collect()
+            } else {
+                Default::default()
+            };
+            self.project_order_gen += 1;
+            self.project_order = order;
+        }
         if projects.is_empty() {
             body = body.child(
                 div()
@@ -340,17 +355,19 @@ impl Workspace {
                 continue;
             }
             let expanded = searching || !p.collapsed;
-            body = body.child(self.render_project_header(&p, sessions.len(), expanded, cx));
-            if expanded {
+            let closing = !expanded && self.closing.contains(&p.id);
+            let mut group = div().flex().flex_col().child(self.render_project_header(&p, sessions.len(), expanded, cx));
+            if expanded || closing {
+                let mut kids = div().flex().flex_col();
                 let limit = if searching || self.show_all.contains(&p.id) { usize::MAX } else { PROJECT_SESSION_LIMIT };
                 let hidden_count = matching.len().saturating_sub(limit);
                 for rec in matching.iter().take(limit) {
                     let running = self.is_running(&rec.id, cx);
-                    body = body.child(self.render_row(self.row_for(rec, running, false), cx));
+                    kids = kids.child(self.render_row(self.row_for(rec, running, false), cx));
                 }
                 if hidden_count > 0 {
                     let pid = p.id.clone();
-                    body = body.child(
+                    kids = kids.child(
                         div()
                             .id(gpui::SharedString::from(format!("more-{pid}")))
                             .ml(px(32.0))
@@ -364,10 +381,37 @@ impl Workspace {
                     );
                 }
                 if matching.is_empty() && sessions.is_empty() {
-                    body = body.child(div().ml(px(32.0)).py(px(3.0)).text_size(px(11.5)).text_color(hsla(theme::TEXT_FAINT)).child("No sessions yet"));
+                    kids = kids.child(div().ml(px(32.0)).py(px(3.0)).text_size(px(11.5)).text_color(hsla(theme::TEXT_FAINT)).child("No sessions yet"));
                 }
+                // Slides open each time the project is expanded (the element is new again after a collapse),
+                // and shut again while it is in `closing`. Row heights are fixed, so the full height is known.
+                let full = (matching.len().min(limit) as f32 * 27.0 + if hidden_count > 0 || matching.is_empty() && sessions.is_empty() { 22.0 } else { 0.0 }).max(1.0);
+                let (key, ms) = if closing { ("shut", CLOSE_MS) } else { ("open", 200) };
+                group = group.child(
+                    div().overflow_hidden().child(kids).with_animation(
+                        gpui::SharedString::from(format!("kids-{key}-{}", p.id)),
+                        Animation::new(Duration::from_millis(ms)).with_easing(gpui::ease_in_out),
+                        move |d, t| {
+                            let t = if closing { 1.0 - t } else { t };
+                            d.max_h(px(full * t)).opacity(t)
+                        },
+                    ),
+                );
+            }
+            // A project that changed place slides from its old position.
+            let moved = self.project_moves.get(&p.id).copied().unwrap_or(0);
+            if moved != 0 {
+                let from = moved as f32 * 28.0;
+                body = body.child(group.relative().with_animation(
+                    gpui::SharedString::from(format!("move-{}-{}", p.id, self.project_order_gen)),
+                    Animation::new(Duration::from_millis(280)).with_easing(gpui::ease_in_out),
+                    move |d, t| d.top(px(from * (1.0 - t))),
+                ));
+            } else {
+                body = body.child(group);
             }
         }
+
 
         // ---- OTHER SESSIONS (imported, not belonging to a registered project)
         let mut others: Vec<SessionRecord> = self

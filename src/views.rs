@@ -25,7 +25,7 @@ impl Workspace {
         let cwd = rec.as_ref().map(|r| r.cwd.clone());
         let in_terminals = matches!(self.main, Main::Terminals);
 
-        let mut right = div().flex().items_center().gap(px(6.0));
+        let mut right = div().flex().flex_none().items_center().gap(px(6.0));
         if in_terminals {
             right = right.child(
                 icon_button("split", "◫").on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.split(window, cx))),
@@ -116,12 +116,16 @@ impl Workspace {
             .pl(px(left_pad))
             .bg(hsla(theme::APP_BG))
             .border_color(hsla(theme::BORDER))
-            .child(
+            // TitleBar's inner row can't shrink below its in-flow content's width, so a long title would push
+            // the right-hand buttons out of view. An absolute overlay takes the content out of that sizing.
+            .child(div().absolute().size_full().flex().items_center().justify_between().child(
                 div()
                     .flex()
                     .items_center()
                     .gap(px(10.0))
+                    .flex_1()
                     .min_w_0()
+                    .overflow_hidden()
                     .child(
                         icon_button("toggle-sidebar", "☰")
                             .on_click(cx.listener(|ws, _: &ClickEvent, _w, cx| {
@@ -132,6 +136,7 @@ impl Workspace {
                     )
                     .child(
                         div()
+                            .min_w_0()
                             .overflow_hidden()
                             .whitespace_nowrap()
                             .text_ellipsis()
@@ -140,7 +145,7 @@ impl Workspace {
                             .child(title),
                     )
                     .when_some(cwd, |d, p| {
-                        d.child(div().text_size(px(11.5)).text_color(hsla(theme::TEXT_FAINT)).child(short_path(&p)))
+                        d.child(div().flex_none().text_size(px(11.5)).text_color(hsla(theme::TEXT_FAINT)).child(short_path(&p)))
                     })
                     .when_some(branch.zip(repo), |d, (b, repo)| {
                         // Click: switch branch or create one (see Workspace::open_branch_menu).
@@ -165,7 +170,7 @@ impl Workspace {
                         )
                     }),
             )
-            .child(right.mr(px(10.0)))
+            .child(right.mr(px(10.0))))
     }
 
     fn render_update_banner(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {

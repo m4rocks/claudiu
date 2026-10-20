@@ -174,6 +174,8 @@ pub struct Toast {
     pub action: Option<(String, Act)>,
 }
 
+pub const CLOSE_MS: u64 = 180;
+
 pub struct Workspace {
     pub store: Store,
     pub claude_exe: Option<PathBuf>,
@@ -195,6 +197,12 @@ pub struct Workspace {
     pub toast: Option<Toast>,
     pub toast_serial: u64,
     pub show_all: HashSet<Id>,
+    /// Project order as last rendered, and how many rows each project moved when it changed.
+    /// Projects whose session list is still sliding shut.
+    pub closing: HashSet<Id>,
+    pub project_order: Vec<Id>,
+    pub project_moves: HashMap<Id, i32>,
+    pub project_order_gen: u64,
     /// Sessions that leave no history once they end (the "fix with Claude" helper).
     ephemeral: HashSet<Id>,
     /// `claude auth login` tabs; account details are re-read when one ends.
@@ -218,7 +226,11 @@ impl Workspace {
         initial_projects: Vec<PathBuf>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let store = Store::load(Store::default_path());
+        let mut store = Store::load(Store::default_path());
+        // Projects start collapsed on every launch.
+        for p in &mut store.data.projects {
+            p.collapsed = true;
+        }
         let claude_exe = claude::discover(store.data.settings.claude_path.as_deref());
         let search_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Search sessions and projects").clean_on_escape());
@@ -250,6 +262,10 @@ impl Workspace {
             toast: None,
             toast_serial: 0,
             show_all: HashSet::new(),
+            closing: HashSet::new(),
+            project_order: vec![],
+            project_moves: HashMap::new(),
+            project_order_gen: 0,
             ephemeral: HashSet::new(),
             logins: HashSet::new(),
             limit_warned: None,
@@ -1281,6 +1297,21 @@ impl Workspace {
             Act::ToggleProject(id) => {
                 if let Some(p) = self.store.data.projects.iter_mut().find(|p| p.id == id) {
                     p.collapsed = !p.collapsed;
+                    if p.collapsed {
+                        // Keep rendering the list while it slides shut.
+                        self.closing.insert(id.clone());
+                        cx.spawn(async move |this, cx| {
+                            cx.background_executor().timer(Duration::from_millis(CLOSE_MS)).await;
+                            this.update(cx, |ws, cx| {
+                                ws.closing.remove(&id);
+                                cx.notify();
+                            })
+                            .ok();
+                        })
+                        .detach();
+                    } else {
+                        self.closing.remove(&id);
+                    }
                     self.store.mark_dirty();
                 }
             }
