@@ -684,7 +684,7 @@ impl Workspace {
         let Some(env) = self.store.account(account).map(Self::account_env).filter(|e| !e.is_empty()) else { return };
         let cwd = platform::home_dir().unwrap_or_else(|| PathBuf::from("."));
         let (program, args) = platform::through_login_shell(exe.to_string_lossy().into_owned(), vec!["auth".into(), "login".into()]);
-        let spec = SpawnSpec { program, args, cwd: Some(cwd.clone()), env, ..Default::default() };
+        let spec = SpawnSpec { program, args, cwd: Some(cwd.clone()), env };
         let record = SessionRecord {
             id: new_id(),
             kind: SessionKind::Shell,
@@ -895,7 +895,6 @@ impl Workspace {
             program: program.clone(),
             args,
             cwd: Some(cwd.clone()),
-            low_priority: true,
             ..Default::default()
         };
         let record = SessionRecord {

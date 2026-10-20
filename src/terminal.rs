@@ -63,9 +63,6 @@ pub struct SpawnSpec {
     pub cwd: Option<PathBuf>,
     /// Extra environment for the child (added on top of the inherited one).
     pub env: Vec<(String, String)>,
-    /// Run below normal priority (inherited by everything the process starts), so a heavy build in a shell
-    /// can't starve Claude sessions and the rest of the machine.
-    pub low_priority: bool,
 }
 
 pub struct Terminal {
@@ -98,11 +95,6 @@ impl Terminal {
         // alacritty's ConPTY setup asserts on failure; surface that as a normal startup error instead of a crash.
         let pty = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| tty::new(&options, window_size, 0)))
             .map_err(|_| anyhow::anyhow!("the pseudo terminal could not be created"))??;
-
-        #[cfg(target_os = "windows")]
-        if spec.low_priority {
-            crate::platform::lower_priority(pty.child_watcher().raw_handle());
-        }
 
         let size = TermSize::new(cols as usize, rows as usize);
         let config = Config { scrolling_history: 10_000, ..Default::default() };
