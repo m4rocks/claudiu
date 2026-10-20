@@ -1,6 +1,30 @@
 @import "tailwindcss";
 
 @theme {
-  --color-claude: #d97757;
-  --color-ink: #0c0c0c;
+	--color-claude: #d97757;
+	--color-ink: #0b0b0a;
+	--color-ink-raised: #131312;
+	--color-line: #2a2a27;
+	--font-serif:
+		"Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia,
+		serif;
+	--font-mono:
+		ui-monospace, "SF Mono", "Cascadia Mono", "Roboto Mono", Consolas,
+		monospace;
+}
+
+@layer base {
+	html {
+		color-scheme: dark;
+	}
+
+	::selection {
+		background: color-mix(in srgb, var(--color-claude) 35%, transparent);
+		color: #fff;
+	}
+
+	:focus-visible {
+		outline: 2px solid var(--color-claude);
+		outline-offset: 3px;
+	}
 }
