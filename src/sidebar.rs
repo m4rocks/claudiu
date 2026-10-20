@@ -227,12 +227,44 @@ impl Workspace {
             })
     }
 
+    /// The sessions in the split view as one card: an accent rail down the edge and a header with a
+    /// miniature of the layout (one block per pane, the focused one lit).
+    fn render_split_group(&self, rows: Vec<Row>, cx: &mut Context<Self>) -> Div {
+        let map = (0..self.panes.len()).fold(div().flex().flex_none().gap(px(2.0)).w(px(16.0)).h(px(9.0)), |d, i| {
+            let lit = i == self.focused;
+            d.child(div().flex_1().rounded(px(2.0)).bg(if lit { hsla(theme::ACCENT) } else { hsla(theme::TEXT_FAINT).opacity(0.55) }))
+        });
+        let map = if self.split_vertical { map.flex_col() } else { map.flex_row() };
+        let header = div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .h(px(19.0))
+            .pl(px(12.0))
+            .pr(px(10.0))
+            .child(section_label("SPLIT"))
+            .child(map);
+        rows.into_iter().fold(
+            div()
+                .relative()
+                .mx(px(6.0))
+                .pb(px(2.0))
+                .rounded(px(8.0))
+                .border_1()
+                .border_color(hsla(theme::BORDER))
+                .bg(hsla(0x101011))
+                .child(div().absolute().left(px(0.0)).top(px(8.0)).bottom(px(8.0)).w(px(2.0)).rounded_r(px(2.0)).bg(hsla(theme::ACCENT).opacity(0.75)))
+                .child(header),
+            |card, row| card.child(self.render_row(row, cx).h(px(24.0)).mx(px(3.0))),
+        )
+    }
+
     pub fn render_sidebar(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let q = self.search.trim().to_lowercase();
         let searching = !q.is_empty();
 
         // ---- CURRENT SESSION
-        let current: Vec<Row> = self
+        let rows: Vec<Row> = self
             .live
             .iter()
             .filter(|l| l.view.read(cx).is_running())
@@ -240,12 +272,20 @@ impl Workspace {
             .filter(|r| self.matches(&q, r))
             .map(|r| self.row_for(r, true, true))
             .collect();
+        // Sessions sharing the split view are drawn together, in pane order.
+        let split = self.panes.len() > 1;
+        let (mut grouped, current): (Vec<Row>, Vec<Row>) = rows.into_iter().partition(|r| split && self.panes.contains(&r.id));
+        grouped.sort_by_key(|r| self.panes.iter().position(|p| *p == r.id));
         let current_total = self.running_count(cx);
 
         let mut body = div().flex().flex_col().gap(px(2.0));
 
         body = body.child(self.section_header("CURRENT SESSION", Some(current_total.to_string()), None::<Stateful<Div>>));
-        if current.is_empty() {
+        let has_group = !grouped.is_empty();
+        if has_group {
+            body = body.child(self.render_split_group(grouped, cx));
+        }
+        if current.is_empty() && !has_group {
             body = body.child(
                 div().px(px(18.0)).py(px(6.0)).text_size(px(12.0)).text_color(hsla(theme::TEXT_FAINT)).child(if searching {
                     "No running sessions match"
