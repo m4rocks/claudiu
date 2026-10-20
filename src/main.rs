@@ -22,6 +22,9 @@ mod widgets;
 use gpui::{App, Bounds, KeyBinding, TitlebarOptions, WindowBounds, WindowOptions, prelude::*, px, size};
 use gpui_kit::component::TitleBar;
 
+// Only the SVGs the title bar's window controls load (nothing else in the app uses bundled icons).
+gpui_kit::assets::icon_assets!(TitleBarIcons, [WindowMinimize, WindowMaximize, WindowRestore, WindowClose]);
+
 use app::{
     CloseSession, FocusNextPane, FocusSearch, HideApp, HideOthers, ImportProject, NewClaude, NewShell, NextSession, OpenSettings, PrevSession, Quit, ShowAllApps,
     SplitPane, ToggleSidebar, Workspace,
@@ -119,7 +122,7 @@ fn main() {
     // `claudiu <folder>...` registers folders as projects (also what a shell "open with" would pass).
     let initial: Vec<std::path::PathBuf> = std::env::args().skip(1).map(std::path::PathBuf::from).filter(|p| p.is_dir()).collect();
 
-    gpui_kit::application().run(move |cx: &mut App| {
+    gpui_kit::application().with_assets(TitleBarIcons).run(move |cx: &mut App| {
         gpui_kit::init(cx);
         gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, cx);
         // Claudiu-global shortcuts. Deliberately Ctrl+Shift (Cmd+Shift on macOS) so every plain Ctrl/Alt

@@ -934,7 +934,7 @@ dependencies = [
 
 [[package]]
 name = "claudiu"
-version = "0.2.14"
+version = "0.2.15"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -2402,6 +2402,7 @@ checksum = "be18e0417095ebfea77ac25962961ff4e41a120ea6cb8f05a7505b682478b83e"
 dependencies = [
  "gpui-base",
  "gpui-component",
+ "gpui-kit-assets",
  "gpui-pre",
  "gpui-pre-platform",
  "gpui-pre-web",
