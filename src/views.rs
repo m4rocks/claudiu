@@ -9,7 +9,7 @@ use crate::app::{
     Act, CloseSession, GitOp, MenuItem, FocusNextPane, FocusSearch, ImportProject, Main, Modal, NewClaude, NewShell, NextSession, OpenSettings, PrevSession, SplitPane,
     ToggleSidebar, Workspace,
 };
-use gpui_kit::component::input::Input;
+use gpui_kit::component::{TitleBar, input::Input};
 use crate::platform::Editor;
 use crate::store::{SessionKind, now};
 use crate::theme::{self, hsla};
@@ -108,14 +108,13 @@ impl Workspace {
 
         let title = rec.as_ref().map(|r| r.display_title().to_string()).unwrap_or_else(|| "Claudiu".into());
         let branch = project.as_ref().and_then(|p| p.git.as_ref()).and_then(|g| g.branch.clone());
-        div()
-            .flex()
-            .items_center()
-            .justify_between()
+        // The title bar is the top bar: macOS keeps its traffic lights (over the sidebar, or left of the
+        // toggle when the sidebar is hidden), Windows/Linux get min/max/close drawn at the right edge.
+        let left_pad = if cfg!(target_os = "macos") && !self.store.data.layout.sidebar_visible { 80.0 } else { 14.0 };
+        TitleBar::new()
             .h(px(40.0))
-            .flex_none()
-            .px(px(14.0))
-            .border_b_1()
+            .pl(px(left_pad))
+            .bg(hsla(theme::APP_BG))
             .border_color(hsla(theme::BORDER))
             .child(
                 div()
@@ -166,7 +165,7 @@ impl Workspace {
                         )
                     }),
             )
-            .child(right)
+            .child(right.mr(px(10.0)))
     }
 
     fn render_update_banner(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {

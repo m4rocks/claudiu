@@ -417,6 +417,22 @@ impl Workspace {
             .bg(hsla(theme::SIDEBAR_BG))
             .border_r_1()
             .border_color(hsla(theme::BORDER))
+            // macOS traffic lights sit here; the strip stays draggable like the top bar next to it.
+            .when(cfg!(target_os = "macos"), |d| {
+                d.child(
+                    div()
+                        .id("traffic-light-strip")
+                        .h(px(40.0))
+                        .flex_none()
+                        .on_mouse_down(MouseButton::Left, |ev, window, _| {
+                            if ev.click_count == 2 {
+                                window.titlebar_double_click();
+                            } else {
+                                window.start_window_move();
+                            }
+                        }),
+                )
+            })
             .child(self.render_sidebar_header(cx))
             .child(div().id("sidebar-scroll").flex_1().min_h_0().overflow_y_scroll().pb(px(10.0)).child(body))
             .child(self.render_footer(cx))

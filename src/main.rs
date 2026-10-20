@@ -20,6 +20,7 @@ mod views;
 mod widgets;
 
 use gpui::{App, Bounds, KeyBinding, TitlebarOptions, WindowBounds, WindowOptions, prelude::*, px, size};
+use gpui_kit::component::TitleBar;
 
 use app::{
     CloseSession, FocusNextPane, FocusSearch, HideApp, HideOthers, ImportProject, NewClaude, NewShell, NextSession, OpenSettings, PrevSession, Quit, ShowAllApps,
@@ -151,7 +152,13 @@ fn main() {
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 window_min_size: Some(size(px(720.0), px(420.0))),
-                titlebar: Some(TitlebarOptions { title: Some("Claudiu".into()), ..Default::default() }),
+                titlebar: Some(TitlebarOptions {
+                    title: Some("Claudiu".into()),
+                    traffic_light_position: Some(gpui::point(px(14.0), px(13.0))),
+                    ..TitleBar::title_bar_options()
+                }),
+                // The top bar owns dragging and double-click (see TitleBar::window_options).
+                app_owns_titlebar_drag: true,
                 ..Default::default()
             },
             cx,
