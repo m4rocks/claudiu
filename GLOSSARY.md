@@ -1,6 +1,6 @@
-# m4code
+# Claudiu
 
-A native desktop app for running and organising coding-agent sessions per project.
+A native desktop app for running and organising Claude Code sessions per project.
 
 ## Language
 
@@ -19,3 +19,19 @@ _Avoid_: generative UI, card, widget
 **Project**:
 A folder, usually a Git repository, that tasks run in.
 _Avoid_: workspace, repo (as the concept)
+
+**Context firewall**:
+The part of m4code that keeps tool output small before the model sees it, by compacting it and keeping the full text retrievable.
+_Avoid_: filter, proxy, compressor
+
+**Handle**:
+A short code that names a piece of full tool output kept aside, so the model can ask for part of it later.
+_Avoid_: id, pointer, reference
+
+**Ledger**:
+A record of what the model has already seen of each file, used to avoid sending it again.
+_Avoid_: cache, history
+
+**Subagent**:
+A session another session starts to do part of its work, shown nested under its parent task. It is a session but not a task.
+_Avoid_: child task, sidekick, helper
