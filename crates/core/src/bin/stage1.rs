@@ -712,6 +712,81 @@ fn c11_rewind() {
     p.quit();
 }
 
+/// 12. What hooks see: tool_response shapes of the native tools, and when SessionStart reaches an http hook.
+fn c12_shapes() {
+    let started = Instant::now();
+    let log: Arc<Mutex<Vec<(f64, String, Value)>>> = Arc::default();
+    let l2 = log.clone();
+    let server = HookServer::start(Arc::new(move |path, body| {
+        l2.lock().unwrap().push((started.elapsed().as_secs_f64(), path.to_string(), body.clone()));
+        (Duration::ZERO, json!({}))
+    }));
+    let mut settings = http_hooks(&server.url("pre"), &server.url("post"), ".*", ".*", json!({}));
+    settings["hooks"]["SessionStart"] = json!([{"hooks": [{"type": "http", "url": server.url("start"), "timeout": 20}]}]);
+    let mut p = Probe::open("c12", Options { settings, ..Options::default() });
+    println!("  session ready at {:.2}s", started.elapsed().as_secs_f64());
+    std::fs::write(p.dir.join("a.txt"), "alpha\nbeta\ngamma\n").unwrap();
+    let t = p.turn("Do these four things with the dedicated tools: run `echo hello` with Bash, search for the word beta with Grep, list *.txt files with Glob, and Read a.txt. Then say done.");
+    show("turn", &t);
+    for (at, path, body) in log.lock().unwrap().iter() {
+        let tool = body["tool_name"].as_str().unwrap_or("-");
+        let extra = if path == "post" { format!(" tool_response={}", body["tool_response"].to_string().chars().take(420).collect::<String>()) } else if path == "pre" { format!(" tool_input={}", body["tool_input"].to_string().chars().take(160).collect::<String>()) } else { format!(" keys={:?}", body.as_object().map(|o| o.keys().cloned().collect::<Vec<_>>())) };
+        println!("  [{at:.2}s] {path} {tool}{extra}");
+    }
+    let sample_keys: Vec<_> = log.lock().unwrap().iter().find(|(_, p, _)| p == "post").and_then(|(_, _, b)| b.as_object().map(|o| o.keys().cloned().collect())).unwrap_or_default();
+    println!("  post hook input keys: {sample_keys:?}");
+    p.quit();
+}
+
+/// 13. An http MCP server named claudiu: does Claude Code list and call its tools?
+fn c13_mcp_http() {
+    let server = HookServer::start(Arc::new(|path, body| {
+        if path != "mcp" {
+            return (Duration::ZERO, json!({}));
+        }
+        let id = body["id"].clone();
+        let result = match body["method"].as_str() {
+            Some("initialize") => json!({"protocolVersion": body["params"]["protocolVersion"], "capabilities": {"tools": {}}, "serverInfo": {"name": "claudiu", "version": "0"}}),
+            Some("tools/list") => json!({"tools": [{"name": "expand", "description": "Return kept-aside output by handle.", "inputSchema": {"type": "object", "properties": {"handle": {"type": "string"}}, "required": ["handle"]}}]}),
+            Some("tools/call") => json!({"content": [{"type": "text", "text": format!("EXPANDED:{}", body["params"]["arguments"]["handle"])}]}),
+            _ => return (Duration::ZERO, json!({"jsonrpc": "2.0", "id": id, "result": {}})),
+        };
+        (Duration::ZERO, json!({"jsonrpc": "2.0", "id": id, "result": result}))
+    }));
+    let dir = scratch("c13");
+    let (conn, rx) = Probe::spawn(&dir);
+    Probe::init(&conn, false);
+    let made = conn.call("session/new", json!({"cwd": dir.to_string_lossy(), "mcpServers": [{"type": "http", "name": "claudiu", "url": server.url("mcp"), "headers": []}], "_meta": Probe::meta(&Options::default())}), Duration::from_secs(90)).expect("session/new");
+    let sid = made["sessionId"].as_str().unwrap().to_string();
+    let _ = conn.call("session/set_mode", json!({"sessionId": sid, "modeId": "bypassPermissions"}), Duration::from_secs(30));
+    let mut p = Probe { conn, rx, sid, dir, elicit: Box::new(|_| json!({"action": "cancel"})), elicitations: Vec::new() };
+    let t = p.turn("Call the expand tool from the claudiu MCP server with handle abc123def456 and tell me exactly what it returned.");
+    show("turn", &t);
+    println!("  mcp requests seen by the server: {:?}", server.calls().iter().map(|c| c.body["method"].clone()).collect::<Vec<_>>());
+    p.quit();
+}
+
+/// 14. UserPromptSubmit over http: does it fire on a prompt, and can it add context for the model?
+fn c14_prompt_hook() {
+    let started = Instant::now();
+    let server = HookServer::start(Arc::new(|path, _| {
+        if path == "prompt" {
+            (Duration::ZERO, json!({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": "The secret word is KIWI."}}))
+        } else {
+            (Duration::ZERO, json!({}))
+        }
+    }));
+    let mut settings = json!({"disableAllHooks": false, "hooks": {}});
+    settings["hooks"]["UserPromptSubmit"] = json!([{"hooks": [{"type": "http", "url": server.url("prompt"), "timeout": 20, "onFailure": "block"}]}]);
+    settings["hooks"]["SessionStart"] = json!([{"hooks": [{"type": "http", "url": server.url("start"), "timeout": 20}]}]);
+    let mut p = Probe::open("c14", Options { settings, ..Options::default() });
+    println!("  session ready at {:.2}s; hook calls before the first prompt: {:?}", started.elapsed().as_secs_f64(), server.calls().iter().map(|c| c.path.clone()).collect::<Vec<_>>());
+    let t = p.turn("What is the secret word? One word.");
+    show("turn", &t);
+    println!("  hook calls: {:?}", server.calls().iter().map(|c| (c.path.clone(), c.body["hook_event_name"].clone())).collect::<Vec<_>>());
+    p.quit();
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let checks: Vec<(&str, fn())> = vec![
@@ -726,6 +801,9 @@ fn main() {
         ("c9", c9_questions),
         ("c10", c10_compaction),
         ("c11", c11_rewind),
+        ("c12", c12_shapes),
+        ("c13", c13_mcp_http),
+        ("c14", c14_prompt_hook),
     ];
     for (name, f) in checks {
         if args.is_empty() || args.iter().any(|a| a == name) {

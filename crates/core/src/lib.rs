@@ -4,9 +4,16 @@
 pub mod acp;
 mod core;
 mod event;
+mod guard;
+mod hooks;
+mod http;
+mod mcp;
+mod policy;
+mod shell;
 mod store;
 
 pub use acp::AdapterCommand;
-pub use core::{Clock, Config, Core};
-pub use event::{Event, SessionId, SessionRecord, UsageRow, kind};
+pub use core::{Clock, Config, Core, GuardState};
+pub use guard::GuardConfig;
+pub use event::{AccessRequest, Decision, Event, SessionId, SessionRecord, UsageRow, kind};
 pub use store::Store;

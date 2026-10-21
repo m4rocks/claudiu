@@ -10,6 +10,7 @@
 //! - `{"wait_cancel": true}`: blocks until `session/cancel` arrives; the turn then ends as `cancelled`.
 //!
 //! Turns beyond the script end at once with `end_turn`.
+//! If `FAKE_ACP_LOG` names a file, every message received is appended to it as one JSON line.
 
 use std::io::{BufRead, Write};
 
@@ -93,7 +94,13 @@ fn main() {
         next_request: 0,
     };
     let mut created = 0;
+    let log = std::env::var("FAKE_ACP_LOG").ok();
     while let Some(msg) = fake.read() {
+        if let Some(path) = &log {
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+                let _ = writeln!(f, "{msg}");
+            }
+        }
         let id = msg["id"].clone();
         match msg["method"].as_str() {
             Some("initialize") => fake.reply(id, json!({"protocolVersion": 1, "agentCapabilities": {}})),
@@ -101,7 +108,8 @@ fn main() {
                 created += 1;
                 fake.session = format!("fake-session-{created}");
                 let session = fake.session.clone();
-                fake.reply(id, json!({"sessionId": session}));
+                let modes = ["default", "acceptEdits", "plan", "auto", "bypassPermissions"].map(|m| json!({"value": m, "name": m}));
+                fake.reply(id, json!({"sessionId": session, "configOptions": [{"id": "mode", "category": "mode", "currentValue": "default", "options": modes}]}));
             }
             Some("session/load") => {
                 fake.session = msg["params"]["sessionId"].as_str().unwrap_or("").to_string();
@@ -117,6 +125,7 @@ fn main() {
                 fake.reply(id, json!({"stopReason": stop}));
             }
             Some("session/cancel") => fake.cancelled = true,
+            Some("session/set_mode") => fake.reply(id, json!({})),
             Some(_) if !id.is_null() => fake.send(json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32601, "message": "method not found"}})),
             _ => {}
         }

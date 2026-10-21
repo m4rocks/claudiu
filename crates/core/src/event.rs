@@ -45,6 +45,9 @@ pub mod kind {
     pub const INTERRUPTED: &str = "interrupted";
     pub const ERROR: &str = "error";
     pub const ADAPTER_EXIT: &str = "adapter_exit";
+    pub const GUARDS_OFF: &str = "guards_off";
+    pub const ACCESS_REQUESTED: &str = "access_requested";
+    pub const ACCESS_RESOLVED: &str = "access_resolved";
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -63,4 +66,22 @@ pub struct UsageRow {
     pub used: Option<i64>,
     pub size: Option<i64>,
     pub raw: Value,
+}
+
+/// A write outside the project that the model asked for and the user has not answered yet.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AccessRequest {
+    pub id: u64,
+    pub path: std::path::PathBuf,
+    pub reason: String,
+}
+
+/// The user's answer to an [`AccessRequest`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Decision {
+    Deny,
+    /// Allowed for this task only.
+    Task,
+    /// Allowed for every task in this project.
+    Project,
 }
