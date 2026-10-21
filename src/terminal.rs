@@ -2,7 +2,7 @@
 
 use std::borrow::Cow;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
@@ -65,53 +65,130 @@ pub struct SpawnSpec {
     pub env: Vec<(String, String)>,
 }
 
+/// How messages reach the PTY's event loop: queued while the process is still being created, then sent directly.
+enum Link {
+    Starting(Vec<Msg>),
+    Ready(EventLoopSender),
+    Failed,
+}
+
 pub struct Terminal {
     pub term: Arc<FairMutex<Term<Listener>>>,
-    sender: EventLoopSender,
+    link: Arc<Mutex<Link>>,
+    start_error: Arc<Mutex<Option<String>>>,
     cols: AtomicU32,
     rows: AtomicU32,
 }
 
+/// Create the PTY, start the child and its event loop. Slow for a big executable (the OS scans it first).
+fn start_pty(
+    spec: &SpawnSpec,
+    window_size: WindowSize,
+    term: Arc<FairMutex<Term<Listener>>>,
+    listener: Listener,
+) -> anyhow::Result<EventLoopSender> {
+    let program = if spec.program.contains(' ') && !spec.program.starts_with('"') {
+        format!("\"{}\"", spec.program)
+    } else {
+        spec.program.clone()
+    };
+    let options = tty::Options {
+        shell: Some(tty::Shell::new(program, spec.args.clone())),
+        working_directory: spec.cwd.clone(),
+        drain_on_exit: true,
+        env: spec.env.iter().cloned().collect(),
+        // Arguments may contain spaces (e.g. a settings file path): quote them properly.
+        #[cfg(target_os = "windows")]
+        escape_args: true,
+    };
+    // alacritty's ConPTY setup asserts on failure; surface that as a normal startup error instead of a crash.
+    let pty = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| tty::new(&options, window_size, 0)))
+        .map_err(|_| anyhow::anyhow!("the pseudo terminal could not be created"))??;
+    let event_loop = EventLoop::new(term, listener, pty, true, false)?;
+    let sender = event_loop.channel();
+    event_loop.spawn();
+    Ok(sender)
+}
+
 impl Terminal {
-    pub fn spawn(spec: &SpawnSpec, cols: u16, rows: u16) -> anyhow::Result<(Self, UnboundedReceiver<Event>)> {
+    fn build(spec: &SpawnSpec, cols: u16, rows: u16) -> (Self, UnboundedReceiver<Event>, Listener, WindowSize) {
         let (tx, rx) = unbounded();
         let listener = Listener(tx);
-
-        let program = if spec.program.contains(' ') && !spec.program.starts_with('"') {
-            format!("\"{}\"", spec.program)
-        } else {
-            spec.program.clone()
-        };
-        let options = tty::Options {
-            shell: Some(tty::Shell::new(program, spec.args.clone())),
-            working_directory: spec.cwd.clone(),
-            drain_on_exit: true,
-            env: spec.env.iter().cloned().collect(),
-            // Arguments may contain spaces (e.g. a settings file path): quote them properly.
-            #[cfg(target_os = "windows")]
-            escape_args: true,
-        };
         let window_size = WindowSize { num_lines: rows, num_cols: cols, cell_width: 8, cell_height: 16 };
-        // alacritty's ConPTY setup asserts on failure; surface that as a normal startup error instead of a crash.
-        let pty = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| tty::new(&options, window_size, 0)))
-            .map_err(|_| anyhow::anyhow!("the pseudo terminal could not be created"))??;
-
         let size = TermSize::new(cols as usize, rows as usize);
         let config = Config { scrolling_history: 10_000, ..Default::default() };
         let term = Arc::new(FairMutex::new(Term::new(config, &size, listener.clone())));
+        let _ = spec;
+        let this = Self {
+            term,
+            link: Arc::new(Mutex::new(Link::Starting(vec![]))),
+            start_error: Arc::new(Mutex::new(None)),
+            cols: AtomicU32::new(cols as u32),
+            rows: AtomicU32::new(rows as u32),
+        };
+        (this, rx, listener, window_size)
+    }
 
-        let event_loop = EventLoop::new(term.clone(), listener, pty, true, false)?;
-        let sender = event_loop.channel();
-        event_loop.spawn();
+    /// Start the child and wait for it to exist (an unstartable program is an `Err`).
+    pub fn spawn(spec: &SpawnSpec, cols: u16, rows: u16) -> anyhow::Result<(Self, UnboundedReceiver<Event>)> {
+        let (this, rx, listener, window_size) = Self::build(spec, cols, rows);
+        let sender = start_pty(spec, window_size, this.term.clone(), listener)?;
+        *this.link.lock().unwrap() = Link::Ready(sender);
+        Ok((this, rx))
+    }
 
-        Ok((
-            Self { term, sender, cols: AtomicU32::new(cols as u32), rows: AtomicU32::new(rows as u32) },
-            rx,
-        ))
+    /// Return at once and start the child on another thread: creating a process from a very large executable
+    /// takes about a second, which would freeze the window. Input and resizes sent meanwhile are queued. If the
+    /// child cannot start, the terminal reports an exit and `start_error` says why.
+    pub fn spawn_deferred(spec: &SpawnSpec, cols: u16, rows: u16) -> (Self, UnboundedReceiver<Event>) {
+        let (this, rx, listener, window_size) = Self::build(spec, cols, rows);
+        let (spec, term, link, error) = (spec.clone(), this.term.clone(), Arc::downgrade(&this.link), this.start_error.clone());
+        std::thread::spawn(move || {
+            let outcome = start_pty(&spec, window_size, term, listener.clone());
+            // The terminal may be gone already (the session was closed while starting): then drop the new child.
+            let Some(link) = link.upgrade() else {
+                if let Ok(sender) = outcome {
+                    let _ = sender.send(Msg::Shutdown);
+                }
+                return;
+            };
+            let mut link = link.lock().unwrap();
+            match outcome {
+                Ok(sender) => {
+                    if let Link::Starting(queued) = std::mem::replace(&mut *link, Link::Failed) {
+                        for msg in queued {
+                            let _ = sender.send(msg);
+                        }
+                    }
+                    *link = Link::Ready(sender);
+                }
+                Err(e) => {
+                    *link = Link::Failed;
+                    *error.lock().unwrap() = Some(e.to_string());
+                    listener.send_event(Event::Exit);
+                }
+            }
+        });
+        (this, rx)
+    }
+
+    /// Why the child could not be started, for a terminal made by `spawn_deferred`.
+    pub fn start_error(&self) -> Option<String> {
+        self.start_error.lock().unwrap().clone()
+    }
+
+    fn send(&self, msg: Msg) {
+        match &mut *self.link.lock().unwrap() {
+            Link::Starting(queue) => queue.push(msg),
+            Link::Ready(sender) => {
+                let _ = sender.send(msg);
+            }
+            Link::Failed => {}
+        }
     }
 
     pub fn write(&self, bytes: impl Into<Cow<'static, [u8]>>) {
-        let _ = self.sender.send(Msg::Input(bytes.into()));
+        self.send(Msg::Input(bytes.into()));
     }
 
     pub fn size(&self) -> (u16, u16) {
@@ -131,14 +208,14 @@ impl Terminal {
         self.cols.store(cols as u32, Ordering::Relaxed);
         self.rows.store(rows as u32, Ordering::Relaxed);
         self.term.lock().resize(TermSize::new(cols as usize, rows as usize));
-        let _ = self.sender.send(Msg::Resize(self.window_size(cell_w, cell_h)));
+        self.send(Msg::Resize(self.window_size(cell_w, cell_h)));
     }
 }
 
 impl Drop for Terminal {
     fn drop(&mut self) {
         // Closing the pseudo console also terminates the child.
-        let _ = self.sender.send(Msg::Shutdown);
+        self.send(Msg::Shutdown);
     }
 }
 

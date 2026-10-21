@@ -239,6 +239,10 @@ pub struct Store {
 impl Store {
     /// Platform app-data location, e.g. `%LOCALAPPDATA%\Claudiu\data\state.json`.
     pub fn default_path() -> PathBuf {
+        // Tests (and anyone running a second copy) can keep their state away from the real one.
+        if let Some(dir) = std::env::var_os("CLAUDIU_DATA_DIR") {
+            return PathBuf::from(dir).join("state.json");
+        }
         // Local (non-roaming) data: it holds machine-specific paths.
         directories::ProjectDirs::from("", "", "Claudiu")
             .map(|d| d.data_local_dir().join("state.json"))

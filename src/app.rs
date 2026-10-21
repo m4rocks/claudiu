@@ -984,13 +984,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let (terminal, rx) = match TerminalView::spawn(&spec) {
-            Ok(t) => t,
-            Err(e) => {
-                self.toast(format!("Could not start {} in {}: {e}", spec.program, spec.cwd.as_deref().unwrap_or(std::path::Path::new(".")).display()), true, cx);
-                return;
-            }
-        };
+        let (terminal, rx) = TerminalView::spawn(&spec);
         let id = record.id.clone();
         let loading = record.kind == SessionKind::Claude;
         record.exit_code = None;
@@ -1120,6 +1114,10 @@ impl Workspace {
     }
 
     fn on_exit(&mut self, id: &str, code: Option<i32>, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(err) = self.live_view(id).and_then(|v| v.read(cx).start_error()) {
+            let program = self.store.session(id).map(|r| r.display_title().to_string()).unwrap_or_default();
+            self.toast(format!("Could not start {program}: {err}"), true, cx);
+        }
         if self.logins.remove(id) {
             self.refresh_accounts(cx);
         }
@@ -2018,5 +2016,88 @@ mod split_tests {
         let (panes, slot, parked) = switch_layout(vec![ids(&["a", "b"]), ids(&["c", "d"]), ids(&["e", "f"])], &"d".to_string());
         assert_eq!((panes, slot), (ids(&["c", "d"]), 1));
         assert_eq!(parked, vec![ids(&["a", "b"]), ids(&["e", "f"])]);
+    }
+}
+
+#[cfg(test)]
+mod headless {
+    //! Drives the real workspace on gpui's test platform (no window opens) with a throwaway data folder, to catch
+    //! hangs and panics when sessions start, split and switch. Spawns the real `claude` and shell.
+    //! `cargo test -- --ignored headless`.
+    use super::*;
+    use gpui::TestAppContext;
+
+    fn run() {
+        let data = tempfile::tempdir().unwrap();
+        // SAFETY: set before any other thread reads the environment; this test owns the process.
+        unsafe { std::env::set_var("CLAUDIU_DATA_DIR", data.path()) };
+        let work = tempfile::tempdir().unwrap();
+        let mut cx = TestAppContext::single();
+        cx.update(|app| {
+            gpui_kit::init(app);
+            gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, app);
+        });
+        let (window, ws) = cx
+            .update(|app| {
+                gpui_kit::open_window(Default::default(), app, |window, app| app.new(|cx| Workspace::new(window, vec![], cx)))
+            })
+            .unwrap();
+        let draw = |cx: &mut TestAppContext| {
+            cx.update_window(window, |_, window, app| window.draw(app).clear(app)).unwrap();
+            cx.run_until_parked();
+        };
+        let step = |cx: &mut TestAppContext, f: &dyn Fn(&mut Workspace, &mut Window, &mut Context<Workspace>)| {
+            let t = std::time::Instant::now();
+            cx.update_window(window, |_, window, app| ws.update(app, |ws, cx| f(ws, window, cx))).unwrap();
+            let acted = t.elapsed();
+            draw(cx);
+            draw(cx);
+            // Starting a process must never run on the UI thread (a big `claude.exe` took a second to create).
+            assert!(acted < Duration::from_millis(400), "the window was blocked for {acted:?}");
+        };
+        let cwd = work.path().to_path_buf();
+        draw(&mut cx);
+        step(&mut cx, &|ws, w, cx| ws.new_claude(cwd.clone(), w, cx));
+        assert!(ws.read_with(&cx, |ws, _| ws.panes.len() == 1), "claude pane exists");
+        step(&mut cx, &|ws, w, cx| ws.new_shell(cwd.clone(), w, cx));
+        step(&mut cx, &|ws, w, cx| ws.split(w, cx));
+        step(&mut cx, &|ws, w, cx| ws.split_claude(cwd.clone(), w, cx));
+        assert!(ws.read_with(&cx, |ws, _| ws.panes.len() == 3), "three panes");
+        // Switch to a session outside the split: the split is parked, then comes back.
+        step(&mut cx, &|ws, w, cx| ws.new_shell(cwd.clone(), w, cx));
+        assert!(ws.read_with(&cx, |ws, _| ws.panes.len() == 1 && ws.groups.len() == 1), "split parked");
+        let member = ws.read_with(&cx, |ws, _| ws.groups[0][0].clone());
+        step(&mut cx, &|ws, w, cx| ws.show_session(&member, w, cx));
+        assert!(ws.read_with(&cx, |ws, _| ws.panes.len() == 3), "split restored");
+        step(&mut cx, &|ws, w, cx| ws.exit_split(w, cx));
+        assert!(ws.read_with(&cx, |ws, _| ws.panes.len() == 1));
+        // The GitHub pane as a session type: opens once per folder, "Ask Claude" starts a session beside it.
+        step(&mut cx, &|ws, w, cx| ws.open_github(cwd.clone(), false, w, cx));
+        assert!(ws.read_with(&cx, |ws, _| ws.panes.len() == 1 && ws.gh.len() == 1 && ws.gh_pane(&ws.panes[0]).is_some()), "github pane shown");
+        step(&mut cx, &|ws, w, cx| ws.open_github(cwd.clone(), false, w, cx));
+        assert!(ws.read_with(&cx, |ws, _| ws.gh.len() == 1), "one github pane per folder");
+        step(&mut cx, &|ws, _w, cx| {
+            let view = ws.gh[0].view.clone();
+            view.update(cx, |_, cx| cx.emit(crate::github::view::GhEvent::AskClaude("explain issue 1".into())));
+        });
+        assert!(ws.read_with(&cx, |ws, _| ws.panes.len() == 2), "Ask Claude opens a session beside the pane");
+        step(&mut cx, &|ws, w, cx| ws.exit_split(w, cx));
+    }
+
+    #[test]
+    #[ignore]
+    fn starting_sessions_does_not_hang_or_panic() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let t = std::thread::spawn(move || {
+            run();
+            tx.send(()).ok();
+        });
+        if rx.recv_timeout(std::time::Duration::from_secs(120)).is_err() {
+            // Either it froze (the bug) or the run panicked (the sender dropped).
+            match t.is_finished() {
+                true => t.join().unwrap(),
+                false => panic!("the workspace froze while starting sessions"),
+            }
+        }
     }
 }

@@ -74,9 +74,14 @@ pub const FONT: &str = "Cascadia Mono";
 pub const FONT: &str = "Menlo";
 
 impl TerminalView {
-    /// Spawn the process first (so failures can be reported), then wrap it in a view.
-    pub fn spawn(spec: &SpawnSpec) -> anyhow::Result<(Terminal, UnboundedReceiver<TermEvent>)> {
-        Terminal::spawn(spec, 120, 32)
+    /// Start the process in the background, so a slow start never freezes the window. A failure to start
+    /// shows up as an exit with `start_error` set.
+    pub fn spawn(spec: &SpawnSpec) -> (Terminal, UnboundedReceiver<TermEvent>) {
+        Terminal::spawn_deferred(spec, 120, 32)
+    }
+
+    pub fn start_error(&self) -> Option<String> {
+        self.terminal.start_error()
     }
 
     pub fn new(
