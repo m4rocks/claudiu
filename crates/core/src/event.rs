@@ -48,6 +48,8 @@ pub mod kind {
     pub const GUARDS_OFF: &str = "guards_off";
     pub const ACCESS_REQUESTED: &str = "access_requested";
     pub const ACCESS_RESOLVED: &str = "access_resolved";
+    pub const DELEGATION_STARTED: &str = "delegation_started";
+    pub const DELEGATION_ENDED: &str = "delegation_ended";
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -57,6 +59,8 @@ pub struct SessionRecord {
     pub title: Option<String>,
     pub adapter_session_id: Option<String>,
     pub created_ms: i64,
+    /// The task that started this session as a subagent.
+    pub parent: Option<SessionId>,
 }
 
 /// One reading of a session's context window, from the adapter's usage updates.

@@ -58,6 +58,7 @@ const MIGRATIONS: &[&str] = &[
         ts_ms INTEGER NOT NULL,
         PRIMARY KEY (session_id, agent, key)
     );",
+    "ALTER TABLE sessions ADD COLUMN parent TEXT;",
 ];
 
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
@@ -133,8 +134,8 @@ impl Store {
         let rec = rec.clone();
         self.write(move |c| {
             c.execute(
-                "INSERT INTO sessions (id, cwd, title, adapter_session_id, created_ms) VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![rec.id.0, rec.cwd, rec.title, rec.adapter_session_id, rec.created_ms],
+                "INSERT INTO sessions (id, cwd, title, adapter_session_id, created_ms, parent) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![rec.id.0, rec.cwd, rec.title, rec.adapter_session_id, rec.created_ms, rec.parent.map(|p| p.0)],
             )?;
             Ok(())
         })
@@ -224,9 +225,9 @@ impl Store {
 
     pub fn sessions(&self) -> Result<Vec<SessionRecord>> {
         self.read(|c| {
-            let mut q = c.prepare("SELECT id, cwd, title, adapter_session_id, created_ms FROM sessions ORDER BY created_ms, rowid")?;
+            let mut q = c.prepare("SELECT id, cwd, title, adapter_session_id, created_ms, parent FROM sessions ORDER BY created_ms, rowid")?;
             let rows = q.query_map([], |r| {
-                Ok(SessionRecord { id: SessionId(r.get(0)?), cwd: r.get(1)?, title: r.get(2)?, adapter_session_id: r.get(3)?, created_ms: r.get(4)? })
+                Ok(SessionRecord { id: SessionId(r.get(0)?), cwd: r.get(1)?, title: r.get(2)?, adapter_session_id: r.get(3)?, created_ms: r.get(4)?, parent: r.get::<_, Option<String>>(5)?.map(SessionId) })
             })?;
             Ok(rows.collect::<rusqlite::Result<_>>()?)
         })

@@ -3,6 +3,7 @@
 
 pub mod acp;
 mod core;
+mod delegate;
 mod event;
 mod firewall;
 mod guard;

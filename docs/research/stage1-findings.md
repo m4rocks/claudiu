@@ -59,3 +59,11 @@ Settings Claudiu must apply, learned here:
 - `UserPromptSubmit` http hooks fire on every prompt, and `additionalContext` in `hookSpecificOutput` reaches the model. This is how a decision from the user is told to it once.
 - An http MCP server (`{"type":"http","name":"claudiu","url":...,"headers":[]}` in `session/new` `mcpServers`) works. Claude Code sends `server/discover` (answer -32601), `initialize`, `notifications/initialized`, `tools/list` and `tools/call`. The tools show up as `mcp__claudiu__<name>`, but Claude Code defers them behind `ToolSearch`, which costs the model one extra call.
 - http hooks emit no `hook_started` or `hook_response` events over ACP, so end-to-end hook latency is not observable from the client side.
+
+## Addendum: trimmed subagent session (check c15)
+
+- `session/new` offers the config options `mode`, `model` and `effort` (default `high`); `session/set_config_option` accepts `model=haiku` and `effort=low`.
+- The `tools` option in `_meta.claudeCode.options` is honoured: a session started with `["Read","Grep","Glob"]` reports exactly those three tools in its init message.
+- Raw `assistant` SDK messages carry `message.id` and `message.usage` with `input_tokens`, `cache_creation_input_tokens`, `cache_read_input_tokens` and `output_tokens`. The core meters a subagent from these, counting each message id once at its largest values.
+- A trimmed scout started on Haiku had a first request of about 6.3k tokens (3.1k cache write, 3.2k cache read); the GO bar for a subagent cold start is 5k, so measure it with the real MCP server and profile prompt in `bench`.
+- Not verified: whether `settingSources: []`, `strictMcpConfig`, `promptSuggestions`, `title` and `maxTurns` change anything through the adapter (they are passed; the session starts and answers).

@@ -132,6 +132,8 @@ struct Probe {
     elicit: Box<dyn Fn(&Value) -> Value>,
     /// Every elicitation request seen.
     elicitations: Vec<Value>,
+    /// What `session/new` answered.
+    made: Value,
 }
 
 #[derive(Default, Debug)]
@@ -199,7 +201,7 @@ impl Probe {
                 println!("  (set_mode bypassPermissions failed: {e})");
             }
         }
-        Probe { conn, rx, sid, dir, elicit: Box::new(|_| json!({"action": "cancel"})), elicitations: Vec::new() }
+        Probe { conn, rx, sid, dir, elicit: Box::new(|_| json!({"action": "cancel"})), elicitations: Vec::new(), made }
     }
 
     fn turn(&mut self, text: &str) -> Turn {
@@ -514,7 +516,7 @@ fn c6_system_prompt() {
         Duration::from_secs(90),
     );
     println!("  load: {}", loaded.as_ref().map(|v| v.to_string().chars().take(120).collect::<String>()).unwrap_or_else(|e| e.to_string()));
-    let mut q = Probe { conn, rx, sid, dir, elicit: Box::new(|_| json!({"action": "cancel"})), elicitations: Vec::new() };
+    let mut q = Probe { conn, rx, sid, dir, elicit: Box::new(|_| json!({"action": "cancel"})), elicitations: Vec::new(), made: Value::Null };
     let _ = q.conn.call("session/set_mode", json!({"sessionId": q.sid, "modeId": "bypassPermissions"}), Duration::from_secs(30));
     // Replayed history arrives as updates first; the next turn shows what is in force.
     let t2 = q.turn("What is your codeword? One word.");
@@ -572,7 +574,7 @@ fn c8_project_disable() {
         let made = conn.call("session/new", json!({"cwd": dir.to_string_lossy(), "mcpServers": [], "_meta": Probe::meta(&Options { settings, ..Options::default() })}), Duration::from_secs(90)).expect("session/new");
         let sid = made["sessionId"].as_str().unwrap().to_string();
         let _ = conn.call("session/set_mode", json!({"sessionId": sid, "modeId": "bypassPermissions"}), Duration::from_secs(30));
-        let mut p = Probe { conn, rx, sid, dir, elicit: Box::new(|_| json!({"action": "cancel"})), elicitations: Vec::new() };
+        let mut p = Probe { conn, rx, sid, dir, elicit: Box::new(|_| json!({"action": "cancel"})), elicitations: Vec::new(), made: Value::Null };
         let before = server.calls().len();
         let t = p.turn("Create note.txt containing the word hello using the Write tool. Quote any refusal.");
         println!("  [{label}] hook called: {}   note.txt created: {}   refusal reached model: {}", server.calls().len() > before, p.dir.join("note.txt").exists(), t.text.contains("STAGE1-REFUSED"));
@@ -759,7 +761,7 @@ fn c13_mcp_http() {
     let made = conn.call("session/new", json!({"cwd": dir.to_string_lossy(), "mcpServers": [{"type": "http", "name": "claudiu", "url": server.url("mcp"), "headers": []}], "_meta": Probe::meta(&Options::default())}), Duration::from_secs(90)).expect("session/new");
     let sid = made["sessionId"].as_str().unwrap().to_string();
     let _ = conn.call("session/set_mode", json!({"sessionId": sid, "modeId": "bypassPermissions"}), Duration::from_secs(30));
-    let mut p = Probe { conn, rx, sid, dir, elicit: Box::new(|_| json!({"action": "cancel"})), elicitations: Vec::new() };
+    let mut p = Probe { conn, rx, sid, dir, elicit: Box::new(|_| json!({"action": "cancel"})), elicitations: Vec::new(), made: Value::Null };
     let t = p.turn("Call the expand tool from the claudiu MCP server with handle abc123def456 and tell me exactly what it returned.");
     show("turn", &t);
     println!("  mcp requests seen by the server: {:?}", server.calls().iter().map(|c| c.body["method"].clone()).collect::<Vec<_>>());
@@ -787,6 +789,25 @@ fn c14_prompt_hook() {
     p.quit();
 }
 
+/// 15. A trimmed subagent session: which options does the adapter honour, and what does it offer to configure?
+fn c15_subagent() {
+    let options = json!({"tools": ["Read", "Grep", "Glob"], "settingSources": [], "strictMcpConfig": true, "promptSuggestions": false, "title": "scout: probe", "maxTurns": 5});
+    let mut p = Probe::open("c15", Options { options, system_prompt: Some("You are a scout. Answer in one short line.".into()), ..Options::default() });
+    let configs: Vec<String> = p.made["configOptions"].as_array().into_iter().flatten().map(|o| format!("{}={}", o["id"], o["currentValue"])).collect();
+    println!("  config options offered: {}", configs.join(", "));
+    for (id, value) in [("model", "haiku"), ("effort", "low")] {
+        let r = p.conn.call("session/set_config_option", json!({"sessionId": p.sid, "configId": id, "value": value}), Duration::from_secs(30));
+        println!("  set {id}={value}: {}", r.map_or_else(|e| format!("FAILED {e}"), |_| "ok".into()));
+    }
+    let t = p.turn("Name the tools you can call, comma separated, nothing else.");
+    println!("  answer: {}", t.text.trim());
+    if let Some((_, m)) = t.raw.iter().find(|(_, m)| m["type"] == "system" && m["subtype"] == "init") {
+        println!("  init: model={} tools={} mcp={} permissionMode={}", m["model"], m["tools"], m["mcp_servers"], m["permissionMode"]);
+    }
+    let usage: Vec<String> = t.raw.iter().filter(|(_, m)| m["type"] == "assistant").map(|(_, m)| format!("{}:{}", m["message"]["id"], m["message"]["usage"])).collect();
+    println!("  assistant usage messages: {}", usage.join(" | "));
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let checks: Vec<(&str, fn())> = vec![
@@ -804,6 +825,7 @@ fn main() {
         ("c12", c12_shapes),
         ("c13", c13_mcp_http),
         ("c14", c14_prompt_hook),
+        ("c15", c15_subagent),
     ];
     for (name, f) in checks {
         if args.is_empty() || args.iter().any(|a| a == name) {

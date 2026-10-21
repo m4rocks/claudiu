@@ -3,6 +3,7 @@
 //! Tool descriptions are short on purpose: every token here is paid on every request of every session.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use serde_json::{Value, json};
 
@@ -10,9 +11,26 @@ use crate::core::{Shared, SessionInfo};
 use crate::event::{SessionId, kind};
 use crate::guard::{Allowed, resolve};
 
-fn tools() -> Value {
+fn tools(subagent: bool) -> Value {
     let mut all = tools_without_index();
     all.as_array_mut().unwrap().extend(crate::index::tools().as_array().unwrap().iter().cloned());
+    if !subagent {
+        all.as_array_mut().unwrap().push(json!({
+            "name": "delegate",
+            "description": "Hand a bounded job to a subagent: scout, thinker, worker or verifier. Returns its receipt.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "profile": {"enum": ["scout", "thinker", "worker", "verifier"]},
+                    "goal": {"type": "string"}, "scope": {"type": "string"}, "constraints": {"type": "string"},
+                    "done": {"type": "string"}, "decided": {"type": "string"},
+                    "pointers": {"type": "array", "items": {"type": "string"}},
+                    "background": {"type": "boolean"}
+                },
+                "required": ["profile", "goal", "done"]
+            }
+        }));
+    }
     all
 }
 
@@ -44,7 +62,7 @@ fn text(t: &str) -> Value {
 }
 
 /// Handles one JSON-RPC request; `None` is a notification that gets an empty 202.
-pub fn handle(shared: &Shared, session: &SessionId, info: &SessionInfo, body: &Value) -> Option<Value> {
+pub fn handle(shared: &Shared, session: &SessionId, info: &Arc<SessionInfo>, body: &Value) -> Option<Value> {
     let id = body.get("id").cloned()?;
     let result = match body["method"].as_str().unwrap_or("") {
         "initialize" => json!({
@@ -53,14 +71,14 @@ pub fn handle(shared: &Shared, session: &SessionId, info: &SessionInfo, body: &V
             "serverInfo": {"name": "claudiu", "version": env!("CARGO_PKG_VERSION")}
         }),
         "ping" => json!({}),
-        "tools/list" => json!({"tools": tools()}),
+        "tools/list" => json!({"tools": tools(info.parent.is_some())}),
         "tools/call" => call(shared, session, info, &body["params"]),
         other => return Some(json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32601, "message": format!("{other} is not supported")}})),
     };
     Some(json!({"jsonrpc": "2.0", "id": id, "result": result}))
 }
 
-fn call(shared: &Shared, session: &SessionId, info: &SessionInfo, params: &Value) -> Value {
+fn call(shared: &Shared, session: &SessionId, info: &Arc<SessionInfo>, params: &Value) -> Value {
     let args = &params["arguments"];
     match params["name"].as_str().unwrap_or("") {
         "request_access" => {
@@ -68,15 +86,21 @@ fn call(shared: &Shared, session: &SessionId, info: &SessionInfo, params: &Value
                 return json!({"isError": true, "content": [{"type": "text", "text": "request_access needs a path and a reason."}]});
             };
             let target = resolve(Path::new(path), &info.cwd);
-            let grants = shared.policy.grants(session, &info.cwd);
+            let grants = shared.policy.grants(&info.policy_session, &info.cwd);
             let allowed = Allowed { cwd: &info.cwd, toolchain_dirs: &shared.guard.toolchain_dirs, grants: &grants };
             if allowed.permits(&target) {
                 return text("Already allowed; no request needed.");
             }
-            let request = info.add_request(target.clone(), reason.to_string());
-            let _ = shared.rec.record(session, kind::ACCESS_REQUESTED, json!({"request_id": request, "path": target.to_string_lossy(), "reason": reason}));
+            // A subagent's request is the parent task's to answer, and the answer covers both.
+            let (owner_id, owner) = info.parent.as_ref().map_or((session, info), |(id, parent)| (id, parent));
+            let request = owner.add_request(target.clone(), reason.to_string());
+            let _ = shared.rec.record(owner_id, kind::ACCESS_REQUESTED, json!({"request_id": request, "path": target.to_string_lossy(), "reason": reason, "from": session.to_string()}));
             text("Pending: the user has been asked. Keep working on other things; you will be told the answer.")
         }
+        "delegate" => match shared.engine() {
+            Some(engine) => text(&engine.delegate(session, info, args)),
+            None => text("Delegation is not available."),
+        },
         "expand" => text(&crate::firewall::expand(&shared.rec.store, args["handle"].as_str().unwrap_or(""), args["from"].as_u64(), args["to"].as_u64())),
         other => match shared.indexes.call(&info.cwd, other, args) {
             Some(answer) => text(&answer),

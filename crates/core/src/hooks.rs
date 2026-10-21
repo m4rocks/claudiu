@@ -50,7 +50,7 @@ pub fn handle(shared: &Arc<Shared>, path: &str, body: Value) -> (u16, Value) {
     match event {
         "pre" => {
             info.hooks_fired();
-            (200, pre(shared, &session, &info.cwd, &body))
+            (200, pre(shared, &info.policy_session, &info.cwd, &body))
         }
         "prompt" => {
             info.hooks_fired();

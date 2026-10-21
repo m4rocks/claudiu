@@ -32,9 +32,14 @@ pub fn config(dir: &Path, script: &Value, now: &Arc<AtomicI64>) -> Config {
 
 impl Harness {
     pub fn new(script: Value) -> Harness {
+        Harness::with(script, |c| c)
+    }
+
+    /// Like `new`, with the core's config adjusted first.
+    pub fn with(script: Value, adjust: impl FnOnce(Config) -> Config) -> Harness {
         let dir = TempDir::new().unwrap();
         let now = Arc::new(AtomicI64::new(T0));
-        let core = Core::open(config(dir.path(), &script, &now)).unwrap();
+        let core = Core::open(adjust(config(dir.path(), &script, &now))).unwrap();
         Harness { dir, core, now }
     }
 
