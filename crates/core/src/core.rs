@@ -133,6 +133,7 @@ pub(crate) struct Shared {
     pub rec: Arc<Recorder>,
     pub guard: GuardConfig,
     pub policy: Policy,
+    pub indexes: crate::index::Indexes,
     permission_mode: String,
     canary_timeout: Duration,
     /// Random, part of every hook url, so other local processes cannot call the endpoint.
@@ -174,6 +175,7 @@ impl Core {
             rec: rec.clone(),
             guard: config.guard,
             policy: Policy::new(config.data_dir.join("policy")),
+            indexes: Default::default(),
             permission_mode: config.permission_mode,
             canary_timeout: config.canary_timeout,
             token: uuid::Uuid::new_v4().simple().to_string(),
@@ -197,6 +199,11 @@ impl Core {
 
     pub fn events(&self, session: &SessionId) -> Result<Vec<Event>> {
         self.rec.store.events(session)
+    }
+
+    /// How many files the repo index of this session has parsed so far (a change should cost only its own files).
+    pub fn index_parses(&self, session: &SessionId) -> u64 {
+        self.shared.session(session).map_or(0, |i| self.shared.indexes.parses(&i.cwd))
     }
 
     pub fn guard_state(&self, session: &SessionId) -> GuardState {
@@ -270,7 +277,7 @@ impl Core {
         let cwd_text = cwd.to_string_lossy().into_owned();
         // The session must be known to the endpoint before the adapter can call a hook for it.
         self.shared.sessions.lock().unwrap().insert(id.clone(), Arc::new(SessionInfo::new(cwd.to_path_buf())));
-        let options = json!({"settings": crate::hooks::settings(self.hook_url(&id, "").trim_end_matches('/')), "enableFileCheckpointing": true});
+        let options = json!({"settings": crate::hooks::settings(self.hook_url(&id, "").trim_end_matches('/')), "enableFileCheckpointing": true, "allowedTools": ["mcp__claudiu"]});
         let servers = json!([{"type": "http", "name": "claudiu", "url": self.mcp_url(&id), "headers": []}]);
         let new = json!({"cwd": cwd_text, "mcpServers": servers, "_meta": {"claudeCode": {"options": options}}});
         let made = conn.call("session/new", new, CALL_TIMEOUT)?;

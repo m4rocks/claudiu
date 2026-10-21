@@ -8,6 +8,7 @@ mod firewall;
 mod guard;
 mod hooks;
 mod http;
+mod index;
 mod mcp;
 mod policy;
 mod shell;

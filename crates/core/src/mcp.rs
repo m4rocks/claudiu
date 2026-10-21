@@ -11,6 +11,12 @@ use crate::event::{SessionId, kind};
 use crate::guard::{Allowed, resolve};
 
 fn tools() -> Value {
+    let mut all = tools_without_index();
+    all.as_array_mut().unwrap().extend(crate::index::tools().as_array().unwrap().iter().cloned());
+    all
+}
+
+fn tools_without_index() -> Value {
     json!([
         {
             "name": "expand",
@@ -72,6 +78,9 @@ fn call(shared: &Shared, session: &SessionId, info: &SessionInfo, params: &Value
             text("Pending: the user has been asked. Keep working on other things; you will be told the answer.")
         }
         "expand" => text(&crate::firewall::expand(&shared.rec.store, args["handle"].as_str().unwrap_or(""), args["from"].as_u64(), args["to"].as_u64())),
-        other => json!({"isError": true, "content": [{"type": "text", "text": format!("Unknown tool {other}.")}]}),
+        other => match shared.indexes.call(&info.cwd, other, args) {
+            Some(answer) => text(&answer),
+            None => json!({"isError": true, "content": [{"type": "text", "text": format!("Unknown tool {other}.")}]}),
+        },
     }
 }
