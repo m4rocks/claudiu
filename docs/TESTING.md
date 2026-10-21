@@ -79,6 +79,7 @@ Everything below needs eyes and a keyboard. Roughly ordered by risk. `[ ]` = not
 ## 11. Chat tab (Claude through ACP)
 Automated: `cargo test -- --ignored headless` also installs the adapter into a throwaway data folder, starts a chat, checks it lists the agent's skills and commands, sends one tiny prompt (costs a few cents), closes the chat and reopens it from history. Needs Node.js, npm and a signed-in `claude`.
 - [ ] The sidebar tabs **Chat | Code** (Chat first) switch the list; Code keeps + Claude / + Shell / GitHub, Chat shows + New chat and the chat list. Search filters whichever list is shown. A chat's conversation never shows up in the Code list after a rescan.
+- [ ] **+ New chat** opens the empty chat at once with the cursor in the box; Claude starts behind it with no "Starting" message. Type and send before it is ready: the message shows right away and is delivered as soon as Claude is up, in order.
 - [ ] First **+ New chat** shows "Setting up the Claude adapter (first time only)…" (one `npm install` into `<data>/acp`, about 15 s), then the empty chat. Later chats start in a few seconds.
 - [ ] Without Node.js the pane says so with a link; with a broken `claude` path it says Claude Code was not found. "Try again" retries.
 - [ ] Task Manager while a chat is open: one `node.exe` and, below it, **your** `claude.exe` (`~/.local/bin`), not a bundled copy. Ending the chat (row ×, pane ×, or closing the app) leaves neither behind: check this by hand, the automated run only proves the chat view is dropped (which closes the adapter).
@@ -89,7 +90,15 @@ Automated: `cargo test -- --ignored headless` also installs the adapter into a t
 - [ ] Chats appear in the split dropdown and the row menu ("Add to split").
 - [ ] Chats belong to no account: after **Switch account** the open chats restart under the new login once idle, with the same conversation; the 5 HOUR / 7 DAY / CONTEXT meters follow the chat you are looking at (they read "after first message" until its first reply).
 - [ ] **Ctrl+Shift+M** opens a new chat. Ctrl+V with a picture (or a copied image file) in the input attaches it as a thumbnail with a ×; Send includes it, and the sent message shows the picture. Text still pastes as text. Images over 4.5 MB are refused with a toast; reopened history shows "[image]" for old pictures.
-- [ ] A new chat is **not tied to a project** (the chip under the input reads "No project", the top bar has no editor buttons). Before the first message the chip opens a project list; picking one restarts the conversation in that folder, and from then on the chip only shows the project. **New chat here** in a project's menu starts it tied.
+- [ ] A new chat is **not tied to a project** (the chip under the input reads "No project", the top bar has no editor buttons). The chip opens a project list whenever the chat is idle (not mid-turn): before the first message picking one just restarts in that folder; after messages the old ones stay on screen above a notice and Claude starts a new conversation in the folder; the earlier messages are compacted into a summary (Haiku, in the background) that rides along with your next message, so Claude knows the gist (ask "what were we doing?"). The chip stays visible, but not clickable, while Claude is answering. The earlier Claude session is no longer listed under the chat, so it can show up in the Code list after a rescan. **New chat here** in a project's menu starts it tied.
+
+- [ ] The sidebar reopens on the tab (Chat or Code) you left it on. With no session selected, the Chat tab shows a chat home (New chat, recent chats), the Code tab the code welcome page.
+- [ ] `/` works in the middle of a message ("please run /sk" offers matches; picking one completes only that word and keeps the rest). The list scrolls (wheel, Up/Down) through every skill and command, with no cut-off.
+- [ ] Open a new chat, type "half a thought" without sending, quit and start Claudiu: the chat is still there, loads, and the box holds "half a thought". Do the same without typing: the empty chat is gone after restart (and when closed, and on quit).
+- [ ] Quit Claudiu with a chat that has messages and reopen it: the old conversation is on screen at once, with "Loading the conversation…" at the bottom, then the live one replaces it and the box accepts Send.
+- [ ] Right-click a chat or a Claude Code session > **Regenerate title**: a toast says "Writing a new title…", then the row is renamed (a session's new name also shows in Claude Code's `/resume`). A chat or session with nothing said says "Nothing to title yet."
+- [ ] Split cards in the sidebar are compact (no "SPLIT" label or focus marker); chats can be members of a split and show in the card in both tabs.
+- [ ] Every icon is a Lucide icon: session/chat/GitHub rows, close, archive, plus, chevrons, search, settings, split and orientation buttons, the branch pill, GitHub states and checks. A working session or chat, and a running tool, show a turning loader. No blank spots where an icon should be.
 
 ### Chats and code sessions reaching each other
 Automated by `headless` (the confirmation, the decline, a chat opened with a first message, a code session opened and read).
@@ -97,3 +106,11 @@ Automated by `headless` (the confirmation, the decline, a chat opened with a fir
 - [ ] In a code session ask "start a chat about X": a dialog appears, Allow opens the Chat tab with a chat that already received the first message, not tied to a project. Same for reading: `read_chat` works for an open chat, `read_code_session` for a running session; an ended session or closed chat says it can't be read.
 - [ ] A request for an unknown project, or with a first message over 2,000 characters, is answered at once, without a dialog. The dialog shows the whole first message (scrolling if long). Several requests queue, one dialog at a time; opening Settings (Ctrl+,) while one is showing declines it. Allowing a request after Claude gave up (more than 5 minutes) does nothing and says so.
 - [ ] **Remove from list** on a chat, then restart Claudiu: its conversation does not appear in the Code list.
+
+## Generative UI (`ui` blocks in chat)
+
+- [ ] Ask a chat for "a dashboard of three stats with a bar chart" and "a comparison table": each comes back as a native card/table/drawing in the dark theme, not as code.
+- [ ] While it streams, the block fills in without flicker or errors; an SVG shows "Drawing…" until it closes.
+- [ ] Reopen the chat (cache and `session/load`): the blocks render again. Copying a block's text yields the `ui` source.
+- [ ] A link in a block opens the browser; nothing else is clickable.
+Automated: `cargo test chat::ui` (parser, plus a headless draw of a sample block).

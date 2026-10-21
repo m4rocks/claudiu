@@ -1,9 +1,10 @@
 //! What a chat shows, built from the agent's `session/update` notifications. No GPUI here: `apply` is the one
 //! place that knows the update shapes, so the view only draws `Item`s.
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Tool {
     pub id: String,
     pub title: String,
@@ -13,7 +14,7 @@ pub struct Tool {
     pub output: String,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Item {
     User(String),
     Agent(String),
@@ -104,6 +105,25 @@ fn stream(items: &mut Vec<Item>, text: &str, same: fn(&mut Item) -> Option<&mut 
     } else {
         items.push(new(text.to_string()));
     }
+}
+
+/// The last `last` messages as plain text, newest part kept when long (for another session, or to title the chat).
+pub fn transcript(items: &[Item], last: usize) -> String {
+    let lines: Vec<String> = items
+        .iter()
+        .filter_map(|i| match i {
+            Item::User(t) => Some(format!("User: {t}")),
+            Item::Agent(t) => Some(format!("Claude: {t}")),
+            Item::Tool(t) => Some(format!("[tool: {} ({})]", t.title, t.status)),
+            Item::Notice { text, .. } => Some(format!("[{text}]")),
+            Item::Thought(_) | Item::Plan(_) => None,
+        })
+        .collect();
+    let text = lines[lines.len().saturating_sub(last)..].join("
+
+");
+    let skip = text.chars().count().saturating_sub(30_000);
+    text.chars().skip(skip).collect()
 }
 
 pub fn apply(items: &mut Vec<Item>, meta: &mut Meta, u: &Value) {
@@ -198,6 +218,15 @@ pub fn apply(items: &mut Vec<Item>, meta: &mut Meta, u: &Value) {
     }
 }
 
+/// The `/word` the cursor (a byte offset) is in: it starts the text or follows whitespace. Returns its byte
+/// range and what was typed after the slash.
+pub fn slash_token(text: &str, cursor: usize) -> Option<(std::ops::Range<usize>, String)> {
+    let end = cursor.min(text.len());
+    let start = text[..end].char_indices().rev().find(|(_, c)| c.is_whitespace()).map_or(0, |(i, c)| i + c.len_utf8());
+    let word = &text[start..end];
+    word.starts_with('/').then(|| (start..end, word[1..].to_string()))
+}
+
 /// Commands matching what is typed after the `/`, best first (prefix matches before substring matches).
 pub fn matching<'a>(commands: &'a [Command], typed: &str) -> Vec<&'a Command> {
     let q = typed.to_lowercase();
@@ -218,6 +247,17 @@ pub fn matching<'a>(commands: &'a [Command], typed: &str) -> Vec<&'a Command> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_slash_word_is_found_wherever_the_cursor_is_in_it() {
+        assert_eq!(slash_token("/he", 3), Some((0..3, "he".into())));
+        assert_eq!(slash_token("please run /pony now", 15), Some((11..15, "pon".into())));
+        assert_eq!(slash_token("line one\n/sk", 12), Some((9..12, "sk".into())));
+        assert_eq!(slash_token("see src/main", 12), None, "a slash inside a word is a path, not a command");
+        assert_eq!(slash_token("/help me", 8), None, "the cursor is past the command");
+        assert_eq!(slash_token("é /x", 5), Some((3..5, "x".into())));
+        assert_eq!(slash_token("", 0), None);
+    }
 
     fn run(updates: &[Value]) -> (Vec<Item>, Meta) {
         let (mut items, mut meta) = (vec![], Meta::default());

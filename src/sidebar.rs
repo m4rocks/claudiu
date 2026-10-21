@@ -4,7 +4,7 @@ use std::{cell::RefCell, collections::HashMap, rc::Rc, time::{Duration, Instant}
 
 use gpui::{
     Animation, AnimationExt, AnyElement, AppContext, DragMoveEvent, SharedString, WeakEntity, canvas, ease_out_quint, ClickEvent, Context, Div, FontWeight, Hsla, InteractiveElement, IntoElement, MouseButton, MouseDownEvent, ParentElement, Pixels, Render,
-    Stateful, StatefulInteractiveElement, Styled, Window, WindowControlArea, div, prelude::FluentBuilder, pulsating_between, px,
+    Stateful, StatefulInteractiveElement, Styled, Window, WindowControlArea, div, prelude::FluentBuilder, px,
 };
 
 use gpui_kit::component::input::Input;
@@ -12,7 +12,8 @@ use crate::chat::store::ChatRecord;
 use crate::app::{CLOSE_MS, Act, Activity, MenuItem, Side, Workspace};
 use crate::store::{ExternalState, Id, Project, SessionKind, SessionRecord, now};
 use crate::theme::{self, hsla};
-use crate::widgets::{ago, avatar, button, clawd, cog, countdown, divider, icon_button, meter, section_label};
+use gpui_kit::assets::IconName;
+use crate::widgets::{ago, avatar, button, clawd, countdown, divider, icon, icon_button, meter, section_label, spinner};
 
 pub const SIDEBAR_W: f32 = 284.0;
 const PROJECT_SESSION_LIMIT: usize = 5;
@@ -20,9 +21,9 @@ const PROJECT_SESSION_LIMIT: usize = 5;
 #[derive(Clone)]
 struct Row {
     id: Id,
-    glyph: &'static str,
+    glyph: IconName,
     glyph_color: Hsla,
-    /// The dot is pulsing: the Claude session is working.
+    /// The icon is a spinner: the Claude session is working.
     pulse: bool,
     title: String,
     right: String,
@@ -152,16 +153,16 @@ impl Workspace {
         let (glyph, color) = match (rec.kind, running) {
             // Orange only when the session stopped and wants the user; gray otherwise, pulsing while it works.
             (SessionKind::Claude, true) => (
-                "●",
+                IconName::Bot,
                 match activity {
                     Some(Activity::Attention) => hsla(theme::ACCENT),
                     Some(Activity::Working) => hsla(0xa8a8a8),
                     None => hsla(0x6b6b6b),
                 },
             ),
-            (SessionKind::Shell, true) => ("$", hsla(theme::OK)),
-            (SessionKind::Claude, false) => ("○", hsla(theme::TEXT_FAINT)),
-            (SessionKind::Shell, false) => ("$", hsla(theme::TEXT_FAINT)),
+            (SessionKind::Shell, true) => (IconName::Terminal, hsla(theme::OK)),
+            (SessionKind::Claude, false) => (IconName::Bot, hsla(theme::TEXT_FAINT)),
+            (SessionKind::Shell, false) => (IconName::Terminal, hsla(theme::TEXT_FAINT)),
         };
         let stale = rec.claude.as_ref().is_some_and(|c| c.external == ExternalState::Missing);
         Row {
@@ -202,6 +203,9 @@ impl Workspace {
         }
         items.extend(self.split_items(&rec.id, running || rec.kind == SessionKind::Claude));
         items.push(item("Rename…", Act::Rename(rec.id.clone()), false, false));
+        if rec.kind == SessionKind::Claude {
+            items.push(item("Regenerate title", Act::RegenTitle(rec.id.clone()), false, false));
+        }
         if let Some(c) = &rec.claude {
             items.push(item("Copy Claude session ID", Act::CopyText(c.session_id.clone()), false, true));
         }
@@ -312,16 +316,11 @@ impl Workspace {
         let menu_id = id.clone();
         let close_id = id.clone();
         let archive_id = id.clone();
-        let dot = div().w(px(12.0)).flex_none().text_size(px(11.0)).text_color(row.glyph_color).child(row.glyph);
-        let dot: AnyElement = if row.pulse {
-            dot.with_animation(
-                gpui::SharedString::from(format!("pulse-{}-{}", row.scope, id)),
-                Animation::new(Duration::from_millis(1400)).repeat().with_easing(pulsating_between(0.25, 1.0)),
-                |d, t| d.opacity(t),
-            )
-            .into_any_element()
+        let dot = div().w(px(14.0)).flex_none().text_color(row.glyph_color);
+        let dot = if row.pulse {
+            dot.child(spinner(gpui::SharedString::from(format!("spin-{}-{}", row.scope, id)), 14.0))
         } else {
-            dot.into_any_element()
+            dot.child(icon(row.glyph, 14.0))
         };
         div()
             .id(gpui::SharedString::from(format!("row-{}-{}", row.scope, id)))
@@ -382,7 +381,7 @@ impl Workspace {
             )
             .when(row.running, |d| {
                 d.child(
-                    icon_button(gpui::SharedString::from(format!("close-{}-{close_id}", row.scope)), "×")
+                    icon_button(gpui::SharedString::from(format!("close-{}-{close_id}", row.scope)), IconName::X)
                         .invisible()
                         .group_hover("row", |s| s.visible())
                         .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
@@ -395,7 +394,7 @@ impl Workspace {
             .when(!row.running && row.scope != "chat", |d| {
                 let archive = !row.archived;
                 d.child(
-                    icon_button(gpui::SharedString::from(format!("archive-{}-{archive_id}", row.scope)), if archive { "⊟" } else { "↺" })
+                    icon_button(gpui::SharedString::from(format!("archive-{}-{archive_id}", row.scope)), if archive { IconName::Archive } else { IconName::ArchiveRestore })
                         .invisible()
                         .group_hover("row", |s| s.visible())
                         .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
@@ -406,36 +405,78 @@ impl Workspace {
             })
     }
 
-    /// The sessions in the split view as one card: an accent rail down the edge and a header with a
-    /// miniature of the layout (one block per pane, the focused one lit).
-    fn render_split_group(&self, rows: Vec<Row>, size: usize, lit: Option<usize>, cx: &mut Context<Self>) -> Div {
-        let map = (0..size).fold(div().flex().flex_none().gap(px(2.0)).w(px(16.0)).h(px(9.0)), |d, i| {
-            let lit = lit == Some(i);
-            d.child(div().flex_1().rounded(px(2.0)).bg(if lit { hsla(theme::ACCENT) } else { hsla(theme::TEXT_FAINT).opacity(0.55) }))
-        });
-        let map = if self.split_vertical { map.flex_col() } else { map.flex_row() };
-        let header = div()
-            .flex()
-            .items_center()
-            .justify_between()
-            .h(px(19.0))
-            .pl(px(12.0))
-            .pr(px(10.0))
-            .child(section_label("SPLIT"))
-            .child(map);
+    /// The sessions (terminals, GitHub panes and chats alike) of one split as a compact card: just the rows, with
+    /// an accent rail down the edge while the split is the one on screen.
+    fn render_split_group(&self, rows: Vec<Row>, shown: bool, cx: &mut Context<Self>) -> Div {
         rows.into_iter().fold(
             div()
                 .relative()
                 .mx(px(6.0))
-                .pb(px(2.0))
+                .py(px(2.0))
                 .rounded(px(8.0))
                 .border_1()
                 .border_color(hsla(theme::BORDER))
                 .bg(hsla(0x101011))
-                .child(div().absolute().left(px(0.0)).top(px(8.0)).bottom(px(8.0)).w(px(2.0)).rounded_r(px(2.0)).bg(if lit.is_some() { hsla(theme::ACCENT).opacity(0.75) } else { hsla(theme::TEXT_FAINT).opacity(0.4) }))
-                .child(header),
-            |card, row| card.child(self.session_row(row, true, cx).h(px(24.0)).mx(px(3.0))),
+                .child(div().absolute().left(px(0.0)).top(px(8.0)).bottom(px(8.0)).w(px(2.0)).rounded_r(px(2.0)).bg(if shown { hsla(theme::ACCENT).opacity(0.75) } else { hsla(theme::TEXT_FAINT).opacity(0.4) })),
+            |card, row| {
+                let el = if row.scope == "chat" { self.render_row(row, cx) } else { self.session_row(row, true, cx) };
+                card.child(el.h(px(24.0)).mx(px(3.0)))
+            },
         )
+    }
+
+    /// One card per split that has a member in this tab, with every member (in pane order) as a row.
+    /// `here` says whether a member belongs to the tab, `row` builds a member's row.
+    fn split_cards(&self, here: impl Fn(&Id) -> bool, row: impl Fn(&Id) -> Option<Row>) -> Vec<(Vec<Row>, bool)> {
+        let shown = (self.panes.len() > 1).then(|| self.panes.clone());
+        self.splits()
+            .into_iter()
+            .filter(|g| g.iter().any(&here))
+            .map(|g| (g.iter().filter_map(&row).collect::<Vec<_>>(), shown.as_ref() == Some(&g)))
+            .filter(|(members, _)| !members.is_empty())
+            .collect()
+    }
+
+    fn gh_row(&self, p: &crate::app::GhPane) -> Row {
+        Row {
+            id: p.id.clone(),
+            glyph: IconName::GitPullRequest,
+            glyph_color: hsla(0x58a6ff),
+            pulse: false,
+            title: "GitHub".into(),
+            right: p.project.clone(),
+            active: self.selected.as_deref() == Some(p.id.as_str()),
+            dim: false,
+            running: true,
+            indent: false,
+            stale: false,
+            archived: false,
+            scope: "cur",
+        }
+    }
+
+    fn chat_row(&self, r: &ChatRecord, cx: &gpui::App) -> Row {
+        let live = self.chat_pane(&r.id).map(|p| p.view.read(cx).is_busy());
+        let project = self.store.project_for_cwd(&r.cwd).and_then(|p| self.store.project(&p)).map(|p| p.name.clone());
+        Row {
+            glyph: IconName::MessageSquare,
+            glyph_color: hsla(match live {
+                Some(true) => 0xa8a8a8,
+                Some(false) => 0x6b6b6b,
+                None => theme::TEXT_FAINT,
+            }),
+            pulse: live == Some(true),
+            title: r.title.clone(),
+            right: project.unwrap_or_else(|| ago(r.last_active, now())),
+            active: self.selected.as_deref() == Some(r.id.as_str()),
+            dim: live.is_none(),
+            running: live.is_some(),
+            indent: false,
+            stale: false,
+            archived: false,
+            scope: "chat",
+            id: r.id.clone(),
+        }
     }
 
     pub fn render_sidebar(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -462,34 +503,20 @@ impl Workspace {
             self.gh
                 .iter()
                 .filter(|p| q.is_empty() || "github issues pull requests".contains(&q) || p.project.to_lowercase().contains(&q))
-                .map(|p| Row {
-                    id: p.id.clone(),
-                    glyph: "◉",
-                    glyph_color: hsla(0x58a6ff),
-                    pulse: false,
-                    title: "GitHub".into(),
-                    right: p.project.clone(),
-                    active: self.selected.as_deref() == Some(p.id.as_str()),
-                    dim: false,
-                    running: true,
-                    indent: false,
-                    stale: false,
-                    archived: false,
-                    scope: "cur",
-                }),
+                .map(|p| self.gh_row(p)),
         );
         // Sessions sharing a split are drawn together, in pane order: one card per split (the shown one lit).
+        // A chat in the split is a row of the card too.
+        let cards = self.split_cards(
+            |id| rows.iter().any(|r| r.id == *id),
+            |id| {
+                rows.iter().find(|r| r.id == *id).cloned().or_else(|| {
+                    let rec = self.chat_store.get(id)?;
+                    self.chat_pane(id).map(|_| self.chat_row(rec, cx))
+                })
+            },
+        );
         let splits = self.splits();
-        let shown = (self.panes.len() > 1).then(|| self.panes.clone());
-        let mut cards: Vec<(Vec<Row>, usize, Option<usize>)> = vec![];
-        for g in &splits {
-            let mut members: Vec<Row> = rows.iter().filter(|r| g.contains(&r.id)).cloned().collect();
-            members.sort_by_key(|r| g.iter().position(|p| *p == r.id));
-            if !members.is_empty() {
-                let lit = (shown.as_ref() == Some(g)).then_some(self.focused);
-                cards.push((members, g.len(), lit));
-            }
-        }
         let current: Vec<Row> = rows.into_iter().filter(|r| !splits.iter().any(|g| g.contains(&r.id))).collect();
         let current_total = self.running_count(cx) + self.gh.len();
 
@@ -497,8 +524,8 @@ impl Workspace {
 
         body = body.child(self.section_header("CURRENT SESSION", Some(current_total.to_string()), None::<Stateful<Div>>));
         let has_group = !cards.is_empty();
-        for (members, size, lit) in cards {
-            body = body.child(self.render_split_group(members, size, lit, cx));
+        for (members, shown) in cards {
+            body = body.child(self.render_split_group(members, shown, cx));
         }
         if current.is_empty() && !has_group {
             body = body.child(
@@ -525,7 +552,7 @@ impl Workspace {
         }
 
         // ---- PROJECTS
-        let add_btn = icon_button("add-project", "+").on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::ImportProject, window, cx)));
+        let add_btn = icon_button("add-project", IconName::Plus).on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::ImportProject, window, cx)));
         body = body.child(div().h(px(10.0)));
         body = body.child(self.section_header("PROJECTS", None, Some(add_btn)));
 
@@ -654,7 +681,7 @@ impl Workspace {
                     .px(px(18.0))
                     .h(px(22.0))
                     .cursor_pointer()
-                    .child(div().text_size(px(9.0)).text_color(hsla(theme::TEXT_FAINT)).child(if collapsed { "▸" } else { "▾" }))
+                    .child(div().text_color(hsla(theme::TEXT_FAINT)).child(icon(if collapsed { IconName::ChevronRight } else { IconName::ChevronDown }, 12.0)))
                     .child(section_label("OTHER SESSIONS"))
                     .child(div().text_size(px(10.5)).text_color(hsla(theme::TEXT_FAINT)).child(others.len().to_string()))
                     .on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::ToggleOther, window, cx))),
@@ -726,7 +753,7 @@ impl Workspace {
                     .px(px(4.0))
                     .child(clawd(24.0))
                     .child(div().flex_1().text_size(px(13.0)).font_weight(FontWeight::BOLD).text_color(hsla(theme::TEXT)).child("CLAUDIU"))
-                    .child(icon_button("settings", "").occlude().group("settings").child(cog("settings")).on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::OpenSettings, window, cx)))),
+                    .child(icon_button("settings", IconName::Settings).occlude().on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::OpenSettings, window, cx)))),
             )
             .child(self.render_side_tabs(cx))
             .when(self.side == Side::Sessions, |h| h.child(
@@ -760,7 +787,7 @@ impl Workspace {
                     Input::new(&self.search_input)
                         .h(px(28.0))
                         .text_size(px(12.5))
-                        .prefix(div().text_color(hsla(theme::TEXT_FAINT)).child("⌕")),
+                        .prefix(div().text_color(hsla(theme::TEXT_FAINT)).child(icon(IconName::Search, 14.0))),
                 ),
             )
     }
@@ -797,8 +824,27 @@ impl Workspace {
             .cloned()
             .collect();
         recs.sort_by_key(|r| std::cmp::Reverse(r.last_active));
-        let mut body = div().flex().flex_col().gap(px(2.0)).child(self.section_header("CHATS", Some(recs.len().to_string()), None::<Stateful<Div>>));
-        if recs.is_empty() {
+        let total = recs.len();
+        // A split with a chat in it is one card (its terminals and GitHub panes included); the chats in it leave the list.
+        let cards = self.split_cards(
+            |id| recs.iter().any(|r| r.id == *id),
+            |id| {
+                if let Some(rec) = self.chat_store.get(id) {
+                    return Some(self.chat_row(rec, cx));
+                }
+                if let Some(rec) = self.store.session(id) {
+                    return Some(self.row_for(rec, true, true));
+                }
+                self.gh_pane(id).map(|p| self.gh_row(p))
+            },
+        );
+        let splits = self.splits();
+        recs.retain(|r| !splits.iter().any(|g| g.contains(&r.id) && g.len() > 1));
+        let mut body = div().flex().flex_col().gap(px(2.0)).child(self.section_header("CHATS", Some(total.to_string()), None::<Stateful<Div>>));
+        for (members, shown) in cards {
+            body = body.child(self.render_split_group(members, shown, cx));
+        }
+        if recs.is_empty() && total == 0 {
             body = body.child(div().px(px(18.0)).py(px(6.0)).text_size(px(12.0)).text_color(hsla(theme::TEXT_FAINT)).child(if q.is_empty() {
                 "No chats yet. Start one with + New chat."
             } else {
@@ -806,30 +852,8 @@ impl Workspace {
             }));
         }
         for r in recs {
-            let live = self.chat_pane(&r.id).map(|p| p.view.read(cx).is_busy());
-            let project = self.store.project_for_cwd(&r.cwd).and_then(|p| self.store.project(&p)).map(|p| p.name.clone());
-            body = body.child(self.render_row(
-                Row {
-                    glyph: if live.is_some() { "●" } else { "○" },
-                    glyph_color: hsla(match live {
-                        Some(true) => 0xa8a8a8,
-                        Some(false) => 0x6b6b6b,
-                        None => theme::TEXT_FAINT,
-                    }),
-                    pulse: live == Some(true),
-                    title: r.title.clone(),
-                    right: project.unwrap_or_else(|| ago(r.last_active, now())),
-                    active: self.selected.as_deref() == Some(r.id.as_str()),
-                    dim: live.is_none(),
-                    running: live.is_some(),
-                    indent: false,
-                    stale: false,
-                    archived: false,
-                    scope: "chat",
-                    id: r.id,
-                },
-                cx,
-            ));
+            let row = self.chat_row(&r, cx);
+            body = body.child(self.render_row(row, cx));
         }
         body
     }
@@ -914,7 +938,7 @@ impl Workspace {
                     }
                 }),
             )
-            .child(div().w(px(10.0)).flex_none().text_size(px(9.0)).text_color(hsla(theme::TEXT_FAINT)).child(if expanded { "▾" } else { "▸" }))
+            .child(div().w(px(12.0)).flex_none().text_color(hsla(theme::TEXT_FAINT)).child(icon(if expanded { IconName::ChevronDown } else { IconName::ChevronRight }, 12.0)))
             .child(
                 div()
                     .flex_1()
@@ -945,7 +969,7 @@ impl Workspace {
                     }),
             )
             .child(
-                icon_button(gpui::SharedString::from(format!("proj-new-{}", p.id)), "+")
+                icon_button(gpui::SharedString::from(format!("proj-new-{}", p.id)), IconName::Plus)
                     .invisible()
                     .group_hover("row", |s| s.visible())
                     .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
@@ -1012,7 +1036,7 @@ impl Workspace {
             .child(avatar(&name, 18.0))
             .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(12.5)).text_color(hsla(theme::TEXT)).child(name))
             .child(div().flex_none().text_size(px(10.5)).text_color(hsla(theme::TEXT_FAINT)).child(plan))
-            .child(div().flex_none().text_size(px(9.0)).text_color(hsla(theme::TEXT_FAINT)).child("▾"))
+            .child(div().flex_none().text_color(hsla(theme::TEXT_FAINT)).child(icon(IconName::ChevronDown, 12.0)))
     }
 
     fn render_footer(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {

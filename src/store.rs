@@ -182,6 +182,9 @@ pub struct Layout {
     pub selected_session: Option<Id>,
     pub sidebar_visible: bool,
     pub other_collapsed: bool,
+    /// The sidebar showed the Chat tab (not Code) when Claudiu last ran.
+    #[serde(default)]
+    pub chat_tab: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

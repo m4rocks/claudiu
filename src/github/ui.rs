@@ -14,7 +14,8 @@ use super::view::*;
 use crate::store::now;
 use crate::terminal_view::FONT;
 use crate::theme::{self, hsla};
-use crate::widgets::{ago, avatar, button, button_disabled, danger_button, fade_in, icon_button, section_label};
+use gpui_kit::assets::IconName;
+use crate::widgets::{ago, avatar, button, button_disabled, button_leading, danger_button, fade_in, icon, icon_button, section_label};
 
 const GREEN: u32 = 0x3fb950;
 const PURPLE: u32 = 0xa371f7;
@@ -76,15 +77,24 @@ fn dim(text: impl Into<SharedString>) -> Div {
     div().text_size(px(12.0)).text_color(hsla(theme::TEXT_DIM)).child(text.into())
 }
 
-fn state_style(item: &Item) -> (&'static str, u32, &'static str) {
+fn state_style(item: &Item) -> (IconName, u32, &'static str) {
     match (item.kind, item.state) {
-        (Kind::Issue, State::Open) => ("●", GREEN, "Open"),
-        (Kind::Issue, _) if item.not_planned => ("⊘", GRAY, "Not planned"),
-        (Kind::Issue, _) => ("✓", PURPLE, "Closed"),
-        (Kind::Pull, State::Merged) => ("⎇", PURPLE, "Merged"),
-        (Kind::Pull, State::Closed) => ("⎇", RED, "Closed"),
-        (Kind::Pull, State::Open) if item.draft => ("⎇", GRAY, "Draft"),
-        (Kind::Pull, State::Open) => ("⎇", GREEN, "Open"),
+        (Kind::Issue, State::Open) => (IconName::CircleDot, GREEN, "Open"),
+        (Kind::Issue, _) if item.not_planned => (IconName::CircleSlash, GRAY, "Not planned"),
+        (Kind::Issue, _) => (IconName::CircleCheck, PURPLE, "Closed"),
+        (Kind::Pull, State::Merged) => (IconName::GitMerge, PURPLE, "Merged"),
+        (Kind::Pull, State::Closed) => (IconName::GitPullRequestClosed, RED, "Closed"),
+        (Kind::Pull, State::Open) if item.draft => (IconName::GitPullRequestDraft, GRAY, "Draft"),
+        (Kind::Pull, State::Open) => (IconName::GitPullRequest, GREEN, "Open"),
+    }
+}
+
+/// Passed, failed or still running, drawn in the color `check_color` picked.
+fn check_icon(color: u32) -> IconName {
+    match color {
+        GREEN => IconName::CircleCheck,
+        RED => IconName::CircleX,
+        _ => IconName::CircleDot,
     }
 }
 
@@ -297,13 +307,14 @@ impl GithubView {
                     .items_center()
                     .gap(px(10.0))
                     .min_w_0()
+                    .when(private, |d| d.child(icon(IconName::Lock, 13.0)))
                     .child(
                         div()
                             .overflow_hidden()
                             .whitespace_nowrap()
                             .text_ellipsis()
                             .font_weight(FontWeight::SEMIBOLD)
-                            .child(format!("{}{repo}", if private { "🔒 " } else { "" })),
+                            .child(format!("{repo}")),
                     )
                     .child(tab(Kind::Issue, "Issues"))
                     .child(tab(Kind::Pull, "Pull requests")),
@@ -315,8 +326,8 @@ impl GithubView {
                     .items_center()
                     .gap(px(6.0))
                     .when_some(busy, |d, b| d.child(dim(b)))
-                    .child(icon_button("gh-refresh", if loading { "…" } else { "⟳" }).on_click(go(cx, GhAct::Refresh)))
-                    .child(icon_button("gh-web", "↗").on_click(go(cx, GhAct::OpenWeb(url))))
+                    .child(icon_button("gh-refresh", if loading { IconName::LoaderCircle } else { IconName::RefreshCw }).on_click(go(cx, GhAct::Refresh)))
+                    .child(icon_button("gh-web", IconName::ExternalLink).on_click(go(cx, GhAct::OpenWeb(url))))
                     .child(
                         button("gh-new", if new_kind == Kind::Issue { "New issue" } else { "New pull request" }, true)
                             .on_click(go(cx, GhAct::New(new_kind))),
@@ -339,7 +350,11 @@ impl GithubView {
             .bg(hsla(if active { 0x2a211d } else { 0x161616 }))
             .text_color(hsla(if active { theme::ACCENT } else { theme::TEXT_DIM }))
             .hover(|s| s.bg(hsla(0x262626)))
-            .child(format!("{label} ▾"))
+            .flex()
+            .items_center()
+            .gap(px(4.0))
+            .child(label.to_string())
+            .child(icon(IconName::ChevronDown, 12.0))
             .on_mouse_down(MouseButton::Left, popup_at(cx, kind))
     }
 
@@ -348,7 +363,7 @@ impl GithubView {
         let q = &self.queries[i];
         let list = &self.lists[i];
         let state = state_of(q);
-        let state_tab = |id: &str, glyph: &str, name: &str, count: usize, key: &'static str| {
+        let state_tab = |id: &str, glyph: IconName, name: &str, count: usize, key: &'static str| {
             let on = state.as_deref() == Some(key);
             div()
                 .id(SharedString::from(format!("gh-state-tab-{id}")))
@@ -360,12 +375,12 @@ impl GithubView {
                 .font_weight(if on { FontWeight::SEMIBOLD } else { FontWeight::NORMAL })
                 .text_color(hsla(if on { theme::TEXT } else { theme::TEXT_DIM }))
                 .hover(|s| s.text_color(hsla(theme::TEXT)))
-                .child(glyph.to_string())
+                .child(icon(glyph, 14.0))
                 .child(format!("{name} {count}"))
                 .on_click(go(cx, GhAct::SetState(Some(key))))
         };
-        let open_glyph = if self.kind == Kind::Issue { "●" } else { "⎇" };
-        let closed_glyph = if self.kind == Kind::Issue { "✓" } else { "⎇" };
+        let open_glyph = if self.kind == Kind::Issue { IconName::CircleDot } else { IconName::GitPullRequest };
+        let closed_glyph = if self.kind == Kind::Issue { IconName::CircleCheck } else { IconName::GitMerge };
 
         let mut chips = div().flex().flex_wrap().gap(px(6.0));
         let one = |key: &str| qualifiers(q, key).into_iter().next();
@@ -417,7 +432,7 @@ impl GithubView {
             .p(px(12.0))
             .border_b_1()
             .border_color(hsla(theme::BORDER))
-            .child(div().child(Input::new(&self.query_input).h(px(30.0)).text_size(px(12.5)).prefix(div().text_color(hsla(theme::TEXT_FAINT)).child("⌕"))))
+            .child(div().child(Input::new(&self.query_input).h(px(30.0)).text_size(px(12.5)).prefix(div().text_color(hsla(theme::TEXT_FAINT)).child(icon(IconName::Search, 14.0)))))
             .child(
                 div()
                     .flex()
@@ -488,11 +503,7 @@ impl GithubView {
         let mut right = div().flex().flex_none().items_center().gap(px(8.0)).text_size(px(11.5));
         if it.kind == Kind::Pull {
             if let Some(c) = &it.checks {
-                right = right.child(div().text_color(hsla(check_color(c))).child(match check_color(c) {
-                    GREEN => "✓",
-                    RED => "✗",
-                    _ => "●",
-                }));
+                right = right.child(div().text_color(hsla(check_color(c))).child(icon(check_icon(check_color(c)), 14.0)));
             }
             match it.review.as_deref() {
                 Some("APPROVED") => right = right.child(div().text_color(hsla(GREEN)).child("approved")),
@@ -501,7 +512,7 @@ impl GithubView {
             }
         }
         if it.comments > 0 {
-            right = right.child(div().text_color(hsla(theme::TEXT_FAINT)).child(format!("💬 {}", it.comments)));
+            right = right.child(div().flex().items_center().gap(px(3.0)).text_color(hsla(theme::TEXT_FAINT)).child(icon(IconName::MessageSquare, 13.0)).child(it.comments.to_string()));
         }
         div()
             .id(SharedString::from(format!("gh-row-{:?}-{}", it.kind, it.number)))
@@ -514,7 +525,7 @@ impl GithubView {
             .cursor_pointer()
             .bg(hsla(if selected { theme::ROW_ACTIVE } else { theme::APP_BG }))
             .hover(|s| s.bg(hsla(theme::ROW_HOVER)))
-            .child(div().w(px(14.0)).flex_none().pt(px(1.0)).text_color(hsla(color)).child(glyph))
+            .child(div().w(px(14.0)).flex_none().pt(px(1.0)).text_color(hsla(color)).child(icon(glyph, 14.0)))
             .child(
                 div()
                     .flex_1()
@@ -560,7 +571,7 @@ impl GithubView {
                 .flex_none()
                 .px(px(12.0))
                 .pt(px(8.0))
-                .child(button("gh-back", "← Back to list", false).on_click(go(cx, GhAct::Back)))
+                .child(button_leading("gh-back", IconName::ArrowLeft, "Back to list", false).on_click(go(cx, GhAct::Back)))
         });
         let Some(d) = &ds.data else {
             let msg = match &ds.error {
@@ -601,7 +612,7 @@ impl GithubView {
                         .child(it.title.clone())
                         .child(div().text_color(hsla(theme::TEXT_FAINT)).font_weight(FontWeight::NORMAL).child(format!("#{}", it.number))),
                 )
-                .when(d.can_update || d.mine, |r| r.child(icon_button("gh-edit-title", "✎").on_click(go(cx, GhAct::EditStart(Edit::Title)))))
+                .when(d.can_update || d.mine, |r| r.child(icon_button("gh-edit-title", IconName::Pencil).on_click(go(cx, GhAct::EditStart(Edit::Title)))))
         };
 
         let mut status = div().flex().flex_wrap().items_center().gap(px(8.0)).child(pill(state_name, color));
@@ -642,9 +653,9 @@ impl GithubView {
             .flex()
             .flex_wrap()
             .gap(px(6.0))
-            .child(button("gh-claude", "Ask Claude ▾", true).on_mouse_down(MouseButton::Left, popup_at(cx, PopKind::Claude)))
-            .child(button("gh-open-web", "Open on GitHub ↗", false).on_click(go(cx, GhAct::OpenWeb(url))))
-            .child(button("gh-more-menu", "⋯", false).on_mouse_down(MouseButton::Left, popup_at(cx, PopKind::More)))
+            .child(button("gh-claude", "Ask Claude", true).child(div().ml(px(4.0)).child(icon(IconName::ChevronDown, 12.0))).on_mouse_down(MouseButton::Left, popup_at(cx, PopKind::Claude)))
+            .child(button("gh-open-web", "Open on GitHub", false).child(div().ml(px(4.0)).child(icon(IconName::ExternalLink, 12.0))).on_click(go(cx, GhAct::OpenWeb(url))))
+            .child(button("gh-more-menu", "", false).child(icon(IconName::Ellipsis, 14.0)).on_mouse_down(MouseButton::Left, popup_at(cx, PopKind::More)))
             .when(ds.loading, |d| d.child(dim("Refreshing…")));
 
         let header = div()
@@ -717,14 +728,14 @@ impl GithubView {
             let mut rv = div().flex().flex_wrap().gap(px(10.0));
             for (who, state) in &pr.reviews {
                 let (g, c) = match state.as_str() {
-                    "APPROVED" => ("✓", GREEN),
-                    "CHANGES_REQUESTED" => ("✗", RED),
-                    _ => ("●", GRAY),
+                    "APPROVED" => (IconName::CircleCheck, GREEN),
+                    "CHANGES_REQUESTED" => (IconName::CircleX, RED),
+                    _ => (IconName::CircleDot, GRAY),
                 };
-                rv = rv.child(div().flex().items_center().gap(px(4.0)).child(div().text_color(hsla(c)).child(g)).child(dim(who.clone())));
+                rv = rv.child(div().flex().items_center().gap(px(4.0)).child(div().text_color(hsla(c)).child(icon(g, 13.0))).child(dim(who.clone())));
             }
             for who in pr.requested.iter().filter(|w| !pr.reviews.iter().any(|(r, _)| r == *w)) {
-                rv = rv.child(div().flex().items_center().gap(px(4.0)).child(div().text_color(hsla(YELLOW)).child("◔")).child(dim(who.clone())));
+                rv = rv.child(div().flex().items_center().gap(px(4.0)).child(div().text_color(hsla(YELLOW)).child(icon(IconName::Clock, 13.0))).child(dim(who.clone())));
             }
             if pr.reviews.is_empty() && pr.requested.is_empty() {
                 rv = rv.child(faint("No reviews yet"));
@@ -812,7 +823,7 @@ impl GithubView {
                     .text_size(px(12.0))
                     .text_color(hsla(theme::TEXT_FAINT))
                     .hover(|s| s.bg(hsla(0x262626)).text_color(hsla(theme::TEXT)))
-                    .child("☺ +")
+                    .child(icon(IconName::HeartPlus, 14.0))
                     .on_mouse_down(MouseButton::Left, popup_at(cx, PopKind::React(subject.to_string()))),
             );
         }
@@ -971,7 +982,7 @@ impl GithubView {
             .items_center()
             .gap(px(8.0))
             .px(px(4.0))
-            .child(div().text_color(hsla(theme::TEXT_FAINT)).child("◆"))
+            .child(div().text_color(hsla(theme::TEXT_FAINT)).child(icon(IconName::GitCommitHorizontal, 14.0)))
             .child(div().font_family(FONT).text_size(px(11.5)).text_color(hsla(theme::ACCENT)).child(c.short.clone()))
             .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(c.headline.clone()))
             .child(faint(format!("{} · {}", c.author, ago(c.created, t))))
@@ -1055,12 +1066,12 @@ impl GithubView {
     fn render_merge_box(&self, d: &Detail, pr: &Pr, cx: &mut Context<Self>) -> Div {
         let it = &d.item;
         let info = self.info.clone().unwrap_or_default();
-        let line = |glyph: &str, color: u32, title: String, sub: Option<String>| {
+        let line = |glyph: IconName, color: u32, title: String, sub: Option<String>| {
             div()
                 .flex()
                 .items_start()
                 .gap(px(10.0))
-                .child(div().w(px(16.0)).flex_none().text_color(hsla(color)).child(glyph.to_string()))
+                .child(div().w(px(16.0)).flex_none().text_color(hsla(color)).child(icon(glyph, 16.0)))
                 .child(div().flex().flex_col().child(div().font_weight(FontWeight::MEDIUM).child(title)).children(sub.map(faint)))
         };
         let mut rows = div().flex().flex_col().gap(px(10.0));
@@ -1072,22 +1083,22 @@ impl GithubView {
         };
         match it.state {
             State::Merged => {
-                rows = rows.child(line("⎇", PURPLE, "Pull request merged".into(), pr.merged_by.clone().map(|b| format!("Merged by {b}"))));
+                rows = rows.child(line(IconName::GitMerge, PURPLE, "Pull request merged".into(), pr.merged_by.clone().map(|b| format!("Merged by {b}"))));
                 let branch_gone = d.timeline.iter().any(|e| matches!(e, Entry::Event(ev) if ev.what.starts_with("deleted the")));
                 if !pr.cross_repo && !branch_gone && !it.head.is_empty() && info.can_write() && !info.delete_branch_on_merge {
                     actions = actions.child(button("gh-del-branch", format!("Delete {}", it.head), false).on_click(go(cx, GhAct::DeleteBranch)));
                 }
             }
             State::Closed => {
-                rows = rows.child(line("⎇", RED, "This pull request is closed".into(), None));
+                rows = rows.child(line(IconName::GitPullRequestClosed, RED, "This pull request is closed".into(), None));
                 actions = actions.child(button("gh-reopen-pr", "Reopen pull request", false).on_click(go(cx, GhAct::ReopenItem)));
             }
             State::Open => {
                 // reviews
                 match it.review.as_deref() {
-                    Some("APPROVED") => rows = rows.child(line("✓", GREEN, "Changes approved".into(), None)),
-                    Some("CHANGES_REQUESTED") => rows = rows.child(line("✗", RED, "Changes requested".into(), Some("A reviewer asked for changes before this can merge.".into()))),
-                    Some("REVIEW_REQUIRED") => rows = rows.child(line("●", YELLOW, "Review required".into(), Some("At least one approving review is required.".into()))),
+                    Some("APPROVED") => rows = rows.child(line(IconName::CircleCheck, GREEN, "Changes approved".into(), None)),
+                    Some("CHANGES_REQUESTED") => rows = rows.child(line(IconName::CircleX, RED, "Changes requested".into(), Some("A reviewer asked for changes before this can merge.".into()))),
+                    Some("REVIEW_REQUIRED") => rows = rows.child(line(IconName::CircleDot, YELLOW, "Review required".into(), Some("At least one approving review is required.".into()))),
                     _ => {}
                 }
                 // checks
@@ -1096,11 +1107,11 @@ impl GithubView {
                     let wait = pr.checks.iter().filter(|c| check_color(&c.result) == YELLOW).count();
                     let ok = pr.checks.len() - bad - wait;
                     let (g, c, title) = if bad > 0 {
-                        ("✗", RED, format!("{bad} failing"))
+                        (IconName::CircleX, RED, format!("{bad} failing"))
                     } else if wait > 0 {
-                        ("●", YELLOW, format!("{wait} pending"))
+                        (IconName::CircleDot, YELLOW, format!("{wait} pending"))
                     } else {
-                        ("✓", GREEN, "All checks have passed".to_string())
+                        (IconName::CircleCheck, GREEN, "All checks have passed".to_string())
                     };
                     let mut r = line(g, c, title, Some(format!("{} successful, {} failing, {} pending", ok, bad, wait)));
                     for ck in pr.checks.iter().take(12) {
@@ -1115,7 +1126,7 @@ impl GithubView {
                                 .text_size(px(12.0))
                                 .hover(|s| s.text_color(hsla(theme::TEXT)))
                                 .text_color(hsla(theme::TEXT_DIM))
-                                .child(div().text_color(hsla(check_color(&ck.result))).child(match check_color(&ck.result) { GREEN => "✓", RED => "✗", _ => "●" }))
+                                .child(div().text_color(hsla(check_color(&ck.result))).child(icon(check_icon(check_color(&ck.result)), 13.0)))
                                 .child(ck.name.clone())
                                 .on_click(go(cx, GhAct::OpenWeb(url))),
                         );
@@ -1124,17 +1135,17 @@ impl GithubView {
                 }
                 // conflicts / behind
                 if pr.mergeable == "CONFLICTING" {
-                    rows = rows.child(line("✗", RED, "This branch has conflicts".into(), Some("Resolve them before merging (ask Claude, or check the branch out).".into())));
+                    rows = rows.child(line(IconName::CircleX, RED, "This branch has conflicts".into(), Some("Resolve them before merging (ask Claude, or check the branch out).".into())));
                 } else if pr.merge_state == "BEHIND" && info.can_write() {
-                    rows = rows.child(line("●", YELLOW, "This branch is out of date with the base branch".into(), None));
+                    rows = rows.child(line(IconName::CircleDot, YELLOW, "This branch is out of date with the base branch".into(), None));
                     actions = actions.child(button("gh-update-branch", "Update branch", false).on_click(go(cx, GhAct::UpdateBranch)));
                 }
                 if let Some((who, method)) = &pr.auto_merge {
-                    rows = rows.child(line("◔", PURPLE, format!("Auto-merge enabled by {who}"), Some(format!("Will merge automatically ({}) once requirements pass.", method.to_lowercase()))));
+                    rows = rows.child(line(IconName::Clock, PURPLE, format!("Auto-merge enabled by {who}"), Some(format!("Will merge automatically ({}) once requirements pass.", method.to_lowercase()))));
                     actions = actions.child(button("gh-auto-off", "Disable auto-merge", false).on_click(go(cx, GhAct::AutoMerge(false))));
                 }
                 if it.draft {
-                    rows = rows.child(line("⎇", GRAY, "This pull request is still a work in progress".into(), Some("Draft pull requests cannot be merged.".into())));
+                    rows = rows.child(line(IconName::GitPullRequestDraft, GRAY, "This pull request is still a work in progress".into(), Some("Draft pull requests cannot be merged.".into())));
                     if info.can_write() || d.mine {
                         actions = actions.child(button("gh-ready", "Ready for review", true).on_click(go(cx, GhAct::Ready)));
                     }
@@ -1166,16 +1177,16 @@ impl GithubView {
                                 div()
                                     .flex()
                                     .child(main.on_click(go(cx, GhAct::Merge(m))))
-                                    .when(allowed.len() > 1, |d| d.child(icon_button("gh-merge-pick", "▾").ml(px(2.0)).on_mouse_down(MouseButton::Left, popup_at(cx, PopKind::Merge)))),
+                                    .when(allowed.len() > 1, |d| d.child(icon_button("gh-merge-pick", IconName::ChevronDown).ml(px(2.0)).on_mouse_down(MouseButton::Left, popup_at(cx, PopKind::Merge)))),
                             );
                         }
                     } else {
                         actions = actions.child(faint("This repository does not allow merging pull requests."));
                     }
                     if blocked {
-                        rows = rows.child(line("●", YELLOW, "Merging is blocked".into(), Some("Required reviews or checks have not been met.".into())));
+                        rows = rows.child(line(IconName::CircleDot, YELLOW, "Merging is blocked".into(), Some("Required reviews or checks have not been met.".into())));
                     } else if pr.mergeable == "MERGEABLE" {
-                        rows = rows.child(line("✓", GREEN, "No conflicts with the base branch".into(), Some("Merging can be performed automatically.".into())));
+                        rows = rows.child(line(IconName::CircleCheck, GREEN, "No conflicts with the base branch".into(), Some("Merging can be performed automatically.".into())));
                     }
                 }
             }
@@ -1214,7 +1225,7 @@ impl GithubView {
                 if it.kind == Kind::Issue {
                     buttons = buttons
                         .child(button("gh-close", "Close issue", false).on_click(go(cx, GhAct::Comment(Some(true)))))
-                        .child(icon_button("gh-close-reason", "▾").on_mouse_down(MouseButton::Left, popup_at(cx, PopKind::CloseReason)));
+                        .child(icon_button("gh-close-reason", IconName::ChevronDown).on_mouse_down(MouseButton::Left, popup_at(cx, PopKind::CloseReason)));
                 } else {
                     buttons = buttons.child(button("gh-close", "Close pull request", false).on_click(go(cx, GhAct::Comment(Some(true)))));
                 }
@@ -1258,7 +1269,7 @@ impl GithubView {
                 .bg(hsla(CARD_HEAD))
                 .cursor_pointer()
                 .hover(|s| s.bg(hsla(0x1c1c1d)))
-                .child(div().text_size(px(10.0)).text_color(hsla(theme::TEXT_FAINT)).child(if open { "▾" } else { "▸" }))
+                .child(div().text_color(hsla(theme::TEXT_FAINT)).child(icon(if open { IconName::ChevronDown } else { IconName::ChevronRight }, 12.0)))
                 .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().font_family(FONT).text_size(px(12.0)).child(f.path.clone()))
                 .children((f.status != "modified").then(|| faint(f.status.clone())))
                 .child(div().text_size(px(11.5)).text_color(hsla(GREEN)).child(format!("+{}", f.additions)))
@@ -1351,7 +1362,7 @@ impl GithubView {
             .size_full()
             .flex()
             .flex_col()
-            .when(stacked, |d| d.child(div().px(px(12.0)).pt(px(8.0)).child(button("gh-back", "← Back to list", false).on_click(go(cx, GhAct::Back)))))
+            .when(stacked, |d| d.child(div().px(px(12.0)).pt(px(8.0)).child(button_leading("gh-back", IconName::ArrowLeft, "Back to list", false).on_click(go(cx, GhAct::Back)))))
             .child(div().id("gh-new-scroll").flex_1().min_h_0().overflow_y_scroll().child(form))
     }
 
@@ -1594,7 +1605,7 @@ impl GithubView {
                     .cursor_pointer()
                     .text_size(px(12.5))
                     .hover(|s| s.bg(hsla(0x252525)))
-                    .child(div().w(px(12.0)).flex_none().text_color(hsla(theme::ACCENT)).child(match it.checked { Some(true) => "✓", _ => "" }))
+                    .child(div().w(px(12.0)).flex_none().text_color(hsla(theme::ACCENT)).children((it.checked == Some(true)).then(|| icon(IconName::Check, 13.0))))
                     .children(it.swatch.map(|c| div().size(px(10.0)).flex_none().rounded_full().bg(hsla(c))))
                     .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(it.label))
                     .children(it.hint.map(faint))

@@ -5,4 +5,5 @@
 pub mod acp;
 pub mod model;
 pub mod store;
+pub mod ui;
 pub mod view;

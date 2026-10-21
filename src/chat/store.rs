@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use super::model::Item;
 use crate::store::Id;
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -22,6 +23,16 @@ pub struct ChatRecord {
     /// and is not imported into the Code list on the next launch.
     #[serde(default)]
     pub removed: bool,
+    /// What was typed in the message box and not sent yet.
+    #[serde(default)]
+    pub draft: String,
+}
+
+impl ChatRecord {
+    /// Nothing was said or typed: not worth keeping.
+    pub fn is_blank(&self) -> bool {
+        self.title == DEFAULT_TITLE && self.draft.trim().is_empty()
+    }
 }
 
 pub const DEFAULT_TITLE: &str = "New chat";
@@ -99,6 +110,15 @@ impl ChatStore {
     pub fn remove(&mut self, id: &str) {
         self.records.retain(|r| r.id != id);
         self.dirty = true;
+        drop_cache(id);
+    }
+
+    /// Forget every chat nothing was said or typed in (left over from a run that ended without closing them).
+    pub fn purge_blank(&mut self) {
+        let blank: Vec<Id> = self.records.iter().filter(|r| r.is_blank()).map(|r| r.id.clone()).collect();
+        for id in blank {
+            self.remove(&id);
+        }
     }
 
     pub fn save_if_dirty(&mut self) {
@@ -112,6 +132,38 @@ impl ChatStore {
         let ok = serde_json::to_string_pretty(&self.records).is_ok_and(|t| fs::write(&tmp, t).is_ok() && fs::rename(&tmp, &self.path).is_ok());
         self.dirty = !ok;
     }
+}
+
+fn cache_path(id: &str) -> PathBuf {
+    crate::statusline::data_dir().join("chat-cache").join(format!("{id}.json"))
+}
+
+/// The conversation as it was last seen, to show while the agent loads the real one.
+pub fn load_cache(id: &str) -> Vec<Item> {
+    fs::read_to_string(cache_path(id)).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
+}
+
+/// Keeps the newest part and cuts long tool output, so the file stays small.
+pub fn save_cache(id: &str, items: &[Item]) {
+    const KEEP: usize = 300;
+    let mut items = items[items.len().saturating_sub(KEEP)..].to_vec();
+    for item in &mut items {
+        if let Item::Tool(t) = item {
+            t.output = t.output.chars().take(2000).collect();
+        }
+    }
+    let path = cache_path(id);
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let tmp = path.with_extension("json.tmp");
+    if serde_json::to_string(&items).is_ok_and(|t| fs::write(&tmp, t).is_ok()) {
+        let _ = fs::rename(&tmp, &path);
+    }
+}
+
+pub fn drop_cache(id: &str) {
+    let _ = fs::remove_file(cache_path(id));
 }
 
 /// The sidebar title for a chat that has none yet: the start of the first message.
@@ -151,6 +203,20 @@ mod tests {
         fs::write(&path, "{nope").unwrap();
         assert!(ChatStore::load(path.clone()).records.is_empty());
         assert!(path.with_extension("json.corrupt").exists());
+    }
+
+    #[test]
+    fn a_chat_with_a_typed_draft_is_kept_and_an_empty_one_is_not() {
+        let mut store = ChatStore::default();
+        let blank = |id: &str| ChatRecord { id: id.into(), title: DEFAULT_TITLE.into(), ..Default::default() };
+        store.add(blank("empty"));
+        store.add(ChatRecord { draft: "half a thought".into(), ..blank("typed") });
+        store.add(ChatRecord { title: "Hello".into(), ..blank("said") });
+        store.add(ChatRecord { draft: "  
+".into(), ..blank("spaces") });
+        store.purge_blank();
+        let kept: Vec<&str> = store.records.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(kept, ["typed", "said"]);
     }
 
     #[test]

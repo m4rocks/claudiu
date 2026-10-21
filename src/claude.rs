@@ -169,6 +169,45 @@ fn first_prompt_text(v: &Value) -> Option<String> {
     Some(one_line.chars().take(80).collect())
 }
 
+/// What was said in a transcript as plain text ("User: …" / "Claude: …"), the start and the newest part when long.
+/// Only for naming a session; tool calls and results are left out.
+pub fn conversation_text(path: &Path) -> String {
+    const HEAD: usize = 1500;
+    const MAX: usize = 8000;
+    let Ok(text) = std::fs::read_to_string(path) else { return String::new() };
+    let mut out = String::new();
+    for v in text.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()) {
+        let who = match v.get("type").and_then(Value::as_str) {
+            Some("user") => "User",
+            Some("assistant") => "Claude",
+            _ => continue,
+        };
+        if v.get("isMeta").and_then(Value::as_bool) == Some(true) || v.get("isSidechain").and_then(Value::as_bool) == Some(true) {
+            continue;
+        }
+        let content = v.get("message").and_then(|m| m.get("content"));
+        let said: Vec<&str> = match content {
+            Some(Value::String(s)) => vec![s.as_str()],
+            Some(Value::Array(items)) => items.iter().filter(|i| i.get("type").and_then(Value::as_str) == Some("text")).filter_map(|i| i.get("text").and_then(Value::as_str)).collect(),
+            _ => vec![],
+        };
+        for t in said.into_iter().map(str::trim).filter(|t| !t.is_empty() && !t.starts_with('<') && !t.starts_with("Caveat:")) {
+            out.push_str(&format!("{who}: {}
+
+", t.chars().take(1500).collect::<String>()));
+        }
+    }
+    let n = out.chars().count();
+    if n <= MAX {
+        return out;
+    }
+    let head: String = out.chars().take(HEAD).collect();
+    let tail: String = out.chars().skip(n - (MAX - HEAD)).collect();
+    format!("{head}
+[…]
+{tail}")
+}
+
 pub fn read_session(path: &Path) -> Option<SessionScan> {
     let session_id = path.file_stem()?.to_str()?.to_string();
     let (head, tail, whole, created_fs, modified_fs) = read_chunks(path).ok()?;
@@ -272,6 +311,26 @@ mod tests {
         assert_eq!(parse_rfc3339("1970-01-01T00:00:00Z"), Some(0));
         assert_eq!(parse_rfc3339("2026-10-05T14:10:53.395Z"), Some(1791209453));
         assert_eq!(parse_rfc3339("nope"), None);
+    }
+
+    #[test]
+    fn conversation_text_keeps_what_was_said_and_drops_the_rest() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = write_session(
+            dir.path(),
+            "s",
+            &[
+                r#"{"type":"user","message":{"content":"fix the login bug"}}"#,
+                r#"{"type":"user","isMeta":true,"message":{"content":"meta"}}"#,
+                r#"{"type":"user","message":{"content":"<command-name>/x</command-name>"}}"#,
+                r#"{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"hm"},{"type":"text","text":"Found it."},{"type":"tool_use","name":"Read"}]}}"#,
+            ],
+        );
+        assert_eq!(conversation_text(&p), "User: fix the login bug
+
+Claude: Found it.
+
+");
     }
 
     fn write_session(dir: &Path, id: &str, lines: &[&str]) -> PathBuf {

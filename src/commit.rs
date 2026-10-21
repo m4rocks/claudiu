@@ -32,7 +32,7 @@ pub fn commit_and_push(claude: &Path, cwd: &Path) -> Result<String, String> {
         None
     } else {
         let recent = git(cwd, &["log", "-8", "--format=%s"], None).unwrap_or_default();
-        let message = generate(claude, &prompt(&recent, &diff)).map_err(|e| format!("{e} (changes are staged)"))?;
+        let message = generate(claude, SYSTEM, &prompt(&recent, &diff)).map_err(|e| format!("{e} (changes are staged)"))?;
         git(cwd, &["commit", "-F", "-"], Some(&message))?;
         Some(message.lines().next().unwrap_or_default().to_string())
     };
@@ -149,11 +149,12 @@ fn prompt(recent: &str, diff: &str) -> String {
     format!("Recent commit subjects:\n{recent}\n\nStaged changes:\n{}{cut}\n\nWrite the commit message.", &diff[..end])
 }
 
-fn generate(claude: &Path, prompt: &str) -> Result<String, String> {
+/// One text-in, text-out call to Haiku through the user's `claude`. Blocking; also used to title sessions.
+pub fn generate(claude: &Path, system: &str, prompt: &str) -> Result<String, String> {
     let mut cmd = crate::claude::command(claude);
     cmd.args(["-p", "--model", MODEL, "--no-session-persistence", "--disable-slash-commands", "--strict-mcp-config"])
         // No tools, and none of the user's settings/hooks: this is a plain text-in, text-out call.
-        .args(["--tools", "", "--setting-sources", "", "--system-prompt", SYSTEM])
+        .args(["--tools", "", "--setting-sources", "", "--system-prompt", system])
         .env("CLAUDE_CODE_AUTO_CONNECT_IDE", "false")
         // Neutral folder: keeps project CLAUDE.md files out of the call.
         .current_dir(crate::platform::home_dir().unwrap_or_else(std::env::temp_dir))
@@ -173,7 +174,7 @@ fn generate(claude: &Path, prompt: &str) -> Result<String, String> {
     if let Some(mut out) = child.stdout.take() {
         let _ = out.read_to_end(&mut bytes);
     }
-    clean_message(&String::from_utf8_lossy(&bytes)).ok_or_else(|| "claude returned no commit message".into())
+    clean_message(&String::from_utf8_lossy(&bytes)).ok_or_else(|| "claude returned nothing".into())
 }
 
 /// Trim, and unwrap a code fence if the model added one anyway.

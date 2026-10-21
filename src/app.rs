@@ -93,6 +93,8 @@ pub enum Act {
     OpenChat(Id),
     /// Forget a chat in the list (Claude Code's transcript stays).
     RemoveChat(Id),
+    /// Have Haiku write a new title for a chat or a Claude Code session from what was said in it.
+    RegenTitle(Id),
     /// Switch the sidebar between terminal sessions and chats.
     SideTab(Side),
     /// Stage everything in this folder's repository, commit it with a Haiku-written message, push.
@@ -171,6 +173,7 @@ pub enum Modal {
     },
 }
 
+#[derive(Clone, Copy)]
 pub enum Main {
     Home,
     Terminals,
@@ -245,6 +248,8 @@ pub struct Workspace {
     pub split_vertical: bool,
     pub main: Main,
     pub selected: Option<Id>,
+    /// What the main window showed on the sidebar tab that is not open, to bring back when it is.
+    parked: Option<chats::Layout>,
     pub search: String,
     pub search_input: Entity<InputState>,
     pub root_focus: FocusHandle,
@@ -316,8 +321,12 @@ impl Workspace {
             live: vec![],
             gh: vec![],
             chats: vec![],
-            chat_store: ChatStore::load(ChatStore::path_for(&Store::default_path())),
-            side: Side::Sessions,
+            chat_store: {
+                let mut chats = ChatStore::load(ChatStore::path_for(&Store::default_path()));
+                chats.purge_blank();
+                chats
+            },
+            side: if store.data.layout.chat_tab { Side::Chat } else { Side::Sessions },
             panes: vec![],
             groups: vec![],
             active_slot: usize::MAX,
@@ -326,6 +335,7 @@ impl Workspace {
             split_vertical: false,
             main: Main::Home,
             selected: store.data.layout.selected_session.clone(),
+            parked: None,
             search: String::new(),
             search_input,
             root_focus: cx.focus_handle(),
@@ -552,6 +562,7 @@ impl Workspace {
     fn tick(&mut self, cx: &mut Context<Self>) {
         self.purge_dead_shells();
         self.store.save_if_dirty();
+        self.chat_store.save_if_dirty();
         self.refresh_live(cx);
         self.ingest_statusline(cx);
         self.suggest_less_used_account(cx);
@@ -1316,7 +1327,9 @@ impl Workspace {
 
     fn finalize(&mut self) {
         self.quitting = true;
-        self.chats.clear(); // closes each adapter
+        for id in self.chats.drain(..).map(|p| p.id).collect::<Vec<_>>() {
+            self.forget_if_unused(&id); // a chat nothing was said in is dropped; dropping its pane closes the adapter
+        }
         self.chat_store.save_if_dirty();
         let t = now();
         let running: Vec<Id> = self.live.iter().map(|l| l.id.clone()).collect();
@@ -1393,7 +1406,8 @@ impl Workspace {
             }
             Act::OpenChat(id) => self.open_chat(&id, window, cx),
             Act::RemoveChat(id) => self.remove_chat(&id, window, cx),
-            Act::SideTab(side) => self.side = side,
+            Act::RegenTitle(id) => self.regen_title(&id, cx),
+            Act::SideTab(side) => self.set_side(side),
             Act::CommitPush(cwd) => match self.claude_exe.clone() {
                 Some(exe) => self.run_git(
                     GitOp::CommitPush,

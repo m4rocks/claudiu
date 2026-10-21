@@ -7,6 +7,7 @@ use gpui::{
 };
 
 use crate::app::{
+    Side,
     Act, CloseSession, GitOp, MenuItem, FocusNextPane, FocusSearch, ImportProject, Main, Modal, NewChat, NewClaude, NewShell, NextSession, OpenGithub, OpenSettings, PrevSession, SplitPane,
     ToggleSidebar, Workspace,
 };
@@ -15,7 +16,8 @@ use crate::platform::Editor;
 use crate::store::{SessionKind, now};
 use crate::theme::{self, hsla};
 use crate::updater::Status;
-use crate::widgets::{ago, button, button_disabled, clawd, danger_button, fade_in, icon_button, section_label, segment, short_path};
+use gpui_kit::assets::IconName;
+use crate::widgets::{ago, button, button_disabled, clawd, danger_button, fade_in, icon, icon_button, section_label, segment, short_path, spinner};
 
 impl Workspace {
     // ------------------------------------------------------------------ top bar
@@ -40,7 +42,7 @@ impl Workspace {
         let mut right = div().flex().flex_none().items_center().gap(px(6.0));
         if in_terminals {
             right = right.child(
-                icon_button("split", "◫").on_mouse_down(
+                icon_button("split", IconName::SquareSplitHorizontal).on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|ws, ev: &MouseDownEvent, _w, cx| {
                         let items = ws.split_menu(cx);
@@ -50,7 +52,7 @@ impl Workspace {
             );
             if self.panes.len() > 1 {
                 right = right.child(
-                    icon_button("orient", if self.split_vertical { "▤" } else { "▥" }).on_click(cx.listener(|ws, _: &ClickEvent, _w, cx| {
+                    icon_button("orient", if self.split_vertical { IconName::Rows2 } else { IconName::Columns2 }).on_click(cx.listener(|ws, _: &ClickEvent, _w, cx| {
                         ws.split_vertical = !ws.split_vertical;
                         cx.notify();
                     })),
@@ -62,9 +64,9 @@ impl Workspace {
             // "Open in <editor>" plus a ▾ to pick another installed editor (remembered, see Act::OpenEditor).
             if let Some(editor) = self.preferred_editor() {
                 let (t, pick_target) = (target.clone(), target.clone());
-                let open = segment("open-in", format!("Open in {}", editor_name(editor)))
+                let open = segment("open-in").child(format!("Open in {}", editor_name(editor)))
                     .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::OpenEditor(editor, t.clone()), window, cx)));
-                let pick = segment("open-in-pick", "▾").on_mouse_down(
+                let pick = segment("open-in-pick").child(icon(IconName::ChevronDown, 14.0)).on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |ws, ev: &MouseDownEvent, _w, cx| {
                         let current = ws.preferred_editor();
@@ -151,7 +153,7 @@ impl Workspace {
                     .overflow_hidden()
                     // No `.occlude()` here: the title and the empty space stay part of the drag area; the buttons occlude themselves.
                     .child(
-                        icon_button("toggle-sidebar", "☰")
+                        icon_button("toggle-sidebar", IconName::PanelLeft)
                             .occlude()
                             .on_click(cx.listener(|ws, _: &ClickEvent, _w, cx| {
                                 ws.store.data.layout.sidebar_visible = !ws.store.data.layout.sidebar_visible;
@@ -174,12 +176,15 @@ impl Workspace {
                     })
                     .when_some(branch.zip(repo), |d, (b, repo)| {
                         // Click: switch branch or create one (see Workspace::open_branch_menu).
-                        let label = if busy == Some(GitOp::Branch) { format!("⎇ {b} …") } else { format!("⎇ {b} ▾") };
+                        let tail: AnyElement = if busy == Some(GitOp::Branch) { spinner("branch-busy", 12.0).into_any_element() } else { icon(IconName::ChevronDown, 12.0).into_any_element() };
                         d.child(
                             div()
                                 .id("branch")
                                 .occlude()
                                 .flex_none()
+                                .flex()
+                                .items_center()
+                                .gap(px(4.0))
                                 .px(px(7.0))
                                 .py(px(1.0))
                                 .rounded(px(10.0))
@@ -188,7 +193,9 @@ impl Workspace {
                                 .text_color(hsla(theme::TEXT_DIM))
                                 .cursor_pointer()
                                 .hover(|s| s.bg(hsla(0x262626)).text_color(hsla(theme::TEXT)))
-                                .child(label)
+                                .child(icon(IconName::GitBranch, 12.0))
+                                .child(b)
+                                .child(tail)
                                 .on_mouse_down(
                                     MouseButton::Left,
                                     cx.listener(move |ws, ev: &MouseDownEvent, _w, cx| ws.open_branch_menu(repo.clone(), ev.position, cx)),
@@ -272,7 +279,7 @@ impl Workspace {
                             .text_ellipsis()
                             .child(title.clone()),
                     )
-                    .child(icon_button(gpui::SharedString::from(format!("pane-x-{i}")), "×").on_click(cx.listener(
+                    .child(icon_button(gpui::SharedString::from(format!("pane-x-{i}")), IconName::X).on_click(cx.listener(
                         move |ws, _: &ClickEvent, window, cx| {
                             cx.stop_propagation();
                             ws.act(Act::CloseLive(cid.clone()), window, cx)
@@ -419,6 +426,70 @@ impl Workspace {
                     .gap(px(4.0))
                     .child(shortcut("Ctrl+Shift+N", "New Claude session"))
                     .child(shortcut("Ctrl+Shift+T", "New shell"))
+                    .child(shortcut("Ctrl+Shift+D", "Split pane"))
+                    .child(shortcut("Ctrl+Tab", "Next session"))
+                    .child(shortcut("Ctrl+Shift+W", "End session")),
+            )
+    }
+
+    /// What the main area shows while the Chat tab is open and no session is selected.
+    fn render_chat_home(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let shortcut = |keys: &str, what: &str| {
+            div()
+                .flex()
+                .justify_between()
+                .gap(px(28.0))
+                .child(div().text_size(px(12.0)).text_color(hsla(theme::TEXT_DIM)).child(what.to_string()))
+                .child(div().text_size(px(12.0)).text_color(hsla(theme::TEXT_FAINT)).child(keys.to_string()))
+        };
+        let mut chats: Vec<_> = self.chat_store.shown().cloned().collect();
+        chats.sort_by_key(|c| std::cmp::Reverse(c.last_active));
+        let t = now();
+        let mut recent = div().flex().flex_col().gap(px(2.0)).mt(px(26.0)).w(px(420.0));
+        if !chats.is_empty() {
+            recent = recent.child(div().mb(px(4.0)).child(section_label("RECENT CHATS")));
+        }
+        for (i, c) in chats.into_iter().take(5).enumerate() {
+            let id = c.id.clone();
+            recent = recent.child(
+                div()
+                    .id(gpui::SharedString::from(format!("recent-chat-{i}")))
+                    .flex()
+                    .justify_between()
+                    .px(px(10.0))
+                    .py(px(6.0))
+                    .rounded(px(6.0))
+                    .cursor_pointer()
+                    .hover(|st| st.bg(hsla(theme::ROW_HOVER)))
+                    .child(div().text_size(px(13.0)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(c.title.clone()))
+                    .child(div().text_size(px(11.5)).text_color(hsla(theme::TEXT_FAINT)).child(ago(c.last_active, t)))
+                    .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::OpenChat(id.clone()), window, cx))),
+            );
+        }
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .child(clawd(72.0))
+            .child(div().mt(px(20.0)).text_size(px(22.0)).font_weight(FontWeight::SEMIBOLD).child("Claudiu"))
+            .child(div().mt(px(4.0)).text_size(px(13.0)).text_color(hsla(theme::TEXT_DIM)).child("Chat with Claude about anything, or tie a chat to a project"))
+            .child(
+                div()
+                    .mt(px(22.0))
+                    .flex()
+                    .gap(px(8.0))
+                    .child(button("home-chat", "New chat", true).on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::NewChat { cwd: None, split: false }, window, cx)))),
+            )
+            .child(recent)
+            .child(
+                div()
+                    .mt(px(30.0))
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.0))
+                    .child(shortcut("Ctrl+Shift+M", "New chat"))
                     .child(shortcut("Ctrl+Shift+D", "Split pane"))
                     .child(shortcut("Ctrl+Tab", "Next session"))
                     .child(shortcut("Ctrl+Shift+W", "End session")),
@@ -672,6 +743,7 @@ impl Render for Workspace {
         let avail_w = f32::from(window.viewport_size().width) - sidebar_w;
         let main: AnyElement = match &self.main {
             Main::Terminals => self.render_panes(avail_w, cx).into_any_element(),
+            Main::Home if self.side == Side::Chat => self.render_chat_home(cx).into_any_element(),
             Main::Home => self.render_home(cx).into_any_element(),
         };
         let menu = self.render_menu(cx);

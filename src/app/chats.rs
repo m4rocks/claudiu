@@ -3,12 +3,31 @@
 
 use super::*;
 
+/// The main window's panes, set aside while the other sidebar tab is open.
+pub struct Layout {
+    pub panes: Vec<Id>,
+    pub groups: Vec<Vec<Id>>,
+    pub active_slot: usize,
+    pub focused: usize,
+    pub recent: Vec<Id>,
+    pub main: Main,
+    pub selected: Option<Id>,
+}
+
+impl Layout {
+    fn empty() -> Self {
+        Self { panes: vec![], groups: vec![], active_slot: usize::MAX, focused: 0, recent: vec![], main: Main::Home, selected: None }
+    }
+}
+
 /// Which list the sidebar shows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Side {
     Sessions,
     Chat,
 }
+
+const TITLE_SYSTEM: &str = "You name conversations. Reply with the title only: two to six words, no quotes, no trailing punctuation, in the language the conversation is mostly in. Say what the conversation is about, not how it started.";
 
 /// A chat whose agent is running. Closing the pane drops the view, which ends the agent; the record stays.
 pub struct ChatPane {
@@ -49,6 +68,36 @@ impl Workspace {
         }
     }
 
+    /// Switch the sidebar tab and remember it for the next launch. Each tab keeps its own main window: leaving one parks
+    /// its panes, and the other tab gets back what it showed (the welcome page if it showed nothing).
+    pub(super) fn set_side(&mut self, side: Side) {
+        if side != self.side {
+            let leaving = Layout {
+                panes: std::mem::take(&mut self.panes),
+                groups: std::mem::take(&mut self.groups),
+                active_slot: self.active_slot,
+                focused: self.focused,
+                recent: std::mem::take(&mut self.recent),
+                main: self.main,
+                selected: self.selected.take(),
+            };
+            let back = self.parked.replace(leaving).unwrap_or(Layout::empty());
+            // A session may have ended or been closed while the tab was away.
+            let open = |ws: &Self, id: &Id| ws.live_view(id).is_some() || ws.gh_pane(id).is_some() || ws.chat_pane(id).is_some();
+            let keep = |ws: &Self, ids: Vec<Id>| ids.into_iter().filter(|id| open(ws, id)).collect::<Vec<_>>();
+            self.groups = back.groups.into_iter().map(|g| keep(self, g)).filter(|g| !g.is_empty()).collect();
+            self.panes = keep(self, back.panes);
+            self.recent = keep(self, back.recent);
+            self.active_slot = back.active_slot;
+            self.focused = back.focused.min(self.panes.len().saturating_sub(1));
+            self.main = if self.panes.is_empty() { Main::Home } else { back.main };
+            self.selected = back.selected.filter(|id| open(self, id) || self.chat_store.get(id).is_some() || self.store.session(id).is_some());
+        }
+        self.side = side;
+        self.store.data.layout.chat_tab = side == Side::Chat;
+        self.store.mark_dirty();
+    }
+
     /// Projects a chat can be tied to, as (name, folder).
     fn project_choices(&self) -> Vec<(String, PathBuf)> {
         self.store.data.projects.iter().map(|p| (p.name.clone(), p.path.clone())).collect()
@@ -65,11 +114,12 @@ impl Workspace {
             created_at: now(),
             last_active: now(),
             removed: false,
+            draft: String::new(),
         };
         let id = rec.id.clone();
         self.chat_store.add(rec);
         if !split {
-            self.side = Side::Chat;
+            self.set_side(Side::Chat);
         }
         if split && !self.panes.is_empty() {
             let at = self.focused;
@@ -95,7 +145,12 @@ impl Workspace {
             if !is_tied(&cwd) {
                 let _ = std::fs::create_dir_all(&cwd);
             }
-            let view = cx.new(|cx| ChatView::new(rec.id.clone(), rec.cwd.clone(), launch, rec.session_id.clone(), window, cx));
+            // A chat nothing was said in has no conversation to load (its empty session is not one Claude can resume).
+            let resume = rec.session_id.clone().filter(|_| rec.title != DEFAULT_TITLE);
+            let view = cx.new(|cx| ChatView::new(rec.id.clone(), rec.cwd.clone(), launch, resume, window, cx));
+            if !rec.draft.is_empty() {
+                view.update(cx, |v, cx| v.set_draft(&rec.draft, window, cx));
+            }
             let projects = self.project_choices();
             view.update(cx, |v, _| v.set_projects(projects));
             let sub_id = rec.id.clone();
@@ -107,11 +162,17 @@ impl Workspace {
 
     fn on_chat_event(&mut self, id: &str, ev: &ChatEvent, _window: &mut Window, cx: &mut Context<Self>) {
         match ev {
+            // Typing is saved on the next tick, not on every key.
+            ChatEvent::Draft(text) => {
+                self.chat_store.update(id, |r| r.draft = text.clone());
+                return;
+            }
             ChatEvent::Toast { text, error } => self.toast(text.clone(), *error, cx),
             ChatEvent::Session(sid) => self.chat_store.update(id, |r| r.session_id = Some(sid.clone())),
             ChatEvent::Title(t) => self.chat_store.update(id, |r| r.title = t.clone()),
             ChatEvent::Sent(text) => self.chat_store.update(id, |r| {
                 r.last_active = now();
+                r.draft.clear();
                 if r.title == DEFAULT_TITLE {
                     r.title = title_from(text);
                 }
@@ -142,10 +203,61 @@ impl Workspace {
 
     /// A chat that never got a message has nothing worth keeping once it is closed.
     pub(super) fn forget_if_unused(&mut self, id: &str) {
-        if self.chat_store.get(id).is_some_and(|r| r.title == DEFAULT_TITLE) {
+        if self.chat_store.get(id).is_some_and(|r| r.is_blank()) {
             self.chat_store.remove(id);
         }
         self.chat_store.save_if_dirty();
+    }
+
+    /// Have Haiku write a new title from what was said, and use it as the name of the chat or Claude Code session
+    /// (a session's name also reaches Claude Code itself through `sync_claude_names`).
+    pub(super) fn regen_title(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(claude) = self.claude_exe.clone() else { return self.toast("Could not find the `claude` CLI.", true, cx) };
+        let is_chat = self.chat_store.get(id).is_some();
+        // What was said: a chat's messages as they are on screen (or last saved), a session's transcript file.
+        let (said, transcript) = if is_chat {
+            let items = self.chat_pane(id).map(|p| p.view.read(cx).transcript(40));
+            (items.unwrap_or_else(|| crate::chat::model::transcript(&crate::chat::store::load_cache(id), 40)), None)
+        } else {
+            (String::new(), self.store.session(id).and_then(|s| s.claude.as_ref()?.transcript.clone()))
+        };
+        if said.is_empty() && transcript.is_none() {
+            return self.toast("Nothing to title yet.", false, cx);
+        }
+        self.toast("Writing a new title…", false, cx);
+        let id = id.to_string();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let said = transcript.map_or(said, |p| crate::claude::conversation_text(&p));
+                    if said.trim().is_empty() {
+                        return Err("Nothing to title yet.".to_string());
+                    }
+                    let prompt = format!("Conversation:
+
+{said}
+
+Write the title.");
+                    let raw = crate::commit::generate(&claude, TITLE_SYSTEM, &prompt)?;
+                    let title: String = raw.lines().next().unwrap_or_default().trim().trim_matches(['"', '\'', '`', '.']).chars().take(60).collect();
+                    if title.is_empty() { Err("claude returned no title".to_string()) } else { Ok(title) }
+                })
+                .await;
+            let _ = this.update(cx, |ws, cx| match result {
+                Ok(title) => {
+                    if ws.chat_store.get(&id).is_some() {
+                        ws.chat_store.update(&id, |r| r.title = title.clone());
+                        ws.chat_store.save_if_dirty();
+                    } else if let Some(rec) = ws.store.session_mut(&id) {
+                        rec.custom_title = Some(title.clone());
+                    }
+                    ws.toast(format!("Renamed to “{title}”"), false, cx);
+                }
+                Err(e) => ws.toast(e, true, cx),
+            });
+        })
+        .detach();
     }
 
     /// Remove a chat from the list. Claude Code's own transcript is not touched.
@@ -154,6 +266,7 @@ impl Workspace {
             self.close_live(id, window, cx);
         }
         self.chat_store.hide(id);
+        crate::chat::store::drop_cache(id);
         self.chat_store.save_if_dirty();
         if self.selected.as_deref() == Some(id) {
             self.selected = None;
@@ -167,6 +280,7 @@ impl Workspace {
         let item = |label: &str, act: Act, danger: bool, sep: bool| MenuItem { label: label.into(), hint: None, act, danger, disabled: false, separator_before: sep };
         let mut items = vec![item(if live { "Switch to chat" } else { "Open chat" }, Act::OpenChat(id.into()), false, false)];
         items.extend(self.split_items(&id.to_string(), true));
+        items.push(item("Regenerate title", Act::RegenTitle(id.into()), false, false));
         if let Some(sid) = &rec.session_id {
             items.push(item("Copy Claude session ID", Act::CopyText(sid.clone()), false, true));
         }

@@ -1,9 +1,13 @@
 //! Small stateless UI pieces shared by sidebar / main view / modals.
 
+use std::time::Duration;
+
 use gpui::{
-    Div, FontWeight, Hsla, InteractiveElement, ParentElement, SharedString,
+    Animation, AnimationElement, AnimationExt, Div, ElementId, FontWeight, Hsla, InteractiveElement, ParentElement, SharedString,
     Stateful, Styled, div, px,
 };
+use gpui_kit::assets::IconName;
+use gpui_kit::component::Icon;
 
 use crate::theme::{self, hsla};
 
@@ -170,13 +174,18 @@ pub fn button(
     }
 }
 
+/// `button` with a Lucide icon before the label.
+pub fn button_leading(id: impl Into<SharedString>, name: IconName, label: impl Into<SharedString>, primary: bool) -> Stateful<Div> {
+    button(id, "", primary).child(icon(name, 13.0)).child(div().ml(px(5.0)).child(label.into()))
+}
+
 /// A button that can't be pressed right now: dimmed, no hover, no click handler attached by the caller.
 pub fn button_disabled(id: impl Into<SharedString>, label: impl Into<SharedString>) -> Stateful<Div> {
     button_with(id.into(), label.into(), hsla(0x1b1b1b), hsla(theme::TEXT_FAINT), hsla(0x1b1b1b), false).cursor_default()
 }
 
-/// One half of a split button (`( label | ▾ )`): sits inside a rounded group and only shows a hover fill.
-pub fn segment(id: impl Into<SharedString>, label: impl Into<SharedString>) -> Stateful<Div> {
+/// One half of a split button (`( label | v )`): sits inside a rounded group and only shows a hover fill.
+pub fn segment(id: impl Into<SharedString>) -> Stateful<Div> {
     div()
         .id(id.into())
         .h_full()
@@ -187,7 +196,6 @@ pub fn segment(id: impl Into<SharedString>, label: impl Into<SharedString>) -> S
         .text_color(hsla(theme::TEXT))
         .cursor_pointer()
         .hover(|s| s.bg(hsla(0x262626)))
-        .child(label.into())
 }
 
 /// Destructive action (end session, quit).
@@ -202,7 +210,21 @@ pub fn danger_button(id: impl Into<SharedString>, label: impl Into<SharedString>
     )
 }
 
-pub fn icon_button(id: impl Into<SharedString>, glyph: &'static str) -> Stateful<Div> {
+/// A Lucide icon, `size` px square, in the text color it is drawn under.
+pub fn icon(name: IconName, size: f32) -> Icon {
+    Icon::new(name).size(px(size))
+}
+
+/// The "working" icon: Lucide's loader, turning.
+pub fn spinner(id: impl Into<ElementId>, size: f32) -> AnimationElement<Icon> {
+    icon(IconName::LoaderCircle, size).with_animation(
+        id,
+        Animation::new(Duration::from_millis(1000)).repeat(),
+        |i, t| i.rotate(gpui::radians(t * std::f32::consts::TAU)),
+    )
+}
+
+pub fn icon_button(id: impl Into<SharedString>, glyph: IconName) -> Stateful<Div> {
     div()
         .id(id.into())
         .size(px(22.0))
@@ -210,53 +232,10 @@ pub fn icon_button(id: impl Into<SharedString>, glyph: &'static str) -> Stateful
         .items_center()
         .justify_center()
         .rounded(px(5.0))
-        .text_size(px(13.0))
         .text_color(hsla(theme::TEXT_DIM))
         .cursor_pointer()
         .hover(|s| s.bg(hsla(0x262626)).text_color(hsla(theme::TEXT)))
-        .child(glyph)
-}
-
-/// A gear drawn from rectangles (like `clawd`), so it matches the plain glyph icons instead of an emoji.
-/// It brightens with the `group` named `group` being hovered, like `icon_button`'s text does.
-pub fn cog(group: &'static str) -> Div {
-    let tint = |d: Div, rect: (f32, f32, f32, f32)| {
-        d.child(
-            div()
-                .absolute()
-                .left(px(rect.0))
-                .top(px(rect.1))
-                .w(px(rect.2))
-                .h(px(rect.3))
-                .bg(hsla(theme::TEXT_DIM))
-                .group_hover(group, |s| s.bg(hsla(theme::TEXT))),
-        )
-    };
-    let mut root = div().relative().size(px(14.0)).flex_none().child(
-        div()
-            .absolute()
-            .left(px(3.0))
-            .top(px(3.0))
-            .size(px(8.0))
-            .rounded_full()
-            .border_2()
-            .border_color(hsla(theme::TEXT_DIM))
-            .group_hover(group, |s| s.border_color(hsla(theme::TEXT))),
-    );
-    // Four teeth on the axes, four small ones on the diagonals.
-    for rect in [
-        (6.0, 0.0, 2.0, 3.0),
-        (6.0, 11.0, 2.0, 3.0),
-        (0.0, 6.0, 3.0, 2.0),
-        (11.0, 6.0, 3.0, 2.0),
-        (2.0, 2.0, 2.0, 2.0),
-        (10.0, 2.0, 2.0, 2.0),
-        (2.0, 10.0, 2.0, 2.0),
-        (10.0, 10.0, 2.0, 2.0),
-    ] {
-        root = tint(root, rect);
-    }
-    root
+        .child(icon(glyph, 14.0))
 }
 
 /// Monogram avatar: the first letter of `seed` on a color picked from it, so each account keeps its color.

@@ -19,11 +19,12 @@ use serde_json::{Value, json};
 
 use super::acp::{self, Agent, Msg};
 use super::model::{self, Command, Item, Meta, Tool};
-use super::store::scratch_dir;
-use crate::github::ui::markdown;
+use super::store::{load_cache, save_cache, scratch_dir};
+use super::ui::markdown;
 use crate::store::{RateLimit, now};
 use crate::theme::{self, hsla};
-use crate::widgets::{button, clawd, fade_in};
+use gpui_kit::assets::IconName;
+use crate::widgets::{button, clawd, fade_in, icon, spinner};
 
 /// How to run the user's Claude for this chat: their executable, plus the environment of the account to use.
 #[derive(Clone)]
@@ -45,12 +46,17 @@ pub enum ChatEvent {
     Limits { five: Option<RateLimit>, seven: Option<RateLimit> },
     /// Context tokens used and the window size.
     Context(u64, u64),
+    /// The message box now holds this (not sent).
+    Draft(String),
     /// The user tied the (still empty) chat to a project, or untied it: a new conversation in this folder.
     Cwd(PathBuf),
 }
 
 /// `picker` value that means the project list rather than one of the agent's options.
 const PROJECT_PICKER: usize = usize::MAX;
+
+/// What a normal start says. It is not shown: the chat is usable at once and the agent starts behind it.
+const START: &str = "Starting Claude…";
 
 /// An image waiting to be sent with the next message.
 struct Attachment {
@@ -128,6 +134,18 @@ enum Choice {
     Project(Option<PathBuf>),
 }
 
+/// The earlier conversation of a chat whose project was changed: compacted into a summary that goes along with the
+/// next message, so the new conversation knows what came before.
+enum Carry {
+    None,
+    /// The project changed; the summary is made when the next message is sent, so a misclick costs nothing.
+    Pending(String),
+    Summarizing,
+    Ready(String),
+}
+
+const COMPACT_SYSTEM: &str = "You compact conversations so another assistant can carry on in a new session. Write a summary of: the goal, decisions made, key facts (files, names, numbers, commands), what is done and what is still open. At most 400 words, plain text, no preamble.";
+
 enum Pending {
     Init,
     Session,
@@ -150,6 +168,9 @@ pub struct ChatView {
     projects: Vec<(String, PathBuf)>,
     /// A first message to send as soon as the conversation is ready (a chat opened by another session).
     startup: Option<String>,
+    /// Messages sent before the conversation was ready: (text, images, prompt blocks), delivered in order once it is.
+    queued: Vec<(String, Vec<Arc<Image>>, Vec<Value>)>,
+    carry: Carry,
     pub phase: Phase,
     items: Vec<Item>,
     meta: Meta,
@@ -172,11 +193,16 @@ pub struct ChatView {
     /// The account changed: restart the agent (same conversation) as soon as the chat is idle.
     relaunch: bool,
     slash_sel: usize,
+    slash_scroll: ScrollHandle,
     /// Esc closed the command list; it stays closed until the text changes.
     slash_off: bool,
     picker: Option<(usize, Point<Pixels>)>,
     scroll: ScrollHandle,
     follow: bool,
+    /// `items` is the saved copy of the conversation, shown until the agent replays the real one.
+    cached_shown: bool,
+    /// The conversation being replayed while the saved copy is still on screen; it replaces the copy when done.
+    replay: Vec<Item>,
     pub focus: FocusHandle,
     _subs: Vec<Subscription>,
 }
@@ -199,10 +225,13 @@ impl ChatView {
             InputEvent::Change => {
                 v.slash_sel = 0;
                 v.slash_off = false;
+                cx.emit(ChatEvent::Draft(v.input.read(cx).value().to_string()));
                 cx.notify();
             }
             _ => {}
         })];
+        // The command list follows the cursor, which moves without a Change event.
+        subs.push(cx.observe(&input, |_, _, cx| cx.notify()));
         // Arrow keys and Enter are text-box actions that run before any key listener, so the command list
         // picks them up first, and only while it is open and the box has the focus.
         let this = cx.entity().downgrade();
@@ -223,7 +252,9 @@ impl ChatView {
             cwd,
             projects: vec![],
             startup: None,
-            phase: Phase::Working("Starting Claude…"),
+            queued: vec![],
+            carry: Carry::None,
+            phase: Phase::Working(START),
             items: vec![],
             meta: Meta::default(),
             launch,
@@ -240,15 +271,31 @@ impl ChatView {
             sent_images: HashMap::new(),
             relaunch: false,
             slash_sel: 0,
+            slash_scroll: ScrollHandle::new(),
             slash_off: false,
             picker: None,
             scroll: ScrollHandle::new(),
             follow: true,
+            cached_shown: false,
+            replay: vec![],
             focus: cx.focus_handle(),
             _subs: subs,
         };
         view.start(window, cx);
         view
+    }
+
+    /// Put back what was typed before. The cursor goes to the end.
+    pub fn set_draft(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.input.update(cx, |s, cx| {
+            s.set_value(text.to_string(), window, cx);
+            s.set_selected_range(text.len()..text.len(), cx);
+        });
+    }
+
+    fn save_cache(&self, cx: &mut Context<Self>) {
+        let (id, items) = (self.id.clone(), self.items.clone());
+        cx.background_executor().spawn(async move { save_cache(&id, &items) }).detach();
     }
 
     pub fn is_busy(&self) -> bool {
@@ -269,9 +316,15 @@ impl ChatView {
         super::store::is_tied(&self.cwd)
     }
 
-    /// The project can still be changed while nothing has been said: a different folder means a new conversation.
+    /// The project can be changed any time the chat is idle (not mid-turn, not waiting on an approval or loading an
+    /// old conversation). A different folder means a new Claude conversation there.
     fn can_retie(&self) -> bool {
-        self.resume.is_none() && self.items.is_empty() && self.inflight == 0 && self.startup.is_none() && self.phase == Phase::Ready
+        let idle = !matches!(self.carry, Carry::Summarizing) && self.inflight == 0 && self.perms.is_empty() && self.startup.is_none() && self.queued.is_empty();
+        idle && match self.phase {
+            Phase::Ready => true,
+            Phase::Working(_) => self.resume.is_none(),
+            _ => false,
+        }
     }
 
     pub fn set_project(&mut self, project: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
@@ -281,29 +334,61 @@ impl ChatView {
             cx.notify();
             return;
         }
+        // A conversation already under way stays on screen above a notice; Claude itself starts afresh in the folder
+        // (Claude Code keeps a session with the folder it began in).
+        let shown = (!self.items.is_empty()).then(|| (std::mem::take(&mut self.items), std::mem::take(&mut self.sent_images)));
+        let place = if super::store::is_tied(&cwd) { cwd.file_name().map_or_else(|| cwd.to_string_lossy().into_owned(), |n| n.to_string_lossy().into_owned()) } else { "no project".into() };
         self.cwd = cwd.clone();
         self.session_id = None;
+        self.resume = None;
         cx.emit(ChatEvent::Cwd(cwd));
         self.start(window, cx);
+        if let Some((items, images)) = shown {
+            let mut said = model::transcript(&items, 200);
+            if let Carry::Ready(earlier) = &self.carry {
+                said = format!("Summary of what came before:
+{earlier}
+
+{said}");
+            }
+            self.items = items;
+            self.sent_images = images;
+            self.notice(format!("Now working in {place}. This is a new conversation; a summary of the messages above goes along with your next message."), false);
+            self.carry = Carry::Pending(said);
+        }
+    }
+
+    /// Compacts the earlier conversation (Haiku through the user's `claude`) for the message about to be sent.
+    fn summarize(&mut self, said: String, cx: &mut Context<Self>) {
+        let Some(claude) = self.launch.as_ref().map(|l| l.claude.clone()) else { return };
+        self.carry = Carry::Summarizing;
+        cx.spawn(async move |this, cx| {
+            let summary = cx
+                .background_executor()
+                .spawn(async move {
+                    // The summary is Haiku's; if that fails the tail of the conversation itself goes instead.
+                    crate::commit::generate(&claude, COMPACT_SYSTEM, &format!("Conversation:
+
+{said}
+
+Write the summary.")).unwrap_or_else(|_| {
+                        let skip = said.chars().count().saturating_sub(6000);
+                        said.chars().skip(skip).collect()
+                    })
+                })
+                .await;
+            let _ = this.update(cx, |v, cx| {
+                v.carry = Carry::Ready(summary);
+                v.flush_queue();
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// The last `last` messages as plain text, for another session that is allowed to read this chat.
     pub fn transcript(&self, last: usize) -> String {
-        let lines: Vec<String> = self
-            .items
-            .iter()
-            .filter_map(|i| match i {
-                Item::User(t) => Some(format!("User: {t}")),
-                Item::Agent(t) => Some(format!("Claude: {t}")),
-                Item::Tool(t) => Some(format!("[tool: {} ({})]", t.title, t.status)),
-                Item::Notice { text, .. } => Some(format!("[{text}]")),
-                Item::Thought(_) | Item::Plan(_) => None,
-            })
-            .collect();
-        let text = lines[lines.len().saturating_sub(last)..].join("\n\n");
-        // Keep the newest part of a long transcript.
-        let skip = text.chars().count().saturating_sub(30_000);
-        text.chars().skip(skip).collect()
+        model::transcript(&self.items, last)
     }
 
     pub fn focus_input(&self, window: &mut Window, cx: &mut Context<Self>) {
@@ -320,14 +405,24 @@ impl ChatView {
         self.pending.clear();
         self.inflight = 0;
         self.perms.clear();
-        self.items.clear();
-        self.sent_images.clear();
+        self.replay.clear();
+        // A conversation being loaded shows what was last seen (the saved copy, or what a restart interrupted).
+        if self.resume.is_some() {
+            if self.items.is_empty() {
+                self.items = load_cache(&self.id);
+            }
+            self.cached_shown = !self.items.is_empty();
+        } else {
+            self.items.clear();
+            self.sent_images.clear();
+            self.cached_shown = false;
+        }
         let Some(launch) = self.launch.clone() else {
             self.phase = Phase::NoClaude;
             cx.notify();
             return;
         };
-        self.phase = Phase::Working(if acp::installed() { "Starting Claude…" } else { "Setting up the Claude adapter (first time only)…" });
+        self.phase = Phase::Working(if acp::installed() { START } else { "Setting up the Claude adapter (first time only)…" });
         cx.notify();
         let cwd = self.cwd.clone();
         cx.spawn_in(window, async move |this, cx| {
@@ -395,7 +490,7 @@ impl ChatView {
                     && let Some(u) = params.get("update")
                 {
                     let (title, context) = (self.meta.title.clone(), self.meta.context);
-                    model::apply(&mut self.items, &mut self.meta, u);
+                    model::apply(if self.cached_shown { &mut self.replay } else { &mut self.items }, &mut self.meta, u);
                     if self.meta.title != title
                         && let Some(t) = self.meta.title.clone()
                     {
@@ -468,6 +563,7 @@ impl ChatView {
                 let mut params = json!({
                     "cwd": self.cwd,
                     "mcpServers": crate::mcp::chat_servers(&self.id),
+                    "systemPrompt": {"mode": "append", "content": [{"type": "text", "text": super::ui::PROMPT}]},
                     "_meta": {"claudeCode": {"options": {"allowedTools": crate::mcp::allowed_tools("chat")}}},
                 });
                 let method = if let Some(sid) = self.resume.clone() {
@@ -482,6 +578,13 @@ impl ChatView {
                     self.pending.insert(id, Pending::Session);
                 }
             }
+            // Claude has no file for a session nothing was said in yet (a project was picked and the app closed): start afresh.
+            (Pending::Session, Err(e)) if self.resume.is_some() && e.to_lowercase().contains("not found") => {
+                let keep = (std::mem::take(&mut self.items), std::mem::take(&mut self.sent_images));
+                self.resume = None;
+                self.start(window, cx);
+                (self.items, self.sent_images) = keep;
+            }
             (Pending::Init | Pending::Session, Err(e)) => self.phase = Phase::Failed(e),
             (Pending::Session, Ok(r)) => {
                 let sid = r.get("sessionId").and_then(Value::as_str).map(String::from).or_else(|| self.resume.clone());
@@ -492,8 +595,13 @@ impl ChatView {
                     self.session_id = Some(sid);
                 }
                 self.meta.options = model::parse_options(r.get("configOptions").unwrap_or(&Value::Null));
+                if std::mem::take(&mut self.cached_shown) {
+                    self.items = std::mem::take(&mut self.replay);
+                    self.sent_images.clear();
+                    self.save_cache(cx);
+                }
                 self.phase = Phase::Ready;
-                self.focus_input(window, cx);
+                self.flush_queue();
                 if let Some(text) = self.startup.take() {
                     self.send(text, window, cx);
                 }
@@ -503,6 +611,9 @@ impl ChatView {
                 self.inflight = self.inflight.saturating_sub(1);
                 if let Err(e) = result {
                     self.notice(e, true);
+                }
+                if self.inflight == 0 {
+                    self.save_cache(cx);
                 }
                 self.maybe_relaunch(window, cx);
             }
@@ -524,9 +635,22 @@ impl ChatView {
         }
     }
 
-    /// Send a message (with any attached images) once the conversation is ready. False when nothing was sent.
+    /// Send a message (with any attached images). While the conversation is still starting it is queued and goes out
+    /// the moment it is ready. False when nothing was sent.
     fn send(&mut self, text: String, _window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let (Some(sid), Phase::Ready) = (self.session_id.clone(), &self.phase) else { return false };
+        let live = self.phase == Phase::Ready && self.session_id.is_some();
+        if !live && !matches!(self.phase, Phase::Working(_)) {
+            return false;
+        }
+        if let Carry::Pending(said) = std::mem::replace(&mut self.carry, Carry::None) {
+            if text.is_empty() && self.attachments.is_empty() {
+                self.carry = Carry::Pending(said);
+            } else {
+                self.summarize(said, cx);
+            }
+        }
+        // Still compacting the earlier conversation: wait for it, like for the agent.
+        let ready = live && !matches!(self.carry, Carry::Summarizing);
         if text.is_empty() && self.attachments.is_empty() {
             return false;
         }
@@ -538,19 +662,50 @@ impl ChatView {
         if !text.is_empty() {
             prompt.push(json!({"type": "text", "text": text}));
         }
-        self.items.push(Item::User(text.clone()));
-        if !images.is_empty() {
-            self.sent_images.insert(self.items.len() - 1, images.into_iter().map(|a| a.image).collect());
+        let images: Vec<Arc<Image>> = images.into_iter().map(|a| a.image).collect();
+        if ready {
+            self.items.push(Item::User(text.clone()));
+            if !images.is_empty() {
+                self.sent_images.insert(self.items.len() - 1, images);
+            }
+            self.dispatch(prompt);
+        } else {
+            self.queued.push((text.clone(), images, prompt));
         }
         self.follow = true;
+        cx.emit(ChatEvent::Sent(if text.is_empty() { "Image".into() } else { text }));
+        cx.notify();
+        true
+    }
+
+    /// Deliver the messages that waited for the conversation (or for the summary of the earlier one).
+    fn flush_queue(&mut self) {
+        if self.phase != Phase::Ready || matches!(self.carry, Carry::Summarizing) {
+            return;
+        }
+        for (text, images, prompt) in std::mem::take(&mut self.queued) {
+            self.items.push(Item::User(text));
+            if !images.is_empty() {
+                self.sent_images.insert(self.items.len() - 1, images);
+            }
+            self.dispatch(prompt);
+        }
+    }
+
+    fn dispatch(&mut self, mut prompt: Vec<Value>) {
+        let Some(sid) = self.session_id.clone() else { return };
+        if let Carry::Ready(summary) = std::mem::replace(&mut self.carry, Carry::None) {
+            prompt.insert(0, json!({"type": "text", "text": format!("(Context: this chat continues from an earlier conversation in another folder. Summary of it:
+
+{summary}
+
+The user's message follows.)")}));
+        }
         if let Some(a) = &mut self.agent {
             let id = a.call("session/prompt", json!({"sessionId": sid, "prompt": prompt}));
             self.pending.insert(id, Pending::Prompt);
             self.inflight += 1;
         }
-        cx.emit(ChatEvent::Sent(if text.is_empty() { "Image".into() } else { text }));
-        cx.notify();
-        true
     }
 
     /// Ctrl/Cmd+V with a picture (or an image file) on the clipboard attaches it. Text still pastes as text.
@@ -619,10 +774,16 @@ impl ChatView {
     }
 
     /// The commands the text box currently offers: it starts with `/` and has no space yet.
+    /// The `/word` the cursor is in: it starts the text or follows whitespace. Returns its byte range and what
+    /// was typed after the slash.
+    fn slash_token(&self, cx: &App) -> Option<(std::ops::Range<usize>, String)> {
+        let state = self.input.read(cx);
+        model::slash_token(&state.value(), state.cursor())
+    }
+
     fn slash_matches(&self, cx: &App) -> Vec<Command> {
-        let text = self.input.read(cx).value();
-        match text.strip_prefix('/') {
-            Some(typed) if !self.slash_off && !typed.contains(char::is_whitespace) => model::matching(&self.meta.commands, typed).into_iter().take(8).cloned().collect(),
+        match self.slash_token(cx) {
+            Some((_, typed)) if !self.slash_off => model::matching(&self.meta.commands, &typed).into_iter().cloned().collect(),
             _ => vec![],
         }
     }
@@ -637,8 +798,14 @@ impl ChatView {
             return false;
         }
         match key {
-            "up" => self.slash_sel = (self.slash_sel + matches.len() - 1) % matches.len(),
-            "down" => self.slash_sel = (self.slash_sel + 1) % matches.len(),
+            "up" => {
+                self.slash_sel = (self.slash_sel.min(matches.len() - 1) + matches.len() - 1) % matches.len();
+                self.slash_scroll.scroll_to_item(self.slash_sel);
+            }
+            "down" => {
+                self.slash_sel = (self.slash_sel.min(matches.len() - 1) + 1) % matches.len();
+                self.slash_scroll.scroll_to_item(self.slash_sel);
+            }
             "escape" => self.slash_off = true,
             "tab" | "enter" => self.pick_command(&matches[self.slash_sel.min(matches.len() - 1)], window, cx),
             _ => return false,
@@ -647,16 +814,30 @@ impl ChatView {
         true
     }
 
-    /// A command without arguments runs at once; one with arguments is filled in for the user to complete.
+    /// Completes the `/word` at the cursor. When it is the whole message and the command takes no arguments it
+    /// runs at once; otherwise the name is filled in (with a space after) for the user to go on typing.
     fn pick_command(&mut self, c: &Command, window: &mut Window, cx: &mut Context<Self>) {
         let takes_args = c.hint.is_some();
-        self.input.update(cx, |s, cx| s.set_value(format!("/{}{}", c.name, if takes_args { " " } else { "" }), window, cx));
-        if takes_args {
-            self.slash_off = true;
-            self.focus_input(window, cx);
-        } else {
+        let text = self.input.read(cx).value().to_string();
+        let Some((range, _)) = self.slash_token(cx) else { return };
+        let whole = range.start == 0 && range.end == text.len();
+        if whole && !takes_args {
+            self.input.update(cx, |s, cx| s.set_value(format!("/{}", c.name), window, cx));
             self.submit(window, cx);
+            return;
         }
+        let rest = &text[range.end..];
+        let space = if rest.starts_with(char::is_whitespace) { "" } else { " " };
+        let head = format!("{}/{}{space}", &text[..range.start], c.name);
+        // The cursor goes after the space, which may be the one that was already there.
+        let cursor = head.len() + if space.is_empty() { rest.chars().next().map_or(0, char::len_utf8) } else { 0 };
+        self.input.update(cx, |s, cx| {
+            s.set_value(format!("{head}{rest}"), window, cx);
+            s.set_selected_range(cursor..cursor, cx);
+        });
+        self.slash_off = true;
+        self.focus_input(window, cx);
+        cx.notify();
     }
 }
 
@@ -666,12 +847,22 @@ fn dim(text: impl Into<SharedString>) -> Div {
     div().text_size(px(12.0)).text_color(hsla(theme::TEXT_DIM)).child(text.into())
 }
 
-fn tool_glyph(t: &Tool) -> (&'static str, u32) {
+fn tool_glyph(t: &Tool) -> (IconName, u32) {
     match t.status.as_str() {
-        "completed" => ("✓", theme::OK),
-        "failed" => ("✕", theme::DANGER),
-        _ => ("◐", theme::ACCENT),
+        "completed" => (IconName::Check, theme::OK),
+        "failed" => (IconName::X, theme::DANGER),
+        _ => (IconName::LoaderCircle, theme::ACCENT),
     }
+}
+
+/// A status mark: the loader turns, the other icons stay still.
+fn status_mark(id: impl Into<gpui::ElementId>, name: IconName, size: f32) -> AnyElement {
+    if name == IconName::LoaderCircle { spinner(id, size).into_any_element() } else { icon(name, size).into_any_element() }
+}
+
+/// A line saying something is going on, with the turning loader before it.
+fn working(text: impl Into<SharedString>) -> Div {
+    div().flex().items_center().gap(px(6.0)).text_size(px(12.0)).text_color(hsla(theme::TEXT_DIM)).child(spinner("chat-working", 13.0)).child(text.into())
 }
 
 /// The last lines of a tool's output: enough to see what happened without a wall of text.
@@ -693,6 +884,7 @@ impl Render for ChatView {
         }
         let body: AnyElement = match self.phase.clone() {
             Phase::Ready => self.render_chat(window, cx),
+            Phase::Working(_) => self.render_chat(window, cx),
             other => self.render_state(other, cx),
         };
         div()
@@ -748,7 +940,7 @@ impl ChatView {
     fn render_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let busy = self.inflight > 0;
         let mut col = div().flex().flex_col().gap(px(14.0)).w_full().max_w(px(780.0)).mx_auto().px(px(20.0)).py(px(18.0));
-        if self.items.is_empty() {
+        if self.items.is_empty() && self.queued.is_empty() {
             col = col.child(
                 div()
                     .mt(px(80.0))
@@ -766,8 +958,21 @@ impl ChatView {
                 col = col.child(el);
             }
         }
-        if busy && !matches!(self.items.last(), Some(Item::Thought(_))) {
-            col = col.child(dim("Working…"));
+        // Messages sent while the conversation was starting wait here in order.
+        for (k, (text, _, _)) in self.queued.iter().enumerate() {
+            if let Some(el) = self.render_item(self.items.len() + k, &Item::User(text.clone()), false, cx) {
+                col = col.child(el);
+            }
+        }
+        // A plain start is invisible; setting up the adapter or loading an old conversation says so.
+        if matches!(self.carry, Carry::Summarizing) && !self.queued.is_empty() {
+            col = col.child(working("Carrying over the earlier conversation…"));
+        } else if let Phase::Working(what) = self.phase
+            && what != START
+        {
+            col = col.child(working(what));
+        } else if busy && !matches!(self.items.last(), Some(Item::Thought(_))) {
+            col = col.child(working("Working…"));
         }
 
         let mut footer = div().flex().flex_col().gap(px(8.0)).w_full().max_w(px(780.0)).mx_auto().px(px(20.0)).pb(px(14.0));
@@ -792,7 +997,19 @@ impl ChatView {
         let matches = self.slash_matches(cx);
         if !matches.is_empty() {
             let sel = self.slash_sel.min(matches.len() - 1);
-            let mut list = div().flex().flex_col().p(px(4.0)).rounded(px(10.0)).bg(hsla(0x151515)).border_1().border_color(hsla(0x2a2a2a));
+            // Every skill and command is in the list: it scrolls (wheel, or Up/Down with the selection kept in view).
+            let mut list = div()
+                .id("slash-list")
+                .flex()
+                .flex_col()
+                .max_h(px(280.0))
+                .overflow_y_scroll()
+                .track_scroll(&self.slash_scroll)
+                .p(px(4.0))
+                .rounded(px(10.0))
+                .bg(hsla(0x151515))
+                .border_1()
+                .border_color(hsla(0x2a2a2a));
             for (i, c) in matches.into_iter().enumerate() {
                 let hint = c.hint.clone().filter(|h| !h.is_empty());
                 list = list.child(
@@ -818,7 +1035,7 @@ impl ChatView {
 
         let mut chips = div().flex().items_center().gap(px(4.0));
         let (tied, can_pick) = (self.tied(), self.can_retie() && !self.projects.is_empty());
-        if tied || can_pick {
+        {
             let name = if tied {
                 let key = crate::platform::path_key(&self.cwd);
                 self.projects
@@ -844,7 +1061,12 @@ impl ChatView {
                             cx.notify();
                         }))
                     })
-                    .child(if can_pick { format!("{name} ▾") } else { name }),
+                    .flex()
+                    .items_center()
+                    .gap(px(3.0))
+                    .child(name)
+                    // Always drawn (dimmed when the project can't change) so the chip keeps its width.
+                    .child(div().opacity(if can_pick { 1.0 } else { 0.35 }).child(icon(IconName::ChevronDown, 12.0))),
             );
         }
         for (i, o) in self.meta.options.iter().enumerate() {
@@ -858,7 +1080,11 @@ impl ChatView {
                     .text_color(hsla(theme::TEXT_DIM))
                     .cursor_pointer()
                     .hover(|s| s.bg(hsla(0x222222)).text_color(hsla(theme::TEXT)))
-                    .child(format!("{} ▾", o.current_label()))
+                    .flex()
+                    .items_center()
+                    .gap(px(3.0))
+                    .child(o.current_label().to_string())
+                    .child(icon(IconName::ChevronDown, 12.0))
                     .on_mouse_down(MouseButton::Left, cx.listener(move |v, ev: &MouseDownEvent, _, cx| {
                         v.picker = Some((i, ev.position));
                         cx.notify();
@@ -904,7 +1130,7 @@ impl ChatView {
                                         .text_color(hsla(theme::TEXT))
                                         .cursor_pointer()
                                         .hover(|s| s.bg(hsla(theme::DANGER)))
-                                        .child("×")
+                                        .child(icon(IconName::X, 12.0))
                                         .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| {
                                             v.attachments.remove(i);
                                             cx.notify();
@@ -972,9 +1198,9 @@ impl ChatView {
                             .px(px(10.0))
                             .py(px(6.0))
                             .cursor_pointer()
-                            .child(div().flex_none().text_size(px(12.0)).text_color(hsla(color)).child(glyph))
+                            .child(div().flex_none().text_color(hsla(color)).child(status_mark(SharedString::from(format!("tool-spin-{}", t.id)), glyph, 14.0)))
                             .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(12.5)).child(t.title.clone()))
-                            .child(div().flex_none().text_size(px(10.5)).text_color(hsla(theme::TEXT_FAINT)).child(if open { "▾" } else { "▸" }))
+                            .child(div().flex_none().text_color(hsla(theme::TEXT_FAINT)).child(icon(if open { IconName::ChevronDown } else { IconName::ChevronRight }, 12.0)))
                             .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| {
                                 if !v.expanded.remove(&id) {
                                     v.expanded.insert(id.clone());
@@ -999,11 +1225,11 @@ impl ChatView {
                 let mut col = div().flex().flex_col().gap(px(3.0)).p(px(10.0)).rounded(px(8.0)).bg(hsla(0x111112)).border_1().border_color(hsla(0x222223));
                 for (text, status) in entries {
                     let (glyph, color) = match status.as_str() {
-                        "completed" => ("✓", theme::OK),
-                        "in_progress" => ("◐", theme::ACCENT),
-                        _ => ("○", theme::TEXT_FAINT),
+                        "completed" => (IconName::CircleCheck, theme::OK),
+                        "in_progress" => (IconName::LoaderCircle, theme::ACCENT),
+                        _ => (IconName::Circle, theme::TEXT_FAINT),
                     };
-                    col = col.child(div().flex().gap(px(8.0)).text_size(px(12.5)).child(div().text_color(hsla(color)).child(glyph)).child(text.clone()));
+                    col = col.child(div().flex().gap(px(8.0)).text_size(px(12.5)).child(div().pt(px(2.0)).text_color(hsla(color)).child(status_mark(SharedString::from(format!("plan-spin-{text}")), glyph, 13.0))).child(text.clone()));
                 }
                 col.into_any_element()
             }
@@ -1037,7 +1263,7 @@ impl ChatView {
                     .cursor_pointer()
                     .text_size(px(12.5))
                     .hover(|s| s.bg(hsla(0x252525)))
-                    .child(div().w(px(12.0)).flex_none().text_color(hsla(theme::ACCENT)).child(if current { "✓" } else { "" }))
+                    .child(div().w(px(12.0)).flex_none().text_color(hsla(theme::ACCENT)).children(current.then(|| icon(IconName::Check, 12.0))))
                     .child(label)
                     .on_click(cx.listener(move |v, _: &ClickEvent, window, cx| match choice.clone() {
                         Choice::Option(i, value) => v.set_option(i, value, cx),
