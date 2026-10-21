@@ -13,6 +13,15 @@ use crate::guard::{Allowed, resolve};
 fn tools() -> Value {
     json!([
         {
+            "name": "expand",
+            "description": "Return output kept aside under a handle: all of it, or lines from..to.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"handle": {"type": "string"}, "from": {"type": "integer"}, "to": {"type": "integer"}},
+                "required": ["handle"]
+            }
+        },
+        {
             "name": "request_access",
             "description": "Ask the user for write access to a path outside the project. Returns at once; keep working.",
             "inputSchema": {
@@ -62,6 +71,7 @@ fn call(shared: &Shared, session: &SessionId, info: &SessionInfo, params: &Value
             let _ = shared.rec.record(session, kind::ACCESS_REQUESTED, json!({"request_id": request, "path": target.to_string_lossy(), "reason": reason}));
             text("Pending: the user has been asked. Keep working on other things; you will be told the answer.")
         }
+        "expand" => text(&crate::firewall::expand(&shared.rec.store, args["handle"].as_str().unwrap_or(""), args["from"].as_u64(), args["to"].as_u64())),
         other => json!({"isError": true, "content": [{"type": "text", "text": format!("Unknown tool {other}.")}]}),
     }
 }

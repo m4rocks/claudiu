@@ -82,14 +82,15 @@ fn bodies_expire_on_schedule_and_the_rest_stays() {
     h.core.send_prompt(&id, "go").unwrap();
     until(&rx, "turn_ended");
     let blob = h.core.put_blob(&id, b"full tool output").unwrap();
+    assert_eq!(blob.len(), 12, "a short content-addressed handle");
 
     h.advance(13 * DAY);
     h.core.prune_expired().unwrap();
-    assert_eq!(h.core.blob(blob).unwrap().as_deref(), Some(&b"full tool output"[..]), "a blob lives 14 days");
+    assert_eq!(h.core.blob(&blob).unwrap().as_deref(), Some(&b"full tool output"[..]), "a blob lives 14 days");
 
     h.advance(2 * DAY);
     h.core.prune_expired().unwrap();
-    assert_eq!(h.core.blob(blob).unwrap(), None);
+    assert_eq!(h.core.blob(&blob).unwrap(), None);
     let call = |h: &Harness| h.core.events(&id).unwrap().into_iter().find(|e| e.kind == "tool_call").unwrap();
     assert_eq!(call(&h).payload["toolCallId"], "call-1", "a tool call body lives 30 days");
 

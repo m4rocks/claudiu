@@ -24,6 +24,8 @@ pub fn settings(base: &str) -> Value {
             "PreToolUse": [{"matcher": "Bash|Write|Edit|MultiEdit|NotebookEdit", "hooks": [hook("pre", true)]}],
             // Fires on every prompt; the first one proves to the canary that hooks run.
             "UserPromptSubmit": [{"hooks": [hook("prompt", false)]}],
+            // The firewall fails open: if it breaks, the output goes through whole.
+            "PostToolUse": [{"matcher": "Read|Grep|Glob|Bash", "hooks": [hook("post", false)]}],
         }
     })
 }
@@ -58,6 +60,10 @@ pub fn handle(shared: &Arc<Shared>, path: &str, body: Value) -> (u16, Value) {
             }
             (200, json!({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": notes.join(" ")}}))
         }
+        "post" => {
+            info.hooks_fired();
+            (200, post(shared, &session, &body))
+        }
         "mcp" => match crate::mcp::handle(shared, &session, &info, &body) {
             Some(reply) => (200, reply),
             None => (202, Value::Null),
@@ -84,5 +90,16 @@ fn pre(shared: &Shared, session: &SessionId, cwd: &Path, body: &Value) -> Value 
             _ => json!({}),
         },
         _ => json!({}),
+    }
+}
+
+/// The firewall: compact the output of a finished native tool call, if it is worth it.
+fn post(shared: &Shared, session: &SessionId, body: &Value) -> Value {
+    let agent = body["agent_id"].as_str().unwrap_or("main");
+    let tool = body["tool_name"].as_str().unwrap_or("");
+    let ts_ms = (shared.rec.clock)();
+    match crate::firewall::compact(&shared.rec.store, session, ts_ms, agent, tool, &body["tool_input"], &body["tool_response"]) {
+        Some(output) => json!({"hookSpecificOutput": {"hookEventName": "PostToolUse", "updatedToolOutput": output}}),
+        None => json!({}),
     }
 }

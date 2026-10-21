@@ -52,3 +52,10 @@ Settings Claudiu must apply, learned here:
 - A `tool.check` mod against a hook denial (check 8).
 - Managed-settings machines (hooks may be switched off by policy): the canary covers this at run time.
 - Whether free-text answers survive the real chat flow (only the protocol round trip was checked).
+
+## Addendum (found while building the hook server and MCP endpoint)
+
+- `SessionStart` http hooks do not fire at all. The canary uses the first `UserPromptSubmit` or `PreToolUse` instead.
+- `UserPromptSubmit` http hooks fire on every prompt, and `additionalContext` in `hookSpecificOutput` reaches the model. This is how a decision from the user is told to it once.
+- An http MCP server (`{"type":"http","name":"claudiu","url":...,"headers":[]}` in `session/new` `mcpServers`) works. Claude Code sends `server/discover` (answer -32601), `initialize`, `notifications/initialized`, `tools/list` and `tools/call`. The tools show up as `mcp__claudiu__<name>`, but Claude Code defers them behind `ToolSearch`, which costs the model one extra call.
+- http hooks emit no `hook_started` or `hook_response` events over ACP, so end-to-end hook latency is not observable from the client side.

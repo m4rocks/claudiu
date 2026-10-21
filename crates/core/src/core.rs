@@ -58,8 +58,8 @@ impl Config {
 
 /// Writes events to the store and tells subscribers, in one order.
 pub(crate) struct Recorder {
-    store: Store,
-    clock: Clock,
+    pub(crate) store: Store,
+    pub(crate) clock: Clock,
     subscribers: Mutex<Vec<Sender<Event>>>,
     order: Mutex<()>,
 }
@@ -208,12 +208,12 @@ impl Core {
     }
 
     /// Keeps full tool output aside (the context firewall's handles build on this); it expires after 14 days.
-    pub fn put_blob(&self, session: &SessionId, data: &[u8]) -> Result<i64> {
+    pub fn put_blob(&self, session: &SessionId, data: &[u8]) -> Result<String> {
         self.rec.store.put_blob(session, (self.rec.clock)(), data)
     }
 
-    pub fn blob(&self, id: i64) -> Result<Option<Vec<u8>>> {
-        self.rec.store.blob(id)
+    pub fn blob(&self, handle: &str) -> Result<Option<Vec<u8>>> {
+        self.rec.store.blob(handle)
     }
 
     /// Applies the retention rules; the app calls it at startup and now and then.
@@ -270,7 +270,7 @@ impl Core {
         let cwd_text = cwd.to_string_lossy().into_owned();
         // The session must be known to the endpoint before the adapter can call a hook for it.
         self.shared.sessions.lock().unwrap().insert(id.clone(), Arc::new(SessionInfo::new(cwd.to_path_buf())));
-        let options = json!({"settings": crate::hooks::settings(&self.hook_url(&id, "").trim_end_matches('/')), "enableFileCheckpointing": true});
+        let options = json!({"settings": crate::hooks::settings(self.hook_url(&id, "").trim_end_matches('/')), "enableFileCheckpointing": true});
         let servers = json!([{"type": "http", "name": "claudiu", "url": self.mcp_url(&id), "headers": []}]);
         let new = json!({"cwd": cwd_text, "mcpServers": servers, "_meta": {"claudeCode": {"options": options}}});
         let made = conn.call("session/new", new, CALL_TIMEOUT)?;
@@ -305,6 +305,10 @@ impl Core {
                     Some("tool_call" | "tool_call_update") => kind::TOOL_CALL,
                     _ => kind::AGENT_UPDATE,
                 };
+                if update["_meta"]["claudeCode"]["toolName"] == "compact" {
+                    // The conversation is being summarised: the model no longer has what the ledger says it saw.
+                    let _ = rec.store.clear_ledger(&id);
+                }
                 if update["sessionUpdate"] == "usage_update" {
                     let _ = rec.store.record_usage(&id, (rec.clock)(), update["used"].as_i64(), update["size"].as_i64(), &update);
                 }

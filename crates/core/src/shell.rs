@@ -213,7 +213,7 @@ fn writes_outside(name: &str, args: &[&String], all: &[String], allowed: &Allowe
     if PATH_ARGS.contains(&name) {
         targets.extend(paths());
     } else if DEST_LAST.contains(&name) {
-        targets.extend(paths().last());
+        targets.extend(paths().next_back());
     } else if name == "sed" && args.iter().any(|a| a.starts_with("-i") || *a == "--in-place") {
         targets.extend(paths().skip(1));
     }

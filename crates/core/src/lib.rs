@@ -4,6 +4,7 @@
 pub mod acp;
 mod core;
 mod event;
+mod firewall;
 mod guard;
 mod hooks;
 mod http;

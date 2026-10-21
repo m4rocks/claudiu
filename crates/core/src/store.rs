@@ -48,6 +48,16 @@ const MIGRATIONS: &[&str] = &[
         ts_ms INTEGER NOT NULL,
         data BLOB NOT NULL
     );",
+    "ALTER TABLE blobs ADD COLUMN handle TEXT;
+    CREATE UNIQUE INDEX blobs_by_handle ON blobs (handle);
+    CREATE TABLE ledger (
+        session_id TEXT NOT NULL,
+        agent TEXT NOT NULL,
+        key TEXT NOT NULL,
+        hash TEXT NOT NULL,
+        ts_ms INTEGER NOT NULL,
+        PRIMARY KEY (session_id, agent, key)
+    );",
 ];
 
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
@@ -157,16 +167,46 @@ impl Store {
         })
     }
 
-    pub fn put_blob(&self, session: &SessionId, ts_ms: i64, data: &[u8]) -> Result<i64> {
-        let (session, data) = (session.0.clone(), data.to_vec());
+    /// Keeps `data` under its content-addressed handle (12 hex). Storing the same bytes again refreshes the expiry.
+    pub fn put_blob(&self, session: &SessionId, ts_ms: i64, data: &[u8]) -> Result<String> {
+        let handle = crate::firewall::handle_of(data);
+        let (session, data, h) = (session.0.clone(), data.to_vec(), handle.clone());
         self.write(move |c| {
-            c.execute("INSERT INTO blobs (session_id, ts_ms, data) VALUES (?1, ?2, ?3)", params![session, ts_ms, data])?;
-            Ok(c.last_insert_rowid())
+            c.execute(
+                "INSERT INTO blobs (session_id, ts_ms, data, handle) VALUES (?1, ?2, ?3, ?4) ON CONFLICT(handle) DO UPDATE SET ts_ms = excluded.ts_ms",
+                params![session, ts_ms, data, h],
+            )?;
+            Ok(())
+        })?;
+        Ok(handle)
+    }
+
+    pub fn blob(&self, handle: &str) -> Result<Option<Vec<u8>>> {
+        self.read(|c| Ok(c.query_row("SELECT data FROM blobs WHERE handle = ?1", [handle], |r| r.get(0)).optional()?))
+    }
+
+    /// Whether this agent has already been shown exactly `hash` for `key`; records it either way.
+    pub fn ledger_seen(&self, session: &SessionId, agent: &str, key: &str, hash: &str, ts_ms: i64) -> Result<bool> {
+        let (session, agent, key, hash) = (session.0.clone(), agent.to_string(), key.to_string(), hash.to_string());
+        self.write(move |c| {
+            let before: Option<String> = c
+                .query_row("SELECT hash FROM ledger WHERE session_id = ?1 AND agent = ?2 AND key = ?3", params![session, agent, key], |r| r.get(0))
+                .optional()?;
+            c.execute(
+                "INSERT INTO ledger (session_id, agent, key, hash, ts_ms) VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(session_id, agent, key) DO UPDATE SET hash = excluded.hash, ts_ms = excluded.ts_ms",
+                params![session, agent, key, hash, ts_ms],
+            )?;
+            Ok(before.as_deref() == Some(hash.as_str()))
         })
     }
 
-    pub fn blob(&self, id: i64) -> Result<Option<Vec<u8>>> {
-        self.read(|c| Ok(c.query_row("SELECT data FROM blobs WHERE id = ?1", [id], |r| r.get(0)).optional()?))
+    /// The model no longer has what it was shown (the conversation was compacted).
+    pub fn clear_ledger(&self, session: &SessionId) -> Result<()> {
+        let session = session.0.clone();
+        self.write(move |c| {
+            c.execute("DELETE FROM ledger WHERE session_id = ?1", [session])?;
+            Ok(())
+        })
     }
 
     /// Drops what has outlived its retention: old tool-call and receipt bodies (the event stays, its payload goes)
