@@ -1,0 +1,20 @@
+[package]
+name = "claudiu-core"
+version = "0.0.0"
+edition = "2024"
+description = "GPUI-free core of Claudiu: sessions, the event store and the adapter connection"
+publish = false
+
+[dependencies]
+anyhow = "1.0.104"
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+uuid = { version = "1.27.0", features = ["v4"] }
+
+[dev-dependencies]
+tempfile = "3.27.0"
+
+[[bin]]
+name = "fake-acp"
+path = "src/bin/fake_acp.rs"

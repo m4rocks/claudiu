@@ -6,6 +6,9 @@ description = "A native workspace for Claude Code sessions: real PTYs, projects,
 repository = "https://github.com/m4rocks/claudiu"
 publish = false
 
+[workspace]
+members = ["crates/core"]
+
 [dependencies]
 alacritty_terminal = "0.26.0"
 anyhow = "1.0.104"

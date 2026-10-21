@@ -22,4 +22,4 @@ jobs:
       - name: Build
         run: cargo build --locked
       - name: Unit tests (store/reconcile, claude import, git, keys, glyphs, process lifecycle)
-        run: cargo test --locked
+        run: cargo test --locked --workspace
