@@ -56,6 +56,10 @@ type Reply = Box<dyn FnOnce(Result<Value, String>) + Send>;
 pub struct Responder(Sender<String>);
 
 impl Responder {
+    pub fn respond(&self, id: Value, result: Value) {
+        let _ = self.0.send(json!({"jsonrpc": "2.0", "id": id, "result": result}).to_string());
+    }
+
     pub fn respond_error(&self, id: Value, code: i64, message: &str) {
         let _ = self.0.send(json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}}).to_string());
     }
@@ -154,6 +158,11 @@ impl Conn {
 
     pub fn notify(&self, method: &str, params: Value) {
         self.send(json!({"jsonrpc": "2.0", "method": method, "params": params}));
+    }
+
+    /// Ends the adapter at once, as a crash would; its `claude` child is not told.
+    pub fn kill(&self) {
+        let _ = self.child.lock().unwrap().kill();
     }
 
     /// Ends the adapter: closes its stdin, gives it a moment to leave, then kills it.

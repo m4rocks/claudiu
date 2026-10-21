@@ -1,7 +1,7 @@
 //! The GPUI-free core of Claudiu: sessions driven through an ACP adapter, an event store, and (later) the
 //! guards, firewall and delegation. The UI is a thin client of [`Core`].
 
-mod acp;
+pub mod acp;
 mod core;
 mod event;
 mod store;
