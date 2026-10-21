@@ -238,6 +238,14 @@ impl TerminalView {
         }
     }
 
+    /// The last `max_lines` lines of the screen and scrollback as plain text, trailing blank lines dropped.
+    pub fn tail_text(&self, max_lines: usize) -> String {
+        let term = self.terminal.term.lock();
+        let (top, bottom, last) = (term.topmost_line(), term.bottommost_line(), term.last_column());
+        let start = Line((bottom.0 - max_lines.max(1) as i32 + 1).max(top.0));
+        term.bounds_to_string(GridPoint::new(start, Column(0)), GridPoint::new(bottom, last)).trim_end().to_string()
+    }
+
     /// Copies the selection; returns whether there was one.
     pub fn copy(&mut self, cx: &mut Context<Self>) -> bool {
         let mut term = self.terminal.term.lock();

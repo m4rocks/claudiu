@@ -977,16 +977,18 @@ dependencies = [
 
 [[package]]
 name = "claudiu"
-version = "0.2.21"
+version = "0.3.0"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
+ "base64 0.22.1",
  "directories",
  "dunce",
  "futures",
  "git2",
  "gpui-kit",
  "gpui-pre",
+ "image",
  "junction",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",

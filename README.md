@@ -35,6 +35,7 @@ Claudiu's own shortcuts use Ctrl+Shift (Cmd+Shift on macOS), so plain Ctrl and A
 | Shortcut | Action |
 |---|---|
 | Ctrl+Shift+N | New Claude session, in the active session's folder |
+| Ctrl+Shift+M | New chat (Claude in a native conversation view); not tied to a project unless you pick one |
 | Ctrl+Shift+T | New shell |
 | Ctrl+Shift+D | Split: new shell beside the current pane |
 | Ctrl+Shift+W | End the focused session (no confirmation) |

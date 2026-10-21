@@ -96,7 +96,7 @@ fn check_color(state: &str) -> u32 {
     }
 }
 
-fn markdown(id: String, text: &str) -> TextView {
+pub(crate) fn markdown(id: String, text: &str) -> TextView {
     TextView::markdown(SharedString::from(id), SharedString::from(text.to_string()))
         .selectable(true)
         .on_link_click(|url, _, _, cx: &mut App| {

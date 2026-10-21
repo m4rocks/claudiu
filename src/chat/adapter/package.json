@@ -1,0 +1,8 @@
+{
+  "name": "claudiu-acp-adapter",
+  "private": true,
+  "description": "Pinned install of the Claude ACP adapter that Claudiu runs for chats",
+  "dependencies": {
+    "@agentclientprotocol/claude-agent-acp": "0.94.0"
+  }
+}

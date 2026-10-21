@@ -7,7 +7,7 @@ use gpui::{
 };
 
 use crate::app::{
-    Act, CloseSession, GitOp, MenuItem, FocusNextPane, FocusSearch, ImportProject, Main, Modal, NewClaude, NewShell, NextSession, OpenGithub, OpenSettings, PrevSession, SplitPane,
+    Act, CloseSession, GitOp, MenuItem, FocusNextPane, FocusSearch, ImportProject, Main, Modal, NewChat, NewClaude, NewShell, NextSession, OpenGithub, OpenSettings, PrevSession, SplitPane,
     ToggleSidebar, Workspace,
 };
 use gpui_kit::component::{TitleBar, input::Input};
@@ -23,14 +23,18 @@ impl Workspace {
     fn render_topbar(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let rec = self.active_id().and_then(|id| self.store.session(id)).cloned();
         // A GitHub pane has no session record; its folder and project stand in for one.
-        let gh = self.active_id().and_then(|id| self.gh_pane(id)).map(|p| (p.cwd.clone(), p.project.clone()));
+        let gh = self
+            .active_id()
+            .and_then(|id| self.gh_pane(id))
+            .map(|p| (p.cwd.clone(), format!("GitHub · {}", p.project)))
+            .or_else(|| self.active_id().and_then(|id| self.chat_pane(id).map(|p| (p.cwd.clone(), self.chat_title(id).unwrap_or_default()))));
         let project = rec
             .as_ref()
             .and_then(|r| r.project_id.clone())
             .or_else(|| gh.as_ref().and_then(|(cwd, _)| self.store.project_for_cwd(cwd)))
             .and_then(|p| self.store.project(&p))
             .cloned();
-        let cwd = rec.as_ref().map(|r| r.cwd.clone()).or_else(|| gh.as_ref().map(|(cwd, _)| cwd.clone()));
+        let cwd = rec.as_ref().map(|r| r.cwd.clone()).or_else(|| gh.as_ref().filter(|(cwd, _)| crate::chat::store::is_tied(cwd)).map(|(cwd, _)| cwd.clone()));
         let in_terminals = matches!(self.main, Main::Terminals);
 
         let mut right = div().flex().flex_none().items_center().gap(px(6.0));
@@ -123,7 +127,7 @@ impl Workspace {
         let title = rec
             .as_ref()
             .map(|r| r.display_title().to_string())
-            .or_else(|| gh.as_ref().map(|(_, name)| format!("GitHub · {name}")))
+            .or_else(|| gh.as_ref().map(|(_, name)| name.clone()))
             .unwrap_or_else(|| "Claudiu".into());
         let branch = project.as_ref().and_then(|p| p.git.as_ref()).and_then(|g| g.branch.clone());
         // `.occlude()` on both groups: the bar is a Windows drag (HTCAPTION) area, which would otherwise swallow clicks on the buttons inside it.
@@ -233,8 +237,9 @@ impl Workspace {
 
         for (i, id) in self.panes.clone().into_iter().enumerate() {
             let gh = self.gh_pane(&id).map(|p| (p.view.clone(), p.project.clone()));
-            let term = if gh.is_none() { self.live_view(&id).cloned() } else { None };
-            if gh.is_none() && term.is_none() {
+            let chat = self.chat_pane(&id).map(|p| p.view.clone());
+            let term = if gh.is_none() && chat.is_none() { self.live_view(&id).cloned() } else { None };
+            if gh.is_none() && chat.is_none() && term.is_none() {
                 continue;
             }
             let rec = self.store.session(&id).cloned();
@@ -242,6 +247,7 @@ impl Workspace {
             let focused = i == self.focused;
             let title = match &gh {
                 Some((_, project)) => format!("GitHub · {project}"),
+                None if chat.is_some() => self.chat_title(&id).unwrap_or_default(),
                 None => rec.as_ref().map(|r| r.display_title().to_string()).unwrap_or_default(),
             };
             let is_claude = rec.as_ref().is_some_and(|r| r.kind == SessionKind::Claude);
@@ -326,14 +332,15 @@ impl Workspace {
                         }),
                     )
                     .children(header)
-                    .child(match (gh, term) {
-                        (Some((view, _)), _) => {
+                    .child(match (gh, chat, term) {
+                        (Some((view, _)), ..) => {
                             let w = if self.split_vertical { avail_w } else { avail_w / n as f32 };
                             view.update(cx, |v, _| v.width = w);
                             div().flex_1().min_h_0().child(view)
                         }
-                        (None, Some(view)) => div().flex_1().min_h_0().p(px(8.0)).child(view),
-                        (None, None) => div(),
+                        (None, Some(view), _) => div().flex_1().min_h_0().child(view),
+                        (None, None, Some(view)) => div().flex_1().min_h_0().p(px(8.0)).child(view),
+                        _ => div(),
                     })
                     .children(banner),
                 format!("pane-in-{id}"),
@@ -490,6 +497,12 @@ impl Workspace {
                 div().text_size(px(13.0)).text_color(hsla(theme::TEXT_DIM)).child(body.clone()).into_any_element(),
                 confirm.clone(),
                 *danger,
+            ),
+            Modal::Bridge { title, body, confirm, .. } => (
+                title.clone(),
+                div().id("bridge-body").max_h(px(260.0)).overflow_y_scroll().text_size(px(13.0)).text_color(hsla(theme::TEXT_DIM)).child(body.clone()).into_any_element(),
+                confirm.clone(),
+                false,
             ),
             Modal::Settings { shell, claude, updates } => {
                 let toggle = |on: bool| if on { "On" } else { "Off" };
@@ -678,6 +691,7 @@ impl Render for Workspace {
                 let cwd = ws.active_cwd();
                 ws.act(Act::NewClaude { cwd }, window, cx)
             }))
+            .on_action(cx.listener(|ws, _: &NewChat, window, cx| ws.act(Act::NewChat { cwd: None, split: false }, window, cx)))
             .on_action(cx.listener(|ws, _: &NewShell, window, cx| {
                 let cwd = ws.active_cwd();
                 ws.act(Act::NewShell { cwd }, window, cx)

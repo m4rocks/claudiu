@@ -11,6 +11,8 @@ use gpui::{
 
 use gpui_kit::component::input::{InputEvent, InputState};
 use crate::accounts;
+use crate::chat::store::{ChatRecord, ChatStore, DEFAULT_TITLE, is_tied, scratch_dir, title_from};
+use crate::chat::view::{ChatEvent, ChatView, Launch};
 use crate::claude;
 use crate::github::view::{GhEvent, GithubView};
 use crate::mcp;
@@ -23,10 +25,15 @@ use crate::terminal::SpawnSpec;
 use crate::terminal_view::{TerminalEvent, TerminalView};
 use crate::updater::UpdateState;
 
+mod chats;
+mod cross;
+pub use chats::{ChatPane, Side};
+
 actions!(
     claudiu,
     [
         NewClaude,
+        NewChat,
         NewShell,
         CloseSession,
         NextSession,
@@ -77,6 +84,17 @@ pub enum Act {
         cwd: PathBuf,
         split: bool,
     },
+    /// A new chat (Claude through ACP), tied to a project folder only when `cwd` is given; `split` puts it next
+    /// to the current pane.
+    NewChat {
+        cwd: Option<PathBuf>,
+        split: bool,
+    },
+    OpenChat(Id),
+    /// Forget a chat in the list (Claude Code's transcript stays).
+    RemoveChat(Id),
+    /// Switch the sidebar between terminal sessions and chats.
+    SideTab(Side),
     /// Stage everything in this folder's repository, commit it with a Haiku-written message, push.
     CommitPush(PathBuf),
     Pull(PathBuf),
@@ -144,6 +162,13 @@ pub enum Modal {
         claude: Entity<InputState>,
         updates: bool,
     },
+    /// A session asked to reach another one; nothing happens unless the user allows it (see `app/cross.rs`).
+    Bridge {
+        req: crate::bridge::Request,
+        title: String,
+        body: String,
+        confirm: String,
+    },
 }
 
 pub enum Main {
@@ -206,6 +231,9 @@ pub struct Workspace {
     pub shell: (String, Vec<String>),
     pub live: Vec<Live>,
     pub gh: Vec<GhPane>,
+    pub chats: Vec<ChatPane>,
+    pub chat_store: ChatStore,
+    pub side: Side,
     pub panes: Vec<Id>,
     /// Splits that are not on screen right now; a session in one of them brings its whole split back when shown.
     pub groups: Vec<Vec<Id>>,
@@ -226,6 +254,8 @@ pub struct Workspace {
     pub toast: Option<Toast>,
     pub toast_serial: u64,
     pub show_all: HashSet<Id>,
+    /// Requests from sessions to other sessions, waiting for the user's answer.
+    pub bridge_queue: std::collections::VecDeque<crate::bridge::Request>,
     /// Projects whose session list is still sliding shut.
     pub closing: HashSet<Id>,
     /// Sessions that leave no history once they end (the "fix with Claude" helper).
@@ -285,6 +315,9 @@ impl Workspace {
             shell: platform::default_shell(store.data.settings.shell.as_deref()),
             live: vec![],
             gh: vec![],
+            chats: vec![],
+            chat_store: ChatStore::load(ChatStore::path_for(&Store::default_path())),
+            side: Side::Sessions,
             panes: vec![],
             groups: vec![],
             active_slot: usize::MAX,
@@ -302,6 +335,7 @@ impl Workspace {
             toast: None,
             toast_serial: 0,
             show_all: HashSet::new(),
+            bridge_queue: Default::default(),
             closing: HashSet::new(),
             ephemeral: HashSet::new(),
             logins: HashSet::new(),
@@ -374,7 +408,9 @@ impl Workspace {
                 .await;
             let _ = this.update(cx, |ws, cx| {
                 ws.scanning = false;
-                ws.store.reconcile(&result.sessions, result.ok);
+                // A chat's conversation lives in Claude's history too, but it belongs to the Chat tab, not the Code list.
+                let sessions: Vec<_> = result.sessions.iter().filter(|s| !ws.chat_store.owns(&s.session_id)).cloned().collect();
+                ws.store.reconcile(&sessions, result.ok);
                 if result.ok {
                     // Records from earlier runs that never produced a transcript: nothing to resume.
                     let live: Vec<Id> = ws.live.iter().map(|l| l.id.clone()).collect();
@@ -438,11 +474,16 @@ impl Workspace {
         cx.spawn_in(window, async move |this, cx| {
             loop {
                 cx.background_executor().timer(Duration::from_secs(1)).await;
-                let statuses = cx
+                let (statuses, requests) = cx
                     .background_executor()
-                    .spawn(async { claude::claude_home().map(|h| claude::session_statuses(&h)).unwrap_or_default() })
+                    .spawn(async { (claude::claude_home().map(|h| claude::session_statuses(&h)).unwrap_or_default(), crate::bridge::take_requests()) })
                     .await;
-                if this.update_in(cx, |ws, window, cx| ws.update_activity(window, cx, &statuses)).is_err() {
+                let update = this.update_in(cx, |ws, window, cx| {
+                    ws.bridge_queue.extend(requests);
+                    ws.ask_about_next_request(window, cx);
+                    ws.update_activity(window, cx, &statuses)
+                });
+                if update.is_err() {
                     break;
                 }
             }
@@ -635,6 +676,7 @@ impl Workspace {
         &self,
         mut spec: SpawnSpec,
         claude_session_id: &str,
+        record_id: &str,
         cwd: &std::path::Path,
     ) -> SpawnSpec {
         if let Ok((path, env)) = statusline::prepare(claude_session_id, cwd) {
@@ -642,8 +684,10 @@ impl Workspace {
             spec.args.push(path.to_string_lossy().into_owned());
             spec.env.extend(env);
         }
-        if let Ok(config) = mcp::prepare(claude_session_id) {
-            spec.args.extend(["--allowedTools".into(), mcp::ALLOWED_TOOL.into(), "--mcp-config".into(), config.to_string_lossy().into_owned()]);
+        if let Ok(config) = mcp::prepare(claude_session_id, record_id) {
+            spec.args.push("--allowedTools".into());
+            spec.args.extend(mcp::allowed_tools("code"));
+            spec.args.extend(["--mcp-config".into(), config.to_string_lossy().into_owned()]);
         }
         if let Ok(dir) = mcp::prepare_mod() {
             spec.args.extend(["--plugin-dir".into(), dir.to_string_lossy().into_owned()]);
@@ -746,7 +790,7 @@ impl Workspace {
         if self
             .selected
             .as_ref()
-            .is_some_and(|id| self.store.session(id).is_none() && self.gh_pane(id).is_none())
+            .is_some_and(|id| self.store.session(id).is_none() && self.gh_pane(id).is_none() && self.chat_pane(id).is_none())
         {
             self.selected = None;
         }
@@ -852,7 +896,13 @@ impl Workspace {
 
     pub fn active_cwd(&self) -> PathBuf {
         self.active_id()
-            .and_then(|id| self.store.session(id).map(|s| s.cwd.clone()).or_else(|| self.gh_pane(id).map(|p| p.cwd.clone())))
+            .and_then(|id| {
+                self.store
+                    .session(id)
+                    .map(|s| s.cwd.clone())
+                    .or_else(|| self.gh_pane(id).map(|p| p.cwd.clone()))
+                    .or_else(|| self.chat_pane(id).filter(|p| crate::chat::store::is_tied(&p.cwd)).map(|p| p.cwd.clone()))
+            })
             .or_else(|| self.store.data.projects.first().map(|p| p.path.clone()))
             .or_else(platform::home_dir)
             .unwrap_or_else(|| PathBuf::from("."))
@@ -899,11 +949,12 @@ impl Workspace {
             return;
         };
         let session_id = new_id();
+        let record_id = new_id();
         let mut spec = claude::new_session_spec(&exe, &cwd, &session_id);
         spec.args.splice(0..0, leading);
-        let spec = self.with_helpers(spec, &session_id, &cwd);
+        let spec = self.with_helpers(spec, &session_id, &record_id, &cwd);
         let record = SessionRecord {
-            id: new_id(),
+            id: record_id,
             kind: SessionKind::Claude,
             title: "New Claude session".into(),
             custom_title: None,
@@ -972,7 +1023,7 @@ impl Workspace {
         if let Some(name) = rec.chosen_title() {
             spec.args.extend(["--name".into(), name.into()]);
         }
-        let spec = self.with_helpers(spec, &meta.session_id, &rec.cwd);
+        let spec = self.with_helpers(spec, &meta.session_id, &rec.id, &rec.cwd);
         self.start(rec, spec, false, window, cx);
     }
 
@@ -1140,13 +1191,15 @@ impl Workspace {
     pub fn show_session(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         let id = id.to_string();
         self.selected = Some(id.clone());
-        if self.live_view(&id).is_some() || self.gh_pane(&id).is_some() {
+        if self.live_view(&id).is_some() || self.gh_pane(&id).is_some() || self.chat_pane(&id).is_some() {
             self.place_in_pane(&id, cx);
             self.remember(&id);
             self.main = Main::Terminals;
             self.focus_active(window, cx);
             self.persist_layout();
             cx.notify();
+        } else if self.chat_store.get(&id).is_some() {
+            self.open_chat(&id, window, cx);
         } else {
             self.resume(&id, window, cx);
         }
@@ -1171,6 +1224,14 @@ impl Workspace {
                 }
                 return;
             }
+            if let Some(p) = self.chat_pane(id) {
+                // The text box may already hold the focus (it was just clicked); leave it there.
+                let (view, handle) = (p.view.clone(), p.view.read(cx).focus.clone());
+                if !handle.contains_focused(window, cx) {
+                    view.update(cx, |v, cx| v.focus_input(window, cx));
+                }
+                return;
+            }
         }
         window.focus(&self.root_focus, cx);
     }
@@ -1183,12 +1244,14 @@ impl Workspace {
         let current = self.active_id().cloned();
         self.live.retain(|l| l.id != id); // dropping the view drops the Terminal, which closes the PTY
         self.gh.retain(|p| p.id != id);
+        self.chats.retain(|p| p.id != id);
+        self.forget_if_unused(id);
         self.panes.retain(|p| p != id);
         self.leave_stored(id);
         self.recent.retain(|r| r != id);
         // Closing the shown session goes back to the one shown before it; otherwise stay where we are.
         let target = if was_active {
-            self.recent.iter().rev().find(|r| self.live.iter().any(|l| &l.id == *r) || self.gh.iter().any(|p| &p.id == *r)).cloned()
+            self.recent.iter().rev().find(|r| self.live.iter().any(|l| &l.id == *r) || self.gh.iter().any(|p| &p.id == *r) || self.chats.iter().any(|p| &p.id == *r)).cloned()
         } else {
             current
         };
@@ -1230,12 +1293,12 @@ impl Workspace {
             let v = l.view.read(cx);
             v.is_running() && v.is_working() && self.store.session(&l.id).is_some_and(|r| r.kind == SessionKind::Claude)
         });
-        let working = working.count();
+        let working = working.count() + self.chats.iter().filter(|c| c.view.read(cx).is_busy()).count();
         if working == 0 {
             self.finalize();
             return true;
         }
-        self.modal = Some(Modal::Confirm {
+        self.open_modal(Modal::Confirm {
             title: "Quit Claudiu?".into(),
             body: format!(
                 "{working} Claude session{} still working. Quitting interrupts {} — sessions stay in your history and can be resumed.",
@@ -1253,6 +1316,8 @@ impl Workspace {
 
     fn finalize(&mut self) {
         self.quitting = true;
+        self.chats.clear(); // closes each adapter
+        self.chat_store.save_if_dirty();
         let t = now();
         let running: Vec<Id> = self.live.iter().map(|l| l.id.clone()).collect();
         for id in running {
@@ -1293,7 +1358,7 @@ impl Workspace {
                     .map(|s| s.display_title().to_string())
                     .unwrap_or_default();
                 let input = self.modal_input(&text, "", window, cx);
-                self.modal = Some(Modal::Rename { id, input });
+                self.open_modal(Modal::Rename { id, input });
             }
             Act::Archive(id, archive) => {
                 if let Some(rec) = self.store.session_mut(&id) {
@@ -1323,6 +1388,12 @@ impl Workspace {
             }
             Act::ImportProject => self.import_project(window, cx),
             Act::OpenGithub { cwd, split } => self.open_github(cwd, split, window, cx),
+            Act::NewChat { cwd, split } => {
+                self.new_chat(cwd, None, split, window, cx);
+            }
+            Act::OpenChat(id) => self.open_chat(&id, window, cx),
+            Act::RemoveChat(id) => self.remove_chat(&id, window, cx),
+            Act::SideTab(side) => self.side = side,
             Act::CommitPush(cwd) => match self.claude_exe.clone() {
                 Some(exe) => self.run_git(
                     GitOp::CommitPush,
@@ -1360,11 +1431,11 @@ impl Workspace {
                 let claude_hint = self.claude_exe.as_ref().map_or("not found".to_string(), |p| p.to_string_lossy().into_owned());
                 let claude = self.modal_input(&claude_t, &claude_hint, window, cx);
                 let shell = self.modal_input(&shell_t, &platform::default_shell(None).0, window, cx);
-                self.modal = Some(Modal::Settings { shell, claude, updates });
+                self.open_modal(Modal::Settings { shell, claude, updates });
             }
             Act::NewBranch(cwd) => {
                 let input = self.modal_input("", "", window, cx);
-                self.modal = Some(Modal::NewBranch { cwd, input });
+                self.open_modal(Modal::NewBranch { cwd, input });
             }
             Act::CreateBranch(cwd, name) => {
                 self.run_git(GitOp::Branch, move || Ok(crate::commit::create_branch(&cwd, &name)?), cx)
@@ -1417,6 +1488,7 @@ impl Workspace {
                 cx.quit();
             }
             Act::Dismiss => {
+                self.deny_pending_request();
                 self.modal = None;
                 self.focus_active(window, cx);
             }
@@ -1424,7 +1496,7 @@ impl Workspace {
                 let ready = matches!(self.update.status, crate::updater::Status::Ready { .. });
                 let running = self.running_count(cx);
                 if ready && running > 0 {
-                    self.modal = Some(Modal::Confirm {
+                    self.open_modal(Modal::Confirm {
                         title: "Restart to update?".into(),
                         body: format!(
                             "{running} session{} running. Restarting ends {}. Claude sessions can be resumed afterwards.",
@@ -1448,10 +1520,11 @@ impl Workspace {
                 self.store.data.active_account = Some(id);
                 self.store.mark_dirty();
                 self.refresh_accounts(cx);
-                self.toast("Switched. New and resumed sessions use this account; running ones keep theirs.", false, cx);
+                self.relaunch_chats(window, cx);
+                self.toast("Switched. New and resumed sessions and all chats use this account; running terminal sessions keep theirs.", false, cx);
             }
             Act::AddAccount => {
-                self.modal = Some(Modal::Confirm {
+                self.open_modal(Modal::Confirm {
                     title: "Add an account?".into(),
                     body: "The new account shares your main Claude Code setup: settings, CLAUDE.md, agents, skills, plugins and \
                            session history. Changes made while using it (like /model) change your main setup too. \
@@ -1479,7 +1552,7 @@ impl Workspace {
             Act::SignIn(id) => self.sign_in(&id, window, cx),
             Act::RemoveAccount(id) => {
                 let name = self.store.account(&id).and_then(|a| a.email.clone()).unwrap_or_else(|| "this account".into());
-                self.modal = Some(Modal::Confirm {
+                self.open_modal(Modal::Confirm {
                     title: format!("Remove {name}?"),
                     body: "Deletes this account's login from Claudiu. Shared settings and session history stay in your main \
                            ~/.claude. End its running sessions first."
@@ -1652,6 +1725,10 @@ impl Workspace {
     pub fn submit_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let act = match self.modal.take() {
             Some(Modal::Confirm { act, .. }) => act,
+            Some(Modal::Bridge { req, .. }) => {
+                self.finish_request(&req, window, cx);
+                Act::Dismiss
+            }
             Some(Modal::Rename { id, input }) => {
                 let text = input.read(cx).value().trim().to_string();
                 if let Some(rec) = self.store.session_mut(&id) {
@@ -1672,7 +1749,7 @@ impl Workspace {
                     .find(|(_, t)| !t.is_empty() && platform::resolve_program(t).is_none());
                 if let Some((what, t)) = bad {
                     let msg = format!("{what}: “{t}” is not a file or a program on PATH");
-                    self.modal = Some(Modal::Settings { shell, claude, updates });
+                    self.open_modal(Modal::Settings { shell, claude, updates });
                     self.toast(msg, true, cx);
                     return;
                 }
@@ -1839,6 +1916,7 @@ impl Workspace {
         let mut items = vec![
             item("New shell".into(), None, Act::SplitShell, full, false),
             item("New Claude session".into(), None, Act::SplitClaude(cwd.clone()), full, false),
+            item("New chat".into(), None, Act::NewChat { cwd: None, split: true }, full, false),
         ];
         let project = self.store.project_for_cwd(&cwd).and_then(|id| self.store.project(&id));
         if let Some(p) = project.filter(|p| p.git.is_some()) {
@@ -1851,7 +1929,8 @@ impl Workspace {
             .iter()
             .filter(|l| l.view.read(cx).is_running())
             .filter_map(|l| self.store.session(&l.id).map(|r| (r.id.clone(), r.display_title().to_string(), r.cwd.file_name().map(|n| n.to_string_lossy().into_owned()))))
-            .chain(self.gh.iter().map(|g| (g.id.clone(), "GitHub".to_string(), Some(g.project.clone()))));
+            .chain(self.gh.iter().map(|g| (g.id.clone(), "GitHub".to_string(), Some(g.project.clone()))))
+            .chain(self.chats.iter().map(|c| (c.id.clone(), self.chat_title(&c.id).unwrap_or_else(|| "Chat".into()), is_tied(&c.cwd).then(|| c.cwd.file_name().map(|n| n.to_string_lossy().into_owned())).flatten())));
         for (id, title, folder) in others.filter(|(id, ..)| !self.panes.contains(id)) {
             items.push(item(title, folder, Act::AddToSplit(id), full, std::mem::take(&mut first)));
         }
@@ -1933,6 +2012,7 @@ impl Workspace {
             .map(|l| l.id.clone())
             .collect();
         running.extend(self.gh.iter().map(|p| p.id.clone()));
+        running.extend(self.chats.iter().map(|p| p.id.clone()));
         if running.is_empty() {
             return;
         }
@@ -1973,6 +2053,9 @@ impl Workspace {
     /// itself reported the percentage (status line); otherwise it is estimated from the transcript.
     pub fn selected_context(&self) -> Option<(f32, u64, bool)> {
         let id = self.selected.as_ref().or(self.active_id())?;
+        if let Some(p) = self.chat_pane(id) {
+            return p.context.filter(|&(_, size)| size > 0).map(|(used, size)| ((used as f32 / size as f32).min(1.0), used, true));
+        }
         let meta = self.store.session(id)?.claude.as_ref()?;
         if let Some(f) = meta.context_fraction {
             let tokens = meta.context_tokens.unwrap_or_else(|| {
@@ -2082,6 +2165,158 @@ mod headless {
         });
         assert!(ws.read_with(&cx, |ws, _| ws.panes.len() == 2), "Ask Claude opens a session beside the pane");
         step(&mut cx, &|ws, w, cx| ws.exit_split(w, cx));
+
+        // Chat: the Chat tab lists chats; a chat runs the real adapter (installed into the throwaway data folder
+        // on first use), offers the agent's skills, answers, and comes back with its history after being closed.
+        step(&mut cx, &|ws, w, cx| {
+            ws.act(Act::SideTab(Side::Chat), w, cx);
+            ws.new_chat(None, None, false, w, cx);
+        });
+        let (id, view) = ws.read_with(&cx, |ws, _| (ws.chats[0].id.clone(), ws.chats[0].view.clone()));
+        let wait = |cx: &mut TestAppContext, view: &Entity<crate::chat::view::ChatView>, what: &str, ok: &dyn Fn(&crate::chat::view::ChatView) -> bool| {
+            let t = std::time::Instant::now();
+            while !view.read_with(cx, |v, _| ok(v)) {
+                assert!(t.elapsed() < Duration::from_secs(150), "timed out waiting for {what}: {:?}", view.read_with(cx, |v, _| v.probe()));
+                std::thread::sleep(Duration::from_millis(100));
+                draw(cx);
+            }
+        };
+        wait(&mut cx, &view, "the chat to be ready", &|v| v.probe().0 == crate::chat::view::Phase::Ready);
+        assert!(view.read_with(&cx, |v, _| v.probe().2) > 0, "the agent lists skills and commands");
+        let rec = ws.read_with(&cx, |ws, _| ws.chat_store.get(&id).cloned()).unwrap();
+        assert!(!is_tied(&rec.cwd), "a new chat belongs to no project");
+        // Tie it to a project before the first message: a new conversation in that folder.
+        let before = view.read_with(&cx, |v, _| v.epoch());
+        step(&mut cx, &|_, w, cx| view.update(cx, |v, cx| v.set_project(Some(cwd.clone()), w, cx)));
+        assert_eq!(view.read_with(&cx, |v, _| v.epoch()), before + 1, "a different folder restarts the conversation");
+        wait(&mut cx, &view, "the chat to restart in the project", &|v| v.probe().0 == crate::chat::view::Phase::Ready);
+        assert!(ws.read_with(&cx, |ws, _| ws.chat_store.get(&id).is_some_and(|r| is_tied(&r.cwd) && r.session_id.is_some())));
+        step(&mut cx, &|_, w, cx| view.update(cx, |v, cx| v.send_text("say only the word pong", w, cx)));
+        wait(&mut cx, &view, "the answer", &|v| !v.is_busy() && v.probe().1.iter().any(|i| matches!(i, crate::chat::model::Item::Agent(_))));
+        let reply = view.read_with(&cx, |v, _| format!("{:?}", v.probe().1)).to_lowercase();
+        assert!(reply.contains("pong"), "{reply}");
+        // Image paste: a picture on the clipboard attaches, is sent with the message, and Claude sees it.
+        let png = {
+            let mut out = std::io::Cursor::new(vec![]);
+            ::image::RgbaImage::from_pixel(48, 48, ::image::Rgba([255, 0, 0, 255])).write_to(&mut out, ::image::ImageFormat::Png).unwrap();
+            out.into_inner()
+        };
+        cx.update(|app| app.write_to_clipboard(gpui::ClipboardItem::new_image(&gpui::Image::from_bytes(gpui::ImageFormat::Png, png))));
+        step(&mut cx, &|_, w, cx| view.update(cx, |v, cx| v.focus_input(w, cx)));
+        step(&mut cx, &|_, w, cx| assert!(view.update(cx, |v, cx| v.paste(w, cx)), "an image on the clipboard is taken"));
+        assert_eq!(view.read_with(&cx, |v, _| v.attached()), 1);
+        step(&mut cx, &|_, w, cx| view.update(cx, |v, cx| v.send_text("What single color fills this image? Answer with one lowercase word.", w, cx)));
+        assert_eq!(view.read_with(&cx, |v, _| v.attached()), 0, "the attachment is sent");
+        wait(&mut cx, &view, "the color", &|v| !v.is_busy() && v.probe().1.iter().rev().any(|i| matches!(i, crate::chat::model::Item::Agent(t) if t.to_lowercase().contains("red"))));
+        // Account switch: the chat restarts under the active account and loads the same conversation.
+        let before = view.read_with(&cx, |v, _| v.epoch());
+        step(&mut cx, &|ws, w, cx| ws.relaunch_chats(w, cx));
+        assert_eq!(view.read_with(&cx, |v, _| v.epoch()), before + 1, "the agent was restarted");
+        wait(&mut cx, &view, "the chat to reload", &|v| v.probe().0 == crate::chat::view::Phase::Ready && v.probe().1.len() >= 4);
+        let rec = ws.read_with(&cx, |ws, _| ws.chat_store.get(&id).cloned()).unwrap();
+        assert!(rec.session_id.is_some() && rec.title != DEFAULT_TITLE, "{rec:?}");
+        step(&mut cx, &|ws, w, cx| ws.close_live(&id, w, cx));
+        assert!(ws.read_with(&cx, |ws, _| ws.chats.is_empty() && ws.chat_store.get(&id).is_some()), "closing keeps the history");
+        // Nothing may keep the view (and with it the adapter and its `claude`) alive once the chat is closed.
+        let weak = view.downgrade();
+        drop(view);
+        draw(&mut cx);
+        draw(&mut cx);
+        assert!(weak.upgrade().is_none(), "a closed chat's view is still alive");
+        step(&mut cx, &|ws, w, cx| ws.open_chat(&id, w, cx));
+        let view = ws.read_with(&cx, |ws, _| ws.chats[0].view.clone());
+        wait(&mut cx, &view, "the history to load", &|v| {
+            let (phase, items, _) = v.probe();
+            phase == crate::chat::view::Phase::Ready && items.iter().any(|i| matches!(i, crate::chat::model::Item::User(t) if t.contains("pong")))
+        });
+        // Cross-session tools: nothing happens until the user says yes, and no means no.
+        use serde_json::{Value, json};
+        let ask = |from: String, tool: &'static str, args: Value| std::thread::spawn(move || crate::bridge::ask(&from, tool, &args));
+        let take = || loop {
+            if let Some(r) = crate::bridge::take_requests().pop() {
+                break r;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        let offer = |cx: &mut TestAppContext, req: crate::bridge::Request| {
+            step(cx, &|ws, w, cx| {
+                ws.bridge_queue.push_back(req.clone());
+                ws.ask_about_next_request(w, cx);
+            })
+        };
+        let asking = |cx: &TestAppContext| ws.read_with(cx, |ws, _| matches!(ws.modal, Some(Modal::Bridge { .. })));
+        let from_chat = format!("chat:{id}");
+
+        let h = ask(from_chat.clone(), "list_chats", json!({}));
+        offer(&mut cx, take());
+        assert!(asking(&cx), "the user is asked first");
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(!h.is_finished(), "nothing is answered before the user does");
+        step(&mut cx, &|ws, w, cx| ws.submit_modal(w, cx));
+        let text = h.join().unwrap().unwrap();
+        assert!(text.contains(&id) && text.contains("this chat"), "{text}");
+
+        // Another dialog replacing the question declines it instead of leaving the asker hanging.
+        let h = ask(from_chat.clone(), "list_chats", json!({}));
+        offer(&mut cx, take());
+        assert!(asking(&cx));
+        step(&mut cx, &|ws, w, cx| ws.act(Act::OpenSettings, w, cx));
+        assert!(!asking(&cx));
+        assert_eq!(h.join().unwrap(), Err("The user declined.".to_string()));
+        step(&mut cx, &|ws, w, cx| ws.act(Act::Dismiss, w, cx));
+        // A request whose asker gave up is not carried out when the user allows it late.
+        let stale = crate::bridge::Request { id: "late".into(), from: from_chat.clone(), tool: "start_chat".into(), args: json!({}), deadline: now() + 2 };
+        offer(&mut cx, stale);
+        assert!(asking(&cx));
+        std::thread::sleep(Duration::from_millis(2500));
+        step(&mut cx, &|ws, w, cx| ws.submit_modal(w, cx));
+        assert_eq!(ws.read_with(&cx, |ws, _| ws.chats.len()), 1, "an expired request opens nothing");
+
+        let h = ask(from_chat.clone(), "read_chat", json!({"id": id}));
+        offer(&mut cx, take());
+        step(&mut cx, &|ws, w, cx| ws.submit_modal(w, cx));
+        let text = h.join().unwrap().unwrap();
+        assert!(text.contains("pong"), "read_chat returns the messages: {text}");
+
+        let h = ask(from_chat.clone(), "start_chat", json!({"prompt": "no thanks"}));
+        offer(&mut cx, take());
+        step(&mut cx, &|ws, w, cx| ws.act(Act::Dismiss, w, cx));
+        assert_eq!(h.join().unwrap(), Err("The user declined.".to_string()));
+        assert_eq!(ws.read_with(&cx, |ws, _| ws.chats.len()), 1, "a declined request opens nothing");
+
+        let h = ask(from_chat.clone(), "start_code_session", json!({"folder": "no-such-project"}));
+        offer(&mut cx, take());
+        assert!(!asking(&cx), "a request that cannot work is not put to the user");
+        assert!(h.join().unwrap().unwrap_err().contains("No project or folder"));
+
+        let h = ask("code:someone".into(), "start_chat", json!({"prompt": "say only the word ping"}));
+        offer(&mut cx, take());
+        step(&mut cx, &|ws, w, cx| ws.submit_modal(w, cx));
+        h.join().unwrap().unwrap();
+        assert_eq!(ws.read_with(&cx, |ws, _| ws.chats.len()), 2);
+        let (second_id, second) = ws.read_with(&cx, |ws, _| (ws.chats[1].id.clone(), ws.chats[1].view.clone()));
+        assert!(!ws.read_with(&cx, |ws, _| is_tied(&ws.chat_store.get(&second_id).unwrap().cwd)), "a chat opened by a session has no project either");
+        wait(&mut cx, &second, "the first message to be answered", &|v| !v.is_busy() && v.probe().1.iter().any(|i| matches!(i, crate::chat::model::Item::Agent(t) if t.to_lowercase().contains("ping"))));
+
+        let live_before = ws.read_with(&cx, |ws, _| ws.live.len());
+        let h = ask(from_chat.clone(), "start_code_session", json!({"folder": cwd.to_string_lossy()}));
+        offer(&mut cx, take());
+        step(&mut cx, &|ws, w, cx| ws.submit_modal(w, cx));
+        let text = h.join().unwrap().unwrap();
+        assert_eq!(ws.read_with(&cx, |ws, _| ws.live.len()), live_before + 1);
+        assert!(ws.read_with(&cx, |ws, _| ws.side == Side::Sessions), "it opens in the Code tab");
+        let code_id = text.split("(id ").nth(1).and_then(|t| t.split(')').next()).unwrap().to_string();
+        let t = std::time::Instant::now();
+        while ws.read_with(&cx, |ws, cx| ws.live_view(&code_id).is_none_or(|v| v.read(cx).tail_text(40).is_empty())) {
+            assert!(t.elapsed() < Duration::from_secs(60), "the session drew nothing to read");
+            std::thread::sleep(Duration::from_millis(200));
+            draw(&mut cx);
+        }
+        let h = ask(from_chat.clone(), "read_code_session", json!({"id": code_id}));
+        offer(&mut cx, take());
+        step(&mut cx, &|ws, w, cx| ws.submit_modal(w, cx));
+        assert!(h.join().unwrap().unwrap().contains("latest terminal output"));
+        step(&mut cx, &|ws, w, cx| ws.close_live(&id, w, cx));
     }
 
     #[test]
@@ -2092,7 +2327,7 @@ mod headless {
             run();
             tx.send(()).ok();
         });
-        if rx.recv_timeout(std::time::Duration::from_secs(120)).is_err() {
+        if rx.recv_timeout(std::time::Duration::from_secs(480)).is_err() {
             // Either it froze (the bug) or the run panicked (the sender dropped).
             match t.is_finished() {
                 true => t.join().unwrap(),

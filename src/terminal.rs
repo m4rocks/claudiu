@@ -129,7 +129,9 @@ impl Terminal {
         (this, rx, listener, window_size)
     }
 
-    /// Start the child and wait for it to exist (an unstartable program is an `Err`).
+    /// Start the child and wait for it to exist (an unstartable program is an `Err`). The app itself uses
+    /// `spawn_deferred`.
+    #[cfg(test)]
     pub fn spawn(spec: &SpawnSpec, cols: u16, rows: u16) -> anyhow::Result<(Self, UnboundedReceiver<Event>)> {
         let (this, rx, listener, window_size) = Self::build(spec, cols, rows);
         let sender = start_pty(spec, window_size, this.term.clone(), listener)?;

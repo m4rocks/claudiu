@@ -2,6 +2,8 @@
 
 mod accounts;
 mod app;
+mod bridge;
+mod chat;
 mod claude;
 mod commit;
 mod git;
@@ -27,7 +29,7 @@ use gpui_kit::component::TitleBar;
 gpui_kit::assets::icon_assets!(TitleBarIcons, [WindowMinimize, WindowMaximize, WindowRestore, WindowClose]);
 
 use app::{
-    CloseSession, FocusNextPane, FocusSearch, HideApp, HideOthers, ImportProject, NewClaude, NewShell, NextSession, OpenGithub, OpenSettings, PrevSession, Quit, ShowAllApps,
+    CloseSession, FocusNextPane, FocusSearch, HideApp, HideOthers, ImportProject, NewChat, NewClaude, NewShell, NextSession, OpenGithub, OpenSettings, PrevSession, Quit, ShowAllApps,
     SplitPane, ToggleSidebar, Workspace,
 };
 
@@ -51,6 +53,7 @@ fn menu_bar() -> Vec<gpui::Menu> {
         ]),
         Menu::new("File").items([
             MenuItem::action("New Claude Session", NewClaude),
+            MenuItem::action("New Chat", NewChat),
             MenuItem::action("New Shell", NewShell),
             MenuItem::action("GitHub Issues & Pull Requests", OpenGithub),
             MenuItem::separator(),
@@ -131,6 +134,7 @@ fn main() {
         // chord, e.g. Alt+P, still reaches Claude Code untouched.
         cx.bind_keys([
             KeyBinding::new("secondary-shift-n", NewClaude, None),
+            KeyBinding::new("secondary-shift-m", NewChat, None),
             KeyBinding::new("secondary-shift-t", NewShell, None),
             KeyBinding::new("secondary-shift-w", CloseSession, None),
             KeyBinding::new("secondary-shift-d", SplitPane, None),

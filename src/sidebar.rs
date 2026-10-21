@@ -8,7 +8,8 @@ use gpui::{
 };
 
 use gpui_kit::component::input::Input;
-use crate::app::{CLOSE_MS, Act, Activity, MenuItem, Workspace};
+use crate::chat::store::ChatRecord;
+use crate::app::{CLOSE_MS, Act, Activity, MenuItem, Side, Workspace};
 use crate::store::{ExternalState, Id, Project, SessionKind, SessionRecord, now};
 use crate::theme::{self, hsla};
 use crate::widgets::{ago, avatar, button, clawd, cog, countdown, divider, icon_button, meter, section_label};
@@ -224,7 +225,7 @@ impl Workspace {
     }
 
     /// "Add to split" / "Remove from split" for a session row, when it applies.
-    fn split_items(&self, id: &Id, can_open: bool) -> Option<MenuItem> {
+    pub(crate) fn split_items(&self, id: &Id, can_open: bool) -> Option<MenuItem> {
         let item = |label: &str, act: Act| MenuItem { label: label.into(), hint: None, act, danger: false, disabled: false, separator_before: false };
         if self.split_slot(id).is_some() {
             Some(item("Remove from split", Act::RemoveFromSplit(id.clone())))
@@ -238,6 +239,7 @@ impl Workspace {
         let mut items = vec![
             item("New Claude session here".into(), Act::NewClaude { cwd: p.path.clone() }, false, false),
             item("New shell here".into(), Act::NewShell { cwd: p.path.clone() }, false, false),
+            item("New chat here".into(), Act::NewChat { cwd: Some(p.path.clone()), split: false }, false, false),
         ];
         if p.git.is_some() {
             items.push(item("GitHub issues & PRs".into(), Act::OpenGithub { cwd: p.path.clone(), split: false }, false, true));
@@ -343,6 +345,9 @@ impl Workspace {
                         let running = ws.is_running(&menu_id, cx);
                         let items = ws.session_menu(&rec, running);
                         ws.open_menu(ev.position, items, cx);
+                    } else if ws.chat_store.get(&menu_id).is_some() {
+                        let items = ws.chat_menu(&menu_id);
+                        ws.open_menu(ev.position, items, cx);
                     } else if ws.gh_pane(&menu_id).is_some() {
                         let item = |label: &str, act: Act, danger: bool| MenuItem { label: label.into(), hint: None, act, danger, disabled: false, separator_before: false };
                         let mut items = vec![item("Switch to pane", Act::Select(menu_id.clone()), false)];
@@ -386,7 +391,8 @@ impl Workspace {
                         })),
                 )
             })
-            .when(!row.running, |d| {
+            // A past chat is removed from its right-click menu only: a button here sits where the end button was.
+            .when(!row.running && row.scope != "chat", |d| {
                 let archive = !row.archived;
                 d.child(
                     icon_button(gpui::SharedString::from(format!("archive-{}-{archive_id}", row.scope)), if archive { "⊟" } else { "↺" })
@@ -438,6 +444,10 @@ impl Workspace {
         }
         let q = self.search.trim().to_lowercase();
         let searching = !q.is_empty();
+        if self.side == Side::Chat {
+            let body = self.render_chat_body(&q, cx);
+            return self.sidebar_frame(body, cx);
+        }
 
         // ---- CURRENT SESSION
         let mut rows: Vec<Row> = self
@@ -660,6 +670,11 @@ impl Workspace {
             }
         }
 
+        self.sidebar_frame(body, cx)
+    }
+
+    /// The sidebar chrome around either list: header, scrolling body, usage footer.
+    fn sidebar_frame(&mut self, body: Div, cx: &mut Context<Self>) -> Stateful<Div> {
         div()
             .id("sidebar")
             .flex()
@@ -713,7 +728,8 @@ impl Workspace {
                     .child(div().flex_1().text_size(px(13.0)).font_weight(FontWeight::BOLD).text_color(hsla(theme::TEXT)).child("CLAUDIU"))
                     .child(icon_button("settings", "").occlude().group("settings").child(cog("settings")).on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::OpenSettings, window, cx)))),
             )
-            .child(
+            .child(self.render_side_tabs(cx))
+            .when(self.side == Side::Sessions, |h| h.child(
                 div()
                     .occlude()
                     .flex()
@@ -733,7 +749,12 @@ impl Workspace {
                                 ws.act(Act::OpenGithub { cwd, split: false }, window, cx)
                             })),
                     ),
-            )
+            ))
+            .when(self.side == Side::Chat, |h| {
+                h.child(div().occlude().flex().child(
+                    button("new-chat", "+ New chat", true).on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::NewChat { cwd: None, split: false }, window, cx))),
+                ))
+            })
             .child(
                 div().occlude().child(
                     Input::new(&self.search_input)
@@ -742,6 +763,75 @@ impl Workspace {
                         .prefix(div().text_color(hsla(theme::TEXT_FAINT)).child("⌕")),
                 ),
             )
+    }
+
+    /// "Sessions | Chat": which list the sidebar shows.
+    fn render_side_tabs(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let tab = |id: &'static str, label: &'static str, side: Side| {
+            let on = self.side == side;
+            div()
+                .id(id)
+                .flex_1()
+                .h(px(26.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(6.0))
+                .text_size(px(12.0))
+                .cursor_pointer()
+                .text_color(hsla(if on { theme::TEXT } else { theme::TEXT_DIM }))
+                .when(on, |d| d.bg(hsla(0x262626)))
+                .when(!on, |d| d.hover(|s| s.text_color(hsla(theme::TEXT))))
+                .child(label)
+                .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::SideTab(side), window, cx)))
+        };
+        div().occlude().flex().gap(px(2.0)).p(px(2.0)).rounded(px(8.0)).bg(hsla(0x141414)).child(tab("tab-chat", "Chat", Side::Chat)).child(tab("tab-sessions", "Code", Side::Sessions))
+    }
+
+    /// CHATS: every chat started here, newest first. A running one has a filled dot; the rest reopen on click.
+    fn render_chat_body(&mut self, q: &str, cx: &mut Context<Self>) -> Div {
+        let mut recs: Vec<ChatRecord> = self
+            .chat_store
+            .shown()
+            .filter(|r| q.is_empty() || r.title.to_lowercase().contains(q) || (crate::chat::store::is_tied(&r.cwd) && r.cwd.to_string_lossy().to_lowercase().contains(q)))
+            .cloned()
+            .collect();
+        recs.sort_by_key(|r| std::cmp::Reverse(r.last_active));
+        let mut body = div().flex().flex_col().gap(px(2.0)).child(self.section_header("CHATS", Some(recs.len().to_string()), None::<Stateful<Div>>));
+        if recs.is_empty() {
+            body = body.child(div().px(px(18.0)).py(px(6.0)).text_size(px(12.0)).text_color(hsla(theme::TEXT_FAINT)).child(if q.is_empty() {
+                "No chats yet. Start one with + New chat."
+            } else {
+                "No chats match"
+            }));
+        }
+        for r in recs {
+            let live = self.chat_pane(&r.id).map(|p| p.view.read(cx).is_busy());
+            let project = self.store.project_for_cwd(&r.cwd).and_then(|p| self.store.project(&p)).map(|p| p.name.clone());
+            body = body.child(self.render_row(
+                Row {
+                    glyph: if live.is_some() { "●" } else { "○" },
+                    glyph_color: hsla(match live {
+                        Some(true) => 0xa8a8a8,
+                        Some(false) => 0x6b6b6b,
+                        None => theme::TEXT_FAINT,
+                    }),
+                    pulse: live == Some(true),
+                    title: r.title.clone(),
+                    right: project.unwrap_or_else(|| ago(r.last_active, now())),
+                    active: self.selected.as_deref() == Some(r.id.as_str()),
+                    dim: live.is_none(),
+                    running: live.is_some(),
+                    indent: false,
+                    stale: false,
+                    archived: false,
+                    scope: "chat",
+                    id: r.id,
+                },
+                cx,
+            ));
+        }
+        body
     }
 
     fn section_header(&self, label: &str, count: Option<String>, trailing: Option<Stateful<Div>>) -> Div {

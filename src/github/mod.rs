@@ -3,7 +3,7 @@
 
 pub mod cli;
 pub mod model;
-mod ui;
+pub(crate) mod ui;
 pub mod view;
 
 #[cfg(test)]

@@ -14,8 +14,27 @@ use serde_json::{Value, json};
 
 pub const FLAG: &str = "--mcp-title";
 pub const SESSION_ENV: &str = "CLAUDIU_SESSION";
-/// `mcp__<server>__<tool>`: allowed per process so renaming the tab never raises a permission prompt.
-pub const ALLOWED_TOOL: &str = "mcp__claudiu__set_tab_title";
+/// `code` (a Claude Code session in a terminal) or `chat` (a native chat); decides which tools the server offers.
+pub const CALLER_ENV: &str = "CLAUDIU_CALLER";
+/// Claudiu's own id of the session or chat. Unlike Claude's session id it survives `/clear`.
+pub const RECORD_ENV: &str = "CLAUDIU_RECORD";
+
+/// Tools that reach other sessions. Each one makes Claudiu ask the user before it does anything (`bridge.rs`).
+const BRIDGE_TOOLS: [&str; 6] = ["list_chats", "read_chat", "list_code_sessions", "read_code_session", "start_code_session", "start_chat"];
+
+/// `mcp__<server>__<tool>` names allowed per process so Claude Code (or the chat adapter) adds no prompt of its own:
+/// renaming the tab is harmless, and the cross-session tools are gated by Claudiu's own confirmation instead.
+pub fn allowed_tools(caller: &str) -> Vec<String> {
+    let title = (caller == "code").then_some("set_tab_title");
+    title.into_iter().chain(BRIDGE_TOOLS).map(|t| format!("mcp__claudiu__{t}")).collect()
+}
+
+const BRIDGE_INSTRUCTIONS: &str = " Claudiu also has tools that reach your other sessions: list_chats, read_chat, list_code_sessions, \
+read_code_session, start_code_session (opens a new Claude Code session in the Code tab) and start_chat (opens a new \
+chat in the Chat tab). Each one makes Claudiu ask the user to confirm first. Use them only when the user asks you to \
+look at, hand work to or continue in another session; if the user declines, accept it and don't ask again.";
+
+const CHAT_INSTRUCTIONS: &str = "You are a chat running inside Claudiu.";
 
 const INSTRUCTIONS: &str = "You are running inside Claudiu, which shows a tab title for this session. Call the \
 set_tab_title tool with a short title (2-5 words, no quotes) once you understand the user's first request. After \
@@ -61,11 +80,15 @@ fn clean_title(raw: &str) -> Option<String> {
 /// Entry point of `claudiu --mcp-title`: newline-delimited JSON-RPC over stdio.
 pub fn run() -> i32 {
     let session = std::env::var(SESSION_ENV).unwrap_or_default();
-    serve(std::io::stdin().lock(), std::io::stdout().lock(), &session, &titles_dir());
+    let caller = std::env::var(CALLER_ENV).unwrap_or_else(|_| "code".into());
+    let from = format!("{caller}:{}", std::env::var(RECORD_ENV).unwrap_or_else(|_| session.clone()));
+    serve(std::io::stdin().lock(), std::io::stdout().lock(), &caller, &session, &titles_dir(), |tool, args| crate::bridge::ask(&from, tool, args));
     0
 }
 
-fn serve(input: impl BufRead, mut out: impl Write, session: &str, titles: &Path) {
+/// `ask` carries a cross-session request to Claudiu and waits for the user's answer.
+fn serve(input: impl BufRead, mut out: impl Write, caller: &str, session: &str, titles: &Path, ask: impl Fn(&str, &Value) -> Result<String, String>) {
+    let chat = caller == "chat";
     for line in input.lines().map_while(Result::ok) {
         let Ok(msg) = serde_json::from_str::<Value>(&line) else { continue };
         // Notifications (no id) and responses (no method) need no answer.
@@ -75,31 +98,17 @@ fn serve(input: impl BufRead, mut out: impl Write, session: &str, titles: &Path)
                 "protocolVersion": msg["params"]["protocolVersion"].as_str().unwrap_or("2025-06-18"),
                 "capabilities": { "tools": {} },
                 "serverInfo": { "name": "claudiu", "version": env!("CARGO_PKG_VERSION") },
-                "instructions": INSTRUCTIONS,
+                "instructions": if chat { format!("{CHAT_INSTRUCTIONS}{BRIDGE_INSTRUCTIONS}") } else { format!("{INSTRUCTIONS}{BRIDGE_INSTRUCTIONS}") },
             })),
             "ping" => Ok(json!({})),
-            "tools/list" => Ok(json!({ "tools": [{
-                "name": "set_tab_title",
-                "description": "Set this session's tab title in Claudiu (2-5 words). Call after the first request, when the current task or scope changes, and whenever the user asks to rename the session or tab. Don't repeat an unchanged title.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": { "title": { "type": "string", "description": "Short tab title, 2-5 words" } },
-                    "required": ["title"],
-                },
-            }, {
-                "name": "set_model",
-                "description": "Switch this session's model and/or effort from your next request on, even mid-turn. Always ask the user first with the AskUserQuestion tool (which model, which effort) unless they just named them explicitly; never switch on your own. Claude Code also keeps the choice as the user's default model/effort.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "model": { "type": "string", "description": "Model alias (sonnet, opus, haiku) or full model id" },
-                        "effort": { "type": "string", "description": "Effort level: low, medium, high, xhigh, max or auto" },
-                    },
-                },
-            }]})),
+            "tools/list" => Ok(json!({ "tools": own_tools(chat).into_iter().chain(bridge_tools()).collect::<Vec<_>>() })),
             "tools/call" => Ok(match msg["params"]["name"].as_str() {
-                Some("set_tab_title") => set_title(&msg["params"], session, titles),
-                Some("set_model") => reply("Model switching isn't available in this session (Claudiu's mod isn't loaded).", true),
+                Some("set_tab_title") if !chat => set_title(&msg["params"], session, titles),
+                Some("set_model") if !chat => reply("Model switching isn't available in this session (Claudiu's mod isn't loaded).", true),
+                Some(tool) if BRIDGE_TOOLS.contains(&tool) => match ask(tool, &msg["params"]["arguments"]) {
+                    Ok(text) => reply(&text, false),
+                    Err(text) => reply(&text, true),
+                },
                 _ => reply("unknown tool", true),
             }),
             _ => Err(json!({ "code": -32601, "message": "method not found" })),
@@ -111,6 +120,59 @@ fn serve(input: impl BufRead, mut out: impl Write, session: &str, titles: &Path)
         let _ = writeln!(out, "{body}");
         let _ = out.flush();
     }
+}
+
+/// Tab title and model switch: only for terminal sessions (a chat names itself and has its own model picker).
+fn own_tools(chat: bool) -> Vec<Value> {
+    if chat {
+        return vec![];
+    }
+    vec![json!({
+                "name": "set_tab_title",
+                "description": "Set this session's tab title in Claudiu (2-5 words). Call after the first request, when the current task or scope changes, and whenever the user asks to rename the session or tab. Don't repeat an unchanged title.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": { "title": { "type": "string", "description": "Short tab title, 2-5 words" } },
+                    "required": ["title"],
+                },
+            }), json!({
+                "name": "set_model",
+                "description": "Switch this session's model and/or effort from your next request on, even mid-turn. Always ask the user first with the AskUserQuestion tool (which model, which effort) unless they just named them explicitly; never switch on your own. Claude Code also keeps the choice as the user's default model/effort.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "model": { "type": "string", "description": "Model alias (sonnet, opus, haiku) or full model id" },
+                        "effort": { "type": "string", "description": "Effort level: low, medium, high, xhigh, max or auto" },
+                    },
+                },
+            })]
+}
+
+const CONFIRM: &str = " Claudiu asks the user to confirm first, so only call it when the user asked for this.";
+
+fn bridge_tools() -> Vec<Value> {
+    let tool = |name: &str, description: String, properties: Value| json!({ "name": name, "description": description, "inputSchema": { "type": "object", "properties": properties } });
+    let id = |what: &str| json!({ "id": { "type": "string", "description": format!("The id from {what}") } });
+    let target = json!({
+        "prompt": { "type": "string", "description": "First message for the new session (optional)" },
+        "folder": { "type": "string", "description": "Project name or folder path (optional)" },
+    });
+    vec![
+        tool("list_chats", format!("List the user's chats in Claudiu (id, title, project, whether it is open).{CONFIRM}"), json!({})),
+        tool(
+            "read_chat",
+            format!("Read the latest messages of a chat that is open in Claudiu.{CONFIRM}"),
+            json!({ "id": id("list_chats")["id"], "messages": { "type": "integer", "description": "How many recent messages (default 30)" } }),
+        ),
+        tool("list_code_sessions", format!("List the user's Claude Code sessions in Claudiu (id, title, folder, whether it is running).{CONFIRM}"), json!({})),
+        tool(
+            "read_code_session",
+            format!("Read the latest terminal output of a Claude Code session that is running in Claudiu.{CONFIRM}"),
+            json!({ "id": id("list_code_sessions")["id"], "lines": { "type": "integer", "description": "How many recent lines (default 120)" } }),
+        ),
+        tool("start_code_session", format!("Open a new Claude Code session in the Code tab, optionally with a first prompt.{CONFIRM}"), target.clone()),
+        tool("start_chat", format!("Open a new chat in the Chat tab, optionally with a first message. Without a folder it is not tied to a project.{CONFIRM}"), target),
+    ]
 }
 
 fn reply(text: &str, is_error: bool) -> Value {
@@ -131,15 +193,26 @@ fn set_title(params: &Value, session: &str, dir: &Path) -> Value {
 }
 
 /// Write the per-session MCP config and return its path (for `--mcp-config`).
-pub fn prepare(claude_session_id: &str) -> std::io::Result<PathBuf> {
+pub fn prepare(claude_session_id: &str, record_id: &str) -> std::io::Result<PathBuf> {
     let config = json!({ "mcpServers": { "claudiu": {
         "command": std::env::current_exe()?.to_string_lossy(),
         "args": [FLAG],
-        "env": { SESSION_ENV: claude_session_id },
+        "env": { SESSION_ENV: claude_session_id, CALLER_ENV: "code", RECORD_ENV: record_id },
     }}});
     let path = config_dir().join(format!("{}.json", crate::statusline::safe_file_stem(claude_session_id)));
     crate::statusline::write_atomic(&path, &config.to_string())?;
     Ok(path)
+}
+
+/// The same server for a chat, in the shape ACP's `session/new` takes (`mcpServers`).
+pub fn chat_servers(chat_id: &str) -> Value {
+    let Ok(exe) = std::env::current_exe() else { return json!([]) };
+    json!([{
+        "name": "claudiu",
+        "command": exe.to_string_lossy(),
+        "args": [FLAG],
+        "env": [{ "name": SESSION_ENV, "value": chat_id }, { "name": CALLER_ENV, "value": "chat" }, { "name": RECORD_ENV, "value": chat_id }],
+    }])
 }
 
 /// The mod that answers this server's tools in-process (see `mod/`), written to the data dir and loaded per
@@ -183,11 +256,37 @@ pub fn cleanup_dirs() -> [PathBuf; 3] {
 mod tests {
     use super::*;
 
-    fn talk(requests: &[Value], session: &str, dir: &Path) -> Vec<Value> {
+    fn talk_as(caller: &str, requests: &[Value], session: &str, dir: &Path, ask: impl Fn(&str, &Value) -> Result<String, String>) -> Vec<Value> {
         let input: String = requests.iter().map(|r| format!("{r}\n")).collect();
         let mut out = Vec::new();
-        serve(input.as_bytes(), &mut out, session, dir);
+        serve(input.as_bytes(), &mut out, caller, session, dir, ask);
         String::from_utf8(out).unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect()
+    }
+
+    fn talk(requests: &[Value], session: &str, dir: &Path) -> Vec<Value> {
+        talk_as("code", requests, session, dir, |_, _| Err("no".into()))
+    }
+
+    #[test]
+    fn chats_only_see_the_cross_session_tools_and_every_call_is_forwarded_to_the_user() {
+        let tmp = tempfile::tempdir().unwrap();
+        let call = |name: &str| json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":{"id":"x"}}});
+        let r = talk_as(
+            "chat",
+            &[json!({"jsonrpc":"2.0","id":9,"method":"tools/list"}), call("read_code_session"), call("set_tab_title"), call("start_chat")],
+            "c1",
+            tmp.path(),
+            |tool, args| if tool == "start_chat" { Err("The user declined.".into()) } else { Ok(format!("{tool} {}", args["id"])) },
+        );
+        let names: Vec<_> = r[0]["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert_eq!(names, BRIDGE_TOOLS);
+        assert_eq!(r[1]["result"]["content"][0]["text"], "read_code_session \"x\"");
+        assert_eq!(r[1]["result"]["isError"], false);
+        assert_eq!(r[2]["result"]["isError"], true, "a chat cannot set a terminal tab title");
+        assert_eq!(r[3]["result"]["content"][0]["text"], "The user declined.");
+        assert_eq!(r[3]["result"]["isError"], true);
+        assert!(allowed_tools("chat").iter().all(|t| !t.ends_with("set_tab_title")));
+        assert_eq!(allowed_tools("code").len(), BRIDGE_TOOLS.len() + 1);
     }
 
     #[test]
