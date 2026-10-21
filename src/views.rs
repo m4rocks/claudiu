@@ -2,11 +2,12 @@
 
 use gpui::{
     AnyElement, ClickEvent, Context, FontWeight, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
-    ParentElement, Render, StatefulInteractiveElement, Styled, Window, anchored, deferred, div, prelude::FluentBuilder, px, rgba,
+    ParentElement, Render, StatefulInteractiveElement, Styled, Window, anchored, deferred, div, prelude::FluentBuilder,
+    px, rgba,
 };
 
 use crate::app::{
-    Act, CloseSession, GitOp, MenuItem, FocusNextPane, FocusSearch, ImportProject, Main, Modal, NewClaude, NewShell, NextSession, OpenSettings, PrevSession, SplitPane,
+    Act, CloseSession, GitOp, MenuItem, FocusNextPane, FocusSearch, ImportProject, Main, Modal, NewClaude, NewShell, NextSession, OpenGithub, OpenSettings, PrevSession, SplitPane,
     ToggleSidebar, Workspace,
 };
 use gpui_kit::component::{TitleBar, input::Input};
@@ -14,21 +15,34 @@ use crate::platform::Editor;
 use crate::store::{SessionKind, now};
 use crate::theme::{self, hsla};
 use crate::updater::Status;
-use crate::widgets::{ago, button, button_disabled, clawd, danger_button, icon_button, section_label, segment, short_path};
+use crate::widgets::{ago, button, button_disabled, clawd, danger_button, fade_in, icon_button, section_label, segment, short_path};
 
 impl Workspace {
     // ------------------------------------------------------------------ top bar
 
     fn render_topbar(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let rec = self.active_id().and_then(|id| self.store.session(id)).cloned();
-        let project = rec.as_ref().and_then(|r| r.project_id.as_ref()).and_then(|p| self.store.project(p)).cloned();
-        let cwd = rec.as_ref().map(|r| r.cwd.clone());
+        // A GitHub pane has no session record; its folder and project stand in for one.
+        let gh = self.active_id().and_then(|id| self.gh_pane(id)).map(|p| (p.cwd.clone(), p.project.clone()));
+        let project = rec
+            .as_ref()
+            .and_then(|r| r.project_id.clone())
+            .or_else(|| gh.as_ref().and_then(|(cwd, _)| self.store.project_for_cwd(cwd)))
+            .and_then(|p| self.store.project(&p))
+            .cloned();
+        let cwd = rec.as_ref().map(|r| r.cwd.clone()).or_else(|| gh.as_ref().map(|(cwd, _)| cwd.clone()));
         let in_terminals = matches!(self.main, Main::Terminals);
 
         let mut right = div().flex().flex_none().items_center().gap(px(6.0));
         if in_terminals {
             right = right.child(
-                icon_button("split", "◫").on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.split(window, cx))),
+                icon_button("split", "◫").on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|ws, ev: &MouseDownEvent, _w, cx| {
+                        let items = ws.split_menu(cx);
+                        ws.open_menu(ev.position, items, cx);
+                    }),
+                ),
             );
             if self.panes.len() > 1 {
                 right = right.child(
@@ -106,7 +120,11 @@ impl Workspace {
             right = right.child(commit).child(pull);
         }
 
-        let title = rec.as_ref().map(|r| r.display_title().to_string()).unwrap_or_else(|| "Claudiu".into());
+        let title = rec
+            .as_ref()
+            .map(|r| r.display_title().to_string())
+            .or_else(|| gh.as_ref().map(|(_, name)| format!("GitHub · {name}")))
+            .unwrap_or_else(|| "Claudiu".into());
         let branch = project.as_ref().and_then(|p| p.git.as_ref()).and_then(|g| g.branch.clone());
         // `.occlude()` on both groups: the bar is a Windows drag (HTCAPTION) area, which would otherwise swallow clicks on the buttons inside it.
         // The title bar is the top bar: macOS keeps its traffic lights (over the sidebar, or left of the
@@ -127,9 +145,10 @@ impl Workspace {
                     .flex_1()
                     .min_w_0()
                     .overflow_hidden()
-                    .occlude()
+                    // No `.occlude()` here: the title and the empty space stay part of the drag area; the buttons occlude themselves.
                     .child(
                         icon_button("toggle-sidebar", "☰")
+                            .occlude()
                             .on_click(cx.listener(|ws, _: &ClickEvent, _w, cx| {
                                 ws.store.data.layout.sidebar_visible = !ws.store.data.layout.sidebar_visible;
                                 ws.store.mark_dirty();
@@ -155,6 +174,7 @@ impl Workspace {
                         d.child(
                             div()
                                 .id("branch")
+                                .occlude()
                                 .flex_none()
                                 .px(px(7.0))
                                 .py(px(1.0))
@@ -205,17 +225,25 @@ impl Workspace {
 
     // ------------------------------------------------------------------ panes
 
-    fn render_panes(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    /// `avail_w` is the width left of the sidebar; a GitHub pane uses its share of it to pick its layout.
+    fn render_panes(&mut self, avail_w: f32, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let n = self.panes.len();
         let mut container = div().flex().size_full().gap(px(1.0)).bg(hsla(theme::BORDER));
         container = if self.split_vertical { container.flex_col() } else { container.flex_row() };
 
         for (i, id) in self.panes.clone().into_iter().enumerate() {
-            let Some(view) = self.live_view(&id).cloned() else { continue };
+            let gh = self.gh_pane(&id).map(|p| (p.view.clone(), p.project.clone()));
+            let term = if gh.is_none() { self.live_view(&id).cloned() } else { None };
+            if gh.is_none() && term.is_none() {
+                continue;
+            }
             let rec = self.store.session(&id).cloned();
-            let exit = view.read(cx).exit_code;
+            let exit = term.as_ref().and_then(|v| v.read(cx).exit_code);
             let focused = i == self.focused;
-            let title = rec.as_ref().map(|r| r.display_title().to_string()).unwrap_or_default();
+            let title = match &gh {
+                Some((_, project)) => format!("GitHub · {project}"),
+                None => rec.as_ref().map(|r| r.display_title().to_string()).unwrap_or_default(),
+            };
             let is_claude = rec.as_ref().is_some_and(|r| r.kind == SessionKind::Claude);
             let cwd = rec.as_ref().map(|r| r.cwd.clone());
             let (rid, cid) = (id.clone(), id.clone());
@@ -279,7 +307,7 @@ impl Workspace {
                     ))
             });
 
-            container = container.child(
+            container = container.child(fade_in(
                 div()
                     .id(gpui::SharedString::from(format!("pane-{i}")))
                     .relative()
@@ -298,9 +326,20 @@ impl Workspace {
                         }),
                     )
                     .children(header)
-                    .child(div().flex_1().min_h_0().p(px(8.0)).child(view))
+                    .child(match (gh, term) {
+                        (Some((view, _)), _) => {
+                            let w = if self.split_vertical { avail_w } else { avail_w / n as f32 };
+                            view.update(cx, |v, _| v.width = w);
+                            div().flex_1().min_h_0().child(view)
+                        }
+                        (None, Some(view)) => div().flex_1().min_h_0().p(px(8.0)).child(view),
+                        (None, None) => div(),
+                    })
                     .children(banner),
-            );
+                format!("pane-in-{id}"),
+                150,
+                0.4,
+            ));
         }
         container
     }
@@ -435,7 +474,7 @@ impl Workspace {
                     .size_full()
                     .on_mouse_down(MouseButton::Left, cx.listener(close))
                     .on_mouse_down(MouseButton::Right, cx.listener(close))
-                    .child(anchored().position(pos).snap_to_window_with_margin(px(8.0)).child(card)),
+                    .child(anchored().position(pos).snap_to_window_with_margin(px(8.0)).child(fade_in(card, "menu-in", 110, 0.0))),
             )
             .with_priority(10)
             .into_any_element(),
@@ -570,6 +609,7 @@ impl Workspace {
         Some(
             deferred(
                 div().absolute().bottom(px(18.0)).right(px(18.0)).child(
+                    fade_in(
                     div()
                         .max_w(px(420.0))
                         .px(px(14.0))
@@ -582,6 +622,10 @@ impl Workspace {
                         .text_color(hsla(if t.error { theme::DANGER } else { theme::TEXT }))
                         .child(t.text.clone())
                         .children(action),
+                        format!("toast-{}", t.serial),
+                        160,
+                        0.0,
+                    ),
                 ),
             )
             .with_priority(30)
@@ -611,8 +655,10 @@ impl Render for Workspace {
             let visible = showing.contains(&l.id);
             l.view.update(cx, |v, _| v.visible = visible);
         }
+        let sidebar_w = if self.store.data.layout.sidebar_visible { crate::sidebar::SIDEBAR_W } else { 0.0 };
+        let avail_w = f32::from(window.viewport_size().width) - sidebar_w;
         let main: AnyElement = match &self.main {
-            Main::Terminals => self.render_panes(cx).into_any_element(),
+            Main::Terminals => self.render_panes(avail_w, cx).into_any_element(),
             Main::Home => self.render_home(cx).into_any_element(),
         };
         let menu = self.render_menu(cx);
@@ -655,6 +701,10 @@ impl Render for Workspace {
                 cx.notify();
             }))
             .on_action(cx.listener(|ws, _: &ImportProject, window, cx| ws.act(Act::ImportProject, window, cx)))
+            .on_action(cx.listener(|ws, _: &OpenGithub, window, cx| {
+                let cwd = ws.active_cwd();
+                ws.act(Act::OpenGithub { cwd, split: false }, window, cx)
+            }))
             .on_action(cx.listener(|ws, _: &OpenSettings, window, cx| ws.act(Act::OpenSettings, window, cx)))
             .on_action(cx.listener(|ws, _: &FocusNextPane, window, cx| {
                 if !ws.panes.is_empty() {

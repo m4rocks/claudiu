@@ -349,3 +349,14 @@ mod tests {
         assert!(short_path(p).chars().count() <= 46);
     }
 }
+
+/// Fades `el` in the first time it is drawn; a new `key` replays it (e.g. a different item or session).
+/// It starts at `from` opacity so terminals never flash fully empty.
+pub fn fade_in<E: gpui::IntoElement + Styled + 'static>(el: E, key: impl Into<SharedString>, ms: u64, from: f32) -> gpui::AnimationElement<E> {
+    use gpui::{Animation, AnimationExt};
+    el.with_animation(
+        key.into(),
+        Animation::new(std::time::Duration::from_millis(ms)).with_easing(gpui::ease_out_quint()),
+        move |el, t| el.opacity(from + (1.0 - from) * t),
+    )
+}

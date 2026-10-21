@@ -4,7 +4,7 @@ use std::{cell::RefCell, collections::HashMap, rc::Rc, time::{Duration, Instant}
 
 use gpui::{
     Animation, AnimationExt, AnyElement, AppContext, DragMoveEvent, SharedString, WeakEntity, canvas, ease_out_quint, ClickEvent, Context, Div, FontWeight, Hsla, InteractiveElement, IntoElement, MouseButton, MouseDownEvent, ParentElement, Pixels, Render,
-    Stateful, StatefulInteractiveElement, Styled, Window, div, prelude::FluentBuilder, pulsating_between, px,
+    Stateful, StatefulInteractiveElement, Styled, Window, WindowControlArea, div, prelude::FluentBuilder, pulsating_between, px,
 };
 
 use gpui_kit::component::input::Input;
@@ -13,9 +13,10 @@ use crate::store::{ExternalState, Id, Project, SessionKind, SessionRecord, now};
 use crate::theme::{self, hsla};
 use crate::widgets::{ago, avatar, button, clawd, cog, countdown, divider, icon_button, meter, section_label};
 
-const SIDEBAR_W: f32 = 284.0;
+pub const SIDEBAR_W: f32 = 284.0;
 const PROJECT_SESSION_LIMIT: usize = 5;
 
+#[derive(Clone)]
 struct Row {
     id: Id,
     glyph: &'static str,
@@ -198,6 +199,7 @@ impl Workspace {
         } else {
             items.push(item("Open new shell here", Act::NewShell { cwd: rec.cwd.clone() }, false, false));
         }
+        items.extend(self.split_items(&rec.id, running || rec.kind == SessionKind::Claude));
         items.push(item("Rename…", Act::Rename(rec.id.clone()), false, false));
         if let Some(c) = &rec.claude {
             items.push(item("Copy Claude session ID", Act::CopyText(c.session_id.clone()), false, true));
@@ -212,12 +214,37 @@ impl Workspace {
         items
     }
 
+    /// Which split holds `id`: `Some(None)` the one on screen, `Some(Some(i))` the parked split `groups[i]`.
+    fn split_slot(&self, id: &Id) -> Option<Option<usize>> {
+        if self.panes.len() > 1 && self.panes.contains(id) {
+            Some(None)
+        } else {
+            self.groups.iter().position(|g| g.contains(id)).map(Some)
+        }
+    }
+
+    /// "Add to split" / "Remove from split" for a session row, when it applies.
+    fn split_items(&self, id: &Id, can_open: bool) -> Option<MenuItem> {
+        let item = |label: &str, act: Act| MenuItem { label: label.into(), hint: None, act, danger: false, disabled: false, separator_before: false };
+        if self.split_slot(id).is_some() {
+            Some(item("Remove from split", Act::RemoveFromSplit(id.clone())))
+        } else {
+            (can_open && !self.panes.is_empty() && self.panes.len() < 4 && !self.panes.contains(id)).then(|| item("Add to split", Act::AddToSplit(id.clone())))
+        }
+    }
+
     fn project_menu(&self, p: &Project) -> Vec<MenuItem> {
         let item = |label: String, act: Act, danger: bool, sep: bool| MenuItem { label, hint: None, act, danger, disabled: false, separator_before: sep };
         let mut items = vec![
             item("New Claude session here".into(), Act::NewClaude { cwd: p.path.clone() }, false, false),
             item("New shell here".into(), Act::NewShell { cwd: p.path.clone() }, false, false),
         ];
+        if p.git.is_some() {
+            items.push(item("GitHub issues & PRs".into(), Act::OpenGithub { cwd: p.path.clone(), split: false }, false, true));
+            if !self.panes.is_empty() {
+                items.push(item("GitHub issues & PRs in split".into(), Act::OpenGithub { cwd: p.path.clone(), split: true }, false, false));
+            }
+        }
         let mut first = true;
         for (editor, found) in &self.editors {
             if *found {
@@ -246,11 +273,32 @@ impl Workspace {
                     if from == this || !ev.bounds.contains(&ev.event.position) || !ws.pointer_moved(ev.event.position) {
                         return;
                     }
-                    let at = |id: &Id| ws.live.iter().position(|l| l.id == *id);
-                    if let (Some(from), Some(to)) = (at(&from), at(&this)) {
-                        move_to(&mut ws.live, from, to);
-                        ws.last_swap = Instant::now();
-                        cx.notify();
+                    // Rows of a split card reorder that split; the others reorder the session list.
+                    match (ws.split_slot(&from), ws.split_slot(&this)) {
+                        (Some(a), Some(b)) if a == b => {
+                            let focused = ws.panes.get(ws.focused).cloned();
+                            let v = match a {
+                                None => &mut ws.panes,
+                                Some(g) => &mut ws.groups[g],
+                            };
+                            if let (Some(from), Some(to)) = (v.iter().position(|p| *p == from), v.iter().position(|p| *p == this)) {
+                                move_to(v, from, to);
+                                if a.is_none() {
+                                    ws.focused = focused.and_then(|f| ws.panes.iter().position(|p| *p == f)).unwrap_or(0);
+                                }
+                                ws.last_swap = Instant::now();
+                                cx.notify();
+                            }
+                        }
+                        (None, None) => {
+                            let at = |id: &Id| ws.live.iter().position(|l| l.id == *id);
+                            if let (Some(from), Some(to)) = (at(&from), at(&this)) {
+                                move_to(&mut ws.live, from, to);
+                                ws.last_swap = Instant::now();
+                                cx.notify();
+                            }
+                        }
+                        _ => {}
                     }
                 }))
             })
@@ -294,6 +342,12 @@ impl Workspace {
                     if let Some(rec) = ws.store.session(&menu_id).cloned() {
                         let running = ws.is_running(&menu_id, cx);
                         let items = ws.session_menu(&rec, running);
+                        ws.open_menu(ev.position, items, cx);
+                    } else if ws.gh_pane(&menu_id).is_some() {
+                        let item = |label: &str, act: Act, danger: bool| MenuItem { label: label.into(), hint: None, act, danger, disabled: false, separator_before: false };
+                        let mut items = vec![item("Switch to pane", Act::Select(menu_id.clone()), false)];
+                        items.extend(ws.split_items(&menu_id, true));
+                        items.push(MenuItem { separator_before: true, ..item("Close", Act::CloseLive(menu_id.clone()), true) });
                         ws.open_menu(ev.position, items, cx);
                     }
                 }),
@@ -348,9 +402,9 @@ impl Workspace {
 
     /// The sessions in the split view as one card: an accent rail down the edge and a header with a
     /// miniature of the layout (one block per pane, the focused one lit).
-    fn render_split_group(&self, rows: Vec<Row>, cx: &mut Context<Self>) -> Div {
-        let map = (0..self.panes.len()).fold(div().flex().flex_none().gap(px(2.0)).w(px(16.0)).h(px(9.0)), |d, i| {
-            let lit = i == self.focused;
+    fn render_split_group(&self, rows: Vec<Row>, size: usize, lit: Option<usize>, cx: &mut Context<Self>) -> Div {
+        let map = (0..size).fold(div().flex().flex_none().gap(px(2.0)).w(px(16.0)).h(px(9.0)), |d, i| {
+            let lit = lit == Some(i);
             d.child(div().flex_1().rounded(px(2.0)).bg(if lit { hsla(theme::ACCENT) } else { hsla(theme::TEXT_FAINT).opacity(0.55) }))
         });
         let map = if self.split_vertical { map.flex_col() } else { map.flex_row() };
@@ -372,9 +426,9 @@ impl Workspace {
                 .border_1()
                 .border_color(hsla(theme::BORDER))
                 .bg(hsla(0x101011))
-                .child(div().absolute().left(px(0.0)).top(px(8.0)).bottom(px(8.0)).w(px(2.0)).rounded_r(px(2.0)).bg(hsla(theme::ACCENT).opacity(0.75)))
+                .child(div().absolute().left(px(0.0)).top(px(8.0)).bottom(px(8.0)).w(px(2.0)).rounded_r(px(2.0)).bg(if lit.is_some() { hsla(theme::ACCENT).opacity(0.75) } else { hsla(theme::TEXT_FAINT).opacity(0.4) }))
                 .child(header),
-            |card, row| card.child(self.render_row(row, cx).h(px(24.0)).mx(px(3.0))),
+            |card, row| card.child(self.session_row(row, true, cx).h(px(24.0)).mx(px(3.0))),
         )
     }
 
@@ -386,7 +440,7 @@ impl Workspace {
         let searching = !q.is_empty();
 
         // ---- CURRENT SESSION
-        let rows: Vec<Row> = self
+        let mut rows: Vec<Row> = self
             .live
             .iter()
             .filter(|l| l.view.read(cx).is_running())
@@ -394,18 +448,47 @@ impl Workspace {
             .filter(|r| self.matches(&q, r))
             .map(|r| self.row_for(r, true, true))
             .collect();
-        // Sessions sharing the split view are drawn together, in pane order.
-        let split = self.panes.len() > 1;
-        let (mut grouped, current): (Vec<Row>, Vec<Row>) = rows.into_iter().partition(|r| split && self.panes.contains(&r.id));
-        grouped.sort_by_key(|r| self.panes.iter().position(|p| *p == r.id));
-        let current_total = self.running_count(cx);
+        rows.extend(
+            self.gh
+                .iter()
+                .filter(|p| q.is_empty() || "github issues pull requests".contains(&q) || p.project.to_lowercase().contains(&q))
+                .map(|p| Row {
+                    id: p.id.clone(),
+                    glyph: "◉",
+                    glyph_color: hsla(0x58a6ff),
+                    pulse: false,
+                    title: "GitHub".into(),
+                    right: p.project.clone(),
+                    active: self.selected.as_deref() == Some(p.id.as_str()),
+                    dim: false,
+                    running: true,
+                    indent: false,
+                    stale: false,
+                    archived: false,
+                    scope: "cur",
+                }),
+        );
+        // Sessions sharing a split are drawn together, in pane order: one card per split (the shown one lit).
+        let splits = self.splits();
+        let shown = (self.panes.len() > 1).then(|| self.panes.clone());
+        let mut cards: Vec<(Vec<Row>, usize, Option<usize>)> = vec![];
+        for g in &splits {
+            let mut members: Vec<Row> = rows.iter().filter(|r| g.contains(&r.id)).cloned().collect();
+            members.sort_by_key(|r| g.iter().position(|p| *p == r.id));
+            if !members.is_empty() {
+                let lit = (shown.as_ref() == Some(g)).then_some(self.focused);
+                cards.push((members, g.len(), lit));
+            }
+        }
+        let current: Vec<Row> = rows.into_iter().filter(|r| !splits.iter().any(|g| g.contains(&r.id))).collect();
+        let current_total = self.running_count(cx) + self.gh.len();
 
         let mut body = div().flex().flex_col().gap(px(2.0));
 
         body = body.child(self.section_header("CURRENT SESSION", Some(current_total.to_string()), None::<Stateful<Div>>));
-        let has_group = !grouped.is_empty();
-        if has_group {
-            body = body.child(self.render_split_group(grouped, cx));
+        let has_group = !cards.is_empty();
+        for (members, size, lit) in cards {
+            body = body.child(self.render_split_group(members, size, lit, cx));
         }
         if current.is_empty() && !has_group {
             body = body.child(
@@ -618,6 +701,8 @@ impl Workspace {
             .px(px(12.0))
             .pt(px(14.0))
             .pb(px(12.0))
+            // Same as the top bar: dragging the empty header moves the window, controls occlude it.
+            .window_control_area(WindowControlArea::Drag)
             .child(
                 div()
                     .flex()
@@ -626,10 +711,11 @@ impl Workspace {
                     .px(px(4.0))
                     .child(clawd(24.0))
                     .child(div().flex_1().text_size(px(13.0)).font_weight(FontWeight::BOLD).text_color(hsla(theme::TEXT)).child("CLAUDIU"))
-                    .child(icon_button("settings", "").group("settings").child(cog("settings")).on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::OpenSettings, window, cx)))),
+                    .child(icon_button("settings", "").occlude().group("settings").child(cog("settings")).on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::OpenSettings, window, cx)))),
             )
             .child(
                 div()
+                    .occlude()
                     .flex()
                     .gap(px(6.0))
                     .child(
@@ -639,13 +725,22 @@ impl Workspace {
                     .child(
                         button("new-shell", "+ Shell", false)
                             .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::NewShell { cwd: cwd_b.clone() }, window, cx))),
+                    )
+                    .child(
+                        button("new-github", "GitHub", false)
+                            .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
+                                let cwd = ws.active_cwd();
+                                ws.act(Act::OpenGithub { cwd, split: false }, window, cx)
+                            })),
                     ),
             )
             .child(
-                Input::new(&self.search_input)
-                    .h(px(28.0))
-                    .text_size(px(12.5))
-                    .prefix(div().text_color(hsla(theme::TEXT_FAINT)).child("⌕")),
+                div().occlude().child(
+                    Input::new(&self.search_input)
+                        .h(px(28.0))
+                        .text_size(px(12.5))
+                        .prefix(div().text_color(hsla(theme::TEXT_FAINT)).child("⌕")),
+                ),
             )
     }
 

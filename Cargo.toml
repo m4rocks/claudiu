@@ -1,6 +1,6 @@
 [package]
 name = "claudiu"
-version = "0.2.19"
+version = "0.2.20"
 edition = "2024"
 description = "A native workspace for Claude Code sessions: real PTYs, projects, and session history"
 repository = "https://github.com/m4rocks/claudiu"
@@ -25,6 +25,8 @@ wait-timeout = "0.2.1"
 which = "8.0.6"
 
 [dev-dependencies]
+gpui = { package = "gpui-pre", version = "=0.3.8", features = ["test-support"] }
+gpui-kit = { version = "0.7.1", default-features = false, features = ["component", "test-support"] }
 tempfile = "3.27.0"
 
 [build-dependencies]

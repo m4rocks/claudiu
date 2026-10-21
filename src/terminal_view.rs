@@ -69,9 +69,9 @@ impl Focusable for TerminalView {
 }
 
 #[cfg(target_os = "windows")]
-const FONT: &str = "Cascadia Mono";
+pub const FONT: &str = "Cascadia Mono";
 #[cfg(not(target_os = "windows"))]
-const FONT: &str = "Menlo";
+pub const FONT: &str = "Menlo";
 
 impl TerminalView {
     /// Spawn the process first (so failures can be reported), then wrap it in a view.

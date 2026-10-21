@@ -5,6 +5,7 @@ mod app;
 mod claude;
 mod commit;
 mod git;
+mod github;
 mod glyphs;
 mod keys;
 mod mcp;
@@ -26,7 +27,7 @@ use gpui_kit::component::TitleBar;
 gpui_kit::assets::icon_assets!(TitleBarIcons, [WindowMinimize, WindowMaximize, WindowRestore, WindowClose]);
 
 use app::{
-    CloseSession, FocusNextPane, FocusSearch, HideApp, HideOthers, ImportProject, NewClaude, NewShell, NextSession, OpenSettings, PrevSession, Quit, ShowAllApps,
+    CloseSession, FocusNextPane, FocusSearch, HideApp, HideOthers, ImportProject, NewClaude, NewShell, NextSession, OpenGithub, OpenSettings, PrevSession, Quit, ShowAllApps,
     SplitPane, ToggleSidebar, Workspace,
 };
 
@@ -51,6 +52,7 @@ fn menu_bar() -> Vec<gpui::Menu> {
         Menu::new("File").items([
             MenuItem::action("New Claude Session", NewClaude),
             MenuItem::action("New Shell", NewShell),
+            MenuItem::action("GitHub Issues & Pull Requests", OpenGithub),
             MenuItem::separator(),
             MenuItem::action("Add Project…", ImportProject),
             MenuItem::separator(),
@@ -135,6 +137,7 @@ fn main() {
             KeyBinding::new("secondary-shift-b", ToggleSidebar, None),
             KeyBinding::new("secondary-shift-f", FocusSearch, None),
             KeyBinding::new("secondary-shift-o", ImportProject, None),
+            KeyBinding::new("secondary-shift-g", OpenGithub, None),
             KeyBinding::new("secondary-,", OpenSettings, None),
             KeyBinding::new("secondary-shift-]", FocusNextPane, None),
             KeyBinding::new("ctrl-tab", NextSession, None),

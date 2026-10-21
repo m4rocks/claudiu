@@ -49,6 +49,7 @@ Everything below needs eyes and a keyboard. Roughly ordered by risk. `[ ]` = not
 ## 6. Splits and layout
 - [ ] Ctrl+Shift+D splits (up to 4 panes), orientation button toggles rows/columns, clicking a pane focuses it, pane × ends that session.
 - [ ] The selected session and sidebar visibility are restored after restart (sessions themselves are history until clicked).
+- [ ] The top-bar ◫ button opens a dropdown: new shell / new Claude / GitHub in the split, running sessions to add, "Remove this pane from split", "Exit split". Right-click a sidebar row (including GitHub rows): "Add to split" / "Remove from split". Clicking a session outside the shown split shows it alone and keeps the split as its own card in CURRENT SESSION (you can have several); clicking any session of a card brings that whole split back. Ending a session removes it from its card; a card with one session left dissolves. At four panes the add items are greyed out.
 
 ## 7. Lifecycle
 - [ ] Ctrl+Shift+W / the row × / the pane × end a running session immediately (no prompt). Check Task Manager: no orphaned `claude.exe`/`pwsh.exe`/`conhost.exe` left behind.
@@ -64,3 +65,13 @@ Everything below needs eyes and a keyboard. Roughly ordered by risk. `[ ]` = not
 - [ ] Push a tag (`v0.1.0`), let CI publish; install it. Push `v0.1.1`: the installed app shows "Claudiu 0.1.1 is available", downloads, and "Restart to update" swaps versions (with a confirmation if sessions are running).
 - [ ] A dev build (`cargo run`) never shows an update banner.
 - [ ] macOS: build, run, and the same flows above. The macOS release job (universal build, ad-hoc signed, no notarization) has never run: check the Actions log after the first tag, and that the installed app launches past Gatekeeper (right-click → Open).
+
+## 10. Title bar and GitHub pane (never run by hand yet)
+- [ ] Windows: press on empty space anywhere along the top bar and the sidebar header and drag; the window moves. Double-click maximizes. The sidebar toggle, branch chip, right-hand buttons, settings icon, buttons row and search box still click normally.
+- [ ] Ctrl+Shift+G (or the sidebar "GitHub" button, or a project's ⋯ menu) opens one GitHub pane per project, listed under CURRENT SESSION; opening it again focuses it. "…in split" puts it beside the active session.
+- [ ] Without `gh` or when signed out, the pane shows a neutral state; "Sign in" opens a shell tab running `gh auth login`. A folder with no GitHub remote says so.
+- [ ] Issues / Pull requests tabs show Open and Closed counts. The search box takes GitHub syntax (`is:open label:bug author:@me`), Enter applies it; the chips and Open/Closed tabs rewrite the query. Scroll to the end and "Load more" appends.
+- [ ] Pane narrower than ~860 px stacks list and detail with a "Back to list" button; wider shows them side by side.
+- [ ] Issue: open, comment, close (with reason), reopen, edit title/body, react, labels, assignees, milestone, lock. PR: Conversation / Commits / Files changed tabs, review (approve / request changes / comment), merge methods, auto-merge, ready / draft, update branch, delete branch, checkout.
+- [ ] "Ask Claude" starts a Claude session in a split next to the pane with a short prompt about the item.
+- [ ] Headless smoke test for panics in the drawing code (no window opens): `cargo test -- --ignored render` (needs a signed-in `gh`). `cargo test -- --ignored live` checks the queries against real GitHub.
