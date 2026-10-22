@@ -447,7 +447,7 @@ pub fn evaluate(results: &[RunResult], verdicts: &[(String, bool)], refusal_revi
 
     let colds: Vec<f64> = family.iter().flat_map(|r| r.delegations.iter().map(|d| d.cold_start_tokens as f64)).collect();
     let mean = colds.iter().sum::<f64>() / colds.len().max(1) as f64;
-    row("subagent cold start", format!("mean {mean:.0} tokens over {} subagents", colds.len()), "under 5,000 tokens", (!colds.is_empty()).then_some(mean < COLD_START_TOKENS));
+    row("subagent cold start", if colds.is_empty() { "no subagent ran".to_string() } else { format!("mean {mean:.0} tokens over {} subagents", colds.len()) }, "under 5,000 tokens", (!colds.is_empty()).then_some(mean < COLD_START_TOKENS));
 
     if !family.is_empty() && !results.iter().any(|r| r.arm == "claudiu" && r.compactions > 0) && results.iter().any(|r| r.arm == "claudiu") {
         stop.push("the hooks never compacted anything (a firewall that cannot compact)".into());
