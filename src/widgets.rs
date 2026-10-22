@@ -184,20 +184,6 @@ pub fn button_disabled(id: impl Into<SharedString>, label: impl Into<SharedStrin
     button_with(id.into(), label.into(), hsla(0x1b1b1b), hsla(theme::TEXT_FAINT), hsla(0x1b1b1b), false).cursor_default()
 }
 
-/// One half of a split button (`( label | v )`): sits inside a rounded group and only shows a hover fill.
-pub fn segment(id: impl Into<SharedString>) -> Stateful<Div> {
-    div()
-        .id(id.into())
-        .h_full()
-        .px(px(9.0))
-        .flex()
-        .items_center()
-        .text_size(px(12.0))
-        .text_color(hsla(theme::TEXT))
-        .cursor_pointer()
-        .hover(|s| s.bg(hsla(0x262626)))
-}
-
 /// Destructive action (end session, quit).
 pub fn danger_button(id: impl Into<SharedString>, label: impl Into<SharedString>) -> Stateful<Div> {
     button_with(
@@ -255,10 +241,6 @@ pub fn avatar(seed: &str, size: f32) -> Div {
         .font_weight(FontWeight::BOLD)
         .text_color(hsla(0x17100d))
         .child(letter.to_string())
-}
-
-pub fn divider() -> Div {
-    div().h(px(1.0)).w_full().bg(hsla(theme::BORDER))
 }
 
 /// Relative time like "now", "5m", "3h", "2d", "6w".

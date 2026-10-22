@@ -8,114 +8,26 @@ use gpui::{
 
 use crate::app::{
     Side,
-    Act, CloseSession, GitOp, MenuItem, FocusSearch, ImportProject, Main, Modal, NewChat, NewClaude, NextSession, OpenGithub, OpenSettings, PrevSession, ShellDrag, SwapFocus,
-    ToggleShell, ToggleSidebar, Workspace, SHELL_HEIGHT,
+    Act, CloseSession, GitOp, FocusSearch, ImportProject, Main, Modal, NewChat, NewClaude, NextSession, OpenGithub, OpenSettings, PrevSession, ShellDrag, SwapFocus,
+    ToggleRight, ToggleShell, ToggleSidebar, Workspace, SHELL_HEIGHT,
 };
 use gpui_kit::component::{TitleBar, input::Input};
-use crate::platform::Editor;
 use crate::store::{SessionKind, now};
 use crate::theme::{self, hsla};
 use crate::updater::Status;
 use gpui_kit::assets::IconName;
-use crate::widgets::{ago, button, button_disabled, clawd, danger_button, fade_in, icon, icon_button, section_label, segment, short_path, spinner};
+use crate::widgets::{ago, button, clawd, danger_button, fade_in, icon, icon_button, section_label, short_path, spinner};
 
 impl Workspace {
     // ------------------------------------------------------------------ top bar
 
     fn render_topbar(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let rec = self.active_id().and_then(|id| self.store.session(id)).cloned();
-        // A GitHub pane has no session record; its folder and project stand in for one.
-        let gh = self
-            .active_id()
-            .and_then(|id| self.gh_pane(id))
-            .map(|p| (p.cwd.clone(), format!("GitHub · {}", p.project)))
-            .or_else(|| self.active_id().and_then(|id| self.chat_pane(id).map(|p| (p.cwd.clone(), self.chat_title(id).unwrap_or_default()))));
-        let project = rec
-            .as_ref()
-            .and_then(|r| r.project_id.clone())
-            .or_else(|| gh.as_ref().and_then(|(cwd, _)| self.store.project_for_cwd(cwd)))
-            .and_then(|p| self.store.project(&p))
-            .cloned();
-        let cwd = rec.as_ref().map(|r| r.cwd.clone()).or_else(|| gh.as_ref().filter(|(cwd, _)| crate::chat::store::is_tied(cwd)).map(|(cwd, _)| cwd.clone()));
-        let in_terminals = matches!(self.main, Main::Terminals);
-
-        let mut right = div().flex().flex_none().items_center().gap(px(6.0));
-        let shell_for = self.active_id().filter(|id| self.store.session(id).is_some_and(|r| r.kind == SessionKind::Claude)).cloned();
-        if let (true, Some(id)) = (in_terminals, shell_for) {
-            right = right.child(icon_button("shell", IconName::Terminal).on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::ToggleShell(id.clone()), window, cx))));
-        }
-        if let Some(path) = cwd.clone() {
-            let target = project.as_ref().map(|p| p.path.clone()).unwrap_or(path);
-            // "Open in <editor>" plus a ▾ to pick another installed editor (remembered, see Act::OpenEditor).
-            if let Some(editor) = self.preferred_editor() {
-                let (t, pick_target) = (target.clone(), target.clone());
-                let open = segment("open-in").child(format!("Open in {}", editor_name(editor)))
-                    .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::OpenEditor(editor, t.clone()), window, cx)));
-                let pick = segment("open-in-pick").child(icon(IconName::ChevronDown, 14.0)).on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |ws, ev: &MouseDownEvent, _w, cx| {
-                        let current = ws.preferred_editor();
-                        let items = ws
-                            .editors
-                            .iter()
-                            .filter(|(_, found)| *found)
-                            .map(|(e, _)| MenuItem {
-                                label: format!("{}{}", if current == Some(*e) { "✓  " } else { "    " }, e.label()),
-                                hint: None,
-                                disabled: false,
-                                act: Act::OpenEditor(*e, pick_target.clone()),
-                                danger: false,
-                                separator_before: false,
-                            })
-                            .collect();
-                        ws.open_menu(ev.position, items, cx);
-                    }),
-                );
-                right = right.child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .h(px(26.0))
-                        .rounded(px(6.0))
-                        .overflow_hidden()
-                        .bg(hsla(0x1b1b1b))
-                        .child(open)
-                        .child(div().w(px(1.0)).h(px(14.0)).bg(hsla(0x363636)))
-                        .child(pick),
-                );
-            }
-            let t = target.clone();
-            right = right.child(
-                button("reveal", "Open folder", false)
-                    .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::Reveal(t.clone()), window, cx))),
-            );
-        }
-        // Git actions are offered for sessions inside a Git project (the repo is found from the session's own folder).
+        let crate::inspector::Shown { rec, cwd, project, chat_title } = self.shown();
+        // Git actions live in the right sidebar; the branch pill here needs the repository of the session's own folder.
         let repo = project.as_ref().filter(|p| p.git.is_some()).and(cwd.clone());
         let busy = self.git_busy;
-        if let Some(repo) = repo.clone() {
-            let pull_repo = repo.clone();
-            // One git operation at a time: while one runs, both buttons are disabled.
-            let commit = if busy.is_some() {
-                button_disabled("commit-push", if busy == Some(GitOp::CommitPush) { "Committing…" } else { "Commit & Push" })
-            } else {
-                button("commit-push", "Commit & Push", false)
-                    .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::CommitPush(repo.clone()), window, cx)))
-            };
-            let pull = if busy.is_some() {
-                button_disabled("pull", if busy == Some(GitOp::Pull) { "Pulling…" } else { "Pull" })
-            } else {
-                button("pull", "Pull", false)
-                    .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::Pull(pull_repo.clone()), window, cx)))
-            };
-            right = right.child(commit).child(pull);
-        }
 
-        let title = rec
-            .as_ref()
-            .map(|r| r.display_title().to_string())
-            .or_else(|| gh.as_ref().map(|(_, name)| name.clone()))
-            .unwrap_or_else(|| "Claudiu".into());
+        let title = rec.as_ref().map(|r| r.display_title().to_string()).or(chat_title).unwrap_or_else(|| "Claudiu".into());
         let branch = project.as_ref().and_then(|p| p.git.as_ref()).and_then(|g| g.branch.clone());
         // `.occlude()` on both groups: the bar is a Windows drag (HTCAPTION) area, which would otherwise swallow clicks on the buttons inside it.
         // The title bar is the top bar: macOS keeps its traffic lights (over the sidebar, or left of the
@@ -188,7 +100,11 @@ impl Workspace {
                         )
                     }),
             )
-            .child(right.mr(px(10.0)).occlude()))
+            .child(
+                div().flex().flex_none().mr(px(10.0)).occlude().child(
+                    icon_button("toggle-right", IconName::PanelRight).on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.toggle_right(window, cx))),
+                ),
+            ))
     }
 
     fn render_update_banner(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -221,14 +137,12 @@ impl Workspace {
 
     // ------------------------------------------------------------------ the shown session
 
-    /// `avail_w` is the width left of the sidebar; a GitHub pane uses it to pick its layout.
-    fn render_session(&mut self, avail_w: f32, cx: &mut Context<Self>) -> AnyElement {
+    fn render_session(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let blank = || div().size_full().bg(hsla(theme::TERMINAL_BG)).into_any_element();
         let Some(id) = self.active.clone() else { return blank() };
-        let gh = self.gh_pane(&id).map(|p| p.view.clone());
         let chat = self.chat_pane(&id).map(|p| p.view.clone());
-        let term = if gh.is_none() && chat.is_none() { self.live_view(&id).cloned() } else { None };
-        if gh.is_none() && chat.is_none() && term.is_none() {
+        let term = if chat.is_none() { self.live_view(&id).cloned() } else { None };
+        if chat.is_none() && term.is_none() {
             return blank();
         }
         let rec = self.store.session(&id).cloned();
@@ -271,13 +185,9 @@ impl Workspace {
                 .min_w_0()
                 .min_h_0()
                 .bg(hsla(theme::TERMINAL_BG))
-                .child(match (gh, chat, term) {
-                    (Some(view), ..) => {
-                        view.update(cx, |v, _| v.width = avail_w);
-                        div().flex_1().min_h_0().child(view)
-                    }
-                    (None, Some(view), _) => div().flex_1().min_h_0().child(view),
-                    (None, None, Some(view)) => div().flex_1().min_h_0().p(px(8.0)).child(view),
+                .child(match (chat, term) {
+                    (Some(view), _) => div().flex_1().min_h_0().child(view),
+                    (None, Some(view)) => div().flex_1().min_h_0().p(px(8.0)).child(view),
                     _ => div(),
                 })
                 .children(banner),
@@ -692,10 +602,9 @@ impl Render for Workspace {
             let visible = p.open && showing == Some(owner);
             p.view.update(cx, |v, _| v.visible = visible);
         }
-        let sidebar_w = if self.store.data.layout.sidebar_visible { crate::sidebar::SIDEBAR_W } else { 0.0 };
-        let avail_w = f32::from(window.viewport_size().width) - sidebar_w;
+        let right = self.render_right(f32::from(window.viewport_size().width), cx);
         let main: AnyElement = match &self.main {
-            Main::Terminals => self.render_session(avail_w, cx),
+            Main::Terminals => self.render_session(cx),
             Main::Home if self.side == Side::Chat => self.render_chat_home(cx).into_any_element(),
             Main::Home => self.render_home(cx).into_any_element(),
         };
@@ -734,6 +643,7 @@ impl Render for Workspace {
                 ws.store.mark_dirty();
                 cx.notify();
             }))
+            .on_action(cx.listener(|ws, _: &ToggleRight, window, cx| ws.toggle_right(window, cx)))
             .on_action(cx.listener(|ws, _: &FocusSearch, window, cx| {
                 ws.store.data.layout.sidebar_visible = true;
                 ws.search_input.update(cx, |s, cx| s.focus(window, cx));
@@ -747,19 +657,22 @@ impl Render for Workspace {
             .on_action(cx.listener(|ws, _: &OpenSettings, window, cx| ws.act(Act::OpenSettings, window, cx)))
             .on_action(cx.listener(|ws, _: &SwapFocus, window, cx| ws.swap_focus(window, cx)))
             .on_mouse_move(cx.listener(|ws, ev: &gpui::MouseMoveEvent, window, cx| {
-                if ws.shell_drag.is_none() {
+                if ws.shell_drag.is_none() && ws.right_drag.is_none() {
                     return;
                 }
                 // The button was let go outside the window: stop following the pointer.
                 if ev.pressed_button != Some(MouseButton::Left) {
                     ws.shell_drag = None;
+                    ws.right_drag = None;
                 } else {
-                    ws.drag_shell(f32::from(ev.position.y), f32::from(window.viewport_size().height));
+                    let size = window.viewport_size();
+                    ws.drag_shell(f32::from(ev.position.y), f32::from(size.height));
+                    ws.drag_right(f32::from(ev.position.x), f32::from(size.width));
                 }
                 cx.notify();
             }))
             .on_mouse_up(MouseButton::Left, cx.listener(|ws, _: &gpui::MouseUpEvent, _w, cx| {
-                if ws.shell_drag.take().is_some() {
+                if ws.shell_drag.take().is_some() | ws.right_drag.take().is_some() {
                     cx.notify();
                 }
             }))
@@ -784,17 +697,10 @@ impl Render for Workspace {
                     .h_full()
                     .child(topbar)
                     .children(banner)
-                    .child(div().flex_1().min_h_0().child(main)),
+                    .child(div().flex().flex_1().min_h_0().child(div().flex_1().min_w_0().h_full().child(main)).children(right)),
             )
             .children(menu)
             .children(modal)
             .children(toast)
-    }
-}
-
-fn editor_name(editor: Editor) -> &'static str {
-    match editor {
-        Editor::VsCode => "VS Code",
-        Editor::Zed => "Zed",
     }
 }

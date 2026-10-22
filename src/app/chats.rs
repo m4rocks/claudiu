@@ -77,7 +77,7 @@ impl Workspace {
             };
             let back = self.parked.replace(leaving).unwrap_or(Layout::empty());
             // A session may have ended or been closed while the tab was away.
-            let open = |ws: &Self, id: &Id| ws.live_view(id).is_some() || ws.gh_pane(id).is_some() || ws.chat_pane(id).is_some();
+            let open = |ws: &Self, id: &Id| ws.live_view(id).is_some() || ws.chat_pane(id).is_some();
             let keep = |ws: &Self, ids: Vec<Id>| ids.into_iter().filter(|id| open(ws, id)).collect::<Vec<_>>();
             self.active = back.active.filter(|id| open(self, id));
             self.recent = keep(self, back.recent);

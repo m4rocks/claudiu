@@ -19,7 +19,7 @@ use crate::mcp;
 use crate::platform::{self, Editor};
 use crate::{datadir, usage};
 use crate::store::{
-    Account, ClaudeMeta, ExternalState, Id, MAIN_ACCOUNT, SessionKind, SessionRecord, Store, new_id, now,
+    Account, Attached, ClaudeMeta, ExternalState, Id, MAIN_ACCOUNT, SessionKind, SessionRecord, Store, new_id, now,
 };
 use crate::terminal::SpawnSpec;
 use crate::terminal_view::{TerminalEvent, TerminalView};
@@ -39,6 +39,7 @@ actions!(
         NextSession,
         PrevSession,
         ToggleSidebar,
+        ToggleRight,
         FocusSearch,
         ImportProject,
         SwapFocus,
@@ -196,8 +197,8 @@ pub struct Live {
     pub title_stamp: Option<std::time::SystemTime>,
 }
 
-/// A GitHub pane. Like a shell it exists only while open and is never written to `state.json`
-/// (an older Claudiu sharing that file would not understand a new session kind).
+/// A project's GitHub view, shown in the right sidebar. Kept while Claudiu runs so each project keeps its place;
+/// never written to `state.json`.
 pub struct GhPane {
     pub id: Id,
     /// The project's root folder: the pane's repository is whatever `gh` resolves from it.
@@ -218,6 +219,17 @@ pub struct ShellPanel {
 
 pub const SHELL_HEIGHT: f32 = 260.0;
 pub const SHELL_MIN: f32 = 120.0;
+
+/// The right sidebar: a fixed-width menu, or the wider, resizable GitHub view.
+pub const RIGHT_MENU_W: f32 = 272.0;
+pub const RIGHT_GH_W: f32 = 560.0;
+pub const RIGHT_GH_MIN: f32 = 380.0;
+
+/// A drag of the right sidebar's left edge: where it started and how wide the sidebar was then.
+pub struct RightDrag {
+    pub x: f32,
+    pub width: f32,
+}
 
 /// A drag of the divider above the shell panel: which session, and where it started.
 pub struct ShellDrag {
@@ -242,6 +254,9 @@ pub struct Workspace {
     pub shell: (String, Vec<String>),
     pub live: Vec<Live>,
     pub gh: Vec<GhPane>,
+    /// The GitHub view the right sidebar shows; `None` is its menu.
+    pub right_gh: Option<Id>,
+    pub right_drag: Option<RightDrag>,
     pub chats: Vec<ChatPane>,
     pub chat_store: ChatStore,
     pub side: Side,
@@ -326,6 +341,8 @@ impl Workspace {
             shell: platform::default_shell(store.data.settings.shell.as_deref()),
             live: vec![],
             gh: vec![],
+            right_gh: None,
+            right_drag: None,
             chats: vec![],
             chat_store: {
                 let mut chats = ChatStore::load(ChatStore::path_for(&Store::default_path()));
@@ -614,9 +631,9 @@ impl Workspace {
     /// Costs no tokens; the files are tiny, but the read still happens off the UI thread.
     fn ingest_usage(&mut self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
-            let (snaps, titles) = cx
+            let (snaps, titles, attached) = cx
                 .background_executor()
-                .spawn(async move { (usage::read_snapshots(&usage::snapshot_dir()), mcp::read_titles()) })
+                .spawn(async move { (usage::read_snapshots(&usage::snapshot_dir()), mcp::read_titles(), mcp::read_attached()) })
                 .await;
             let _ = this.update(cx, |ws, cx| {
                 let mut changed = false;
@@ -673,7 +690,33 @@ impl Workspace {
                                 meta.model = snap.model.clone();
                                 changed = true;
                             }
+                            // Advisor `None` is real (it is off); the other two are only known once the mod has seen them.
+                            if meta.advisor != snap.advisor {
+                                meta.advisor = snap.advisor.clone();
+                                changed = true;
+                            }
+                            if snap.auto_compact.is_some() && meta.auto_compact != snap.auto_compact {
+                                meta.auto_compact = snap.auto_compact;
+                                changed = true;
+                            }
+                            if snap.last_command.is_some() && meta.last_command != snap.last_command {
+                                meta.last_command = snap.last_command.clone();
+                                changed = true;
+                            }
                         }
+                }
+                for (stem, item) in attached {
+                    let Some(meta) = ws
+                        .store
+                        .data
+                        .sessions
+                        .iter_mut()
+                        .find(|s| datadir::safe_file_stem(&s.id) == stem)
+                        .and_then(|s| s.claude.as_mut())
+                    else {
+                        continue;
+                    };
+                    changed |= attach(&mut meta.attached, item);
                 }
                 if changed {
                     ws.store.mark_dirty();
@@ -800,7 +843,7 @@ impl Workspace {
         if self
             .selected
             .as_ref()
-            .is_some_and(|id| self.store.session(id).is_none() && self.gh_pane(id).is_none() && self.chat_pane(id).is_none())
+            .is_some_and(|id| self.store.session(id).is_none() && self.chat_pane(id).is_none())
         {
             self.selected = None;
         }
@@ -910,7 +953,6 @@ impl Workspace {
                 self.store
                     .session(id)
                     .map(|s| s.cwd.clone())
-                    .or_else(|| self.gh_pane(id).map(|p| p.cwd.clone()))
                     .or_else(|| self.chat_pane(id).filter(|p| crate::chat::store::is_tied(&p.cwd)).map(|p| p.cwd.clone()))
             })
             .or_else(|| self.store.data.projects.first().map(|p| p.path.clone()))
@@ -1207,10 +1249,11 @@ impl Workspace {
     pub fn show_session(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         let id = id.to_string();
         self.selected = Some(id.clone());
-        if self.live_view(&id).is_some() || self.gh_pane(&id).is_some() || self.chat_pane(&id).is_some() {
+        if self.live_view(&id).is_some() || self.chat_pane(&id).is_some() {
             self.activate(&id, cx);
             self.remember(&id);
             self.main = Main::Terminals;
+            self.sync_github(window, cx);
             self.focus_active(window, cx);
             self.persist_layout();
             cx.notify();
@@ -1232,14 +1275,6 @@ impl Workspace {
                 window.focus(&view.read(cx).focus_handle(cx), cx);
                 return;
             }
-            if let Some(p) = self.gh_pane(id) {
-                // A text box inside the pane may already hold the focus (it was just clicked); leave it there.
-                let handle = p.view.read(cx).focus.clone();
-                if !handle.contains_focused(window, cx) {
-                    window.focus(&handle, cx);
-                }
-                return;
-            }
             if let Some(p) = self.chat_pane(id) {
                 // The text box may already hold the focus (it was just clicked); leave it there.
                 let (view, handle) = (p.view.clone(), p.view.read(cx).focus.clone());
@@ -1258,14 +1293,13 @@ impl Workspace {
         }
         let was_active = self.active_id().is_some_and(|a| a == id);
         self.live.retain(|l| l.id != id); // dropping the view drops the Terminal, which closes the PTY
-        self.gh.retain(|p| p.id != id);
         self.chats.retain(|p| p.id != id);
         self.forget_if_unused(id);
         self.shells.remove(id);
         self.recent.retain(|r| r != id);
         // Closing the shown session goes back to the one shown before it; otherwise stay where we are.
         if was_active {
-            self.active = self.recent.iter().rev().find(|r| self.live.iter().any(|l| &l.id == *r) || self.gh.iter().any(|p| &p.id == *r) || self.chats.iter().any(|p| &p.id == *r)).cloned();
+            self.active = self.recent.iter().rev().find(|r| self.live.iter().any(|l| &l.id == *r) || self.chats.iter().any(|p| &p.id == *r)).cloned();
             self.selected = self.active.clone();
             self.persist_layout();
         }
@@ -1803,12 +1837,48 @@ impl Workspace {
 
     // ------------------------------------------------------------------ GitHub panes
 
-    /// Show the project's GitHub pane (one per project), creating it on first use.
+    /// Show the project's GitHub view in the right sidebar and move the keyboard into it.
     pub fn open_github(&mut self, cwd: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let id = self.github_pane(cwd, window, cx);
+        self.right_gh = Some(id.clone());
+        self.store.data.layout.right_hidden = false;
+        self.store.mark_dirty();
+        if let Some(p) = self.gh_pane(&id) {
+            let handle = p.view.read(cx).focus.clone();
+            window.focus(&handle, cx);
+        }
+        cx.notify();
+    }
+
+    /// An attached issue or pull request was clicked: show it in the GitHub view of the shown session's project.
+    pub fn open_attached(&mut self, pull: bool, number: u32, window: &mut Window, cx: &mut Context<Self>) {
+        let cwd = self.active_cwd();
+        self.open_github(cwd, window, cx);
+        let kind = if pull { crate::github::model::Kind::Pull } else { crate::github::model::Kind::Issue };
+        if let Some(view) = self.right_gh.as_ref().and_then(|id| self.gh_pane(id)).map(|p| p.view.clone()) {
+            view.update(cx, |v, cx| v.open_item(kind, number, window, cx));
+        }
+    }
+
+    /// While the right sidebar shows GitHub, it follows the shown session to that session's project (no focus change).
+    fn sync_github(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.right_gh.as_ref().and(self.active.clone()) else { return };
+        let cwd = self
+            .store
+            .session(&id)
+            .map(|s| s.cwd.clone())
+            .or_else(|| self.chat_pane(&id).filter(|p| is_tied(&p.cwd)).map(|p| p.cwd.clone()));
+        if let Some(cwd) = cwd {
+            self.right_gh = Some(self.github_pane(cwd, window, cx));
+        }
+    }
+
+    /// The project's GitHub view (one per project), created on first use.
+    fn github_pane(&mut self, cwd: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Id {
         let project = self.store.project_for_cwd(&cwd).and_then(|id| self.store.project(&id)).cloned();
         let root = project.as_ref().map(|p| p.path.clone()).unwrap_or(cwd);
         let key = platform::path_key(&root);
-        let id = match self.gh.iter().find(|p| platform::path_key(&p.cwd) == key) {
+        match self.gh.iter().find(|p| platform::path_key(&p.cwd) == key) {
             Some(p) => p.id.clone(),
             None => {
                 let name = project
@@ -1822,8 +1892,32 @@ impl Workspace {
                 self.gh.push(GhPane { id: id.clone(), cwd: root, project: name, view, _sub: sub });
                 id
             }
-        };
-        self.show_session(&id, window, cx);
+        }
+    }
+
+    pub fn toggle_right(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let layout = &mut self.store.data.layout;
+        layout.right_hidden = !layout.right_hidden;
+        self.store.mark_dirty();
+        self.focus_active(window, cx);
+        cx.notify();
+    }
+
+    /// The right sidebar's current width: fixed for the menu, remembered (and draggable) for GitHub.
+    pub fn right_width(&self, window_w: f32) -> f32 {
+        if self.right_gh.is_none() {
+            return RIGHT_MENU_W;
+        }
+        let wanted = self.store.data.layout.right_gh_w.unwrap_or(RIGHT_GH_W);
+        wanted.clamp(RIGHT_GH_MIN, (window_w - 560.0).max(RIGHT_GH_MIN))
+    }
+
+    /// The right sidebar's left edge is being dragged: follow the pointer, wider to the left.
+    pub fn drag_right(&mut self, x: f32, window_w: f32) {
+        let Some(d) = self.right_drag.as_ref() else { return };
+        let wanted = d.width + d.x - x;
+        self.store.data.layout.right_gh_w = Some(wanted.clamp(RIGHT_GH_MIN, (window_w - 560.0).max(RIGHT_GH_MIN)));
+        self.store.mark_dirty();
     }
 
     fn on_gh_event(&mut self, pane: &str, ev: &GhEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -1872,7 +1966,6 @@ impl Workspace {
             .filter(|l| l.view.read(cx).is_running())
             .map(|l| l.id.clone())
             .collect();
-        running.extend(self.gh.iter().map(|p| p.id.clone()));
         running.extend(self.chats.iter().map(|p| p.id.clone()));
         if running.is_empty() {
             return;
@@ -1915,6 +2008,55 @@ impl Workspace {
         }
         let tokens = meta.context_tokens?;
         Some((claude::context_fraction(tokens), tokens, false))
+    }
+}
+
+/// Most items one session keeps; the oldest go first.
+const MAX_ATTACHED: usize = 20;
+
+/// Add an attached item unless it is there already (a later title fills in a missing one). True when anything changed.
+fn attach(list: &mut Vec<Attached>, item: Attached) -> bool {
+    if let Some(have) = list.iter_mut().find(|a| a.pull == item.pull && a.number == item.number) {
+        if have.title.is_none() && item.title.is_some() {
+            have.title = item.title;
+            return true;
+        }
+        return false;
+    }
+    list.push(item);
+    if list.len() > MAX_ATTACHED {
+        list.remove(0);
+    }
+    true
+}
+
+#[cfg(test)]
+mod attach_tests {
+    use super::*;
+
+    fn item(pull: bool, number: u32, title: Option<&str>) -> Attached {
+        Attached { pull, number, title: title.map(String::from) }
+    }
+
+    #[test]
+    fn an_item_is_attached_once_and_may_gain_a_title() {
+        let mut list = vec![];
+        assert!(attach(&mut list, item(false, 5, None)));
+        assert!(!attach(&mut list, item(false, 5, None)), "same item again");
+        assert!(attach(&mut list, item(true, 5, None)), "a pull request is not the issue with that number");
+        assert!(attach(&mut list, item(false, 5, Some("Fix it"))), "title filled in");
+        assert!(!attach(&mut list, item(false, 5, Some("Other"))), "an existing title stays");
+        assert_eq!(list, [item(false, 5, Some("Fix it")), item(true, 5, None)]);
+    }
+
+    #[test]
+    fn the_oldest_items_drop_off() {
+        let mut list = vec![];
+        for n in 1..=(MAX_ATTACHED as u32 + 3) {
+            attach(&mut list, item(false, n, None));
+        }
+        assert_eq!(list.len(), MAX_ATTACHED);
+        assert_eq!(list[0].number, 4);
     }
 }
 
@@ -2164,9 +2306,25 @@ mod headless {
         });
         step(&mut cx, &|ws, w, cx| ws.close_live(&first, w, cx));
         assert!(ws.read_with(&cx, |ws, _| !ws.shells.contains_key(&first)), "closing the session drops its shell");
-        // The GitHub pane is a main view for now: opens once per folder, "Ask Claude" starts a session.
+        // The GitHub view lives in the right sidebar: one per folder, it widens the sidebar, "Ask Claude" starts a session.
+        assert_eq!(ws.read_with(&cx, |ws, _| ws.right_width(1600.0)), RIGHT_MENU_W, "the menu has a fixed width");
         step(&mut cx, &|ws, w, cx| ws.open_github(cwd.clone(), w, cx));
-        assert!(ws.read_with(&cx, |ws, _| ws.gh.len() == 1 && ws.active.as_ref().is_some_and(|a| ws.gh_pane(a).is_some())), "github pane shown");
+        assert!(ws.read_with(&cx, |ws, _| ws.gh.len() == 1 && ws.right_gh.is_some()), "github shown in the right sidebar");
+        assert_eq!(ws.read_with(&cx, |ws, _| ws.right_width(1600.0)), RIGHT_GH_W);
+        step(&mut cx, &|ws, _w, _cx| {
+            ws.right_drag = Some(RightDrag { x: 1000.0, width: RIGHT_GH_W });
+            ws.drag_right(900.0, 1600.0);
+            assert_eq!(ws.right_width(1600.0), RIGHT_GH_W + 100.0);
+            ws.drag_right(5000.0, 1600.0);
+            assert_eq!(ws.right_width(1600.0), RIGHT_GH_MIN);
+            ws.drag_right(-5000.0, 1600.0);
+            assert_eq!(ws.right_width(1600.0), 1040.0, "keeps room for the session");
+            ws.right_drag = None;
+        });
+        step(&mut cx, &|ws, w, cx| ws.toggle_right(w, cx));
+        assert!(ws.read_with(&cx, |ws, _| ws.store.data.layout.right_hidden), "hidden");
+        step(&mut cx, &|ws, w, cx| ws.toggle_right(w, cx));
+        assert!(ws.read_with(&cx, |ws, _| !ws.store.data.layout.right_hidden), "shown again");
         step(&mut cx, &|ws, w, cx| ws.open_github(cwd.clone(), w, cx));
         assert!(ws.read_with(&cx, |ws, _| ws.gh.len() == 1), "one github pane per folder");
         let before = ws.read_with(&cx, |ws, _| ws.live.len());
@@ -2174,7 +2332,8 @@ mod headless {
             let view = ws.gh[0].view.clone();
             view.update(cx, |_, cx| cx.emit(crate::github::view::GhEvent::AskClaude("explain issue 1".into())));
         });
-        assert!(ws.read_with(&cx, |ws, _| ws.live.len() == before + 1 && ws.active.as_ref().is_some_and(|a| ws.gh_pane(a).is_none())), "Ask Claude opens a session");
+        assert!(ws.read_with(&cx, |ws, _| ws.live.len() == before + 1 && ws.active.is_some()), "Ask Claude opens a session");
+        assert!(ws.read_with(&cx, |ws, _| ws.right_gh.is_some() && ws.gh.len() == 1), "the right sidebar keeps following the same project");
     }
 
     #[test]

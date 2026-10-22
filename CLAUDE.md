@@ -185,7 +185,7 @@ Claudiu does not edit Claude Code's settings files itself. Per-process flags and
 
 **Usage and status through the per-process mod (product owner decision, replaces the status-line helper):** to read account usage (5-hour / 7-day), exact context and a few settings without spending tokens, the per-process mod (`mod/`, below) reports from inside Claude Code: on `session.measure`, `config.set` and `command.run` it writes one small JSON file per Claude session into `CLAUDIU_USAGE_DIR` (`usage.rs` reads them). The snapshot holds only limits, context figures, the model, the `/config` auto-compact switch, the `advisorModel` setting, the session id and the last typed command (its arguments only for `advisor`, `model`, `effort` and `autocompact`). It never blocks or fails Claude Code and writes only when something changed. There is no `--settings` file and no `statusLine` any more, so the user's own status line is untouched. Claudiu never runs the setting forms of `/model`, `/effort` or `/advisor` to test, since they change the user's saved settings.
 
-**Claudiu MCP server:** each Claude session is started with a per-process `--mcp-config <file>` pointing at Claudiu's own executable in a hidden helper mode (`--mcp-title`), plus `--allowedTools mcp__claudiu__set_tab_title` so renaming never prompts. A second tool, `set_model`, is declared by that server but answered in-process by a per-process mod (`mod/`, written to the data dir at launch and loaded with `--plugin-dir`): its `turn.step` hook overrides model/effort from the next request, even mid-turn, with no permission prompt and nothing typed into the PTY; once Claude Code is idle the mod also runs `/model` and `/effort` through `$.command.run` so the session's own model (what `/model` shows) changes, which Claude Code saves as the user's default. If the mod isn't active the tool just reports an error. The same mod applies Claudiu's tab title as Claude Code's own session name: Claudiu writes the wanted name to a file in its data dir (`CLAUDIU_NAME_FILE`) and the mod runs `/rename` through `$.command.run`, which Claude Code queues until idle. Nothing is ever typed into the PTY on the user's behalf. IDE integration is switched off per process through the `CLAUDE_CODE_AUTO_CONNECT_IDE=false` and `CLAUDE_CODE_IDE_SKIP_AUTO_INSTALL=1` environment variables. Nothing is written to the user's Claude Code config. The "Commit & Push" action runs a separate headless `claude -p` (Haiku, no tools, `--setting-sources ""`, no saved session) through the user's own CLI.
+**Claudiu MCP server:** each Claude session is started with a per-process `--mcp-config <file>` pointing at Claudiu's own executable in a hidden helper mode (`--mcp-title`), plus `--allowedTools mcp__claudiu__set_tab_title,mcp__claudiu__attach_github` so neither prompts. A second tool, `set_model`, is declared by that server but answered in-process by a per-process mod (`mod/`, written to the data dir at launch and loaded with `--plugin-dir`): its `turn.step` hook overrides model/effort from the next request, even mid-turn, with no permission prompt and nothing typed into the PTY; once Claude Code is idle the mod also runs `/model` and `/effort` through `$.command.run` so the session's own model (what `/model` shows) changes, which Claude Code saves as the user's default. If the mod isn't active the tool just reports an error. The same mod applies Claudiu's tab title as Claude Code's own session name: Claudiu writes the wanted name to a file in its data dir (`CLAUDIU_NAME_FILE`) and the mod runs `/rename` through `$.command.run`, which Claude Code queues until idle. Nothing is ever typed into the PTY on the user's behalf. IDE integration is switched off per process through the `CLAUDE_CODE_AUTO_CONNECT_IDE=false` and `CLAUDE_CODE_IDE_SKIP_AUTO_INSTALL=1` environment variables. Nothing is written to the user's Claude Code config. The "Commit & Push" action runs a separate headless `claude -p` (Haiku, no tools, `--setting-sources ""`, no saved session) through the user's own CLI.
 
 **Alt accounts (product owner decision):** the main account is the user's normal Claude Code (`~/.claude`, no `CLAUDE_CONFIG_DIR`) and Claudiu never writes to it. Each alt account is a Claudiu-created folder under its data dir (`accounts/<id>`), passed per process as `CLAUDE_CONFIG_DIR`. It keeps only its own login (`.credentials.json`, `.claude.json`). Every other entry is linked back to `~/.claude` (junctions on Windows, symlinks elsewhere), so the alt shares settings, history and so on, and Claude Code writes made in an alt land in the main folder. Sign-in runs `claude auth login`, and email/plan come from `claude auth status --json`. Removing an alt unlinks the links and deletes only that folder. Without Windows Developer Mode, files are hard-linked. When Claude Code replaces one, the next launch rejoins it and the newer copy wins: an alt's change is copied into main after backing up main's old copy in the alt's `backups/`. The account list lives in `accounts.json`, not `state.json`, so an older Claudiu that is still running can't erase it. Alt processes also get `CLAUDE_SECURESTORAGE_CONFIG_DIR`, which keys the macOS Keychain entry to each alt.
 
@@ -296,17 +296,13 @@ ACCOUNT
   7 DAY
   ████░░░░░░ 34%
   resets in 4d 8h
-
-SESSION
-  CONTEXT
-  █████████░ 78%
 ```
 
-The **context meter changes when the selected session changes**.
+The **context meter (and the prompt-cache timer) sit in the right sidebar, see "Right sidebar", and change when the selected session changes**.
 
 The **5-hour and 7-day meters are account-wide** and should not change simply because the user switches tabs.
 
-The account-wide section should remain visually stable while the session context meter follows the selected Claude session.
+The account-wide section should remain visually stable while the session meters follow the selected Claude session.
 
 ---
 
@@ -397,6 +393,17 @@ Each Claude session can show a **shell under its terminal**, toggled with Ctrl+S
 - It keeps running while another session is shown, remembers its height for as long as the session lives, and ends with the session (closing it, or the session leaving the running list). If the shell itself exits, the panel closes and the next toggle starts a fresh one.
 - Chats have no shell panel.
 - The shell is not a special Claude integration; it is a plain terminal.
+
+# Right sidebar
+
+A column on the right, under the top bar (so the window buttons stay in the corner), on by default. Toggle it with the top bar's panel button or Ctrl+Shift+R (Cmd+Shift+R); `layout.right_hidden` remembers it. It has two views, switched inside the same column:
+
+- **Menu** (272 px): the actions that used to crowd the top bar (Open in editor ▾, Open folder, Commit & Push, Pull, show or hide the shell, GitHub), the **issues and pull requests Claude attached** to the session, and the session's **status**: context, prompt-cache timer, auto-compact, advisor and the last slash command. The 5 HOUR / 7 DAY account meters stay in the left sidebar.
+- **GitHub**: the project's issues and pull requests (`github/view.rs`), in a wider column (`layout.right_gh_w`, 560 px by default, resizable by dragging its left edge). The arrow returns to the menu. The view follows the shown session to that session's project; it is never a session, a tab or a main-area page.
+
+Status comes from the per-process mod (`usage.rs` snapshots, no tokens): it reports context, limits, the `/config` auto-compact switch, `advisorModel` and the last slash command (`ClaudeMeta`). Nothing is typed into the PTY.
+
+**Attaching items (product owner decision):** the model, not Claudiu, decides what belongs to a session. The MCP server's `attach_github(kind, number, title?)` (code sessions only, pre-allowed, no focus change) appends a line to `<data>/attach/<record id>.jsonl`; Claudiu ingests and deletes the file on its tick and keeps the items in `ClaudeMeta.attached` (deduplicated, 20 at most, dismissible with ×). Clicking one opens it in the GitHub view. The transcript is not scanned for issue numbers.
 
 ---
 

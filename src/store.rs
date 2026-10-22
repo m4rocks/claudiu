@@ -39,6 +39,15 @@ pub enum ExternalState {
     Missing,
 }
 
+/// A GitHub issue or pull request Claude attached to a session.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Attached {
+    pub pull: bool,
+    pub number: u32,
+    #[serde(default)]
+    pub title: Option<String>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ClaudeMeta {
     pub session_id: String,
@@ -55,6 +64,16 @@ pub struct ClaudeMeta {
     /// Unix time of the last request that read or wrote the prompt cache (the moment its TTL restarted).
     #[serde(default)]
     pub cache_at: Option<i64>,
+    /// The `/config` auto-compact switch, the `advisorModel` setting and the last slash command, as the mod reports them.
+    #[serde(default)]
+    pub auto_compact: Option<bool>,
+    #[serde(default)]
+    pub advisor: Option<String>,
+    #[serde(default)]
+    pub last_command: Option<String>,
+    /// Issues and pull requests Claude attached to this session (the `attach_github` tool), oldest first.
+    #[serde(default)]
+    pub attached: Vec<Attached>,
     pub transcript: Option<PathBuf>,
     #[serde(default)]
     pub external: ExternalState,
@@ -185,6 +204,12 @@ pub struct Layout {
     /// The sidebar showed the Chat tab (not Code) when Claudiu last ran.
     #[serde(default)]
     pub chat_tab: bool,
+    /// The right sidebar is hidden (stored negated so older state files keep it on).
+    #[serde(default)]
+    pub right_hidden: bool,
+    /// Width of the right sidebar while it shows GitHub; the menu has a fixed width.
+    #[serde(default)]
+    pub right_gh_w: Option<f32>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

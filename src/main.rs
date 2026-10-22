@@ -10,6 +10,7 @@ mod datadir;
 mod git;
 mod github;
 mod glyphs;
+mod inspector;
 mod keys;
 mod mcp;
 mod platform;
@@ -31,9 +32,9 @@ use gpui_kit::component::TitleBar;
 gpui_kit::assets::icon_assets!(
     AppIcons,
     [
-        WindowMinimize, WindowMaximize, WindowRestore, WindowClose, Archive, ArchiveRestore, ArrowLeft, Bot, Check, ChevronDown, ChevronRight, Circle,
-        CircleCheck, CircleDot, CircleSlash, CircleX, Clock, Ellipsis, ExternalLink, GitBranch, GitCommitHorizontal, GitMerge, GitPullRequest,
-        GitPullRequestClosed, GitPullRequestDraft, HeartPlus, LoaderCircle, Lock, MessageSquare, PanelLeft, Pencil, Plus, RefreshCw, Search,
+        WindowMinimize, WindowMaximize, WindowRestore, WindowClose, Archive, ArchiveRestore, ArrowDownToLine, ArrowLeft, Bot, Check, ChevronDown, ChevronRight, Circle,
+        CircleCheck, CircleDot, CircleSlash, CircleX, Clock, Ellipsis, ExternalLink, FolderOpen, GitBranch, GitCommitHorizontal, GitMerge, GitPullRequest,
+        GitPullRequestClosed, GitPullRequestDraft, HeartPlus, LoaderCircle, Lock, MessageSquare, PanelLeft, PanelRight, Pencil, Plus, RefreshCw, Search,
         Settings, Terminal, X
     ]
 );
@@ -89,7 +90,7 @@ mod icon_tests {
 
 use app::{
     CloseSession, FocusSearch, HideApp, HideOthers, ImportProject, NewChat, NewClaude, NextSession, OpenGithub, OpenSettings, PrevSession, Quit, ShowAllApps,
-    SwapFocus, ToggleShell, ToggleSidebar, Workspace,
+    SwapFocus, ToggleRight, ToggleShell, ToggleSidebar, Workspace,
 };
 
 /// The macOS menu bar. Every item is an existing Claudiu action, so menu, shortcut and sidebar share one code path;
@@ -129,6 +130,7 @@ fn menu_bar() -> Vec<gpui::Menu> {
         ]),
         Menu::new("View").items([
             MenuItem::action("Toggle Sidebar", ToggleSidebar),
+            MenuItem::action("Toggle Right Sidebar", ToggleRight),
             MenuItem::action("Find Sessions", FocusSearch),
             MenuItem::separator(),
             MenuItem::action("Next Session", NextSession),
@@ -192,6 +194,7 @@ fn main() {
             KeyBinding::new("secondary-shift-t", ToggleShell, None),
             KeyBinding::new("secondary-shift-w", CloseSession, None),
             KeyBinding::new("secondary-shift-b", ToggleSidebar, None),
+            KeyBinding::new("secondary-shift-r", ToggleRight, None),
             KeyBinding::new("secondary-shift-f", FocusSearch, None),
             KeyBinding::new("secondary-shift-o", ImportProject, None),
             KeyBinding::new("secondary-shift-g", OpenGithub, None),

@@ -13,7 +13,7 @@ use crate::app::{CLOSE_MS, Act, Activity, MenuItem, Side, Workspace};
 use crate::store::{ExternalState, Id, Project, SessionKind, SessionRecord, now};
 use crate::theme::{self, hsla};
 use gpui_kit::assets::IconName;
-use crate::widgets::{ago, avatar, button, clawd, countdown, divider, icon, icon_button, meter, section_label, spinner};
+use crate::widgets::{ago, avatar, button, clawd, countdown, icon, icon_button, meter, section_label, spinner};
 
 pub const SIDEBAR_W: f32 = 284.0;
 const PROJECT_SESSION_LIMIT: usize = 5;
@@ -303,11 +303,6 @@ impl Workspace {
                     } else if ws.chat_store.get(&menu_id).is_some() {
                         let items = ws.chat_menu(&menu_id);
                         ws.open_menu(ev.position, items, cx);
-                    } else if ws.gh_pane(&menu_id).is_some() {
-                        let item = |label: &str, act: Act, danger: bool| MenuItem { label: label.into(), hint: None, act, danger, disabled: false, separator_before: false };
-                        let mut items = vec![item("Switch to pane", Act::Select(menu_id.clone()), false)];
-                        items.push(MenuItem { separator_before: true, ..item("Close", Act::CloseLive(menu_id.clone()), true) });
-                        ws.open_menu(ev.position, items, cx);
                     }
                 }),
             )
@@ -360,24 +355,6 @@ impl Workspace {
             })
     }
 
-    fn gh_row(&self, p: &crate::app::GhPane) -> Row {
-        Row {
-            id: p.id.clone(),
-            glyph: IconName::GitPullRequest,
-            glyph_color: hsla(0x58a6ff),
-            pulse: false,
-            title: "GitHub".into(),
-            right: p.project.clone(),
-            active: self.selected.as_deref() == Some(p.id.as_str()),
-            dim: false,
-            running: true,
-            indent: false,
-            stale: false,
-            archived: false,
-            scope: "cur",
-        }
-    }
-
     fn chat_row(&self, r: &ChatRecord, cx: &gpui::App) -> Row {
         let live = self.chat_pane(&r.id).map(|p| p.view.read(cx).is_busy());
         let project = self.store.project_for_cwd(&r.cwd).and_then(|p| self.store.project(&p)).map(|p| p.name.clone());
@@ -414,7 +391,7 @@ impl Workspace {
         }
 
         // ---- CURRENT SESSION
-        let mut rows: Vec<Row> = self
+        let rows: Vec<Row> = self
             .live
             .iter()
             .filter(|l| l.view.read(cx).is_running())
@@ -422,14 +399,8 @@ impl Workspace {
             .filter(|r| self.matches(&q, r))
             .map(|r| self.row_for(r, true, true))
             .collect();
-        rows.extend(
-            self.gh
-                .iter()
-                .filter(|p| q.is_empty() || "github issues pull requests".contains(&q) || p.project.to_lowercase().contains(&q))
-                .map(|p| self.gh_row(p)),
-        );
         let current = rows;
-        let current_total = self.running_count(cx) + self.gh.len();
+        let current_total = self.running_count(cx);
 
         let mut body = div().flex().flex_col().gap(px(2.0));
 
@@ -946,24 +917,6 @@ impl Workspace {
             }
         };
 
-        let (ctx_fraction, ctx_caption) = match self.selected_context() {
-            Some((f, tokens, true)) => (Some(f), format!("{}k tokens", tokens / 1000)),
-            Some((f, tokens, false)) => (Some(f), format!("~{}k tokens (estimate)", tokens / 1000)),
-            None => (None, "no session".to_string()),
-        };
-
-        // Fills with time left; goes red in the last fifth. Expired means the next message re-reads the whole context at full price.
-        let cache = match self.selected_cache() {
-            Some((_, 0, _)) => meter("CACHE", Some(0.0), "expired".into(), None),
-            Some((f, left, ttl)) => {
-                let tone = hsla(if f < 0.2 { theme::DANGER } else { theme::ACCENT });
-                let window = if ttl >= 3600 { "1h" } else { "5m" };
-                let left = if left < 60 { "<1m".to_string() } else { countdown(left) };
-                meter("CACHE", Some(f), format!("{left} left of {window}"), Some(tone))
-            }
-            None => meter("CACHE", None, "no session".into(), None),
-        };
-
         let pair = |a: Div, b: Div| div().flex().gap(px(14.0)).child(a.flex_1().min_w_0()).child(b.flex_1().min_w_0());
         div()
             .flex()
@@ -976,8 +929,6 @@ impl Workspace {
             .border_color(hsla(theme::BORDER))
             .child(self.render_account_switcher(cx))
             .child(pair(limit("5 HOUR", &usage.five_hour), limit("7 DAY", &usage.seven_day)))
-            .child(divider())
-            .child(pair(cache, meter("CONTEXT", ctx_fraction, ctx_caption, None)))
     }
 }
 
