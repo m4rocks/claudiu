@@ -14,7 +14,7 @@ use serde::Deserialize;
 const OWN: &[&str] = &[".credentials.json", "backups", "daemon", "daemon.log"];
 
 pub fn root() -> PathBuf {
-    crate::statusline::data_dir().join("accounts")
+    crate::datadir::data_dir().join("accounts")
 }
 
 /// Every alt folder on disk.

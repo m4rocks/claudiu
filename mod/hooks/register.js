@@ -3,6 +3,8 @@
 // mid-turn, then runs /model and /effort once idle so the session itself (what /model shows) switches too;
 // Claude Code saves those as the user's default. It also applies the session name Claudiu writes to
 // `CLAUDIU_NAME_FILE` with `/rename`, which Claude Code queues until the session is idle.
+// Last, it reports usage and status (context, 5-hour / 7-day limits, auto-compact, advisor, the command the user
+// last ran) to `CLAUDIU_USAGE_DIR/<claude session id>.json` for Claudiu's sidebar; no tokens are spent.
 const MODELS = {
   haiku: 'claude-haiku-4-5-20251001',
   sonnet: 'claude-sonnet-5-5',
@@ -15,7 +17,79 @@ let want = {} // { model?, effort? }, per process
 let named = null // `${claude session id}\n${name}` last applied
 let poll
 
+// ---- usage report -------------------------------------------------------------------------------------------
+// Commands whose arguments are short settings, safe to show; any other command is reported by name only.
+const SETTING_COMMANDS = ['advisor', 'model', 'effort', 'autocompact']
+const stem = id => String(id).replace(/[^A-Za-z0-9_-]/g, '_')
+const secs = iso => { const t = Date.parse(iso); return Number.isFinite(t) ? Math.floor(t / 1000) : null }
+
+let measured = null // { context, limits: { five_hour, seven_day } } from the last session.measure
+let lastCommand = null
+let written = '' // what the file holds, minus times, so an unchanged report is not rewritten (a write is cheap, a redraw is not)
+
+// Reads the status Claude Code keeps; every read is best effort, a failed one is left out rather than failing a hook.
+async function report($) {
+  try {
+    const dir = await $.env.get('CLAUDIU_USAGE_DIR')
+    if (!dir) return
+    const id = await $.session.id()
+    if (!id) return
+    const ctx = measured?.context
+    const fraction = ctx?.tokens != null && ctx?.window > 0 ? Math.min(1, ctx.tokens / ctx.window) : null
+    const rows = await $.config.list().catch(() => [])
+    const advisor = await $.settings.read({ key: 'advisorModel' }).catch(() => undefined)
+    const snap = {
+      session_id: id,
+      five_hour: measured?.limits.five_hour ?? null,
+      seven_day: measured?.limits.seven_day ?? null,
+      context_fraction: fraction,
+      context_tokens: ctx?.tokens ?? null,
+      context_window: ctx?.window ?? null,
+      model: (await $.session.model().catch(() => null)) ?? null,
+      account: (await $.env.get('CLAUDIU_ACCOUNT')) ?? null,
+      auto_compact: rows.find(r => r.key === 'autoCompact')?.value ?? null,
+      advisor: typeof advisor === 'string' ? advisor : null,
+      last_command: lastCommand,
+    }
+    const key = JSON.stringify(snap, (k, v) => (k === 'seen_at' ? undefined : v))
+    if (key === written) return
+    written = key
+    await $.fs.write(dir + '/' + stem(id) + '.json', JSON.stringify({ ...snap, captured_at: Math.floor(Date.now() / 1000) }))
+  } catch {
+    // Reporting must never disturb the session.
+  }
+}
+
 export function register(on) {
+  on('session.measure', async ($, e, next) => {
+    const seen = Math.floor(Date.now() / 1000)
+    const limit = kind => {
+      const r = e.rateLimits.find(l => l.kind === kind)
+      return r ? { utilization: Math.min(1, Math.max(0, r.percentUsed / 100)), resets_at: secs(r.resetsAt), seen_at: seen } : null
+    }
+    measured = { context: e.context, limits: { five_hour: limit('five_hour'), seven_day: limit('seven_day') } }
+    const r = await next(e)
+    await report($)
+    return r
+  })
+
+  on('command.run', async ($, e, next) => {
+    if (e.origin?.kind !== 'plugin') {
+      const args = SETTING_COMMANDS.includes(e.command) ? e.args.trim().slice(0, 40) : ''
+      lastCommand = args ? e.command + ' ' + args : e.command
+    }
+    const r = await next(e) // the command has run: a setting it changed is read after it
+    await report($)
+    return r
+  })
+
+  on('config.set', async ($, e, next) => {
+    const r = await next(e)
+    await report($)
+    return r
+  })
+
+
   on('tool.call', { tool: 'mcp__claudiu__set_model' }, async ($, e) => {
     const alias = String(e.model ?? '').trim().toLowerCase()
     const model = MODELS[alias] ?? (/^claude-[a-z0-9.-]+$/.test(alias) ? alias : undefined)
@@ -47,6 +121,7 @@ export function register(on) {
 
   on('session.start', async ($, e, next) => {
     const r = await next(e)
+    await report($)
     const file = await $.env.get('CLAUDIU_NAME_FILE')
     if (!file) return r
     const read = async () => (await $.fs.read(file).catch(() => '')).trim()

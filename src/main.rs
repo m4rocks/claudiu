@@ -6,6 +6,7 @@ mod bridge;
 mod chat;
 mod claude;
 mod commit;
+mod datadir;
 mod git;
 mod github;
 mod glyphs;
@@ -17,8 +18,8 @@ mod store;
 mod terminal;
 mod terminal_view;
 mod theme;
-mod statusline;
 mod updater;
+mod usage;
 mod views;
 mod widgets;
 
@@ -166,10 +167,6 @@ fn install_crash_log() {
 }
 
 fn main() {
-    // Hidden helper mode: Claude Code runs this as its status line (see statusline.rs). Keep it instant.
-    if std::env::args().nth(1).as_deref() == Some(statusline::TEE_FLAG) {
-        std::process::exit(statusline::run_tee());
-    }
     // Hidden helper mode: the MCP server that lets Claude name its own tab (see mcp.rs).
     if std::env::args().nth(1).as_deref() == Some(mcp::FLAG) {
         std::process::exit(mcp::run());

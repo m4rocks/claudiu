@@ -17,7 +17,7 @@ use crate::claude;
 use crate::github::view::{GhEvent, GithubView};
 use crate::mcp;
 use crate::platform::{self, Editor};
-use crate::statusline;
+use crate::{datadir, usage};
 use crate::store::{
     Account, ClaudeMeta, ExternalState, Id, MAIN_ACCOUNT, SessionKind, SessionRecord, Store, new_id, now,
 };
@@ -391,8 +391,8 @@ impl Workspace {
             }
         }
         ws.start_scan(cx);
-        statusline::cleanup();
-        ws.ingest_statusline(cx);
+        datadir::cleanup();
+        ws.ingest_usage(cx);
         ws.refresh_accounts(cx);
         ws.start_ticker(cx);
         ws.start_fetch_loop(cx);
@@ -564,7 +564,7 @@ impl Workspace {
         self.store.save_if_dirty();
         self.chat_store.save_if_dirty();
         self.refresh_live(cx);
-        self.ingest_statusline(cx);
+        self.ingest_usage(cx);
         self.suggest_less_used_account(cx);
         cx.notify();
     }
@@ -605,14 +605,14 @@ impl Workspace {
         self.show_toast(text, true, Some(("Switch".into(), act)), cx);
     }
 
-    /// Pick up what Claude Code's status line (via our per-process tee) wrote: account limits and exact context,
-    /// plus the tab titles Claude chose through the MCP tool.
+    /// Pick up what the per-process mod reported: account limits and exact context, plus the tab titles Claude
+    /// chose through the MCP tool.
     /// Costs no tokens; the files are tiny, but the read still happens off the UI thread.
-    fn ingest_statusline(&mut self, cx: &mut Context<Self>) {
+    fn ingest_usage(&mut self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             let (snaps, titles) = cx
                 .background_executor()
-                .spawn(async move { (statusline::read_snapshots(&statusline::snapshot_dir()), mcp::read_titles()) })
+                .spawn(async move { (usage::read_snapshots(&usage::snapshot_dir()), mcp::read_titles()) })
                 .await;
             let _ = this.update(cx, |ws, cx| {
                 let mut changed = false;
@@ -622,7 +622,7 @@ impl Workspace {
                         .data
                         .sessions
                         .iter_mut()
-                        .find(|s| s.claude_id().is_some_and(|id| statusline::safe_file_stem(id) == stem))
+                        .find(|s| s.claude_id().is_some_and(|id| datadir::safe_file_stem(id) == stem))
                     else {
                         continue;
                     };
@@ -681,20 +681,14 @@ impl Workspace {
     }
 
     /// Per-process additions to a Claude launch; nothing in the user's Claude Code config changes:
-    /// the status-line tee (`--settings`), the tab-title MCP server (`--mcp-config`, its one tool pre-allowed),
-    /// and IDE integration switched off through environment variables.
+    /// the mod (`--plugin-dir`, which reports usage and status), the tab-title MCP server (`--mcp-config`, its
+    /// tools pre-allowed), and IDE integration switched off through environment variables.
     fn with_helpers(
         &self,
         mut spec: SpawnSpec,
         claude_session_id: &str,
         record_id: &str,
-        cwd: &std::path::Path,
     ) -> SpawnSpec {
-        if let Ok((path, env)) = statusline::prepare(claude_session_id, cwd) {
-            spec.args.push("--settings".into());
-            spec.args.push(path.to_string_lossy().into_owned());
-            spec.env.extend(env);
-        }
         if let Ok(config) = mcp::prepare(claude_session_id, record_id) {
             spec.args.push("--allowedTools".into());
             spec.args.extend(mcp::allowed_tools("code"));
@@ -703,11 +697,12 @@ impl Workspace {
         if let Ok(dir) = mcp::prepare_mod() {
             spec.args.extend(["--plugin-dir".into(), dir.to_string_lossy().into_owned()]);
             spec.env.push(("CLAUDIU_NAME_FILE".into(), mcp::name_file(claude_session_id).to_string_lossy().into_owned()));
+            spec.env.push((usage::USAGE_DIR_ENV.into(), usage::snapshot_dir().to_string_lossy().into_owned()));
         }
         spec.env.push(("CLAUDE_CODE_AUTO_CONNECT_IDE".into(), "false".into()));
         spec.env.push(("CLAUDE_CODE_IDE_SKIP_AUTO_INSTALL".into(), "1".into()));
         if let Some(acct) = self.store.active_account() {
-            spec.env.push((statusline::ACCOUNT_ENV.into(), acct.id.clone()));
+            spec.env.push((usage::ACCOUNT_ENV.into(), acct.id.clone()));
             spec.env.extend(Self::account_env(acct));
         }
         (spec.program, spec.args) = platform::through_login_shell(spec.program, spec.args);
@@ -963,7 +958,7 @@ impl Workspace {
         let record_id = new_id();
         let mut spec = claude::new_session_spec(&exe, &cwd, &session_id);
         spec.args.splice(0..0, leading);
-        let spec = self.with_helpers(spec, &session_id, &record_id, &cwd);
+        let spec = self.with_helpers(spec, &session_id, &record_id);
         let record = SessionRecord {
             id: record_id,
             kind: SessionKind::Claude,
@@ -1034,7 +1029,7 @@ impl Workspace {
         if let Some(name) = rec.chosen_title() {
             spec.args.extend(["--name".into(), name.into()]);
         }
-        let spec = self.with_helpers(spec, &meta.session_id, &rec.id, &rec.cwd);
+        let spec = self.with_helpers(spec, &meta.session_id, &rec.id);
         self.start(rec, spec, false, window, cx);
     }
 

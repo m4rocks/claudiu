@@ -47,26 +47,26 @@ model and effort they want, unless they just named them explicitly. The switch a
 after calling set_model, end your turn and ask the user to confirm before continuing, so the session itself switches.";
 
 fn titles_dir() -> PathBuf {
-    crate::statusline::data_dir().join("titles")
+    crate::datadir::data_dir().join("titles")
 }
 
 /// Where Claudiu puts the Claude Code session name it wants for a session; the mod (`CLAUDIU_NAME_FILE`)
 /// applies it with `/rename`, so nothing is typed into the PTY.
 pub fn name_file(claude_session_id: &str) -> PathBuf {
-    crate::statusline::data_dir().join("names").join(format!("{}.txt", crate::statusline::safe_file_stem(claude_session_id)))
+    crate::datadir::data_dir().join("names").join(format!("{}.txt", crate::datadir::safe_file_stem(claude_session_id)))
 }
 
 /// Ask the mod for this session name (or none, for a nameless session).
 pub fn write_name(claude_session_id: &str, name: Option<&str>) {
     let path = name_file(claude_session_id);
     let _ = match name {
-        Some(name) => crate::statusline::write_atomic(&path, name),
+        Some(name) => crate::datadir::write_atomic(&path, name),
         None => std::fs::remove_file(&path),
     };
 }
 
 fn config_dir() -> PathBuf {
-    crate::statusline::data_dir().join("mcp")
+    crate::datadir::data_dir().join("mcp")
 }
 
 /// Collapse whitespace, drop control characters, cap the length. `None` when nothing is left.
@@ -186,7 +186,7 @@ fn set_title(params: &Value, session: &str, dir: &Path) -> Value {
     if session.is_empty() {
         return reply("not running inside Claudiu", true);
     }
-    match crate::statusline::write_atomic(&dir.join(format!("{}.txt", crate::statusline::safe_file_stem(session))), &title) {
+    match crate::datadir::write_atomic(&dir.join(format!("{}.txt", crate::datadir::safe_file_stem(session))), &title) {
         Ok(()) => reply("Tab renamed.", false),
         Err(e) => reply(&format!("could not save title: {e}"), true),
     }
@@ -199,8 +199,8 @@ pub fn prepare(claude_session_id: &str, record_id: &str) -> std::io::Result<Path
         "args": [FLAG],
         "env": { SESSION_ENV: claude_session_id, CALLER_ENV: "code", RECORD_ENV: record_id },
     }}});
-    let path = config_dir().join(format!("{}.json", crate::statusline::safe_file_stem(claude_session_id)));
-    crate::statusline::write_atomic(&path, &config.to_string())?;
+    let path = config_dir().join(format!("{}.json", crate::datadir::safe_file_stem(claude_session_id)));
+    crate::datadir::write_atomic(&path, &config.to_string())?;
     Ok(path)
 }
 
@@ -218,7 +218,7 @@ pub fn chat_servers(chat_id: &str) -> Value {
 /// The mod that answers this server's tools in-process (see `mod/`), written to the data dir and loaded per
 /// process through `--plugin-dir`. Files are only rewritten when they changed: a rewrite reloads running sessions' mods.
 pub fn prepare_mod() -> std::io::Result<PathBuf> {
-    let dir = crate::statusline::data_dir().join("mod");
+    let dir = crate::datadir::data_dir().join("mod");
     for (rel, text) in [
         (".claude-plugin/plugin.json", include_str!("../mod/.claude-plugin/plugin.json")),
         ("hooks/hooks.json", include_str!("../mod/hooks/hooks.json")),
@@ -226,7 +226,7 @@ pub fn prepare_mod() -> std::io::Result<PathBuf> {
     ] {
         let path = dir.join(rel);
         if std::fs::read_to_string(&path).ok().as_deref() != Some(text) {
-            crate::statusline::write_atomic(&path, text)?;
+            crate::datadir::write_atomic(&path, text)?;
         }
     }
     Ok(dir)
@@ -247,9 +247,9 @@ pub fn read_titles() -> Vec<(String, String, Option<std::time::SystemTime>)> {
         .collect()
 }
 
-/// Directories `statusline::cleanup` prunes: `[per-session MCP configs, titles, names]` (titles also live in the store).
+/// Directories `datadir::cleanup` prunes: `[per-session MCP configs, titles, names]` (titles also live in the store).
 pub fn cleanup_dirs() -> [PathBuf; 3] {
-    [config_dir(), titles_dir(), crate::statusline::data_dir().join("names")]
+    [config_dir(), titles_dir(), crate::datadir::data_dir().join("names")]
 }
 
 #[cfg(test)]

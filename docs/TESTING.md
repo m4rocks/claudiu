@@ -37,13 +37,13 @@ Everything below needs eyes and a keyboard. Roughly ordered by risk. `[ ]` = not
 - [ ] Rename or delete a transcript file outside Claudiu, relaunch: the session is flagged *stale*, never silently removed.
 - [ ] Break `state.json` (invalid JSON), relaunch: app starts clean and keeps `state.json.corrupt`.
 
-## 5. Usage meters (status-line tee, zero tokens)
+## 5. Usage meters (per-process mod, zero tokens)
 - [ ] Start a **new** Claude session from Claudiu and send one message. Within about 5 s of the reply, ACCOUNT 5 HOUR / 7 DAY show percentages with a reset countdown, and SESSION → CONTEXT shows an exact figure (caption without `~`).
 - [ ] The values keep updating after later replies. Open a second Claude session: ACCOUNT stays the same (account-wide) while CONTEXT follows the selected session, and shows "no Claude session selected" for shells.
-- [ ] `%LOCALAPPDATA%/Claudiu/data/usage/<session-id>.json` exists and holds only limits, context figures, session id and model (no prompts, paths or costs).
+- [ ] `%LOCALAPPDATA%/Claudiu/data/usage/<session-id>.json` exists and holds only limits, context figures, session id, model, auto-compact, advisor and the last command name (no prompts, paths or costs).
 - [ ] Your own `~/.claude/settings.json` is **unchanged** (check its modified time) and contains nothing from Claudiu.
-- [ ] If you have your own statusLine (user, project or local settings), it renders exactly as before inside Claudiu. If you have none, Claude Code shows an empty status row and hides most footer keyboard hints while Claudiu's status line is active (documented Claude Code behaviour). Tell us if that bothers you.
-- [ ] Task Manager: no lingering `claudiu.exe` helper processes after replies (the tee exits immediately).
+- [ ] Your own statusLine, if any, renders exactly as before, and Claude Code's footer keyboard hints are all there (Claudiu no longer sets a status line).
+- [ ] In the session, type `/advisor` (no argument) and `/autocompact`: the snapshot's `last_command` follows. Do not run the setting forms: they change your saved settings.
 - [ ] Close and reopen Claudiu: the meters show the last values with an age label, not blank. Sessions started outside Claudiu do not feed the meters (expected).
 
 ## 6. Splits and layout

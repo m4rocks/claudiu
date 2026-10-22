@@ -52,16 +52,16 @@ Inside the terminal, Ctrl+Shift+C or Ctrl+Insert copies, and Ctrl+V, Ctrl+Shift+
 I wanted this to be safe to try on a setup you care about, so:
 
 - **Claude Code's data is read-only.** Claudiu never writes to `~/.claude` and never edits `settings.json`, keybindings or any other Claude Code config. Hiding a session only removes it from Claudiu's own index.
-- **Two things are passed per process**, and live only as long as that session: a `--settings` file for the status line (see [Usage meters](#usage-meters)) and a `--mcp-config` file for the tab-title tool. Both point back at the Claudiu executable. Nothing lands in your Claude Code config.
+- **Two things are passed per process**, and live only as long as that session: a `--plugin-dir` mod that reports usage (see [Usage meters](#usage-meters)) and a `--mcp-config` file for the tab-title tool. The MCP server points back at the Claudiu executable. Nothing lands in your Claude Code config.
 - **IDE auto-connect is switched off** for the sessions Claudiu starts, through environment variables on the child process.
-- **Everything else is documented CLI flags**: `--session-id`, `--resume`, `--settings`, `--mcp-config`, `--allowedTools`.
+- **Everything else is documented CLI flags**: `--session-id`, `--resume`, `--plugin-dir`, `--mcp-config`, `--allowedTools`.
 - **Claudiu's own state** is in `%LOCALAPPDATA%\Claudiu\data\state.json` on Windows and `~/Library/Application Support/Claudiu` on macOS. Crashes go to `crash.log` next to it.
 - **Nothing is uploaded.** Terminal contents are never logged. The only network request Claudiu makes is the update check against the public GitHub Releases API. To turn it off, set `"settings": { "update_url": "" }` in `state.json`.
 - **Clean environment for children.** Markers from other terminals (like `WT_SESSION`) and Claude Code's nested-session markers are removed, and `TERM_PROGRAM=Claudiu` is set. A `NO_COLOR` that leaked in from a Claude Code tool shell is dropped. One you set yourself is kept.
 
 ## Usage meters
 
-The 5-hour and 7-day meters, and the exact context figure, come from Claude Code's own status-line data. Each Claude session that Claudiu starts gets a per-process `--settings` file whose `statusLine` runs `claudiu --statusline-tee`. Claude Code calls it locally after each response, and per its docs that costs no tokens. Claudiu keeps a tiny snapshot: limits, context figures, session id. If you have your own status line, Claudiu forwards to it, so yours looks the same as before.
+The 5-hour and 7-day meters, and the exact context figure, come from inside Claude Code. Each Claude session that Claudiu starts loads a small per-process mod (`--plugin-dir`) that, after each response, writes a tiny snapshot to Claudiu's data folder: limits, context figures, session id, plus the auto-compact and advisor settings. That costs no tokens. Your own status line is not touched.
 
 So the meters aren't empty at launch, Claudiu also runs one `claude -p "/usage" --no-session-persistence` per launch. It skips this if there's a reading from the last 5 minutes. Anthropic's docs say `/usage` may use a small number of tokens.
 

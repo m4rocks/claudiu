@@ -34,12 +34,12 @@ fn dir(base: &Path, kind: &str) -> PathBuf {
 }
 
 fn stem(id: &str) -> String {
-    crate::statusline::safe_file_stem(id)
+    crate::datadir::safe_file_stem(id)
 }
 
 /// Helper side: file a request and block until Claudiu answers (or `PATIENCE` runs out).
 pub fn ask(from: &str, tool: &str, args: &Value) -> Result<String, String> {
-    ask_in(&crate::statusline::data_dir(), from, tool, args)
+    ask_in(&crate::datadir::data_dir(), from, tool, args)
 }
 
 fn ask_in(base: &Path, from: &str, tool: &str, args: &Value) -> Result<String, String> {
@@ -47,7 +47,7 @@ fn ask_in(base: &Path, from: &str, tool: &str, args: &Value) -> Result<String, S
     let req = Request { id: id.clone(), from: from.into(), tool: tool.into(), args: args.clone(), deadline: crate::store::now() + PATIENCE.as_secs() as i64 };
     let (req_path, res_path) = (dir(base, "req").join(format!("{}.json", stem(&id))), dir(base, "res").join(format!("{}.json", stem(&id))));
     let body = serde_json::to_string(&req).map_err(|e| e.to_string())?;
-    crate::statusline::write_atomic(&req_path, &body).map_err(|e| format!("could not reach Claudiu: {e}"))?;
+    crate::datadir::write_atomic(&req_path, &body).map_err(|e| format!("could not reach Claudiu: {e}"))?;
     let start = Instant::now();
     while start.elapsed() < PATIENCE {
         std::thread::sleep(Duration::from_millis(200));
@@ -63,7 +63,7 @@ fn ask_in(base: &Path, from: &str, tool: &str, args: &Value) -> Result<String, S
 
 /// Claudiu side: every request filed since the last call. Files are consumed; expired or unreadable ones are dropped.
 pub fn take_requests() -> Vec<Request> {
-    take_requests_in(&crate::statusline::data_dir())
+    take_requests_in(&crate::datadir::data_dir())
 }
 
 fn take_requests_in(base: &Path) -> Vec<Request> {
@@ -94,12 +94,12 @@ fn prune_answers(base: &Path) {
 
 /// Claudiu side: answer a request (`ok = false` makes the tool report an error to the model).
 pub fn respond(id: &str, ok: bool, text: impl Into<String>) {
-    respond_in(&crate::statusline::data_dir(), id, ok, text);
+    respond_in(&crate::datadir::data_dir(), id, ok, text);
 }
 
 fn respond_in(base: &Path, id: &str, ok: bool, text: impl Into<String>) {
     let body = serde_json::to_string(&Reply { ok, text: text.into() }).unwrap_or_default();
-    let _ = crate::statusline::write_atomic(&dir(base, "res").join(format!("{}.json", stem(id))), &body);
+    let _ = crate::datadir::write_atomic(&dir(base, "res").join(format!("{}.json", stem(id))), &body);
 }
 
 #[cfg(test)]
@@ -151,7 +151,7 @@ mod tests {
 
         // A request nobody is waiting for any more is dropped.
         let old = Request { id: "old".into(), from: "chat:c".into(), tool: "list_chats".into(), args: Value::Null, deadline: 1 };
-        crate::statusline::write_atomic(&dir(&base, "req").join("old.json"), &serde_json::to_string(&old).unwrap()).unwrap();
+        crate::datadir::write_atomic(&dir(&base, "req").join("old.json"), &serde_json::to_string(&old).unwrap()).unwrap();
         assert!(take_requests_in(&base).is_empty());
         assert!(!dir(&base, "req").join("old.json").exists());
     }

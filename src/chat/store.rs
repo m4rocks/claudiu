@@ -39,7 +39,7 @@ pub const DEFAULT_TITLE: &str = "New chat";
 
 /// The folder a chat runs in while it is not tied to a project (a neutral, empty folder of its own).
 pub fn scratch_dir() -> PathBuf {
-    crate::statusline::data_dir().join("chats")
+    crate::datadir::data_dir().join("chats")
 }
 
 /// A chat is tied to a project exactly when it does not run in the scratch folder.
@@ -135,7 +135,7 @@ impl ChatStore {
 }
 
 fn cache_path(id: &str) -> PathBuf {
-    crate::statusline::data_dir().join("chat-cache").join(format!("{id}.json"))
+    crate::datadir::data_dir().join("chat-cache").join(format!("{id}.json"))
 }
 
 /// The conversation as it was last seen, to show while the agent loads the real one.

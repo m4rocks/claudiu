@@ -20,7 +20,7 @@ pub const ADAPTER_VERSION: &str = "0.94.0";
 const PACKAGE: &str = "@agentclientprotocol/claude-agent-acp";
 
 fn dir() -> PathBuf {
-    crate::statusline::data_dir().join("acp")
+    crate::datadir::data_dir().join("acp")
 }
 
 fn package_dir() -> PathBuf {
