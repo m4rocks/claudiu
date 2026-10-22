@@ -17,11 +17,11 @@ There's no API key and no login in Claudiu. Authentication stays with Claude Cod
 ## What you get
 
 - **A real terminal.** 24-bit color, scrollback, selection, mouse reporting, bracketed paste, alt screen, Ctrl+click on links, IME input.
-- **Current Session.** The sidebar lists everything that's running, Claude sessions and plain shells alike. Switching between them never touches the other processes.
+- **Current Session.** The sidebar lists everything that's running. Switching between sessions never touches the other processes.
 - **Projects.** Git-aware, with branch and linked worktrees. Add one with the button, by dropping a folder on the window, or with `claudiu <folder>`.
-- **History.** Ended Claude sessions stay in the sidebar, and a click resumes one through `claude --resume`. Plain shells aren't saved.
+- **History.** Ended Claude sessions stay in the sidebar, and a click resumes one through `claude --resume`.
 - **Import on startup.** Your existing Claude Code sessions are found and merged in (read-only, no duplicates).
-- **Splits.** Up to four panes, each its own session.
+- **Shell panel.** Each Claude session can show its own shell under its terminal (Ctrl+Shift+T). It starts in the session's folder and ends with the session.
 - **Usage meters.** Context per session, plus 5-hour and 7-day account limits. See [Usage meters](#usage-meters) for the catch.
 - **Git buttons.** Commit & Push (Haiku writes the message through your own `claude` CLI) and Pull. Branch management too.
 - **Tab titles.** Claude names its own tabs.
@@ -36,11 +36,10 @@ Claudiu's own shortcuts use Ctrl+Shift (Cmd+Shift on macOS), so plain Ctrl and A
 |---|---|
 | Ctrl+Shift+N | New Claude session, in the active session's folder |
 | Ctrl+Shift+M | New chat (Claude in a native conversation view); not tied to a project unless you pick one |
-| Ctrl+Shift+T | New shell |
-| Ctrl+Shift+D | Split: new shell beside the current pane |
+| Ctrl+Shift+T | Show or hide the session's shell |
 | Ctrl+Shift+W | End the focused session (no confirmation) |
 | Ctrl+Tab / Ctrl+Shift+Tab | Next / previous running session |
-| Ctrl+Shift+] | Focus next pane |
+| Ctrl+Shift+] | Move the keyboard between Claude and its shell |
 | Ctrl+Shift+B | Toggle sidebar |
 | Ctrl+Shift+F | Search sessions and projects |
 | Ctrl+Shift+O | Add a project folder |

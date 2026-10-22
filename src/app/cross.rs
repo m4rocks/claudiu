@@ -205,7 +205,7 @@ impl Workspace {
                 }
             }
             "start_chat" => {
-                let id = self.new_chat(folder, prompt, false, window, cx);
+                let id = self.new_chat(folder, prompt, window, cx);
                 Ok(format!("Opened a new chat (id {id}) in the user's Chat tab."))
             }
             other => Err(format!("unknown tool {other}")),

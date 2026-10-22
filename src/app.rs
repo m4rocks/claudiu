@@ -34,15 +34,14 @@ actions!(
     [
         NewClaude,
         NewChat,
-        NewShell,
+        ToggleShell,
         CloseSession,
         NextSession,
         PrevSession,
-        SplitPane,
         ToggleSidebar,
         FocusSearch,
         ImportProject,
-        FocusNextPane,
+        SwapFocus,
         OpenGithub,
         Quit,
         HideApp,
@@ -58,17 +57,10 @@ pub enum Act {
     NewClaude {
         cwd: PathBuf,
     },
-    NewShell {
-        cwd: PathBuf,
-    },
-    /// Click on a session row: live -> show its terminal alone (leaving any split), history -> resume it.
+    /// Show or hide the shell under a Claude session's terminal (started on first use, in the session's folder).
+    ToggleShell(Id),
+    /// Click on a session row: live -> show it, history -> resume it.
     Select(Id),
-    /// Put a session (resuming it if it ended) next to the focused pane.
-    AddToSplit(Id),
-    RemoveFromSplit(Id),
-    ExitSplit,
-    SplitShell,
-    SplitClaude(PathBuf),
     Resume(Id),
     CloseLive(Id),
     Rename(Id),
@@ -79,16 +71,13 @@ pub enum Act {
     OpenEditor(Editor, PathBuf),
     ImportProject,
     OpenSettings,
-    /// The project's GitHub issues and pull requests; `split` puts the pane next to the current one.
+    /// The project's GitHub issues and pull requests.
     OpenGithub {
         cwd: PathBuf,
-        split: bool,
     },
-    /// A new chat (Claude through ACP), tied to a project folder only when `cwd` is given; `split` puts it next
-    /// to the current pane.
+    /// A new chat (Claude through ACP), tied to a project folder only when `cwd` is given.
     NewChat {
         cwd: Option<PathBuf>,
-        split: bool,
     },
     OpenChat(Id),
     /// Forget a chat in the list (Claude Code's transcript stays).
@@ -218,6 +207,25 @@ pub struct GhPane {
     pub _sub: Subscription,
 }
 
+/// The shell under a Claude session's terminal. It belongs to that session (never listed, never persisted), keeps
+/// its height while the session lives, and goes away with it.
+pub struct ShellPanel {
+    pub view: Entity<TerminalView>,
+    pub _sub: Subscription,
+    pub open: bool,
+    pub height: f32,
+}
+
+pub const SHELL_HEIGHT: f32 = 260.0;
+pub const SHELL_MIN: f32 = 120.0;
+
+/// A drag of the divider above the shell panel: which session, and where it started.
+pub struct ShellDrag {
+    pub id: Id,
+    pub y: f32,
+    pub height: f32,
+}
+
 pub struct Toast {
     pub text: String,
     pub error: bool,
@@ -237,15 +245,13 @@ pub struct Workspace {
     pub chats: Vec<ChatPane>,
     pub chat_store: ChatStore,
     pub side: Side,
-    pub panes: Vec<Id>,
-    /// Splits that are not on screen right now; a session in one of them brings its whole split back when shown.
-    pub groups: Vec<Vec<Id>>,
-    /// Where the shown split sits among `groups` in the sidebar, so cards do not jump when you switch.
-    active_slot: usize,
-    pub focused: usize,
+    /// The session shown in the main area.
+    pub active: Option<Id>,
+    /// Shells under Claude sessions, by the session they belong to.
+    pub shells: HashMap<Id, ShellPanel>,
+    pub shell_drag: Option<ShellDrag>,
     /// Open sessions in the order they were last shown (most recent last); closing one goes back to the previous.
     recent: Vec<Id>,
-    pub split_vertical: bool,
     pub main: Main,
     pub selected: Option<Id>,
     /// What the main window showed on the sidebar tab that is not open, to bring back when it is.
@@ -327,12 +333,10 @@ impl Workspace {
                 chats
             },
             side: if store.data.layout.chat_tab { Side::Chat } else { Side::Sessions },
-            panes: vec![],
-            groups: vec![],
-            active_slot: usize::MAX,
-            focused: 0,
+            active: None,
+            shells: HashMap::new(),
+            shell_drag: None,
             recent: vec![],
-            split_vertical: false,
             main: Main::Home,
             selected: store.data.layout.selected_session.clone(),
             parked: None,
@@ -891,7 +895,7 @@ impl Workspace {
 
     pub fn active_id(&self) -> Option<&Id> {
         match self.main {
-            Main::Terminals => self.panes.get(self.focused),
+            Main::Terminals => self.active.as_ref(),
             Main::Home => None,
         }
     }
@@ -979,31 +983,73 @@ impl Workspace {
         self.start(record, spec, true, window, cx);
     }
 
-    pub fn new_shell(&mut self, cwd: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        let (program, args) = self.shell.clone();
-        // A session's folder may be gone (temp dirs, deleted worktrees); CreateProcess then fails with "filename syntax is incorrect".
-        let cwd = if cwd.is_dir() { cwd } else { platform::home_dir().unwrap_or(cwd) };
-        let spec = SpawnSpec {
-            program: program.clone(),
-            args,
-            cwd: Some(cwd.clone()),
-            ..Default::default()
+    /// Show or hide the shell under a Claude session. It starts on first use, in the session's folder, and lives and
+    /// dies with the session.
+    pub fn toggle_shell(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let rec = self.store.session(id).filter(|r| r.kind == SessionKind::Claude).cloned();
+        let Some(rec) = rec.filter(|_| self.is_running(id, cx)) else {
+            self.toast("Open a Claude session to use its shell.", false, cx);
+            return;
         };
-        let record = SessionRecord {
-            id: new_id(),
-            kind: SessionKind::Shell,
-            title: platform::shell_label(&program),
-            custom_title: None,
-            auto_title: None,
-            project_id: self.store.project_for_cwd(&cwd),
-            cwd,
-            created_at: now(),
-            last_active: now(),
-            exit_code: None,
-            hidden: false,
-            claude: None,
-        };
-        self.start(record, spec, true, window, cx);
+        // From another session the shell is brought up with its session; only on the shown one does it toggle.
+        let shown = self.active.as_deref() == Some(id) && matches!(self.main, Main::Terminals);
+        if !shown {
+            self.show_session(id, window, cx);
+        }
+        if let Some(p) = self.shells.get_mut(id) {
+            p.open = !shown || !p.open;
+            if !p.open {
+                self.focus_active(window, cx);
+                cx.notify();
+                return;
+            }
+        } else {
+            let (program, args) = self.shell.clone();
+            // A session's folder may be gone (temp dirs, deleted worktrees); CreateProcess then fails with "filename syntax is incorrect".
+            let cwd = if rec.cwd.is_dir() { rec.cwd.clone() } else { platform::home_dir().unwrap_or(rec.cwd.clone()) };
+            let spec = SpawnSpec { program, args, cwd: Some(cwd), ..Default::default() };
+            let (terminal, rx) = TerminalView::spawn(&spec);
+            let view = cx.new(|cx| TerminalView::new(terminal, rx, cx));
+            let owner = id.to_string();
+            let sub = cx.subscribe_in(&view, window, move |ws: &mut Workspace, view, ev: &TerminalEvent, window, cx| {
+                if matches!(ev, TerminalEvent::Exited(_)) {
+                    if let Some(err) = view.read(cx).start_error() {
+                        ws.toast(format!("Could not start the shell: {err}"), true, cx);
+                    }
+                    ws.shells.remove(&owner);
+                    ws.focus_active(window, cx);
+                    cx.notify();
+                }
+            });
+            self.shells.insert(id.to_string(), ShellPanel { view, _sub: sub, open: true, height: SHELL_HEIGHT });
+        }
+        self.focus_shell(window, cx);
+        cx.notify();
+    }
+
+    fn focus_shell(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(p) = self.active_id().and_then(|id| self.shells.get(id)).filter(|p| p.open) {
+            window.focus(&p.view.read(cx).focus_handle(cx), cx);
+        }
+    }
+
+    /// Move the keyboard between the Claude terminal and its open shell.
+    pub fn swap_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(shell) = self.active_id().and_then(|id| self.shells.get(id)).filter(|p| p.open) else { return };
+        if shell.view.read(cx).focus_handle(cx).is_focused(window) {
+            self.focus_active(window, cx);
+        } else {
+            self.focus_shell(window, cx);
+        }
+    }
+
+    /// The divider above the shell panel is being dragged: follow the pointer, keeping room for the terminal.
+    pub fn drag_shell(&mut self, y: f32, window_h: f32) {
+        let Some(d) = self.shell_drag.as_ref() else { return };
+        let height = (d.height + d.y - y).clamp(SHELL_MIN, (window_h - 200.0).max(SHELL_MIN));
+        if let Some(p) = self.shells.get_mut(&d.id) {
+            p.height = height;
+        }
     }
 
     /// Resume a Claude session through `claude --resume`. Reuses the history record.
@@ -1016,8 +1062,6 @@ impl Workspace {
             return;
         };
         let Some(meta) = rec.claude.clone() else {
-            // Shell history can't be resumed: open a fresh shell in the same folder.
-            self.new_shell(rec.cwd, window, cx);
             return;
         };
         let Some(exe) = self.claude_exe.clone() else {
@@ -1082,7 +1126,7 @@ impl Workspace {
             claude_name,
             title_stamp: None,
         });
-        self.place_in_pane(&id, cx);
+        self.activate(&id, cx);
         self.remember(&id);
         self.selected = Some(id.clone());
         self.main = Main::Terminals;
@@ -1091,46 +1135,18 @@ impl Workspace {
         cx.notify();
     }
 
-    /// A session already in the split is just focused. One that a split action made room for (`with_pane_after`)
-    /// joins it. Anything else switches layouts: the current split is parked as it is, and the session shows
-    /// with its own split if it has one, else alone. Clicking never swaps a pane or breaks a split up.
-    fn place_in_pane(&mut self, id: &Id, cx: &App) {
-        if let Some(pos) = self.panes.iter().position(|p| p == id) {
-            self.focused = pos;
-        } else if let Some(slot) = self.panes.iter().position(|p| p.is_empty()) {
-            self.leave_stored(id);
-            self.panes[slot] = id.clone();
-            self.focused = slot;
-        } else {
-            let (panes, slot, parked) = switch_layout(self.splits(), id);
-            self.focused = panes.iter().position(|p| p == id).unwrap_or(0);
-            (self.panes, self.active_slot, self.groups) = (panes, slot, parked);
-        }
+    /// Make `id` the session shown.
+    fn activate(&mut self, id: &Id, cx: &App) {
+        self.active = Some(id.clone());
         self.prune_live(cx);
     }
 
-    /// Every split in sidebar order: the parked ones, with the shown one (if it is a split) at its own slot.
-    pub fn splits(&self) -> Vec<Vec<Id>> {
-        let mut all = self.groups.clone();
-        if self.panes.len() > 1 {
-            all.insert(self.active_slot.min(all.len()), self.panes.clone());
-        }
-        all
-    }
-
-    /// Take `id` out of any parked split; a split left with one session dissolves.
-    fn leave_stored(&mut self, id: &str) {
-        for g in &mut self.groups {
-            g.retain(|p| p != id);
-        }
-        self.groups.retain(|g| g.len() > 1);
-    }
-
-    /// Exited terminals are only kept while a pane (or a parked split) still shows them.
+    /// Exited terminals are only kept while shown; a shell panel goes with its session.
     fn prune_live(&mut self, cx: &App) {
-        let (panes, groups) = (&self.panes, &self.groups);
-        self.live
-            .retain(|l| panes.contains(&l.id) || groups.iter().any(|g| g.contains(&l.id)) || l.view.read(cx).is_running());
+        let active = &self.active;
+        self.live.retain(|l| active.as_ref() == Some(&l.id) || l.view.read(cx).is_running());
+        let live = &self.live;
+        self.shells.retain(|id, _| live.iter().any(|l| &l.id == id));
     }
 
     /// A Claude session that never produced a transcript (opened and closed without a prompt) has nothing
@@ -1170,7 +1186,7 @@ impl Workspace {
         self.recent.push(id.clone());
     }
 
-    fn on_exit(&mut self, id: &str, code: Option<i32>, window: &mut Window, cx: &mut Context<Self>) {
+    fn on_exit(&mut self, id: &str, code: Option<i32>, _window: &mut Window, cx: &mut Context<Self>) {
         if let Some(err) = self.live_view(id).and_then(|v| v.read(cx).start_error()) {
             let program = self.store.session(id).map(|r| r.display_title().to_string()).unwrap_or_default();
             self.toast(format!("Could not start {program}: {err}"), true, cx);
@@ -1182,12 +1198,6 @@ impl Workspace {
             rec.exit_code = Some(code.unwrap_or(0));
             rec.last_active = now();
         }
-        // A shell that exits inside a split has nothing left to show: close its pane.
-        let is_shell = self.store.session(id).is_some_and(|r| r.kind == SessionKind::Shell);
-        if is_shell && self.panes.len() > 1 && self.panes.iter().any(|p| p == id) {
-            self.close_live(id, window, cx);
-            return;
-        }
         self.drop_if_empty(id);
         self.store.save_if_dirty();
         cx.notify();
@@ -1198,7 +1208,7 @@ impl Workspace {
         let id = id.to_string();
         self.selected = Some(id.clone());
         if self.live_view(&id).is_some() || self.gh_pane(&id).is_some() || self.chat_pane(&id).is_some() {
-            self.place_in_pane(&id, cx);
+            self.activate(&id, cx);
             self.remember(&id);
             self.main = Main::Terminals;
             self.focus_active(window, cx);
@@ -1217,7 +1227,7 @@ impl Workspace {
     }
 
     pub fn focus_active(&self, window: &mut Window, cx: &mut Context<Self>) {
-        if let (Main::Terminals, Some(id)) = (&self.main, self.panes.get(self.focused)) {
+        if let (Main::Terminals, Some(id)) = (&self.main, self.active.as_ref()) {
             if let Some(view) = self.live_view(id) {
                 window.focus(&view.read(cx).focus_handle(cx), cx);
                 return;
@@ -1247,30 +1257,16 @@ impl Workspace {
             self.refresh_accounts(cx);
         }
         let was_active = self.active_id().is_some_and(|a| a == id);
-        let current = self.active_id().cloned();
         self.live.retain(|l| l.id != id); // dropping the view drops the Terminal, which closes the PTY
         self.gh.retain(|p| p.id != id);
         self.chats.retain(|p| p.id != id);
         self.forget_if_unused(id);
-        self.panes.retain(|p| p != id);
-        self.leave_stored(id);
+        self.shells.remove(id);
         self.recent.retain(|r| r != id);
         // Closing the shown session goes back to the one shown before it; otherwise stay where we are.
-        let target = if was_active {
-            self.recent.iter().rev().find(|r| self.live.iter().any(|l| &l.id == *r) || self.gh.iter().any(|p| &p.id == *r) || self.chats.iter().any(|p| &p.id == *r)).cloned()
-        } else {
-            current
-        };
-        match target.as_ref().map(|t| (t, self.panes.iter().position(|p| p == t))) {
-            Some((_, Some(pos))) => self.focused = pos,
-            Some((t, None)) if self.panes.is_empty() => {
-                self.panes.push(t.clone());
-                self.focused = 0;
-            }
-            _ => self.focused = self.focused.min(self.panes.len().saturating_sub(1)),
-        }
         if was_active {
-            self.selected = self.panes.get(self.focused).cloned();
+            self.active = self.recent.iter().rev().find(|r| self.live.iter().any(|l| &l.id == *r) || self.gh.iter().any(|p| &p.id == *r) || self.chats.iter().any(|p| &p.id == *r)).cloned();
+            self.selected = self.active.clone();
             self.persist_layout();
         }
         if let Some(rec) = self.store.session_mut(id) {
@@ -1281,7 +1277,7 @@ impl Workspace {
         }
         self.drop_if_empty(id);
         self.purge_dead_shells();
-        if self.panes.is_empty() {
+        if self.active.is_none() {
             self.main = Main::Home;
         }
         self.store.save_if_dirty();
@@ -1350,13 +1346,8 @@ impl Workspace {
         self.menu = None;
         match act {
             Act::NewClaude { cwd } => self.new_claude(cwd, window, cx),
-            Act::NewShell { cwd } => self.new_shell(cwd, window, cx),
+            Act::ToggleShell(id) => self.toggle_shell(&id, window, cx),
             Act::Select(id) => self.show_session(&id, window, cx),
-            Act::AddToSplit(id) => self.add_to_split(&id, window, cx),
-            Act::RemoveFromSplit(id) => self.remove_from_split(&id, window, cx),
-            Act::ExitSplit => self.exit_split(window, cx),
-            Act::SplitShell => self.split(window, cx),
-            Act::SplitClaude(cwd) => self.split_claude(cwd, window, cx),
             Act::Resume(id) => self.resume(&id, window, cx),
             Act::CloseLive(id) => self.close_live(&id, window, cx),
             Act::Rename(id) => {
@@ -1395,9 +1386,9 @@ impl Workspace {
                 }
             }
             Act::ImportProject => self.import_project(window, cx),
-            Act::OpenGithub { cwd, split } => self.open_github(cwd, split, window, cx),
-            Act::NewChat { cwd, split } => {
-                self.new_chat(cwd, None, split, window, cx);
+            Act::OpenGithub { cwd } => self.open_github(cwd, window, cx),
+            Act::NewChat { cwd } => {
+                self.new_chat(cwd, None, window, cx);
             }
             Act::OpenChat(id) => self.open_chat(&id, window, cx),
             Act::RemoveChat(id) => self.remove_chat(&id, window, cx),
@@ -1812,9 +1803,8 @@ impl Workspace {
 
     // ------------------------------------------------------------------ GitHub panes
 
-    /// Show the project's GitHub pane (one per project), creating it on first use. With `split` it opens
-    /// beside the current pane instead of replacing it.
-    pub fn open_github(&mut self, cwd: PathBuf, split: bool, window: &mut Window, cx: &mut Context<Self>) {
+    /// Show the project's GitHub pane (one per project), creating it on first use.
+    pub fn open_github(&mut self, cwd: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         let project = self.store.project_for_cwd(&cwd).and_then(|id| self.store.project(&id)).cloned();
         let root = project.as_ref().map(|p| p.path.clone()).unwrap_or(cwd);
         let key = platform::path_key(&root);
@@ -1833,131 +1823,14 @@ impl Workspace {
                 id
             }
         };
-        if split && !self.panes.contains(&id) {
-            self.with_pane_after(self.focused, |ws| ws.show_session(&id, window, cx));
-        } else {
-            self.show_session(&id, window, cx);
-        }
-    }
-
-    /// Run `f` (which fills one pane, e.g. by starting a session) with an empty slot opened after pane `at`.
-    /// At the four-pane limit, or with no panes yet, `f` simply replaces the focused pane as usual.
-    fn with_pane_after(&mut self, at: usize, f: impl FnOnce(&mut Self)) {
-        let mut replaced = None;
-        if self.panes.is_empty() {
-        } else if self.panes.len() < 4 {
-            let slot = (at + 1).min(self.panes.len());
-            self.panes.insert(slot, String::new());
-            self.focused = slot;
-        } else {
-            let slot = self.focused.min(self.panes.len() - 1);
-            replaced = Some((slot, std::mem::take(&mut self.panes[slot])));
-        }
-        f(self);
-        // `f` failed (e.g. no `claude` CLI): give the replaced pane back.
-        if let Some((slot, old)) = replaced
-            && self.panes[slot].is_empty()
-        {
-            self.panes[slot] = old;
-        }
-        self.panes.retain(|p| !p.is_empty());
-        self.focused = self
-            .selected
-            .as_ref()
-            .and_then(|s| self.panes.iter().position(|p| p == s))
-            .unwrap_or(self.focused)
-            .min(self.panes.len().saturating_sub(1));
-    }
-
-    /// Show `id` next to the focused pane, keeping the split.
-    pub fn add_to_split(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
-        if self.panes.len() >= 4 && !self.panes.iter().any(|p| p == id) {
-            self.toast("Up to four panes", false, cx);
-            return;
-        }
-        let at = self.focused;
-        self.with_pane_after(at, |ws| ws.show_session(id, window, cx));
-    }
-
-    /// Take `id` out of the split; the session itself keeps running and stays in the sidebar.
-    pub fn remove_from_split(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
-        if self.groups.iter().any(|g| g.iter().any(|p| p == id)) {
-            self.leave_stored(id);
-            cx.notify();
-            return;
-        }
-        let Some(pos) = self.panes.iter().position(|p| p == id) else { return };
-        if self.panes.len() < 2 {
-            return;
-        }
-        self.panes.remove(pos);
-        if pos < self.focused {
-            self.focused -= 1;
-        }
-        self.focused = self.focused.min(self.panes.len() - 1);
-        self.after_layout_change(window, cx);
-    }
-
-    /// Leave the split, keeping only the focused pane.
-    pub fn exit_split(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.panes.len() < 2 {
-            return;
-        }
-        self.panes = vec![self.panes[self.focused.min(self.panes.len() - 1)].clone()];
-        self.active_slot = usize::MAX;
-        self.focused = 0;
-        self.after_layout_change(window, cx);
-    }
-
-    fn after_layout_change(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.prune_live(cx);
-        self.selected = self.panes.get(self.focused).cloned();
-        self.persist_layout();
-        self.focus_active(window, cx);
-        cx.notify();
-    }
-
-    /// The top bar's split dropdown: ways to put something next to the current pane, then ways out.
-    pub fn split_menu(&self, cx: &App) -> Vec<MenuItem> {
-        let item = |label: String, hint: Option<String>, act: Act, disabled: bool, sep: bool| MenuItem { label, hint, act, danger: false, disabled, separator_before: sep };
-        let full = self.panes.len() >= 4;
-        let cwd = self.active_cwd();
-        let mut items = vec![
-            item("New shell".into(), None, Act::SplitShell, full, false),
-            item("New Claude session".into(), None, Act::SplitClaude(cwd.clone()), full, false),
-            item("New chat".into(), None, Act::NewChat { cwd: None, split: true }, full, false),
-        ];
-        let project = self.store.project_for_cwd(&cwd).and_then(|id| self.store.project(&id));
-        if let Some(p) = project.filter(|p| p.git.is_some()) {
-            let shown = self.gh.iter().any(|g| platform::path_key(&g.cwd) == platform::path_key(&p.path) && self.panes.contains(&g.id));
-            items.push(item("GitHub issues & PRs".into(), None, Act::OpenGithub { cwd: p.path.clone(), split: true }, full || shown, false));
-        }
-        let mut first = true;
-        let others = self
-            .live
-            .iter()
-            .filter(|l| l.view.read(cx).is_running())
-            .filter_map(|l| self.store.session(&l.id).map(|r| (r.id.clone(), r.display_title().to_string(), r.cwd.file_name().map(|n| n.to_string_lossy().into_owned()))))
-            .chain(self.gh.iter().map(|g| (g.id.clone(), "GitHub".to_string(), Some(g.project.clone()))))
-            .chain(self.chats.iter().map(|c| (c.id.clone(), self.chat_title(&c.id).unwrap_or_else(|| "Chat".into()), is_tied(&c.cwd).then(|| c.cwd.file_name().map(|n| n.to_string_lossy().into_owned())).flatten())));
-        for (id, title, folder) in others.filter(|(id, ..)| !self.panes.contains(id)) {
-            items.push(item(title, folder, Act::AddToSplit(id), full, std::mem::take(&mut first)));
-        }
-        if self.panes.len() > 1 {
-            let active = self.active_id().cloned().unwrap_or_default();
-            items.push(item("Remove this pane from split".into(), None, Act::RemoveFromSplit(active), false, true));
-            items.push(item("Exit split".into(), None, Act::ExitSplit, false, false));
-        }
-        items
+        self.show_session(&id, window, cx);
     }
 
     fn on_gh_event(&mut self, pane: &str, ev: &GhEvent, window: &mut Window, cx: &mut Context<Self>) {
         let Some(cwd) = self.gh_pane(pane).map(|p| p.cwd.clone()) else { return };
-        let at = self.panes.iter().position(|p| p == pane).unwrap_or(self.focused);
         match ev {
             GhEvent::Toast { text, error } => self.toast(text.clone(), *error, cx),
-            // A Claude session about the item opens beside the GitHub pane so both stay in view.
-            GhEvent::AskClaude(prompt) => self.with_pane_after(at, |ws| ws.new_claude_with(cwd, vec![prompt.clone()], window, cx)),
+            GhEvent::AskClaude(prompt) => self.new_claude_with(cwd, vec![prompt.clone()], window, cx),
             GhEvent::Checkout(number) => {
                 let Some(exe) = crate::github::cli::locate() else { return };
                 let number = *number;
@@ -1985,33 +1858,12 @@ impl Workspace {
                     hidden: false,
                     claude: None,
                 };
-                self.with_pane_after(at, |ws| ws.start(record, spec, true, window, cx));
+                self.start(record, spec, true, window, cx);
             }
         }
     }
 
-    // ------------------------------------------------------------------ pane layout
-
-    pub fn split(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // New shell beside the current pane, in the same folder.
-        if self.panes.len() >= 4 {
-            self.toast("Up to four panes", false, cx);
-            return;
-        }
-        let (cwd, at) = (self.active_cwd(), self.focused);
-        self.with_pane_after(at, |ws| ws.new_shell(cwd, window, cx));
-        cx.notify();
-    }
-
-    pub fn split_claude(&mut self, cwd: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        if self.panes.len() >= 4 {
-            self.toast("Up to four panes", false, cx);
-            return;
-        }
-        let at = self.focused;
-        self.with_pane_after(at, |ws| ws.new_claude(cwd, window, cx));
-        cx.notify();
-    }
+    // ------------------------------------------------------------------ session switching
 
     pub fn cycle(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
         let mut running: Vec<Id> = self
@@ -2031,18 +1883,6 @@ impl Workspace {
             .unwrap_or(0) as isize;
         let next = (cur + delta).rem_euclid(running.len() as isize) as usize;
         self.show_session(&running[next].clone(), window, cx);
-    }
-
-    pub fn focus_pane(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        if index < self.panes.len() {
-            self.focused = index;
-            self.selected = self.panes.get(index).cloned();
-            if let Some(id) = self.selected.clone() {
-                self.remember(&id);
-            }
-            self.focus_active(window, cx);
-            cx.notify();
-        }
     }
 
     /// Prompt-cache timer for the selected session: `(remaining fraction, remaining secs, ttl secs)`.
@@ -2078,43 +1918,10 @@ impl Workspace {
     }
 }
 
-/// Show session `id` given every split (shown one included, in sidebar order): its own split if it is in one,
-/// else just itself. Returns the panes to show, the shown split's slot among the parked ones, and the parked ones.
-fn switch_layout(mut all: Vec<Vec<Id>>, id: &Id) -> (Vec<Id>, usize, Vec<Vec<Id>>) {
-    match all.iter().position(|g| g.contains(id)) {
-        Some(t) => (all.remove(t), t, all),
-        None => (vec![id.clone()], usize::MAX, all),
-    }
-}
-
-#[cfg(test)]
-mod split_tests {
-    use super::switch_layout;
-
-    fn ids(v: &[&str]) -> Vec<String> {
-        v.iter().map(|s| s.to_string()).collect()
-    }
-
-    #[test]
-    fn a_session_outside_every_split_shows_alone_and_keeps_all_splits() {
-        let all = vec![ids(&["a", "b"]), ids(&["c", "d"])];
-        let (panes, _, parked) = switch_layout(all.clone(), &"x".to_string());
-        assert_eq!(panes, ids(&["x"]));
-        assert_eq!(parked, all);
-    }
-
-    #[test]
-    fn a_session_in_a_split_brings_its_whole_split_and_slot_back() {
-        let (panes, slot, parked) = switch_layout(vec![ids(&["a", "b"]), ids(&["c", "d"]), ids(&["e", "f"])], &"d".to_string());
-        assert_eq!((panes, slot), (ids(&["c", "d"]), 1));
-        assert_eq!(parked, vec![ids(&["a", "b"]), ids(&["e", "f"])]);
-    }
-}
-
 #[cfg(test)]
 mod headless {
     //! Drives the real workspace on gpui's test platform (no window opens) with a throwaway data folder, to catch
-    //! hangs and panics when sessions start, split and switch. Spawns the real `claude` and shell.
+    //! hangs and panics when sessions start and switch and a shell panel opens. Spawns the real `claude` and shell.
     //! `cargo test -- --ignored headless`.
     use super::*;
     use gpui::TestAppContext;
@@ -2150,36 +1957,11 @@ mod headless {
         let cwd = work.path().to_path_buf();
         draw(&mut cx);
         step(&mut cx, &|ws, w, cx| ws.new_claude(cwd.clone(), w, cx));
-        assert!(ws.read_with(&cx, |ws, _| ws.panes.len() == 1), "claude pane exists");
-        step(&mut cx, &|ws, w, cx| ws.new_shell(cwd.clone(), w, cx));
-        step(&mut cx, &|ws, w, cx| ws.split(w, cx));
-        step(&mut cx, &|ws, w, cx| ws.split_claude(cwd.clone(), w, cx));
-        assert!(ws.read_with(&cx, |ws, _| ws.panes.len() == 3), "three panes");
-        // Switch to a session outside the split: the split is parked, then comes back.
-        step(&mut cx, &|ws, w, cx| ws.new_shell(cwd.clone(), w, cx));
-        assert!(ws.read_with(&cx, |ws, _| ws.panes.len() == 1 && ws.groups.len() == 1), "split parked");
-        let member = ws.read_with(&cx, |ws, _| ws.groups[0][0].clone());
-        step(&mut cx, &|ws, w, cx| ws.show_session(&member, w, cx));
-        assert!(ws.read_with(&cx, |ws, _| ws.panes.len() == 3), "split restored");
-        step(&mut cx, &|ws, w, cx| ws.exit_split(w, cx));
-        assert!(ws.read_with(&cx, |ws, _| ws.panes.len() == 1));
-        // The GitHub pane as a session type: opens once per folder, "Ask Claude" starts a session beside it.
-        step(&mut cx, &|ws, w, cx| ws.open_github(cwd.clone(), false, w, cx));
-        assert!(ws.read_with(&cx, |ws, _| ws.panes.len() == 1 && ws.gh.len() == 1 && ws.gh_pane(&ws.panes[0]).is_some()), "github pane shown");
-        step(&mut cx, &|ws, w, cx| ws.open_github(cwd.clone(), false, w, cx));
-        assert!(ws.read_with(&cx, |ws, _| ws.gh.len() == 1), "one github pane per folder");
-        step(&mut cx, &|ws, _w, cx| {
-            let view = ws.gh[0].view.clone();
-            view.update(cx, |_, cx| cx.emit(crate::github::view::GhEvent::AskClaude("explain issue 1".into())));
-        });
-        assert!(ws.read_with(&cx, |ws, _| ws.panes.len() == 2), "Ask Claude opens a session beside the pane");
-        step(&mut cx, &|ws, w, cx| ws.exit_split(w, cx));
-
         // Chat: the Chat tab lists chats; a chat runs the real adapter (installed into the throwaway data folder
         // on first use), offers the agent's skills, answers, and comes back with its history after being closed.
         step(&mut cx, &|ws, w, cx| {
             ws.act(Act::SideTab(Side::Chat), w, cx);
-            ws.new_chat(None, None, false, w, cx);
+            ws.new_chat(None, None, w, cx);
         });
         let (id, view) = ws.read_with(&cx, |ws, _| (ws.chats[0].id.clone(), ws.chats[0].view.clone()));
         let wait = |cx: &mut TestAppContext, view: &Entity<crate::chat::view::ChatView>, what: &str, ok: &dyn Fn(&crate::chat::view::ChatView) -> bool| {
@@ -2326,6 +2108,85 @@ mod headless {
         step(&mut cx, &|ws, w, cx| ws.submit_modal(w, cx));
         assert!(h.join().unwrap().unwrap().contains("latest terminal output"));
         step(&mut cx, &|ws, w, cx| ws.close_live(&id, w, cx));
+    }
+
+    /// Sessions, the shell panel and the GitHub view, with the real `claude` and shell but no model calls.
+    fn sessions_and_shell() {
+        let data = tempfile::tempdir().unwrap();
+        // SAFETY: set before any other thread reads the environment; this test owns the process.
+        unsafe { std::env::set_var("CLAUDIU_DATA_DIR", data.path()) };
+        let work = tempfile::tempdir().unwrap();
+        let mut cx = TestAppContext::single();
+        cx.update(|app| {
+            gpui_kit::init(app);
+            gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, app);
+        });
+        let (window, ws) = cx
+            .update(|app| {
+                gpui_kit::open_window(Default::default(), app, |window, app| app.new(|cx| Workspace::new(window, vec![], cx)))
+            })
+            .unwrap();
+        let step = |cx: &mut TestAppContext, f: &dyn Fn(&mut Workspace, &mut Window, &mut Context<Workspace>)| {
+            let t = std::time::Instant::now();
+            cx.update_window(window, |_, window, app| ws.update(app, |ws, cx| f(ws, window, cx))).unwrap();
+            let acted = t.elapsed();
+            for _ in 0..2 {
+                cx.update_window(window, |_, window, app| window.draw(app).clear(app)).unwrap();
+                cx.run_until_parked();
+            }
+            assert!(acted < Duration::from_millis(400), "the window was blocked for {acted:?}");
+        };
+        let cwd = work.path().to_path_buf();
+        step(&mut cx, &|ws, w, cx| ws.new_claude(cwd.clone(), w, cx));
+        let first = ws.read_with(&cx, |ws, _| ws.active.clone().expect("a session is shown"));
+        // The shell under a Claude session: starts on first use, survives switching away, goes with its session.
+        step(&mut cx, &|ws, w, cx| ws.toggle_shell(&first, w, cx));
+        assert!(ws.read_with(&cx, |ws, _| ws.shells.get(&first).is_some_and(|p| p.open)), "shell opened");
+        step(&mut cx, &|ws, w, cx| ws.new_claude(cwd.clone(), w, cx));
+        let second = ws.read_with(&cx, |ws, _| ws.active.clone().unwrap());
+        assert_ne!(first, second);
+        assert!(ws.read_with(&cx, |ws, _| ws.shells.contains_key(&first) && !ws.shells.contains_key(&second)), "the shell stays with its own session");
+        step(&mut cx, &|ws, w, cx| ws.toggle_shell(&first, w, cx));
+        assert!(ws.read_with(&cx, |ws, _| ws.active.as_deref() == Some(first.as_str()) && ws.shells[&first].open), "from another session, it shows the session and its shell");
+        step(&mut cx, &|ws, w, cx| ws.toggle_shell(&first, w, cx));
+        assert!(ws.read_with(&cx, |ws, _| !ws.shells[&first].open), "toggled shut");
+        step(&mut cx, &|ws, w, cx| ws.toggle_shell(&first, w, cx));
+        // Dragging the divider resizes the panel within bounds.
+        step(&mut cx, &|ws, _w, _cx| {
+            ws.shell_drag = Some(ShellDrag { id: first.clone(), y: 500.0, height: SHELL_HEIGHT });
+            ws.drag_shell(400.0, 900.0);
+            assert_eq!(ws.shells[&first].height, SHELL_HEIGHT + 100.0);
+            ws.drag_shell(10.0, 900.0);
+            assert_eq!(ws.shells[&first].height, 700.0, "keeps room for the terminal");
+            ws.drag_shell(5000.0, 900.0);
+            assert_eq!(ws.shells[&first].height, SHELL_MIN);
+            ws.shell_drag = None;
+        });
+        step(&mut cx, &|ws, w, cx| ws.close_live(&first, w, cx));
+        assert!(ws.read_with(&cx, |ws, _| !ws.shells.contains_key(&first)), "closing the session drops its shell");
+        // The GitHub pane is a main view for now: opens once per folder, "Ask Claude" starts a session.
+        step(&mut cx, &|ws, w, cx| ws.open_github(cwd.clone(), w, cx));
+        assert!(ws.read_with(&cx, |ws, _| ws.gh.len() == 1 && ws.active.as_ref().is_some_and(|a| ws.gh_pane(a).is_some())), "github pane shown");
+        step(&mut cx, &|ws, w, cx| ws.open_github(cwd.clone(), w, cx));
+        assert!(ws.read_with(&cx, |ws, _| ws.gh.len() == 1), "one github pane per folder");
+        let before = ws.read_with(&cx, |ws, _| ws.live.len());
+        step(&mut cx, &|ws, _w, cx| {
+            let view = ws.gh[0].view.clone();
+            view.update(cx, |_, cx| cx.emit(crate::github::view::GhEvent::AskClaude("explain issue 1".into())));
+        });
+        assert!(ws.read_with(&cx, |ws, _| ws.live.len() == before + 1 && ws.active.as_ref().is_some_and(|a| ws.gh_pane(a).is_none())), "Ask Claude opens a session");
+    }
+
+    #[test]
+    #[ignore]
+    fn sessions_and_the_shell_panel() {
+        let t = std::thread::spawn(sessions_and_shell);
+        let start = std::time::Instant::now();
+        while !t.is_finished() {
+            assert!(start.elapsed() < Duration::from_secs(120), "the workspace froze");
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        t.join().unwrap();
     }
 
     #[test]

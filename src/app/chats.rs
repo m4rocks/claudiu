@@ -3,12 +3,9 @@
 
 use super::*;
 
-/// The main window's panes, set aside while the other sidebar tab is open.
+/// What the main window showed, set aside while the other sidebar tab is open.
 pub struct Layout {
-    pub panes: Vec<Id>,
-    pub groups: Vec<Vec<Id>>,
-    pub active_slot: usize,
-    pub focused: usize,
+    pub active: Option<Id>,
     pub recent: Vec<Id>,
     pub main: Main,
     pub selected: Option<Id>,
@@ -16,7 +13,7 @@ pub struct Layout {
 
 impl Layout {
     fn empty() -> Self {
-        Self { panes: vec![], groups: vec![], active_slot: usize::MAX, focused: 0, recent: vec![], main: Main::Home, selected: None }
+        Self { active: None, recent: vec![], main: Main::Home, selected: None }
     }
 }
 
@@ -46,7 +43,7 @@ impl Workspace {
         self.chats.iter().find(|p| p.id == id)
     }
 
-    /// Folder and title of a pane that is neither a terminal nor GitHub, for the top bar and split headers.
+    /// Title of a chat, for the top bar.
     pub fn chat_title(&self, id: &str) -> Option<String> {
         self.chat_pane(id).and_then(|p| self.chat_store.get(&p.id)).map(|r| r.title.clone())
     }
@@ -69,14 +66,11 @@ impl Workspace {
     }
 
     /// Switch the sidebar tab and remember it for the next launch. Each tab keeps its own main window: leaving one parks
-    /// its panes, and the other tab gets back what it showed (the welcome page if it showed nothing).
+    /// its session, and the other tab gets back what it showed (the welcome page if it showed nothing).
     pub(super) fn set_side(&mut self, side: Side) {
         if side != self.side {
             let leaving = Layout {
-                panes: std::mem::take(&mut self.panes),
-                groups: std::mem::take(&mut self.groups),
-                active_slot: self.active_slot,
-                focused: self.focused,
+                active: self.active.take(),
                 recent: std::mem::take(&mut self.recent),
                 main: self.main,
                 selected: self.selected.take(),
@@ -85,12 +79,9 @@ impl Workspace {
             // A session may have ended or been closed while the tab was away.
             let open = |ws: &Self, id: &Id| ws.live_view(id).is_some() || ws.gh_pane(id).is_some() || ws.chat_pane(id).is_some();
             let keep = |ws: &Self, ids: Vec<Id>| ids.into_iter().filter(|id| open(ws, id)).collect::<Vec<_>>();
-            self.groups = back.groups.into_iter().map(|g| keep(self, g)).filter(|g| !g.is_empty()).collect();
-            self.panes = keep(self, back.panes);
+            self.active = back.active.filter(|id| open(self, id));
             self.recent = keep(self, back.recent);
-            self.active_slot = back.active_slot;
-            self.focused = back.focused.min(self.panes.len().saturating_sub(1));
-            self.main = if self.panes.is_empty() { Main::Home } else { back.main };
+            self.main = if self.active.is_none() { Main::Home } else { back.main };
             self.selected = back.selected.filter(|id| open(self, id) || self.chat_store.get(id).is_some() || self.store.session(id).is_some());
         }
         self.side = side;
@@ -104,7 +95,7 @@ impl Workspace {
     }
 
     /// A new chat. It belongs to no project unless `cwd` names one; `prompt` is sent as its first message.
-    pub fn new_chat(&mut self, cwd: Option<PathBuf>, prompt: Option<String>, split: bool, window: &mut Window, cx: &mut Context<Self>) -> Id {
+    pub fn new_chat(&mut self, cwd: Option<PathBuf>, prompt: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> Id {
         let cwd = cwd.unwrap_or_else(scratch_dir);
         let rec = ChatRecord {
             id: new_id(),
@@ -118,15 +109,8 @@ impl Workspace {
         };
         let id = rec.id.clone();
         self.chat_store.add(rec);
-        if !split {
-            self.set_side(Side::Chat);
-        }
-        if split && !self.panes.is_empty() {
-            let at = self.focused;
-            self.with_pane_after(at, |ws| ws.open_chat(&id, window, cx));
-        } else {
-            self.open_chat(&id, window, cx);
-        }
+        self.set_side(Side::Chat);
+        self.open_chat(&id, window, cx);
         if let (Some(prompt), Some(pane)) = (prompt, self.chat_pane(&id)) {
             pane.view.update(cx, |v, _| v.send_when_ready(prompt));
         }
@@ -279,7 +263,6 @@ Write the title.");
         let live = self.chat_pane(id).is_some();
         let item = |label: &str, act: Act, danger: bool, sep: bool| MenuItem { label: label.into(), hint: None, act, danger, disabled: false, separator_before: sep };
         let mut items = vec![item(if live { "Switch to chat" } else { "Open chat" }, Act::OpenChat(id.into()), false, false)];
-        items.extend(self.split_items(&id.to_string(), true));
         items.push(item("Regenerate title", Act::RegenTitle(id.into()), false, false));
         if let Some(sid) = &rec.session_id {
             items.push(item("Copy Claude session ID", Act::CopyText(sid.clone()), false, true));

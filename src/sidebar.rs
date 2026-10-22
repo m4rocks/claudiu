@@ -198,10 +198,10 @@ impl Workspace {
             items.push(item("Switch to session", Act::Select(rec.id.clone()), false, false));
         } else if rec.kind == SessionKind::Claude {
             items.push(item("Resume session", Act::Resume(rec.id.clone()), false, false));
-        } else {
-            items.push(item("Open new shell here", Act::NewShell { cwd: rec.cwd.clone() }, false, false));
         }
-        items.extend(self.split_items(&rec.id, running || rec.kind == SessionKind::Claude));
+        if running && rec.kind == SessionKind::Claude {
+            items.push(item("Show or hide shell", Act::ToggleShell(rec.id.clone()), false, false));
+        }
         items.push(item("Rename…", Act::Rename(rec.id.clone()), false, false));
         if rec.kind == SessionKind::Claude {
             items.push(item("Regenerate title", Act::RegenTitle(rec.id.clone()), false, false));
@@ -219,37 +219,14 @@ impl Workspace {
         items
     }
 
-    /// Which split holds `id`: `Some(None)` the one on screen, `Some(Some(i))` the parked split `groups[i]`.
-    fn split_slot(&self, id: &Id) -> Option<Option<usize>> {
-        if self.panes.len() > 1 && self.panes.contains(id) {
-            Some(None)
-        } else {
-            self.groups.iter().position(|g| g.contains(id)).map(Some)
-        }
-    }
-
-    /// "Add to split" / "Remove from split" for a session row, when it applies.
-    pub(crate) fn split_items(&self, id: &Id, can_open: bool) -> Option<MenuItem> {
-        let item = |label: &str, act: Act| MenuItem { label: label.into(), hint: None, act, danger: false, disabled: false, separator_before: false };
-        if self.split_slot(id).is_some() {
-            Some(item("Remove from split", Act::RemoveFromSplit(id.clone())))
-        } else {
-            (can_open && !self.panes.is_empty() && self.panes.len() < 4 && !self.panes.contains(id)).then(|| item("Add to split", Act::AddToSplit(id.clone())))
-        }
-    }
-
     fn project_menu(&self, p: &Project) -> Vec<MenuItem> {
         let item = |label: String, act: Act, danger: bool, sep: bool| MenuItem { label, hint: None, act, danger, disabled: false, separator_before: sep };
         let mut items = vec![
             item("New Claude session here".into(), Act::NewClaude { cwd: p.path.clone() }, false, false),
-            item("New shell here".into(), Act::NewShell { cwd: p.path.clone() }, false, false),
-            item("New chat here".into(), Act::NewChat { cwd: Some(p.path.clone()), split: false }, false, false),
+            item("New chat here".into(), Act::NewChat { cwd: Some(p.path.clone()) }, false, false),
         ];
         if p.git.is_some() {
-            items.push(item("GitHub issues & PRs".into(), Act::OpenGithub { cwd: p.path.clone(), split: false }, false, true));
-            if !self.panes.is_empty() {
-                items.push(item("GitHub issues & PRs in split".into(), Act::OpenGithub { cwd: p.path.clone(), split: true }, false, false));
-            }
+            items.push(item("GitHub issues & PRs".into(), Act::OpenGithub { cwd: p.path.clone() }, false, true));
         }
         let mut first = true;
         for (editor, found) in &self.editors {
@@ -279,32 +256,11 @@ impl Workspace {
                     if from == this || !ev.bounds.contains(&ev.event.position) || !ws.pointer_moved(ev.event.position) {
                         return;
                     }
-                    // Rows of a split card reorder that split; the others reorder the session list.
-                    match (ws.split_slot(&from), ws.split_slot(&this)) {
-                        (Some(a), Some(b)) if a == b => {
-                            let focused = ws.panes.get(ws.focused).cloned();
-                            let v = match a {
-                                None => &mut ws.panes,
-                                Some(g) => &mut ws.groups[g],
-                            };
-                            if let (Some(from), Some(to)) = (v.iter().position(|p| *p == from), v.iter().position(|p| *p == this)) {
-                                move_to(v, from, to);
-                                if a.is_none() {
-                                    ws.focused = focused.and_then(|f| ws.panes.iter().position(|p| *p == f)).unwrap_or(0);
-                                }
-                                ws.last_swap = Instant::now();
-                                cx.notify();
-                            }
-                        }
-                        (None, None) => {
-                            let at = |id: &Id| ws.live.iter().position(|l| l.id == *id);
-                            if let (Some(from), Some(to)) = (at(&from), at(&this)) {
-                                move_to(&mut ws.live, from, to);
-                                ws.last_swap = Instant::now();
-                                cx.notify();
-                            }
-                        }
-                        _ => {}
+                    let at = |id: &Id| ws.live.iter().position(|l| l.id == *id);
+                    if let (Some(from), Some(to)) = (at(&from), at(&this)) {
+                        move_to(&mut ws.live, from, to);
+                        ws.last_swap = Instant::now();
+                        cx.notify();
                     }
                 }))
             })
@@ -350,7 +306,6 @@ impl Workspace {
                     } else if ws.gh_pane(&menu_id).is_some() {
                         let item = |label: &str, act: Act, danger: bool| MenuItem { label: label.into(), hint: None, act, danger, disabled: false, separator_before: false };
                         let mut items = vec![item("Switch to pane", Act::Select(menu_id.clone()), false)];
-                        items.extend(ws.split_items(&menu_id, true));
                         items.push(MenuItem { separator_before: true, ..item("Close", Act::CloseLive(menu_id.clone()), true) });
                         ws.open_menu(ev.position, items, cx);
                     }
@@ -403,38 +358,6 @@ impl Workspace {
                         })),
                 )
             })
-    }
-
-    /// The sessions (terminals, GitHub panes and chats alike) of one split as a compact card: just the rows, with
-    /// an accent rail down the edge while the split is the one on screen.
-    fn render_split_group(&self, rows: Vec<Row>, shown: bool, cx: &mut Context<Self>) -> Div {
-        rows.into_iter().fold(
-            div()
-                .relative()
-                .mx(px(6.0))
-                .py(px(2.0))
-                .rounded(px(8.0))
-                .border_1()
-                .border_color(hsla(theme::BORDER))
-                .bg(hsla(0x101011))
-                .child(div().absolute().left(px(0.0)).top(px(8.0)).bottom(px(8.0)).w(px(2.0)).rounded_r(px(2.0)).bg(if shown { hsla(theme::ACCENT).opacity(0.75) } else { hsla(theme::TEXT_FAINT).opacity(0.4) })),
-            |card, row| {
-                let el = if row.scope == "chat" { self.render_row(row, cx) } else { self.session_row(row, true, cx) };
-                card.child(el.h(px(24.0)).mx(px(3.0)))
-            },
-        )
-    }
-
-    /// One card per split that has a member in this tab, with every member (in pane order) as a row.
-    /// `here` says whether a member belongs to the tab, `row` builds a member's row.
-    fn split_cards(&self, here: impl Fn(&Id) -> bool, row: impl Fn(&Id) -> Option<Row>) -> Vec<(Vec<Row>, bool)> {
-        let shown = (self.panes.len() > 1).then(|| self.panes.clone());
-        self.splits()
-            .into_iter()
-            .filter(|g| g.iter().any(&here))
-            .map(|g| (g.iter().filter_map(&row).collect::<Vec<_>>(), shown.as_ref() == Some(&g)))
-            .filter(|(members, _)| !members.is_empty())
-            .collect()
     }
 
     fn gh_row(&self, p: &crate::app::GhPane) -> Row {
@@ -505,34 +428,18 @@ impl Workspace {
                 .filter(|p| q.is_empty() || "github issues pull requests".contains(&q) || p.project.to_lowercase().contains(&q))
                 .map(|p| self.gh_row(p)),
         );
-        // Sessions sharing a split are drawn together, in pane order: one card per split (the shown one lit).
-        // A chat in the split is a row of the card too.
-        let cards = self.split_cards(
-            |id| rows.iter().any(|r| r.id == *id),
-            |id| {
-                rows.iter().find(|r| r.id == *id).cloned().or_else(|| {
-                    let rec = self.chat_store.get(id)?;
-                    self.chat_pane(id).map(|_| self.chat_row(rec, cx))
-                })
-            },
-        );
-        let splits = self.splits();
-        let current: Vec<Row> = rows.into_iter().filter(|r| !splits.iter().any(|g| g.contains(&r.id))).collect();
+        let current = rows;
         let current_total = self.running_count(cx) + self.gh.len();
 
         let mut body = div().flex().flex_col().gap(px(2.0));
 
         body = body.child(self.section_header("CURRENT SESSION", Some(current_total.to_string()), None::<Stateful<Div>>));
-        let has_group = !cards.is_empty();
-        for (members, shown) in cards {
-            body = body.child(self.render_split_group(members, shown, cx));
-        }
-        if current.is_empty() && !has_group {
+        if current.is_empty() {
             body = body.child(
                 div().px(px(18.0)).py(px(6.0)).text_size(px(12.0)).text_color(hsla(theme::TEXT_FAINT)).child(if searching {
                     "No running sessions match"
                 } else {
-                    "Nothing running. Start a Claude session or a shell."
+                    "Nothing running. Start a Claude session."
                 }),
             );
         }
@@ -735,7 +642,7 @@ impl Workspace {
 
     fn render_sidebar_header(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let cwd = self.active_cwd();
-        let (cwd_a, cwd_b) = (cwd.clone(), cwd);
+        let cwd_a = cwd;
         div()
             .flex()
             .flex_col()
@@ -766,20 +673,16 @@ impl Workspace {
                             .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::NewClaude { cwd: cwd_a.clone() }, window, cx))),
                     )
                     .child(
-                        button("new-shell", "+ Shell", false)
-                            .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::NewShell { cwd: cwd_b.clone() }, window, cx))),
-                    )
-                    .child(
                         button("new-github", "GitHub", false)
                             .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
                                 let cwd = ws.active_cwd();
-                                ws.act(Act::OpenGithub { cwd, split: false }, window, cx)
+                                ws.act(Act::OpenGithub { cwd }, window, cx)
                             })),
                     ),
             ))
             .when(self.side == Side::Chat, |h| {
                 h.child(div().occlude().flex().child(
-                    button("new-chat", "+ New chat", true).on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::NewChat { cwd: None, split: false }, window, cx))),
+                    button("new-chat", "+ New chat", true).on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::NewChat { cwd: None }, window, cx))),
                 ))
             })
             .child(
@@ -825,25 +728,7 @@ impl Workspace {
             .collect();
         recs.sort_by_key(|r| std::cmp::Reverse(r.last_active));
         let total = recs.len();
-        // A split with a chat in it is one card (its terminals and GitHub panes included); the chats in it leave the list.
-        let cards = self.split_cards(
-            |id| recs.iter().any(|r| r.id == *id),
-            |id| {
-                if let Some(rec) = self.chat_store.get(id) {
-                    return Some(self.chat_row(rec, cx));
-                }
-                if let Some(rec) = self.store.session(id) {
-                    return Some(self.row_for(rec, true, true));
-                }
-                self.gh_pane(id).map(|p| self.gh_row(p))
-            },
-        );
-        let splits = self.splits();
-        recs.retain(|r| !splits.iter().any(|g| g.contains(&r.id) && g.len() > 1));
         let mut body = div().flex().flex_col().gap(px(2.0)).child(self.section_header("CHATS", Some(total.to_string()), None::<Stateful<Div>>));
-        for (members, shown) in cards {
-            body = body.child(self.render_split_group(members, shown, cx));
-        }
         if recs.is_empty() && total == 0 {
             body = body.child(div().px(px(18.0)).py(px(6.0)).text_size(px(12.0)).text_color(hsla(theme::TEXT_FAINT)).child(if q.is_empty() {
                 "No chats yet. Start one with + New chat."

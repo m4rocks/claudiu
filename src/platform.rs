@@ -45,19 +45,6 @@ pub fn through_login_shell(program: String, args: Vec<String>) -> (String, Vec<S
     }
 }
 
-pub fn shell_label(program: &str) -> String {
-    let stem = Path::new(program).file_stem().and_then(|s| s.to_str()).unwrap_or(program);
-    match stem.to_ascii_lowercase().as_str() {
-        "pwsh" => "PowerShell 7".into(),
-        "powershell" => "PowerShell".into(),
-        "cmd" => "Command Prompt".into(),
-        "zsh" => "zsh".into(),
-        "bash" => "bash".into(),
-        "fish" => "fish".into(),
-        other => other.to_string(),
-    }
-}
-
 pub fn home_dir() -> Option<PathBuf> {
     directories::BaseDirs::new().map(|d| d.home_dir().to_path_buf())
 }
@@ -263,12 +250,5 @@ mod tests {
     fn env_expansion() {
         unsafe { std::env::set_var("CLAUDIU_TEST_X", "val") };
         assert_eq!(expand_env("a%CLAUDIU_TEST_X%b"), "avalb");
-    }
-
-    #[test]
-    fn shell_labels() {
-        #[cfg(windows)]
-        assert_eq!(shell_label(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"), "PowerShell");
-        assert_eq!(shell_label("/bin/zsh"), "zsh");
     }
 }

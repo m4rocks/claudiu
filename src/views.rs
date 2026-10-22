@@ -1,4 +1,4 @@
-//! Main area (terminal panes / session details / home), overlays (menu, modal, toast), and the root `Render`.
+//! Main area (the shown session / home), overlays (menu, modal, toast), and the root `Render`.
 
 use gpui::{
     AnyElement, ClickEvent, Context, FontWeight, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
@@ -8,8 +8,8 @@ use gpui::{
 
 use crate::app::{
     Side,
-    Act, CloseSession, GitOp, MenuItem, FocusNextPane, FocusSearch, ImportProject, Main, Modal, NewChat, NewClaude, NewShell, NextSession, OpenGithub, OpenSettings, PrevSession, SplitPane,
-    ToggleSidebar, Workspace,
+    Act, CloseSession, GitOp, MenuItem, FocusSearch, ImportProject, Main, Modal, NewChat, NewClaude, NextSession, OpenGithub, OpenSettings, PrevSession, ShellDrag, SwapFocus,
+    ToggleShell, ToggleSidebar, Workspace, SHELL_HEIGHT,
 };
 use gpui_kit::component::{TitleBar, input::Input};
 use crate::platform::Editor;
@@ -40,24 +40,9 @@ impl Workspace {
         let in_terminals = matches!(self.main, Main::Terminals);
 
         let mut right = div().flex().flex_none().items_center().gap(px(6.0));
-        if in_terminals {
-            right = right.child(
-                icon_button("split", IconName::SquareSplitHorizontal).on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|ws, ev: &MouseDownEvent, _w, cx| {
-                        let items = ws.split_menu(cx);
-                        ws.open_menu(ev.position, items, cx);
-                    }),
-                ),
-            );
-            if self.panes.len() > 1 {
-                right = right.child(
-                    icon_button("orient", if self.split_vertical { IconName::Rows2 } else { IconName::Columns2 }).on_click(cx.listener(|ws, _: &ClickEvent, _w, cx| {
-                        ws.split_vertical = !ws.split_vertical;
-                        cx.notify();
-                    })),
-                );
-            }
+        let shell_for = self.active_id().filter(|id| self.store.session(id).is_some_and(|r| r.kind == SessionKind::Claude)).cloned();
+        if let (true, Some(id)) = (in_terminals, shell_for) {
+            right = right.child(icon_button("shell", IconName::Terminal).on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::ToggleShell(id.clone()), window, cx))));
         }
         if let Some(path) = cwd.clone() {
             let target = project.as_ref().map(|p| p.path.clone()).unwrap_or(path);
@@ -234,135 +219,104 @@ impl Workspace {
         )
     }
 
-    // ------------------------------------------------------------------ panes
+    // ------------------------------------------------------------------ the shown session
 
-    /// `avail_w` is the width left of the sidebar; a GitHub pane uses its share of it to pick its layout.
-    fn render_panes(&mut self, avail_w: f32, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let n = self.panes.len();
-        let mut container = div().flex().size_full().gap(px(1.0)).bg(hsla(theme::BORDER));
-        container = if self.split_vertical { container.flex_col() } else { container.flex_row() };
-
-        for (i, id) in self.panes.clone().into_iter().enumerate() {
-            let gh = self.gh_pane(&id).map(|p| (p.view.clone(), p.project.clone()));
-            let chat = self.chat_pane(&id).map(|p| p.view.clone());
-            let term = if gh.is_none() && chat.is_none() { self.live_view(&id).cloned() } else { None };
-            if gh.is_none() && chat.is_none() && term.is_none() {
-                continue;
-            }
-            let rec = self.store.session(&id).cloned();
-            let exit = term.as_ref().and_then(|v| v.read(cx).exit_code);
-            let focused = i == self.focused;
-            let title = match &gh {
-                Some((_, project)) => format!("GitHub · {project}"),
-                None if chat.is_some() => self.chat_title(&id).unwrap_or_default(),
-                None => rec.as_ref().map(|r| r.display_title().to_string()).unwrap_or_default(),
-            };
-            let is_claude = rec.as_ref().is_some_and(|r| r.kind == SessionKind::Claude);
-            let cwd = rec.as_ref().map(|r| r.cwd.clone());
-            let (rid, cid) = (id.clone(), id.clone());
-
-            let header = (n > 1).then(|| {
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .h(px(26.0))
-                    .flex_none()
-                    .px(px(10.0))
-                    .bg(hsla(theme::APP_BG))
-                    .child(
-                        div()
-                            .text_size(px(11.5))
-                            .text_color(hsla(if focused { theme::TEXT } else { theme::TEXT_DIM }))
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .child(title.clone()),
-                    )
-                    .child(icon_button(gpui::SharedString::from(format!("pane-x-{i}")), IconName::X).on_click(cx.listener(
-                        move |ws, _: &ClickEvent, window, cx| {
-                            cx.stop_propagation();
-                            ws.act(Act::CloseLive(cid.clone()), window, cx)
-                        },
-                    )))
-            });
-
-            let banner = exit.map(|code| {
-                let label = match code {
-                    Some(0) | None => "Session ended".to_string(),
-                    Some(c) => format!("Session ended (exit code {c})"),
-                };
-                let primary = if is_claude { "Resume" } else { "New shell here" };
-                let act = if is_claude {
-                    Act::Resume(rid.clone())
-                } else {
-                    Act::NewShell { cwd: cwd.clone().unwrap_or_default() }
-                };
-                div()
-                    .absolute()
-                    .bottom(px(12.0))
-                    .left(px(12.0))
-                    .right(px(12.0))
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .px(px(12.0))
-                    .py(px(8.0))
-                    .rounded(px(8.0))
-                    .bg(hsla(0x181818))
-                    .border_1()
-                    .border_color(hsla(0x2a2a2a))
-                    .child(div().text_size(px(12.5)).text_color(hsla(theme::TEXT_DIM)).child(label))
-                    .child(div().flex().gap(px(6.0)).child(
-                        button(gpui::SharedString::from(format!("ended-act-{i}")), primary, true).on_click(cx.listener(
-                            move |ws, _: &ClickEvent, window, cx| ws.act(act.clone(), window, cx),
-                        )),
-                    ))
-            });
-
-            container = container.child(fade_in(
-                div()
-                    .id(gpui::SharedString::from(format!("pane-{i}")))
-                    .relative()
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .min_w_0()
-                    .min_h_0()
-                    .bg(hsla(theme::TERMINAL_BG))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |ws, _: &MouseDownEvent, window, cx| {
-                            if ws.focused != i {
-                                ws.focus_pane(i, window, cx);
-                            }
-                        }),
-                    )
-                    .children(header)
-                    .child(match (gh, chat, term) {
-                        (Some((view, _)), ..) => {
-                            let w = if self.split_vertical { avail_w } else { avail_w / n as f32 };
-                            view.update(cx, |v, _| v.width = w);
-                            div().flex_1().min_h_0().child(view)
-                        }
-                        (None, Some(view), _) => div().flex_1().min_h_0().child(view),
-                        (None, None, Some(view)) => div().flex_1().min_h_0().p(px(8.0)).child(view),
-                        _ => div(),
-                    })
-                    .children(banner),
-                format!("pane-in-{id}"),
-                150,
-                0.4,
-            ));
+    /// `avail_w` is the width left of the sidebar; a GitHub pane uses it to pick its layout.
+    fn render_session(&mut self, avail_w: f32, cx: &mut Context<Self>) -> AnyElement {
+        let blank = || div().size_full().bg(hsla(theme::TERMINAL_BG)).into_any_element();
+        let Some(id) = self.active.clone() else { return blank() };
+        let gh = self.gh_pane(&id).map(|p| p.view.clone());
+        let chat = self.chat_pane(&id).map(|p| p.view.clone());
+        let term = if gh.is_none() && chat.is_none() { self.live_view(&id).cloned() } else { None };
+        if gh.is_none() && chat.is_none() && term.is_none() {
+            return blank();
         }
-        container
+        let rec = self.store.session(&id).cloned();
+        let exit = term.as_ref().and_then(|v| v.read(cx).exit_code);
+        let is_claude = rec.as_ref().is_some_and(|r| r.kind == SessionKind::Claude);
+        let rid = id.clone();
+
+        let banner = exit.map(|code| {
+            let label = match code {
+                Some(0) | None => "Session ended".to_string(),
+                Some(c) => format!("Session ended (exit code {c})"),
+            };
+            div()
+                .absolute()
+                .bottom(px(12.0))
+                .left(px(12.0))
+                .right(px(12.0))
+                .flex()
+                .items_center()
+                .justify_between()
+                .px(px(12.0))
+                .py(px(8.0))
+                .rounded(px(8.0))
+                .bg(hsla(0x181818))
+                .border_1()
+                .border_color(hsla(0x2a2a2a))
+                .child(div().text_size(px(12.5)).text_color(hsla(theme::TEXT_DIM)).child(label))
+                .children(is_claude.then(|| {
+                    button("ended-act", "Resume", true).on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::Resume(rid.clone()), window, cx)))
+                }))
+        });
+
+        let pane = fade_in(
+            div()
+                .id("pane")
+                .relative()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_w_0()
+                .min_h_0()
+                .bg(hsla(theme::TERMINAL_BG))
+                .child(match (gh, chat, term) {
+                    (Some(view), ..) => {
+                        view.update(cx, |v, _| v.width = avail_w);
+                        div().flex_1().min_h_0().child(view)
+                    }
+                    (None, Some(view), _) => div().flex_1().min_h_0().child(view),
+                    (None, None, Some(view)) => div().flex_1().min_h_0().p(px(8.0)).child(view),
+                    _ => div(),
+                })
+                .children(banner),
+            format!("pane-in-{id}"),
+            150,
+            0.4,
+        );
+        let mut container = div().flex().flex_col().size_full().gap(px(1.0)).bg(hsla(theme::BORDER)).child(pane);
+
+        // The session's shell, under its terminal, with a divider to drag it taller or shorter.
+        if let Some((view, height)) = self.shells.get(&id).filter(|p| p.open).map(|p| (p.view.clone(), p.height)) {
+            let drag_id = id.clone();
+            container = container
+                .child(
+                    div()
+                        .id("shell-divider")
+                        .h(px(5.0))
+                        .flex_none()
+                        .bg(hsla(theme::BORDER))
+                        .cursor_row_resize()
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |ws, ev: &MouseDownEvent, _w, cx| {
+                                let height = ws.shells.get(&drag_id).map_or(SHELL_HEIGHT, |p| p.height);
+                                ws.shell_drag = Some(ShellDrag { id: drag_id.clone(), y: f32::from(ev.position.y), height });
+                                cx.notify();
+                            }),
+                        ),
+                )
+                .child(div().h(px(height)).flex_none().bg(hsla(theme::TERMINAL_BG)).p(px(8.0)).child(view));
+        }
+        container.into_any_element()
     }
 
     // ------------------------------------------------------------------ details & home
 
     fn render_home(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let cwd = self.active_cwd();
-        let (c1, c2) = (cwd.clone(), cwd);
+        let c1 = cwd;
         let shortcut = |keys: &str, what: &str| {
             div()
                 .flex()
@@ -412,9 +366,6 @@ impl Workspace {
                     .child(button("home-claude", "New Claude session", true).on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
                         ws.act(Act::NewClaude { cwd: c1.clone() }, window, cx)
                     })))
-                    .child(button("home-shell", "New shell", false).on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
-                        ws.act(Act::NewShell { cwd: c2.clone() }, window, cx)
-                    })))
                     .child(button("home-import", "Add project", false).on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::ImportProject, window, cx)))),
             )
             .child(recent)
@@ -425,8 +376,7 @@ impl Workspace {
                     .flex_col()
                     .gap(px(4.0))
                     .child(shortcut("Ctrl+Shift+N", "New Claude session"))
-                    .child(shortcut("Ctrl+Shift+T", "New shell"))
-                    .child(shortcut("Ctrl+Shift+D", "Split pane"))
+                    .child(shortcut("Ctrl+Shift+T", "Show or hide shell"))
                     .child(shortcut("Ctrl+Tab", "Next session"))
                     .child(shortcut("Ctrl+Shift+W", "End session")),
             )
@@ -480,7 +430,7 @@ impl Workspace {
                     .mt(px(22.0))
                     .flex()
                     .gap(px(8.0))
-                    .child(button("home-chat", "New chat", true).on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::NewChat { cwd: None, split: false }, window, cx)))),
+                    .child(button("home-chat", "New chat", true).on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::NewChat { cwd: None }, window, cx)))),
             )
             .child(recent)
             .child(
@@ -490,7 +440,6 @@ impl Workspace {
                     .flex_col()
                     .gap(px(4.0))
                     .child(shortcut("Ctrl+Shift+M", "New chat"))
-                    .child(shortcut("Ctrl+Shift+D", "Split pane"))
                     .child(shortcut("Ctrl+Tab", "Next session"))
                     .child(shortcut("Ctrl+Shift+W", "End session")),
             )
@@ -734,15 +683,19 @@ impl Render for Workspace {
         let banner = self.render_update_banner(cx);
         let topbar = self.render_topbar(cx);
         // Terminals that aren't on screen keep running but must not trigger window redraws on every output burst.
-        let showing: &[crate::store::Id] = if matches!(self.main, Main::Terminals) { &self.panes } else { &[] };
+        let showing = if matches!(self.main, Main::Terminals) { self.active.as_ref() } else { None };
         for l in &self.live {
-            let visible = showing.contains(&l.id);
+            let visible = showing == Some(&l.id);
             l.view.update(cx, |v, _| v.visible = visible);
+        }
+        for (owner, p) in &self.shells {
+            let visible = p.open && showing == Some(owner);
+            p.view.update(cx, |v, _| v.visible = visible);
         }
         let sidebar_w = if self.store.data.layout.sidebar_visible { crate::sidebar::SIDEBAR_W } else { 0.0 };
         let avail_w = f32::from(window.viewport_size().width) - sidebar_w;
         let main: AnyElement = match &self.main {
-            Main::Terminals => self.render_panes(avail_w, cx).into_any_element(),
+            Main::Terminals => self.render_session(avail_w, cx),
             Main::Home if self.side == Side::Chat => self.render_chat_home(cx).into_any_element(),
             Main::Home => self.render_home(cx).into_any_element(),
         };
@@ -763,19 +716,19 @@ impl Render for Workspace {
                 let cwd = ws.active_cwd();
                 ws.act(Act::NewClaude { cwd }, window, cx)
             }))
-            .on_action(cx.listener(|ws, _: &NewChat, window, cx| ws.act(Act::NewChat { cwd: None, split: false }, window, cx)))
-            .on_action(cx.listener(|ws, _: &NewShell, window, cx| {
-                let cwd = ws.active_cwd();
-                ws.act(Act::NewShell { cwd }, window, cx)
+            .on_action(cx.listener(|ws, _: &NewChat, window, cx| ws.act(Act::NewChat { cwd: None }, window, cx)))
+            .on_action(cx.listener(|ws, _: &ToggleShell, window, cx| {
+                if let Some(id) = ws.active.clone() {
+                    ws.act(Act::ToggleShell(id), window, cx)
+                }
             }))
             .on_action(cx.listener(|ws, _: &CloseSession, window, cx| {
-                if let Some(id) = ws.panes.get(ws.focused).cloned() {
+                if let Some(id) = ws.active.clone() {
                     ws.act(Act::CloseLive(id), window, cx)
                 }
             }))
             .on_action(cx.listener(|ws, _: &NextSession, window, cx| ws.cycle(1, window, cx)))
             .on_action(cx.listener(|ws, _: &PrevSession, window, cx| ws.cycle(-1, window, cx)))
-            .on_action(cx.listener(|ws, _: &SplitPane, window, cx| ws.split(window, cx)))
             .on_action(cx.listener(|ws, _: &ToggleSidebar, _w, cx| {
                 ws.store.data.layout.sidebar_visible = !ws.store.data.layout.sidebar_visible;
                 ws.store.mark_dirty();
@@ -789,17 +742,29 @@ impl Render for Workspace {
             .on_action(cx.listener(|ws, _: &ImportProject, window, cx| ws.act(Act::ImportProject, window, cx)))
             .on_action(cx.listener(|ws, _: &OpenGithub, window, cx| {
                 let cwd = ws.active_cwd();
-                ws.act(Act::OpenGithub { cwd, split: false }, window, cx)
+                ws.act(Act::OpenGithub { cwd }, window, cx)
             }))
             .on_action(cx.listener(|ws, _: &OpenSettings, window, cx| ws.act(Act::OpenSettings, window, cx)))
-            .on_action(cx.listener(|ws, _: &FocusNextPane, window, cx| {
-                if !ws.panes.is_empty() {
-                    let next = (ws.focused + 1) % ws.panes.len();
-                    ws.focus_pane(next, window, cx);
+            .on_action(cx.listener(|ws, _: &SwapFocus, window, cx| ws.swap_focus(window, cx)))
+            .on_mouse_move(cx.listener(|ws, ev: &gpui::MouseMoveEvent, window, cx| {
+                if ws.shell_drag.is_none() {
+                    return;
+                }
+                // The button was let go outside the window: stop following the pointer.
+                if ev.pressed_button != Some(MouseButton::Left) {
+                    ws.shell_drag = None;
+                } else {
+                    ws.drag_shell(f32::from(ev.position.y), f32::from(window.viewport_size().height));
+                }
+                cx.notify();
+            }))
+            .on_mouse_up(MouseButton::Left, cx.listener(|ws, _: &gpui::MouseUpEvent, _w, cx| {
+                if ws.shell_drag.take().is_some() {
+                    cx.notify();
                 }
             }))
             .on_drop(cx.listener(|ws, paths: &gpui::ExternalPaths, window, cx| {
-                let focused = ws.panes.get(ws.focused).and_then(|id| ws.live_view(id)).cloned();
+                let focused = ws.active.as_ref().and_then(|id| ws.live_view(id)).cloned();
                 if let (Some(view), Main::Terminals) = (focused, &ws.main) {
                     // Over a terminal, files go to the session as paths (Claude Code attaches images).
                     view.update(cx, |v, cx| v.paste_paths(paths.paths(), cx));

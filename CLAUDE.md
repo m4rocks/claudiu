@@ -127,10 +127,7 @@ Consider later supporting discovery of repositories under user-selected workspac
 
 # Session model
 
-A session is a persistent record representing either:
-
-1. a Claude Code CLI process, or
-2. a normal shell process.
+A session is a persistent record representing a Claude Code CLI process. (A shell is not a session of its own: each Claude session can show a shell under its terminal, see "Shell panel". The only other terminal tabs are short-lived sign-in flows, `claude auth login` and `gh auth login`.)
 
 Each live session has:
 
@@ -381,26 +378,25 @@ Possible future integrations:
 
 ---
 
-# Splits
+# Shell panel
 
-The application should support terminal splits if the GPUI architecture can accommodate them cleanly.
+The main area shows one session at a time. There are **no splits** (product owner decision: they were cumbersome).
 
-Example:
+Each Claude session can show a **shell under its terminal**, toggled with Ctrl+Shift+T (Cmd+Shift+T on macOS), the top bar's terminal button or the session's right-click menu. Ctrl+Shift+] moves the keyboard between Claude and the shell.
 
 ```text
-┌───────────────────────┬───────────────────────┐
-│ Claude                │ Claude                │
-│ project-a             │ project-b             │
-│                       │                       │
-├───────────────────────┴───────────────────────┤
-│ PowerShell                                     │
-│ project-a                                     │
+┌────────────────────────────────────────────────┐
+│ Claude                                         │
+│ project-a                                      │
+├────────────────────────────────────────────────┤  <- drag to resize
+│ shell, in the session's folder                 │
 └────────────────────────────────────────────────┘
 ```
 
-Each split remains backed by its own session/PTY.
-
-Splits must not create a special Claude integration; they are simply a layout of independent terminal sessions.
+- The shell is started the first time it is shown, in the session's folder, with the user's shell. It is a separate PTY, never listed in the sidebar and never persisted.
+- It keeps running while another session is shown, remembers its height for as long as the session lives, and ends with the session (closing it, or the session leaving the running list). If the shell itself exits, the panel closes and the next toggle starts a fresh one.
+- Chats have no shell panel.
+- The shell is not a special Claude integration; it is a plain terminal.
 
 ---
 
@@ -598,7 +594,7 @@ Build in this order unless implementation evidence strongly suggests otherwise:
 - Zed integration
 - project reveal/open-folder actions
 - session search
-- splits
+- shell panel
 - keyboard shortcuts
 - layout persistence
 
@@ -697,16 +693,16 @@ https://code.claude.com/docs/en/statusline
 - Theme: **black/dark-first**
 - Sidebar: **left-side, Claude Desktop-inspired**
 - First sidebar section: **Current Session**
-- Current Session contains both **Claude sessions and normal shells**
+- Current Session lists the running **Claude sessions** (and chats); a shell belongs to its session as a panel, not a list entry
 - Projects are **Git-first**
-- Normal shell sessions are supported
+- Each Claude session can show its own shell in a panel under its terminal
 - One PTY per session
 - Multiple sessions can run simultaneously
 - Switching tabs/sessions does not kill other sessions
 - Context meter is **per session**
 - 5-hour limit is **account-wide**
 - 7-day limit is **account-wide**
-- Splits are desired if technically practical
+- **No splits** (product owner decision, replaces the earlier wish for them): the main area shows one session
 - Projects have editor launchers, including VS Code and Zed
 - Startup should reconcile/import Claude Code sessions so the sidebar stays current
 - Claudiu does **not** use the user's Claude subscription directly
@@ -724,7 +720,7 @@ These are intentionally left for the implementation/specification round rather t
 3. How much metadata to import from Claude Code session records.
 4. Whether to add a background filesystem watcher in v1 or keep startup reconciliation only.
 5. Exact sidebar density, icons, typography, and spacing.
-6. Exact split UX and keyboard shortcuts.
+6. Exact keyboard shortcuts.
 7. Whether application restart should offer to restore the previous UI layout automatically.
 8. How to detect installed editors robustly on Windows and macOS.
 9. Whether Claudiu should support user-configured alternate shell profiles in addition to the platform default shell.

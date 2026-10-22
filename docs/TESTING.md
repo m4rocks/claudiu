@@ -18,7 +18,7 @@ Everything below needs eyes and a keyboard. Roughly ordered by risk. `[ ]` = not
 ## 2. Sessions and sidebar
 - [ ] CURRENT SESSION lists Claude *and* shell processes; hover shows ×.
 - [ ] Switch between sessions with clicks and Ctrl+Tab: the other terminals keep running (start something long in one).
-- [ ] Click a **former** session: it opens straight in Claude Code (`--resume`), no intermediate page. Click a former shell: a new shell opens in its folder.
+- [ ] Click a **former** session: it opens straight in Claude Code (`--resume`), no intermediate page.
 - [ ] Exit Claude (`/exit`): a banner appears with Resume; the entry moves out of CURRENT SESSION into its project's history.
 - [ ] Open a Claude session and close it before typing anything: it does **not** leave an empty "New Claude session" in history.
 - [ ] Session titles update from "New Claude session" to the real title after the first prompt (within ~5 s).
@@ -46,10 +46,12 @@ Everything below needs eyes and a keyboard. Roughly ordered by risk. `[ ]` = not
 - [ ] In the session, type `/advisor` (no argument) and `/autocompact`: the snapshot's `last_command` follows. Do not run the setting forms: they change your saved settings.
 - [ ] Close and reopen Claudiu: the meters show the last values with an age label, not blank. Sessions started outside Claudiu do not feed the meters (expected).
 
-## 6. Splits and layout
-- [ ] Ctrl+Shift+D splits (up to 4 panes), orientation button toggles rows/columns, clicking a pane focuses it, pane × ends that session.
+## 6. Shell panel and layout
+- [ ] There are no splits: no split button in the top bar, no "Add to split" in any menu, no Ctrl+Shift+D.
+- [ ] Ctrl+Shift+T (or the top-bar terminal button, or the row menu's "Show or hide shell") opens a shell under the Claude terminal, in the session's folder. Type in both; Ctrl+Shift+] moves the keyboard between them. Toggling again hides it, and the next toggle brings back the same shell with its history.
+- [ ] Drag the divider above the shell: it resizes, never below ~120 px and never past the window. Resize the window: both terminals re-wrap correctly. Switch to another session and back: the shell is still there at the same height.
+- [ ] Ending the Claude session ends its shell. Exiting the shell (`exit`) closes the panel; the next toggle starts a fresh one. Chats and the GitHub pane have no shell button.
 - [ ] The selected session and sidebar visibility are restored after restart (sessions themselves are history until clicked).
-- [ ] The top-bar ◫ button opens a dropdown: new shell / new Claude / GitHub in the split, running sessions to add, "Remove this pane from split", "Exit split". Right-click a sidebar row (including GitHub rows): "Add to split" / "Remove from split". Clicking a session outside the shown split shows it alone and keeps the split as its own card in CURRENT SESSION (you can have several); clicking any session of a card brings that whole split back. Ending a session removes it from its card; a card with one session left dissolves. At four panes the add items are greyed out.
 
 ## 7. Lifecycle
 - [ ] Ctrl+Shift+W / the row × / the pane × end a running session immediately (no prompt). Check Task Manager: no orphaned `claude.exe`/`pwsh.exe`/`conhost.exe` left behind.
@@ -68,17 +70,17 @@ Everything below needs eyes and a keyboard. Roughly ordered by risk. `[ ]` = not
 
 ## 10. Title bar and GitHub pane (never run by hand yet)
 - [ ] Windows: press on empty space anywhere along the top bar and the sidebar header and drag; the window moves. Double-click maximizes. The sidebar toggle, branch chip, right-hand buttons, settings icon, buttons row and search box still click normally.
-- [ ] Ctrl+Shift+G (or the sidebar "GitHub" button, or a project's ⋯ menu) opens one GitHub pane per project, listed under CURRENT SESSION; opening it again focuses it. "…in split" puts it beside the active session.
+- [ ] Ctrl+Shift+G (or the sidebar "GitHub" button, or a project's ⋯ menu) opens one GitHub pane per project, listed under CURRENT SESSION; opening it again focuses it.
 - [ ] Without `gh` or when signed out, the pane shows a neutral state; "Sign in" opens a shell tab running `gh auth login`. A folder with no GitHub remote says so.
 - [ ] Issues / Pull requests tabs show Open and Closed counts. The search box takes GitHub syntax (`is:open label:bug author:@me`), Enter applies it; the chips and Open/Closed tabs rewrite the query. Scroll to the end and "Load more" appends.
 - [ ] Pane narrower than ~860 px stacks list and detail with a "Back to list" button; wider shows them side by side.
 - [ ] Issue: open, comment, close (with reason), reopen, edit title/body, react, labels, assignees, milestone, lock. PR: Conversation / Commits / Files changed tabs, review (approve / request changes / comment), merge methods, auto-merge, ready / draft, update branch, delete branch, checkout.
-- [ ] "Ask Claude" starts a Claude session in a split next to the pane with a short prompt about the item.
+- [ ] "Ask Claude" starts a Claude session with a short prompt about the item, and shows it.
 - [ ] Automated, no window opens (all need a signed-in `gh`, except `headless`): `cargo test -- --ignored render` draws every pane state with real data; `schema` sends every GitHub mutation with made-up ids to catch type mismatches; `live` checks the queries; `headless` drives the real workspace (sessions, splits, parked splits, the GitHub pane) and fails if starting a session blocks the window for 400 ms; `e2e` (about 4 minutes) runs every pane action against a throwaway private repo it creates on your account (`claudiu-gh-pane-test-<time>`; deleting it needs the `delete_repo` scope, otherwise `gh repo delete <name> --yes`).
 
 ## 11. Chat tab (Claude through ACP)
 Automated: `cargo test -- --ignored headless` also installs the adapter into a throwaway data folder, starts a chat, checks it lists the agent's skills and commands, sends one tiny prompt (costs a few cents), closes the chat and reopens it from history. Needs Node.js, npm and a signed-in `claude`.
-- [ ] The sidebar tabs **Chat | Code** (Chat first) switch the list; Code keeps + Claude / + Shell / GitHub, Chat shows + New chat and the chat list. Search filters whichever list is shown. A chat's conversation never shows up in the Code list after a rescan.
+- [ ] The sidebar tabs **Chat | Code** (Chat first) switch the list; Code keeps + Claude / GitHub, Chat shows + New chat and the chat list. Search filters whichever list is shown. A chat's conversation never shows up in the Code list after a rescan.
 - [ ] **+ New chat** opens the empty chat at once with the cursor in the box; Claude starts behind it with no "Starting" message. Type and send before it is ready: the message shows right away and is delivered as soon as Claude is up, in order.
 - [ ] First **+ New chat** shows "Setting up the Claude adapter (first time only)…" (one `npm install` into `<data>/acp`, about 15 s), then the empty chat. Later chats start in a few seconds.
 - [ ] Without Node.js the pane says so with a link; with a broken `claude` path it says Claude Code was not found. "Try again" retries.
@@ -87,7 +89,6 @@ Automated: `cargo test -- --ignored headless` also installs the adapter into a t
 - [ ] Streaming text renders as Markdown; tool calls show as rows (click to see output); plans show as a checklist; Stop cancels the turn.
 - [ ] Mode / model chips under the input open a picker; the choice applies to the next message. In Manual mode a tool call shows "Claude asks permission" with buttons; a turn never hangs waiting for it.
 - [ ] A chat you close stays in the list (dim dot); clicking it reopens it with the old messages. The × on a dim row removes it from the list only; the transcript under `~/.claude/projects` stays. A chat closed before the first message leaves no entry.
-- [ ] Chats appear in the split dropdown and the row menu ("Add to split").
 - [ ] Chats belong to no account: after **Switch account** the open chats restart under the new login once idle, with the same conversation; the 5 HOUR / 7 DAY / CONTEXT meters follow the chat you are looking at (they read "after first message" until its first reply).
 - [ ] **Ctrl+Shift+M** opens a new chat. Ctrl+V with a picture (or a copied image file) in the input attaches it as a thumbnail with a ×; Send includes it, and the sent message shows the picture. Text still pastes as text. Images over 4.5 MB are refused with a toast; reopened history shows "[image]" for old pictures.
 - [ ] A new chat is **not tied to a project** (the chip under the input reads "No project", the top bar has no editor buttons). The chip opens a project list whenever the chat is idle (not mid-turn): before the first message picking one just restarts in that folder; after messages the old ones stay on screen above a notice and Claude starts a new conversation in the folder; the earlier messages are compacted into a summary (Haiku, in the background) that rides along with your next message, so Claude knows the gist (ask "what were we doing?"). The chip stays visible, but not clickable, while Claude is answering. The earlier Claude session is no longer listed under the chat, so it can show up in the Code list after a rescan. **New chat here** in a project's menu starts it tied.
@@ -97,8 +98,7 @@ Automated: `cargo test -- --ignored headless` also installs the adapter into a t
 - [ ] Open a new chat, type "half a thought" without sending, quit and start Claudiu: the chat is still there, loads, and the box holds "half a thought". Do the same without typing: the empty chat is gone after restart (and when closed, and on quit).
 - [ ] Quit Claudiu with a chat that has messages and reopen it: the old conversation is on screen at once, with "Loading the conversation…" at the bottom, then the live one replaces it and the box accepts Send.
 - [ ] Right-click a chat or a Claude Code session > **Regenerate title**: a toast says "Writing a new title…", then the row is renamed (a session's new name also shows in Claude Code's `/resume`). A chat or session with nothing said says "Nothing to title yet."
-- [ ] Split cards in the sidebar are compact (no "SPLIT" label or focus marker); chats can be members of a split and show in the card in both tabs.
-- [ ] Every icon is a Lucide icon: session/chat/GitHub rows, close, archive, plus, chevrons, search, settings, split and orientation buttons, the branch pill, GitHub states and checks. A working session or chat, and a running tool, show a turning loader. No blank spots where an icon should be.
+- [ ] Every icon is a Lucide icon: session/chat/GitHub rows, close, archive, plus, chevrons, search, settings, the shell button, the branch pill, GitHub states and checks. A working session or chat, and a running tool, show a turning loader. No blank spots where an icon should be.
 
 ### Chats and code sessions reaching each other
 Automated by `headless` (the confirmation, the decline, a chat opened with a first message, a code session opened and read).

@@ -32,9 +32,9 @@ gpui_kit::assets::icon_assets!(
     AppIcons,
     [
         WindowMinimize, WindowMaximize, WindowRestore, WindowClose, Archive, ArchiveRestore, ArrowLeft, Bot, Check, ChevronDown, ChevronRight, Circle,
-        CircleCheck, CircleDot, CircleSlash, CircleX, Clock, Columns2, Ellipsis, ExternalLink, GitBranch, GitCommitHorizontal, GitMerge, GitPullRequest,
-        GitPullRequestClosed, GitPullRequestDraft, HeartPlus, LoaderCircle, Lock, MessageSquare, PanelLeft, Pencil, Plus, RefreshCw, Rows2, Search,
-        Settings, SquareSplitHorizontal, Terminal, X
+        CircleCheck, CircleDot, CircleSlash, CircleX, Clock, Ellipsis, ExternalLink, GitBranch, GitCommitHorizontal, GitMerge, GitPullRequest,
+        GitPullRequestClosed, GitPullRequestDraft, HeartPlus, LoaderCircle, Lock, MessageSquare, PanelLeft, Pencil, Plus, RefreshCw, Search,
+        Settings, Terminal, X
     ]
 );
 
@@ -88,8 +88,8 @@ mod icon_tests {
 }
 
 use app::{
-    CloseSession, FocusNextPane, FocusSearch, HideApp, HideOthers, ImportProject, NewChat, NewClaude, NewShell, NextSession, OpenGithub, OpenSettings, PrevSession, Quit, ShowAllApps,
-    SplitPane, ToggleSidebar, Workspace,
+    CloseSession, FocusSearch, HideApp, HideOthers, ImportProject, NewChat, NewClaude, NextSession, OpenGithub, OpenSettings, PrevSession, Quit, ShowAllApps,
+    SwapFocus, ToggleShell, ToggleSidebar, Workspace,
 };
 
 /// The macOS menu bar. Every item is an existing Claudiu action, so menu, shortcut and sidebar share one code path;
@@ -113,7 +113,7 @@ fn menu_bar() -> Vec<gpui::Menu> {
         Menu::new("File").items([
             MenuItem::action("New Claude Session", NewClaude),
             MenuItem::action("New Chat", NewChat),
-            MenuItem::action("New Shell", NewShell),
+            MenuItem::action("Show or Hide Shell", ToggleShell),
             MenuItem::action("GitHub Issues & Pull Requests", OpenGithub),
             MenuItem::separator(),
             MenuItem::action("Add Project…", ImportProject),
@@ -134,8 +134,7 @@ fn menu_bar() -> Vec<gpui::Menu> {
             MenuItem::action("Next Session", NextSession),
             MenuItem::action("Previous Session", PrevSession),
             MenuItem::separator(),
-            MenuItem::action("Split Pane", SplitPane),
-            MenuItem::action("Focus Next Pane", FocusNextPane),
+            MenuItem::action("Switch Focus Between Claude and Shell", SwapFocus),
         ]),
     ]
 }
@@ -190,15 +189,14 @@ fn main() {
         cx.bind_keys([
             KeyBinding::new("secondary-shift-n", NewClaude, None),
             KeyBinding::new("secondary-shift-m", NewChat, None),
-            KeyBinding::new("secondary-shift-t", NewShell, None),
+            KeyBinding::new("secondary-shift-t", ToggleShell, None),
             KeyBinding::new("secondary-shift-w", CloseSession, None),
-            KeyBinding::new("secondary-shift-d", SplitPane, None),
             KeyBinding::new("secondary-shift-b", ToggleSidebar, None),
             KeyBinding::new("secondary-shift-f", FocusSearch, None),
             KeyBinding::new("secondary-shift-o", ImportProject, None),
             KeyBinding::new("secondary-shift-g", OpenGithub, None),
             KeyBinding::new("secondary-,", OpenSettings, None),
-            KeyBinding::new("secondary-shift-]", FocusNextPane, None),
+            KeyBinding::new("secondary-shift-]", SwapFocus, None),
             KeyBinding::new("ctrl-tab", NextSession, None),
             KeyBinding::new("ctrl-shift-tab", PrevSession, None),
         ]);
