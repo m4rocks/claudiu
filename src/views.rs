@@ -608,22 +608,24 @@ impl Render for Workspace {
             .on_action(cx.listener(|ws, _: &OpenSettings, window, cx| ws.act(Act::OpenSettings, window, cx)))
             .on_action(cx.listener(|ws, _: &SwapFocus, window, cx| ws.swap_focus(window, cx)))
             .on_mouse_move(cx.listener(|ws, ev: &gpui::MouseMoveEvent, window, cx| {
-                if ws.shell_drag.is_none() && ws.right_drag.is_none() {
+                if ws.shell_drag.is_none() && ws.right_drag.is_none() && ws.left_drag.is_none() {
                     return;
                 }
                 // The button was let go outside the window: stop following the pointer.
                 if ev.pressed_button != Some(MouseButton::Left) {
                     ws.shell_drag = None;
                     ws.right_drag = None;
+                    ws.left_drag = None;
                 } else {
                     let size = window.viewport_size();
                     ws.drag_shell(f32::from(ev.position.y), f32::from(size.height));
                     ws.drag_right(f32::from(ev.position.x), f32::from(size.width));
+                    ws.drag_left(f32::from(ev.position.x), f32::from(size.width));
                 }
                 cx.notify();
             }))
             .on_mouse_up(MouseButton::Left, cx.listener(|ws, _: &gpui::MouseUpEvent, _w, cx| {
-                if ws.shell_drag.take().is_some() | ws.right_drag.take().is_some() {
+                if ws.shell_drag.take().is_some() | ws.right_drag.take().is_some() | ws.left_drag.take().is_some() {
                     cx.notify();
                 }
             }))

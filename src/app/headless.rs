@@ -213,12 +213,34 @@ fn sessions_and_shell() {
     step(&mut cx, &|ws, w, cx| ws.close_live(&first, w, cx));
     assert!(ws.read_with(&cx, |ws, _| !ws.shells.contains_key(&first)), "closing the session drops its shell");
     // The GitHub view lives in the right sidebar: one per folder, it widens the sidebar, "Ask Claude" starts a session.
-    assert_eq!(ws.read_with(&cx, |ws, _| ws.right_width(1600.0)), RIGHT_MENU_W, "the menu has a fixed width");
+    assert_eq!(ws.read_with(&cx, |ws, _| ws.right_width(1600.0)), RIGHT_MENU_W, "the menu starts at its default width");
+    // Both sidebars can be dragged; the menu and the GitHub view each remember their own width.
+    step(&mut cx, &|ws, _w, _cx| {
+        ws.right_drag = Some(SideDrag { x: 1000.0, width: RIGHT_MENU_W });
+        ws.drag_right(960.0, 1600.0);
+        assert_eq!(ws.right_width(1600.0), RIGHT_MENU_W + 40.0);
+        ws.drag_right(5000.0, 1600.0);
+        assert_eq!(ws.right_width(1600.0), RIGHT_MENU_MIN);
+        ws.drag_right(-5000.0, 1600.0);
+        assert_eq!(ws.right_width(1600.0), RIGHT_MENU_MAX);
+        ws.drag_right(960.0, 1600.0);
+        ws.right_drag = None;
+        assert_eq!(ws.left_width(1600.0), SIDEBAR_W);
+        ws.left_drag = Some(SideDrag { x: 300.0, width: SIDEBAR_W });
+        ws.drag_left(350.0, 1600.0);
+        assert_eq!(ws.left_width(1600.0), SIDEBAR_W + 50.0);
+        ws.drag_left(0.0, 1600.0);
+        assert_eq!(ws.left_width(1600.0), SIDEBAR_MIN);
+        ws.drag_left(5000.0, 1600.0);
+        assert_eq!(ws.left_width(1600.0), SIDEBAR_MAX);
+        assert_eq!(ws.left_width(700.0), SIDEBAR_MIN, "keeps room for the session in a small window");
+        ws.left_drag = None;
+    });
     step(&mut cx, &|ws, w, cx| ws.open_github(cwd.clone(), w, cx));
     assert!(ws.read_with(&cx, |ws, _| ws.gh.len() == 1 && ws.right_gh.is_some()), "github shown in the right sidebar");
-    assert_eq!(ws.read_with(&cx, |ws, _| ws.right_width(1600.0)), RIGHT_GH_W);
+    assert_eq!(ws.read_with(&cx, |ws, _| ws.right_width(1600.0)), RIGHT_GH_W, "GitHub keeps its own width");
     step(&mut cx, &|ws, _w, _cx| {
-        ws.right_drag = Some(RightDrag { x: 1000.0, width: RIGHT_GH_W });
+        ws.right_drag = Some(SideDrag { x: 1000.0, width: RIGHT_GH_W });
         ws.drag_right(900.0, 1600.0);
         assert_eq!(ws.right_width(1600.0), RIGHT_GH_W + 100.0);
         ws.drag_right(5000.0, 1600.0);

@@ -215,9 +215,15 @@ pub struct Layout {
     /// The right sidebar is hidden (stored negated so older state files keep it on).
     #[serde(default)]
     pub right_hidden: bool,
-    /// Width of the right sidebar while it shows GitHub; the menu has a fixed width.
+    /// Width of the right sidebar while it shows GitHub; the menu keeps its own, `right_menu_w`.
     #[serde(default)]
     pub right_gh_w: Option<f32>,
+    /// Width of the left sidebar when the user has dragged it; the default otherwise.
+    #[serde(default)]
+    pub left_w: Option<f32>,
+    /// Width of the right sidebar's menu when the user has dragged it; the default otherwise.
+    #[serde(default)]
+    pub right_menu_w: Option<f32>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

@@ -10,13 +10,15 @@ use gpui::{
 
 use gpui_kit::component::input::Input;
 use crate::chat::store::ChatRecord;
-use crate::app::{Act, Activity, MenuItem, Workspace};
+use crate::app::{Act, Activity, MenuItem, SideDrag, Workspace};
 use crate::store::{ExternalState, Id, Project, SessionKind, SessionRecord, now};
 use crate::theme::{self, hsla};
 use gpui_kit::assets::IconName;
 use crate::widgets::{ago, avatar, button, clawd, countdown, icon, icon_button, meter, section_label, spinner, tick};
 
 pub const SIDEBAR_W: f32 = 284.0;
+pub const SIDEBAR_MIN: f32 = 220.0;
+pub const SIDEBAR_MAX: f32 = 520.0;
 /// Entries shown under RECENT before the rest go behind OLDER.
 const RECENT_LIMIT: usize = 12;
 
@@ -554,12 +556,30 @@ impl Workspace {
 
     /// The sidebar chrome around either list: header, scrolling body, usage footer.
     fn sidebar_frame(&mut self, body: Div, window: &mut Window, cx: &mut Context<Self>) -> Stateful<Div> {
+        let width = self.left_width(f32::from(window.viewport_size().width));
+        // The right edge is the drag handle (inside the sidebar, so the terminal beside it cannot cover it).
+        let handle = div()
+            .id("left-resize")
+            .absolute()
+            .top_0()
+            .right_0()
+            .w(px(5.0))
+            .h_full()
+            .cursor_col_resize()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |ws, ev: &MouseDownEvent, _w, cx| {
+                    ws.left_drag = Some(SideDrag { x: f32::from(ev.position.x), width });
+                    cx.notify();
+                }),
+            );
         div()
             .id("sidebar")
+            .relative()
             .flex()
             .flex_col()
             .flex_none()
-            .w(px(SIDEBAR_W))
+            .w(px(width))
             .h_full()
             .bg(hsla(theme::SIDEBAR_BG))
             .border_r_1()
@@ -583,6 +603,7 @@ impl Workspace {
             .child(self.render_sidebar_header(cx))
             .child(self.sidebar_scroll.wire(div().id("sidebar-scroll").flex_1().min_h_0(), window).pb(px(10.0)).child(body))
             .child(self.render_footer(cx))
+            .child(handle)
     }
 
     fn render_sidebar_header(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {

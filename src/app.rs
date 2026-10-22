@@ -14,6 +14,7 @@ use crate::accounts;
 use crate::chat::store::{ChatRecord, ChatStore, DEFAULT_TITLE, is_tied, scratch_dir, title_from};
 use crate::chat::view::{ChatEvent, ChatView, Launch};
 use crate::claude;
+use crate::sidebar::{SIDEBAR_MAX, SIDEBAR_MIN, SIDEBAR_W};
 use crate::github::view::{GhEvent, GithubView};
 use crate::mcp;
 use crate::platform::{self, Editor};
@@ -233,13 +234,15 @@ pub struct ShellPanel {
 pub const SHELL_HEIGHT: f32 = 260.0;
 pub const SHELL_MIN: f32 = 120.0;
 
-/// The right sidebar: a fixed-width menu, or the wider, resizable GitHub view.
+/// The right sidebar: the menu or the wider GitHub view, each with its own remembered width.
 pub const RIGHT_MENU_W: f32 = 272.0;
+pub const RIGHT_MENU_MIN: f32 = 240.0;
+pub const RIGHT_MENU_MAX: f32 = 480.0;
 pub const RIGHT_GH_W: f32 = 560.0;
 pub const RIGHT_GH_MIN: f32 = 380.0;
 
-/// A drag of the right sidebar's left edge: where it started and how wide the sidebar was then.
-pub struct RightDrag {
+/// A drag of a sidebar's inner edge: where it started and how wide the sidebar was then.
+pub struct SideDrag {
     pub x: f32,
     pub width: f32,
 }
@@ -267,7 +270,8 @@ pub struct Workspace {
     pub gh: Vec<GhPane>,
     /// The GitHub view the right sidebar shows; `None` is its menu.
     pub right_gh: Option<Id>,
-    pub right_drag: Option<RightDrag>,
+    pub right_drag: Option<SideDrag>,
+    pub left_drag: Option<SideDrag>,
     pub chats: Vec<ChatPane>,
     pub chat_store: ChatStore,
     /// The session shown in the main area.
@@ -347,6 +351,7 @@ impl Workspace {
             gh: vec![],
             right_gh: None,
             right_drag: None,
+            left_drag: None,
             chats: vec![],
             chat_store: {
                 let mut chats = ChatStore::load(ChatStore::path_for(&Store::default_path()));
@@ -1736,20 +1741,41 @@ impl Workspace {
         cx.notify();
     }
 
-    /// The right sidebar's current width: fixed for the menu, remembered (and draggable) for GitHub.
+    /// The right sidebar's current width: the remembered one for the menu or for GitHub, kept within bounds.
     pub fn right_width(&self, window_w: f32) -> f32 {
+        let layout = &self.store.data.layout;
+        let room = (window_w - 560.0).max(RIGHT_GH_MIN);
         if self.right_gh.is_none() {
-            return RIGHT_MENU_W;
+            return layout.right_menu_w.unwrap_or(RIGHT_MENU_W).clamp(RIGHT_MENU_MIN, RIGHT_MENU_MAX.min(room));
         }
-        let wanted = self.store.data.layout.right_gh_w.unwrap_or(RIGHT_GH_W);
-        wanted.clamp(RIGHT_GH_MIN, (window_w - 560.0).max(RIGHT_GH_MIN))
+        layout.right_gh_w.unwrap_or(RIGHT_GH_W).clamp(RIGHT_GH_MIN, room)
     }
 
     /// The right sidebar's left edge is being dragged: follow the pointer, wider to the left.
     pub fn drag_right(&mut self, x: f32, window_w: f32) {
         let Some(d) = self.right_drag.as_ref() else { return };
         let wanted = d.width + d.x - x;
-        self.store.data.layout.right_gh_w = Some(wanted.clamp(RIGHT_GH_MIN, (window_w - 560.0).max(RIGHT_GH_MIN)));
+        let room = (window_w - 560.0).max(RIGHT_GH_MIN);
+        let layout = &mut self.store.data.layout;
+        if self.right_gh.is_none() {
+            layout.right_menu_w = Some(wanted.clamp(RIGHT_MENU_MIN, RIGHT_MENU_MAX.min(room)));
+        } else {
+            layout.right_gh_w = Some(wanted.clamp(RIGHT_GH_MIN, room));
+        }
+        self.store.mark_dirty();
+    }
+
+    /// The left sidebar's current width, kept within bounds and leaving room for the session.
+    pub fn left_width(&self, window_w: f32) -> f32 {
+        let wanted = self.store.data.layout.left_w.unwrap_or(SIDEBAR_W);
+        wanted.clamp(SIDEBAR_MIN, SIDEBAR_MAX.min((window_w - 560.0).max(SIDEBAR_MIN)))
+    }
+
+    /// The left sidebar's right edge is being dragged: follow the pointer, wider to the right.
+    pub fn drag_left(&mut self, x: f32, window_w: f32) {
+        let Some(d) = self.left_drag.as_ref() else { return };
+        let wanted = d.width + x - d.x;
+        self.store.data.layout.left_w = Some(wanted.clamp(SIDEBAR_MIN, SIDEBAR_MAX.min((window_w - 560.0).max(SIDEBAR_MIN))));
         self.store.mark_dirty();
     }
 
