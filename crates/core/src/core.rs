@@ -15,7 +15,7 @@ use anyhow::{Result, anyhow, bail};
 use serde_json::{Value, json};
 
 use crate::acp::{AdapterCommand, Conn, Msg};
-use crate::delegate::{Meter, Run, Signal, Stagger};
+use crate::delegate::{Meter, Run, Signal, Stagger, Tokens};
 use crate::event::{AccessRequest, Decision, Event, SessionId, SessionRecord, UsageRow, kind};
 use crate::guard::GuardConfig;
 use crate::http::Server;
@@ -23,6 +23,31 @@ use crate::policy::{Policy, Scope};
 use crate::store::Store;
 
 pub type Clock = Arc<dyn Fn() -> i64 + Send + Sync>;
+
+/// What Claudiu adds around Claude Code. All of it is on; `bench` switches parts off to measure each one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Features {
+    /// The guard hooks and the canary that checks they run.
+    pub hooks: bool,
+    /// The context firewall (a hook on tool output).
+    pub firewall: bool,
+    /// The claudiu MCP server: index tools, `expand`, `request_access`.
+    pub mcp: bool,
+    pub delegation: bool,
+}
+
+impl Default for Features {
+    fn default() -> Features {
+        Features { hooks: true, firewall: true, mcp: true, delegation: true }
+    }
+}
+
+impl Features {
+    /// Claude Code through the adapter and nothing else.
+    pub fn stock() -> Features {
+        Features { hooks: false, firewall: false, mcp: false, delegation: false }
+    }
+}
 
 pub struct Config {
     pub data_dir: PathBuf,
@@ -35,6 +60,7 @@ pub struct Config {
     pub canary_timeout: Duration,
     /// How long a subagent's start holds back its same-profile sibling when it has not streamed yet.
     pub stagger_fallback: Duration,
+    pub features: Features,
 }
 
 impl Config {
@@ -50,7 +76,13 @@ impl Config {
             permission_mode: "auto".into(),
             canary_timeout: Duration::from_secs(20),
             stagger_fallback: Duration::from_secs(5),
+            features: Features::default(),
         }
+    }
+
+    pub fn with_features(mut self, features: Features) -> Config {
+        self.features = features;
+        self
     }
 
     /// Where a task may write besides its project.
@@ -180,6 +212,9 @@ pub(crate) struct Shared {
     pub indexes: crate::index::Indexes,
     permission_mode: String,
     canary_timeout: Duration,
+    pub features: Features,
+    /// How long each hook call took to answer, in milliseconds.
+    pub latencies: Mutex<Vec<f64>>,
     /// Random, part of every hook url, so other local processes cannot call the endpoint.
     pub token: String,
     sessions: Mutex<HashMap<SessionId, Arc<SessionInfo>>>,
@@ -203,6 +238,13 @@ pub(crate) struct Live {
     pub running: Arc<AtomicBool>,
     /// We are ending the adapter on purpose, so its exit is not a crash.
     pub closing: Arc<AtomicBool>,
+}
+
+/// What a task has cost, as the adapter reports it.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Spend {
+    pub tokens: Tokens,
+    pub cost_usd: f64,
 }
 
 /// How a session is started when it is a subagent.
@@ -250,6 +292,8 @@ impl Core {
             indexes: Default::default(),
             permission_mode: config.permission_mode,
             canary_timeout: config.canary_timeout,
+            features: config.features,
+            latencies: Mutex::default(),
             token: uuid::Uuid::new_v4().simple().to_string(),
             sessions: Mutex::default(),
             engine: OnceLock::new(),
@@ -300,6 +344,30 @@ impl Engine {
 
     pub fn guard_state(&self, session: &SessionId) -> GuardState {
         self.shared.session(session).map_or(GuardState::Pending, |i| *i.guard.lock().unwrap())
+    }
+
+    /// What the task and the subagents it started have used so far.
+    pub fn spend(&self, task: &SessionId) -> Spend {
+        let mut spend = Spend::default();
+        for (id, info) in self.shared.sessions.lock().unwrap().iter() {
+            if id == task || info.parent.as_ref().is_some_and(|(p, _)| p == task) {
+                spend.tokens.add(&info.meter.totals());
+                spend.cost_usd += info.meter.cost_usd();
+            }
+        }
+        spend
+    }
+
+    /// How long each hook call took the core to answer, in milliseconds, oldest first.
+    pub fn hook_latencies_ms(&self) -> Vec<f64> {
+        self.shared.latencies.lock().unwrap().clone()
+    }
+
+    /// Sets a session option the adapter offers, such as `model` or `effort`.
+    pub fn set_config(&self, session: &SessionId, config: &str, value: &str) -> Result<()> {
+        let live = self.live(session)?;
+        live.conn.call("session/set_config_option", json!({"sessionId": live.adapter_session_id, "configId": config, "value": value}), CALL_TIMEOUT)?;
+        Ok(())
     }
 
     pub fn usage(&self, session: &SessionId) -> Result<Vec<UsageRow>> {
@@ -383,8 +451,18 @@ impl Engine {
         let conn = self.spawn_adapter(&command, &id, info, running.clone(), closing.clone())?;
         conn.call("initialize", json!({"protocolVersion": 1, "clientCapabilities": {}}), CALL_TIMEOUT)?;
         let cwd_text = cwd.to_string_lossy().into_owned();
-        let mut options = json!({"settings": crate::hooks::settings(self.hook_url(&id, "").trim_end_matches('/')), "enableFileCheckpointing": true, "allowedTools": ["mcp__claudiu"]});
-        let mut new = json!({"cwd": cwd_text, "mcpServers": [{"type": "http", "name": "claudiu", "url": self.mcp_url(&id), "headers": []}]});
+        let features = self.shared.features;
+        let mut options = json!({});
+        if features.hooks {
+            options["settings"] = crate::hooks::settings(self.hook_url(&id, "").trim_end_matches('/'), features.firewall);
+            options["enableFileCheckpointing"] = json!(true);
+        }
+        let mut servers = json!([]);
+        if features.mcp {
+            options["allowedTools"] = json!(["mcp__claudiu"]);
+            servers = json!([{"type": "http", "name": "claudiu", "url": self.mcp_url(&id), "headers": []}]);
+        }
+        let mut new = json!({"cwd": cwd_text, "mcpServers": servers});
         if let Some(c) = &child {
             c.profile.trim(&mut options, &mut new, &c.title);
         }
@@ -450,6 +528,9 @@ impl Engine {
                     // The conversation is being summarised: the model no longer has what the ledger says it saw.
                     let _ = rec.store.clear_ledger(&id);
                 }
+                if let Some(usd) = update["cost"]["amount"].as_f64() {
+                    info.meter.set_cost(usd);
+                }
                 if update["sessionUpdate"] == "usage_update" {
                     let _ = rec.store.record_usage(&id, (rec.clock)(), update["used"].as_i64(), update["size"].as_i64(), &update);
                 }
@@ -492,15 +573,17 @@ impl Engine {
             *state = GuardState::Off;
             drop(state);
             // The badge event follows the mode change, so whoever sees one can rely on the other.
-            let _ = live.conn.call("session/set_mode", json!({"sessionId": live.adapter_session_id, "modeId": "default"}), CALL_TIMEOUT);
-            let _ = rec.record(&id, kind::GUARDS_OFF, json!({"reason": "no hook call arrived after the first prompt"}));
+            let fallback = live.conn.call("session/set_mode", json!({"sessionId": live.adapter_session_id, "modeId": "default"}), CALL_TIMEOUT).is_ok();
+            let _ = rec.record(&id, kind::GUARDS_OFF, json!({"reason": "no hook call arrived after the first prompt", "fallback": fallback}));
         });
     }
 
     pub fn send_prompt(&self, id: &SessionId, text: &str) -> Result<()> {
         let live = self.live(id)?;
         self.start_turn(id, &live, text, |_| {})?;
-        self.start_canary(id, &live);
+        if self.shared.features.hooks {
+            self.start_canary(id, &live);
+        }
         Ok(())
     }
 

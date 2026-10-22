@@ -218,7 +218,7 @@ impl Stagger {
     }
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Tokens {
     pub input: u64,
     pub cache_write: u64,
@@ -227,11 +227,25 @@ pub struct Tokens {
 }
 
 impl Tokens {
-    fn billed(&self) -> u64 {
+    /// What a budget counts: uncached input, cache writes and output. Cache reads are free to it.
+    pub fn billed(&self) -> u64 {
         self.input + self.cache_write + self.output
     }
 
-    fn json(&self) -> Value {
+    pub fn add(&mut self, other: &Tokens) {
+        self.input += other.input;
+        self.cache_write += other.cache_write;
+        self.cache_read += other.cache_read;
+        self.output += other.output;
+    }
+
+    /// The share of what the model read that came from the cache.
+    pub fn cache_hit_rate(&self) -> f64 {
+        let read = (self.input + self.cache_write + self.cache_read) as f64;
+        if read == 0.0 { 0.0 } else { self.cache_read as f64 / read }
+    }
+
+    pub fn json(&self) -> Value {
         json!({"input": self.input, "cache_write": self.cache_write, "cache_read": self.cache_read, "output": self.output})
     }
 }
@@ -239,7 +253,14 @@ impl Tokens {
 /// What the adapter says a session has used. A message streams in several updates that each repeat its usage,
 /// so each message counts once, at its largest.
 #[derive(Default)]
-pub struct Meter(Mutex<(Vec<String>, HashMap<String, Tokens>)>);
+pub struct Meter(Mutex<MeterState>);
+
+#[derive(Default)]
+struct MeterState {
+    order: Vec<String>,
+    by_id: HashMap<String, Tokens>,
+    cost_usd: f64,
+}
 
 impl Meter {
     pub fn add(&self, message: &Value) {
@@ -248,7 +269,7 @@ impl Meter {
         }
         let (Some(id), usage) = (message["message"]["id"].as_str(), &message["message"]["usage"]) else { return };
         let get = |key: &str| usage[key].as_u64().unwrap_or(0);
-        let (order, by_id) = &mut *self.0.lock().unwrap();
+        let MeterState { order, by_id, .. } = &mut *self.0.lock().unwrap();
         if !by_id.contains_key(id) {
             order.push(id.to_string());
         }
@@ -259,14 +280,26 @@ impl Meter {
         seen.output = seen.output.max(get("output_tokens"));
     }
 
-    fn totals(&self) -> Tokens {
-        let guard = self.0.lock().unwrap();
-        guard.1.values().fold(Tokens::default(), |a, t| Tokens {
-            input: a.input + t.input,
-            cache_write: a.cache_write + t.cache_write,
-            cache_read: a.cache_read + t.cache_read,
-            output: a.output + t.output,
-        })
+    pub fn totals(&self) -> Tokens {
+        let mut sum = Tokens::default();
+        self.0.lock().unwrap().by_id.values().for_each(|t| sum.add(t));
+        sum
+    }
+
+    /// The session's cost so far, as Claude Code reports it (cumulative, so the largest reading wins).
+    pub fn set_cost(&self, usd: f64) {
+        let mut state = self.0.lock().unwrap();
+        state.cost_usd = state.cost_usd.max(usd);
+    }
+
+    pub fn cost_usd(&self) -> f64 {
+        self.0.lock().unwrap().cost_usd
+    }
+
+    /// Everything the first request read and wrote: how big the session was when it started.
+    pub fn cold_start_tokens(&self) -> u64 {
+        let state = self.0.lock().unwrap();
+        state.order.first().and_then(|id| state.by_id.get(id)).map_or(0, |t| t.input + t.cache_write + t.cache_read)
     }
 
     pub fn billed(&self) -> u64 {
@@ -275,8 +308,8 @@ impl Meter {
 
     /// What the first request wrote to the cache: the price of starting cold.
     fn cold_start_write(&self) -> u64 {
-        let guard = self.0.lock().unwrap();
-        guard.0.first().and_then(|id| guard.1.get(id)).map_or(0, |t| t.cache_write)
+        let state = self.0.lock().unwrap();
+        state.order.first().and_then(|id| state.by_id.get(id)).map_or(0, |t| t.cache_write)
     }
 }
 
@@ -393,7 +426,8 @@ impl Engine {
             json!({
                 "id": run.id, "profile": profile.name, "child": child.to_string(), "status": result.status, "turns": result.turns,
                 "tool_calls": child_info.tool_calls.load(Ordering::SeqCst), "over_budget": tokens.billed() > profile.budget,
-                "cold_start_cache_write": child_info.meter.cold_start_write(), "tokens": tokens.json(),
+                "cold_start_cache_write": child_info.meter.cold_start_write(), "cold_start_tokens": child_info.meter.cold_start_tokens(),
+                "cost_usd": child_info.meter.cost_usd(), "tokens": tokens.json(),
                 "receipt_tokens": result.receipt.as_ref().map_or(0, |r| r.tokens),
             }),
         );

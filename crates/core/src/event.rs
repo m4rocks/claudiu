@@ -48,6 +48,8 @@ pub mod kind {
     pub const GUARDS_OFF: &str = "guards_off";
     pub const ACCESS_REQUESTED: &str = "access_requested";
     pub const ACCESS_RESOLVED: &str = "access_resolved";
+    pub const GUARD_REFUSED: &str = "guard_refused";
+    pub const FIREWALL: &str = "firewall";
     pub const DELEGATION_STARTED: &str = "delegation_started";
     pub const DELEGATION_ENDED: &str = "delegation_ended";
 }

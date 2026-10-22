@@ -71,7 +71,7 @@ pub fn handle(shared: &Shared, session: &SessionId, info: &Arc<SessionInfo>, bod
             "serverInfo": {"name": "claudiu", "version": env!("CARGO_PKG_VERSION")}
         }),
         "ping" => json!({}),
-        "tools/list" => json!({"tools": tools(info.parent.is_some())}),
+        "tools/list" => json!({"tools": tools(info.parent.is_some() || !shared.features.delegation)}),
         "tools/call" => call(shared, session, info, &body["params"]),
         other => return Some(json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32601, "message": format!("{other} is not supported")}})),
     };
@@ -97,6 +97,7 @@ fn call(shared: &Shared, session: &SessionId, info: &Arc<SessionInfo>, params: &
             let _ = shared.rec.record(owner_id, kind::ACCESS_REQUESTED, json!({"request_id": request, "path": target.to_string_lossy(), "reason": reason, "from": session.to_string()}));
             text("Pending: the user has been asked. Keep working on other things; you will be told the answer.")
         }
+        "delegate" if !shared.features.delegation => text("Delegation is off."),
         "delegate" => match shared.engine() {
             Some(engine) => text(&engine.delegate(session, info, args)),
             None => text("Delegation is not available."),

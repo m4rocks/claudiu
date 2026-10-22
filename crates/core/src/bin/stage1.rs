@@ -808,6 +808,19 @@ fn c15_subagent() {
     println!("  assistant usage messages: {}", usage.join(" | "));
 }
 
+/// 16. Where does the cost of a turn come from? Raw `result` messages over two turns.
+fn c16_cost() {
+    let mut p = Probe::open("c16", Options::default());
+    for prompt in ["Say the word one.", "Say the word two."] {
+        let t = p.turn(prompt);
+        for (_, m) in t.raw.iter().filter(|(_, m)| m["type"] == "result") {
+            println!("  result: subtype={} total_cost_usd={} num_turns={} usage={}", m["subtype"], m["total_cost_usd"], m["num_turns"], m["usage"]);
+        }
+        let costs: Vec<String> = t.updates.iter().filter(|u| u["sessionUpdate"] == "usage_update").map(|u| u.to_string()).collect();
+        println!("  usage_update: {}", costs.join(" | "));
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let checks: Vec<(&str, fn())> = vec![
@@ -826,6 +839,7 @@ fn main() {
         ("c13", c13_mcp_http),
         ("c14", c14_prompt_hook),
         ("c15", c15_subagent),
+        ("c16", c16_cost),
     ];
     for (name, f) in checks {
         if args.is_empty() || args.iter().any(|a| a == name) {

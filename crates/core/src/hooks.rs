@@ -6,11 +6,11 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 
 use crate::core::Shared;
-use crate::event::SessionId;
+use crate::event::{SessionId, kind};
 use crate::guard::Allowed;
 
 /// The per-process settings that point Claude Code's hooks at this core. Guards fail closed (`onFailure: block`).
-pub fn settings(base: &str) -> Value {
+pub fn settings(base: &str, firewall: bool) -> Value {
     let hook = |event: &str, block: bool| {
         let mut h = json!({"type": "http", "url": format!("{base}/{event}"), "timeout": 10});
         if block {
@@ -18,16 +18,16 @@ pub fn settings(base: &str) -> Value {
         }
         h
     };
-    json!({
-        "disableAllHooks": false,
-        "hooks": {
-            "PreToolUse": [{"matcher": "Bash|Write|Edit|MultiEdit|NotebookEdit", "hooks": [hook("pre", true)]}],
-            // Fires on every prompt; the first one proves to the canary that hooks run.
-            "UserPromptSubmit": [{"hooks": [hook("prompt", false)]}],
-            // The firewall fails open: if it breaks, the output goes through whole.
-            "PostToolUse": [{"matcher": "Read|Grep|Glob|Bash", "hooks": [hook("post", false)]}],
-        }
-    })
+    let mut hooks = json!({
+        "PreToolUse": [{"matcher": "Bash|Write|Edit|MultiEdit|NotebookEdit", "hooks": [hook("pre", true)]}],
+        // Fires on every prompt; the first one proves to the canary that hooks run.
+        "UserPromptSubmit": [{"hooks": [hook("prompt", false)]}],
+    });
+    if firewall {
+        // The firewall fails open: if it breaks, the output goes through whole.
+        hooks["PostToolUse"] = json!([{"matcher": "Read|Grep|Glob|Bash", "hooks": [hook("post", false)]}]);
+    }
+    json!({"disableAllHooks": false, "hooks": hooks})
 }
 
 fn deny(reason: &str) -> Value {
@@ -47,10 +47,15 @@ pub fn handle(shared: &Arc<Shared>, path: &str, body: Value) -> (u16, Value) {
     }
     let session = SessionId(session.to_string());
     let Some(info) = shared.session(&session) else { return (404, Value::Null) };
-    match event {
+    let began = std::time::Instant::now();
+    let reply = match event {
         "pre" => {
             info.hooks_fired();
-            (200, pre(shared, &info.policy_session, &info.cwd, &body))
+            let reply = pre(shared, &info.policy_session, &info.cwd, &body);
+            if reply["hookSpecificOutput"]["permissionDecision"] == "deny" {
+                let _ = shared.rec.record(&session, kind::GUARD_REFUSED, json!({"tool": body["tool_name"], "reason": reply["hookSpecificOutput"]["permissionDecisionReason"]}));
+            }
+            (200, reply)
         }
         "prompt" => {
             info.hooks_fired();
@@ -69,7 +74,11 @@ pub fn handle(shared: &Arc<Shared>, path: &str, body: Value) -> (u16, Value) {
             None => (202, Value::Null),
         },
         _ => (404, Value::Null),
+    };
+    if event != "mcp" {
+        shared.latencies.lock().unwrap().push(began.elapsed().as_secs_f64() * 1000.0);
     }
+    reply
 }
 
 fn pre(shared: &Shared, session: &SessionId, cwd: &Path, body: &Value) -> Value {
@@ -99,7 +108,11 @@ fn post(shared: &Shared, session: &SessionId, body: &Value) -> Value {
     let tool = body["tool_name"].as_str().unwrap_or("");
     let ts_ms = (shared.rec.clock)();
     match crate::firewall::compact(&shared.rec.store, session, ts_ms, agent, tool, &body["tool_input"], &body["tool_response"]) {
-        Some(output) => json!({"hookSpecificOutput": {"hookEventName": "PostToolUse", "updatedToolOutput": output}}),
+        Some(output) => {
+            let (before, after) = (body["tool_response"].to_string().len(), output.to_string().len());
+            let _ = shared.rec.record(session, kind::FIREWALL, json!({"tool": tool, "before_chars": before, "after_chars": after}));
+            json!({"hookSpecificOutput": {"hookEventName": "PostToolUse", "updatedToolOutput": output}})
+        }
         None => json!({}),
     }
 }

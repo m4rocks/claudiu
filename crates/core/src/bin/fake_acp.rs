@@ -6,6 +6,7 @@
 //! - `{"update": {...}}`: a `session/update` notification carrying that update;
 //! - `{"notify": {"method": "...", "params": {...}}}`: any notification;
 //! - `{"request": {"method": "...", "params": {...}}}`: a request to the client, waits for its reply;
+//! - `{"write": {"path": "a.txt", "text": "..."}}`: writes a file in the session's folder, as an agent editing code would;
 //! - `{"sleep_ms": 50}`;
 //! - `{"wait_cancel": true}`: blocks until `session/cancel` arrives; the turn then ends as `cancelled`.
 //!
@@ -24,6 +25,7 @@ struct Fake {
     cancelled: bool,
     next_request: u64,
     log: Option<String>,
+    cwd: String,
 }
 
 impl Fake {
@@ -80,6 +82,12 @@ impl Fake {
                     break;
                 }
             }
+        } else if let Some(w) = step.get("write") {
+            let path = std::path::Path::new(&self.cwd).join(w["path"].as_str().unwrap_or("out.txt"));
+            if let Some(dir) = path.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            let _ = std::fs::write(path, w["text"].as_str().unwrap_or(""));
         } else if let Some(ms) = step.get("sleep_ms").and_then(Value::as_u64) {
             std::thread::sleep(std::time::Duration::from_millis(ms));
         } else if step.get("wait_cancel").is_some() {
@@ -104,6 +112,7 @@ fn main() {
         cancelled: false,
         next_request: 0,
         log: std::env::var("FAKE_ACP_LOG").ok(),
+        cwd: String::new(),
     };
     let mut created = 0;
     while let Some(msg) = fake.read() {
@@ -112,6 +121,7 @@ fn main() {
             Some("initialize") => fake.reply(id, json!({"protocolVersion": 1, "agentCapabilities": {}})),
             Some("session/new") => {
                 created += 1;
+                fake.cwd = msg["params"]["cwd"].as_str().unwrap_or("").to_string();
                 fake.session = format!("fake-session-{created}");
                 let session = fake.session.clone();
                 let modes = ["default", "acceptEdits", "plan", "auto", "bypassPermissions"].map(|m| json!({"value": m, "name": m}));
