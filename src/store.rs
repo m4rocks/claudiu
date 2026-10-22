@@ -200,10 +200,14 @@ pub struct Account {
 pub struct Layout {
     pub selected_session: Option<Id>,
     pub sidebar_visible: bool,
+    /// No longer used (the "Other sessions" group is gone); still written because older Claudiu versions require it.
     pub other_collapsed: bool,
-    /// The sidebar showed the Chat tab (not Code) when Claudiu last ran.
+    /// The sidebar's OLDER group is expanded.
     #[serde(default)]
-    pub chat_tab: bool,
+    pub older_open: bool,
+    /// The project the sidebar list is filtered to.
+    #[serde(default)]
+    pub project_filter: Option<Id>,
     /// The right sidebar is hidden (stored negated so older state files keep it on).
     #[serde(default)]
     pub right_hidden: bool,

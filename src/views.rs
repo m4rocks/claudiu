@@ -7,7 +7,6 @@ use gpui::{
 };
 
 use crate::app::{
-    Side,
     Act, CloseSession, GitOp, FocusSearch, ImportProject, Main, Modal, NewChat, NewClaude, NextSession, OpenGithub, OpenSettings, PrevSession, ShellDrag, SwapFocus,
     ToggleRight, ToggleShell, ToggleSidebar, Workspace, SHELL_HEIGHT,
 };
@@ -236,14 +235,22 @@ impl Workspace {
                 .child(div().text_size(px(12.0)).text_color(hsla(theme::TEXT_FAINT)).child(keys.to_string()))
         };
         let mut recent = div().flex().flex_col().gap(px(2.0)).mt(px(26.0)).w(px(420.0));
-        let mut sessions: Vec<_> = self.store.data.sessions.iter().filter(|s| s.kind == SessionKind::Claude && !s.hidden).cloned().collect();
-        sessions.sort_by_key(|s| std::cmp::Reverse(s.last_active));
+        // Code sessions and chats together, newest first: (id, title, last active).
+        let mut sessions: Vec<(String, String, i64)> = self
+            .store
+            .data
+            .sessions
+            .iter()
+            .filter(|s| s.kind == SessionKind::Claude && !s.hidden)
+            .map(|s| (s.id.clone(), s.display_title().to_string(), s.last_active))
+            .chain(self.chat_store.shown().map(|c| (c.id.clone(), c.title.clone(), c.last_active)))
+            .collect();
+        sessions.sort_by_key(|s| std::cmp::Reverse(s.2));
         let t = now();
         if !sessions.is_empty() {
             recent = recent.child(div().mb(px(4.0)).child(section_label("RECENT")));
         }
-        for (i, s) in sessions.into_iter().take(5).enumerate() {
-            let id = s.id.clone();
+        for (i, (id, title, last_active)) in sessions.into_iter().take(5).enumerate() {
             recent = recent.child(
                 div()
                     .id(gpui::SharedString::from(format!("recent-{i}")))
@@ -254,8 +261,8 @@ impl Workspace {
                     .rounded(px(6.0))
                     .cursor_pointer()
                     .hover(|st| st.bg(hsla(theme::ROW_HOVER)))
-                    .child(div().text_size(px(13.0)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(s.display_title().to_string()))
-                    .child(div().text_size(px(11.5)).text_color(hsla(theme::TEXT_FAINT)).child(ago(s.last_active, t)))
+                    .child(div().text_size(px(13.0)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(title))
+                    .child(div().text_size(px(11.5)).text_color(hsla(theme::TEXT_FAINT)).child(ago(last_active, t)))
                     .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::Select(id.clone()), window, cx))),
             );
         }
@@ -273,9 +280,10 @@ impl Workspace {
                     .mt(px(22.0))
                     .flex()
                     .gap(px(8.0))
-                    .child(button("home-claude", "New Claude session", true).on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
+                    .child(button("home-claude", "New code session", true).on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
                         ws.act(Act::NewClaude { cwd: c1.clone() }, window, cx)
                     })))
+                    .child(button("home-chat", "New chat", false).on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::NewChat { cwd: None }, window, cx))))
                     .child(button("home-import", "Add project", false).on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::ImportProject, window, cx)))),
             )
             .child(recent)
@@ -285,71 +293,9 @@ impl Workspace {
                     .flex()
                     .flex_col()
                     .gap(px(4.0))
-                    .child(shortcut("Ctrl+Shift+N", "New Claude session"))
-                    .child(shortcut("Ctrl+Shift+T", "Show or hide shell"))
-                    .child(shortcut("Ctrl+Tab", "Next session"))
-                    .child(shortcut("Ctrl+Shift+W", "End session")),
-            )
-    }
-
-    /// What the main area shows while the Chat tab is open and no session is selected.
-    fn render_chat_home(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let shortcut = |keys: &str, what: &str| {
-            div()
-                .flex()
-                .justify_between()
-                .gap(px(28.0))
-                .child(div().text_size(px(12.0)).text_color(hsla(theme::TEXT_DIM)).child(what.to_string()))
-                .child(div().text_size(px(12.0)).text_color(hsla(theme::TEXT_FAINT)).child(keys.to_string()))
-        };
-        let mut chats: Vec<_> = self.chat_store.shown().cloned().collect();
-        chats.sort_by_key(|c| std::cmp::Reverse(c.last_active));
-        let t = now();
-        let mut recent = div().flex().flex_col().gap(px(2.0)).mt(px(26.0)).w(px(420.0));
-        if !chats.is_empty() {
-            recent = recent.child(div().mb(px(4.0)).child(section_label("RECENT CHATS")));
-        }
-        for (i, c) in chats.into_iter().take(5).enumerate() {
-            let id = c.id.clone();
-            recent = recent.child(
-                div()
-                    .id(gpui::SharedString::from(format!("recent-chat-{i}")))
-                    .flex()
-                    .justify_between()
-                    .px(px(10.0))
-                    .py(px(6.0))
-                    .rounded(px(6.0))
-                    .cursor_pointer()
-                    .hover(|st| st.bg(hsla(theme::ROW_HOVER)))
-                    .child(div().text_size(px(13.0)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(c.title.clone()))
-                    .child(div().text_size(px(11.5)).text_color(hsla(theme::TEXT_FAINT)).child(ago(c.last_active, t)))
-                    .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::OpenChat(id.clone()), window, cx))),
-            );
-        }
-        div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .items_center()
-            .justify_center()
-            .child(clawd(72.0))
-            .child(div().mt(px(20.0)).text_size(px(22.0)).font_weight(FontWeight::SEMIBOLD).child("Claudiu"))
-            .child(div().mt(px(4.0)).text_size(px(13.0)).text_color(hsla(theme::TEXT_DIM)).child("Chat with Claude about anything, or tie a chat to a project"))
-            .child(
-                div()
-                    .mt(px(22.0))
-                    .flex()
-                    .gap(px(8.0))
-                    .child(button("home-chat", "New chat", true).on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::NewChat { cwd: None }, window, cx)))),
-            )
-            .child(recent)
-            .child(
-                div()
-                    .mt(px(30.0))
-                    .flex()
-                    .flex_col()
-                    .gap(px(4.0))
+                    .child(shortcut("Ctrl+Shift+N", "New code session"))
                     .child(shortcut("Ctrl+Shift+M", "New chat"))
+                    .child(shortcut("Ctrl+Shift+T", "Show or hide shell"))
                     .child(shortcut("Ctrl+Tab", "Next session"))
                     .child(shortcut("Ctrl+Shift+W", "End session")),
             )
@@ -605,7 +551,6 @@ impl Render for Workspace {
         let right = self.render_right(f32::from(window.viewport_size().width), cx);
         let main: AnyElement = match &self.main {
             Main::Terminals => self.render_session(cx),
-            Main::Home if self.side == Side::Chat => self.render_chat_home(cx).into_any_element(),
             Main::Home => self.render_home(cx).into_any_element(),
         };
         let menu = self.render_menu(cx);

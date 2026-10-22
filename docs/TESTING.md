@@ -16,19 +16,20 @@ Everything below needs eyes and a keyboard. Roughly ordered by risk. `[ ]` = not
 - [ ] A plain shell (Ctrl+Shift+T): PowerShell colors, `Get-ChildItem`, `vim`/`less` (alt screen), tab completion, Ctrl+R.
 
 ## 2. Sessions and sidebar
-- [ ] CURRENT SESSION lists Claude *and* shell processes; hover shows ×.
+- [ ] RUNNING lists Claude sessions and open chats (no shells); hover shows ×. Drag a running session over another: they swap.
 - [ ] Switch between sessions with clicks and Ctrl+Tab: the other terminals keep running (start something long in one).
 - [ ] Click a **former** session: it opens straight in Claude Code (`--resume`), no intermediate page.
-- [ ] Exit Claude (`/exit`): a banner appears with Resume; the entry moves out of CURRENT SESSION into its project's history.
+- [ ] Exit Claude (`/exit`): a banner appears with Resume; the entry moves from RUNNING into RECENT.
 - [ ] Open a Claude session and close it before typing anything: it does **not** leave an empty "New Claude session" in history.
 - [ ] Session titles update from "New Claude session" to the real title after the first prompt (within ~5 s).
 - [ ] Right-click a session: Rename (shows only in Claudiu), Hide from list (check that the transcript under `~/.claude/projects` is still there), Copy session ID, Copy folder, Show in Explorer, End session.
-- [ ] Search (Ctrl+Shift+F): filters running sessions, projects and history; Esc clears.
+- [ ] Search (Ctrl+Shift+F): filters running sessions, chats and history by title, folder and project; Esc clears.
+- [ ] RECENT shows 12 entries, newest first, sessions and chats mixed; a collapsed OLDER (with a count) holds the rest and its state survives a restart. While searching everything matching is shown.
 
 ## 3. Projects
 - [ ] Add a Git repo (+ button, drag a folder onto the window, and `claudiu.exe <folder>`). Name and branch show; a repo with linked worktrees shows `+N`.
-- [ ] Sessions started from any of its worktrees group under the project. Adding a project adopts existing "Other sessions" under it.
-- [ ] Project menu: new Claude / shell here, open in VS Code / Zed (only installed ones appear), Explorer, copy path, remove project (sessions go to "Other sessions", nothing deleted).
+- [ ] Sessions started from any of its worktrees group under the project. Adding a project gives existing sessions in its folders its name as their chip.
+- [ ] The project chip under the search box lists All projects, each project (✓ on the current one) and "Add project…". Choosing one narrows RUNNING and RECENT to its sessions and chats (a project-less chat disappears); the choice survives a restart; removing that project clears it. With a project chosen the ⋯ button offers: new Claude session / chat here, GitHub, open in VS Code / Zed (only installed ones appear), Explorer, copy path, remove project (sessions stay listed, nothing deleted). "+ Code session" starts in that project's folder.
 - [ ] A non-Git folder works as a project.
 
 ## 4. Import / reconciliation
@@ -82,10 +83,10 @@ Everything below needs eyes and a keyboard. Roughly ordered by risk. `[ ]` = not
 - [ ] "Ask Claude" starts a Claude session with a short prompt about the item, and shows it.
 - [ ] Automated, no window opens (all need a signed-in `gh`, except `headless`): `cargo test -- --ignored render` draws every pane state with real data; `schema` sends every GitHub mutation with made-up ids to catch type mismatches; `live` checks the queries; `headless` drives the real workspace (sessions, splits, parked splits, the GitHub pane) and fails if starting a session blocks the window for 400 ms; `e2e` (about 4 minutes) runs every pane action against a throwaway private repo it creates on your account (`claudiu-gh-pane-test-<time>`; deleting it needs the `delete_repo` scope, otherwise `gh repo delete <name> --yes`).
 
-## 11. Chat tab (Claude through ACP)
+## 11. Chats (Claude through ACP)
 Automated: `cargo test -- --ignored headless` also installs the adapter into a throwaway data folder, starts a chat, checks it lists the agent's skills and commands, sends one tiny prompt (costs a few cents), closes the chat and reopens it from history. Needs Node.js, npm and a signed-in `claude`.
-- [ ] The sidebar tabs **Chat | Code** (Chat first) switch the list; Code keeps + Claude / GitHub, Chat shows + New chat and the chat list. Search filters whichever list is shown. A chat's conversation never shows up in the Code list after a rescan.
-- [ ] **+ New chat** opens the empty chat at once with the cursor in the box; Claude starts behind it with no "Starting" message. Type and send before it is ready: the message shows right away and is delivered as soon as Claude is up, in order.
+- [ ] There are no Chat/Code tabs: **+ Code session** and **+ Chat** sit above the one list, where a chat has its own icon. A chat's conversation never shows up as a code session after a rescan.
+- [ ] **+ Chat** opens the empty chat at once with the cursor in the box; Claude starts behind it with no "Starting" message. Type and send before it is ready: the message shows right away and is delivered as soon as Claude is up, in order.
 - [ ] First **+ New chat** shows "Setting up the Claude adapter (first time only)…" (one `npm install` into `<data>/acp`, about 15 s), then the empty chat. Later chats start in a few seconds.
 - [ ] Without Node.js the pane says so with a link; with a broken `claude` path it says Claude Code was not found. "Try again" retries.
 - [ ] Task Manager while a chat is open: one `node.exe` and, below it, **your** `claude.exe` (`~/.local/bin`), not a bundled copy. Ending the chat (row ×, pane ×, or closing the app) leaves neither behind: check this by hand, the automated run only proves the chat view is dropped (which closes the adapter).
@@ -97,7 +98,7 @@ Automated: `cargo test -- --ignored headless` also installs the adapter into a t
 - [ ] **Ctrl+Shift+M** opens a new chat. Ctrl+V with a picture (or a copied image file) in the input attaches it as a thumbnail with a ×; Send includes it, and the sent message shows the picture. Text still pastes as text. Images over 4.5 MB are refused with a toast; reopened history shows "[image]" for old pictures.
 - [ ] A new chat is **not tied to a project** (the chip under the input reads "No project", the right sidebar has no editor or folder rows). The chip opens a project list whenever the chat is idle (not mid-turn): before the first message picking one just restarts in that folder; after messages the old ones stay on screen above a notice and Claude starts a new conversation in the folder; the earlier messages are compacted into a summary (Haiku, in the background) that rides along with your next message, so Claude knows the gist (ask "what were we doing?"). The chip stays visible, but not clickable, while Claude is answering. The earlier Claude session is no longer listed under the chat, so it can show up in the Code list after a rescan. **New chat here** in a project's menu starts it tied.
 
-- [ ] The sidebar reopens on the tab (Chat or Code) you left it on. With no session selected, the Chat tab shows a chat home (New chat, recent chats), the Code tab the code welcome page.
+- [ ] With nothing shown, the welcome page has New code session / New chat / Add project and recents of both kinds.
 - [ ] `/` works in the middle of a message ("please run /sk" offers matches; picking one completes only that word and keeps the rest). The list scrolls (wheel, Up/Down) through every skill and command, with no cut-off.
 - [ ] Open a new chat, type "half a thought" without sending, quit and start Claudiu: the chat is still there, loads, and the box holds "half a thought". Do the same without typing: the empty chat is gone after restart (and when closed, and on quit).
 - [ ] Quit Claudiu with a chat that has messages and reopen it: the old conversation is on screen at once, with "Loading the conversation…" at the bottom, then the live one replaces it and the box accepts Send.
@@ -107,7 +108,7 @@ Automated: `cargo test -- --ignored headless` also installs the adapter into a t
 ### Chats and code sessions reaching each other
 Automated by `headless` (the confirmation, the decline, a chat opened with a first message, a code session opened and read).
 - [ ] In a chat ask "list my code sessions", then "open a Claude Code session in <project> and ...": Claudiu shows a dialog naming the chat and what it wants (folder, first prompt) and nothing happens until **Allow**; Cancel, Esc or a click outside tells Claude the user declined and it stops. Enter does **not** confirm.
-- [ ] In a code session ask "start a chat about X": a dialog appears, Allow opens the Chat tab with a chat that already received the first message, not tied to a project. Same for reading: `read_chat` works for an open chat, `read_code_session` for a running session; an ended session or closed chat says it can't be read.
+- [ ] In a code session ask "start a chat about X": a dialog appears, Allow opens a chat that already received the first message, not tied to a project. Same for reading: `read_chat` works for an open chat, `read_code_session` for a running session; an ended session or closed chat says it can't be read.
 - [ ] A request for an unknown project, or with a first message over 2,000 characters, is answered at once, without a dialog. The dialog shows the whole first message (scrolling if long). Several requests queue, one dialog at a time; opening Settings (Ctrl+,) while one is showing declines it. Allowing a request after Claude gave up (more than 5 minutes) does nothing and says so.
 - [ ] **Remove from list** on a chat, then restart Claudiu: its conversation does not appear in the Code list.
 

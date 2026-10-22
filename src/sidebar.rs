@@ -1,22 +1,24 @@
-//! Left sidebar: CURRENT SESSION, PROJECTS, other sessions, and the usage meters.
+//! Left sidebar: one list of Claude Code sessions and chats (running first, then recent, then older), a project
+//! filter, and the account usage meters.
 
-use std::{cell::RefCell, collections::HashMap, rc::Rc, time::{Duration, Instant}};
+use std::time::{Duration, Instant};
 
 use gpui::{
-    Animation, AnimationExt, AnyElement, AppContext, DragMoveEvent, SharedString, WeakEntity, canvas, ease_out_quint, ClickEvent, Context, Div, FontWeight, Hsla, InteractiveElement, IntoElement, MouseButton, MouseDownEvent, ParentElement, Pixels, Render,
+    Animation, AnimationExt, AnyElement, AppContext, DragMoveEvent, SharedString, WeakEntity, ease_out_quint, ClickEvent, Context, Div, FontWeight, Hsla, InteractiveElement, IntoElement, MouseButton, MouseDownEvent, ParentElement, Pixels, Render,
     Stateful, StatefulInteractiveElement, Styled, Window, WindowControlArea, div, prelude::FluentBuilder, px,
 };
 
 use gpui_kit::component::input::Input;
 use crate::chat::store::ChatRecord;
-use crate::app::{CLOSE_MS, Act, Activity, MenuItem, Side, Workspace};
+use crate::app::{Act, Activity, MenuItem, Workspace};
 use crate::store::{ExternalState, Id, Project, SessionKind, SessionRecord, now};
 use crate::theme::{self, hsla};
 use gpui_kit::assets::IconName;
 use crate::widgets::{ago, avatar, button, clawd, countdown, icon, icon_button, meter, section_label, spinner};
 
 pub const SIDEBAR_W: f32 = 284.0;
-const PROJECT_SESSION_LIMIT: usize = 5;
+/// Entries shown under RECENT before the rest go behind OLDER.
+const RECENT_LIMIT: usize = 12;
 
 #[derive(Clone)]
 struct Row {
@@ -37,9 +39,8 @@ struct Row {
     scope: &'static str,
 }
 
-/// Drag payloads: a running session row / a project header, dropped onto another of the same kind.
+/// Drag payload: a running session row, dropped onto another to reorder.
 struct DragSession(Id);
-struct DragProject(Id);
 
 /// The drag view GPUI requires. It draws nothing: the dragged row itself stays in the list (lifted, see
 /// `lifted`) and slides to wherever the cursor is, so it can never leave its list.
@@ -96,16 +97,6 @@ fn slid(el: impl IntoElement + gpui::Styled + 'static, id: &Id, slide: Option<Sl
             .into_any_element(),
         None => el.into_any_element(),
     }
-}
-
-/// Records the painted height of its parent (which must be `relative`) under `id`.
-fn measure_height(heights: &Rc<RefCell<HashMap<Id, f32>>>, id: &Id) -> impl IntoElement {
-    let (heights, id) = (heights.clone(), id.clone());
-    canvas(move |b, _, _| {
-            heights.borrow_mut().insert(id, f32::from(b.size.height));
-        }, |_, _, _, _| {})
-        .absolute()
-        .size_full()
 }
 
 /// Moves `v[from]` into the slot of `v[to]`, shifting the items in between.
@@ -379,42 +370,80 @@ impl Workspace {
         }
     }
 
+    /// Code sessions shown in the list: matching the search, and in the project filter when there is one.
+    fn listed(&self, q: &str, filter: Option<&Id>, rec: &SessionRecord) -> bool {
+        self.matches(q, rec) && filter.is_none_or(|f| rec.project_id.as_ref() == Some(f))
+    }
+
+    /// Chats shown in the list: the same two rules, a chat's project being the one its folder belongs to.
+    fn chat_listed(&self, q: &str, filter: Option<&Id>, r: &ChatRecord) -> bool {
+        let project = self.store.project_for_cwd(&r.cwd);
+        let matches = q.is_empty()
+            || r.title.to_lowercase().contains(q)
+            || project.as_ref().and_then(|p| self.store.project(p)).is_some_and(|p| p.name.to_lowercase().contains(q))
+            || (crate::chat::store::is_tied(&r.cwd) && r.cwd.to_string_lossy().to_lowercase().contains(q));
+        matches && filter.is_none_or(|f| project.as_ref() == Some(f))
+    }
+
+    /// The project the list is filtered to, if any (a removed project filters nothing).
+    pub fn project_filter(&self) -> Option<&Project> {
+        self.store.data.layout.project_filter.as_ref().and_then(|id| self.store.project(id))
+    }
+
+    /// A row of the list: a chat opens by click, a Claude Code session can also be dragged.
+    fn list_row(&self, row: Row, cx: &mut Context<Self>) -> Stateful<Div> {
+        if row.scope == "chat" { self.render_row(row, cx) } else { self.session_row(row, false, cx) }
+    }
+
+    /// One list for chats and Claude Code sessions: what is running first (terminals in the order you arranged them,
+    /// then open chats), then the most recent, with the rest behind "Older". The project filter narrows all of it.
     pub fn render_sidebar(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         if self.dragging.is_some() && !cx.has_active_drag() {
             self.dragging = None;
         }
         let q = self.search.trim().to_lowercase();
         let searching = !q.is_empty();
-        if self.side == Side::Chat {
-            let body = self.render_chat_body(&q, cx);
-            return self.sidebar_frame(body, cx);
-        }
+        let filter = self.project_filter().map(|p| p.id.clone());
 
-        // ---- CURRENT SESSION
-        let rows: Vec<Row> = self
+        // ---- RUNNING
+        let mut running: Vec<Row> = self
             .live
             .iter()
             .filter(|l| l.view.read(cx).is_running())
             .filter_map(|l| self.store.session(&l.id))
-            .filter(|r| self.matches(&q, r))
+            .filter(|r| self.listed(&q, filter.as_ref(), r))
             .map(|r| self.row_for(r, true, true))
             .collect();
-        let current = rows;
-        let current_total = self.running_count(cx);
+        running.extend(
+            self.chats
+                .iter()
+                .filter_map(|p| self.chat_store.get(&p.id))
+                .filter(|r| self.chat_listed(&q, filter.as_ref(), r))
+                .map(|r| self.chat_row(r, cx)),
+        );
+
+        // ---- RECENT: everything else, newest first
+        let mut recent: Vec<(i64, Row)> = vec![];
+        for rec in self.store.data.sessions.iter().filter(|s| s.kind == SessionKind::Claude && (searching || !s.hidden) && self.listed(&q, filter.as_ref(), s)) {
+            if !self.is_running(&rec.id, cx) {
+                let mut row = self.row_for(rec, false, true);
+                row.scope = "rec";
+                recent.push((rec.last_active, row));
+            }
+        }
+        for r in self.chat_store.shown().filter(|r| self.chat_pane(&r.id).is_none() && self.chat_listed(&q, filter.as_ref(), r)) {
+            recent.push((r.last_active, self.chat_row(r, cx)));
+        }
+        recent.sort_by_key(|(t, _)| std::cmp::Reverse(*t));
+        let older = recent.split_off(recent.len().min(if searching { usize::MAX } else { RECENT_LIMIT }));
 
         let mut body = div().flex().flex_col().gap(px(2.0));
-
-        body = body.child(self.section_header("CURRENT SESSION", Some(current_total.to_string()), None::<Stateful<Div>>));
-        if current.is_empty() {
-            body = body.child(
-                div().px(px(18.0)).py(px(6.0)).text_size(px(12.0)).text_color(hsla(theme::TEXT_FAINT)).child(if searching {
-                    "No running sessions match"
-                } else {
-                    "Nothing running. Start a Claude session."
-                }),
-            );
+        body = body.child(self.section_header("RUNNING", Some(running.len().to_string()), None::<Stateful<Div>>));
+        if running.is_empty() {
+            let text = if searching || filter.is_some() { "Nothing running matches" } else { "Nothing running. Start a session or a chat." };
+            body = body.child(div().px(px(18.0)).py(px(6.0)).text_size(px(12.0)).text_color(hsla(theme::TEXT_FAINT)).child(text));
         }
-        let ids: Vec<Id> = current.iter().map(|r| r.id.clone()).collect();
+        let ids: Vec<Id> = running.iter().map(|r| r.id.clone()).collect();
         if is_reorder(&self.prev_current, &ids) {
             self.slide_gen += 1;
             for (new, id) in ids.iter().enumerate() {
@@ -424,158 +453,95 @@ impl Workspace {
             }
         }
         self.prev_current = ids;
-        for row in current {
+        for row in running {
             let (id, slide) = (row.id.clone(), self.slides.get(&row.id).copied());
-            body = body.child(slid(self.session_row(row, true, cx), &id, slide));
+            let el = if row.scope == "chat" { self.render_row(row, cx) } else { self.session_row(row, true, cx) };
+            body = body.child(slid(el, &id, slide));
         }
 
-        // ---- PROJECTS
-        let add_btn = icon_button("add-project", IconName::Plus).on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::ImportProject, window, cx)));
-        body = body.child(div().h(px(10.0)));
-        body = body.child(self.section_header("PROJECTS", None, Some(add_btn)));
-
-        let projects: Vec<Project> = self.store.data.projects.clone();
-        if projects.is_empty() {
+        if !recent.is_empty() || !older.is_empty() {
+            body = body.child(div().h(px(10.0))).child(self.section_header("RECENT", None, None::<Stateful<Div>>));
+            for (_, row) in recent {
+                body = body.child(self.list_row(row, cx));
+            }
+        } else if searching || filter.is_some() {
+            body = body.child(div().px(px(18.0)).py(px(6.0)).text_size(px(12.0)).text_color(hsla(theme::TEXT_FAINT)).child("No sessions or chats match"));
+        }
+        if !older.is_empty() {
+            let open = self.store.data.layout.older_open;
             body = body.child(
                 div()
-                    .px(px(18.0))
-                    .py(px(6.0))
-                    .flex()
-                    .flex_col()
-                    .gap(px(8.0))
-                    .child(div().text_size(px(12.0)).text_color(hsla(theme::TEXT_FAINT)).child("Add a Git project to group its sessions."))
-                    .child(
-                        div().child(
-                            button("import-empty", "Add project folder", false)
-                                .on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::ImportProject, window, cx))),
-                        ),
-                    ),
-            );
-        }
-        // Projects that changed places slide from where their block was painted to where it is now.
-        let ids: Vec<Id> = projects.iter().map(|p| p.id.clone()).collect();
-        if !searching && is_reorder(&self.prev_projects, &ids) {
-            let heights = self.block_heights.borrow();
-            let top = |order: &[Id], id: &Id| -> f32 {
-                order.iter().take_while(|x| *x != id).map(|x| heights.get(x).map_or(0.0, |h| h + 2.0)).sum()
-            };
-            let moves: Vec<(Id, f32)> = ids
-                .iter()
-                .filter(|id| self.dragging.as_ref() != Some(*id))
-                .map(|id| (id.clone(), top(&self.prev_projects, id) - top(&ids, id)))
-                .filter(|(_, d)| d.abs() > 0.5)
-                .collect();
-            drop(heights);
-            self.slide_gen += 1;
-            for (id, from) in moves {
-                self.slides.insert(id, Slide { from, epoch: self.slide_gen });
-            }
-        }
-        self.prev_projects = ids;
-        for p in projects {
-            let sessions: Vec<SessionRecord> = {
-                let mut v: Vec<SessionRecord> = self
-                    .store
-                    .data
-                    .sessions
-                    .iter()
-                    .filter(|s| s.kind == SessionKind::Claude && s.project_id.as_deref() == Some(p.id.as_str()) && (searching || !s.hidden))
-                    .cloned()
-                    .collect();
-                v.sort_by_key(|s| std::cmp::Reverse(s.last_active));
-                v
-            };
-            let name_match = searching && p.name.to_lowercase().contains(&q);
-            let matching: Vec<&SessionRecord> = sessions.iter().filter(|s| name_match || self.matches(&q, s)).collect();
-            if searching && !name_match && matching.is_empty() {
-                continue;
-            }
-            let expanded = searching || !p.collapsed;
-            let closing = !expanded && self.closing.contains(&p.id);
-            let mut group = div().relative().flex().flex_col().child(measure_height(&self.block_heights, &p.id)).child(self.render_project_header(&p, sessions.len(), expanded, cx));
-            if expanded || closing {
-                let mut kids = div().flex().flex_col();
-                let limit = if searching || self.show_all.contains(&p.id) { usize::MAX } else { PROJECT_SESSION_LIMIT };
-                let hidden_count = matching.len().saturating_sub(limit);
-                for rec in matching.iter().take(limit) {
-                    let running = self.is_running(&rec.id, cx);
-                    kids = kids.child(self.session_row(self.row_for(rec, running, false), false, cx));
-                }
-                if hidden_count > 0 {
-                    let pid = p.id.clone();
-                    kids = kids.child(
-                        div()
-                            .id(gpui::SharedString::from(format!("more-{pid}")))
-                            .ml(px(32.0))
-                            .py(px(3.0))
-                            .text_size(px(11.5))
-                            .text_color(hsla(theme::TEXT_FAINT))
-                            .cursor_pointer()
-                            .hover(|s| s.text_color(hsla(theme::TEXT_DIM)))
-                            .child(format!("Show {hidden_count} more"))
-                            .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::ShowAll(pid.clone()), window, cx))),
-                    );
-                }
-                if matching.is_empty() && sessions.is_empty() {
-                    kids = kids.child(div().ml(px(32.0)).py(px(3.0)).text_size(px(11.5)).text_color(hsla(theme::TEXT_FAINT)).child("No sessions yet"));
-                }
-                // Slides open each time the project is expanded (the element is new again after a collapse),
-                // and shut again while it is in `closing`. Row heights are fixed, so the full height is known.
-                let full = (matching.len().min(limit) as f32 * 27.0 + if hidden_count > 0 || matching.is_empty() && sessions.is_empty() { 22.0 } else { 0.0 }).max(1.0);
-                let (key, ms) = if closing { ("shut", CLOSE_MS) } else { ("open", 200) };
-                group = group.child(
-                    div().overflow_hidden().child(kids).with_animation(
-                        gpui::SharedString::from(format!("kids-{key}-{}", p.id)),
-                        Animation::new(Duration::from_millis(ms)).with_easing(gpui::ease_in_out),
-                        move |d, t| {
-                            let t = if closing { 1.0 - t } else { t };
-                            d.max_h(px(full * t)).opacity(t)
-                        },
-                    ),
-                );
-            }
-            body = body.child(slid(group, &p.id, self.slides.get(&p.id).copied()));
-        }
-
-        // ---- OTHER SESSIONS (imported, not belonging to a registered project)
-        let mut others: Vec<SessionRecord> = self
-            .store
-            .data
-            .sessions
-            .iter()
-            .filter(|s| s.kind == SessionKind::Claude && s.project_id.is_none() && (searching || !s.hidden) && self.matches(&q, s))
-            .cloned()
-            .collect();
-        others.sort_by_key(|s| std::cmp::Reverse(s.last_active));
-        if !others.is_empty() {
-            let collapsed = self.store.data.layout.other_collapsed && !searching;
-            body = body.child(div().h(px(10.0)));
-            body = body.child(
-                div()
-                    .id("other-header")
+                    .id("older-header")
                     .flex()
                     .items_center()
                     .gap(px(6.0))
                     .px(px(18.0))
                     .h(px(22.0))
                     .cursor_pointer()
-                    .child(div().text_color(hsla(theme::TEXT_FAINT)).child(icon(if collapsed { IconName::ChevronRight } else { IconName::ChevronDown }, 12.0)))
-                    .child(section_label("OTHER SESSIONS"))
-                    .child(div().text_size(px(10.5)).text_color(hsla(theme::TEXT_FAINT)).child(others.len().to_string()))
-                    .on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::ToggleOther, window, cx))),
+                    .child(div().text_color(hsla(theme::TEXT_FAINT)).child(icon(if open { IconName::ChevronDown } else { IconName::ChevronRight }, 12.0)))
+                    .child(section_label("OLDER"))
+                    .child(div().text_size(px(10.5)).text_color(hsla(theme::TEXT_FAINT)).child(older.len().to_string()))
+                    .on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::ToggleOlder, window, cx))),
             );
-            if !collapsed {
-                for rec in others.iter().take(if searching { usize::MAX } else { 12 }) {
-                    let running = self.is_running(&rec.id, cx);
-                    let mut row = self.row_for(rec, running, true);
-                    row.indent = false;
-                    row.scope = "oth";
-                    body = body.child(self.session_row(row, false, cx));
+            if open {
+                for (_, row) in older {
+                    body = body.child(self.list_row(row, cx));
                 }
             }
         }
 
         self.sidebar_frame(body, cx)
+    }
+
+    /// The project filter: a chip that lists the projects, and (with a project chosen) a ⋯ button for its actions.
+    fn render_project_filter(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let current = self.project_filter().cloned();
+        let name = current.as_ref().map_or("All projects".to_string(), |p| p.name.clone());
+        let chip = div()
+            .id("project-filter")
+            .flex_1()
+            .min_w_0()
+            .h(px(26.0))
+            .px(px(8.0))
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .rounded(px(6.0))
+            .bg(hsla(0x141414))
+            .cursor_pointer()
+            .hover(|s| s.bg(hsla(0x1b1b1b)))
+            .text_size(px(12.0))
+            .text_color(hsla(if current.is_some() { theme::TEXT } else { theme::TEXT_DIM }))
+            .child(icon(IconName::FolderOpen, 13.0))
+            .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(name))
+            .child(div().flex_none().text_color(hsla(theme::TEXT_FAINT)).child(icon(IconName::ChevronDown, 12.0)))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|ws, ev: &MouseDownEvent, _w, cx| {
+                    let chosen = ws.project_filter().map(|p| p.id.clone());
+                    let item = |label: String, act: Act, sep: bool| MenuItem { label, hint: None, act, danger: false, disabled: false, separator_before: sep };
+                    let mark = |on: bool| if on { "✓  " } else { "    " };
+                    let mut items = vec![item(format!("{}All projects", mark(chosen.is_none())), Act::FilterProject(None), false)];
+                    items.extend(ws.store.data.projects.iter().map(|p| item(format!("{}{}", mark(chosen.as_ref() == Some(&p.id)), p.name), Act::FilterProject(Some(p.id.clone())), false)));
+                    items.push(item("Add project…".into(), Act::ImportProject, true));
+                    ws.open_menu(ev.position, items, cx);
+                }),
+            );
+        div()
+            .occlude()
+            .flex()
+            .items_center()
+            .gap(px(4.0))
+            .child(chip)
+            .when_some(current, |d, p| {
+                d.child(icon_button("project-more", IconName::Ellipsis).on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |ws, ev: &MouseDownEvent, _w, cx| {
+                        let items = ws.project_menu(&p);
+                        ws.open_menu(ev.position, items, cx);
+                    }),
+                ))
+            })
     }
 
     /// The sidebar chrome around either list: header, scrolling body, usage footer.
@@ -612,8 +578,8 @@ impl Workspace {
     }
 
     fn render_sidebar_header(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let cwd = self.active_cwd();
-        let cwd_a = cwd;
+        // A new session starts in the filtered project when there is one.
+        let cwd = self.project_filter().map_or_else(|| self.active_cwd(), |p| p.path.clone());
         div()
             .flex()
             .flex_col()
@@ -633,29 +599,21 @@ impl Workspace {
                     .child(div().flex_1().text_size(px(13.0)).font_weight(FontWeight::BOLD).text_color(hsla(theme::TEXT)).child("CLAUDIU"))
                     .child(icon_button("settings", IconName::Settings).occlude().on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::OpenSettings, window, cx)))),
             )
-            .child(self.render_side_tabs(cx))
-            .when(self.side == Side::Sessions, |h| h.child(
+            .child(
                 div()
                     .occlude()
                     .flex()
                     .gap(px(6.0))
                     .child(
-                        button("new-claude", "+ Claude", true)
-                            .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::NewClaude { cwd: cwd_a.clone() }, window, cx))),
+                        button("new-claude", "+ Code session", true)
+                            .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::NewClaude { cwd: cwd.clone() }, window, cx))),
                     )
                     .child(
-                        button("new-github", "GitHub", false)
-                            .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
-                                let cwd = ws.active_cwd();
-                                ws.act(Act::OpenGithub { cwd }, window, cx)
-                            })),
+                        button("new-chat", "+ Chat", false)
+                            .on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::NewChat { cwd: None }, window, cx))),
                     ),
-            ))
-            .when(self.side == Side::Chat, |h| {
-                h.child(div().occlude().flex().child(
-                    button("new-chat", "+ New chat", true).on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::NewChat { cwd: None }, window, cx))),
-                ))
-            })
+            )
+            .child(self.render_project_filter(cx))
             .child(
                 div().occlude().child(
                     Input::new(&self.search_input)
@@ -664,54 +622,6 @@ impl Workspace {
                         .prefix(div().text_color(hsla(theme::TEXT_FAINT)).child(icon(IconName::Search, 14.0))),
                 ),
             )
-    }
-
-    /// "Sessions | Chat": which list the sidebar shows.
-    fn render_side_tabs(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let tab = |id: &'static str, label: &'static str, side: Side| {
-            let on = self.side == side;
-            div()
-                .id(id)
-                .flex_1()
-                .h(px(26.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(6.0))
-                .text_size(px(12.0))
-                .cursor_pointer()
-                .text_color(hsla(if on { theme::TEXT } else { theme::TEXT_DIM }))
-                .when(on, |d| d.bg(hsla(0x262626)))
-                .when(!on, |d| d.hover(|s| s.text_color(hsla(theme::TEXT))))
-                .child(label)
-                .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::SideTab(side), window, cx)))
-        };
-        div().occlude().flex().gap(px(2.0)).p(px(2.0)).rounded(px(8.0)).bg(hsla(0x141414)).child(tab("tab-chat", "Chat", Side::Chat)).child(tab("tab-sessions", "Code", Side::Sessions))
-    }
-
-    /// CHATS: every chat started here, newest first. A running one has a filled dot; the rest reopen on click.
-    fn render_chat_body(&mut self, q: &str, cx: &mut Context<Self>) -> Div {
-        let mut recs: Vec<ChatRecord> = self
-            .chat_store
-            .shown()
-            .filter(|r| q.is_empty() || r.title.to_lowercase().contains(q) || (crate::chat::store::is_tied(&r.cwd) && r.cwd.to_string_lossy().to_lowercase().contains(q)))
-            .cloned()
-            .collect();
-        recs.sort_by_key(|r| std::cmp::Reverse(r.last_active));
-        let total = recs.len();
-        let mut body = div().flex().flex_col().gap(px(2.0)).child(self.section_header("CHATS", Some(total.to_string()), None::<Stateful<Div>>));
-        if recs.is_empty() && total == 0 {
-            body = body.child(div().px(px(18.0)).py(px(6.0)).text_size(px(12.0)).text_color(hsla(theme::TEXT_FAINT)).child(if q.is_empty() {
-                "No chats yet. Start one with + New chat."
-            } else {
-                "No chats match"
-            }));
-        }
-        for r in recs {
-            let row = self.chat_row(&r, cx);
-            body = body.child(self.render_row(row, cx));
-        }
-        body
     }
 
     fn section_header(&self, label: &str, count: Option<String>, trailing: Option<Stateful<Div>>) -> Div {
@@ -731,108 +641,6 @@ impl Workspace {
                     .when_some(count, |d, c| d.child(div().text_size(px(10.5)).text_color(hsla(theme::TEXT_FAINT)).child(c))),
             )
             .when_some(trailing, |d, t| d.child(t))
-    }
-
-    fn render_project_header(&self, p: &Project, session_count: usize, expanded: bool, cx: &mut Context<Self>) -> Stateful<Div> {
-        let (toggle_id, menu_id, new_id_) = (p.id.clone(), p.id.clone(), p.path.clone());
-        let branch = p.git.as_ref().and_then(|g| g.branch.clone()).unwrap_or_default();
-        let (target, drop_target) = (p.id.clone(), p.id.clone());
-        let ws_weak = cx.entity().downgrade();
-        let non_git = p.git.is_none();
-        let wt = p.git.as_ref().map(|g| g.worktrees.len()).unwrap_or(0);
-        div()
-            .id(gpui::SharedString::from(format!("proj-{}", p.id)))
-            .group("row")
-            .flex()
-            .items_center()
-            .gap(px(7.0))
-            .h(px(28.0))
-            .pl(px(14.0))
-            .pr(px(8.0))
-            .mx(px(6.0))
-            .rounded(px(6.0))
-            .cursor_pointer()
-            .hover(|s| s.bg(hsla(theme::ROW_HOVER)))
-            .on_drag(DragProject(p.id.clone()), move |d, _, _, cx| begin_drag(&ws_weak, &d.0, cx))
-            .when(self.dragging.as_ref() == Some(&p.id), lifted)
-            // Other projects slide out of the way as this one is dragged over them.
-            .on_drag_move(cx.listener(move |ws, ev: &DragMoveEvent<DragProject>, _w, cx| {
-                let from = ev.drag(cx).0.clone();
-                if from == target || !ev.bounds.contains(&ev.event.position) || !ws.pointer_moved(ev.event.position) {
-                    return;
-                }
-                let projects = &mut ws.store.data.projects;
-                let at = |id: &Id| projects.iter().position(|p| p.id == *id);
-                if let (Some(from), Some(to)) = (at(&from), at(&target)) {
-                    move_to(projects, from, to);
-                    ws.last_swap = Instant::now();
-                    ws.store.mark_dirty();
-                    cx.notify();
-                }
-            }))
-            // A session dropped here is filed under this project.
-            .drag_over::<DragSession>(|s, _, _, _| s.bg(hsla(theme::ROW_ACTIVE)))
-            .on_drop(cx.listener(move |ws, d: &DragSession, _w, cx| {
-                if ws.store.session(&d.0).is_some_and(|s| s.kind == SessionKind::Claude) {
-                    if let Some(s) = ws.store.session_mut(&d.0) {
-                        s.project_id = Some(drop_target.clone());
-                    }
-                    if let Some(p) = ws.store.data.projects.iter_mut().find(|p| p.id == drop_target) {
-                        p.collapsed = false;
-                    }
-                    ws.store.mark_dirty();
-                    cx.notify();
-                }
-            }))
-            .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::ToggleProject(toggle_id.clone()), window, cx)))
-            .on_mouse_down(
-                MouseButton::Right,
-                cx.listener(move |ws, ev: &MouseDownEvent, _window, cx| {
-                    if let Some(p) = ws.store.project(&menu_id).cloned() {
-                        let items = ws.project_menu(&p);
-                        ws.open_menu(ev.position, items, cx);
-                    }
-                }),
-            )
-            .child(div().w(px(12.0)).flex_none().text_color(hsla(theme::TEXT_FAINT)).child(icon(if expanded { IconName::ChevronDown } else { IconName::ChevronRight }, 12.0)))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .text_size(px(13.0))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(hsla(theme::TEXT))
-                    .child(p.name.clone()),
-            )
-            .child(
-                div()
-                    .flex_none()
-                    .max_w(px(88.0))
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .text_size(px(11.0))
-                    .text_color(hsla(theme::TEXT_FAINT))
-                    .child(if non_git {
-                        format!("{session_count}")
-                    } else if wt > 0 {
-                        format!("{branch} +{wt}")
-                    } else {
-                        branch
-                    }),
-            )
-            .child(
-                icon_button(gpui::SharedString::from(format!("proj-new-{}", p.id)), IconName::Plus)
-                    .invisible()
-                    .group_hover("row", |s| s.visible())
-                    .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
-                        cx.stop_propagation();
-                        ws.act(Act::NewClaude { cwd: new_id_.clone() }, window, cx);
-                    })),
-            )
     }
 
     /// Switch account, add one, or sign in again / remove the active alt (shown greyed out for the main account).

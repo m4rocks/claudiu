@@ -27,7 +27,7 @@ use crate::updater::UpdateState;
 
 mod chats;
 mod cross;
-pub use chats::{ChatPane, Side};
+pub use chats::ChatPane;
 
 actions!(
     claudiu,
@@ -86,7 +86,8 @@ pub enum Act {
     /// Have Haiku write a new title for a chat or a Claude Code session from what was said in it.
     RegenTitle(Id),
     /// Switch the sidebar between terminal sessions and chats.
-    SideTab(Side),
+    /// Filter the sidebar list to a project (`None`: all).
+    FilterProject(Option<Id>),
     /// Stage everything in this folder's repository, commit it with a Haiku-written message, push.
     CommitPush(PathBuf),
     Pull(PathBuf),
@@ -98,9 +99,7 @@ pub enum Act {
     FixGitWithClaude(PathBuf),
     AddProject(PathBuf),
     RemoveProject(Id),
-    ToggleProject(Id),
-    ToggleOther,
-    ShowAll(Id),
+    ToggleOlder,
     ConfirmQuit,
     ConfirmInstallUpdate,
     Dismiss,
@@ -246,8 +245,6 @@ pub struct Toast {
     pub action: Option<(String, Act)>,
 }
 
-pub const CLOSE_MS: u64 = 180;
-
 pub struct Workspace {
     pub store: Store,
     pub claude_exe: Option<PathBuf>,
@@ -259,7 +256,6 @@ pub struct Workspace {
     pub right_drag: Option<RightDrag>,
     pub chats: Vec<ChatPane>,
     pub chat_store: ChatStore,
-    pub side: Side,
     /// The session shown in the main area.
     pub active: Option<Id>,
     /// Shells under Claude sessions, by the session they belong to.
@@ -269,8 +265,6 @@ pub struct Workspace {
     recent: Vec<Id>,
     pub main: Main,
     pub selected: Option<Id>,
-    /// What the main window showed on the sidebar tab that is not open, to bring back when it is.
-    parked: Option<chats::Layout>,
     pub search: String,
     pub search_input: Entity<InputState>,
     pub root_focus: FocusHandle,
@@ -279,11 +273,8 @@ pub struct Workspace {
     pub menu: Option<Menu>,
     pub toast: Option<Toast>,
     pub toast_serial: u64,
-    pub show_all: HashSet<Id>,
     /// Requests from sessions to other sessions, waiting for the user's answer.
     pub bridge_queue: std::collections::VecDeque<crate::bridge::Request>,
-    /// Projects whose session list is still sliding shut.
-    pub closing: HashSet<Id>,
     /// Sessions that leave no history once they end (the "fix with Claude" helper).
     ephemeral: HashSet<Id>,
     /// `claude auth login` tabs; account details are re-read when one ends.
@@ -293,13 +284,11 @@ pub struct Workspace {
     pub editors: Vec<(Editor, bool)>,
     pub transcript_mtimes: HashMap<Id, SystemTime>,
     pub window_title: String,
-    /// The session or project being dragged in the sidebar (dimmed in place while its ghost follows the cursor).
+    /// The session being dragged in the sidebar (lifted in place while its ghost follows the cursor).
     pub dragging: Option<Id>,
     /// Pointer position at the last drag-over check, see `pointer_moved`.
-    /// Sidebar reorder animation: last drawn order, painted project block heights, and the slides in flight.
+    /// Sidebar reorder animation: last drawn order of the running rows, and the slides in flight.
     pub prev_current: Vec<Id>,
-    pub prev_projects: Vec<Id>,
-    pub block_heights: std::rc::Rc<std::cell::RefCell<HashMap<Id, f32>>>,
     pub slides: HashMap<Id, crate::sidebar::Slide>,
     pub slide_gen: u64,
     /// When a drag last reordered the sidebar, see `pointer_moved`.
@@ -319,11 +308,7 @@ impl Workspace {
         initial_projects: Vec<PathBuf>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let mut store = Store::load(Store::default_path());
-        // Projects start collapsed on every launch.
-        for p in &mut store.data.projects {
-            p.collapsed = true;
-        }
+        let store = Store::load(Store::default_path());
         let claude_exe = claude::discover(store.data.settings.claude_path.as_deref());
         let search_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Search sessions and projects").clean_on_escape());
@@ -349,14 +334,12 @@ impl Workspace {
                 chats.purge_blank();
                 chats
             },
-            side: if store.data.layout.chat_tab { Side::Chat } else { Side::Sessions },
             active: None,
             shells: HashMap::new(),
             shell_drag: None,
             recent: vec![],
             main: Main::Home,
             selected: store.data.layout.selected_session.clone(),
-            parked: None,
             search: String::new(),
             search_input,
             root_focus: cx.focus_handle(),
@@ -365,9 +348,7 @@ impl Workspace {
             menu: None,
             toast: None,
             toast_serial: 0,
-            show_all: HashSet::new(),
             bridge_queue: Default::default(),
-            closing: HashSet::new(),
             ephemeral: HashSet::new(),
             logins: HashSet::new(),
             limit_warned: None,
@@ -380,8 +361,6 @@ impl Workspace {
             dragging: None,
             drag_pos: None,
             prev_current: Vec::new(),
-            prev_projects: Vec::new(),
-            block_heights: Default::default(),
             slides: HashMap::new(),
             slide_gen: 0,
             last_swap: std::time::Instant::now(),
@@ -1427,7 +1406,6 @@ impl Workspace {
             Act::OpenChat(id) => self.open_chat(&id, window, cx),
             Act::RemoveChat(id) => self.remove_chat(&id, window, cx),
             Act::RegenTitle(id) => self.regen_title(&id, cx),
-            Act::SideTab(side) => self.set_side(side),
             Act::CommitPush(cwd) => match self.claude_exe.clone() {
                 Some(exe) => self.run_git(
                     GitOp::CommitPush,
@@ -1481,40 +1459,19 @@ impl Workspace {
             }
             Act::RemoveProject(id) => {
                 self.store.remove_project(&id);
-                self.toast(
-                    "Project removed. Its sessions are kept under “Other sessions”.",
-                    false,
-                    cx,
-                );
-            }
-            Act::ToggleProject(id) => {
-                if let Some(p) = self.store.data.projects.iter_mut().find(|p| p.id == id) {
-                    p.collapsed = !p.collapsed;
-                    if p.collapsed {
-                        // Keep rendering the list while it slides shut.
-                        self.closing.insert(id.clone());
-                        cx.spawn(async move |this, cx| {
-                            cx.background_executor().timer(Duration::from_millis(CLOSE_MS)).await;
-                            this.update(cx, |ws, cx| {
-                                ws.closing.remove(&id);
-                                cx.notify();
-                            })
-                            .ok();
-                        })
-                        .detach();
-                    } else {
-                        self.closing.remove(&id);
-                    }
-                    self.store.mark_dirty();
+                if self.store.data.layout.project_filter.as_ref() == Some(&id) {
+                    self.store.data.layout.project_filter = None;
                 }
+                self.toast("Project removed. Its sessions are kept.", false, cx);
             }
-            Act::ToggleOther => {
-                let l = &mut self.store.data.layout;
-                l.other_collapsed = !l.other_collapsed;
+            Act::FilterProject(id) => {
+                self.store.data.layout.project_filter = id;
                 self.store.mark_dirty();
             }
-            Act::ShowAll(id) => {
-                self.show_all.insert(id);
+            Act::ToggleOlder => {
+                let l = &mut self.store.data.layout;
+                l.older_open = !l.older_open;
+                self.store.mark_dirty();
             }
             Act::ConfirmQuit => {
                 self.modal = None;
@@ -2102,7 +2059,6 @@ mod headless {
         // Chat: the Chat tab lists chats; a chat runs the real adapter (installed into the throwaway data folder
         // on first use), offers the agent's skills, answers, and comes back with its history after being closed.
         step(&mut cx, &|ws, w, cx| {
-            ws.act(Act::SideTab(Side::Chat), w, cx);
             ws.new_chat(None, None, w, cx);
         });
         let (id, view) = ws.read_with(&cx, |ws, _| (ws.chats[0].id.clone(), ws.chats[0].view.clone()));
@@ -2237,7 +2193,6 @@ mod headless {
         step(&mut cx, &|ws, w, cx| ws.submit_modal(w, cx));
         let text = h.join().unwrap().unwrap();
         assert_eq!(ws.read_with(&cx, |ws, _| ws.live.len()), live_before + 1);
-        assert!(ws.read_with(&cx, |ws, _| ws.side == Side::Sessions), "it opens in the Code tab");
         let code_id = text.split("(id ").nth(1).and_then(|t| t.split(')').next()).unwrap().to_string();
         let t = std::time::Instant::now();
         while ws.read_with(&cx, |ws, cx| ws.live_view(&code_id).is_none_or(|v| v.read(cx).tail_text(40).is_empty())) {
@@ -2281,6 +2236,10 @@ mod headless {
         let cwd = work.path().to_path_buf();
         step(&mut cx, &|ws, w, cx| ws.new_claude(cwd.clone(), w, cx));
         let first = ws.read_with(&cx, |ws, _| ws.active.clone().expect("a session is shown"));
+        // A filter on a project that no longer exists filters nothing; the list still draws.
+        step(&mut cx, &|ws, w, cx| ws.act(Act::FilterProject(Some("gone".into())), w, cx));
+        assert!(ws.read_with(&cx, |ws, _| ws.project_filter().is_none()));
+        step(&mut cx, &|ws, w, cx| ws.act(Act::FilterProject(None), w, cx));
         // The shell under a Claude session: starts on first use, survives switching away, goes with its session.
         step(&mut cx, &|ws, w, cx| ws.toggle_shell(&first, w, cx));
         assert!(ws.read_with(&cx, |ws, _| ws.shells.get(&first).is_some_and(|p| p.open)), "shell opened");

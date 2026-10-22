@@ -3,27 +3,6 @@
 
 use super::*;
 
-/// What the main window showed, set aside while the other sidebar tab is open.
-pub struct Layout {
-    pub active: Option<Id>,
-    pub recent: Vec<Id>,
-    pub main: Main,
-    pub selected: Option<Id>,
-}
-
-impl Layout {
-    fn empty() -> Self {
-        Self { active: None, recent: vec![], main: Main::Home, selected: None }
-    }
-}
-
-/// Which list the sidebar shows.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Side {
-    Sessions,
-    Chat,
-}
-
 const TITLE_SYSTEM: &str = "You name conversations. Reply with the title only: two to six words, no quotes, no trailing punctuation, in the language the conversation is mostly in. Say what the conversation is about, not how it started.";
 
 /// A chat whose agent is running. Closing the pane drops the view, which ends the agent; the record stays.
@@ -65,30 +44,6 @@ impl Workspace {
         }
     }
 
-    /// Switch the sidebar tab and remember it for the next launch. Each tab keeps its own main window: leaving one parks
-    /// its session, and the other tab gets back what it showed (the welcome page if it showed nothing).
-    pub(super) fn set_side(&mut self, side: Side) {
-        if side != self.side {
-            let leaving = Layout {
-                active: self.active.take(),
-                recent: std::mem::take(&mut self.recent),
-                main: self.main,
-                selected: self.selected.take(),
-            };
-            let back = self.parked.replace(leaving).unwrap_or(Layout::empty());
-            // A session may have ended or been closed while the tab was away.
-            let open = |ws: &Self, id: &Id| ws.live_view(id).is_some() || ws.chat_pane(id).is_some();
-            let keep = |ws: &Self, ids: Vec<Id>| ids.into_iter().filter(|id| open(ws, id)).collect::<Vec<_>>();
-            self.active = back.active.filter(|id| open(self, id));
-            self.recent = keep(self, back.recent);
-            self.main = if self.active.is_none() { Main::Home } else { back.main };
-            self.selected = back.selected.filter(|id| open(self, id) || self.chat_store.get(id).is_some() || self.store.session(id).is_some());
-        }
-        self.side = side;
-        self.store.data.layout.chat_tab = side == Side::Chat;
-        self.store.mark_dirty();
-    }
-
     /// Projects a chat can be tied to, as (name, folder).
     fn project_choices(&self) -> Vec<(String, PathBuf)> {
         self.store.data.projects.iter().map(|p| (p.name.clone(), p.path.clone())).collect()
@@ -109,7 +64,6 @@ impl Workspace {
         };
         let id = rec.id.clone();
         self.chat_store.add(rec);
-        self.set_side(Side::Chat);
         self.open_chat(&id, window, cx);
         if let (Some(prompt), Some(pane)) = (prompt, self.chat_pane(&id)) {
             pane.view.update(cx, |v, _| v.send_when_ready(prompt));

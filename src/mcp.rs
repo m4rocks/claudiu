@@ -35,8 +35,8 @@ pub fn allowed_tools(caller: &str) -> Vec<String> {
 }
 
 const BRIDGE_INSTRUCTIONS: &str = " Claudiu also has tools that reach your other sessions: list_chats, read_chat, list_code_sessions, \
-read_code_session, start_code_session (opens a new Claude Code session in the Code tab) and start_chat (opens a new \
-chat in the Chat tab). Each one makes Claudiu ask the user to confirm first. Use them only when the user asks you to \
+read_code_session, start_code_session (opens a new Claude Code session) and start_chat (opens a new \
+chat). Each one makes Claudiu ask the user to confirm first. Use them only when the user asks you to \
 look at, hand work to or continue in another session; if the user declines, accept it and don't ask again.";
 
 const CHAT_INSTRUCTIONS: &str = "You are a chat running inside Claudiu.";
@@ -193,8 +193,8 @@ fn bridge_tools() -> Vec<Value> {
             format!("Read the latest terminal output of a Claude Code session that is running in Claudiu.{CONFIRM}"),
             json!({ "id": id("list_code_sessions")["id"], "lines": { "type": "integer", "description": "How many recent lines (default 120)" } }),
         ),
-        tool("start_code_session", format!("Open a new Claude Code session in the Code tab, optionally with a first prompt.{CONFIRM}"), target.clone()),
-        tool("start_chat", format!("Open a new chat in the Chat tab, optionally with a first message. Without a folder it is not tied to a project.{CONFIRM}"), target),
+        tool("start_code_session", format!("Open a new Claude Code session, optionally with a first prompt.{CONFIRM}"), target.clone()),
+        tool("start_chat", format!("Open a new chat, optionally with a first message. Without a folder it is not tied to a project.{CONFIRM}"), target),
     ]
 }
 

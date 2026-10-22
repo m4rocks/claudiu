@@ -17,7 +17,7 @@ There's no API key and no login in Claudiu. Authentication stays with Claude Cod
 ## What you get
 
 - **A real terminal.** 24-bit color, scrollback, selection, mouse reporting, bracketed paste, alt screen, Ctrl+click on links, IME input.
-- **Current Session.** The sidebar lists everything that's running. Switching between sessions never touches the other processes.
+- **One list.** The sidebar shows what's running first, then recent Claude Code sessions and chats together, with older ones folded away. A project filter narrows it. Switching between sessions never touches the other processes.
 - **Projects.** Git-aware, with branch and linked worktrees. Add one with the button, by dropping a folder on the window, or with `claudiu <folder>`.
 - **History.** Ended Claude sessions stay in the sidebar, and a click resumes one through `claude --resume`.
 - **Import on startup.** Your existing Claude Code sessions are found and merged in (read-only, no duplicates).

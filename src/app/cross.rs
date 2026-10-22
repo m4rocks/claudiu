@@ -197,16 +197,15 @@ impl Workspace {
                 let before = self.selected.clone();
                 // A prompt that looks like a flag must not become one.
                 let leading = prompt.map(|p| if p.starts_with('-') { format!(" {p}") } else { p }).into_iter().collect();
-                self.set_side(Side::Sessions);
                 self.new_claude_with(cwd.clone(), leading, window, cx);
                 match self.selected.clone().filter(|s| Some(s) != before.as_ref()) {
-                    Some(id) => Ok(format!("Opened a Claude Code session (id {id}) in {}. It is running in the user's Code tab.", cwd.to_string_lossy())),
+                    Some(id) => Ok(format!("Opened a Claude Code session (id {id}) in {}. It is running in the user's sidebar.", cwd.to_string_lossy())),
                     None => Err("The session could not be started (is the `claude` CLI installed?).".into()),
                 }
             }
             "start_chat" => {
                 let id = self.new_chat(folder, prompt, window, cx);
-                Ok(format!("Opened a new chat (id {id}) in the user's Chat tab."))
+                Ok(format!("Opened a new chat (id {id}) in the user's sidebar."))
             }
             other => Err(format!("unknown tool {other}")),
         }

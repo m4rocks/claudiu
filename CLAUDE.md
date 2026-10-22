@@ -72,22 +72,22 @@ Do not intercept Claude Code shortcuts merely to implement application-level sho
 
 # Product model
 
-## Current Session
+## The session list
 
-The sidebar's first section is **Current Session**.
-
-It lists all currently running processes/sessions, not only Claude sessions.
-
-Example:
+The left sidebar is **one list** of Claude Code sessions and chats (product owner decision: no Chat/Code tabs, no project tree). **Running** comes first: terminals in the order the user arranged them (drag to reorder), then open chats. **Recent** follows, newest first, chats and sessions mixed; past the first 12 the rest sit behind a collapsed **Older**. Each row carries a project chip (the project's name, or the folder for an unregistered one; a project-less chat shows its age instead).
 
 ```text
-CURRENT SESSION
-
+RUNNING
 ● Claude       pilotist
 ● Claude       giolt
-$ PowerShell   pilotist
-● Claude       website
+◌ Chat         planning the release
+RECENT
+○ Claude       website
+○ Chat         naming ideas
+▸ OLDER  23
 ```
+
+**Projects are a filter, not a tree.** A chip under the search box lists the projects (and "Add project…"); picking one narrows the list to its sessions and chats, and `layout.project_filter` remembers it. With a project chosen, a ⋯ button opens its actions: new session or chat here, GitHub, open in VS Code or Zed, reveal, copy path, remove. "+ Code session" starts in the filtered project. Sessions can no longer be dragged onto a project; a session's project is the one its folder belongs to. A chat is a session type with its own icon; its storage stays in `chats.json`.
 
 A session remains associated with the running PTY until its process exits.
 
@@ -189,9 +189,9 @@ Claudiu does not edit Claude Code's settings files itself. Per-process flags and
 
 **Alt accounts (product owner decision):** the main account is the user's normal Claude Code (`~/.claude`, no `CLAUDE_CONFIG_DIR`) and Claudiu never writes to it. Each alt account is a Claudiu-created folder under its data dir (`accounts/<id>`), passed per process as `CLAUDE_CONFIG_DIR`. It keeps only its own login (`.credentials.json`, `.claude.json`). Every other entry is linked back to `~/.claude` (junctions on Windows, symlinks elsewhere), so the alt shares settings, history and so on, and Claude Code writes made in an alt land in the main folder. Sign-in runs `claude auth login`, and email/plan come from `claude auth status --json`. Removing an alt unlinks the links and deletes only that folder. Without Windows Developer Mode, files are hard-linked. When Claude Code replaces one, the next launch rejoins it and the newer copy wins: an alt's change is copied into main after backing up main's old copy in the alt's `backups/`. The account list lives in `accounts.json`, not `state.json`, so an older Claudiu that is still running can't erase it. Alt processes also get `CLAUDE_SECURESTORAGE_CONFIG_DIR`, which keys the macOS Keychain entry to each alt.
 
-**Chat tab (product owner decision):** besides PTY sessions, the sidebar's **Chat** tab runs Claude Code as a native conversation view through the Agent Client Protocol. Claudiu installs Zed's Node adapter (`@agentclientprotocol/claude-agent-acp`, pinned in `chat/acp.rs`) once into `<data>/acp` with `npm ci --ignore-scripts` from the lockfile shipped in `chat/adapter/` (so every dependency is pinned and none runs an install script; regenerate the lock when `ADAPTER_VERSION` moves, a test checks they agree), and starts one adapter process per chat with `CLAUDE_CODE_EXECUTABLE` set to the user's own `claude`, so login, settings, skills and commands are Claude Code's; the SDK's bundled binary is not installed (`--omit=optional`). Claudiu still makes no Anthropic API calls and holds no credentials. Skills and slash commands come from the agent's `available_commands_update` and run as plain prompt text. `fs` and `terminal` client capabilities are not offered. Chats are listed in `chats.json` (a pointer to Claude's session id, resumed with `session/load`), never in `state.json`; their conversations are not imported into the Code session list (a chat removed from the list is only hidden in `chats.json`, so its session stays recognised). Closing the adapter's stdin ends it and its `claude`. Chats belong to no account (they run under the active one and restart under a new login after an account switch) and, by default, to no project: they run in Claudiu's own empty `<data>/chats` folder, and the user can tie one to a project before its first message (or start it from a project's menu). Image paste goes to the agent as an ACP image block.
+**Chats (product owner decision):** besides PTY sessions, chats run Claude Code as a native conversation view through the Agent Client Protocol. Claudiu installs Zed's Node adapter (`@agentclientprotocol/claude-agent-acp`, pinned in `chat/acp.rs`) once into `<data>/acp` with `npm ci --ignore-scripts` from the lockfile shipped in `chat/adapter/` (so every dependency is pinned and none runs an install script; regenerate the lock when `ADAPTER_VERSION` moves, a test checks they agree), and starts one adapter process per chat with `CLAUDE_CODE_EXECUTABLE` set to the user's own `claude`, so login, settings, skills and commands are Claude Code's; the SDK's bundled binary is not installed (`--omit=optional`). Claudiu still makes no Anthropic API calls and holds no credentials. Skills and slash commands come from the agent's `available_commands_update` and run as plain prompt text. `fs` and `terminal` client capabilities are not offered. Chats are listed in `chats.json` (a pointer to Claude's session id, resumed with `session/load`), never in `state.json`; their conversations are not imported into the Code session list (a chat removed from the list is only hidden in `chats.json`, so its session stays recognised). Closing the adapter's stdin ends it and its `claude`. Chats belong to no account (they run under the active one and restart under a new login after an account switch) and, by default, to no project: they run in Claudiu's own empty `<data>/chats` folder, and the user can tie one to a project before its first message (or start it from a project's menu). Image paste goes to the agent as an ACP image block.
 
-**Chat details (product owner decision):** the sidebar remembers the last tab (`layout.chat_tab`). `/` completes anywhere in the message (the word at the cursor), and the command list scrolls through every skill. A chat nothing was said or typed in is not kept (dropped when it is closed, on quit and at startup); what was typed and not sent is a draft in `chats.json` and comes back in the message box. A chat is resumed with `session/load` only once it has a title (an empty Claude session cannot be loaded). While the adapter loads, the chat shows its last conversation from `<data>/chat-cache/<id>.json`, a local, trimmed copy of what the view shows that Claudiu writes after each turn and deletes with the chat; the replayed conversation replaces it. "Regenerate title" (chat and session menus) runs the same headless Haiku call as Commit & Push on the last messages (a chat's own, or for a Claude Code session the text parts of its transcript file, read the way discovery already reads it) and stores the result as the chat's title or the session's chosen name (which then also renames it inside Claude Code). Icons are Lucide, embedded through `icon_assets!` in `main.rs` (a test fails if one is used but not listed); only the brand mark is drawn by hand.
+**Chat details (product owner decision):** `/` completes anywhere in the message (the word at the cursor), and the command list scrolls through every skill. A chat nothing was said or typed in is not kept (dropped when it is closed, on quit and at startup); what was typed and not sent is a draft in `chats.json` and comes back in the message box. A chat is resumed with `session/load` only once it has a title (an empty Claude session cannot be loaded). While the adapter loads, the chat shows its last conversation from `<data>/chat-cache/<id>.json`, a local, trimmed copy of what the view shows that Claudiu writes after each turn and deletes with the chat; the replayed conversation replaces it. "Regenerate title" (chat and session menus) runs the same headless Haiku call as Commit & Push on the last messages (a chat's own, or for a Claude Code session the text parts of its transcript file, read the way discovery already reads it) and stores the result as the chat's title or the session's chosen name (which then also renames it inside Claude Code). Icons are Lucide, embedded through `icon_assets!` in `main.rs` (a test fails if one is used but not listed); only the brand mark is drawn by hand.
 
 **Generative UI in chats (product owner decision):** a chat reply may hold a fenced block with the info string `ui`, written as HTML with inline CSS and drawn natively in Claudiu's theme (`chat/ui/`: `parse.rs` reads a forgiving HTML/CSS subset, tolerant of half-streamed input, `render.rs` draws it with GPUI elements, `PROMPT` in `mod.rs` teaches the dialect). It is a general canvas, not a widget catalog: flex/grid layout, box styling, text styling, inline `<svg>` (rasterised once by GPUI), theme colours as `var(--accent)` etc. It is static: no scripts, no external images, no buttons; links open only on http(s). `PROMPT` is appended to the chat's system prompt through ACP `systemPrompt` (`mode: append`) in `session/new` and `session/load`. Keep `PROMPT`, `default_css` and `Css::set` in step.
 
@@ -274,17 +274,16 @@ Suggested structure:
 ```text
 CLAUDIU
 
-CURRENT SESSION
+RUNNING
   Claude / project
   Claude / project
-  $ PowerShell / project
+  Chat
 
-PROJECTS
-  Project A
-    Session 1
-    Session 2
-  Project B
-    Session 3
+RECENT
+  Claude / project
+  Chat
+
+OLDER
 
 ────────────────
 
@@ -699,8 +698,8 @@ https://code.claude.com/docs/en/statusline
 - UI framework: **GPUI**
 - Theme: **black/dark-first**
 - Sidebar: **left-side, Claude Desktop-inspired**
-- First sidebar section: **Current Session**
-- Current Session lists the running **Claude sessions** (and chats); a shell belongs to its session as a panel, not a list entry
+- First sidebar section: **Running** (one list of sessions and chats, projects are a filter)
+- The Running section lists the running **Claude sessions** (and chats); a shell belongs to its session as a panel, not a list entry
 - Projects are **Git-first**
 - Each Claude session can show its own shell in a panel under its terminal
 - One PTY per session
