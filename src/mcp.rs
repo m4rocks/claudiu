@@ -49,7 +49,7 @@ and call link_session with its id, once per pair. link_session is silent and cha
 const CHAT_INSTRUCTIONS: &str = "You are a chat running inside Claudiu.";
 
 /// Both callers: what makes the model call `attach_github`.
-const GITHUB_INSTRUCTIONS: &str = " GitHub: the moment an issue or pull request of this project comes up, call attach_github (kind issue or pull, the number, and the title if you know it) before you carry on, once per item. That means: the user mentions one (#123, \"issue 52\", a github.com .../issues/N or .../pull/N link), you read or search one with gh or the GitHub tools, you open or push a pull request, or a commit or branch name refers to one. It is silent, costs nothing and shows the item in the user's sidebar, so prefer calling it to skipping it. If its schema is not loaded yet, load it first with ToolSearch (select:mcp__claudiu__attach_github).";
+const GITHUB_INSTRUCTIONS: &str = " GitHub: attach_github is silent and costs nothing, and its description says when to call it. If its schema is not loaded yet, load it first with ToolSearch (select:mcp__claudiu__attach_github).";
 
 const INSTRUCTIONS: &str = "You are running inside Claudiu, which shows a tab title for this session. Call the \
 set_tab_title tool with a short title (2-5 words, no quotes) once you understand the user's first request. After \
