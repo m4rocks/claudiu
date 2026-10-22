@@ -168,13 +168,13 @@ impl Workspace {
             // One git operation at a time: while one runs, both rows are disabled.
             actions = actions
                 .child(if busy.is_some() {
-                    dim(row("commit-push", IconName::GitCommitHorizontal, if busy == Some(GitOp::CommitPush) { "Committing…" } else { "Commit & Push" }))
+                    dim_row("commit-push", IconName::GitCommitHorizontal, if busy == Some(GitOp::CommitPush) { "Committing…" } else { "Commit & Push" })
                 } else {
                     row("commit-push", IconName::GitCommitHorizontal, "Commit & Push")
                         .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::CommitPush(repo.clone()), window, cx)))
                 })
                 .child(if busy.is_some() {
-                    dim(row("pull", IconName::ArrowDownToLine, if busy == Some(GitOp::Pull) { "Pulling…" } else { "Pull" }))
+                    dim_row("pull", IconName::ArrowDownToLine, if busy == Some(GitOp::Pull) { "Pulling…" } else { "Pull" })
                 } else {
                     row("pull", IconName::ArrowDownToLine, "Pull")
                         .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::Pull(pull_repo.clone()), window, cx)))
@@ -271,7 +271,7 @@ fn group(label: &str, body: impl IntoElement) -> Div {
     div().flex().flex_col().gap(px(4.0)).child(div().px(px(10.0)).child(section_label(label.to_string()))).child(body)
 }
 
-fn row(id: impl Into<SharedString>, glyph: IconName, label: impl Into<SharedString>) -> Stateful<Div> {
+fn base_row(id: impl Into<SharedString>, glyph: IconName, label: impl Into<SharedString>) -> Stateful<Div> {
     div()
         .id(id.into())
         .h(px(28.0))
@@ -281,16 +281,29 @@ fn row(id: impl Into<SharedString>, glyph: IconName, label: impl Into<SharedStri
         .gap(px(10.0))
         .rounded(px(6.0))
         .text_size(px(12.5))
-        .text_color(hsla(theme::TEXT))
-        .cursor_pointer()
-        .hover(|s| s.bg(hsla(theme::ROW_HOVER)))
         .child(div().flex_none().text_color(hsla(theme::TEXT_DIM)).child(icon(glyph, 14.0)))
         .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(label.into()))
 }
 
-/// The row as it looks while its action is unavailable (no click handler is attached to it).
-fn dim(row: Stateful<Div>) -> Stateful<Div> {
-    row.cursor_default().text_color(hsla(theme::TEXT_FAINT)).hover(|s| s)
+fn row(id: impl Into<SharedString>, glyph: IconName, label: impl Into<SharedString>) -> Stateful<Div> {
+    base_row(id, glyph, label).text_color(hsla(theme::TEXT)).cursor_pointer().hover(|s| s.bg(hsla(theme::ROW_HOVER)))
+}
+
+/// The row as it looks while its action is unavailable: no hover, no pointer (give it no click handler either).
+fn dim_row(id: impl Into<SharedString>, glyph: IconName, label: impl Into<SharedString>) -> Stateful<Div> {
+    base_row(id, glyph, label).text_color(hsla(theme::TEXT_FAINT)).cursor_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// gpui panics when a style is set twice (a hover on a row that already has one), so just building both is the check.
+    #[test]
+    fn both_row_kinds_can_be_built() {
+        row("a", IconName::Terminal, "A");
+        dim_row("b", IconName::Terminal, "B");
+    }
 }
 
 fn kv(label: &str, value: String) -> Div {
