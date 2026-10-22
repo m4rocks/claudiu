@@ -219,9 +219,49 @@ impl Drop for Agent {
     }
 }
 
+/// Tools a chat never gets (product owner decision): it can read and search the project and talk about it, but
+/// changes happen in a Code session. Denied tools are taken out of the model's context, whatever the permission mode.
+pub const READ_ONLY_DENY: [&str; 8] = ["Bash", "PowerShell", "Monitor", "Edit", "Write", "NotebookEdit", "EnterWorktree", "ExitWorktree"];
+
+/// `_meta.claudeCode.options` for `session/new` and `session/load`: the Claudiu tools are pre-allowed (Claudiu asks the
+/// user itself before it acts on one) and the file and shell tools are denied.
+pub fn session_options() -> serde_json::Value {
+    serde_json::json!({ "allowedTools": crate::mcp::allowed_tools("chat"), "disallowedTools": READ_ONLY_DENY })
+}
+
+/// What a chat is told about being read-only and how to hand work to a Code session. `tied` is whether it has a project.
+pub fn handoff_prompt(chat_id: &str, tied: bool) -> String {
+    let folder = if tied {
+        "the folder defaults to this chat's project"
+    } else {
+        "this chat has no project, so ask the user which project or folder, and pass it as the folder argument"
+    };
+    format!(
+        "# This chat is read-only\n\nYou can read and search the project's files, but you cannot edit files or run commands: those tools are switched off here. Coding happens in a Claude Code session. When the user wants to start coding (or sends \"Start coding\"), call the start_code_session tool with a prompt that is a self-contained implementation brief of **under 2,000 characters**: the goal, the decisions made in this chat, the files and places involved, constraints, and how to check the result ({folder}). End the brief with: \"Background: the chat {chat_id} (read_chat) has the full conversation.\" Claudiu shows the brief to the user, who confirms before anything starts. This chat's id is {chat_id}."
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_chat_cannot_edit_or_run_commands_and_its_pre_allowed_tools_do_not_undo_that() {
+        let o = session_options();
+        let denied: Vec<_> = o["disallowedTools"].as_array().unwrap().iter().map(|t| t.as_str().unwrap()).collect();
+        for tool in ["Bash", "Monitor", "Edit", "Write", "NotebookEdit"] {
+            assert!(denied.contains(&tool), "{tool} must be denied");
+        }
+        // Pre-allowed tools are Claudiu's own MCP tools only.
+        assert!(o["allowedTools"].as_array().unwrap().iter().all(|t| t.as_str().unwrap().starts_with("mcp__claudiu__")));
+    }
+
+    #[test]
+    fn the_handoff_prompt_names_the_chat_and_the_cap() {
+        let p = handoff_prompt("c-1", false);
+        assert!(p.contains("c-1") && p.contains("2,000") && p.contains("ask the user which project"));
+        assert!(handoff_prompt("c-1", true).contains("defaults to this chat's project"));
+    }
 
     #[test]
     fn the_shipped_lockfile_pins_the_adapter_version_in_this_file() {

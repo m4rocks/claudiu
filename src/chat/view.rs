@@ -57,6 +57,8 @@ const PROJECT_PICKER: usize = usize::MAX;
 
 /// What a normal start says. It is not shown: the chat is usable at once and the agent starts behind it.
 const START: &str = "Starting Claude…";
+/// What the "Start coding" button sends: the chat's instructions (see `acp::handoff_prompt`) say what to do with it.
+const START_CODING: &str = "Start coding: write the implementation brief for a Claude Code session (under 2,000 characters, self-contained) and call start_code_session with it.";
 
 /// An image waiting to be sent with the next message.
 struct Attachment {
@@ -559,12 +561,13 @@ Write the summary.")).unwrap_or_else(|_| {
         let Some(kind) = self.pending.remove(&id) else { return };
         match (kind, result) {
             (Pending::Init, Ok(_)) => {
-                // The cross-session tools are pre-allowed here because Claudiu asks the user itself before it acts on one.
+                // The cross-session tools are pre-allowed here because Claudiu asks the user itself before it acts on one;
+                // the file and shell tools are denied (a chat is read-only, see `acp::READ_ONLY_DENY`).
                 let mut params = json!({
                     "cwd": self.cwd,
                     "mcpServers": crate::mcp::chat_servers(&self.id),
-                    "systemPrompt": {"mode": "append", "content": [{"type": "text", "text": super::ui::PROMPT}]},
-                    "_meta": {"claudeCode": {"options": {"allowedTools": crate::mcp::allowed_tools("chat")}}},
+                    "systemPrompt": {"mode": "append", "content": [{"type": "text", "text": format!("{}\n\n{}", super::ui::PROMPT, super::acp::handoff_prompt(&self.id, self.tied()))}]},
+                    "_meta": {"claudeCode": {"options": super::acp::session_options()}},
                 });
                 let method = if let Some(sid) = self.resume.clone() {
                     params["sessionId"] = sid.into();
@@ -1088,6 +1091,24 @@ impl ChatView {
                     .on_mouse_down(MouseButton::Left, cx.listener(move |v, ev: &MouseDownEvent, _, cx| {
                         v.picker = Some((i, ev.position));
                         cx.notify();
+                    })),
+            );
+        }
+        // Hand the conversation to a Code session: the model writes the brief and Claudiu asks before starting it.
+        if !busy && self.session_id.is_some() && !self.items.is_empty() {
+            chips = chips.child(
+                div()
+                    .id("chat-start-coding")
+                    .px(px(8.0))
+                    .py(px(3.0))
+                    .rounded(px(6.0))
+                    .text_size(px(11.5))
+                    .text_color(hsla(theme::ACCENT))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(hsla(0x222222)))
+                    .child("Start coding")
+                    .on_click(cx.listener(|v, _: &ClickEvent, window, cx| {
+                        v.send(START_CODING.into(), window, cx);
                     })),
             );
         }
