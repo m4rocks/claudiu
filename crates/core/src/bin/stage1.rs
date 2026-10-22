@@ -214,8 +214,8 @@ impl Probe {
         let mut finished = false;
         let deadline = Instant::now() + Duration::from_secs(240);
         while Instant::now() < deadline {
-            if !finished {
-                if let Ok(r) = done.try_recv() {
+            if !finished
+                && let Ok(r) = done.try_recv() {
                     match r {
                         Ok(v) => t.reply = v,
                         Err(e) => t.error = Some(e),
@@ -223,7 +223,6 @@ impl Probe {
                     t.ms = started.elapsed().as_millis();
                     finished = true;
                 }
-            }
             match self.rx.recv_timeout(Duration::from_millis(if finished { 400 } else { 100 })) {
                 Ok((msg, responder)) => self.inbound(&mut t, msg, responder),
                 Err(_) if finished => break,
@@ -442,11 +441,10 @@ fn c4_latency() {
     for (at, m) in &t.raw {
         if m["type"] == "system" && m["subtype"] == "hook_started" {
             started.insert(m["hook_id"].as_str().unwrap_or("").to_string(), *at);
-        } else if m["type"] == "system" && m["subtype"] == "hook_response" {
-            if let Some(s) = started.get(m["hook_id"].as_str().unwrap_or("")) {
+        } else if m["type"] == "system" && m["subtype"] == "hook_response"
+            && let Some(s) = started.get(m["hook_id"].as_str().unwrap_or("")) {
                 ms.push(at.duration_since(*s).as_secs_f64() * 1000.0);
             }
-        }
     }
     let count = |sub: &str| t.raw.iter().filter(|(_, m)| m["type"] == "system" && m["subtype"] == sub).count();
     println!("  raw hook events: started={} progress={} response={}", count("hook_started"), count("hook_progress"), count("hook_response"));

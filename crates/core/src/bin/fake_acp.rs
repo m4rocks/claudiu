@@ -39,13 +39,12 @@ impl Fake {
         loop {
             let line = self.input.next()?.ok()?;
             if let Ok(v) = serde_json::from_str::<Value>(&line) {
-                if let Some(path) = &self.log {
-                    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+                if let Some(path) = &self.log
+                    && let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
                         // One write, so lines from two adapters never interleave.
                         let _ = f.write_all(format!("{v}
 ").as_bytes());
                     }
-                }
                 return Some(v);
             }
         }
