@@ -74,7 +74,7 @@ Do not intercept Claude Code shortcuts merely to implement application-level sho
 
 ## The session list
 
-The left sidebar is **one list** of Claude Code sessions and chats (product owner decision: no Chat/Code tabs, no project tree). **Running** comes first: terminals in the order the user arranged them (drag to reorder), then open chats. **Recent** follows, newest first, chats and sessions mixed; past the first 12 the rest sit behind a collapsed **Older**. Each row carries a project chip (the project's name, or the folder for an unregistered one; a project-less chat shows its age instead).
+The left sidebar (284 px by default, 220–520 px by dragging its right edge; `layout.left_w` remembers it) is **one list** of Claude Code sessions and chats (product owner decision: no Chat/Code tabs, no project tree). **Running** comes first: terminals in the order the user arranged them (drag to reorder), then open chats. **Recent** follows, newest first, chats and sessions mixed; past the first 12 the rest sit behind a collapsed **Older**. Each row carries a project chip (the project's name, or the folder for an unregistered one; a project-less chat shows its age instead).
 
 ```text
 RUNNING
@@ -399,7 +399,7 @@ Each Claude session can show a **shell under its terminal**, toggled with Ctrl+S
 
 A column on the right, under the top bar (so the window buttons stay in the corner), on by default. Toggle it with the top bar's panel button or Ctrl+Shift+R (Cmd+Shift+R); `layout.right_hidden` remembers it. It has two views, switched inside the same column:
 
-- **Menu** (272 px): the actions that used to crowd the top bar (Open in editor ▾, Open folder, Commit & Push, Pull, show or hide the shell, GitHub), the **issues and pull requests Claude attached** to the session, the sessions and chats **linked** with it, and the session's **status**: context, prompt-cache timer, auto-compact and advisor. Auto-compact (On/Off) and Advisor (Off, Opus, Sonnet, Other… with a name box) are dropdowns while the session runs. The 5 HOUR / 7 DAY account meters stay in the left sidebar.
+- **Menu** (272 px by default, `layout.right_menu_w`, 240–480 px by dragging its left edge): the actions that used to crowd the top bar (Open in editor ▾, Open folder, Commit & Push, Pull, show or hide the shell, GitHub), the **issues and pull requests Claude attached** to the session, the sessions and chats **linked** with it, and the session's **status**: context, prompt-cache timer, auto-compact and advisor. Auto-compact (On/Off) and Advisor (Off, Opus, Sonnet, Other… with a name box) are dropdowns while the session runs. The 5 HOUR / 7 DAY account meters stay in the left sidebar.
 - **GitHub**: the project's issues and pull requests (`github/view.rs`), in a wider column (`layout.right_gh_w`, 560 px by default, resizable by dragging its left edge). The arrow returns to the menu. The view follows the shown session to that session's project; it is never a session, a tab or a main-area page.
 
 Status comes from the per-process mod (`usage.rs` snapshots, no tokens): it reports context, limits, the `/config` auto-compact switch, the auto-compact threshold and `advisorModel` (`ClaudeMeta`). Nothing is typed into the PTY.

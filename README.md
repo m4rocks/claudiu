@@ -22,7 +22,7 @@ There's no API key and no login in Claudiu. Authentication stays with Claude Cod
 - **History.** Ended Claude sessions stay in the sidebar, and a click resumes one through `claude --resume`.
 - **Import on startup.** Your existing Claude Code sessions are found and merged in (read-only, no duplicates).
 - **Shell panel.** Each Claude session can show its own shell under its terminal (Ctrl+Shift+T). It starts in the session's folder and ends with the session.
-- **Right sidebar.** The actions for the shown session (open in your editor, open folder, Commit & Push, Pull, shell), its status (context, prompt cache, auto-compact, advisor), the issues and pull requests Claude attached to it, the sessions and chats linked with it, and a GitHub view. Auto-compact and the advisor model can be changed from its status rows. Ctrl+Shift+R shows or hides it.
+- **Right sidebar.** The actions for the shown session (open in your editor, open folder, Commit & Push, Pull, shell), its status (context, prompt cache, auto-compact, advisor), the issues and pull requests Claude attached to it, the sessions and chats linked with it, and a GitHub view. Auto-compact and the advisor model can be changed from its status rows. Ctrl+Shift+R shows or hides it. Drag the edge of either sidebar to resize it; the widths are remembered.
 - **Usage meters.** Context per session, plus 5-hour and 7-day account limits. See [Usage meters](#usage-meters) for the catch.
 - **Git buttons.** Commit & Push (Haiku writes the message through your own `claude` CLI) and Pull. Branch management too.
 - **Tab titles.** Claude names its own tabs.

@@ -8,7 +8,7 @@ use gpui::{
     StatefulInteractiveElement, Styled, Window, div, px,
 };
 
-use crate::app::{Act, GitOp, MenuItem, RightDrag, Workspace};
+use crate::app::{Act, GitOp, MenuItem, SideDrag, Workspace};
 use crate::platform::Editor;
 use crate::store::{Attached, Id, Project, SessionKind, SessionRecord};
 use crate::theme::{self, hsla};
@@ -77,8 +77,8 @@ impl Workspace {
             }
             None => self.render_right_menu(window, cx).into_any_element(),
         };
-        // The wide GitHub view can be resized by its left edge; the menu has one width.
-        let handle = self.right_gh.is_some().then(|| {
+        // Both views can be resized by their left edge.
+        let handle = Some(
             div()
                 .id("right-resize")
                 .absolute()
@@ -90,11 +90,11 @@ impl Workspace {
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |ws, ev: &MouseDownEvent, _w, cx| {
-                        ws.right_drag = Some(RightDrag { x: f32::from(ev.position.x), width });
+                        ws.right_drag = Some(SideDrag { x: f32::from(ev.position.x), width });
                         cx.notify();
                     }),
-                )
-        });
+                ),
+        );
         Some(
             div()
                 .id("right-sidebar")
