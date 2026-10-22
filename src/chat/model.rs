@@ -26,7 +26,7 @@ pub enum Item {
 }
 
 /// A skill or slash command the agent offers (`available_commands_update`).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Command {
     pub name: String,
     pub description: String,
@@ -35,7 +35,7 @@ pub struct Command {
 }
 
 /// A session setting the agent lets the client change (mode, model, effort…).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ConfigOption {
     pub id: String,
     pub name: String,

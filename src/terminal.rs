@@ -4,6 +4,7 @@ use std::borrow::Cow;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::Instant;
 
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::event_loop::{EventLoop, EventLoopSender, Msg};
@@ -78,6 +79,9 @@ pub struct Terminal {
     start_error: Arc<Mutex<Option<String>>>,
     cols: AtomicU32,
     rows: AtomicU32,
+    /// When it was made, and what to call it in the start-up trace (`trace.rs`).
+    pub born: Instant,
+    pub tag: String,
 }
 
 /// Create the PTY, start the child and its event loop. Slow for a big executable (the OS scans it first).
@@ -118,13 +122,15 @@ impl Terminal {
         let size = TermSize::new(cols as usize, rows as usize);
         let config = Config { scrolling_history: 10_000, ..Default::default() };
         let term = Arc::new(FairMutex::new(Term::new(config, &size, listener.clone())));
-        let _ = spec;
+        let tag = spec.cwd.as_ref().and_then(|c| c.file_name()).map_or_else(|| spec.program.clone(), |n| n.to_string_lossy().into_owned());
         let this = Self {
             term,
             link: Arc::new(Mutex::new(Link::Starting(vec![]))),
             start_error: Arc::new(Mutex::new(None)),
             cols: AtomicU32::new(cols as u32),
             rows: AtomicU32::new(rows as u32),
+            born: Instant::now(),
+            tag,
         };
         (this, rx, listener, window_size)
     }
@@ -145,8 +151,10 @@ impl Terminal {
     pub fn spawn_deferred(spec: &SpawnSpec, cols: u16, rows: u16) -> (Self, UnboundedReceiver<Event>) {
         let (this, rx, listener, window_size) = Self::build(spec, cols, rows);
         let (spec, term, link, error) = (spec.clone(), this.term.clone(), Arc::downgrade(&this.link), this.start_error.clone());
+        let (born, tag) = (this.born, this.tag.clone());
         std::thread::spawn(move || {
             let outcome = start_pty(&spec, window_size, term, listener.clone());
+            crate::trace::note(&tag, born.elapsed(), "child process created");
             // The terminal may be gone already (the session was closed while starting): then drop the new child.
             let Some(link) = link.upgrade() else {
                 if let Ok(sender) = outcome {

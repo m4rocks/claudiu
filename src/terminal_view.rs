@@ -13,10 +13,10 @@ use alacritty_terminal::vte::ansi::CursorShape;
 use futures::StreamExt;
 use futures::channel::mpsc::UnboundedReceiver;
 use gpui::{
-    Animation, AnimationExt, App, Bounds, ClipboardItem, Context, Element, ElementId, ElementInputHandler, Entity,
+    App, Bounds, ClipboardItem, Context, Element, ElementId, ElementInputHandler, Entity,
     EntityInputHandler, EventEmitter, FocusHandle, Focusable, Font, FontStyle, FontWeight, GlobalElementId, Hsla, InspectorElementId, IntoElement,
-    KeyDownEvent, LayoutId, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    Pixels, Point, Render, ScrollDelta, ScrollWheelEvent, ShapedLine, StrikethroughStyle, Style,
+    KeyDownEvent, Keystroke, LayoutId, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    ContentMask, Pixels, Point, Render, ScrollDelta, ScrollWheelEvent, ShapedLine, StrikethroughStyle, Style,
     TextRun, UTF16Selection, UnderlineStyle, Window, div, fill, outline, point, prelude::*, px, relative, size,
 };
 
@@ -24,6 +24,7 @@ use gpui_kit::component::input;
 
 use crate::glyphs;
 use crate::keys;
+use crate::skeleton::{self, Draft};
 use crate::terminal::{SpawnSpec, Terminal};
 use crate::theme;
 
@@ -37,6 +38,8 @@ struct Metrics {
     cell_w: Pixels,
     line_h: Pixels,
     origin: Point<Pixels>,
+    /// How far the rows are drawn below their cells while scrolling between two lines.
+    shift: Pixels,
 }
 
 pub struct TerminalView {
@@ -45,10 +48,20 @@ pub struct TerminalView {
     metrics: Option<Metrics>,
     selecting: bool,
     scroll_px: f32,
+    /// Smooth scrollback: the view stands `frac` of a line above the line alacritty shows (0 at rest), and a wheel
+    /// notch eases there (`glide.rs`). Sub-line positions are drawn by shifting the rows.
+    frac: f32,
+    glide: Option<crate::glide::Glide>,
     pub title: Option<String>,
     /// Output timing, for `is_working`: when output last arrived and when the current burst began.
     last_output: Option<Instant>,
     burst_start: Option<Instant>,
+    /// The start-up trace has begun for this terminal (`trace.rs`).
+    traced: bool,
+    /// The previous screen of a session being resumed, shown dimmed behind the start-up spinner.
+    pub preview: Option<String>,
+    /// What the user types while Claude Code starts; moved into the real prompt when it appears (`skeleton.rs`).
+    draft: Draft,
     pub exit_code: Option<Option<i32>>,
     /// IME composition / dead-key text not yet committed; drawn at the cursor, never sent to the program.
     marked: Option<String>,
@@ -97,9 +110,14 @@ impl TerminalView {
             metrics: None,
             selecting: false,
             scroll_px: 0.0,
+            frac: 0.0,
+            glide: None,
             title: None,
             last_output: None,
             burst_start: None,
+            traced: false,
+            preview: None,
+            draft: Draft::default(),
             exit_code: None,
             marked: None,
             font_family: FONT,
@@ -107,6 +125,26 @@ impl TerminalView {
             loading: false,
             visible: true,
         }
+    }
+
+    /// Trace when the start-up burst of output ends (a second without any): about when Claude Code is ready.
+    fn trace_quiet(&self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_millis(250)).await;
+                let Ok(quiet) = this.update(cx, |v, _| {
+                    let last = v.last_output?;
+                    (last.elapsed() > Duration::from_secs(1)).then(|| (v.terminal.tag.clone(), last.duration_since(v.terminal.born)))
+                }) else {
+                    break;
+                };
+                if let Some((tag, at)) = quiet {
+                    crate::trace::note(&tag, at, "last output of the start-up burst");
+                    break;
+                }
+            }
+        })
+        .detach();
     }
 
     pub fn is_running(&self) -> bool {
@@ -132,6 +170,11 @@ impl TerminalView {
                     self.burst_start = Some(t);
                 }
                 self.last_output = Some(t);
+                if crate::trace::on() && !self.traced {
+                    self.traced = true;
+                    crate::trace::note(&self.terminal.tag, self.terminal.born.elapsed(), "first output");
+                    self.trace_quiet(cx);
+                }
                 // Off-screen terminals only record the timing; a notify would redraw the whole window.
                 if self.visible {
                     cx.notify()
@@ -180,17 +223,27 @@ impl TerminalView {
     }
 
     fn send(&mut self, bytes: Vec<u8>, cx: &mut Context<Self>) {
+        // Claude Code is not listening yet: keys edit the draft instead (`draft_key`).
+        if self.loading {
+            return;
+        }
         let mut term = self.terminal.term.lock();
         term.selection = None;
         if term.grid().display_offset() != 0 {
             term.scroll_display(Scroll::Bottom);
         }
         drop(term);
+        (self.frac, self.glide) = (0.0, None);
         self.terminal.write(bytes);
         cx.notify();
     }
 
     pub fn paste_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        if self.loading {
+            self.draft.insert(text);
+            cx.notify();
+            return;
+        }
         let text = text.replace("\r\n", "\r").replace('\n', "\r");
         let bytes = if self.mode().contains(TermMode::BRACKETED_PASTE) {
             // Strip embedded end-marker so pasted text can't terminate the paste early.
@@ -313,6 +366,7 @@ impl TerminalView {
                 _ => None,
             };
             if let Some(scroll) = scroll {
+                (self.frac, self.glide) = (0.0, None);
                 self.terminal.term.lock().scroll_display(scroll);
                 cx.notify();
                 cx.stop_propagation();
@@ -323,9 +377,56 @@ impl TerminalView {
         if self.exit_code.is_some() || keys::is_text(ks) {
             return;
         }
+        if self.loading {
+            self.draft_key(ks);
+            cx.notify();
+            cx.stop_propagation();
+            return;
+        }
         if let Some(bytes) = keys::encode(ks, self.mode()) {
             self.send(bytes, cx);
             cx.stop_propagation();
+        }
+    }
+
+    /// A key pressed while Claude Code starts: edit the draft; nothing reaches the program.
+    fn draft_key(&mut self, ks: &Keystroke) {
+        let m = &ks.modifiers;
+        let d = &mut self.draft;
+        match ks.key.as_str() {
+            "enter" if m.shift || m.alt => d.insert("\n"),
+            "enter" if !m.control => d.send(),
+            "escape" => d.sent = false,
+            "backspace" => d.backspace(),
+            "delete" => d.delete(),
+            "left" => d.left(),
+            "right" => d.right(),
+            "home" => d.home(),
+            "end" => d.end(),
+            "c" if m.control => d.clear(),
+            _ => {}
+        }
+    }
+
+    /// The prompt is up: move what was typed into it, and press Enter if the user did.
+    fn hand_over(&mut self, cx: &mut Context<Self>) {
+        let (text, sent) = self.draft.take();
+        if text.is_empty() {
+            return;
+        }
+        // A line is typed as it was; several go in as one paste, so their breaks stay breaks.
+        if text.contains('\n') {
+            self.paste_text(&text, cx);
+        } else {
+            self.send(text.into_bytes(), cx);
+        }
+        if sent {
+            // Enter right behind a paste can be read as part of it.
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(Duration::from_millis(150)).await;
+                this.update(cx, |v, cx| v.send(b"\r".to_vec(), cx)).ok();
+            })
+            .detach();
         }
     }
 
@@ -333,7 +434,7 @@ impl TerminalView {
         let m = self.metrics?;
         let (cols, rows) = self.terminal.size();
         let x = f32::from(position.x - m.origin.x).max(0.0);
-        let y = f32::from(position.y - m.origin.y).max(0.0);
+        let y = f32::from(position.y - m.origin.y - m.shift).max(0.0);
         let col = ((x / f32::from(m.cell_w)) as usize).min(cols as usize - 1);
         let row = ((y / f32::from(m.line_h)) as usize).min(rows as usize - 1);
         let side = if x - col as f32 * f32::from(m.cell_w) < f32::from(m.cell_w) / 2.0 {
@@ -503,12 +604,61 @@ impl TerminalView {
             }
     }
 
+    /// Where the view is in the scrollback, in lines up from the bottom.
+    fn position(&self) -> f32 {
+        self.terminal.term.lock().grid().display_offset() as f32 + self.frac
+    }
+
+    /// Show the scrollback at `p` lines up from the bottom: whole lines are alacritty's offset, the rest is `frac`.
+    fn set_position(&mut self, p: f32) {
+        let mut term = self.terminal.term.lock();
+        let (now, to) = (term.grid().display_offset() as i32, p.floor() as i32);
+        if to != now {
+            term.scroll_display(Scroll::Delta(to - now));
+        }
+        self.frac = if term.grid().display_offset() as i32 == to { p - to as f32 } else { 0.0 };
+    }
+
+    /// A wheel notch moves the target and the view eases there; a trackpad's pixel steps are applied as they come.
+    fn scroll_back(&mut self, lines: f32, notch: bool) {
+        let top = self.terminal.term.lock().history_size() as f32;
+        let here = self.position();
+        if notch {
+            crate::glide::Glide::nudge(&mut self.glide, here, lines * crate::glide::NOTCH, 0.0, top);
+        } else {
+            self.glide = None;
+            self.set_position((here + lines).clamp(0.0, top));
+        }
+    }
+
+    /// One frame of an easing scroll.
+    fn glide_step(&mut self, window: &mut Window) {
+        let Some(g) = &mut self.glide else { return };
+        let moving = g.step(0.01);
+        let p = g.shown;
+        if moving {
+            window.request_animation_frame();
+        } else {
+            self.glide = None;
+        }
+        self.set_position(p);
+    }
+
     fn on_scroll(&mut self, event: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
         let Some(m) = self.metrics else { return };
+        let notch = matches!(event.delta, ScrollDelta::Lines(_));
         let lines = match event.delta {
             ScrollDelta::Lines(p) => p.y,
             ScrollDelta::Pixels(p) => f32::from(p.y) / f32::from(m.line_h),
         };
+        let mode = self.mode();
+        let alt_scroll = mode.contains(TermMode::ALT_SCREEN) && mode.contains(TermMode::ALTERNATE_SCROLL);
+        // Plain scrollback is ours to scroll smoothly; a program that takes the wheel gets whole lines.
+        if !self.mouse_reporting(&event.modifiers) && !alt_scroll {
+            self.scroll_back(lines, notch);
+            cx.notify();
+            return;
+        }
         self.scroll_px += lines;
         let whole = self.scroll_px.trunc() as i32;
         if whole == 0 {
@@ -516,7 +666,6 @@ impl TerminalView {
         }
         self.scroll_px -= whole as f32;
 
-        let mode = self.mode();
         if self.mouse_reporting(&event.modifiers) {
             if let Some((_, _, col, row)) = self.grid_point(event.position) {
                 let button = if whole > 0 { 64 } else { 65 };
@@ -524,7 +673,7 @@ impl TerminalView {
                     self.report_mouse(button, col, row, true, &event.modifiers, false);
                 }
             }
-        } else if mode.contains(TermMode::ALT_SCREEN) && mode.contains(TermMode::ALTERNATE_SCROLL) {
+        } else {
             let app = mode.contains(TermMode::APP_CURSOR);
             let key = match (whole > 0, app) {
                 (true, true) => "\x1bOA",
@@ -534,12 +683,6 @@ impl TerminalView {
             };
             self.terminal
                 .write(key.repeat(whole.unsigned_abs() as usize).into_bytes());
-        } else {
-            self.terminal
-                .term
-                .lock()
-                .scroll_display(Scroll::Delta(whole));
-            cx.notify();
         }
     }
 }
@@ -566,7 +709,10 @@ impl EntityInputHandler for TerminalView {
 
     fn replace_text_in_range(&mut self, _: Option<Range<usize>>, text: &str, _: &mut Window, cx: &mut Context<Self>) {
         self.marked = None;
-        if !text.is_empty() && self.is_running() {
+        if self.loading {
+            self.draft.insert(text);
+            cx.notify();
+        } else if !text.is_empty() && self.is_running() {
             self.send(text.as_bytes().to_vec(), cx);
         } else {
             cx.notify();
@@ -592,7 +738,7 @@ impl EntityInputHandler for TerminalView {
         let cursor = term.grid().cursor.point;
         let row = (cursor.line.0 + term.grid().display_offset() as i32).max(0);
         Some(Bounds::new(
-            point(m.origin.x + m.cell_w * cursor.column.0 as f32, m.origin.y + m.line_h * row as f32),
+            point(m.origin.x + m.cell_w * cursor.column.0 as f32, m.origin.y + m.shift + m.line_h * row as f32),
             size(m.cell_w, m.line_h),
         ))
     }
@@ -630,9 +776,14 @@ async fn pump(
 }
 
 impl Render for TerminalView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.glide_step(window);
         if self.loading && (self.exit_code.is_some() || self.has_content()) {
             self.loading = false;
+            crate::trace::note(&self.terminal.tag, self.terminal.born.elapsed(), "first content painted");
+            if self.exit_code.is_none() {
+                self.hand_over(cx);
+            }
         }
         div()
             .id("terminal")
@@ -658,7 +809,9 @@ impl Render for TerminalView {
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_scroll_wheel(cx.listener(Self::on_scroll))
             .child(TerminalElement { view: cx.entity() })
-            .when(self.loading, |d| d.child(loading_overlay()))
+            .when(self.loading, |d| {
+                d.child(skeleton::overlay(&self.draft, self.preview.as_deref(), self.terminal.born.elapsed(), self.last_output.is_some()))
+            })
     }
 }
 
@@ -667,36 +820,6 @@ impl TerminalView {
     fn has_content(&self) -> bool {
         self.terminal.term.lock().renderable_content().display_iter.any(|c| !matches!(c.c, ' ' | '\0'))
     }
-}
-
-/// Claude Code's own spinner glyphs, cycling in the accent color, while `claude` boots.
-fn loading_overlay() -> impl IntoElement {
-    // ✳ (U+2733) has an emoji presentation that Windows draws as a green emoji; Claude Code uses `*` there too.
-    #[cfg(target_os = "windows")]
-    const FRAMES: [&str; 6] = ["·", "✢", "*", "✶", "✻", "✽"];
-    #[cfg(not(target_os = "windows"))]
-    const FRAMES: [&str; 6] = ["·", "✢", "✳", "✶", "✻", "✽"];
-    div()
-        .absolute()
-        .inset_0()
-        .flex()
-        .flex_col()
-        .items_center()
-        .justify_center()
-        .gap(px(10.0))
-        .bg(theme::hsla(theme::TERMINAL_BG))
-        .child(
-            div().font_family(FONT).text_size(px(28.0)).text_color(theme::hsla(theme::ACCENT)).with_animation(
-                "claude-loading",
-                Animation::new(Duration::from_millis(1200)).repeat(),
-                |d, t| {
-                    // Ping-pong through the frames like Claude Code does.
-                    let i = ((t * 10.0) as usize).min(9);
-                    d.child(FRAMES[if i < 6 { i } else { 10 - i }])
-                },
-            ),
-        )
-        .child(div().text_size(px(12.0)).text_color(theme::hsla(theme::TEXT_FAINT)).child("Starting Claude Code…"))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -795,13 +918,17 @@ impl Element for TerminalElement {
 
         let terminal = &self.view.read(cx).terminal;
         terminal.resize(cols, rows, f32::from(cell_w), f32::from(line_h));
+        let frac = self.view.read(cx).frac;
         self.view.update(cx, |v, _| {
             v.metrics = Some(Metrics {
                 cell_w,
                 line_h,
                 origin: bounds.origin,
+                shift: line_h * frac,
             });
         });
+        // Where row 0 of the cells below is drawn (one row higher while the line above is peeking in).
+        let top_y;
 
         let mut backgrounds: Vec<(Bounds<Pixels>, Hsla)> = Vec::new();
         let mut batches: Vec<Batch> = Vec::new();
@@ -820,12 +947,12 @@ impl Element for TerminalElement {
             let block_cursor = focused && cursor.shape == CursorShape::Block;
             let default_bg = theme::default_bg();
 
-            let cell_origin = |row: usize, col: usize| {
-                point(
-                    bounds.origin.x + cell_w * col as f32,
-                    bounds.origin.y + line_h * row as f32,
-                )
-            };
+            // Between two lines the view is shifted down by `frac` of a line and the line above shows in the gap.
+            let extra = (frac > 0.0 && term.grid().display_offset() < term.history_size()).then(|| Line(-offset - 1));
+            let top = extra.is_some() as usize;
+            top_y = bounds.origin.y + line_h * frac - line_h * top as f32;
+            let cell_origin = |row: usize, col: usize| point(bounds.origin.x + cell_w * col as f32, top_y + line_h * row as f32);
+            let above = extra.into_iter().flat_map(|l| (0..cols as usize).map(move |c| (l, c))).map(|(l, c)| (&term.grid()[l][Column(c)], GridPoint::new(l, Column(c))));
 
             // Open background span: (row, start_col, end_col_exclusive, color)
             let mut open_bg: Option<(usize, usize, usize, Hsla)> = None;
@@ -842,14 +969,12 @@ impl Element for TerminalElement {
                 }
             };
 
-            for indexed in content.display_iter {
-                let cell = indexed.cell;
-                let p = indexed.point;
+            for (cell, p) in content.display_iter.map(|i| (i.cell, i.point)).chain(above) {
                 let row = p.line.0 + offset;
-                if row < 0 || row >= rows as i32 || p.column.0 >= cols as usize {
+                if row < -(top as i32) || row >= rows as i32 || p.column.0 >= cols as usize {
                     continue;
                 }
-                let (row, col) = (row as usize, p.column.0);
+                let (row, col) = ((row + top as i32) as usize, p.column.0);
                 if cell
                     .flags
                     .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
@@ -910,7 +1035,7 @@ impl Element for TerminalElement {
                     continue;
                 }
                 // Block elements / box drawing: exact rectangles instead of font glyphs, so they tile seamlessly.
-                let (ox, oy) = (f32::from(bounds.origin.x), f32::from(bounds.origin.y));
+                let (ox, oy) = (f32::from(bounds.origin.x), f32::from(top_y));
                 let (cw, lh) = (f32::from(cell_w), f32::from(line_h));
                 let x0 = (ox + cw * col as f32).round();
                 let x1 = (ox + cw * (col + width) as f32).round();
@@ -964,7 +1089,7 @@ impl Element for TerminalElement {
             // Cursor (non-block shapes, or hollow when unfocused)
             let cur_row = cursor.point.line.0 + offset;
             if cur_row >= 0 && cur_row < rows as i32 {
-                preedit_at = Some(cell_origin(cur_row as usize, cursor.point.column.0));
+                preedit_at = Some(cell_origin(cur_row as usize + top, cursor.point.column.0));
             }
             if cur_row >= 0
                 && cur_row < rows as i32
@@ -978,7 +1103,7 @@ impl Element for TerminalElement {
                 };
                 if shape != CursorShape::Block {
                     let wide = term.grid()[cursor.point].flags.contains(Flags::WIDE_CHAR);
-                    let origin = cell_origin(cur_row as usize, cursor.point.column.0);
+                    let origin = cell_origin(cur_row as usize + top, cursor.point.column.0);
                     let bounds =
                         Bounds::new(origin, size(cell_w * if wide { 2.0 } else { 1.0 }, line_h));
                     cursor_out = Some((bounds, shape, focused));
@@ -1016,7 +1141,7 @@ impl Element for TerminalElement {
                     .shape_line(b.text.into(), font_size, &[run], Some(cell_w));
             let origin = point(
                 bounds.origin.x + cell_w * b.col as f32,
-                bounds.origin.y + line_h * b.row as f32,
+                top_y + line_h * b.row as f32,
             );
             lines.push((origin, line));
         }
@@ -1057,6 +1182,8 @@ impl Element for TerminalElement {
         cx: &mut App,
     ) {
         window.paint_quad(fill(pre.bounds, theme::hsla(theme::TERMINAL_BG)));
+        // A shifted view draws a row past the edges; the mask cuts it off.
+        window.with_content_mask(Some(ContentMask { bounds: pre.bounds }), |window| {
         for (bounds, color) in pre.backgrounds.drain(..) {
             window.paint_quad(fill(bounds, color));
         }
@@ -1087,6 +1214,7 @@ impl Element for TerminalElement {
             window.paint_quad(fill(Bounds::new(origin, size(line.width, pre.line_h)), theme::hsla(theme::TERMINAL_BG)));
             let _ = line.paint(origin, pre.line_h, gpui::TextAlign::Left, None, window, cx);
         }
+        });
         // Receive typed text / IME input while this terminal has focus.
         let focus = self.view.read(cx).focus.clone();
         window.handle_input(&focus, ElementInputHandler::new(pre.bounds, self.view.clone()), cx);

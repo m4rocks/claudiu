@@ -16,6 +16,7 @@ pub struct ChatPane {
     pub context: Option<(u64, u64)>,
     /// What the chat's mod reported (see `usage.rs`); `None` until it has.
     pub auto_compact: Option<bool>,
+    pub compact_at: Option<u64>,
     pub advisor: Option<String>,
     /// When the last turn ended: the prompt cache is warm for a while after it.
     pub turn_at: Option<i64>,
@@ -44,14 +45,19 @@ impl Workspace {
 
     /// Start the chat adapter in the background so a chat opens ready (it is shared by all chats).
     pub fn warm_chats(&self, cx: &mut Context<Self>) {
-        let Some((launch, _)) = self.chat_launch() else { return };
+        if let Some((launch, _)) = self.chat_launch() {
+            Self::warm(launch, cx);
+        }
+    }
+
+    fn warm(launch: Launch, cx: &mut Context<Self>) {
         cx.background_executor().spawn(async move { crate::chat::acp::warm(&launch.claude, launch.env) }).detach();
     }
 
     /// Move every open chat to the newly active account once it is idle (same conversation, new login).
     pub(super) fn relaunch_chats(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.warm_chats(cx);
         let Some((launch, account)) = self.chat_launch() else { return };
+        Self::warm(launch.clone(), cx);
         for pane in &mut self.chats {
             pane.account = account.clone();
             pane.view.update(cx, |v, cx| v.relaunch(Some(launch.clone()), window, cx));
@@ -109,7 +115,7 @@ impl Workspace {
             view.update(cx, |v, _| v.set_projects(projects));
             let sub_id = rec.id.clone();
             let sub = cx.subscribe_in(&view, window, move |ws: &mut Workspace, _view, ev: &ChatEvent, window, cx| ws.on_chat_event(&sub_id, ev, window, cx));
-            self.chats.push(ChatPane { id: rec.id, cwd, view, account, context: None, auto_compact: None, advisor: None, turn_at: None, _sub: sub });
+            self.chats.push(ChatPane { id: rec.id, cwd, view, account, context: None, auto_compact: None, compact_at: None, advisor: None, turn_at: None, _sub: sub });
         }
         self.show_session(id, window, cx);
     }

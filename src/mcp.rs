@@ -26,20 +26,20 @@ pub const RECORD_ENV: &str = "CLAUDIU_RECORD";
 const CODE_TOOLS: [&str; 5] = ["set_tab_title", "attach_github", "detach_github", "link_session", "unlink_session"];
 const CHAT_TOOLS: [&str; 4] = ["attach_github", "detach_github", "link_session", "unlink_session"];
 
-/// Tools that reach other sessions. Each one makes Claudiu ask the user before it does anything (`bridge.rs`).
-const BRIDGE_TOOLS: [&str; 7] = ["list_chats", "read_chat", "list_code_sessions", "read_code_session", "search_sessions", "start_code_session", "start_chat"];
+/// Tools that reach other sessions (`bridge.rs`).
+const BRIDGE_TOOLS: [&str; 9] = ["list_chats", "read_chat", "list_code_sessions", "read_code_session", "search_sessions", "search_projects", "start_code_session", "start_chat", "set_chat_project"];
 
 /// `mcp__<server>__<tool>` names allowed per process so Claude Code (or the chat adapter) adds no prompt of its own:
-/// renaming the tab is harmless, and the cross-session tools are gated by Claudiu's own confirmation instead.
+/// renaming the tab is harmless, and the cross-session tools are limited to what the user asks of the model.
 pub fn allowed_tools(caller: &str) -> Vec<String> {
     let own: &[&str] = if caller == "code" { &CODE_TOOLS } else { &CHAT_TOOLS };
     own.iter().copied().chain(BRIDGE_TOOLS).map(|t| format!("mcp__claudiu__{t}")).collect()
 }
 
 const BRIDGE_INSTRUCTIONS: &str = " Claudiu also has tools that reach your other sessions: list_chats, read_chat, list_code_sessions, \
-read_code_session, search_sessions, start_code_session (opens a new Claude Code session) and start_chat (opens a new \
-chat). Each one makes Claudiu ask the user to confirm first. Use them only when the user asks you to \
-look at, hand work to or continue in another session; if the user declines, accept it and don't ask again.";
+read_code_session, search_sessions, search_projects (the user's projects), start_code_session (opens a new Claude Code session) and \
+start_chat (opens a new chat). A chat can also tie itself to a project with set_chat_project. They act at once. Use them only when \
+the user asks you to look at, hand work to or continue in another session, or to work in a project.";
 
 /// Both callers: the sidebar shows linked sessions and chats together.
 const LINK_INSTRUCTIONS: &str = " Claudiu shows related sessions and chats together. When this work continues, builds on or was \
@@ -122,7 +122,7 @@ fn serve(input: impl BufRead, mut out: impl Write, caller: &str, session: &str, 
                 "instructions": if chat { format!("{CHAT_INSTRUCTIONS}{GITHUB_INSTRUCTIONS}{LINK_INSTRUCTIONS}{BRIDGE_INSTRUCTIONS}") } else { format!("{INSTRUCTIONS}{GITHUB_INSTRUCTIONS}{LINK_INSTRUCTIONS}{BRIDGE_INSTRUCTIONS}") },
             })),
             "ping" => Ok(json!({})),
-            "tools/list" => Ok(json!({ "tools": own_tools(chat).into_iter().chain(bridge_tools()).collect::<Vec<_>>() })),
+            "tools/list" => Ok(json!({ "tools": own_tools(chat).into_iter().chain(bridge_tools(chat)).collect::<Vec<_>>() })),
             "tools/call" => Ok(match msg["params"]["name"].as_str() {
                 Some("set_tab_title") if !chat => set_title(&msg["params"], session, &data.join("titles")),
                 Some("attach_github") => attach_github(&msg["params"], record, &attach_dir(data)),
@@ -130,7 +130,7 @@ fn serve(input: impl BufRead, mut out: impl Write, caller: &str, session: &str, 
                 Some("link_session") => link_session(&msg["params"], record, &attach_dir(data), "link"),
                 Some("unlink_session") => link_session(&msg["params"], record, &attach_dir(data), "unlink"),
                 Some("set_model") if !chat => reply("Model switching isn't available in this session (Claudiu's mod isn't loaded).", true),
-                Some(tool) if BRIDGE_TOOLS.contains(&tool) => match ask(tool, &msg["params"]["arguments"]) {
+                Some(tool) if BRIDGE_TOOLS.contains(&tool) && (chat || tool != "set_chat_project") => match ask(tool, &msg["params"]["arguments"]) {
                     Ok(text) => reply(&text, false),
                     Err(text) => reply(&text, true),
                 },
@@ -192,10 +192,17 @@ fn own_tools(chat: bool) -> Vec<Value> {
             "required": ["id"],
         },
     });
+    // Claude Code defers MCP tools behind ToolSearch, and a model rarely goes looking for a bookkeeping tool: these
+    // are sent with their schema from the start (`anthropic/alwaysLoad`).
+    let upfront = |mut tool: Value| {
+        tool["_meta"] = json!({ "anthropic/alwaysLoad": true });
+        tool
+    };
+    let (attach, detach, link, unlink) = (upfront(attach), upfront(detach), upfront(link), upfront(unlink));
     if chat {
         return vec![attach, detach, link, unlink];
     }
-    vec![json!({
+    vec![upfront(json!({
                 "name": "set_tab_title",
                 "description": "Set this session's tab title in Claudiu (2-5 words). Call after the first request, when the current task or scope changes, and whenever the user asks to rename the session or tab. Don't repeat an unchanged title.",
                 "inputSchema": {
@@ -203,7 +210,7 @@ fn own_tools(chat: bool) -> Vec<Value> {
                     "properties": { "title": { "type": "string", "description": "Short tab title, 2-5 words" } },
                     "required": ["title"],
                 },
-            }), attach, detach, json!({
+            })), attach, detach, json!({
                 "name": "set_model",
                 "description": "Switch this session's model and/or effort from your next request on, even mid-turn. Always ask the user first with the AskUserQuestion tool (which model, which effort) unless they just named them explicitly; never switch on your own. Claude Code also keeps the choice as the user's default model/effort.",
                 "inputSchema": {
@@ -216,16 +223,16 @@ fn own_tools(chat: bool) -> Vec<Value> {
             }), link, unlink]
 }
 
-const CONFIRM: &str = " Claudiu asks the user to confirm first, so only call it when the user asked for this.";
+const CONFIRM: &str = " It acts at once, so only call it when the user asked for this.";
 
-fn bridge_tools() -> Vec<Value> {
+fn bridge_tools(chat: bool) -> Vec<Value> {
     let tool = |name: &str, description: String, properties: Value| json!({ "name": name, "description": description, "inputSchema": { "type": "object", "properties": properties } });
     let id = |what: &str| json!({ "id": { "type": "string", "description": format!("The id from {what}") } });
     let target = json!({
         "prompt": { "type": "string", "description": "First message for the new session (optional)" },
         "folder": { "type": "string", "description": "Project name or folder path (optional)" },
     });
-    vec![
+    let mut tools = vec![
         tool("list_chats", format!("List the user's chats in Claudiu (id, title, project, whether it is open, when it was created and last updated).{CONFIRM}"), json!({})),
         tool(
             "read_chat",
@@ -243,9 +250,22 @@ fn bridge_tools() -> Vec<Value> {
             format!("Search the user's chats and Claude Code sessions by words in their title, project or folder. Returns kind, id, title, project and created/updated times of the best matches; pass an id to link_session.{CONFIRM}"),
             json!({ "query": { "type": "string", "description": "Words to look for (optional: without it, the most recent)" } }),
         ),
+        tool(
+            "search_projects",
+            format!("Search the user's projects (name, folder, git branch) by words. Pass a project's name as the folder of start_code_session or start_chat, or to set_chat_project.{CONFIRM}"),
+            json!({ "query": { "type": "string", "description": "Words to look for (optional: without it, every project)" } }),
+        ),
         tool("start_code_session", format!("Open a new Claude Code session, optionally with a first prompt.{CONFIRM}"), target.clone()),
         tool("start_chat", format!("Open a new chat, optionally with a first message. Without a folder it is not tied to a project.{CONFIRM}"), target),
-    ]
+    ];
+    if chat {
+        tools.push(tool(
+            "set_chat_project",
+            format!("Tie this chat to one of the user's projects so it can read and search its files (find the name with search_projects). The chat carries on there once this reply is finished, as a new conversation that gets a summary of this one.{CONFIRM}"),
+            json!({ "project": { "type": "string", "description": "The project's name" } }),
+        ));
+    }
+    tools
 }
 
 fn reply(text: &str, is_error: bool) -> Value {
@@ -469,7 +489,10 @@ mod tests {
             |tool, args| if tool == "start_chat" { Err("The user declined.".into()) } else { Ok(format!("{tool} {}", args["id"])) },
         );
         let names: Vec<_> = r[0]["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
-        assert_eq!(names, ["attach_github", "detach_github", "link_session", "unlink_session", "list_chats", "read_chat", "list_code_sessions", "read_code_session", "search_sessions", "start_code_session", "start_chat"]);
+        assert_eq!(names, ["attach_github", "detach_github", "link_session", "unlink_session", "list_chats", "read_chat", "list_code_sessions", "read_code_session", "search_sessions", "search_projects", "start_code_session", "start_chat", "set_chat_project"]);
+        let tools = r[0]["result"]["tools"].as_array().unwrap();
+        assert!(tools[..4].iter().all(|t| t["_meta"]["anthropic/alwaysLoad"] == true), "the bookkeeping tools are loaded upfront");
+        assert!(tools[4..].iter().all(|t| t["_meta"].is_null()), "the session-reaching tools stay deferred");
         assert_eq!(r[1]["result"]["content"][0]["text"], "read_code_session \"x\"");
         assert_eq!(r[1]["result"]["isError"], false);
         assert_eq!(r[2]["result"]["isError"], true, "a chat cannot set a terminal tab title");

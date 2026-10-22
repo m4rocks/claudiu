@@ -22,17 +22,27 @@ let ctlPoll
 let ctlSeen = null // highest command number handled; null until the file was first read (older ones are not replayed)
 
 // ---- usage report -------------------------------------------------------------------------------------------
-// Commands whose arguments are short settings, safe to show; any other command is reported by name only.
-const SETTING_COMMANDS = ['advisor', 'model', 'effort', 'autocompact']
 const stem = id => String(id).replace(/[^A-Za-z0-9_-]/g, '_')
 const secs = iso => { const t = Date.parse(iso); return Number.isFinite(t) ? Math.floor(t / 1000) : null }
 
 let measured = null // { context, limits: { five_hour, seven_day } } from the last session.measure
-let lastCommand = null
 let written = '' // what the file holds, minus times, so an unchanged report is not rewritten (a write is cheap, a redraw is not)
 
+// The token count auto-compaction runs at (null while it is off). It only changes with settings, the model or the
+// environment, and the breakdown it comes from is a local estimate, so it is read again at most once a minute or after
+// a setting changed.
+let compactAt = null
+let compactRead = 0
+async function threshold($, fresh) {
+  if (!fresh && Date.now() - compactRead < 60_000) return compactAt
+  compactRead = Date.now()
+  const b = (await $.session.usage({ breakdown: 'summary' }).catch(() => null))?.context.breakdown
+  if (b) compactAt = b.isAutoCompactEnabled ? (b.autoCompactThreshold ?? null) : null
+  return compactAt
+}
+
 // Reads the status Claude Code keeps; every read is best effort, a failed one is left out rather than failing a hook.
-async function report($) {
+async function report($, fresh = false) {
   try {
     const dir = await $.env.get('CLAUDIU_USAGE_DIR')
     if (!dir) return
@@ -52,8 +62,8 @@ async function report($) {
       model: (await $.session.model().catch(() => null)) ?? null,
       account: (await $.env.get('CLAUDIU_ACCOUNT')) ?? null,
       auto_compact: rows.find(r => r.key === 'autoCompact')?.value ?? null,
+      compact_at: await threshold($, fresh),
       advisor: typeof advisor === 'string' ? advisor : null,
-      last_command: lastCommand,
     }
     const key = JSON.stringify(snap, (k, v) => (k === 'seen_at' ? undefined : v))
     if (key === written) return
@@ -79,7 +89,7 @@ async function applyCtl($) {
       ctlSeen = c.seq
       if (c.key === 'auto_compact' && typeof c.value === 'boolean') await $.config.set({ key: 'autoCompact', value: c.value }).catch(() => {})
       else if (c.key === 'advisor' && typeof c.value === 'string' && /^[A-Za-z0-9._-]{1,60}$/.test(c.value)) await $.command.run({ command: 'advisor', args: c.value }).catch(() => {})
-      await report($)
+      await report($, true)
     }
   } catch {
     // A bad file must not disturb the session.
@@ -100,18 +110,14 @@ export function register(on) {
   })
 
   on('command.run', async ($, e, next) => {
-    if (e.origin?.kind !== 'plugin') {
-      const args = SETTING_COMMANDS.includes(e.command) ? e.args.trim().slice(0, 40) : ''
-      lastCommand = args ? e.command + ' ' + args : e.command
-    }
     const r = await next(e) // the command has run: a setting it changed is read after it
-    await report($)
+    await report($, true)
     return r
   })
 
   on('config.set', async ($, e, next) => {
     const r = await next(e)
-    await report($)
+    await report($, true)
     return r
   })
 

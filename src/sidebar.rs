@@ -14,7 +14,7 @@ use crate::app::{Act, Activity, MenuItem, Workspace};
 use crate::store::{ExternalState, Id, Project, SessionKind, SessionRecord, now};
 use crate::theme::{self, hsla};
 use gpui_kit::assets::IconName;
-use crate::widgets::{ago, avatar, button, clawd, countdown, icon, icon_button, meter, section_label, spinner};
+use crate::widgets::{ago, avatar, button, clawd, countdown, icon, icon_button, meter, section_label, spinner, tick};
 
 pub const SIDEBAR_W: f32 = 284.0;
 /// Entries shown under RECENT before the rest go behind OLDER.
@@ -144,7 +144,7 @@ impl Workspace {
         let (glyph, color) = match (rec.kind, running) {
             // Orange only when the session stopped and wants the user; gray otherwise, pulsing while it works.
             (SessionKind::Claude, true) => (
-                IconName::Bot,
+                IconName::Brackets,
                 match activity {
                     Some(Activity::Attention) => hsla(theme::ACCENT),
                     Some(Activity::Working) => hsla(0xa8a8a8),
@@ -152,7 +152,7 @@ impl Workspace {
                 },
             ),
             (SessionKind::Shell, true) => (IconName::Terminal, hsla(theme::OK)),
-            (SessionKind::Claude, false) => (IconName::Bot, hsla(theme::TEXT_FAINT)),
+            (SessionKind::Claude, false) => (IconName::Brackets, hsla(theme::TEXT_FAINT)),
             (SessionKind::Shell, false) => (IconName::Terminal, hsla(theme::TEXT_FAINT)),
         };
         let stale = rec.claude.as_ref().is_some_and(|c| c.external == ExternalState::Missing);
@@ -397,7 +397,7 @@ impl Workspace {
 
     /// One list for chats and Claude Code sessions: what is running first (terminals in the order you arranged them,
     /// then open chats), then the most recent, with the rest behind "Older". The project filter narrows all of it.
-    pub fn render_sidebar(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    pub fn render_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         if self.dragging.is_some() && !cx.has_active_drag() {
             self.dragging = None;
         }
@@ -490,7 +490,7 @@ impl Workspace {
             }
         }
 
-        self.sidebar_frame(body, cx)
+        self.sidebar_frame(body, window, cx)
     }
 
     /// "+ Code session" with no project chosen: pick where it starts.
@@ -529,9 +529,8 @@ impl Workspace {
                 cx.listener(|ws, ev: &MouseDownEvent, _w, cx| {
                     let chosen = ws.project_filter().map(|p| p.id.clone());
                     let item = |label: String, act: Act, sep: bool| MenuItem { label, hint: None, act, danger: false, disabled: false, separator_before: sep };
-                    let mark = |on: bool| if on { "✓  " } else { "    " };
-                    let mut items = vec![item(format!("{}All projects", mark(chosen.is_none())), Act::FilterProject(None), false)];
-                    items.extend(ws.store.data.projects.iter().map(|p| item(format!("{}{}", mark(chosen.as_ref() == Some(&p.id)), p.name), Act::FilterProject(Some(p.id.clone())), false)));
+                    let mut items = vec![item(format!("{}All projects", tick(chosen.is_none())), Act::FilterProject(None), false)];
+                    items.extend(ws.store.data.projects.iter().map(|p| item(format!("{}{}", tick(chosen.as_ref() == Some(&p.id)), p.name), Act::FilterProject(Some(p.id.clone())), false)));
                     items.push(item("Add project…".into(), Act::ImportProject, true));
                     ws.open_menu(ev.position, items, cx);
                 }),
@@ -554,7 +553,7 @@ impl Workspace {
     }
 
     /// The sidebar chrome around either list: header, scrolling body, usage footer.
-    fn sidebar_frame(&mut self, body: Div, cx: &mut Context<Self>) -> Stateful<Div> {
+    fn sidebar_frame(&mut self, body: Div, window: &mut Window, cx: &mut Context<Self>) -> Stateful<Div> {
         div()
             .id("sidebar")
             .flex()
@@ -582,7 +581,7 @@ impl Workspace {
                 )
             })
             .child(self.render_sidebar_header(cx))
-            .child(div().id("sidebar-scroll").flex_1().min_h_0().overflow_y_scroll().pb(px(10.0)).child(body))
+            .child(self.sidebar_scroll.wire(div().id("sidebar-scroll").flex_1().min_h_0(), window).pb(px(10.0)).child(body))
             .child(self.render_footer(cx))
     }
 
@@ -681,7 +680,7 @@ impl Workspace {
         let mut items: Vec<MenuItem> = accounts
             .iter()
             .map(|a| {
-                let mark = if active.as_ref() == Some(&a.id) { "✓  " } else { "    " };
+                let mark = tick(active.as_ref() == Some(&a.id));
                 item(format!("{mark}{}", a.name()), Some(account_hint(a)), Act::SwitchAccount(a.id.clone()), false, false)
             })
             .collect();

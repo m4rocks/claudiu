@@ -15,7 +15,7 @@ use crate::chat::store::{ChatRecord, ChatStore, DEFAULT_TITLE, is_tied, scratch_
 use crate::chat::view::{ChatEvent, ChatView, Launch};
 use crate::claude;
 use crate::github::view::{GhEvent, GithubView};
-use crate::mcp::{self, Attachment};
+use crate::mcp;
 use crate::platform::{self, Editor};
 use crate::{datadir, usage};
 use crate::store::{
@@ -27,6 +27,11 @@ use crate::updater::UpdateState;
 
 mod chats;
 mod cross;
+#[cfg(test)]
+mod headless;
+mod ingest;
+mod lifecycle;
+mod links;
 pub use chats::ChatPane;
 
 actions!(
@@ -120,6 +125,13 @@ pub enum Act {
     ConfirmRemoveAccount(Id),
 }
 
+impl MenuItem {
+    /// A plain entry: not dangerous, enabled, no hint, no separator above.
+    pub fn new(label: impl Into<String>, act: Act) -> Self {
+        Self { label: label.into(), hint: None, act, danger: false, disabled: false, separator_before: false }
+    }
+}
+
 pub struct MenuItem {
     pub label: String,
     /// Faint text on the right that is never cut, so a long `label` is shortened with "…" instead.
@@ -161,13 +173,6 @@ pub enum Modal {
         shell: Entity<InputState>,
         claude: Entity<InputState>,
         updates: bool,
-    },
-    /// A session asked to reach another one; nothing happens unless the user allows it (see `app/cross.rs`).
-    Bridge {
-        req: crate::bridge::Request,
-        title: String,
-        body: String,
-        confirm: String,
     },
 }
 
@@ -283,7 +288,6 @@ pub struct Workspace {
     pub toast: Option<Toast>,
     pub toast_serial: u64,
     /// Requests from sessions to other sessions, waiting for the user's answer.
-    pub bridge_queue: std::collections::VecDeque<crate::bridge::Request>,
     /// Sessions that leave no history once they end (the "fix with Claude" helper).
     ephemeral: HashSet<Id>,
     /// `claude auth login` tabs; account details are re-read when one ends.
@@ -306,6 +310,12 @@ pub struct Workspace {
     pub update: UpdateState,
     pub scanning: bool,
     pub quitting: bool,
+    /// What `running.json` holds, and whether the saved list has been brought back yet (nothing is written before).
+    pub remembered: Vec<Id>,
+    /// Smooth wheel scrolling of the left list and the right menu.
+    pub sidebar_scroll: crate::glide::Smooth,
+    pub menu_scroll: crate::glide::Smooth,
+    pub restored: bool,
     /// Sessions that are working or waiting for the user; absent = idle and already seen.
     pub activity: HashMap<Id, Activity>,
     pub git_busy: Option<GitOp>,
@@ -357,7 +367,6 @@ impl Workspace {
             menu: None,
             toast: None,
             toast_serial: 0,
-            bridge_queue: Default::default(),
             ephemeral: HashSet::new(),
             logins: HashSet::new(),
             limit_warned: None,
@@ -376,6 +385,10 @@ impl Workspace {
             update: UpdateState::default(),
             scanning: false,
             quitting: false,
+            remembered: vec![],
+            sidebar_scroll: Default::default(),
+            menu_scroll: Default::default(),
+            restored: false,
             activity: HashMap::new(),
             git_busy: None,
             store,
@@ -404,6 +417,11 @@ impl Workspace {
         ws.ingest_usage(cx);
         ws.refresh_accounts(cx);
         ws.warm_chats(cx);
+        // After the first frame: starting every saved session is the slow part of coming back.
+        cx.spawn_in(window, async move |this, cx| {
+            let _ = this.update_in(cx, |ws, window, cx| ws.restore_open(window, cx));
+        })
+        .detach();
         ws.start_ticker(cx);
         ws.start_fetch_loop(cx);
         ws.start_git_watch(cx);
@@ -448,33 +466,6 @@ impl Workspace {
         .detach();
     }
 
-    /// Keep the newest reading per window. Returns whether anything changed (the same snapshot is re-read
-    /// every tick, so an unconditional save would rewrite state.json every few seconds).
-    fn merge_account(
-        &mut self,
-        account: &str,
-        five: Option<crate::store::RateLimit>,
-        seven: Option<crate::store::RateLimit>,
-    ) -> bool {
-        // A removed account's leftover snapshots are ignored.
-        let Some(acct) = self.store.data.accounts.iter_mut().find(|a| a.id == account).map(|a| &mut a.usage) else {
-            return false;
-        };
-        let mut changed = false;
-        for (slot, new) in [(&mut acct.five_hour, five), (&mut acct.seven_day, seven)] {
-            if let Some(new) = new
-                && slot.as_ref().is_none_or(|cur| new.seen_at >= cur.seen_at && *cur != new)
-            {
-                *slot = Some(new);
-                changed = true;
-            }
-        }
-        if changed {
-            self.store.mark_dirty();
-        }
-        changed
-    }
-
     fn start_ticker(&mut self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             loop {
@@ -499,8 +490,7 @@ impl Workspace {
                     .spawn(async { (claude::claude_home().map(|h| claude::session_statuses(&h)).unwrap_or_default(), crate::bridge::take_requests()) })
                     .await;
                 let update = this.update_in(cx, |ws, window, cx| {
-                    ws.bridge_queue.extend(requests);
-                    ws.ask_about_next_request(window, cx);
+                    ws.serve_requests(requests, window, cx);
                     ws.update_activity(window, cx, &statuses)
                 });
                 if update.is_err() {
@@ -574,6 +564,7 @@ impl Workspace {
         self.store.save_if_dirty();
         self.chat_store.save_if_dirty();
         self.refresh_live(cx);
+        self.remember_open(cx);
         self.ingest_usage(cx);
         self.suggest_less_used_account(cx);
         cx.notify();
@@ -615,127 +606,6 @@ impl Workspace {
         self.show_toast(text, true, Some(("Switch".into(), act)), cx);
     }
 
-    /// Pick up what the per-process mod reported: account limits and exact context, plus the tab titles Claude
-    /// chose through the MCP tool.
-    /// Costs no tokens; the files are tiny, but the read still happens off the UI thread.
-    fn ingest_usage(&mut self, cx: &mut Context<Self>) {
-        cx.spawn(async move |this, cx| {
-            let (snaps, titles, attached) = cx
-                .background_executor()
-                .spawn(async move { (usage::read_snapshots(&usage::snapshot_dir()), mcp::read_titles(), mcp::read_attached()) })
-                .await;
-            let _ = this.update(cx, |ws, cx| {
-                let mut changed = false;
-                for (stem, title, stamp) in titles {
-                    let Some(rec) = ws
-                        .store
-                        .data
-                        .sessions
-                        .iter_mut()
-                        .find(|s| s.claude_id().is_some_and(|id| datadir::safe_file_stem(id) == stem))
-                    else {
-                        continue;
-                    };
-                    if let Some(l) = ws.live.iter_mut().find(|l| l.id == rec.id)
-                        && l.title_stamp != stamp
-                    {
-                        // The first read only records the stamp: a resumed session already got `--name`.
-                        if l.title_stamp.is_some() {
-                            l.claude_name = None;
-                        }
-                        l.title_stamp = stamp;
-                    }
-                    if rec.auto_title.as_deref() != Some(title.as_str()) {
-                        rec.auto_title = Some(title);
-                        changed = true;
-                    }
-                }
-                for snap in snaps {
-                    let account = snap.account.as_deref().unwrap_or(MAIN_ACCOUNT);
-                    changed |= ws.merge_account(account, snap.five_hour.clone(), snap.seven_day.clone());
-                    // A chat's own claude runs the mod too: its settings are shown in the sidebar.
-                    let chat = ws.chat_store.shown().find(|c| c.session_id.as_deref() == Some(snap.session_id.as_str())).map(|c| c.id.clone());
-                    if let Some(p) = chat.and_then(|id| ws.chats.iter_mut().find(|p| p.id == id))
-                        && (p.auto_compact != snap.auto_compact.or(p.auto_compact) || p.advisor != snap.advisor)
-                    {
-                        p.auto_compact = snap.auto_compact.or(p.auto_compact);
-                        p.advisor = snap.advisor.clone();
-                        changed = true;
-                    }
-                    if let Some(rec) = ws
-                        .store
-                        .data
-                        .sessions
-                        .iter_mut()
-                        .find(|s| s.claude_id() == Some(snap.session_id.as_str()))
-                        && let Some(meta) = rec.claude.as_mut() {
-                            let (f, t, w) = (
-                                snap.context_fraction,
-                                snap.context_tokens,
-                                snap.context_window,
-                            );
-                            if f.is_some()
-                                && (meta.context_fraction != f || meta.context_window != w)
-                            {
-                                meta.context_fraction = f;
-                                meta.context_window = w;
-                                if t.is_some() {
-                                    meta.context_tokens = t;
-                                }
-                                changed = true;
-                            }
-                            if snap.model.is_some() && meta.model != snap.model {
-                                meta.model = snap.model.clone();
-                                changed = true;
-                            }
-                            // Advisor `None` is real (it is off); the other two are only known once the mod has seen them.
-                            if meta.advisor != snap.advisor {
-                                meta.advisor = snap.advisor.clone();
-                                changed = true;
-                            }
-                            if snap.auto_compact.is_some() && meta.auto_compact != snap.auto_compact {
-                                meta.auto_compact = snap.auto_compact;
-                                changed = true;
-                            }
-                            if snap.last_command.is_some() && meta.last_command != snap.last_command {
-                                meta.last_command = snap.last_command.clone();
-                                changed = true;
-                            }
-                        }
-                }
-                for (stem, item) in attached {
-                    let me = ws
-                        .store
-                        .data
-                        .sessions
-                        .iter()
-                        .map(|s| &s.id)
-                        .chain(ws.chat_store.shown().map(|c| &c.id))
-                        .find(|id| datadir::safe_file_stem(id) == stem)
-                        .cloned();
-                    let Some(me) = me else { continue };
-                    changed |= match item {
-                        Attachment::Github(a) => ws.edit_attached(&me, |list| attach(list, a)),
-                        Attachment::Link(other) => ws.link(&me, &other),
-                        Attachment::Unlink(other) => {
-                            ws.unlink(&me, &other);
-                            true
-                        }
-                        Attachment::Detach { pull, number } => {
-                            ws.detach(&me, pull, number);
-                            true
-                        }
-                    };
-                }
-                if changed {
-                    ws.store.mark_dirty();
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
-    }
-
     /// Per-process additions to a Claude launch; nothing in the user's Claude Code config changes:
     /// the mod (`--plugin-dir`, which reports usage and status), the tab-title MCP server (`--mcp-config`, its
     /// tools pre-allowed), and IDE integration switched off through environment variables.
@@ -745,12 +615,15 @@ impl Workspace {
         claude_session_id: &str,
         record_id: &str,
     ) -> SpawnSpec {
-        if let Ok(config) = mcp::prepare(claude_session_id, record_id) {
+        let started = std::time::Instant::now();
+        // Diagnostics for the start-up trace (`trace.rs`): start without Claudiu's MCP server or mod to see what they cost.
+        let without = |name: &str| crate::trace::on() && std::env::var_os(name).is_some();
+        if let Ok(config) = mcp::prepare(claude_session_id, record_id).and_then(|c| if without("CLAUDIU_NO_MCP") { Err(std::io::Error::other("off")) } else { Ok(c) }) {
             spec.args.push("--allowedTools".into());
             spec.args.extend(mcp::allowed_tools("code"));
             spec.args.extend(["--mcp-config".into(), config.to_string_lossy().into_owned()]);
         }
-        if let Ok(dir) = mcp::prepare_mod() {
+        if let Ok(dir) = mcp::prepare_mod().and_then(|d| if without("CLAUDIU_NO_MOD") { Err(std::io::Error::other("off")) } else { Ok(d) }) {
             spec.args.extend(["--plugin-dir".into(), dir.to_string_lossy().into_owned()]);
             spec.env.push(("CLAUDIU_NAME_FILE".into(), mcp::name_file(claude_session_id).to_string_lossy().into_owned()));
             spec.env.push((usage::USAGE_DIR_ENV.into(), usage::snapshot_dir().to_string_lossy().into_owned()));
@@ -762,7 +635,14 @@ impl Workspace {
             spec.env.push((usage::ACCOUNT_ENV.into(), acct.id.clone()));
             spec.env.extend(Self::account_env(acct));
         }
+        // Extra `claude` flags for the start-up trace, e.g. CLAUDIU_TRACE_ARGS="--safe-mode".
+        if crate::trace::on() && let Some(extra) = std::env::var_os("CLAUDIU_TRACE_ARGS") {
+            spec.args.extend(extra.to_string_lossy().split_whitespace().map(String::from));
+        }
         (spec.program, spec.args) = platform::through_login_shell(spec.program, spec.args);
+        if let Some(cwd) = spec.cwd.as_ref().and_then(|c| c.file_name()) {
+            crate::trace::note(&cwd.to_string_lossy(), started.elapsed(), "launch files and arguments prepared (before the terminal exists)");
+        }
         spec
     }
 
@@ -917,10 +797,6 @@ impl Workspace {
             });
         })
         .detach();
-    }
-
-    pub fn persist_for_restart(&mut self) {
-        self.finalize();
     }
 
     pub fn check_updates(&mut self, cx: &mut Context<Self>) {
@@ -1157,9 +1033,11 @@ impl Workspace {
             r.exit_code = None;
             r.last_active = now();
         }
+        let preview = if is_new { None } else { Self::load_screen(&id) };
         let view = cx.new(|cx| {
             let mut v = TerminalView::new(terminal, rx, cx);
             v.loading = loading;
+            v.preview = preview;
             v
         });
         let sub_id = id.clone();
@@ -1244,6 +1122,7 @@ impl Workspace {
     }
 
     fn on_exit(&mut self, id: &str, code: Option<i32>, _window: &mut Window, cx: &mut Context<Self>) {
+        self.save_screen(id, cx);
         if let Some(err) = self.live_view(id).and_then(|v| v.read(cx).start_error()) {
             let program = self.store.session(id).map(|r| r.display_title().to_string()).unwrap_or_default();
             self.toast(format!("Could not start {program}: {err}"), true, cx);
@@ -1334,61 +1213,6 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Called by the window's close handler. Returns true when it is fine to close right now: asks first only
-    /// while a Claude session is mid-turn; idle sessions just end with the app.
-    pub fn request_quit(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        if self.quitting {
-            return true;
-        }
-        let working = self.live.iter().filter(|l| {
-            let v = l.view.read(cx);
-            v.is_running() && v.is_working() && self.store.session(&l.id).is_some_and(|r| r.kind == SessionKind::Claude)
-        });
-        let working = working.count() + self.chats.iter().filter(|c| c.view.read(cx).is_busy()).count();
-        if working == 0 {
-            self.finalize();
-            return true;
-        }
-        self.open_modal(Modal::Confirm {
-            title: "Quit Claudiu?".into(),
-            body: format!(
-                "{working} Claude session{} still working. Quitting interrupts {} — sessions stay in your history and can be resumed.",
-                if working == 1 { " is" } else { "s are" },
-                if working == 1 { "it" } else { "them" }
-            ),
-            confirm: "Quit anyway".into(),
-            danger: true,
-            act: Act::ConfirmQuit,
-        });
-        window.focus(&self.modal_focus, cx);
-        cx.notify();
-        false
-    }
-
-    fn finalize(&mut self) {
-        self.quitting = true;
-        for id in self.chats.drain(..).map(|p| p.id).collect::<Vec<_>>() {
-            self.forget_if_unused(&id); // a chat nothing was said in is dropped; dropping its pane closes the adapter
-        }
-        self.chat_store.save_if_dirty();
-        let t = now();
-        let running: Vec<Id> = self.live.iter().map(|l| l.id.clone()).collect();
-        for id in running {
-            if let Some(rec) = self.store.session_mut(&id)
-                && rec.exit_code.is_none() {
-                    rec.exit_code = Some(-1);
-                    rec.last_active = t;
-                }
-        }
-        // Terminal sessions are never persisted, nor are ephemeral ones.
-        let ephemeral = &self.ephemeral;
-        self.store
-            .data
-            .sessions
-            .retain(|s| s.kind != SessionKind::Shell && !ephemeral.contains(&s.id));
-        self.store.save();
-    }
-
     // ------------------------------------------------------------------ actions
 
     pub fn act(&mut self, act: Act, window: &mut Window, cx: &mut Context<Self>) {
@@ -1406,7 +1230,7 @@ impl Workspace {
                     .map(|s| s.display_title().to_string())
                     .unwrap_or_default();
                 let input = self.modal_input(&text, "", window, cx);
-                self.open_modal(Modal::Rename { id, input });
+                self.modal = Some(Modal::Rename { id, input });
             }
             Act::Archive(id, archive) => {
                 if let Some(rec) = self.store.session_mut(&id) {
@@ -1479,11 +1303,11 @@ impl Workspace {
                 let claude_hint = self.claude_exe.as_ref().map_or("not found".to_string(), |p| p.to_string_lossy().into_owned());
                 let claude = self.modal_input(&claude_t, &claude_hint, window, cx);
                 let shell = self.modal_input(&shell_t, &platform::default_shell(None).0, window, cx);
-                self.open_modal(Modal::Settings { shell, claude, updates });
+                self.modal = Some(Modal::Settings { shell, claude, updates });
             }
             Act::NewBranch(cwd) => {
                 let input = self.modal_input("", "", window, cx);
-                self.open_modal(Modal::NewBranch { cwd, input });
+                self.modal = Some(Modal::NewBranch { cwd, input });
             }
             Act::CreateBranch(cwd, name) => {
                 self.run_git(GitOp::Branch, move || Ok(crate::commit::create_branch(&cwd, &name)?), cx)
@@ -1511,7 +1335,7 @@ impl Workspace {
             Act::AskAdvisor(id) => {
                 let current = self.store.session(&id).and_then(|s| s.claude.as_ref()).and_then(|m| m.advisor.clone()).unwrap_or_default();
                 let input = self.modal_input(&current, "opus, sonnet, off, or a model id", window, cx);
-                self.open_modal(Modal::Advisor { id, input });
+                self.modal = Some(Modal::Advisor { id, input });
             }
             Act::FilterProject(id) => {
                 self.store.data.layout.project_filter = id;
@@ -1524,11 +1348,10 @@ impl Workspace {
             }
             Act::ConfirmQuit => {
                 self.modal = None;
-                self.finalize();
+                self.finalize(cx);
                 cx.quit();
             }
             Act::Dismiss => {
-                self.deny_pending_request();
                 self.modal = None;
                 self.focus_active(window, cx);
             }
@@ -1536,7 +1359,7 @@ impl Workspace {
                 let ready = matches!(self.update.status, crate::updater::Status::Ready { .. });
                 let running = self.running_count(cx);
                 if ready && running > 0 {
-                    self.open_modal(Modal::Confirm {
+                    self.modal = Some(Modal::Confirm {
                         title: "Restart to update?".into(),
                         body: format!(
                             "{running} session{} running. Restarting ends {}. Claude sessions can be resumed afterwards.",
@@ -1564,7 +1387,7 @@ impl Workspace {
                 self.toast("Switched. New and resumed sessions and all chats use this account; running terminal sessions keep theirs.", false, cx);
             }
             Act::AddAccount => {
-                self.open_modal(Modal::Confirm {
+                self.modal = Some(Modal::Confirm {
                     title: "Add an account?".into(),
                     body: "The new account shares your main Claude Code setup: settings, CLAUDE.md, agents, skills, plugins and \
                            session history. Changes made while using it (like /model) change your main setup too. \
@@ -1592,7 +1415,7 @@ impl Workspace {
             Act::SignIn(id) => self.sign_in(&id, window, cx),
             Act::RemoveAccount(id) => {
                 let name = self.store.account(&id).and_then(|a| a.email.clone()).unwrap_or_else(|| "this account".into());
-                self.open_modal(Modal::Confirm {
+                self.modal = Some(Modal::Confirm {
                     title: format!("Remove {name}?"),
                     body: "Deletes this account's login from Claudiu. Shared settings and session history stay in your main \
                            ~/.claude. End its running sessions first."
@@ -1727,14 +1550,7 @@ impl Workspace {
                         let mut items: Vec<MenuItem> = names
                             .into_iter()
                             .take(15)
-                            .map(|name| MenuItem {
-                                label: format!("{}{name}", if current.as_deref() == Some(name.as_str()) { "✓  " } else { "    " }),
-                                hint: None,
-                                disabled: false,
-                                act: Act::SwitchBranch(cwd.clone(), name),
-                                danger: false,
-                                separator_before: false,
-                            })
+                            .map(|name| MenuItem::new(format!("{}{name}", crate::widgets::tick(current.as_deref() == Some(name.as_str()))), Act::SwitchBranch(cwd.clone(), name)))
                             .collect();
                         let first = items.is_empty();
                         items.push(MenuItem { label: "New branch…".into(), hint: None, act: Act::NewBranch(cwd), danger: false, disabled: false, separator_before: !first });
@@ -1765,10 +1581,6 @@ impl Workspace {
     pub fn submit_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let act = match self.modal.take() {
             Some(Modal::Confirm { act, .. }) => act,
-            Some(Modal::Bridge { req, .. }) => {
-                self.finish_request(&req, window, cx);
-                Act::Dismiss
-            }
             Some(Modal::Rename { id, input }) => {
                 let text = input.read(cx).value().trim().to_string();
                 if let Some(rec) = self.store.session_mut(&id) {
@@ -1781,7 +1593,7 @@ impl Workspace {
                 if name.is_empty() {
                     Act::Dismiss
                 } else if !usage::valid_model_name(&name) {
-                    self.open_modal(Modal::Advisor { id, input });
+                    self.modal = Some(Modal::Advisor { id, input });
                     self.toast("Use a model alias or id (letters, digits, . _ -), or “off”.", true, cx);
                     return;
                 } else {
@@ -1802,7 +1614,7 @@ impl Workspace {
                     .find(|(_, t)| !t.is_empty() && platform::resolve_program(t).is_none());
                 if let Some((what, t)) = bad {
                     let msg = format!("{what}: “{t}” is not a file or a program on PATH");
-                    self.open_modal(Modal::Settings { shell, claude, updates });
+                    self.modal = Some(Modal::Settings { shell, claude, updates });
                     self.toast(msg, true, cx);
                     return;
                 }
@@ -1816,6 +1628,8 @@ impl Workspace {
                 self.shell = platform::default_shell(s.shell.as_deref());
                 self.claude_exe = claude::discover(s.claude_path.as_deref());
                 self.store.mark_dirty();
+                // Chats move to an adapter that runs the new `claude` once they are idle.
+                self.relaunch_chats(window, cx);
                 self.toast("Settings saved. Open sessions keep their current shell.", false, cx);
                 Act::Dismiss
             }
@@ -1922,75 +1736,6 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Show two sessions or chats together: each lists the other. True when something changed (false when either
-    /// does not exist or they were linked already).
-    pub fn link(&mut self, a: &str, b: &str) -> bool {
-        let exists = |ws: &Self, id: &str| ws.store.session(id).is_some_and(|s| s.claude.is_some()) || ws.chat_store.get(id).is_some();
-        if a == b || !exists(self, a) || !exists(self, b) {
-            return false;
-        }
-        let a_new = self.edit_links(a, |l| add_once(l, b));
-        let b_new = self.edit_links(b, |l| add_once(l, a));
-        a_new | b_new
-    }
-
-    /// Run `f` on the attached items of a session or a chat; true when it changed anything.
-    fn edit_attached(&mut self, id: &str, f: impl FnOnce(&mut Vec<Attached>) -> bool) -> bool {
-        if let Some(meta) = self.store.session_mut(id).and_then(|s| s.claude.as_mut()) {
-            return f(&mut meta.attached);
-        }
-        let mut changed = false;
-        self.chat_store.update(id, |r| changed = f(&mut r.attached));
-        changed
-    }
-
-    pub fn attached_of(&self, id: &str) -> Vec<Attached> {
-        match self.store.session(id).and_then(|s| s.claude.as_ref()) {
-            Some(m) => m.attached.clone(),
-            None => self.chat_store.get(id).map(|c| c.attached.clone()).unwrap_or_default(),
-        }
-    }
-
-    /// Take an attached item away from a session or chat.
-    pub fn detach(&mut self, id: &str, pull: bool, number: u32) {
-        self.edit_attached(id, |l| {
-            l.retain(|x| !(x.pull == pull && x.number == number));
-            true
-        });
-        self.store.mark_dirty();
-    }
-
-    /// Take the link between two away on both sides.
-    pub fn unlink(&mut self, a: &str, b: &str) {
-        self.edit_links(a, |l| remove_id(l, b));
-        self.edit_links(b, |l| remove_id(l, a));
-        self.store.mark_dirty();
-    }
-
-    /// Run `f` on the link list of a session or a chat; true when it changed anything.
-    fn edit_links(&mut self, id: &str, f: impl FnOnce(&mut Vec<Id>) -> bool) -> bool {
-        if let Some(meta) = self.store.session_mut(id).and_then(|s| s.claude.as_mut()) {
-            return f(&mut meta.linked);
-        }
-        let mut changed = false;
-        self.chat_store.update(id, |r| changed = f(&mut r.links));
-        changed
-    }
-
-    /// The sessions and chats linked with `id`, as `(id, title)`; a linked one that has gone is left out.
-    pub fn links_of(&self, id: &str) -> Vec<(Id, String)> {
-        let ids = match self.store.session(id).and_then(|s| s.claude.as_ref()) {
-            Some(m) => m.linked.clone(),
-            None => self.chat_store.get(id).map(|c| c.links.clone()).unwrap_or_default(),
-        };
-        ids.into_iter()
-            .filter_map(|o| {
-                let title = self.store.session(&o).map(|s| s.display_title().to_string()).or_else(|| self.chat_store.get(&o).map(|c| c.title.clone()))?;
-                Some((o, title))
-            })
-            .collect()
-    }
-
     /// The right sidebar's current width: fixed for the menu, remembered (and draggable) for GitHub.
     pub fn right_width(&self, window_w: f32) -> f32 {
         if self.right_gh.is_none() {
@@ -2084,401 +1829,24 @@ impl Workspace {
         Some((left as f32 / ttl as f32, left, ttl))
     }
 
-    /// Context-meter source for the selected session: `(fraction, tokens, exact)`. `exact` means Claude Code
-    /// itself reported the percentage (status line); otherwise it is estimated from the transcript.
-    pub fn selected_context(&self) -> Option<(f32, u64, bool)> {
+    /// Context-meter source for the selected session: `(fraction, tokens, exact, full at)`. `exact` means Claude Code
+    /// itself reported the figures; otherwise they are estimated from the transcript. `full at` is the token count
+    /// the bar ends at (`claude::context_limit`), when known.
+    pub fn selected_context(&self) -> Option<(f32, u64, bool, Option<u64>)> {
         let id = self.selected.as_ref().or(self.active_id())?;
+        let scaled = |tokens: u64, limit: Option<u64>| limit.map(|l| (tokens as f64 / l as f64).min(1.0) as f32);
         if let Some(p) = self.chat_pane(id) {
-            return p.context.filter(|&(_, size)| size > 0).map(|(used, size)| ((used as f32 / size as f32).min(1.0), used, true));
+            let (used, size) = p.context.filter(|&(_, size)| size > 0)?;
+            let limit = claude::context_limit(Some(size), p.compact_at, p.auto_compact);
+            return Some((scaled(used, limit)?, used, true, limit));
         }
         let meta = self.store.session(id)?.claude.as_ref()?;
+        let limit = claude::context_limit(meta.context_window, meta.compact_at, meta.auto_compact);
         if let Some(f) = meta.context_fraction {
-            let tokens = meta.context_tokens.unwrap_or_else(|| {
-                meta.context_window
-                    .map_or(0, |w| (w as f64 * f as f64) as u64)
-            });
-            return Some((f, tokens, true));
+            let tokens = meta.context_tokens.unwrap_or_else(|| meta.context_window.map_or(0, |w| (w as f64 * f as f64) as u64));
+            return Some((scaled(tokens, limit).unwrap_or(f), tokens, true, limit));
         }
         let tokens = meta.context_tokens?;
-        Some((claude::context_fraction(tokens), tokens, false))
-    }
-}
-
-fn add_once(list: &mut Vec<Id>, id: &str) -> bool {
-    let missing = !list.iter().any(|x| x == id);
-    if missing {
-        list.push(id.to_string());
-    }
-    missing
-}
-
-fn remove_id(list: &mut Vec<Id>, id: &str) -> bool {
-    let before = list.len();
-    list.retain(|x| x != id);
-    list.len() != before
-}
-
-/// Most items one session keeps; the oldest go first.
-const MAX_ATTACHED: usize = 20;
-
-/// Add an attached item unless it is there already (a later title fills in a missing one). True when anything changed.
-fn attach(list: &mut Vec<Attached>, item: Attached) -> bool {
-    if let Some(have) = list.iter_mut().find(|a| a.pull == item.pull && a.number == item.number) {
-        if have.title.is_none() && item.title.is_some() {
-            have.title = item.title;
-            return true;
-        }
-        return false;
-    }
-    list.push(item);
-    if list.len() > MAX_ATTACHED {
-        list.remove(0);
-    }
-    true
-}
-
-#[cfg(test)]
-mod attach_tests {
-    use super::*;
-
-    #[test]
-    fn link_lists_add_and_remove_once() {
-        let mut l = vec![];
-        assert!(add_once(&mut l, "a") && !add_once(&mut l, "a") && add_once(&mut l, "b"));
-        assert!(remove_id(&mut l, "a") && !remove_id(&mut l, "a"));
-        assert_eq!(l, ["b"]);
-    }
-
-    fn item(pull: bool, number: u32, title: Option<&str>) -> Attached {
-        Attached { pull, number, title: title.map(String::from) }
-    }
-
-    #[test]
-    fn an_item_is_attached_once_and_may_gain_a_title() {
-        let mut list = vec![];
-        assert!(attach(&mut list, item(false, 5, None)));
-        assert!(!attach(&mut list, item(false, 5, None)), "same item again");
-        assert!(attach(&mut list, item(true, 5, None)), "a pull request is not the issue with that number");
-        assert!(attach(&mut list, item(false, 5, Some("Fix it"))), "title filled in");
-        assert!(!attach(&mut list, item(false, 5, Some("Other"))), "an existing title stays");
-        assert_eq!(list, [item(false, 5, Some("Fix it")), item(true, 5, None)]);
-    }
-
-    #[test]
-    fn the_oldest_items_drop_off() {
-        let mut list = vec![];
-        for n in 1..=(MAX_ATTACHED as u32 + 3) {
-            attach(&mut list, item(false, n, None));
-        }
-        assert_eq!(list.len(), MAX_ATTACHED);
-        assert_eq!(list[0].number, 4);
-    }
-}
-
-#[cfg(test)]
-mod headless {
-    //! Drives the real workspace on gpui's test platform (no window opens) with a throwaway data folder, to catch
-    //! hangs and panics when sessions start and switch and a shell panel opens. Spawns the real `claude` and shell.
-    //! `cargo test -- --ignored headless`.
-    use super::*;
-    use gpui::TestAppContext;
-
-    fn run() {
-        let data = tempfile::tempdir().unwrap();
-        // SAFETY: set before any other thread reads the environment; this test owns the process.
-        unsafe { std::env::set_var("CLAUDIU_DATA_DIR", data.path()) };
-        let work = tempfile::tempdir().unwrap();
-        let mut cx = TestAppContext::single();
-        cx.update(|app| {
-            gpui_kit::init(app);
-            gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, app);
-        });
-        let (window, ws) = cx
-            .update(|app| {
-                gpui_kit::open_window(Default::default(), app, |window, app| app.new(|cx| Workspace::new(window, vec![], cx)))
-            })
-            .unwrap();
-        let draw = |cx: &mut TestAppContext| {
-            cx.update_window(window, |_, window, app| window.draw(app).clear(app)).unwrap();
-            cx.run_until_parked();
-        };
-        let step = |cx: &mut TestAppContext, f: &dyn Fn(&mut Workspace, &mut Window, &mut Context<Workspace>)| {
-            let t = std::time::Instant::now();
-            cx.update_window(window, |_, window, app| ws.update(app, |ws, cx| f(ws, window, cx))).unwrap();
-            let acted = t.elapsed();
-            draw(cx);
-            draw(cx);
-            // Starting a process must never run on the UI thread (a big `claude.exe` took a second to create).
-            assert!(acted < Duration::from_millis(400), "the window was blocked for {acted:?}");
-        };
-        let cwd = work.path().to_path_buf();
-        draw(&mut cx);
-        step(&mut cx, &|ws, w, cx| ws.new_claude(cwd.clone(), w, cx));
-        // Chat: the Chat tab lists chats; a chat runs the real adapter (installed into the throwaway data folder
-        // on first use), offers the agent's skills, answers, and comes back with its history after being closed.
-        step(&mut cx, &|ws, w, cx| {
-            ws.new_chat(None, None, w, cx);
-        });
-        let (id, view) = ws.read_with(&cx, |ws, _| (ws.chats[0].id.clone(), ws.chats[0].view.clone()));
-        let wait = |cx: &mut TestAppContext, view: &Entity<crate::chat::view::ChatView>, what: &str, ok: &dyn Fn(&crate::chat::view::ChatView) -> bool| {
-            let t = std::time::Instant::now();
-            while !view.read_with(cx, |v, _| ok(v)) {
-                assert!(t.elapsed() < Duration::from_secs(150), "timed out waiting for {what}: {:?}", view.read_with(cx, |v, _| v.probe()));
-                std::thread::sleep(Duration::from_millis(100));
-                draw(cx);
-            }
-        };
-        wait(&mut cx, &view, "the chat to be ready", &|v| v.probe().0 == crate::chat::view::Phase::Ready);
-        assert!(view.read_with(&cx, |v, _| v.probe().2) > 0, "the agent lists skills and commands");
-        let rec = ws.read_with(&cx, |ws, _| ws.chat_store.get(&id).cloned()).unwrap();
-        assert!(!is_tied(&rec.cwd), "a new chat belongs to no project");
-        // Tie it to a project before the first message: a new conversation in that folder.
-        let before = view.read_with(&cx, |v, _| v.epoch());
-        step(&mut cx, &|_, w, cx| view.update(cx, |v, cx| v.set_project(Some(cwd.clone()), w, cx)));
-        assert_eq!(view.read_with(&cx, |v, _| v.epoch()), before + 1, "a different folder restarts the conversation");
-        wait(&mut cx, &view, "the chat to restart in the project", &|v| v.probe().0 == crate::chat::view::Phase::Ready);
-        assert!(ws.read_with(&cx, |ws, _| ws.chat_store.get(&id).is_some_and(|r| is_tied(&r.cwd) && r.session_id.is_some())));
-        step(&mut cx, &|_, w, cx| view.update(cx, |v, cx| v.send_text("say only the word pong", w, cx)));
-        wait(&mut cx, &view, "the answer", &|v| !v.is_busy() && v.probe().1.iter().any(|i| matches!(i, crate::chat::model::Item::Agent(_))));
-        let reply = view.read_with(&cx, |v, _| format!("{:?}", v.probe().1)).to_lowercase();
-        assert!(reply.contains("pong"), "{reply}");
-        // Image paste: a picture on the clipboard attaches, is sent with the message, and Claude sees it.
-        let png = {
-            let mut out = std::io::Cursor::new(vec![]);
-            ::image::RgbaImage::from_pixel(48, 48, ::image::Rgba([255, 0, 0, 255])).write_to(&mut out, ::image::ImageFormat::Png).unwrap();
-            out.into_inner()
-        };
-        cx.update(|app| app.write_to_clipboard(gpui::ClipboardItem::new_image(&gpui::Image::from_bytes(gpui::ImageFormat::Png, png))));
-        step(&mut cx, &|_, w, cx| view.update(cx, |v, cx| v.focus_input(w, cx)));
-        step(&mut cx, &|_, w, cx| assert!(view.update(cx, |v, cx| v.paste(w, cx)), "an image on the clipboard is taken"));
-        assert_eq!(view.read_with(&cx, |v, _| v.attached()), 1);
-        step(&mut cx, &|_, w, cx| view.update(cx, |v, cx| v.send_text("What single color fills this image? Answer with one lowercase word.", w, cx)));
-        assert_eq!(view.read_with(&cx, |v, _| v.attached()), 0, "the attachment is sent");
-        wait(&mut cx, &view, "the color", &|v| !v.is_busy() && v.probe().1.iter().rev().any(|i| matches!(i, crate::chat::model::Item::Agent(t) if t.to_lowercase().contains("red"))));
-        // Account switch: the chat restarts under the active account and loads the same conversation.
-        let before = view.read_with(&cx, |v, _| v.epoch());
-        step(&mut cx, &|ws, w, cx| ws.relaunch_chats(w, cx));
-        assert_eq!(view.read_with(&cx, |v, _| v.epoch()), before + 1, "the agent was restarted");
-        wait(&mut cx, &view, "the chat to reload", &|v| v.probe().0 == crate::chat::view::Phase::Ready && v.probe().1.len() >= 4);
-        let rec = ws.read_with(&cx, |ws, _| ws.chat_store.get(&id).cloned()).unwrap();
-        assert!(rec.session_id.is_some() && rec.title != DEFAULT_TITLE, "{rec:?}");
-        step(&mut cx, &|ws, w, cx| ws.close_live(&id, w, cx));
-        assert!(ws.read_with(&cx, |ws, _| ws.chats.is_empty() && ws.chat_store.get(&id).is_some()), "closing keeps the history");
-        // Nothing may keep the view (and with it the adapter and its `claude`) alive once the chat is closed.
-        let weak = view.downgrade();
-        drop(view);
-        draw(&mut cx);
-        draw(&mut cx);
-        assert!(weak.upgrade().is_none(), "a closed chat's view is still alive");
-        step(&mut cx, &|ws, w, cx| ws.open_chat(&id, w, cx));
-        let view = ws.read_with(&cx, |ws, _| ws.chats[0].view.clone());
-        wait(&mut cx, &view, "the history to load", &|v| {
-            let (phase, items, _) = v.probe();
-            phase == crate::chat::view::Phase::Ready && items.iter().any(|i| matches!(i, crate::chat::model::Item::User(t) if t.contains("pong")))
-        });
-        // Cross-session tools: nothing happens until the user says yes, and no means no.
-        use serde_json::{Value, json};
-        let ask = |from: String, tool: &'static str, args: Value| std::thread::spawn(move || crate::bridge::ask(&from, tool, &args));
-        let take = || loop {
-            if let Some(r) = crate::bridge::take_requests().pop() {
-                break r;
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        };
-        let offer = |cx: &mut TestAppContext, req: crate::bridge::Request| {
-            step(cx, &|ws, w, cx| {
-                ws.bridge_queue.push_back(req.clone());
-                ws.ask_about_next_request(w, cx);
-            })
-        };
-        let asking = |cx: &TestAppContext| ws.read_with(cx, |ws, _| matches!(ws.modal, Some(Modal::Bridge { .. })));
-        let from_chat = format!("chat:{id}");
-
-        let h = ask(from_chat.clone(), "list_chats", json!({}));
-        offer(&mut cx, take());
-        assert!(asking(&cx), "the user is asked first");
-        std::thread::sleep(Duration::from_millis(500));
-        assert!(!h.is_finished(), "nothing is answered before the user does");
-        step(&mut cx, &|ws, w, cx| ws.submit_modal(w, cx));
-        let text = h.join().unwrap().unwrap();
-        assert!(text.contains(&id) && text.contains("this chat"), "{text}");
-
-        // Another dialog replacing the question declines it instead of leaving the asker hanging.
-        let h = ask(from_chat.clone(), "list_chats", json!({}));
-        offer(&mut cx, take());
-        assert!(asking(&cx));
-        step(&mut cx, &|ws, w, cx| ws.act(Act::OpenSettings, w, cx));
-        assert!(!asking(&cx));
-        assert_eq!(h.join().unwrap(), Err("The user declined.".to_string()));
-        step(&mut cx, &|ws, w, cx| ws.act(Act::Dismiss, w, cx));
-        // A request whose asker gave up is not carried out when the user allows it late.
-        let stale = crate::bridge::Request { id: "late".into(), from: from_chat.clone(), tool: "start_chat".into(), args: json!({}), deadline: now() + 2 };
-        offer(&mut cx, stale);
-        assert!(asking(&cx));
-        std::thread::sleep(Duration::from_millis(2500));
-        step(&mut cx, &|ws, w, cx| ws.submit_modal(w, cx));
-        assert_eq!(ws.read_with(&cx, |ws, _| ws.chats.len()), 1, "an expired request opens nothing");
-
-        let h = ask(from_chat.clone(), "read_chat", json!({"id": id}));
-        offer(&mut cx, take());
-        step(&mut cx, &|ws, w, cx| ws.submit_modal(w, cx));
-        let text = h.join().unwrap().unwrap();
-        assert!(text.contains("pong"), "read_chat returns the messages: {text}");
-
-        let h = ask(from_chat.clone(), "start_chat", json!({"prompt": "no thanks"}));
-        offer(&mut cx, take());
-        step(&mut cx, &|ws, w, cx| ws.act(Act::Dismiss, w, cx));
-        assert_eq!(h.join().unwrap(), Err("The user declined.".to_string()));
-        assert_eq!(ws.read_with(&cx, |ws, _| ws.chats.len()), 1, "a declined request opens nothing");
-
-        let h = ask(from_chat.clone(), "start_code_session", json!({"folder": "no-such-project"}));
-        offer(&mut cx, take());
-        assert!(!asking(&cx), "a request that cannot work is not put to the user");
-        assert!(h.join().unwrap().unwrap_err().contains("No project or folder"));
-
-        let h = ask("code:someone".into(), "start_chat", json!({"prompt": "say only the word ping"}));
-        offer(&mut cx, take());
-        step(&mut cx, &|ws, w, cx| ws.submit_modal(w, cx));
-        h.join().unwrap().unwrap();
-        assert_eq!(ws.read_with(&cx, |ws, _| ws.chats.len()), 2);
-        let (second_id, second) = ws.read_with(&cx, |ws, _| (ws.chats[1].id.clone(), ws.chats[1].view.clone()));
-        assert!(!ws.read_with(&cx, |ws, _| is_tied(&ws.chat_store.get(&second_id).unwrap().cwd)), "a chat opened by a session has no project either");
-        wait(&mut cx, &second, "the first message to be answered", &|v| !v.is_busy() && v.probe().1.iter().any(|i| matches!(i, crate::chat::model::Item::Agent(t) if t.to_lowercase().contains("ping"))));
-
-        let live_before = ws.read_with(&cx, |ws, _| ws.live.len());
-        let h = ask(from_chat.clone(), "start_code_session", json!({"folder": cwd.to_string_lossy()}));
-        offer(&mut cx, take());
-        step(&mut cx, &|ws, w, cx| ws.submit_modal(w, cx));
-        let text = h.join().unwrap().unwrap();
-        assert_eq!(ws.read_with(&cx, |ws, _| ws.live.len()), live_before + 1);
-        let code_id = text.split("(id ").nth(1).and_then(|t| t.split(')').next()).unwrap().to_string();
-        let t = std::time::Instant::now();
-        while ws.read_with(&cx, |ws, cx| ws.live_view(&code_id).is_none_or(|v| v.read(cx).tail_text(40).is_empty())) {
-            assert!(t.elapsed() < Duration::from_secs(60), "the session drew nothing to read");
-            std::thread::sleep(Duration::from_millis(200));
-            draw(&mut cx);
-        }
-        let h = ask(from_chat.clone(), "read_code_session", json!({"id": code_id}));
-        offer(&mut cx, take());
-        step(&mut cx, &|ws, w, cx| ws.submit_modal(w, cx));
-        assert!(h.join().unwrap().unwrap().contains("latest terminal output"));
-        step(&mut cx, &|ws, w, cx| ws.close_live(&id, w, cx));
-    }
-
-    /// Sessions, the shell panel and the GitHub view, with the real `claude` and shell but no model calls.
-    fn sessions_and_shell() {
-        let data = tempfile::tempdir().unwrap();
-        // SAFETY: set before any other thread reads the environment; this test owns the process.
-        unsafe { std::env::set_var("CLAUDIU_DATA_DIR", data.path()) };
-        let work = tempfile::tempdir().unwrap();
-        let mut cx = TestAppContext::single();
-        cx.update(|app| {
-            gpui_kit::init(app);
-            gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, app);
-        });
-        let (window, ws) = cx
-            .update(|app| {
-                gpui_kit::open_window(Default::default(), app, |window, app| app.new(|cx| Workspace::new(window, vec![], cx)))
-            })
-            .unwrap();
-        let step = |cx: &mut TestAppContext, f: &dyn Fn(&mut Workspace, &mut Window, &mut Context<Workspace>)| {
-            let t = std::time::Instant::now();
-            cx.update_window(window, |_, window, app| ws.update(app, |ws, cx| f(ws, window, cx))).unwrap();
-            let acted = t.elapsed();
-            for _ in 0..2 {
-                cx.update_window(window, |_, window, app| window.draw(app).clear(app)).unwrap();
-                cx.run_until_parked();
-            }
-            assert!(acted < Duration::from_millis(400), "the window was blocked for {acted:?}");
-        };
-        let cwd = work.path().to_path_buf();
-        step(&mut cx, &|ws, w, cx| ws.new_claude(cwd.clone(), w, cx));
-        let first = ws.read_with(&cx, |ws, _| ws.active.clone().expect("a session is shown"));
-        // A filter on a project that no longer exists filters nothing; the list still draws.
-        step(&mut cx, &|ws, w, cx| ws.act(Act::FilterProject(Some("gone".into())), w, cx));
-        assert!(ws.read_with(&cx, |ws, _| ws.project_filter().is_none()));
-        step(&mut cx, &|ws, w, cx| ws.act(Act::FilterProject(None), w, cx));
-        // The shell under a Claude session: starts on first use, survives switching away, goes with its session.
-        step(&mut cx, &|ws, w, cx| ws.toggle_shell(&first, w, cx));
-        assert!(ws.read_with(&cx, |ws, _| ws.shells.get(&first).is_some_and(|p| p.open)), "shell opened");
-        step(&mut cx, &|ws, w, cx| ws.new_claude(cwd.clone(), w, cx));
-        let second = ws.read_with(&cx, |ws, _| ws.active.clone().unwrap());
-        assert_ne!(first, second);
-        assert!(ws.read_with(&cx, |ws, _| ws.shells.contains_key(&first) && !ws.shells.contains_key(&second)), "the shell stays with its own session");
-        step(&mut cx, &|ws, w, cx| ws.toggle_shell(&first, w, cx));
-        assert!(ws.read_with(&cx, |ws, _| ws.active.as_deref() == Some(first.as_str()) && ws.shells[&first].open), "from another session, it shows the session and its shell");
-        step(&mut cx, &|ws, w, cx| ws.toggle_shell(&first, w, cx));
-        assert!(ws.read_with(&cx, |ws, _| !ws.shells[&first].open), "toggled shut");
-        step(&mut cx, &|ws, w, cx| ws.toggle_shell(&first, w, cx));
-        // Dragging the divider resizes the panel within bounds.
-        step(&mut cx, &|ws, _w, _cx| {
-            ws.shell_drag = Some(ShellDrag { id: first.clone(), y: 500.0, height: SHELL_HEIGHT });
-            ws.drag_shell(400.0, 900.0);
-            assert_eq!(ws.shells[&first].height, SHELL_HEIGHT + 100.0);
-            ws.drag_shell(10.0, 900.0);
-            assert_eq!(ws.shells[&first].height, 700.0, "keeps room for the terminal");
-            ws.drag_shell(5000.0, 900.0);
-            assert_eq!(ws.shells[&first].height, SHELL_MIN);
-            ws.shell_drag = None;
-        });
-        step(&mut cx, &|ws, w, cx| ws.close_live(&first, w, cx));
-        assert!(ws.read_with(&cx, |ws, _| !ws.shells.contains_key(&first)), "closing the session drops its shell");
-        // The GitHub view lives in the right sidebar: one per folder, it widens the sidebar, "Ask Claude" starts a session.
-        assert_eq!(ws.read_with(&cx, |ws, _| ws.right_width(1600.0)), RIGHT_MENU_W, "the menu has a fixed width");
-        step(&mut cx, &|ws, w, cx| ws.open_github(cwd.clone(), w, cx));
-        assert!(ws.read_with(&cx, |ws, _| ws.gh.len() == 1 && ws.right_gh.is_some()), "github shown in the right sidebar");
-        assert_eq!(ws.read_with(&cx, |ws, _| ws.right_width(1600.0)), RIGHT_GH_W);
-        step(&mut cx, &|ws, _w, _cx| {
-            ws.right_drag = Some(RightDrag { x: 1000.0, width: RIGHT_GH_W });
-            ws.drag_right(900.0, 1600.0);
-            assert_eq!(ws.right_width(1600.0), RIGHT_GH_W + 100.0);
-            ws.drag_right(5000.0, 1600.0);
-            assert_eq!(ws.right_width(1600.0), RIGHT_GH_MIN);
-            ws.drag_right(-5000.0, 1600.0);
-            assert_eq!(ws.right_width(1600.0), 1040.0, "keeps room for the session");
-            ws.right_drag = None;
-        });
-        step(&mut cx, &|ws, w, cx| ws.toggle_right(w, cx));
-        assert!(ws.read_with(&cx, |ws, _| ws.store.data.layout.right_hidden), "hidden");
-        step(&mut cx, &|ws, w, cx| ws.toggle_right(w, cx));
-        assert!(ws.read_with(&cx, |ws, _| !ws.store.data.layout.right_hidden), "shown again");
-        step(&mut cx, &|ws, w, cx| ws.open_github(cwd.clone(), w, cx));
-        assert!(ws.read_with(&cx, |ws, _| ws.gh.len() == 1), "one github pane per folder");
-        let before = ws.read_with(&cx, |ws, _| ws.live.len());
-        step(&mut cx, &|ws, _w, cx| {
-            let view = ws.gh[0].view.clone();
-            view.update(cx, |_, cx| cx.emit(crate::github::view::GhEvent::AskClaude("explain issue 1".into())));
-        });
-        assert!(ws.read_with(&cx, |ws, _| ws.live.len() == before + 1 && ws.active.is_some()), "Ask Claude opens a session");
-        assert!(ws.read_with(&cx, |ws, _| ws.right_gh.is_some() && ws.gh.len() == 1), "the right sidebar keeps following the same project");
-    }
-
-    #[test]
-    #[ignore]
-    fn sessions_and_the_shell_panel() {
-        let t = std::thread::spawn(sessions_and_shell);
-        let start = std::time::Instant::now();
-        while !t.is_finished() {
-            assert!(start.elapsed() < Duration::from_secs(120), "the workspace froze");
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        t.join().unwrap();
-    }
-
-    #[test]
-    #[ignore]
-    fn starting_sessions_does_not_hang_or_panic() {
-        let (tx, rx) = std::sync::mpsc::channel();
-        let t = std::thread::spawn(move || {
-            run();
-            tx.send(()).ok();
-        });
-        if rx.recv_timeout(std::time::Duration::from_secs(480)).is_err() {
-            // Either it froze (the bug) or the run panicked (the sender dropped).
-            match t.is_finished() {
-                true => t.join().unwrap(),
-                false => panic!("the workspace froze while starting sessions"),
-            }
-        }
+        Some((claude::context_fraction(tokens), tokens, false, None))
     }
 }

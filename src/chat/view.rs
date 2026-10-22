@@ -11,7 +11,7 @@ use futures::StreamExt;
 use gpui::{
     AppContext, ClipboardEntry, Image, ImageFormat, img,
     AnyElement, App, ClickEvent, Context, Div, Entity, EventEmitter, FocusHandle, Focusable, InteractiveElement, IntoElement, MouseButton,
-    MouseDownEvent, ParentElement, Pixels, Point, Render, ScrollHandle, SharedString, StatefulInteractiveElement, Styled,
+    MouseDownEvent, ParentElement, Pixels, Point, Render, ScrollHandle, ScrollWheelEvent, SharedString, StatefulInteractiveElement, Styled,
     Subscription, Window, anchored, deferred, div, prelude::FluentBuilder, px,
 };
 use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
@@ -19,7 +19,7 @@ use serde_json::{Value, json};
 
 use super::acp::{self, Agent, Msg};
 use super::model::{self, Command, Item, Meta, Tool};
-use super::store::{load_cache, save_cache, scratch_dir};
+use super::store::{load_cache, load_picks, save_cache, save_picks, scratch_dir};
 use super::ui::markdown;
 use crate::store::{RateLimit, now};
 use crate::theme::{self, hsla};
@@ -59,6 +59,7 @@ const PROJECT_PICKER: usize = usize::MAX;
 
 /// What a normal start says. It is not shown: the chat is usable at once and the agent starts behind it.
 const START: &str = "Starting Claude…";
+const LOADING: &str = "Loading the conversation…";
 
 /// An image waiting to be sent with the next message.
 struct Attachment {
@@ -168,6 +169,11 @@ pub struct ChatView {
     pub cwd: PathBuf,
     /// Projects a new chat can be tied to, as (name, folder).
     projects: Vec<(String, PathBuf)>,
+    /// What the context figure ends at: the auto-compact switch and threshold the mod reported (`claude::context_limit`).
+    auto_compact: Option<bool>,
+    compact_at: Option<u64>,
+    /// A project the model asked for (`set_chat_project`); applied when the turn in progress ends.
+    tie_next: Option<PathBuf>,
     /// A first message to send as soon as the conversation is ready (a chat opened by another session).
     startup: Option<String>,
     /// Messages sent before the conversation was ready: (text, images, prompt blocks), delivered in order once it is.
@@ -176,6 +182,8 @@ pub struct ChatView {
     pub phase: Phase,
     items: Vec<Item>,
     meta: Meta,
+    /// Model or effort picked before the session was ready, as (option id, value); applied once it is.
+    early: Vec<(String, String)>,
     launch: Option<Launch>,
     /// Claude's session id to load instead of starting a new conversation.
     resume: Option<String>,
@@ -200,6 +208,7 @@ pub struct ChatView {
     slash_off: bool,
     picker: Option<(usize, Point<Pixels>)>,
     scroll: ScrollHandle,
+    smooth: crate::glide::Smooth,
     follow: bool,
     /// `items` is the saved copy of the conversation, shown until the agent replays the real one.
     cached_shown: bool,
@@ -258,16 +267,22 @@ impl ChatView {
                 cx.stop_propagation();
             }
         }));
+        let (options, commands) = load_picks();
+        let smooth = crate::glide::Smooth::default();
         let mut view = Self {
             id,
             cwd,
             projects: vec![],
+            tie_next: None,
+            auto_compact: None,
+            compact_at: None,
             startup: None,
             queued: vec![],
             carry: Carry::None,
             phase: Phase::Working(START),
             items: vec![],
-            meta: Meta::default(),
+            meta: Meta { options, commands, ..Meta::default() },
+            early: vec![],
             launch,
             resume,
             session_id: None,
@@ -285,7 +300,8 @@ impl ChatView {
             slash_scroll: ScrollHandle::new(),
             slash_off: false,
             picker: None,
-            scroll: ScrollHandle::new(),
+            scroll: smooth.handle(),
+            smooth,
             follow: true,
             cached_shown: false,
             replay: vec![],
@@ -304,6 +320,12 @@ impl ChatView {
         });
     }
 
+    /// Keep the model, effort and command choices for the next chat to show while it starts.
+    fn save_picks(&self, cx: &mut Context<Self>) {
+        let (options, commands) = (self.meta.options.clone(), self.meta.commands.clone());
+        cx.background_executor().spawn(async move { save_picks(&options, &commands) }).detach();
+    }
+
     fn save_cache(&self, cx: &mut Context<Self>) {
         let (id, items) = (self.id.clone(), self.items.clone());
         cx.background_executor().spawn(async move { save_cache(&id, &items) }).detach();
@@ -315,6 +337,16 @@ impl ChatView {
 
     pub fn set_projects(&mut self, projects: Vec<(String, PathBuf)>) {
         self.projects = projects;
+    }
+
+    pub fn set_compact(&mut self, auto_compact: Option<bool>, compact_at: Option<u64>, cx: &mut Context<Self>) {
+        (self.auto_compact, self.compact_at) = (auto_compact, compact_at);
+        cx.notify();
+    }
+
+    /// Tie the chat to a project once the turn that asked for it is over (restarting the agent now would cut it off).
+    pub fn tie_after_turn(&mut self, project: PathBuf) {
+        self.tie_next = Some(project);
     }
 
     /// Send this as the first message as soon as the conversation is ready.
@@ -500,8 +532,11 @@ Write the summary.")).unwrap_or_else(|_| {
                 if method == "session/update"
                     && let Some(u) = params.get("update")
                 {
-                    let (title, context) = (self.meta.title.clone(), self.meta.context);
+                    let (title, context, commands) = (self.meta.title.clone(), self.meta.context, self.meta.commands.len());
                     model::apply(if self.cached_shown { &mut self.replay } else { &mut self.items }, &mut self.meta, u);
+                    if self.meta.commands.len() != commands {
+                        self.save_picks(cx);
+                    }
                     if self.meta.title != title
                         && let Some(t) = self.meta.title.clone()
                     {
@@ -580,7 +615,7 @@ Write the summary.")).unwrap_or_else(|_| {
                 });
                 let method = if let Some(sid) = self.resume.clone() {
                     params["sessionId"] = sid.into();
-                    self.phase = Phase::Working("Loading the conversation…");
+                    self.phase = Phase::Working(LOADING);
                     "session/load"
                 } else {
                     "session/new"
@@ -607,12 +642,18 @@ Write the summary.")).unwrap_or_else(|_| {
                     self.session_id = Some(sid);
                 }
                 self.meta.options = model::parse_options(r.get("configOptions").unwrap_or(&Value::Null));
+                self.save_picks(cx);
                 if std::mem::take(&mut self.cached_shown) {
                     self.items = std::mem::take(&mut self.replay);
                     self.sent_images.clear();
                     self.save_cache(cx);
                 }
                 self.phase = Phase::Ready;
+                for (config, value) in std::mem::take(&mut self.early) {
+                    if let Some(i) = self.meta.options.iter().position(|o| o.id == config && o.current != value && o.choices.iter().any(|(v, _)| *v == value)) {
+                        self.set_option(i, value, cx);
+                    }
+                }
                 self.flush_queue();
                 if let Some(text) = self.startup.take() {
                     self.send(text, window, cx);
@@ -627,6 +668,10 @@ Write the summary.")).unwrap_or_else(|_| {
                 }
                 if self.inflight == 0 {
                     self.save_cache(cx);
+                    self.save_picks(cx);
+                    if let Some(project) = self.tie_next.take() {
+                        self.set_project(Some(project), window, cx);
+                    }
                 }
                 self.maybe_relaunch(window, cx);
             }
@@ -776,9 +821,16 @@ The user's message follows.)")}));
 
     fn set_option(&mut self, idx: usize, value: String, cx: &mut Context<Self>) {
         self.picker = None;
-        let (Some(o), Some(sid)) = (self.meta.options.get_mut(idx), self.session_id.clone()) else { return };
+        let Some(o) = self.meta.options.get_mut(idx) else { return };
         let config = o.id.clone();
         o.current = value.clone();
+        let Some(sid) = self.session_id.clone() else {
+            // The options shown are the last session's: remember the pick and apply it when the session is up.
+            self.early.retain(|(id, _)| *id != config);
+            self.early.push((config, value));
+            cx.notify();
+            return;
+        };
         if let Some(a) = &mut self.agent {
             let id = a.call("session/set_config_option", json!({"sessionId": sid, "configId": config, "value": value}));
             self.pending.insert(id, Pending::SetOption);
@@ -893,6 +945,7 @@ fn tail(output: &str, lines: usize) -> String {
 impl Render for ChatView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.follow {
+            self.smooth.cancel();
             self.scroll.scroll_to_bottom();
         }
         let body = self.render_chat(window, cx);
@@ -980,6 +1033,7 @@ impl ChatView {
             col = col.child(working("Carrying over the earlier conversation…"));
         } else if let Phase::Working(what) = self.phase
             && what != START
+            && !(what == LOADING && self.cached_shown)
         {
             col = col.child(working(what));
         } else if busy && !matches!(self.items.last(), Some(Item::Thought(_))) {
@@ -1103,7 +1157,10 @@ impl ChatView {
                     })),
             );
         }
-        let context = self.meta.context.map(|(used, size)| format!("{}k / {}k", used / 1000, size / 1000));
+        let context = self.meta.context.map(|(used, size)| {
+            let full = crate::claude::context_limit(Some(size), self.compact_at, self.auto_compact).unwrap_or(size);
+            format!("{}k / {}k", used / 1000, full / 1000)
+        });
         let send = if busy {
             button("chat-stop", "Stop", false).on_click(cx.listener(|v, _: &ClickEvent, _, cx| v.stop(cx)))
         } else {
@@ -1170,7 +1227,7 @@ impl ChatView {
             // Scrolling by hand ends following; the next message resumes it if the view is back at the bottom.
             .child(match state {
                 Some(state) => div().flex_1().min_h_0().child(state).into_any_element(),
-                None => div().id("chat-scroll").flex_1().min_h_0().overflow_y_scroll().track_scroll(&self.scroll).on_scroll_wheel(cx.listener(|v, _, _, _| v.follow = false)).child(col).into_any_element(),
+                None => self.smooth.wire(div().id("chat-scroll").flex_1().min_h_0(), window).on_scroll_wheel(cx.listener(|v, _: &ScrollWheelEvent, _, _| v.follow = false)).child(col).into_any_element(),
             })
             .child(footer)
             .into_any_element()

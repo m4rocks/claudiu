@@ -5,15 +5,14 @@ use std::path::PathBuf;
 
 use gpui::{
     AnyElement, ClickEvent, Context, Div, FontWeight, InteractiveElement, IntoElement, MouseButton, MouseDownEvent, ParentElement, SharedString, Stateful,
-    StatefulInteractiveElement, Styled, div, prelude::FluentBuilder, px,
+    StatefulInteractiveElement, Styled, Window, div, px,
 };
 
 use crate::app::{Act, GitOp, MenuItem, RightDrag, Workspace};
-use crate::store::Id;
 use crate::platform::Editor;
-use crate::store::{Project, SessionKind, SessionRecord};
+use crate::store::{Attached, Id, Project, SessionKind, SessionRecord};
 use crate::theme::{self, hsla};
-use crate::widgets::{countdown, icon, icon_button, meter, section_label};
+use crate::widgets::{countdown, icon, icon_button, meter, section_label, tick};
 use gpui_kit::assets::IconName;
 
 /// What the top bar and the right sidebar describe: the shown session (or chat) and the folder and project it is in.
@@ -40,7 +39,7 @@ impl Workspace {
         Shown { rec, cwd, project, chat_title: chat.map(|(_, title)| title) }
     }
 
-    pub fn render_right(&mut self, window_w: f32, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub fn render_right(&mut self, window_w: f32, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         if self.store.data.layout.right_hidden {
             return None;
         }
@@ -76,7 +75,7 @@ impl Workspace {
                     .child(div().flex_1().min_h_0().child(view))
                     .into_any_element()
             }
-            None => self.render_right_menu(cx).into_any_element(),
+            None => self.render_right_menu(window, cx).into_any_element(),
         };
         // The wide GitHub view can be resized by its left edge; the menu has one width.
         let handle = self.right_gh.is_some().then(|| {
@@ -112,14 +111,34 @@ impl Workspace {
         )
     }
 
-    fn render_right_menu(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn render_right_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let shown = self.shown();
         let id = self.active_id().cloned();
-        let claude = shown.rec.as_ref().filter(|r| r.kind == SessionKind::Claude);
+        let running = id.as_ref().is_some_and(|id| self.is_running(id, cx));
+        let actions = self.action_rows(&shown, id.as_ref(), running, cx);
+        let attached = id.as_deref().map(|i| self.attached_of(i)).unwrap_or_default();
+        let github = (!attached.is_empty()).then(|| self.attached_rows(id.as_ref(), attached, cx));
+        let links = id.as_deref().map(|i| self.links_of(i)).unwrap_or_default();
+        let linked = (!links.is_empty()).then(|| self.linked_rows(id.as_ref(), links, cx));
+        let status = self.status_rows(&shown, id.as_ref(), running, cx);
+        self.menu_scroll
+            .wire(div().id("right-menu").size_full(), window)
+            .flex()
+            .flex_col()
+            .gap(px(14.0))
+            .p(px(8.0))
+            .child(group("ACTIONS", actions))
+            .children(github.map(|g| group("GITHUB", g)))
+            .children(linked.map(|l| group("LINKED", l)))
+            .child(group("STATUS", status))
+    }
+
+    /// Open in the editor, the folder, git, the shell and the GitHub view.
+    fn action_rows(&self, shown: &Shown, id: Option<&Id>, running: bool, cx: &mut Context<Self>) -> Div {
+        let claude = shown.rec.as_ref().is_some_and(|r| r.kind == SessionKind::Claude);
         let target = shown.project.as_ref().map(|p| p.path.clone()).or_else(|| shown.cwd.clone());
         let repo = shown.project.as_ref().filter(|p| p.git.is_some()).and(shown.cwd.clone());
         let busy = self.git_busy;
-        let running = id.as_ref().is_some_and(|id| self.is_running(id, cx));
 
         let mut actions = div().flex().flex_col().gap(px(1.0));
         if let Some(target) = target {
@@ -135,28 +154,19 @@ impl Workspace {
                                 .flex_1()
                                 .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::OpenEditor(editor, t.clone()), window, cx))),
                         )
-                        .child(
-                            icon_button("open-in-pick", IconName::ChevronDown).on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(move |ws, ev: &MouseDownEvent, _w, cx| {
-                                    let current = ws.preferred_editor();
-                                    let items = ws
-                                        .editors
-                                        .iter()
-                                        .filter(|(_, found)| *found)
-                                        .map(|(e, _)| MenuItem {
-                                            label: format!("{}{}", if current == Some(*e) { "✓  " } else { "    " }, e.label()),
-                                            hint: None,
-                                            disabled: false,
-                                            act: Act::OpenEditor(*e, pick_target.clone()),
-                                            danger: false,
-                                            separator_before: false,
-                                        })
-                                        .collect();
-                                    ws.open_menu(ev.position, items, cx);
-                                }),
-                            ),
-                        ),
+                        .child(icon_button("open-in-pick", IconName::ChevronDown).on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |ws, ev: &MouseDownEvent, _w, cx| {
+                                let current = ws.preferred_editor();
+                                let items = ws
+                                    .editors
+                                    .iter()
+                                    .filter(|(_, found)| *found)
+                                    .map(|(e, _)| MenuItem::new(format!("{}{}", tick(current == Some(*e)), e.label()), Act::OpenEditor(*e, pick_target.clone())))
+                                    .collect();
+                                ws.open_menu(ev.position, items, cx);
+                            }),
+                        )),
                 );
             }
             actions = actions.child(
@@ -165,23 +175,20 @@ impl Workspace {
             );
         }
         if let Some(repo) = repo {
-            let pull_repo = repo.clone();
             // One git operation at a time: while one runs, both rows are disabled.
+            let git_row = |cx: &mut Context<Self>, key: &'static str, glyph: IconName, label: &'static str, doing: &'static str, op: GitOp, make: fn(PathBuf) -> Act| {
+                if busy.is_some() {
+                    dim_row(key, glyph, if busy == Some(op) { doing } else { label })
+                } else {
+                    let repo = repo.clone();
+                    row(key, glyph, label).on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(make(repo.clone()), window, cx)))
+                }
+            };
             actions = actions
-                .child(if busy.is_some() {
-                    dim_row("commit-push", IconName::GitCommitHorizontal, if busy == Some(GitOp::CommitPush) { "Committing…" } else { "Commit & Push" })
-                } else {
-                    row("commit-push", IconName::GitCommitHorizontal, "Commit & Push")
-                        .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::CommitPush(repo.clone()), window, cx)))
-                })
-                .child(if busy.is_some() {
-                    dim_row("pull", IconName::ArrowDownToLine, if busy == Some(GitOp::Pull) { "Pulling…" } else { "Pull" })
-                } else {
-                    row("pull", IconName::ArrowDownToLine, "Pull")
-                        .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::Pull(pull_repo.clone()), window, cx)))
-                });
+                .child(git_row(cx, "commit-push", IconName::GitCommitHorizontal, "Commit & Push", "Committing…", GitOp::CommitPush, Act::CommitPush))
+                .child(git_row(cx, "pull", IconName::ArrowDownToLine, "Pull", "Pulling…", GitOp::Pull, Act::Pull));
         }
-        if let (Some(id), true, true) = (id.clone(), claude.is_some(), running) {
+        if let (Some(id), true, true) = (id.cloned(), claude, running) {
             let open = self.shells.get(&id).is_some_and(|p| p.open);
             actions = actions.child(
                 row("shell", IconName::Terminal, if open { "Hide shell" } else { "Show shell" })
@@ -189,38 +196,63 @@ impl Workspace {
             );
         }
         let cwd = self.active_cwd();
-        actions = actions.child(
+        actions.child(
             row("github", IconName::GitPullRequest, "GitHub")
                 .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::OpenGithub { cwd: cwd.clone() }, window, cx))),
-        );
+        )
+    }
 
-        // Issues and pull requests Claude attached to this session.
-        let attached = id.as_deref().map(|i| self.attached_of(i)).unwrap_or_default();
-        let any_attached = !attached.is_empty();
-        let mut github = div().flex().flex_col().gap(px(1.0));
+    /// Issues and pull requests attached to the session or chat: click to open, × to take off.
+    fn attached_rows(&self, id: Option<&Id>, attached: Vec<Attached>, cx: &mut Context<Self>) -> Div {
+        let mut rows = div().flex().flex_col().gap(px(1.0));
         for a in attached {
             let (pull, number) = (a.pull, a.number);
-            let (open_id, rec_id) = (format!("attached-{}-{number}", a.pull), id.clone());
-            let title = match &a.title {
-                Some(t) => format!("#{number}  {t}"),
-                None => format!("#{number}"),
-            };
-            github = github.child(
-                row(open_id, if pull { IconName::GitPullRequest } else { IconName::CircleDot }, title)
-                    .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.open_attached(pull, number, window, cx)))
-                    .child(icon_button(format!("detach-{pull}-{number}"), IconName::X).on_click(cx.listener(move |ws, _: &ClickEvent, _w, cx| {
-                        cx.stop_propagation();
-                        if let Some(id) = &rec_id {
-                            ws.detach(id, pull, number);
-                        }
-                        cx.notify();
-                    }))),
-            );
+            let owner = id.cloned();
+            let title = a.title.map_or_else(|| format!("#{number}"), |t| format!("#{number}  {t}"));
+            rows = rows.child(removable_row(
+                cx,
+                format!("attached-{pull}-{number}"),
+                if pull { IconName::GitPullRequest } else { IconName::CircleDot },
+                title,
+                move |ws, window, cx| ws.open_attached(pull, number, window, cx),
+                move |ws| {
+                    if let Some(id) = &owner {
+                        ws.detach(id, pull, number);
+                    }
+                },
+            ));
         }
+        rows
+    }
 
+    /// Sessions and chats linked with this one: click to go there, × to unlink.
+    fn linked_rows(&self, id: Option<&Id>, links: Vec<(Id, String)>, cx: &mut Context<Self>) -> Div {
+        let mut rows = div().flex().flex_col().gap(px(1.0));
+        for (other, title) in links {
+            let glyph = if self.chat_store.get(&other).is_some() { IconName::MessageSquare } else { IconName::Brackets };
+            let (me, go, gone) = (id.cloned(), other.clone(), other.clone());
+            rows = rows.child(removable_row(
+                cx,
+                format!("linked-{other}"),
+                glyph,
+                title,
+                move |ws, window, cx| ws.act(Act::Select(go.clone()), window, cx),
+                move |ws| {
+                    if let Some(me) = &me {
+                        ws.unlink(me, &gone);
+                    }
+                },
+            ));
+        }
+        rows
+    }
+
+    /// Context and cache meters, and the two settings Claude Code keeps (dropdowns while the session runs).
+    fn status_rows(&self, shown: &Shown, id: Option<&Id>, running: bool, cx: &mut Context<Self>) -> Div {
         let (ctx_fraction, ctx_caption) = match self.selected_context() {
-            Some((f, tokens, true)) => (Some(f), format!("{}k tokens", tokens / 1000)),
-            Some((f, tokens, false)) => (Some(f), format!("~{}k tokens (estimate)", tokens / 1000)),
+            Some((f, tokens, true, Some(full))) => (Some(f), format!("{}k of {}k tokens", tokens / 1000, full / 1000)),
+            Some((f, tokens, true, None)) => (Some(f), format!("{}k tokens", tokens / 1000)),
+            Some((f, tokens, false, _)) => (Some(f), format!("~{}k tokens (estimate)", tokens / 1000)),
             None => (None, "no session".to_string()),
         };
         // Fills with time left; goes red in the last fifth. Expired means the next message re-reads the whole context at full price.
@@ -234,109 +266,51 @@ impl Workspace {
             }
             None => meter("CACHE", None, "no session".into(), None),
         };
-        let meta = claude.and_then(|r| r.claude.as_ref());
-        let on_off = |v: Option<bool>| v.map_or("—", |v| if v { "On" } else { "Off" }).to_string();
+
         // A code session's figures come from its snapshot, a chat's from the mod inside its own claude.
-        let pane = id.as_deref().and_then(|i| self.chat_pane(i));
-        let compact_now = meta.map(|m| m.auto_compact).or(pane.map(|p| p.auto_compact)).flatten();
-        let advisor_now = match (meta, pane) {
-            (Some(m), _) => m.advisor.clone(),
-            (None, Some(p)) => p.advisor.clone(),
-            _ => None,
-        }
-        .map(|a| a.to_lowercase());
-        let known = meta.is_some() || pane.is_some_and(|p| p.auto_compact.is_some() || p.advisor.is_some());
-        let auto_compact = on_off(compact_now);
-        let advisor = if known { advisor_now.clone().unwrap_or_else(|| "Off".into()) } else { "—".into() };
-        let live = (claude.is_some() && running) || pane.is_some();
-
-        // Settings Claude Code keeps: a dropdown while the session runs (the mod applies it), else just the value.
-        let setting = |sid: Option<&Id>, key: &'static str, label: &'static str, value: String, items: Box<dyn Fn(&Id) -> Vec<MenuItem>>| match sid.filter(|_| live) {
-            Some(sid) => {
-                let sid = sid.clone();
-                kv_pick(key, label, value).on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |ws, ev: &MouseDownEvent, _w, cx| {
-                        let items = items(&sid);
-                        ws.open_menu(ev.position, items, cx);
-                    }),
-                )
-                .into_any_element()
-            }
-            None => kv(label, value).into_any_element(),
+        let meta = shown.rec.as_ref().filter(|r| r.kind == SessionKind::Claude).and_then(|r| r.claude.as_ref());
+        let pane = id.and_then(|i| self.chat_pane(i));
+        let (compact, advisor, known) = match (meta, pane) {
+            (Some(m), _) => (m.auto_compact, m.advisor.clone(), true),
+            (None, Some(p)) => (p.auto_compact, p.advisor.clone(), p.auto_compact.is_some() || p.advisor.is_some()),
+            _ => (None, None, false),
         };
-        let item = |label: String, act: Act| MenuItem { label, hint: None, act, danger: false, disabled: false, separator_before: false };
-        let tick = |on: bool, text: &str| format!("{}{text}", if on { "✓  " } else { "    " });
-        let auto_compact_row = setting(
-            id.as_ref(),
-            "set-auto-compact",
-            "Auto-compact",
-            auto_compact,
-            Box::new(move |sid| vec![item(tick(compact_now == Some(true), "On"), Act::SetAutoCompact(sid.clone(), true)), item(tick(compact_now == Some(false), "Off"), Act::SetAutoCompact(sid.clone(), false))]),
-        );
-        let advisor_row = setting(
-            id.as_ref(),
-            "set-advisor",
-            "Advisor",
-            advisor,
-            Box::new(move |sid| {
-                let known = [("opus", "Opus"), ("sonnet", "Sonnet")];
-                let other = advisor_now.as_deref().is_some_and(|a| a != "off" && !known.iter().any(|(k, _)| *k == a));
-                let mut items = vec![item(tick(advisor_now.is_none(), "Off"), Act::SetAdvisor(sid.clone(), "off".into()))];
-                items.extend(known.iter().map(|(m, name)| item(tick(advisor_now.as_deref() == Some(*m), name), Act::SetAdvisor(sid.clone(), (*m).into()))));
-                items.push(item(tick(other, "Other…"), Act::AskAdvisor(sid.clone())));
-                items
-            }),
-        );
+        let advisor = advisor.map(|a| a.to_lowercase());
+        let compact_text = compact.map_or("—", |v| if v { "On" } else { "Off" }).to_string();
+        let advisor_text = if known { advisor.clone().unwrap_or_else(|| "Off".into()) } else { "—".into() };
+        let settable = id.filter(|_| (meta.is_some() && running) || pane.is_some()).cloned();
 
-        // Sessions and chats linked with this one.
-        let links = id.as_deref().map(|i| self.links_of(i)).unwrap_or_default();
-        let mut linked = div().flex().flex_col().gap(px(1.0));
-        for (other, title) in links.iter().cloned() {
-            let chat = self.chat_store.get(&other).is_some();
-            let (me, go, gone) = (id.clone(), other.clone(), other.clone());
-            linked = linked.child(
-                row(format!("linked-{other}"), if chat { IconName::MessageSquare } else { IconName::Bot }, title)
-                    .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::Select(go.clone()), window, cx)))
-                    .child(icon_button(format!("unlink-{gone}"), IconName::X).on_click(cx.listener(move |ws, _: &ClickEvent, _w, cx| {
-                        cx.stop_propagation();
-                        if let Some(me) = &me {
-                            ws.unlink(me, &gone);
-                        }
-                        cx.notify();
-                    }))),
-            );
-        }
-        let any_linked = !links.is_empty();
-        let status = div()
+        let compact_row = match settable.clone() {
+            Some(sid) => pick_row(cx, "set-auto-compact", "Auto-compact", compact_text, move || auto_compact_menu(&sid, compact)).into_any_element(),
+            None => kv("Auto-compact", compact_text).into_any_element(),
+        };
+        let advisor_row = match settable {
+            Some(sid) => pick_row(cx, "set-advisor", "Advisor", advisor_text, move || advisor_menu(&sid, advisor.as_deref())).into_any_element(),
+            None => kv("Advisor", advisor_text).into_any_element(),
+        };
+        div()
             .flex()
             .flex_col()
             .gap(px(10.0))
             .px(px(10.0))
             .child(meter("CONTEXT", ctx_fraction, ctx_caption, None))
             .child(cache)
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(2.0))
-                    .child(auto_compact_row)
-                    .child(advisor_row),
-            );
-
-        div()
-            .id("right-menu")
-            .size_full()
-            .overflow_y_scroll()
-            .flex()
-            .flex_col()
-            .gap(px(14.0))
-            .p(px(8.0))
-            .child(group("ACTIONS", actions))
-            .when(any_attached, |d| d.child(group("GITHUB", github)))
-            .when(any_linked, |d| d.child(group("LINKED", linked)))
-            .child(group("STATUS", status))
+            .child(div().flex().flex_col().gap(px(2.0)).child(compact_row).child(advisor_row))
     }
+}
+
+fn auto_compact_menu(sid: &Id, current: Option<bool>) -> Vec<MenuItem> {
+    [(true, "On"), (false, "Off")].into_iter().map(|(on, name)| MenuItem::new(format!("{}{name}", tick(current == Some(on))), Act::SetAutoCompact(sid.clone(), on))).collect()
+}
+
+/// Off, the two aliases, and "Other…" (ticked for any other model) which asks for a name.
+fn advisor_menu(sid: &Id, current: Option<&str>) -> Vec<MenuItem> {
+    const ALIASES: [(&str, &str); 2] = [("opus", "Opus"), ("sonnet", "Sonnet")];
+    let other = current.is_some_and(|a| a != "off" && !ALIASES.iter().any(|(k, _)| *k == a));
+    let mut items = vec![MenuItem::new(format!("{}Off", tick(current.is_none())), Act::SetAdvisor(sid.clone(), "off".into()))];
+    items.extend(ALIASES.iter().map(|(alias, name)| MenuItem::new(format!("{}{name}", tick(current == Some(*alias))), Act::SetAdvisor(sid.clone(), (*alias).into()))));
+    items.push(MenuItem::new(format!("{}Other…", tick(other)), Act::AskAdvisor(sid.clone())));
+    items
 }
 
 fn group(label: &str, body: impl IntoElement) -> Div {
@@ -366,20 +340,27 @@ fn dim_row(id: impl Into<SharedString>, glyph: IconName, label: impl Into<Shared
     base_row(id, glyph, label).text_color(hsla(theme::TEXT_FAINT)).cursor_default()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// gpui panics when a style is set twice (a hover on a row that already has one), so just building both is the check.
-    #[test]
-    fn both_row_kinds_can_be_built() {
-        row("a", IconName::Terminal, "A");
-        dim_row("b", IconName::Terminal, "B");
-    }
+/// A list row that does something when clicked and has a × that removes the entry.
+fn removable_row(
+    cx: &mut Context<Workspace>,
+    key: String,
+    glyph: IconName,
+    title: String,
+    open: impl Fn(&mut Workspace, &mut Window, &mut Context<Workspace>) + 'static,
+    remove: impl Fn(&mut Workspace) + 'static,
+) -> Stateful<Div> {
+    let x = format!("remove-{key}");
+    row(key, glyph, title)
+        .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| open(ws, window, cx)))
+        .child(icon_button(x, IconName::X).on_click(cx.listener(move |ws, _: &ClickEvent, _w, cx| {
+            cx.stop_propagation();
+            remove(ws);
+            cx.notify();
+        })))
 }
 
-/// A setting row that opens a menu: the value with a chevron, lit on hover.
-fn kv_pick(id: &'static str, label: &str, value: String) -> Stateful<Div> {
+/// A setting row that opens a menu (built when it is clicked): the value with a chevron, lit on hover.
+fn pick_row(cx: &mut Context<Workspace>, id: &'static str, label: &str, value: String, menu: impl Fn() -> Vec<MenuItem> + 'static) -> Stateful<Div> {
     div()
         .id(id)
         .flex()
@@ -404,6 +385,7 @@ fn kv_pick(id: &'static str, label: &str, value: String) -> Stateful<Div> {
                 .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(value))
                 .child(div().flex_none().text_color(hsla(theme::TEXT_FAINT)).child(icon(IconName::ChevronDown, 12.0))),
         )
+        .on_mouse_down(MouseButton::Left, cx.listener(move |ws, ev: &MouseDownEvent, _w, cx| ws.open_menu(ev.position, menu(), cx)))
 }
 
 fn kv(label: &str, value: String) -> Div {
@@ -422,5 +404,31 @@ fn editor_name(editor: Editor) -> &'static str {
     match editor {
         Editor::VsCode => "VS Code",
         Editor::Zed => "Zed",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// gpui panics when a style is set twice (a hover on a row that already has one), so just building both is the check.
+    #[test]
+    fn both_row_kinds_can_be_built() {
+        row("a", IconName::Terminal, "A");
+        dim_row("b", IconName::Terminal, "B");
+    }
+
+    fn labels(items: &[MenuItem]) -> Vec<&str> {
+        items.iter().map(|i| i.label.as_str()).collect()
+    }
+
+    #[test]
+    fn the_setting_menus_tick_the_current_value() {
+        let sid = "s".to_string();
+        assert_eq!(labels(&auto_compact_menu(&sid, Some(false))), ["    On", "✓  Off"]);
+        assert_eq!(labels(&auto_compact_menu(&sid, None)), ["    On", "    Off"]);
+        assert_eq!(labels(&advisor_menu(&sid, None)), ["✓  Off", "    Opus", "    Sonnet", "    Other…"]);
+        assert_eq!(labels(&advisor_menu(&sid, Some("sonnet"))), ["    Off", "    Opus", "✓  Sonnet", "    Other…"]);
+        assert_eq!(labels(&advisor_menu(&sid, Some("claude-opus-5-5"))), ["    Off", "    Opus", "    Sonnet", "✓  Other…"]);
     }
 }

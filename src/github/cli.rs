@@ -101,11 +101,10 @@ impl Gh {
             kind: if e.kind() == std::io::ErrorKind::NotFound { ErrKind::NoCli } else { ErrKind::Other },
             msg: format!("could not run gh: {e}"),
         })?;
-        if let Some(mut pipe) = child.stdin.take() {
-            if let Some(text) = stdin {
+        if let Some(mut pipe) = child.stdin.take()
+            && let Some(text) = stdin {
                 let _ = pipe.write_all(text.as_bytes());
             }
-        }
         let out = child.wait_with_output().map_err(|e| Error::other(e.to_string()))?;
         let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
         if out.status.success() {

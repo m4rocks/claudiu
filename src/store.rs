@@ -69,8 +69,9 @@ pub struct ClaudeMeta {
     pub auto_compact: Option<bool>,
     #[serde(default)]
     pub advisor: Option<String>,
+    /// Tokens at which auto-compaction runs (the context bar's full mark); `None` while it is off or unknown.
     #[serde(default)]
-    pub last_command: Option<String>,
+    pub compact_at: Option<u64>,
     /// Issues and pull requests Claude attached to this session (the `attach_github` tool), oldest first.
     #[serde(default)]
     pub attached: Vec<Attached>,

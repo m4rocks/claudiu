@@ -206,6 +206,9 @@ struct Shared {
     routes: Mutex<Routes>,
 }
 
+/// Every adapter process started, so quitting can end the ones no longer current as well.
+static ALL: Mutex<Vec<std::sync::Weak<Shared>>> = Mutex::new(Vec::new());
+
 /// The process everyone uses. Replaced when the `claude` or the account changes; the old one ends once its last chat has left it.
 static CURRENT: Mutex<Option<Arc<Shared>>> = Mutex::new(None);
 
@@ -223,6 +226,7 @@ impl Shared {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         let mut child = cmd.spawn().map_err(|e| format!("could not start the Claude adapter: {e}"))?;
+        crate::platform::kill_with_parent(&child);
         let (mut stdin, stdout, stderr) = (child.stdin.take().unwrap(), child.stdout.take().unwrap(), child.stderr.take().unwrap());
 
         let (tx, lines) = channel::<String>();
@@ -255,6 +259,11 @@ impl Shared {
             next: AtomicU64::new(init),
             routes: Mutex::new(Routes { chats: HashMap::new(), calls: HashMap::new(), sessions: HashMap::new(), orphans: vec![], init: Init::Pending { id: init, waiters: vec![] }, exited: false }),
         });
+        {
+            let mut all = ALL.lock().unwrap_or_else(|e| e.into_inner());
+            all.retain(|w| w.strong_count() > 0);
+            all.push(Arc::downgrade(&shared));
+        }
         shared.send(json!({"jsonrpc": "2.0", "id": init, "method": "initialize", "params": {"protocolVersion": 1, "clientCapabilities": {"fs": {"readTextFile": false, "writeTextFile": false}}}}));
 
         // Weak: the reader must not keep the process alive once nobody uses it.
@@ -296,17 +305,54 @@ impl Shared {
 
 impl Drop for Shared {
     fn drop(&mut self) {
-        *self.tx.lock().unwrap_or_else(|e| e.into_inner()) = None; // closes stdin: the adapter exits and ends its `claude`s
-        let Some(mut child) = self.child.lock().unwrap_or_else(|e| e.into_inner()).take() else { return };
-        // shortcut: a stuck adapter is killed after 3 s, but on Windows only the node process, not a `claude`
-        // it started; harden with a job object if orphans ever show up.
-        std::thread::spawn(move || {
-            use wait_timeout::ChildExt;
-            if !matches!(child.wait_timeout(Duration::from_secs(3)), Ok(Some(_))) {
-                let _ = child.kill();
-                let _ = child.wait();
-            }
-        });
+        self.close_input();
+        // Nobody is waiting for it: end it in the background. (On Windows the job object in
+        // `platform::kill_with_parent` also takes its `claude`s along if this does not get to run.)
+        let this = self.child.lock().unwrap_or_else(|e| e.into_inner()).take();
+        if let Some(child) = this {
+            std::thread::spawn(move || end(child, Duration::from_secs(3)));
+        }
+    }
+}
+
+impl Shared {
+    /// Closes the adapter's stdin: it ends its sessions and exits.
+    fn close_input(&self) {
+        *self.tx.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+}
+
+/// Wait up to `grace` for the adapter to exit by itself, then kill it.
+fn end(mut child: Child, grace: Duration) {
+    use wait_timeout::ChildExt;
+    if !matches!(child.wait_timeout(grace), Ok(Some(_))) {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+}
+
+/// Quitting: close every adapter's input so it ends its sessions and exits, and kill any that has not within a moment.
+/// (On Windows the job object in `platform::kill_with_parent` is the backstop if Claudiu dies first.)
+pub fn shutdown() {
+    close_all();
+    let all: Vec<Arc<Shared>> = ALL.lock().unwrap_or_else(|e| e.into_inner()).drain(..).filter_map(|w| w.upgrade()).collect();
+    let deadline = std::time::Instant::now() + Duration::from_millis(1500);
+    for s in all {
+        let child = s.child.lock().unwrap_or_else(|e| e.into_inner()).take();
+        if let Some(child) = child {
+            end(child, deadline.saturating_duration_since(std::time::Instant::now()));
+        }
+    }
+}
+
+/// First half of quitting: tell every adapter to wind down, without waiting, so it overlaps with saving state.
+pub fn close_all() {
+    // A start in progress holds `CURRENT`; do not wait for it (its process is closed through `ALL` or the job object).
+    if let Ok(mut current) = CURRENT.try_lock() {
+        current.take();
+    }
+    for s in ALL.lock().unwrap_or_else(|e| e.into_inner()).iter().filter_map(|w| w.upgrade()) {
+        s.close_input();
     }
 }
 
@@ -393,8 +439,7 @@ impl Drop for Agent {
 /// changes happen in a Code session. Denied tools are taken out of the model's context, whatever the permission mode.
 pub const READ_ONLY_DENY: [&str; 8] = ["Bash", "PowerShell", "Monitor", "Edit", "Write", "NotebookEdit", "EnterWorktree", "ExitWorktree"];
 
-/// `_meta.claudeCode.options` for `session/new` and `session/load`: the Claudiu tools are pre-allowed (Claudiu asks the
-/// user itself before it acts on one) and the file and shell tools are denied.
+/// `_meta.claudeCode.options` for `session/new` and `session/load`: the Claudiu tools are pre-allowed  and the file and shell tools are denied.
 pub fn session_options(chat_id: &str) -> serde_json::Value {
     let mut o = serde_json::json!({ "allowedTools": crate::mcp::allowed_tools("chat"), "disallowedTools": READ_ONLY_DENY });
     // The same per-process mod the terminal sessions get: it reports auto-compact and the advisor, and applies changes
@@ -417,7 +462,7 @@ pub fn handoff_prompt(chat_id: &str, tied: bool) -> String {
         "this chat has no project, so ask the user which project or folder, and pass it as the folder argument"
     };
     format!(
-        "# This chat is read-only\n\nYou can read and search the project's files, but you cannot edit files or run commands: those tools are switched off here. Coding happens in a Claude Code session. When the user wants to start coding (or sends \"Start coding\"), call the start_code_session tool with a prompt that is a self-contained implementation brief of **under 2,000 characters**: the goal, the decisions made in this chat, the files and places involved, constraints, and how to check the result ({folder}). End the brief with: \"Background: the chat {chat_id} (read_chat) has the full conversation.\" Claudiu shows the brief to the user, who confirms before anything starts. This chat's id is {chat_id}."
+        "# This chat is read-only\n\nYou can read and search the project's files, but you cannot edit files or run commands: those tools are switched off here. Coding happens in a Claude Code session. When the user wants to start coding (or sends \"Start coding\"), call the start_code_session tool with a prompt that is a self-contained implementation brief of **under 2,000 characters**: the goal, the decisions made in this chat, the files and places involved, constraints, and how to check the result ({folder}). End the brief with: \"Background: the chat {chat_id} (read_chat) has the full conversation.\" Claudiu starts the session as soon as you call the tool, so call it only when the user asked to start coding. This chat's id is {chat_id}."
     )
 }
 

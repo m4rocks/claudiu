@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use super::model::Item;
+use super::model::{Command, ConfigOption, Item};
 use crate::store::Id;
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -166,6 +166,27 @@ pub fn save_cache(id: &str, items: &[Item]) {
     if serde_json::to_string(&items).is_ok_and(|t| fs::write(&tmp, t).is_ok()) {
         let _ = fs::rename(&tmp, &path);
     }
+}
+
+/// The model and effort choices and the commands the agent offered last time, so a chat that is still starting
+/// can show them (and take a pick) at once.
+pub fn load_picks() -> (Vec<ConfigOption>, Vec<Command>) {
+    fs::read_to_string(picks_path()).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
+}
+
+pub fn save_picks(options: &[ConfigOption], commands: &[Command]) {
+    if options.is_empty() {
+        return;
+    }
+    let path = picks_path();
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = crate::datadir::write_atomic(&path, &serde_json::json!([options, commands]).to_string());
+}
+
+fn picks_path() -> PathBuf {
+    crate::datadir::data_dir().join("chat-picks.json")
 }
 
 pub fn drop_cache(id: &str) {

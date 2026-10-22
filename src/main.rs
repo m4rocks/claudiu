@@ -9,12 +9,15 @@ mod commit;
 mod datadir;
 mod git;
 mod github;
+mod glide;
+mod trace;
 mod glyphs;
 mod inspector;
 mod keys;
 mod mcp;
 mod platform;
 mod sidebar;
+mod skeleton;
 mod store;
 mod terminal;
 mod terminal_view;
@@ -32,7 +35,7 @@ use gpui_kit::component::TitleBar;
 gpui_kit::assets::icon_assets!(
     AppIcons,
     [
-        WindowMinimize, WindowMaximize, WindowRestore, WindowClose, Archive, ArchiveRestore, ArrowDownToLine, ArrowLeft, Bot, Check, ChevronDown, ChevronRight, Circle,
+        WindowMinimize, WindowMaximize, WindowRestore, WindowClose, Archive, ArchiveRestore, ArrowDownToLine, ArrowLeft, Brackets, Check, ChevronDown, ChevronRight, Circle,
         CircleCheck, CircleDot, CircleSlash, CircleX, Clock, Ellipsis, ExternalLink, FolderOpen, GitBranch, GitCommitHorizontal, GitMerge, GitPullRequest,
         GitPullRequestClosed, GitPullRequestDraft, HeartPlus, LoaderCircle, Lock, MessageSquare, PanelLeft, PanelRight, Pencil, Plus, RefreshCw, Search,
         Settings, Terminal, X

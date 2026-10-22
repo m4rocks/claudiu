@@ -297,6 +297,12 @@ pub fn read_session(path: &Path) -> Option<SessionScan> {
 
 /// Approximate context-window usage in 0.0..=1.0. Claude Code doesn't expose the window for the
 /// model in transcripts, so assume 200k and fall back to 1M once usage exceeds it. Shown as approximate.
+/// What the context bar is full at: the auto-compact threshold while auto-compact is on (the bar fills as compaction
+/// nears), otherwise the model's window.
+pub fn context_limit(window: Option<u64>, compact_at: Option<u64>, auto_compact: Option<bool>) -> Option<u64> {
+    compact_at.filter(|&t| t > 0 && auto_compact != Some(false)).or(window).filter(|&w| w > 0)
+}
+
 pub fn context_fraction(tokens: u64) -> f32 {
     let window: f64 = if tokens > 200_000 { 1_000_000.0 } else { 200_000.0 };
     (tokens as f64 / window).min(1.0) as f32
@@ -414,6 +420,15 @@ Claude: Found it.
         assert_eq!(r.sessions.len(), 1);
         assert!(find_transcript(tmp.path(), "id-1").is_some());
         assert!(find_transcript(tmp.path(), "nope").is_none());
+    }
+
+    #[test]
+    fn the_bar_is_full_at_the_threshold_while_auto_compact_is_on() {
+        assert_eq!(context_limit(Some(1_000_000), Some(167_000), Some(true)), Some(167_000));
+        assert_eq!(context_limit(Some(1_000_000), Some(167_000), None), Some(167_000));
+        assert_eq!(context_limit(Some(1_000_000), Some(167_000), Some(false)), Some(1_000_000), "off: the model's window");
+        assert_eq!(context_limit(Some(1_000_000), None, Some(true)), Some(1_000_000));
+        assert_eq!(context_limit(None, None, None), None);
     }
 
     #[test]

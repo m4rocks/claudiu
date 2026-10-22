@@ -243,6 +243,11 @@ pub fn avatar(seed: &str, size: f32) -> Div {
         .child(letter.to_string())
 }
 
+/// The marker in front of menu entries, so the current one shows.
+pub fn tick(current: bool) -> &'static str {
+    if current { "✓  " } else { "    " }
+}
+
 /// Relative time like "now", "5m", "3h", "2d", "6w".
 pub fn ago(ts: i64, now: i64) -> String {
     let d = (now - ts).max(0);

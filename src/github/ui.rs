@@ -172,9 +172,9 @@ fn item(label: impl Into<String>, act: GhAct) -> PopItem {
 }
 
 impl Render for GithubView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let body: AnyElement = match self.phase.clone() {
-            Phase::Ready => self.render_ready(cx),
+            Phase::Ready => self.render_ready(window, cx),
             other => self.render_state(other, cx),
         };
         let popup = self.render_popup(cx);
@@ -242,7 +242,7 @@ impl GithubView {
 
     // ------------------------------------------------------------------------------------------------ layout
 
-    fn render_ready(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_ready(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let wide = self.width >= WIDE;
         let showing_detail = self.detail.is_some() || matches!(self.mode, Mode::New(_));
         let header = self.render_header(cx);
@@ -251,13 +251,13 @@ impl GithubView {
                 .flex()
                 .flex_1()
                 .min_h_0()
-                .child(self.render_list(true, cx))
-                .child(fade_in(div().flex_1().min_w_0().h_full().child(self.render_detail(false, cx)), self.detail_key(), 160, 0.0))
+                .child(self.render_list(true, window, cx))
+                .child(fade_in(div().flex_1().min_w_0().h_full().child(self.render_detail(false, window, cx)), self.detail_key(), 160, 0.0))
                 .into_any_element()
         } else if showing_detail {
-            fade_in(div().flex_1().min_h_0().child(self.render_detail(true, cx)), self.detail_key(), 160, 0.0).into_any_element()
+            fade_in(div().flex_1().min_h_0().child(self.render_detail(true, window, cx)), self.detail_key(), 160, 0.0).into_any_element()
         } else {
-            div().flex().flex_1().min_h_0().child(self.render_list(false, cx)).into_any_element()
+            div().flex().flex_1().min_h_0().child(self.render_list(false, window, cx)).into_any_element()
         };
         div().size_full().flex().flex_col().child(header).child(content).into_any_element()
     }
@@ -314,7 +314,7 @@ impl GithubView {
                             .whitespace_nowrap()
                             .text_ellipsis()
                             .font_weight(FontWeight::SEMIBOLD)
-                            .child(format!("{repo}")),
+                            .child(repo.to_string()),
                     )
                     .child(tab(Kind::Issue, "Issues"))
                     .child(tab(Kind::Pull, "Pull requests")),
@@ -358,7 +358,7 @@ impl GithubView {
             .on_mouse_down(MouseButton::Left, popup_at(cx, kind))
     }
 
-    fn render_list(&self, wide: bool, cx: &mut Context<Self>) -> Div {
+    fn render_list(&self, wide: bool, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let i = if self.kind == Kind::Issue { 0 } else { 1 };
         let q = &self.queries[i];
         let list = &self.lists[i];
@@ -477,7 +477,7 @@ impl GithubView {
             .when(wide, |d| d.w(px(LIST_W)).flex_none().border_r_1().border_color(hsla(theme::BORDER)))
             .when(!wide, |d| d.flex_1().min_w_0())
             .child(toolbar)
-            .child(div().id("gh-list").flex_1().min_h_0().overflow_y_scroll().child(rows).children(footer))
+            .child(self.scrolls[0].wire(div().id("gh-list").flex_1().min_h_0(), window).child(rows).children(footer))
     }
 
     fn render_row(&self, it: &Item, t: i64, cx: &mut Context<Self>) -> Stateful<Div> {
@@ -561,9 +561,9 @@ impl GithubView {
             .child(faint("Search with GitHub syntax, e.g. is:open label:bug author:@me"))
     }
 
-    fn render_detail(&self, stacked: bool, cx: &mut Context<Self>) -> AnyElement {
+    fn render_detail(&self, stacked: bool, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         if let Mode::New(kind) = self.mode {
-            return self.render_new(kind, stacked, cx).into_any_element();
+            return self.render_new(kind, stacked, window, cx).into_any_element();
         }
         let Some(ds) = &self.detail else { return self.render_empty_detail().into_any_element() };
         let back = stacked.then(|| {
@@ -776,11 +776,8 @@ impl GithubView {
             DetailTab::Commits => self.render_commits(d, t).into_any_element(),
             DetailTab::Files => self.render_files(ds, cx).into_any_element(),
         };
-        let scroll = div()
-            .id("gh-detail")
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scroll()
+        let scroll = self.scrolls[1]
+            .wire(div().id("gh-detail").flex_1().min_h_0(), window)
             .child(div().px(px(16.0)).py(px(12.0)).child(meta))
             .children(tabs)
             .child(div().px(px(16.0)).py(px(12.0)).child(content));
@@ -1318,7 +1315,7 @@ impl GithubView {
 
     // -------------------------------------------------------------------------------------------------- new item
 
-    fn render_new(&self, kind: Kind, stacked: bool, cx: &mut Context<Self>) -> Div {
+    fn render_new(&self, kind: Kind, stacked: bool, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let can_triage = self.info.as_ref().is_some_and(|i| i.can_triage());
         let mut meta = div().flex().flex_col().gap(px(8.0));
         if kind == Kind::Issue && can_triage {
@@ -1363,7 +1360,7 @@ impl GithubView {
             .flex()
             .flex_col()
             .when(stacked, |d| d.child(div().px(px(12.0)).pt(px(8.0)).child(button_leading("gh-back", IconName::ArrowLeft, "Back to list", false).on_click(go(cx, GhAct::Back)))))
-            .child(div().id("gh-new-scroll").flex_1().min_h_0().overflow_y_scroll().child(form))
+            .child(self.scrolls[2].wire(div().id("gh-new-scroll").flex_1().min_h_0(), window).child(form))
     }
 
     // ---------------------------------------------------------------------------------------------- pickers

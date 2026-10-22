@@ -143,8 +143,8 @@ fn hex(s: &str) -> Option<Color> {
     }
     let v = |i: usize, n: usize| u32::from_str_radix(&s[i..i + n], 16).ok();
     match s.len() {
-        3 => Some(Color(v(0, 1)? * 0x110000 | v(1, 1)? * 0x1100 | v(2, 1)? * 0x11, 1.0)),
-        4 => Some(Color(v(0, 1)? * 0x110000 | v(1, 1)? * 0x1100 | v(2, 1)? * 0x11, v(3, 1)? as f32 / 15.0)),
+        3 => Some(Color((v(0, 1)? * 0x110000) | (v(1, 1)? * 0x1100) | (v(2, 1)? * 0x11), 1.0)),
+        4 => Some(Color((v(0, 1)? * 0x110000) | (v(1, 1)? * 0x1100) | (v(2, 1)? * 0x11), v(3, 1)? as f32 / 15.0)),
         6 => Some(Color(v(0, 6)?, 1.0)),
         8 => Some(Color(v(0, 6)?, v(6, 2)? as f32 / 255.0)),
         _ => None,
@@ -630,22 +630,20 @@ fn mark_last_rows(nodes: &mut [Node]) {
             if let Node::El(e) = n {
                 if e.tag == "tr" {
                     found = Some(e);
-                } else if matches!(e.tag.as_str(), "thead" | "tbody" | "tfoot") {
-                    if let Some(r) = last_row(&mut e.children) {
+                } else if matches!(e.tag.as_str(), "thead" | "tbody" | "tfoot")
+                    && let Some(r) = last_row(&mut e.children) {
                         found = Some(r);
                     }
-                }
             }
         }
         found
     }
     for n in nodes {
         if let Node::El(e) = n {
-            if e.tag == "table" {
-                if let Some(r) = last_row(&mut e.children) {
+            if e.tag == "table"
+                && let Some(r) = last_row(&mut e.children) {
                     r.css.border[2] = Some(0.0);
                 }
-            }
             mark_last_rows(&mut e.children);
         }
     }

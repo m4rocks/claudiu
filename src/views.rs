@@ -374,12 +374,6 @@ impl Workspace {
                 confirm.clone(),
                 *danger,
             ),
-            Modal::Bridge { title, body, confirm, .. } => (
-                title.clone(),
-                div().id("bridge-body").max_h(px(260.0)).overflow_y_scroll().text_size(px(13.0)).text_color(hsla(theme::TEXT_DIM)).child(body.clone()).into_any_element(),
-                confirm.clone(),
-                false,
-            ),
             Modal::Settings { shell, claude, updates } => {
                 let toggle = |on: bool| if on { "On" } else { "Off" };
                 (
@@ -547,7 +541,7 @@ impl Render for Workspace {
             self.window_title = title;
         }
 
-        let sidebar = self.store.data.layout.sidebar_visible.then(|| self.render_sidebar(cx));
+        let sidebar = self.store.data.layout.sidebar_visible.then(|| self.render_sidebar(window, cx));
         let banner = self.render_update_banner(cx);
         let topbar = self.render_topbar(cx);
         // Terminals that aren't on screen keep running but must not trigger window redraws on every output burst.
@@ -560,7 +554,7 @@ impl Render for Workspace {
             let visible = p.open && showing == Some(owner);
             p.view.update(cx, |v, _| v.visible = visible);
         }
-        let right = self.render_right(f32::from(window.viewport_size().width), cx);
+        let right = self.render_right(f32::from(window.viewport_size().width), window, cx);
         let main: AnyElement = match &self.main {
             Main::Terminals => self.render_session(cx),
             Main::Home => self.render_home(cx).into_any_element(),

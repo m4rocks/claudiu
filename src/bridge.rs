@@ -1,7 +1,6 @@
 //! Requests from a Claude session (a code session or a chat) to Claudiu, made through the MCP helper
 //! (`claudiu --mcp-title`, see `mcp.rs`). The helper is a separate process, so the two talk through files:
-//! it drops `bridge/req/<id>.json` and waits for `bridge/res/<id>.json`. Claudiu asks the user before it answers
-//! anything, so the model can never start, list or read sessions on its own.
+//! it drops `bridge/req/<id>.json` and waits for `bridge/res/<id>.json`, which Claudiu writes on its next tick.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};

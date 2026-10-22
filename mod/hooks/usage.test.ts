@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-test('reports context, limits, auto-compact, advisor and the typed command; rewrites only on change', async ($, on) => {
+test('reports context, limits, auto-compact and advisor; rewrites only on change', async ($, on) => {
   mock.env(on, { CLAUDIU_USAGE_DIR: 'usage', CLAUDIU_ACCOUNT: 'work' })
   let advisor: string | undefined = 'opus'
   const writes: { path: string; snap: any }[] = []
@@ -12,6 +12,10 @@ test('reports context, limits, auto-compact, advisor and the typed command; rewr
   on('session.model', () => ({ value: 'claude-haiku-5-5' }))
   on('config.list', () => ({ value: [{ key: 'autoCompact', label: 'Auto-compact', kind: 'boolean', value: true }] }))
   on('settings.read', () => ({ value: { advisorModel: advisor } }))
+  let compactAt: number | undefined = 167_000
+  on('session.usage', () => ({
+    value: { startedAt: 0, rateLimits: [], cost: { usd: 0 }, context: { window: 1_000_000, breakdown: { isAutoCompactEnabled: compactAt != null, autoCompactThreshold: compactAt } } },
+  }) as any)
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
   on('command.run', () => ({}))
   on('session.measure', (_$, e) => ({ changed: e.changed }))
@@ -19,7 +23,7 @@ test('reports context, limits, auto-compact, advisor and the typed command; rewr
   await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
   expect(writes.length).toBe(1)
   expect(writes[0].path).toMatch(/usage[\\/]abc_123\.json$/) // the session id cannot escape the directory
-  expect(writes[0].snap).toMatchObject({ session_id: 'abc/123', model: 'claude-haiku-5-5', account: 'work', auto_compact: true, advisor: 'opus', context_fraction: null })
+  expect(writes[0].snap).toMatchObject({ session_id: 'abc/123', model: 'claude-haiku-5-5', account: 'work', auto_compact: true, advisor: 'opus', compact_at: 167_000, context_fraction: null })
 
   const measure = {
     context: { tokens: 28000, window: 1_000_000, percent: 3 },
@@ -40,10 +44,12 @@ test('reports context, limits, auto-compact, advisor and the typed command; rewr
   await $.session.measure(measure as any)
   expect(writes.length).toBe(n) // nothing changed: nothing rewritten
 
+  compactAt = undefined // auto-compact switched off
+  await $.command.run({ command: 'autocompact', args: 'off' })
+  expect(writes.at(-1)!.snap.compact_at).toBe(null)
+
   advisor = undefined
   await $.command.run({ command: 'advisor', args: ' off ' })
-  expect(writes.at(-1)!.snap).toMatchObject({ advisor: null, last_command: 'advisor off' })
-
-  await $.command.run({ command: 'compact', args: 'keep my private notes' })
-  expect(writes.at(-1)!.snap.last_command).toBe('compact') // free-text arguments are not reported
+  expect(writes.at(-1)!.snap.advisor).toBe(null)
+  expect(JSON.stringify(writes.at(-1)!.snap)).not.toContain('command') // what the user types is not reported
 })
