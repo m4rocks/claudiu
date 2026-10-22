@@ -157,7 +157,7 @@ fn own_tools(chat: bool) -> Vec<Value> {
     });
     let attach = json!({
         "name": "attach_github",
-        "description": "Show a GitHub issue or pull request of this session's project in Claudiu's sidebar. Call it when the user names one or you start working on one; once per item. It changes nothing on GitHub.",
+        "description": "Show a GitHub issue or pull request of this session's project in Claudiu's sidebar. Call this every time you read, view, search, open, comment on or push anything about a GitHub issue or pull request, including when the user only asks to see it. Also call it when the user names one by number or link. Call it once per item, before running the next command. It changes nothing on GitHub.",
         "inputSchema": {
             "type": "object",
             "properties": {
