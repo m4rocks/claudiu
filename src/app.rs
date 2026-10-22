@@ -403,6 +403,7 @@ impl Workspace {
         datadir::cleanup();
         ws.ingest_usage(cx);
         ws.refresh_accounts(cx);
+        ws.warm_chats(cx);
         ws.start_ticker(cx);
         ws.start_fetch_loop(cx);
         ws.start_git_watch(cx);
@@ -716,6 +717,14 @@ impl Workspace {
                     changed |= match item {
                         Attachment::Github(a) => ws.edit_attached(&me, |list| attach(list, a)),
                         Attachment::Link(other) => ws.link(&me, &other),
+                        Attachment::Unlink(other) => {
+                            ws.unlink(&me, &other);
+                            true
+                        }
+                        Attachment::Detach { pull, number } => {
+                            ws.detach(&me, pull, number);
+                            true
+                        }
                     };
                 }
                 if changed {

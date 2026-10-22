@@ -22,9 +22,9 @@ pub const CALLER_ENV: &str = "CLAUDIU_CALLER";
 pub const RECORD_ENV: &str = "CLAUDIU_RECORD";
 
 /// Tools the model uses to tell Claudiu something about itself; none of them reads or starts another session.
-/// A chat gets `attach_github` and `link_session` too.
-const CODE_TOOLS: [&str; 3] = ["set_tab_title", "attach_github", "link_session"];
-const CHAT_TOOLS: [&str; 2] = ["attach_github", "link_session"];
+/// A chat gets all but the first and the model switch.
+const CODE_TOOLS: [&str; 5] = ["set_tab_title", "attach_github", "detach_github", "link_session", "unlink_session"];
+const CHAT_TOOLS: [&str; 4] = ["attach_github", "detach_github", "link_session", "unlink_session"];
 
 /// Tools that reach other sessions. Each one makes Claudiu ask the user before it does anything (`bridge.rs`).
 const BRIDGE_TOOLS: [&str; 7] = ["list_chats", "read_chat", "list_code_sessions", "read_code_session", "search_sessions", "start_code_session", "start_chat"];
@@ -44,12 +44,13 @@ look at, hand work to or continue in another session; if the user declines, acce
 /// Both callers: the sidebar shows linked sessions and chats together.
 const LINK_INSTRUCTIONS: &str = " Claudiu shows related sessions and chats together. When this work continues, builds on or was \
 prompted by another chat or Claude Code session (the user says so, or you recognise it), find it with search_sessions \
-and call link_session with its id, once per pair. link_session is silent and changes nothing else.";
+and call link_session with its id, once per pair. When a link no longer fits (the work went elsewhere, or it was linked by mistake), \
+call unlink_session with the id. Both are silent and change nothing else.";
 
 const CHAT_INSTRUCTIONS: &str = "You are a chat running inside Claudiu.";
 
 /// Both callers: what makes the model call `attach_github`.
-const GITHUB_INSTRUCTIONS: &str = " GitHub: attach_github is silent and costs nothing, and its description says when to call it. If its schema is not loaded yet, load it first with ToolSearch (select:mcp__claudiu__attach_github).";
+const GITHUB_INSTRUCTIONS: &str = " GitHub: attach_github is silent and costs nothing, and its description says when to call it; detach_github takes an item off again when it no longer belongs. If its schema is not loaded yet, load it first with ToolSearch (select:mcp__claudiu__attach_github).";
 
 const INSTRUCTIONS: &str = "You are running inside Claudiu, which shows a tab title for this session. Call the \
 set_tab_title tool with a short title (2-5 words, no quotes) once you understand the user's first request. After \
@@ -125,7 +126,9 @@ fn serve(input: impl BufRead, mut out: impl Write, caller: &str, session: &str, 
             "tools/call" => Ok(match msg["params"]["name"].as_str() {
                 Some("set_tab_title") if !chat => set_title(&msg["params"], session, &data.join("titles")),
                 Some("attach_github") => attach_github(&msg["params"], record, &attach_dir(data)),
-                Some("link_session") => link_session(&msg["params"], record, &attach_dir(data)),
+                Some("detach_github") => detach_github(&msg["params"], record, &attach_dir(data)),
+                Some("link_session") => link_session(&msg["params"], record, &attach_dir(data), "link"),
+                Some("unlink_session") => link_session(&msg["params"], record, &attach_dir(data), "unlink"),
                 Some("set_model") if !chat => reply("Model switching isn't available in this session (Claudiu's mod isn't loaded).", true),
                 Some(tool) if BRIDGE_TOOLS.contains(&tool) => match ask(tool, &msg["params"]["arguments"]) {
                     Ok(text) => reply(&text, false),
@@ -168,8 +171,29 @@ fn own_tools(chat: bool) -> Vec<Value> {
             "required": ["kind", "number"],
         },
     });
+    let detach = json!({
+        "name": "detach_github",
+        "description": "Take a GitHub issue or pull request off this session's sidebar again, when it no longer belongs to this work or was attached by mistake. Silent; it changes nothing on GitHub.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "kind": { "type": "string", "enum": ["issue", "pull"], "description": "issue or pull (a pull request)" },
+                "number": { "type": "integer", "description": "The issue or pull request number" },
+            },
+            "required": ["kind", "number"],
+        },
+    });
+    let unlink = json!({
+        "name": "unlink_session",
+        "description": "Take back a link made with link_session, for a chat or Claude Code session that no longer relates to this one. Silent.",
+        "inputSchema": {
+            "type": "object",
+            "properties": { "id": { "type": "string", "description": "The id of the other session or chat" } },
+            "required": ["id"],
+        },
+    });
     if chat {
-        return vec![attach, link];
+        return vec![attach, detach, link, unlink];
     }
     vec![json!({
                 "name": "set_tab_title",
@@ -179,7 +203,7 @@ fn own_tools(chat: bool) -> Vec<Value> {
                     "properties": { "title": { "type": "string", "description": "Short tab title, 2-5 words" } },
                     "required": ["title"],
                 },
-            }), attach, json!({
+            }), attach, detach, json!({
                 "name": "set_model",
                 "description": "Switch this session's model and/or effort from your next request on, even mid-turn. Always ask the user first with the AskUserQuestion tool (which model, which effort) unless they just named them explicitly; never switch on your own. Claude Code also keeps the choice as the user's default model/effort.",
                 "inputSchema": {
@@ -189,7 +213,7 @@ fn own_tools(chat: bool) -> Vec<Value> {
                         "effort": { "type": "string", "description": "Effort level: low, medium, high, xhigh, max or auto" },
                     },
                 },
-            }), link]
+            }), link, unlink]
 }
 
 const CONFIRM: &str = " Claudiu asks the user to confirm first, so only call it when the user asked for this.";
@@ -245,21 +269,42 @@ fn set_title(params: &Value, session: &str, dir: &Path) -> Value {
 /// Keyed by Claudiu's own record id, which (unlike Claude's session id) survives `/clear`.
 fn attach_github(params: &Value, record: &str, dir: &Path) -> Value {
     let args = &params["arguments"];
-    let pull = match args["kind"].as_str() {
-        Some("issue") => false,
-        Some("pull") => true,
-        _ => return reply("kind must be \"issue\" or \"pull\"", true),
+    let (pull, number) = match github_item(args, record) {
+        Ok(item) => item,
+        Err(e) => return e,
     };
-    let Some(number) = args["number"].as_u64().and_then(|n| u32::try_from(n).ok()).filter(|&n| n > 0) else {
-        return reply("number must be a positive integer", true);
-    };
-    if record.is_empty() {
-        return reply("not running inside Claudiu", true);
-    }
     let title = args["title"].as_str().and_then(clean_title);
     match append_line(dir, record, &json!({ "pull": pull, "number": number, "title": title })) {
         Ok(()) => reply(&format!("{} #{number} attached.", if pull { "Pull request" } else { "Issue" }), false),
         Err(e) => reply(&format!("could not attach: {e}"), true),
+    }
+}
+
+/// The kind and number of an issue or pull request named in a tool call.
+fn github_item(args: &Value, record: &str) -> Result<(bool, u32), Value> {
+    let pull = match args["kind"].as_str() {
+        Some("issue") => false,
+        Some("pull") => true,
+        _ => return Err(reply("kind must be \"issue\" or \"pull\"", true)),
+    };
+    let Some(number) = args["number"].as_u64().and_then(|n| u32::try_from(n).ok()).filter(|&n| n > 0) else {
+        return Err(reply("number must be a positive integer", true));
+    };
+    if record.is_empty() {
+        return Err(reply("not running inside Claudiu", true));
+    }
+    Ok((pull, number))
+}
+
+/// Take an issue or pull request off the session again.
+fn detach_github(params: &Value, record: &str, dir: &Path) -> Value {
+    let (pull, number) = match github_item(&params["arguments"], record) {
+        Ok(item) => item,
+        Err(e) => return e,
+    };
+    match append_line(dir, record, &json!({ "detach": { "pull": pull, "number": number } })) {
+        Ok(()) => reply(&format!("{} #{number} detached.", if pull { "Pull request" } else { "Issue" }), false),
+        Err(e) => reply(&format!("could not detach: {e}"), true),
     }
 }
 
@@ -271,8 +316,9 @@ fn append_line(dir: &Path, record: &str, line: &Value) -> std::io::Result<()> {
     writeln!(std::fs::OpenOptions::new().create(true).append(true).open(path)?, "{line}")
 }
 
-/// Ask Claudiu to show this session or chat together with another one. Claudiu checks that the other exists.
-fn link_session(params: &Value, record: &str, dir: &Path) -> Value {
+/// Ask Claudiu to show this session or chat together with another one (`verb` "link"), or to stop. Claudiu checks that
+/// the other exists.
+fn link_session(params: &Value, record: &str, dir: &Path, verb: &str) -> Value {
     let id = params["arguments"]["id"].as_str().map(str::trim).filter(|i| !i.is_empty() && i.len() <= 64 && i.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
     let Some(id) = id else { return reply("id must be a session or chat id from search_sessions", true) };
     if record.is_empty() {
@@ -281,9 +327,9 @@ fn link_session(params: &Value, record: &str, dir: &Path) -> Value {
     if id == record {
         return reply("that is this session itself", true);
     }
-    match append_line(dir, record, &json!({ "link": id })) {
-        Ok(()) => reply("Linked.", false),
-        Err(e) => reply(&format!("could not link: {e}"), true),
+    match append_line(dir, record, &json!({ verb: id })) {
+        Ok(()) => reply(if verb == "link" { "Linked." } else { "Unlinked." }, false),
+        Err(e) => reply(&format!("could not {verb}: {e}"), true),
     }
 }
 
@@ -348,6 +394,9 @@ pub enum Attachment {
     Github(Attached),
     /// The id of another session or chat.
     Link(String),
+    Unlink(String),
+    /// Take an issue or pull request off again.
+    Detach { pull: bool, number: u32 },
 }
 
 /// `(record id stem, item)` for everything attached since the last call. Each file is renamed before it is
@@ -375,10 +424,16 @@ pub fn read_attached() -> Vec<(String, Attachment)> {
 
 fn parse_attachment(line: &str) -> Option<Attachment> {
     let v: Value = serde_json::from_str(line).ok()?;
-    match v.get("link").and_then(Value::as_str) {
-        Some(id) => Some(Attachment::Link(id.to_string())),
-        None => serde_json::from_value(v).ok().map(Attachment::Github),
+    if let Some(id) = v.get("link").and_then(Value::as_str) {
+        return Some(Attachment::Link(id.to_string()));
     }
+    if let Some(id) = v.get("unlink").and_then(Value::as_str) {
+        return Some(Attachment::Unlink(id.to_string()));
+    }
+    if let Some(d) = v.get("detach") {
+        return Some(Attachment::Detach { pull: d.get("pull")?.as_bool()?, number: u32::try_from(d.get("number")?.as_u64()?).ok()? });
+    }
+    serde_json::from_value(v).ok().map(Attachment::Github)
 }
 
 /// Directories `datadir::cleanup` prunes: `[per-session MCP configs, titles, names, attached items]` (titles also live in the store).
@@ -414,7 +469,7 @@ mod tests {
             |tool, args| if tool == "start_chat" { Err("The user declined.".into()) } else { Ok(format!("{tool} {}", args["id"])) },
         );
         let names: Vec<_> = r[0]["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
-        assert_eq!(names, ["attach_github", "link_session", "list_chats", "read_chat", "list_code_sessions", "read_code_session", "search_sessions", "start_code_session", "start_chat"]);
+        assert_eq!(names, ["attach_github", "detach_github", "link_session", "unlink_session", "list_chats", "read_chat", "list_code_sessions", "read_code_session", "search_sessions", "start_code_session", "start_chat"]);
         assert_eq!(r[1]["result"]["content"][0]["text"], "read_code_session \"x\"");
         assert_eq!(r[1]["result"]["isError"], false);
         assert_eq!(r[2]["result"]["isError"], true, "a chat cannot set a terminal tab title");
@@ -453,7 +508,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let call = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"set_model","arguments":{"model":"opus"}}});
         let r = talk(&[json!({"jsonrpc":"2.0","id":9,"method":"tools/list"}), call], "abc-123", tmp.path());
-        assert_eq!(r[0]["result"]["tools"][2]["name"], "set_model");
+        assert_eq!(r[0]["result"]["tools"][3]["name"], "set_model");
         assert_eq!(r[1]["result"]["isError"], true);
     }
 
@@ -492,6 +547,9 @@ mod tests {
         assert_eq!(line.lines().count(), 1);
         assert_eq!(parse_attachment(line.lines().next().unwrap()), Some(Attachment::Link("abc-123".into())));
         assert_eq!(parse_attachment(r#"{"pull":true,"number":7,"title":null}"#), Some(Attachment::Github(Attached { pull: true, number: 7, title: None })));
+        assert_eq!(parse_attachment(r#"{"unlink":"x"}"#), Some(Attachment::Unlink("x".into())));
+        assert_eq!(parse_attachment(r#"{"detach":{"pull":false,"number":3}}"#), Some(Attachment::Detach { pull: false, number: 3 }));
+        assert_eq!(parse_attachment(r#"{"detach":{"number":3}}"#), None);
         assert_eq!(parse_attachment("nonsense"), None);
     }
 

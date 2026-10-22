@@ -209,6 +209,15 @@ pub struct ChatView {
     _subs: Vec<Subscription>,
 }
 
+impl Drop for ChatView {
+    fn drop(&mut self) {
+        // The adapter outlives the chat, so its conversation is ended there.
+        if let (Some(agent), Some(session)) = (&self.agent, &self.session_id) {
+            agent.close(session);
+        }
+    }
+}
+
 impl EventEmitter<ChatEvent> for ChatView {}
 
 impl Focusable for ChatView {
@@ -426,7 +435,7 @@ Write the summary.")).unwrap_or_else(|_| {
         };
         self.phase = Phase::Working(if acp::installed() { START } else { "Setting up the Claude adapter (first time only)…" });
         cx.notify();
-        let cwd = self.cwd.clone();
+        let chat = self.id.clone();
         cx.spawn_in(window, async move |this, cx| {
             let started = cx
                 .background_executor()
@@ -437,7 +446,7 @@ Write the summary.")).unwrap_or_else(|_| {
                     if !acp::installed() {
                         acp::install().map_err(Some)?;
                     }
-                    Agent::spawn(&launch.claude, &cwd, launch.env).map_err(Some)
+                    Agent::attach(&launch.claude, launch.env, &chat).map_err(Some)
                 })
                 .await;
             // `this` stays weak: closing the chat drops the view, which drops the agent and ends this loop.

@@ -42,8 +42,15 @@ impl Workspace {
         Some((Launch { claude, env }, acct.id.clone()))
     }
 
+    /// Start the chat adapter in the background so a chat opens ready (it is shared by all chats).
+    pub fn warm_chats(&self, cx: &mut Context<Self>) {
+        let Some((launch, _)) = self.chat_launch() else { return };
+        cx.background_executor().spawn(async move { crate::chat::acp::warm(&launch.claude, launch.env) }).detach();
+    }
+
     /// Move every open chat to the newly active account once it is idle (same conversation, new login).
     pub(super) fn relaunch_chats(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.warm_chats(cx);
         let Some((launch, account)) = self.chat_launch() else { return };
         for pane in &mut self.chats {
             pane.account = account.clone();

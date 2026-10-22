@@ -97,9 +97,15 @@ impl Workspace {
                 _ => Err(format!("No project or folder “{name}”. Projects: {}.", self.project_names())),
             };
         }
-        Ok(match kind {
+        let cwd = match kind {
             "chat" => self.chat_store.get(id).map(|r| r.cwd.clone()).filter(|c| is_tied(c)),
             _ => self.store.session(id).map(|s| s.cwd.clone()),
+        };
+        // A chat belongs to the project, not to whichever subfolder the asker happens to be in.
+        let root = |c: &PathBuf| self.store.project_for_cwd(c).and_then(|p| self.store.project(&p)).map(|p| p.path.clone());
+        Ok(match cwd {
+            Some(c) if req.tool == "start_chat" => Some(root(&c).unwrap_or(c)),
+            other => other,
         })
     }
 
