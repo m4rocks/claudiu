@@ -61,6 +61,7 @@ impl Workspace {
             last_active: now(),
             removed: false,
             draft: String::new(),
+            links: vec![],
         };
         let id = rec.id.clone();
         self.chat_store.add(rec);

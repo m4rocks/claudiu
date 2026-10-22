@@ -111,6 +111,11 @@ impl Workspace {
                 let title = self.chat_store.get(&id).map(|r| r.title.clone()).ok_or("No chat with that id. Use list_chats.")?;
                 ("Let it read a chat?".into(), format!("{who} wants to read the latest messages of the chat “{title}”."), "Allow".into())
             }
+            "search_sessions" => {
+                let q = req.args["query"].as_str().map(str::trim).filter(|q| !q.is_empty());
+                let what = q.map_or("the most recent ones".to_string(), |q| format!("“{q}”"));
+                ("Let it search your sessions?".into(), format!("{who} wants to search the titles and projects of your chats and Claude Code sessions for {what}."), "Allow".into())
+            }
             "read_code_session" => {
                 let title = self.store.session(&id).filter(|s| s.kind == SessionKind::Claude).map(|s| s.display_title().to_string()).ok_or("No session with that id. Use list_code_sessions.")?;
                 ("Let it read a session?".into(), format!("{who} wants to read the latest terminal output of the Claude Code session “{title}”."), "Allow".into())
@@ -142,6 +147,7 @@ impl Workspace {
     pub(super) fn run_request(&mut self, req: &Request, window: &mut Window, cx: &mut Context<Self>) -> Result<String, String> {
         let id = req.args["id"].as_str().unwrap_or_default().to_string();
         let count = |key: &str, default: u64, max: u64| req.args[key].as_u64().unwrap_or(default).clamp(1, max) as usize;
+        let requester_id = req.from.split_once(':').map_or(req.from.as_str(), |(_, id)| id);
         let folder = req.args["folder"].as_str().map(PathBuf::from);
         let prompt = req.args["prompt"].as_str().map(str::trim).filter(|p| !p.is_empty()).map(String::from);
         match req.tool.as_str() {
@@ -186,6 +192,29 @@ impl Workspace {
                     .collect();
                 Ok(if lines.is_empty() { "No Claude Code sessions.".into() } else { lines.join("\n") })
             }
+            "search_sessions" => {
+                let words: Vec<String> = req.args["query"].as_str().unwrap_or_default().to_lowercase().split_whitespace().map(String::from).collect();
+                let project_of = |cwd: &std::path::Path| self.store.project_for_cwd(cwd).and_then(|p| self.store.project(&p)).map(|p| p.name.clone());
+                let mut found: Vec<(i64, String)> = vec![];
+                for r in self.chat_store.shown().filter(|r| r.title != DEFAULT_TITLE) {
+                    let project = if is_tied(&r.cwd) { project_of(&r.cwd) } else { None };
+                    let hay = format!("{} {}", r.title, project.clone().unwrap_or_default()).to_lowercase();
+                    if words.iter().all(|w| hay.contains(w)) {
+                        found.push((r.last_active, format!("- chat id {} · {} · {}{}", r.id, r.title, project.unwrap_or_else(|| "no project".into()), if req.from == format!("chat:{}", r.id) { " · this chat" } else { "" })));
+                    }
+                }
+                for s in self.store.data.sessions.iter().filter(|s| s.kind == SessionKind::Claude && !s.hidden) {
+                    let project = project_of(&s.cwd);
+                    let hay = format!("{} {} {}", s.display_title(), project.clone().unwrap_or_default(), s.cwd.to_string_lossy()).to_lowercase();
+                    if words.iter().all(|w| hay.contains(w)) {
+                        let me = req.from == format!("code:{}", s.id);
+                        found.push((s.last_active, format!("- code session id {} · {} · {}{}", s.id, s.display_title(), project.unwrap_or_else(|| s.cwd.to_string_lossy().into_owned()), if me { " · this session" } else { "" })));
+                    }
+                }
+                found.sort_by_key(|(t, _)| std::cmp::Reverse(*t));
+                let lines: Vec<String> = found.into_iter().take(15).map(|(_, l)| l).collect();
+                Ok(if lines.is_empty() { "Nothing matches.".into() } else { format!("{}\nLink one with link_session.", lines.join("\n")) })
+            }
             "read_code_session" => {
                 let rec = self.store.session(&id).filter(|s| s.kind == SessionKind::Claude).ok_or("No session with that id.")?;
                 let view = self.live_view(&id).filter(|v| v.read(cx).is_running()).ok_or_else(|| format!("The session “{}” has ended; only running sessions can be read.", rec.display_title()))?;
@@ -199,12 +228,17 @@ impl Workspace {
                 let leading = prompt.map(|p| if p.starts_with('-') { format!(" {p}") } else { p }).into_iter().collect();
                 self.new_claude_with(cwd.clone(), leading, window, cx);
                 match self.selected.clone().filter(|s| Some(s) != before.as_ref()) {
-                    Some(id) => Ok(format!("Opened a Claude Code session (id {id}) in {}. It is running in the user's sidebar.", cwd.to_string_lossy())),
+                    Some(id) => {
+                        // A session started from another one is linked with it from the start.
+                        self.link(requester_id, &id);
+                        Ok(format!("Opened a Claude Code session (id {id}) in {}. It is running in the user's sidebar.", cwd.to_string_lossy()))
+                    }
                     None => Err("The session could not be started (is the `claude` CLI installed?).".into()),
                 }
             }
             "start_chat" => {
                 let id = self.new_chat(folder, prompt, window, cx);
+                self.link(requester_id, &id);
                 Ok(format!("Opened a new chat (id {id}) in the user's sidebar."))
             }
             other => Err(format!("unknown tool {other}")),

@@ -3,6 +3,8 @@
 // mid-turn, then runs /model and /effort once idle so the session itself (what /model shows) switches too;
 // Claude Code saves those as the user's default. It also applies the session name Claudiu writes to
 // `CLAUDIU_NAME_FILE` with `/rename`, which Claude Code queues until the session is idle.
+// It also applies the settings the user changes in Claudiu's sidebar (auto-compact, advisor), sent through
+// `CLAUDIU_CTL_FILE`: the same as the user choosing them in `/config` or typing `/advisor`, which Claude Code saves.
 // Last, it reports usage and status (context, 5-hour / 7-day limits, auto-compact, advisor, the command the user
 // last ran) to `CLAUDIU_USAGE_DIR/<claude session id>.json` for Claudiu's sidebar; no tokens are spent.
 const MODELS = {
@@ -16,6 +18,8 @@ const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']
 let want = {} // { model?, effort? }, per process
 let named = null // `${claude session id}\n${name}` last applied
 let poll
+let ctlPoll
+let ctlSeen = null // highest command number handled; null until the file was first read (older ones are not replayed)
 
 // ---- usage report -------------------------------------------------------------------------------------------
 // Commands whose arguments are short settings, safe to show; any other command is reported by name only.
@@ -57,6 +61,28 @@ async function report($) {
     await $.fs.write(dir + '/' + stem(id) + '.json', JSON.stringify({ ...snap, captured_at: Math.floor(Date.now() / 1000) }))
   } catch {
     // Reporting must never disturb the session.
+  }
+}
+
+// Applies what Claudiu's sidebar asked for since the last look. The file holds the latest few `{ seq, key, value }`
+// commands; only known keys and plainly shaped values are acted on.
+async function applyCtl($) {
+  try {
+    const file = await $.env.get('CLAUDIU_CTL_FILE')
+    if (!file) return
+    const cmds = JSON.parse(await $.fs.read(file).catch(() => '{}')).cmds ?? []
+    if (ctlSeen === null) {
+      ctlSeen = cmds.reduce((top, c) => Math.max(top, c.seq), 0)
+      return
+    }
+    for (const c of cmds.filter(c => c.seq > ctlSeen).sort((a, b) => a.seq - b.seq)) {
+      ctlSeen = c.seq
+      if (c.key === 'auto_compact' && typeof c.value === 'boolean') await $.config.set({ key: 'autoCompact', value: c.value }).catch(() => {})
+      else if (c.key === 'advisor' && typeof c.value === 'string' && /^[A-Za-z0-9._-]{1,60}$/.test(c.value)) await $.command.run({ command: 'advisor', args: c.value }).catch(() => {})
+      await report($)
+    }
+  } catch {
+    // A bad file must not disturb the session.
   }
 }
 
@@ -122,6 +148,9 @@ export function register(on) {
   on('session.start', async ($, e, next) => {
     const r = await next(e)
     await report($)
+    await applyCtl($)
+    ctlPoll?.cancel()
+    ctlPoll = $.clock.every(1000, () => applyCtl($))
     const file = await $.env.get('CLAUDIU_NAME_FILE')
     if (!file) return r
     const read = async () => (await $.fs.read(file).catch(() => '')).trim()

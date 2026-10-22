@@ -15,7 +15,7 @@ use crate::chat::store::{ChatRecord, ChatStore, DEFAULT_TITLE, is_tied, scratch_
 use crate::chat::view::{ChatEvent, ChatView, Launch};
 use crate::claude;
 use crate::github::view::{GhEvent, GithubView};
-use crate::mcp;
+use crate::mcp::{self, Attachment};
 use crate::platform::{self, Editor};
 use crate::{datadir, usage};
 use crate::store::{
@@ -86,6 +86,11 @@ pub enum Act {
     /// Have Haiku write a new title for a chat or a Claude Code session from what was said in it.
     RegenTitle(Id),
     /// Switch the sidebar between terminal sessions and chats.
+    /// Change a setting of a running session through its mod (see `usage::send_ctl`).
+    SetAutoCompact(Id, bool),
+    SetAdvisor(Id, String),
+    /// Ask for an advisor model by name.
+    AskAdvisor(Id),
     /// Filter the sidebar list to a project (`None`: all).
     FilterProject(Option<Id>),
     /// Stage everything in this folder's repository, commit it with a Haiku-written message, push.
@@ -145,6 +150,10 @@ pub enum Modal {
     },
     NewBranch {
         cwd: PathBuf,
+        input: Entity<InputState>,
+    },
+    Advisor {
+        id: Id,
         input: Entity<InputState>,
     },
     /// Empty text = use the default.
@@ -685,17 +694,20 @@ impl Workspace {
                         }
                 }
                 for (stem, item) in attached {
-                    let Some(meta) = ws
+                    let me = ws
                         .store
                         .data
                         .sessions
-                        .iter_mut()
-                        .find(|s| datadir::safe_file_stem(&s.id) == stem)
-                        .and_then(|s| s.claude.as_mut())
-                    else {
-                        continue;
+                        .iter()
+                        .map(|s| &s.id)
+                        .chain(ws.chat_store.shown().map(|c| &c.id))
+                        .find(|id| datadir::safe_file_stem(id) == stem)
+                        .cloned();
+                    let Some(me) = me else { continue };
+                    changed |= match item {
+                        Attachment::Github(a) => ws.store.session_mut(&me).and_then(|s| s.claude.as_mut()).is_some_and(|meta| attach(&mut meta.attached, a)),
+                        Attachment::Link(other) => ws.link(&me, &other),
                     };
-                    changed |= attach(&mut meta.attached, item);
                 }
                 if changed {
                     ws.store.mark_dirty();
@@ -724,6 +736,7 @@ impl Workspace {
             spec.args.extend(["--plugin-dir".into(), dir.to_string_lossy().into_owned()]);
             spec.env.push(("CLAUDIU_NAME_FILE".into(), mcp::name_file(claude_session_id).to_string_lossy().into_owned()));
             spec.env.push((usage::USAGE_DIR_ENV.into(), usage::snapshot_dir().to_string_lossy().into_owned()));
+            spec.env.push((usage::CTL_ENV.into(), usage::ctl_file(record_id).to_string_lossy().into_owned()));
         }
         spec.env.push(("CLAUDE_CODE_AUTO_CONNECT_IDE".into(), "false".into()));
         spec.env.push(("CLAUDE_CODE_IDE_SKIP_AUTO_INSTALL".into(), "1".into()));
@@ -924,6 +937,11 @@ impl Workspace {
 
     pub fn gh_pane(&self, id: &str) -> Option<&GhPane> {
         self.gh.iter().find(|p| p.id == id)
+    }
+
+    /// Where a new Claude session starts: the project the sidebar is filtered to, else where the shown session is.
+    pub fn new_session_cwd(&self) -> PathBuf {
+        self.project_filter().map_or_else(|| self.active_cwd(), |p| p.path.clone())
     }
 
     pub fn active_cwd(&self) -> PathBuf {
@@ -1464,6 +1482,19 @@ impl Workspace {
                 }
                 self.toast("Project removed. Its sessions are kept.", false, cx);
             }
+            Act::SetAutoCompact(id, on) => {
+                usage::send_ctl(&usage::ctl_file(&id), "auto_compact", on.into());
+                self.toast(format!("Turning auto-compact {}…", if on { "on" } else { "off" }), false, cx);
+            }
+            Act::SetAdvisor(id, model) => {
+                usage::send_ctl(&usage::ctl_file(&id), "advisor", model.clone().into());
+                self.toast(if model == "off" { "Turning the advisor off…".to_string() } else { format!("Setting the advisor to {model}…") }, false, cx);
+            }
+            Act::AskAdvisor(id) => {
+                let current = self.store.session(&id).and_then(|s| s.claude.as_ref()).and_then(|m| m.advisor.clone()).unwrap_or_default();
+                let input = self.modal_input(&current, "opus, sonnet, off, or a model id", window, cx);
+                self.open_modal(Modal::Advisor { id, input });
+            }
             Act::FilterProject(id) => {
                 self.store.data.layout.project_filter = id;
                 self.store.mark_dirty();
@@ -1727,6 +1758,19 @@ impl Workspace {
                 }
                 Act::Dismiss
             }
+            Some(Modal::Advisor { id, input }) => {
+                let name = input.read(cx).value().trim().to_lowercase();
+                if name.is_empty() {
+                    Act::Dismiss
+                } else if !usage::valid_model_name(&name) {
+                    self.open_modal(Modal::Advisor { id, input });
+                    self.toast("Use a model alias or id (letters, digits, . _ -), or “off”.", true, cx);
+                    return;
+                } else {
+                    self.act(Act::SetAdvisor(id, name), window, cx);
+                    Act::Dismiss
+                }
+            }
             Some(Modal::NewBranch { cwd, input }) => {
                 // Spaces aren't allowed in branch names; git reports anything else that is invalid.
                 let name = input.read(cx).value().split_whitespace().collect::<Vec<_>>().join("-");
@@ -1860,6 +1904,49 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Show two sessions or chats together: each lists the other. True when something changed (false when either
+    /// does not exist or they were linked already).
+    pub fn link(&mut self, a: &str, b: &str) -> bool {
+        let exists = |ws: &Self, id: &str| ws.store.session(id).is_some_and(|s| s.claude.is_some()) || ws.chat_store.get(id).is_some();
+        if a == b || !exists(self, a) || !exists(self, b) {
+            return false;
+        }
+        let a_new = self.edit_links(a, |l| add_once(l, b));
+        let b_new = self.edit_links(b, |l| add_once(l, a));
+        a_new | b_new
+    }
+
+    /// Take the link between two away on both sides.
+    pub fn unlink(&mut self, a: &str, b: &str) {
+        self.edit_links(a, |l| remove_id(l, b));
+        self.edit_links(b, |l| remove_id(l, a));
+        self.store.mark_dirty();
+    }
+
+    /// Run `f` on the link list of a session or a chat; true when it changed anything.
+    fn edit_links(&mut self, id: &str, f: impl FnOnce(&mut Vec<Id>) -> bool) -> bool {
+        if let Some(meta) = self.store.session_mut(id).and_then(|s| s.claude.as_mut()) {
+            return f(&mut meta.linked);
+        }
+        let mut changed = false;
+        self.chat_store.update(id, |r| changed = f(&mut r.links));
+        changed
+    }
+
+    /// The sessions and chats linked with `id`, as `(id, title)`; a linked one that has gone is left out.
+    pub fn links_of(&self, id: &str) -> Vec<(Id, String)> {
+        let ids = match self.store.session(id).and_then(|s| s.claude.as_ref()) {
+            Some(m) => m.linked.clone(),
+            None => self.chat_store.get(id).map(|c| c.links.clone()).unwrap_or_default(),
+        };
+        ids.into_iter()
+            .filter_map(|o| {
+                let title = self.store.session(&o).map(|s| s.display_title().to_string()).or_else(|| self.chat_store.get(&o).map(|c| c.title.clone()))?;
+                Some((o, title))
+            })
+            .collect()
+    }
+
     /// The right sidebar's current width: fixed for the menu, remembered (and draggable) for GitHub.
     pub fn right_width(&self, window_w: f32) -> f32 {
         if self.right_gh.is_none() {
@@ -1968,6 +2055,20 @@ impl Workspace {
     }
 }
 
+fn add_once(list: &mut Vec<Id>, id: &str) -> bool {
+    let missing = !list.iter().any(|x| x == id);
+    if missing {
+        list.push(id.to_string());
+    }
+    missing
+}
+
+fn remove_id(list: &mut Vec<Id>, id: &str) -> bool {
+    let before = list.len();
+    list.retain(|x| x != id);
+    list.len() != before
+}
+
 /// Most items one session keeps; the oldest go first.
 const MAX_ATTACHED: usize = 20;
 
@@ -1990,6 +2091,14 @@ fn attach(list: &mut Vec<Attached>, item: Attached) -> bool {
 #[cfg(test)]
 mod attach_tests {
     use super::*;
+
+    #[test]
+    fn link_lists_add_and_remove_once() {
+        let mut l = vec![];
+        assert!(add_once(&mut l, "a") && !add_once(&mut l, "a") && add_once(&mut l, "b"));
+        assert!(remove_id(&mut l, "a") && !remove_id(&mut l, "a"));
+        assert_eq!(l, ["b"]);
+    }
 
     fn item(pull: bool, number: u32, title: Option<&str>) -> Attached {
         Attached { pull, number, title: title.map(String::from) }

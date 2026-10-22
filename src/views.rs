@@ -418,6 +418,18 @@ impl Workspace {
                     false,
                 )
             }
+            Modal::Advisor { input, .. } => (
+                "Advisor model".into(),
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.0))
+                    .child(div().text_size(px(12.0)).text_color(hsla(theme::TEXT_DIM)).child("A model alias or id, such as opus, sonnet or claude-opus-5-5, or “off”. Claude Code saves it as your default."))
+                    .child(Input::new(input))
+                    .into_any_element(),
+                "Set".into(),
+                false,
+            ),
             Modal::Rename { input, .. } | Modal::NewBranch { input, .. } => (
                 if matches!(modal, Modal::NewBranch { .. }) { "New branch" } else { "Rename session" }.into(),
                 Input::new(input).into_any_element(),
@@ -567,7 +579,7 @@ impl Render for Workspace {
             .bg(hsla(theme::TERMINAL_BG))
             .text_color(hsla(theme::TEXT))
             .on_action(cx.listener(|ws, _: &NewClaude, window, cx| {
-                let cwd = ws.active_cwd();
+                let cwd = ws.new_session_cwd();
                 ws.act(Act::NewClaude { cwd }, window, cx)
             }))
             .on_action(cx.listener(|ws, _: &NewChat, window, cx| ws.act(Act::NewChat { cwd: None }, window, cx)))

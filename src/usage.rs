@@ -16,6 +16,40 @@ pub const ACCOUNT_ENV: &str = "CLAUDIU_ACCOUNT";
 /// Env var holding the directory the mod writes its snapshot into.
 pub const USAGE_DIR_ENV: &str = "CLAUDIU_USAGE_DIR";
 
+/// Env var holding the file Claudiu writes settings requests into for the mod to apply.
+pub const CTL_ENV: &str = "CLAUDIU_CTL_FILE";
+
+pub fn ctl_dir() -> PathBuf {
+    crate::datadir::data_dir().join("ctl")
+}
+
+/// The request file of one session, named by Claudiu's own record id (which survives `/clear`).
+pub fn ctl_file(record_id: &str) -> PathBuf {
+    ctl_dir().join(format!("{}.json", crate::datadir::safe_file_stem(record_id)))
+}
+
+/// A model alias or id as the mod accepts it for `/advisor` (it checks the same rule).
+pub fn valid_model_name(name: &str) -> bool {
+    !name.is_empty() && name.len() <= 60 && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
+/// Ask the mod of a running session to change a setting: `auto_compact` (bool) or `advisor` (a model name or `off`).
+/// The file keeps the latest few commands, each with a number that only goes up, so none is lost if two come within
+/// the mod's one-second look and none is applied twice.
+pub fn send_ctl(file: &Path, key: &str, value: serde_json::Value) {
+    let mut cmds: Vec<serde_json::Value> = std::fs::read_to_string(file)
+        .ok()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .and_then(|v| v["cmds"].as_array().cloned())
+        .unwrap_or_default();
+    let last = cmds.iter().filter_map(|c| c["seq"].as_i64()).max().unwrap_or(0);
+    let ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64);
+    cmds.push(serde_json::json!({ "seq": ms.max(last + 1), "key": key, "value": value }));
+    let keep = cmds.len().saturating_sub(8);
+    cmds.drain(..keep);
+    let _ = crate::datadir::write_atomic(file, &serde_json::json!({ "cmds": cmds }).to_string());
+}
+
 /// What the mod reports (no paths, no costs, no prompts).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Snapshot {
@@ -68,6 +102,21 @@ mod tests {
       "seven_day": {"utilization": 0.22, "resets_at": 1793167200, "seen_at": 1000},
       "auto_compact": true, "advisor": "opus", "last_command": "advisor opus"
     }"#;
+
+    #[test]
+    fn requests_keep_rising_numbers_and_only_the_latest_few() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("ctl/me.json");
+        for i in 0..10 {
+            send_ctl(&file, "advisor", serde_json::json!(format!("m{i}")));
+        }
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        let cmds = v["cmds"].as_array().unwrap();
+        assert_eq!(cmds.len(), 8);
+        assert!(cmds.windows(2).all(|w| w[0]["seq"].as_i64() < w[1]["seq"].as_i64()), "numbers only go up");
+        assert_eq!(cmds[7]["value"], "m9");
+        assert!(valid_model_name("claude-opus-5-5") && valid_model_name("off") && !valid_model_name("") && !valid_model_name("a b") && !valid_model_name("../x"));
+    }
 
     #[test]
     fn reads_what_the_mod_writes_and_skips_garbage() {

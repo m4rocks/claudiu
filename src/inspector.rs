@@ -9,6 +9,7 @@ use gpui::{
 };
 
 use crate::app::{Act, GitOp, MenuItem, RightDrag, Workspace};
+use crate::store::Id;
 use crate::platform::Editor;
 use crate::store::{Project, SessionKind, SessionRecord};
 use crate::theme::{self, hsla};
@@ -236,6 +237,69 @@ impl Workspace {
         };
         let meta = claude.and_then(|r| r.claude.as_ref());
         let on_off = |v: Option<bool>| v.map_or("—", |v| if v { "On" } else { "Off" }).to_string();
+        let auto_compact = on_off(meta.and_then(|m| m.auto_compact));
+        let advisor = meta.map_or("—".into(), |m| m.advisor.clone().unwrap_or_else(|| "Off".into()));
+
+        // Settings Claude Code keeps: a dropdown while the session runs (the mod applies it), else just the value.
+        let setting = |sid: Option<&Id>, key: &'static str, label: &'static str, value: String, items: Box<dyn Fn(&Id) -> Vec<MenuItem>>| match sid.filter(|_| claude.is_some() && running) {
+            Some(sid) => {
+                let sid = sid.clone();
+                kv_pick(key, label, value).on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |ws, ev: &MouseDownEvent, _w, cx| {
+                        let items = items(&sid);
+                        ws.open_menu(ev.position, items, cx);
+                    }),
+                )
+                .into_any_element()
+            }
+            None => kv(label, value).into_any_element(),
+        };
+        let item = |label: String, act: Act| MenuItem { label, hint: None, act, danger: false, disabled: false, separator_before: false };
+        let tick = |on: bool, text: &str| format!("{}{text}", if on { "✓  " } else { "    " });
+        let compact_now = meta.and_then(|m| m.auto_compact);
+        let advisor_now = meta.and_then(|m| m.advisor.clone()).map(|a| a.to_lowercase());
+        let auto_compact_row = setting(
+            id.as_ref(),
+            "set-auto-compact",
+            "Auto-compact",
+            auto_compact,
+            Box::new(move |sid| vec![item(tick(compact_now == Some(true), "On"), Act::SetAutoCompact(sid.clone(), true)), item(tick(compact_now == Some(false), "Off"), Act::SetAutoCompact(sid.clone(), false))]),
+        );
+        let advisor_row = setting(
+            id.as_ref(),
+            "set-advisor",
+            "Advisor",
+            advisor,
+            Box::new(move |sid| {
+                let known = [("opus", "Opus"), ("sonnet", "Sonnet")];
+                let other = advisor_now.as_deref().is_some_and(|a| a != "off" && !known.iter().any(|(k, _)| *k == a));
+                let mut items = vec![item(tick(advisor_now.is_none(), "Off"), Act::SetAdvisor(sid.clone(), "off".into()))];
+                items.extend(known.iter().map(|(m, name)| item(tick(advisor_now.as_deref() == Some(*m), name), Act::SetAdvisor(sid.clone(), (*m).into()))));
+                items.push(item(tick(other, "Other…"), Act::AskAdvisor(sid.clone())));
+                items
+            }),
+        );
+
+        // Sessions and chats linked with this one.
+        let links = id.as_deref().map(|i| self.links_of(i)).unwrap_or_default();
+        let mut linked = div().flex().flex_col().gap(px(1.0));
+        for (other, title) in links.iter().cloned() {
+            let chat = self.chat_store.get(&other).is_some();
+            let (me, go, gone) = (id.clone(), other.clone(), other.clone());
+            linked = linked.child(
+                row(format!("linked-{other}"), if chat { IconName::MessageSquare } else { IconName::Bot }, title)
+                    .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::Select(go.clone()), window, cx)))
+                    .child(icon_button(format!("unlink-{gone}"), IconName::X).on_click(cx.listener(move |ws, _: &ClickEvent, _w, cx| {
+                        cx.stop_propagation();
+                        if let Some(me) = &me {
+                            ws.unlink(me, &gone);
+                        }
+                        cx.notify();
+                    }))),
+            );
+        }
+        let any_linked = !links.is_empty();
         let status = div()
             .flex()
             .flex_col()
@@ -248,8 +312,8 @@ impl Workspace {
                     .flex()
                     .flex_col()
                     .gap(px(2.0))
-                    .child(kv("Auto-compact", on_off(meta.and_then(|m| m.auto_compact))))
-                    .child(kv("Advisor", meta.map_or("—".into(), |m| m.advisor.clone().unwrap_or_else(|| "Off".into()))))
+                    .child(auto_compact_row)
+                    .child(advisor_row)
                     .child(kv("Last command", meta.and_then(|m| m.last_command.clone()).map_or("—".into(), |c| format!("/{c}")))),
             );
 
@@ -263,6 +327,7 @@ impl Workspace {
             .p(px(8.0))
             .child(group("ACTIONS", actions))
             .when(any_attached, |d| d.child(group("GITHUB", github)))
+            .when(any_linked, |d| d.child(group("LINKED", linked)))
             .child(group("STATUS", status))
     }
 }
@@ -304,6 +369,32 @@ mod tests {
         row("a", IconName::Terminal, "A");
         dim_row("b", IconName::Terminal, "B");
     }
+}
+
+/// A setting row that opens a menu: the value with a chevron, lit on hover.
+fn kv_pick(id: &'static str, label: &str, value: String) -> Stateful<Div> {
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap(px(10.0))
+        .h(px(22.0))
+        .px(px(4.0))
+        .rounded(px(5.0))
+        .cursor_pointer()
+        .hover(|s| s.bg(hsla(theme::ROW_HOVER)))
+        .text_size(px(12.0))
+        .child(div().flex_none().text_color(hsla(theme::TEXT_DIM)).child(label.to_string()))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(4.0))
+                .min_w_0()
+                .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(value))
+                .child(div().flex_none().text_color(hsla(theme::TEXT_FAINT)).child(icon(IconName::ChevronDown, 12.0))),
+        )
 }
 
 fn kv(label: &str, value: String) -> Div {

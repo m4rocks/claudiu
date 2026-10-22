@@ -26,6 +26,9 @@ pub struct ChatRecord {
     /// What was typed in the message box and not sent yet.
     #[serde(default)]
     pub draft: String,
+    /// Ids of the sessions and chats this chat is linked with (the other side lists this one too).
+    #[serde(default)]
+    pub links: Vec<Id>,
 }
 
 impl ChatRecord {

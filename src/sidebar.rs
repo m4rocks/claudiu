@@ -493,6 +493,15 @@ impl Workspace {
         self.sidebar_frame(body, cx)
     }
 
+    /// "+ Code session" with no project chosen: pick where it starts.
+    fn new_session_menu(&self) -> Vec<MenuItem> {
+        let item = |label: String, hint: Option<String>, act: Act, disabled: bool, sep: bool| MenuItem { label, hint, act, danger: false, disabled, separator_before: sep };
+        let mut items = vec![item("Start the session in…".into(), None, Act::Dismiss, true, false)];
+        items.extend(self.store.data.projects.iter().map(|p| item(p.name.clone(), Some(crate::widgets::short_path(&p.path)), Act::NewClaude { cwd: p.path.clone() }, false, false)));
+        items.push(item("Add project…".into(), None, Act::ImportProject, false, true));
+        items
+    }
+
     /// The project filter: a chip that lists the projects, and (with a project chosen) a ⋯ button for its actions.
     fn render_project_filter(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let current = self.project_filter().cloned();
@@ -578,8 +587,12 @@ impl Workspace {
     }
 
     fn render_sidebar_header(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        // A new session starts in the filtered project when there is one.
-        let cwd = self.project_filter().map_or_else(|| self.active_cwd(), |p| p.path.clone());
+        // With a project chosen a new session starts there (and the button says so); with "All projects" it asks.
+        let filter = self.project_filter().map(|p| p.name.clone());
+        let label = match filter {
+            Some(name) => format!("+ Code in {}", if name.chars().count() > 12 { format!("{}…", name.chars().take(11).collect::<String>()) } else { name }),
+            None => "+ Code session".to_string(),
+        };
         div()
             .flex()
             .flex_col()
@@ -604,10 +617,20 @@ impl Workspace {
                     .occlude()
                     .flex()
                     .gap(px(6.0))
-                    .child(
-                        button("new-claude", "+ Code session", true)
-                            .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::NewClaude { cwd: cwd.clone() }, window, cx))),
-                    )
+                    .child(button("new-claude", label, true).on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|ws, ev: &MouseDownEvent, window, cx| match ws.project_filter().map(|p| p.path.clone()) {
+                            Some(cwd) => ws.act(Act::NewClaude { cwd }, window, cx),
+                            None if ws.store.data.projects.is_empty() => {
+                                let cwd = ws.active_cwd();
+                                ws.act(Act::NewClaude { cwd }, window, cx)
+                            }
+                            None => {
+                                let items = ws.new_session_menu();
+                                ws.open_menu(ev.position, items, cx);
+                            }
+                        }),
+                    ))
                     .child(
                         button("new-chat", "+ Chat", false)
                             .on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::NewChat { cwd: None }, window, cx))),

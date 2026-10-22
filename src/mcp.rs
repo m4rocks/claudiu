@@ -21,23 +21,30 @@ pub const CALLER_ENV: &str = "CLAUDIU_CALLER";
 /// Claudiu's own id of the session or chat. Unlike Claude's session id it survives `/clear`.
 pub const RECORD_ENV: &str = "CLAUDIU_RECORD";
 
-/// Tools that reach other sessions. Each one makes Claudiu ask the user before it does anything (`bridge.rs`).
-/// Tools the model uses to tell Claudiu something about the session; none of them reaches another session.
-const OWN_TOOLS: [&str; 2] = ["set_tab_title", "attach_github"];
+/// Tools the model uses to tell Claudiu something about itself; none of them reads or starts another session.
+/// `link_session` is the only one a chat gets too.
+const CODE_TOOLS: [&str; 3] = ["set_tab_title", "attach_github", "link_session"];
+const CHAT_TOOLS: [&str; 1] = ["link_session"];
 
-const BRIDGE_TOOLS: [&str; 6] = ["list_chats", "read_chat", "list_code_sessions", "read_code_session", "start_code_session", "start_chat"];
+/// Tools that reach other sessions. Each one makes Claudiu ask the user before it does anything (`bridge.rs`).
+const BRIDGE_TOOLS: [&str; 7] = ["list_chats", "read_chat", "list_code_sessions", "read_code_session", "search_sessions", "start_code_session", "start_chat"];
 
 /// `mcp__<server>__<tool>` names allowed per process so Claude Code (or the chat adapter) adds no prompt of its own:
 /// renaming the tab is harmless, and the cross-session tools are gated by Claudiu's own confirmation instead.
 pub fn allowed_tools(caller: &str) -> Vec<String> {
-    let own: &[&str] = if caller == "code" { &OWN_TOOLS } else { &[] };
+    let own: &[&str] = if caller == "code" { &CODE_TOOLS } else { &CHAT_TOOLS };
     own.iter().copied().chain(BRIDGE_TOOLS).map(|t| format!("mcp__claudiu__{t}")).collect()
 }
 
 const BRIDGE_INSTRUCTIONS: &str = " Claudiu also has tools that reach your other sessions: list_chats, read_chat, list_code_sessions, \
-read_code_session, start_code_session (opens a new Claude Code session) and start_chat (opens a new \
+read_code_session, search_sessions, start_code_session (opens a new Claude Code session) and start_chat (opens a new \
 chat). Each one makes Claudiu ask the user to confirm first. Use them only when the user asks you to \
 look at, hand work to or continue in another session; if the user declines, accept it and don't ask again.";
+
+/// Both callers: the sidebar shows linked sessions and chats together.
+const LINK_INSTRUCTIONS: &str = " Claudiu shows related sessions and chats together. When this work continues, builds on or was \
+prompted by another chat or Claude Code session (the user says so, or you recognise it), find it with search_sessions \
+and call link_session with its id, once per pair. link_session is silent and changes nothing else.";
 
 const CHAT_INSTRUCTIONS: &str = "You are a chat running inside Claudiu.";
 
@@ -47,7 +54,7 @@ that, call it again only when the current task or scope changes and the title no
 whenever the user asks you to rename or retitle this session or tab (use the name they gave). Don't call it again \
 with the same or a near-identical title, and never twice in a row for the same reason (if the user ran /rename \
 themselves, the title is already set; leave it). Don't mention the tool unless the user asked for a rename. \
-When the work concerns a GitHub issue or pull request of this project (the user names one, or you start working on one), call attach_github with its kind and number so it appears in the sidebar; each one only once. Never switch models on your own. Before calling set_model, ask the user with the AskUserQuestion tool which \
+GitHub: the moment an issue or pull request of this project comes up, call attach_github (kind issue or pull, the number, and the title if you know it) before you carry on, once per item. That means: the user mentions one (#123, \"issue 52\", a github.com .../issues/N or .../pull/N link), you read or search one with gh or the GitHub tools, you open or push a pull request, or a commit or branch name refers to one. It is silent, costs nothing and shows the item in the user's sidebar, so prefer calling it to skipping it. If its schema is not loaded yet, load it first with ToolSearch (select:mcp__claudiu__attach_github). Never switch models on your own. Before calling set_model, ask the user with the AskUserQuestion tool which \
 model and effort they want, unless they just named them explicitly. The switch applies from your next request; \
 after calling set_model, end your turn and ask the user to confirm before continuing, so the session itself switches.";
 
@@ -108,13 +115,14 @@ fn serve(input: impl BufRead, mut out: impl Write, caller: &str, session: &str, 
                 "protocolVersion": msg["params"]["protocolVersion"].as_str().unwrap_or("2025-06-18"),
                 "capabilities": { "tools": {} },
                 "serverInfo": { "name": "claudiu", "version": env!("CARGO_PKG_VERSION") },
-                "instructions": if chat { format!("{CHAT_INSTRUCTIONS}{BRIDGE_INSTRUCTIONS}") } else { format!("{INSTRUCTIONS}{BRIDGE_INSTRUCTIONS}") },
+                "instructions": if chat { format!("{CHAT_INSTRUCTIONS}{LINK_INSTRUCTIONS}{BRIDGE_INSTRUCTIONS}") } else { format!("{INSTRUCTIONS}{LINK_INSTRUCTIONS}{BRIDGE_INSTRUCTIONS}") },
             })),
             "ping" => Ok(json!({})),
             "tools/list" => Ok(json!({ "tools": own_tools(chat).into_iter().chain(bridge_tools()).collect::<Vec<_>>() })),
             "tools/call" => Ok(match msg["params"]["name"].as_str() {
                 Some("set_tab_title") if !chat => set_title(&msg["params"], session, &data.join("titles")),
                 Some("attach_github") if !chat => attach_github(&msg["params"], record, &attach_dir(data)),
+                Some("link_session") => link_session(&msg["params"], record, &attach_dir(data)),
                 Some("set_model") if !chat => reply("Model switching isn't available in this session (Claudiu's mod isn't loaded).", true),
                 Some(tool) if BRIDGE_TOOLS.contains(&tool) => match ask(tool, &msg["params"]["arguments"]) {
                     Ok(text) => reply(&text, false),
@@ -135,8 +143,17 @@ fn serve(input: impl BufRead, mut out: impl Write, caller: &str, session: &str, 
 
 /// Tab title and model switch: only for terminal sessions (a chat names itself and has its own model picker).
 fn own_tools(chat: bool) -> Vec<Value> {
+    let link = json!({
+        "name": "link_session",
+        "description": "Link this session or chat to another one, so Claudiu shows them together in the sidebar. Use it when this work continues, builds on or was prompted by another chat or Claude Code session. Find the id with search_sessions. Silent; once per pair.",
+        "inputSchema": {
+            "type": "object",
+            "properties": { "id": { "type": "string", "description": "The id of the other session or chat, from search_sessions" } },
+            "required": ["id"],
+        },
+    });
     if chat {
-        return vec![];
+        return vec![link];
     }
     vec![json!({
                 "name": "set_tab_title",
@@ -168,7 +185,7 @@ fn own_tools(chat: bool) -> Vec<Value> {
                         "effort": { "type": "string", "description": "Effort level: low, medium, high, xhigh, max or auto" },
                     },
                 },
-            })]
+            }), link]
 }
 
 const CONFIRM: &str = " Claudiu asks the user to confirm first, so only call it when the user asked for this.";
@@ -192,6 +209,11 @@ fn bridge_tools() -> Vec<Value> {
             "read_code_session",
             format!("Read the latest terminal output of a Claude Code session that is running in Claudiu.{CONFIRM}"),
             json!({ "id": id("list_code_sessions")["id"], "lines": { "type": "integer", "description": "How many recent lines (default 120)" } }),
+        ),
+        tool(
+            "search_sessions",
+            format!("Search the user's chats and Claude Code sessions by words in their title, project or folder. Returns kind, id, title and project of the best matches; pass an id to link_session.{CONFIRM}"),
+            json!({ "query": { "type": "string", "description": "Words to look for (optional: without it, the most recent)" } }),
         ),
         tool("start_code_session", format!("Open a new Claude Code session, optionally with a first prompt.{CONFIRM}"), target.clone()),
         tool("start_chat", format!("Open a new chat, optionally with a first message. Without a folder it is not tied to a project.{CONFIRM}"), target),
@@ -231,15 +253,33 @@ fn attach_github(params: &Value, record: &str, dir: &Path) -> Value {
         return reply("not running inside Claudiu", true);
     }
     let title = args["title"].as_str().and_then(clean_title);
-    let line = json!({ "pull": pull, "number": number, "title": title });
-    let path = dir.join(format!("{}.jsonl", crate::datadir::safe_file_stem(record)));
-    let written = std::fs::create_dir_all(dir).and_then(|()| {
-        use std::io::Write as _;
-        writeln!(std::fs::OpenOptions::new().create(true).append(true).open(path)?, "{line}")
-    });
-    match written {
+    match append_line(dir, record, &json!({ "pull": pull, "number": number, "title": title })) {
         Ok(()) => reply(&format!("{} #{number} attached.", if pull { "Pull request" } else { "Issue" }), false),
         Err(e) => reply(&format!("could not attach: {e}"), true),
+    }
+}
+
+/// One JSON line for Claudiu to pick up, in the file of the calling session or chat.
+fn append_line(dir: &Path, record: &str, line: &Value) -> std::io::Result<()> {
+    use std::io::Write as _;
+    std::fs::create_dir_all(dir)?;
+    let path = dir.join(format!("{}.jsonl", crate::datadir::safe_file_stem(record)));
+    writeln!(std::fs::OpenOptions::new().create(true).append(true).open(path)?, "{line}")
+}
+
+/// Ask Claudiu to show this session or chat together with another one. Claudiu checks that the other exists.
+fn link_session(params: &Value, record: &str, dir: &Path) -> Value {
+    let id = params["arguments"]["id"].as_str().map(str::trim).filter(|i| !i.is_empty() && i.len() <= 64 && i.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
+    let Some(id) = id else { return reply("id must be a session or chat id from search_sessions", true) };
+    if record.is_empty() {
+        return reply("not running inside Claudiu", true);
+    }
+    if id == record {
+        return reply("that is this session itself", true);
+    }
+    match append_line(dir, record, &json!({ "link": id })) {
+        Ok(()) => reply("Linked.", false),
+        Err(e) => reply(&format!("could not link: {e}"), true),
     }
 }
 
@@ -298,9 +338,17 @@ pub fn read_titles() -> Vec<(String, String, Option<std::time::SystemTime>)> {
         .collect()
 }
 
+/// What a session or chat asked Claudiu to remember about itself.
+#[derive(Debug, PartialEq)]
+pub enum Attachment {
+    Github(Attached),
+    /// The id of another session or chat.
+    Link(String),
+}
+
 /// `(record id stem, item)` for everything attached since the last call. Each file is renamed before it is
 /// read, so a line written meanwhile lands in a fresh file instead of being lost.
-pub fn read_attached() -> Vec<(String, Attached)> {
+pub fn read_attached() -> Vec<(String, Attachment)> {
     let dir = attach_dir(&crate::datadir::data_dir());
     let Ok(entries) = std::fs::read_dir(&dir) else { return vec![] };
     let mut out = vec![];
@@ -316,9 +364,17 @@ pub fn read_attached() -> Vec<(String, Attached)> {
         }
         let text = std::fs::read_to_string(&taken).unwrap_or_default();
         let _ = std::fs::remove_file(&taken);
-        out.extend(text.lines().filter_map(|l| serde_json::from_str::<Attached>(l).ok()).map(|a| (stem.clone(), a)));
+        out.extend(text.lines().filter_map(parse_attachment).map(|a| (stem.clone(), a)));
     }
     out
+}
+
+fn parse_attachment(line: &str) -> Option<Attachment> {
+    let v: Value = serde_json::from_str(line).ok()?;
+    match v.get("link").and_then(Value::as_str) {
+        Some(id) => Some(Attachment::Link(id.to_string())),
+        None => serde_json::from_value(v).ok().map(Attachment::Github),
+    }
 }
 
 /// Directories `datadir::cleanup` prunes: `[per-session MCP configs, titles, names, attached items]` (titles also live in the store).
@@ -354,14 +410,15 @@ mod tests {
             |tool, args| if tool == "start_chat" { Err("The user declined.".into()) } else { Ok(format!("{tool} {}", args["id"])) },
         );
         let names: Vec<_> = r[0]["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
-        assert_eq!(names, BRIDGE_TOOLS);
+        assert_eq!(names, ["link_session", "list_chats", "read_chat", "list_code_sessions", "read_code_session", "search_sessions", "start_code_session", "start_chat"]);
         assert_eq!(r[1]["result"]["content"][0]["text"], "read_code_session \"x\"");
         assert_eq!(r[1]["result"]["isError"], false);
         assert_eq!(r[2]["result"]["isError"], true, "a chat cannot set a terminal tab title");
         assert_eq!(r[3]["result"]["content"][0]["text"], "The user declined.");
         assert_eq!(r[3]["result"]["isError"], true);
         assert!(allowed_tools("chat").iter().all(|t| !t.ends_with("set_tab_title")));
-        assert_eq!(allowed_tools("code").len(), BRIDGE_TOOLS.len() + OWN_TOOLS.len());
+        assert_eq!(allowed_tools("code").len(), BRIDGE_TOOLS.len() + CODE_TOOLS.len());
+        assert!(allowed_tools("chat").contains(&"mcp__claudiu__link_session".to_string()));
     }
 
     #[test]
@@ -418,6 +475,20 @@ mod tests {
         assert_eq!(talk(&[call(json!({"kind":"issue","number":1}))], "", tmp.path())[0]["result"]["isError"], true);
         assert!(allowed_tools("code").contains(&"mcp__claudiu__attach_github".to_string()));
         assert!(allowed_tools("chat").iter().all(|t| !t.ends_with("attach_github")));
+    }
+
+    #[test]
+    fn link_session_appends_a_validated_id_and_claudiu_reads_it_back() {
+        let tmp = tempfile::tempdir().unwrap();
+        let call = |id: Value| json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"link_session","arguments":{"id":id}}});
+        let r = talk(&[call(json!("abc-123")), call(json!("")), call(json!("../x")), call(json!("s1")), call(json!(5))], "s1", tmp.path());
+        let errors: Vec<_> = r.iter().map(|x| x["result"]["isError"].as_bool().unwrap()).collect();
+        assert_eq!(errors, [false, true, true, true, true], "bad ids and a link to itself are refused");
+        let line = std::fs::read_to_string(tmp.path().join("attach/s1.jsonl")).unwrap();
+        assert_eq!(line.lines().count(), 1);
+        assert_eq!(parse_attachment(line.lines().next().unwrap()), Some(Attachment::Link("abc-123".into())));
+        assert_eq!(parse_attachment(r#"{"pull":true,"number":7,"title":null}"#), Some(Attachment::Github(Attached { pull: true, number: 7, title: None })));
+        assert_eq!(parse_attachment("nonsense"), None);
     }
 
     #[test]
