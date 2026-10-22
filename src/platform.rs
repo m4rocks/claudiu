@@ -106,6 +106,58 @@ pub fn kill_with_parent(child: &std::process::Child) {
     let _ = child;
 }
 
+/// Put an image on the clipboard as a bitmap, which is what Claude Code's image paste reads on Windows (it asks
+/// .NET's `Clipboard.GetImage`, and gpui's clipboard write only offers the registered `PNG` format). Returns whether
+/// it worked; replaces whatever the clipboard held.
+#[cfg(target_os = "windows")]
+pub fn set_clipboard_bitmap(encoded: &[u8]) -> bool {
+    use windows_sys::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData};
+    use windows_sys::Win32::Foundation::GlobalFree;
+    use windows_sys::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
+    const CF_DIB: u32 = 8;
+    // A DIB is a BMP file without its 14-byte file header.
+    let mut bmp = Vec::new();
+    let Ok(img) = image::load_from_memory(encoded) else { return false };
+    if img.to_rgb8().write_to(&mut std::io::Cursor::new(&mut bmp), image::ImageFormat::Bmp).is_err() || bmp.len() <= 14 {
+        return false;
+    }
+    let dib = &bmp[14..];
+    unsafe {
+        let mem = GlobalAlloc(GMEM_MOVEABLE, dib.len());
+        if mem.is_null() {
+            return false;
+        }
+        let dst = GlobalLock(mem).cast::<u8>();
+        if dst.is_null() {
+            GlobalFree(mem);
+            return false;
+        }
+        std::ptr::copy_nonoverlapping(dib.as_ptr(), dst, dib.len());
+        GlobalUnlock(mem);
+        // Another program may hold the clipboard for a moment.
+        let mut opened = false;
+        for _ in 0..10 {
+            if OpenClipboard(std::ptr::null_mut()) != 0 {
+                opened = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        if !opened {
+            GlobalFree(mem);
+            return false;
+        }
+        EmptyClipboard();
+        // The clipboard owns the memory once this succeeds.
+        let ok = !SetClipboardData(CF_DIB, mem).is_null();
+        if !ok {
+            GlobalFree(mem);
+        }
+        CloseClipboard();
+        ok
+    }
+}
+
 /// Keep a helper process from flashing a console window (Windows only).
 pub fn no_window(cmd: &mut Command) {
     #[cfg(target_os = "windows")]

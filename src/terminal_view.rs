@@ -15,7 +15,7 @@ use futures::channel::mpsc::UnboundedReceiver;
 use gpui::{
     App, Bounds, ClipboardItem, Context, Element, ElementId, ElementInputHandler, Entity,
     EntityInputHandler, EventEmitter, FocusHandle, Focusable, Font, FontStyle, FontWeight, GlobalElementId, Hsla, InspectorElementId, IntoElement,
-    KeyDownEvent, Keystroke, LayoutId, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    KeyDownEvent, LayoutId, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
     ContentMask, Pixels, Point, Render, ScrollDelta, ScrollWheelEvent, ShapedLine, StrikethroughStyle, Style,
     TextRun, UTF16Selection, UnderlineStyle, Window, div, fill, outline, point, prelude::*, px, relative, size,
 };
@@ -24,7 +24,7 @@ use gpui_kit::component::input;
 
 use crate::glyphs;
 use crate::keys;
-use crate::skeleton::{self, Draft};
+use crate::skeleton::{self, Draft, Step};
 use crate::terminal::{SpawnSpec, Terminal};
 use crate::theme;
 
@@ -62,6 +62,8 @@ pub struct TerminalView {
     pub preview: Option<String>,
     /// What the user types while Claude Code starts; moved into the real prompt when it appears (`skeleton.rs`).
     draft: Draft,
+    /// The draft is being typed into Claude Code; the skeleton stays until the real prompt shows it.
+    handing: bool,
     pub exit_code: Option<Option<i32>>,
     /// IME composition / dead-key text not yet committed; drawn at the cursor, never sent to the program.
     marked: Option<String>,
@@ -81,10 +83,42 @@ impl Focusable for TerminalView {
     }
 }
 
+/// A row's height at the terminal's 14 px font (`font_size * 1.35`, rounded); the skeleton prompt lines up with it.
+pub const LINE_H: f32 = 19.0;
+
 #[cfg(target_os = "windows")]
 pub const FONT: &str = "Cascadia Mono";
 #[cfg(not(target_os = "windows"))]
 pub const FONT: &str = "Menlo";
+
+/// What to look for on Claude Code's screen to know a piece of the draft arrived.
+enum Marker {
+    Text(String),
+    Image,
+}
+
+/// Images Claude Code takes.
+fn is_image_file(p: &std::path::Path) -> bool {
+    p.extension().and_then(|e| e.to_str()).is_some_and(|e| ["png", "jpg", "jpeg", "gif", "webp", "bmp"].contains(&e.to_ascii_lowercase().as_str()))
+}
+
+/// Keep a pasted clipboard image as a file under the data folder (`pasted/`, pruned after a week).
+fn save_pasted(image: &gpui::Image) -> Option<std::path::PathBuf> {
+    use gpui::ImageFormat::*;
+    let ext = match image.format {
+        Png => "png",
+        Jpeg => "jpg",
+        Webp => "webp",
+        Gif => "gif",
+        Bmp => "bmp",
+        _ => return None,
+    };
+    let dir = crate::datadir::data_dir().join("pasted");
+    std::fs::create_dir_all(&dir).ok()?;
+    let path = dir.join(format!("{:x}.{ext}", image.id));
+    std::fs::write(&path, &image.bytes).ok()?;
+    Some(path)
+}
 
 impl TerminalView {
     /// Start the process in the background, so a slow start never freezes the window. A failure to start
@@ -118,6 +152,7 @@ impl TerminalView {
             traced: false,
             preview: None,
             draft: Draft::default(),
+            handing: false,
             exit_code: None,
             marked: None,
             font_family: FONT,
@@ -224,9 +259,12 @@ impl TerminalView {
 
     fn send(&mut self, bytes: Vec<u8>, cx: &mut Context<Self>) {
         // Claude Code is not listening yet: keys edit the draft instead (`draft_key`).
-        if self.loading {
-            return;
+        if !self.loading {
+            self.write_input(bytes, cx);
         }
+    }
+
+    fn write_input(&mut self, bytes: Vec<u8>, cx: &mut Context<Self>) {
         let mut term = self.terminal.term.lock();
         term.selection = None;
         if term.grid().display_offset() != 0 {
@@ -244,15 +282,19 @@ impl TerminalView {
             cx.notify();
             return;
         }
+        let bytes = self.paste_bytes(text);
+        self.send(bytes, cx);
+    }
+
+    fn paste_bytes(&self, text: &str) -> Vec<u8> {
         let text = text.replace("\r\n", "\r").replace('\n', "\r");
-        let bytes = if self.mode().contains(TermMode::BRACKETED_PASTE) {
+        if self.mode().contains(TermMode::BRACKETED_PASTE) {
             // Strip embedded end-marker so pasted text can't terminate the paste early.
             let clean = text.replace("\x1b[201~", "");
             format!("\x1b[200~{clean}\x1b[201~").into_bytes()
         } else {
             text.into_bytes()
-        };
-        self.send(bytes, cx);
+        }
     }
 
     pub fn paste(&mut self, cx: &mut Context<Self>) {
@@ -261,6 +303,22 @@ impl TerminalView {
         };
         if let Some(text) = item.text().filter(|t| !t.is_empty()) {
             self.paste_text(&text, cx);
+            return;
+        }
+        // While Claude Code starts, images are kept as files and typed in as paths when it is ready (`skeleton.rs`).
+        if self.loading {
+            for entry in item.entries() {
+                match entry {
+                    gpui::ClipboardEntry::Image(image) => {
+                        if let Some(path) = save_pasted(image) {
+                            self.draft.add_image(path);
+                        }
+                    }
+                    gpui::ClipboardEntry::ExternalPaths(p) => self.paste_paths(p.paths(), cx),
+                    _ => {}
+                }
+            }
+            cx.notify();
             return;
         }
         // An image on the clipboard: Claude Code reads it itself on its image-paste key (Alt+V on Windows,
@@ -278,14 +336,18 @@ impl TerminalView {
 
     /// Dropped or copied files: paste their paths (quoted when needed); Claude Code attaches them.
     pub fn paste_paths(&mut self, paths: &[std::path::PathBuf], cx: &mut Context<Self>) {
-        let text = paths
-            .iter()
-            .map(|p| {
-                let s = p.to_string_lossy();
-                if s.contains(' ') { format!("\"{s}\"") } else { s.into_owned() }
-            })
-            .collect::<Vec<_>>()
-            .join(" ");
+        if self.loading {
+            for p in paths {
+                if is_image_file(p) {
+                    self.draft.add_image(p.clone());
+                } else {
+                    self.draft.insert(&format!("{} ", skeleton::quote_path(p)));
+                }
+            }
+            cx.notify();
+            return;
+        }
+        let text = paths.iter().map(|p| skeleton::quote_path(p)).collect::<Vec<_>>().join(" ");
         if !text.is_empty() {
             self.paste_text(&format!("{text} "), cx);
         }
@@ -378,7 +440,7 @@ impl TerminalView {
             return;
         }
         if self.loading {
-            self.draft_key(ks);
+            self.draft.key(ks);
             cx.notify();
             cx.stop_propagation();
             return;
@@ -389,37 +451,120 @@ impl TerminalView {
         }
     }
 
-    /// A key pressed while Claude Code starts: edit the draft; nothing reaches the program.
-    fn draft_key(&mut self, ks: &Keystroke) {
-        let m = &ks.modifiers;
-        let d = &mut self.draft;
-        match ks.key.as_str() {
-            "enter" if m.shift || m.alt => d.insert("\n"),
-            "enter" if !m.control => d.send(),
-            "escape" => d.sent = false,
-            "backspace" => d.backspace(),
-            "delete" => d.delete(),
-            "left" => d.left(),
-            "right" => d.right(),
-            "home" => d.home(),
-            "end" => d.end(),
-            "c" if m.control => d.clear(),
-            _ => {}
-        }
-    }
-
-    /// The prompt is up: move what was typed into it, and press Enter if the user did.
-    fn hand_over(&mut self, cx: &mut Context<Self>) {
-        let (text, sent) = self.draft.take();
+    /// Type a message into Claude Code: a line as keystrokes, several as one paste so their breaks stay breaks.
+    fn type_in(&mut self, text: &str, cx: &mut Context<Self>) {
         if text.is_empty() {
             return;
         }
-        // A line is typed as it was; several go in as one paste, so their breaks stay breaks.
-        if text.contains('\n') {
-            self.paste_text(&text, cx);
-        } else {
-            self.send(text.into_bytes(), cx);
+        // A long line is better pasted than typed.
+        let bytes = if text.contains('\n') || text.chars().count() > 200 { self.paste_bytes(text) } else { text.as_bytes().to_vec() };
+        self.write_input(bytes, cx);
+    }
+
+    /// Put an image file on the clipboard and press Claude Code's image-paste key, which reads it from there.
+    fn paste_image_file(&mut self, path: &std::path::Path, cx: &mut Context<Self>) -> bool {
+        use gpui::ImageFormat::*;
+        let format = match path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).as_deref() {
+            Some("png") => Png,
+            Some("jpg" | "jpeg") => Jpeg,
+            Some("gif") => Gif,
+            Some("webp") => Webp,
+            Some("bmp") => Bmp,
+            _ => return false,
+        };
+        let Ok(bytes) = std::fs::read(path) else { return false };
+        #[cfg(target_os = "windows")]
+        if !crate::platform::set_clipboard_bitmap(&bytes) {
+            return false;
         }
+        #[cfg(not(target_os = "windows"))]
+        cx.write_to_clipboard(ClipboardItem::new_image(&gpui::Image::from_bytes(format, bytes)));
+        #[cfg(target_os = "windows")]
+        let _ = format;
+        let key: &[u8] = if cfg!(target_os = "windows") { b"\x1bv" } else { b"\x16" };
+        self.write_input(key.to_vec(), cx);
+        true
+    }
+
+    /// How often the markers show on the screen: the text just typed (or "[Pasted text" when it is long), or "[Image #".
+    fn marks(&self, marker: &Marker) -> usize {
+        let screen = self.tail_text(60);
+        match marker {
+            Marker::Text(t) => screen.matches(t.as_str()).count() + screen.matches("[Pasted text").count(),
+            Marker::Image => screen.matches("[Image #").count(),
+        }
+    }
+
+    /// Wait until `marker` shows more often than `before`, at most `patience`. A count, not a lookup, because a resumed
+    /// session may already show such text, and Claude Code's image numbers may not start at 1.
+    async fn wait_for(this: &gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp, marker: &Marker, before: usize, patience: Duration) {
+        let start = Instant::now();
+        while start.elapsed() < patience {
+            match this.update(cx, |v, _| v.marks(marker) > before) {
+                Ok(false) => cx.background_executor().timer(Duration::from_millis(50)).await,
+                _ => return,
+            }
+        }
+    }
+
+    /// Claude Code drew something: type the draft into it piece by piece, waiting after each for it to show on the
+    /// real screen (its first screen can arrive well before it reads the keyboard, and each image is read from the
+    /// clipboard when its key is handled). The skeleton stays up meanwhile, and keeps taking what is typed; then
+    /// `finish_loading`.
+    fn hand_over(&mut self, cx: &mut Context<Self>) {
+        self.handing = true;
+        cx.spawn(async move |this, cx| {
+            // Images borrow the clipboard; the user's own comes back at the end.
+            let mut clipboard = None;
+            // The first piece also waits for Claude Code to start reading the keyboard.
+            let mut patience = Duration::from_secs(10);
+            loop {
+                let Ok(steps) = this.update(cx, |v, _| v.draft.next_steps()) else { return };
+                if steps.is_empty() {
+                    break;
+                }
+                for step in steps {
+                    let wait = this
+                        .update(cx, |v, cx| match &step {
+                            Step::Text(t) => {
+                                let last = t.lines().rev().map(str::trim).find(|l| !l.is_empty()).unwrap_or_default();
+                                let marker = Marker::Text(last.chars().take(20).collect());
+                                let before = v.marks(&marker);
+                                v.type_in(t, cx);
+                                (!last.is_empty()).then_some((marker, before))
+                            }
+                            Step::Image(path, _) => {
+                                clipboard.get_or_insert_with(|| cx.read_from_clipboard());
+                                let before = v.marks(&Marker::Image);
+                                v.paste_image_file(path, cx).then_some((Marker::Image, before))
+                            }
+                        })
+                        .ok()
+                        .flatten();
+                    if let Some((marker, before)) = wait {
+                        Self::wait_for(&this, cx, &marker, before, patience).await;
+                    }
+                    patience = Duration::from_secs(3);
+                }
+            }
+            this.update(cx, |v, cx| {
+                if let Some(Some(item)) = clipboard {
+                    cx.write_to_clipboard(item);
+                }
+                v.finish_loading(cx)
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The real prompt is up: drop the skeleton, type what was added meanwhile, and press Enter if the user did.
+    fn finish_loading(&mut self, cx: &mut Context<Self>) {
+        self.loading = false;
+        self.handing = false;
+        crate::trace::note(&self.terminal.tag, self.terminal.born.elapsed(), "prompt ready");
+        let (rest, sent) = self.draft.take();
+        self.type_in(&rest, cx);
         if sent {
             // Enter right behind a paste can be read as part of it.
             cx.spawn(async move |this, cx| {
@@ -778,13 +923,21 @@ async fn pump(
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.glide_step(window);
-        if self.loading && (self.exit_code.is_some() || self.has_content()) {
+        if self.loading && self.exit_code.is_some() {
             self.loading = false;
+        } else if self.loading && !self.handing && self.has_content() {
             crate::trace::note(&self.terminal.tag, self.terminal.born.elapsed(), "first content painted");
-            if self.exit_code.is_none() {
+            if self.draft.is_empty() {
+                self.finish_loading(cx);
+            } else {
                 self.hand_over(cx);
             }
         }
+        let phase = match (self.handing, self.last_output) {
+            (true, _) => "Handing your message to Claude Code…",
+            (false, Some(_)) => "Loading skills, plugins and MCP servers…",
+            (false, None) => "Starting Claude Code…",
+        };
         div()
             .id("terminal")
             .relative()
@@ -810,7 +963,10 @@ impl Render for TerminalView {
             .on_scroll_wheel(cx.listener(Self::on_scroll))
             .child(TerminalElement { view: cx.entity() })
             .when(self.loading, |d| {
-                d.child(skeleton::overlay(&self.draft, self.preview.as_deref(), self.terminal.born.elapsed(), self.last_output.is_some()))
+                let (cols, rows) = self.terminal.size();
+                let (cell_w, line_h) = self.metrics.map_or((8.0, LINE_H), |m| (f32::from(m.cell_w), f32::from(m.line_h)));
+                let grid = skeleton::Grid { cell_w, line_h, cols, rows };
+                d.child(skeleton::overlay(&self.draft, self.preview.as_deref(), self.terminal.born.elapsed(), phase, grid))
             })
     }
 }
