@@ -225,8 +225,18 @@ pub const READ_ONLY_DENY: [&str; 8] = ["Bash", "PowerShell", "Monitor", "Edit", 
 
 /// `_meta.claudeCode.options` for `session/new` and `session/load`: the Claudiu tools are pre-allowed (Claudiu asks the
 /// user itself before it acts on one) and the file and shell tools are denied.
-pub fn session_options() -> serde_json::Value {
-    serde_json::json!({ "allowedTools": crate::mcp::allowed_tools("chat"), "disallowedTools": READ_ONLY_DENY })
+pub fn session_options(chat_id: &str) -> serde_json::Value {
+    let mut o = serde_json::json!({ "allowedTools": crate::mcp::allowed_tools("chat"), "disallowedTools": READ_ONLY_DENY });
+    // The same per-process mod the terminal sessions get: it reports auto-compact and the advisor, and applies changes
+    // made in the sidebar. It runs inside this chat's own `claude`, so nothing else is touched.
+    if let Ok(dir) = crate::mcp::prepare_mod() {
+        o["plugins"] = serde_json::json!([{ "type": "local", "path": dir }]);
+        o["env"] = serde_json::json!({
+            crate::usage::USAGE_DIR_ENV: crate::usage::snapshot_dir(),
+            crate::usage::CTL_ENV: crate::usage::ctl_file(chat_id),
+        });
+    }
+    o
 }
 
 /// What a chat is told about being read-only and how to hand work to a Code session. `tied` is whether it has a project.
@@ -247,7 +257,7 @@ mod tests {
 
     #[test]
     fn a_chat_cannot_edit_or_run_commands_and_its_pre_allowed_tools_do_not_undo_that() {
-        let o = session_options();
+        let o = session_options("c1");
         let denied: Vec<_> = o["disallowedTools"].as_array().unwrap().iter().map(|t| t.as_str().unwrap()).collect();
         for tool in ["Bash", "Monitor", "Edit", "Write", "NotebookEdit"] {
             assert!(denied.contains(&tool), "{tool} must be denied");

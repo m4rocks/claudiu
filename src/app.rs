@@ -652,6 +652,15 @@ impl Workspace {
                 for snap in snaps {
                     let account = snap.account.as_deref().unwrap_or(MAIN_ACCOUNT);
                     changed |= ws.merge_account(account, snap.five_hour.clone(), snap.seven_day.clone());
+                    // A chat's own claude runs the mod too: its settings are shown in the sidebar.
+                    let chat = ws.chat_store.shown().find(|c| c.session_id.as_deref() == Some(snap.session_id.as_str())).map(|c| c.id.clone());
+                    if let Some(p) = chat.and_then(|id| ws.chats.iter_mut().find(|p| p.id == id))
+                        && (p.auto_compact != snap.auto_compact.or(p.auto_compact) || p.advisor != snap.advisor)
+                    {
+                        p.auto_compact = snap.auto_compact.or(p.auto_compact);
+                        p.advisor = snap.advisor.clone();
+                        changed = true;
+                    }
                     if let Some(rec) = ws
                         .store
                         .data
@@ -705,7 +714,7 @@ impl Workspace {
                         .cloned();
                     let Some(me) = me else { continue };
                     changed |= match item {
-                        Attachment::Github(a) => ws.store.session_mut(&me).and_then(|s| s.claude.as_mut()).is_some_and(|meta| attach(&mut meta.attached, a)),
+                        Attachment::Github(a) => ws.edit_attached(&me, |list| attach(list, a)),
                         Attachment::Link(other) => ws.link(&me, &other),
                     };
                 }
@@ -1916,6 +1925,32 @@ impl Workspace {
         a_new | b_new
     }
 
+    /// Run `f` on the attached items of a session or a chat; true when it changed anything.
+    fn edit_attached(&mut self, id: &str, f: impl FnOnce(&mut Vec<Attached>) -> bool) -> bool {
+        if let Some(meta) = self.store.session_mut(id).and_then(|s| s.claude.as_mut()) {
+            return f(&mut meta.attached);
+        }
+        let mut changed = false;
+        self.chat_store.update(id, |r| changed = f(&mut r.attached));
+        changed
+    }
+
+    pub fn attached_of(&self, id: &str) -> Vec<Attached> {
+        match self.store.session(id).and_then(|s| s.claude.as_ref()) {
+            Some(m) => m.attached.clone(),
+            None => self.chat_store.get(id).map(|c| c.attached.clone()).unwrap_or_default(),
+        }
+    }
+
+    /// Take an attached item away from a session or chat.
+    pub fn detach(&mut self, id: &str, pull: bool, number: u32) {
+        self.edit_attached(id, |l| {
+            l.retain(|x| !(x.pull == pull && x.number == number));
+            true
+        });
+        self.store.mark_dirty();
+    }
+
     /// Take the link between two away on both sides.
     pub fn unlink(&mut self, a: &str, b: &str) {
         self.edit_links(a, |l| remove_id(l, b));
@@ -2028,6 +2063,11 @@ impl Workspace {
     /// Unknown TTL assumes the 5-minute tier.
     pub fn selected_cache(&self) -> Option<(f32, i64, i64)> {
         let id = self.selected.as_ref().or(self.active_id())?;
+        // A chat has no transcript scan: the cache is taken to be the usual five minutes from the end of its last turn.
+        if let Some(p) = self.chat_pane(id) {
+            let left = (p.turn_at? + 300 - now()).clamp(0, 300);
+            return Some((left as f32 / 300.0, left, 300));
+        }
         let meta = self.store.session(id)?.claude.as_ref()?;
         let last = meta.cache_at?;
         let ttl = meta.cache_ttl.unwrap_or(300) as i64;

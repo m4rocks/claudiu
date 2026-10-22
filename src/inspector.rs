@@ -195,7 +195,7 @@ impl Workspace {
         );
 
         // Issues and pull requests Claude attached to this session.
-        let attached = claude.and_then(|r| r.claude.as_ref()).map(|m| m.attached.clone()).unwrap_or_default();
+        let attached = id.as_deref().map(|i| self.attached_of(i)).unwrap_or_default();
         let any_attached = !attached.is_empty();
         let mut github = div().flex().flex_col().gap(px(1.0));
         for a in attached {
@@ -210,9 +210,8 @@ impl Workspace {
                     .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.open_attached(pull, number, window, cx)))
                     .child(icon_button(format!("detach-{pull}-{number}"), IconName::X).on_click(cx.listener(move |ws, _: &ClickEvent, _w, cx| {
                         cx.stop_propagation();
-                        if let Some(meta) = rec_id.as_ref().and_then(|id| ws.store.session_mut(id)).and_then(|r| r.claude.as_mut()) {
-                            meta.attached.retain(|x| !(x.pull == pull && x.number == number));
-                            ws.store.mark_dirty();
+                        if let Some(id) = &rec_id {
+                            ws.detach(id, pull, number);
                         }
                         cx.notify();
                     }))),
@@ -237,11 +236,22 @@ impl Workspace {
         };
         let meta = claude.and_then(|r| r.claude.as_ref());
         let on_off = |v: Option<bool>| v.map_or("—", |v| if v { "On" } else { "Off" }).to_string();
-        let auto_compact = on_off(meta.and_then(|m| m.auto_compact));
-        let advisor = meta.map_or("—".into(), |m| m.advisor.clone().unwrap_or_else(|| "Off".into()));
+        // A code session's figures come from its snapshot, a chat's from the mod inside its own claude.
+        let pane = id.as_deref().and_then(|i| self.chat_pane(i));
+        let compact_now = meta.map(|m| m.auto_compact).or(pane.map(|p| p.auto_compact)).flatten();
+        let advisor_now = match (meta, pane) {
+            (Some(m), _) => m.advisor.clone(),
+            (None, Some(p)) => p.advisor.clone(),
+            _ => None,
+        }
+        .map(|a| a.to_lowercase());
+        let known = meta.is_some() || pane.is_some_and(|p| p.auto_compact.is_some() || p.advisor.is_some());
+        let auto_compact = on_off(compact_now);
+        let advisor = if known { advisor_now.clone().unwrap_or_else(|| "Off".into()) } else { "—".into() };
+        let live = (claude.is_some() && running) || pane.is_some();
 
         // Settings Claude Code keeps: a dropdown while the session runs (the mod applies it), else just the value.
-        let setting = |sid: Option<&Id>, key: &'static str, label: &'static str, value: String, items: Box<dyn Fn(&Id) -> Vec<MenuItem>>| match sid.filter(|_| claude.is_some() && running) {
+        let setting = |sid: Option<&Id>, key: &'static str, label: &'static str, value: String, items: Box<dyn Fn(&Id) -> Vec<MenuItem>>| match sid.filter(|_| live) {
             Some(sid) => {
                 let sid = sid.clone();
                 kv_pick(key, label, value).on_mouse_down(
@@ -257,8 +267,6 @@ impl Workspace {
         };
         let item = |label: String, act: Act| MenuItem { label, hint: None, act, danger: false, disabled: false, separator_before: false };
         let tick = |on: bool, text: &str| format!("{}{text}", if on { "✓  " } else { "    " });
-        let compact_now = meta.and_then(|m| m.auto_compact);
-        let advisor_now = meta.and_then(|m| m.advisor.clone()).map(|a| a.to_lowercase());
         let auto_compact_row = setting(
             id.as_ref(),
             "set-auto-compact",
@@ -313,8 +321,7 @@ impl Workspace {
                     .flex_col()
                     .gap(px(2.0))
                     .child(auto_compact_row)
-                    .child(advisor_row)
-                    .child(kv("Last command", meta.and_then(|m| m.last_command.clone()).map_or("—".into(), |c| format!("/{c}")))),
+                    .child(advisor_row),
             );
 
         div()
@@ -379,8 +386,10 @@ fn kv_pick(id: &'static str, label: &str, value: String) -> Stateful<Div> {
         .items_center()
         .justify_between()
         .gap(px(10.0))
+        // Text lines up with the rows above; the hover background reaches out past it.
         .h(px(22.0))
-        .px(px(4.0))
+        .mx(px(-6.0))
+        .px(px(6.0))
         .rounded(px(5.0))
         .cursor_pointer()
         .hover(|s| s.bg(hsla(theme::ROW_HOVER)))

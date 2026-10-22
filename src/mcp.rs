@@ -22,9 +22,9 @@ pub const CALLER_ENV: &str = "CLAUDIU_CALLER";
 pub const RECORD_ENV: &str = "CLAUDIU_RECORD";
 
 /// Tools the model uses to tell Claudiu something about itself; none of them reads or starts another session.
-/// `link_session` is the only one a chat gets too.
+/// A chat gets `attach_github` and `link_session` too.
 const CODE_TOOLS: [&str; 3] = ["set_tab_title", "attach_github", "link_session"];
-const CHAT_TOOLS: [&str; 1] = ["link_session"];
+const CHAT_TOOLS: [&str; 2] = ["attach_github", "link_session"];
 
 /// Tools that reach other sessions. Each one makes Claudiu ask the user before it does anything (`bridge.rs`).
 const BRIDGE_TOOLS: [&str; 7] = ["list_chats", "read_chat", "list_code_sessions", "read_code_session", "search_sessions", "start_code_session", "start_chat"];
@@ -48,13 +48,16 @@ and call link_session with its id, once per pair. link_session is silent and cha
 
 const CHAT_INSTRUCTIONS: &str = "You are a chat running inside Claudiu.";
 
+/// Both callers: what makes the model call `attach_github`.
+const GITHUB_INSTRUCTIONS: &str = " GitHub: the moment an issue or pull request of this project comes up, call attach_github (kind issue or pull, the number, and the title if you know it) before you carry on, once per item. That means: the user mentions one (#123, \"issue 52\", a github.com .../issues/N or .../pull/N link), you read or search one with gh or the GitHub tools, you open or push a pull request, or a commit or branch name refers to one. It is silent, costs nothing and shows the item in the user's sidebar, so prefer calling it to skipping it. If its schema is not loaded yet, load it first with ToolSearch (select:mcp__claudiu__attach_github).";
+
 const INSTRUCTIONS: &str = "You are running inside Claudiu, which shows a tab title for this session. Call the \
 set_tab_title tool with a short title (2-5 words, no quotes) once you understand the user's first request. After \
 that, call it again only when the current task or scope changes and the title no longer fits. Also call it \
 whenever the user asks you to rename or retitle this session or tab (use the name they gave). Don't call it again \
 with the same or a near-identical title, and never twice in a row for the same reason (if the user ran /rename \
-themselves, the title is already set; leave it). Don't mention the tool unless the user asked for a rename. \
-GitHub: the moment an issue or pull request of this project comes up, call attach_github (kind issue or pull, the number, and the title if you know it) before you carry on, once per item. That means: the user mentions one (#123, \"issue 52\", a github.com .../issues/N or .../pull/N link), you read or search one with gh or the GitHub tools, you open or push a pull request, or a commit or branch name refers to one. It is silent, costs nothing and shows the item in the user's sidebar, so prefer calling it to skipping it. If its schema is not loaded yet, load it first with ToolSearch (select:mcp__claudiu__attach_github). Never switch models on your own. Before calling set_model, ask the user with the AskUserQuestion tool which \
+themselves, the title is already set; leave it). Don't mention the tool unless the user asked for a rename.\
+ Never switch models on your own. Before calling set_model, ask the user with the AskUserQuestion tool which \
 model and effort they want, unless they just named them explicitly. The switch applies from your next request; \
 after calling set_model, end your turn and ask the user to confirm before continuing, so the session itself switches.";
 
@@ -115,13 +118,13 @@ fn serve(input: impl BufRead, mut out: impl Write, caller: &str, session: &str, 
                 "protocolVersion": msg["params"]["protocolVersion"].as_str().unwrap_or("2025-06-18"),
                 "capabilities": { "tools": {} },
                 "serverInfo": { "name": "claudiu", "version": env!("CARGO_PKG_VERSION") },
-                "instructions": if chat { format!("{CHAT_INSTRUCTIONS}{LINK_INSTRUCTIONS}{BRIDGE_INSTRUCTIONS}") } else { format!("{INSTRUCTIONS}{LINK_INSTRUCTIONS}{BRIDGE_INSTRUCTIONS}") },
+                "instructions": if chat { format!("{CHAT_INSTRUCTIONS}{GITHUB_INSTRUCTIONS}{LINK_INSTRUCTIONS}{BRIDGE_INSTRUCTIONS}") } else { format!("{INSTRUCTIONS}{GITHUB_INSTRUCTIONS}{LINK_INSTRUCTIONS}{BRIDGE_INSTRUCTIONS}") },
             })),
             "ping" => Ok(json!({})),
             "tools/list" => Ok(json!({ "tools": own_tools(chat).into_iter().chain(bridge_tools()).collect::<Vec<_>>() })),
             "tools/call" => Ok(match msg["params"]["name"].as_str() {
                 Some("set_tab_title") if !chat => set_title(&msg["params"], session, &data.join("titles")),
-                Some("attach_github") if !chat => attach_github(&msg["params"], record, &attach_dir(data)),
+                Some("attach_github") => attach_github(&msg["params"], record, &attach_dir(data)),
                 Some("link_session") => link_session(&msg["params"], record, &attach_dir(data)),
                 Some("set_model") if !chat => reply("Model switching isn't available in this session (Claudiu's mod isn't loaded).", true),
                 Some(tool) if BRIDGE_TOOLS.contains(&tool) => match ask(tool, &msg["params"]["arguments"]) {
@@ -152,8 +155,21 @@ fn own_tools(chat: bool) -> Vec<Value> {
             "required": ["id"],
         },
     });
+    let attach = json!({
+        "name": "attach_github",
+        "description": "Show a GitHub issue or pull request of this session's project in Claudiu's sidebar. Call it when the user names one or you start working on one; once per item. It changes nothing on GitHub.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "kind": { "type": "string", "enum": ["issue", "pull"], "description": "issue or pull (a pull request)" },
+                "number": { "type": "integer", "description": "The issue or pull request number" },
+                "title": { "type": "string", "description": "Its title, if you know it (optional)" },
+            },
+            "required": ["kind", "number"],
+        },
+    });
     if chat {
-        return vec![link];
+        return vec![attach, link];
     }
     vec![json!({
                 "name": "set_tab_title",
@@ -163,19 +179,7 @@ fn own_tools(chat: bool) -> Vec<Value> {
                     "properties": { "title": { "type": "string", "description": "Short tab title, 2-5 words" } },
                     "required": ["title"],
                 },
-            }), json!({
-                "name": "attach_github",
-                "description": "Show a GitHub issue or pull request of this session's project in Claudiu's sidebar. Call it when the user names one or you start working on one; once per item. It changes nothing on GitHub.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "kind": { "type": "string", "enum": ["issue", "pull"], "description": "issue or pull (a pull request)" },
-                        "number": { "type": "integer", "description": "The issue or pull request number" },
-                        "title": { "type": "string", "description": "Its title, if you know it (optional)" },
-                    },
-                    "required": ["kind", "number"],
-                },
-            }), json!({
+            }), attach, json!({
                 "name": "set_model",
                 "description": "Switch this session's model and/or effort from your next request on, even mid-turn. Always ask the user first with the AskUserQuestion tool (which model, which effort) unless they just named them explicitly; never switch on your own. Claude Code also keeps the choice as the user's default model/effort.",
                 "inputSchema": {
@@ -198,13 +202,13 @@ fn bridge_tools() -> Vec<Value> {
         "folder": { "type": "string", "description": "Project name or folder path (optional)" },
     });
     vec![
-        tool("list_chats", format!("List the user's chats in Claudiu (id, title, project, whether it is open).{CONFIRM}"), json!({})),
+        tool("list_chats", format!("List the user's chats in Claudiu (id, title, project, whether it is open, when it was created and last updated).{CONFIRM}"), json!({})),
         tool(
             "read_chat",
             format!("Read the latest messages of a chat that is open in Claudiu.{CONFIRM}"),
             json!({ "id": id("list_chats")["id"], "messages": { "type": "integer", "description": "How many recent messages (default 30)" } }),
         ),
-        tool("list_code_sessions", format!("List the user's Claude Code sessions in Claudiu (id, title, folder, whether it is running).{CONFIRM}"), json!({})),
+        tool("list_code_sessions", format!("List the user's Claude Code sessions in Claudiu (id, title, folder, whether it is running, when it was created and last updated).{CONFIRM}"), json!({})),
         tool(
             "read_code_session",
             format!("Read the latest terminal output of a Claude Code session that is running in Claudiu.{CONFIRM}"),
@@ -212,7 +216,7 @@ fn bridge_tools() -> Vec<Value> {
         ),
         tool(
             "search_sessions",
-            format!("Search the user's chats and Claude Code sessions by words in their title, project or folder. Returns kind, id, title and project of the best matches; pass an id to link_session.{CONFIRM}"),
+            format!("Search the user's chats and Claude Code sessions by words in their title, project or folder. Returns kind, id, title, project and created/updated times of the best matches; pass an id to link_session.{CONFIRM}"),
             json!({ "query": { "type": "string", "description": "Words to look for (optional: without it, the most recent)" } }),
         ),
         tool("start_code_session", format!("Open a new Claude Code session, optionally with a first prompt.{CONFIRM}"), target.clone()),
@@ -410,7 +414,7 @@ mod tests {
             |tool, args| if tool == "start_chat" { Err("The user declined.".into()) } else { Ok(format!("{tool} {}", args["id"])) },
         );
         let names: Vec<_> = r[0]["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
-        assert_eq!(names, ["link_session", "list_chats", "read_chat", "list_code_sessions", "read_code_session", "search_sessions", "start_code_session", "start_chat"]);
+        assert_eq!(names, ["attach_github", "link_session", "list_chats", "read_chat", "list_code_sessions", "read_code_session", "search_sessions", "start_code_session", "start_chat"]);
         assert_eq!(r[1]["result"]["content"][0]["text"], "read_code_session \"x\"");
         assert_eq!(r[1]["result"]["isError"], false);
         assert_eq!(r[2]["result"]["isError"], true, "a chat cannot set a terminal tab title");
@@ -474,7 +478,7 @@ mod tests {
         assert_eq!(lines, [Attached { pull: false, number: 52, title: Some("Right sidebar".into()) }, Attached { pull: true, number: 7, title: None }]);
         assert_eq!(talk(&[call(json!({"kind":"issue","number":1}))], "", tmp.path())[0]["result"]["isError"], true);
         assert!(allowed_tools("code").contains(&"mcp__claudiu__attach_github".to_string()));
-        assert!(allowed_tools("chat").iter().all(|t| !t.ends_with("attach_github")));
+        assert!(allowed_tools("chat").contains(&"mcp__claudiu__attach_github".to_string()));
     }
 
     #[test]

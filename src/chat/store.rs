@@ -29,6 +29,9 @@ pub struct ChatRecord {
     /// Ids of the sessions and chats this chat is linked with (the other side lists this one too).
     #[serde(default)]
     pub links: Vec<Id>,
+    /// Issues and pull requests the chat attached (the `attach_github` tool).
+    #[serde(default)]
+    pub attached: Vec<crate::store::Attached>,
 }
 
 impl ChatRecord {

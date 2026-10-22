@@ -46,6 +46,8 @@ pub enum ChatEvent {
     Limits { five: Option<RateLimit>, seven: Option<RateLimit> },
     /// Context tokens used and the window size.
     Context(u64, u64),
+    /// A turn ended (the prompt-cache timer starts from here).
+    Turn,
     /// The message box now holds this (not sent).
     Draft(String),
     /// The user tied the (still empty) chat to a project, or untied it: a new conversation in this folder.
@@ -57,8 +59,6 @@ const PROJECT_PICKER: usize = usize::MAX;
 
 /// What a normal start says. It is not shown: the chat is usable at once and the agent starts behind it.
 const START: &str = "Starting Claude…";
-/// What the "Start coding" button sends: the chat's instructions (see `acp::handoff_prompt`) say what to do with it.
-const START_CODING: &str = "Start coding: write the implementation brief for a Claude Code session (under 2,000 characters, self-contained) and call start_code_session with it.";
 
 /// An image waiting to be sent with the next message.
 struct Attachment {
@@ -567,7 +567,7 @@ Write the summary.")).unwrap_or_else(|_| {
                     "cwd": self.cwd,
                     "mcpServers": crate::mcp::chat_servers(&self.id),
                     "systemPrompt": {"mode": "append", "content": [{"type": "text", "text": format!("{}\n\n{}", super::ui::PROMPT, super::acp::handoff_prompt(&self.id, self.tied()))}]},
-                    "_meta": {"claudeCode": {"options": super::acp::session_options()}},
+                    "_meta": {"claudeCode": {"options": super::acp::session_options(&self.id)}},
                 });
                 let method = if let Some(sid) = self.resume.clone() {
                     params["sessionId"] = sid.into();
@@ -612,6 +612,7 @@ Write the summary.")).unwrap_or_else(|_| {
             }
             (Pending::Prompt, result) => {
                 self.inflight = self.inflight.saturating_sub(1);
+                cx.emit(ChatEvent::Turn);
                 if let Err(e) = result {
                     self.notice(e, true);
                 }
@@ -885,11 +886,7 @@ impl Render for ChatView {
         if self.follow {
             self.scroll.scroll_to_bottom();
         }
-        let body: AnyElement = match self.phase.clone() {
-            Phase::Ready => self.render_chat(window, cx),
-            Phase::Working(_) => self.render_chat(window, cx),
-            other => self.render_state(other, cx),
-        };
+        let body = self.render_chat(window, cx);
         div()
             .id("chat")
             .key_context("Chat")
@@ -956,6 +953,8 @@ impl ChatView {
             );
         }
         let last = self.items.len().saturating_sub(1);
+        // A failed start replaces the conversation, not the message box: the box stays where it was.
+        let state = (!matches!(self.phase, Phase::Ready | Phase::Working(_))).then(|| self.render_state(self.phase.clone(), cx));
         for (i, item) in self.items.iter().enumerate() {
             if let Some(el) = self.render_item(i, item, i == last && busy, cx) {
                 col = col.child(el);
@@ -1036,7 +1035,8 @@ impl ChatView {
             footer = footer.child(list);
         }
 
-        let mut chips = div().flex().items_center().gap(px(4.0));
+        // Fixed height, so the row does not jump when the model and effort chips arrive.
+        let mut chips = div().flex().items_center().gap(px(4.0)).min_h(px(26.0));
         let (tied, can_pick) = (self.tied(), self.can_retie() && !self.projects.is_empty());
         {
             let name = if tied {
@@ -1091,24 +1091,6 @@ impl ChatView {
                     .on_mouse_down(MouseButton::Left, cx.listener(move |v, ev: &MouseDownEvent, _, cx| {
                         v.picker = Some((i, ev.position));
                         cx.notify();
-                    })),
-            );
-        }
-        // Hand the conversation to a Code session: the model writes the brief and Claudiu asks before starting it.
-        if !busy && self.session_id.is_some() && !self.items.is_empty() {
-            chips = chips.child(
-                div()
-                    .id("chat-start-coding")
-                    .px(px(8.0))
-                    .py(px(3.0))
-                    .rounded(px(6.0))
-                    .text_size(px(11.5))
-                    .text_color(hsla(theme::ACCENT))
-                    .cursor_pointer()
-                    .hover(|s| s.bg(hsla(0x222222)))
-                    .child("Start coding")
-                    .on_click(cx.listener(|v, _: &ClickEvent, window, cx| {
-                        v.send(START_CODING.into(), window, cx);
                     })),
             );
         }
@@ -1177,7 +1159,10 @@ impl ChatView {
             .flex()
             .flex_col()
             // Scrolling by hand ends following; the next message resumes it if the view is back at the bottom.
-            .child(div().id("chat-scroll").flex_1().min_h_0().overflow_y_scroll().track_scroll(&self.scroll).on_scroll_wheel(cx.listener(|v, _, _, _| v.follow = false)).child(col))
+            .child(match state {
+                Some(state) => div().flex_1().min_h_0().child(state).into_any_element(),
+                None => div().id("chat-scroll").flex_1().min_h_0().overflow_y_scroll().track_scroll(&self.scroll).on_scroll_wheel(cx.listener(|v, _, _, _| v.follow = false)).child(col).into_any_element(),
+            })
             .child(footer)
             .into_any_element()
     }

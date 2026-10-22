@@ -14,6 +14,11 @@ pub struct ChatPane {
     pub account: Id,
     /// Context tokens used and the window size, for the sidebar's CONTEXT meter.
     pub context: Option<(u64, u64)>,
+    /// What the chat's mod reported (see `usage.rs`); `None` until it has.
+    pub auto_compact: Option<bool>,
+    pub advisor: Option<String>,
+    /// When the last turn ended: the prompt cache is warm for a while after it.
+    pub turn_at: Option<i64>,
     pub _sub: Subscription,
 }
 
@@ -32,7 +37,9 @@ impl Workspace {
     fn chat_launch(&self) -> Option<(Launch, Id)> {
         let claude = self.claude_exe.clone()?;
         let acct = self.store.active_account()?;
-        Some((Launch { claude, env: Self::account_env(acct) }, acct.id.clone()))
+        let mut env = Self::account_env(acct);
+        env.push((usage::ACCOUNT_ENV.into(), acct.id.clone()));
+        Some((Launch { claude, env }, acct.id.clone()))
     }
 
     /// Move every open chat to the newly active account once it is idle (same conversation, new login).
@@ -62,6 +69,7 @@ impl Workspace {
             removed: false,
             draft: String::new(),
             links: vec![],
+            attached: vec![],
         };
         let id = rec.id.clone();
         self.chat_store.add(rec);
@@ -94,7 +102,7 @@ impl Workspace {
             view.update(cx, |v, _| v.set_projects(projects));
             let sub_id = rec.id.clone();
             let sub = cx.subscribe_in(&view, window, move |ws: &mut Workspace, _view, ev: &ChatEvent, window, cx| ws.on_chat_event(&sub_id, ev, window, cx));
-            self.chats.push(ChatPane { id: rec.id, cwd, view, account, context: None, _sub: sub });
+            self.chats.push(ChatPane { id: rec.id, cwd, view, account, context: None, auto_compact: None, advisor: None, turn_at: None, _sub: sub });
         }
         self.show_session(id, window, cx);
     }
@@ -123,6 +131,11 @@ impl Workspace {
                 });
                 if let Some(p) = self.chats.iter_mut().find(|p| p.id == id) {
                     p.cwd = cwd.clone();
+                }
+            }
+            ChatEvent::Turn => {
+                if let Some(p) = self.chats.iter_mut().find(|p| p.id == id) {
+                    p.turn_at = Some(now());
                 }
             }
             ChatEvent::Context(used, size) => {

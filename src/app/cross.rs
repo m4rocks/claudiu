@@ -10,6 +10,31 @@ use serde_json::Value;
 /// travels) is limited to about 32,000 characters.
 const MAX_PROMPT: usize = 2000;
 
+/// `2026-10-22 09:10 UTC` for a Unix time (days since 1970 turned into a calendar date, no time crate needed).
+fn utc(ts: i64) -> String {
+    let (days, secs) = (ts.div_euclid(86_400), ts.rem_euclid(86_400));
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!("{year:04}-{month:02}-{day:02} {:02}:{:02} UTC", secs / 3600, secs % 3600 / 60)
+}
+
+/// What the model reads to tell how old a session is: when it was created and last updated, and how long ago.
+fn stamps(created: i64, updated: i64) -> String {
+    let now = crate::store::now();
+    let old = |t: i64| match crate::widgets::ago(t, now).as_str() {
+        "now" => "just now".to_string(),
+        a => format!("{a} ago"),
+    };
+    format!("created {} ({}) · updated {} ({})", utc(created), old(created), utc(updated), old(updated))
+}
+
 /// Answer a request, unless the asker has given up already: nobody would read it and the file would linger.
 fn answer(req: &Request, ok: bool, text: impl Into<String>) {
     if req.deadline > crate::store::now() {
@@ -164,7 +189,7 @@ impl Workspace {
                             "no project".into()
                         };
                         let state = if self.chat_pane(&r.id).is_some() { "open" } else { "closed" };
-                        format!("- id {} · {} · {project} · {state}{}", r.id, r.title, if req.from == format!("chat:{}", r.id) { " · this chat" } else { "" })
+                        format!("- id {} · {} · {project} · {state} · {}{}", r.id, r.title, stamps(r.created_at, r.last_active), if req.from == format!("chat:{}", r.id) { " · this chat" } else { "" })
                     })
                     .collect();
                 Ok(if lines.is_empty() { "No chats.".into() } else { lines.join("\n") })
@@ -175,7 +200,7 @@ impl Workspace {
                     return Err(format!("The chat “{}” is not open in Claudiu, so its messages can't be read. Ask the user to open it.", rec.title));
                 };
                 let text = pane.view.read(cx).transcript(count("messages", 30, 200));
-                Ok(format!("Chat “{}”, latest messages:\n\n{}", rec.title, if text.is_empty() { "(no messages yet)" } else { &text }))
+                Ok(format!("Chat “{}” ({}), latest messages:\n\n{}", rec.title, stamps(rec.created_at, rec.last_active), if text.is_empty() { "(no messages yet)" } else { &text }))
             }
             "list_code_sessions" => {
                 let mut sessions: Vec<&SessionRecord> = self.store.data.sessions.iter().filter(|s| s.kind == SessionKind::Claude && !s.hidden).collect();
@@ -187,7 +212,7 @@ impl Workspace {
                         let project = self.store.project_for_cwd(&s.cwd).and_then(|p| self.store.project(&p)).map_or_else(|| s.cwd.to_string_lossy().into_owned(), |p| p.name.clone());
                         let state = if self.is_running(&s.id, cx) { "running" } else { "ended" };
                         let me = req.from == format!("code:{}", s.id);
-                        format!("- id {} · {} · {project} · {state}{}", s.id, s.display_title(), if me { " · this session" } else { "" })
+                        format!("- id {} · {} · {project} · {state} · {}{}", s.id, s.display_title(), stamps(s.created_at, s.last_active), if me { " · this session" } else { "" })
                     })
                     .collect();
                 Ok(if lines.is_empty() { "No Claude Code sessions.".into() } else { lines.join("\n") })
@@ -200,7 +225,7 @@ impl Workspace {
                     let project = if is_tied(&r.cwd) { project_of(&r.cwd) } else { None };
                     let hay = format!("{} {}", r.title, project.clone().unwrap_or_default()).to_lowercase();
                     if words.iter().all(|w| hay.contains(w)) {
-                        found.push((r.last_active, format!("- chat id {} · {} · {}{}", r.id, r.title, project.unwrap_or_else(|| "no project".into()), if req.from == format!("chat:{}", r.id) { " · this chat" } else { "" })));
+                        found.push((r.last_active, format!("- chat id {} · {} · {} · {}{}", r.id, r.title, project.unwrap_or_else(|| "no project".into()), stamps(r.created_at, r.last_active), if req.from == format!("chat:{}", r.id) { " · this chat" } else { "" })));
                     }
                 }
                 for s in self.store.data.sessions.iter().filter(|s| s.kind == SessionKind::Claude && !s.hidden) {
@@ -208,7 +233,7 @@ impl Workspace {
                     let hay = format!("{} {} {}", s.display_title(), project.clone().unwrap_or_default(), s.cwd.to_string_lossy()).to_lowercase();
                     if words.iter().all(|w| hay.contains(w)) {
                         let me = req.from == format!("code:{}", s.id);
-                        found.push((s.last_active, format!("- code session id {} · {} · {}{}", s.id, s.display_title(), project.unwrap_or_else(|| s.cwd.to_string_lossy().into_owned()), if me { " · this session" } else { "" })));
+                        found.push((s.last_active, format!("- code session id {} · {} · {} · {}{}", s.id, s.display_title(), project.unwrap_or_else(|| s.cwd.to_string_lossy().into_owned()), stamps(s.created_at, s.last_active), if me { " · this session" } else { "" })));
                     }
                 }
                 found.sort_by_key(|(t, _)| std::cmp::Reverse(*t));
@@ -219,7 +244,7 @@ impl Workspace {
                 let rec = self.store.session(&id).filter(|s| s.kind == SessionKind::Claude).ok_or("No session with that id.")?;
                 let view = self.live_view(&id).filter(|v| v.read(cx).is_running()).ok_or_else(|| format!("The session “{}” has ended; only running sessions can be read.", rec.display_title()))?;
                 let text = view.read(cx).tail_text(count("lines", 120, 400));
-                Ok(format!("Session “{}”, latest terminal output:\n\n{text}", rec.display_title()))
+                Ok(format!("Session “{}” ({}), latest terminal output:\n\n{text}", rec.display_title(), stamps(rec.created_at, rec.last_active)))
             }
             "start_code_session" => {
                 let cwd = folder.ok_or("No folder.")?;
@@ -243,5 +268,17 @@ impl Workspace {
             }
             other => Err(format!("unknown tool {other}")),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unix_times_become_utc_dates() {
+        assert_eq!(utc(0), "1970-01-01 00:00 UTC");
+        assert_eq!(utc(1_782_119_400), "2026-06-22 09:10 UTC");
+        assert_eq!(utc(951_782_400 + 3600), "2000-02-29 01:00 UTC");
     }
 }
