@@ -112,7 +112,7 @@ mod tests {
         assert_eq!((got[0].0.as_str(), got[0].1.title.as_str(), got[0].1.done), ("one", "T", false));
         assert!(read_changed(tmp.path(), &mut seen).is_empty(), "unchanged");
 
-        std::fs::write(tmp.path().join("one.json"), r##"{"call":"t1","title":"T","content":"# AB","done":true}"##).unwrap();
+        std::fs::write(tmp.path().join("one.json"), r##"{"call":"t1","title":"T","content":"# A longer one","done":true}"##).unwrap();
         std::fs::write(tmp.path().join("bad.json"), r#"{"call":"t2","content":"ok","done":true}"#).unwrap();
         let mut got = read_changed(tmp.path(), &mut seen);
         got.sort_by(|a, b| a.0.cmp(&b.0));
