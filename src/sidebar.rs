@@ -301,7 +301,7 @@ impl Workspace {
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .text_ellipsis()
-                    .text_size(px(13.0))
+                    .text_size(crate::scale::px(13.0))
                     .text_color(hsla(if row.dim { theme::TEXT_DIM } else { theme::TEXT }))
                     .child(row.title),
             )
@@ -312,7 +312,7 @@ impl Workspace {
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .text_ellipsis()
-                    .text_size(px(11.0))
+                    .text_size(crate::scale::px(11.0))
                     .text_color(hsla(if row.stale { theme::WARN } else { theme::TEXT_FAINT }))
                     .child(if row.archived { "archived".to_string() } else if row.stale { "stale".to_string() } else { row.right }),
             )
@@ -387,7 +387,7 @@ impl Workspace {
         body = body.child(self.section_header("RUNNING", Some(running.len().to_string()), None::<Stateful<Div>>));
         if running.is_empty() {
             let text = if searching || filter.is_some() { "Nothing running matches" } else { "Nothing running. Start a session." };
-            body = body.child(div().px(px(18.0)).py(px(6.0)).text_size(px(12.0)).text_color(hsla(theme::TEXT_FAINT)).child(text));
+            body = body.child(div().px(px(18.0)).py(px(6.0)).text_size(crate::scale::px(12.0)).text_color(hsla(theme::TEXT_FAINT)).child(text));
         }
         let ids: Vec<Id> = running.iter().map(|r| r.id.clone()).collect();
         if is_reorder(&self.prev_current, &ids) {
@@ -410,7 +410,7 @@ impl Workspace {
                 body = body.child(self.session_row(row, false, cx));
             }
         } else if searching || filter.is_some() {
-            body = body.child(div().px(px(18.0)).py(px(6.0)).text_size(px(12.0)).text_color(hsla(theme::TEXT_FAINT)).child("No sessions match"));
+            body = body.child(div().px(px(18.0)).py(px(6.0)).text_size(crate::scale::px(12.0)).text_color(hsla(theme::TEXT_FAINT)).child("No sessions match"));
         }
         if !older.is_empty() {
             let open = self.store.data.layout.older_open;
@@ -425,7 +425,7 @@ impl Workspace {
                     .cursor_pointer()
                     .child(div().text_color(hsla(theme::TEXT_FAINT)).child(icon(if open { IconName::ChevronDown } else { IconName::ChevronRight }, 12.0)))
                     .child(section_label("OLDER"))
-                    .child(div().text_size(px(10.5)).text_color(hsla(theme::TEXT_FAINT)).child(older.len().to_string()))
+                    .child(div().text_size(crate::scale::px(10.5)).text_color(hsla(theme::TEXT_FAINT)).child(older.len().to_string()))
                     .on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::ToggleOlder, window, cx))),
             );
             if open {
@@ -464,7 +464,7 @@ impl Workspace {
             .bg(hsla(0x141414))
             .cursor_pointer()
             .hover(|s| s.bg(hsla(0x1b1b1b)))
-            .text_size(px(12.0))
+            .text_size(crate::scale::px(12.0))
             .text_color(hsla(if current.is_some() { theme::TEXT } else { theme::TEXT_DIM }))
             .child(icon(IconName::FolderOpen, 13.0))
             .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(name))
@@ -572,7 +572,7 @@ impl Workspace {
                     .gap(px(10.0))
                     .px(px(4.0))
                     .child(clawd(24.0))
-                    .child(div().flex_1().text_size(px(13.0)).font_weight(FontWeight::BOLD).text_color(hsla(theme::TEXT)).child("CLAUDIU"))
+                    .child(div().flex_1().text_size(crate::scale::px(13.0)).font_weight(FontWeight::BOLD).text_color(hsla(theme::TEXT)).child("CLAUDIU"))
                     .child(icon_button("settings", IconName::Settings).occlude().on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::OpenSettings, window, cx)))),
             )
             .child(
@@ -600,7 +600,7 @@ impl Workspace {
                 div().occlude().child(
                     Input::new(&self.search_input)
                         .h(px(28.0))
-                        .text_size(px(12.5))
+                        .text_size(crate::scale::px(12.5))
                         .prefix(div().text_color(hsla(theme::TEXT_FAINT)).child(icon(IconName::Search, 14.0))),
                 ),
             )
@@ -620,7 +620,7 @@ impl Workspace {
                     .items_center()
                     .gap(px(6.0))
                     .child(section_label(label.to_string()))
-                    .when_some(count, |d, c| d.child(div().text_size(px(10.5)).text_color(hsla(theme::TEXT_FAINT)).child(c))),
+                    .when_some(count, |d, c| d.child(div().text_size(crate::scale::px(10.5)).text_color(hsla(theme::TEXT_FAINT)).child(c))),
             )
             .when_some(trailing, |d, t| d.child(t))
     }
@@ -680,8 +680,8 @@ impl Workspace {
                 }),
             )
             .child(avatar(&name, 18.0))
-            .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(12.5)).text_color(hsla(theme::TEXT)).child(name))
-            .child(div().flex_none().text_size(px(10.5)).text_color(hsla(theme::TEXT_FAINT)).child(plan))
+            .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(crate::scale::px(12.5)).text_color(hsla(theme::TEXT)).child(name))
+            .child(div().flex_none().text_size(crate::scale::px(10.5)).text_color(hsla(theme::TEXT_FAINT)).child(plan))
             .child(div().flex_none().text_color(hsla(theme::TEXT_FAINT)).child(icon(IconName::ChevronDown, 12.0)))
     }
 

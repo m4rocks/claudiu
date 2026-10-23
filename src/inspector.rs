@@ -61,7 +61,7 @@ impl Workspace {
                                         cx.notify();
                                     })),
                             )
-                            .child(div().text_size(px(12.5)).font_weight(FontWeight::MEDIUM).child(format!("GitHub · {project}"))),
+                            .child(div().text_size(crate::scale::px(12.5)).font_weight(FontWeight::MEDIUM).child(format!("GitHub · {project}"))),
                     )
                     .child(div().flex_1().min_h_0().child(view))
                     .into_any_element()
@@ -116,7 +116,7 @@ impl Workspace {
             .border_b_1()
             .border_color(hsla(theme::BORDER))
             .child(icon_button("visual-back", IconName::ArrowLeft).on_click(cx.listener(|ws, _: &ClickEvent, _w, cx| ws.hide_visual(false, cx))))
-            .child(div().flex_1().text_size(px(12.5)).font_weight(FontWeight::MEDIUM).child(format!("Visual · {}", cards.len())))
+            .child(div().flex_1().text_size(crate::scale::px(12.5)).font_weight(FontWeight::MEDIUM).child(format!("Visual · {}", cards.len())))
             .child(icon_button("visual-clear", IconName::X).on_click(cx.listener(|ws, _: &ClickEvent, _w, cx| ws.hide_visual(true, cx))));
         let mut list = div().flex().flex_col().w_full();
         for (n, card) in cards.iter().enumerate() {
@@ -125,14 +125,14 @@ impl Workspace {
                 one = one.border_t_1().border_color(hsla(theme::BORDER));
             }
             if !card.title.is_empty() || !card.done {
-                let mut head = div().flex().items_center().gap(px(8.0)).text_size(px(12.5));
+                let mut head = div().flex().items_center().gap(px(8.0)).text_size(crate::scale::px(12.5));
                 head = head.child(div().flex_1().min_w_0().font_weight(FontWeight::MEDIUM).child(card.title.clone()));
                 if !card.done {
                     head = head.child(div().flex_none().text_color(hsla(theme::TEXT_FAINT)).child("drawing…"));
                 }
                 one = one.child(head);
             }
-            one = one.child(div().text_size(px(13.0)).child(crate::visual::ui::markdown(format!("visual-{}", card.call), &card.content)));
+            one = one.child(div().text_size(crate::scale::px(13.0)).child(crate::visual::ui::markdown(format!("visual-{}", card.call), &card.content)));
             list = list.child(one);
         }
         div().flex().flex_col().size_full().child(header).child(self.visual_scroll.wire(div().id("visual-scroll").flex_1().min_h_0(), window).child(list))
@@ -372,7 +372,7 @@ fn base_row(id: impl Into<SharedString>, glyph: IconName, label: impl Into<Share
         .items_center()
         .gap(px(10.0))
         .rounded(px(6.0))
-        .text_size(px(12.5))
+        .text_size(crate::scale::px(12.5))
         .child(div().flex_none().text_color(hsla(theme::TEXT_DIM)).child(icon(glyph, 14.0)))
         .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(label.into()))
 }
@@ -420,7 +420,7 @@ fn pick_row(cx: &mut Context<Workspace>, id: &'static str, label: &str, value: S
         .rounded(px(5.0))
         .cursor_pointer()
         .hover(|s| s.bg(hsla(theme::ROW_HOVER)))
-        .text_size(px(12.0))
+        .text_size(crate::scale::px(12.0))
         .child(div().flex_none().text_color(hsla(theme::TEXT_DIM)).child(label.to_string()))
         .child(
             div()
@@ -441,7 +441,7 @@ fn kv(label: &str, value: String) -> Div {
         .justify_between()
         .gap(px(10.0))
         .h(px(22.0))
-        .text_size(px(12.0))
+        .text_size(crate::scale::px(12.0))
         .child(div().flex_none().text_color(hsla(theme::TEXT_DIM)).child(label.to_string()))
         .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(value))
 }

@@ -16,6 +16,7 @@ mod inspector;
 mod keys;
 mod mcp;
 mod platform;
+mod scale;
 mod sidebar;
 mod skeleton;
 mod store;
@@ -194,6 +195,7 @@ fn main() {
         cx.bind_keys([
             KeyBinding::new("secondary-shift-n", NewClaude, None),
             KeyBinding::new("secondary-shift-t", ToggleShell, None),
+            KeyBinding::new("secondary-j", ToggleShell, None),
             KeyBinding::new("secondary-shift-w", CloseSession, None),
             KeyBinding::new("secondary-shift-b", ToggleSidebar, None),
             KeyBinding::new("secondary-shift-r", ToggleRight, None),

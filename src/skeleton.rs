@@ -398,7 +398,7 @@ pub fn overlay(draft: &Draft, preview: Option<&str>, elapsed: Duration, phase: &
                 .justify_end()
                 .overflow_hidden()
                 .font_family(FONT)
-                .text_size(px(14.0))
+                .text_size(crate::scale::px(14.0))
                 .line_height(px(lh))
                 // Where the session left off, faint, until the real screen replaces it.
                 .when_some(preview, |d, text| {

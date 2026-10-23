@@ -376,7 +376,7 @@ Possible future integrations:
 
 The main area shows one session at a time. There are **no splits** (product owner decision: they were cumbersome).
 
-Each Claude session can show a **shell under its terminal**, toggled with Ctrl+Shift+T (Cmd+Shift+T on macOS), the top bar's terminal button or the session's right-click menu. Ctrl+Shift+] moves the keyboard between Claude and the shell.
+Each Claude session can show a **shell under its terminal**, toggled with Ctrl+Shift+T or Ctrl+J (Cmd+Shift+T or Cmd+J on macOS; Ctrl+J therefore no longer reaches Claude Code on Windows, Shift+Enter still breaks a line), the top bar's terminal button or the session's right-click menu. Ctrl+Shift+] moves the keyboard between Claude and the shell.
 
 ```text
 ┌────────────────────────────────────────────────┐
@@ -390,6 +390,8 @@ Each Claude session can show a **shell under its terminal**, toggled with Ctrl+S
 - The shell is started the first time it is shown, in the session's folder, with the user's shell. It is a separate PTY, never listed in the sidebar and never persisted.
 - It keeps running while another session is shown, remembers its height for as long as the session lives, and ends with the session (closing it, or the session leaving the running list). If the shell itself exits, the panel closes and the next toggle starts a fresh one.
 - The shell is not a special Claude integration; it is a plain terminal.
+
+**Scale (product owner decision):** Settings has a Scale (80–160 %, `settings.scale`, `scale.rs`). GPUI has no global zoom, so it multiplies every `text_size` (through `crate::scale::px`) and the terminal font; paddings, row heights and gpui-kit widgets keep their size.
 
 # Right sidebar
 

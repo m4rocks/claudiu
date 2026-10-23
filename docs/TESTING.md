@@ -49,7 +49,7 @@ Everything below needs eyes and a keyboard. Roughly ordered by risk. `[ ]` = not
 
 ## 6. Shell panel, right sidebar and layout
 - [ ] There are no splits: no split button in the top bar, no "Add to split" in any menu, no Ctrl+Shift+D.
-- [ ] Ctrl+Shift+T (or the top-bar terminal button, or the row menu's "Show or hide shell") opens a shell under the Claude terminal, in the session's folder. Type in both; Ctrl+Shift+] moves the keyboard between them. Toggling again hides it, and the next toggle brings back the same shell with its history.
+- [ ] Ctrl+Shift+T or Ctrl+J (or the top-bar terminal button, or the row menu's "Show or hide shell") opens a shell under the Claude terminal, in the session's folder. Type in both; Ctrl+Shift+] moves the keyboard between them. Toggling again hides it, and the next toggle brings back the same shell with its history.
 - [ ] Drag the divider above the shell: it resizes, never below ~120 px and never past the window. Resize the window: both terminals re-wrap correctly. Switch to another session and back: the shell is still there at the same height.
 - [ ] Ending the Claude session ends its shell. Exiting the shell (`exit`) closes the panel; the next toggle starts a fresh one.
 - [ ] The right sidebar is on at first, under the top bar (window buttons stay top right). The top bar only has the sidebar toggle, title, folder, branch chip and the right-sidebar toggle; Ctrl+Shift+R and the toggle hide and show it, and the choice survives a restart.

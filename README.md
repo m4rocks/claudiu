@@ -21,7 +21,7 @@ There's no API key and no login in Claudiu. Authentication stays with Claude Cod
 - **Projects.** Git-aware, with branch and linked worktrees. Add one with the button, by dropping a folder on the window, or with `claudiu <folder>`.
 - **History.** Ended Claude sessions stay in the sidebar, and a click resumes one through `claude --resume`.
 - **Import on startup.** Your existing Claude Code sessions are found and merged in (read-only, no duplicates).
-- **Shell panel.** Each Claude session can show its own shell under its terminal (Ctrl+Shift+T). It starts in the session's folder and ends with the session.
+- **Shell panel.** Each Claude session can show its own shell under its terminal (Ctrl+Shift+T or Ctrl+J). It starts in the session's folder and ends with the session.
 - **Right sidebar.** The actions for the shown session (open in your editor, open folder, Commit & Push, Pull, shell), its status (context, prompt cache, auto-compact, advisor), the issues and pull requests Claude attached to it, the sessions linked with it, what the model drew for it in the **Visual** panel, and a GitHub view. Auto-compact and the advisor model can be changed from its status rows. Ctrl+Shift+R shows or hides it. Drag the edge of either sidebar to resize it; the widths are remembered.
 - **Usage meters.** Context per session, plus 5-hour and 7-day account limits. See [Usage meters](#usage-meters) for the catch.
 - **Git buttons.** Commit & Push (Haiku writes the message through the running session itself, no extra `claude` process) and Pull. Branch management too.
@@ -37,7 +37,7 @@ Claudiu's own shortcuts use Ctrl+Shift (Cmd+Shift on macOS), so plain Ctrl and A
 | Shortcut | Action |
 |---|---|
 | Ctrl+Shift+N | New Claude session, in the active session's folder |
-| Ctrl+Shift+T | Show or hide the session's shell |
+| Ctrl+Shift+T / Ctrl+J | Show or hide the session's shell |
 | Ctrl+Shift+W | End the focused session (no confirmation) |
 | Ctrl+Tab / Ctrl+Shift+Tab | Next / previous running session |
 | Ctrl+Shift+] | Move the keyboard between Claude and its shell |

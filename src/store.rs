@@ -238,6 +238,9 @@ pub struct Settings {
     /// Editor the "Open in" button uses; the last one picked.
     #[serde(default)]
     pub editor: Option<crate::platform::Editor>,
+    /// UI scale in percent (text and terminal font); 100 when unset.
+    #[serde(default)]
+    pub scale: Option<u32>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

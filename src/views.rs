@@ -63,12 +63,12 @@ impl Workspace {
                             .overflow_hidden()
                             .whitespace_nowrap()
                             .text_ellipsis()
-                            .text_size(px(13.0))
+                            .text_size(crate::scale::px(13.0))
                             .font_weight(FontWeight::MEDIUM)
                             .child(title),
                     )
                     .when_some(cwd, |d, p| {
-                        d.child(div().flex_none().text_size(px(11.5)).text_color(hsla(theme::TEXT_FAINT)).child(short_path(&p)))
+                        d.child(div().flex_none().text_size(crate::scale::px(11.5)).text_color(hsla(theme::TEXT_FAINT)).child(short_path(&p)))
                     })
                     .when_some(branch.zip(repo), |d, (b, repo)| {
                         // Click: switch branch or create one (see Workspace::open_branch_menu).
@@ -85,7 +85,7 @@ impl Workspace {
                                 .py(px(1.0))
                                 .rounded(px(10.0))
                                 .bg(hsla(0x1a1a1a))
-                                .text_size(px(11.0))
+                                .text_size(crate::scale::px(11.0))
                                 .text_color(hsla(theme::TEXT_DIM))
                                 .cursor_pointer()
                                 .hover(|s| s.bg(hsla(0x262626)).text_color(hsla(theme::TEXT)))
@@ -124,7 +124,7 @@ impl Workspace {
                 .bg(hsla(0x1d1512))
                 .border_b_1()
                 .border_color(hsla(0x3a2a24))
-                .child(div().text_size(px(12.0)).text_color(hsla(theme::ACCENT)).child(text))
+                .child(div().text_size(crate::scale::px(12.0)).text_color(hsla(theme::ACCENT)).child(text))
                 .when_some(action, |d, (label, act)| {
                     d.child(button("update-action", label, true).h(px(22.0)).on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
                         ws.act(act.clone(), window, cx)
@@ -164,7 +164,7 @@ impl Workspace {
                 .bg(hsla(0x181818))
                 .border_1()
                 .border_color(hsla(0x2a2a2a))
-                .child(div().text_size(px(12.5)).text_color(hsla(theme::TEXT_DIM)).child(label))
+                .child(div().text_size(crate::scale::px(12.5)).text_color(hsla(theme::TEXT_DIM)).child(label))
                 .children(is_claude.then(|| {
                     button("ended-act", "Resume", true).on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::Resume(rid.clone()), window, cx)))
                 }))
@@ -223,8 +223,8 @@ impl Workspace {
                 .flex()
                 .justify_between()
                 .gap(px(28.0))
-                .child(div().text_size(px(12.0)).text_color(hsla(theme::TEXT_DIM)).child(what.to_string()))
-                .child(div().text_size(px(12.0)).text_color(hsla(theme::TEXT_FAINT)).child(keys.to_string()))
+                .child(div().text_size(crate::scale::px(12.0)).text_color(hsla(theme::TEXT_DIM)).child(what.to_string()))
+                .child(div().text_size(crate::scale::px(12.0)).text_color(hsla(theme::TEXT_FAINT)).child(keys.to_string()))
         };
         let mut recent = div().flex().flex_col().gap(px(2.0)).mt(px(26.0)).w(px(420.0));
         // Newest first: (id, title, last active).
@@ -252,8 +252,8 @@ impl Workspace {
                     .rounded(px(6.0))
                     .cursor_pointer()
                     .hover(|st| st.bg(hsla(theme::ROW_HOVER)))
-                    .child(div().text_size(px(13.0)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(title))
-                    .child(div().text_size(px(11.5)).text_color(hsla(theme::TEXT_FAINT)).child(ago(last_active, t)))
+                    .child(div().text_size(crate::scale::px(13.0)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(title))
+                    .child(div().text_size(crate::scale::px(11.5)).text_color(hsla(theme::TEXT_FAINT)).child(ago(last_active, t)))
                     .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::Select(id.clone()), window, cx))),
             );
         }
@@ -264,8 +264,8 @@ impl Workspace {
             .items_center()
             .justify_center()
             .child(clawd(72.0))
-            .child(div().mt(px(20.0)).text_size(px(22.0)).font_weight(FontWeight::SEMIBOLD).child("Claudiu"))
-            .child(div().mt(px(4.0)).text_size(px(13.0)).text_color(hsla(theme::TEXT_DIM)).child("A workspace for your Claude Code sessions"))
+            .child(div().mt(px(20.0)).text_size(crate::scale::px(22.0)).font_weight(FontWeight::SEMIBOLD).child("Claudiu"))
+            .child(div().mt(px(4.0)).text_size(crate::scale::px(13.0)).text_color(hsla(theme::TEXT_DIM)).child("A workspace for your Claude Code sessions"))
             .child(
                 div()
                     .mt(px(22.0))
@@ -320,11 +320,11 @@ impl Workspace {
                 .flex()
                 .items_center()
                 .rounded(px(5.0))
-                .text_size(px(12.5))
+                .text_size(crate::scale::px(12.5))
                 .text_color(hsla(color))
                 .gap(px(8.0))
                 .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(item.label.clone()))
-                .children(item.hint.clone().map(|h| div().flex_none().text_size(px(11.0)).text_color(hsla(theme::TEXT_FAINT)).child(h)));
+                .children(item.hint.clone().map(|h| div().flex_none().text_size(crate::scale::px(11.0)).text_color(hsla(theme::TEXT_FAINT)).child(h)));
             card = card.child(if item.disabled {
                 row
             } else {
@@ -359,11 +359,11 @@ impl Workspace {
         let (title, body, confirm_label, danger): (String, gpui::AnyElement, String, bool) = match modal {
             Modal::Confirm { title, body, confirm, danger, .. } => (
                 title.clone(),
-                div().text_size(px(13.0)).text_color(hsla(theme::TEXT_DIM)).child(body.clone()).into_any_element(),
+                div().text_size(crate::scale::px(13.0)).text_color(hsla(theme::TEXT_DIM)).child(body.clone()).into_any_element(),
                 confirm.clone(),
                 *danger,
             ),
-            Modal::Settings { shell, claude, updates } => {
+            Modal::Settings { shell, claude, updates, scale } => {
                 let toggle = |on: bool| if on { "On" } else { "Off" };
                 (
                     "Settings".into(),
@@ -373,6 +373,29 @@ impl Workspace {
                         .gap(px(10.0))
                         .child(div().flex().flex_col().gap(px(4.0)).child(section_label("SHELL".to_string())).child(Input::new(shell)))
                         .child(div().flex().flex_col().gap(px(4.0)).child(section_label("CLAUDE CODE PATH".to_string())).child(Input::new(claude)))
+                        .child(
+                            div()
+                                .h(px(32.0))
+                                .px(px(10.0))
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .rounded(px(6.0))
+                                .bg(hsla(0x111111))
+                                .border_1()
+                                .border_color(hsla(0x242424))
+                                .text_size(px(13.0))
+                                .child("Scale (text and terminal)")
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(10.0))
+                                        .child(scale_step("scale-down", "−", -(crate::scale::STEP as i32), cx))
+                                        .child(div().w(px(40.0)).flex().justify_center().child(format!("{scale}%")))
+                                        .child(scale_step("scale-up", "+", crate::scale::STEP as i32, cx)),
+                                ),
+                        )
                         .child(
                             div()
                                 .id("settings-updates")
@@ -385,7 +408,7 @@ impl Workspace {
                                 .bg(hsla(0x111111))
                                 .border_1()
                                 .border_color(hsla(0x242424))
-                                .text_size(px(13.0))
+                                .text_size(crate::scale::px(13.0))
                                 .cursor_pointer()
                                 .child("Check for updates")
                                 .child(div().text_color(hsla(if *updates { theme::ACCENT } else { theme::TEXT_FAINT })).child(toggle(*updates)))
@@ -407,7 +430,7 @@ impl Workspace {
                     .flex()
                     .flex_col()
                     .gap(px(8.0))
-                    .child(div().text_size(px(12.0)).text_color(hsla(theme::TEXT_DIM)).child("A model alias or id, such as opus, sonnet or claude-opus-5-5, or “off”. Claude Code saves it as your default."))
+                    .child(div().text_size(crate::scale::px(12.0)).text_color(hsla(theme::TEXT_DIM)).child("A model alias or id, such as opus, sonnet or claude-opus-5-5, or “off”. Claude Code saves it as your default."))
                     .child(Input::new(input))
                     .into_any_element(),
                 "Set".into(),
@@ -442,7 +465,7 @@ impl Workspace {
                     _ => {}
                 }
             }))
-            .child(div().text_size(px(15.0)).font_weight(FontWeight::SEMIBOLD).child(title))
+            .child(div().text_size(crate::scale::px(15.0)).font_weight(FontWeight::SEMIBOLD).child(title))
             .child(body)
             .child(
                 div()
@@ -502,7 +525,7 @@ impl Workspace {
                         .bg(hsla(0x1a1a1a))
                         .border_1()
                         .border_color(hsla(if t.error { 0x5a2327 } else { 0x2c2c2c }))
-                        .text_size(px(12.5))
+                        .text_size(crate::scale::px(12.5))
                         .text_color(hsla(if t.error { theme::DANGER } else { theme::TEXT }))
                         .child(t.text.clone())
                         .children(action),
@@ -644,4 +667,16 @@ impl Render for Workspace {
             .children(modal)
             .children(toast)
     }
+}
+
+/// A − / + button in the Settings modal that moves the scale by `by` percent, within the allowed range.
+fn scale_step(id: &'static str, label: &'static str, by: i32, cx: &mut Context<Workspace>) -> impl IntoElement {
+    div().id(id).w(px(22.0)).h(px(22.0)).flex().items_center().justify_center().rounded(px(4.0)).cursor_pointer().hover(|s| s.bg(hsla(0x242424))).child(label).on_click(
+        cx.listener(move |ws, _: &ClickEvent, _w, cx| {
+            if let Some(Modal::Settings { scale, .. }) = ws.modal.as_mut() {
+                *scale = (*scale as i32 + by).clamp(crate::scale::MIN as i32, crate::scale::MAX as i32) as u32;
+            }
+            cx.notify();
+        }),
+    )
 }

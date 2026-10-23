@@ -1058,7 +1058,7 @@ impl Element for TerminalElement {
     ) -> Prepaint {
         let (family, font_size, focused, marked) = {
             let v = self.view.read(cx);
-            (v.font_family, v.font_size, v.focus.is_focused(window), v.marked.clone())
+            (v.font_family, crate::scale::px(f32::from(v.font_size)), v.focus.is_focused(window), v.marked.clone())
         };
         let base_font: Font = gpui::font(family);
         let font_id = window.text_system().resolve_font(&base_font);

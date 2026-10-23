@@ -163,6 +163,7 @@ pub enum Modal {
         shell: Entity<InputState>,
         claude: Entity<InputState>,
         updates: bool,
+        scale: u32,
     },
 }
 
@@ -324,6 +325,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Self {
         let store = Store::load(Store::default_path());
+        crate::scale::set(store.data.settings.scale.unwrap_or(100));
         let claude_exe = claude::discover(store.data.settings.claude_path.as_deref());
         let search_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Search sessions and projects").clean_on_escape());
@@ -1278,7 +1280,7 @@ impl Workspace {
                 let claude_hint = self.claude_exe.as_ref().map_or("not found".to_string(), |p| p.to_string_lossy().into_owned());
                 let claude = self.modal_input(&claude_t, &claude_hint, window, cx);
                 let shell = self.modal_input(&shell_t, &platform::default_shell(None).0, window, cx);
-                self.modal = Some(Modal::Settings { shell, claude, updates });
+                self.modal = Some(Modal::Settings { shell, claude, updates, scale: crate::scale::percent() });
             }
             Act::NewBranch(cwd) => {
                 let input = self.modal_input("", "", window, cx);
@@ -1580,7 +1582,7 @@ impl Workspace {
                 let name = input.read(cx).value().split_whitespace().collect::<Vec<_>>().join("-");
                 if name.is_empty() { Act::Dismiss } else { Act::CreateBranch(cwd, name) }
             }
-            Some(Modal::Settings { shell, claude, updates }) => {
+            Some(Modal::Settings { shell, claude, updates, scale }) => {
                 let clean = |s: &str| s.trim().trim_matches('"').to_string();
                 let (shell_t, claude_t) = (clean(shell.read(cx).value().as_ref()), clean(claude.read(cx).value().as_ref()));
                 let bad = [("Shell", &shell_t), ("Claude path", &claude_t)]
@@ -1588,7 +1590,7 @@ impl Workspace {
                     .find(|(_, t)| !t.is_empty() && platform::resolve_program(t).is_none());
                 if let Some((what, t)) = bad {
                     let msg = format!("{what}: “{t}” is not a file or a program on PATH");
-                    self.modal = Some(Modal::Settings { shell, claude, updates });
+                    self.modal = Some(Modal::Settings { shell, claude, updates, scale });
                     self.toast(msg, true, cx);
                     return;
                 }
@@ -1599,6 +1601,8 @@ impl Workspace {
                 if updates == (s.update_url.as_deref() == Some("")) {
                     s.update_url = (!updates).then(String::new);
                 }
+                s.scale = (scale != 100).then_some(scale);
+                crate::scale::set(scale);
                 self.shell = platform::default_shell(s.shell.as_deref());
                 self.claude_exe = claude::discover(s.claude_path.as_deref());
                 self.store.mark_dirty();
