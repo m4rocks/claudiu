@@ -1,6 +1,6 @@
-//! Sessions reaching other sessions: a chat can open a Claude Code session or read a terminal, a terminal can
-//! open a chat or read one. The MCP helper files the request (`bridge.rs`) and Claudiu answers it on its next tick,
-//! with no dialog (product owner decision).
+//! Sessions reaching other sessions: a Claude Code session can list, search and read the others and open a new one.
+//! The MCP helper files the request (`bridge.rs`) and Claudiu answers it on its next tick, with no dialog (product
+//! owner decision).
 
 use super::*;
 use crate::bridge::{self, Request};
@@ -49,7 +49,7 @@ impl Workspace {
 
     /// The project or folder a request names; without one, the requester's own project, if it has one.
     fn requested_folder(&self, req: &Request) -> Result<Option<PathBuf>, String> {
-        let (kind, id) = req.from.split_once(':').unwrap_or(("", &req.from));
+        let id = req.from.split_once(':').map_or(req.from.as_str(), |(_, id)| id);
         if let Some(name) = req.args["folder"].as_str().map(str::trim).filter(|n| !n.is_empty()) {
             let by_name = self.store.data.projects.iter().find(|p| p.name.eq_ignore_ascii_case(name));
             let path = PathBuf::from(name);
@@ -59,16 +59,7 @@ impl Workspace {
                 _ => Err(format!("No project or folder “{name}”. Projects: {}.", self.project_names())),
             };
         }
-        let cwd = match kind {
-            "chat" => self.chat_store.get(id).map(|r| r.cwd.clone()).filter(|c| is_tied(c)),
-            _ => self.store.session(id).map(|s| s.cwd.clone()),
-        };
-        // A chat belongs to the project, not to whichever subfolder the asker happens to be in.
-        let root = |c: &PathBuf| self.store.project_for_cwd(c).and_then(|p| self.store.project(&p)).map(|p| p.path.clone());
-        Ok(match cwd {
-            Some(c) if req.tool == "start_chat" => Some(root(&c).unwrap_or(c)),
-            other => other,
-        })
+        Ok(self.store.session(id).map(|s| s.cwd.clone()))
     }
 
     /// Answer the requests that arrived since the last tick (not those whose asker has given up). One that can't
@@ -81,13 +72,13 @@ impl Workspace {
         }
     }
 
-    /// Check what starting a session or chat needs and resolve the folder into `req.args["folder"]`.
+    /// Check what starting a session needs and resolve the folder into `req.args["folder"]`.
     fn prepare(&self, req: &mut Request) -> Result<(), String> {
-        if !matches!(req.tool.as_str(), "start_code_session" | "start_chat") {
+        if req.tool != "start_code_session" {
             return Ok(());
         }
         let folder = self.requested_folder(req)?;
-        if req.tool == "start_code_session" && folder.is_none() {
+        if folder.is_none() {
             return Err(format!("Say which project or folder to open it in (the folder argument). Projects: {}.", self.project_names()));
         }
         req.args["folder"] = folder.map_or(Value::Null, |f| f.to_string_lossy().into_owned().into());
@@ -105,32 +96,6 @@ impl Workspace {
         let folder = req.args["folder"].as_str().map(PathBuf::from);
         let prompt = req.args["prompt"].as_str().map(str::trim).filter(|p| !p.is_empty()).map(String::from);
         match req.tool.as_str() {
-            "list_chats" => {
-                let mut chats: Vec<&ChatRecord> = self.chat_store.shown().filter(|r| r.title != DEFAULT_TITLE || self.chat_pane(&r.id).is_some()).collect();
-                chats.sort_by_key(|r| std::cmp::Reverse(r.last_active));
-                let lines: Vec<String> = chats
-                    .iter()
-                    .take(50)
-                    .map(|r| {
-                        let project = if is_tied(&r.cwd) {
-                            self.store.project_for_cwd(&r.cwd).and_then(|p| self.store.project(&p)).map_or_else(|| r.cwd.to_string_lossy().into_owned(), |p| p.name.clone())
-                        } else {
-                            "no project".into()
-                        };
-                        let state = if self.chat_pane(&r.id).is_some() { "open" } else { "closed" };
-                        format!("- id {} · {} · {project} · {state} · {}{}", r.id, r.title, stamps(r.created_at, r.last_active), if req.from == format!("chat:{}", r.id) { " · this chat" } else { "" })
-                    })
-                    .collect();
-                Ok(if lines.is_empty() { "No chats.".into() } else { lines.join("\n") })
-            }
-            "read_chat" => {
-                let rec = self.chat_store.get(&id).ok_or("No chat with that id.")?;
-                let Some(pane) = self.chat_pane(&id) else {
-                    return Err(format!("The chat “{}” is not open in Claudiu, so its messages can't be read. Ask the user to open it.", rec.title));
-                };
-                let text = pane.view.read(cx).transcript(count("messages", 30, 200));
-                Ok(format!("Chat “{}” ({}), latest messages:\n\n{}", rec.title, stamps(rec.created_at, rec.last_active), if text.is_empty() { "(no messages yet)" } else { &text }))
-            }
             "list_code_sessions" => {
                 let mut sessions: Vec<&SessionRecord> = self.store.data.sessions.iter().filter(|s| s.kind == SessionKind::Claude && !s.hidden).collect();
                 sessions.sort_by_key(|s| std::cmp::Reverse(s.last_active));
@@ -150,13 +115,6 @@ impl Workspace {
                 let words: Vec<String> = req.args["query"].as_str().unwrap_or_default().to_lowercase().split_whitespace().map(String::from).collect();
                 let project_of = |cwd: &std::path::Path| self.store.project_for_cwd(cwd).and_then(|p| self.store.project(&p)).map(|p| p.name.clone());
                 let mut found: Vec<(i64, String)> = vec![];
-                for r in self.chat_store.shown().filter(|r| r.title != DEFAULT_TITLE) {
-                    let project = if is_tied(&r.cwd) { project_of(&r.cwd) } else { None };
-                    let hay = format!("{} {}", r.title, project.clone().unwrap_or_default()).to_lowercase();
-                    if words.iter().all(|w| hay.contains(w)) {
-                        found.push((r.last_active, format!("- chat id {} · {} · {} · {}{}", r.id, r.title, project.unwrap_or_else(|| "no project".into()), stamps(r.created_at, r.last_active), if req.from == format!("chat:{}", r.id) { " · this chat" } else { "" })));
-                    }
-                }
                 for s in self.store.data.sessions.iter().filter(|s| s.kind == SessionKind::Claude && !s.hidden) {
                     let project = project_of(&s.cwd);
                     let hay = format!("{} {} {}", s.display_title(), project.clone().unwrap_or_default(), s.cwd.to_string_lossy()).to_lowercase();
@@ -188,15 +146,6 @@ impl Workspace {
                     .collect();
                 Ok(if lines.is_empty() { "No project matches.".into() } else { lines.join("\n") })
             }
-            "set_chat_project" => {
-                let name = req.args["project"].as_str().map(str::trim).unwrap_or_default();
-                let chat = req.from.strip_prefix("chat:").ok_or("Only a chat can be tied to a project.")?;
-                let project = self.store.data.projects.iter().find(|p| p.name.eq_ignore_ascii_case(name)).ok_or_else(|| format!("No project “{name}”. Projects: {}.", self.project_names()))?;
-                let (path, name) = (project.path.clone(), project.name.clone());
-                let pane = self.chat_pane(chat).ok_or("This chat is not open.")?;
-                pane.view.update(cx, |v, _| v.tie_after_turn(path));
-                Ok(format!("This chat will work in {name} as soon as this reply is finished."))
-            }
             "read_code_session" => {
                 let rec = self.store.session(&id).filter(|s| s.kind == SessionKind::Claude).ok_or("No session with that id.")?;
                 let view = self.live_view(&id).filter(|v| v.read(cx).is_running()).ok_or_else(|| format!("The session “{}” has ended; only running sessions can be read.", rec.display_title()))?;
@@ -217,11 +166,6 @@ impl Workspace {
                     }
                     None => Err("The session could not be started (is the `claude` CLI installed?).".into()),
                 }
-            }
-            "start_chat" => {
-                let id = self.new_chat(folder, prompt, window, cx);
-                self.link(requester_id, &id);
-                Ok(format!("Opened a new chat (id {id}) in the user's sidebar."))
             }
             other => Err(format!("unknown tool {other}")),
         }

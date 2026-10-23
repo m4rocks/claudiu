@@ -211,7 +211,7 @@ fn words(v: &str) -> Vec<&str> {
     out
 }
 
-/// `em` and `rem` are taken as 14px: the chat's text size.
+/// `em` and `rem` are taken as 14px: the panel's text size.
 fn len(v: &str) -> Option<Len> {
     let v = v.trim().to_ascii_lowercase();
     if let Some(p) = v.strip_suffix('%') {

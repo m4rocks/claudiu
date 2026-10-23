@@ -981,7 +981,6 @@ version = "0.4.0"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
- "base64 0.22.1",
  "directories",
  "dunce",
  "futures",
@@ -999,7 +998,6 @@ dependencies = [
  "time",
  "uuid",
  "velopack",
- "wait-timeout",
  "which",
  "windows-sys 0.61.2",
  "winresource",

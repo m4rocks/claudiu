@@ -73,11 +73,6 @@ impl Smooth {
         self.0.borrow().handle.clone()
     }
 
-    /// Stop a glide in progress (the view is being moved some other way).
-    pub fn cancel(&self) {
-        self.0.borrow_mut().glide = None;
-    }
-
     /// Make `el` a vertically scrolling area whose wheel notches ease. Call it while building the view, every frame.
     pub fn wire<E: InteractiveElement + StatefulInteractiveElement + Styled>(&self, el: E, window: &mut Window) -> E {
         self.step(window);

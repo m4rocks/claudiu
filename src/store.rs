@@ -75,7 +75,7 @@ pub struct ClaudeMeta {
     /// Issues and pull requests Claude attached to this session (the `attach_github` tool), oldest first.
     #[serde(default)]
     pub attached: Vec<Attached>,
-    /// Ids of the sessions and chats this one is linked with (the other side lists this one too).
+    /// Ids of the sessions this one is linked with (the other side lists this one too).
     #[serde(default)]
     pub linked: Vec<Id>,
     pub transcript: Option<PathBuf>,

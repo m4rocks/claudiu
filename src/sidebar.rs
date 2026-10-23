@@ -1,5 +1,5 @@
-//! Left sidebar: one list of Claude Code sessions and chats (running first, then recent, then older), a project
-//! filter, and the account usage meters.
+//! Left sidebar: one list of Claude Code sessions (running first, then recent, then older), a project filter, and
+//! the account usage meters.
 
 use std::time::{Duration, Instant};
 
@@ -9,7 +9,6 @@ use gpui::{
 };
 
 use gpui_kit::component::input::Input;
-use crate::chat::store::ChatRecord;
 use crate::app::{Act, Activity, MenuItem, SideDrag, Workspace};
 use crate::store::{ExternalState, Id, Project, SessionKind, SessionRecord, now};
 use crate::theme::{self, hsla};
@@ -196,7 +195,8 @@ impl Workspace {
             items.push(item("Show or hide shell", Act::ToggleShell(rec.id.clone()), false, false));
         }
         items.push(item("Rename…", Act::Rename(rec.id.clone()), false, false));
-        if rec.kind == SessionKind::Claude {
+        // The new title is written by the session's own mod, so the session has to be running.
+        if rec.kind == SessionKind::Claude && running {
             items.push(item("Regenerate title", Act::RegenTitle(rec.id.clone()), false, false));
         }
         if let Some(c) = &rec.claude {
@@ -214,10 +214,7 @@ impl Workspace {
 
     fn project_menu(&self, p: &Project) -> Vec<MenuItem> {
         let item = |label: String, act: Act, danger: bool, sep: bool| MenuItem { label, hint: None, act, danger, disabled: false, separator_before: sep };
-        let mut items = vec![
-            item("New Claude session here".into(), Act::NewClaude { cwd: p.path.clone() }, false, false),
-            item("New chat here".into(), Act::NewChat { cwd: Some(p.path.clone()) }, false, false),
-        ];
+        let mut items = vec![item("New Claude session here".into(), Act::NewClaude { cwd: p.path.clone() }, false, false)];
         if p.git.is_some() {
             items.push(item("GitHub issues & PRs".into(), Act::OpenGithub { cwd: p.path.clone() }, false, true));
         }
@@ -293,9 +290,6 @@ impl Workspace {
                         let running = ws.is_running(&menu_id, cx);
                         let items = ws.session_menu(&rec, running);
                         ws.open_menu(ev.position, items, cx);
-                    } else if ws.chat_store.get(&menu_id).is_some() {
-                        let items = ws.chat_menu(&menu_id);
-                        ws.open_menu(ev.position, items, cx);
                     }
                 }),
             )
@@ -333,8 +327,7 @@ impl Workspace {
                         })),
                 )
             })
-            // A past chat is removed from its right-click menu only: a button here sits where the end button was.
-            .when(!row.running && row.scope != "chat", |d| {
+            .when(!row.running, |d| {
                 let archive = !row.archived;
                 d.child(
                     icon_button(gpui::SharedString::from(format!("archive-{}-{archive_id}", row.scope)), if archive { IconName::Archive } else { IconName::ArchiveRestore })
@@ -348,43 +341,9 @@ impl Workspace {
             })
     }
 
-    fn chat_row(&self, r: &ChatRecord, cx: &gpui::App) -> Row {
-        let live = self.chat_pane(&r.id).map(|p| p.view.read(cx).is_busy());
-        let project = self.store.project_for_cwd(&r.cwd).and_then(|p| self.store.project(&p)).map(|p| p.name.clone());
-        Row {
-            glyph: IconName::MessageSquare,
-            glyph_color: hsla(match live {
-                Some(true) => 0xa8a8a8,
-                Some(false) => 0x6b6b6b,
-                None => theme::TEXT_FAINT,
-            }),
-            pulse: live == Some(true),
-            title: r.title.clone(),
-            right: project.unwrap_or_else(|| ago(r.last_active, now())),
-            active: self.selected.as_deref() == Some(r.id.as_str()),
-            dim: live.is_none(),
-            running: live.is_some(),
-            indent: false,
-            stale: false,
-            archived: false,
-            scope: "chat",
-            id: r.id.clone(),
-        }
-    }
-
     /// Code sessions shown in the list: matching the search, and in the project filter when there is one.
     fn listed(&self, q: &str, filter: Option<&Id>, rec: &SessionRecord) -> bool {
         self.matches(q, rec) && filter.is_none_or(|f| rec.project_id.as_ref() == Some(f))
-    }
-
-    /// Chats shown in the list: the same two rules, a chat's project being the one its folder belongs to.
-    fn chat_listed(&self, q: &str, filter: Option<&Id>, r: &ChatRecord) -> bool {
-        let project = self.store.project_for_cwd(&r.cwd);
-        let matches = q.is_empty()
-            || r.title.to_lowercase().contains(q)
-            || project.as_ref().and_then(|p| self.store.project(p)).is_some_and(|p| p.name.to_lowercase().contains(q))
-            || (crate::chat::store::is_tied(&r.cwd) && r.cwd.to_string_lossy().to_lowercase().contains(q));
-        matches && filter.is_none_or(|f| project.as_ref() == Some(f))
     }
 
     /// The project the list is filtered to, if any (a removed project filters nothing).
@@ -392,13 +351,8 @@ impl Workspace {
         self.store.data.layout.project_filter.as_ref().and_then(|id| self.store.project(id))
     }
 
-    /// A row of the list: a chat opens by click, a Claude Code session can also be dragged.
-    fn list_row(&self, row: Row, cx: &mut Context<Self>) -> Stateful<Div> {
-        if row.scope == "chat" { self.render_row(row, cx) } else { self.session_row(row, false, cx) }
-    }
-
-    /// One list for chats and Claude Code sessions: what is running first (terminals in the order you arranged them,
-    /// then open chats), then the most recent, with the rest behind "Older". The project filter narrows all of it.
+    /// One list of Claude Code sessions: what is running first (in the order you arranged them), then the most
+    /// recent, with the rest behind "Older". The project filter narrows all of it.
     pub fn render_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         if self.dragging.is_some() && !cx.has_active_drag() {
             self.dragging = None;
@@ -408,7 +362,7 @@ impl Workspace {
         let filter = self.project_filter().map(|p| p.id.clone());
 
         // ---- RUNNING
-        let mut running: Vec<Row> = self
+        let running: Vec<Row> = self
             .live
             .iter()
             .filter(|l| l.view.read(cx).is_running())
@@ -416,13 +370,6 @@ impl Workspace {
             .filter(|r| self.listed(&q, filter.as_ref(), r))
             .map(|r| self.row_for(r, true, true))
             .collect();
-        running.extend(
-            self.chats
-                .iter()
-                .filter_map(|p| self.chat_store.get(&p.id))
-                .filter(|r| self.chat_listed(&q, filter.as_ref(), r))
-                .map(|r| self.chat_row(r, cx)),
-        );
 
         // ---- RECENT: everything else, newest first
         let mut recent: Vec<(i64, Row)> = vec![];
@@ -433,16 +380,13 @@ impl Workspace {
                 recent.push((rec.last_active, row));
             }
         }
-        for r in self.chat_store.shown().filter(|r| self.chat_pane(&r.id).is_none() && self.chat_listed(&q, filter.as_ref(), r)) {
-            recent.push((r.last_active, self.chat_row(r, cx)));
-        }
         recent.sort_by_key(|(t, _)| std::cmp::Reverse(*t));
         let older = recent.split_off(recent.len().min(if searching { usize::MAX } else { RECENT_LIMIT }));
 
         let mut body = div().flex().flex_col().gap(px(2.0));
         body = body.child(self.section_header("RUNNING", Some(running.len().to_string()), None::<Stateful<Div>>));
         if running.is_empty() {
-            let text = if searching || filter.is_some() { "Nothing running matches" } else { "Nothing running. Start a session or a chat." };
+            let text = if searching || filter.is_some() { "Nothing running matches" } else { "Nothing running. Start a session." };
             body = body.child(div().px(px(18.0)).py(px(6.0)).text_size(px(12.0)).text_color(hsla(theme::TEXT_FAINT)).child(text));
         }
         let ids: Vec<Id> = running.iter().map(|r| r.id.clone()).collect();
@@ -457,17 +401,16 @@ impl Workspace {
         self.prev_current = ids;
         for row in running {
             let (id, slide) = (row.id.clone(), self.slides.get(&row.id).copied());
-            let el = if row.scope == "chat" { self.render_row(row, cx) } else { self.session_row(row, true, cx) };
-            body = body.child(slid(el, &id, slide));
+            body = body.child(slid(self.session_row(row, true, cx), &id, slide));
         }
 
         if !recent.is_empty() || !older.is_empty() {
             body = body.child(div().h(px(10.0))).child(self.section_header("RECENT", None, None::<Stateful<Div>>));
             for (_, row) in recent {
-                body = body.child(self.list_row(row, cx));
+                body = body.child(self.session_row(row, false, cx));
             }
         } else if searching || filter.is_some() {
-            body = body.child(div().px(px(18.0)).py(px(6.0)).text_size(px(12.0)).text_color(hsla(theme::TEXT_FAINT)).child("No sessions or chats match"));
+            body = body.child(div().px(px(18.0)).py(px(6.0)).text_size(px(12.0)).text_color(hsla(theme::TEXT_FAINT)).child("No sessions match"));
         }
         if !older.is_empty() {
             let open = self.store.data.layout.older_open;
@@ -487,7 +430,7 @@ impl Workspace {
             );
             if open {
                 for (_, row) in older {
-                    body = body.child(self.list_row(row, cx));
+                    body = body.child(self.session_row(row, false, cx));
                 }
             }
         }
@@ -650,11 +593,7 @@ impl Workspace {
                                 ws.open_menu(ev.position, items, cx);
                             }
                         }),
-                    ))
-                    .child(
-                        button("new-chat", "+ Chat", false)
-                            .on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::NewChat { cwd: None }, window, cx))),
-                    ),
+                    )),
             )
             .child(self.render_project_filter(cx))
             .child(

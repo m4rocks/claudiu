@@ -2,8 +2,8 @@
 
 mod accounts;
 mod app;
+mod ask;
 mod bridge;
-mod chat;
 mod claude;
 mod commit;
 mod datadir;
@@ -25,6 +25,7 @@ mod theme;
 mod updater;
 mod usage;
 mod views;
+mod visual;
 mod widgets;
 
 use gpui::{App, Bounds, KeyBinding, TitlebarOptions, WindowBounds, WindowOptions, prelude::*, px, size};
@@ -36,7 +37,7 @@ gpui_kit::assets::icon_assets!(
     AppIcons,
     [
         WindowMinimize, WindowMaximize, WindowRestore, WindowClose, Archive, ArchiveRestore, ArrowDownToLine, ArrowLeft, Brackets, Check, ChevronDown, ChevronRight, Circle,
-        CircleCheck, CircleDot, CircleSlash, CircleX, Clock, Ellipsis, ExternalLink, FolderOpen, GitBranch, GitCommitHorizontal, GitMerge, GitPullRequest,
+        CircleCheck, CircleDot, CircleSlash, CircleX, Clock, Ellipsis, Eye, ExternalLink, FolderOpen, GitBranch, GitCommitHorizontal, GitMerge, GitPullRequest,
         GitPullRequestClosed, GitPullRequestDraft, HeartPlus, LoaderCircle, Lock, MessageSquare, PanelLeft, PanelRight, Pencil, Plus, RefreshCw, Search,
         Settings, Terminal, X
     ]
@@ -92,7 +93,7 @@ mod icon_tests {
 }
 
 use app::{
-    CloseSession, FocusSearch, HideApp, HideOthers, ImportProject, NewChat, NewClaude, NextSession, OpenGithub, OpenSettings, PrevSession, Quit, ShowAllApps,
+    CloseSession, FocusSearch, HideApp, HideOthers, ImportProject, NewClaude, NextSession, OpenGithub, OpenSettings, PrevSession, Quit, ShowAllApps,
     SwapFocus, ToggleRight, ToggleShell, ToggleSidebar, Workspace,
 };
 
@@ -116,7 +117,6 @@ fn menu_bar() -> Vec<gpui::Menu> {
         ]),
         Menu::new("File").items([
             MenuItem::action("New Claude Session", NewClaude),
-            MenuItem::action("New Chat", NewChat),
             MenuItem::action("Show or Hide Shell", ToggleShell),
             MenuItem::action("GitHub Issues & Pull Requests", OpenGithub),
             MenuItem::separator(),
@@ -193,7 +193,6 @@ fn main() {
         // chord, e.g. Alt+P, still reaches Claude Code untouched.
         cx.bind_keys([
             KeyBinding::new("secondary-shift-n", NewClaude, None),
-            KeyBinding::new("secondary-shift-m", NewChat, None),
             KeyBinding::new("secondary-shift-t", ToggleShell, None),
             KeyBinding::new("secondary-shift-w", CloseSession, None),
             KeyBinding::new("secondary-shift-b", ToggleSidebar, None),

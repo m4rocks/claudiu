@@ -5,8 +5,12 @@
 // `CLAUDIU_NAME_FILE` with `/rename`, which Claude Code queues until the session is idle.
 // It also applies the settings the user changes in Claudiu's sidebar (auto-compact, advisor), sent through
 // `CLAUDIU_CTL_FILE`: the same as the user choosing them in `/config` or typing `/advisor`, which Claude Code saves.
-// Last, it reports usage and status (context, 5-hour / 7-day limits, auto-compact, advisor, the command the user
+// It reports usage and status (context, 5-hour / 7-day limits, auto-compact, advisor, the command the user
 // last ran) to `CLAUDIU_USAGE_DIR/<claude session id>.json` for Claudiu's sidebar; no tokens are spent.
+// It answers Claudiu's `show_visual` tool in-process and, while the model is still writing the call, streams
+// its Markdown to `CLAUDIU_VISUAL_FILE` so the Visual panel fills live.
+// Last, it makes the one-shot text completions Claudiu asks for through `CLAUDIU_ASK_FILE` (commit messages, session
+// titles) with `$.model.complete`, so they run on this session's own client and Claudiu needs no `claude -p`.
 const MODELS = {
   haiku: 'claude-haiku-4-5-20251001',
   sonnet: 'claude-sonnet-5-5',
@@ -20,6 +24,13 @@ let named = null // `${claude session id}\n${name}` last applied
 let poll
 let ctlPoll
 let ctlSeen = null // highest command number handled; null until the file was first read (older ones are not replayed)
+let askPoll
+let askSeen = null // id of the last request looked at
+let asking = false
+let visualChain = Promise.resolve() // visual writes in order, without holding up the stream
+let lastVisual = null // id of the show_visual call being written or last written
+const VISUAL_TOOL = 'mcp__claudiu__show_visual'
+const ASK_MODELS = ['haiku', 'sonnet', 'opus']
 
 // ---- usage report -------------------------------------------------------------------------------------------
 const stem = id => String(id).replace(/[^A-Za-z0-9_-]/g, '_')
@@ -96,6 +107,81 @@ async function applyCtl($) {
   }
 }
 
+// ---- Visual panel ---------------------------------------------------------------------------------------------
+// The text of a string property of JSON that is still being written; it may end anywhere, even inside an escape.
+function partialString(json, key) {
+  const m = new RegExp('"' + key + '"\\s*:\\s*"').exec(json)
+  if (!m) return null
+  let out = ''
+  let i = m.index + m[0].length
+  while (i < json.length) {
+    const ch = json[i]
+    if (ch === '"') break
+    if (ch !== '\\') {
+      out += ch
+      i += 1
+      continue
+    }
+    const n = json[i + 1]
+    if (n === undefined) break
+    if (n === 'u') {
+      const hex = json.slice(i + 2, i + 6)
+      if (!/^[0-9a-fA-F]{4}$/.test(hex)) break
+      out += String.fromCharCode(parseInt(hex, 16))
+      i += 6
+    } else {
+      out += { n: '\n', t: '\t', r: '\r', b: '\b', f: '\f' }[n] ?? n
+      i += 2
+    }
+  }
+  return out
+}
+
+function writeVisual($, file, call, title, content, done) {
+  const body = JSON.stringify({ call, title: String(title ?? '').slice(0, 80), content: String(content ?? '').slice(0, 200_000), done, at: Date.now() })
+  visualChain = visualChain.then(() => $.fs.write(file, body)).catch(() => {})
+}
+
+// ---- one-shot completions for Claudiu ---------------------------------------------------------------------------
+// The request file holds `{ id, model, system, prompt, deadline }`; the answer goes next to it as `<name>.res.json`
+// (`working` as soon as the request is picked up, then `done` with the text or `error`).
+async function answerAsk($) {
+  if (asking) return
+  let reply
+  let id
+  try {
+    const file = await $.env.get('CLAUDIU_ASK_FILE')
+    if (!file) return
+    const text = await $.fs.read(file).catch(() => '')
+    if (!text) return
+    const req = JSON.parse(text)
+    if (typeof req.id !== 'string' || req.id === askSeen) return
+    askSeen = req.id
+    id = req.id
+    if (!(req.deadline > Date.now() / 1000)) return // nobody is waiting any more
+    asking = true
+    reply = file.replace(/\.json$/, '.res.json')
+    if (typeof req.prompt !== 'string' || !req.prompt.trim()) {
+      await $.fs.write(reply, JSON.stringify({ id, state: 'error', error: 'The request had no prompt.' }))
+      return
+    }
+    await $.fs.write(reply, JSON.stringify({ id, state: 'working' }))
+    const r = await $.model.complete({
+      model: ASK_MODELS.includes(req.model) ? req.model : 'haiku',
+      system: typeof req.system === 'string' ? req.system.slice(0, 4000) : undefined,
+      prompt: req.prompt.slice(0, 120_000),
+      maxTokens: 1024,
+      timeoutMs: 90_000,
+    })
+    const out = r.isAnswered ? { id, state: 'done', text: r.text } : { id, state: 'error', error: 'The model call failed (' + r.reason + (r.status ? ' ' + r.status : '') + ').' }
+    await $.fs.write(reply, JSON.stringify(out))
+  } catch (err) {
+    if (reply) await $.fs.write(reply, JSON.stringify({ id, state: 'error', error: 'The model call failed: ' + String(err?.message ?? err).slice(0, 200) })).catch(() => {})
+  } finally {
+    asking = false
+  }
+}
+
 export function register(on) {
   on('session.measure', async ($, e, next) => {
     const seen = Math.floor(Date.now() / 1000)
@@ -146,9 +232,36 @@ export function register(on) {
     }
   })
 
+  // The model's `show_visual` call streams to the Visual panel while it is written: the call's arguments arrive as
+  // pieces of JSON, and Markdown read out of them so far goes to the file at most a few times a second. The tool.call
+  // hook below writes the finished card.
+  on('tool.call', { tool: VISUAL_TOOL }, async ($, e) => {
+    const file = await $.env.get('CLAUDIU_VISUAL_FILE')
+    if (!file) return { result: "The Visual panel isn't available in this session (Claudiu's mod has no file for it).", isError: true }
+    if (typeof e.content !== 'string' || !e.content.trim()) return { result: 'content must be non-empty Markdown.', isError: true }
+    writeVisual($, file, e.tool_use_id ?? lastVisual ?? 'v' + Date.now(), e.title, e.content, true)
+    return { result: "Shown in Claudiu's Visual panel. Say the key facts in a short reply; don't repeat the content." }
+  })
+
   on('turn.step', async function* ($, e, next) {
-    if (e.agentId || (!want.model && !want.effort)) return yield* next(e)
-    return yield* next({ ...e, model: want.model ?? e.model, effort: want.effort ?? e.effort })
+    const step = !e.agentId && (want.model || want.effort) ? { ...e, model: want.model ?? e.model, effort: want.effort ?? e.effort } : e
+    const file = e.agentId ? null : await $.env.get('CLAUDIU_VISUAL_FILE')
+    if (!file) return yield* next(step)
+    const open = new Map() // block index -> the show_visual call being written there
+    for await (const c of next(step)) {
+      if (c.kind === 'tool' && c.name === VISUAL_TOOL) {
+        open.set(c.index, { id: c.id, json: '', at: 0 })
+        lastVisual = c.id
+      } else if (c.kind === 'input' && open.has(c.index)) {
+        const v = open.get(c.index)
+        v.json += c.json
+        if (Date.now() - v.at >= 150) {
+          v.at = Date.now()
+          writeVisual($, file, v.id, partialString(v.json, 'title'), partialString(v.json, 'content'), false)
+        }
+      }
+      yield c
+    }
   })
 
   on('session.start', async ($, e, next) => {
@@ -157,6 +270,8 @@ export function register(on) {
     await applyCtl($)
     ctlPoll?.cancel()
     ctlPoll = $.clock.every(1000, () => applyCtl($))
+    askPoll?.cancel()
+    askPoll = $.clock.every(500, () => answerAsk($))
     const file = await $.env.get('CLAUDIU_NAME_FILE')
     if (!file) return r
     const read = async () => (await $.fs.read(file).catch(() => '')).trim()

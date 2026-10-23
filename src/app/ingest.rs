@@ -17,7 +17,7 @@ impl Workspace {
             let _ = this.update(cx, |ws, cx| {
                 let mut changed = false;
                 changed |= titles.into_iter().fold(false, |c, (stem, title, stamp)| ws.apply_title(&stem, title, stamp) | c);
-                changed |= snaps.iter().fold(false, |c, snap| ws.apply_snapshot(snap, cx) | c);
+                changed |= snaps.iter().fold(false, |c, snap| ws.apply_snapshot(snap) | c);
                 changed |= items.into_iter().fold(false, |c, (stem, item)| ws.apply_attachment(&stem, item) | c);
                 if changed {
                     ws.store.mark_dirty();
@@ -47,20 +47,10 @@ impl Workspace {
         true
     }
 
-    /// One mod report: the account's limits, and the session's or chat's own figures and settings.
-    fn apply_snapshot(&mut self, snap: &Snapshot, cx: &mut Context<Self>) -> bool {
+    /// One mod report: the account's limits, and the session's own figures and settings.
+    fn apply_snapshot(&mut self, snap: &Snapshot) -> bool {
         let account = snap.account.as_deref().unwrap_or(MAIN_ACCOUNT);
         let mut changed = self.merge_account(account, snap.five_hour.clone(), snap.seven_day.clone());
-        // A chat's own claude runs the mod too.
-        let chat = self.chat_store.shown().find(|c| c.session_id.as_deref() == Some(snap.session_id.as_str())).map(|c| c.id.clone());
-        if let Some(p) = chat.and_then(|id| self.chats.iter_mut().find(|p| p.id == id)) {
-            let compact = snap.auto_compact.or(p.auto_compact);
-            if (p.auto_compact, &p.advisor, p.compact_at) != (compact, &snap.advisor, snap.compact_at) {
-                (p.auto_compact, p.advisor, p.compact_at) = (compact, snap.advisor.clone(), snap.compact_at);
-                p.view.update(cx, |v, cx| v.set_compact(compact, snap.compact_at, cx));
-                changed = true;
-            }
-        }
         if let Some(meta) = self.store.data.sessions.iter_mut().find(|s| s.claude_id() == Some(snap.session_id.as_str())).and_then(|s| s.claude.as_mut()) {
             changed |= apply_to_meta(meta, snap);
         }

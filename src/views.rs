@@ -7,7 +7,7 @@ use gpui::{
 };
 
 use crate::app::{
-    Act, CloseSession, GitOp, FocusSearch, ImportProject, Main, Modal, NewChat, NewClaude, NextSession, OpenGithub, OpenSettings, PrevSession, ShellDrag, SwapFocus,
+    Act, CloseSession, GitOp, FocusSearch, ImportProject, Main, Modal, NewClaude, NextSession, OpenGithub, OpenSettings, PrevSession, ShellDrag, SwapFocus,
     ToggleRight, ToggleShell, ToggleSidebar, Workspace, SHELL_HEIGHT,
 };
 use gpui_kit::component::{TitleBar, input::Input};
@@ -21,12 +21,12 @@ impl Workspace {
     // ------------------------------------------------------------------ top bar
 
     fn render_topbar(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let crate::inspector::Shown { rec, cwd, project, chat_title } = self.shown();
+        let crate::inspector::Shown { rec, cwd, project } = self.shown();
         // Git actions live in the right sidebar; the branch pill here needs the repository of the session's own folder.
         let repo = project.as_ref().filter(|p| p.git.is_some()).and(cwd.clone());
         let busy = self.git_busy;
 
-        let title = rec.as_ref().map(|r| r.display_title().to_string()).or(chat_title).unwrap_or_else(|| "Claudiu".into());
+        let title = rec.as_ref().map(|r| r.display_title().to_string()).unwrap_or_else(|| "Claudiu".into());
         let branch = project.as_ref().and_then(|p| p.git.as_ref()).and_then(|g| g.branch.clone());
         // `.occlude()` on both groups: the bar is a Windows drag (HTCAPTION) area, which would otherwise swallow clicks on the buttons inside it.
         // The title bar is the top bar: macOS keeps its traffic lights (over the sidebar, or left of the
@@ -139,13 +139,9 @@ impl Workspace {
     fn render_session(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let blank = || div().size_full().bg(hsla(theme::TERMINAL_BG)).into_any_element();
         let Some(id) = self.active.clone() else { return blank() };
-        let chat = self.chat_pane(&id).map(|p| p.view.clone());
-        let term = if chat.is_none() { self.live_view(&id).cloned() } else { None };
-        if chat.is_none() && term.is_none() {
-            return blank();
-        }
+        let Some(term) = self.live_view(&id).cloned() else { return blank() };
         let rec = self.store.session(&id).cloned();
-        let exit = term.as_ref().and_then(|v| v.read(cx).exit_code);
+        let exit = term.read(cx).exit_code;
         let is_claude = rec.as_ref().is_some_and(|r| r.kind == SessionKind::Claude);
         let rid = id.clone();
 
@@ -184,11 +180,7 @@ impl Workspace {
                 .min_w_0()
                 .min_h_0()
                 .bg(hsla(theme::TERMINAL_BG))
-                .child(match (chat, term) {
-                    (Some(view), _) => div().flex_1().min_h_0().child(view),
-                    (None, Some(view)) => div().flex_1().min_h_0().p(px(8.0)).child(view),
-                    _ => div(),
-                })
+                .child(div().flex_1().min_h_0().p(px(8.0)).child(term))
                 .children(banner),
             format!("pane-in-{id}"),
             150,
@@ -235,7 +227,7 @@ impl Workspace {
                 .child(div().text_size(px(12.0)).text_color(hsla(theme::TEXT_FAINT)).child(keys.to_string()))
         };
         let mut recent = div().flex().flex_col().gap(px(2.0)).mt(px(26.0)).w(px(420.0));
-        // Code sessions and chats together, newest first: (id, title, last active).
+        // Newest first: (id, title, last active).
         let mut sessions: Vec<(String, String, i64)> = self
             .store
             .data
@@ -243,7 +235,6 @@ impl Workspace {
             .iter()
             .filter(|s| s.kind == SessionKind::Claude && !s.hidden)
             .map(|s| (s.id.clone(), s.display_title().to_string(), s.last_active))
-            .chain(self.chat_store.shown().map(|c| (c.id.clone(), c.title.clone(), c.last_active)))
             .collect();
         sessions.sort_by_key(|s| std::cmp::Reverse(s.2));
         let t = now();
@@ -283,7 +274,6 @@ impl Workspace {
                     .child(button("home-claude", "New code session", true).on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
                         ws.act(Act::NewClaude { cwd: c1.clone() }, window, cx)
                     })))
-                    .child(button("home-chat", "New chat", false).on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::NewChat { cwd: None }, window, cx))))
                     .child(button("home-import", "Add project", false).on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::ImportProject, window, cx)))),
             )
             .child(recent)
@@ -294,7 +284,6 @@ impl Workspace {
                     .flex_col()
                     .gap(px(4.0))
                     .child(shortcut("Ctrl+Shift+N", "New code session"))
-                    .child(shortcut("Ctrl+Shift+M", "New chat"))
                     .child(shortcut("Ctrl+Shift+T", "Show or hide shell"))
                     .child(shortcut("Ctrl+Tab", "Next session"))
                     .child(shortcut("Ctrl+Shift+W", "End session")),
@@ -576,7 +565,6 @@ impl Render for Workspace {
                 let cwd = ws.new_session_cwd();
                 ws.act(Act::NewClaude { cwd }, window, cx)
             }))
-            .on_action(cx.listener(|ws, _: &NewChat, window, cx| ws.act(Act::NewChat { cwd: None }, window, cx)))
             .on_action(cx.listener(|ws, _: &ToggleShell, window, cx| {
                 if let Some(id) = ws.active.clone() {
                     ws.act(Act::ToggleShell(id), window, cx)

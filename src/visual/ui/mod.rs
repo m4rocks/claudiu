@@ -1,6 +1,6 @@
-//! Generative UI in chats: a reply may contain a fenced block with the info string `ui`, written as HTML with inline
-//! CSS, which is drawn natively in Claudiu's theme instead of shown as code (`parse` reads it, `render` draws it).
-//! The model is taught the dialect by `PROMPT`, appended to the chat's system prompt.
+//! Generative UI in the Visual panel: Markdown that may contain fenced blocks with the info string `ui`, written as
+//! HTML with inline CSS, drawn natively in Claudiu's theme instead of shown as code (`parse` reads it, `render` draws
+//! it). The model is taught the dialect by `PROMPT`, which is the description of the `show_visual` tool.
 
 mod parse;
 mod render;
@@ -11,11 +11,11 @@ use parse::Tree;
 
 const NODE: &str = "claudiu-ui";
 
-/// Appended to the chat's system prompt (`session/new` and `session/load`). Keep it in step with `parse::default_css`
-/// and the properties `Css::set` understands.
-pub const PROMPT: &str = r#"# Showing visuals in this chat
+/// The description of the `show_visual` tool. Keep it in step with `parse::default_css` and the properties
+/// `Css::set` understands.
+pub const PROMPT: &str = r#"Draws Markdown in Claudiu's Visual panel, beside the terminal. Use it when something is easier to see than to read: a dashboard, a comparison, a layout, a timeline, a diagram, a chart, a status board, a mock-up, or a structured walkthrough. The panel fills while you write the call, so put the most important part first. Each call adds a new card to the panel. The user sees the drawing and not the markup, so keep your normal reply short and say the key facts there without repeating the content.
 
-This chat is Claudiu, which renders rich output natively. When a visual explains something better than prose (a dashboard, a comparison, a layout, a timeline, a diagram, a chart, a status board, a mock-up), put it in a fenced block with the info string `ui`. The block holds HTML with inline CSS, and Claudiu draws it in the app's own dark style. Use ordinary Markdown for everything else, and mix them freely: prose before and after, several blocks per reply. The result is static (no clicking, no scripts), and the user sees the drawing and not the markup, so say the key facts in text too.
+`content` is ordinary Markdown (headings, lists, tables, code, links, emphasis). Where a drawing helps, put it in a fenced block with the info string `ui`; Markdown and `ui` blocks mix freely, with prose before and after and several blocks per call. The block holds HTML with inline CSS, and Claudiu draws it in the app's own dark style. The result is static (no clicking, no scripts).
 
 ````
 ```ui
@@ -39,7 +39,7 @@ Drawings: an inline `<svg>` with a viewBox (and width/height) renders shapes, pa
 Be as creative as the content deserves; this is a general canvas, not a fixed set of widgets. Keep one block focused on one thing, and keep it under about 60 elements.
 "#;
 
-/// The chat's markdown view: the shared one, plus `ui` fences. (GitHub text does not get them.)
+/// The Visual panel's markdown view: the shared one, plus `ui` fences. (GitHub text does not get them.)
 pub fn markdown(id: String, text: &str) -> TextView {
     crate::github::ui::markdown(id, text)
         .markdown_block_parser(|node, _| match node {
@@ -52,6 +52,11 @@ pub fn markdown(id: String, text: &str) -> TextView {
             Some(tree) => render::render(tree, window, cx),
             None => gpui::IntoElement::into_any_element(gpui::div()),
         })
+}
+
+/// What the model reads about `show_visual`.
+pub fn tool_description() -> String {
+    PROMPT.trim().to_string()
 }
 
 #[cfg(test)]

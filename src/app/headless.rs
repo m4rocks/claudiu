@@ -35,68 +35,7 @@ fn run() {
     let cwd = work.path().to_path_buf();
     draw(&mut cx);
     step(&mut cx, &|ws, w, cx| ws.new_claude(cwd.clone(), w, cx));
-    // Chat: the Chat tab lists chats; a chat runs the real adapter (installed into the throwaway data folder
-    // on first use), offers the agent's skills, answers, and comes back with its history after being closed.
-    step(&mut cx, &|ws, w, cx| {
-        ws.new_chat(None, None, w, cx);
-    });
-    let (id, view) = ws.read_with(&cx, |ws, _| (ws.chats[0].id.clone(), ws.chats[0].view.clone()));
-    let wait = |cx: &mut TestAppContext, view: &Entity<crate::chat::view::ChatView>, what: &str, ok: &dyn Fn(&crate::chat::view::ChatView) -> bool| {
-        let t = std::time::Instant::now();
-        while !view.read_with(cx, |v, _| ok(v)) {
-            assert!(t.elapsed() < Duration::from_secs(150), "timed out waiting for {what}: {:?}", view.read_with(cx, |v, _| v.probe()));
-            std::thread::sleep(Duration::from_millis(100));
-            draw(cx);
-        }
-    };
-    wait(&mut cx, &view, "the chat to be ready", &|v| v.probe().0 == crate::chat::view::Phase::Ready);
-    assert!(view.read_with(&cx, |v, _| v.probe().2) > 0, "the agent lists skills and commands");
-    let rec = ws.read_with(&cx, |ws, _| ws.chat_store.get(&id).cloned()).unwrap();
-    assert!(!is_tied(&rec.cwd), "a new chat belongs to no project");
-    // Tie it to a project before the first message: a new conversation in that folder.
-    let before = view.read_with(&cx, |v, _| v.epoch());
-    step(&mut cx, &|_, w, cx| view.update(cx, |v, cx| v.set_project(Some(cwd.clone()), w, cx)));
-    assert_eq!(view.read_with(&cx, |v, _| v.epoch()), before + 1, "a different folder restarts the conversation");
-    wait(&mut cx, &view, "the chat to restart in the project", &|v| v.probe().0 == crate::chat::view::Phase::Ready);
-    assert!(ws.read_with(&cx, |ws, _| ws.chat_store.get(&id).is_some_and(|r| is_tied(&r.cwd) && r.session_id.is_some())));
-    step(&mut cx, &|_, w, cx| view.update(cx, |v, cx| v.send_text("say only the word pong", w, cx)));
-    wait(&mut cx, &view, "the answer", &|v| !v.is_busy() && v.probe().1.iter().any(|i| matches!(i, crate::chat::model::Item::Agent(_))));
-    let reply = view.read_with(&cx, |v, _| format!("{:?}", v.probe().1)).to_lowercase();
-    assert!(reply.contains("pong"), "{reply}");
-    // Image paste: a picture on the clipboard attaches, is sent with the message, and Claude sees it.
-    let png = {
-        let mut out = std::io::Cursor::new(vec![]);
-        ::image::RgbaImage::from_pixel(48, 48, ::image::Rgba([255, 0, 0, 255])).write_to(&mut out, ::image::ImageFormat::Png).unwrap();
-        out.into_inner()
-    };
-    cx.update(|app| app.write_to_clipboard(gpui::ClipboardItem::new_image(&gpui::Image::from_bytes(gpui::ImageFormat::Png, png))));
-    step(&mut cx, &|_, w, cx| view.update(cx, |v, cx| v.focus_input(w, cx)));
-    step(&mut cx, &|_, w, cx| assert!(view.update(cx, |v, cx| v.paste(w, cx)), "an image on the clipboard is taken"));
-    assert_eq!(view.read_with(&cx, |v, _| v.attached()), 1);
-    step(&mut cx, &|_, w, cx| view.update(cx, |v, cx| v.send_text("What single color fills this image? Answer with one lowercase word.", w, cx)));
-    assert_eq!(view.read_with(&cx, |v, _| v.attached()), 0, "the attachment is sent");
-    wait(&mut cx, &view, "the color", &|v| !v.is_busy() && v.probe().1.iter().rev().any(|i| matches!(i, crate::chat::model::Item::Agent(t) if t.to_lowercase().contains("red"))));
-    // Account switch: the chat restarts under the active account and loads the same conversation.
-    let before = view.read_with(&cx, |v, _| v.epoch());
-    step(&mut cx, &|ws, w, cx| ws.relaunch_chats(w, cx));
-    assert_eq!(view.read_with(&cx, |v, _| v.epoch()), before + 1, "the agent was restarted");
-    wait(&mut cx, &view, "the chat to reload", &|v| v.probe().0 == crate::chat::view::Phase::Ready && v.probe().1.len() >= 4);
-    let rec = ws.read_with(&cx, |ws, _| ws.chat_store.get(&id).cloned()).unwrap();
-    assert!(rec.session_id.is_some() && rec.title != DEFAULT_TITLE, "{rec:?}");
-    step(&mut cx, &|ws, w, cx| ws.close_live(&id, w, cx));
-    assert!(ws.read_with(&cx, |ws, _| ws.chats.is_empty() && ws.chat_store.get(&id).is_some()), "closing keeps the history");
-    // Nothing may keep the view (and with it the adapter and its `claude`) alive once the chat is closed.
-    let weak = view.downgrade();
-    drop(view);
-    draw(&mut cx);
-    draw(&mut cx);
-    assert!(weak.upgrade().is_none(), "a closed chat's view is still alive");
-    step(&mut cx, &|ws, w, cx| ws.open_chat(&id, w, cx));
-    let view = ws.read_with(&cx, |ws, _| ws.chats[0].view.clone());
-    wait(&mut cx, &view, "the history to load", &|v| {
-        let (phase, items, _) = v.probe();
-        phase == crate::chat::view::Phase::Ready && items.iter().any(|i| matches!(i, crate::chat::model::Item::User(t) if t.contains("pong")))
-    });
+    let id = ws.read_with(&cx, |ws, _| ws.active.clone().expect("a session is shown"));
     // Cross-session tools are answered on the spot, and one that can't work says why.
     use serde_json::{Value, json};
     let ask = |from: String, tool: &'static str, args: Value| std::thread::spawn(move || crate::bridge::ask(&from, tool, &args));
@@ -107,37 +46,25 @@ fn run() {
         std::thread::sleep(Duration::from_millis(50));
     };
     let serve = |cx: &mut TestAppContext, req: crate::bridge::Request| step(cx, &|ws, w, cx| ws.serve_requests(vec![req.clone()], w, cx));
-    let from_chat = format!("chat:{id}");
+    let from_session = format!("code:{id}");
 
-    let h = ask(from_chat.clone(), "list_chats", json!({}));
+    let h = ask(from_session.clone(), "list_code_sessions", json!({}));
     serve(&mut cx, take());
     let text = h.join().unwrap().unwrap();
-    assert!(text.contains(&id) && text.contains("this chat"), "{text}");
+    assert!(text.contains(&id) && text.contains("this session"), "{text}");
 
     // A request whose asker gave up is dropped.
-    let stale = crate::bridge::Request { id: "late".into(), from: from_chat.clone(), tool: "start_chat".into(), args: json!({}), deadline: now() - 1 };
+    let stale = crate::bridge::Request { id: "late".into(), from: from_session.clone(), tool: "start_code_session".into(), args: json!({"folder": cwd.to_string_lossy()}), deadline: now() - 1 };
+    let before = ws.read_with(&cx, |ws, _| ws.live.len());
     serve(&mut cx, stale);
-    assert_eq!(ws.read_with(&cx, |ws, _| ws.chats.len()), 1, "an expired request was carried out");
+    assert_eq!(ws.read_with(&cx, |ws, _| ws.live.len()), before, "an expired request was carried out");
 
-    let h = ask(from_chat.clone(), "read_chat", json!({"id": id}));
-    serve(&mut cx, take());
-    let text = h.join().unwrap().unwrap();
-    assert!(text.contains("pong"), "read_chat returns the messages: {text}");
-
-    let h = ask(from_chat.clone(), "start_code_session", json!({"folder": "no-such-project"}));
+    let h = ask(from_session.clone(), "start_code_session", json!({"folder": "no-such-project"}));
     serve(&mut cx, take());
     assert!(h.join().unwrap().unwrap_err().contains("No project or folder"));
 
-    let h = ask("code:someone".into(), "start_chat", json!({"prompt": "say only the word ping"}));
-    serve(&mut cx, take());
-    h.join().unwrap().unwrap();
-    assert_eq!(ws.read_with(&cx, |ws, _| ws.chats.len()), 2);
-    let (second_id, second) = ws.read_with(&cx, |ws, _| (ws.chats[1].id.clone(), ws.chats[1].view.clone()));
-    assert!(!ws.read_with(&cx, |ws, _| is_tied(&ws.chat_store.get(&second_id).unwrap().cwd)), "a chat opened by a session has no project either");
-    wait(&mut cx, &second, "the first message to be answered", &|v| !v.is_busy() && v.probe().1.iter().any(|i| matches!(i, crate::chat::model::Item::Agent(t) if t.to_lowercase().contains("ping"))));
-
     let live_before = ws.read_with(&cx, |ws, _| ws.live.len());
-    let h = ask(from_chat.clone(), "start_code_session", json!({"folder": cwd.to_string_lossy()}));
+    let h = ask(from_session.clone(), "start_code_session", json!({"folder": cwd.to_string_lossy()}));
     serve(&mut cx, take());
     let text = h.join().unwrap().unwrap();
     assert_eq!(ws.read_with(&cx, |ws, _| ws.live.len()), live_before + 1);
@@ -148,7 +75,7 @@ fn run() {
         std::thread::sleep(Duration::from_millis(200));
         draw(&mut cx);
     }
-    let h = ask(from_chat.clone(), "read_code_session", json!({"id": code_id}));
+    let h = ask(from_session.clone(), "read_code_session", json!({"id": code_id}));
     serve(&mut cx, take());
     assert!(h.join().unwrap().unwrap().contains("latest terminal output"));
     step(&mut cx, &|ws, w, cx| ws.close_live(&id, w, cx));
@@ -236,6 +163,23 @@ fn sessions_and_shell() {
         assert_eq!(ws.left_width(700.0), SIDEBAR_MIN, "keeps room for the session in a small window");
         ws.left_drag = None;
     });
+    // The Visual panel: the first card a session's model draws opens it (wide, sharing GitHub's width), the same call
+    // keeps filling its card without reopening it, and a card for a session that is not shown only lists it.
+    let shown = ws.read_with(&cx, |ws, _| ws.active.clone().unwrap());
+    let stem = datadir::safe_file_stem(&shown);
+    let card = |content: &str, done: bool| crate::visual::Card { call: "c1".into(), title: "Plan".into(), content: content.into(), done };
+    assert!(ws.read_with(&cx, |ws, _| !ws.visual_shown()));
+    step(&mut cx, &|ws, _w, cx| ws.apply_visuals(vec![(stem.clone(), card("# Hi", false))], cx));
+    assert!(ws.read_with(&cx, |ws, _| ws.visual_shown() && ws.right_gh.is_none()), "a new card opens the panel");
+    assert_eq!(ws.read_with(&cx, |ws, _| ws.right_width(1600.0)), RIGHT_GH_W);
+    step(&mut cx, &|ws, _w, cx| ws.hide_visual(false, cx));
+    step(&mut cx, &|ws, _w, cx| ws.apply_visuals(vec![(stem.clone(), card("# Hi there", true))], cx));
+    assert!(ws.read_with(&cx, |ws, _| !ws.visual_shown() && ws.visual_cards().len() == 1 && ws.visual_cards()[0].done), "the same call updates its card and leaves the panel shut");
+    assert_eq!(ws.read_with(&cx, |ws, _| ws.right_width(1600.0)), RIGHT_MENU_W + 40.0);
+    step(&mut cx, &|ws, _w, cx| ws.show_visual(cx));
+    assert!(ws.read_with(&cx, |ws, _| ws.visual_shown()));
+    step(&mut cx, &|ws, _w, cx| ws.hide_visual(true, cx));
+    assert!(ws.read_with(&cx, |ws, _| ws.visual_cards().is_empty() && !ws.visual_shown()), "clearing forgets the cards");
     step(&mut cx, &|ws, w, cx| ws.open_github(cwd.clone(), w, cx));
     assert!(ws.read_with(&cx, |ws, _| ws.gh.len() == 1 && ws.right_gh.is_some()), "github shown in the right sidebar");
     assert_eq!(ws.read_with(&cx, |ws, _| ws.right_width(1600.0)), RIGHT_GH_W, "GitHub keeps its own width");

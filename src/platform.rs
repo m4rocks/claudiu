@@ -74,38 +74,6 @@ pub fn spawn_detached(program: &Path, args: &[&OsStr]) -> std::io::Result<()> {
     cmd.spawn().map(|_| ())
 }
 
-/// Make sure `child` and everything it starts end when Claudiu does, however Claudiu ends (a crash included).
-/// Windows: the child joins a job object that kills its members when Claudiu's last handle to it closes.
-/// Elsewhere a child whose input pipe Claudiu holds ends by itself when the pipe closes, so nothing is needed.
-pub fn kill_with_parent(child: &std::process::Child) {
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::io::AsRawHandle;
-        use windows_sys::Win32::Foundation::HANDLE;
-        use windows_sys::Win32::System::JobObjects::{
-            AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
-            SetInformationJobObject,
-        };
-        // One job for the whole run, never closed by us: it closes with the process.
-        static JOB: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-        let job = *JOB.get_or_init(|| unsafe {
-            let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
-            if job.is_null() {
-                return 0;
-            }
-            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
-            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-            SetInformationJobObject(job, JobObjectExtendedLimitInformation, (&raw const info).cast(), size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32);
-            job as usize
-        });
-        if job != 0 {
-            unsafe { AssignProcessToJobObject(job as HANDLE, child.as_raw_handle() as HANDLE) };
-        }
-    }
-    #[cfg(not(target_os = "windows"))]
-    let _ = child;
-}
-
 /// Put an image on the clipboard as a bitmap, which is what Claude Code's image paste reads on Windows (it asks
 /// .NET's `Clipboard.GetImage`, and gpui's clipboard write only offers the registered `PNG` format). Returns whether
 /// it worked; replaces whatever the clipboard held.
