@@ -257,7 +257,7 @@ fn end_child(pid: u32) {
     }
     unsafe { libc::kill(pid as i32, libc::SIGTERM) };
     std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_secs(2));
+        std::thread::sleep(std::time::Duration::from_secs(2));
         // ponytail: a pid reused within these two seconds would be hit; the PTY drop reaps the child, so it is rare.
         unsafe { libc::kill(pid as i32, libc::SIGKILL) };
     });
