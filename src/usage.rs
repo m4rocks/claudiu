@@ -71,6 +71,10 @@ pub struct Snapshot {
     /// The `advisorModel` setting (`opus`, `sonnet`, ...); `None` when the advisor is off.
     #[serde(default)]
     pub advisor: Option<String>,
+    /// The advisor the current conversation declared; it follows `advisor` on `/clear` or `/compact` and when the
+    /// advisor is switched off or on, but not when only the model changes mid-conversation.
+    #[serde(default)]
+    pub advisor_active: Option<String>,
     /// Tokens at which auto-compaction runs; `None` while it is off or not yet known.
     #[serde(default)]
     pub compact_at: Option<u64>,
@@ -100,7 +104,7 @@ mod tests {
       "context_fraction": 0.028, "context_tokens": 28062, "context_window": 1000000,
       "five_hour": {"utilization": 0.67, "resets_at": 1792659600, "seen_at": 1000},
       "seven_day": {"utilization": 0.22, "resets_at": 1793167200, "seen_at": 1000},
-      "auto_compact": true, "advisor": "opus", "compact_at": 167000
+      "auto_compact": true, "advisor": "opus", "advisor_active": "opus", "compact_at": 167000
     }"#;
 
     #[test]
@@ -131,7 +135,7 @@ mod tests {
         assert_eq!(s.five_hour.as_ref().unwrap().utilization, Some(0.67));
         assert_eq!(s.seven_day.as_ref().unwrap().resets_at, Some(1793167200));
         assert_eq!((s.context_tokens, s.context_window), (Some(28062), Some(1_000_000)));
-        assert_eq!((s.auto_compact, s.advisor.as_deref(), s.compact_at), (Some(true), Some("opus"), Some(167_000)));
+        assert_eq!((s.auto_compact, s.advisor.as_deref(), s.advisor_active.as_deref(), s.compact_at), (Some(true), Some("opus"), Some("opus"), Some(167_000)));
     }
 
     #[test]

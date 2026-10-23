@@ -16,20 +16,20 @@ Everything below needs eyes and a keyboard. Roughly ordered by risk. `[ ]` = not
 - [ ] A plain shell (Ctrl+Shift+T): PowerShell colors, `Get-ChildItem`, `vim`/`less` (alt screen), tab completion, Ctrl+R.
 
 ## 2. Sessions and sidebar
-- [ ] RUNNING lists Claude sessions and open chats (no shells); hover shows ×. Drag a running session over another: they swap.
+- [ ] RUNNING lists Claude sessions (no shells); hover shows ×. Drag a running session over another: they swap.
 - [ ] Switch between sessions with clicks and Ctrl+Tab: the other terminals keep running (start something long in one).
 - [ ] Click a **former** session: it opens straight in Claude Code (`--resume`), no intermediate page.
 - [ ] Exit Claude (`/exit`): a banner appears with Resume; the entry moves from RUNNING into RECENT.
 - [ ] Open a Claude session and close it before typing anything: it does **not** leave an empty "New Claude session" in history.
 - [ ] Session titles update from "New Claude session" to the real title after the first prompt (within ~5 s).
 - [ ] Right-click a session: Rename (shows only in Claudiu), Hide from list (check that the transcript under `~/.claude/projects` is still there), Copy session ID, Copy folder, Show in Explorer, End session.
-- [ ] Search (Ctrl+Shift+F): filters running sessions, chats and history by title, folder and project; Esc clears.
-- [ ] RECENT shows 12 entries, newest first, sessions and chats mixed; a collapsed OLDER (with a count) holds the rest and its state survives a restart. While searching everything matching is shown.
+- [ ] Search (Ctrl+Shift+F): filters running sessions and history by title, folder and project; Esc clears.
+- [ ] RECENT shows 12 entries, newest first; a collapsed OLDER (with a count) holds the rest and its state survives a restart. While searching everything matching is shown.
 
 ## 3. Projects
 - [ ] Add a Git repo (+ button, drag a folder onto the window, and `claudiu.exe <folder>`). Name and branch show; a repo with linked worktrees shows `+N`.
 - [ ] Sessions started from any of its worktrees group under the project. Adding a project gives existing sessions in its folders its name as their chip.
-- [ ] The project chip under the search box lists All projects, each project (✓ on the current one) and "Add project…". Choosing one narrows RUNNING and RECENT to its sessions and chats (a project-less chat disappears); the choice survives a restart; removing that project clears it. With a project chosen the ⋯ button offers: new Claude session / chat here, GitHub, open in VS Code / Zed (only installed ones appear), Explorer, copy path, remove project (sessions stay listed, nothing deleted). "+ Code session" starts in that project's folder.
+- [ ] The project chip under the search box lists All projects, each project (✓ on the current one) and "Add project…". Choosing one narrows RUNNING and RECENT to its sessions; the choice survives a restart; removing that project clears it. With a project chosen the ⋯ button offers: new Claude session here, GitHub, open in VS Code / Zed (only installed ones appear), Explorer, copy path, remove project (sessions stay listed, nothing deleted). "+ Code session" starts in that project's folder.
 - [ ] A non-Git folder works as a project.
 
 ## 4. Import / reconciliation
@@ -40,7 +40,7 @@ Everything below needs eyes and a keyboard. Roughly ordered by risk. `[ ]` = not
 
 ## 5. Usage meters (per-process mod, zero tokens)
 - [ ] Start a **new** Claude session from Claudiu and send one message. Within about 5 s of the reply, ACCOUNT 5 HOUR / 7 DAY show percentages with a reset countdown, and SESSION → CONTEXT shows an exact figure (caption without `~`).
-- [ ] CONTEXT reads "Nk of Mk tokens" with M the auto-compact threshold while auto-compact is on; switch auto-compact off in the dropdown and within a few seconds M becomes the model's window (and the bar shrinks accordingly). Same in a chat.
+- [ ] CONTEXT reads "Nk of Mk tokens" with M the auto-compact threshold while auto-compact is on; switch auto-compact off in the dropdown and within a few seconds M becomes the model's window (and the bar shrinks accordingly).
 - [ ] The values keep updating after later replies. Open a second Claude session: ACCOUNT stays the same (account-wide) while CONTEXT follows the selected session, and shows "no Claude session selected" for shells.
 - [ ] `%LOCALAPPDATA%/Claudiu/data/usage/<session-id>.json` exists and holds only limits, context figures, session id, model, auto-compact, advisor (no prompts, paths or costs).
 - [ ] Your own `~/.claude/settings.json` is **unchanged** (check its modified time) and contains nothing from Claudiu.
@@ -49,26 +49,21 @@ Everything below needs eyes and a keyboard. Roughly ordered by risk. `[ ]` = not
 
 ## 6. Shell panel, right sidebar and layout
 - [ ] There are no splits: no split button in the top bar, no "Add to split" in any menu, no Ctrl+Shift+D.
-- [ ] Ctrl+Shift+T (or the top-bar terminal button, or the row menu's "Show or hide shell") opens a shell under the Claude terminal, in the session's folder. Type in both; Ctrl+Shift+] moves the keyboard between them. Toggling again hides it, and the next toggle brings back the same shell with its history.
+- [ ] Ctrl+Shift+T or Ctrl+J (or the top-bar terminal button, or the row menu's "Show or hide shell") opens a shell under the Claude terminal, in the session's folder. Type in both; Ctrl+Shift+] moves the keyboard between them. Toggling again hides it, and the next toggle brings back the same shell with its history.
 - [ ] Drag the divider above the shell: it resizes, never below ~120 px and never past the window. Resize the window: both terminals re-wrap correctly. Switch to another session and back: the shell is still there at the same height.
-- [ ] Ending the Claude session ends its shell. Exiting the shell (`exit`) closes the panel; the next toggle starts a fresh one. Chats have no shell button.
+- [ ] Ending the Claude session ends its shell. Exiting the shell (`exit`) closes the panel; the next toggle starts a fresh one.
 - [ ] The right sidebar is on at first, under the top bar (window buttons stay top right). The top bar only has the sidebar toggle, title, folder, branch chip and the right-sidebar toggle; Ctrl+Shift+R and the toggle hide and show it, and the choice survives a restart.
 - [ ] Menu: Open in <editor> (and ▾ picks another), Open folder, Commit & Push, Pull (greyed with "Committing…"/"Pulling…" while one runs), Show/Hide shell, GitHub. A session outside a Git project has no Commit/Pull; with no folder there are no editor rows.
-- [ ] Status: CONTEXT and CACHE meters follow the shown session (they moved out of the left footer, which has only 5 HOUR / 7 DAY). In a real session `/config` auto-compact, `/advisor` (never run the setting forms against your own config) update the rows within a few seconds. In a chat the same three rows (CACHE counts five minutes from the end of the last turn, an estimate) and the dropdowns work once its first turn has run (its own claude loads the same mod; if the rows stay "—", the mod did not load there).
-- [ ] Chats share one adapter: a new chat is ready at once (no wait for Node), two chats answer independently, closing one leaves the other working, and after Switch account the chats move to a new adapter once idle. `cargo test -- --ignored two_chats_share_one_adapter` checks two sessions in one adapter (no tokens).
-- [ ] Ask a session to unlink a chat (`unlink_session`) or drop an issue (`detach_github`): the LINKED / GITHUB row goes. A chat started by a session without a folder shows that session's project on its chip.
-- [ ] A chat's composer never changes: the box stays when the chat fails to start (the error shows above it), and the model/effort chips row keeps its height while they load. Chats call `attach_github` too (GITHUB section).
-- [ ] `list_chats`, `list_code_sessions`, `search_sessions` and the read tools show created/updated times with how long ago.
-- [ ] Auto-compact and Advisor in STATUS are dropdowns while the session runs: choosing On/Off or Off/Opus/Sonnet changes what `/config` and `/advisor` show in that session within a couple of seconds (never test by typing the setting forms yourself); "Other…" asks for a model name and refuses spaces. For an exited session they are plain text.
-- [ ] Ask a session "find the chat where we planned X and link it": it calls `search_sessions` (Claudiu asks first) then `link_session`; both sides then list the other under LINKED, clicking switches, × unlinks. A session started by another through `start_code_session` is linked automatically.
+- [ ] Status: CONTEXT and CACHE meters follow the shown session (they moved out of the left footer, which has only 5 HOUR / 7 DAY). In a real session `/config` auto-compact, `/advisor` (never run the setting forms against your own config) update the rows within a few seconds.
+- [ ] Auto-compact and Advisor in STATUS are dropdowns while the session runs: choosing On/Off changes what `/config` shows in that session right away; choosing Off/Opus/Sonnet changes the saved advisor, and the row shows `active → saved` until `/clear` or `/compact` (turning the advisor off or on applies at once). "Other…" asks for a model name and refuses spaces. For an exited session they are plain text.
+- [ ] Ask a session "find the session where we planned X and link it": it calls `search_sessions` (Claudiu asks first) then `link_session`; both sides then list the other under LINKED, clicking switches, × unlinks. A session started by another through `start_code_session` is linked automatically.
 - [ ] With a project chosen in the chip, the header button reads "+ Code in <project>" and starts there; with All projects it opens "Start the session in…" listing the projects (or starts in the shown session's folder when there are none). Ctrl+Shift+N starts in the chosen project too.
 - [ ] Ask a session to work on an issue ("look at issue 52"): it calls `attach_github` without a prompt and the item appears under GITHUB (kind icon, number, title). Clicking it opens the GitHub view on that item (the keyboard moves into the view); × removes it; it survives a restart.
-- [ ] After quitting with a few Claude sessions and chats open, the next start brings them back (the window paints first), in the same order, with the one that was shown on screen; ones closed before quitting stay closed. Same after killing Claudiu from Task Manager, and with another (older) Claudiu running on the same data folder: `running.json` survives it. The shared chat adapter (a `node` process) is gone after quitting.
+- [ ] After quitting with a few Claude sessions open, the next start brings them back (the window paints first), in the same order, with the one that was shown on screen; ones closed before quitting stay closed. Same after killing Claudiu from Task Manager, and with another (older) Claudiu running on the same data folder: `running.json` survives it.
 
 ## 7. Lifecycle
 - [ ] Ctrl+Shift+W / the row × / the pane × end a running session immediately (no prompt). Check Task Manager: no orphaned `claude.exe`/`pwsh.exe`/`conhost.exe` left behind.
-- [ ] New chat (+ Chat), right after clicking: no "Starting" text, the model/effort chips and `/` skills are already there, and picking a model or effort before the session is up takes effect on the first reply. Reopen a chat with history: the old conversation is on screen at once, with no "Loading the conversation…" line.
-- [ ] Smooth scrolling: with a mouse wheel (not a trackpad) the chat, the left list, the right menu and the GitHub list/detail glide to a stop instead of jumping; a fast burst of notches keeps accelerating one glide; scrolling by hand in the chat stops it following the bottom, as before. In a terminal with scrollback (shell: `1..300`), the wheel scrolls smoothly with no gaps or flicker at the top or bottom edge, selection by mouse while scrolled still picks the right text, typing snaps back to the bottom, and in Claude Code's full-screen views the wheel still scrolls the app in whole lines.
+- [ ] Smooth scrolling: with a mouse wheel (not a trackpad) the left list, the right menu, the Visual panel and the GitHub list/detail glide to a stop instead of jumping; a fast burst of notches keeps accelerating one glide. In a terminal with scrollback (shell: `1..300`), the wheel scrolls smoothly with no gaps or flicker at the top or bottom edge, selection by mouse while scrolled still picks the right text, typing snaps back to the bottom, and in Claude Code's full-screen views the wheel still scrolls the app in whole lines.
 - [ ] Closing the window with running sessions asks "Quit Claudiu?"; Cancel keeps everything alive; Quit ends them and they appear as history.
 - [ ] Kill Claudiu from Task Manager while sessions run: check for orphaned child processes. (Not guaranteed to be clean yet.)
 - [ ] If the app ever dies unexpectedly, look at `%LOCALAPPDATA%\Claudiu\data\crash.log` and send it over.
@@ -92,44 +87,23 @@ Everything below needs eyes and a keyboard. Roughly ordered by risk. `[ ]` = not
 - [ ] "Ask Claude" starts a Claude session with a short prompt about the item, and shows it.
 - [ ] Automated, no window opens (all need a signed-in `gh`, except `headless`): `cargo test -- --ignored render` draws every pane state with real data; `schema` sends every GitHub mutation with made-up ids to catch type mismatches; `live` checks the queries; `headless` drives the real workspace (sessions, splits, parked splits, the GitHub pane) and fails if starting a session blocks the window for 400 ms; `e2e` (about 4 minutes) runs every pane action against a throwaway private repo it creates on your account (`claudiu-gh-pane-test-<time>`; deleting it needs the `delete_repo` scope, otherwise `gh repo delete <name> --yes`).
 
-## 11. Chats (Claude through ACP)
-Automated: `cargo test -- --ignored headless` also installs the adapter into a throwaway data folder, starts a chat, checks it lists the agent's skills and commands, sends one tiny prompt (costs a few cents), closes the chat and reopens it from history. Needs Node.js, npm and a signed-in `claude`.
-- [ ] There are no Chat/Code tabs: **+ Code session** and **+ Chat** sit above the one list, where a chat has its own icon. A chat's conversation never shows up as a code session after a rescan.
-- [ ] A chat is read-only: ask it to "create a file notes.txt here" or "run git status": it says it cannot (it has no Edit, Write or shell tools) and nothing is changed, whatever mode the Mode chip shows (try the most permissive one). It can still read files ("what does main.rs do?"), draw a `ui` block and use the session tools.
-- [ ] Tell a chat you want to start coding (there is no button): the model writes a brief (under 2,000 characters, ending with the chat's id) and a Claude Code session opens at once with the brief as its first message (no dialog). The chat stays open and linked; in the new session ask it to read the chat. A chat with no project makes the model ask which project to use.
-- [ ] **+ Chat** opens the empty chat at once with the cursor in the box; Claude starts behind it with no "Starting" message. Type and send before it is ready: the message shows right away and is delivered as soon as Claude is up, in order.
-- [ ] First **+ New chat** shows "Setting up the Claude adapter (first time only)…" (one `npm install` into `<data>/acp`, about 15 s), then the empty chat. Later chats start in a few seconds.
-- [ ] Without Node.js the pane says so with a link; with a broken `claude` path it says Claude Code was not found. "Try again" retries.
-- [ ] Task Manager while a chat is open: one `node.exe` and, below it, **your** `claude.exe` (`~/.local/bin`), not a bundled copy. Ending the chat (row ×, pane ×, or closing the app) leaves neither behind: check this by hand, the automated run only proves the chat view is dropped (which closes the adapter).
-- [ ] Type `/`: your skills and commands appear (Up/Down, Tab/Enter, Esc, click). A command without arguments runs at once; one with an argument hint is filled in for you to finish. Plugin skills like `/ponytail:ponytail-help` work.
-- [ ] Streaming text renders as Markdown; tool calls show as rows (click to see output); plans show as a checklist; Stop cancels the turn.
-- [ ] Mode / model chips under the input open a picker; the choice applies to the next message. In Manual mode a tool call shows "Claude asks permission" with buttons; a turn never hangs waiting for it.
-- [ ] A chat you close stays in the list (dim dot); clicking it reopens it with the old messages. The × on a dim row removes it from the list only; the transcript under `~/.claude/projects` stays. A chat closed before the first message leaves no entry.
-- [ ] Chats belong to no account: after **Switch account** the open chats restart under the new login once idle, with the same conversation; the 5 HOUR / 7 DAY meters (left) and the CONTEXT meter (right sidebar) follow the chat you are looking at (they read "after first message" until its first reply).
-- [ ] **Ctrl+Shift+M** opens a new chat. Ctrl+V with a picture (or a copied image file) in the input attaches it as a thumbnail with a ×; Send includes it, and the sent message shows the picture. Text still pastes as text. Images over 4.5 MB are refused with a toast; reopened history shows "[image]" for old pictures.
-- [ ] A new chat is **not tied to a project** (the chip under the input reads "No project", the right sidebar has no editor or folder rows). The chip opens a project list whenever the chat is idle (not mid-turn): before the first message picking one just restarts in that folder; after messages the old ones stay on screen above a notice and Claude starts a new conversation in the folder; the earlier messages are compacted into a summary (Haiku, in the background) that rides along with your next message, so Claude knows the gist (ask "what were we doing?"). The chip stays visible, but not clickable, while Claude is answering. The earlier Claude session is no longer listed under the chat, so it can show up in the Code list after a rescan. **New chat here** in a project's menu starts it tied.
+## 11. Visual panel, and text written through the mod
+Automated: `cargo test visual` (cards, parser, a headless draw of a `ui` block), `cargo test ask` (the request/answer files), `claude plugin test mod` (the mod's streaming and completion hooks) and `cargo test -- --ignored headless` (the panel opens, shares GitHub's width and clears).
+- [ ] There are no chats: the header has only **+ Code session**; no Ctrl+Shift+M, no "New chat" on the welcome page, no Chat rows. Leftover `chats.json`, `acp/` and `chat-cache/` in the data folder are ignored.
+- [ ] In a running session ask "draw me a release plan with a table and three stat boxes with the Visual panel". Claude loads `show_visual` (ToolSearch) and calls it with no permission prompt; the right sidebar switches to **Visual** by itself, without taking the keyboard from the terminal.
+- [ ] While the call is written the card fills in live (Markdown renders as it grows, "drawing…" next to the title), then settles; a `ui` block draws natively in the dark theme (cards, bars, an SVG) and is never shown as code.
+- [ ] A second `show_visual` call adds a card above the first. The arrow returns to the menu, which now lists **Visual · 2** (click reopens, × forgets the cards); × in the panel header does the same. Switching to a session without cards shows the menu; back again, the cards are there.
+- [ ] The panel shares GitHub's width and the drag handle on its left edge; the menu keeps its own. GitHub, when opened, takes the column; closing it returns to the menu.
+- [ ] A link in a card opens the browser (http/https only); nothing else is clickable. Mouse wheel scrolling glides.
+- [ ] A session started with `CLAUDIU_NO_MOD=1` (with `CLAUDIU_TRACE_START=1`): `show_visual` answers that the panel isn't available; Commit & Push is dimmed or fails within ~8 s with "didn't pick the request up".
+- [ ] **Commit & Push** in a running session with changes: the commit message appears within seconds, written by the session's mod (no `claude -p` process in Task Manager); the toast says "Committed and pushed: <subject>". With an ended session the row reads "Commit & Push · needs a running session" and is dimmed.
+- [ ] Right-click a running session > **Regenerate title**: "Writing a new title…", then the row is renamed (also in Claude Code's `/resume`). For an ended session a toast says to start it first.
+- [ ] Every icon is a Lucide icon: session/GitHub rows, close, archive, plus, chevrons, search, settings, the shell button, the branch pill, the Visual eye, GitHub states and checks.
 
-- [ ] With nothing shown, the welcome page has New code session / New chat / Add project and recents of both kinds.
-- [ ] `/` works in the middle of a message ("please run /sk" offers matches; picking one completes only that word and keeps the rest). The list scrolls (wheel, Up/Down) through every skill and command, with no cut-off.
-- [ ] Open a new chat, type "half a thought" without sending, quit and start Claudiu: the chat is still there, loads, and the box holds "half a thought". Do the same without typing: the empty chat is gone after restart (and when closed, and on quit).
-- [ ] Quit Claudiu with a chat that has messages and reopen it: the old conversation is on screen at once, with "Loading the conversation…" at the bottom, then the live one replaces it and the box accepts Send.
-- [ ] Right-click a chat or a Claude Code session > **Regenerate title**: a toast says "Writing a new title…", then the row is renamed (a session's new name also shows in Claude Code's `/resume`). A chat or session with nothing said says "Nothing to title yet."
-- [ ] Every icon is a Lucide icon: session/chat/GitHub rows, close, archive, plus, chevrons, search, settings, the shell button, the branch pill, GitHub states and checks. A working session or chat, and a running tool, show a turning loader. No blank spots where an icon should be.
-
-### Chats and code sessions reaching each other
-Automated by `headless` (a chat opened with a first message, a code session opened and read, an unknown project refused).
-- [ ] In a chat ask "list my code sessions", then "open a Claude Code session in <project> and ...": the session opens in the sidebar at once, linked to the chat, with no dialog.
-- [ ] In a code session ask "start a chat about X": a chat opens that already received the first message, not tied to a project. Same for reading: `read_chat` works for an open chat, `read_code_session` for a running session; an ended session or closed chat says it can't be read.
+### Sessions reaching each other
+Automated by `headless` (a code session opened and read, an unknown project refused, an expired request dropped).
+- [ ] In a code session ask "list my code sessions", then "open a Claude Code session in <project> and ...": the session opens in the sidebar at once, linked to the first, with no dialog.
 - [ ] A request for an unknown project, or with a first message over 2,000 characters, is refused with the reason. A request older than 5 minutes is dropped.
-- [ ] **Remove from list** on a chat, then restart Claudiu: its conversation does not appear in the Code list.
-
-## Generative UI (`ui` blocks in chat)
-
-- [ ] Ask a chat for "a dashboard of three stats with a bar chart" and "a comparison table": each comes back as a native card/table/drawing in the dark theme, not as code.
-- [ ] While it streams, the block fills in without flicker or errors; an SVG shows "Drawing…" until it closes.
-- [ ] Reopen the chat (cache and `session/load`): the blocks render again. Copying a block's text yields the `ui` source.
-- [ ] A link in a block opens the browser; nothing else is clickable.
-Automated: `cargo test chat::ui` (parser, plus a headless draw of a sample block).
 
 ## Start-up timing
 

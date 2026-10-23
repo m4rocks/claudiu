@@ -1,13 +1,17 @@
 import { expect, mock, test } from 'claude-code/testing'
 
 test('applies the settings Claudiu asks for, once each, and not the ones sent before it started', async ($, on) => {
-  mock.env(on, { CLAUDIU_CTL_FILE: 'ctl/me.json' })
+  mock.env(on, { CLAUDIU_CTL_FILE: 'ctl/me.json', CLAUDIU_USAGE_DIR: 'usage' })
   const clock = mock.clock(on)
   let file = JSON.stringify({ cmds: [{ seq: 5, key: 'advisor', value: 'sonnet' }] }) // from an earlier run
   const sets: unknown[] = []
   const ran: string[] = []
+  const writes: { path: string; text: string }[] = []
   on('fs.read', () => ({ value: file }))
-  on('fs.write', () => ({ value: undefined }))
+  on('fs.write', (_$, e) => {
+    writes.push({ path: e.path, text: e.text })
+    return { value: undefined }
+  })
   on('session.id', () => ({ value: 's1' }))
   on('session.model', () => ({ value: 'claude-haiku-5-5' }))
   on('config.list', () => ({ value: [] }))
@@ -38,6 +42,10 @@ test('applies the settings Claudiu asks for, once each, and not the ones sent be
   await clock.advance(1000)
   expect(sets).toEqual([['autoCompact', false]])
   expect(ran).toEqual(['advisor opus'])
+  const snap = JSON.parse(writes.at(-1)!.text)
+  expect(snap.advisor).toBe('opus')
+  expect(snap.advisor_active).toBe('opus')
+  expect(snap.auto_compact).toBe(false)
 
   await clock.advance(3000)
   expect(sets.length + ran.length).toBe(2) // handled once

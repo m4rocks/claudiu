@@ -1,13 +1,13 @@
-//! Links between sessions and chats, and the GitHub issues and pull requests attached to them. Both live on the
-//! session's or chat's own record; the model sets them through the MCP tools and the user edits them in the right sidebar.
+//! Links between sessions, and the GitHub issues and pull requests attached to them. Both live on the session's own
+//! record; the model sets them through the MCP tools and the user edits them in the right sidebar.
 
 use super::*;
 
 impl Workspace {
-    /// Show two sessions or chats together: each lists the other. True when something changed (false when either
-    /// does not exist or they were linked already).
+    /// Show two sessions together: each lists the other. True when something changed (false when either does not
+    /// exist or they were linked already).
     pub fn link(&mut self, a: &str, b: &str) -> bool {
-        let exists = |ws: &Self, id: &str| ws.store.session(id).is_some_and(|s| s.claude.is_some()) || ws.chat_store.get(id).is_some();
+        let exists = |ws: &Self, id: &str| ws.store.session(id).is_some_and(|s| s.claude.is_some());
         if a == b || !exists(self, a) || !exists(self, b) {
             return false;
         }
@@ -16,24 +16,16 @@ impl Workspace {
         a_new | b_new
     }
 
-    /// Run `f` on the attached items of a session or a chat; true when it changed anything.
+    /// Run `f` on the attached items of a session; true when it changed anything.
     fn edit_attached(&mut self, id: &str, f: impl FnOnce(&mut Vec<Attached>) -> bool) -> bool {
-        if let Some(meta) = self.store.session_mut(id).and_then(|s| s.claude.as_mut()) {
-            return f(&mut meta.attached);
-        }
-        let mut changed = false;
-        self.chat_store.update(id, |r| changed = f(&mut r.attached));
-        changed
+        self.store.session_mut(id).and_then(|s| s.claude.as_mut()).is_some_and(|meta| f(&mut meta.attached))
     }
 
     pub fn attached_of(&self, id: &str) -> Vec<Attached> {
-        match self.store.session(id).and_then(|s| s.claude.as_ref()) {
-            Some(m) => m.attached.clone(),
-            None => self.chat_store.get(id).map(|c| c.attached.clone()).unwrap_or_default(),
-        }
+        self.store.session(id).and_then(|s| s.claude.as_ref()).map(|m| m.attached.clone()).unwrap_or_default()
     }
 
-    /// Take an attached item away from a session or chat.
+    /// Take an attached item away from a session.
     pub fn detach(&mut self, id: &str, pull: bool, number: u32) {
         self.edit_attached(id, |l| {
             l.retain(|x| !(x.pull == pull && x.number == number));
@@ -42,10 +34,10 @@ impl Workspace {
         self.store.mark_dirty();
     }
 
-    /// What a session or chat asked for through its MCP tools (`stem` is its record id as a file name).
+    /// What a session asked for through its MCP tools (`stem` is its record id as a file name).
     pub(super) fn apply_attachment(&mut self, stem: &str, item: crate::mcp::Attachment) -> bool {
         use crate::mcp::Attachment::*;
-        let me = self.store.data.sessions.iter().map(|s| &s.id).chain(self.chat_store.shown().map(|c| &c.id)).find(|id| datadir::safe_file_stem(id) == stem).cloned();
+        let me = self.store.data.sessions.iter().map(|s| &s.id).find(|id| datadir::safe_file_stem(id) == stem).cloned();
         let Some(me) = me else { return false };
         match item {
             Github(a) => self.edit_attached(&me, |list| attach(list, a)),
@@ -68,28 +60,15 @@ impl Workspace {
         self.store.mark_dirty();
     }
 
-    /// Run `f` on the link list of a session or a chat; true when it changed anything.
+    /// Run `f` on the link list of a session; true when it changed anything.
     fn edit_links(&mut self, id: &str, f: impl FnOnce(&mut Vec<Id>) -> bool) -> bool {
-        if let Some(meta) = self.store.session_mut(id).and_then(|s| s.claude.as_mut()) {
-            return f(&mut meta.linked);
-        }
-        let mut changed = false;
-        self.chat_store.update(id, |r| changed = f(&mut r.links));
-        changed
+        self.store.session_mut(id).and_then(|s| s.claude.as_mut()).is_some_and(|meta| f(&mut meta.linked))
     }
 
-    /// The sessions and chats linked with `id`, as `(id, title)`; a linked one that has gone is left out.
+    /// The sessions linked with `id`, as `(id, title)`; a linked one that has gone is left out.
     pub fn links_of(&self, id: &str) -> Vec<(Id, String)> {
-        let ids = match self.store.session(id).and_then(|s| s.claude.as_ref()) {
-            Some(m) => m.linked.clone(),
-            None => self.chat_store.get(id).map(|c| c.links.clone()).unwrap_or_default(),
-        };
-        ids.into_iter()
-            .filter_map(|o| {
-                let title = self.store.session(&o).map(|s| s.display_title().to_string()).or_else(|| self.chat_store.get(&o).map(|c| c.title.clone()))?;
-                Some((o, title))
-            })
-            .collect()
+        let ids = self.store.session(id).and_then(|s| s.claude.as_ref()).map(|m| m.linked.clone()).unwrap_or_default();
+        ids.into_iter().filter_map(|o| Some((o.clone(), self.store.session(&o)?.display_title().to_string()))).collect()
     }
 }
 

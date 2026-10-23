@@ -1,4 +1,4 @@
-//! Requests from a Claude session (a code session or a chat) to Claudiu, made through the MCP helper
+//! Requests from a Claude Code session to Claudiu, made through the MCP helper
 //! (`claudiu --mcp-title`, see `mcp.rs`). The helper is a separate process, so the two talk through files:
 //! it drops `bridge/req/<id>.json` and waits for `bridge/res/<id>.json`, which Claudiu writes on its next tick.
 
@@ -14,7 +14,7 @@ pub const PATIENCE: Duration = Duration::from_secs(300);
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Request {
     pub id: String,
-    /// `chat:<chat id>` or `code:<claude session id>`.
+    /// `code:<record id>`.
     pub from: String,
     pub tool: String,
     pub args: Value,
@@ -111,7 +111,7 @@ mod tests {
         let base = tmp.path().to_path_buf();
         let asker = {
             let base = base.clone();
-            std::thread::spawn(move || ask_in(&base, "chat:c1", "list_chats", &serde_json::json!({})))
+            std::thread::spawn(move || ask_in(&base, "code:c1", "list_code_sessions", &serde_json::json!({})))
         };
         let mut taken = vec![];
         for _ in 0..50 {
@@ -122,14 +122,14 @@ mod tests {
             std::thread::sleep(Duration::from_millis(100));
         }
         assert_eq!(taken.len(), 1);
-        assert_eq!((taken[0].from.as_str(), taken[0].tool.as_str()), ("chat:c1", "list_chats"));
+        assert_eq!((taken[0].from.as_str(), taken[0].tool.as_str()), ("code:c1", "list_code_sessions"));
         assert!(take_requests_in(&base).is_empty(), "a request is handed out once");
-        respond_in(&base, &taken[0].id, true, "two chats");
-        assert_eq!(asker.join().unwrap(), Ok("two chats".to_string()));
+        respond_in(&base, &taken[0].id, true, "two sessions");
+        assert_eq!(asker.join().unwrap(), Ok("two sessions".to_string()));
 
         let asker = {
             let base = base.clone();
-            std::thread::spawn(move || ask_in(&base, "code:s1", "read_chat", &serde_json::json!({"id": "x"})))
+            std::thread::spawn(move || ask_in(&base, "code:s1", "read_code_session", &serde_json::json!({"id": "x"})))
         };
         let req = loop {
             if let Some(r) = take_requests_in(&base).pop() {
@@ -149,7 +149,7 @@ mod tests {
         assert!(!dir(&base, "res").join("stale.json").exists() && dir(&base, "res").join("fresh.json").exists());
 
         // A request nobody is waiting for any more is dropped.
-        let old = Request { id: "old".into(), from: "chat:c".into(), tool: "list_chats".into(), args: Value::Null, deadline: 1 };
+        let old = Request { id: "old".into(), from: "code:c".into(), tool: "list_code_sessions".into(), args: Value::Null, deadline: 1 };
         crate::datadir::write_atomic(&dir(&base, "req").join("old.json"), &serde_json::to_string(&old).unwrap()).unwrap();
         assert!(take_requests_in(&base).is_empty());
         assert!(!dir(&base, "req").join("old.json").exists());

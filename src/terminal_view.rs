@@ -58,8 +58,6 @@ pub struct TerminalView {
     burst_start: Option<Instant>,
     /// The start-up trace has begun for this terminal (`trace.rs`).
     traced: bool,
-    /// The previous screen of a session being resumed, shown dimmed behind the start-up spinner.
-    pub preview: Option<String>,
     /// What the user types while Claude Code starts; moved into the real prompt when it appears (`skeleton.rs`).
     draft: Draft,
     /// The draft is being typed into Claude Code; the skeleton stays until the real prompt shows it.
@@ -150,7 +148,6 @@ impl TerminalView {
             last_output: None,
             burst_start: None,
             traced: false,
-            preview: None,
             draft: Draft::default(),
             handing: false,
             exit_code: None,
@@ -966,7 +963,7 @@ impl Render for TerminalView {
                 let (cols, rows) = self.terminal.size();
                 let (cell_w, line_h) = self.metrics.map_or((8.0, LINE_H), |m| (f32::from(m.cell_w), f32::from(m.line_h)));
                 let grid = skeleton::Grid { cell_w, line_h, cols, rows };
-                d.child(skeleton::overlay(&self.draft, self.preview.as_deref(), self.terminal.born.elapsed(), phase, grid))
+                d.child(skeleton::overlay(&self.draft, self.terminal.born.elapsed(), phase, grid))
             })
     }
 }
@@ -1058,7 +1055,7 @@ impl Element for TerminalElement {
     ) -> Prepaint {
         let (family, font_size, focused, marked) = {
             let v = self.view.read(cx);
-            (v.font_family, v.font_size, v.focus.is_focused(window), v.marked.clone())
+            (v.font_family, crate::scale::px(f32::from(v.font_size)), v.focus.is_focused(window), v.marked.clone())
         };
         let base_font: Font = gpui::font(family);
         let font_id = window.text_system().resolve_font(&base_font);

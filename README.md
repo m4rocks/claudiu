@@ -17,15 +17,16 @@ There's no API key and no login in Claudiu. Authentication stays with Claude Cod
 ## What you get
 
 - **A real terminal.** 24-bit color, scrollback, selection, mouse reporting, bracketed paste, alt screen, Ctrl+click on links, IME input.
-- **One list.** The sidebar shows what's running first, then recent Claude Code sessions and chats together, with older ones folded away. A project filter narrows it. Switching between sessions never touches the other processes.
+- **One list.** The sidebar shows what's running first, then recent Claude Code sessions, with older ones folded away. A project filter narrows it. Switching between sessions never touches the other processes.
 - **Projects.** Git-aware, with branch and linked worktrees. Add one with the button, by dropping a folder on the window, or with `claudiu <folder>`.
 - **History.** Ended Claude sessions stay in the sidebar, and a click resumes one through `claude --resume`.
 - **Import on startup.** Your existing Claude Code sessions are found and merged in (read-only, no duplicates).
-- **Shell panel.** Each Claude session can show its own shell under its terminal (Ctrl+Shift+T). It starts in the session's folder and ends with the session.
-- **Right sidebar.** The actions for the shown session (open in your editor, open folder, Commit & Push, Pull, shell), its status (context, prompt cache, auto-compact, advisor), the issues and pull requests Claude attached to it, the sessions and chats linked with it, and a GitHub view. Auto-compact and the advisor model can be changed from its status rows. Ctrl+Shift+R shows or hides it. Drag the edge of either sidebar to resize it; the widths are remembered.
+- **Shell panel.** Each Claude session can show its own shell under its terminal (Ctrl+Shift+T or Ctrl+J). It starts in the session's folder and ends with the session.
+- **Right sidebar.** The actions for the shown session (open in your editor, open folder, Commit & Push, Pull, shell), its status (context, prompt cache, auto-compact, advisor), the issues and pull requests Claude attached to it, the sessions linked with it, what the model drew for it in the **Visual** panel, and a GitHub view. Auto-compact and the advisor model can be changed from its status rows. Ctrl+Shift+R shows or hides it. Drag the edge of either sidebar to resize it; the widths are remembered.
 - **Usage meters.** Context per session, plus 5-hour and 7-day account limits. See [Usage meters](#usage-meters) for the catch.
-- **Git buttons.** Commit & Push (Haiku writes the message through your own `claude` CLI) and Pull. Branch management too.
+- **Git buttons.** Commit & Push (Haiku writes the message through the running session itself, no extra `claude` process) and Pull. Branch management too.
 - **Tab titles.** Claude names its own tabs.
+- **Visual panel.** Ask Claude to draw something and it appears beside the terminal as Markdown plus native cards, tables and charts, streamed while it writes.
 - **Editors.** Open a project in VS Code or Zed, reveal it in Finder or Explorer, copy its path.
 - **Auto-update** from GitHub Releases, for installed copies.
 
@@ -36,8 +37,7 @@ Claudiu's own shortcuts use Ctrl+Shift (Cmd+Shift on macOS), so plain Ctrl and A
 | Shortcut | Action |
 |---|---|
 | Ctrl+Shift+N | New Claude session, in the active session's folder |
-| Ctrl+Shift+M | New chat (Claude in a native conversation view); not tied to a project unless you pick one |
-| Ctrl+Shift+T | Show or hide the session's shell |
+| Ctrl+Shift+T / Ctrl+J | Show or hide the session's shell |
 | Ctrl+Shift+W | End the focused session (no confirmation) |
 | Ctrl+Tab / Ctrl+Shift+Tab | Next / previous running session |
 | Ctrl+Shift+] | Move the keyboard between Claude and its shell |

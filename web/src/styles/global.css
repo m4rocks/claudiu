@@ -1,30 +1,444 @@
 @import "tailwindcss";
+@import "@fontsource-variable/schibsted-grotesk";
 
 @theme {
-	--color-claude: #d97757;
-	--color-ink: #0b0b0a;
-	--color-ink-raised: #131312;
-	--color-line: #2a2a27;
-	--font-serif:
-		"Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia,
-		serif;
-	--font-mono:
-		ui-monospace, "SF Mono", "Cascadia Mono", "Roboto Mono", Consolas,
-		monospace;
+	--color-paper: #0e0e0f;
+	--color-ink: #e8e6e1;
+	--color-dim: #a3a19b;
+	--color-faint: #57564f;
+	--color-rule: #2a2a2c;
+	--color-orange: #d97757;
+	--font-sans: "Schibsted Grotesk Variable", ui-sans-serif, system-ui, sans-serif;
+	--font-mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, monospace;
 }
 
 @layer base {
 	html {
 		color-scheme: dark;
+		background: var(--color-paper);
+		scrollbar-color: var(--color-faint) var(--color-paper);
+	}
+
+	body {
+		background: var(--color-paper);
+		color: var(--color-ink);
+		font-family: var(--font-sans);
+		font-size: 17px;
+		line-height: 1.55;
+		font-variant-numeric: tabular-nums;
+		-webkit-font-smoothing: antialiased;
+		caret-color: var(--color-orange);
 	}
 
 	::selection {
-		background: color-mix(in srgb, var(--color-claude) 35%, transparent);
-		color: #fff;
+		background: var(--color-orange);
+		color: var(--color-paper);
 	}
 
 	:focus-visible {
-		outline: 2px solid var(--color-claude);
+		outline: 2px solid var(--color-orange);
 		outline-offset: 3px;
+		border-radius: 2px;
+	}
+
+	a {
+		color: inherit;
+		text-decoration-color: var(--color-faint);
+		text-underline-offset: 0.22em;
+		text-decoration-thickness: 1px;
+	}
+	a:hover {
+		text-decoration-color: var(--color-orange);
+	}
+
+	h1,
+	h2,
+	h3 {
+		text-wrap: balance;
+	}
+	p {
+		text-wrap: pretty;
+	}
+
+	code,
+	kbd {
+		font-family: var(--font-mono);
+		font-size: 0.86em;
+	}
+}
+
+@layer components {
+	.wrap {
+		width: 100%;
+		max-width: 1320px;
+		margin-inline: auto;
+		padding-inline: clamp(16px, 4vw, 56px);
+	}
+
+	/* running head, as on every manual page */
+	.head {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 24px;
+		padding-block: 18px;
+		border-bottom: 1px solid var(--color-rule);
+		font-size: 14px;
+		color: var(--color-dim);
+	}
+	.head nav {
+		display: flex;
+		gap: 22px;
+	}
+	.head nav a {
+		text-decoration: none;
+	}
+	.head nav a:hover {
+		color: var(--color-ink);
+	}
+
+	.lede {
+		font-size: 19px;
+		color: var(--color-dim);
+		max-width: 34ch;
+	}
+	.lede b {
+		color: var(--color-ink);
+		font-weight: 600;
+	}
+
+	/* spec table: ruled rows, label left, value right */
+	.spec {
+		width: 100%;
+		border-top: 1.5px solid var(--color-ink);
+		border-collapse: collapse;
+		font-size: 15px;
+	}
+	.spec th,
+	.spec td {
+		padding: 10px 0;
+		border-bottom: 1px solid var(--color-rule);
+		vertical-align: top;
+		text-align: left;
+	}
+	.spec th {
+		font-weight: 400;
+		color: var(--color-dim);
+		padding-right: 24px;
+		white-space: nowrap;
+	}
+	.spec td {
+		text-align: right;
+	}
+	.spec.wide td {
+		text-align: left;
+	}
+
+	.download {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 16px;
+		background: var(--color-orange);
+		color: var(--color-paper);
+		padding: 16px 18px;
+		font-weight: 800;
+		font-size: 22px;
+		letter-spacing: -0.01em;
+		text-decoration: none;
+		transition: background-color 160ms cubic-bezier(0.16, 1, 0.3, 1);
+	}
+	.download:hover {
+		background: #e5876a;
+	}
+	.download small {
+		font-weight: 500;
+		font-size: 14px;
+	}
+	.download svg {
+		width: 26px;
+		height: 26px;
+		flex: none;
+	}
+
+	/* callout disc: the manual's numbered part */
+	.disc {
+		display: inline-grid;
+		place-items: center;
+		width: 1.6em;
+		height: 1.6em;
+		border-radius: 50%;
+		background: var(--color-orange);
+		color: var(--color-paper);
+		font-weight: 800;
+		font-size: 0.62em;
+		line-height: 1;
+		flex: none;
+		vertical-align: 0.3em;
+	}
+
+	/* the exploded drawing */
+	.fig svg {
+		width: 100%;
+		height: auto;
+		display: block;
+	}
+	/* a part of the screenshot, outlined only while its number is pointed at */
+	.fig .zone {
+		fill: none;
+		stroke: transparent;
+		stroke-width: 5;
+		transition: stroke 160ms cubic-bezier(0.16, 1, 0.3, 1);
+	}
+	.fig .pin {
+		fill: var(--color-orange);
+	}
+	.fig .lead {
+		stroke: var(--color-orange);
+		stroke-width: 3;
+		fill: none;
+	}
+	.fig .call circle {
+		fill: var(--color-orange);
+	}
+	.fig .call text {
+		fill: var(--color-paper);
+		font: 800 38px var(--font-sans);
+		text-anchor: middle;
+		dominant-baseline: central;
+	}
+	.fig .call:focus-visible {
+		outline: none;
+	}
+	.fig .call:focus-visible circle {
+		stroke: var(--color-ink);
+		stroke-width: 6;
+	}
+	/* hovering or focusing a part number lights that part */
+	.fig:has([data-k="1"]:is(:hover, :focus-visible)) .p1,
+	.fig:has([data-k="2"]:is(:hover, :focus-visible)) .p2,
+	.fig:has([data-k="3"]:is(:hover, :focus-visible)) .p3,
+	.fig:has([data-k="4"]:is(:hover, :focus-visible)) .p4,
+	.fig:has([data-k="5"]:is(:hover, :focus-visible)) .p5,
+	.fig:has([data-k="6"]:is(:hover, :focus-visible)) .p6,
+	.fig:has([data-k="7"]:is(:hover, :focus-visible)) .p7,
+	.fig:has([data-k="8"]:is(:hover, :focus-visible)) .p8 {
+		stroke: var(--color-orange);
+	}
+
+	.key {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 6px 22px;
+		font-size: 15px;
+		color: var(--color-dim);
+		margin-top: 16px;
+		padding-top: 12px;
+		border-top: 1px solid var(--color-rule);
+	}
+	.key a {
+		display: inline-flex;
+		align-items: center;
+		gap: 8px;
+		text-decoration: none;
+	}
+	.key a:hover {
+		color: var(--color-ink);
+	}
+	.key .disc {
+		font-size: 12px;
+		width: 20px;
+		height: 20px;
+		vertical-align: 0;
+	}
+
+	.cap {
+		font-size: 14px;
+		color: var(--color-dim);
+		margin-top: 12px;
+	}
+	.cap b {
+		color: var(--color-ink);
+		font-weight: 600;
+		margin-right: 0.5em;
+	}
+
+	/* drawn panel inside a figure: hairline outline, no fill */
+	.panel {
+		border: 1.5px solid var(--color-ink);
+		border-radius: 8px;
+		padding: 14px 16px;
+	}
+	.lbl {
+		font-size: 12px;
+		font-weight: 600;
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+		color: var(--color-dim);
+	}
+	.rowline {
+		display: flex;
+		align-items: center;
+		gap: 10px;
+		padding: 7px 0;
+		border-bottom: 1px solid var(--color-rule);
+		font-size: 15px;
+	}
+	.rowline:last-child {
+		border-bottom: 0;
+	}
+	.rowline .chip {
+		margin-left: auto;
+		font-size: 13px;
+		color: var(--color-dim);
+		border: 1px solid var(--color-faint);
+		border-radius: 4px;
+		padding: 0 6px;
+	}
+	.dot {
+		width: 8px;
+		height: 8px;
+		border-radius: 50%;
+		background: #7fb069;
+		flex: none;
+	}
+	.dot.off {
+		background: none;
+		border: 1.5px solid var(--color-faint);
+	}
+	.note {
+		font-size: 13px;
+		color: var(--color-orange);
+	}
+
+	/* ruled meter: measured against a labelled scale */
+	.meter {
+		position: relative;
+		height: 10px;
+		border: 1px solid var(--color-faint);
+		margin-top: 8px;
+	}
+	.meter i {
+		position: absolute;
+		inset: 0 auto 0 0;
+		width: var(--v);
+		background: var(--color-ink);
+	}
+	.scale {
+		display: flex;
+		justify-content: space-between;
+		font-size: 11px;
+		color: var(--color-dim);
+		margin-top: 4px;
+	}
+
+	.keys td:first-child {
+		white-space: nowrap;
+	}
+	kbd {
+		display: inline-block;
+		border: 1px solid var(--color-faint);
+		border-bottom-width: 2px;
+		border-radius: 4px;
+		padding: 0 6px;
+		color: var(--color-ink);
+	}
+
+	@media (prefers-reduced-motion: no-preference) {
+		.fig .lead {
+			stroke-dasharray: 160;
+			stroke-dashoffset: 160;
+			animation: draw 900ms cubic-bezier(0.16, 1, 0.3, 1) 200ms forwards;
+		}
+		@keyframes draw {
+			to {
+				stroke-dashoffset: 0;
+			}
+		}
+	}
+}
+
+/* the parts, laid out where they sit in the Claudiu window */
+@layer components {
+	.win {
+		display: grid;
+		margin-block: 8px 96px;
+		grid-template-columns: minmax(0, 1fr) minmax(0, 1.35fr) minmax(0, 1fr);
+		grid-template-areas: "tb tb tb" "p1 p2 p4" "p1 p2 p5" "p7 p3 p6" "p7 p3 p8" "sp sp sp";
+		gap: 6px;
+		background: #131316;
+		padding: 0 6px 6px;
+		border-radius: 14px;
+		border: 1px solid #242428;
+	}
+	.win .tb {
+		grid-area: tb;
+		display: flex;
+		justify-content: space-between;
+		padding: 10px 8px;
+		font-size: 13px;
+		color: var(--color-dim);
+	}
+	.win .tb span:first-child {
+		color: var(--color-ink);
+		font-weight: 700;
+	}
+	.win .cell {
+		display: flex;
+		flex-direction: column;
+		gap: 14px;
+		scroll-margin-top: 8px;
+		min-width: 0;
+		background: var(--color-paper);
+		border: 1px solid #242428;
+		border-radius: 8px;
+		padding: 24px;
+	}
+	.win .cell h2 {
+		font-size: clamp(22px, 2vw, 28px);
+		line-height: 1.1;
+		font-weight: 800;
+		letter-spacing: -0.02em;
+	}
+	.win .cell p {
+		color: var(--color-dim);
+		font-size: 15.5px;
+		max-width: 58ch;
+	}
+	.win .cell figure {
+		margin-top: auto;
+		padding-top: 6px;
+	}
+	.win .p1 { grid-area: p1; }
+	.win .p2 { grid-area: p2; }
+	.win .p3 { grid-area: p3; }
+	.win .p4 { grid-area: p4; }
+	.win .p5 { grid-area: p5; }
+	.win .p6 { grid-area: p6; }
+	.win .p7 { grid-area: p7; }
+	.win .p8 { grid-area: p8; }
+	.win .sp {
+		grid-area: sp;
+		display: grid;
+		grid-template-columns: minmax(0, 4fr) minmax(0, 8fr);
+		column-gap: 48px;
+	}
+	.win .sp > div {
+		grid-column: 2;
+		grid-row: 1 / span 3;
+		margin: 0;
+	}
+	@media (max-width: 899px) {
+		.win {
+			grid-template-columns: minmax(0, 1fr);
+			grid-template-areas: "tb" "p1" "p2" "p3" "p4" "p5" "p6" "p7" "p8" "sp";
+		}
+		.win .sp {
+			grid-template-columns: minmax(0, 1fr);
+		}
+		.win .sp > div {
+			grid-column: 1;
+			grid-row: auto;
+		}
 	}
 }

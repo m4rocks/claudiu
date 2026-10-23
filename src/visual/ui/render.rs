@@ -256,7 +256,7 @@ fn svg(s: Option<&Svg>) -> AnyElement {
             .px(px(12.0))
             .rounded(px(8.0))
             .bg(tok("surface"))
-            .text_size(px(12.0))
+            .text_size(crate::scale::px(12.0))
             .text_color(tok("faint"))
             .child("Drawing…")
             .into_any_element(),
@@ -347,7 +347,7 @@ fn boxed(c: &Css) -> Div {
         d = d.overflow_hidden();
     }
     if let Some(s) = c.size {
-        d = d.text_size(px(s));
+        d = d.text_size(crate::scale::px(s));
     }
     if let Some(l) = c.line_height {
         d = d.line_height(relative(l));

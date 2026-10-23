@@ -7,7 +7,7 @@ use gpui::{
 };
 
 use crate::app::{
-    Act, CloseSession, GitOp, FocusSearch, ImportProject, Main, Modal, NewChat, NewClaude, NextSession, OpenGithub, OpenSettings, PrevSession, ShellDrag, SwapFocus,
+    Act, CloseSession, GitOp, FocusSearch, ImportProject, Main, Modal, NewClaude, NextSession, OpenGithub, OpenSettings, PrevSession, ShellDrag, SwapFocus,
     ToggleRight, ToggleShell, ToggleSidebar, Workspace, SHELL_HEIGHT,
 };
 use gpui_kit::component::{TitleBar, input::Input};
@@ -20,30 +20,30 @@ use crate::widgets::{ago, button, clawd, danger_button, fade_in, icon, icon_butt
 impl Workspace {
     // ------------------------------------------------------------------ top bar
 
-    fn render_topbar(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let crate::inspector::Shown { rec, cwd, project, chat_title } = self.shown();
+    fn render_topbar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let crate::inspector::Shown { rec, cwd, project } = self.shown();
         // Git actions live in the right sidebar; the branch pill here needs the repository of the session's own folder.
         let repo = project.as_ref().filter(|p| p.git.is_some()).and(cwd.clone());
         let busy = self.git_busy;
 
-        let title = rec.as_ref().map(|r| r.display_title().to_string()).or(chat_title).unwrap_or_else(|| "Claudiu".into());
+        let title = rec.as_ref().map(|r| r.display_title().to_string()).unwrap_or_else(|| "Claudiu".into());
         let branch = project.as_ref().and_then(|p| p.git.as_ref()).and_then(|g| g.branch.clone());
         // `.occlude()` on both groups: the bar is a Windows drag (HTCAPTION) area, which would otherwise swallow clicks on the buttons inside it.
-        // The title bar is the top bar: macOS keeps its traffic lights (over the sidebar, or left of the
-        // toggle when the sidebar is hidden), Windows/Linux get min/max/close drawn at the right edge.
-        let left_pad = if cfg!(target_os = "macos") && !self.store.data.layout.sidebar_visible { 80.0 } else { 14.0 };
+        // The top bar spans the window and is drawn as the window background, not as a panel. macOS keeps its
+        // traffic lights at the left (they are hidden in fullscreen); Windows/Linux get min/max/close at the right.
+        let left_pad = if cfg!(target_os = "macos") && !window.is_fullscreen() { 80.0 } else { 10.0 };
         TitleBar::new()
-            .h(px(40.0))
+            .h(px(theme::TOPBAR_HEIGHT))
             .pl(px(left_pad))
             .bg(hsla(theme::APP_BG))
-            .border_color(hsla(theme::BORDER))
+            .border_b_0()
             // TitleBar's inner row can't shrink below its in-flow content's width, so a long title would push
             // the right-hand buttons out of view. An absolute overlay takes the content out of that sizing.
-            .child(div().absolute().size_full().flex().items_center().justify_between().child(
+            .child(div().absolute().size_full().flex().items_center().justify_between().pr(px(theme::PANEL_GAP)).child(
                 div()
                     .flex()
                     .items_center()
-                    .gap(px(10.0))
+                    .gap(px(6.0))
                     .flex_1()
                     .min_w_0()
                     .overflow_hidden()
@@ -63,12 +63,12 @@ impl Workspace {
                             .overflow_hidden()
                             .whitespace_nowrap()
                             .text_ellipsis()
-                            .text_size(px(13.0))
+                            .text_size(crate::scale::px(13.0))
                             .font_weight(FontWeight::MEDIUM)
                             .child(title),
                     )
                     .when_some(cwd, |d, p| {
-                        d.child(div().flex_none().text_size(px(11.5)).text_color(hsla(theme::TEXT_FAINT)).child(short_path(&p)))
+                        d.child(div().flex_none().text_size(crate::scale::px(11.5)).text_color(hsla(theme::TEXT_FAINT)).child(short_path(&p)))
                     })
                     .when_some(branch.zip(repo), |d, (b, repo)| {
                         // Click: switch branch or create one (see Workspace::open_branch_menu).
@@ -84,11 +84,11 @@ impl Workspace {
                                 .px(px(7.0))
                                 .py(px(1.0))
                                 .rounded(px(10.0))
-                                .bg(hsla(0x1a1a1a))
-                                .text_size(px(11.0))
+                                .bg(hsla(0x26262a))
+                                .text_size(crate::scale::px(11.0))
                                 .text_color(hsla(theme::TEXT_DIM))
                                 .cursor_pointer()
-                                .hover(|s| s.bg(hsla(0x262626)).text_color(hsla(theme::TEXT)))
+                                .hover(|s| s.bg(hsla(0x323236)).text_color(hsla(theme::TEXT)))
                                 .child(icon(IconName::GitBranch, 12.0))
                                 .child(b)
                                 .child(tail)
@@ -100,7 +100,7 @@ impl Workspace {
                     }),
             )
             .child(
-                div().flex().flex_none().mr(px(10.0)).occlude().child(
+                div().flex().flex_none().occlude().child(
                     icon_button("toggle-right", IconName::PanelRight).on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.toggle_right(window, cx))),
                 ),
             ))
@@ -118,13 +118,14 @@ impl Workspace {
                 .flex()
                 .items_center()
                 .justify_between()
-                .h(px(32.0))
+                .h(px(28.0))
                 .flex_none()
-                .px(px(14.0))
+                .px(px(10.0))
+                .rounded(px(6.0))
                 .bg(hsla(0x1d1512))
-                .border_b_1()
+                .border_1()
                 .border_color(hsla(0x3a2a24))
-                .child(div().text_size(px(12.0)).text_color(hsla(theme::ACCENT)).child(text))
+                .child(div().text_size(crate::scale::px(12.0)).text_color(hsla(theme::ACCENT)).child(text))
                 .when_some(action, |d, (label, act)| {
                     d.child(button("update-action", label, true).h(px(22.0)).on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
                         ws.act(act.clone(), window, cx)
@@ -139,13 +140,9 @@ impl Workspace {
     fn render_session(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let blank = || div().size_full().bg(hsla(theme::TERMINAL_BG)).into_any_element();
         let Some(id) = self.active.clone() else { return blank() };
-        let chat = self.chat_pane(&id).map(|p| p.view.clone());
-        let term = if chat.is_none() { self.live_view(&id).cloned() } else { None };
-        if chat.is_none() && term.is_none() {
-            return blank();
-        }
+        let Some(term) = self.live_view(&id).cloned() else { return blank() };
         let rec = self.store.session(&id).cloned();
-        let exit = term.as_ref().and_then(|v| v.read(cx).exit_code);
+        let exit = term.read(cx).exit_code;
         let is_claude = rec.as_ref().is_some_and(|r| r.kind == SessionKind::Claude);
         let rid = id.clone();
 
@@ -168,7 +165,7 @@ impl Workspace {
                 .bg(hsla(0x181818))
                 .border_1()
                 .border_color(hsla(0x2a2a2a))
-                .child(div().text_size(px(12.5)).text_color(hsla(theme::TEXT_DIM)).child(label))
+                .child(div().text_size(crate::scale::px(12.5)).text_color(hsla(theme::TEXT_DIM)).child(label))
                 .children(is_claude.then(|| {
                     button("ended-act", "Resume", true).on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::Resume(rid.clone()), window, cx)))
                 }))
@@ -184,11 +181,7 @@ impl Workspace {
                 .min_w_0()
                 .min_h_0()
                 .bg(hsla(theme::TERMINAL_BG))
-                .child(match (chat, term) {
-                    (Some(view), _) => div().flex_1().min_h_0().child(view),
-                    (None, Some(view)) => div().flex_1().min_h_0().p(px(8.0)).child(view),
-                    _ => div(),
-                })
+                .child(div().flex_1().min_h_0().p(px(6.0)).child(term))
                 .children(banner),
             format!("pane-in-{id}"),
             150,
@@ -203,7 +196,7 @@ impl Workspace {
                 .child(
                     div()
                         .id("shell-divider")
-                        .h(px(5.0))
+                        .h(px(4.0))
                         .flex_none()
                         .bg(hsla(theme::BORDER))
                         .cursor_row_resize()
@@ -216,7 +209,7 @@ impl Workspace {
                             }),
                         ),
                 )
-                .child(div().h(px(height)).flex_none().bg(hsla(theme::TERMINAL_BG)).p(px(8.0)).child(view));
+                .child(div().h(px(height)).flex_none().bg(hsla(theme::TERMINAL_BG)).p(px(6.0)).child(view));
         }
         container.into_any_element()
     }
@@ -231,11 +224,11 @@ impl Workspace {
                 .flex()
                 .justify_between()
                 .gap(px(28.0))
-                .child(div().text_size(px(12.0)).text_color(hsla(theme::TEXT_DIM)).child(what.to_string()))
-                .child(div().text_size(px(12.0)).text_color(hsla(theme::TEXT_FAINT)).child(keys.to_string()))
+                .child(div().text_size(crate::scale::px(12.0)).text_color(hsla(theme::TEXT_DIM)).child(what.to_string()))
+                .child(div().text_size(crate::scale::px(12.0)).text_color(hsla(theme::TEXT_FAINT)).child(keys.to_string()))
         };
         let mut recent = div().flex().flex_col().gap(px(2.0)).mt(px(26.0)).w(px(420.0));
-        // Code sessions and chats together, newest first: (id, title, last active).
+        // Newest first: (id, title, last active).
         let mut sessions: Vec<(String, String, i64)> = self
             .store
             .data
@@ -243,7 +236,6 @@ impl Workspace {
             .iter()
             .filter(|s| s.kind == SessionKind::Claude && !s.hidden)
             .map(|s| (s.id.clone(), s.display_title().to_string(), s.last_active))
-            .chain(self.chat_store.shown().map(|c| (c.id.clone(), c.title.clone(), c.last_active)))
             .collect();
         sessions.sort_by_key(|s| std::cmp::Reverse(s.2));
         let t = now();
@@ -261,8 +253,8 @@ impl Workspace {
                     .rounded(px(6.0))
                     .cursor_pointer()
                     .hover(|st| st.bg(hsla(theme::ROW_HOVER)))
-                    .child(div().text_size(px(13.0)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(title))
-                    .child(div().text_size(px(11.5)).text_color(hsla(theme::TEXT_FAINT)).child(ago(last_active, t)))
+                    .child(div().text_size(crate::scale::px(13.0)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(title))
+                    .child(div().text_size(crate::scale::px(11.5)).text_color(hsla(theme::TEXT_FAINT)).child(ago(last_active, t)))
                     .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::Select(id.clone()), window, cx))),
             );
         }
@@ -273,8 +265,8 @@ impl Workspace {
             .items_center()
             .justify_center()
             .child(clawd(72.0))
-            .child(div().mt(px(20.0)).text_size(px(22.0)).font_weight(FontWeight::SEMIBOLD).child("Claudiu"))
-            .child(div().mt(px(4.0)).text_size(px(13.0)).text_color(hsla(theme::TEXT_DIM)).child("A workspace for your Claude Code sessions"))
+            .child(div().mt(px(20.0)).text_size(crate::scale::px(22.0)).font_weight(FontWeight::SEMIBOLD).child("Claudiu"))
+            .child(div().mt(px(4.0)).text_size(crate::scale::px(13.0)).text_color(hsla(theme::TEXT_DIM)).child("A workspace for your Claude Code sessions"))
             .child(
                 div()
                     .mt(px(22.0))
@@ -283,7 +275,6 @@ impl Workspace {
                     .child(button("home-claude", "New code session", true).on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
                         ws.act(Act::NewClaude { cwd: c1.clone() }, window, cx)
                     })))
-                    .child(button("home-chat", "New chat", false).on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::NewChat { cwd: None }, window, cx))))
                     .child(button("home-import", "Add project", false).on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::ImportProject, window, cx)))),
             )
             .child(recent)
@@ -294,7 +285,6 @@ impl Workspace {
                     .flex_col()
                     .gap(px(4.0))
                     .child(shortcut("Ctrl+Shift+N", "New code session"))
-                    .child(shortcut("Ctrl+Shift+M", "New chat"))
                     .child(shortcut("Ctrl+Shift+T", "Show or hide shell"))
                     .child(shortcut("Ctrl+Tab", "Next session"))
                     .child(shortcut("Ctrl+Shift+W", "End session")),
@@ -331,11 +321,11 @@ impl Workspace {
                 .flex()
                 .items_center()
                 .rounded(px(5.0))
-                .text_size(px(12.5))
+                .text_size(crate::scale::px(12.5))
                 .text_color(hsla(color))
                 .gap(px(8.0))
                 .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(item.label.clone()))
-                .children(item.hint.clone().map(|h| div().flex_none().text_size(px(11.0)).text_color(hsla(theme::TEXT_FAINT)).child(h)));
+                .children(item.hint.clone().map(|h| div().flex_none().text_size(crate::scale::px(11.0)).text_color(hsla(theme::TEXT_FAINT)).child(h)));
             card = card.child(if item.disabled {
                 row
             } else {
@@ -370,11 +360,11 @@ impl Workspace {
         let (title, body, confirm_label, danger): (String, gpui::AnyElement, String, bool) = match modal {
             Modal::Confirm { title, body, confirm, danger, .. } => (
                 title.clone(),
-                div().text_size(px(13.0)).text_color(hsla(theme::TEXT_DIM)).child(body.clone()).into_any_element(),
+                div().text_size(crate::scale::px(13.0)).text_color(hsla(theme::TEXT_DIM)).child(body.clone()).into_any_element(),
                 confirm.clone(),
                 *danger,
             ),
-            Modal::Settings { shell, claude, updates } => {
+            Modal::Settings { shell, claude, updates, scale } => {
                 let toggle = |on: bool| if on { "On" } else { "Off" };
                 (
                     "Settings".into(),
@@ -384,6 +374,29 @@ impl Workspace {
                         .gap(px(10.0))
                         .child(div().flex().flex_col().gap(px(4.0)).child(section_label("SHELL".to_string())).child(Input::new(shell)))
                         .child(div().flex().flex_col().gap(px(4.0)).child(section_label("CLAUDE CODE PATH".to_string())).child(Input::new(claude)))
+                        .child(
+                            div()
+                                .h(px(32.0))
+                                .px(px(10.0))
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .rounded(px(6.0))
+                                .bg(hsla(0x111111))
+                                .border_1()
+                                .border_color(hsla(0x242424))
+                                .text_size(px(13.0))
+                                .child("Scale (text and terminal)")
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(10.0))
+                                        .child(scale_step("scale-down", "−", -(crate::scale::STEP as i32), cx))
+                                        .child(div().w(px(40.0)).flex().justify_center().child(format!("{scale}%")))
+                                        .child(scale_step("scale-up", "+", crate::scale::STEP as i32, cx)),
+                                ),
+                        )
                         .child(
                             div()
                                 .id("settings-updates")
@@ -396,7 +409,7 @@ impl Workspace {
                                 .bg(hsla(0x111111))
                                 .border_1()
                                 .border_color(hsla(0x242424))
-                                .text_size(px(13.0))
+                                .text_size(crate::scale::px(13.0))
                                 .cursor_pointer()
                                 .child("Check for updates")
                                 .child(div().text_color(hsla(if *updates { theme::ACCENT } else { theme::TEXT_FAINT })).child(toggle(*updates)))
@@ -418,7 +431,7 @@ impl Workspace {
                     .flex()
                     .flex_col()
                     .gap(px(8.0))
-                    .child(div().text_size(px(12.0)).text_color(hsla(theme::TEXT_DIM)).child("A model alias or id, such as opus, sonnet or claude-opus-5-5, or “off”. Claude Code saves it as your default."))
+                    .child(div().text_size(crate::scale::px(12.0)).text_color(hsla(theme::TEXT_DIM)).child("A model alias or id, such as opus, sonnet or claude-opus-5-5, or “off”. Claude Code saves it as your default."))
                     .child(Input::new(input))
                     .into_any_element(),
                 "Set".into(),
@@ -453,7 +466,7 @@ impl Workspace {
                     _ => {}
                 }
             }))
-            .child(div().text_size(px(15.0)).font_weight(FontWeight::SEMIBOLD).child(title))
+            .child(div().text_size(crate::scale::px(15.0)).font_weight(FontWeight::SEMIBOLD).child(title))
             .child(body)
             .child(
                 div()
@@ -513,7 +526,7 @@ impl Workspace {
                         .bg(hsla(0x1a1a1a))
                         .border_1()
                         .border_color(hsla(if t.error { 0x5a2327 } else { 0x2c2c2c }))
-                        .text_size(px(12.5))
+                        .text_size(crate::scale::px(12.5))
                         .text_color(hsla(if t.error { theme::DANGER } else { theme::TEXT }))
                         .child(t.text.clone())
                         .children(action),
@@ -541,9 +554,20 @@ impl Render for Workspace {
             self.window_title = title;
         }
 
-        let sidebar = self.store.data.layout.sidebar_visible.then(|| self.render_sidebar(window, cx));
+        let left_open = self.left_reveal.step(self.store.data.layout.sidebar_visible, window);
+        let left_w = self.left_width(f32::from(window.viewport_size().width));
+        let sidebar = (left_open > 0.0).then(|| {
+            div()
+                .flex()
+                .flex_none()
+                .w(px((left_w + theme::PANEL_GAP) * left_open))
+                .h_full()
+                .overflow_hidden()
+                .child(self.render_sidebar(window, cx))
+                .child(div().flex_none().w(px(theme::PANEL_GAP)))
+        });
         let banner = self.render_update_banner(cx);
-        let topbar = self.render_topbar(cx);
+        let topbar = self.render_topbar(window, cx);
         // Terminals that aren't on screen keep running but must not trigger window redraws on every output burst.
         let showing = if matches!(self.main, Main::Terminals) { self.active.as_ref() } else { None };
         for l in &self.live {
@@ -562,6 +586,8 @@ impl Render for Workspace {
         let menu = self.render_menu(cx);
         let modal = self.render_modal(cx);
         let toast = self.render_toast(cx);
+        // The top bar's own background is the gutter above the panels; only an update banner needs real space.
+        let content_top = if banner.is_some() { theme::PANEL_GAP } else { 0.0 };
 
         div()
             .id("workspace")
@@ -570,13 +596,13 @@ impl Render for Workspace {
             .relative()
             .size_full()
             .flex()
-            .bg(hsla(theme::TERMINAL_BG))
+            .flex_col()
+            .bg(hsla(theme::APP_BG))
             .text_color(hsla(theme::TEXT))
             .on_action(cx.listener(|ws, _: &NewClaude, window, cx| {
                 let cwd = ws.new_session_cwd();
                 ws.act(Act::NewClaude { cwd }, window, cx)
             }))
-            .on_action(cx.listener(|ws, _: &NewChat, window, cx| ws.act(Act::NewChat { cwd: None }, window, cx)))
             .on_action(cx.listener(|ws, _: &ToggleShell, window, cx| {
                 if let Some(id) = ws.active.clone() {
                     ws.act(Act::ToggleShell(id), window, cx)
@@ -640,20 +666,53 @@ impl Render for Workspace {
                     ws.act(Act::AddProject(p.clone()), window, cx);
                 }
             }))
-            .children(sidebar)
+            .child(topbar)
             .child(
                 div()
                     .flex()
                     .flex_col()
                     .flex_1()
-                    .min_w_0()
-                    .h_full()
-                    .child(topbar)
+                    .min_h_0()
+                    .gap(px(theme::PANEL_GAP))
+                    .px(px(theme::PANEL_GAP))
+                    .pt(px(content_top))
+                    .pb(px(theme::PANEL_GAP))
                     .children(banner)
-                    .child(div().flex().flex_1().min_h_0().child(div().flex_1().min_w_0().h_full().child(main)).children(right)),
+                    .child(
+                        div()
+                            .flex()
+                            .flex_1()
+                            .min_h_0()
+                            .children(sidebar)
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .h_full()
+                                    .rounded(px(theme::PANEL_RADIUS))
+                                    .overflow_hidden()
+                                    .border_1()
+                                    .border_color(hsla(theme::PANEL_BORDER))
+                                    .bg(hsla(theme::PANEL_BG))
+                                    .child(main),
+                            )
+                            .children(right),
+                    ),
             )
             .children(menu)
             .children(modal)
             .children(toast)
     }
+}
+
+/// A − / + button in the Settings modal that moves the scale by `by` percent, within the allowed range.
+fn scale_step(id: &'static str, label: &'static str, by: i32, cx: &mut Context<Workspace>) -> impl IntoElement {
+    div().id(id).w(px(22.0)).h(px(22.0)).flex().items_center().justify_center().rounded(px(4.0)).cursor_pointer().hover(|s| s.bg(hsla(0x242424))).child(label).on_click(
+        cx.listener(move |ws, _: &ClickEvent, _w, cx| {
+            if let Some(Modal::Settings { scale, .. }) = ws.modal.as_mut() {
+                *scale = (*scale as i32 + by).clamp(crate::scale::MIN as i32, crate::scale::MAX as i32) as u32;
+            }
+            cx.notify();
+        }),
+    )
 }

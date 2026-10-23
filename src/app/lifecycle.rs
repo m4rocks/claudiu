@@ -2,7 +2,7 @@
 
 use super::*;
 
-/// The ids of the sessions and chats that were open, in order.
+/// The ids of the sessions that were open, in order.
 fn running_file() -> PathBuf {
     datadir::data_dir().join("running.json")
 }
@@ -18,7 +18,7 @@ impl Workspace {
             let v = l.view.read(cx);
             v.is_running() && v.is_working() && self.store.session(&l.id).is_some_and(|r| r.kind == SessionKind::Claude)
         });
-        let working = working.count() + self.chats.iter().filter(|c| c.view.read(cx).is_busy()).count();
+        let working = working.count();
         if working == 0 {
             self.finalize(cx);
             return true;
@@ -39,16 +39,14 @@ impl Workspace {
         false
     }
 
-    /// The sessions and chats that are open now, in order. A chat nothing was said in does not count.
+    /// The sessions that are open now, in order.
     fn open_ids(&self, cx: &App) -> Vec<Id> {
-        let sessions = self.live.iter().filter(|l| self.store.session(&l.id).is_some_and(|r| r.kind == SessionKind::Claude) && self.is_running(&l.id, cx)).map(|l| l.id.clone());
-        let chats = self.chats.iter().filter(|p| self.chat_store.get(&p.id).is_some_and(|r| !r.is_blank())).map(|p| p.id.clone());
-        sessions.chain(chats).collect()
+        self.live.iter().filter(|l| self.store.session(&l.id).is_some_and(|r| r.kind == SessionKind::Claude) && self.is_running(&l.id, cx)).map(|l| l.id.clone()).collect()
     }
 
     /// Remember what is open, so the next start brings it back (also while running, in case Claudiu does not get to
-    /// quit). It has its own file, like `chats.json`: another Claudiu sharing the data folder rewrites `state.json`
-    /// without knowing this list.
+    /// quit). It has its own file: another Claudiu sharing the data folder rewrites `state.json` without knowing this
+    /// list.
     pub(super) fn remember_open(&mut self, cx: &App) {
         if !self.restored || self.quitting {
             return;
@@ -60,16 +58,14 @@ impl Workspace {
         }
     }
 
-    /// Bring back what was open when Claudiu last ended, then show what was on screen.
+    /// Bring back what was open when Claudiu last ended, then show what was on screen. (Older versions also listed
+    /// chats here; those ids match no session and are skipped.)
     pub(super) fn restore_open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let saved: Vec<Id> = std::fs::read_to_string(running_file()).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
         let shown = self.selected.clone();
         let mut back = vec![];
         for id in saved {
-            if self.chat_store.get(&id).is_some() {
-                self.open_chat(&id, window, cx);
-                back.push(id);
-            } else if self.store.session(&id).is_some_and(|s| s.kind == SessionKind::Claude && !s.hidden) {
+            if self.store.session(&id).is_some_and(|s| s.kind == SessionKind::Claude && !s.hidden) {
                 self.resume(&id, window, cx);
                 back.push(id);
             }
@@ -81,34 +77,9 @@ impl Workspace {
         self.remember_open(cx);
     }
 
-    fn screen_file(id: &str) -> PathBuf {
-        crate::datadir::data_dir().join("screens").join(format!("{}.txt", crate::datadir::safe_file_stem(id)))
-    }
-
-    /// Keep the end of a session's screen, to show while its resume starts.
-    pub(super) fn save_screen(&self, id: &str, cx: &App) {
-        let Some(view) = self.live_view(id) else { return };
-        let text = view.read(cx).tail_text(40);
-        if !text.trim().is_empty() {
-            let _ = crate::datadir::write_atomic(&Self::screen_file(id), &text);
-        }
-    }
-
-    pub(super) fn load_screen(id: &str) -> Option<String> {
-        std::fs::read_to_string(Self::screen_file(id)).ok().filter(|t| !t.trim().is_empty())
-    }
-
     pub fn finalize(&mut self, cx: &App) {
         self.remember_open(cx);
-        for l in &self.live {
-            self.save_screen(&l.id, cx);
-        }
         self.quitting = true;
-        crate::chat::acp::close_all(); // they wind down while the state is saved below
-        for id in self.chats.drain(..).map(|p| p.id).collect::<Vec<_>>() {
-            self.forget_if_unused(&id); // a chat nothing was said in is dropped; dropping its pane closes the adapter
-        }
-        self.chat_store.save_if_dirty();
         let t = now();
         let running: Vec<Id> = self.live.iter().map(|l| l.id.clone()).collect();
         for id in running {
@@ -125,6 +96,5 @@ impl Workspace {
             .sessions
             .retain(|s| s.kind != SessionKind::Shell && !ephemeral.contains(&s.id));
         self.store.save();
-        crate::chat::acp::shutdown();
     }
 }

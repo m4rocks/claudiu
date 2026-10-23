@@ -11,8 +11,6 @@ use gpui::{
 
 use gpui_kit::component::input::{InputEvent, InputState};
 use crate::accounts;
-use crate::chat::store::{ChatRecord, ChatStore, DEFAULT_TITLE, is_tied, scratch_dir, title_from};
-use crate::chat::view::{ChatEvent, ChatView, Launch};
 use crate::claude;
 use crate::sidebar::{SIDEBAR_MAX, SIDEBAR_MIN, SIDEBAR_W};
 use crate::github::view::{GhEvent, GithubView};
@@ -26,20 +24,19 @@ use crate::terminal::SpawnSpec;
 use crate::terminal_view::{TerminalEvent, TerminalView};
 use crate::updater::UpdateState;
 
-mod chats;
 mod cross;
 #[cfg(test)]
 mod headless;
 mod ingest;
 mod lifecycle;
 mod links;
-pub use chats::ChatPane;
+mod titles;
+mod visuals;
 
 actions!(
     claudiu,
     [
         NewClaude,
-        NewChat,
         ToggleShell,
         CloseSession,
         NextSession,
@@ -82,16 +79,8 @@ pub enum Act {
     OpenGithub {
         cwd: PathBuf,
     },
-    /// A new chat (Claude through ACP), tied to a project folder only when `cwd` is given.
-    NewChat {
-        cwd: Option<PathBuf>,
-    },
-    OpenChat(Id),
-    /// Forget a chat in the list (Claude Code's transcript stays).
-    RemoveChat(Id),
-    /// Have Haiku write a new title for a chat or a Claude Code session from what was said in it.
+    /// Have the running session's own mod (Haiku) write a new title from what was said in it.
     RegenTitle(Id),
-    /// Switch the sidebar between terminal sessions and chats.
     /// Change a setting of a running session through its mod (see `usage::send_ctl`).
     SetAutoCompact(Id, bool),
     SetAdvisor(Id, String),
@@ -99,8 +88,8 @@ pub enum Act {
     AskAdvisor(Id),
     /// Filter the sidebar list to a project (`None`: all).
     FilterProject(Option<Id>),
-    /// Stage everything in this folder's repository, commit it with a Haiku-written message, push.
-    CommitPush(PathBuf),
+    /// Stage everything in this folder's repository, commit it with a message the running session's mod (Haiku) writes, push.
+    CommitPush(Id, PathBuf),
     Pull(PathBuf),
     SwitchBranch(PathBuf, String),
     /// Ask for a name, then `CreateBranch`.
@@ -174,6 +163,7 @@ pub enum Modal {
         shell: Entity<InputState>,
         claude: Entity<InputState>,
         updates: bool,
+        scale: u32,
     },
 }
 
@@ -270,10 +260,23 @@ pub struct Workspace {
     pub gh: Vec<GhPane>,
     /// The GitHub view the right sidebar shows; `None` is its menu.
     pub right_gh: Option<Id>,
+    /// The right sidebar shows the Visual panel (when the shown session has cards and GitHub is not open).
+    pub right_visual: bool,
+    /// What each session's model drew in the Visual panel, oldest card first.
+    pub visuals: HashMap<Id, Vec<crate::visual::Card>>,
+    pub visual_scroll: crate::glide::Smooth,
     pub right_drag: Option<SideDrag>,
+    /// Right-sidebar rows whose × was clicked and that are shrinking away before their entry is removed.
+    pub leaving: std::collections::HashSet<String>,
+    pub left_reveal: crate::widgets::Reveal,
+    pub right_reveal: crate::widgets::Reveal,
+    /// The right sidebar's animated width, and the view it currently shows ("menu", "visual" or "gh:<id>"):
+    /// a change of view fades the old one out, slides the width, then fades the new one in.
+    pub right_w: crate::widgets::Reveal,
+    pub right_view: String,
+    pub right_out: Option<std::time::Instant>,
+    pub right_in: std::time::Instant,
     pub left_drag: Option<SideDrag>,
-    pub chats: Vec<ChatPane>,
-    pub chat_store: ChatStore,
     /// The session shown in the main area.
     pub active: Option<Id>,
     /// Shells under Claude sessions, by the session they belong to.
@@ -332,6 +335,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Self {
         let store = Store::load(Store::default_path());
+        crate::scale::set(store.data.settings.scale.unwrap_or(100));
         let claude_exe = claude::discover(store.data.settings.claude_path.as_deref());
         let search_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Search sessions and projects").clean_on_escape());
@@ -350,14 +354,18 @@ impl Workspace {
             live: vec![],
             gh: vec![],
             right_gh: None,
+            right_visual: false,
+            visuals: HashMap::new(),
+            visual_scroll: Default::default(),
             right_drag: None,
+            leaving: Default::default(),
+            left_reveal: crate::widgets::Reveal::new(store.data.layout.sidebar_visible),
+            right_reveal: crate::widgets::Reveal::new(!store.data.layout.right_hidden),
+            right_w: crate::widgets::Reveal::at_value(store.data.layout.right_menu_w.unwrap_or(RIGHT_MENU_W)),
+            right_view: "menu".into(),
+            right_out: None,
+            right_in: std::time::Instant::now() - Duration::from_secs(5),
             left_drag: None,
-            chats: vec![],
-            chat_store: {
-                let mut chats = ChatStore::load(ChatStore::path_for(&Store::default_path()));
-                chats.purge_blank();
-                chats
-            },
             active: None,
             shells: HashMap::new(),
             shell_drag: None,
@@ -421,13 +429,13 @@ impl Workspace {
         datadir::cleanup();
         ws.ingest_usage(cx);
         ws.refresh_accounts(cx);
-        ws.warm_chats(cx);
         // After the first frame: starting every saved session is the slow part of coming back.
         cx.spawn_in(window, async move |this, cx| {
             let _ = this.update_in(cx, |ws, window, cx| ws.restore_open(window, cx));
         })
         .detach();
         ws.start_ticker(cx);
+        ws.start_visual_poll(cx);
         ws.start_fetch_loop(cx);
         ws.start_git_watch(cx);
         ws.start_activity_poll(window, cx);
@@ -451,9 +459,7 @@ impl Workspace {
                 .await;
             let _ = this.update(cx, |ws, cx| {
                 ws.scanning = false;
-                // A chat's conversation lives in Claude's history too, but it belongs to the Chat tab, not the Code list.
-                let sessions: Vec<_> = result.sessions.iter().filter(|s| !ws.chat_store.owns(&s.session_id)).cloned().collect();
-                ws.store.reconcile(&sessions, result.ok);
+                ws.store.reconcile(&result.sessions, result.ok);
                 if result.ok {
                     // Records from earlier runs that never produced a transcript: nothing to resume.
                     let live: Vec<Id> = ws.live.iter().map(|l| l.id.clone()).collect();
@@ -567,7 +573,6 @@ impl Workspace {
     fn tick(&mut self, cx: &mut Context<Self>) {
         self.purge_dead_shells();
         self.store.save_if_dirty();
-        self.chat_store.save_if_dirty();
         self.refresh_live(cx);
         self.remember_open(cx);
         self.ingest_usage(cx);
@@ -625,7 +630,7 @@ impl Workspace {
         let without = |name: &str| crate::trace::on() && std::env::var_os(name).is_some();
         if let Ok(config) = mcp::prepare(claude_session_id, record_id).and_then(|c| if without("CLAUDIU_NO_MCP") { Err(std::io::Error::other("off")) } else { Ok(c) }) {
             spec.args.push("--allowedTools".into());
-            spec.args.extend(mcp::allowed_tools("code"));
+            spec.args.extend(mcp::allowed_tools());
             spec.args.extend(["--mcp-config".into(), config.to_string_lossy().into_owned()]);
         }
         if let Ok(dir) = mcp::prepare_mod().and_then(|d| if without("CLAUDIU_NO_MOD") { Err(std::io::Error::other("off")) } else { Ok(d) }) {
@@ -633,6 +638,8 @@ impl Workspace {
             spec.env.push(("CLAUDIU_NAME_FILE".into(), mcp::name_file(claude_session_id).to_string_lossy().into_owned()));
             spec.env.push((usage::USAGE_DIR_ENV.into(), usage::snapshot_dir().to_string_lossy().into_owned()));
             spec.env.push((usage::CTL_ENV.into(), usage::ctl_file(record_id).to_string_lossy().into_owned()));
+            spec.env.push((crate::visual::VISUAL_ENV.into(), crate::visual::file(record_id).to_string_lossy().into_owned()));
+            spec.env.push((crate::ask::ASK_ENV.into(), crate::ask::request_file(record_id).to_string_lossy().into_owned()));
         }
         spec.env.push(("CLAUDE_CODE_AUTO_CONNECT_IDE".into(), "false".into()));
         spec.env.push(("CLAUDE_CODE_IDE_SKIP_AUTO_INSTALL".into(), "1".into()));
@@ -738,7 +745,7 @@ impl Workspace {
         if self
             .selected
             .as_ref()
-            .is_some_and(|id| self.store.session(id).is_none() && self.chat_pane(id).is_none())
+            .is_some_and(|id| self.store.session(id).is_none())
         {
             self.selected = None;
         }
@@ -845,12 +852,7 @@ impl Workspace {
 
     pub fn active_cwd(&self) -> PathBuf {
         self.active_id()
-            .and_then(|id| {
-                self.store
-                    .session(id)
-                    .map(|s| s.cwd.clone())
-                    .or_else(|| self.chat_pane(id).filter(|p| crate::chat::store::is_tied(&p.cwd)).map(|p| p.cwd.clone()))
-            })
+            .and_then(|id| self.store.session(id).map(|s| s.cwd.clone()))
             .or_else(|| self.store.data.projects.first().map(|p| p.path.clone()))
             .or_else(platform::home_dir)
             .unwrap_or_else(|| PathBuf::from("."))
@@ -1038,11 +1040,9 @@ impl Workspace {
             r.exit_code = None;
             r.last_active = now();
         }
-        let preview = if is_new { None } else { Self::load_screen(&id) };
         let view = cx.new(|cx| {
             let mut v = TerminalView::new(terminal, rx, cx);
             v.loading = loading;
-            v.preview = preview;
             v
         });
         let sub_id = id.clone();
@@ -1127,7 +1127,6 @@ impl Workspace {
     }
 
     fn on_exit(&mut self, id: &str, code: Option<i32>, _window: &mut Window, cx: &mut Context<Self>) {
-        self.save_screen(id, cx);
         if let Some(err) = self.live_view(id).and_then(|v| v.read(cx).start_error()) {
             let program = self.store.session(id).map(|r| r.display_title().to_string()).unwrap_or_default();
             self.toast(format!("Could not start {program}: {err}"), true, cx);
@@ -1148,7 +1147,7 @@ impl Workspace {
     pub fn show_session(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         let id = id.to_string();
         self.selected = Some(id.clone());
-        if self.live_view(&id).is_some() || self.chat_pane(&id).is_some() {
+        if self.live_view(&id).is_some() {
             self.activate(&id, cx);
             self.remember(&id);
             self.main = Main::Terminals;
@@ -1156,8 +1155,6 @@ impl Workspace {
             self.focus_active(window, cx);
             self.persist_layout();
             cx.notify();
-        } else if self.chat_store.get(&id).is_some() {
-            self.open_chat(&id, window, cx);
         } else {
             self.resume(&id, window, cx);
         }
@@ -1174,14 +1171,6 @@ impl Workspace {
                 window.focus(&view.read(cx).focus_handle(cx), cx);
                 return;
             }
-            if let Some(p) = self.chat_pane(id) {
-                // The text box may already hold the focus (it was just clicked); leave it there.
-                let (view, handle) = (p.view.clone(), p.view.read(cx).focus.clone());
-                if !handle.contains_focused(window, cx) {
-                    view.update(cx, |v, cx| v.focus_input(window, cx));
-                }
-                return;
-            }
         }
         window.focus(&self.root_focus, cx);
     }
@@ -1192,13 +1181,12 @@ impl Workspace {
         }
         let was_active = self.active_id().is_some_and(|a| a == id);
         self.live.retain(|l| l.id != id); // dropping the view drops the Terminal, which closes the PTY
-        self.chats.retain(|p| p.id != id);
-        self.forget_if_unused(id);
         self.shells.remove(id);
+        self.visuals.remove(id);
         self.recent.retain(|r| r != id);
         // Closing the shown session goes back to the one shown before it; otherwise stay where we are.
         if was_active {
-            self.active = self.recent.iter().rev().find(|r| self.live.iter().any(|l| &l.id == *r) || self.chats.iter().any(|p| &p.id == *r)).cloned();
+            self.active = self.recent.iter().rev().find(|r| self.live.iter().any(|l| &l.id == *r)).cloned();
             self.selected = self.active.clone();
             self.persist_layout();
         }
@@ -1265,20 +1253,18 @@ impl Workspace {
             }
             Act::ImportProject => self.import_project(window, cx),
             Act::OpenGithub { cwd } => self.open_github(cwd, window, cx),
-            Act::NewChat { cwd } => {
-                self.new_chat(cwd, None, window, cx);
-            }
-            Act::OpenChat(id) => self.open_chat(&id, window, cx),
-            Act::RemoveChat(id) => self.remove_chat(&id, window, cx),
             Act::RegenTitle(id) => self.regen_title(&id, cx),
-            Act::CommitPush(cwd) => match self.claude_exe.clone() {
-                Some(exe) => self.run_git(
-                    GitOp::CommitPush,
-                    move || crate::commit::commit_and_push(&exe, &cwd).map_err(|e| crate::commit::classify(&cwd, e)),
-                    cx,
-                ),
-                None => self.toast("Could not find the `claude` CLI.", true, cx),
-            },
+            Act::CommitPush(id, cwd) => {
+                if self.is_running(&id, cx) {
+                    self.run_git(
+                        GitOp::CommitPush,
+                        move || crate::commit::commit_and_push(&|system, prompt| crate::ask::complete(&id, system, prompt), &cwd).map_err(|e| crate::commit::classify(&cwd, e)),
+                        cx,
+                    )
+                } else {
+                    self.toast("Start the session first: the message is written through the running session.", true, cx)
+                }
+            }
             Act::Pull(cwd) => self.run_git(
                 GitOp::Pull,
                 move || crate::commit::pull(&cwd).map_err(|e| crate::commit::classify(&cwd, e)),
@@ -1308,7 +1294,7 @@ impl Workspace {
                 let claude_hint = self.claude_exe.as_ref().map_or("not found".to_string(), |p| p.to_string_lossy().into_owned());
                 let claude = self.modal_input(&claude_t, &claude_hint, window, cx);
                 let shell = self.modal_input(&shell_t, &platform::default_shell(None).0, window, cx);
-                self.modal = Some(Modal::Settings { shell, claude, updates });
+                self.modal = Some(Modal::Settings { shell, claude, updates, scale: crate::scale::percent() });
             }
             Act::NewBranch(cwd) => {
                 let input = self.modal_input("", "", window, cx);
@@ -1330,12 +1316,47 @@ impl Workspace {
                 self.toast("Project removed. Its sessions are kept.", false, cx);
             }
             Act::SetAutoCompact(id, on) => {
+                // Show the choice at once; the mod's next snapshot confirms or corrects it.
+                if let Some(meta) = self.store.session_mut(&id).and_then(|s| s.claude.as_mut()) {
+                    meta.auto_compact = Some(on);
+                }
+                self.store.mark_dirty();
+                cx.notify();
                 usage::send_ctl(&usage::ctl_file(&id), "auto_compact", on.into());
                 self.toast(format!("Turning auto-compact {}…", if on { "on" } else { "off" }), false, cx);
             }
             Act::SetAdvisor(id, model) => {
+                // The saved setting changes at once, but a different model only reaches the current conversation on
+                // /clear or /compact; switching the advisor off or on does apply right away.
+                let saved = (model != "off").then(|| model.clone());
+                let mut pending = false;
+                let mut was_off = false;
+                if let Some(meta) = self.store.session_mut(&id).and_then(|s| s.claude.as_mut()) {
+                    let active = meta.advisor_active.clone().or_else(|| meta.advisor.clone());
+                    was_off = active.is_none();
+                    pending = !was_off && saved.as_deref() != active.as_deref();
+                    meta.advisor = saved.clone();
+                    if saved.is_none() {
+                        meta.advisor_active = None;
+                    } else if was_off {
+                        meta.advisor_active = saved.clone();
+                    } else {
+                        meta.advisor_active = active;
+                    }
+                }
+                self.store.mark_dirty();
+                cx.notify();
                 usage::send_ctl(&usage::ctl_file(&id), "advisor", model.clone().into());
-                self.toast(if model == "off" { "Turning the advisor off…".to_string() } else { format!("Setting the advisor to {model}…") }, false, cx);
+                let note = if model == "off" {
+                    "Advisor off.".to_string()
+                } else if pending {
+                    format!("Advisor will switch to {model} after /clear or /compact.")
+                } else if was_off {
+                    format!("Advisor on ({model}).")
+                } else {
+                    format!("Advisor set to {model}.")
+                };
+                self.toast(note, false, cx);
             }
             Act::AskAdvisor(id) => {
                 let current = self.store.session(&id).and_then(|s| s.claude.as_ref()).and_then(|m| m.advisor.clone()).unwrap_or_default();
@@ -1388,8 +1409,7 @@ impl Workspace {
                 self.store.data.active_account = Some(id);
                 self.store.mark_dirty();
                 self.refresh_accounts(cx);
-                self.relaunch_chats(window, cx);
-                self.toast("Switched. New and resumed sessions and all chats use this account; running terminal sessions keep theirs.", false, cx);
+                self.toast("Switched. New and resumed sessions use this account; running sessions keep theirs.", false, cx);
             }
             Act::AddAccount => {
                 self.modal = Some(Modal::Confirm {
@@ -1611,7 +1631,7 @@ impl Workspace {
                 let name = input.read(cx).value().split_whitespace().collect::<Vec<_>>().join("-");
                 if name.is_empty() { Act::Dismiss } else { Act::CreateBranch(cwd, name) }
             }
-            Some(Modal::Settings { shell, claude, updates }) => {
+            Some(Modal::Settings { shell, claude, updates, scale }) => {
                 let clean = |s: &str| s.trim().trim_matches('"').to_string();
                 let (shell_t, claude_t) = (clean(shell.read(cx).value().as_ref()), clean(claude.read(cx).value().as_ref()));
                 let bad = [("Shell", &shell_t), ("Claude path", &claude_t)]
@@ -1619,7 +1639,7 @@ impl Workspace {
                     .find(|(_, t)| !t.is_empty() && platform::resolve_program(t).is_none());
                 if let Some((what, t)) = bad {
                     let msg = format!("{what}: “{t}” is not a file or a program on PATH");
-                    self.modal = Some(Modal::Settings { shell, claude, updates });
+                    self.modal = Some(Modal::Settings { shell, claude, updates, scale });
                     self.toast(msg, true, cx);
                     return;
                 }
@@ -1630,11 +1650,11 @@ impl Workspace {
                 if updates == (s.update_url.as_deref() == Some("")) {
                     s.update_url = (!updates).then(String::new);
                 }
+                s.scale = (scale != 100).then_some(scale);
+                crate::scale::set(scale);
                 self.shell = platform::default_shell(s.shell.as_deref());
                 self.claude_exe = claude::discover(s.claude_path.as_deref());
                 self.store.mark_dirty();
-                // Chats move to an adapter that runs the new `claude` once they are idle.
-                self.relaunch_chats(window, cx);
                 self.toast("Settings saved. Open sessions keep their current shell.", false, cx);
                 Act::Dismiss
             }
@@ -1701,11 +1721,7 @@ impl Workspace {
     /// While the right sidebar shows GitHub, it follows the shown session to that session's project (no focus change).
     fn sync_github(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(id) = self.right_gh.as_ref().and(self.active.clone()) else { return };
-        let cwd = self
-            .store
-            .session(&id)
-            .map(|s| s.cwd.clone())
-            .or_else(|| self.chat_pane(&id).filter(|p| is_tied(&p.cwd)).map(|p| p.cwd.clone()));
+        let cwd = self.store.session(&id).map(|s| s.cwd.clone());
         if let Some(cwd) = cwd {
             self.right_gh = Some(self.github_pane(cwd, window, cx));
         }
@@ -1741,11 +1757,20 @@ impl Workspace {
         cx.notify();
     }
 
+    /// GitHub and the Visual panel are read and written in, so they share one wider, resizable width.
+    fn right_wide(&self) -> bool {
+        self.right_gh.is_some() || self.visual_shown()
+    }
+
     /// The right sidebar's current width: the remembered one for the menu or for GitHub, kept within bounds.
     pub fn right_width(&self, window_w: f32) -> f32 {
+        self.right_width_of(self.right_wide(), window_w)
+    }
+
+    pub fn right_width_of(&self, wide: bool, window_w: f32) -> f32 {
         let layout = &self.store.data.layout;
         let room = (window_w - 560.0).max(RIGHT_GH_MIN);
-        if self.right_gh.is_none() {
+        if !wide {
             return layout.right_menu_w.unwrap_or(RIGHT_MENU_W).clamp(RIGHT_MENU_MIN, RIGHT_MENU_MAX.min(room));
         }
         layout.right_gh_w.unwrap_or(RIGHT_GH_W).clamp(RIGHT_GH_MIN, room)
@@ -1756,8 +1781,9 @@ impl Workspace {
         let Some(d) = self.right_drag.as_ref() else { return };
         let wanted = d.width + d.x - x;
         let room = (window_w - 560.0).max(RIGHT_GH_MIN);
+        let wide = self.right_wide();
         let layout = &mut self.store.data.layout;
-        if self.right_gh.is_none() {
+        if !wide {
             layout.right_menu_w = Some(wanted.clamp(RIGHT_MENU_MIN, RIGHT_MENU_MAX.min(room)));
         } else {
             layout.right_gh_w = Some(wanted.clamp(RIGHT_GH_MIN, room));
@@ -1819,13 +1845,12 @@ impl Workspace {
     // ------------------------------------------------------------------ session switching
 
     pub fn cycle(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
-        let mut running: Vec<Id> = self
+        let running: Vec<Id> = self
             .live
             .iter()
             .filter(|l| l.view.read(cx).is_running())
             .map(|l| l.id.clone())
             .collect();
-        running.extend(self.chats.iter().map(|p| p.id.clone()));
         if running.is_empty() {
             return;
         }
@@ -1843,11 +1868,6 @@ impl Workspace {
     /// Unknown TTL assumes the 5-minute tier.
     pub fn selected_cache(&self) -> Option<(f32, i64, i64)> {
         let id = self.selected.as_ref().or(self.active_id())?;
-        // A chat has no transcript scan: the cache is taken to be the usual five minutes from the end of its last turn.
-        if let Some(p) = self.chat_pane(id) {
-            let left = (p.turn_at? + 300 - now()).clamp(0, 300);
-            return Some((left as f32 / 300.0, left, 300));
-        }
         let meta = self.store.session(id)?.claude.as_ref()?;
         let last = meta.cache_at?;
         let ttl = meta.cache_ttl.unwrap_or(300) as i64;
@@ -1861,11 +1881,6 @@ impl Workspace {
     pub fn selected_context(&self) -> Option<(f32, u64, bool, Option<u64>)> {
         let id = self.selected.as_ref().or(self.active_id())?;
         let scaled = |tokens: u64, limit: Option<u64>| limit.map(|l| (tokens as f64 / l as f64).min(1.0) as f32);
-        if let Some(p) = self.chat_pane(id) {
-            let (used, size) = p.context.filter(|&(_, size)| size > 0)?;
-            let limit = claude::context_limit(Some(size), p.compact_at, p.auto_compact);
-            return Some((scaled(used, limit)?, used, true, limit));
-        }
         let meta = self.store.session(id)?.claude.as_ref()?;
         let limit = claude::context_limit(meta.context_window, meta.compact_at, meta.auto_compact);
         if let Some(f) = meta.context_fraction {
