@@ -266,6 +266,16 @@ pub struct Workspace {
     pub visuals: HashMap<Id, Vec<crate::visual::Card>>,
     pub visual_scroll: crate::glide::Smooth,
     pub right_drag: Option<SideDrag>,
+    /// Right-sidebar rows whose × was clicked and that are shrinking away before their entry is removed.
+    pub leaving: std::collections::HashSet<String>,
+    pub left_reveal: crate::widgets::Reveal,
+    pub right_reveal: crate::widgets::Reveal,
+    /// The right sidebar's animated width, and the view it currently shows ("menu", "visual" or "gh:<id>"):
+    /// a change of view fades the old one out, slides the width, then fades the new one in.
+    pub right_w: crate::widgets::Reveal,
+    pub right_view: String,
+    pub right_out: Option<std::time::Instant>,
+    pub right_in: std::time::Instant,
     pub left_drag: Option<SideDrag>,
     /// The session shown in the main area.
     pub active: Option<Id>,
@@ -348,6 +358,13 @@ impl Workspace {
             visuals: HashMap::new(),
             visual_scroll: Default::default(),
             right_drag: None,
+            leaving: Default::default(),
+            left_reveal: crate::widgets::Reveal::new(store.data.layout.sidebar_visible),
+            right_reveal: crate::widgets::Reveal::new(!store.data.layout.right_hidden),
+            right_w: crate::widgets::Reveal::at_value(store.data.layout.right_menu_w.unwrap_or(RIGHT_MENU_W)),
+            right_view: "menu".into(),
+            right_out: None,
+            right_in: std::time::Instant::now() - Duration::from_secs(5),
             left_drag: None,
             active: None,
             shells: HashMap::new(),
@@ -1023,11 +1040,9 @@ impl Workspace {
             r.exit_code = None;
             r.last_active = now();
         }
-        let preview = if is_new { None } else { Self::load_screen(&id) };
         let view = cx.new(|cx| {
             let mut v = TerminalView::new(terminal, rx, cx);
             v.loading = loading;
-            v.preview = preview;
             v
         });
         let sub_id = id.clone();
@@ -1112,7 +1127,6 @@ impl Workspace {
     }
 
     fn on_exit(&mut self, id: &str, code: Option<i32>, _window: &mut Window, cx: &mut Context<Self>) {
-        self.save_screen(id, cx);
         if let Some(err) = self.live_view(id).and_then(|v| v.read(cx).start_error()) {
             let program = self.store.session(id).map(|r| r.display_title().to_string()).unwrap_or_default();
             self.toast(format!("Could not start {program}: {err}"), true, cx);
@@ -1750,9 +1764,13 @@ impl Workspace {
 
     /// The right sidebar's current width: the remembered one for the menu or for GitHub, kept within bounds.
     pub fn right_width(&self, window_w: f32) -> f32 {
+        self.right_width_of(self.right_wide(), window_w)
+    }
+
+    pub fn right_width_of(&self, wide: bool, window_w: f32) -> f32 {
         let layout = &self.store.data.layout;
         let room = (window_w - 560.0).max(RIGHT_GH_MIN);
-        if !self.right_wide() {
+        if !wide {
             return layout.right_menu_w.unwrap_or(RIGHT_MENU_W).clamp(RIGHT_MENU_MIN, RIGHT_MENU_MAX.min(room));
         }
         layout.right_gh_w.unwrap_or(RIGHT_GH_W).clamp(RIGHT_GH_MIN, room)

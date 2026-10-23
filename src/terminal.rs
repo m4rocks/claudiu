@@ -4,7 +4,7 @@ use std::borrow::Cow;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::event_loop::{EventLoop, EventLoopSender, Msg};
@@ -79,6 +79,8 @@ pub struct Terminal {
     start_error: Arc<Mutex<Option<String>>>,
     cols: AtomicU32,
     rows: AtomicU32,
+    /// The child's process id (Unix; 0 until it exists), so closing can make sure it ends.
+    pid: Arc<AtomicU32>,
     /// When it was made, and what to call it in the start-up trace (`trace.rs`).
     pub born: Instant,
     pub tag: String,
@@ -90,6 +92,7 @@ fn start_pty(
     window_size: WindowSize,
     term: Arc<FairMutex<Term<Listener>>>,
     listener: Listener,
+    pid: &AtomicU32,
 ) -> anyhow::Result<EventLoopSender> {
     let program = if spec.program.contains(' ') && !spec.program.starts_with('"') {
         format!("\"{}\"", spec.program)
@@ -108,6 +111,10 @@ fn start_pty(
     // alacritty's ConPTY setup asserts on failure; surface that as a normal startup error instead of a crash.
     let pty = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| tty::new(&options, window_size, 0)))
         .map_err(|_| anyhow::anyhow!("the pseudo terminal could not be created"))??;
+    #[cfg(unix)]
+    pid.store(pty.child().id(), Ordering::Relaxed);
+    #[cfg(not(unix))]
+    let _ = pid;
     let event_loop = EventLoop::new(term, listener, pty, true, false)?;
     let sender = event_loop.channel();
     event_loop.spawn();
@@ -129,6 +136,7 @@ impl Terminal {
             start_error: Arc::new(Mutex::new(None)),
             cols: AtomicU32::new(cols as u32),
             rows: AtomicU32::new(rows as u32),
+            pid: Arc::new(AtomicU32::new(0)),
             born: Instant::now(),
             tag,
         };
@@ -140,7 +148,7 @@ impl Terminal {
     #[cfg(test)]
     pub fn spawn(spec: &SpawnSpec, cols: u16, rows: u16) -> anyhow::Result<(Self, UnboundedReceiver<Event>)> {
         let (this, rx, listener, window_size) = Self::build(spec, cols, rows);
-        let sender = start_pty(spec, window_size, this.term.clone(), listener)?;
+        let sender = start_pty(spec, window_size, this.term.clone(), listener, &this.pid)?;
         *this.link.lock().unwrap() = Link::Ready(sender);
         Ok((this, rx))
     }
@@ -151,14 +159,15 @@ impl Terminal {
     pub fn spawn_deferred(spec: &SpawnSpec, cols: u16, rows: u16) -> (Self, UnboundedReceiver<Event>) {
         let (this, rx, listener, window_size) = Self::build(spec, cols, rows);
         let (spec, term, link, error) = (spec.clone(), this.term.clone(), Arc::downgrade(&this.link), this.start_error.clone());
-        let (born, tag) = (this.born, this.tag.clone());
+        let (born, tag, pid) = (this.born, this.tag.clone(), this.pid.clone());
         std::thread::spawn(move || {
-            let outcome = start_pty(&spec, window_size, term, listener.clone());
+            let outcome = start_pty(&spec, window_size, term, listener.clone(), &pid);
             crate::trace::note(&tag, born.elapsed(), "child process created");
             // The terminal may be gone already (the session was closed while starting): then drop the new child.
             let Some(link) = link.upgrade() else {
                 if let Ok(sender) = outcome {
                     let _ = sender.send(Msg::Shutdown);
+                    end_child(pid.load(Ordering::Relaxed));
                 }
                 return;
             };
@@ -226,8 +235,28 @@ impl Drop for Terminal {
     fn drop(&mut self) {
         // Closing the pseudo console also terminates the child.
         self.send(Msg::Shutdown);
+        end_child(self.pid.load(Ordering::Relaxed));
     }
 }
+
+/// Closing a Unix PTY only sends the child SIGHUP, which Claude Code can outlive: it then keeps running (and keeps
+/// Remote Control for the conversation) after its session was closed, so reopening starts a second one. Ask it to
+/// end, and force it if it has not after a moment.
+#[cfg(unix)]
+fn end_child(pid: u32) {
+    if pid == 0 {
+        return;
+    }
+    unsafe { libc::kill(pid as i32, libc::SIGTERM) };
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(2));
+        // ponytail: a pid reused within these two seconds would be hit; the PTY drop reaps the child, so it is rare.
+        unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+    });
+}
+
+#[cfg(not(unix))]
+fn end_child(_pid: u32) {}
 
 #[cfg(test)]
 mod tests {
@@ -282,5 +311,17 @@ mod tests {
         assert_eq!(term.term.lock().grid().columns(), 100);
         term.resize(100, 30, 8.0, 16.0);
         assert_eq!(term.size(), (100, 30));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn closing_ends_a_child_that_ignores_hangup() {
+        let spec = SpawnSpec { program: "sh".into(), args: vec!["-c".into(), "trap '' HUP TERM; sleep 60".into()], cwd: None, ..Default::default() };
+        let (t, _rx) = Terminal::spawn(&spec, 80, 24).unwrap();
+        let pid = t.pid.load(Ordering::Relaxed) as i32;
+        std::thread::sleep(Duration::from_millis(300));
+        drop(t);
+        std::thread::sleep(Duration::from_secs(3));
+        assert_ne!(unsafe { libc::kill(pid, 0) }, 0, "child must be gone");
     }
 }

@@ -554,7 +554,18 @@ impl Render for Workspace {
             self.window_title = title;
         }
 
-        let sidebar = self.store.data.layout.sidebar_visible.then(|| self.render_sidebar(window, cx));
+        let left_open = self.left_reveal.step(self.store.data.layout.sidebar_visible, window);
+        let left_w = self.left_width(f32::from(window.viewport_size().width));
+        let sidebar = (left_open > 0.0).then(|| {
+            div()
+                .flex()
+                .flex_none()
+                .w(px((left_w + theme::PANEL_GAP) * left_open))
+                .h_full()
+                .overflow_hidden()
+                .child(self.render_sidebar(window, cx))
+                .child(div().flex_none().w(px(theme::PANEL_GAP)))
+        });
         let banner = self.render_update_banner(cx);
         let topbar = self.render_topbar(window, cx);
         // Terminals that aren't on screen keep running but must not trigger window redraws on every output burst.
@@ -672,7 +683,6 @@ impl Render for Workspace {
                             .flex()
                             .flex_1()
                             .min_h_0()
-                            .gap(px(theme::PANEL_GAP))
                             .children(sidebar)
                             .child(
                                 div()

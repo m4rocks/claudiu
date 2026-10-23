@@ -31,14 +31,52 @@ impl Workspace {
     }
 
     pub fn render_right(&mut self, window_w: f32, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if self.store.data.layout.right_hidden {
+        let open = self.right_reveal.step(!self.store.data.layout.right_hidden, window);
+        if open <= 0.0 {
             return None;
         }
-        let width = self.right_width(window_w);
-        let github = self.right_gh.as_ref().and_then(|id| self.gh_pane(id)).map(|p| (p.view.clone(), p.project.clone()));
+        // The view the state asks for; the one drawn changes only after the old one has faded out.
+        let desired = match self.right_gh.as_ref().filter(|id| self.gh_pane(id).is_some()) {
+            Some(id) => format!("gh:{id}"),
+            None if self.visual_shown() => "visual".to_string(),
+            None => "menu".to_string(),
+        };
+        const OUT_MS: f32 = 100.0;
+        const IN_MS: f32 = 140.0;
+        let mut fade = 1.0;
+        if self.right_view != desired {
+            let t0 = *self.right_out.get_or_insert_with(std::time::Instant::now);
+            let e = t0.elapsed().as_secs_f32() * 1000.0;
+            if e >= OUT_MS || open < 1.0 {
+                self.right_view = desired.clone();
+                self.right_out = None;
+                self.right_in = std::time::Instant::now();
+            } else {
+                fade = 1.0 - e / OUT_MS;
+                window.request_animation_frame();
+            }
+        }
+        if self.right_view == desired {
+            // Fade in once the width has finished moving.
+            let e = self.right_in.elapsed().as_secs_f32() * 1000.0 - crate::widgets::Reveal::MS;
+            if e < IN_MS {
+                fade = (e / IN_MS).max(0.0);
+                window.request_animation_frame();
+            }
+        }
+        let shown_view = self.right_view.clone();
+        let target = self.right_width_of(shown_view != "menu", window_w);
+        if self.right_drag.is_some() {
+            self.right_w.snap(target);
+        }
+        let width = self.right_w.to(target, window);
+        let github = shown_view
+            .strip_prefix("gh:")
+            .and_then(|id| self.gh_pane(id))
+            .map(|p| (p.view.clone(), p.project.clone()));
         let body = match github {
             Some((view, project)) => {
-                view.update(cx, |v, _| v.width = width);
+                view.update(cx, |v, _| v.width = target);
                 div()
                     .flex()
                     .flex_col()
@@ -66,9 +104,11 @@ impl Workspace {
                     .child(div().flex_1().min_h_0().child(view))
                     .into_any_element()
             }
-            None if self.visual_shown() => self.render_visual_view(window, cx).into_any_element(),
+            None if shown_view == "visual" => self.render_visual_view(window, cx).into_any_element(),
             None => self.render_right_menu(window, cx).into_any_element(),
         };
+        // A different view (menu, GitHub project, Visual) fades in.
+        let body = div().flex_none().w(px(target)).h_full().opacity(fade).child(body);
         // Both views can be resized by their left edge; a small grip sits in the gutter.
         let handle_center = theme::PANEL_GAP / 2.0 + 3.0;
         let handle = Some(
@@ -102,6 +142,15 @@ impl Workspace {
         );
         Some(
             div()
+                .flex()
+                .flex_none()
+                .w(px((width + theme::PANEL_GAP) * open))
+                .h_full()
+                .overflow_hidden()
+                .justify_end()
+                .child(div().flex_none().w(px(theme::PANEL_GAP)))
+                .child(
+            div()
                 .id("right-sidebar")
                 .relative()
                 .flex_none()
@@ -117,7 +166,8 @@ impl Workspace {
                         .bg(hsla(theme::SIDEBAR_BG))
                         .child(body),
                 )
-                .children(handle)
+                .children(handle),
+                )
                 .into_any_element(),
         )
     }
@@ -152,7 +202,7 @@ impl Workspace {
                 one = one.child(head);
             }
             one = one.child(div().text_size(crate::scale::px(13.0)).child(crate::visual::ui::markdown(format!("visual-{}", card.call), &card.content)));
-            list = list.child(one);
+            list = list.child(crate::widgets::fade_in(one, format!("visual-card-{}", card.call), 220, 0.0));
         }
         div().flex().flex_col().size_full().child(header).child(self.visual_scroll.wire(div().id("visual-scroll").flex_1().min_h_0(), window).child(list))
     }
@@ -171,6 +221,7 @@ impl Workspace {
         let visual = (drawn > 0).then(|| {
             div().flex().flex_col().gap(px(1.0)).child(removable_row(
                 cx,
+                self.leaving.contains("visual-open"),
                 "visual-open".to_string(),
                 IconName::Eye,
                 format!("Visual · {drawn}"),
@@ -277,9 +328,11 @@ impl Workspace {
             let (pull, number) = (a.pull, a.number);
             let owner = id.cloned();
             let title = a.title.map_or_else(|| format!("#{number}"), |t| format!("#{number}  {t}"));
+            let key = format!("attached-{pull}-{number}");
             rows = rows.child(removable_row(
                 cx,
-                format!("attached-{pull}-{number}"),
+                self.leaving.contains(&key),
+                key,
                 if pull { IconName::GitPullRequest } else { IconName::CircleDot },
                 title,
                 move |ws, window, cx| ws.open_attached(pull, number, window, cx),
@@ -298,9 +351,11 @@ impl Workspace {
         let mut rows = div().flex().flex_col().gap(px(1.0));
         for (other, title) in links {
             let (me, go, gone) = (id.cloned(), other.clone(), other.clone());
+            let key = format!("linked-{other}");
             rows = rows.child(removable_row(
                 cx,
-                format!("linked-{other}"),
+                self.leaving.contains(&key),
+                key,
                 IconName::Brackets,
                 title,
                 move |ws, window, cx| ws.act(Act::Select(go.clone()), window, cx),
@@ -440,22 +495,49 @@ fn dim_row(id: impl Into<SharedString>, glyph: IconName, label: impl Into<Shared
 }
 
 /// A list row that does something when clicked and has a × that removes the entry.
+/// It grows in when first drawn; × shrinks it away (`leaving`) and removes the entry once it is gone, so the rows below slide.
 fn removable_row(
     cx: &mut Context<Workspace>,
+    leaving: bool,
     key: String,
     glyph: IconName,
     title: String,
     open: impl Fn(&mut Workspace, &mut Window, &mut Context<Workspace>) + 'static,
     remove: impl Fn(&mut Workspace) + 'static,
-) -> Stateful<Div> {
+) -> impl IntoElement {
+    use gpui::{Animation, AnimationExt};
+    const MS: u64 = 180;
     let x = format!("remove-{key}");
-    row(key, glyph, title)
+    let remove = std::rc::Rc::new(remove);
+    let gone_key = key.clone();
+    let anim_key = SharedString::from(format!("{}-{key}", if leaving { "leave" } else { "enter" }));
+    let row = row(key, glyph, title)
         .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| open(ws, window, cx)))
         .child(icon_button(x, IconName::X).on_click(cx.listener(move |ws, _: &ClickEvent, _w, cx| {
             cx.stop_propagation();
-            remove(ws);
+            if !ws.leaving.insert(gone_key.clone()) {
+                return;
+            }
+            let (remove, gone_key) = (remove.clone(), gone_key.clone());
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(std::time::Duration::from_millis(MS)).await;
+                let _ = this.update(cx, |ws, cx| {
+                    ws.leaving.remove(&gone_key);
+                    remove(ws);
+                    cx.notify();
+                });
+            })
+            .detach();
             cx.notify();
-        })))
+        })));
+    div().flex_none().overflow_hidden().child(row).with_animation(
+        anim_key,
+        Animation::new(std::time::Duration::from_millis(MS)).with_easing(gpui::ease_out_quint()),
+        move |d, t| {
+            let open = if leaving { 1.0 - t } else { t };
+            d.h(px(26.0 * open)).opacity(open)
+        },
+    )
 }
 
 /// A setting row that opens a menu (built when it is clicked): the value with a chevron, lit on hover.

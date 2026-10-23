@@ -77,28 +77,8 @@ impl Workspace {
         self.remember_open(cx);
     }
 
-    fn screen_file(id: &str) -> PathBuf {
-        crate::datadir::data_dir().join("screens").join(format!("{}.txt", crate::datadir::safe_file_stem(id)))
-    }
-
-    /// Keep the end of a session's screen, to show while its resume starts.
-    pub(super) fn save_screen(&self, id: &str, cx: &App) {
-        let Some(view) = self.live_view(id) else { return };
-        let text = view.read(cx).tail_text(40);
-        if !text.trim().is_empty() {
-            let _ = crate::datadir::write_atomic(&Self::screen_file(id), &text);
-        }
-    }
-
-    pub(super) fn load_screen(id: &str) -> Option<String> {
-        std::fs::read_to_string(Self::screen_file(id)).ok().filter(|t| !t.trim().is_empty())
-    }
-
     pub fn finalize(&mut self, cx: &App) {
         self.remember_open(cx);
-        for l in &self.live {
-            self.save_screen(&l.id, cx);
-        }
         self.quitting = true;
         let t = now();
         let running: Vec<Id> = self.live.iter().map(|l| l.id.clone()).collect();

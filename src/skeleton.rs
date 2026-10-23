@@ -360,9 +360,8 @@ pub struct Grid {
 }
 
 /// Over the terminal until Claude Code is ready: laid out like its start screen (prompt box between two rules) on the
-/// terminal's own grid, at the bottom where Claude Code keeps it, with what is being loaded above it, over the
-/// previous screen when there is one. `phase` says what is going on.
-pub fn overlay(draft: &Draft, preview: Option<&str>, elapsed: Duration, phase: &str, grid: Grid) -> impl IntoElement {
+/// terminal's own grid, at the bottom where Claude Code keeps it, with what is being loaded above it. `phase` says what is going on.
+pub fn overlay(draft: &Draft, elapsed: Duration, phase: &str, grid: Grid) -> impl IntoElement {
     let (text, dim, faint) = (theme::hsla(theme::TEXT), theme::hsla(theme::TEXT_DIM), theme::hsla(theme::TEXT_FAINT));
     let lh = grid.line_h;
     let hint = if draft.sent {
@@ -400,19 +399,6 @@ pub fn overlay(draft: &Draft, preview: Option<&str>, elapsed: Duration, phase: &
                 .font_family(FONT)
                 .text_size(crate::scale::px(14.0))
                 .line_height(px(lh))
-                // Where the session left off, faint, until the real screen replaces it.
-                .when_some(preview, |d, text| {
-                    d.child(
-                        div()
-                            .absolute()
-                            .inset_0()
-                            .flex()
-                            .flex_col()
-                            .justify_end()
-                            .text_color(theme::hsla(theme::TEXT_FAINT).opacity(0.45))
-                            .children(text.lines().map(|l| div().child(if l.is_empty() { " ".to_string() } else { l.to_string() }))),
-                    )
-                })
                 .child(
                     div()
                         .flex()

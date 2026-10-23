@@ -316,6 +316,53 @@ mod tests {
     }
 }
 
+/// Eases a value (a panel's open fraction, 0 hidden to 1 shown, or its width) toward its target over `Reveal::MS`.
+pub struct Reveal {
+    from: f32,
+    to: f32,
+    start: std::time::Instant,
+}
+
+impl Reveal {
+    pub const MS: f32 = 180.0;
+
+    pub fn new(shown: bool) -> Self {
+        Self::at_value(shown as u8 as f32)
+    }
+
+    pub fn at_value(v: f32) -> Self {
+        Self { from: v, to: v, start: std::time::Instant::now() - std::time::Duration::from_secs(1) }
+    }
+
+    fn at(&self) -> f32 {
+        let t = (self.start.elapsed().as_secs_f32() * 1000.0 / Self::MS).min(1.0);
+        self.from + (self.to - self.from) * (1.0 - (1.0 - t).powi(3))
+    }
+
+    /// The open fraction now, for a panel that should be `shown`; keeps frames coming while it moves.
+    pub fn step(&mut self, shown: bool, window: &mut gpui::Window) -> f32 {
+        self.to(shown as u8 as f32, window)
+    }
+
+    /// Jump to `v` with no easing (while the user drags the edge).
+    pub fn snap(&mut self, v: f32) {
+        *self = Self { from: v, to: v, start: self.start };
+    }
+
+    /// The value now, easing toward `target`.
+    pub fn to(&mut self, target: f32, window: &mut gpui::Window) -> f32 {
+        if target != self.to {
+            self.from = self.at();
+            self.to = target;
+            self.start = std::time::Instant::now();
+        }
+        if self.start.elapsed().as_secs_f32() * 1000.0 < Self::MS {
+            window.request_animation_frame();
+        }
+        self.at()
+    }
+}
+
 /// Fades `el` in the first time it is drawn; a new `key` replays it (e.g. a different item or session).
 /// It starts at `from` opacity so terminals never flash fully empty.
 pub fn fade_in<E: gpui::IntoElement + Styled + 'static>(el: E, key: impl Into<SharedString>, ms: u64, from: f32) -> gpui::AnimationElement<E> {
