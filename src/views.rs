@@ -743,6 +743,8 @@ impl Render for Workspace {
                             .child(
                                 div().flex().flex_col().flex_1().min_w_0().h_full().child(
                                     div()
+                                        .flex()
+                                        .flex_col()
                                         .flex_1()
                                         .min_h_0()
                                         .w_full()
