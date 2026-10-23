@@ -286,16 +286,30 @@ pub struct Store {
 }
 
 impl Store {
-    /// Platform app-data location, e.g. `%LOCALAPPDATA%\Claudiu\data\state.json`.
+    /// Platform app-data location, e.g. `%LOCALAPPDATA%\m4rocks\Claudiu\data\state.json`.
     pub fn default_path() -> PathBuf {
         // Tests (and anyone running a second copy) can keep their state away from the real one.
         if let Some(dir) = std::env::var_os("CLAUDIU_DATA_DIR") {
             return PathBuf::from(dir).join("state.json");
         }
         // Local (non-roaming) data: it holds machine-specific paths.
-        directories::ProjectDirs::from("", "", "Claudiu")
-            .map(|d| d.data_local_dir().join("state.json"))
-            .unwrap_or_else(|| PathBuf::from("claudiu-state.json"))
+        // On Windows the Velopack install root is `%LOCALAPPDATA%\Claudiu`, and running Setup.exe over it wipes
+        // everything inside, so the data lives under an organization folder beside it instead.
+        let org = if cfg!(windows) { "m4rocks" } else { "" };
+        let Some(dirs) = directories::ProjectDirs::from("", org, "Claudiu") else { return PathBuf::from("claudiu-state.json") };
+        let dir = dirs.data_local_dir().to_path_buf();
+        #[cfg(windows)]
+        {
+            static MIGRATE: std::sync::Once = std::sync::Once::new();
+            MIGRATE.call_once(|| {
+                let old = directories::ProjectDirs::from("", "", "Claudiu").map(|d| d.data_local_dir().to_path_buf());
+                if let Some(old) = old.filter(|o| o.join("state.json").exists() && !dir.join("state.json").exists()) {
+                    // Same volume, so a rename moves everything at once; if it fails the app starts fresh, the old folder untouched.
+                    let _ = fs::create_dir_all(dir.parent().unwrap_or(&dir)).and_then(|_| fs::rename(&old, &dir));
+                }
+            });
+        }
+        dir.join("state.json")
     }
 
     /// Load tolerant of missing/corrupt files: a corrupt file is moved aside, never overwritten silently.

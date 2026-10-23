@@ -56,7 +56,7 @@ I wanted this to be safe to try on a setup you care about, so:
 - **Two things are passed per process**, and live only as long as that session: a `--plugin-dir` mod that reports usage (see [Usage meters](#usage-meters)) and a `--mcp-config` file for the tab-title tool. The MCP server points back at the Claudiu executable. Nothing lands in your Claude Code config.
 - **IDE auto-connect is switched off** for the sessions Claudiu starts, through environment variables on the child process.
 - **Everything else is documented CLI flags**: `--session-id`, `--resume`, `--plugin-dir`, `--mcp-config`, `--allowedTools`.
-- **Claudiu's own state** is in `%LOCALAPPDATA%\Claudiu\data\state.json` on Windows and `~/Library/Application Support/Claudiu` on macOS. Crashes go to `crash.log` next to it.
+- **Claudiu's own state** is in `%LOCALAPPDATA%\m4rocks\Claudiu\data\state.json` on Windows (outside the installer's folder, so reinstalling keeps it) and `~/Library/Application Support/Claudiu` on macOS. Crashes go to `crash.log` next to it.
 - **Nothing is uploaded.** Terminal contents are never logged. The only network request Claudiu makes is the update check against the public GitHub Releases API. To turn it off, set `"settings": { "update_url": "" }` in `state.json`.
 - **Clean environment for children.** Markers from other terminals (like `WT_SESSION`) and Claude Code's nested-session markers are removed, and `TERM_PROGRAM=Claudiu` is set. A `NO_COLOR` that leaked in from a Claude Code tool shell is dropped. One you set yourself is kept.
 
