@@ -216,6 +216,8 @@ pub struct GithubView {
     pub focus: FocusHandle,
     list_seq: [u64; 2],
     detail_seq: u64,
+    /// Smooth wheel scrolling of the list, the detail and the new-item form.
+    pub scrolls: [crate::glide::Smooth; 3],
     _subs: Vec<Subscription>,
 }
 
@@ -287,6 +289,7 @@ impl GithubView {
             focus,
             list_seq: [0; 2],
             detail_seq: 0,
+            scrolls: Default::default(),
             _subs: subs,
         };
         view.query_input.update(cx, |s, cx| s.set_value(DEFAULT_QUERY, window, cx));
@@ -811,11 +814,10 @@ impl GithubView {
                 self.mutate("Saving…", window, cx, move |gh, _| gh.graphql(q, json!({"id": id})).map(|_| ()), |_, _, _| {});
             }
             GhAct::ToggleFile(path) => {
-                if let Some(d) = self.detail.as_mut() {
-                    if !d.expanded.remove(&path) {
+                if let Some(d) = self.detail.as_mut()
+                    && !d.expanded.remove(&path) {
                         d.expanded.insert(path);
                     }
-                }
             }
             GhAct::ShowAllLines(path) => {
                 if let Some(d) = self.detail.as_mut() {
@@ -948,7 +950,7 @@ impl GithubView {
         let (title, body) = (self.edit_title.read(cx).value().trim().to_string(), self.edit_body.read(cx).value().to_string());
         let edit = |kind_pull: bool| if kind_pull { cli::M_EDIT_PR } else { cli::M_EDIT_ISSUE };
         match target {
-            Edit::Title if title.is_empty() => return,
+            Edit::Title if title.is_empty() => (),
             Edit::Title => {
                 let q = edit(pull);
                 self.mutate("Saving…", window, cx, move |gh, _| gh.graphql(q, json!({"id": id, "title": title})).map(|_| ()), |v, _, _| v.editing = None);

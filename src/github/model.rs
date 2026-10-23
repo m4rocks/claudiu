@@ -211,7 +211,7 @@ fn text(v: &Value) -> String {
     v.as_str().unwrap_or_default().to_string()
 }
 
-fn nodes<'a>(v: &'a Value) -> impl Iterator<Item = &'a Value> {
+fn nodes(v: &Value) -> impl Iterator<Item = &Value> {
     v["nodes"].as_array().into_iter().flatten().filter(|n| !n.is_null())
 }
 

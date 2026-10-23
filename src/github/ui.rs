@@ -49,7 +49,7 @@ fn label_pill(l: &Label) -> Div {
         .border_1()
         .border_color(hsla(l.color).opacity(0.5))
         .bg(hsla(l.color).opacity(0.16))
-        .text_size(px(11.0))
+        .text_size(crate::scale::px(11.0))
         .text_color(hsla(lighten(l.color, 0.45)))
         .child(l.name.clone())
 }
@@ -63,18 +63,18 @@ fn pill(text: impl Into<SharedString>, color: u32) -> Div {
         .items_center()
         .rounded(px(10.0))
         .bg(hsla(color))
-        .text_size(px(11.5))
+        .text_size(crate::scale::px(11.5))
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(hsla(0x0c0c0d))
         .child(text.into())
 }
 
 fn faint(text: impl Into<SharedString>) -> Div {
-    div().text_size(px(11.5)).text_color(hsla(theme::TEXT_FAINT)).child(text.into())
+    div().text_size(crate::scale::px(11.5)).text_color(hsla(theme::TEXT_FAINT)).child(text.into())
 }
 
 fn dim(text: impl Into<SharedString>) -> Div {
-    div().text_size(px(12.0)).text_color(hsla(theme::TEXT_DIM)).child(text.into())
+    div().text_size(crate::scale::px(12.0)).text_color(hsla(theme::TEXT_DIM)).child(text.into())
 }
 
 fn state_style(item: &Item) -> (IconName, u32, &'static str) {
@@ -172,9 +172,9 @@ fn item(label: impl Into<String>, act: GhAct) -> PopItem {
 }
 
 impl Render for GithubView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let body: AnyElement = match self.phase.clone() {
-            Phase::Ready => self.render_ready(cx),
+            Phase::Ready => self.render_ready(window, cx),
             other => self.render_state(other, cx),
         };
         let popup = self.render_popup(cx);
@@ -186,9 +186,9 @@ impl Render for GithubView {
             .size_full()
             .flex()
             .flex_col()
-            .bg(hsla(theme::APP_BG))
+            .bg(hsla(theme::PANEL_BG))
             .text_color(hsla(theme::TEXT))
-            .text_size(px(13.0))
+            .text_size(crate::scale::px(13.0))
             .on_key_down(cx.listener(|v, ev: &KeyDownEvent, window, cx| {
                 if ev.keystroke.key == "escape" {
                     v.act(GhAct::Escape, window, cx);
@@ -234,15 +234,15 @@ impl GithubView {
             .items_center()
             .justify_center()
             .px(px(32.0))
-            .child(div().text_size(px(16.0)).font_weight(FontWeight::SEMIBOLD).child(title))
-            .child(div().mt(px(8.0)).max_w(px(460.0)).text_size(px(13.0)).text_color(hsla(theme::TEXT_DIM)).child(text))
+            .child(div().text_size(crate::scale::px(16.0)).font_weight(FontWeight::SEMIBOLD).child(title))
+            .child(div().mt(px(8.0)).max_w(px(460.0)).text_size(crate::scale::px(13.0)).text_color(hsla(theme::TEXT_DIM)).child(text))
             .child(row)
             .into_any_element()
     }
 
     // ------------------------------------------------------------------------------------------------ layout
 
-    fn render_ready(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_ready(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let wide = self.width >= WIDE;
         let showing_detail = self.detail.is_some() || matches!(self.mode, Mode::New(_));
         let header = self.render_header(cx);
@@ -251,13 +251,13 @@ impl GithubView {
                 .flex()
                 .flex_1()
                 .min_h_0()
-                .child(self.render_list(true, cx))
-                .child(fade_in(div().flex_1().min_w_0().h_full().child(self.render_detail(false, cx)), self.detail_key(), 160, 0.0))
+                .child(self.render_list(true, window, cx))
+                .child(fade_in(div().flex_1().min_w_0().h_full().child(self.render_detail(false, window, cx)), self.detail_key(), 160, 0.0))
                 .into_any_element()
         } else if showing_detail {
-            fade_in(div().flex_1().min_h_0().child(self.render_detail(true, cx)), self.detail_key(), 160, 0.0).into_any_element()
+            fade_in(div().flex_1().min_h_0().child(self.render_detail(true, window, cx)), self.detail_key(), 160, 0.0).into_any_element()
         } else {
-            div().flex().flex_1().min_h_0().child(self.render_list(false, cx)).into_any_element()
+            div().flex().flex_1().min_h_0().child(self.render_list(false, window, cx)).into_any_element()
         };
         div().size_full().flex().flex_col().child(header).child(content).into_any_element()
     }
@@ -278,13 +278,13 @@ impl GithubView {
                 .px(px(10.0))
                 .rounded(px(6.0))
                 .cursor_pointer()
-                .text_size(px(12.5))
+                .text_size(crate::scale::px(12.5))
                 .font_weight(if on { FontWeight::SEMIBOLD } else { FontWeight::NORMAL })
-                .bg(if on { hsla(theme::ROW_ACTIVE) } else { hsla(theme::APP_BG) })
+                .bg(if on { hsla(theme::ROW_ACTIVE) } else { hsla(theme::PANEL_BG) })
                 .text_color(hsla(if on { theme::TEXT } else { theme::TEXT_DIM }))
                 .hover(|s| s.bg(hsla(theme::ROW_HOVER)))
                 .child(label.to_string())
-                .when(loaded, |d| d.child(div().text_size(px(11.0)).text_color(hsla(theme::TEXT_FAINT)).child(count.to_string())))
+                .when(loaded, |d| d.child(div().text_size(crate::scale::px(11.0)).text_color(hsla(theme::TEXT_FAINT)).child(count.to_string())))
                 .on_click(go(cx, GhAct::SetKind(kind)))
         };
         let url = self.repo.as_ref().map(|r| r.url.clone()).unwrap_or_default();
@@ -314,7 +314,7 @@ impl GithubView {
                             .whitespace_nowrap()
                             .text_ellipsis()
                             .font_weight(FontWeight::SEMIBOLD)
-                            .child(format!("{repo}")),
+                            .child(repo.to_string()),
                     )
                     .child(tab(Kind::Issue, "Issues"))
                     .child(tab(Kind::Pull, "Pull requests")),
@@ -346,7 +346,7 @@ impl GithubView {
             .px(px(9.0))
             .rounded(px(12.0))
             .cursor_pointer()
-            .text_size(px(12.0))
+            .text_size(crate::scale::px(12.0))
             .bg(hsla(if active { 0x2a211d } else { 0x161616 }))
             .text_color(hsla(if active { theme::ACCENT } else { theme::TEXT_DIM }))
             .hover(|s| s.bg(hsla(0x262626)))
@@ -358,7 +358,7 @@ impl GithubView {
             .on_mouse_down(MouseButton::Left, popup_at(cx, kind))
     }
 
-    fn render_list(&self, wide: bool, cx: &mut Context<Self>) -> Div {
+    fn render_list(&self, wide: bool, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let i = if self.kind == Kind::Issue { 0 } else { 1 };
         let q = &self.queries[i];
         let list = &self.lists[i];
@@ -371,7 +371,7 @@ impl GithubView {
                 .items_center()
                 .gap(px(5.0))
                 .cursor_pointer()
-                .text_size(px(12.5))
+                .text_size(crate::scale::px(12.5))
                 .font_weight(if on { FontWeight::SEMIBOLD } else { FontWeight::NORMAL })
                 .text_color(hsla(if on { theme::TEXT } else { theme::TEXT_DIM }))
                 .hover(|s| s.text_color(hsla(theme::TEXT)))
@@ -416,7 +416,7 @@ impl GithubView {
                     .flex()
                     .items_center()
                     .cursor_pointer()
-                    .text_size(px(12.0))
+                    .text_size(crate::scale::px(12.0))
                     .text_color(hsla(theme::TEXT_FAINT))
                     .hover(|s| s.text_color(hsla(theme::TEXT)))
                     .child("Clear")
@@ -432,7 +432,7 @@ impl GithubView {
             .p(px(12.0))
             .border_b_1()
             .border_color(hsla(theme::BORDER))
-            .child(div().child(Input::new(&self.query_input).h(px(30.0)).text_size(px(12.5)).prefix(div().text_color(hsla(theme::TEXT_FAINT)).child(icon(IconName::Search, 14.0)))))
+            .child(div().child(Input::new(&self.query_input).h(px(30.0)).text_size(crate::scale::px(12.5)).prefix(div().text_color(hsla(theme::TEXT_FAINT)).child(icon(IconName::Search, 14.0)))))
             .child(
                 div()
                     .flex()
@@ -477,7 +477,7 @@ impl GithubView {
             .when(wide, |d| d.w(px(LIST_W)).flex_none().border_r_1().border_color(hsla(theme::BORDER)))
             .when(!wide, |d| d.flex_1().min_w_0())
             .child(toolbar)
-            .child(div().id("gh-list").flex_1().min_h_0().overflow_y_scroll().child(rows).children(footer))
+            .child(self.scrolls[0].wire(div().id("gh-list").flex_1().min_h_0(), window).child(rows).children(footer))
     }
 
     fn render_row(&self, it: &Item, t: i64, cx: &mut Context<Self>) -> Stateful<Div> {
@@ -500,7 +500,7 @@ impl GithubView {
         if it.labels.len() > 3 {
             sub = sub.child(faint(format!("+{}", it.labels.len() - 3)));
         }
-        let mut right = div().flex().flex_none().items_center().gap(px(8.0)).text_size(px(11.5));
+        let mut right = div().flex().flex_none().items_center().gap(px(8.0)).text_size(crate::scale::px(11.5));
         if it.kind == Kind::Pull {
             if let Some(c) = &it.checks {
                 right = right.child(div().text_color(hsla(check_color(c))).child(icon(check_icon(check_color(c)), 14.0)));
@@ -523,7 +523,7 @@ impl GithubView {
             .border_b_1()
             .border_color(hsla(theme::BORDER))
             .cursor_pointer()
-            .bg(hsla(if selected { theme::ROW_ACTIVE } else { theme::APP_BG }))
+            .bg(hsla(if selected { theme::ROW_ACTIVE } else { theme::PANEL_BG }))
             .hover(|s| s.bg(hsla(theme::ROW_HOVER)))
             .child(div().w(px(14.0)).flex_none().pt(px(1.0)).text_color(hsla(color)).child(icon(glyph, 14.0)))
             .child(
@@ -557,13 +557,13 @@ impl GithubView {
             .items_center()
             .justify_center()
             .gap(px(6.0))
-            .child(div().text_size(px(14.0)).text_color(hsla(theme::TEXT_DIM)).child("Select an issue or pull request"))
+            .child(div().text_size(crate::scale::px(14.0)).text_color(hsla(theme::TEXT_DIM)).child("Select an issue or pull request"))
             .child(faint("Search with GitHub syntax, e.g. is:open label:bug author:@me"))
     }
 
-    fn render_detail(&self, stacked: bool, cx: &mut Context<Self>) -> AnyElement {
+    fn render_detail(&self, stacked: bool, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         if let Mode::New(kind) = self.mode {
-            return self.render_new(kind, stacked, cx).into_any_element();
+            return self.render_new(kind, stacked, window, cx).into_any_element();
         }
         let Some(ds) = &self.detail else { return self.render_empty_detail().into_any_element() };
         let back = stacked.then(|| {
@@ -607,7 +607,7 @@ impl GithubView {
                         .flex_wrap()
                         .items_baseline()
                         .gap(px(8.0))
-                        .text_size(px(18.0))
+                        .text_size(crate::scale::px(18.0))
                         .font_weight(FontWeight::SEMIBOLD)
                         .child(it.title.clone())
                         .child(div().text_color(hsla(theme::TEXT_FAINT)).font_weight(FontWeight::NORMAL).child(format!("#{}", it.number))),
@@ -630,7 +630,7 @@ impl GithubView {
             status = status.child(
                 div()
                     .font_family(FONT)
-                    .text_size(px(11.5))
+                    .text_size(crate::scale::px(11.5))
                     .px(px(7.0))
                     .py(px(1.0))
                     .rounded(px(5.0))
@@ -642,7 +642,7 @@ impl GithubView {
                 div()
                     .flex()
                     .gap(px(6.0))
-                    .text_size(px(12.0))
+                    .text_size(crate::scale::px(12.0))
                     .child(div().text_color(hsla(GREEN)).child(format!("+{}", pr.additions)))
                     .child(div().text_color(hsla(RED)).child(format!("−{}", pr.deletions))),
             );
@@ -680,7 +680,7 @@ impl GithubView {
                     .cursor_pointer()
                     .px(px(6.0))
                     .rounded(px(5.0))
-                    .text_size(px(12.0))
+                    .text_size(crate::scale::px(12.0))
                     .text_color(hsla(theme::TEXT_FAINT))
                     .hover(|s| s.bg(hsla(0x262626)).text_color(hsla(theme::TEXT)))
                     .child("＋ Edit")
@@ -754,9 +754,9 @@ impl GithubView {
                     .flex()
                     .items_center()
                     .cursor_pointer()
-                    .text_size(px(12.5))
+                    .text_size(crate::scale::px(12.5))
                     .border_b_2()
-                    .border_color(if on { hsla(theme::ACCENT) } else { hsla(theme::APP_BG) })
+                    .border_color(if on { hsla(theme::ACCENT) } else { hsla(theme::PANEL_BG) })
                     .text_color(hsla(if on { theme::TEXT } else { theme::TEXT_DIM }))
                     .hover(|s| s.text_color(hsla(theme::TEXT)))
                     .child(name)
@@ -776,11 +776,8 @@ impl GithubView {
             DetailTab::Commits => self.render_commits(d, t).into_any_element(),
             DetailTab::Files => self.render_files(ds, cx).into_any_element(),
         };
-        let scroll = div()
-            .id("gh-detail")
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scroll()
+        let scroll = self.scrolls[1]
+            .wire(div().id("gh-detail").flex_1().min_h_0(), window)
             .child(div().px(px(16.0)).py(px(12.0)).child(meta))
             .children(tabs)
             .child(div().px(px(16.0)).py(px(12.0)).child(content));
@@ -801,7 +798,7 @@ impl GithubView {
                     .px(px(8.0))
                     .rounded(px(11.0))
                     .cursor_pointer()
-                    .text_size(px(12.0))
+                    .text_size(crate::scale::px(12.0))
                     .border_1()
                     .border_color(hsla(if r.mine { theme::ACCENT } else { CARD_BORDER }))
                     .bg(hsla(if r.mine { 0x2a211d } else { CARD_HEAD }))
@@ -820,7 +817,7 @@ impl GithubView {
                     .px(px(8.0))
                     .rounded(px(11.0))
                     .cursor_pointer()
-                    .text_size(px(12.0))
+                    .text_size(crate::scale::px(12.0))
                     .text_color(hsla(theme::TEXT_FAINT))
                     .hover(|s| s.bg(hsla(0x262626)).text_color(hsla(theme::TEXT)))
                     .child(icon(IconName::HeartPlus, 14.0))
@@ -867,7 +864,7 @@ impl GithubView {
                     .child(avatar(author, 20.0))
                     .child(div().font_weight(FontWeight::SEMIBOLD).child(author.to_string()))
                     .child(dim(format!("{verb} {}{}", ago(when, t), if edited { " · edited" } else { "" })))
-                    .children(assoc_label(assoc).map(|a| div().px(px(6.0)).rounded(px(8.0)).border_1().border_color(hsla(CARD_BORDER)).text_size(px(10.5)).text_color(hsla(theme::TEXT_DIM)).child(a))),
+                    .children(assoc_label(assoc).map(|a| div().px(px(6.0)).rounded(px(8.0)).border_1().border_color(hsla(CARD_BORDER)).text_size(crate::scale::px(10.5)).text_color(hsla(theme::TEXT_DIM)).child(a))),
             )
             .children(menu.map(|m| {
                 div()
@@ -898,7 +895,7 @@ impl GithubView {
         } else if body.trim().is_empty() {
             faint("No description provided.").into_any_element()
         } else {
-            div().text_size(px(13.5)).child(markdown(format!("md-{key}"), body)).into_any_element()
+            div().text_size(crate::scale::px(13.5)).child(markdown(format!("md-{key}"), body)).into_any_element()
         };
         let react = reactions.map(|(subject, list)| self.reactions_row(subject, list, true, cx));
         div()
@@ -958,7 +955,7 @@ impl GithubView {
                             .gap(px(6.0))
                             .px(px(4.0))
                             .child(div().text_color(hsla(theme::TEXT_FAINT)).child("•"))
-                            .child(div().text_size(px(12.0)).font_weight(FontWeight::MEDIUM).text_color(hsla(theme::TEXT_DIM)).child(ev.actor.clone()))
+                            .child(div().text_size(crate::scale::px(12.0)).font_weight(FontWeight::MEDIUM).text_color(hsla(theme::TEXT_DIM)).child(ev.actor.clone()))
                             .child(dim(ev.what.clone()))
                             .children(ev.label.as_ref().map(label_pill))
                             .child(faint(ago(ev.created, t))),
@@ -983,7 +980,7 @@ impl GithubView {
             .gap(px(8.0))
             .px(px(4.0))
             .child(div().text_color(hsla(theme::TEXT_FAINT)).child(icon(IconName::GitCommitHorizontal, 14.0)))
-            .child(div().font_family(FONT).text_size(px(11.5)).text_color(hsla(theme::ACCENT)).child(c.short.clone()))
+            .child(div().font_family(FONT).text_size(crate::scale::px(11.5)).text_color(hsla(theme::ACCENT)).child(c.short.clone()))
             .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(c.headline.clone()))
             .child(faint(format!("{} · {}", c.author, ago(c.created, t))))
     }
@@ -1031,11 +1028,11 @@ impl GithubView {
                     .child(faint(ago(r.created, t))),
             );
         if !r.body.trim().is_empty() {
-            col = col.child(div().p(px(12.0)).text_size(px(13.5)).child(markdown(format!("md-review-{n}"), &r.body)));
+            col = col.child(div().p(px(12.0)).text_size(crate::scale::px(13.5)).child(markdown(format!("md-review-{n}"), &r.body)));
         }
         for (k, c) in r.comments.iter().enumerate() {
             let hunk: Vec<&str> = c.hunk.lines().rev().take(6).collect::<Vec<_>>().into_iter().rev().collect();
-            let mut code = div().flex().flex_col().font_family(FONT).text_size(px(11.5)).bg(hsla(0x0e0e0f)).py(px(4.0)).overflow_hidden();
+            let mut code = div().flex().flex_col().font_family(FONT).text_size(crate::scale::px(11.5)).bg(hsla(0x0e0e0f)).py(px(4.0)).overflow_hidden();
             for l in hunk {
                 let bg = if l.starts_with('+') { Some(GREEN) } else if l.starts_with('-') { Some(RED) } else { None };
                 code = code.child(div().px(px(10.0)).whitespace_nowrap().when_some(bg, |d, c| d.bg(hsla(c).opacity(0.14))).child(if l.is_empty() { " ".to_string() } else { l.to_string() }));
@@ -1050,11 +1047,11 @@ impl GithubView {
                             .gap(px(8.0))
                             .px(px(12.0))
                             .py(px(6.0))
-                            .child(div().font_family(FONT).text_size(px(11.5)).text_color(hsla(theme::TEXT_DIM)).child(format!("{}{}", c.path, c.line.map(|l| format!(":{l}")).unwrap_or_default())))
+                            .child(div().font_family(FONT).text_size(crate::scale::px(11.5)).text_color(hsla(theme::TEXT_DIM)).child(format!("{}{}", c.path, c.line.map(|l| format!(":{l}")).unwrap_or_default())))
                             .children(c.outdated.then(|| faint("outdated"))),
                     )
                     .child(code)
-                    .child(div().p(px(12.0)).text_size(px(13.5)).child(markdown(format!("md-rc-{n}-{k}"), &format!("**{}**: {}", c.author, c.body)))),
+                    .child(div().p(px(12.0)).text_size(crate::scale::px(13.5)).child(markdown(format!("md-rc-{n}-{k}"), &format!("**{}**: {}", c.author, c.body)))),
             );
         }
         let _ = cx;
@@ -1123,7 +1120,7 @@ impl GithubView {
                                 .flex()
                                 .gap(px(6.0))
                                 .cursor_pointer()
-                                .text_size(px(12.0))
+                                .text_size(crate::scale::px(12.0))
                                 .hover(|s| s.text_color(hsla(theme::TEXT)))
                                 .text_color(hsla(theme::TEXT_DIM))
                                 .child(div().text_color(hsla(check_color(&ck.result))).child(icon(check_icon(check_color(&ck.result)), 13.0)))
@@ -1270,10 +1267,10 @@ impl GithubView {
                 .cursor_pointer()
                 .hover(|s| s.bg(hsla(0x1c1c1d)))
                 .child(div().text_color(hsla(theme::TEXT_FAINT)).child(icon(if open { IconName::ChevronDown } else { IconName::ChevronRight }, 12.0)))
-                .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().font_family(FONT).text_size(px(12.0)).child(f.path.clone()))
+                .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().font_family(FONT).text_size(crate::scale::px(12.0)).child(f.path.clone()))
                 .children((f.status != "modified").then(|| faint(f.status.clone())))
-                .child(div().text_size(px(11.5)).text_color(hsla(GREEN)).child(format!("+{}", f.additions)))
-                .child(div().text_size(px(11.5)).text_color(hsla(RED)).child(format!("−{}", f.deletions)))
+                .child(div().text_size(crate::scale::px(11.5)).text_color(hsla(GREEN)).child(format!("+{}", f.additions)))
+                .child(div().text_size(crate::scale::px(11.5)).text_color(hsla(RED)).child(format!("−{}", f.deletions)))
                 .on_click(go(cx, GhAct::ToggleFile(f.path.clone())));
             let mut card = div().rounded(px(8.0)).border_1().border_color(hsla(CARD_BORDER)).overflow_hidden().child(head);
             if open {
@@ -1289,7 +1286,7 @@ impl GithubView {
         if f.no_patch {
             return div().p(px(12.0)).child(faint("No inline diff for this file (binary or too large). Open on GitHub to view it."));
         }
-        let mut lines = div().flex().flex_col().font_family(FONT).text_size(px(11.5)).py(px(4.0));
+        let mut lines = div().flex().flex_col().font_family(FONT).text_size(crate::scale::px(11.5)).py(px(4.0));
         for l in f.lines.iter().take(if full { usize::MAX } else { SHOWN }) {
             let (bg, sign) = match l.kind {
                 DiffKind::Add => (Some(GREEN), "+"),
@@ -1318,7 +1315,7 @@ impl GithubView {
 
     // -------------------------------------------------------------------------------------------------- new item
 
-    fn render_new(&self, kind: Kind, stacked: bool, cx: &mut Context<Self>) -> Div {
+    fn render_new(&self, kind: Kind, stacked: bool, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let can_triage = self.info.as_ref().is_some_and(|i| i.can_triage());
         let mut meta = div().flex().flex_col().gap(px(8.0));
         if kind == Kind::Issue && can_triage {
@@ -1336,7 +1333,7 @@ impl GithubView {
         }
         let field = |name: &str, el: AnyElement| div().flex().flex_col().gap(px(4.0)).child(section_label(name.to_string())).child(el);
         let mut form = div().flex().flex_col().gap(px(12.0)).p(px(16.0));
-        form = form.child(div().text_size(px(16.0)).font_weight(FontWeight::SEMIBOLD).child(if kind == Kind::Issue { "New issue" } else { "New pull request" }));
+        form = form.child(div().text_size(crate::scale::px(16.0)).font_weight(FontWeight::SEMIBOLD).child(if kind == Kind::Issue { "New issue" } else { "New pull request" }));
         if kind == Kind::Pull {
             form = form.child(
                 div()
@@ -1363,7 +1360,7 @@ impl GithubView {
             .flex()
             .flex_col()
             .when(stacked, |d| d.child(div().px(px(12.0)).pt(px(8.0)).child(button_leading("gh-back", IconName::ArrowLeft, "Back to list", false).on_click(go(cx, GhAct::Back)))))
-            .child(div().id("gh-new-scroll").flex_1().min_h_0().overflow_y_scroll().child(form))
+            .child(self.scrolls[2].wire(div().id("gh-new-scroll").flex_1().min_h_0(), window).child(form))
     }
 
     // ---------------------------------------------------------------------------------------------- pickers
@@ -1603,7 +1600,7 @@ impl GithubView {
                     .px(px(10.0))
                     .rounded(px(5.0))
                     .cursor_pointer()
-                    .text_size(px(12.5))
+                    .text_size(crate::scale::px(12.5))
                     .hover(|s| s.bg(hsla(0x252525)))
                     .child(div().w(px(12.0)).flex_none().text_color(hsla(theme::ACCENT)).children((it.checked == Some(true)).then(|| icon(IconName::Check, 13.0))))
                     .children(it.swatch.map(|c| div().size(px(10.0)).flex_none().rounded_full().bg(hsla(c))))
@@ -1630,7 +1627,7 @@ impl GithubView {
             .flex()
             .flex_col()
             .gap(px(4.0))
-            .when(searchable, |d| d.child(div().p(px(2.0)).child(Input::new(&popup.filter).h(px(28.0)).text_size(px(12.5)))))
+            .when(searchable, |d| d.child(div().p(px(2.0)).child(Input::new(&popup.filter).h(px(28.0)).text_size(crate::scale::px(12.5)))))
             .child(list);
         let close = cx.listener(|v: &mut GithubView, _: &MouseDownEvent, window, cx| v.act(GhAct::ClosePopup, window, cx));
         Some(

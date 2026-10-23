@@ -17,14 +17,16 @@ There's no API key and no login in Claudiu. Authentication stays with Claude Cod
 ## What you get
 
 - **A real terminal.** 24-bit color, scrollback, selection, mouse reporting, bracketed paste, alt screen, Ctrl+click on links, IME input.
-- **Current Session.** The sidebar lists everything that's running, Claude sessions and plain shells alike. Switching between them never touches the other processes.
+- **One list.** The sidebar shows what's running first, then recent Claude Code sessions, with older ones folded away. A project filter narrows it. Switching between sessions never touches the other processes.
 - **Projects.** Git-aware, with branch and linked worktrees. Add one with the button, by dropping a folder on the window, or with `claudiu <folder>`.
-- **History.** Ended Claude sessions stay in the sidebar, and a click resumes one through `claude --resume`. Plain shells aren't saved.
+- **History.** Ended Claude sessions stay in the sidebar, and a click resumes one through `claude --resume`.
 - **Import on startup.** Your existing Claude Code sessions are found and merged in (read-only, no duplicates).
-- **Splits.** Up to four panes, each its own session.
+- **Shell panel.** Each Claude session can show its own shell under its terminal (Ctrl+Shift+T or Ctrl+J). It starts in the session's folder and ends with the session.
+- **Right sidebar.** The actions for the shown session (open in your editor, open folder, Commit & Push, Pull, shell), its status (context, prompt cache, auto-compact, advisor), the issues and pull requests Claude attached to it, the sessions linked with it, what the model drew for it in the **Visual** panel, and a GitHub view. Auto-compact and the advisor model can be changed from its status rows. Ctrl+Shift+R shows or hides it. Drag the edge of either sidebar to resize it; the widths are remembered.
 - **Usage meters.** Context per session, plus 5-hour and 7-day account limits. See [Usage meters](#usage-meters) for the catch.
-- **Git buttons.** Commit & Push (Haiku writes the message through your own `claude` CLI) and Pull. Branch management too.
+- **Git buttons.** Commit & Push (Haiku writes the message through the running session itself, no extra `claude` process) and Pull. Branch management too.
 - **Tab titles.** Claude names its own tabs.
+- **Visual panel.** Ask Claude to draw something and it appears beside the terminal as Markdown plus native cards, tables and charts, streamed while it writes.
 - **Editors.** Open a project in VS Code or Zed, reveal it in Finder or Explorer, copy its path.
 - **Auto-update** from GitHub Releases, for installed copies.
 
@@ -35,13 +37,12 @@ Claudiu's own shortcuts use Ctrl+Shift (Cmd+Shift on macOS), so plain Ctrl and A
 | Shortcut | Action |
 |---|---|
 | Ctrl+Shift+N | New Claude session, in the active session's folder |
-| Ctrl+Shift+M | New chat (Claude in a native conversation view); not tied to a project unless you pick one |
-| Ctrl+Shift+T | New shell |
-| Ctrl+Shift+D | Split: new shell beside the current pane |
+| Ctrl+Shift+T / Ctrl+J | Show or hide the session's shell |
 | Ctrl+Shift+W | End the focused session (no confirmation) |
 | Ctrl+Tab / Ctrl+Shift+Tab | Next / previous running session |
-| Ctrl+Shift+] | Focus next pane |
+| Ctrl+Shift+] | Move the keyboard between Claude and its shell |
 | Ctrl+Shift+B | Toggle sidebar |
+| Ctrl+Shift+R | Toggle right sidebar |
 | Ctrl+Shift+F | Search sessions and projects |
 | Ctrl+Shift+O | Add a project folder |
 
@@ -52,16 +53,16 @@ Inside the terminal, Ctrl+Shift+C or Ctrl+Insert copies, and Ctrl+V, Ctrl+Shift+
 I wanted this to be safe to try on a setup you care about, so:
 
 - **Claude Code's data is read-only.** Claudiu never writes to `~/.claude` and never edits `settings.json`, keybindings or any other Claude Code config. Hiding a session only removes it from Claudiu's own index.
-- **Two things are passed per process**, and live only as long as that session: a `--settings` file for the status line (see [Usage meters](#usage-meters)) and a `--mcp-config` file for the tab-title tool. Both point back at the Claudiu executable. Nothing lands in your Claude Code config.
+- **Two things are passed per process**, and live only as long as that session: a `--plugin-dir` mod that reports usage (see [Usage meters](#usage-meters)) and a `--mcp-config` file for the tab-title tool. The MCP server points back at the Claudiu executable. Nothing lands in your Claude Code config.
 - **IDE auto-connect is switched off** for the sessions Claudiu starts, through environment variables on the child process.
-- **Everything else is documented CLI flags**: `--session-id`, `--resume`, `--settings`, `--mcp-config`, `--allowedTools`.
+- **Everything else is documented CLI flags**: `--session-id`, `--resume`, `--plugin-dir`, `--mcp-config`, `--allowedTools`.
 - **Claudiu's own state** is in `%LOCALAPPDATA%\Claudiu\data\state.json` on Windows and `~/Library/Application Support/Claudiu` on macOS. Crashes go to `crash.log` next to it.
 - **Nothing is uploaded.** Terminal contents are never logged. The only network request Claudiu makes is the update check against the public GitHub Releases API. To turn it off, set `"settings": { "update_url": "" }` in `state.json`.
 - **Clean environment for children.** Markers from other terminals (like `WT_SESSION`) and Claude Code's nested-session markers are removed, and `TERM_PROGRAM=Claudiu` is set. A `NO_COLOR` that leaked in from a Claude Code tool shell is dropped. One you set yourself is kept.
 
 ## Usage meters
 
-The 5-hour and 7-day meters, and the exact context figure, come from Claude Code's own status-line data. Each Claude session that Claudiu starts gets a per-process `--settings` file whose `statusLine` runs `claudiu --statusline-tee`. Claude Code calls it locally after each response, and per its docs that costs no tokens. Claudiu keeps a tiny snapshot: limits, context figures, session id. If you have your own status line, Claudiu forwards to it, so yours looks the same as before.
+The 5-hour and 7-day meters, and the exact context figure, come from inside Claude Code. Each Claude session that Claudiu starts loads a small per-process mod (`--plugin-dir`) that, after each response, writes a tiny snapshot to Claudiu's data folder: limits, context figures, session id, plus the auto-compact and advisor settings. That costs no tokens. Your own status line is not touched.
 
 So the meters aren't empty at launch, Claudiu also runs one `claude -p "/usage" --no-session-persistence` per launch. It skips this if there's a reading from the last 5 minutes. Anthropic's docs say `/usage` may use a small number of tokens.
 

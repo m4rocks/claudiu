@@ -107,7 +107,7 @@ pub fn install(ws: &mut Workspace, _window: &mut Window, cx: &mut Context<Worksp
         }
         Status::Ready { .. } => {
             // Persist state, then hand over to the updater; it restarts Claudiu into the new version.
-            ws.persist_for_restart();
+            ws.finalize(cx);
             if let Err(e) = manager.apply_updates_and_restart(&info) {
                 ws.toast(format!("Could not apply update: {e}"), true, cx);
             }

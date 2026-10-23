@@ -57,7 +57,7 @@ pub fn clawd(size: f32) -> Div {
 
 pub fn section_label(text: impl Into<SharedString>) -> Div {
     div()
-        .text_size(px(10.5))
+        .text_size(crate::scale::px(10.5))
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(hsla(theme::TEXT_FAINT))
         .child(text.into())
@@ -86,7 +86,7 @@ pub fn meter(label: &str, fraction: Option<f32>, caption: String, tone: Option<H
                 .child(section_label(label.to_string()))
                 .child(
                     div()
-                        .text_size(px(11.5))
+                        .text_size(crate::scale::px(11.5))
                         .text_color(hsla(if fraction.is_some() {
                             theme::TEXT
                         } else {
@@ -112,7 +112,7 @@ pub fn meter(label: &str, fraction: Option<f32>, caption: String, tone: Option<H
         )
         .child(
             div()
-                .text_size(px(10.5))
+                .text_size(crate::scale::px(10.5))
                 .text_color(hsla(theme::TEXT_FAINT))
                 .child(caption),
         )
@@ -135,7 +135,7 @@ fn button_with(
         .rounded(px(6.0))
         .bg(bg)
         .text_color(fg)
-        .text_size(px(12.0))
+        .text_size(crate::scale::px(12.0))
         .font_weight(if bold {
             FontWeight::SEMIBOLD
         } else {
@@ -182,20 +182,6 @@ pub fn button_leading(id: impl Into<SharedString>, name: IconName, label: impl I
 /// A button that can't be pressed right now: dimmed, no hover, no click handler attached by the caller.
 pub fn button_disabled(id: impl Into<SharedString>, label: impl Into<SharedString>) -> Stateful<Div> {
     button_with(id.into(), label.into(), hsla(0x1b1b1b), hsla(theme::TEXT_FAINT), hsla(0x1b1b1b), false).cursor_default()
-}
-
-/// One half of a split button (`( label | v )`): sits inside a rounded group and only shows a hover fill.
-pub fn segment(id: impl Into<SharedString>) -> Stateful<Div> {
-    div()
-        .id(id.into())
-        .h_full()
-        .px(px(9.0))
-        .flex()
-        .items_center()
-        .text_size(px(12.0))
-        .text_color(hsla(theme::TEXT))
-        .cursor_pointer()
-        .hover(|s| s.bg(hsla(0x262626)))
 }
 
 /// Destructive action (end session, quit).
@@ -251,14 +237,15 @@ pub fn avatar(seed: &str, size: f32) -> Div {
         .justify_center()
         .rounded_full()
         .bg(hsla(COLORS[hash as usize % COLORS.len()]))
-        .text_size(px(size * 0.55))
+        .text_size(crate::scale::px(size * 0.55))
         .font_weight(FontWeight::BOLD)
         .text_color(hsla(0x17100d))
         .child(letter.to_string())
 }
 
-pub fn divider() -> Div {
-    div().h(px(1.0)).w_full().bg(hsla(theme::BORDER))
+/// The marker in front of menu entries, so the current one shows.
+pub fn tick(current: bool) -> &'static str {
+    if current { "✓  " } else { "    " }
 }
 
 /// Relative time like "now", "5m", "3h", "2d", "6w".
@@ -326,6 +313,53 @@ mod tests {
             "/a/very/long/path/that/keeps/going/and/going/forever/and/ever/project",
         );
         assert!(short_path(p).chars().count() <= 46);
+    }
+}
+
+/// Eases a value (a panel's open fraction, 0 hidden to 1 shown, or its width) toward its target over `Reveal::MS`.
+pub struct Reveal {
+    from: f32,
+    to: f32,
+    start: std::time::Instant,
+}
+
+impl Reveal {
+    pub const MS: f32 = 180.0;
+
+    pub fn new(shown: bool) -> Self {
+        Self::at_value(shown as u8 as f32)
+    }
+
+    pub fn at_value(v: f32) -> Self {
+        Self { from: v, to: v, start: std::time::Instant::now() - std::time::Duration::from_secs(1) }
+    }
+
+    fn at(&self) -> f32 {
+        let t = (self.start.elapsed().as_secs_f32() * 1000.0 / Self::MS).min(1.0);
+        self.from + (self.to - self.from) * (1.0 - (1.0 - t).powi(3))
+    }
+
+    /// The open fraction now, for a panel that should be `shown`; keeps frames coming while it moves.
+    pub fn step(&mut self, shown: bool, window: &mut gpui::Window) -> f32 {
+        self.to(shown as u8 as f32, window)
+    }
+
+    /// Jump to `v` with no easing (while the user drags the edge).
+    pub fn snap(&mut self, v: f32) {
+        *self = Self { from: v, to: v, start: self.start };
+    }
+
+    /// The value now, easing toward `target`.
+    pub fn to(&mut self, target: f32, window: &mut gpui::Window) -> f32 {
+        if target != self.to {
+            self.from = self.at();
+            self.to = target;
+            self.start = std::time::Instant::now();
+        }
+        if self.start.elapsed().as_secs_f32() * 1000.0 < Self::MS {
+            window.request_animation_frame();
+        }
+        self.at()
     }
 }
 

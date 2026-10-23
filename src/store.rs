@@ -39,6 +39,15 @@ pub enum ExternalState {
     Missing,
 }
 
+/// A GitHub issue or pull request Claude attached to a session.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Attached {
+    pub pull: bool,
+    pub number: u32,
+    #[serde(default)]
+    pub title: Option<String>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ClaudeMeta {
     pub session_id: String,
@@ -55,6 +64,24 @@ pub struct ClaudeMeta {
     /// Unix time of the last request that read or wrote the prompt cache (the moment its TTL restarted).
     #[serde(default)]
     pub cache_at: Option<i64>,
+    /// The `/config` auto-compact switch, the `advisorModel` setting and the last slash command, as the mod reports them.
+    #[serde(default)]
+    pub auto_compact: Option<bool>,
+    #[serde(default)]
+    pub advisor: Option<String>,
+    /// The advisor declared for the current conversation. A model change is saved in `advisor` at once but only
+    /// becomes `advisor_active` on `/clear` or `/compact`; turning the advisor off/on changes it immediately.
+    #[serde(default)]
+    pub advisor_active: Option<String>,
+    /// Tokens at which auto-compaction runs (the context bar's full mark); `None` while it is off or unknown.
+    #[serde(default)]
+    pub compact_at: Option<u64>,
+    /// Issues and pull requests Claude attached to this session (the `attach_github` tool), oldest first.
+    #[serde(default)]
+    pub attached: Vec<Attached>,
+    /// Ids of the sessions this one is linked with (the other side lists this one too).
+    #[serde(default)]
+    pub linked: Vec<Id>,
     pub transcript: Option<PathBuf>,
     #[serde(default)]
     pub external: ExternalState,
@@ -181,10 +208,26 @@ pub struct Account {
 pub struct Layout {
     pub selected_session: Option<Id>,
     pub sidebar_visible: bool,
+    /// No longer used (the "Other sessions" group is gone); still written because older Claudiu versions require it.
     pub other_collapsed: bool,
-    /// The sidebar showed the Chat tab (not Code) when Claudiu last ran.
+    /// The sidebar's OLDER group is expanded.
     #[serde(default)]
-    pub chat_tab: bool,
+    pub older_open: bool,
+    /// The project the sidebar list is filtered to.
+    #[serde(default)]
+    pub project_filter: Option<Id>,
+    /// The right sidebar is hidden (stored negated so older state files keep it on).
+    #[serde(default)]
+    pub right_hidden: bool,
+    /// Width of the right sidebar while it shows GitHub; the menu keeps its own, `right_menu_w`.
+    #[serde(default)]
+    pub right_gh_w: Option<f32>,
+    /// Width of the left sidebar when the user has dragged it; the default otherwise.
+    #[serde(default)]
+    pub left_w: Option<f32>,
+    /// Width of the right sidebar's menu when the user has dragged it; the default otherwise.
+    #[serde(default)]
+    pub right_menu_w: Option<f32>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -199,6 +242,9 @@ pub struct Settings {
     /// Editor the "Open in" button uses; the last one picked.
     #[serde(default)]
     pub editor: Option<crate::platform::Editor>,
+    /// UI scale in percent (text and terminal font); 100 when unset.
+    #[serde(default)]
+    pub scale: Option<u32>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

@@ -45,19 +45,6 @@ pub fn through_login_shell(program: String, args: Vec<String>) -> (String, Vec<S
     }
 }
 
-pub fn shell_label(program: &str) -> String {
-    let stem = Path::new(program).file_stem().and_then(|s| s.to_str()).unwrap_or(program);
-    match stem.to_ascii_lowercase().as_str() {
-        "pwsh" => "PowerShell 7".into(),
-        "powershell" => "PowerShell".into(),
-        "cmd" => "Command Prompt".into(),
-        "zsh" => "zsh".into(),
-        "bash" => "bash".into(),
-        "fish" => "fish".into(),
-        other => other.to_string(),
-    }
-}
-
 pub fn home_dir() -> Option<PathBuf> {
     directories::BaseDirs::new().map(|d| d.home_dir().to_path_buf())
 }
@@ -85,6 +72,58 @@ pub fn spawn_detached(program: &Path, args: &[&OsStr]) -> std::io::Result<()> {
         cmd.creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS);
     }
     cmd.spawn().map(|_| ())
+}
+
+/// Put an image on the clipboard as a bitmap, which is what Claude Code's image paste reads on Windows (it asks
+/// .NET's `Clipboard.GetImage`, and gpui's clipboard write only offers the registered `PNG` format). Returns whether
+/// it worked; replaces whatever the clipboard held.
+#[cfg(target_os = "windows")]
+pub fn set_clipboard_bitmap(encoded: &[u8]) -> bool {
+    use windows_sys::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData};
+    use windows_sys::Win32::Foundation::GlobalFree;
+    use windows_sys::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
+    const CF_DIB: u32 = 8;
+    // A DIB is a BMP file without its 14-byte file header.
+    let mut bmp = Vec::new();
+    let Ok(img) = image::load_from_memory(encoded) else { return false };
+    if img.to_rgb8().write_to(&mut std::io::Cursor::new(&mut bmp), image::ImageFormat::Bmp).is_err() || bmp.len() <= 14 {
+        return false;
+    }
+    let dib = &bmp[14..];
+    unsafe {
+        let mem = GlobalAlloc(GMEM_MOVEABLE, dib.len());
+        if mem.is_null() {
+            return false;
+        }
+        let dst = GlobalLock(mem).cast::<u8>();
+        if dst.is_null() {
+            GlobalFree(mem);
+            return false;
+        }
+        std::ptr::copy_nonoverlapping(dib.as_ptr(), dst, dib.len());
+        GlobalUnlock(mem);
+        // Another program may hold the clipboard for a moment.
+        let mut opened = false;
+        for _ in 0..10 {
+            if OpenClipboard(std::ptr::null_mut()) != 0 {
+                opened = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        if !opened {
+            GlobalFree(mem);
+            return false;
+        }
+        EmptyClipboard();
+        // The clipboard owns the memory once this succeeds.
+        let ok = !SetClipboardData(CF_DIB, mem).is_null();
+        if !ok {
+            GlobalFree(mem);
+        }
+        CloseClipboard();
+        ok
+    }
 }
 
 /// Keep a helper process from flashing a console window (Windows only).
@@ -263,12 +302,5 @@ mod tests {
     fn env_expansion() {
         unsafe { std::env::set_var("CLAUDIU_TEST_X", "val") };
         assert_eq!(expand_env("a%CLAUDIU_TEST_X%b"), "avalb");
-    }
-
-    #[test]
-    fn shell_labels() {
-        #[cfg(windows)]
-        assert_eq!(shell_label(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"), "PowerShell");
-        assert_eq!(shell_label("/bin/zsh"), "zsh");
     }
 }

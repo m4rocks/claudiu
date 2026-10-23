@@ -13,10 +13,10 @@ use alacritty_terminal::vte::ansi::CursorShape;
 use futures::StreamExt;
 use futures::channel::mpsc::UnboundedReceiver;
 use gpui::{
-    Animation, AnimationExt, App, Bounds, ClipboardItem, Context, Element, ElementId, ElementInputHandler, Entity,
+    App, Bounds, ClipboardItem, Context, Element, ElementId, ElementInputHandler, Entity,
     EntityInputHandler, EventEmitter, FocusHandle, Focusable, Font, FontStyle, FontWeight, GlobalElementId, Hsla, InspectorElementId, IntoElement,
     KeyDownEvent, LayoutId, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    Pixels, Point, Render, ScrollDelta, ScrollWheelEvent, ShapedLine, StrikethroughStyle, Style,
+    ContentMask, Pixels, Point, Render, ScrollDelta, ScrollWheelEvent, ShapedLine, StrikethroughStyle, Style,
     TextRun, UTF16Selection, UnderlineStyle, Window, div, fill, outline, point, prelude::*, px, relative, size,
 };
 
@@ -24,6 +24,7 @@ use gpui_kit::component::input;
 
 use crate::glyphs;
 use crate::keys;
+use crate::skeleton::{self, Draft, Step};
 use crate::terminal::{SpawnSpec, Terminal};
 use crate::theme;
 
@@ -37,6 +38,8 @@ struct Metrics {
     cell_w: Pixels,
     line_h: Pixels,
     origin: Point<Pixels>,
+    /// How far the rows are drawn below their cells while scrolling between two lines.
+    shift: Pixels,
 }
 
 pub struct TerminalView {
@@ -45,10 +48,20 @@ pub struct TerminalView {
     metrics: Option<Metrics>,
     selecting: bool,
     scroll_px: f32,
+    /// Smooth scrollback: the view stands `frac` of a line above the line alacritty shows (0 at rest), and a wheel
+    /// notch eases there (`glide.rs`). Sub-line positions are drawn by shifting the rows.
+    frac: f32,
+    glide: Option<crate::glide::Glide>,
     pub title: Option<String>,
     /// Output timing, for `is_working`: when output last arrived and when the current burst began.
     last_output: Option<Instant>,
     burst_start: Option<Instant>,
+    /// The start-up trace has begun for this terminal (`trace.rs`).
+    traced: bool,
+    /// What the user types while Claude Code starts; moved into the real prompt when it appears (`skeleton.rs`).
+    draft: Draft,
+    /// The draft is being typed into Claude Code; the skeleton stays until the real prompt shows it.
+    handing: bool,
     pub exit_code: Option<Option<i32>>,
     /// IME composition / dead-key text not yet committed; drawn at the cursor, never sent to the program.
     marked: Option<String>,
@@ -68,10 +81,42 @@ impl Focusable for TerminalView {
     }
 }
 
+/// A row's height at the terminal's 14 px font (`font_size * 1.35`, rounded); the skeleton prompt lines up with it.
+pub const LINE_H: f32 = 19.0;
+
 #[cfg(target_os = "windows")]
 pub const FONT: &str = "Cascadia Mono";
 #[cfg(not(target_os = "windows"))]
 pub const FONT: &str = "Menlo";
+
+/// What to look for on Claude Code's screen to know a piece of the draft arrived.
+enum Marker {
+    Text(String),
+    Image,
+}
+
+/// Images Claude Code takes.
+fn is_image_file(p: &std::path::Path) -> bool {
+    p.extension().and_then(|e| e.to_str()).is_some_and(|e| ["png", "jpg", "jpeg", "gif", "webp", "bmp"].contains(&e.to_ascii_lowercase().as_str()))
+}
+
+/// Keep a pasted clipboard image as a file under the data folder (`pasted/`, pruned after a week).
+fn save_pasted(image: &gpui::Image) -> Option<std::path::PathBuf> {
+    use gpui::ImageFormat::*;
+    let ext = match image.format {
+        Png => "png",
+        Jpeg => "jpg",
+        Webp => "webp",
+        Gif => "gif",
+        Bmp => "bmp",
+        _ => return None,
+    };
+    let dir = crate::datadir::data_dir().join("pasted");
+    std::fs::create_dir_all(&dir).ok()?;
+    let path = dir.join(format!("{:x}.{ext}", image.id));
+    std::fs::write(&path, &image.bytes).ok()?;
+    Some(path)
+}
 
 impl TerminalView {
     /// Start the process in the background, so a slow start never freezes the window. A failure to start
@@ -97,9 +142,14 @@ impl TerminalView {
             metrics: None,
             selecting: false,
             scroll_px: 0.0,
+            frac: 0.0,
+            glide: None,
             title: None,
             last_output: None,
             burst_start: None,
+            traced: false,
+            draft: Draft::default(),
+            handing: false,
             exit_code: None,
             marked: None,
             font_family: FONT,
@@ -107,6 +157,26 @@ impl TerminalView {
             loading: false,
             visible: true,
         }
+    }
+
+    /// Trace when the start-up burst of output ends (a second without any): about when Claude Code is ready.
+    fn trace_quiet(&self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_millis(250)).await;
+                let Ok(quiet) = this.update(cx, |v, _| {
+                    let last = v.last_output?;
+                    (last.elapsed() > Duration::from_secs(1)).then(|| (v.terminal.tag.clone(), last.duration_since(v.terminal.born)))
+                }) else {
+                    break;
+                };
+                if let Some((tag, at)) = quiet {
+                    crate::trace::note(&tag, at, "last output of the start-up burst");
+                    break;
+                }
+            }
+        })
+        .detach();
     }
 
     pub fn is_running(&self) -> bool {
@@ -132,6 +202,11 @@ impl TerminalView {
                     self.burst_start = Some(t);
                 }
                 self.last_output = Some(t);
+                if crate::trace::on() && !self.traced {
+                    self.traced = true;
+                    crate::trace::note(&self.terminal.tag, self.terminal.born.elapsed(), "first output");
+                    self.trace_quiet(cx);
+                }
                 // Off-screen terminals only record the timing; a notify would redraw the whole window.
                 if self.visible {
                     cx.notify()
@@ -180,26 +255,43 @@ impl TerminalView {
     }
 
     fn send(&mut self, bytes: Vec<u8>, cx: &mut Context<Self>) {
+        // Claude Code is not listening yet: keys edit the draft instead (`draft_key`).
+        if !self.loading {
+            self.write_input(bytes, cx);
+        }
+    }
+
+    fn write_input(&mut self, bytes: Vec<u8>, cx: &mut Context<Self>) {
         let mut term = self.terminal.term.lock();
         term.selection = None;
         if term.grid().display_offset() != 0 {
             term.scroll_display(Scroll::Bottom);
         }
         drop(term);
+        (self.frac, self.glide) = (0.0, None);
         self.terminal.write(bytes);
         cx.notify();
     }
 
     pub fn paste_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        if self.loading {
+            self.draft.insert(text);
+            cx.notify();
+            return;
+        }
+        let bytes = self.paste_bytes(text);
+        self.send(bytes, cx);
+    }
+
+    fn paste_bytes(&self, text: &str) -> Vec<u8> {
         let text = text.replace("\r\n", "\r").replace('\n', "\r");
-        let bytes = if self.mode().contains(TermMode::BRACKETED_PASTE) {
+        if self.mode().contains(TermMode::BRACKETED_PASTE) {
             // Strip embedded end-marker so pasted text can't terminate the paste early.
             let clean = text.replace("\x1b[201~", "");
             format!("\x1b[200~{clean}\x1b[201~").into_bytes()
         } else {
             text.into_bytes()
-        };
-        self.send(bytes, cx);
+        }
     }
 
     pub fn paste(&mut self, cx: &mut Context<Self>) {
@@ -208,6 +300,22 @@ impl TerminalView {
         };
         if let Some(text) = item.text().filter(|t| !t.is_empty()) {
             self.paste_text(&text, cx);
+            return;
+        }
+        // While Claude Code starts, images are kept as files and typed in as paths when it is ready (`skeleton.rs`).
+        if self.loading {
+            for entry in item.entries() {
+                match entry {
+                    gpui::ClipboardEntry::Image(image) => {
+                        if let Some(path) = save_pasted(image) {
+                            self.draft.add_image(path);
+                        }
+                    }
+                    gpui::ClipboardEntry::ExternalPaths(p) => self.paste_paths(p.paths(), cx),
+                    _ => {}
+                }
+            }
+            cx.notify();
             return;
         }
         // An image on the clipboard: Claude Code reads it itself on its image-paste key (Alt+V on Windows,
@@ -225,14 +333,18 @@ impl TerminalView {
 
     /// Dropped or copied files: paste their paths (quoted when needed); Claude Code attaches them.
     pub fn paste_paths(&mut self, paths: &[std::path::PathBuf], cx: &mut Context<Self>) {
-        let text = paths
-            .iter()
-            .map(|p| {
-                let s = p.to_string_lossy();
-                if s.contains(' ') { format!("\"{s}\"") } else { s.into_owned() }
-            })
-            .collect::<Vec<_>>()
-            .join(" ");
+        if self.loading {
+            for p in paths {
+                if is_image_file(p) {
+                    self.draft.add_image(p.clone());
+                } else {
+                    self.draft.insert(&format!("{} ", skeleton::quote_path(p)));
+                }
+            }
+            cx.notify();
+            return;
+        }
+        let text = paths.iter().map(|p| skeleton::quote_path(p)).collect::<Vec<_>>().join(" ");
         if !text.is_empty() {
             self.paste_text(&format!("{text} "), cx);
         }
@@ -313,6 +425,7 @@ impl TerminalView {
                 _ => None,
             };
             if let Some(scroll) = scroll {
+                (self.frac, self.glide) = (0.0, None);
                 self.terminal.term.lock().scroll_display(scroll);
                 cx.notify();
                 cx.stop_propagation();
@@ -323,9 +436,139 @@ impl TerminalView {
         if self.exit_code.is_some() || keys::is_text(ks) {
             return;
         }
+        if self.loading {
+            self.draft.key(ks);
+            cx.notify();
+            cx.stop_propagation();
+            return;
+        }
         if let Some(bytes) = keys::encode(ks, self.mode()) {
             self.send(bytes, cx);
             cx.stop_propagation();
+        }
+    }
+
+    /// Type a message into Claude Code: a line as keystrokes, several as one paste so their breaks stay breaks.
+    fn type_in(&mut self, text: &str, cx: &mut Context<Self>) {
+        if text.is_empty() {
+            return;
+        }
+        // A long line is better pasted than typed.
+        let bytes = if text.contains('\n') || text.chars().count() > 200 { self.paste_bytes(text) } else { text.as_bytes().to_vec() };
+        self.write_input(bytes, cx);
+    }
+
+    /// Put an image file on the clipboard and press Claude Code's image-paste key, which reads it from there.
+    fn paste_image_file(&mut self, path: &std::path::Path, cx: &mut Context<Self>) -> bool {
+        use gpui::ImageFormat::*;
+        let format = match path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).as_deref() {
+            Some("png") => Png,
+            Some("jpg" | "jpeg") => Jpeg,
+            Some("gif") => Gif,
+            Some("webp") => Webp,
+            Some("bmp") => Bmp,
+            _ => return false,
+        };
+        let Ok(bytes) = std::fs::read(path) else { return false };
+        #[cfg(target_os = "windows")]
+        if !crate::platform::set_clipboard_bitmap(&bytes) {
+            return false;
+        }
+        #[cfg(not(target_os = "windows"))]
+        cx.write_to_clipboard(ClipboardItem::new_image(&gpui::Image::from_bytes(format, bytes)));
+        #[cfg(target_os = "windows")]
+        let _ = format;
+        let key: &[u8] = if cfg!(target_os = "windows") { b"\x1bv" } else { b"\x16" };
+        self.write_input(key.to_vec(), cx);
+        true
+    }
+
+    /// How often the markers show on the screen: the text just typed (or "[Pasted text" when it is long), or "[Image #".
+    fn marks(&self, marker: &Marker) -> usize {
+        let screen = self.tail_text(60);
+        match marker {
+            Marker::Text(t) => screen.matches(t.as_str()).count() + screen.matches("[Pasted text").count(),
+            Marker::Image => screen.matches("[Image #").count(),
+        }
+    }
+
+    /// Wait until `marker` shows more often than `before`, at most `patience`. A count, not a lookup, because a resumed
+    /// session may already show such text, and Claude Code's image numbers may not start at 1.
+    async fn wait_for(this: &gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp, marker: &Marker, before: usize, patience: Duration) {
+        let start = Instant::now();
+        while start.elapsed() < patience {
+            match this.update(cx, |v, _| v.marks(marker) > before) {
+                Ok(false) => cx.background_executor().timer(Duration::from_millis(50)).await,
+                _ => return,
+            }
+        }
+    }
+
+    /// Claude Code drew something: type the draft into it piece by piece, waiting after each for it to show on the
+    /// real screen (its first screen can arrive well before it reads the keyboard, and each image is read from the
+    /// clipboard when its key is handled). The skeleton stays up meanwhile, and keeps taking what is typed; then
+    /// `finish_loading`.
+    fn hand_over(&mut self, cx: &mut Context<Self>) {
+        self.handing = true;
+        cx.spawn(async move |this, cx| {
+            // Images borrow the clipboard; the user's own comes back at the end.
+            let mut clipboard = None;
+            // The first piece also waits for Claude Code to start reading the keyboard.
+            let mut patience = Duration::from_secs(10);
+            loop {
+                let Ok(steps) = this.update(cx, |v, _| v.draft.next_steps()) else { return };
+                if steps.is_empty() {
+                    break;
+                }
+                for step in steps {
+                    let wait = this
+                        .update(cx, |v, cx| match &step {
+                            Step::Text(t) => {
+                                let last = t.lines().rev().map(str::trim).find(|l| !l.is_empty()).unwrap_or_default();
+                                let marker = Marker::Text(last.chars().take(20).collect());
+                                let before = v.marks(&marker);
+                                v.type_in(t, cx);
+                                (!last.is_empty()).then_some((marker, before))
+                            }
+                            Step::Image(path, _) => {
+                                clipboard.get_or_insert_with(|| cx.read_from_clipboard());
+                                let before = v.marks(&Marker::Image);
+                                v.paste_image_file(path, cx).then_some((Marker::Image, before))
+                            }
+                        })
+                        .ok()
+                        .flatten();
+                    if let Some((marker, before)) = wait {
+                        Self::wait_for(&this, cx, &marker, before, patience).await;
+                    }
+                    patience = Duration::from_secs(3);
+                }
+            }
+            this.update(cx, |v, cx| {
+                if let Some(Some(item)) = clipboard {
+                    cx.write_to_clipboard(item);
+                }
+                v.finish_loading(cx)
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The real prompt is up: drop the skeleton, type what was added meanwhile, and press Enter if the user did.
+    fn finish_loading(&mut self, cx: &mut Context<Self>) {
+        self.loading = false;
+        self.handing = false;
+        crate::trace::note(&self.terminal.tag, self.terminal.born.elapsed(), "prompt ready");
+        let (rest, sent) = self.draft.take();
+        self.type_in(&rest, cx);
+        if sent {
+            // Enter right behind a paste can be read as part of it.
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(Duration::from_millis(150)).await;
+                this.update(cx, |v, cx| v.send(b"\r".to_vec(), cx)).ok();
+            })
+            .detach();
         }
     }
 
@@ -333,7 +576,7 @@ impl TerminalView {
         let m = self.metrics?;
         let (cols, rows) = self.terminal.size();
         let x = f32::from(position.x - m.origin.x).max(0.0);
-        let y = f32::from(position.y - m.origin.y).max(0.0);
+        let y = f32::from(position.y - m.origin.y - m.shift).max(0.0);
         let col = ((x / f32::from(m.cell_w)) as usize).min(cols as usize - 1);
         let row = ((y / f32::from(m.line_h)) as usize).min(rows as usize - 1);
         let side = if x - col as f32 * f32::from(m.cell_w) < f32::from(m.cell_w) / 2.0 {
@@ -503,12 +746,61 @@ impl TerminalView {
             }
     }
 
+    /// Where the view is in the scrollback, in lines up from the bottom.
+    fn position(&self) -> f32 {
+        self.terminal.term.lock().grid().display_offset() as f32 + self.frac
+    }
+
+    /// Show the scrollback at `p` lines up from the bottom: whole lines are alacritty's offset, the rest is `frac`.
+    fn set_position(&mut self, p: f32) {
+        let mut term = self.terminal.term.lock();
+        let (now, to) = (term.grid().display_offset() as i32, p.floor() as i32);
+        if to != now {
+            term.scroll_display(Scroll::Delta(to - now));
+        }
+        self.frac = if term.grid().display_offset() as i32 == to { p - to as f32 } else { 0.0 };
+    }
+
+    /// A wheel notch moves the target and the view eases there; a trackpad's pixel steps are applied as they come.
+    fn scroll_back(&mut self, lines: f32, notch: bool) {
+        let top = self.terminal.term.lock().history_size() as f32;
+        let here = self.position();
+        if notch {
+            crate::glide::Glide::nudge(&mut self.glide, here, lines * crate::glide::NOTCH, 0.0, top);
+        } else {
+            self.glide = None;
+            self.set_position((here + lines).clamp(0.0, top));
+        }
+    }
+
+    /// One frame of an easing scroll.
+    fn glide_step(&mut self, window: &mut Window) {
+        let Some(g) = &mut self.glide else { return };
+        let moving = g.step(0.01);
+        let p = g.shown;
+        if moving {
+            window.request_animation_frame();
+        } else {
+            self.glide = None;
+        }
+        self.set_position(p);
+    }
+
     fn on_scroll(&mut self, event: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
         let Some(m) = self.metrics else { return };
+        let notch = matches!(event.delta, ScrollDelta::Lines(_));
         let lines = match event.delta {
             ScrollDelta::Lines(p) => p.y,
             ScrollDelta::Pixels(p) => f32::from(p.y) / f32::from(m.line_h),
         };
+        let mode = self.mode();
+        let alt_scroll = mode.contains(TermMode::ALT_SCREEN) && mode.contains(TermMode::ALTERNATE_SCROLL);
+        // Plain scrollback is ours to scroll smoothly; a program that takes the wheel gets whole lines.
+        if !self.mouse_reporting(&event.modifiers) && !alt_scroll {
+            self.scroll_back(lines, notch);
+            cx.notify();
+            return;
+        }
         self.scroll_px += lines;
         let whole = self.scroll_px.trunc() as i32;
         if whole == 0 {
@@ -516,7 +808,6 @@ impl TerminalView {
         }
         self.scroll_px -= whole as f32;
 
-        let mode = self.mode();
         if self.mouse_reporting(&event.modifiers) {
             if let Some((_, _, col, row)) = self.grid_point(event.position) {
                 let button = if whole > 0 { 64 } else { 65 };
@@ -524,7 +815,7 @@ impl TerminalView {
                     self.report_mouse(button, col, row, true, &event.modifiers, false);
                 }
             }
-        } else if mode.contains(TermMode::ALT_SCREEN) && mode.contains(TermMode::ALTERNATE_SCROLL) {
+        } else {
             let app = mode.contains(TermMode::APP_CURSOR);
             let key = match (whole > 0, app) {
                 (true, true) => "\x1bOA",
@@ -534,12 +825,6 @@ impl TerminalView {
             };
             self.terminal
                 .write(key.repeat(whole.unsigned_abs() as usize).into_bytes());
-        } else {
-            self.terminal
-                .term
-                .lock()
-                .scroll_display(Scroll::Delta(whole));
-            cx.notify();
         }
     }
 }
@@ -566,7 +851,10 @@ impl EntityInputHandler for TerminalView {
 
     fn replace_text_in_range(&mut self, _: Option<Range<usize>>, text: &str, _: &mut Window, cx: &mut Context<Self>) {
         self.marked = None;
-        if !text.is_empty() && self.is_running() {
+        if self.loading {
+            self.draft.insert(text);
+            cx.notify();
+        } else if !text.is_empty() && self.is_running() {
             self.send(text.as_bytes().to_vec(), cx);
         } else {
             cx.notify();
@@ -592,7 +880,7 @@ impl EntityInputHandler for TerminalView {
         let cursor = term.grid().cursor.point;
         let row = (cursor.line.0 + term.grid().display_offset() as i32).max(0);
         Some(Bounds::new(
-            point(m.origin.x + m.cell_w * cursor.column.0 as f32, m.origin.y + m.line_h * row as f32),
+            point(m.origin.x + m.cell_w * cursor.column.0 as f32, m.origin.y + m.shift + m.line_h * row as f32),
             size(m.cell_w, m.line_h),
         ))
     }
@@ -630,10 +918,23 @@ async fn pump(
 }
 
 impl Render for TerminalView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.loading && (self.exit_code.is_some() || self.has_content()) {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.glide_step(window);
+        if self.loading && self.exit_code.is_some() {
             self.loading = false;
+        } else if self.loading && !self.handing && self.has_content() {
+            crate::trace::note(&self.terminal.tag, self.terminal.born.elapsed(), "first content painted");
+            if self.draft.is_empty() {
+                self.finish_loading(cx);
+            } else {
+                self.hand_over(cx);
+            }
         }
+        let phase = match (self.handing, self.last_output) {
+            (true, _) => "Handing your message to Claude Code…",
+            (false, Some(_)) => "Loading skills, plugins and MCP servers…",
+            (false, None) => "Starting Claude Code…",
+        };
         div()
             .id("terminal")
             .relative()
@@ -658,7 +959,12 @@ impl Render for TerminalView {
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_scroll_wheel(cx.listener(Self::on_scroll))
             .child(TerminalElement { view: cx.entity() })
-            .when(self.loading, |d| d.child(loading_overlay()))
+            .when(self.loading, |d| {
+                let (cols, rows) = self.terminal.size();
+                let (cell_w, line_h) = self.metrics.map_or((8.0, LINE_H), |m| (f32::from(m.cell_w), f32::from(m.line_h)));
+                let grid = skeleton::Grid { cell_w, line_h, cols, rows };
+                d.child(skeleton::overlay(&self.draft, self.terminal.born.elapsed(), phase, grid))
+            })
     }
 }
 
@@ -667,36 +973,6 @@ impl TerminalView {
     fn has_content(&self) -> bool {
         self.terminal.term.lock().renderable_content().display_iter.any(|c| !matches!(c.c, ' ' | '\0'))
     }
-}
-
-/// Claude Code's own spinner glyphs, cycling in the accent color, while `claude` boots.
-fn loading_overlay() -> impl IntoElement {
-    // ✳ (U+2733) has an emoji presentation that Windows draws as a green emoji; Claude Code uses `*` there too.
-    #[cfg(target_os = "windows")]
-    const FRAMES: [&str; 6] = ["·", "✢", "*", "✶", "✻", "✽"];
-    #[cfg(not(target_os = "windows"))]
-    const FRAMES: [&str; 6] = ["·", "✢", "✳", "✶", "✻", "✽"];
-    div()
-        .absolute()
-        .inset_0()
-        .flex()
-        .flex_col()
-        .items_center()
-        .justify_center()
-        .gap(px(10.0))
-        .bg(theme::hsla(theme::TERMINAL_BG))
-        .child(
-            div().font_family(FONT).text_size(px(28.0)).text_color(theme::hsla(theme::ACCENT)).with_animation(
-                "claude-loading",
-                Animation::new(Duration::from_millis(1200)).repeat(),
-                |d, t| {
-                    // Ping-pong through the frames like Claude Code does.
-                    let i = ((t * 10.0) as usize).min(9);
-                    d.child(FRAMES[if i < 6 { i } else { 10 - i }])
-                },
-            ),
-        )
-        .child(div().text_size(px(12.0)).text_color(theme::hsla(theme::TEXT_FAINT)).child("Starting Claude Code…"))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -779,7 +1055,7 @@ impl Element for TerminalElement {
     ) -> Prepaint {
         let (family, font_size, focused, marked) = {
             let v = self.view.read(cx);
-            (v.font_family, v.font_size, v.focus.is_focused(window), v.marked.clone())
+            (v.font_family, crate::scale::px(f32::from(v.font_size)), v.focus.is_focused(window), v.marked.clone())
         };
         let base_font: Font = gpui::font(family);
         let font_id = window.text_system().resolve_font(&base_font);
@@ -795,13 +1071,17 @@ impl Element for TerminalElement {
 
         let terminal = &self.view.read(cx).terminal;
         terminal.resize(cols, rows, f32::from(cell_w), f32::from(line_h));
+        let frac = self.view.read(cx).frac;
         self.view.update(cx, |v, _| {
             v.metrics = Some(Metrics {
                 cell_w,
                 line_h,
                 origin: bounds.origin,
+                shift: line_h * frac,
             });
         });
+        // Where row 0 of the cells below is drawn (one row higher while the line above is peeking in).
+        let top_y;
 
         let mut backgrounds: Vec<(Bounds<Pixels>, Hsla)> = Vec::new();
         let mut batches: Vec<Batch> = Vec::new();
@@ -820,12 +1100,12 @@ impl Element for TerminalElement {
             let block_cursor = focused && cursor.shape == CursorShape::Block;
             let default_bg = theme::default_bg();
 
-            let cell_origin = |row: usize, col: usize| {
-                point(
-                    bounds.origin.x + cell_w * col as f32,
-                    bounds.origin.y + line_h * row as f32,
-                )
-            };
+            // Between two lines the view is shifted down by `frac` of a line and the line above shows in the gap.
+            let extra = (frac > 0.0 && term.grid().display_offset() < term.history_size()).then(|| Line(-offset - 1));
+            let top = extra.is_some() as usize;
+            top_y = bounds.origin.y + line_h * frac - line_h * top as f32;
+            let cell_origin = |row: usize, col: usize| point(bounds.origin.x + cell_w * col as f32, top_y + line_h * row as f32);
+            let above = extra.into_iter().flat_map(|l| (0..cols as usize).map(move |c| (l, c))).map(|(l, c)| (&term.grid()[l][Column(c)], GridPoint::new(l, Column(c))));
 
             // Open background span: (row, start_col, end_col_exclusive, color)
             let mut open_bg: Option<(usize, usize, usize, Hsla)> = None;
@@ -842,14 +1122,12 @@ impl Element for TerminalElement {
                 }
             };
 
-            for indexed in content.display_iter {
-                let cell = indexed.cell;
-                let p = indexed.point;
+            for (cell, p) in content.display_iter.map(|i| (i.cell, i.point)).chain(above) {
                 let row = p.line.0 + offset;
-                if row < 0 || row >= rows as i32 || p.column.0 >= cols as usize {
+                if row < -(top as i32) || row >= rows as i32 || p.column.0 >= cols as usize {
                     continue;
                 }
-                let (row, col) = (row as usize, p.column.0);
+                let (row, col) = ((row + top as i32) as usize, p.column.0);
                 if cell
                     .flags
                     .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
@@ -910,7 +1188,7 @@ impl Element for TerminalElement {
                     continue;
                 }
                 // Block elements / box drawing: exact rectangles instead of font glyphs, so they tile seamlessly.
-                let (ox, oy) = (f32::from(bounds.origin.x), f32::from(bounds.origin.y));
+                let (ox, oy) = (f32::from(bounds.origin.x), f32::from(top_y));
                 let (cw, lh) = (f32::from(cell_w), f32::from(line_h));
                 let x0 = (ox + cw * col as f32).round();
                 let x1 = (ox + cw * (col + width) as f32).round();
@@ -964,7 +1242,7 @@ impl Element for TerminalElement {
             // Cursor (non-block shapes, or hollow when unfocused)
             let cur_row = cursor.point.line.0 + offset;
             if cur_row >= 0 && cur_row < rows as i32 {
-                preedit_at = Some(cell_origin(cur_row as usize, cursor.point.column.0));
+                preedit_at = Some(cell_origin(cur_row as usize + top, cursor.point.column.0));
             }
             if cur_row >= 0
                 && cur_row < rows as i32
@@ -978,7 +1256,7 @@ impl Element for TerminalElement {
                 };
                 if shape != CursorShape::Block {
                     let wide = term.grid()[cursor.point].flags.contains(Flags::WIDE_CHAR);
-                    let origin = cell_origin(cur_row as usize, cursor.point.column.0);
+                    let origin = cell_origin(cur_row as usize + top, cursor.point.column.0);
                     let bounds =
                         Bounds::new(origin, size(cell_w * if wide { 2.0 } else { 1.0 }, line_h));
                     cursor_out = Some((bounds, shape, focused));
@@ -1016,7 +1294,7 @@ impl Element for TerminalElement {
                     .shape_line(b.text.into(), font_size, &[run], Some(cell_w));
             let origin = point(
                 bounds.origin.x + cell_w * b.col as f32,
-                bounds.origin.y + line_h * b.row as f32,
+                top_y + line_h * b.row as f32,
             );
             lines.push((origin, line));
         }
@@ -1057,6 +1335,8 @@ impl Element for TerminalElement {
         cx: &mut App,
     ) {
         window.paint_quad(fill(pre.bounds, theme::hsla(theme::TERMINAL_BG)));
+        // A shifted view draws a row past the edges; the mask cuts it off.
+        window.with_content_mask(Some(ContentMask { bounds: pre.bounds }), |window| {
         for (bounds, color) in pre.backgrounds.drain(..) {
             window.paint_quad(fill(bounds, color));
         }
@@ -1087,6 +1367,7 @@ impl Element for TerminalElement {
             window.paint_quad(fill(Bounds::new(origin, size(line.width, pre.line_h)), theme::hsla(theme::TERMINAL_BG)));
             let _ = line.paint(origin, pre.line_h, gpui::TextAlign::Left, None, window, cx);
         }
+        });
         // Receive typed text / IME input while this terminal has focus.
         let focus = self.view.read(cx).focus.clone();
         window.handle_input(&focus, ElementInputHandler::new(pre.bounds, self.view.clone()), cx);

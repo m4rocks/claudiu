@@ -11,38 +11,41 @@ use gpui::{
 
 use gpui_kit::component::input::{InputEvent, InputState};
 use crate::accounts;
-use crate::chat::store::{ChatRecord, ChatStore, DEFAULT_TITLE, is_tied, scratch_dir, title_from};
-use crate::chat::view::{ChatEvent, ChatView, Launch};
 use crate::claude;
+use crate::sidebar::{SIDEBAR_MAX, SIDEBAR_MIN, SIDEBAR_W};
 use crate::github::view::{GhEvent, GithubView};
 use crate::mcp;
 use crate::platform::{self, Editor};
-use crate::statusline;
+use crate::{datadir, usage};
 use crate::store::{
-    Account, ClaudeMeta, ExternalState, Id, MAIN_ACCOUNT, SessionKind, SessionRecord, Store, new_id, now,
+    Account, Attached, ClaudeMeta, ExternalState, Id, MAIN_ACCOUNT, SessionKind, SessionRecord, Store, new_id, now,
 };
 use crate::terminal::SpawnSpec;
 use crate::terminal_view::{TerminalEvent, TerminalView};
 use crate::updater::UpdateState;
 
-mod chats;
 mod cross;
-pub use chats::{ChatPane, Side};
+#[cfg(test)]
+mod headless;
+mod ingest;
+mod lifecycle;
+mod links;
+mod titles;
+mod visuals;
 
 actions!(
     claudiu,
     [
         NewClaude,
-        NewChat,
-        NewShell,
+        ToggleShell,
         CloseSession,
         NextSession,
         PrevSession,
-        SplitPane,
         ToggleSidebar,
+        ToggleRight,
         FocusSearch,
         ImportProject,
-        FocusNextPane,
+        SwapFocus,
         OpenGithub,
         Quit,
         HideApp,
@@ -58,17 +61,10 @@ pub enum Act {
     NewClaude {
         cwd: PathBuf,
     },
-    NewShell {
-        cwd: PathBuf,
-    },
-    /// Click on a session row: live -> show its terminal alone (leaving any split), history -> resume it.
+    /// Show or hide the shell under a Claude session's terminal (started on first use, in the session's folder).
+    ToggleShell(Id),
+    /// Click on a session row: live -> show it, history -> resume it.
     Select(Id),
-    /// Put a session (resuming it if it ended) next to the focused pane.
-    AddToSplit(Id),
-    RemoveFromSplit(Id),
-    ExitSplit,
-    SplitShell,
-    SplitClaude(PathBuf),
     Resume(Id),
     CloseLive(Id),
     Rename(Id),
@@ -79,26 +75,21 @@ pub enum Act {
     OpenEditor(Editor, PathBuf),
     ImportProject,
     OpenSettings,
-    /// The project's GitHub issues and pull requests; `split` puts the pane next to the current one.
+    /// The project's GitHub issues and pull requests.
     OpenGithub {
         cwd: PathBuf,
-        split: bool,
     },
-    /// A new chat (Claude through ACP), tied to a project folder only when `cwd` is given; `split` puts it next
-    /// to the current pane.
-    NewChat {
-        cwd: Option<PathBuf>,
-        split: bool,
-    },
-    OpenChat(Id),
-    /// Forget a chat in the list (Claude Code's transcript stays).
-    RemoveChat(Id),
-    /// Have Haiku write a new title for a chat or a Claude Code session from what was said in it.
+    /// Have the running session's own mod (Haiku) write a new title from what was said in it.
     RegenTitle(Id),
-    /// Switch the sidebar between terminal sessions and chats.
-    SideTab(Side),
-    /// Stage everything in this folder's repository, commit it with a Haiku-written message, push.
-    CommitPush(PathBuf),
+    /// Change a setting of a running session through its mod (see `usage::send_ctl`).
+    SetAutoCompact(Id, bool),
+    SetAdvisor(Id, String),
+    /// Ask for an advisor model by name.
+    AskAdvisor(Id),
+    /// Filter the sidebar list to a project (`None`: all).
+    FilterProject(Option<Id>),
+    /// Stage everything in this folder's repository, commit it with a message the running session's mod (Haiku) writes, push.
+    CommitPush(Id, PathBuf),
     Pull(PathBuf),
     SwitchBranch(PathBuf, String),
     /// Ask for a name, then `CreateBranch`.
@@ -108,9 +99,7 @@ pub enum Act {
     FixGitWithClaude(PathBuf),
     AddProject(PathBuf),
     RemoveProject(Id),
-    ToggleProject(Id),
-    ToggleOther,
-    ShowAll(Id),
+    ToggleOlder,
     ConfirmQuit,
     ConfirmInstallUpdate,
     Dismiss,
@@ -124,6 +113,13 @@ pub enum Act {
     SignIn(Id),
     RemoveAccount(Id),
     ConfirmRemoveAccount(Id),
+}
+
+impl MenuItem {
+    /// A plain entry: not dangerous, enabled, no hint, no separator above.
+    pub fn new(label: impl Into<String>, act: Act) -> Self {
+        Self { label: label.into(), hint: None, act, danger: false, disabled: false, separator_before: false }
+    }
 }
 
 pub struct MenuItem {
@@ -158,18 +154,16 @@ pub enum Modal {
         cwd: PathBuf,
         input: Entity<InputState>,
     },
+    Advisor {
+        id: Id,
+        input: Entity<InputState>,
+    },
     /// Empty text = use the default.
     Settings {
         shell: Entity<InputState>,
         claude: Entity<InputState>,
         updates: bool,
-    },
-    /// A session asked to reach another one; nothing happens unless the user allows it (see `app/cross.rs`).
-    Bridge {
-        req: crate::bridge::Request,
-        title: String,
-        body: String,
-        confirm: String,
+        scale: u32,
     },
 }
 
@@ -207,8 +201,8 @@ pub struct Live {
     pub title_stamp: Option<std::time::SystemTime>,
 }
 
-/// A GitHub pane. Like a shell it exists only while open and is never written to `state.json`
-/// (an older Claudiu sharing that file would not understand a new session kind).
+/// A project's GitHub view, shown in the right sidebar. Kept while Claudiu runs so each project keeps its place;
+/// never written to `state.json`.
 pub struct GhPane {
     pub id: Id,
     /// The project's root folder: the pane's repository is whatever `gh` resolves from it.
@@ -216,6 +210,38 @@ pub struct GhPane {
     pub project: String,
     pub view: Entity<GithubView>,
     pub _sub: Subscription,
+}
+
+/// The shell under a Claude session's terminal. It belongs to that session (never listed, never persisted), keeps
+/// its height while the session lives, and goes away with it.
+pub struct ShellPanel {
+    pub view: Entity<TerminalView>,
+    pub _sub: Subscription,
+    pub open: bool,
+    pub height: f32,
+}
+
+pub const SHELL_HEIGHT: f32 = 260.0;
+pub const SHELL_MIN: f32 = 120.0;
+
+/// The right sidebar: the menu or the wider GitHub view, each with its own remembered width.
+pub const RIGHT_MENU_W: f32 = 272.0;
+pub const RIGHT_MENU_MIN: f32 = 240.0;
+pub const RIGHT_MENU_MAX: f32 = 480.0;
+pub const RIGHT_GH_W: f32 = 560.0;
+pub const RIGHT_GH_MIN: f32 = 380.0;
+
+/// A drag of a sidebar's inner edge: where it started and how wide the sidebar was then.
+pub struct SideDrag {
+    pub x: f32,
+    pub width: f32,
+}
+
+/// A drag of the divider above the shell panel: which session, and where it started.
+pub struct ShellDrag {
+    pub id: Id,
+    pub y: f32,
+    pub height: f32,
 }
 
 pub struct Toast {
@@ -226,30 +252,40 @@ pub struct Toast {
     pub action: Option<(String, Act)>,
 }
 
-pub const CLOSE_MS: u64 = 180;
-
 pub struct Workspace {
     pub store: Store,
     pub claude_exe: Option<PathBuf>,
     pub shell: (String, Vec<String>),
     pub live: Vec<Live>,
     pub gh: Vec<GhPane>,
-    pub chats: Vec<ChatPane>,
-    pub chat_store: ChatStore,
-    pub side: Side,
-    pub panes: Vec<Id>,
-    /// Splits that are not on screen right now; a session in one of them brings its whole split back when shown.
-    pub groups: Vec<Vec<Id>>,
-    /// Where the shown split sits among `groups` in the sidebar, so cards do not jump when you switch.
-    active_slot: usize,
-    pub focused: usize,
+    /// The GitHub view the right sidebar shows; `None` is its menu.
+    pub right_gh: Option<Id>,
+    /// The right sidebar shows the Visual panel (when the shown session has cards and GitHub is not open).
+    pub right_visual: bool,
+    /// What each session's model drew in the Visual panel, oldest card first.
+    pub visuals: HashMap<Id, Vec<crate::visual::Card>>,
+    pub visual_scroll: crate::glide::Smooth,
+    pub right_drag: Option<SideDrag>,
+    /// Right-sidebar rows whose × was clicked and that are shrinking away before their entry is removed.
+    pub leaving: std::collections::HashSet<String>,
+    pub left_reveal: crate::widgets::Reveal,
+    pub right_reveal: crate::widgets::Reveal,
+    /// The right sidebar's animated width, and the view it currently shows ("menu", "visual" or "gh:<id>"):
+    /// a change of view fades the old one out, slides the width, then fades the new one in.
+    pub right_w: crate::widgets::Reveal,
+    pub right_view: String,
+    pub right_out: Option<std::time::Instant>,
+    pub right_in: std::time::Instant,
+    pub left_drag: Option<SideDrag>,
+    /// The session shown in the main area.
+    pub active: Option<Id>,
+    /// Shells under Claude sessions, by the session they belong to.
+    pub shells: HashMap<Id, ShellPanel>,
+    pub shell_drag: Option<ShellDrag>,
     /// Open sessions in the order they were last shown (most recent last); closing one goes back to the previous.
     recent: Vec<Id>,
-    pub split_vertical: bool,
     pub main: Main,
     pub selected: Option<Id>,
-    /// What the main window showed on the sidebar tab that is not open, to bring back when it is.
-    parked: Option<chats::Layout>,
     pub search: String,
     pub search_input: Entity<InputState>,
     pub root_focus: FocusHandle,
@@ -258,11 +294,7 @@ pub struct Workspace {
     pub menu: Option<Menu>,
     pub toast: Option<Toast>,
     pub toast_serial: u64,
-    pub show_all: HashSet<Id>,
     /// Requests from sessions to other sessions, waiting for the user's answer.
-    pub bridge_queue: std::collections::VecDeque<crate::bridge::Request>,
-    /// Projects whose session list is still sliding shut.
-    pub closing: HashSet<Id>,
     /// Sessions that leave no history once they end (the "fix with Claude" helper).
     ephemeral: HashSet<Id>,
     /// `claude auth login` tabs; account details are re-read when one ends.
@@ -272,13 +304,11 @@ pub struct Workspace {
     pub editors: Vec<(Editor, bool)>,
     pub transcript_mtimes: HashMap<Id, SystemTime>,
     pub window_title: String,
-    /// The session or project being dragged in the sidebar (dimmed in place while its ghost follows the cursor).
+    /// The session being dragged in the sidebar (lifted in place while its ghost follows the cursor).
     pub dragging: Option<Id>,
     /// Pointer position at the last drag-over check, see `pointer_moved`.
-    /// Sidebar reorder animation: last drawn order, painted project block heights, and the slides in flight.
+    /// Sidebar reorder animation: last drawn order of the running rows, and the slides in flight.
     pub prev_current: Vec<Id>,
-    pub prev_projects: Vec<Id>,
-    pub block_heights: std::rc::Rc<std::cell::RefCell<HashMap<Id, f32>>>,
     pub slides: HashMap<Id, crate::sidebar::Slide>,
     pub slide_gen: u64,
     /// When a drag last reordered the sidebar, see `pointer_moved`.
@@ -287,6 +317,12 @@ pub struct Workspace {
     pub update: UpdateState,
     pub scanning: bool,
     pub quitting: bool,
+    /// What `running.json` holds, and whether the saved list has been brought back yet (nothing is written before).
+    pub remembered: Vec<Id>,
+    /// Smooth wheel scrolling of the left list and the right menu.
+    pub sidebar_scroll: crate::glide::Smooth,
+    pub menu_scroll: crate::glide::Smooth,
+    pub restored: bool,
     /// Sessions that are working or waiting for the user; absent = idle and already seen.
     pub activity: HashMap<Id, Activity>,
     pub git_busy: Option<GitOp>,
@@ -298,11 +334,8 @@ impl Workspace {
         initial_projects: Vec<PathBuf>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let mut store = Store::load(Store::default_path());
-        // Projects start collapsed on every launch.
-        for p in &mut store.data.projects {
-            p.collapsed = true;
-        }
+        let store = Store::load(Store::default_path());
+        crate::scale::set(store.data.settings.scale.unwrap_or(100));
         let claude_exe = claude::discover(store.data.settings.claude_path.as_deref());
         let search_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Search sessions and projects").clean_on_escape());
@@ -320,22 +353,25 @@ impl Workspace {
             shell: platform::default_shell(store.data.settings.shell.as_deref()),
             live: vec![],
             gh: vec![],
-            chats: vec![],
-            chat_store: {
-                let mut chats = ChatStore::load(ChatStore::path_for(&Store::default_path()));
-                chats.purge_blank();
-                chats
-            },
-            side: if store.data.layout.chat_tab { Side::Chat } else { Side::Sessions },
-            panes: vec![],
-            groups: vec![],
-            active_slot: usize::MAX,
-            focused: 0,
+            right_gh: None,
+            right_visual: false,
+            visuals: HashMap::new(),
+            visual_scroll: Default::default(),
+            right_drag: None,
+            leaving: Default::default(),
+            left_reveal: crate::widgets::Reveal::new(store.data.layout.sidebar_visible),
+            right_reveal: crate::widgets::Reveal::new(!store.data.layout.right_hidden),
+            right_w: crate::widgets::Reveal::at_value(store.data.layout.right_menu_w.unwrap_or(RIGHT_MENU_W)),
+            right_view: "menu".into(),
+            right_out: None,
+            right_in: std::time::Instant::now() - Duration::from_secs(5),
+            left_drag: None,
+            active: None,
+            shells: HashMap::new(),
+            shell_drag: None,
             recent: vec![],
-            split_vertical: false,
             main: Main::Home,
             selected: store.data.layout.selected_session.clone(),
-            parked: None,
             search: String::new(),
             search_input,
             root_focus: cx.focus_handle(),
@@ -344,9 +380,6 @@ impl Workspace {
             menu: None,
             toast: None,
             toast_serial: 0,
-            show_all: HashSet::new(),
-            bridge_queue: Default::default(),
-            closing: HashSet::new(),
             ephemeral: HashSet::new(),
             logins: HashSet::new(),
             limit_warned: None,
@@ -359,14 +392,16 @@ impl Workspace {
             dragging: None,
             drag_pos: None,
             prev_current: Vec::new(),
-            prev_projects: Vec::new(),
-            block_heights: Default::default(),
             slides: HashMap::new(),
             slide_gen: 0,
             last_swap: std::time::Instant::now(),
             update: UpdateState::default(),
             scanning: false,
             quitting: false,
+            remembered: vec![],
+            sidebar_scroll: Default::default(),
+            menu_scroll: Default::default(),
+            restored: false,
             activity: HashMap::new(),
             git_busy: None,
             store,
@@ -391,10 +426,16 @@ impl Workspace {
             }
         }
         ws.start_scan(cx);
-        statusline::cleanup();
-        ws.ingest_statusline(cx);
+        datadir::cleanup();
+        ws.ingest_usage(cx);
         ws.refresh_accounts(cx);
+        // After the first frame: starting every saved session is the slow part of coming back.
+        cx.spawn_in(window, async move |this, cx| {
+            let _ = this.update_in(cx, |ws, window, cx| ws.restore_open(window, cx));
+        })
+        .detach();
         ws.start_ticker(cx);
+        ws.start_visual_poll(cx);
         ws.start_fetch_loop(cx);
         ws.start_git_watch(cx);
         ws.start_activity_poll(window, cx);
@@ -418,9 +459,7 @@ impl Workspace {
                 .await;
             let _ = this.update(cx, |ws, cx| {
                 ws.scanning = false;
-                // A chat's conversation lives in Claude's history too, but it belongs to the Chat tab, not the Code list.
-                let sessions: Vec<_> = result.sessions.iter().filter(|s| !ws.chat_store.owns(&s.session_id)).cloned().collect();
-                ws.store.reconcile(&sessions, result.ok);
+                ws.store.reconcile(&result.sessions, result.ok);
                 if result.ok {
                     // Records from earlier runs that never produced a transcript: nothing to resume.
                     let live: Vec<Id> = ws.live.iter().map(|l| l.id.clone()).collect();
@@ -436,33 +475,6 @@ impl Workspace {
             });
         })
         .detach();
-    }
-
-    /// Keep the newest reading per window. Returns whether anything changed (the same snapshot is re-read
-    /// every tick, so an unconditional save would rewrite state.json every few seconds).
-    fn merge_account(
-        &mut self,
-        account: &str,
-        five: Option<crate::store::RateLimit>,
-        seven: Option<crate::store::RateLimit>,
-    ) -> bool {
-        // A removed account's leftover snapshots are ignored.
-        let Some(acct) = self.store.data.accounts.iter_mut().find(|a| a.id == account).map(|a| &mut a.usage) else {
-            return false;
-        };
-        let mut changed = false;
-        for (slot, new) in [(&mut acct.five_hour, five), (&mut acct.seven_day, seven)] {
-            if let Some(new) = new
-                && slot.as_ref().is_none_or(|cur| new.seen_at >= cur.seen_at && *cur != new)
-            {
-                *slot = Some(new);
-                changed = true;
-            }
-        }
-        if changed {
-            self.store.mark_dirty();
-        }
-        changed
     }
 
     fn start_ticker(&mut self, cx: &mut Context<Self>) {
@@ -489,8 +501,7 @@ impl Workspace {
                     .spawn(async { (claude::claude_home().map(|h| claude::session_statuses(&h)).unwrap_or_default(), crate::bridge::take_requests()) })
                     .await;
                 let update = this.update_in(cx, |ws, window, cx| {
-                    ws.bridge_queue.extend(requests);
-                    ws.ask_about_next_request(window, cx);
+                    ws.serve_requests(requests, window, cx);
                     ws.update_activity(window, cx, &statuses)
                 });
                 if update.is_err() {
@@ -562,9 +573,9 @@ impl Workspace {
     fn tick(&mut self, cx: &mut Context<Self>) {
         self.purge_dead_shells();
         self.store.save_if_dirty();
-        self.chat_store.save_if_dirty();
         self.refresh_live(cx);
-        self.ingest_statusline(cx);
+        self.remember_open(cx);
+        self.ingest_usage(cx);
         self.suggest_less_used_account(cx);
         cx.notify();
     }
@@ -605,112 +616,45 @@ impl Workspace {
         self.show_toast(text, true, Some(("Switch".into(), act)), cx);
     }
 
-    /// Pick up what Claude Code's status line (via our per-process tee) wrote: account limits and exact context,
-    /// plus the tab titles Claude chose through the MCP tool.
-    /// Costs no tokens; the files are tiny, but the read still happens off the UI thread.
-    fn ingest_statusline(&mut self, cx: &mut Context<Self>) {
-        cx.spawn(async move |this, cx| {
-            let (snaps, titles) = cx
-                .background_executor()
-                .spawn(async move { (statusline::read_snapshots(&statusline::snapshot_dir()), mcp::read_titles()) })
-                .await;
-            let _ = this.update(cx, |ws, cx| {
-                let mut changed = false;
-                for (stem, title, stamp) in titles {
-                    let Some(rec) = ws
-                        .store
-                        .data
-                        .sessions
-                        .iter_mut()
-                        .find(|s| s.claude_id().is_some_and(|id| statusline::safe_file_stem(id) == stem))
-                    else {
-                        continue;
-                    };
-                    if let Some(l) = ws.live.iter_mut().find(|l| l.id == rec.id)
-                        && l.title_stamp != stamp
-                    {
-                        // The first read only records the stamp: a resumed session already got `--name`.
-                        if l.title_stamp.is_some() {
-                            l.claude_name = None;
-                        }
-                        l.title_stamp = stamp;
-                    }
-                    if rec.auto_title.as_deref() != Some(title.as_str()) {
-                        rec.auto_title = Some(title);
-                        changed = true;
-                    }
-                }
-                for snap in snaps {
-                    let account = snap.account.as_deref().unwrap_or(MAIN_ACCOUNT);
-                    changed |= ws.merge_account(account, snap.five_hour.clone(), snap.seven_day.clone());
-                    if let Some(rec) = ws
-                        .store
-                        .data
-                        .sessions
-                        .iter_mut()
-                        .find(|s| s.claude_id() == Some(snap.session_id.as_str()))
-                        && let Some(meta) = rec.claude.as_mut() {
-                            let (f, t, w) = (
-                                snap.context_fraction,
-                                snap.context_tokens,
-                                snap.context_window,
-                            );
-                            if f.is_some()
-                                && (meta.context_fraction != f || meta.context_window != w)
-                            {
-                                meta.context_fraction = f;
-                                meta.context_window = w;
-                                if t.is_some() {
-                                    meta.context_tokens = t;
-                                }
-                                changed = true;
-                            }
-                            if snap.model.is_some() && meta.model != snap.model {
-                                meta.model = snap.model.clone();
-                                changed = true;
-                            }
-                        }
-                }
-                if changed {
-                    ws.store.mark_dirty();
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
-    }
-
     /// Per-process additions to a Claude launch; nothing in the user's Claude Code config changes:
-    /// the status-line tee (`--settings`), the tab-title MCP server (`--mcp-config`, its one tool pre-allowed),
-    /// and IDE integration switched off through environment variables.
+    /// the mod (`--plugin-dir`, which reports usage and status), the tab-title MCP server (`--mcp-config`, its
+    /// tools pre-allowed), and IDE integration switched off through environment variables.
     fn with_helpers(
         &self,
         mut spec: SpawnSpec,
         claude_session_id: &str,
         record_id: &str,
-        cwd: &std::path::Path,
     ) -> SpawnSpec {
-        if let Ok((path, env)) = statusline::prepare(claude_session_id, cwd) {
-            spec.args.push("--settings".into());
-            spec.args.push(path.to_string_lossy().into_owned());
-            spec.env.extend(env);
-        }
-        if let Ok(config) = mcp::prepare(claude_session_id, record_id) {
+        let started = std::time::Instant::now();
+        // Diagnostics for the start-up trace (`trace.rs`): start without Claudiu's MCP server or mod to see what they cost.
+        let without = |name: &str| crate::trace::on() && std::env::var_os(name).is_some();
+        if let Ok(config) = mcp::prepare(claude_session_id, record_id).and_then(|c| if without("CLAUDIU_NO_MCP") { Err(std::io::Error::other("off")) } else { Ok(c) }) {
             spec.args.push("--allowedTools".into());
-            spec.args.extend(mcp::allowed_tools("code"));
+            spec.args.extend(mcp::allowed_tools());
             spec.args.extend(["--mcp-config".into(), config.to_string_lossy().into_owned()]);
         }
-        if let Ok(dir) = mcp::prepare_mod() {
+        if let Ok(dir) = mcp::prepare_mod().and_then(|d| if without("CLAUDIU_NO_MOD") { Err(std::io::Error::other("off")) } else { Ok(d) }) {
             spec.args.extend(["--plugin-dir".into(), dir.to_string_lossy().into_owned()]);
             spec.env.push(("CLAUDIU_NAME_FILE".into(), mcp::name_file(claude_session_id).to_string_lossy().into_owned()));
+            spec.env.push((usage::USAGE_DIR_ENV.into(), usage::snapshot_dir().to_string_lossy().into_owned()));
+            spec.env.push((usage::CTL_ENV.into(), usage::ctl_file(record_id).to_string_lossy().into_owned()));
+            spec.env.push((crate::visual::VISUAL_ENV.into(), crate::visual::file(record_id).to_string_lossy().into_owned()));
+            spec.env.push((crate::ask::ASK_ENV.into(), crate::ask::request_file(record_id).to_string_lossy().into_owned()));
         }
         spec.env.push(("CLAUDE_CODE_AUTO_CONNECT_IDE".into(), "false".into()));
         spec.env.push(("CLAUDE_CODE_IDE_SKIP_AUTO_INSTALL".into(), "1".into()));
         if let Some(acct) = self.store.active_account() {
-            spec.env.push((statusline::ACCOUNT_ENV.into(), acct.id.clone()));
+            spec.env.push((usage::ACCOUNT_ENV.into(), acct.id.clone()));
             spec.env.extend(Self::account_env(acct));
         }
+        // Extra `claude` flags for the start-up trace, e.g. CLAUDIU_TRACE_ARGS="--safe-mode".
+        if crate::trace::on() && let Some(extra) = std::env::var_os("CLAUDIU_TRACE_ARGS") {
+            spec.args.extend(extra.to_string_lossy().split_whitespace().map(String::from));
+        }
         (spec.program, spec.args) = platform::through_login_shell(spec.program, spec.args);
+        if let Some(cwd) = spec.cwd.as_ref().and_then(|c| c.file_name()) {
+            crate::trace::note(&cwd.to_string_lossy(), started.elapsed(), "launch files and arguments prepared (before the terminal exists)");
+        }
         spec
     }
 
@@ -801,7 +745,7 @@ impl Workspace {
         if self
             .selected
             .as_ref()
-            .is_some_and(|id| self.store.session(id).is_none() && self.gh_pane(id).is_none() && self.chat_pane(id).is_none())
+            .is_some_and(|id| self.store.session(id).is_none())
         {
             self.selected = None;
         }
@@ -867,10 +811,6 @@ impl Workspace {
         .detach();
     }
 
-    pub fn persist_for_restart(&mut self) {
-        self.finalize();
-    }
-
     pub fn check_updates(&mut self, cx: &mut Context<Self>) {
         crate::updater::check(self, cx);
     }
@@ -896,7 +836,7 @@ impl Workspace {
 
     pub fn active_id(&self) -> Option<&Id> {
         match self.main {
-            Main::Terminals => self.panes.get(self.focused),
+            Main::Terminals => self.active.as_ref(),
             Main::Home => None,
         }
     }
@@ -905,15 +845,14 @@ impl Workspace {
         self.gh.iter().find(|p| p.id == id)
     }
 
+    /// Where a new Claude session starts: the project the sidebar is filtered to, else where the shown session is.
+    pub fn new_session_cwd(&self) -> PathBuf {
+        self.project_filter().map_or_else(|| self.active_cwd(), |p| p.path.clone())
+    }
+
     pub fn active_cwd(&self) -> PathBuf {
         self.active_id()
-            .and_then(|id| {
-                self.store
-                    .session(id)
-                    .map(|s| s.cwd.clone())
-                    .or_else(|| self.gh_pane(id).map(|p| p.cwd.clone()))
-                    .or_else(|| self.chat_pane(id).filter(|p| crate::chat::store::is_tied(&p.cwd)).map(|p| p.cwd.clone()))
-            })
+            .and_then(|id| self.store.session(id).map(|s| s.cwd.clone()))
             .or_else(|| self.store.data.projects.first().map(|p| p.path.clone()))
             .or_else(platform::home_dir)
             .unwrap_or_else(|| PathBuf::from("."))
@@ -963,7 +902,7 @@ impl Workspace {
         let record_id = new_id();
         let mut spec = claude::new_session_spec(&exe, &cwd, &session_id);
         spec.args.splice(0..0, leading);
-        let spec = self.with_helpers(spec, &session_id, &record_id, &cwd);
+        let spec = self.with_helpers(spec, &session_id, &record_id);
         let record = SessionRecord {
             id: record_id,
             kind: SessionKind::Claude,
@@ -984,31 +923,73 @@ impl Workspace {
         self.start(record, spec, true, window, cx);
     }
 
-    pub fn new_shell(&mut self, cwd: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        let (program, args) = self.shell.clone();
-        // A session's folder may be gone (temp dirs, deleted worktrees); CreateProcess then fails with "filename syntax is incorrect".
-        let cwd = if cwd.is_dir() { cwd } else { platform::home_dir().unwrap_or(cwd) };
-        let spec = SpawnSpec {
-            program: program.clone(),
-            args,
-            cwd: Some(cwd.clone()),
-            ..Default::default()
+    /// Show or hide the shell under a Claude session. It starts on first use, in the session's folder, and lives and
+    /// dies with the session.
+    pub fn toggle_shell(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let rec = self.store.session(id).filter(|r| r.kind == SessionKind::Claude).cloned();
+        let Some(rec) = rec.filter(|_| self.is_running(id, cx)) else {
+            self.toast("Open a Claude session to use its shell.", false, cx);
+            return;
         };
-        let record = SessionRecord {
-            id: new_id(),
-            kind: SessionKind::Shell,
-            title: platform::shell_label(&program),
-            custom_title: None,
-            auto_title: None,
-            project_id: self.store.project_for_cwd(&cwd),
-            cwd,
-            created_at: now(),
-            last_active: now(),
-            exit_code: None,
-            hidden: false,
-            claude: None,
-        };
-        self.start(record, spec, true, window, cx);
+        // From another session the shell is brought up with its session; only on the shown one does it toggle.
+        let shown = self.active.as_deref() == Some(id) && matches!(self.main, Main::Terminals);
+        if !shown {
+            self.show_session(id, window, cx);
+        }
+        if let Some(p) = self.shells.get_mut(id) {
+            p.open = !shown || !p.open;
+            if !p.open {
+                self.focus_active(window, cx);
+                cx.notify();
+                return;
+            }
+        } else {
+            let (program, args) = self.shell.clone();
+            // A session's folder may be gone (temp dirs, deleted worktrees); CreateProcess then fails with "filename syntax is incorrect".
+            let cwd = if rec.cwd.is_dir() { rec.cwd.clone() } else { platform::home_dir().unwrap_or(rec.cwd.clone()) };
+            let spec = SpawnSpec { program, args, cwd: Some(cwd), ..Default::default() };
+            let (terminal, rx) = TerminalView::spawn(&spec);
+            let view = cx.new(|cx| TerminalView::new(terminal, rx, cx));
+            let owner = id.to_string();
+            let sub = cx.subscribe_in(&view, window, move |ws: &mut Workspace, view, ev: &TerminalEvent, window, cx| {
+                if matches!(ev, TerminalEvent::Exited(_)) {
+                    if let Some(err) = view.read(cx).start_error() {
+                        ws.toast(format!("Could not start the shell: {err}"), true, cx);
+                    }
+                    ws.shells.remove(&owner);
+                    ws.focus_active(window, cx);
+                    cx.notify();
+                }
+            });
+            self.shells.insert(id.to_string(), ShellPanel { view, _sub: sub, open: true, height: SHELL_HEIGHT });
+        }
+        self.focus_shell(window, cx);
+        cx.notify();
+    }
+
+    fn focus_shell(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(p) = self.active_id().and_then(|id| self.shells.get(id)).filter(|p| p.open) {
+            window.focus(&p.view.read(cx).focus_handle(cx), cx);
+        }
+    }
+
+    /// Move the keyboard between the Claude terminal and its open shell.
+    pub fn swap_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(shell) = self.active_id().and_then(|id| self.shells.get(id)).filter(|p| p.open) else { return };
+        if shell.view.read(cx).focus_handle(cx).is_focused(window) {
+            self.focus_active(window, cx);
+        } else {
+            self.focus_shell(window, cx);
+        }
+    }
+
+    /// The divider above the shell panel is being dragged: follow the pointer, keeping room for the terminal.
+    pub fn drag_shell(&mut self, y: f32, window_h: f32) {
+        let Some(d) = self.shell_drag.as_ref() else { return };
+        let height = (d.height + d.y - y).clamp(SHELL_MIN, (window_h - 200.0).max(SHELL_MIN));
+        if let Some(p) = self.shells.get_mut(&d.id) {
+            p.height = height;
+        }
     }
 
     /// Resume a Claude session through `claude --resume`. Reuses the history record.
@@ -1021,8 +1002,6 @@ impl Workspace {
             return;
         };
         let Some(meta) = rec.claude.clone() else {
-            // Shell history can't be resumed: open a fresh shell in the same folder.
-            self.new_shell(rec.cwd, window, cx);
             return;
         };
         let Some(exe) = self.claude_exe.clone() else {
@@ -1034,7 +1013,7 @@ impl Workspace {
         if let Some(name) = rec.chosen_title() {
             spec.args.extend(["--name".into(), name.into()]);
         }
-        let spec = self.with_helpers(spec, &meta.session_id, &rec.id, &rec.cwd);
+        let spec = self.with_helpers(spec, &meta.session_id, &rec.id);
         self.start(rec, spec, false, window, cx);
     }
 
@@ -1087,7 +1066,7 @@ impl Workspace {
             claude_name,
             title_stamp: None,
         });
-        self.place_in_pane(&id, cx);
+        self.activate(&id, cx);
         self.remember(&id);
         self.selected = Some(id.clone());
         self.main = Main::Terminals;
@@ -1096,46 +1075,18 @@ impl Workspace {
         cx.notify();
     }
 
-    /// A session already in the split is just focused. One that a split action made room for (`with_pane_after`)
-    /// joins it. Anything else switches layouts: the current split is parked as it is, and the session shows
-    /// with its own split if it has one, else alone. Clicking never swaps a pane or breaks a split up.
-    fn place_in_pane(&mut self, id: &Id, cx: &App) {
-        if let Some(pos) = self.panes.iter().position(|p| p == id) {
-            self.focused = pos;
-        } else if let Some(slot) = self.panes.iter().position(|p| p.is_empty()) {
-            self.leave_stored(id);
-            self.panes[slot] = id.clone();
-            self.focused = slot;
-        } else {
-            let (panes, slot, parked) = switch_layout(self.splits(), id);
-            self.focused = panes.iter().position(|p| p == id).unwrap_or(0);
-            (self.panes, self.active_slot, self.groups) = (panes, slot, parked);
-        }
+    /// Make `id` the session shown.
+    fn activate(&mut self, id: &Id, cx: &App) {
+        self.active = Some(id.clone());
         self.prune_live(cx);
     }
 
-    /// Every split in sidebar order: the parked ones, with the shown one (if it is a split) at its own slot.
-    pub fn splits(&self) -> Vec<Vec<Id>> {
-        let mut all = self.groups.clone();
-        if self.panes.len() > 1 {
-            all.insert(self.active_slot.min(all.len()), self.panes.clone());
-        }
-        all
-    }
-
-    /// Take `id` out of any parked split; a split left with one session dissolves.
-    fn leave_stored(&mut self, id: &str) {
-        for g in &mut self.groups {
-            g.retain(|p| p != id);
-        }
-        self.groups.retain(|g| g.len() > 1);
-    }
-
-    /// Exited terminals are only kept while a pane (or a parked split) still shows them.
+    /// Exited terminals are only kept while shown; a shell panel goes with its session.
     fn prune_live(&mut self, cx: &App) {
-        let (panes, groups) = (&self.panes, &self.groups);
-        self.live
-            .retain(|l| panes.contains(&l.id) || groups.iter().any(|g| g.contains(&l.id)) || l.view.read(cx).is_running());
+        let active = &self.active;
+        self.live.retain(|l| active.as_ref() == Some(&l.id) || l.view.read(cx).is_running());
+        let live = &self.live;
+        self.shells.retain(|id, _| live.iter().any(|l| &l.id == id));
     }
 
     /// A Claude session that never produced a transcript (opened and closed without a prompt) has nothing
@@ -1175,7 +1126,7 @@ impl Workspace {
         self.recent.push(id.clone());
     }
 
-    fn on_exit(&mut self, id: &str, code: Option<i32>, window: &mut Window, cx: &mut Context<Self>) {
+    fn on_exit(&mut self, id: &str, code: Option<i32>, _window: &mut Window, cx: &mut Context<Self>) {
         if let Some(err) = self.live_view(id).and_then(|v| v.read(cx).start_error()) {
             let program = self.store.session(id).map(|r| r.display_title().to_string()).unwrap_or_default();
             self.toast(format!("Could not start {program}: {err}"), true, cx);
@@ -1187,12 +1138,6 @@ impl Workspace {
             rec.exit_code = Some(code.unwrap_or(0));
             rec.last_active = now();
         }
-        // A shell that exits inside a split has nothing left to show: close its pane.
-        let is_shell = self.store.session(id).is_some_and(|r| r.kind == SessionKind::Shell);
-        if is_shell && self.panes.len() > 1 && self.panes.iter().any(|p| p == id) {
-            self.close_live(id, window, cx);
-            return;
-        }
         self.drop_if_empty(id);
         self.store.save_if_dirty();
         cx.notify();
@@ -1202,15 +1147,14 @@ impl Workspace {
     pub fn show_session(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         let id = id.to_string();
         self.selected = Some(id.clone());
-        if self.live_view(&id).is_some() || self.gh_pane(&id).is_some() || self.chat_pane(&id).is_some() {
-            self.place_in_pane(&id, cx);
+        if self.live_view(&id).is_some() {
+            self.activate(&id, cx);
             self.remember(&id);
             self.main = Main::Terminals;
+            self.sync_github(window, cx);
             self.focus_active(window, cx);
             self.persist_layout();
             cx.notify();
-        } else if self.chat_store.get(&id).is_some() {
-            self.open_chat(&id, window, cx);
         } else {
             self.resume(&id, window, cx);
         }
@@ -1222,25 +1166,9 @@ impl Workspace {
     }
 
     pub fn focus_active(&self, window: &mut Window, cx: &mut Context<Self>) {
-        if let (Main::Terminals, Some(id)) = (&self.main, self.panes.get(self.focused)) {
+        if let (Main::Terminals, Some(id)) = (&self.main, self.active.as_ref()) {
             if let Some(view) = self.live_view(id) {
                 window.focus(&view.read(cx).focus_handle(cx), cx);
-                return;
-            }
-            if let Some(p) = self.gh_pane(id) {
-                // A text box inside the pane may already hold the focus (it was just clicked); leave it there.
-                let handle = p.view.read(cx).focus.clone();
-                if !handle.contains_focused(window, cx) {
-                    window.focus(&handle, cx);
-                }
-                return;
-            }
-            if let Some(p) = self.chat_pane(id) {
-                // The text box may already hold the focus (it was just clicked); leave it there.
-                let (view, handle) = (p.view.clone(), p.view.read(cx).focus.clone());
-                if !handle.contains_focused(window, cx) {
-                    view.update(cx, |v, cx| v.focus_input(window, cx));
-                }
                 return;
             }
         }
@@ -1252,30 +1180,14 @@ impl Workspace {
             self.refresh_accounts(cx);
         }
         let was_active = self.active_id().is_some_and(|a| a == id);
-        let current = self.active_id().cloned();
         self.live.retain(|l| l.id != id); // dropping the view drops the Terminal, which closes the PTY
-        self.gh.retain(|p| p.id != id);
-        self.chats.retain(|p| p.id != id);
-        self.forget_if_unused(id);
-        self.panes.retain(|p| p != id);
-        self.leave_stored(id);
+        self.shells.remove(id);
+        self.visuals.remove(id);
         self.recent.retain(|r| r != id);
         // Closing the shown session goes back to the one shown before it; otherwise stay where we are.
-        let target = if was_active {
-            self.recent.iter().rev().find(|r| self.live.iter().any(|l| &l.id == *r) || self.gh.iter().any(|p| &p.id == *r) || self.chats.iter().any(|p| &p.id == *r)).cloned()
-        } else {
-            current
-        };
-        match target.as_ref().map(|t| (t, self.panes.iter().position(|p| p == t))) {
-            Some((_, Some(pos))) => self.focused = pos,
-            Some((t, None)) if self.panes.is_empty() => {
-                self.panes.push(t.clone());
-                self.focused = 0;
-            }
-            _ => self.focused = self.focused.min(self.panes.len().saturating_sub(1)),
-        }
         if was_active {
-            self.selected = self.panes.get(self.focused).cloned();
+            self.active = self.recent.iter().rev().find(|r| self.live.iter().any(|l| &l.id == *r)).cloned();
+            self.selected = self.active.clone();
             self.persist_layout();
         }
         if let Some(rec) = self.store.session_mut(id) {
@@ -1286,67 +1198,12 @@ impl Workspace {
         }
         self.drop_if_empty(id);
         self.purge_dead_shells();
-        if self.panes.is_empty() {
+        if self.active.is_none() {
             self.main = Main::Home;
         }
         self.store.save_if_dirty();
         self.focus_active(window, cx);
         cx.notify();
-    }
-
-    /// Called by the window's close handler. Returns true when it is fine to close right now: asks first only
-    /// while a Claude session is mid-turn; idle sessions just end with the app.
-    pub fn request_quit(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        if self.quitting {
-            return true;
-        }
-        let working = self.live.iter().filter(|l| {
-            let v = l.view.read(cx);
-            v.is_running() && v.is_working() && self.store.session(&l.id).is_some_and(|r| r.kind == SessionKind::Claude)
-        });
-        let working = working.count() + self.chats.iter().filter(|c| c.view.read(cx).is_busy()).count();
-        if working == 0 {
-            self.finalize();
-            return true;
-        }
-        self.open_modal(Modal::Confirm {
-            title: "Quit Claudiu?".into(),
-            body: format!(
-                "{working} Claude session{} still working. Quitting interrupts {} — sessions stay in your history and can be resumed.",
-                if working == 1 { " is" } else { "s are" },
-                if working == 1 { "it" } else { "them" }
-            ),
-            confirm: "Quit anyway".into(),
-            danger: true,
-            act: Act::ConfirmQuit,
-        });
-        window.focus(&self.modal_focus, cx);
-        cx.notify();
-        false
-    }
-
-    fn finalize(&mut self) {
-        self.quitting = true;
-        for id in self.chats.drain(..).map(|p| p.id).collect::<Vec<_>>() {
-            self.forget_if_unused(&id); // a chat nothing was said in is dropped; dropping its pane closes the adapter
-        }
-        self.chat_store.save_if_dirty();
-        let t = now();
-        let running: Vec<Id> = self.live.iter().map(|l| l.id.clone()).collect();
-        for id in running {
-            if let Some(rec) = self.store.session_mut(&id)
-                && rec.exit_code.is_none() {
-                    rec.exit_code = Some(-1);
-                    rec.last_active = t;
-                }
-        }
-        // Terminal sessions are never persisted, nor are ephemeral ones.
-        let ephemeral = &self.ephemeral;
-        self.store
-            .data
-            .sessions
-            .retain(|s| s.kind != SessionKind::Shell && !ephemeral.contains(&s.id));
-        self.store.save();
     }
 
     // ------------------------------------------------------------------ actions
@@ -1355,13 +1212,8 @@ impl Workspace {
         self.menu = None;
         match act {
             Act::NewClaude { cwd } => self.new_claude(cwd, window, cx),
-            Act::NewShell { cwd } => self.new_shell(cwd, window, cx),
+            Act::ToggleShell(id) => self.toggle_shell(&id, window, cx),
             Act::Select(id) => self.show_session(&id, window, cx),
-            Act::AddToSplit(id) => self.add_to_split(&id, window, cx),
-            Act::RemoveFromSplit(id) => self.remove_from_split(&id, window, cx),
-            Act::ExitSplit => self.exit_split(window, cx),
-            Act::SplitShell => self.split(window, cx),
-            Act::SplitClaude(cwd) => self.split_claude(cwd, window, cx),
             Act::Resume(id) => self.resume(&id, window, cx),
             Act::CloseLive(id) => self.close_live(&id, window, cx),
             Act::Rename(id) => {
@@ -1371,7 +1223,7 @@ impl Workspace {
                     .map(|s| s.display_title().to_string())
                     .unwrap_or_default();
                 let input = self.modal_input(&text, "", window, cx);
-                self.open_modal(Modal::Rename { id, input });
+                self.modal = Some(Modal::Rename { id, input });
             }
             Act::Archive(id, archive) => {
                 if let Some(rec) = self.store.session_mut(&id) {
@@ -1400,22 +1252,19 @@ impl Workspace {
                 }
             }
             Act::ImportProject => self.import_project(window, cx),
-            Act::OpenGithub { cwd, split } => self.open_github(cwd, split, window, cx),
-            Act::NewChat { cwd, split } => {
-                self.new_chat(cwd, None, split, window, cx);
-            }
-            Act::OpenChat(id) => self.open_chat(&id, window, cx),
-            Act::RemoveChat(id) => self.remove_chat(&id, window, cx),
+            Act::OpenGithub { cwd } => self.open_github(cwd, window, cx),
             Act::RegenTitle(id) => self.regen_title(&id, cx),
-            Act::SideTab(side) => self.set_side(side),
-            Act::CommitPush(cwd) => match self.claude_exe.clone() {
-                Some(exe) => self.run_git(
-                    GitOp::CommitPush,
-                    move || crate::commit::commit_and_push(&exe, &cwd).map_err(|e| crate::commit::classify(&cwd, e)),
-                    cx,
-                ),
-                None => self.toast("Could not find the `claude` CLI.", true, cx),
-            },
+            Act::CommitPush(id, cwd) => {
+                if self.is_running(&id, cx) {
+                    self.run_git(
+                        GitOp::CommitPush,
+                        move || crate::commit::commit_and_push(&|system, prompt| crate::ask::complete(&id, system, prompt), &cwd).map_err(|e| crate::commit::classify(&cwd, e)),
+                        cx,
+                    )
+                } else {
+                    self.toast("Start the session first: the message is written through the running session.", true, cx)
+                }
+            }
             Act::Pull(cwd) => self.run_git(
                 GitOp::Pull,
                 move || crate::commit::pull(&cwd).map_err(|e| crate::commit::classify(&cwd, e)),
@@ -1445,11 +1294,11 @@ impl Workspace {
                 let claude_hint = self.claude_exe.as_ref().map_or("not found".to_string(), |p| p.to_string_lossy().into_owned());
                 let claude = self.modal_input(&claude_t, &claude_hint, window, cx);
                 let shell = self.modal_input(&shell_t, &platform::default_shell(None).0, window, cx);
-                self.open_modal(Modal::Settings { shell, claude, updates });
+                self.modal = Some(Modal::Settings { shell, claude, updates, scale: crate::scale::percent() });
             }
             Act::NewBranch(cwd) => {
                 let input = self.modal_input("", "", window, cx);
-                self.open_modal(Modal::NewBranch { cwd, input });
+                self.modal = Some(Modal::NewBranch { cwd, input });
             }
             Act::CreateBranch(cwd, name) => {
                 self.run_git(GitOp::Branch, move || Ok(crate::commit::create_branch(&cwd, &name)?), cx)
@@ -1461,48 +1310,74 @@ impl Workspace {
             }
             Act::RemoveProject(id) => {
                 self.store.remove_project(&id);
-                self.toast(
-                    "Project removed. Its sessions are kept under “Other sessions”.",
-                    false,
-                    cx,
-                );
-            }
-            Act::ToggleProject(id) => {
-                if let Some(p) = self.store.data.projects.iter_mut().find(|p| p.id == id) {
-                    p.collapsed = !p.collapsed;
-                    if p.collapsed {
-                        // Keep rendering the list while it slides shut.
-                        self.closing.insert(id.clone());
-                        cx.spawn(async move |this, cx| {
-                            cx.background_executor().timer(Duration::from_millis(CLOSE_MS)).await;
-                            this.update(cx, |ws, cx| {
-                                ws.closing.remove(&id);
-                                cx.notify();
-                            })
-                            .ok();
-                        })
-                        .detach();
-                    } else {
-                        self.closing.remove(&id);
-                    }
-                    self.store.mark_dirty();
+                if self.store.data.layout.project_filter.as_ref() == Some(&id) {
+                    self.store.data.layout.project_filter = None;
                 }
+                self.toast("Project removed. Its sessions are kept.", false, cx);
             }
-            Act::ToggleOther => {
-                let l = &mut self.store.data.layout;
-                l.other_collapsed = !l.other_collapsed;
+            Act::SetAutoCompact(id, on) => {
+                // Show the choice at once; the mod's next snapshot confirms or corrects it.
+                if let Some(meta) = self.store.session_mut(&id).and_then(|s| s.claude.as_mut()) {
+                    meta.auto_compact = Some(on);
+                }
+                self.store.mark_dirty();
+                cx.notify();
+                usage::send_ctl(&usage::ctl_file(&id), "auto_compact", on.into());
+                self.toast(format!("Turning auto-compact {}…", if on { "on" } else { "off" }), false, cx);
+            }
+            Act::SetAdvisor(id, model) => {
+                // The saved setting changes at once, but a different model only reaches the current conversation on
+                // /clear or /compact; switching the advisor off or on does apply right away.
+                let saved = (model != "off").then(|| model.clone());
+                let mut pending = false;
+                let mut was_off = false;
+                if let Some(meta) = self.store.session_mut(&id).and_then(|s| s.claude.as_mut()) {
+                    let active = meta.advisor_active.clone().or_else(|| meta.advisor.clone());
+                    was_off = active.is_none();
+                    pending = !was_off && saved.as_deref() != active.as_deref();
+                    meta.advisor = saved.clone();
+                    if saved.is_none() {
+                        meta.advisor_active = None;
+                    } else if was_off {
+                        meta.advisor_active = saved.clone();
+                    } else {
+                        meta.advisor_active = active;
+                    }
+                }
+                self.store.mark_dirty();
+                cx.notify();
+                usage::send_ctl(&usage::ctl_file(&id), "advisor", model.clone().into());
+                let note = if model == "off" {
+                    "Advisor off.".to_string()
+                } else if pending {
+                    format!("Advisor will switch to {model} after /clear or /compact.")
+                } else if was_off {
+                    format!("Advisor on ({model}).")
+                } else {
+                    format!("Advisor set to {model}.")
+                };
+                self.toast(note, false, cx);
+            }
+            Act::AskAdvisor(id) => {
+                let current = self.store.session(&id).and_then(|s| s.claude.as_ref()).and_then(|m| m.advisor.clone()).unwrap_or_default();
+                let input = self.modal_input(&current, "opus, sonnet, off, or a model id", window, cx);
+                self.modal = Some(Modal::Advisor { id, input });
+            }
+            Act::FilterProject(id) => {
+                self.store.data.layout.project_filter = id;
                 self.store.mark_dirty();
             }
-            Act::ShowAll(id) => {
-                self.show_all.insert(id);
+            Act::ToggleOlder => {
+                let l = &mut self.store.data.layout;
+                l.older_open = !l.older_open;
+                self.store.mark_dirty();
             }
             Act::ConfirmQuit => {
                 self.modal = None;
-                self.finalize();
+                self.finalize(cx);
                 cx.quit();
             }
             Act::Dismiss => {
-                self.deny_pending_request();
                 self.modal = None;
                 self.focus_active(window, cx);
             }
@@ -1510,7 +1385,7 @@ impl Workspace {
                 let ready = matches!(self.update.status, crate::updater::Status::Ready { .. });
                 let running = self.running_count(cx);
                 if ready && running > 0 {
-                    self.open_modal(Modal::Confirm {
+                    self.modal = Some(Modal::Confirm {
                         title: "Restart to update?".into(),
                         body: format!(
                             "{running} session{} running. Restarting ends {}. Claude sessions can be resumed afterwards.",
@@ -1534,11 +1409,10 @@ impl Workspace {
                 self.store.data.active_account = Some(id);
                 self.store.mark_dirty();
                 self.refresh_accounts(cx);
-                self.relaunch_chats(window, cx);
-                self.toast("Switched. New and resumed sessions and all chats use this account; running terminal sessions keep theirs.", false, cx);
+                self.toast("Switched. New and resumed sessions use this account; running sessions keep theirs.", false, cx);
             }
             Act::AddAccount => {
-                self.open_modal(Modal::Confirm {
+                self.modal = Some(Modal::Confirm {
                     title: "Add an account?".into(),
                     body: "The new account shares your main Claude Code setup: settings, CLAUDE.md, agents, skills, plugins and \
                            session history. Changes made while using it (like /model) change your main setup too. \
@@ -1566,7 +1440,7 @@ impl Workspace {
             Act::SignIn(id) => self.sign_in(&id, window, cx),
             Act::RemoveAccount(id) => {
                 let name = self.store.account(&id).and_then(|a| a.email.clone()).unwrap_or_else(|| "this account".into());
-                self.open_modal(Modal::Confirm {
+                self.modal = Some(Modal::Confirm {
                     title: format!("Remove {name}?"),
                     body: "Deletes this account's login from Claudiu. Shared settings and session history stay in your main \
                            ~/.claude. End its running sessions first."
@@ -1701,14 +1575,7 @@ impl Workspace {
                         let mut items: Vec<MenuItem> = names
                             .into_iter()
                             .take(15)
-                            .map(|name| MenuItem {
-                                label: format!("{}{name}", if current.as_deref() == Some(name.as_str()) { "✓  " } else { "    " }),
-                                hint: None,
-                                disabled: false,
-                                act: Act::SwitchBranch(cwd.clone(), name),
-                                danger: false,
-                                separator_before: false,
-                            })
+                            .map(|name| MenuItem::new(format!("{}{name}", crate::widgets::tick(current.as_deref() == Some(name.as_str()))), Act::SwitchBranch(cwd.clone(), name)))
                             .collect();
                         let first = items.is_empty();
                         items.push(MenuItem { label: "New branch…".into(), hint: None, act: Act::NewBranch(cwd), danger: false, disabled: false, separator_before: !first });
@@ -1739,10 +1606,6 @@ impl Workspace {
     pub fn submit_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let act = match self.modal.take() {
             Some(Modal::Confirm { act, .. }) => act,
-            Some(Modal::Bridge { req, .. }) => {
-                self.finish_request(&req, window, cx);
-                Act::Dismiss
-            }
             Some(Modal::Rename { id, input }) => {
                 let text = input.read(cx).value().trim().to_string();
                 if let Some(rec) = self.store.session_mut(&id) {
@@ -1750,12 +1613,25 @@ impl Workspace {
                 }
                 Act::Dismiss
             }
+            Some(Modal::Advisor { id, input }) => {
+                let name = input.read(cx).value().trim().to_lowercase();
+                if name.is_empty() {
+                    Act::Dismiss
+                } else if !usage::valid_model_name(&name) {
+                    self.modal = Some(Modal::Advisor { id, input });
+                    self.toast("Use a model alias or id (letters, digits, . _ -), or “off”.", true, cx);
+                    return;
+                } else {
+                    self.act(Act::SetAdvisor(id, name), window, cx);
+                    Act::Dismiss
+                }
+            }
             Some(Modal::NewBranch { cwd, input }) => {
                 // Spaces aren't allowed in branch names; git reports anything else that is invalid.
                 let name = input.read(cx).value().split_whitespace().collect::<Vec<_>>().join("-");
                 if name.is_empty() { Act::Dismiss } else { Act::CreateBranch(cwd, name) }
             }
-            Some(Modal::Settings { shell, claude, updates }) => {
+            Some(Modal::Settings { shell, claude, updates, scale }) => {
                 let clean = |s: &str| s.trim().trim_matches('"').to_string();
                 let (shell_t, claude_t) = (clean(shell.read(cx).value().as_ref()), clean(claude.read(cx).value().as_ref()));
                 let bad = [("Shell", &shell_t), ("Claude path", &claude_t)]
@@ -1763,7 +1639,7 @@ impl Workspace {
                     .find(|(_, t)| !t.is_empty() && platform::resolve_program(t).is_none());
                 if let Some((what, t)) = bad {
                     let msg = format!("{what}: “{t}” is not a file or a program on PATH");
-                    self.open_modal(Modal::Settings { shell, claude, updates });
+                    self.modal = Some(Modal::Settings { shell, claude, updates, scale });
                     self.toast(msg, true, cx);
                     return;
                 }
@@ -1774,6 +1650,8 @@ impl Workspace {
                 if updates == (s.update_url.as_deref() == Some("")) {
                     s.update_url = (!updates).then(String::new);
                 }
+                s.scale = (scale != 100).then_some(scale);
+                crate::scale::set(scale);
                 self.shell = platform::default_shell(s.shell.as_deref());
                 self.claude_exe = claude::discover(s.claude_path.as_deref());
                 self.store.mark_dirty();
@@ -1817,13 +1695,44 @@ impl Workspace {
 
     // ------------------------------------------------------------------ GitHub panes
 
-    /// Show the project's GitHub pane (one per project), creating it on first use. With `split` it opens
-    /// beside the current pane instead of replacing it.
-    pub fn open_github(&mut self, cwd: PathBuf, split: bool, window: &mut Window, cx: &mut Context<Self>) {
+    /// Show the project's GitHub view in the right sidebar and move the keyboard into it.
+    pub fn open_github(&mut self, cwd: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let id = self.github_pane(cwd, window, cx);
+        self.right_gh = Some(id.clone());
+        self.store.data.layout.right_hidden = false;
+        self.store.mark_dirty();
+        if let Some(p) = self.gh_pane(&id) {
+            let handle = p.view.read(cx).focus.clone();
+            window.focus(&handle, cx);
+        }
+        cx.notify();
+    }
+
+    /// An attached issue or pull request was clicked: show it in the GitHub view of the shown session's project.
+    pub fn open_attached(&mut self, pull: bool, number: u32, window: &mut Window, cx: &mut Context<Self>) {
+        let cwd = self.active_cwd();
+        self.open_github(cwd, window, cx);
+        let kind = if pull { crate::github::model::Kind::Pull } else { crate::github::model::Kind::Issue };
+        if let Some(view) = self.right_gh.as_ref().and_then(|id| self.gh_pane(id)).map(|p| p.view.clone()) {
+            view.update(cx, |v, cx| v.open_item(kind, number, window, cx));
+        }
+    }
+
+    /// While the right sidebar shows GitHub, it follows the shown session to that session's project (no focus change).
+    fn sync_github(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.right_gh.as_ref().and(self.active.clone()) else { return };
+        let cwd = self.store.session(&id).map(|s| s.cwd.clone());
+        if let Some(cwd) = cwd {
+            self.right_gh = Some(self.github_pane(cwd, window, cx));
+        }
+    }
+
+    /// The project's GitHub view (one per project), created on first use.
+    fn github_pane(&mut self, cwd: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Id {
         let project = self.store.project_for_cwd(&cwd).and_then(|id| self.store.project(&id)).cloned();
         let root = project.as_ref().map(|p| p.path.clone()).unwrap_or(cwd);
         let key = platform::path_key(&root);
-        let id = match self.gh.iter().find(|p| platform::path_key(&p.cwd) == key) {
+        match self.gh.iter().find(|p| platform::path_key(&p.cwd) == key) {
             Some(p) => p.id.clone(),
             None => {
                 let name = project
@@ -1837,132 +1746,70 @@ impl Workspace {
                 self.gh.push(GhPane { id: id.clone(), cwd: root, project: name, view, _sub: sub });
                 id
             }
-        };
-        if split && !self.panes.contains(&id) {
-            self.with_pane_after(self.focused, |ws| ws.show_session(&id, window, cx));
-        } else {
-            self.show_session(&id, window, cx);
         }
     }
 
-    /// Run `f` (which fills one pane, e.g. by starting a session) with an empty slot opened after pane `at`.
-    /// At the four-pane limit, or with no panes yet, `f` simply replaces the focused pane as usual.
-    fn with_pane_after(&mut self, at: usize, f: impl FnOnce(&mut Self)) {
-        let mut replaced = None;
-        if self.panes.is_empty() {
-        } else if self.panes.len() < 4 {
-            let slot = (at + 1).min(self.panes.len());
-            self.panes.insert(slot, String::new());
-            self.focused = slot;
-        } else {
-            let slot = self.focused.min(self.panes.len() - 1);
-            replaced = Some((slot, std::mem::take(&mut self.panes[slot])));
-        }
-        f(self);
-        // `f` failed (e.g. no `claude` CLI): give the replaced pane back.
-        if let Some((slot, old)) = replaced
-            && self.panes[slot].is_empty()
-        {
-            self.panes[slot] = old;
-        }
-        self.panes.retain(|p| !p.is_empty());
-        self.focused = self
-            .selected
-            .as_ref()
-            .and_then(|s| self.panes.iter().position(|p| p == s))
-            .unwrap_or(self.focused)
-            .min(self.panes.len().saturating_sub(1));
-    }
-
-    /// Show `id` next to the focused pane, keeping the split.
-    pub fn add_to_split(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
-        if self.panes.len() >= 4 && !self.panes.iter().any(|p| p == id) {
-            self.toast("Up to four panes", false, cx);
-            return;
-        }
-        let at = self.focused;
-        self.with_pane_after(at, |ws| ws.show_session(id, window, cx));
-    }
-
-    /// Take `id` out of the split; the session itself keeps running and stays in the sidebar.
-    pub fn remove_from_split(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
-        if self.groups.iter().any(|g| g.iter().any(|p| p == id)) {
-            self.leave_stored(id);
-            cx.notify();
-            return;
-        }
-        let Some(pos) = self.panes.iter().position(|p| p == id) else { return };
-        if self.panes.len() < 2 {
-            return;
-        }
-        self.panes.remove(pos);
-        if pos < self.focused {
-            self.focused -= 1;
-        }
-        self.focused = self.focused.min(self.panes.len() - 1);
-        self.after_layout_change(window, cx);
-    }
-
-    /// Leave the split, keeping only the focused pane.
-    pub fn exit_split(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.panes.len() < 2 {
-            return;
-        }
-        self.panes = vec![self.panes[self.focused.min(self.panes.len() - 1)].clone()];
-        self.active_slot = usize::MAX;
-        self.focused = 0;
-        self.after_layout_change(window, cx);
-    }
-
-    fn after_layout_change(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.prune_live(cx);
-        self.selected = self.panes.get(self.focused).cloned();
-        self.persist_layout();
+    pub fn toggle_right(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let layout = &mut self.store.data.layout;
+        layout.right_hidden = !layout.right_hidden;
+        self.store.mark_dirty();
         self.focus_active(window, cx);
         cx.notify();
     }
 
-    /// The top bar's split dropdown: ways to put something next to the current pane, then ways out.
-    pub fn split_menu(&self, cx: &App) -> Vec<MenuItem> {
-        let item = |label: String, hint: Option<String>, act: Act, disabled: bool, sep: bool| MenuItem { label, hint, act, danger: false, disabled, separator_before: sep };
-        let full = self.panes.len() >= 4;
-        let cwd = self.active_cwd();
-        let mut items = vec![
-            item("New shell".into(), None, Act::SplitShell, full, false),
-            item("New Claude session".into(), None, Act::SplitClaude(cwd.clone()), full, false),
-            item("New chat".into(), None, Act::NewChat { cwd: None, split: true }, full, false),
-        ];
-        let project = self.store.project_for_cwd(&cwd).and_then(|id| self.store.project(&id));
-        if let Some(p) = project.filter(|p| p.git.is_some()) {
-            let shown = self.gh.iter().any(|g| platform::path_key(&g.cwd) == platform::path_key(&p.path) && self.panes.contains(&g.id));
-            items.push(item("GitHub issues & PRs".into(), None, Act::OpenGithub { cwd: p.path.clone(), split: true }, full || shown, false));
+    /// GitHub and the Visual panel are read and written in, so they share one wider, resizable width.
+    fn right_wide(&self) -> bool {
+        self.right_gh.is_some() || self.visual_shown()
+    }
+
+    /// The right sidebar's current width: the remembered one for the menu or for GitHub, kept within bounds.
+    pub fn right_width(&self, window_w: f32) -> f32 {
+        self.right_width_of(self.right_wide(), window_w)
+    }
+
+    pub fn right_width_of(&self, wide: bool, window_w: f32) -> f32 {
+        let layout = &self.store.data.layout;
+        let room = (window_w - 560.0).max(RIGHT_GH_MIN);
+        if !wide {
+            return layout.right_menu_w.unwrap_or(RIGHT_MENU_W).clamp(RIGHT_MENU_MIN, RIGHT_MENU_MAX.min(room));
         }
-        let mut first = true;
-        let others = self
-            .live
-            .iter()
-            .filter(|l| l.view.read(cx).is_running())
-            .filter_map(|l| self.store.session(&l.id).map(|r| (r.id.clone(), r.display_title().to_string(), r.cwd.file_name().map(|n| n.to_string_lossy().into_owned()))))
-            .chain(self.gh.iter().map(|g| (g.id.clone(), "GitHub".to_string(), Some(g.project.clone()))))
-            .chain(self.chats.iter().map(|c| (c.id.clone(), self.chat_title(&c.id).unwrap_or_else(|| "Chat".into()), is_tied(&c.cwd).then(|| c.cwd.file_name().map(|n| n.to_string_lossy().into_owned())).flatten())));
-        for (id, title, folder) in others.filter(|(id, ..)| !self.panes.contains(id)) {
-            items.push(item(title, folder, Act::AddToSplit(id), full, std::mem::take(&mut first)));
+        layout.right_gh_w.unwrap_or(RIGHT_GH_W).clamp(RIGHT_GH_MIN, room)
+    }
+
+    /// The right sidebar's left edge is being dragged: follow the pointer, wider to the left.
+    pub fn drag_right(&mut self, x: f32, window_w: f32) {
+        let Some(d) = self.right_drag.as_ref() else { return };
+        let wanted = d.width + d.x - x;
+        let room = (window_w - 560.0).max(RIGHT_GH_MIN);
+        let wide = self.right_wide();
+        let layout = &mut self.store.data.layout;
+        if !wide {
+            layout.right_menu_w = Some(wanted.clamp(RIGHT_MENU_MIN, RIGHT_MENU_MAX.min(room)));
+        } else {
+            layout.right_gh_w = Some(wanted.clamp(RIGHT_GH_MIN, room));
         }
-        if self.panes.len() > 1 {
-            let active = self.active_id().cloned().unwrap_or_default();
-            items.push(item("Remove this pane from split".into(), None, Act::RemoveFromSplit(active), false, true));
-            items.push(item("Exit split".into(), None, Act::ExitSplit, false, false));
-        }
-        items
+        self.store.mark_dirty();
+    }
+
+    /// The left sidebar's current width, kept within bounds and leaving room for the session.
+    pub fn left_width(&self, window_w: f32) -> f32 {
+        let wanted = self.store.data.layout.left_w.unwrap_or(SIDEBAR_W);
+        wanted.clamp(SIDEBAR_MIN, SIDEBAR_MAX.min((window_w - 560.0).max(SIDEBAR_MIN)))
+    }
+
+    /// The left sidebar's right edge is being dragged: follow the pointer, wider to the right.
+    pub fn drag_left(&mut self, x: f32, window_w: f32) {
+        let Some(d) = self.left_drag.as_ref() else { return };
+        let wanted = d.width + x - d.x;
+        self.store.data.layout.left_w = Some(wanted.clamp(SIDEBAR_MIN, SIDEBAR_MAX.min((window_w - 560.0).max(SIDEBAR_MIN))));
+        self.store.mark_dirty();
     }
 
     fn on_gh_event(&mut self, pane: &str, ev: &GhEvent, window: &mut Window, cx: &mut Context<Self>) {
         let Some(cwd) = self.gh_pane(pane).map(|p| p.cwd.clone()) else { return };
-        let at = self.panes.iter().position(|p| p == pane).unwrap_or(self.focused);
         match ev {
             GhEvent::Toast { text, error } => self.toast(text.clone(), *error, cx),
-            // A Claude session about the item opens beside the GitHub pane so both stay in view.
-            GhEvent::AskClaude(prompt) => self.with_pane_after(at, |ws| ws.new_claude_with(cwd, vec![prompt.clone()], window, cx)),
+            GhEvent::AskClaude(prompt) => self.new_claude_with(cwd, vec![prompt.clone()], window, cx),
             GhEvent::Checkout(number) => {
                 let Some(exe) = crate::github::cli::locate() else { return };
                 let number = *number;
@@ -1990,43 +1837,20 @@ impl Workspace {
                     hidden: false,
                     claude: None,
                 };
-                self.with_pane_after(at, |ws| ws.start(record, spec, true, window, cx));
+                self.start(record, spec, true, window, cx);
             }
         }
     }
 
-    // ------------------------------------------------------------------ pane layout
-
-    pub fn split(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // New shell beside the current pane, in the same folder.
-        if self.panes.len() >= 4 {
-            self.toast("Up to four panes", false, cx);
-            return;
-        }
-        let (cwd, at) = (self.active_cwd(), self.focused);
-        self.with_pane_after(at, |ws| ws.new_shell(cwd, window, cx));
-        cx.notify();
-    }
-
-    pub fn split_claude(&mut self, cwd: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        if self.panes.len() >= 4 {
-            self.toast("Up to four panes", false, cx);
-            return;
-        }
-        let at = self.focused;
-        self.with_pane_after(at, |ws| ws.new_claude(cwd, window, cx));
-        cx.notify();
-    }
+    // ------------------------------------------------------------------ session switching
 
     pub fn cycle(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
-        let mut running: Vec<Id> = self
+        let running: Vec<Id> = self
             .live
             .iter()
             .filter(|l| l.view.read(cx).is_running())
             .map(|l| l.id.clone())
             .collect();
-        running.extend(self.gh.iter().map(|p| p.id.clone()));
-        running.extend(self.chats.iter().map(|p| p.id.clone()));
         if running.is_empty() {
             return;
         }
@@ -2036,18 +1860,6 @@ impl Workspace {
             .unwrap_or(0) as isize;
         let next = (cur + delta).rem_euclid(running.len() as isize) as usize;
         self.show_session(&running[next].clone(), window, cx);
-    }
-
-    pub fn focus_pane(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        if index < self.panes.len() {
-            self.focused = index;
-            self.selected = self.panes.get(index).cloned();
-            if let Some(id) = self.selected.clone() {
-                self.remember(&id);
-            }
-            self.focus_active(window, cx);
-            cx.notify();
-        }
     }
 
     /// Prompt-cache timer for the selected session: `(remaining fraction, remaining secs, ttl secs)`.
@@ -2063,290 +1875,19 @@ impl Workspace {
         Some((left as f32 / ttl as f32, left, ttl))
     }
 
-    /// Context-meter source for the selected session: `(fraction, tokens, exact)`. `exact` means Claude Code
-    /// itself reported the percentage (status line); otherwise it is estimated from the transcript.
-    pub fn selected_context(&self) -> Option<(f32, u64, bool)> {
+    /// Context-meter source for the selected session: `(fraction, tokens, exact, full at)`. `exact` means Claude Code
+    /// itself reported the figures; otherwise they are estimated from the transcript. `full at` is the token count
+    /// the bar ends at (`claude::context_limit`), when known.
+    pub fn selected_context(&self) -> Option<(f32, u64, bool, Option<u64>)> {
         let id = self.selected.as_ref().or(self.active_id())?;
-        if let Some(p) = self.chat_pane(id) {
-            return p.context.filter(|&(_, size)| size > 0).map(|(used, size)| ((used as f32 / size as f32).min(1.0), used, true));
-        }
+        let scaled = |tokens: u64, limit: Option<u64>| limit.map(|l| (tokens as f64 / l as f64).min(1.0) as f32);
         let meta = self.store.session(id)?.claude.as_ref()?;
+        let limit = claude::context_limit(meta.context_window, meta.compact_at, meta.auto_compact);
         if let Some(f) = meta.context_fraction {
-            let tokens = meta.context_tokens.unwrap_or_else(|| {
-                meta.context_window
-                    .map_or(0, |w| (w as f64 * f as f64) as u64)
-            });
-            return Some((f, tokens, true));
+            let tokens = meta.context_tokens.unwrap_or_else(|| meta.context_window.map_or(0, |w| (w as f64 * f as f64) as u64));
+            return Some((scaled(tokens, limit).unwrap_or(f), tokens, true, limit));
         }
         let tokens = meta.context_tokens?;
-        Some((claude::context_fraction(tokens), tokens, false))
-    }
-}
-
-/// Show session `id` given every split (shown one included, in sidebar order): its own split if it is in one,
-/// else just itself. Returns the panes to show, the shown split's slot among the parked ones, and the parked ones.
-fn switch_layout(mut all: Vec<Vec<Id>>, id: &Id) -> (Vec<Id>, usize, Vec<Vec<Id>>) {
-    match all.iter().position(|g| g.contains(id)) {
-        Some(t) => (all.remove(t), t, all),
-        None => (vec![id.clone()], usize::MAX, all),
-    }
-}
-
-#[cfg(test)]
-mod split_tests {
-    use super::switch_layout;
-
-    fn ids(v: &[&str]) -> Vec<String> {
-        v.iter().map(|s| s.to_string()).collect()
-    }
-
-    #[test]
-    fn a_session_outside_every_split_shows_alone_and_keeps_all_splits() {
-        let all = vec![ids(&["a", "b"]), ids(&["c", "d"])];
-        let (panes, _, parked) = switch_layout(all.clone(), &"x".to_string());
-        assert_eq!(panes, ids(&["x"]));
-        assert_eq!(parked, all);
-    }
-
-    #[test]
-    fn a_session_in_a_split_brings_its_whole_split_and_slot_back() {
-        let (panes, slot, parked) = switch_layout(vec![ids(&["a", "b"]), ids(&["c", "d"]), ids(&["e", "f"])], &"d".to_string());
-        assert_eq!((panes, slot), (ids(&["c", "d"]), 1));
-        assert_eq!(parked, vec![ids(&["a", "b"]), ids(&["e", "f"])]);
-    }
-}
-
-#[cfg(test)]
-mod headless {
-    //! Drives the real workspace on gpui's test platform (no window opens) with a throwaway data folder, to catch
-    //! hangs and panics when sessions start, split and switch. Spawns the real `claude` and shell.
-    //! `cargo test -- --ignored headless`.
-    use super::*;
-    use gpui::TestAppContext;
-
-    fn run() {
-        let data = tempfile::tempdir().unwrap();
-        // SAFETY: set before any other thread reads the environment; this test owns the process.
-        unsafe { std::env::set_var("CLAUDIU_DATA_DIR", data.path()) };
-        let work = tempfile::tempdir().unwrap();
-        let mut cx = TestAppContext::single();
-        cx.update(|app| {
-            gpui_kit::init(app);
-            gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, app);
-        });
-        let (window, ws) = cx
-            .update(|app| {
-                gpui_kit::open_window(Default::default(), app, |window, app| app.new(|cx| Workspace::new(window, vec![], cx)))
-            })
-            .unwrap();
-        let draw = |cx: &mut TestAppContext| {
-            cx.update_window(window, |_, window, app| window.draw(app).clear(app)).unwrap();
-            cx.run_until_parked();
-        };
-        let step = |cx: &mut TestAppContext, f: &dyn Fn(&mut Workspace, &mut Window, &mut Context<Workspace>)| {
-            let t = std::time::Instant::now();
-            cx.update_window(window, |_, window, app| ws.update(app, |ws, cx| f(ws, window, cx))).unwrap();
-            let acted = t.elapsed();
-            draw(cx);
-            draw(cx);
-            // Starting a process must never run on the UI thread (a big `claude.exe` took a second to create).
-            assert!(acted < Duration::from_millis(400), "the window was blocked for {acted:?}");
-        };
-        let cwd = work.path().to_path_buf();
-        draw(&mut cx);
-        step(&mut cx, &|ws, w, cx| ws.new_claude(cwd.clone(), w, cx));
-        assert!(ws.read_with(&cx, |ws, _| ws.panes.len() == 1), "claude pane exists");
-        step(&mut cx, &|ws, w, cx| ws.new_shell(cwd.clone(), w, cx));
-        step(&mut cx, &|ws, w, cx| ws.split(w, cx));
-        step(&mut cx, &|ws, w, cx| ws.split_claude(cwd.clone(), w, cx));
-        assert!(ws.read_with(&cx, |ws, _| ws.panes.len() == 3), "three panes");
-        // Switch to a session outside the split: the split is parked, then comes back.
-        step(&mut cx, &|ws, w, cx| ws.new_shell(cwd.clone(), w, cx));
-        assert!(ws.read_with(&cx, |ws, _| ws.panes.len() == 1 && ws.groups.len() == 1), "split parked");
-        let member = ws.read_with(&cx, |ws, _| ws.groups[0][0].clone());
-        step(&mut cx, &|ws, w, cx| ws.show_session(&member, w, cx));
-        assert!(ws.read_with(&cx, |ws, _| ws.panes.len() == 3), "split restored");
-        step(&mut cx, &|ws, w, cx| ws.exit_split(w, cx));
-        assert!(ws.read_with(&cx, |ws, _| ws.panes.len() == 1));
-        // The GitHub pane as a session type: opens once per folder, "Ask Claude" starts a session beside it.
-        step(&mut cx, &|ws, w, cx| ws.open_github(cwd.clone(), false, w, cx));
-        assert!(ws.read_with(&cx, |ws, _| ws.panes.len() == 1 && ws.gh.len() == 1 && ws.gh_pane(&ws.panes[0]).is_some()), "github pane shown");
-        step(&mut cx, &|ws, w, cx| ws.open_github(cwd.clone(), false, w, cx));
-        assert!(ws.read_with(&cx, |ws, _| ws.gh.len() == 1), "one github pane per folder");
-        step(&mut cx, &|ws, _w, cx| {
-            let view = ws.gh[0].view.clone();
-            view.update(cx, |_, cx| cx.emit(crate::github::view::GhEvent::AskClaude("explain issue 1".into())));
-        });
-        assert!(ws.read_with(&cx, |ws, _| ws.panes.len() == 2), "Ask Claude opens a session beside the pane");
-        step(&mut cx, &|ws, w, cx| ws.exit_split(w, cx));
-
-        // Chat: the Chat tab lists chats; a chat runs the real adapter (installed into the throwaway data folder
-        // on first use), offers the agent's skills, answers, and comes back with its history after being closed.
-        step(&mut cx, &|ws, w, cx| {
-            ws.act(Act::SideTab(Side::Chat), w, cx);
-            ws.new_chat(None, None, false, w, cx);
-        });
-        let (id, view) = ws.read_with(&cx, |ws, _| (ws.chats[0].id.clone(), ws.chats[0].view.clone()));
-        let wait = |cx: &mut TestAppContext, view: &Entity<crate::chat::view::ChatView>, what: &str, ok: &dyn Fn(&crate::chat::view::ChatView) -> bool| {
-            let t = std::time::Instant::now();
-            while !view.read_with(cx, |v, _| ok(v)) {
-                assert!(t.elapsed() < Duration::from_secs(150), "timed out waiting for {what}: {:?}", view.read_with(cx, |v, _| v.probe()));
-                std::thread::sleep(Duration::from_millis(100));
-                draw(cx);
-            }
-        };
-        wait(&mut cx, &view, "the chat to be ready", &|v| v.probe().0 == crate::chat::view::Phase::Ready);
-        assert!(view.read_with(&cx, |v, _| v.probe().2) > 0, "the agent lists skills and commands");
-        let rec = ws.read_with(&cx, |ws, _| ws.chat_store.get(&id).cloned()).unwrap();
-        assert!(!is_tied(&rec.cwd), "a new chat belongs to no project");
-        // Tie it to a project before the first message: a new conversation in that folder.
-        let before = view.read_with(&cx, |v, _| v.epoch());
-        step(&mut cx, &|_, w, cx| view.update(cx, |v, cx| v.set_project(Some(cwd.clone()), w, cx)));
-        assert_eq!(view.read_with(&cx, |v, _| v.epoch()), before + 1, "a different folder restarts the conversation");
-        wait(&mut cx, &view, "the chat to restart in the project", &|v| v.probe().0 == crate::chat::view::Phase::Ready);
-        assert!(ws.read_with(&cx, |ws, _| ws.chat_store.get(&id).is_some_and(|r| is_tied(&r.cwd) && r.session_id.is_some())));
-        step(&mut cx, &|_, w, cx| view.update(cx, |v, cx| v.send_text("say only the word pong", w, cx)));
-        wait(&mut cx, &view, "the answer", &|v| !v.is_busy() && v.probe().1.iter().any(|i| matches!(i, crate::chat::model::Item::Agent(_))));
-        let reply = view.read_with(&cx, |v, _| format!("{:?}", v.probe().1)).to_lowercase();
-        assert!(reply.contains("pong"), "{reply}");
-        // Image paste: a picture on the clipboard attaches, is sent with the message, and Claude sees it.
-        let png = {
-            let mut out = std::io::Cursor::new(vec![]);
-            ::image::RgbaImage::from_pixel(48, 48, ::image::Rgba([255, 0, 0, 255])).write_to(&mut out, ::image::ImageFormat::Png).unwrap();
-            out.into_inner()
-        };
-        cx.update(|app| app.write_to_clipboard(gpui::ClipboardItem::new_image(&gpui::Image::from_bytes(gpui::ImageFormat::Png, png))));
-        step(&mut cx, &|_, w, cx| view.update(cx, |v, cx| v.focus_input(w, cx)));
-        step(&mut cx, &|_, w, cx| assert!(view.update(cx, |v, cx| v.paste(w, cx)), "an image on the clipboard is taken"));
-        assert_eq!(view.read_with(&cx, |v, _| v.attached()), 1);
-        step(&mut cx, &|_, w, cx| view.update(cx, |v, cx| v.send_text("What single color fills this image? Answer with one lowercase word.", w, cx)));
-        assert_eq!(view.read_with(&cx, |v, _| v.attached()), 0, "the attachment is sent");
-        wait(&mut cx, &view, "the color", &|v| !v.is_busy() && v.probe().1.iter().rev().any(|i| matches!(i, crate::chat::model::Item::Agent(t) if t.to_lowercase().contains("red"))));
-        // Account switch: the chat restarts under the active account and loads the same conversation.
-        let before = view.read_with(&cx, |v, _| v.epoch());
-        step(&mut cx, &|ws, w, cx| ws.relaunch_chats(w, cx));
-        assert_eq!(view.read_with(&cx, |v, _| v.epoch()), before + 1, "the agent was restarted");
-        wait(&mut cx, &view, "the chat to reload", &|v| v.probe().0 == crate::chat::view::Phase::Ready && v.probe().1.len() >= 4);
-        let rec = ws.read_with(&cx, |ws, _| ws.chat_store.get(&id).cloned()).unwrap();
-        assert!(rec.session_id.is_some() && rec.title != DEFAULT_TITLE, "{rec:?}");
-        step(&mut cx, &|ws, w, cx| ws.close_live(&id, w, cx));
-        assert!(ws.read_with(&cx, |ws, _| ws.chats.is_empty() && ws.chat_store.get(&id).is_some()), "closing keeps the history");
-        // Nothing may keep the view (and with it the adapter and its `claude`) alive once the chat is closed.
-        let weak = view.downgrade();
-        drop(view);
-        draw(&mut cx);
-        draw(&mut cx);
-        assert!(weak.upgrade().is_none(), "a closed chat's view is still alive");
-        step(&mut cx, &|ws, w, cx| ws.open_chat(&id, w, cx));
-        let view = ws.read_with(&cx, |ws, _| ws.chats[0].view.clone());
-        wait(&mut cx, &view, "the history to load", &|v| {
-            let (phase, items, _) = v.probe();
-            phase == crate::chat::view::Phase::Ready && items.iter().any(|i| matches!(i, crate::chat::model::Item::User(t) if t.contains("pong")))
-        });
-        // Cross-session tools: nothing happens until the user says yes, and no means no.
-        use serde_json::{Value, json};
-        let ask = |from: String, tool: &'static str, args: Value| std::thread::spawn(move || crate::bridge::ask(&from, tool, &args));
-        let take = || loop {
-            if let Some(r) = crate::bridge::take_requests().pop() {
-                break r;
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        };
-        let offer = |cx: &mut TestAppContext, req: crate::bridge::Request| {
-            step(cx, &|ws, w, cx| {
-                ws.bridge_queue.push_back(req.clone());
-                ws.ask_about_next_request(w, cx);
-            })
-        };
-        let asking = |cx: &TestAppContext| ws.read_with(cx, |ws, _| matches!(ws.modal, Some(Modal::Bridge { .. })));
-        let from_chat = format!("chat:{id}");
-
-        let h = ask(from_chat.clone(), "list_chats", json!({}));
-        offer(&mut cx, take());
-        assert!(asking(&cx), "the user is asked first");
-        std::thread::sleep(Duration::from_millis(500));
-        assert!(!h.is_finished(), "nothing is answered before the user does");
-        step(&mut cx, &|ws, w, cx| ws.submit_modal(w, cx));
-        let text = h.join().unwrap().unwrap();
-        assert!(text.contains(&id) && text.contains("this chat"), "{text}");
-
-        // Another dialog replacing the question declines it instead of leaving the asker hanging.
-        let h = ask(from_chat.clone(), "list_chats", json!({}));
-        offer(&mut cx, take());
-        assert!(asking(&cx));
-        step(&mut cx, &|ws, w, cx| ws.act(Act::OpenSettings, w, cx));
-        assert!(!asking(&cx));
-        assert_eq!(h.join().unwrap(), Err("The user declined.".to_string()));
-        step(&mut cx, &|ws, w, cx| ws.act(Act::Dismiss, w, cx));
-        // A request whose asker gave up is not carried out when the user allows it late.
-        let stale = crate::bridge::Request { id: "late".into(), from: from_chat.clone(), tool: "start_chat".into(), args: json!({}), deadline: now() + 2 };
-        offer(&mut cx, stale);
-        assert!(asking(&cx));
-        std::thread::sleep(Duration::from_millis(2500));
-        step(&mut cx, &|ws, w, cx| ws.submit_modal(w, cx));
-        assert_eq!(ws.read_with(&cx, |ws, _| ws.chats.len()), 1, "an expired request opens nothing");
-
-        let h = ask(from_chat.clone(), "read_chat", json!({"id": id}));
-        offer(&mut cx, take());
-        step(&mut cx, &|ws, w, cx| ws.submit_modal(w, cx));
-        let text = h.join().unwrap().unwrap();
-        assert!(text.contains("pong"), "read_chat returns the messages: {text}");
-
-        let h = ask(from_chat.clone(), "start_chat", json!({"prompt": "no thanks"}));
-        offer(&mut cx, take());
-        step(&mut cx, &|ws, w, cx| ws.act(Act::Dismiss, w, cx));
-        assert_eq!(h.join().unwrap(), Err("The user declined.".to_string()));
-        assert_eq!(ws.read_with(&cx, |ws, _| ws.chats.len()), 1, "a declined request opens nothing");
-
-        let h = ask(from_chat.clone(), "start_code_session", json!({"folder": "no-such-project"}));
-        offer(&mut cx, take());
-        assert!(!asking(&cx), "a request that cannot work is not put to the user");
-        assert!(h.join().unwrap().unwrap_err().contains("No project or folder"));
-
-        let h = ask("code:someone".into(), "start_chat", json!({"prompt": "say only the word ping"}));
-        offer(&mut cx, take());
-        step(&mut cx, &|ws, w, cx| ws.submit_modal(w, cx));
-        h.join().unwrap().unwrap();
-        assert_eq!(ws.read_with(&cx, |ws, _| ws.chats.len()), 2);
-        let (second_id, second) = ws.read_with(&cx, |ws, _| (ws.chats[1].id.clone(), ws.chats[1].view.clone()));
-        assert!(!ws.read_with(&cx, |ws, _| is_tied(&ws.chat_store.get(&second_id).unwrap().cwd)), "a chat opened by a session has no project either");
-        wait(&mut cx, &second, "the first message to be answered", &|v| !v.is_busy() && v.probe().1.iter().any(|i| matches!(i, crate::chat::model::Item::Agent(t) if t.to_lowercase().contains("ping"))));
-
-        let live_before = ws.read_with(&cx, |ws, _| ws.live.len());
-        let h = ask(from_chat.clone(), "start_code_session", json!({"folder": cwd.to_string_lossy()}));
-        offer(&mut cx, take());
-        step(&mut cx, &|ws, w, cx| ws.submit_modal(w, cx));
-        let text = h.join().unwrap().unwrap();
-        assert_eq!(ws.read_with(&cx, |ws, _| ws.live.len()), live_before + 1);
-        assert!(ws.read_with(&cx, |ws, _| ws.side == Side::Sessions), "it opens in the Code tab");
-        let code_id = text.split("(id ").nth(1).and_then(|t| t.split(')').next()).unwrap().to_string();
-        let t = std::time::Instant::now();
-        while ws.read_with(&cx, |ws, cx| ws.live_view(&code_id).is_none_or(|v| v.read(cx).tail_text(40).is_empty())) {
-            assert!(t.elapsed() < Duration::from_secs(60), "the session drew nothing to read");
-            std::thread::sleep(Duration::from_millis(200));
-            draw(&mut cx);
-        }
-        let h = ask(from_chat.clone(), "read_code_session", json!({"id": code_id}));
-        offer(&mut cx, take());
-        step(&mut cx, &|ws, w, cx| ws.submit_modal(w, cx));
-        assert!(h.join().unwrap().unwrap().contains("latest terminal output"));
-        step(&mut cx, &|ws, w, cx| ws.close_live(&id, w, cx));
-    }
-
-    #[test]
-    #[ignore]
-    fn starting_sessions_does_not_hang_or_panic() {
-        let (tx, rx) = std::sync::mpsc::channel();
-        let t = std::thread::spawn(move || {
-            run();
-            tx.send(()).ok();
-        });
-        if rx.recv_timeout(std::time::Duration::from_secs(480)).is_err() {
-            // Either it froze (the bug) or the run panicked (the sender dropped).
-            match t.is_finished() {
-                true => t.join().unwrap(),
-                false => panic!("the workspace froze while starting sessions"),
-            }
-        }
+        Some((claude::context_fraction(tokens), tokens, false, None))
     }
 }

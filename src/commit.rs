@@ -1,17 +1,16 @@
-//! "Commit & Push": stage everything, have Haiku write the message through the user's own `claude` CLI
-//! (`claude -p`, no tools, no session saved), commit, then push. "Pull" is a plain `git pull`; the branch menu
+//! "Commit & Push": stage everything, have Haiku write the message through the running session's own mod
+//! (`ask.rs`; no `claude -p`, no second process), commit, then push. "Pull" is a plain `git pull`; the branch menu
 //! switches branches and creates new ones from origin (which `background_fetch` keeps fresh). The `git` CLI is
 //! used rather than libgit2 so the user's hooks, signing, identity, credentials and pull config apply exactly
 //! as for a manual commit.
 
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::Duration;
 
-use wait_timeout::ChildExt;
+/// A text-in, text-out completion: `(system, prompt)` to the model's reply. In the app it is `ask::complete`.
+pub type Complete<'a> = &'a dyn Fn(&str, &str) -> Result<String, String>;
 
-pub const MODEL: &str = "claude-haiku-5-5";
 /// Keeps the prompt small and cheap; the stat summary always covers the whole change.
 const MAX_DIFF_BYTES: usize = 40_000;
 
@@ -21,7 +20,7 @@ line and a few short lines of explanation. Match the style of the recent commits
 
 /// Stage all changes, commit them with a generated message (when there are any), then push.
 /// Returns a one-line summary for a toast. Blocking.
-pub fn commit_and_push(claude: &Path, cwd: &Path) -> Result<String, String> {
+pub fn commit_and_push(complete: Complete, cwd: &Path) -> Result<String, String> {
     // Staging now would commit the conflict markers.
     if has_unmerged(cwd) {
         return Err("Resolve the merge conflicts first".into());
@@ -32,7 +31,7 @@ pub fn commit_and_push(claude: &Path, cwd: &Path) -> Result<String, String> {
         None
     } else {
         let recent = git(cwd, &["log", "-8", "--format=%s"], None).unwrap_or_default();
-        let message = generate(claude, SYSTEM, &prompt(&recent, &diff)).map_err(|e| format!("{e} (changes are staged)"))?;
+        let message = generate(complete, SYSTEM, &prompt(&recent, &diff)).map_err(|e| format!("{e} (changes are staged)"))?;
         git(cwd, &["commit", "-F", "-"], Some(&message))?;
         Some(message.lines().next().unwrap_or_default().to_string())
     };
@@ -149,32 +148,9 @@ fn prompt(recent: &str, diff: &str) -> String {
     format!("Recent commit subjects:\n{recent}\n\nStaged changes:\n{}{cut}\n\nWrite the commit message.", &diff[..end])
 }
 
-/// One text-in, text-out call to Haiku through the user's `claude`. Blocking; also used to title sessions.
-pub fn generate(claude: &Path, system: &str, prompt: &str) -> Result<String, String> {
-    let mut cmd = crate::claude::command(claude);
-    cmd.args(["-p", "--model", MODEL, "--no-session-persistence", "--disable-slash-commands", "--strict-mcp-config"])
-        // No tools, and none of the user's settings/hooks: this is a plain text-in, text-out call.
-        .args(["--tools", "", "--setting-sources", "", "--system-prompt", system])
-        .env("CLAUDE_CODE_AUTO_CONNECT_IDE", "false")
-        // Neutral folder: keeps project CLAUDE.md files out of the call.
-        .current_dir(crate::platform::home_dir().unwrap_or_else(std::env::temp_dir))
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    let mut child = cmd.spawn().map_err(|e| format!("could not run claude: {e}"))?;
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(prompt.as_bytes());
-    }
-    if child.wait_timeout(Duration::from_secs(120)).map_err(|e| e.to_string())?.is_none() {
-        let _ = child.kill();
-        let _ = child.wait();
-        return Err("claude timed out".into());
-    }
-    let mut bytes = Vec::new();
-    if let Some(mut out) = child.stdout.take() {
-        let _ = out.read_to_end(&mut bytes);
-    }
-    clean_message(&String::from_utf8_lossy(&bytes)).ok_or_else(|| "claude returned nothing".into())
+/// One text-in, text-out call; the reply is trimmed and unwrapped from a code fence. Blocking; also titles sessions.
+pub fn generate(complete: Complete, system: &str, prompt: &str) -> Result<String, String> {
+    clean_message(&complete(system, prompt)?).ok_or_else(|| "the model returned nothing".into())
 }
 
 /// Trim, and unwrap a code fence if the model added one anyway.
@@ -224,6 +200,33 @@ mod tests {
         assert!(prompt("", &diff).contains("[diff truncated]"));
     }
 
+    fn no_model(_: &str, _: &str) -> Result<String, String> {
+        Err("no model call was expected".into())
+    }
+
+    #[test]
+    fn the_message_comes_from_the_completion_and_is_committed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (root, a) = (tmp.path(), tmp.path().join("a"));
+        git(root, &["init", "-q", "--bare", "remote.git"], None).unwrap();
+        git(root, &["clone", "-q", "remote.git", "a"], None).unwrap();
+        git(&a, &["config", "user.name", "t"], None).unwrap();
+        git(&a, &["config", "user.email", "t@t"], None).unwrap();
+        std::fs::write(a.join("new.txt"), "x").unwrap();
+        let said = std::cell::RefCell::new(String::new());
+        let model = |system: &str, prompt: &str| {
+            said.replace(format!("{system}|{prompt}"));
+            Ok("```\nAdd new.txt\n\nwhy\n```".to_string())
+        };
+        assert_eq!(commit_and_push(&model, &a).unwrap(), "Committed and pushed: Add new.txt");
+        assert!(said.borrow().contains("new.txt"), "the diff goes to the model");
+        assert_eq!(git(&a, &["log", "-1", "--format=%B"], None).unwrap().trim(), "Add new.txt\n\nwhy");
+        // A failed completion leaves the changes staged and says so.
+        std::fs::write(a.join("two.txt"), "y").unwrap();
+        let err = commit_and_push(&|_: &str, _: &str| Err("the session didn't pick the request up".to_string()), &a).unwrap_err();
+        assert!(err.ends_with("(changes are staged)"), "{err}");
+    }
+
     fn commit(dir: &Path, file: &str) {
         std::fs::write(dir.join(file), file).unwrap();
         git(dir, &["add", "-A"], None).unwrap();
@@ -268,12 +271,12 @@ mod tests {
         git(root, &["clone", "-q", "remote.git", "a"], None).unwrap();
         commit(&a, "one.txt");
         // Nothing staged (so no claude call) and no upstream yet: the existing commit is still pushed.
-        assert_eq!(commit_and_push(Path::new("claude-not-needed"), &a).unwrap(), "Nothing to commit; pushed");
+        assert_eq!(commit_and_push(&no_model, &a).unwrap(), "Nothing to commit; pushed");
         git(root, &["clone", "-q", "remote.git", "b"], None).unwrap();
         assert!(b.join("one.txt").exists());
         assert_eq!(pull(&b).unwrap(), "Already up to date");
         commit(&a, "two.txt");
-        commit_and_push(Path::new("claude-not-needed"), &a).unwrap();
+        commit_and_push(&no_model, &a).unwrap();
         assert_eq!(pull(&b).unwrap(), "Pulled");
         assert!(b.join("two.txt").exists());
     }
@@ -294,12 +297,12 @@ mod tests {
         git(&a, &["push", "-q", "origin", "HEAD"], None).unwrap();
 
         // b's push is rejected (remote moved on), and a merge pull conflicts.
-        let rejected = commit_and_push(Path::new("claude-not-needed"), &b).unwrap_err();
+        let rejected = commit_and_push(&no_model, &b).unwrap_err();
         assert!(classify(&b, rejected).conflict_in.is_some());
         // Identity is set because CI runners have none, and git refuses to merge without one.
         let failed = git(&b, &["-c", "pull.rebase=false", "-c", "user.name=t", "-c", "user.email=t@t", "pull"], None).unwrap_err();
         assert!(classify(&b, failed).conflict_in.is_some());
-        assert_eq!(commit_and_push(Path::new("claude-not-needed"), &b).unwrap_err(), "Resolve the merge conflicts first");
+        assert_eq!(commit_and_push(&no_model, &b).unwrap_err(), "Resolve the merge conflicts first");
         assert!(classify(&b, "git push failed: unable to access".into()).conflict_in.is_some(), "unmerged paths count");
 
         let clean = tmp.path().join("clean");

@@ -1,6 +1,6 @@
 [package]
 name = "claudiu"
-version = "0.3.0"
+version = "0.5.0"
 edition = "2024"
 description = "A native workspace for Claude Code sessions: real PTYs, projects, and session history"
 repository = "https://github.com/m4rocks/claudiu"
@@ -21,12 +21,10 @@ gpui-kit = { version = "0.7.1", default-features = false, features = ["component
 raw-window-handle = "0.6"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
-base64 = "0.22"
-image = { version = "0.25", default-features = false, features = ["png", "bmp"] }
+image = { version = "0.25", default-features = false, features = ["png", "bmp", "jpeg", "gif", "webp"] }
 time = { version = "0.3.55", features = ["parsing"] }
 uuid = { version = "1.27.0", features = ["v4"] }
 velopack = "1.2.161"
-wait-timeout = "0.2.1"
 which = "8.0.6"
 
 [dev-dependencies]
@@ -44,7 +42,10 @@ strip = true
 
 [target."cfg(windows)".dependencies]
 junction = "2.1.0"
-windows-sys = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging", "Win32_Foundation", "Win32_Security", "Win32_System_DataExchange", "Win32_System_Memory"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
@@ -56,5 +57,5 @@ incremental = true
 
 [profile.dev.package."*"]
 debug = false
-# gpui lays out and paints every element on every frame; unoptimised it makes a busy chat visibly laggy.
+# gpui lays out and paints every element on every frame; unoptimised it makes a busy session visibly laggy.
 opt-level = 2

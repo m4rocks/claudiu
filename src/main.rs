@@ -2,24 +2,31 @@
 
 mod accounts;
 mod app;
+mod ask;
 mod bridge;
-mod chat;
 mod claude;
 mod commit;
+mod datadir;
 mod git;
 mod github;
+mod glide;
+mod trace;
 mod glyphs;
+mod inspector;
 mod keys;
 mod mcp;
 mod platform;
+mod scale;
 mod sidebar;
+mod skeleton;
 mod store;
 mod terminal;
 mod terminal_view;
 mod theme;
-mod statusline;
 mod updater;
+mod usage;
 mod views;
+mod visual;
 mod widgets;
 
 use gpui::{App, Bounds, KeyBinding, TitlebarOptions, WindowBounds, WindowOptions, prelude::*, px, size};
@@ -30,10 +37,10 @@ use gpui_kit::component::TitleBar;
 gpui_kit::assets::icon_assets!(
     AppIcons,
     [
-        WindowMinimize, WindowMaximize, WindowRestore, WindowClose, Archive, ArchiveRestore, ArrowLeft, Bot, Check, ChevronDown, ChevronRight, Circle,
-        CircleCheck, CircleDot, CircleSlash, CircleX, Clock, Columns2, Ellipsis, ExternalLink, GitBranch, GitCommitHorizontal, GitMerge, GitPullRequest,
-        GitPullRequestClosed, GitPullRequestDraft, HeartPlus, LoaderCircle, Lock, MessageSquare, PanelLeft, Pencil, Plus, RefreshCw, Rows2, Search,
-        Settings, SquareSplitHorizontal, Terminal, X
+        WindowMinimize, WindowMaximize, WindowRestore, WindowClose, Archive, ArchiveRestore, ArrowDownToLine, ArrowLeft, Brackets, Check, ChevronDown, ChevronRight,
+        CircleCheck, CircleDot, CircleSlash, CircleX, Clock, Ellipsis, Eye, ExternalLink, FolderOpen, GitBranch, GitCommitHorizontal, GitMerge, GitPullRequest,
+        GitPullRequestClosed, GitPullRequestDraft, HeartPlus, LoaderCircle, Lock, MessageSquare, PanelLeft, PanelRight, Pencil, RefreshCw, Search,
+        Settings, Terminal, X
     ]
 );
 
@@ -87,8 +94,8 @@ mod icon_tests {
 }
 
 use app::{
-    CloseSession, FocusNextPane, FocusSearch, HideApp, HideOthers, ImportProject, NewChat, NewClaude, NewShell, NextSession, OpenGithub, OpenSettings, PrevSession, Quit, ShowAllApps,
-    SplitPane, ToggleSidebar, Workspace,
+    CloseSession, FocusSearch, HideApp, HideOthers, ImportProject, NewClaude, NextSession, OpenGithub, OpenSettings, PrevSession, Quit, ShowAllApps,
+    SwapFocus, ToggleRight, ToggleShell, ToggleSidebar, Workspace,
 };
 
 /// The macOS menu bar. Every item is an existing Claudiu action, so menu, shortcut and sidebar share one code path;
@@ -111,8 +118,7 @@ fn menu_bar() -> Vec<gpui::Menu> {
         ]),
         Menu::new("File").items([
             MenuItem::action("New Claude Session", NewClaude),
-            MenuItem::action("New Chat", NewChat),
-            MenuItem::action("New Shell", NewShell),
+            MenuItem::action("Show or Hide Shell", ToggleShell),
             MenuItem::action("GitHub Issues & Pull Requests", OpenGithub),
             MenuItem::separator(),
             MenuItem::action("Add Project…", ImportProject),
@@ -128,13 +134,13 @@ fn menu_bar() -> Vec<gpui::Menu> {
         ]),
         Menu::new("View").items([
             MenuItem::action("Toggle Sidebar", ToggleSidebar),
+            MenuItem::action("Toggle Right Sidebar", ToggleRight),
             MenuItem::action("Find Sessions", FocusSearch),
             MenuItem::separator(),
             MenuItem::action("Next Session", NextSession),
             MenuItem::action("Previous Session", PrevSession),
             MenuItem::separator(),
-            MenuItem::action("Split Pane", SplitPane),
-            MenuItem::action("Focus Next Pane", FocusNextPane),
+            MenuItem::action("Switch Focus Between Claude and Shell", SwapFocus),
         ]),
     ]
 }
@@ -166,10 +172,6 @@ fn install_crash_log() {
 }
 
 fn main() {
-    // Hidden helper mode: Claude Code runs this as its status line (see statusline.rs). Keep it instant.
-    if std::env::args().nth(1).as_deref() == Some(statusline::TEE_FLAG) {
-        std::process::exit(statusline::run_tee());
-    }
     // Hidden helper mode: the MCP server that lets Claude name its own tab (see mcp.rs).
     if std::env::args().nth(1).as_deref() == Some(mcp::FLAG) {
         std::process::exit(mcp::run());
@@ -192,16 +194,16 @@ fn main() {
         // chord, e.g. Alt+P, still reaches Claude Code untouched.
         cx.bind_keys([
             KeyBinding::new("secondary-shift-n", NewClaude, None),
-            KeyBinding::new("secondary-shift-m", NewChat, None),
-            KeyBinding::new("secondary-shift-t", NewShell, None),
+            KeyBinding::new("secondary-shift-t", ToggleShell, None),
+            KeyBinding::new("secondary-j", ToggleShell, None),
             KeyBinding::new("secondary-shift-w", CloseSession, None),
-            KeyBinding::new("secondary-shift-d", SplitPane, None),
             KeyBinding::new("secondary-shift-b", ToggleSidebar, None),
+            KeyBinding::new("secondary-shift-r", ToggleRight, None),
             KeyBinding::new("secondary-shift-f", FocusSearch, None),
             KeyBinding::new("secondary-shift-o", ImportProject, None),
             KeyBinding::new("secondary-shift-g", OpenGithub, None),
             KeyBinding::new("secondary-,", OpenSettings, None),
-            KeyBinding::new("secondary-shift-]", FocusNextPane, None),
+            KeyBinding::new("secondary-shift-]", SwapFocus, None),
             KeyBinding::new("ctrl-tab", NextSession, None),
             KeyBinding::new("ctrl-shift-tab", PrevSession, None),
         ]);
@@ -215,6 +217,9 @@ fn main() {
         cx.bind_keys([KeyBinding::new("cmd-q", Quit, None), KeyBinding::new("cmd-h", HideApp, None), KeyBinding::new("cmd-alt-h", HideOthers, None)]);
 
         let bounds = Bounds::centered(None, size(px(1280.0), px(800.0)), cx);
+        // AppKit's standard window buttons are 14 px tall; center them in the top bar so the
+        // traffic lights line up with its controls (and get equal space above and below).
+        let traffic_light_y = (theme::TOPBAR_HEIGHT - 14.0) / 2.0;
         // Opened through gpui_kit so the window gets the component library's Root (text inputs need it).
         let (window, workspace) = gpui_kit::open_window(
             WindowOptions {
@@ -222,7 +227,7 @@ fn main() {
                 window_min_size: Some(size(px(720.0), px(420.0))),
                 titlebar: Some(TitlebarOptions {
                     title: Some("Claudiu".into()),
-                    traffic_light_position: Some(gpui::point(px(14.0), px(13.0))),
+                    traffic_light_position: Some(gpui::point(px(14.0), px(traffic_light_y))),
                     ..TitleBar::title_bar_options()
                 }),
                 // The top bar owns dragging and double-click (see TitleBar::window_options).

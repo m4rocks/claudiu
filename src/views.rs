@@ -1,4 +1,4 @@
-//! Main area (terminal panes / session details / home), overlays (menu, modal, toast), and the root `Render`.
+//! Main area (the shown session / home), overlays (menu, modal, toast), and the root `Render`.
 
 use gpui::{
     AnyElement, ClickEvent, Context, FontWeight, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
@@ -7,147 +7,43 @@ use gpui::{
 };
 
 use crate::app::{
-    Side,
-    Act, CloseSession, GitOp, MenuItem, FocusNextPane, FocusSearch, ImportProject, Main, Modal, NewChat, NewClaude, NewShell, NextSession, OpenGithub, OpenSettings, PrevSession, SplitPane,
-    ToggleSidebar, Workspace,
+    Act, CloseSession, GitOp, FocusSearch, ImportProject, Main, Modal, NewClaude, NextSession, OpenGithub, OpenSettings, PrevSession, ShellDrag, SwapFocus,
+    ToggleRight, ToggleShell, ToggleSidebar, Workspace, SHELL_HEIGHT,
 };
 use gpui_kit::component::{TitleBar, input::Input};
-use crate::platform::Editor;
 use crate::store::{SessionKind, now};
 use crate::theme::{self, hsla};
 use crate::updater::Status;
 use gpui_kit::assets::IconName;
-use crate::widgets::{ago, button, button_disabled, clawd, danger_button, fade_in, icon, icon_button, section_label, segment, short_path, spinner};
+use crate::widgets::{ago, button, clawd, danger_button, fade_in, icon, icon_button, section_label, short_path, spinner};
 
 impl Workspace {
     // ------------------------------------------------------------------ top bar
 
-    fn render_topbar(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let rec = self.active_id().and_then(|id| self.store.session(id)).cloned();
-        // A GitHub pane has no session record; its folder and project stand in for one.
-        let gh = self
-            .active_id()
-            .and_then(|id| self.gh_pane(id))
-            .map(|p| (p.cwd.clone(), format!("GitHub · {}", p.project)))
-            .or_else(|| self.active_id().and_then(|id| self.chat_pane(id).map(|p| (p.cwd.clone(), self.chat_title(id).unwrap_or_default()))));
-        let project = rec
-            .as_ref()
-            .and_then(|r| r.project_id.clone())
-            .or_else(|| gh.as_ref().and_then(|(cwd, _)| self.store.project_for_cwd(cwd)))
-            .and_then(|p| self.store.project(&p))
-            .cloned();
-        let cwd = rec.as_ref().map(|r| r.cwd.clone()).or_else(|| gh.as_ref().filter(|(cwd, _)| crate::chat::store::is_tied(cwd)).map(|(cwd, _)| cwd.clone()));
-        let in_terminals = matches!(self.main, Main::Terminals);
-
-        let mut right = div().flex().flex_none().items_center().gap(px(6.0));
-        if in_terminals {
-            right = right.child(
-                icon_button("split", IconName::SquareSplitHorizontal).on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|ws, ev: &MouseDownEvent, _w, cx| {
-                        let items = ws.split_menu(cx);
-                        ws.open_menu(ev.position, items, cx);
-                    }),
-                ),
-            );
-            if self.panes.len() > 1 {
-                right = right.child(
-                    icon_button("orient", if self.split_vertical { IconName::Rows2 } else { IconName::Columns2 }).on_click(cx.listener(|ws, _: &ClickEvent, _w, cx| {
-                        ws.split_vertical = !ws.split_vertical;
-                        cx.notify();
-                    })),
-                );
-            }
-        }
-        if let Some(path) = cwd.clone() {
-            let target = project.as_ref().map(|p| p.path.clone()).unwrap_or(path);
-            // "Open in <editor>" plus a ▾ to pick another installed editor (remembered, see Act::OpenEditor).
-            if let Some(editor) = self.preferred_editor() {
-                let (t, pick_target) = (target.clone(), target.clone());
-                let open = segment("open-in").child(format!("Open in {}", editor_name(editor)))
-                    .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::OpenEditor(editor, t.clone()), window, cx)));
-                let pick = segment("open-in-pick").child(icon(IconName::ChevronDown, 14.0)).on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |ws, ev: &MouseDownEvent, _w, cx| {
-                        let current = ws.preferred_editor();
-                        let items = ws
-                            .editors
-                            .iter()
-                            .filter(|(_, found)| *found)
-                            .map(|(e, _)| MenuItem {
-                                label: format!("{}{}", if current == Some(*e) { "✓  " } else { "    " }, e.label()),
-                                hint: None,
-                                disabled: false,
-                                act: Act::OpenEditor(*e, pick_target.clone()),
-                                danger: false,
-                                separator_before: false,
-                            })
-                            .collect();
-                        ws.open_menu(ev.position, items, cx);
-                    }),
-                );
-                right = right.child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .h(px(26.0))
-                        .rounded(px(6.0))
-                        .overflow_hidden()
-                        .bg(hsla(0x1b1b1b))
-                        .child(open)
-                        .child(div().w(px(1.0)).h(px(14.0)).bg(hsla(0x363636)))
-                        .child(pick),
-                );
-            }
-            let t = target.clone();
-            right = right.child(
-                button("reveal", "Open folder", false)
-                    .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::Reveal(t.clone()), window, cx))),
-            );
-        }
-        // Git actions are offered for sessions inside a Git project (the repo is found from the session's own folder).
+    fn render_topbar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let crate::inspector::Shown { rec, cwd, project } = self.shown();
+        // Git actions live in the right sidebar; the branch pill here needs the repository of the session's own folder.
         let repo = project.as_ref().filter(|p| p.git.is_some()).and(cwd.clone());
         let busy = self.git_busy;
-        if let Some(repo) = repo.clone() {
-            let pull_repo = repo.clone();
-            // One git operation at a time: while one runs, both buttons are disabled.
-            let commit = if busy.is_some() {
-                button_disabled("commit-push", if busy == Some(GitOp::CommitPush) { "Committing…" } else { "Commit & Push" })
-            } else {
-                button("commit-push", "Commit & Push", false)
-                    .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::CommitPush(repo.clone()), window, cx)))
-            };
-            let pull = if busy.is_some() {
-                button_disabled("pull", if busy == Some(GitOp::Pull) { "Pulling…" } else { "Pull" })
-            } else {
-                button("pull", "Pull", false)
-                    .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::Pull(pull_repo.clone()), window, cx)))
-            };
-            right = right.child(commit).child(pull);
-        }
 
-        let title = rec
-            .as_ref()
-            .map(|r| r.display_title().to_string())
-            .or_else(|| gh.as_ref().map(|(_, name)| name.clone()))
-            .unwrap_or_else(|| "Claudiu".into());
+        let title = rec.as_ref().map(|r| r.display_title().to_string()).unwrap_or_else(|| "Claudiu".into());
         let branch = project.as_ref().and_then(|p| p.git.as_ref()).and_then(|g| g.branch.clone());
         // `.occlude()` on both groups: the bar is a Windows drag (HTCAPTION) area, which would otherwise swallow clicks on the buttons inside it.
-        // The title bar is the top bar: macOS keeps its traffic lights (over the sidebar, or left of the
-        // toggle when the sidebar is hidden), Windows/Linux get min/max/close drawn at the right edge.
-        let left_pad = if cfg!(target_os = "macos") && !self.store.data.layout.sidebar_visible { 80.0 } else { 14.0 };
+        // The top bar spans the window and is drawn as the window background, not as a panel. macOS keeps its
+        // traffic lights at the left (they are hidden in fullscreen); Windows/Linux get min/max/close at the right.
+        let left_pad = if cfg!(target_os = "macos") && !window.is_fullscreen() { 80.0 } else { 10.0 };
         TitleBar::new()
-            .h(px(40.0))
+            .h(px(theme::TOPBAR_HEIGHT))
             .pl(px(left_pad))
             .bg(hsla(theme::APP_BG))
-            .border_color(hsla(theme::BORDER))
+            .border_b_0()
             // TitleBar's inner row can't shrink below its in-flow content's width, so a long title would push
             // the right-hand buttons out of view. An absolute overlay takes the content out of that sizing.
-            .child(div().absolute().size_full().flex().items_center().justify_between().child(
+            .child(div().absolute().size_full().flex().items_center().justify_between().pr(px(theme::PANEL_GAP)).child(
                 div()
                     .flex()
                     .items_center()
-                    .gap(px(10.0))
+                    .gap(px(6.0))
                     .flex_1()
                     .min_w_0()
                     .overflow_hidden()
@@ -167,12 +63,12 @@ impl Workspace {
                             .overflow_hidden()
                             .whitespace_nowrap()
                             .text_ellipsis()
-                            .text_size(px(13.0))
+                            .text_size(crate::scale::px(13.0))
                             .font_weight(FontWeight::MEDIUM)
                             .child(title),
                     )
                     .when_some(cwd, |d, p| {
-                        d.child(div().flex_none().text_size(px(11.5)).text_color(hsla(theme::TEXT_FAINT)).child(short_path(&p)))
+                        d.child(div().flex_none().text_size(crate::scale::px(11.5)).text_color(hsla(theme::TEXT_FAINT)).child(short_path(&p)))
                     })
                     .when_some(branch.zip(repo), |d, (b, repo)| {
                         // Click: switch branch or create one (see Workspace::open_branch_menu).
@@ -188,11 +84,11 @@ impl Workspace {
                                 .px(px(7.0))
                                 .py(px(1.0))
                                 .rounded(px(10.0))
-                                .bg(hsla(0x1a1a1a))
-                                .text_size(px(11.0))
+                                .bg(hsla(0x26262a))
+                                .text_size(crate::scale::px(11.0))
                                 .text_color(hsla(theme::TEXT_DIM))
                                 .cursor_pointer()
-                                .hover(|s| s.bg(hsla(0x262626)).text_color(hsla(theme::TEXT)))
+                                .hover(|s| s.bg(hsla(0x323236)).text_color(hsla(theme::TEXT)))
                                 .child(icon(IconName::GitBranch, 12.0))
                                 .child(b)
                                 .child(tail)
@@ -203,7 +99,11 @@ impl Workspace {
                         )
                     }),
             )
-            .child(right.mr(px(10.0)).occlude()))
+            .child(
+                div().flex().flex_none().occlude().child(
+                    icon_button("toggle-right", IconName::PanelRight).on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.toggle_right(window, cx))),
+                ),
+            ))
     }
 
     fn render_update_banner(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -218,13 +118,14 @@ impl Workspace {
                 .flex()
                 .items_center()
                 .justify_between()
-                .h(px(32.0))
+                .h(px(28.0))
                 .flex_none()
-                .px(px(14.0))
+                .px(px(10.0))
+                .rounded(px(6.0))
                 .bg(hsla(0x1d1512))
-                .border_b_1()
+                .border_1()
                 .border_color(hsla(0x3a2a24))
-                .child(div().text_size(px(12.0)).text_color(hsla(theme::ACCENT)).child(text))
+                .child(div().text_size(crate::scale::px(12.0)).text_color(hsla(theme::ACCENT)).child(text))
                 .when_some(action, |d, (label, act)| {
                     d.child(button("update-action", label, true).h(px(22.0)).on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
                         ws.act(act.clone(), window, cx)
@@ -234,152 +135,114 @@ impl Workspace {
         )
     }
 
-    // ------------------------------------------------------------------ panes
+    // ------------------------------------------------------------------ the shown session
 
-    /// `avail_w` is the width left of the sidebar; a GitHub pane uses its share of it to pick its layout.
-    fn render_panes(&mut self, avail_w: f32, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let n = self.panes.len();
-        let mut container = div().flex().size_full().gap(px(1.0)).bg(hsla(theme::BORDER));
-        container = if self.split_vertical { container.flex_col() } else { container.flex_row() };
+    fn render_session(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let blank = || div().size_full().bg(hsla(theme::TERMINAL_BG)).into_any_element();
+        let Some(id) = self.active.clone() else { return blank() };
+        let Some(term) = self.live_view(&id).cloned() else { return blank() };
+        let rec = self.store.session(&id).cloned();
+        let exit = term.read(cx).exit_code;
+        let is_claude = rec.as_ref().is_some_and(|r| r.kind == SessionKind::Claude);
+        let rid = id.clone();
 
-        for (i, id) in self.panes.clone().into_iter().enumerate() {
-            let gh = self.gh_pane(&id).map(|p| (p.view.clone(), p.project.clone()));
-            let chat = self.chat_pane(&id).map(|p| p.view.clone());
-            let term = if gh.is_none() && chat.is_none() { self.live_view(&id).cloned() } else { None };
-            if gh.is_none() && chat.is_none() && term.is_none() {
-                continue;
-            }
-            let rec = self.store.session(&id).cloned();
-            let exit = term.as_ref().and_then(|v| v.read(cx).exit_code);
-            let focused = i == self.focused;
-            let title = match &gh {
-                Some((_, project)) => format!("GitHub · {project}"),
-                None if chat.is_some() => self.chat_title(&id).unwrap_or_default(),
-                None => rec.as_ref().map(|r| r.display_title().to_string()).unwrap_or_default(),
+        let banner = exit.map(|code| {
+            let label = match code {
+                Some(0) | None => "Session ended".to_string(),
+                Some(c) => format!("Session ended (exit code {c})"),
             };
-            let is_claude = rec.as_ref().is_some_and(|r| r.kind == SessionKind::Claude);
-            let cwd = rec.as_ref().map(|r| r.cwd.clone());
-            let (rid, cid) = (id.clone(), id.clone());
+            div()
+                .absolute()
+                .bottom(px(12.0))
+                .left(px(12.0))
+                .right(px(12.0))
+                .flex()
+                .items_center()
+                .justify_between()
+                .px(px(12.0))
+                .py(px(8.0))
+                .rounded(px(8.0))
+                .bg(hsla(0x181818))
+                .border_1()
+                .border_color(hsla(0x2a2a2a))
+                .child(div().text_size(crate::scale::px(12.5)).text_color(hsla(theme::TEXT_DIM)).child(label))
+                .children(is_claude.then(|| {
+                    button("ended-act", "Resume", true).on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::Resume(rid.clone()), window, cx)))
+                }))
+        });
 
-            let header = (n > 1).then(|| {
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .h(px(26.0))
-                    .flex_none()
-                    .px(px(10.0))
-                    .bg(hsla(theme::APP_BG))
-                    .child(
-                        div()
-                            .text_size(px(11.5))
-                            .text_color(hsla(if focused { theme::TEXT } else { theme::TEXT_DIM }))
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .child(title.clone()),
-                    )
-                    .child(icon_button(gpui::SharedString::from(format!("pane-x-{i}")), IconName::X).on_click(cx.listener(
-                        move |ws, _: &ClickEvent, window, cx| {
-                            cx.stop_propagation();
-                            ws.act(Act::CloseLive(cid.clone()), window, cx)
-                        },
-                    )))
-            });
+        let pane = fade_in(
+            div()
+                .id("pane")
+                .relative()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_w_0()
+                .min_h_0()
+                .bg(hsla(theme::TERMINAL_BG))
+                .child(div().flex_1().min_h_0().p(px(6.0)).child(term))
+                .children(banner),
+            format!("pane-in-{id}"),
+            150,
+            0.4,
+        );
+        let mut container = div().flex().flex_col().size_full().gap(px(1.0)).bg(hsla(theme::BORDER)).child(pane);
 
-            let banner = exit.map(|code| {
-                let label = match code {
-                    Some(0) | None => "Session ended".to_string(),
-                    Some(c) => format!("Session ended (exit code {c})"),
-                };
-                let primary = if is_claude { "Resume" } else { "New shell here" };
-                let act = if is_claude {
-                    Act::Resume(rid.clone())
-                } else {
-                    Act::NewShell { cwd: cwd.clone().unwrap_or_default() }
-                };
-                div()
-                    .absolute()
-                    .bottom(px(12.0))
-                    .left(px(12.0))
-                    .right(px(12.0))
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .px(px(12.0))
-                    .py(px(8.0))
-                    .rounded(px(8.0))
-                    .bg(hsla(0x181818))
-                    .border_1()
-                    .border_color(hsla(0x2a2a2a))
-                    .child(div().text_size(px(12.5)).text_color(hsla(theme::TEXT_DIM)).child(label))
-                    .child(div().flex().gap(px(6.0)).child(
-                        button(gpui::SharedString::from(format!("ended-act-{i}")), primary, true).on_click(cx.listener(
-                            move |ws, _: &ClickEvent, window, cx| ws.act(act.clone(), window, cx),
-                        )),
-                    ))
-            });
-
-            container = container.child(fade_in(
-                div()
-                    .id(gpui::SharedString::from(format!("pane-{i}")))
-                    .relative()
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .min_w_0()
-                    .min_h_0()
-                    .bg(hsla(theme::TERMINAL_BG))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |ws, _: &MouseDownEvent, window, cx| {
-                            if ws.focused != i {
-                                ws.focus_pane(i, window, cx);
-                            }
-                        }),
-                    )
-                    .children(header)
-                    .child(match (gh, chat, term) {
-                        (Some((view, _)), ..) => {
-                            let w = if self.split_vertical { avail_w } else { avail_w / n as f32 };
-                            view.update(cx, |v, _| v.width = w);
-                            div().flex_1().min_h_0().child(view)
-                        }
-                        (None, Some(view), _) => div().flex_1().min_h_0().child(view),
-                        (None, None, Some(view)) => div().flex_1().min_h_0().p(px(8.0)).child(view),
-                        _ => div(),
-                    })
-                    .children(banner),
-                format!("pane-in-{id}"),
-                150,
-                0.4,
-            ));
+        // The session's shell, under its terminal, with a divider to drag it taller or shorter.
+        if let Some((view, height)) = self.shells.get(&id).filter(|p| p.open).map(|p| (p.view.clone(), p.height)) {
+            let drag_id = id.clone();
+            container = container
+                .child(
+                    div()
+                        .id("shell-divider")
+                        .h(px(4.0))
+                        .flex_none()
+                        .bg(hsla(theme::BORDER))
+                        .cursor_row_resize()
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |ws, ev: &MouseDownEvent, _w, cx| {
+                                let height = ws.shells.get(&drag_id).map_or(SHELL_HEIGHT, |p| p.height);
+                                ws.shell_drag = Some(ShellDrag { id: drag_id.clone(), y: f32::from(ev.position.y), height });
+                                cx.notify();
+                            }),
+                        ),
+                )
+                .child(div().h(px(height)).flex_none().bg(hsla(theme::TERMINAL_BG)).p(px(6.0)).child(view));
         }
-        container
+        container.into_any_element()
     }
 
     // ------------------------------------------------------------------ details & home
 
     fn render_home(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let cwd = self.active_cwd();
-        let (c1, c2) = (cwd.clone(), cwd);
+        let c1 = cwd;
         let shortcut = |keys: &str, what: &str| {
             div()
                 .flex()
                 .justify_between()
                 .gap(px(28.0))
-                .child(div().text_size(px(12.0)).text_color(hsla(theme::TEXT_DIM)).child(what.to_string()))
-                .child(div().text_size(px(12.0)).text_color(hsla(theme::TEXT_FAINT)).child(keys.to_string()))
+                .child(div().text_size(crate::scale::px(12.0)).text_color(hsla(theme::TEXT_DIM)).child(what.to_string()))
+                .child(div().text_size(crate::scale::px(12.0)).text_color(hsla(theme::TEXT_FAINT)).child(keys.to_string()))
         };
         let mut recent = div().flex().flex_col().gap(px(2.0)).mt(px(26.0)).w(px(420.0));
-        let mut sessions: Vec<_> = self.store.data.sessions.iter().filter(|s| s.kind == SessionKind::Claude && !s.hidden).cloned().collect();
-        sessions.sort_by_key(|s| std::cmp::Reverse(s.last_active));
+        // Newest first: (id, title, last active).
+        let mut sessions: Vec<(String, String, i64)> = self
+            .store
+            .data
+            .sessions
+            .iter()
+            .filter(|s| s.kind == SessionKind::Claude && !s.hidden)
+            .map(|s| (s.id.clone(), s.display_title().to_string(), s.last_active))
+            .collect();
+        sessions.sort_by_key(|s| std::cmp::Reverse(s.2));
         let t = now();
         if !sessions.is_empty() {
             recent = recent.child(div().mb(px(4.0)).child(section_label("RECENT")));
         }
-        for (i, s) in sessions.into_iter().take(5).enumerate() {
-            let id = s.id.clone();
+        for (i, (id, title, last_active)) in sessions.into_iter().take(5).enumerate() {
             recent = recent.child(
                 div()
                     .id(gpui::SharedString::from(format!("recent-{i}")))
@@ -390,8 +253,8 @@ impl Workspace {
                     .rounded(px(6.0))
                     .cursor_pointer()
                     .hover(|st| st.bg(hsla(theme::ROW_HOVER)))
-                    .child(div().text_size(px(13.0)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(s.display_title().to_string()))
-                    .child(div().text_size(px(11.5)).text_color(hsla(theme::TEXT_FAINT)).child(ago(s.last_active, t)))
+                    .child(div().text_size(crate::scale::px(13.0)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(title))
+                    .child(div().text_size(crate::scale::px(11.5)).text_color(hsla(theme::TEXT_FAINT)).child(ago(last_active, t)))
                     .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::Select(id.clone()), window, cx))),
             );
         }
@@ -402,18 +265,15 @@ impl Workspace {
             .items_center()
             .justify_center()
             .child(clawd(72.0))
-            .child(div().mt(px(20.0)).text_size(px(22.0)).font_weight(FontWeight::SEMIBOLD).child("Claudiu"))
-            .child(div().mt(px(4.0)).text_size(px(13.0)).text_color(hsla(theme::TEXT_DIM)).child("A workspace for your Claude Code sessions"))
+            .child(div().mt(px(20.0)).text_size(crate::scale::px(22.0)).font_weight(FontWeight::SEMIBOLD).child("Claudiu"))
+            .child(div().mt(px(4.0)).text_size(crate::scale::px(13.0)).text_color(hsla(theme::TEXT_DIM)).child("A workspace for your Claude Code sessions"))
             .child(
                 div()
                     .mt(px(22.0))
                     .flex()
                     .gap(px(8.0))
-                    .child(button("home-claude", "New Claude session", true).on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
+                    .child(button("home-claude", "New code session", true).on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
                         ws.act(Act::NewClaude { cwd: c1.clone() }, window, cx)
-                    })))
-                    .child(button("home-shell", "New shell", false).on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
-                        ws.act(Act::NewShell { cwd: c2.clone() }, window, cx)
                     })))
                     .child(button("home-import", "Add project", false).on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::ImportProject, window, cx)))),
             )
@@ -424,73 +284,8 @@ impl Workspace {
                     .flex()
                     .flex_col()
                     .gap(px(4.0))
-                    .child(shortcut("Ctrl+Shift+N", "New Claude session"))
-                    .child(shortcut("Ctrl+Shift+T", "New shell"))
-                    .child(shortcut("Ctrl+Shift+D", "Split pane"))
-                    .child(shortcut("Ctrl+Tab", "Next session"))
-                    .child(shortcut("Ctrl+Shift+W", "End session")),
-            )
-    }
-
-    /// What the main area shows while the Chat tab is open and no session is selected.
-    fn render_chat_home(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let shortcut = |keys: &str, what: &str| {
-            div()
-                .flex()
-                .justify_between()
-                .gap(px(28.0))
-                .child(div().text_size(px(12.0)).text_color(hsla(theme::TEXT_DIM)).child(what.to_string()))
-                .child(div().text_size(px(12.0)).text_color(hsla(theme::TEXT_FAINT)).child(keys.to_string()))
-        };
-        let mut chats: Vec<_> = self.chat_store.shown().cloned().collect();
-        chats.sort_by_key(|c| std::cmp::Reverse(c.last_active));
-        let t = now();
-        let mut recent = div().flex().flex_col().gap(px(2.0)).mt(px(26.0)).w(px(420.0));
-        if !chats.is_empty() {
-            recent = recent.child(div().mb(px(4.0)).child(section_label("RECENT CHATS")));
-        }
-        for (i, c) in chats.into_iter().take(5).enumerate() {
-            let id = c.id.clone();
-            recent = recent.child(
-                div()
-                    .id(gpui::SharedString::from(format!("recent-chat-{i}")))
-                    .flex()
-                    .justify_between()
-                    .px(px(10.0))
-                    .py(px(6.0))
-                    .rounded(px(6.0))
-                    .cursor_pointer()
-                    .hover(|st| st.bg(hsla(theme::ROW_HOVER)))
-                    .child(div().text_size(px(13.0)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(c.title.clone()))
-                    .child(div().text_size(px(11.5)).text_color(hsla(theme::TEXT_FAINT)).child(ago(c.last_active, t)))
-                    .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::OpenChat(id.clone()), window, cx))),
-            );
-        }
-        div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .items_center()
-            .justify_center()
-            .child(clawd(72.0))
-            .child(div().mt(px(20.0)).text_size(px(22.0)).font_weight(FontWeight::SEMIBOLD).child("Claudiu"))
-            .child(div().mt(px(4.0)).text_size(px(13.0)).text_color(hsla(theme::TEXT_DIM)).child("Chat with Claude about anything, or tie a chat to a project"))
-            .child(
-                div()
-                    .mt(px(22.0))
-                    .flex()
-                    .gap(px(8.0))
-                    .child(button("home-chat", "New chat", true).on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::NewChat { cwd: None, split: false }, window, cx)))),
-            )
-            .child(recent)
-            .child(
-                div()
-                    .mt(px(30.0))
-                    .flex()
-                    .flex_col()
-                    .gap(px(4.0))
-                    .child(shortcut("Ctrl+Shift+M", "New chat"))
-                    .child(shortcut("Ctrl+Shift+D", "Split pane"))
+                    .child(shortcut("Ctrl+Shift+N", "New code session"))
+                    .child(shortcut("Ctrl+Shift+T", "Show or hide shell"))
                     .child(shortcut("Ctrl+Tab", "Next session"))
                     .child(shortcut("Ctrl+Shift+W", "End session")),
             )
@@ -526,11 +321,11 @@ impl Workspace {
                 .flex()
                 .items_center()
                 .rounded(px(5.0))
-                .text_size(px(12.5))
+                .text_size(crate::scale::px(12.5))
                 .text_color(hsla(color))
                 .gap(px(8.0))
                 .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(item.label.clone()))
-                .children(item.hint.clone().map(|h| div().flex_none().text_size(px(11.0)).text_color(hsla(theme::TEXT_FAINT)).child(h)));
+                .children(item.hint.clone().map(|h| div().flex_none().text_size(crate::scale::px(11.0)).text_color(hsla(theme::TEXT_FAINT)).child(h)));
             card = card.child(if item.disabled {
                 row
             } else {
@@ -565,17 +360,11 @@ impl Workspace {
         let (title, body, confirm_label, danger): (String, gpui::AnyElement, String, bool) = match modal {
             Modal::Confirm { title, body, confirm, danger, .. } => (
                 title.clone(),
-                div().text_size(px(13.0)).text_color(hsla(theme::TEXT_DIM)).child(body.clone()).into_any_element(),
+                div().text_size(crate::scale::px(13.0)).text_color(hsla(theme::TEXT_DIM)).child(body.clone()).into_any_element(),
                 confirm.clone(),
                 *danger,
             ),
-            Modal::Bridge { title, body, confirm, .. } => (
-                title.clone(),
-                div().id("bridge-body").max_h(px(260.0)).overflow_y_scroll().text_size(px(13.0)).text_color(hsla(theme::TEXT_DIM)).child(body.clone()).into_any_element(),
-                confirm.clone(),
-                false,
-            ),
-            Modal::Settings { shell, claude, updates } => {
+            Modal::Settings { shell, claude, updates, scale } => {
                 let toggle = |on: bool| if on { "On" } else { "Off" };
                 (
                     "Settings".into(),
@@ -585,6 +374,29 @@ impl Workspace {
                         .gap(px(10.0))
                         .child(div().flex().flex_col().gap(px(4.0)).child(section_label("SHELL".to_string())).child(Input::new(shell)))
                         .child(div().flex().flex_col().gap(px(4.0)).child(section_label("CLAUDE CODE PATH".to_string())).child(Input::new(claude)))
+                        .child(
+                            div()
+                                .h(px(32.0))
+                                .px(px(10.0))
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .rounded(px(6.0))
+                                .bg(hsla(0x111111))
+                                .border_1()
+                                .border_color(hsla(0x242424))
+                                .text_size(px(13.0))
+                                .child("Scale (text and terminal)")
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(10.0))
+                                        .child(scale_step("scale-down", "−", -(crate::scale::STEP as i32), cx))
+                                        .child(div().w(px(40.0)).flex().justify_center().child(format!("{scale}%")))
+                                        .child(scale_step("scale-up", "+", crate::scale::STEP as i32, cx)),
+                                ),
+                        )
                         .child(
                             div()
                                 .id("settings-updates")
@@ -597,7 +409,7 @@ impl Workspace {
                                 .bg(hsla(0x111111))
                                 .border_1()
                                 .border_color(hsla(0x242424))
-                                .text_size(px(13.0))
+                                .text_size(crate::scale::px(13.0))
                                 .cursor_pointer()
                                 .child("Check for updates")
                                 .child(div().text_color(hsla(if *updates { theme::ACCENT } else { theme::TEXT_FAINT })).child(toggle(*updates)))
@@ -613,6 +425,18 @@ impl Workspace {
                     false,
                 )
             }
+            Modal::Advisor { input, .. } => (
+                "Advisor model".into(),
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.0))
+                    .child(div().text_size(crate::scale::px(12.0)).text_color(hsla(theme::TEXT_DIM)).child("A model alias or id, such as opus, sonnet or claude-opus-5-5, or “off”. Claude Code saves it as your default."))
+                    .child(Input::new(input))
+                    .into_any_element(),
+                "Set".into(),
+                false,
+            ),
             Modal::Rename { input, .. } | Modal::NewBranch { input, .. } => (
                 if matches!(modal, Modal::NewBranch { .. }) { "New branch" } else { "Rename session" }.into(),
                 Input::new(input).into_any_element(),
@@ -642,7 +466,7 @@ impl Workspace {
                     _ => {}
                 }
             }))
-            .child(div().text_size(px(15.0)).font_weight(FontWeight::SEMIBOLD).child(title))
+            .child(div().text_size(crate::scale::px(15.0)).font_weight(FontWeight::SEMIBOLD).child(title))
             .child(body)
             .child(
                 div()
@@ -702,7 +526,7 @@ impl Workspace {
                         .bg(hsla(0x1a1a1a))
                         .border_1()
                         .border_color(hsla(if t.error { 0x5a2327 } else { 0x2c2c2c }))
-                        .text_size(px(12.5))
+                        .text_size(crate::scale::px(12.5))
                         .text_color(hsla(if t.error { theme::DANGER } else { theme::TEXT }))
                         .child(t.text.clone())
                         .children(action),
@@ -730,25 +554,40 @@ impl Render for Workspace {
             self.window_title = title;
         }
 
-        let sidebar = self.store.data.layout.sidebar_visible.then(|| self.render_sidebar(cx));
+        let left_open = self.left_reveal.step(self.store.data.layout.sidebar_visible, window);
+        let left_w = self.left_width(f32::from(window.viewport_size().width));
+        let sidebar = (left_open > 0.0).then(|| {
+            div()
+                .flex()
+                .flex_none()
+                .w(px((left_w + theme::PANEL_GAP) * left_open))
+                .h_full()
+                .overflow_hidden()
+                .child(self.render_sidebar(window, cx))
+                .child(div().flex_none().w(px(theme::PANEL_GAP)))
+        });
         let banner = self.render_update_banner(cx);
-        let topbar = self.render_topbar(cx);
+        let topbar = self.render_topbar(window, cx);
         // Terminals that aren't on screen keep running but must not trigger window redraws on every output burst.
-        let showing: &[crate::store::Id] = if matches!(self.main, Main::Terminals) { &self.panes } else { &[] };
+        let showing = if matches!(self.main, Main::Terminals) { self.active.as_ref() } else { None };
         for l in &self.live {
-            let visible = showing.contains(&l.id);
+            let visible = showing == Some(&l.id);
             l.view.update(cx, |v, _| v.visible = visible);
         }
-        let sidebar_w = if self.store.data.layout.sidebar_visible { crate::sidebar::SIDEBAR_W } else { 0.0 };
-        let avail_w = f32::from(window.viewport_size().width) - sidebar_w;
+        for (owner, p) in &self.shells {
+            let visible = p.open && showing == Some(owner);
+            p.view.update(cx, |v, _| v.visible = visible);
+        }
+        let right = self.render_right(f32::from(window.viewport_size().width), window, cx);
         let main: AnyElement = match &self.main {
-            Main::Terminals => self.render_panes(avail_w, cx).into_any_element(),
-            Main::Home if self.side == Side::Chat => self.render_chat_home(cx).into_any_element(),
+            Main::Terminals => self.render_session(cx),
             Main::Home => self.render_home(cx).into_any_element(),
         };
         let menu = self.render_menu(cx);
         let modal = self.render_modal(cx);
         let toast = self.render_toast(cx);
+        // The top bar's own background is the gutter above the panels; only an update banner needs real space.
+        let content_top = if banner.is_some() { theme::PANEL_GAP } else { 0.0 };
 
         div()
             .id("workspace")
@@ -757,30 +596,31 @@ impl Render for Workspace {
             .relative()
             .size_full()
             .flex()
-            .bg(hsla(theme::TERMINAL_BG))
+            .flex_col()
+            .bg(hsla(theme::APP_BG))
             .text_color(hsla(theme::TEXT))
             .on_action(cx.listener(|ws, _: &NewClaude, window, cx| {
-                let cwd = ws.active_cwd();
+                let cwd = ws.new_session_cwd();
                 ws.act(Act::NewClaude { cwd }, window, cx)
             }))
-            .on_action(cx.listener(|ws, _: &NewChat, window, cx| ws.act(Act::NewChat { cwd: None, split: false }, window, cx)))
-            .on_action(cx.listener(|ws, _: &NewShell, window, cx| {
-                let cwd = ws.active_cwd();
-                ws.act(Act::NewShell { cwd }, window, cx)
+            .on_action(cx.listener(|ws, _: &ToggleShell, window, cx| {
+                if let Some(id) = ws.active.clone() {
+                    ws.act(Act::ToggleShell(id), window, cx)
+                }
             }))
             .on_action(cx.listener(|ws, _: &CloseSession, window, cx| {
-                if let Some(id) = ws.panes.get(ws.focused).cloned() {
+                if let Some(id) = ws.active.clone() {
                     ws.act(Act::CloseLive(id), window, cx)
                 }
             }))
             .on_action(cx.listener(|ws, _: &NextSession, window, cx| ws.cycle(1, window, cx)))
             .on_action(cx.listener(|ws, _: &PrevSession, window, cx| ws.cycle(-1, window, cx)))
-            .on_action(cx.listener(|ws, _: &SplitPane, window, cx| ws.split(window, cx)))
             .on_action(cx.listener(|ws, _: &ToggleSidebar, _w, cx| {
                 ws.store.data.layout.sidebar_visible = !ws.store.data.layout.sidebar_visible;
                 ws.store.mark_dirty();
                 cx.notify();
             }))
+            .on_action(cx.listener(|ws, _: &ToggleRight, window, cx| ws.toggle_right(window, cx)))
             .on_action(cx.listener(|ws, _: &FocusSearch, window, cx| {
                 ws.store.data.layout.sidebar_visible = true;
                 ws.search_input.update(cx, |s, cx| s.focus(window, cx));
@@ -789,17 +629,34 @@ impl Render for Workspace {
             .on_action(cx.listener(|ws, _: &ImportProject, window, cx| ws.act(Act::ImportProject, window, cx)))
             .on_action(cx.listener(|ws, _: &OpenGithub, window, cx| {
                 let cwd = ws.active_cwd();
-                ws.act(Act::OpenGithub { cwd, split: false }, window, cx)
+                ws.act(Act::OpenGithub { cwd }, window, cx)
             }))
             .on_action(cx.listener(|ws, _: &OpenSettings, window, cx| ws.act(Act::OpenSettings, window, cx)))
-            .on_action(cx.listener(|ws, _: &FocusNextPane, window, cx| {
-                if !ws.panes.is_empty() {
-                    let next = (ws.focused + 1) % ws.panes.len();
-                    ws.focus_pane(next, window, cx);
+            .on_action(cx.listener(|ws, _: &SwapFocus, window, cx| ws.swap_focus(window, cx)))
+            .on_mouse_move(cx.listener(|ws, ev: &gpui::MouseMoveEvent, window, cx| {
+                if ws.shell_drag.is_none() && ws.right_drag.is_none() && ws.left_drag.is_none() {
+                    return;
+                }
+                // The button was let go outside the window: stop following the pointer.
+                if ev.pressed_button != Some(MouseButton::Left) {
+                    ws.shell_drag = None;
+                    ws.right_drag = None;
+                    ws.left_drag = None;
+                } else {
+                    let size = window.viewport_size();
+                    ws.drag_shell(f32::from(ev.position.y), f32::from(size.height));
+                    ws.drag_right(f32::from(ev.position.x), f32::from(size.width));
+                    ws.drag_left(f32::from(ev.position.x), f32::from(size.width));
+                }
+                cx.notify();
+            }))
+            .on_mouse_up(MouseButton::Left, cx.listener(|ws, _: &gpui::MouseUpEvent, _w, cx| {
+                if ws.shell_drag.take().is_some() | ws.right_drag.take().is_some() | ws.left_drag.take().is_some() {
+                    cx.notify();
                 }
             }))
             .on_drop(cx.listener(|ws, paths: &gpui::ExternalPaths, window, cx| {
-                let focused = ws.panes.get(ws.focused).and_then(|id| ws.live_view(id)).cloned();
+                let focused = ws.active.as_ref().and_then(|id| ws.live_view(id)).cloned();
                 if let (Some(view), Main::Terminals) = (focused, &ws.main) {
                     // Over a terminal, files go to the session as paths (Claude Code attaches images).
                     view.update(cx, |v, cx| v.paste_paths(paths.paths(), cx));
@@ -809,17 +666,38 @@ impl Render for Workspace {
                     ws.act(Act::AddProject(p.clone()), window, cx);
                 }
             }))
-            .children(sidebar)
+            .child(topbar)
             .child(
                 div()
                     .flex()
                     .flex_col()
                     .flex_1()
-                    .min_w_0()
-                    .h_full()
-                    .child(topbar)
+                    .min_h_0()
+                    .gap(px(theme::PANEL_GAP))
+                    .px(px(theme::PANEL_GAP))
+                    .pt(px(content_top))
+                    .pb(px(theme::PANEL_GAP))
                     .children(banner)
-                    .child(div().flex_1().min_h_0().child(main)),
+                    .child(
+                        div()
+                            .flex()
+                            .flex_1()
+                            .min_h_0()
+                            .children(sidebar)
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .h_full()
+                                    .rounded(px(theme::PANEL_RADIUS))
+                                    .overflow_hidden()
+                                    .border_1()
+                                    .border_color(hsla(theme::PANEL_BORDER))
+                                    .bg(hsla(theme::PANEL_BG))
+                                    .child(main),
+                            )
+                            .children(right),
+                    ),
             )
             .children(menu)
             .children(modal)
@@ -827,9 +705,14 @@ impl Render for Workspace {
     }
 }
 
-fn editor_name(editor: Editor) -> &'static str {
-    match editor {
-        Editor::VsCode => "VS Code",
-        Editor::Zed => "Zed",
-    }
+/// A − / + button in the Settings modal that moves the scale by `by` percent, within the allowed range.
+fn scale_step(id: &'static str, label: &'static str, by: i32, cx: &mut Context<Workspace>) -> impl IntoElement {
+    div().id(id).w(px(22.0)).h(px(22.0)).flex().items_center().justify_center().rounded(px(4.0)).cursor_pointer().hover(|s| s.bg(hsla(0x242424))).child(label).on_click(
+        cx.listener(move |ws, _: &ClickEvent, _w, cx| {
+            if let Some(Modal::Settings { scale, .. }) = ws.modal.as_mut() {
+                *scale = (*scale as i32 + by).clamp(crate::scale::MIN as i32, crate::scale::MAX as i32) as u32;
+            }
+            cx.notify();
+        }),
+    )
 }
