@@ -100,7 +100,7 @@ pub struct Css {
 /// The sidebar-matching palette a model can name instead of a hex value (`var(--accent)` or just `accent`).
 pub fn token(name: &str) -> Option<u32> {
     Some(match name {
-        "bg" | "background" | "base" => theme::APP_BG,
+        "bg" | "background" | "base" => theme::PANEL_BG,
         "surface" | "card" => theme::ROW_HOVER,
         "raised" | "surface2" => theme::ROW_ACTIVE,
         "border" => theme::BORDER,

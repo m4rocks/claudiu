@@ -4,8 +4,8 @@
 use std::time::{Duration, Instant};
 
 use gpui::{
-    Animation, AnimationExt, AnyElement, AppContext, DragMoveEvent, SharedString, WeakEntity, ease_out_quint, ClickEvent, Context, Div, FontWeight, Hsla, InteractiveElement, IntoElement, MouseButton, MouseDownEvent, ParentElement, Pixels, Render,
-    Stateful, StatefulInteractiveElement, Styled, Window, WindowControlArea, div, prelude::FluentBuilder, px,
+    Animation, AnimationExt, AnyElement, AppContext, DragMoveEvent, SharedString, WeakEntity, ease_out_quint, pulsating_between, ClickEvent, Context, Div, FontWeight, InteractiveElement, IntoElement, MouseButton, MouseDownEvent, ParentElement, Pixels, Render,
+    Stateful, StatefulInteractiveElement, Styled, Window, div, prelude::FluentBuilder, px,
 };
 
 use gpui_kit::component::input::Input;
@@ -13,7 +13,7 @@ use crate::app::{Act, Activity, MenuItem, SideDrag, Workspace};
 use crate::store::{ExternalState, Id, Project, SessionKind, SessionRecord, now};
 use crate::theme::{self, hsla};
 use gpui_kit::assets::IconName;
-use crate::widgets::{ago, avatar, button, clawd, countdown, icon, icon_button, meter, section_label, spinner, tick};
+use crate::widgets::{ago, avatar, button, clawd, countdown, icon, icon_button, meter, section_label, tick};
 
 pub const SIDEBAR_W: f32 = 284.0;
 pub const SIDEBAR_MIN: f32 = 220.0;
@@ -24,10 +24,8 @@ const RECENT_LIMIT: usize = 12;
 #[derive(Clone)]
 struct Row {
     id: Id,
-    glyph: IconName,
-    glyph_color: Hsla,
-    /// The icon is a spinner: the Claude session is working.
-    pulse: bool,
+    /// What the leading status dot shows.
+    dot: SessionDot,
     title: String,
     right: String,
     active: bool,
@@ -38,6 +36,19 @@ struct Row {
     archived: bool,
     /// Which sidebar section renders the row; keeps element ids unique when a session shows in several.
     scope: &'static str,
+}
+
+/// The four states a sidebar session dot can show.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SessionDot {
+    /// Claude finished while the row was not being watched.
+    Attention,
+    /// The process is running and streaming output.
+    Working,
+    /// Running and idle, with the user up to date.
+    Active,
+    /// The session is not running.
+    Inactive,
 }
 
 /// Drag payload: a running session row, dropped onto another to reorder.
@@ -100,6 +111,27 @@ fn slid(el: impl IntoElement + gpui::Styled + 'static, id: &Id, slide: Option<Sl
     }
 }
 
+/// The leading status dot: a small circle whose fill (and, when working, pulse) says what the session is doing.
+fn session_dot(state: SessionDot, scope: &'static str, id: &str) -> AnyElement {
+    let dot = match state {
+        SessionDot::Attention => div().size(px(7.0)).rounded_full().bg(hsla(theme::ACCENT)),
+        SessionDot::Working => div().size(px(7.0)).rounded_full().bg(hsla(0xc8c8c8)),
+        SessionDot::Active => div().size(px(7.0)).rounded_full().bg(hsla(theme::TEXT_DIM)),
+        SessionDot::Inactive => div().size(px(7.0)).rounded_full().border_1().border_color(hsla(0x3d3d43)),
+    };
+    let dot = if state == SessionDot::Working {
+        dot.with_animation(
+            SharedString::from(format!("dot-{scope}-{id}")),
+            Animation::new(Duration::from_millis(1200)).repeat().with_easing(pulsating_between(0.35, 1.0)),
+            |d, t| d.opacity(t),
+        )
+        .into_any_element()
+    } else {
+        dot.into_any_element()
+    };
+    div().w(px(14.0)).h(px(14.0)).flex_none().flex().items_center().justify_center().child(dot).into_any_element()
+}
+
 /// Moves `v[from]` into the slot of `v[to]`, shifting the items in between.
 fn move_to<T>(v: &mut [T], from: usize, to: usize) {
     if from < to {
@@ -142,26 +174,20 @@ impl Workspace {
 
     fn row_for(&self, rec: &SessionRecord, running: bool, with_project: bool) -> Row {
         let activity = self.activity.get(&rec.id).copied();
-        let (glyph, color) = match (rec.kind, running) {
-            // Orange only when the session stopped and wants the user; gray otherwise, pulsing while it works.
-            (SessionKind::Claude, true) => (
-                IconName::Brackets,
-                match activity {
-                    Some(Activity::Attention) => hsla(theme::ACCENT),
-                    Some(Activity::Working) => hsla(0xa8a8a8),
-                    None => hsla(0x6b6b6b),
-                },
-            ),
-            (SessionKind::Shell, true) => (IconName::Terminal, hsla(theme::OK)),
-            (SessionKind::Claude, false) => (IconName::Brackets, hsla(theme::TEXT_FAINT)),
-            (SessionKind::Shell, false) => (IconName::Terminal, hsla(theme::TEXT_FAINT)),
+        // Anything running is at least active; Claude's own status upgrades it to working or attention.
+        let dot = if !running {
+            SessionDot::Inactive
+        } else {
+            match activity {
+                Some(Activity::Attention) => SessionDot::Attention,
+                Some(Activity::Working) => SessionDot::Working,
+                None => SessionDot::Active,
+            }
         };
         let stale = rec.claude.as_ref().is_some_and(|c| c.external == ExternalState::Missing);
         Row {
             id: rec.id.clone(),
-            glyph,
-            glyph_color: color,
-            pulse: running && activity == Some(Activity::Working),
+            dot,
             title: rec.display_title().to_string(),
             right: if with_project {
                 let p = self.project_name(rec.project_id.as_ref());
@@ -262,22 +288,17 @@ impl Workspace {
         let menu_id = id.clone();
         let close_id = id.clone();
         let archive_id = id.clone();
-        let dot = div().w(px(14.0)).flex_none().text_color(row.glyph_color);
-        let dot = if row.pulse {
-            dot.child(spinner(gpui::SharedString::from(format!("spin-{}-{}", row.scope, id)), 14.0))
-        } else {
-            dot.child(icon(row.glyph, 14.0))
-        };
+        let dot = session_dot(row.dot, row.scope, &id);
         div()
             .id(gpui::SharedString::from(format!("row-{}-{}", row.scope, id)))
             .group("row")
             .flex()
             .items_center()
-            .gap(px(8.0))
-            .h(px(27.0))
-            .pl(px(if row.indent { 26.0 } else { 12.0 }))
-            .pr(px(8.0))
-            .mx(px(6.0))
+            .gap(px(7.0))
+            .h(px(25.0))
+            .pl(px(if row.indent { 22.0 } else { 10.0 }))
+            .pr(px(6.0))
+            .mx(px(5.0))
             .rounded(px(6.0))
             .cursor_pointer()
             .when(row.active, |d| d.bg(hsla(theme::ROW_ACTIVE)))
@@ -387,7 +408,7 @@ impl Workspace {
         body = body.child(self.section_header("RUNNING", Some(running.len().to_string()), None::<Stateful<Div>>));
         if running.is_empty() {
             let text = if searching || filter.is_some() { "Nothing running matches" } else { "Nothing running. Start a session." };
-            body = body.child(div().px(px(18.0)).py(px(6.0)).text_size(crate::scale::px(12.0)).text_color(hsla(theme::TEXT_FAINT)).child(text));
+            body = body.child(div().px(px(14.0)).py(px(4.0)).text_size(crate::scale::px(12.0)).text_color(hsla(theme::TEXT_FAINT)).child(text));
         }
         let ids: Vec<Id> = running.iter().map(|r| r.id.clone()).collect();
         if is_reorder(&self.prev_current, &ids) {
@@ -410,7 +431,7 @@ impl Workspace {
                 body = body.child(self.session_row(row, false, cx));
             }
         } else if searching || filter.is_some() {
-            body = body.child(div().px(px(18.0)).py(px(6.0)).text_size(crate::scale::px(12.0)).text_color(hsla(theme::TEXT_FAINT)).child("No sessions match"));
+            body = body.child(div().px(px(14.0)).py(px(4.0)).text_size(crate::scale::px(12.0)).text_color(hsla(theme::TEXT_FAINT)).child("No sessions match"));
         }
         if !older.is_empty() {
             let open = self.store.data.layout.older_open;
@@ -419,9 +440,9 @@ impl Workspace {
                     .id("older-header")
                     .flex()
                     .items_center()
-                    .gap(px(6.0))
-                    .px(px(18.0))
-                    .h(px(22.0))
+                    .gap(px(5.0))
+                    .px(px(14.0))
+                    .h(px(20.0))
                     .cursor_pointer()
                     .child(div().text_color(hsla(theme::TEXT_FAINT)).child(icon(if open { IconName::ChevronDown } else { IconName::ChevronRight }, 12.0)))
                     .child(section_label("OLDER"))
@@ -455,8 +476,8 @@ impl Workspace {
             .id("project-filter")
             .flex_1()
             .min_w_0()
-            .h(px(26.0))
-            .px(px(8.0))
+            .h(px(24.0))
+            .px(px(6.0))
             .flex()
             .items_center()
             .gap(px(6.0))
@@ -500,14 +521,19 @@ impl Workspace {
     /// The sidebar chrome around either list: header, scrolling body, usage footer.
     fn sidebar_frame(&mut self, body: Div, window: &mut Window, cx: &mut Context<Self>) -> Stateful<Div> {
         let width = self.left_width(f32::from(window.viewport_size().width));
-        // The right edge is the drag handle (inside the sidebar, so the terminal beside it cannot cover it).
+        // The right edge is the drag handle: it fills the gutter with a small visible grip.
+        let handle_center = theme::PANEL_GAP / 2.0 + 3.0;
         let handle = div()
             .id("left-resize")
+            .group("left-resize")
             .absolute()
             .top_0()
-            .right_0()
-            .w(px(5.0))
+            .right(px(-handle_center))
+            .w(px(6.0))
             .h_full()
+            .flex()
+            .items_center()
+            .justify_center()
             .cursor_col_resize()
             .on_mouse_down(
                 MouseButton::Left,
@@ -515,37 +541,35 @@ impl Workspace {
                     ws.left_drag = Some(SideDrag { x: f32::from(ev.position.x), width });
                     cx.notify();
                 }),
+            )
+            .child(
+                div()
+                    .w(px(2.0))
+                    .h(px(28.0))
+                    .rounded_full()
+                    .bg(hsla(0x2b2b30))
+                    .group_hover("left-resize", |s| s.bg(hsla(0x4a4a52))),
             );
         div()
             .id("sidebar")
             .relative()
-            .flex()
-            .flex_col()
             .flex_none()
             .w(px(width))
             .h_full()
-            .bg(hsla(theme::SIDEBAR_BG))
-            .border_r_1()
-            .border_color(hsla(theme::BORDER))
-            // macOS traffic lights sit here; the strip stays draggable like the top bar next to it.
-            .when(cfg!(target_os = "macos"), |d| {
-                d.child(
-                    div()
-                        .id("traffic-light-strip")
-                        .h(px(40.0))
-                        .flex_none()
-                        .on_mouse_down(MouseButton::Left, |ev, window, _| {
-                            if ev.click_count == 2 {
-                                window.titlebar_double_click();
-                            } else {
-                                window.start_window_move();
-                            }
-                        }),
-                )
-            })
-            .child(self.render_sidebar_header(cx))
-            .child(self.sidebar_scroll.wire(div().id("sidebar-scroll").flex_1().min_h_0(), window).pb(px(10.0)).child(body))
-            .child(self.render_footer(cx))
+            .child(
+                div()
+                    .size_full()
+                    .flex()
+                    .flex_col()
+                    .rounded(px(theme::PANEL_RADIUS))
+                    .overflow_hidden()
+                    .border_1()
+                    .border_color(hsla(theme::PANEL_BORDER))
+                    .bg(hsla(theme::SIDEBAR_BG))
+                    .child(self.render_sidebar_header(cx))
+                    .child(self.sidebar_scroll.wire(div().id("sidebar-scroll").flex_1().min_h_0(), window).pb(px(8.0)).child(body))
+                    .child(self.render_footer(cx)),
+            )
             .child(handle)
     }
 
@@ -553,24 +577,22 @@ impl Workspace {
         // With a project chosen a new session starts there (and the button says so); with "All projects" it asks.
         let filter = self.project_filter().map(|p| p.name.clone());
         let label = match filter {
-            Some(name) => format!("+ Code in {}", if name.chars().count() > 12 { format!("{}…", name.chars().take(11).collect::<String>()) } else { name }),
-            None => "+ Code session".to_string(),
+            Some(name) => format!("+ New in {}", if name.chars().count() > 12 { format!("{}…", name.chars().take(11).collect::<String>()) } else { name }),
+            None => "+ New".to_string(),
         };
         div()
             .flex()
             .flex_col()
-            .gap(px(10.0))
-            .px(px(12.0))
-            .pt(px(14.0))
-            .pb(px(12.0))
-            // Same as the top bar: dragging the empty header moves the window, controls occlude it.
-            .window_control_area(WindowControlArea::Drag)
+            .gap(px(8.0))
+            .px(px(8.0))
+            .pt(px(8.0))
+            .pb(px(8.0))
             .child(
                 div()
                     .flex()
                     .items_center()
-                    .gap(px(10.0))
-                    .px(px(4.0))
+                    .gap(px(8.0))
+                    .px(px(2.0))
                     .child(clawd(24.0))
                     .child(div().flex_1().text_size(crate::scale::px(13.0)).font_weight(FontWeight::BOLD).text_color(hsla(theme::TEXT)).child("CLAUDIU"))
                     .child(icon_button("settings", IconName::Settings).occlude().on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::OpenSettings, window, cx)))),
@@ -599,7 +621,7 @@ impl Workspace {
             .child(
                 div().occlude().child(
                     Input::new(&self.search_input)
-                        .h(px(28.0))
+                        .h(px(26.0))
                         .text_size(crate::scale::px(12.5))
                         .prefix(div().text_color(hsla(theme::TEXT_FAINT)).child(icon(IconName::Search, 14.0))),
                 ),
@@ -611,9 +633,9 @@ impl Workspace {
             .flex()
             .items_center()
             .justify_between()
-            .px(px(18.0))
-            .pr(px(12.0))
-            .h(px(22.0))
+            .px(px(14.0))
+            .pr(px(10.0))
+            .h(px(20.0))
             .child(
                 div()
                     .flex()
@@ -666,9 +688,9 @@ impl Workspace {
             .flex()
             .items_center()
             .gap(px(8.0))
-            .h(px(28.0))
-            .mx(px(-6.0))
-            .px(px(6.0))
+            .h(px(26.0))
+            .mx(px(-5.0))
+            .px(px(5.0))
             .rounded(px(6.0))
             .cursor_pointer()
             .hover(|s| s.bg(hsla(theme::ROW_HOVER)))
@@ -707,14 +729,14 @@ impl Workspace {
             }
         };
 
-        let pair = |a: Div, b: Div| div().flex().gap(px(14.0)).child(a.flex_1().min_w_0()).child(b.flex_1().min_w_0());
+        let pair = |a: Div, b: Div| div().flex().gap(px(12.0)).child(a.flex_1().min_w_0()).child(b.flex_1().min_w_0());
         div()
             .flex()
             .flex_col()
-            .gap(px(10.0))
-            .px(px(18.0))
-            .pt(px(8.0))
-            .pb(px(12.0))
+            .gap(px(8.0))
+            .px(px(14.0))
+            .pt(px(6.0))
+            .pb(px(8.0))
             .border_t_1()
             .border_color(hsla(theme::BORDER))
             .child(self.render_account_switcher(cx))

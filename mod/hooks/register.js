@@ -38,6 +38,8 @@ const secs = iso => { const t = Date.parse(iso); return Number.isFinite(t) ? Mat
 
 let measured = null // { context, limits: { five_hour, seven_day } } from the last session.measure
 let written = '' // what the file holds, minus times, so an unchanged report is not rewritten (a write is cheap, a redraw is not)
+let activeAdvisor = null // advisor the current conversation declared; a model change waits for /clear or /compact
+let activeSession = null // Claude session id activeAdvisor belongs to (/clear starts a new one)
 
 // The token count auto-compaction runs at (null while it is off). It only changes with settings, the model or the
 // environment, and the breakdown it comes from is a local estimate, so it is read again at most once a minute or after
@@ -52,8 +54,29 @@ async function threshold($, fresh) {
   return compactAt
 }
 
+// Reads one setting through the plugin API. The call normally returns the value itself; older hosts may hand back
+// the settings object, so both shapes are accepted.
+async function setting($, key) {
+  const v = await $.settings.read({ key }).catch(() => undefined)
+  if (typeof v === 'string' || typeof v === 'boolean') return v
+  if (v && typeof v === 'object' && key in v) return v[key]
+  return undefined
+}
+
+// The menu speaks aliases; settings may hold a resolved id such as `claude-opus-5-5`.
+function advisorAlias(value) {
+  if (typeof value !== 'string') return null
+  const v = value.trim()
+  if (!v || v.toLowerCase() === 'off') return null
+  const lower = v.toLowerCase()
+  if (lower === 'opus' || lower.includes('opus')) return 'opus'
+  if (lower === 'sonnet' || lower.includes('sonnet')) return 'sonnet'
+  return v
+}
+
 // Reads the status Claude Code keeps; every read is best effort, a failed one is left out rather than failing a hook.
-async function report($, fresh = false) {
+// `override` carries a value Claudiu just asked for, so the sidebar updates before the host has refreshed its cache.
+async function report($, fresh = false, override = {}) {
   try {
     const dir = await $.env.get('CLAUDIU_USAGE_DIR')
     if (!dir) return
@@ -62,7 +85,20 @@ async function report($, fresh = false) {
     const ctx = measured?.context
     const fraction = ctx?.tokens != null && ctx?.window > 0 ? Math.min(1, ctx.tokens / ctx.window) : null
     const rows = await $.config.list().catch(() => [])
-    const advisor = await $.settings.read({ key: 'advisorModel' }).catch(() => undefined)
+    let autoCompact = rows.find(r => r.key === 'autoCompact')?.value
+    if (typeof autoCompact !== 'boolean') {
+      const fromSettings = await setting($, 'autoCompactEnabled')
+      autoCompact = typeof fromSettings === 'boolean' ? fromSettings : null
+    }
+    let advisor = advisorAlias(await setting($, 'advisorModel'))
+    if ('auto_compact' in override) autoCompact = override.auto_compact
+    if ('advisor' in override) advisor = override.advisor
+    // A different model only reaches the running conversation on /clear or /compact. Off and on take effect at
+    // once, so null / newly-named advisors replace the active one; a model-to-model change keeps the old one.
+    if (activeSession !== id || advisor == null || activeAdvisor == null) {
+      activeSession = id
+      activeAdvisor = advisor
+    }
     const snap = {
       session_id: id,
       five_hour: measured?.limits.five_hour ?? null,
@@ -72,9 +108,10 @@ async function report($, fresh = false) {
       context_window: ctx?.window ?? null,
       model: (await $.session.model().catch(() => null)) ?? null,
       account: (await $.env.get('CLAUDIU_ACCOUNT')) ?? null,
-      auto_compact: rows.find(r => r.key === 'autoCompact')?.value ?? null,
+      auto_compact: autoCompact,
       compact_at: await threshold($, fresh),
-      advisor: typeof advisor === 'string' ? advisor : null,
+      advisor,
+      advisor_active: activeAdvisor,
     }
     const key = JSON.stringify(snap, (k, v) => (k === 'seen_at' ? undefined : v))
     if (key === written) return
@@ -96,12 +133,18 @@ async function applyCtl($) {
       ctlSeen = cmds.reduce((top, c) => Math.max(top, c.seq), 0)
       return
     }
+    const override = {}
     for (const c of cmds.filter(c => c.seq > ctlSeen).sort((a, b) => a.seq - b.seq)) {
       ctlSeen = c.seq
-      if (c.key === 'auto_compact' && typeof c.value === 'boolean') await $.config.set({ key: 'autoCompact', value: c.value }).catch(() => {})
-      else if (c.key === 'advisor' && typeof c.value === 'string' && /^[A-Za-z0-9._-]{1,60}$/.test(c.value)) await $.command.run({ command: 'advisor', args: c.value }).catch(() => {})
-      await report($, true)
+      if (c.key === 'auto_compact' && typeof c.value === 'boolean') {
+        await $.config.set({ key: 'autoCompact', value: c.value }).catch(() => {})
+        override.auto_compact = c.value
+      } else if (c.key === 'advisor' && typeof c.value === 'string' && /^[A-Za-z0-9._-]{1,60}$/.test(c.value)) {
+        await $.command.run({ command: 'advisor', args: c.value }).catch(() => {})
+        override.advisor = advisorAlias(c.value)
+      }
     }
+    if (Object.keys(override).length > 0) await report($, true, override)
   } catch {
     // A bad file must not disturb the session.
   }
@@ -203,6 +246,15 @@ export function register(on) {
 
   on('config.set', async ($, e, next) => {
     const r = await next(e)
+    await report($, true)
+    return r
+  })
+
+  // Compaction rebuilds the request, so the saved advisor becomes the one this conversation declares.
+  on('session.compact', async ($, e, next) => {
+    const r = await next(e)
+    activeAdvisor = advisorAlias(await setting($, 'advisorModel'))
+    activeSession = await $.session.id().catch(() => null)
     await report($, true)
     return r
   })

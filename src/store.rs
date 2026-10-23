@@ -69,6 +69,10 @@ pub struct ClaudeMeta {
     pub auto_compact: Option<bool>,
     #[serde(default)]
     pub advisor: Option<String>,
+    /// The advisor declared for the current conversation. A model change is saved in `advisor` at once but only
+    /// becomes `advisor_active` on `/clear` or `/compact`; turning the advisor off/on changes it immediately.
+    #[serde(default)]
+    pub advisor_active: Option<String>,
     /// Tokens at which auto-compaction runs (the context bar's full mark); `None` while it is off or unknown.
     #[serde(default)]
     pub compact_at: Option<u64>,

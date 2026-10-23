@@ -37,9 +37,9 @@ use gpui_kit::component::TitleBar;
 gpui_kit::assets::icon_assets!(
     AppIcons,
     [
-        WindowMinimize, WindowMaximize, WindowRestore, WindowClose, Archive, ArchiveRestore, ArrowDownToLine, ArrowLeft, Brackets, Check, ChevronDown, ChevronRight, Circle,
+        WindowMinimize, WindowMaximize, WindowRestore, WindowClose, Archive, ArchiveRestore, ArrowDownToLine, ArrowLeft, Brackets, Check, ChevronDown, ChevronRight,
         CircleCheck, CircleDot, CircleSlash, CircleX, Clock, Ellipsis, Eye, ExternalLink, FolderOpen, GitBranch, GitCommitHorizontal, GitMerge, GitPullRequest,
-        GitPullRequestClosed, GitPullRequestDraft, HeartPlus, LoaderCircle, Lock, MessageSquare, PanelLeft, PanelRight, Pencil, Plus, RefreshCw, Search,
+        GitPullRequestClosed, GitPullRequestDraft, HeartPlus, LoaderCircle, Lock, MessageSquare, PanelLeft, PanelRight, Pencil, RefreshCw, Search,
         Settings, Terminal, X
     ]
 );
@@ -217,6 +217,9 @@ fn main() {
         cx.bind_keys([KeyBinding::new("cmd-q", Quit, None), KeyBinding::new("cmd-h", HideApp, None), KeyBinding::new("cmd-alt-h", HideOthers, None)]);
 
         let bounds = Bounds::centered(None, size(px(1280.0), px(800.0)), cx);
+        // AppKit's standard window buttons are 14 px tall; center them in the top bar so the
+        // traffic lights line up with its controls (and get equal space above and below).
+        let traffic_light_y = (theme::TOPBAR_HEIGHT - 14.0) / 2.0;
         // Opened through gpui_kit so the window gets the component library's Root (text inputs need it).
         let (window, workspace) = gpui_kit::open_window(
             WindowOptions {
@@ -224,7 +227,7 @@ fn main() {
                 window_min_size: Some(size(px(720.0), px(420.0))),
                 titlebar: Some(TitlebarOptions {
                     title: Some("Claudiu".into()),
-                    traffic_light_position: Some(gpui::point(px(14.0), px(13.0))),
+                    traffic_light_position: Some(gpui::point(px(14.0), px(traffic_light_y))),
                     ..TitleBar::title_bar_options()
                 }),
                 // The top bar owns dragging and double-click (see TitleBar::window_options).

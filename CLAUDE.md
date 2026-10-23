@@ -86,7 +86,7 @@ RECENT
 ▸ OLDER  23
 ```
 
-**Projects are a filter, not a tree.** A chip under the search box lists the projects (and "Add project…"); picking one narrows the list to its sessions, and `layout.project_filter` remembers it. With a project chosen, a ⋯ button opens its actions: new session here, GitHub, open in VS Code or Zed, reveal, copy path, remove. "+ Code session" starts in the filtered project. Sessions can no longer be dragged onto a project; a session's project is the one its folder belongs to.
+**Projects are a filter, not a tree.** A chip under the search box lists the projects (and "Add project…"); picking one narrows the list to its sessions, and `layout.project_filter` remembers it. With a project chosen, a ⋯ button opens its actions: new session here, GitHub, open in VS Code or Zed, reveal, copy path, remove. "+ New" starts in the filtered project. Sessions can no longer be dragged onto a project; a session's project is the one its folder belongs to.
 
 A session remains associated with the running PTY until its process exits.
 
@@ -401,11 +401,11 @@ A column on the right, under the top bar (so the window buttons stay in the corn
 - **GitHub**: the project's issues and pull requests (`github/view.rs`), in a wider column (`layout.right_gh_w`, 560 px by default, resizable by dragging its left edge). The arrow returns to the menu. The view follows the shown session to that session's project; it is never a session, a tab or a main-area page.
 - **Visual**: what the model drew for the shown session (see "Visual panel"), in the same wider column; it opens by itself when a card arrives.
 
-Status comes from the per-process mod (`usage.rs` snapshots, no tokens): it reports context, limits, the `/config` auto-compact switch, the auto-compact threshold and `advisorModel` (`ClaudeMeta`). Nothing is typed into the PTY.
+Status comes from the per-process mod (`usage.rs` snapshots, no tokens): it reports context, limits, the `/config` auto-compact switch, the auto-compact threshold, `advisorModel` and the advisor **declared for the current conversation** (`ClaudeMeta.advisor` / `advisor_active`). Nothing is typed into the PTY.
 
 **Context bar scale (product owner decision):** with auto-compact on and a threshold known, the CONTEXT bar is full at that threshold ("28k of 167k tokens"), so it shows how close compaction is; with auto-compact off it is full at the model's context window (`claude::context_limit`).
 
-**Changing auto-compact and the advisor (product owner decision):** the dropdowns write `{seq, key, value}` commands (latest 8, numbers only go up) to `<data>/ctl/<record id>.json` (`usage::send_ctl`, path in `CLAUDIU_CTL_FILE`). The mod looks every second and applies each once: `$.config.set` for `autoCompact`, `/advisor <model>` through `$.command.run` (names limited to letters, digits, `. _ -`). Claude Code saves both as the user's defaults, like typing them. Commands sent before the process started are not replayed. The sidebar shows the change when the next snapshot arrives (a second or two).
+**Changing auto-compact and the advisor (product owner decision):** the dropdowns write `{seq, key, value}` commands (latest 8, numbers only go up) to `<data>/ctl/<record id>.json` (`usage::send_ctl`, path in `CLAUDIU_CTL_FILE`). The mod looks every second and applies each once: `$.config.set` for `autoCompact`, `/advisor <model>` through `$.command.run` (names limited to letters, digits, `. _ -`). Claude Code saves both as the user's defaults, like typing them. Commands sent before the process started are not replayed. Auto-compact applies immediately. So does turning the advisor off or on; changing the advisor **model** does not: the running conversation keeps the advisor tool it already declared until `/clear` or `/compact`, so the sidebar shows `active → saved` while a change is pending. The menu ticks the saved setting. The sidebar reflects the change as soon as the mod has applied it (a second or two).
 
 **Attaching items (product owner decision):** the model, not Claudiu, decides what belongs to a session. The MCP server's `attach_github(kind, number, title?)` (pre-allowed, no focus change) appends a line to `<data>/attach/<record id>.jsonl`; Claudiu ingests and deletes the file on its tick and keeps the items in `ClaudeMeta.attached` (deduplicated, 20 at most, dismissible with ×). Clicking one opens it in the GitHub view. The transcript is not scanned for issue numbers. Claude Code defers MCP tools behind ToolSearch, so the server marks these bookkeeping tools (`attach_github`, `detach_github`, `link_session`, `unlink_session`, `set_tab_title`) with `_meta: {"anthropic/alwaysLoad": true}` and the model sees their schema from the start. The tool's description and the server instructions name the triggers (an issue mentioned, read through `gh`, a PR opened) and say to load its schema with ToolSearch if it is deferred.
 
@@ -529,6 +529,8 @@ Claudiu should be:
 - unmistakably a native application rather than a web wrapper
 
 The terminal should visually belong to Claudiu while still remaining a faithful terminal emulator.
+
+The window follows the floating-panel layout of current VS Code: the left sidebar, the session/home area and the right sidebar are separate panels with a small gutter (`theme::PANEL_GAP`), rounded corners (`theme::PANEL_RADIUS`) and a faint outline. The window background is the *lighter* dark shade (`theme::APP_BG`) and the panels are the darker one (`theme::PANEL_BG`), so the gutter reads as the app behind them. The top bar is the exception: it spans the window and is drawn as background, not as a panel; it owns the drag area and the window buttons.
 
 Do not overuse cards, gradients, huge rounded rectangles, or excessive decoration.
 

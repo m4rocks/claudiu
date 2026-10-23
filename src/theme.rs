@@ -4,11 +4,21 @@ use alacritty_terminal::term::color::Colors;
 use alacritty_terminal::vte::ansi::{Color, NamedColor, Rgb};
 use gpui::{Hsla, rgb};
 
-/// One background for the whole app: sidebar, top bar, panes and the terminal's default background.
-pub const APP_BG: u32 = 0x0c0c0d;
-pub const TERMINAL_BG: u32 = APP_BG;
-pub const SIDEBAR_BG: u32 = APP_BG;
+/// The window background the panels float on, a shade lighter than the panels themselves.
+pub const APP_BG: u32 = 0x131316;
+/// One background for the panels and the terminal's default background.
+pub const PANEL_BG: u32 = 0x0c0c0d;
+pub const TERMINAL_BG: u32 = PANEL_BG;
+pub const SIDEBAR_BG: u32 = PANEL_BG;
 pub const BORDER: u32 = 0x1f1f1f;
+/// The faint outline that separates a panel from the window background.
+pub const PANEL_BORDER: u32 = 0x242428;
+/// Corner radius of the window's panels.
+pub const PANEL_RADIUS: f32 = 8.0;
+/// Gutter between the panels and the window edges.
+pub const PANEL_GAP: f32 = 6.0;
+/// Height of the window's top bar. macOS traffic lights are centered in it (see `main.rs`).
+pub const TOPBAR_HEIGHT: f32 = 34.0;
 pub const ROW_HOVER: u32 = 0x181818;
 pub const ROW_ACTIVE: u32 = 0x211f1e;
 pub const TEXT: u32 = 0xe4e4e4;
@@ -21,7 +31,7 @@ pub const DANGER: u32 = 0xe06c75;
 pub const SELECTION: u32 = 0x3d4a5c;
 
 const FG: Rgb = Rgb { r: 0xe4, g: 0xe4, b: 0xe4 };
-const BG: Rgb = Rgb { r: (APP_BG >> 16) as u8, g: (APP_BG >> 8) as u8, b: APP_BG as u8 };
+const BG: Rgb = Rgb { r: (TERMINAL_BG >> 16) as u8, g: (TERMINAL_BG >> 8) as u8, b: TERMINAL_BG as u8 };
 
 const ANSI: [u32; 16] = [
     0x3b3b3b, 0xe06c75, 0x98c379, 0xe5c07b, 0x61afef, 0xc678dd, 0x56b6c2, 0xc8ccd4, //

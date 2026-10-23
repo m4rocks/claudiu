@@ -51,5 +51,5 @@ incremental = true
 
 [profile.dev.package."*"]
 debug = false
-# gpui lays out and paints every element on every frame; unoptimised it makes a busy chat visibly laggy.
+# gpui lays out and paints every element on every frame; unoptimised it makes a busy session visibly laggy.
 opt-level = 2

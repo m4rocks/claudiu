@@ -98,6 +98,17 @@ fn apply_to_meta(meta: &mut ClaudeMeta, snap: &Snapshot) -> bool {
         meta.advisor = snap.advisor.clone();
         changed = true;
     }
+    // The conversation keeps the advisor it declared. A null set means it is off (or an older mod did not report
+    // the active value at all), in which case the saved setting is the best thing to show.
+    let advisor_active = match &snap.advisor_active {
+        Some(active) => Some(active.clone()),
+        None if snap.advisor.is_none() => None,
+        None => meta.advisor_active.clone().or_else(|| snap.advisor.clone()),
+    };
+    if meta.advisor_active != advisor_active {
+        meta.advisor_active = advisor_active;
+        changed = true;
+    }
     if snap.auto_compact.is_some() && meta.auto_compact != snap.auto_compact {
         meta.auto_compact = snap.auto_compact;
         changed = true;
@@ -124,7 +135,11 @@ mod tests {
         assert!(apply_to_meta(&mut meta, &first));
         assert!(!apply_to_meta(&mut meta, &first), "the same report again changes nothing");
         assert_eq!((meta.context_tokens, meta.auto_compact, meta.advisor.as_deref()), (Some(500), Some(true), Some("sonnet")));
-        let later = snap(r#"{"session_id":"s","five_hour":null,"seven_day":null,"context_fraction":null,"context_tokens":null,"context_window":null,"model":null,"captured_at":2}"#);
+        assert_eq!(meta.advisor_active.as_deref(), Some("sonnet"), "no active report yet: the saved model is the one to show");
+        let pending = snap(r#"{"session_id":"s","five_hour":null,"seven_day":null,"context_fraction":null,"context_tokens":null,"context_window":null,"model":null,"captured_at":2,"advisor":"opus","advisor_active":"sonnet"}"#);
+        assert!(apply_to_meta(&mut meta, &pending));
+        assert_eq!((meta.advisor.as_deref(), meta.advisor_active.as_deref()), (Some("opus"), Some("sonnet")), "the conversation keeps Sonnet until /clear or /compact");
+        let later = snap(r#"{"session_id":"s","five_hour":null,"seven_day":null,"context_fraction":null,"context_tokens":null,"context_window":null,"model":null,"captured_at":3}"#);
         assert!(apply_to_meta(&mut meta, &later), "advisor off is a real change");
         assert_eq!((meta.context_tokens, meta.auto_compact, meta.advisor.clone()), (Some(500), Some(true), None));
     }

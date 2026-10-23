@@ -49,8 +49,8 @@ impl Workspace {
                             .items_center()
                             .gap(px(6.0))
                             .flex_none()
-                            .h(px(34.0))
-                            .px(px(8.0))
+                            .h(px(32.0))
+                            .px(px(6.0))
                             .border_b_1()
                             .border_color(hsla(theme::BORDER))
                             .child(
@@ -69,15 +69,20 @@ impl Workspace {
             None if self.visual_shown() => self.render_visual_view(window, cx).into_any_element(),
             None => self.render_right_menu(window, cx).into_any_element(),
         };
-        // Both views can be resized by their left edge.
+        // Both views can be resized by their left edge; a small grip sits in the gutter.
+        let handle_center = theme::PANEL_GAP / 2.0 + 3.0;
         let handle = Some(
             div()
                 .id("right-resize")
+                .group("right-resize")
                 .absolute()
                 .top_0()
-                .left(px(-3.0))
+                .left(px(-handle_center))
                 .w(px(6.0))
                 .h_full()
+                .flex()
+                .items_center()
+                .justify_center()
                 .cursor_col_resize()
                 .on_mouse_down(
                     MouseButton::Left,
@@ -85,6 +90,14 @@ impl Workspace {
                         ws.right_drag = Some(SideDrag { x: f32::from(ev.position.x), width });
                         cx.notify();
                     }),
+                )
+                .child(
+                    div()
+                        .w(px(2.0))
+                        .h(px(28.0))
+                        .rounded_full()
+                        .bg(hsla(0x2b2b30))
+                        .group_hover("right-resize", |s| s.bg(hsla(0x4a4a52))),
                 ),
         );
         Some(
@@ -94,10 +107,16 @@ impl Workspace {
                 .flex_none()
                 .w(px(width))
                 .h_full()
-                .bg(hsla(theme::SIDEBAR_BG))
-                .border_l_1()
-                .border_color(hsla(theme::BORDER))
-                .child(body)
+                .child(
+                    div()
+                        .size_full()
+                        .rounded(px(theme::PANEL_RADIUS))
+                        .overflow_hidden()
+                        .border_1()
+                        .border_color(hsla(theme::PANEL_BORDER))
+                        .bg(hsla(theme::SIDEBAR_BG))
+                        .child(body),
+                )
                 .children(handle)
                 .into_any_element(),
         )
@@ -111,8 +130,8 @@ impl Workspace {
             .items_center()
             .gap(px(6.0))
             .flex_none()
-            .h(px(34.0))
-            .px(px(8.0))
+            .h(px(32.0))
+            .px(px(6.0))
             .border_b_1()
             .border_color(hsla(theme::BORDER))
             .child(icon_button("visual-back", IconName::ArrowLeft).on_click(cx.listener(|ws, _: &ClickEvent, _w, cx| ws.hide_visual(false, cx))))
@@ -167,8 +186,8 @@ impl Workspace {
             .wire(div().id("right-menu").size_full(), window)
             .flex()
             .flex_col()
-            .gap(px(14.0))
-            .p(px(8.0))
+            .gap(px(10.0))
+            .p(px(6.0))
             .child(group("ACTIONS", actions))
             .children(visual.map(|v| group("VISUAL", v)))
             .children(github.map(|g| group("GITHUB", g)))
@@ -317,13 +336,14 @@ impl Workspace {
 
         // The figures come from the snapshot the session's mod reports.
         let meta = shown.rec.as_ref().filter(|r| r.kind == SessionKind::Claude).and_then(|r| r.claude.as_ref());
-        let (compact, advisor, known) = match meta {
-            Some(m) => (m.auto_compact, m.advisor.clone(), true),
-            None => (None, None, false),
+        let (compact, advisor, active, known) = match meta {
+            Some(m) => (m.auto_compact, m.advisor.clone(), m.advisor_active.clone(), true),
+            None => (None, None, None, false),
         };
         let advisor = advisor.map(|a| a.to_lowercase());
+        let active = active.map(|a| a.to_lowercase());
         let compact_text = compact.map_or("—", |v| if v { "On" } else { "Off" }).to_string();
-        let advisor_text = if known { advisor.clone().unwrap_or_else(|| "Off".into()) } else { "—".into() };
+        let advisor_text = if known { advisor_display(advisor.as_deref(), active.as_deref()) } else { "—".into() };
         let settable = id.filter(|_| meta.is_some() && running).cloned();
 
         let compact_row = match settable.clone() {
@@ -338,7 +358,7 @@ impl Workspace {
             .flex()
             .flex_col()
             .gap(px(10.0))
-            .px(px(10.0))
+            .px(px(8.0))
             .child(meter("CONTEXT", ctx_fraction, ctx_caption, None))
             .child(cache)
             .child(div().flex().flex_col().gap(px(2.0)).child(compact_row).child(advisor_row))
@@ -352,25 +372,58 @@ fn auto_compact_menu(sid: &Id, current: Option<bool>) -> Vec<MenuItem> {
 /// Off, the two aliases, and "Other…" (ticked for any other model) which asks for a name.
 fn advisor_menu(sid: &Id, current: Option<&str>) -> Vec<MenuItem> {
     const ALIASES: [(&str, &str); 2] = [("opus", "Opus"), ("sonnet", "Sonnet")];
-    let other = current.is_some_and(|a| a != "off" && !ALIASES.iter().any(|(k, _)| *k == a));
+    let current = current.and_then(advisor_alias);
+    let other = current.is_some_and(|a| !ALIASES.iter().any(|(k, _)| *k == a));
     let mut items = vec![MenuItem::new(format!("{}Off", tick(current.is_none())), Act::SetAdvisor(sid.clone(), "off".into()))];
     items.extend(ALIASES.iter().map(|(alias, name)| MenuItem::new(format!("{}{name}", tick(current == Some(*alias))), Act::SetAdvisor(sid.clone(), (*alias).into()))));
     items.push(MenuItem::new(format!("{}Other…", tick(other)), Act::AskAdvisor(sid.clone())));
     items
 }
 
+/// Claude Code may store either an alias (`opus`) or the resolved model id (`claude-opus-5-5`); the menu and the
+/// value both speak aliases, so map the id back to the family it belongs to.
+fn advisor_alias(value: &str) -> Option<&str> {
+    let value = value.trim();
+    if value.is_empty() || value.eq_ignore_ascii_case("off") {
+        return None;
+    }
+    let lower = value.to_ascii_lowercase();
+    if lower == "opus" || lower.contains("opus") {
+        Some("opus")
+    } else if lower == "sonnet" || lower.contains("sonnet") {
+        Some("sonnet")
+    } else {
+        Some(value)
+    }
+}
+
+/// `Opus`, or `Opus → Sonnet` while the saved setting waits for `/clear` or `/compact`.
+fn advisor_display(saved: Option<&str>, active: Option<&str>) -> String {
+    let Some(saved) = saved.and_then(advisor_alias) else { return "Off".into() };
+    let active = active.and_then(advisor_alias).unwrap_or(saved);
+    if active == saved { advisor_name(active) } else { format!("{} → {}", advisor_name(active), advisor_name(saved)) }
+}
+
+fn advisor_name(alias: &str) -> String {
+    match alias {
+        "opus" => "Opus".into(),
+        "sonnet" => "Sonnet".into(),
+        other => other.to_string(),
+    }
+}
+
 fn group(label: &str, body: impl IntoElement) -> Div {
-    div().flex().flex_col().gap(px(4.0)).child(div().px(px(10.0)).child(section_label(label.to_string()))).child(body)
+    div().flex().flex_col().gap(px(4.0)).child(div().px(px(8.0)).child(section_label(label.to_string()))).child(body)
 }
 
 fn base_row(id: impl Into<SharedString>, glyph: IconName, label: impl Into<SharedString>) -> Stateful<Div> {
     div()
         .id(id.into())
-        .h(px(28.0))
-        .px(px(10.0))
+        .h(px(26.0))
+        .px(px(8.0))
         .flex()
         .items_center()
-        .gap(px(10.0))
+        .gap(px(8.0))
         .rounded(px(6.0))
         .text_size(crate::scale::px(12.5))
         .child(div().flex_none().text_color(hsla(theme::TEXT_DIM)).child(icon(glyph, 14.0)))
@@ -475,6 +528,13 @@ mod tests {
         assert_eq!(labels(&auto_compact_menu(&sid, None)), ["    On", "    Off"]);
         assert_eq!(labels(&advisor_menu(&sid, None)), ["✓  Off", "    Opus", "    Sonnet", "    Other…"]);
         assert_eq!(labels(&advisor_menu(&sid, Some("sonnet"))), ["    Off", "    Opus", "✓  Sonnet", "    Other…"]);
-        assert_eq!(labels(&advisor_menu(&sid, Some("claude-opus-5-5"))), ["    Off", "    Opus", "    Sonnet", "✓  Other…"]);
+        assert_eq!(labels(&advisor_menu(&sid, Some("claude-opus-5-5"))), ["    Off", "✓  Opus", "    Sonnet", "    Other…"]);
+        assert_eq!(labels(&advisor_menu(&sid, Some("claude-sonnet-4-5-20250929"))), ["    Off", "    Opus", "✓  Sonnet", "    Other…"]);
+        assert_eq!(labels(&advisor_menu(&sid, Some("off"))), ["✓  Off", "    Opus", "    Sonnet", "    Other…"]);
+        assert_eq!(labels(&advisor_menu(&sid, Some("my-model"))), ["    Off", "    Opus", "    Sonnet", "✓  Other…"]);
+        assert_eq!(advisor_display(None, None), "Off");
+        assert_eq!(advisor_display(Some("sonnet"), Some("sonnet")), "Sonnet");
+        assert_eq!(advisor_display(Some("sonnet"), Some("claude-opus-5-5")), "Opus → Sonnet");
+        assert_eq!(advisor_display(Some("opus"), None), "Opus");
     }
 }

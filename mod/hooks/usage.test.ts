@@ -23,7 +23,7 @@ test('reports context, limits, auto-compact and advisor; rewrites only on change
   await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
   expect(writes.length).toBe(1)
   expect(writes[0].path).toMatch(/usage[\\/]abc_123\.json$/) // the session id cannot escape the directory
-  expect(writes[0].snap).toMatchObject({ session_id: 'abc/123', model: 'claude-haiku-5-5', account: 'work', auto_compact: true, advisor: 'opus', compact_at: 167_000, context_fraction: null })
+  expect(writes[0].snap).toMatchObject({ session_id: 'abc/123', model: 'claude-haiku-5-5', account: 'work', auto_compact: true, advisor: 'opus', advisor_active: 'opus', compact_at: 167_000, context_fraction: null })
 
   const measure = {
     context: { tokens: 28000, window: 1_000_000, percent: 3 },
@@ -51,5 +51,12 @@ test('reports context, limits, auto-compact and advisor; rewrites only on change
   advisor = undefined
   await $.command.run({ command: 'advisor', args: ' off ' })
   expect(writes.at(-1)!.snap.advisor).toBe(null)
+  advisor = 'claude-opus-5-5' // a resolved id still reads as the Opus alias
+  await $.session.measure(measure as any)
+  expect(writes.at(-1)!.snap.advisor).toBe('opus')
+
+  advisor = 'sonnet' // saved now, but the running conversation keeps Opus until compaction
+  await $.session.measure(measure as any)
+  expect(writes.at(-1)!.snap).toMatchObject({ advisor: 'sonnet', advisor_active: 'opus' })
   expect(JSON.stringify(writes.at(-1)!.snap)).not.toContain('command') // what the user types is not reported
 })

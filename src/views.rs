@@ -20,7 +20,7 @@ use crate::widgets::{ago, button, clawd, danger_button, fade_in, icon, icon_butt
 impl Workspace {
     // ------------------------------------------------------------------ top bar
 
-    fn render_topbar(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn render_topbar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let crate::inspector::Shown { rec, cwd, project } = self.shown();
         // Git actions live in the right sidebar; the branch pill here needs the repository of the session's own folder.
         let repo = project.as_ref().filter(|p| p.git.is_some()).and(cwd.clone());
@@ -29,21 +29,21 @@ impl Workspace {
         let title = rec.as_ref().map(|r| r.display_title().to_string()).unwrap_or_else(|| "Claudiu".into());
         let branch = project.as_ref().and_then(|p| p.git.as_ref()).and_then(|g| g.branch.clone());
         // `.occlude()` on both groups: the bar is a Windows drag (HTCAPTION) area, which would otherwise swallow clicks on the buttons inside it.
-        // The title bar is the top bar: macOS keeps its traffic lights (over the sidebar, or left of the
-        // toggle when the sidebar is hidden), Windows/Linux get min/max/close drawn at the right edge.
-        let left_pad = if cfg!(target_os = "macos") && !self.store.data.layout.sidebar_visible { 80.0 } else { 14.0 };
+        // The top bar spans the window and is drawn as the window background, not as a panel. macOS keeps its
+        // traffic lights at the left (they are hidden in fullscreen); Windows/Linux get min/max/close at the right.
+        let left_pad = if cfg!(target_os = "macos") && !window.is_fullscreen() { 80.0 } else { 10.0 };
         TitleBar::new()
-            .h(px(40.0))
+            .h(px(theme::TOPBAR_HEIGHT))
             .pl(px(left_pad))
             .bg(hsla(theme::APP_BG))
-            .border_color(hsla(theme::BORDER))
+            .border_b_0()
             // TitleBar's inner row can't shrink below its in-flow content's width, so a long title would push
             // the right-hand buttons out of view. An absolute overlay takes the content out of that sizing.
-            .child(div().absolute().size_full().flex().items_center().justify_between().child(
+            .child(div().absolute().size_full().flex().items_center().justify_between().pr(px(theme::PANEL_GAP)).child(
                 div()
                     .flex()
                     .items_center()
-                    .gap(px(10.0))
+                    .gap(px(6.0))
                     .flex_1()
                     .min_w_0()
                     .overflow_hidden()
@@ -84,11 +84,11 @@ impl Workspace {
                                 .px(px(7.0))
                                 .py(px(1.0))
                                 .rounded(px(10.0))
-                                .bg(hsla(0x1a1a1a))
+                                .bg(hsla(0x26262a))
                                 .text_size(crate::scale::px(11.0))
                                 .text_color(hsla(theme::TEXT_DIM))
                                 .cursor_pointer()
-                                .hover(|s| s.bg(hsla(0x262626)).text_color(hsla(theme::TEXT)))
+                                .hover(|s| s.bg(hsla(0x323236)).text_color(hsla(theme::TEXT)))
                                 .child(icon(IconName::GitBranch, 12.0))
                                 .child(b)
                                 .child(tail)
@@ -100,7 +100,7 @@ impl Workspace {
                     }),
             )
             .child(
-                div().flex().flex_none().mr(px(10.0)).occlude().child(
+                div().flex().flex_none().occlude().child(
                     icon_button("toggle-right", IconName::PanelRight).on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.toggle_right(window, cx))),
                 ),
             ))
@@ -118,11 +118,12 @@ impl Workspace {
                 .flex()
                 .items_center()
                 .justify_between()
-                .h(px(32.0))
+                .h(px(28.0))
                 .flex_none()
-                .px(px(14.0))
+                .px(px(10.0))
+                .rounded(px(6.0))
                 .bg(hsla(0x1d1512))
-                .border_b_1()
+                .border_1()
                 .border_color(hsla(0x3a2a24))
                 .child(div().text_size(crate::scale::px(12.0)).text_color(hsla(theme::ACCENT)).child(text))
                 .when_some(action, |d, (label, act)| {
@@ -180,7 +181,7 @@ impl Workspace {
                 .min_w_0()
                 .min_h_0()
                 .bg(hsla(theme::TERMINAL_BG))
-                .child(div().flex_1().min_h_0().p(px(8.0)).child(term))
+                .child(div().flex_1().min_h_0().p(px(6.0)).child(term))
                 .children(banner),
             format!("pane-in-{id}"),
             150,
@@ -195,7 +196,7 @@ impl Workspace {
                 .child(
                     div()
                         .id("shell-divider")
-                        .h(px(5.0))
+                        .h(px(4.0))
                         .flex_none()
                         .bg(hsla(theme::BORDER))
                         .cursor_row_resize()
@@ -208,7 +209,7 @@ impl Workspace {
                             }),
                         ),
                 )
-                .child(div().h(px(height)).flex_none().bg(hsla(theme::TERMINAL_BG)).p(px(8.0)).child(view));
+                .child(div().h(px(height)).flex_none().bg(hsla(theme::TERMINAL_BG)).p(px(6.0)).child(view));
         }
         container.into_any_element()
     }
@@ -555,7 +556,7 @@ impl Render for Workspace {
 
         let sidebar = self.store.data.layout.sidebar_visible.then(|| self.render_sidebar(window, cx));
         let banner = self.render_update_banner(cx);
-        let topbar = self.render_topbar(cx);
+        let topbar = self.render_topbar(window, cx);
         // Terminals that aren't on screen keep running but must not trigger window redraws on every output burst.
         let showing = if matches!(self.main, Main::Terminals) { self.active.as_ref() } else { None };
         for l in &self.live {
@@ -574,6 +575,8 @@ impl Render for Workspace {
         let menu = self.render_menu(cx);
         let modal = self.render_modal(cx);
         let toast = self.render_toast(cx);
+        // The top bar's own background is the gutter above the panels; only an update banner needs real space.
+        let content_top = if banner.is_some() { theme::PANEL_GAP } else { 0.0 };
 
         div()
             .id("workspace")
@@ -582,7 +585,8 @@ impl Render for Workspace {
             .relative()
             .size_full()
             .flex()
-            .bg(hsla(theme::TERMINAL_BG))
+            .flex_col()
+            .bg(hsla(theme::APP_BG))
             .text_color(hsla(theme::TEXT))
             .on_action(cx.listener(|ws, _: &NewClaude, window, cx| {
                 let cwd = ws.new_session_cwd();
@@ -651,17 +655,39 @@ impl Render for Workspace {
                     ws.act(Act::AddProject(p.clone()), window, cx);
                 }
             }))
-            .children(sidebar)
+            .child(topbar)
             .child(
                 div()
                     .flex()
                     .flex_col()
                     .flex_1()
-                    .min_w_0()
-                    .h_full()
-                    .child(topbar)
+                    .min_h_0()
+                    .gap(px(theme::PANEL_GAP))
+                    .px(px(theme::PANEL_GAP))
+                    .pt(px(content_top))
+                    .pb(px(theme::PANEL_GAP))
                     .children(banner)
-                    .child(div().flex().flex_1().min_h_0().child(div().flex_1().min_w_0().h_full().child(main)).children(right)),
+                    .child(
+                        div()
+                            .flex()
+                            .flex_1()
+                            .min_h_0()
+                            .gap(px(theme::PANEL_GAP))
+                            .children(sidebar)
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .h_full()
+                                    .rounded(px(theme::PANEL_RADIUS))
+                                    .overflow_hidden()
+                                    .border_1()
+                                    .border_color(hsla(theme::PANEL_BORDER))
+                                    .bg(hsla(theme::PANEL_BG))
+                                    .child(main),
+                            )
+                            .children(right),
+                    ),
             )
             .children(menu)
             .children(modal)
