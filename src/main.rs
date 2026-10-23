@@ -1,33 +1,16 @@
 #![cfg_attr(all(not(debug_assertions), target_os = "windows"), windows_subsystem = "windows")]
 
-mod accounts;
 mod app;
-mod ask;
-mod bridge;
 mod claude;
-mod commit;
 mod datadir;
 mod git;
 mod github;
-mod glide;
-mod trace;
-mod glyphs;
-mod inspector;
-mod keys;
-mod mcp;
+mod panels;
 mod platform;
-mod scale;
-mod sidebar;
-mod skeleton;
 mod store;
 mod terminal;
-mod terminal_view;
-mod theme;
 mod updater;
-mod usage;
-mod views;
 mod visual;
-mod widgets;
 
 use gpui::{App, Bounds, KeyBinding, TitlebarOptions, WindowBounds, WindowOptions, prelude::*, px, size};
 use gpui_kit::component::TitleBar;
@@ -43,55 +26,6 @@ gpui_kit::assets::icon_assets!(
         Settings, Terminal, X
     ]
 );
-
-#[cfg(test)]
-mod icon_tests {
-    use gpui::AssetSource;
-    use gpui_kit::assets::IconName;
-
-    fn kebab(name: &str) -> String {
-        let mut out = String::new();
-        let mut prev: Option<char> = None;
-        for c in name.chars() {
-            if (c.is_ascii_uppercase() && prev.is_some()) || (c.is_ascii_digit() && prev.is_some_and(|p| p.is_ascii_alphabetic())) {
-                out.push('-');
-            }
-            out.push(c.to_ascii_lowercase());
-            prev = Some(c);
-        }
-        out
-    }
-
-    fn sources(dir: &std::path::Path, out: &mut String) {
-        for e in std::fs::read_dir(dir).unwrap().flatten() {
-            let path = e.path();
-            if path.is_dir() {
-                sources(&path, out);
-            } else if path.extension().is_some_and(|x| x == "rs") {
-                out.push_str(&std::fs::read_to_string(path).unwrap());
-            }
-        }
-    }
-
-    #[test]
-    fn every_icon_the_app_uses_is_embedded() {
-        let mut code = String::new();
-        sources(std::path::Path::new("src"), &mut code);
-        let dir = IconName::Search.path().to_string();
-        let dir = dir.rsplit_once('/').map_or("", |(d, _)| d).to_string();
-        let mut used = 0;
-        for (i, _) in code.match_indices("IconName::") {
-            let ident: String = code[i + 10..].chars().take_while(|c| c.is_ascii_alphanumeric()).collect();
-            if ident.is_empty() {
-                continue; // this test's own pattern
-            }
-            let path = format!("{dir}/{}.svg", kebab(&ident));
-            assert!(super::AppIcons.load(&path).unwrap().is_some(), "{ident} ({path}) is used but missing from icon_assets!");
-            used += 1;
-        }
-        assert!(used > 20, "found only {used} icon uses; the scan is broken");
-    }
-}
 
 use app::{
     CloseSession, FocusSearch, HideApp, HideOthers, ImportProject, NewClaude, NextSession, OpenGithub, OpenSettings, PrevSession, Quit, ShowAllApps,
@@ -172,9 +106,9 @@ fn install_crash_log() {
 }
 
 fn main() {
-    // Hidden helper mode: the MCP server that lets Claude name its own tab (see mcp.rs).
-    if std::env::args().nth(1).as_deref() == Some(mcp::FLAG) {
-        std::process::exit(mcp::run());
+    // Hidden helper mode: the MCP server that lets Claude name its own tab (see claude/mcp.rs).
+    if std::env::args().nth(1).as_deref() == Some(claude::mcp::FLAG) {
+        std::process::exit(claude::mcp::run());
     }
     install_crash_log();
     // Velopack install/update hooks must run before anything else. A no-op for dev builds.
@@ -219,7 +153,7 @@ fn main() {
         let bounds = Bounds::centered(None, size(px(1280.0), px(800.0)), cx);
         // AppKit's standard window buttons are 14 px tall; center them in the top bar so the
         // traffic lights line up with its controls (and get equal space above and below).
-        let traffic_light_y = (theme::TOPBAR_HEIGHT - 14.0) / 2.0;
+        let traffic_light_y = (panels::theme::TOPBAR_HEIGHT - 14.0) / 2.0;
         // Opened through gpui_kit so the window gets the component library's Root (text inputs need it).
         let (window, workspace) = gpui_kit::open_window(
             WindowOptions {
@@ -268,4 +202,53 @@ fn main() {
         .detach();
         cx.activate(true);
     });
+}
+
+#[cfg(test)]
+mod icon_tests {
+    use gpui::AssetSource;
+    use gpui_kit::assets::IconName;
+
+    fn kebab(name: &str) -> String {
+        let mut out = String::new();
+        let mut prev: Option<char> = None;
+        for c in name.chars() {
+            if (c.is_ascii_uppercase() && prev.is_some()) || (c.is_ascii_digit() && prev.is_some_and(|p| p.is_ascii_alphabetic())) {
+                out.push('-');
+            }
+            out.push(c.to_ascii_lowercase());
+            prev = Some(c);
+        }
+        out
+    }
+
+    fn sources(dir: &std::path::Path, out: &mut String) {
+        for e in std::fs::read_dir(dir).unwrap().flatten() {
+            let path = e.path();
+            if path.is_dir() {
+                sources(&path, out);
+            } else if path.extension().is_some_and(|x| x == "rs") {
+                out.push_str(&std::fs::read_to_string(path).unwrap());
+            }
+        }
+    }
+
+    #[test]
+    fn every_icon_the_app_uses_is_embedded() {
+        let mut code = String::new();
+        sources(std::path::Path::new("src"), &mut code);
+        let dir = IconName::Search.path().to_string();
+        let dir = dir.rsplit_once('/').map_or("", |(d, _)| d).to_string();
+        let mut used = 0;
+        for (i, _) in code.match_indices("IconName::") {
+            let ident: String = code[i + 10..].chars().take_while(|c| c.is_ascii_alphanumeric()).collect();
+            if ident.is_empty() {
+                continue; // this test's own pattern
+            }
+            let path = format!("{dir}/{}.svg", kebab(&ident));
+            assert!(super::AppIcons.load(&path).unwrap().is_some(), "{ident} ({path}) is used but missing from icon_assets!");
+            used += 1;
+        }
+        assert!(used > 20, "found only {used} icon uses; the scan is broken");
+    }
 }

@@ -1,9 +1,9 @@
 //! Sessions reaching other sessions: a Claude Code session can list, search and read the others and open a new one.
-//! The MCP helper files the request (`bridge.rs`) and Claudiu answers it on its next tick, with no dialog (product
+//! The MCP helper files the request (`claude/bridge.rs`) and Claudiu answers it on its next tick, with no dialog (product
 //! owner decision).
 
 use super::*;
-use crate::bridge::{self, Request};
+use crate::claude::bridge::{self, Request};
 use serde_json::Value;
 
 /// Longest first message a session may hand over: it travels on a Windows command line, which is limited to about
@@ -28,7 +28,7 @@ fn utc(ts: i64) -> String {
 /// What the model reads to tell how old a session is: when it was created and last updated, and how long ago.
 fn stamps(created: i64, updated: i64) -> String {
     let now = crate::store::now();
-    let old = |t: i64| match crate::widgets::ago(t, now).as_str() {
+    let old = |t: i64| match crate::panels::widgets::ago(t, now).as_str() {
         "now" => "just now".to_string(),
         a => format!("{a} ago"),
     };

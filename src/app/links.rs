@@ -35,8 +35,8 @@ impl Workspace {
     }
 
     /// What a session asked for through its MCP tools (`stem` is its record id as a file name).
-    pub(super) fn apply_attachment(&mut self, stem: &str, item: crate::mcp::Attachment) -> bool {
-        use crate::mcp::Attachment::*;
+    pub(super) fn apply_attachment(&mut self, stem: &str, item: crate::claude::mcp::Attachment) -> bool {
+        use crate::claude::mcp::Attachment::*;
         let me = self.store.data.sessions.iter().map(|s| &s.id).find(|id| datadir::safe_file_stem(id) == stem).cloned();
         let Some(me) = me else { return false };
         match item {

@@ -2,6 +2,8 @@
 
 The code is the source of truth. This file holds only rules.
 
+Maintain Claudiu as if you'll own it for years: prefer durable fixes over quick ones, push back when a request would hurt its long-term health, and leave the code simpler and easier to navigate than you found it (one job per module, names that are unambiguous and greppable, no dead or duplicate code, references updated when you move things).
+
 ## Boundaries
 
 - Claudiu is a native Rust + GPUI desktop app that manages sessions around the user's existing `claude` CLI. Claude Code owns the agent experience; Claudiu owns the workspace.

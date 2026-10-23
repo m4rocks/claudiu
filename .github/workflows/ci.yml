@@ -21,5 +21,9 @@ jobs:
         run: xcrun -f metal >/dev/null 2>&1 || xcodebuild -downloadComponent MetalToolchain
       - name: Build
         run: cargo build --locked
-      - name: Unit tests (store/reconcile, claude import, git, keys, glyphs, process lifecycle)
-        run: cargo test --locked --workspace
+      - name: Install just
+        uses: extractions/setup-just@v2
+      - name: Install Claude Code CLI (for the mod tests)
+        run: npm install -g @anthropic-ai/claude-code@2.1.309
+      - name: Tests (app unit tests, then mod tests)
+        run: just test

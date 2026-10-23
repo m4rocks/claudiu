@@ -1,7 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 
 const TOOL = 'mcp__claudiu__show_visual'
-const STEP = { turnId: 't', index: 0, answer: '', toolUses: [], stopReason: 'tool_use', usage: null }
+const STEP = { turnId: 't', index: 0, answer: '', toolUses: [], stopReason: 'tool_use' as const, usage: null }
 
 test('streams the Markdown of a show_visual call while it is written, then writes the finished card', async ($, on) => {
   mock.env(on, { CLAUDIU_VISUAL_FILE: 'visual/s.json' })
@@ -23,15 +23,15 @@ test('streams the Markdown of a show_visual call while it is written, then write
   expect(chunks).toEqual(['tool', 'input', 'input', 'input']) // nothing is held back or changed
 
   expect(writes.length).toBeGreaterThanOrEqual(1)
-  const first = writes[0]
-  expect(first.path.endsWith('visual/s.json')).toBe(true)
+  const first = writes[0]!
+  expect(first.path.replace(/\\/g, '/').endsWith('visual/s.json')).toBe(true) // Windows paths use backslashes
   expect(first.card.call).toBe('toolu_1')
   expect(first.card.done).toBe(false)
   expect(first.card.title).toBe('Pla')
 
   const result = await $.tool.call({ tool: TOOL, tool_use_id: 'toolu_1', title: 'Plan', content: '# Hi\n\nsome **bold** é' })
   expect(result.isError).toBeFalsy()
-  const last = writes[writes.length - 1].card
+  const last = writes.at(-1)!.card
   expect(last).toMatchObject({ call: 'toolu_1', title: 'Plan', content: '# Hi\n\nsome **bold** é', done: true })
 })
 

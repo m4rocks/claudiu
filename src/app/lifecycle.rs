@@ -1,10 +1,32 @@
 //! Ending and starting Claudiu: the quit question, remembering what was open, and bringing it back.
 
 use super::*;
+use crate::claude::{ask, mcp, usage};
 
 /// The ids of the sessions that were open, in order.
 fn running_file() -> PathBuf {
     datadir::data_dir().join("running.json")
+}
+
+/// Start-up housekeeping: delete the old per-session files each folder's owner no longer reads. Nothing here touches
+/// Claude Code's own data.
+pub fn tidy_leftovers() {
+    let data = datadir::data_dir();
+    let [mcp_configs, titles, names, attached] = mcp::cleanup_dirs();
+    datadir::prune(names, 7 * 86_400);
+    datadir::prune(attached, 7 * 86_400);
+    datadir::prune(mcp_configs, 7 * 86_400);
+    // Titles are copied into the store on the next tick, so an old file is only a duplicate.
+    datadir::prune(titles, 7 * 86_400);
+    datadir::prune(usage::snapshot_dir(), 30 * 86_400);
+    datadir::prune(usage::ctl_dir(), 7 * 86_400);
+    datadir::prune(ask::dir(), 7 * 86_400);
+    datadir::prune(crate::visual::dir(), 7 * 86_400);
+    datadir::prune(data.join("screens"), 30 * 86_400);
+    datadir::prune(data.join("pasted"), 7 * 86_400);
+    datadir::prune(data.join("github-cache"), 30 * 86_400);
+    // The status-line helper's per-session settings, gone since the mod reports usage; sweep what older builds left.
+    let _ = std::fs::remove_dir_all(data.join("statusline"));
 }
 
 impl Workspace {

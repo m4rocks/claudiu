@@ -4,7 +4,7 @@
 
 use super::*;
 use crate::store::RateLimit;
-use crate::usage::Snapshot;
+use crate::claude::usage::Snapshot;
 
 impl Workspace {
     /// Costs no tokens; the files are tiny.

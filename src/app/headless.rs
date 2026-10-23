@@ -38,14 +38,14 @@ fn run() {
     let id = ws.read_with(&cx, |ws, _| ws.active.clone().expect("a session is shown"));
     // Cross-session tools are answered on the spot, and one that can't work says why.
     use serde_json::{Value, json};
-    let ask = |from: String, tool: &'static str, args: Value| std::thread::spawn(move || crate::bridge::ask(&from, tool, &args));
+    let ask = |from: String, tool: &'static str, args: Value| std::thread::spawn(move || crate::claude::bridge::ask(&from, tool, &args));
     let take = || loop {
-        if let Some(r) = crate::bridge::take_requests().pop() {
+        if let Some(r) = crate::claude::bridge::take_requests().pop() {
             break r;
         }
         std::thread::sleep(Duration::from_millis(50));
     };
-    let serve = |cx: &mut TestAppContext, req: crate::bridge::Request| step(cx, &|ws, w, cx| ws.serve_requests(vec![req.clone()], w, cx));
+    let serve = |cx: &mut TestAppContext, req: crate::claude::bridge::Request| step(cx, &|ws, w, cx| ws.serve_requests(vec![req.clone()], w, cx));
     let from_session = format!("code:{id}");
 
     let h = ask(from_session.clone(), "list_code_sessions", json!({}));
@@ -54,7 +54,7 @@ fn run() {
     assert!(text.contains(&id) && text.contains("this session"), "{text}");
 
     // A request whose asker gave up is dropped.
-    let stale = crate::bridge::Request { id: "late".into(), from: from_session.clone(), tool: "start_code_session".into(), args: json!({"folder": cwd.to_string_lossy()}), deadline: now() - 1 };
+    let stale = crate::claude::bridge::Request { id: "late".into(), from: from_session.clone(), tool: "start_code_session".into(), args: json!({"folder": cwd.to_string_lossy()}), deadline: now() - 1 };
     let before = ws.read_with(&cx, |ws, _| ws.live.len());
     serve(&mut cx, stale);
     assert_eq!(ws.read_with(&cx, |ws, _| ws.live.len()), before, "an expired request was carried out");

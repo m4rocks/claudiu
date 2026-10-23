@@ -1,56 +1,74 @@
-// Loaded per process through `--plugin-dir`; Claudiu itself writes nothing to the user's Claude Code config.
-// It answers Claudiu's `set_model` MCP tool in-process so the override applies from the next request, even
-// mid-turn, then runs /model and /effort once idle so the session itself (what /model shows) switches too;
-// Claude Code saves those as the user's default. It also applies the session name Claudiu writes to
-// `CLAUDIU_NAME_FILE` with `/rename`, which Claude Code queues until the session is idle.
-// It also applies the settings the user changes in Claudiu's sidebar (auto-compact, advisor), sent through
-// `CLAUDIU_CTL_FILE`: the same as the user choosing them in `/config` or typing `/advisor`, which Claude Code saves.
-// It reports usage and status (context, 5-hour / 7-day limits, auto-compact, advisor, the command the user
-// last ran) to `CLAUDIU_USAGE_DIR/<claude session id>.json` for Claudiu's sidebar; no tokens are spent.
-// It answers Claudiu's `show_visual` tool in-process and, while the model is still writing the call, streams
-// its Markdown to `CLAUDIU_VISUAL_FILE` so the Visual panel fills live.
-// Last, it makes the one-shot text completions Claudiu asks for through `CLAUDIU_ASK_FILE` (commit messages, session
-// titles) with `$.model.complete`, so they run on this session's own client and Claudiu needs no `claude -p`.
+// Loaded per process through `--plugin-dir`. Claudiu writes nothing to the user's Claude Code config.
+//
+// What this mod does:
+// - Model and effort: answers Claudiu's `set_model` tool in-process, so the override applies from the next request,
+//   even mid-turn. It then runs /model and /effort once Claude Code is idle, so the session (and what /model shows)
+//   switches too. Claude Code saves those as the user's default.
+// - Session name: applies the name Claudiu writes to `CLAUDIU_NAME_FILE` with /rename, which Claude Code queues
+//   until the session is idle.
+// - Sidebar settings: applies auto-compact and advisor changes sent through `CLAUDIU_CTL_FILE`, the same as the user
+//   choosing them in /config or typing /advisor (which Claude Code saves).
+// - Usage and status: reports context, the 5-hour and 7-day limits, auto-compact, advisor and the last command to
+//   `CLAUDIU_USAGE_DIR/<claude session id>.json`. No tokens are spent.
+// - Visual panel: answers `show_visual` in-process and, while the model is still writing the call, streams its
+//   Markdown to `CLAUDIU_VISUAL_FILE` so the panel fills live.
+// - One-shot completions: runs requests from `CLAUDIU_ASK_FILE` (commit messages, session titles) with
+//   `$.model.complete`, on this session's own client, so Claudiu needs no `claude -p`.
+
+// ---- Constants ----------------------------------------------------------------------------------------------------
+
+// The aliases `set_model` accepts. A full `claude-…` id is accepted too.
 const MODELS = {
-  haiku: 'claude-haiku-4-5-20251001',
+  haiku: 'claude-haiku-5-5',
   sonnet: 'claude-sonnet-5-5',
   opus: 'claude-opus-5-5',
   fable: 'claude-fable-5-1',
 }
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']
-
-let want = {} // { model?, effort? }, per process
-let named = null // `${claude session id}\n${name}` last applied
-let poll
-let ctlPoll
-let ctlSeen = null // highest command number handled; null until the file was first read (older ones are not replayed)
-let askPoll
-let askSeen = null // id of the last request looked at
-let asking = false
-let visualChain = Promise.resolve() // visual writes in order, without holding up the stream
-let lastVisual = null // id of the show_visual call being written or last written
-const VISUAL_TOOL = 'mcp__claudiu__show_visual'
 const ASK_MODELS = ['haiku', 'sonnet', 'opus']
+const VISUAL_TOOL = 'mcp__claudiu__show_visual'
 
-// ---- usage report -------------------------------------------------------------------------------------------
-const stem = id => String(id).replace(/[^A-Za-z0-9_-]/g, '_')
-const secs = iso => { const t = Date.parse(iso); return Number.isFinite(t) ? Math.floor(t / 1000) : null }
+// ---- Per-process state --------------------------------------------------------------------------------------------
+
+let want = {} // { model?, effort? } from Claudiu, applied to each turn step until Claude Code has run /model and /effort
+let named = null // `${claude session id}\n${name}` last applied with /rename
+let namePoll // watches CLAUDIU_NAME_FILE
+let ctlPoll // watches CLAUDIU_CTL_FILE
+let ctlSeen = null // highest command number handled; null until the file was first read (older ones are not replayed)
+let askPoll // watches CLAUDIU_ASK_FILE
+let askSeen = null // id of the last request looked at
+let asking = false // a completion is running; a poll that finds another request waits for it
+let visualChain = Promise.resolve() // visual writes in order, without holding up the stream
+let lastVisual = null // id of the show_visual call being written, or last written
+
+// ---- Usage report -------------------------------------------------------------------------------------------------
 
 let measured = null // { context, limits: { five_hour, seven_day } } from the last session.measure
-let written = '' // what the file holds, minus times, so an unchanged report is not rewritten (a write is cheap, a redraw is not)
-let activeAdvisor = null // advisor the current conversation declared; a model change waits for /clear or /compact
-let activeSession = null // Claude session id activeAdvisor belongs to (/clear starts a new one)
+let written = '' // what the report file holds, minus times; an unchanged report is not rewritten (a write is cheap, a redraw is not)
+let activeAdvisor = null // the advisor the current conversation declared; a model change waits for /clear or /compact
+let activeSession = null // the Claude session id activeAdvisor belongs to (/clear starts a new one)
 
 // The token count auto-compaction runs at (null while it is off). It only changes with settings, the model or the
-// environment, and the breakdown it comes from is a local estimate, so it is read again at most once a minute or after
-// a setting changed.
+// environment, and the breakdown it comes from is a local estimate, so it is read again at most once a minute or
+// after a setting changed.
 let compactAt = null
-let compactedAt = null // when this session last compacted (seconds), so Claudiu can finish a hand-off
 let compactRead = 0
+let compactedAt = null // when this session last compacted (seconds), so Claudiu can finish a hand-off
+
+// A session id as a file name.
+const stem = id => String(id).replace(/[^A-Za-z0-9_-]/g, '_')
+
+// An ISO time as whole seconds, or null when it does not parse.
+function secs(iso) {
+  const t = Date.parse(iso)
+  return Number.isFinite(t) ? Math.floor(t / 1000) : null
+}
+
 async function threshold($, fresh) {
   if (!fresh && Date.now() - compactRead < 60_000) return compactAt
   compactRead = Date.now()
-  const b = (await $.session.usage({ breakdown: 'summary' }).catch(() => null))?.context.breakdown
+  const usage = await $.session.usage({ breakdown: 'summary' }).catch(() => null)
+  const b = usage?.context.breakdown
   if (b) compactAt = b.isAutoCompactEnabled ? (b.autoCompactThreshold ?? null) : null
   return compactAt
 }
@@ -64,7 +82,8 @@ async function setting($, key) {
   return undefined
 }
 
-// The menu speaks aliases; settings may hold a resolved id such as `claude-opus-5-5`.
+// The menu speaks aliases; settings may hold a resolved id such as `claude-opus-5-5`. Returns null when the advisor
+// is off.
 function advisorAlias(value) {
   if (typeof value !== 'string') return null
   const v = value.trim()
@@ -75,16 +94,19 @@ function advisorAlias(value) {
   return v
 }
 
-// Reads the status Claude Code keeps; every read is best effort, a failed one is left out rather than failing a hook.
+// Writes this session's usage and status report for Claudiu's sidebar. `fresh` re-reads the compaction threshold now.
 // `override` carries a value Claudiu just asked for, so the sidebar updates before the host has refreshed its cache.
+// Every read is best effort: a failed one is left out, and reporting never fails a hook.
 async function report($, fresh = false, override = {}) {
   try {
     const dir = await $.env.get('CLAUDIU_USAGE_DIR')
     if (!dir) return
     const id = await $.session.id()
     if (!id) return
+
     const ctx = measured?.context
     const fraction = ctx?.tokens != null && ctx?.window > 0 ? Math.min(1, ctx.tokens / ctx.window) : null
+
     const rows = await $.config.list().catch(() => [])
     let autoCompact = rows.find(r => r.key === 'autoCompact')?.value
     if (typeof autoCompact !== 'boolean') {
@@ -94,12 +116,14 @@ async function report($, fresh = false, override = {}) {
     let advisor = advisorAlias(await setting($, 'advisorModel'))
     if ('auto_compact' in override) autoCompact = override.auto_compact
     if ('advisor' in override) advisor = override.advisor
-    // A different model only reaches the running conversation on /clear or /compact. Off and on take effect at
-    // once, so null / newly-named advisors replace the active one; a model-to-model change keeps the old one.
+
+    // A different model only reaches the running conversation on /clear or /compact. Off and on take effect at once,
+    // so a null or newly named advisor replaces the active one; a model-to-model change keeps the old one.
     if (activeSession !== id || advisor == null || activeAdvisor == null) {
       activeSession = id
       activeAdvisor = advisor
     }
+
     const snap = {
       session_id: id,
       five_hour: measured?.limits.five_hour ?? null,
@@ -115,14 +139,19 @@ async function report($, fresh = false, override = {}) {
       advisor_active: activeAdvisor,
       compacted_at: compactedAt,
     }
+    // `seen_at` (when a limit was read) is left out, so reading the same value again is not a change.
     const key = JSON.stringify(snap, (k, v) => (k === 'seen_at' ? undefined : v))
     if (key === written) return
     written = key
-    await $.fs.write(dir + '/' + stem(id) + '.json', JSON.stringify({ ...snap, captured_at: Math.floor(Date.now() / 1000) }))
+
+    const path = dir + '/' + stem(id) + '.json'
+    await $.fs.write(path, JSON.stringify({ ...snap, captured_at: Math.floor(Date.now() / 1000) }))
   } catch {
     // Reporting must never disturb the session.
   }
 }
+
+// ---- Sidebar commands ---------------------------------------------------------------------------------------------
 
 // Applies what Claudiu's sidebar asked for since the last look. The file holds the latest few `{ seq, key, value }`
 // commands; only known keys and plainly shaped values are acted on.
@@ -132,22 +161,15 @@ async function applyCtl($) {
     if (!file) return
     const cmds = JSON.parse(await $.fs.read(file).catch(() => '{}')).cmds ?? []
     if (ctlSeen === null) {
+      // First look: what is already in the file was sent before this session started, so it is not replayed.
       ctlSeen = cmds.reduce((top, c) => Math.max(top, c.seq), 0)
       return
     }
     const override = {}
-    for (const c of cmds.filter(c => c.seq > ctlSeen).sort((a, b) => a.seq - b.seq)) {
+    const pending = cmds.filter(c => c.seq > ctlSeen).sort((a, b) => a.seq - b.seq)
+    for (const c of pending) {
       ctlSeen = c.seq
-      if (c.key === 'auto_compact' && typeof c.value === 'boolean') {
-        await $.config.set({ key: 'autoCompact', value: c.value }).catch(() => {})
-        override.auto_compact = c.value
-      } else if (c.key === 'compact' && c.value === true) {
-        // Queued by Claude Code until idle, like the user typing /compact; the session.compact hook reports it.
-        await $.command.run({ command: 'compact' }).catch(() => {})
-      } else if (c.key === 'advisor' && typeof c.value === 'string' && /^[A-Za-z0-9._-]{1,60}$/.test(c.value)) {
-        await $.command.run({ command: 'advisor', args: c.value }).catch(() => {})
-        override.advisor = advisorAlias(c.value)
-      }
+      await applyCtlCommand($, c, override)
     }
     if (Object.keys(override).length > 0) await report($, true, override)
   } catch {
@@ -155,11 +177,26 @@ async function applyCtl($) {
   }
 }
 
-// ---- Visual panel ---------------------------------------------------------------------------------------------
-// The text of a string property of JSON that is still being written; it may end anywhere, even inside an escape.
+async function applyCtlCommand($, c, override) {
+  if (c.key === 'auto_compact' && typeof c.value === 'boolean') {
+    await $.config.set({ key: 'autoCompact', value: c.value }).catch(() => {})
+    override.auto_compact = c.value
+  } else if (c.key === 'compact' && c.value === true) {
+    // Queued by Claude Code until idle, like the user typing /compact; the session.compact hook reports it.
+    await $.command.run({ command: 'compact' }).catch(() => {})
+  } else if (c.key === 'advisor' && typeof c.value === 'string' && /^[A-Za-z0-9._-]{1,60}$/.test(c.value)) {
+    await $.command.run({ command: 'advisor', args: c.value }).catch(() => {})
+    override.advisor = advisorAlias(c.value)
+  }
+}
+
+// ---- Visual panel -------------------------------------------------------------------------------------------------
+
+// The text of a string property in JSON that may still be being written. It can end anywhere, even inside an escape.
 function partialString(json, key) {
   const m = new RegExp('"' + key + '"\\s*:\\s*"').exec(json)
   if (!m) return null
+  const ESCAPES = { n: '\n', t: '\t', r: '\r', b: '\b', f: '\f' }
   let out = ''
   let i = m.index + m[0].length
   while (i < json.length) {
@@ -178,21 +215,29 @@ function partialString(json, key) {
       out += String.fromCharCode(parseInt(hex, 16))
       i += 6
     } else {
-      out += { n: '\n', t: '\t', r: '\r', b: '\b', f: '\f' }[n] ?? n
+      out += ESCAPES[n] ?? n
       i += 2
     }
   }
   return out
 }
 
+// Queues a write of the Visual panel's file. Writes run one after another, and a failed one is dropped.
 function writeVisual($, file, call, title, content, done) {
-  const body = JSON.stringify({ call, title: String(title ?? '').slice(0, 80), content: String(content ?? '').slice(0, 200_000), done, at: Date.now() })
+  const body = JSON.stringify({
+    call,
+    title: String(title ?? '').slice(0, 80),
+    content: String(content ?? '').slice(0, 200_000),
+    done,
+    at: Date.now(),
+  })
   visualChain = visualChain.then(() => $.fs.write(file, body)).catch(() => {})
 }
 
-// ---- one-shot completions for Claudiu ---------------------------------------------------------------------------
-// The request file holds `{ id, model, system, prompt, deadline }`; the answer goes next to it as `<name>.res.json`
-// (`working` as soon as the request is picked up, then `done` with the text or `error`).
+// ---- One-shot completions -----------------------------------------------------------------------------------------
+
+// The request file holds `{ id, model, system, prompt, deadline }`. The answer goes next to it as `<name>.res.json`:
+// `working` as soon as the request is picked up, then `done` with the text, or `error`.
 async function answerAsk($) {
   if (asking) return
   let reply
@@ -207,6 +252,7 @@ async function answerAsk($) {
     askSeen = req.id
     id = req.id
     if (!(req.deadline > Date.now() / 1000)) return // nobody is waiting any more
+
     asking = true
     reply = file.replace(/\.json$/, '.res.json')
     if (typeof req.prompt !== 'string' || !req.prompt.trim()) {
@@ -214,6 +260,7 @@ async function answerAsk($) {
       return
     }
     await $.fs.write(reply, JSON.stringify({ id, state: 'working' }))
+
     const r = await $.model.complete({
       model: ASK_MODELS.includes(req.model) ? req.model : 'haiku',
       system: typeof req.system === 'string' ? req.system.slice(0, 4000) : undefined,
@@ -221,131 +268,180 @@ async function answerAsk($) {
       maxTokens: 1024,
       timeoutMs: 90_000,
     })
-    const out = r.isAnswered ? { id, state: 'done', text: r.text } : { id, state: 'error', error: 'The model call failed (' + r.reason + (r.status ? ' ' + r.status : '') + ').' }
+    const out = r.isAnswered
+      ? { id, state: 'done', text: r.text }
+      : { id, state: 'error', error: 'The model call failed (' + r.reason + (r.status ? ' ' + r.status : '') + ').' }
     await $.fs.write(reply, JSON.stringify(out))
   } catch (err) {
-    if (reply) await $.fs.write(reply, JSON.stringify({ id, state: 'error', error: 'The model call failed: ' + String(err?.message ?? err).slice(0, 200) })).catch(() => {})
+    if (reply) {
+      const error = 'The model call failed: ' + String(err?.message ?? err).slice(0, 200)
+      await $.fs.write(reply, JSON.stringify({ id, state: 'error', error })).catch(() => {})
+    }
   } finally {
     asking = false
   }
 }
 
-export function register(on) {
-  on('session.measure', async ($, e, next) => {
-    const seen = Math.floor(Date.now() / 1000)
-    const limit = kind => {
-      const r = e.rateLimits.find(l => l.kind === kind)
-      return r ? { utilization: Math.min(1, Math.max(0, r.percentUsed / 100)), resets_at: secs(r.resetsAt), seen_at: seen } : null
+// ---- Session name -------------------------------------------------------------------------------------------------
+
+// Applies the name Claudiu writes to CLAUDIU_NAME_FILE with /rename: once per name and Claude session.
+async function watchSessionName($) {
+  const file = await $.env.get('CLAUDIU_NAME_FILE')
+  if (!file) return
+  const read = async () => (await $.fs.read(file).catch(() => '')).trim()
+  const key = async name => (await $.session.id()) + '\n' + name
+
+  // What the file holds now is the name the session was launched with (`--name`): don't re-run it.
+  const initial = await read()
+  named = initial ? await key(initial) : null
+  namePoll?.cancel()
+  namePoll = $.clock.every(1000, async () => {
+    const name = await read()
+    if (!name) return
+    const k = await key(name) // a new Claude session id (/clear) gets the name again
+    if (k === named) return
+    named = k
+    await $.command.run({ command: 'rename', args: name }).catch(() => { named = null })
+  })
+}
+
+// ---- Hook handlers ------------------------------------------------------------------------------------------------
+
+async function onMeasure($, e, next) {
+  const seen = Math.floor(Date.now() / 1000)
+  const limit = kind => {
+    const r = e.rateLimits.find(l => l.kind === kind)
+    if (!r) return null
+    return { utilization: Math.min(1, Math.max(0, r.percentUsed / 100)), resets_at: secs(r.resetsAt), seen_at: seen }
+  }
+  measured = { context: e.context, limits: { five_hour: limit('five_hour'), seven_day: limit('seven_day') } }
+  const r = await next(e)
+  await report($)
+  return r
+}
+
+async function onCommandRun($, e, next) {
+  const r = await next(e) // the command has run: a setting it changed is read after it
+  await report($, true)
+  return r
+}
+
+async function onConfigSet($, e, next) {
+  const r = await next(e)
+  await report($, true)
+  return r
+}
+
+// Compaction rebuilds the request, so the saved advisor becomes the one this conversation declares.
+async function onSessionCompact($, e, next) {
+  const r = await next(e)
+  activeAdvisor = advisorAlias(await setting($, 'advisorModel'))
+  activeSession = await $.session.id().catch(() => null)
+  compactedAt = Math.floor(Date.now() / 1000)
+  await report($, true)
+  return r
+}
+
+async function onSetModel($, e) {
+  const alias = String(e.model ?? '').trim().toLowerCase()
+  const model = MODELS[alias] ?? (/^claude-[a-z0-9.-]+$/.test(alias) ? alias : undefined)
+  const effort = String(e.effort ?? '').trim().toLowerCase()
+  if (e.model != null && !model) {
+    return { result: 'Unknown model: ' + e.model + '. Use haiku, sonnet, opus, fable or a full claude-… id.', isError: true }
+  }
+  if (e.effort != null && effort !== 'auto' && !EFFORTS.includes(effort)) {
+    return { result: 'Unknown effort: ' + e.effort + '. Use ' + EFFORTS.join(', ') + ' or auto.', isError: true }
+  }
+  if (!model && e.effort == null) return { result: 'Give a model, an effort, or both.', isError: true }
+
+  if (model) want = { ...want, model }
+  if (e.effort != null) want = { ...want, effort: effort === 'auto' ? undefined : effort }
+
+  // turn.step covers the rest of this turn. The session's own model and effort (what /model shows) follow once
+  // Claude Code is idle. A command can't run from inside a hook the turn waits on, hence the timer.
+  $.clock.after(0, () => {
+    if (model) {
+      $.command.run({ command: 'model', args: model }).then(
+        () => { if (want.model === model) want = { ...want, model: undefined } },
+        () => {},
+      )
     }
-    measured = { context: e.context, limits: { five_hour: limit('five_hour'), seven_day: limit('seven_day') } }
-    const r = await next(e)
-    await report($)
-    return r
-  })
-
-  on('command.run', async ($, e, next) => {
-    const r = await next(e) // the command has run: a setting it changed is read after it
-    await report($, true)
-    return r
-  })
-
-  on('config.set', async ($, e, next) => {
-    const r = await next(e)
-    await report($, true)
-    return r
-  })
-
-  // Compaction rebuilds the request, so the saved advisor becomes the one this conversation declares.
-  on('session.compact', async ($, e, next) => {
-    const r = await next(e)
-    activeAdvisor = advisorAlias(await setting($, 'advisorModel'))
-    activeSession = await $.session.id().catch(() => null)
-    compactedAt = Math.floor(Date.now() / 1000)
-    await report($, true)
-    return r
-  })
-
-
-  on('tool.call', { tool: 'mcp__claudiu__set_model' }, async ($, e) => {
-    const alias = String(e.model ?? '').trim().toLowerCase()
-    const model = MODELS[alias] ?? (/^claude-[a-z0-9.-]+$/.test(alias) ? alias : undefined)
-    const effort = String(e.effort ?? '').trim().toLowerCase()
-    if (e.model != null && !model) return { result: 'Unknown model: ' + e.model + '. Use haiku, sonnet, opus, fable or a full claude-… id.', isError: true }
-    if (e.effort != null && effort !== 'auto' && !EFFORTS.includes(effort)) return { result: 'Unknown effort: ' + e.effort + '. Use ' + EFFORTS.join(', ') + ' or auto.', isError: true }
-    if (!model && e.effort == null) return { result: 'Give a model, an effort, or both.', isError: true }
-    if (model) want = { ...want, model }
-    if (e.effort != null) want = { ...want, effort: effort === 'auto' ? undefined : effort }
-    // turn.step covers the rest of this turn; the session's own model/effort (what /model shows) follow once
-    // Claude Code is idle. A command can't run from inside a hook the turn waits on, hence the timer.
-    $.clock.after(0, () => {
-      if (model) $.command.run({ command: 'model', args: model }).then(() => { if (want.model === model) want = { ...want, model: undefined } }, () => {})
-      if (e.effort != null) $.command.run({ command: 'effort', args: effort }).then(() => { if (want.effort === (effort === 'auto' ? undefined : effort)) want = { ...want, effort: undefined } }, () => {})
-    })
-    const what = [model, e.effort != null && 'effort ' + effort].filter(Boolean).join(', ')
-    // Ending the turn lets the queued /model and /effort run, so the session (and /model) switch for good.
-    return {
-      result: 'Switched to ' + what + ' from your next request. Your system prompt still names the previous model; ignore that. ' +
-        'Now stop: end your turn with one short line telling the user the switch is done and asking them to confirm ' +
-        '(or say what to do next) so the session itself switches. Do not continue the task in this turn.',
+    if (e.effort != null) {
+      $.command.run({ command: 'effort', args: effort }).then(
+        () => { if (want.effort === (effort === 'auto' ? undefined : effort)) want = { ...want, effort: undefined } },
+        () => {},
+      )
     }
   })
 
-  // The model's `show_visual` call streams to the Visual panel while it is written: the call's arguments arrive as
-  // pieces of JSON, and Markdown read out of them so far goes to the file at most a few times a second. The tool.call
-  // hook below writes the finished card.
-  on('tool.call', { tool: VISUAL_TOOL }, async ($, e) => {
-    const file = await $.env.get('CLAUDIU_VISUAL_FILE')
-    if (!file) return { result: "The Visual panel isn't available in this session (Claudiu's mod has no file for it).", isError: true }
-    if (typeof e.content !== 'string' || !e.content.trim()) return { result: 'content must be non-empty Markdown.', isError: true }
-    writeVisual($, file, e.tool_use_id ?? lastVisual ?? 'v' + Date.now(), e.title, e.content, true)
-    return { result: "Shown in Claudiu's Visual panel. Say the key facts in a short reply; don't repeat the content." }
-  })
+  const what = [model, e.effort != null && 'effort ' + effort].filter(Boolean).join(', ')
+  // Ending the turn lets the queued /model and /effort run, so the session (and /model) switch for good.
+  return {
+    result: 'Switched to ' + what + ' from your next request. Your system prompt still names the previous model; ignore that. ' +
+      'Now stop: end your turn with one short line telling the user the switch is done and asking them to confirm ' +
+      '(or say what to do next) so the session itself switches. Do not continue the task in this turn.',
+  }
+}
 
-  on('turn.step', async function* ($, e, next) {
-    const step = !e.agentId && (want.model || want.effort) ? { ...e, model: want.model ?? e.model, effort: want.effort ?? e.effort } : e
-    const file = e.agentId ? null : await $.env.get('CLAUDIU_VISUAL_FILE')
-    if (!file) return yield* next(step)
-    const open = new Map() // block index -> the show_visual call being written there
-    for await (const c of next(step)) {
-      if (c.kind === 'tool' && c.name === VISUAL_TOOL) {
-        open.set(c.index, { id: c.id, json: '', at: 0 })
-        lastVisual = c.id
-      } else if (c.kind === 'input' && open.has(c.index)) {
-        const v = open.get(c.index)
-        v.json += c.json
-        if (Date.now() - v.at >= 150) {
-          v.at = Date.now()
-          writeVisual($, file, v.id, partialString(v.json, 'title'), partialString(v.json, 'content'), false)
-        }
+// The model's show_visual call streams to the Visual panel while it is written. The call's arguments arrive as pieces
+// of JSON; the Markdown read out of them so far goes to the file a few times a second at most. The tool.call hook
+// writes the finished card.
+async function onShowVisual($, e) {
+  const file = await $.env.get('CLAUDIU_VISUAL_FILE')
+  if (!file) {
+    return { result: "The Visual panel isn't available in this session (Claudiu's mod has no file for it).", isError: true }
+  }
+  if (typeof e.content !== 'string' || !e.content.trim()) return { result: 'content must be non-empty Markdown.', isError: true }
+  writeVisual($, file, e.tool_use_id ?? lastVisual ?? 'v' + Date.now(), e.title, e.content, true)
+  return { result: "Shown in Claudiu's Visual panel. Say the key facts in a short reply; don't repeat the content." }
+}
+
+// Applies the saved model and effort to this turn's steps, and streams a show_visual call to the Visual panel while
+// the model writes it. Sub-agent steps are left alone.
+async function* onTurnStep($, e, next) {
+  const step = !e.agentId && (want.model || want.effort)
+    ? { ...e, model: want.model ?? e.model, effort: want.effort ?? e.effort }
+    : e
+  const file = e.agentId ? null : await $.env.get('CLAUDIU_VISUAL_FILE')
+  if (!file) return yield* next(step)
+
+  const open = new Map() // block index -> the show_visual call being written there
+  for await (const c of next(step)) {
+    if (c.kind === 'tool' && c.name === VISUAL_TOOL) {
+      open.set(c.index, { id: c.id, json: '', at: 0 })
+      lastVisual = c.id
+    } else if (c.kind === 'input' && open.has(c.index)) {
+      const v = open.get(c.index)
+      v.json += c.json
+      if (Date.now() - v.at >= 150) {
+        v.at = Date.now()
+        writeVisual($, file, v.id, partialString(v.json, 'title'), partialString(v.json, 'content'), false)
       }
-      yield c
     }
-  })
+    yield c
+  }
+}
 
-  on('session.start', async ($, e, next) => {
-    const r = await next(e)
-    await report($)
-    await applyCtl($)
-    ctlPoll?.cancel()
-    ctlPoll = $.clock.every(1000, () => applyCtl($))
-    askPoll?.cancel()
-    askPoll = $.clock.every(500, () => answerAsk($))
-    const file = await $.env.get('CLAUDIU_NAME_FILE')
-    if (!file) return r
-    const read = async () => (await $.fs.read(file).catch(() => '')).trim()
-    const key = async name => (await $.session.id()) + '\n' + name
-    // What the file holds now is the name the session was launched with (`--name`): don't re-run it.
-    const initial = await read()
-    named = initial ? await key(initial) : null
-    poll?.cancel()
-    poll = $.clock.every(1000, async () => {
-      const name = await read()
-      if (!name) return
-      const k = await key(name) // a new Claude session id (/clear) gets the name again
-      if (k === named) return
-      named = k
-      await $.command.run({ command: 'rename', args: name }).catch(() => { named = null })
-    })
-    return r
-  })
+async function onSessionStart($, e, next) {
+  const r = await next(e)
+  await report($)
+  await applyCtl($)
+
+  ctlPoll?.cancel()
+  ctlPoll = $.clock.every(1000, () => applyCtl($))
+  askPoll?.cancel()
+  askPoll = $.clock.every(500, () => answerAsk($))
+  await watchSessionName($)
+  return r
+}
+
+export function register(on) {
+  on('session.measure', onMeasure)
+  on('command.run', onCommandRun)
+  on('config.set', onConfigSet)
+  on('session.compact', onSessionCompact)
+  on('tool.call', { tool: 'mcp__claudiu__set_model' }, onSetModel)
+  on('tool.call', { tool: VISUAL_TOOL }, onShowVisual)
+  on('turn.step', onTurnStep)
+  on('session.start', onSessionStart)
 }

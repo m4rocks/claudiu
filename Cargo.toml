@@ -1,13 +1,10 @@
 [package]
 name = "claudiu"
-version = "0.5.3"
+version = "0.5.4"
 edition = "2024"
 description = "A native workspace for Claude Code sessions: real PTYs, projects, and session history"
 repository = "https://github.com/m4rocks/claudiu"
 publish = false
-
-[workspace]
-members = ["crates/core"]
 
 [dependencies]
 alacritty_terminal = "0.26.0"

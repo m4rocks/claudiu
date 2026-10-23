@@ -1,5 +1,5 @@
 //! Claudiu's own persisted state (projects, session history, cached usage, layout).
-//! Independent of GPUI. Claude Code's data is only ever *read* (see `claude.rs`) and merged in here.
+//! Independent of GPUI. Claude Code's data is only ever *read* (see `claude/`) and merged in here.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -96,7 +96,7 @@ pub struct SessionRecord {
     /// Claudiu-only display label; wins over `title` when set.
     #[serde(default)]
     pub custom_title: Option<String>,
-    /// Tab title Claude chose itself through Claudiu's MCP tool (see mcp.rs). Beats `title`, loses to `custom_title`.
+    /// Tab title Claude chose itself through Claudiu's MCP tool (see `claude/mcp.rs`). Beats `title`, loses to `custom_title`.
     #[serde(default)]
     pub auto_title: Option<String>,
     pub cwd: PathBuf,
@@ -192,7 +192,7 @@ pub const MAIN_ACCOUNT: &str = "main";
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Account {
     pub id: Id,
-    /// Alt account's Claude Code config folder (see accounts.rs); `None` is the main account.
+    /// Alt account's Claude Code config folder (see `claude/accounts.rs`); `None` is the main account.
     #[serde(default)]
     pub dir: Option<PathBuf>,
     /// From `claude auth status`; `None` until read, or when signed out.

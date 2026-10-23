@@ -1,5 +1,5 @@
 //! "Regenerate title": a new name for a running session, written from what was said in it by the session's own mod
-//! (`ask.rs`), and used as the session's chosen name (which also renames it inside Claude Code).
+//! (`claude/ask.rs`), and used as the session's chosen name (which also renames it inside Claude Code).
 
 use super::*;
 
@@ -26,7 +26,7 @@ impl Workspace {
                         return Err("Nothing to title yet.".to_string());
                     }
                     let prompt = format!("Conversation:\n\n{said}\n\nWrite the title.");
-                    let raw = crate::commit::generate(&|system, prompt| crate::ask::complete(&record, system, prompt), TITLE_SYSTEM, &prompt)?;
+                    let raw = crate::git::commit::generate(&|system, prompt| crate::claude::ask::complete(&record, system, prompt), TITLE_SYSTEM, &prompt)?;
                     let title: String = raw.lines().next().unwrap_or_default().trim().trim_matches(['"', '\'', '`', '.']).chars().take(60).collect();
                     if title.is_empty() { Err("the model returned no title".to_string()) } else { Ok(title) }
                 })

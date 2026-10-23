@@ -27,7 +27,7 @@ mod live {
         assert!(!own.owner.is_empty());
 
         let repo = parse_repo(&gh.graphql(REPO_QUERY, json!({"owner": REPO.0, "name": REPO.1})).unwrap()).unwrap();
-        assert_eq!(repo.viewer.is_empty(), false);
+        assert!(!repo.viewer.is_empty());
 
         for kind in [Kind::Issue, Kind::Pull] {
             let q = scoped("zed-industries/zed", kind, "is:open");

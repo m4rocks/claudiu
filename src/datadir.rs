@@ -19,37 +19,20 @@ pub fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
     std::fs::rename(&tmp, path)
 }
 
-/// Drop leftovers: per-session files (MCP configs, names, titles) after a week, usage snapshots after a month.
-pub fn cleanup() {
-    let prune = |dir: PathBuf, max_age_secs: u64| {
-        let Ok(entries) = std::fs::read_dir(dir) else { return };
-        for e in entries.flatten() {
-            let old = e
-                .metadata()
-                .and_then(|m| m.modified())
-                .ok()
-                .and_then(|t| t.elapsed().ok())
-                .is_some_and(|age| age.as_secs() > max_age_secs);
-            if old {
-                let _ = std::fs::remove_file(e.path());
-            }
+/// Remove the files in `dir` that have not been modified for `max_age_secs`. The caller decides the age.
+pub fn prune(dir: PathBuf, max_age_secs: u64) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for e in entries.flatten() {
+        let old = e
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age.as_secs() > max_age_secs);
+        if old {
+            let _ = std::fs::remove_file(e.path());
         }
-    };
-    let [mcp_configs, titles, names, attached] = crate::mcp::cleanup_dirs();
-    prune(names, 7 * 86_400);
-    prune(attached, 7 * 86_400);
-    prune(mcp_configs, 7 * 86_400);
-    // Titles are copied into the store on the next tick, so an old file is only a duplicate.
-    prune(titles, 7 * 86_400);
-    prune(crate::usage::snapshot_dir(), 30 * 86_400);
-    prune(crate::usage::ctl_dir(), 7 * 86_400);
-    prune(crate::ask::dir(), 7 * 86_400);
-    prune(crate::visual::dir(), 7 * 86_400);
-    prune(data_dir().join("screens"), 30 * 86_400);
-    prune(data_dir().join("pasted"), 7 * 86_400);
-    prune(data_dir().join("github-cache"), 30 * 86_400);
-    // The status-line helper's per-session settings, gone since the mod reports usage; sweep what older builds left.
-    let _ = std::fs::remove_dir_all(data_dir().join("statusline"));
+    }
 }
 
 #[cfg(test)]

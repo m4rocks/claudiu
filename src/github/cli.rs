@@ -67,7 +67,8 @@ impl RepoRef {
 
 /// Tokens `gh` handed out, per host (`None` is github.com), and when it was asked: a host with no login is asked
 /// again after `MISS_FOR`. In memory only.
-static TOKENS: Mutex<Vec<(Option<String>, Option<String>, Instant)>> = Mutex::new(Vec::new());
+type Tokens = Vec<(Option<String>, Option<String>, Instant)>;
+static TOKENS: Mutex<Tokens> = Mutex::new(Vec::new());
 const MISS_FOR: Duration = Duration::from_secs(60);
 
 /// A `gh` bound to one working folder (and Enterprise host, if any).

@@ -8,7 +8,7 @@ use gpui::{
 };
 
 use super::parse::{Ax, Color, Css, Dir, Display, El, Len, Node, Svg, TextAlign, Tree, token};
-use crate::theme;
+use crate::panels::theme;
 
 fn hsla(c: Color) -> Hsla {
     let mut h = theme::hsla(c.0);
@@ -231,7 +231,7 @@ impl R {
             font.style = FontStyle::Italic;
         }
         if ctx.mono {
-            font.family = crate::terminal_view::FONT.into();
+            font.family = crate::terminal::view::FONT.into();
         }
         let color = hsla(ctx.color);
         out.runs.push(TextRun {
@@ -256,7 +256,7 @@ fn svg(s: Option<&Svg>) -> AnyElement {
             .px(px(12.0))
             .rounded(px(8.0))
             .bg(tok("surface"))
-            .text_size(crate::scale::px(12.0))
+            .text_size(crate::panels::scale::px(12.0))
             .text_color(tok("faint"))
             .child("Drawing…")
             .into_any_element(),
@@ -347,7 +347,7 @@ fn boxed(c: &Css) -> Div {
         d = d.overflow_hidden();
     }
     if let Some(s) = c.size {
-        d = d.text_size(crate::scale::px(s));
+        d = d.text_size(crate::panels::scale::px(s));
     }
     if let Some(l) = c.line_height {
         d = d.line_height(relative(l));

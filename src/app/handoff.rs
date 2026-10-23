@@ -5,9 +5,9 @@
 //! the hand-off for a session that runs under another one.
 
 use super::*;
-use crate::usage::Snapshot;
+use crate::claude::usage::Snapshot;
 
-/// Used share of a limit at which the left sidebar offers to switch accounts.
+/// Used share of a limit at which the left sidebar shows its notice.
 pub const HIGH: f32 = 0.95;
 /// How long a compaction may take before the hand-off is given up.
 const TIMEOUT_SECS: i64 = 180;
@@ -19,33 +19,28 @@ pub struct Handoff {
     pub compacted: bool,
 }
 
-/// The left sidebar warning: the active account is at `HIGH` and `to` has used less.
-pub struct Offer {
-    pub to: Id,
-    pub to_name: String,
-    pub text: String,
-}
-
+/// The left sidebar notice: the active account is at `HIGH` of a limit. It only reports; the user picks any account.
 impl Workspace {
-    /// Derived on every render, so the warning stays until the use drops or the account changes.
-    pub fn switch_offer(&self) -> Option<Offer> {
+    /// Derived on every render, so the notice stays until the use drops or the account changes.
+    pub fn switch_offer(&self) -> Option<String> {
         let t = crate::store::now();
         let active = self.store.active_account()?;
         let peak = active.usage.peak(t);
         if peak < HIGH {
             return None;
         }
-        let (best, best_peak) = self
-            .store
-            .data
-            .accounts
-            .iter()
-            .filter(|a| a.id != active.id && (a.is_main() || a.email.is_some()))
-            .map(|a| (a, a.usage.peak(t)))
-            .min_by(|x, y| x.1.total_cmp(&y.1))
-            .filter(|(_, p)| *p < peak)?;
-        let text = format!("{} has used {:.0}% of a usage limit. {} is at {:.0}%.", active.name(), peak * 100.0, best.name(), best_peak * 100.0);
-        Some(Offer { to: best.id.clone(), to_name: best.name(), text })
+        // The reset shown belongs to the limit whose percentage is shown; none if that limit has no known reset.
+        let reset = [&active.usage.five_hour, &active.usage.seven_day]
+            .into_iter()
+            .flatten()
+            .filter(|l| l.resets_at.is_none_or(|r| r > t))
+            .max_by(|a, b| a.utilization.unwrap_or(0.0).total_cmp(&b.utilization.unwrap_or(0.0)))
+            .and_then(|l| l.resets_at);
+        let mut text = format!("{} is at {:.0}% of a usage limit.", active.name(), peak * 100.0);
+        if let Some(r) = reset {
+            text.push_str(&format!(" It resets in {}.", crate::panels::widgets::countdown(r - t)));
+        }
+        Some(text)
     }
 
     /// The right sidebar offer: a running session that runs under another account than the active one.
