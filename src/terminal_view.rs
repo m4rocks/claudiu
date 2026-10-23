@@ -69,6 +69,8 @@ pub struct TerminalView {
     font_size: Pixels,
     /// Show a startup animation until the program first draws something (set for Claude sessions).
     pub loading: bool,
+    /// The account the session is handing over to: the skeleton says so until the new process is ready.
+    pub handover: Option<String>,
     /// Whether a pane currently shows this terminal (kept up to date by the workspace's render).
     pub visible: bool,
 }
@@ -155,6 +157,7 @@ impl TerminalView {
             font_family: FONT,
             font_size: px(14.0),
             loading: false,
+            handover: None,
             visible: true,
         }
     }
@@ -256,7 +259,7 @@ impl TerminalView {
 
     fn send(&mut self, bytes: Vec<u8>, cx: &mut Context<Self>) {
         // Claude Code is not listening yet: keys edit the draft instead (`draft_key`).
-        if !self.loading {
+        if !self.held() {
             self.write_input(bytes, cx);
         }
     }
@@ -274,7 +277,7 @@ impl TerminalView {
     }
 
     pub fn paste_text(&mut self, text: &str, cx: &mut Context<Self>) {
-        if self.loading {
+        if self.held() {
             self.draft.insert(text);
             cx.notify();
             return;
@@ -436,7 +439,7 @@ impl TerminalView {
         if self.exit_code.is_some() || keys::is_text(ks) {
             return;
         }
-        if self.loading {
+        if self.held() {
             self.draft.key(ks);
             cx.notify();
             cx.stop_propagation();
@@ -558,6 +561,7 @@ impl TerminalView {
     /// The real prompt is up: drop the skeleton, type what was added meanwhile, and press Enter if the user did.
     fn finish_loading(&mut self, cx: &mut Context<Self>) {
         self.loading = false;
+        self.handover = None;
         self.handing = false;
         crate::trace::note(&self.terminal.tag, self.terminal.born.elapsed(), "prompt ready");
         let (rest, sent) = self.draft.take();
@@ -851,7 +855,7 @@ impl EntityInputHandler for TerminalView {
 
     fn replace_text_in_range(&mut self, _: Option<Range<usize>>, text: &str, _: &mut Window, cx: &mut Context<Self>) {
         self.marked = None;
-        if self.loading {
+        if self.held() {
             self.draft.insert(text);
             cx.notify();
         } else if !text.is_empty() && self.is_running() {
@@ -922,6 +926,7 @@ impl Render for TerminalView {
         self.glide_step(window);
         if self.loading && self.exit_code.is_some() {
             self.loading = false;
+            self.handover = None;
         } else if self.loading && !self.handing && self.has_content() {
             crate::trace::note(&self.terminal.tag, self.terminal.born.elapsed(), "first content painted");
             if self.draft.is_empty() {
@@ -930,10 +935,11 @@ impl Render for TerminalView {
                 self.hand_over(cx);
             }
         }
-        let phase = match (self.handing, self.last_output) {
-            (true, _) => "Handing your message to Claude Code…",
-            (false, Some(_)) => "Loading skills, plugins and MCP servers…",
-            (false, None) => "Starting Claude Code…",
+        let phase = match (&self.handover, self.handing, self.last_output) {
+            (Some(to), _, _) => format!("Handing over to {to}…"),
+            (None, true, _) => "Handing your message to Claude Code…".into(),
+            (None, false, Some(_)) => "Loading skills, plugins and MCP servers…".into(),
+            (None, false, None) => "Starting Claude Code…".into(),
         };
         div()
             .id("terminal")
@@ -959,16 +965,21 @@ impl Render for TerminalView {
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_scroll_wheel(cx.listener(Self::on_scroll))
             .child(TerminalElement { view: cx.entity() })
-            .when(self.loading, |d| {
+            .when(self.loading || self.handover.is_some(), |d| {
                 let (cols, rows) = self.terminal.size();
                 let (cell_w, line_h) = self.metrics.map_or((8.0, LINE_H), |m| (f32::from(m.cell_w), f32::from(m.line_h)));
                 let grid = skeleton::Grid { cell_w, line_h, cols, rows };
-                d.child(skeleton::overlay(&self.draft, self.terminal.born.elapsed(), phase, grid))
+                d.child(skeleton::overlay(&self.draft, self.terminal.born.elapsed(), &phase, grid))
             })
     }
 }
 
 impl TerminalView {
+    /// Input goes to the skeleton's draft, not the PTY: Claude Code is starting, or the session is handing over.
+    fn held(&self) -> bool {
+        self.loading || self.handover.is_some()
+    }
+
     /// Anything visible on screen yet. Startup mode/escape sequences wake us up but draw nothing.
     fn has_content(&self) -> bool {
         self.terminal.term.lock().renderable_content().display_iter.any(|c| !matches!(c.c, ' ' | '\0'))

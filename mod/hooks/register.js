@@ -45,6 +45,7 @@ let activeSession = null // Claude session id activeAdvisor belongs to (/clear s
 // environment, and the breakdown it comes from is a local estimate, so it is read again at most once a minute or after
 // a setting changed.
 let compactAt = null
+let compactedAt = null // when this session last compacted (seconds), so Claudiu can finish a hand-off
 let compactRead = 0
 async function threshold($, fresh) {
   if (!fresh && Date.now() - compactRead < 60_000) return compactAt
@@ -112,6 +113,7 @@ async function report($, fresh = false, override = {}) {
       compact_at: await threshold($, fresh),
       advisor,
       advisor_active: activeAdvisor,
+      compacted_at: compactedAt,
     }
     const key = JSON.stringify(snap, (k, v) => (k === 'seen_at' ? undefined : v))
     if (key === written) return
@@ -139,6 +141,9 @@ async function applyCtl($) {
       if (c.key === 'auto_compact' && typeof c.value === 'boolean') {
         await $.config.set({ key: 'autoCompact', value: c.value }).catch(() => {})
         override.auto_compact = c.value
+      } else if (c.key === 'compact' && c.value === true) {
+        // Queued by Claude Code until idle, like the user typing /compact; the session.compact hook reports it.
+        await $.command.run({ command: 'compact' }).catch(() => {})
       } else if (c.key === 'advisor' && typeof c.value === 'string' && /^[A-Za-z0-9._-]{1,60}$/.test(c.value)) {
         await $.command.run({ command: 'advisor', args: c.value }).catch(() => {})
         override.advisor = advisorAlias(c.value)
@@ -255,6 +260,7 @@ export function register(on) {
     const r = await next(e)
     activeAdvisor = advisorAlias(await setting($, 'advisorModel'))
     activeSession = await $.session.id().catch(() => null)
+    compactedAt = Math.floor(Date.now() / 1000)
     await report($, true)
     return r
   })

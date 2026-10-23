@@ -39,7 +39,7 @@ gpui_kit::assets::icon_assets!(
     [
         WindowMinimize, WindowMaximize, WindowRestore, WindowClose, Archive, ArchiveRestore, ArrowDownToLine, ArrowLeft, Brackets, Check, ChevronDown, ChevronRight,
         CircleCheck, CircleDot, CircleSlash, CircleX, Clock, Ellipsis, Eye, ExternalLink, FolderOpen, GitBranch, GitCommitHorizontal, GitMerge, GitPullRequest,
-        GitPullRequestClosed, GitPullRequestDraft, HeartPlus, LoaderCircle, Lock, MessageSquare, PanelLeft, PanelRight, Pencil, RefreshCw, Search,
+        GitPullRequestClosed, GitPullRequestDraft, HeartPlus, LoaderCircle, Lock, MessageSquare, PanelBottom, PanelLeft, PanelRight, Pencil, RefreshCw, Search,
         Settings, Terminal, X
     ]
 );
@@ -194,7 +194,7 @@ fn main() {
         // chord, e.g. Alt+P, still reaches Claude Code untouched.
         cx.bind_keys([
             KeyBinding::new("secondary-shift-n", NewClaude, None),
-            KeyBinding::new("secondary-shift-t", ToggleShell, None),
+            KeyBinding::new("ctrl-`", ToggleShell, None),
             KeyBinding::new("secondary-j", ToggleShell, None),
             KeyBinding::new("secondary-shift-w", CloseSession, None),
             KeyBinding::new("secondary-shift-b", ToggleSidebar, None),

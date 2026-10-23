@@ -8,7 +8,12 @@ use gpui::{
     StatefulInteractiveElement, Styled, Window, div, px,
 };
 
+use std::time::Duration;
+
+use gpui::{Animation, AnimationExt};
+
 use crate::app::{Act, GitOp, MenuItem, SideDrag, Workspace};
+use crate::widgets::button;
 use crate::platform::Editor;
 use crate::store::{Attached, Id, Project, SessionKind, SessionRecord};
 use crate::theme::{self, hsla};
@@ -216,6 +221,7 @@ impl Workspace {
         let github = (!attached.is_empty()).then(|| self.attached_rows(id.as_ref(), attached, cx));
         let links = id.as_deref().map(|i| self.links_of(i)).unwrap_or_default();
         let linked = (!links.is_empty()).then(|| self.linked_rows(id.as_ref(), links, cx));
+        let away = id.as_deref().and_then(|i| self.session_away(i, cx));
         let status = self.status_rows(&shown, id.as_ref(), running, cx);
         let drawn = self.visual_cards().len();
         let visual = (drawn > 0).then(|| {
@@ -239,6 +245,20 @@ impl Workspace {
             .flex_col()
             .gap(px(10.0))
             .p(px(6.0))
+            .children(away.map(|(from, to_name)| {
+                // Fades in when the session turns out to be on another account.
+                let body = div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.0))
+                    .px(px(8.0))
+                    .child(div().text_size(crate::scale::px(12.0)).text_color(hsla(theme::WARN)).child(format!("This session runs on {from}.")))
+                    .child(button("handoff-session", format!("Hand off to {to_name}"), true).on_click(cx.listener(|ws, _: &ClickEvent, window, cx| {
+                        ws.act(Act::Handoff, window, cx)
+                    })))
+                    .with_animation("handoff-fade", Animation::new(Duration::from_millis(220)).with_easing(gpui::ease_out_quint()), |d, t| d.opacity(t));
+                group("ACCOUNT", body)
+            }))
             .child(group("ACTIONS", actions))
             .children(visual.map(|v| group("VISUAL", v)))
             .children(github.map(|g| group("GITHUB", g)))

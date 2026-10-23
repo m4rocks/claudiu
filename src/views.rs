@@ -100,9 +100,16 @@ impl Workspace {
                     }),
             )
             .child(
-                div().flex().flex_none().occlude().child(
-                    icon_button("toggle-right", IconName::PanelRight).on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.toggle_right(window, cx))),
-                ),
+                div()
+                    .flex()
+                    .flex_none()
+                    .occlude()
+                    .child(icon_button("toggle-shell", IconName::PanelBottom).on_click(cx.listener(|ws, _: &ClickEvent, window, cx| {
+                        if let Some(id) = ws.active.clone() {
+                            ws.act(Act::ToggleShell(id), window, cx)
+                        }
+                    })))
+                    .child(icon_button("toggle-right", IconName::PanelRight).on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.toggle_right(window, cx)))),
             ))
     }
 
@@ -187,38 +194,79 @@ impl Workspace {
             150,
             0.4,
         );
-        let mut container = div().flex().flex_col().size_full().gap(px(1.0)).bg(hsla(theme::BORDER)).child(pane);
+        pane.into_any_element()
+    }
 
-        // The session's shell, under its terminal, with a divider to drag it taller or shorter.
-        if let Some((view, height)) = self.shells.get(&id).filter(|p| p.open).map(|p| (p.view.clone(), p.height)) {
-            let drag_id = id.clone();
-            container = container
+    /// The session's shell as its own panel under the main one: same gutter, rounding, grip and slide as the sidebars.
+    fn render_shell(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let id = self.active.clone().filter(|_| matches!(self.main, Main::Terminals))?;
+        let (view, full, open) = self.shells.get(&id).map(|p| (p.view.clone(), p.height, p.open))?;
+        let target = if open { full } else { 0.0 };
+        if self.shell_drag.is_some() {
+            self.shell_h.snap(target);
+        }
+        let height = self.shell_h.to(target, window);
+        if height < 0.5 {
+            return None;
+        }
+        // The top edge is the drag handle, with a small grip in the gutter.
+        let handle_center = theme::PANEL_GAP / 2.0 + 3.0;
+        let handle = div()
+            .id("shell-resize")
+            .group("shell-resize")
+            .absolute()
+            .left_0()
+            .top(px(-handle_center))
+            .w_full()
+            .h(px(6.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_row_resize()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |ws, ev: &MouseDownEvent, _w, cx| {
+                    let height = ws.shells.get(&id).map_or(SHELL_HEIGHT, |p| p.height);
+                    ws.shell_drag = Some(ShellDrag { id: id.clone(), y: f32::from(ev.position.y), height });
+                    cx.notify();
+                }),
+            )
+            .child(div().w(px(28.0)).h(px(2.0)).rounded_full().bg(hsla(0x2b2b30)).group_hover("shell-resize", |s| s.bg(hsla(0x4a4a52))));
+        Some(
+            div()
+                .flex()
+                .flex_col()
+                .flex_none()
+                .h(px(height + theme::PANEL_GAP))
+                .overflow_hidden()
+                .justify_end()
+                .child(div().flex_none().h(px(theme::PANEL_GAP)))
                 .child(
                     div()
-                        .id("shell-divider")
-                        .h(px(4.0))
+                        .id("shell-panel")
+                        .relative()
                         .flex_none()
-                        .bg(hsla(theme::BORDER))
-                        .cursor_row_resize()
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |ws, ev: &MouseDownEvent, _w, cx| {
-                                let height = ws.shells.get(&drag_id).map_or(SHELL_HEIGHT, |p| p.height);
-                                ws.shell_drag = Some(ShellDrag { id: drag_id.clone(), y: f32::from(ev.position.y), height });
-                                cx.notify();
-                            }),
-                        ),
+                        .h(px(full))
+                        .child(
+                            div()
+                                .size_full()
+                                .rounded(px(theme::PANEL_RADIUS))
+                                .overflow_hidden()
+                                .border_1()
+                                .border_color(hsla(theme::PANEL_BORDER))
+                                .bg(hsla(theme::TERMINAL_BG))
+                                .p(px(6.0))
+                                .child(view),
+                        )
+                        .child(handle),
                 )
-                .child(div().h(px(height)).flex_none().bg(hsla(theme::TERMINAL_BG)).p(px(6.0)).child(view));
-        }
-        container.into_any_element()
+                .into_any_element(),
+        )
     }
 
     // ------------------------------------------------------------------ details & home
 
     fn render_home(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let cwd = self.active_cwd();
-        let c1 = cwd;
         let shortcut = |keys: &str, what: &str| {
             div()
                 .flex()
@@ -272,9 +320,16 @@ impl Workspace {
                     .mt(px(22.0))
                     .flex()
                     .gap(px(8.0))
-                    .child(button("home-claude", "New code session", true).on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
-                        ws.act(Act::NewClaude { cwd: c1.clone() }, window, cx)
-                    })))
+                    .child(button("home-claude", "New", true).on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|ws, ev: &MouseDownEvent, _w, cx| {
+                            let item = |label: String, act: Act, sep: bool| crate::app::MenuItem { label, hint: None, act, danger: false, disabled: false, separator_before: sep };
+                            let mut items: Vec<_> = ws.store.data.projects.iter().map(|p| item(p.name.clone(), Act::NewClaude { cwd: p.path.clone() }, false)).collect();
+                            let sep = !items.is_empty();
+                            items.push(item("Add project…".into(), Act::ImportProject, sep));
+                            ws.open_menu(ev.position, items, cx);
+                        }),
+                    ))
                     .child(button("home-import", "Add project", false).on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::ImportProject, window, cx)))),
             )
             .child(recent)
@@ -285,7 +340,7 @@ impl Workspace {
                     .flex_col()
                     .gap(px(4.0))
                     .child(shortcut("Ctrl+Shift+N", "New code session"))
-                    .child(shortcut("Ctrl+Shift+T", "Show or hide shell"))
+                    .child(shortcut("Ctrl+`", "Show or hide shell"))
                     .child(shortcut("Ctrl+Tab", "Next session"))
                     .child(shortcut("Ctrl+Shift+W", "End session")),
             )
@@ -579,6 +634,7 @@ impl Render for Workspace {
             p.view.update(cx, |v, _| v.visible = visible);
         }
         let right = self.render_right(f32::from(window.viewport_size().width), window, cx);
+        let shell = self.render_shell(window, cx);
         let main: AnyElement = match &self.main {
             Main::Terminals => self.render_session(cx),
             Main::Home => self.render_home(cx).into_any_element(),
@@ -685,16 +741,19 @@ impl Render for Workspace {
                             .min_h_0()
                             .children(sidebar)
                             .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .h_full()
-                                    .rounded(px(theme::PANEL_RADIUS))
-                                    .overflow_hidden()
-                                    .border_1()
-                                    .border_color(hsla(theme::PANEL_BORDER))
-                                    .bg(hsla(theme::PANEL_BG))
-                                    .child(main),
+                                div().flex().flex_col().flex_1().min_w_0().h_full().child(
+                                    div()
+                                        .flex_1()
+                                        .min_h_0()
+                                        .w_full()
+                                        .rounded(px(theme::PANEL_RADIUS))
+                                        .overflow_hidden()
+                                        .border_1()
+                                        .border_color(hsla(theme::PANEL_BORDER))
+                                        .bg(hsla(theme::PANEL_BG))
+                                        .child(main),
+                                )
+                                .children(shell),
                             )
                             .children(right),
                     ),

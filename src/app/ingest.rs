@@ -18,6 +18,7 @@ impl Workspace {
                 let mut changed = false;
                 changed |= titles.into_iter().fold(false, |c, (stem, title, stamp)| ws.apply_title(&stem, title, stamp) | c);
                 changed |= snaps.iter().fold(false, |c, snap| ws.apply_snapshot(snap) | c);
+                ws.note_compactions(&snaps);
                 changed |= items.into_iter().fold(false, |c, (stem, item)| ws.apply_attachment(&stem, item) | c);
                 if changed {
                     ws.store.mark_dirty();

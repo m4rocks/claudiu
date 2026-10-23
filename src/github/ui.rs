@@ -4,7 +4,7 @@
 use gpui::{
     AnyElement, App, ClickEvent, Context, Div, FontWeight, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
     ParentElement, Render, SharedString, Stateful, StatefulInteractiveElement, Styled, TextAlign, Window, anchored, deferred, div,
-    prelude::FluentBuilder, px,
+    prelude::FluentBuilder, px, AnimationExt,
 };
 use gpui_kit::component::input::{Input, Textarea};
 use gpui_kit::component::text::TextView;
@@ -107,7 +107,12 @@ fn check_color(state: &str) -> u32 {
 }
 
 pub(crate) fn markdown(id: String, text: &str) -> TextView {
+    // The stock style highlights code with the light theme (dark text), which vanishes on Claudiu's dark panels.
+    let mut style = gpui_kit::component::text::TextViewStyle::default();
+    style.highlight_theme = gpui_kit::component::highlighter::HighlightTheme::default_dark();
+    style.is_dark = true;
     TextView::markdown(SharedString::from(id), SharedString::from(text.to_string()))
+        .style(style)
         .selectable(true)
         .on_link_click(|url, _, _, cx: &mut App| {
             if url.starts_with("https://") || url.starts_with("http://") {
@@ -171,10 +176,33 @@ fn item(label: impl Into<String>, act: GhAct) -> PopItem {
     PopItem { label: label.into(), swatch: None, checked: None, hint: None, act }
 }
 
+/// Grey bars where the description and the history will be, pulsing until they arrive.
+fn skeleton() -> AnyElement {
+    let bar = |w: f32, h: f32| div().h(px(h)).w(gpui::relative(w)).rounded(px(4.0)).bg(hsla(0x1f1f21));
+    let card = |lines: &[f32]| {
+        let mut body = div().flex().flex_col().gap(px(8.0)).p(px(12.0));
+        for w in lines {
+            body = body.child(bar(*w, 10.0));
+        }
+        div().flex().flex_col().rounded(px(8.0)).border_1().border_color(hsla(CARD_BORDER)).bg(hsla(CARD_BG)).child(div().h(px(36.0)).px(px(12.0)).flex().items_center().child(bar(0.3, 10.0))).child(body)
+    };
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(12.0))
+        .child(card(&[0.95, 0.8, 0.88, 0.5]))
+        .child(card(&[0.7, 0.4]))
+        .child(card(&[0.85, 0.6, 0.3]))
+        .with_animation("gh-skeleton", gpui::Animation::new(std::time::Duration::from_millis(1200)).repeat().with_easing(gpui::pulsating_between(0.45, 1.0)), |d, t| d.opacity(t))
+        .into_any_element()
+}
+
 impl Render for GithubView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let body: AnyElement = match self.phase.clone() {
             Phase::Ready => self.render_ready(window, cx),
+            // Cached lists stand in while the repository is looked up.
+            Phase::Loading if self.lists.iter().any(|l| l.loaded) => self.render_ready(window, cx),
             other => self.render_state(other, cx),
         };
         let popup = self.render_popup(cx);
@@ -771,11 +799,11 @@ impl GithubView {
                 .child(tab("files", format!("Files changed {}", pr.files), DetailTab::Files, cx))
         });
 
-        let content: AnyElement = match ds.tab {
+        let content: AnyElement = if ds.partial { skeleton() } else { match ds.tab {
             DetailTab::Conversation => self.render_conversation(d, ds, t, cx).into_any_element(),
             DetailTab::Commits => self.render_commits(d, t).into_any_element(),
             DetailTab::Files => self.render_files(ds, cx).into_any_element(),
-        };
+        } };
         let scroll = self.scrolls[1]
             .wire(div().id("gh-detail").flex_1().min_h_0(), window)
             .child(div().px(px(16.0)).py(px(12.0)).child(meta))

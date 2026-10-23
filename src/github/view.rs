@@ -45,6 +45,23 @@ pub struct ListState {
     pub error: Option<String>,
 }
 
+/// What survives a restart: the repository, its permissions and the first page of each list.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct CacheFile {
+    repo: Option<RepoRef>,
+    info: Option<RepoInfo>,
+    lists: [Cached; 2],
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Cached {
+    items: Vec<Item>,
+    total: usize,
+    open: usize,
+    closed: usize,
+    next: Option<String>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DetailTab {
     Conversation,
@@ -65,6 +82,8 @@ pub struct DetailState {
     pub files_error: Option<String>,
     pub expanded: HashSet<String>,
     pub full: HashSet<String>,
+    /// `data` is only what the list row knew (title, labels, ...); the description and history are still on their way.
+    pub partial: bool,
 }
 
 impl DetailState {
@@ -82,6 +101,7 @@ impl DetailState {
             files_error: None,
             expanded: HashSet::new(),
             full: HashSet::new(),
+            partial: false,
         }
     }
 }
@@ -216,6 +236,7 @@ pub struct GithubView {
     pub focus: FocusHandle,
     list_seq: [u64; 2],
     detail_seq: u64,
+    last_refresh: std::time::Instant,
     /// Smooth wheel scrolling of the list, the detail and the new-item form.
     pub scrolls: [crate::glide::Smooth; 3],
     _subs: Vec<Subscription>,
@@ -289,11 +310,15 @@ impl GithubView {
             focus,
             list_seq: [0; 2],
             detail_seq: 0,
+            last_refresh: std::time::Instant::now(),
             scrolls: Default::default(),
             _subs: subs,
         };
+        // Coming back to the pane refreshes it (at most every 5 seconds, and not while the user is mid-edit).
+        let focus_sub = cx.on_focus_in(&view.focus, window, |v: &mut Self, window, cx| v.refresh_on_return(window, cx));
+        view._subs.push(focus_sub);
         view.query_input.update(cx, |s, cx| s.set_value(DEFAULT_QUERY, window, cx));
-        view.connect(window, cx);
+        view.load_cache(window, cx);
         view.start_refresh_loop(window, cx);
         view
     }
@@ -305,6 +330,56 @@ impl GithubView {
             (_, Some(d)) => format!("gh-detail-{:?}-{}", d.kind, d.number),
             _ => "gh-detail-none".into(),
         }
+    }
+
+    // ------------------------------------------------------------------------------------------ cache
+
+    fn cache_file(&self) -> PathBuf {
+        crate::datadir::data_dir().join("github-cache").join(format!("{}.json", crate::datadir::safe_file_stem(&self.cwd.to_string_lossy())))
+    }
+
+    /// Fill the lists from the last run so the pane is populated before `gh` answers; only the default query is cached.
+    /// The file is read off the UI thread, and then the lookup starts, so a cached repository goes first.
+    fn load_cache(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let file = self.cache_file();
+        cx.spawn_in(window, async move |this, cx| {
+            let cached = cx.background_executor().spawn(async move { std::fs::read_to_string(file).ok().and_then(|t| serde_json::from_str::<CacheFile>(&t).ok()) }).await;
+            let _ = this.update_in(cx, |v, window, cx| {
+                if let Some(file) = cached {
+                    // A known repository lets clicks work and the lists refresh before `gh repo view` answers.
+                    (v.repo, v.info) = (file.repo, file.info);
+                    for (list, c) in v.lists.iter_mut().zip(file.lists) {
+                        (list.items, list.total, list.open, list.closed, list.next, list.loaded) = (c.items, c.total, c.open, c.closed, c.next, true);
+                    }
+                }
+                v.connect(window, cx);
+            });
+        })
+        .detach();
+    }
+
+    /// Raw first page of one item's detail, so reopening it shows at once. The dot keeps it apart from the repository's
+    /// file (`safe_file_stem` never produces a dot).
+    fn detail_file(&self, number: u32) -> PathBuf {
+        let dir = crate::datadir::data_dir().join("github-cache");
+        dir.join(format!("{}.{number}.json", crate::datadir::safe_file_stem(&self.cwd.to_string_lossy())))
+    }
+
+    /// Write the first page of each list after a fresh load (skipped while a search is active). Written off the UI thread.
+    fn save_cache(&self, cx: &mut Context<Self>) {
+        if self.queries.iter().any(|q| q != DEFAULT_QUERY) {
+            return;
+        }
+        let one = |l: &ListState| Cached { items: l.items.clone(), total: l.total, open: l.open, closed: l.closed, next: l.next.clone() };
+        let file = CacheFile { repo: self.repo.clone(), info: self.info.clone(), lists: [one(&self.lists[0]), one(&self.lists[1])] };
+        let path = self.cache_file();
+        cx.background_executor()
+            .spawn(async move {
+                if let Ok(text) = serde_json::to_string(&file) {
+                    let _ = crate::datadir::write_atomic(&path, &text);
+                }
+            })
+            .detach();
     }
 
     // ------------------------------------------------------------------------------------------ background work
@@ -340,7 +415,15 @@ impl GithubView {
             cx.notify();
             return;
         }
-        self.phase = Phase::Loading;
+        // With a cached repository the pane is usable at once and the lists load alongside the lookup.
+        let cached = self.repo.clone();
+        if cached.is_some() {
+            self.phase = Phase::Ready;
+            self.load_list(Kind::Issue, false, window, cx);
+            self.load_list(Kind::Pull, false, window, cx);
+        } else {
+            self.phase = Phase::Loading;
+        }
         cx.notify();
         self.spawn(
             window,
@@ -353,15 +436,17 @@ impl GithubView {
                 let info = parse_repo(&data).ok_or_else(|| cli::Error { kind: ErrKind::Other, msg: "repository not found (is the GitHub app or token allowed to see it?)".into() })?;
                 Ok((repo, info, gh))
             },
-            |v, result, window, cx| {
+            move |v, result, window, cx| {
                 match result {
                     Ok((repo, info, gh)) => {
                         v.gh = Some(gh);
                         v.repo = Some(repo);
                         v.info = Some(info);
                         v.phase = Phase::Ready;
-                        v.load_list(Kind::Issue, false, window, cx);
-                        v.load_list(Kind::Pull, false, window, cx);
+                        if cached.as_ref() != v.repo.as_ref() {
+                            v.load_list(Kind::Issue, false, window, cx);
+                            v.load_list(Kind::Pull, false, window, cx);
+                        }
                     }
                     Err(e) => {
                         v.phase = match e.kind {
@@ -383,9 +468,8 @@ impl GithubView {
             loop {
                 cx.background_executor().timer(Duration::from_secs(90)).await;
                 let alive = this.update_in(cx, |v, window, cx| {
-                    let idle = v.busy.is_none() && v.editing.is_none() && v.popup.is_none() && v.phase == Phase::Ready;
-                    if idle {
-                        v.reload_all(window, cx);
+                    if v.is_idle() {
+                        v.reload_visible(window, cx);
                     }
                 });
                 if alive.is_err() {
@@ -400,6 +484,26 @@ impl GithubView {
         self.load_list(self.kind, false, window, cx);
         let other = if self.kind == Kind::Issue { Kind::Pull } else { Kind::Issue };
         self.load_list(other, false, window, cx);
+        self.reload_detail(window, cx);
+    }
+
+    /// Called when the user comes back to the pane or the window: refresh unless it just did or the user is mid-action.
+    pub fn refresh_on_return(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.last_refresh.elapsed() > Duration::from_secs(5) && self.is_idle() {
+            self.reload_visible(window, cx);
+        }
+    }
+
+    fn is_idle(&self) -> bool {
+        self.busy.is_none() && self.editing.is_none() && self.popup.is_none() && self.phase == Phase::Ready
+    }
+
+    /// The 90-second refresh: only what is on screen; the other list reloads when its tab is chosen.
+    fn reload_visible(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let other = if self.kind == Kind::Issue { Kind::Pull } else { Kind::Issue };
+        self.last_refresh = std::time::Instant::now();
+        self.lists[idx(other)].loaded = false;
+        self.load_list(self.kind, false, window, cx);
         self.reload_detail(window, cx);
     }
 
@@ -441,6 +545,9 @@ impl GithubView {
                             list.items = page.items;
                         }
                         (list.total, list.open, list.closed, list.next) = (page.total, page.open, page.closed, page.next);
+                        if !append {
+                            v.save_cache(cx);
+                        }
                     }
                     Err(e) => {
                         if e.kind == ErrKind::SignedOut {
@@ -460,7 +567,40 @@ impl GithubView {
         self.editing = None;
         self.popup = None;
         self.composer.update(cx, |s, cx| s.set_value("", window, cx));
-        self.detail = Some(DetailState::new(kind, number));
+        let mut state = DetailState::new(kind, number);
+        // Show the list row's facts at once; the skeleton stands in for the rest until the answer comes.
+        let row = self.lists[idx(kind)].items.iter().find(|i| i.number == number).cloned();
+        state.partial = row.is_some();
+        state.data = row.map(|item| Detail {
+            item,
+            body: String::new(),
+            assoc: String::new(),
+            edited: false,
+            locked: false,
+            mine: false,
+            can_update: false,
+            reactions: vec![],
+            timeline: vec![],
+            next: None,
+            pr: None,
+        });
+        self.detail = Some(state);
+        // The cached first page is read off the UI thread and replaces those facts, unless the answer came first.
+        let file = self.detail_file(number);
+        cx.spawn_in(window, async move |this, cx| {
+            let cached = cx
+                .background_executor()
+                .spawn(async move { std::fs::read_to_string(file).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).and_then(|v| parse_detail(&v)).filter(|d| d.item.kind == kind) })
+                .await;
+            let Some(cached) = cached else { return };
+            let _ = this.update_in(cx, |v, _window, cx| {
+                if let Some(d) = v.detail.as_mut().filter(|d| d.kind == kind && d.number == number && (d.partial || d.data.is_none())) {
+                    (d.data, d.partial) = (Some(cached), false);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
         self.fetch_detail(None, window, cx);
         cx.notify();
     }
@@ -486,12 +626,17 @@ impl GithubView {
         self.detail_seq += 1;
         let seq = self.detail_seq;
         let append = after.is_some();
+        let file = self.detail_file(number);
         self.spawn(
             window,
             cx,
             move |gh, _| {
                 let vars = json!({"owner": repo.owner, "name": repo.name, "number": number, "after": after});
-                gh.graphql(cli::detail_query_text(), vars)
+                let data: Value = gh.graphql(cli::detail_query_text(), vars)?;
+                if !append {
+                    let _ = crate::datadir::write_atomic(&file, &data.to_string());
+                }
+                Ok::<_, cli::Error>(data)
             },
             move |v, result, _window, cx| {
                 if v.detail_seq != seq {
@@ -508,10 +653,17 @@ impl GithubView {
                             fresh.timeline = timeline;
                         }
                         d.error = None;
+                        d.partial = false;
                         d.data = Some(fresh);
                     }
-                    Ok(None) => d.error = Some("This item could not be found.".into()),
-                    Err(e) => d.error = Some(e.msg),
+                    Ok(None) => {
+                        d.partial = false;
+                        d.error = Some("This item could not be found.".into());
+                    }
+                    Err(e) => {
+                        d.partial = false;
+                        d.error = Some(e.msg);
+                    }
                 }
                 cx.notify();
             },
@@ -601,6 +753,7 @@ impl GithubView {
                     Err(e) => {
                         let hint = if e.msg.contains("Resource not accessible") { " (the token cannot do this here)" } else { "" };
                         v.toast(format!("{}{hint}", e.msg), true, cx);
+                        v.reload_all(window, cx);
                     }
                 }
                 cx.notify();
@@ -710,6 +863,7 @@ impl GithubView {
             GhAct::CloseItem(reason) => {
                 let (Some(id), Some(d)) = (self.current_id(), self.detail.as_ref()) else { return };
                 let pull = d.kind == Kind::Pull;
+                self.show_state(State::Closed, cx);
                 self.mutate(
                     "Closing…",
                     window,
@@ -724,6 +878,7 @@ impl GithubView {
                 let (Some(id), Some(d)) = (self.current_id(), self.detail.as_ref()) else { return };
                 let pull = d.kind == Kind::Pull;
                 let q = if pull { cli::M_REOPEN_PR } else { cli::M_REOPEN_ISSUE };
+                self.show_state(State::Open, cx);
                 self.mutate("Reopening…", window, cx, move |gh, _| gh.graphql(q, json!({"id": id})).map(|_| ()), |_, _, _| {});
             }
             GhAct::Review(event) => {
@@ -902,7 +1057,28 @@ impl GithubView {
         let (Some(id), Some(d)) = (self.current_id(), self.detail_data()) else { return };
         let has = d.item.labels.iter().any(|l| l.name == label.name);
         let q = if has { cli::M_REMOVE_LABEL } else { cli::M_ADD_LABEL };
+        self.edit_item(cx, |i| if has { i.labels.retain(|l| l.name != label.name) } else { i.labels.push(label.clone()) });
         self.mutate("Saving…", window, cx, move |gh, _| gh.graphql(q, json!({"id": id, "ids": [label.id]})).map(|_| ()), |_, _, _| {});
+    }
+
+    /// Show a change in the open item and its list row before GitHub confirms it; a failure reloads the truth.
+    fn edit_item(&mut self, cx: &mut Context<Self>, f: impl Fn(&mut Item)) {
+        // A change that `mutate` is about to refuse (busy) is not shown either.
+        if self.busy.is_some() {
+            return;
+        }
+        let Some(d) = self.detail.as_mut() else { return };
+        if let Some(data) = d.data.as_mut() {
+            f(&mut data.item);
+        }
+        if let Some(i) = self.lists[idx(d.kind)].items.iter_mut().find(|i| i.number == d.number) {
+            f(i);
+        }
+        cx.notify();
+    }
+
+    fn show_state(&mut self, state: State, cx: &mut Context<Self>) {
+        self.edit_item(cx, |i| i.state = state);
     }
 
     fn toggle_assignee(&mut self, user: User, window: &mut Window, cx: &mut Context<Self>) {

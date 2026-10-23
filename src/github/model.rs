@@ -1,22 +1,23 @@
 //! What the GitHub pane shows, parsed out of `gh` / GraphQL answers by hand: the unions in a timeline have dozens of
 //! event types, and anything unknown must simply be skipped rather than fail the whole page. No GPUI in here.
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Kind {
     Issue,
     Pull,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum State {
     Open,
     Closed,
     Merged,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Label {
     pub id: String,
     pub name: String,
@@ -24,14 +25,14 @@ pub struct Label {
     pub color: u32,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct User {
     pub id: String,
     pub login: String,
 }
 
 /// One row of the list, and the header facts of a detail page.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Item {
     pub kind: Kind,
     pub id: String,
@@ -175,7 +176,7 @@ pub struct Detail {
     pub pr: Option<Pr>,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct RepoInfo {
     pub id: String,
     pub private: bool,

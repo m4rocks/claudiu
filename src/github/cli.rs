@@ -3,6 +3,8 @@
 //! background thread. Request bodies go in as JSON on stdin, so user-written markdown never meets argument quoting.
 
 use std::io::Write;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
@@ -48,7 +50,7 @@ pub fn locate() -> Option<PathBuf> {
 }
 
 /// The GitHub repository a folder belongs to.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RepoRef {
     pub owner: String,
     pub name: String,
@@ -62,6 +64,11 @@ impl RepoRef {
         format!("{}/{}", self.owner, self.name)
     }
 }
+
+/// Tokens `gh` handed out, per host (`None` is github.com), and when it was asked: a host with no login is asked
+/// again after `MISS_FOR`. In memory only.
+static TOKENS: Mutex<Vec<(Option<String>, Option<String>, Instant)>> = Mutex::new(Vec::new());
+const MISS_FOR: Duration = Duration::from_secs(60);
 
 /// A `gh` bound to one working folder (and Enterprise host, if any).
 #[derive(Clone, Debug)]
@@ -127,10 +134,81 @@ impl Gh {
         self.run(&all, stdin)
     }
 
+    /// The login `gh` holds for this host, asked for once and kept in memory only (never written anywhere).
+    fn token(&self) -> Option<String> {
+        let cached = TOKENS.lock().ok()?.iter().find(|(h, _, _)| *h == self.host).map(|(_, t, at)| (t.clone(), *at));
+        match cached {
+            Some((Some(t), _)) => return Some(t),
+            Some((None, at)) if at.elapsed() < MISS_FOR => return None,
+            _ => {}
+        }
+        let mut args = vec!["auth", "token"];
+        if let Some(h) = &self.host {
+            args.extend(["--hostname", h.as_str()]);
+        }
+        let token = self.run(&args, None).ok().map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
+        let mut known = TOKENS.lock().ok()?;
+        known.retain(|(h, _, _)| *h != self.host);
+        known.push((self.host.clone(), token.clone(), Instant::now()));
+        token
+    }
+
+    fn forget_token(&self) {
+        if let Ok(mut t) = TOKENS.lock() {
+            t.retain(|(h, _, _)| *h != self.host);
+        }
+    }
+
+    /// Straight to the GitHub API over one pooled connection, skipping a `gh` process per call. `None` means "ask
+    /// `gh` instead": no token, a rejected token, or (only when `safe`, i.e. nothing was changed) a failed request.
+    fn fast(&self, method: &str, path: &str, body: Option<&str>, safe: bool) -> Option<Result<String, Error>> {
+        static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
+        let token = self.token()?;
+        let path = path.trim_start_matches('/');
+        let url = match (&self.host, path) {
+            (None, p) => format!("https://api.github.com/{p}"),
+            (Some(h), "graphql") => format!("https://{h}/api/graphql"),
+            (Some(h), p) => format!("https://{h}/api/v3/{p}"),
+        };
+        let agent = AGENT.get_or_init(|| ureq::Agent::config_builder().http_status_as_error(false).timeout_global(Some(Duration::from_secs(60))).build().into());
+        let request = ureq::http::Request::builder()
+            .method(method)
+            .uri(url)
+            .header("Authorization", format!("Bearer {token}"))
+            .header("User-Agent", "claudiu")
+            .header("Accept", "application/vnd.github+json")
+            .header("Content-Type", "application/json")
+            .body(body.unwrap_or_default().to_string())
+            .ok()?;
+        let mut response = match agent.run(request) {
+            Ok(r) => r,
+            Err(e) => return if safe { None } else { Some(Err(Error::other(format!("request to GitHub failed: {e}")))) },
+        };
+        let status = response.status().as_u16();
+        if status == 401 {
+            self.forget_token();
+            // A read falls back to `gh`, which asks again; a write is never sent twice, so it reports the failure.
+            return if safe { None } else { Some(Err(Error::other("GitHub rejected the saved sign-in; nothing was changed."))) };
+        }
+        let text = match response.body_mut().read_to_string() {
+            Ok(t) => t,
+            Err(e) => return if safe { None } else { Some(Err(Error::other(format!("could not read GitHub's answer: {e}")))) },
+        };
+        if status < 300 {
+            return Some(Ok(text));
+        }
+        let msg = graphql_errors(&text).filter(|m| !m.is_empty()).or_else(|| serde_json::from_str::<Value>(&text).ok().and_then(|v| v["message"].as_str().map(str::to_string))).unwrap_or_else(|| format!("HTTP {status}"));
+        Some(Err(Error { kind: classify(&msg), msg }))
+    }
+
     /// Run a GraphQL query or mutation; returns its `data`.
     pub fn graphql(&self, query: &str, vars: Value) -> Result<Value, Error> {
         let body = json!({ "query": query, "variables": vars }).to_string();
-        let text = self.api(&["graphql", "--input", "-"], Some(&body))?;
+        let safe = !query.trim_start().starts_with("mutation");
+        let text = match self.fast("POST", "graphql", Some(&body), safe) {
+            Some(r) => r?,
+            None => self.api(&["graphql", "--input", "-"], Some(&body))?,
+        };
         let mut v: Value = serde_json::from_str(&text).map_err(|e| Error::other(format!("unexpected answer from gh: {e}")))?;
         if let Some(m) = graphql_errors(&text).filter(|m| !m.is_empty()) {
             return Err(Error::other(m));
@@ -145,7 +223,10 @@ impl Gh {
         if text.is_some() {
             args.extend(["--input", "-"]);
         }
-        let out = self.api(&args, text.as_deref())?;
+        let out = match self.fast(method, path, text.as_deref(), method == "GET") {
+            Some(r) => r?,
+            None => self.api(&args, text.as_deref())?,
+        };
         if out.trim().is_empty() {
             return Ok(Value::Null);
         }

@@ -47,6 +47,7 @@ pub fn cleanup() {
     prune(crate::visual::dir(), 7 * 86_400);
     prune(data_dir().join("screens"), 30 * 86_400);
     prune(data_dir().join("pasted"), 7 * 86_400);
+    prune(data_dir().join("github-cache"), 30 * 86_400);
     // The status-line helper's per-session settings, gone since the mod reports usage; sweep what older builds left.
     let _ = std::fs::remove_dir_all(data_dir().join("statusline"));
 }

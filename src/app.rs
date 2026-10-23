@@ -25,6 +25,7 @@ use crate::terminal_view::{TerminalEvent, TerminalView};
 use crate::updater::UpdateState;
 
 mod cross;
+mod handoff;
 #[cfg(test)]
 mod headless;
 mod ingest;
@@ -106,6 +107,9 @@ pub enum Act {
     InstallUpdate,
     /// New sessions start with this account; running ones keep theirs.
     SwitchAccount(Id),
+    /// The shown session runs under another account: restart it under the active one (asks first, see `handoff.rs`).
+    Handoff,
+    ConfirmHandoff(Id),
     /// Shows the sharing warning, then `ConfirmAddAccount`.
     AddAccount,
     ConfirmAddAccount,
@@ -199,6 +203,8 @@ pub struct Live {
     /// When Claude last called the title tool. A later call (e.g. after `/clear`, which starts a nameless
     /// Claude session) clears `claude_name` so the title is sent again.
     pub title_stamp: Option<std::time::SystemTime>,
+    /// The account this process was started under; a session on another account than the active one can be handed off.
+    pub account: Id,
 }
 
 /// A project's GitHub view, shown in the right sidebar. Kept while Claudiu runs so each project keeps its place;
@@ -210,6 +216,7 @@ pub struct GhPane {
     pub project: String,
     pub view: Entity<GithubView>,
     pub _sub: Subscription,
+    pub _active: Subscription,
 }
 
 /// The shell under a Claude session's terminal. It belongs to that session (never listed, never persisted), keeps
@@ -282,6 +289,8 @@ pub struct Workspace {
     /// Shells under Claude sessions, by the session they belong to.
     pub shells: HashMap<Id, ShellPanel>,
     pub shell_drag: Option<ShellDrag>,
+    /// The shell panel's animated height (0 while hidden).
+    pub shell_h: crate::widgets::Reveal,
     /// Open sessions in the order they were last shown (most recent last); closing one goes back to the previous.
     recent: Vec<Id>,
     pub main: Main,
@@ -299,8 +308,8 @@ pub struct Workspace {
     ephemeral: HashSet<Id>,
     /// `claude auth login` tabs; account details are re-read when one ends.
     logins: HashSet<Id>,
-    /// Account the "switch to a less used account" suggestion was shown for; cleared once its use drops.
-    limit_warned: Option<Id>,
+    /// Sessions being handed to another account: compacting, then resumed under it (see `handoff.rs`).
+    handoffs: HashMap<Id, handoff::Handoff>,
     pub editors: Vec<(Editor, bool)>,
     pub transcript_mtimes: HashMap<Id, SystemTime>,
     pub window_title: String,
@@ -369,6 +378,7 @@ impl Workspace {
             active: None,
             shells: HashMap::new(),
             shell_drag: None,
+            shell_h: crate::widgets::Reveal::at_value(0.0),
             recent: vec![],
             main: Main::Home,
             selected: store.data.layout.selected_session.clone(),
@@ -382,7 +392,7 @@ impl Workspace {
             toast_serial: 0,
             ephemeral: HashSet::new(),
             logins: HashSet::new(),
-            limit_warned: None,
+            handoffs: HashMap::new(),
             editors: Editor::ALL
                 .iter()
                 .map(|e| (*e, e.locate().is_some()))
@@ -502,6 +512,7 @@ impl Workspace {
                     .await;
                 let update = this.update_in(cx, |ws, window, cx| {
                     ws.serve_requests(requests, window, cx);
+                    ws.finish_handoffs(window, cx);
                     ws.update_activity(window, cx, &statuses)
                 });
                 if update.is_err() {
@@ -576,44 +587,7 @@ impl Workspace {
         self.refresh_live(cx);
         self.remember_open(cx);
         self.ingest_usage(cx);
-        self.suggest_less_used_account(cx);
         cx.notify();
-    }
-
-    /// When the active account's 5-hour or 7-day use reaches 90% and another signed-in account has used less,
-    /// offer to switch to the least used one. Once per crossing; it re-arms after the window resets.
-    fn suggest_less_used_account(&mut self, cx: &mut Context<Self>) {
-        const HIGH: f32 = 0.9;
-        let t = now();
-        let Some(active) = self.store.active_account() else { return };
-        let peak = active.usage.peak(t);
-        if peak < HIGH {
-            self.limit_warned = None;
-            return;
-        }
-        if self.limit_warned.as_ref() == Some(&active.id) {
-            return;
-        }
-        let best = self
-            .store
-            .data
-            .accounts
-            .iter()
-            .filter(|a| a.id != active.id && (a.is_main() || a.email.is_some()))
-            .map(|a| (a, a.usage.peak(t)))
-            .min_by(|x, y| x.1.total_cmp(&y.1))
-            .filter(|(_, p)| *p < peak);
-        let Some((best, best_peak)) = best else { return };
-        let text = format!(
-            "{} has used {:.0}% of a usage limit. {} is at {:.0}%.",
-            active.name(),
-            peak * 100.0,
-            best.name(),
-            best_peak * 100.0
-        );
-        let act = Act::SwitchAccount(best.id.clone());
-        self.limit_warned = Some(active.id.clone());
-        self.show_toast(text, true, Some(("Switch".into(), act)), cx);
     }
 
     /// Per-process additions to a Claude launch; nothing in the user's Claude Code config changes:
@@ -1059,12 +1033,14 @@ impl Workspace {
         if let Some(cid) = self.store.session(&id).and_then(|r| r.claude_id()) {
             mcp::write_name(cid, claude_name.as_deref());
         }
+        let account = self.store.active_account().map_or_else(|| MAIN_ACCOUNT.into(), |a| a.id.clone());
         self.live.push(Live {
             id: id.clone(),
             view,
             _sub: sub,
             claude_name,
             title_stamp: None,
+            account,
         });
         self.activate(&id, cx);
         self.remember(&id);
@@ -1411,6 +1387,11 @@ impl Workspace {
                 self.refresh_accounts(cx);
                 self.toast("Switched. New and resumed sessions use this account; running sessions keep theirs.", false, cx);
             }
+            Act::Handoff => self.ask_handoff(window, cx),
+            Act::ConfirmHandoff(id) => {
+                self.modal = None;
+                self.start_handoff(&id, cx);
+            }
             Act::AddAccount => {
                 self.modal = Some(Modal::Confirm {
                     title: "Add an account?".into(),
@@ -1720,9 +1701,12 @@ impl Workspace {
 
     /// While the right sidebar shows GitHub, it follows the shown session to that session's project (no focus change).
     fn sync_github(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(id) = self.right_gh.as_ref().and(self.active.clone()) else { return };
-        let cwd = self.store.session(&id).map(|s| s.cwd.clone());
-        if let Some(cwd) = cwd {
+        // Only the panel on screen follows; other projects' panes are made when the panel opens.
+        if self.right_gh.is_none() {
+            return;
+        }
+        let Some(id) = self.active.clone() else { return };
+        if let Some(cwd) = self.store.session(&id).map(|s| s.cwd.clone()) {
             self.right_gh = Some(self.github_pane(cwd, window, cx));
         }
     }
@@ -1743,7 +1727,14 @@ impl Workspace {
                 let view = cx.new(|cx| GithubView::new(root.clone(), name.clone(), crate::github::cli::locate().map(|exe| crate::github::cli::Gh::new(exe, root.clone())), window, cx));
                 let sub_id = id.clone();
                 let sub = cx.subscribe_in(&view, window, move |ws: &mut Workspace, _view, ev: &GhEvent, window, cx| ws.on_gh_event(&sub_id, ev, window, cx));
-                self.gh.push(GhPane { id: id.clone(), cwd: root, project: name, view, _sub: sub });
+                // Returning to the window refreshes the pane, but only the one that is on screen.
+                let (shown, watched) = (id.clone(), view.clone());
+                let active = cx.observe_window_activation(window, move |ws: &mut Workspace, window, cx| {
+                    if window.is_window_active() && ws.right_gh.as_ref() == Some(&shown) && !ws.store.data.layout.right_hidden {
+                        watched.update(cx, |v, cx| v.refresh_on_return(window, cx));
+                    }
+                });
+                self.gh.push(GhPane { id: id.clone(), cwd: root, project: name, view, _sub: sub, _active: active });
                 id
             }
         }
