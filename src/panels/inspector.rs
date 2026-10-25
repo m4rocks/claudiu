@@ -36,7 +36,7 @@ impl Workspace {
     }
 
     pub fn render_right(&mut self, window_w: f32, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let open = self.right_reveal.step(!self.store.data.layout.right_hidden, window);
+        let open = self.right_reveal.step(!self.store.data.layout.right_hidden && !self.editing(), window);
         if open <= 0.0 {
             return None;
         }

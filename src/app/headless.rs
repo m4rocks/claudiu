@@ -137,8 +137,45 @@ fn sessions_and_shell() {
         assert_eq!(ws.shells[&first].height, SHELL_MIN);
         ws.shell_drag = None;
     });
+    // Editor mode: the shown session keeps its terminal and process, its folder is listed, and files open beside it.
+    std::fs::write(cwd.join("notes.md"), "# Notes\n").unwrap();
+    std::fs::write(cwd.join("big.txt"), "let x = 1; // a line of ordinary code\n".repeat(crate::files::MAX_LINES)).unwrap();
+    let wait = |cx: &mut TestAppContext, what: &str, done: &dyn Fn(&Workspace, &App) -> bool| {
+        let t = std::time::Instant::now();
+        while !ws.read_with(cx, |ws, app| done(ws, app)) {
+            assert!(t.elapsed() < Duration::from_secs(20), "{what} never happened");
+            cx.update_window(window, |_, window, app| window.draw(app).clear(app)).unwrap();
+            cx.run_until_parked();
+        }
+    };
+    let term = ws.read_with(&cx, |ws, _| ws.live_view(&first).unwrap().entity_id());
+    let (live, sidebars) = ws.read_with(&cx, |ws, _| (ws.live.len(), (ws.store.data.layout.sidebar_visible, ws.store.data.layout.right_hidden)));
+    step(&mut cx, &|ws, w, cx| ws.toggle_editor(w, cx));
+    wait(&mut cx, "listing the folder", &|ws, _| ws.panes.get(&first).is_some_and(|p| p.nodes.iter().any(|n| n.name == "notes.md")));
+    assert!(ws.read_with(&cx, |ws, app| ws.editor_mode
+        && ws.live.len() == live
+        && ws.live_view(&first).unwrap().entity_id() == term
+        && ws.is_running(&first, app)), "the terminal keeps running in editor mode");
+    step(&mut cx, &|ws, w, cx| ws.open_file(&first, cwd.join("notes.md"), w, cx));
+    wait(&mut cx, "opening a file", &|ws, _| ws.panes[&first].file.is_some());
+    assert_eq!(ws.read_with(&cx, |ws, app| ws.panes[&first].buffer.read(app).value().to_string()), "# Notes\n");
+    let t = std::time::Instant::now();
+    step(&mut cx, &|ws, w, cx| ws.open_file(&first, cwd.join("big.txt"), w, cx));
+    wait(&mut cx, "opening a large file", &|ws, _| ws.panes[&first].file.as_ref().is_some_and(|f| f.ends_with("big.txt")));
+    eprintln!("a {}-line file opened and drew in {:?}", crate::files::MAX_LINES, t.elapsed());
+    assert!(ws.read_with(&cx, |ws, _| ws.panes[&first].note.is_none()), "a file at the line limit opens");
+    step(&mut cx, &|ws, w, cx| ws.toggle_editor(w, cx));
+    assert!(ws.read_with(&cx, |ws, _| !ws.editor_mode && (ws.store.data.layout.sidebar_visible, ws.store.data.layout.right_hidden) == sidebars), "leaving editor mode brings the sidebars back as they were");
+    // Asking for a sidebar in editor mode leaves it and shows that sidebar, even one that was hidden before.
+    step(&mut cx, &|ws, w, cx| {
+        ws.store.data.layout.sidebar_visible = false;
+        ws.toggle_editor(w, cx);
+        ws.toggle_left(cx);
+    });
+    assert!(ws.read_with(&cx, |ws, _| !ws.editor_mode && ws.store.data.layout.sidebar_visible), "the sidebar shows");
     step(&mut cx, &|ws, w, cx| ws.close_live(&first, w, cx));
     assert!(ws.read_with(&cx, |ws, _| !ws.shells.contains_key(&first)), "closing the session drops its shell");
+    assert!(ws.read_with(&cx, |ws, _| !ws.panes.contains_key(&first)), "closing the session drops its editor pane");
     // The GitHub view lives in the right sidebar: one per folder, it widens the sidebar, "Ask Claude" starts a session.
     assert_eq!(ws.read_with(&cx, |ws, _| ws.right_width(1600.0)), RIGHT_MENU_W, "the menu starts at its default width");
     // Both sidebars can be dragged; the menu and the GitHub view each remember their own width.

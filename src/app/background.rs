@@ -134,6 +134,7 @@ impl Workspace {
         self.refresh_live(cx);
         self.remember_open(cx);
         self.ingest_usage(cx);
+        self.refresh_files(cx);
         cx.notify();
     }
 

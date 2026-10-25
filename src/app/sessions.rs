@@ -324,6 +324,7 @@ impl Workspace {
         let was_active = self.active_id().is_some_and(|a| a == id);
         self.live.retain(|l| l.id != id); // dropping the view drops the Terminal, which closes the PTY
         self.shells.remove(id);
+        self.panes.remove(id);
         self.visuals.remove(id);
         self.recent.retain(|r| r != id);
         // Closing the shown session goes back to the one shown before it; otherwise stay where we are.

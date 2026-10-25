@@ -1,6 +1,7 @@
 //! Workspace: the app's state, the `Act` table that menus, shortcuts and clicks all go through, and `new`. The methods
-//! are split by topic: `sessions` (start, show, close), `background` (timers and polls), `layout` (panels), `modal` (toasts,
-//! menus, modals), `repo` (git), `github_pane`, `alt_accounts`. Rendering lives in `panels/`.
+//! are split by topic: `sessions` (start, show, close), `background` (timers and polls), `layout` (panels),
+//! `editor_mode` (files and editor beside the terminal), `modal` (toasts, menus, modals), `repo` (git), `github_pane`,
+//! `alt_accounts`. Rendering lives in `panels/`.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -29,6 +30,7 @@ use crate::updater::UpdateState;
 mod alt_accounts;
 mod background;
 mod cross;
+mod editor_mode;
 mod github_pane;
 mod handoff;
 #[cfg(test)]
@@ -42,6 +44,8 @@ mod repo;
 mod sessions;
 mod titles;
 mod visuals;
+
+pub use editor_mode::EditorPane;
 
 actions!(
     claudiu,
@@ -62,6 +66,7 @@ actions!(
         HideOthers,
         ShowAllApps,
         OpenSettings,
+        ToggleEditor,
     ]
 );
 
@@ -73,6 +78,8 @@ pub enum Act {
     },
     /// Show or hide the shell under a Claude session's terminal (started on first use, in the session's folder).
     ToggleShell(Id),
+    /// Turn editor mode on or off for the shown session (see `editor_mode.rs`).
+    ToggleEditor,
     /// Click on a session row: live -> show it, history -> resume it.
     Select(Id),
     Resume(Id),
@@ -301,6 +308,10 @@ pub struct Workspace {
     /// Shells under Claude sessions, by the session they belong to.
     pub shells: HashMap<Id, ShellPanel>,
     pub shell_drag: Option<ShellDrag>,
+    /// Editor mode is on: the sidebars give way to the shown session's files and editor. Not remembered across restarts.
+    pub editor_mode: bool,
+    /// Each session's files and editor, by the session they belong to.
+    pub panes: HashMap<Id, EditorPane>,
     /// The shell panel's animated height (0 while hidden).
     pub shell_h: crate::panels::widgets::Reveal,
     /// Open sessions in the order they were last shown (most recent last); closing one goes back to the previous.
@@ -390,6 +401,8 @@ impl Workspace {
             active: None,
             shells: HashMap::new(),
             shell_drag: None,
+            editor_mode: false,
+            panes: HashMap::new(),
             shell_h: crate::panels::widgets::Reveal::at_value(0.0),
             recent: vec![],
             main: Main::Home,
@@ -471,6 +484,7 @@ impl Workspace {
         match act {
             Act::NewClaude { cwd } => self.new_claude(cwd, window, cx),
             Act::ToggleShell(id) => self.toggle_shell(&id, window, cx),
+            Act::ToggleEditor => self.toggle_editor(window, cx),
             Act::Select(id) => self.show_session(&id, window, cx),
             Act::Resume(id) => self.resume(&id, window, cx),
             Act::CloseLive(id) => self.close_live(&id, window, cx),
@@ -510,7 +524,11 @@ impl Workspace {
                 }
             }
             Act::ImportProject => self.import_project(window, cx),
-            Act::OpenGithub { cwd } => self.open_github(cwd, window, cx),
+            Act::OpenGithub { cwd } => {
+                // GitHub opens in the right sidebar, which editor mode hides.
+                self.editor_mode = false;
+                self.open_github(cwd, window, cx)
+            }
             Act::RegenTitle(id) => self.regen_title(&id, cx),
             Act::CommitPush(id, cwd) => {
                 if self.is_running(&id, cx) {

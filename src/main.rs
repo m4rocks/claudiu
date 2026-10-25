@@ -3,6 +3,7 @@
 mod app;
 mod claude;
 mod datadir;
+mod files;
 mod git;
 mod github;
 mod panels;
@@ -22,14 +23,14 @@ gpui_kit::assets::icon_assets!(
     [
         WindowMinimize, WindowMaximize, WindowRestore, WindowClose, Archive, ArchiveRestore, ArrowDownToLine, ArrowLeft, Brackets, Check, ChevronDown, ChevronRight,
         CircleCheck, CircleDot, CircleSlash, CircleX, Clock, Ellipsis, Eye, ExternalLink, FolderOpen, GitBranch, GitCommitHorizontal, GitMerge, GitPullRequest,
-        GitPullRequestClosed, GitPullRequestDraft, HeartPlus, LoaderCircle, Lock, MessageSquare, PanelBottom, PanelLeft, PanelRight, Pencil, RefreshCw, Search,
+        GitPullRequestClosed, GitPullRequestDraft, HeartPlus, LoaderCircle, Lock, MessageSquare, FileCode, PanelBottom, PanelLeft, PanelRight, Pencil, RefreshCw, Search,
         Settings, Terminal, X
     ]
 );
 
 use app::{
     CloseSession, FocusSearch, HideApp, HideOthers, ImportProject, NewClaude, NextSession, OpenGithub, OpenSettings, PrevSession, Quit, ShowAllApps,
-    SwapFocus, ToggleRight, ToggleShell, ToggleSidebar, Workspace,
+    SwapFocus, ToggleEditor, ToggleRight, ToggleShell, ToggleSidebar, Workspace,
 };
 
 /// The macOS menu bar. Every item is an existing Claudiu action, so menu, shortcut and sidebar share one code path;
@@ -53,6 +54,7 @@ fn menu_bar() -> Vec<gpui::Menu> {
         Menu::new("File").items([
             MenuItem::action("New Claude Session", NewClaude),
             MenuItem::action("Show or Hide Shell", ToggleShell),
+            MenuItem::action("Editor Mode", ToggleEditor),
             MenuItem::action("GitHub Issues & Pull Requests", OpenGithub),
             MenuItem::separator(),
             MenuItem::action("Add Project…", ImportProject),
@@ -138,6 +140,7 @@ fn main() {
             KeyBinding::new("secondary-shift-g", OpenGithub, None),
             KeyBinding::new("secondary-,", OpenSettings, None),
             KeyBinding::new("secondary-shift-]", SwapFocus, None),
+            KeyBinding::new("secondary-shift-e", ToggleEditor, None),
             KeyBinding::new("ctrl-tab", NextSession, None),
             KeyBinding::new("ctrl-shift-tab", PrevSession, None),
         ]);

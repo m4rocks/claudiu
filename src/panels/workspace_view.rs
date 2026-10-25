@@ -8,7 +8,7 @@ use gpui::{
 
 use crate::app::{
     Act, CloseSession, GitOp, FocusSearch, ImportProject, Main, Modal, NewClaude, NextSession, OpenGithub, OpenSettings, PrevSession, ShellDrag, SwapFocus,
-    ToggleRight, ToggleShell, ToggleSidebar, Workspace, SHELL_HEIGHT,
+    ToggleEditor, ToggleRight, ToggleShell, ToggleSidebar, Workspace, SHELL_HEIGHT,
 };
 use gpui_kit::component::{TitleBar, input::Input};
 use crate::store::{SessionKind, now};
@@ -51,11 +51,7 @@ impl Workspace {
                     .child(
                         icon_button("toggle-sidebar", IconName::PanelLeft)
                             .occlude()
-                            .on_click(cx.listener(|ws, _: &ClickEvent, _w, cx| {
-                                ws.store.data.layout.sidebar_visible = !ws.store.data.layout.sidebar_visible;
-                                ws.store.mark_dirty();
-                                cx.notify();
-                            })),
+                            .on_click(cx.listener(|ws, _: &ClickEvent, _w, cx| ws.toggle_left(cx))),
                     )
                     .child(
                         div()
@@ -101,6 +97,7 @@ impl Workspace {
                     .flex()
                     .flex_none()
                     .occlude()
+                    .child(icon_button("toggle-editor", IconName::FileCode).on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::ToggleEditor, window, cx))))
                     .child(icon_button("toggle-shell", IconName::PanelBottom).on_click(cx.listener(|ws, _: &ClickEvent, window, cx| {
                         if let Some(id) = ws.active.clone() {
                             ws.act(Act::ToggleShell(id), window, cx)
@@ -611,7 +608,8 @@ impl Render for Workspace {
             self.window_title = title;
         }
 
-        let left_open = self.left_reveal.step(self.store.data.layout.sidebar_visible, window);
+        // Editor mode hides both sidebars without changing the remembered layout, so leaving it brings them back.
+        let left_open = self.left_reveal.step(self.store.data.layout.sidebar_visible && !self.editing(), window);
         let left_w = self.left_width(f32::from(window.viewport_size().width));
         let sidebar = (left_open > 0.0).then(|| {
             div()
@@ -637,6 +635,8 @@ impl Render for Workspace {
         }
         let right = self.render_right(f32::from(window.viewport_size().width), window, cx);
         let shell = self.render_shell(window, cx);
+        let editor = self.render_editor_pane(window, cx);
+        let window_w = f32::from(window.viewport_size().width);
         let main: AnyElement = match &self.main {
             Main::Terminals => self.render_session(cx),
             Main::Home => self.render_home(cx).into_any_element(),
@@ -673,13 +673,10 @@ impl Render for Workspace {
             }))
             .on_action(cx.listener(|ws, _: &NextSession, window, cx| ws.cycle(1, window, cx)))
             .on_action(cx.listener(|ws, _: &PrevSession, window, cx| ws.cycle(-1, window, cx)))
-            .on_action(cx.listener(|ws, _: &ToggleSidebar, _w, cx| {
-                ws.store.data.layout.sidebar_visible = !ws.store.data.layout.sidebar_visible;
-                ws.store.mark_dirty();
-                cx.notify();
-            }))
+            .on_action(cx.listener(|ws, _: &ToggleSidebar, _w, cx| ws.toggle_left(cx)))
             .on_action(cx.listener(|ws, _: &ToggleRight, window, cx| ws.toggle_right(window, cx)))
             .on_action(cx.listener(|ws, _: &FocusSearch, window, cx| {
+                ws.editor_mode = false;
                 ws.store.data.layout.sidebar_visible = true;
                 ws.search_input.update(cx, |s, cx| s.focus(window, cx));
                 cx.notify();
@@ -691,6 +688,7 @@ impl Render for Workspace {
             }))
             .on_action(cx.listener(|ws, _: &OpenSettings, window, cx| ws.act(Act::OpenSettings, window, cx)))
             .on_action(cx.listener(|ws, _: &SwapFocus, window, cx| ws.swap_focus(window, cx)))
+            .on_action(cx.listener(|ws, _: &ToggleEditor, window, cx| ws.act(Act::ToggleEditor, window, cx)))
             .on_mouse_move(cx.listener(|ws, ev: &gpui::MouseMoveEvent, window, cx| {
                 if ws.shell_drag.is_none() && ws.right_drag.is_none() && ws.left_drag.is_none() {
                     return;
@@ -743,7 +741,16 @@ impl Render for Workspace {
                             .min_h_0()
                             .children(sidebar)
                             .child(
-                                div().flex().flex_col().flex_1().min_w_0().h_full().child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .h_full()
+                                    // In editor mode the terminal narrows to the left and the editor takes the rest.
+                                    .map(|d| match editor.is_some() {
+                                        true => d.flex_none().w(px((window_w * 0.36).clamp(380.0, 640.0))),
+                                        false => d.flex_1().min_w_0(),
+                                    })
+                                    .child(
                                     div()
                                         .flex()
                                         .flex_col()
@@ -759,6 +766,7 @@ impl Render for Workspace {
                                 )
                                 .children(shell),
                             )
+                            .when_some(editor, |d, editor| d.child(div().flex_none().w(px(theme::PANEL_GAP))).child(editor))
                             .children(right),
                     ),
             )

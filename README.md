@@ -35,6 +35,7 @@ Claudiu's own shortcuts use Ctrl+Shift (Cmd+Shift on macOS), plus a few Ctrl cho
 | Ctrl+Shift+W | End the focused session |
 | Ctrl+Tab / Ctrl+Shift+Tab | Next / previous running session |
 | Ctrl+Shift+] | Move the keyboard between Claude and its shell |
+| Ctrl+Shift+E | Editor mode: the session's files and an editor beside its terminal |
 | Ctrl+Shift+B / Ctrl+Shift+R | Toggle left / right sidebar |
 | Ctrl+Shift+F | Search sessions and projects |
 | Ctrl+Shift+O | Add a project folder |
