@@ -94,6 +94,8 @@ pub enum Act {
     /// Change a setting of a running session through its mod (see `usage::send_ctl`).
     SetAutoCompact(Id, bool),
     SetAdvisor(Id, String),
+    /// Turn Claude in Chrome on or off; the session restarts to apply it.
+    SetChrome(Id, bool),
     /// Ask for an advisor model by name.
     AskAdvisor(Id),
     /// Filter the sidebar list to a project (`None`: all).
@@ -580,6 +582,14 @@ impl Workspace {
                 cx.notify();
                 usage::send_ctl(&usage::ctl_file(&id), "auto_compact", on.into());
                 self.toast(format!("Turning auto-compact {}…", if on { "on" } else { "off" }), false, cx);
+            }
+            Act::SetChrome(id, on) => {
+                if let Some(meta) = self.store.session_mut(&id).and_then(|s| s.claude.as_mut()) {
+                    meta.chrome = on;
+                }
+                self.store.mark_dirty();
+                self.restart_session(&id, window, cx);
+                self.toast(format!("Claude in Chrome {}. Session restarted.", if on { "on" } else { "off" }), false, cx);
             }
             Act::SetAdvisor(id, model) => {
                 // The saved setting changes at once, but a different model only reaches the current conversation on

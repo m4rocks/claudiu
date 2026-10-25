@@ -28,6 +28,10 @@ impl Workspace {
             spec.env.push((crate::visual::VISUAL_ENV.into(), crate::visual::file(record_id).to_string_lossy().into_owned()));
             spec.env.push((crate::claude::ask::ASK_ENV.into(), crate::claude::ask::request_file(record_id).to_string_lossy().into_owned()));
         }
+        if self.store.session(record_id).and_then(|r| r.claude.as_ref()).is_some_and(|m| m.chrome) {
+            spec.args.push("--chrome".into());
+        }
+        spec.env.push(("CLAUDE_CODE_NO_FLICKER".into(), "1".into())); // fullscreen renderer, per process
         spec.env.push(("CLAUDE_CODE_AUTO_CONNECT_IDE".into(), "false".into()));
         spec.env.push(("CLAUDE_CODE_IDE_SKIP_AUTO_INSTALL".into(), "1".into()));
         if let Some(acct) = self.store.active_account() {
@@ -141,6 +145,20 @@ impl Workspace {
         }
         let spec = self.with_helpers(spec, &meta.session_id, &rec.id);
         self.start(rec, spec, false, window, cx);
+    }
+
+    /// End the session's process and resume the same conversation. The shell and cards belong to the session, so they stay.
+    pub(super) fn restart_session(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let was_shown = self.active_id().is_some_and(|a| a == id);
+        let shell = self.shells.remove(id);
+        self.live.retain(|l| l.id != id); // dropping the view closes the old process
+        self.resume(id, window, cx);
+        if let Some(shell) = shell {
+            self.shells.insert(id.into(), shell);
+        }
+        if was_shown {
+            self.show_session(id, window, cx);
+        }
     }
 
     pub(super) fn start(

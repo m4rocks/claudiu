@@ -69,6 +69,9 @@ pub struct ClaudeMeta {
     pub auto_compact: Option<bool>,
     #[serde(default)]
     pub advisor: Option<String>,
+    /// Claude in Chrome: the session is (re)started with `--chrome`. Claudiu's own choice, so it survives restarts.
+    #[serde(default)]
+    pub chrome: bool,
     /// The advisor declared for the current conversation. A model change is saved in `advisor` at once but only
     /// becomes `advisor_active` on `/clear` or `/compact`; turning the advisor off/on changes it immediately.
     #[serde(default)]

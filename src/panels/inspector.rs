@@ -411,9 +411,9 @@ impl Workspace {
 
         // The figures come from the snapshot the session's mod reports.
         let meta = shown.rec.as_ref().filter(|r| r.kind == SessionKind::Claude).and_then(|r| r.claude.as_ref());
-        let (compact, advisor, active, known) = match meta {
-            Some(m) => (m.auto_compact, m.advisor.clone(), m.advisor_active.clone(), true),
-            None => (None, None, None, false),
+        let (compact, advisor, active, chrome, known) = match meta {
+            Some(m) => (m.auto_compact, m.advisor.clone(), m.advisor_active.clone(), m.chrome, true),
+            None => (None, None, None, false, false),
         };
         let advisor = advisor.map(|a| a.to_lowercase());
         let active = active.map(|a| a.to_lowercase());
@@ -424,6 +424,10 @@ impl Workspace {
         let compact_row = match settable.clone() {
             Some(sid) => pick_row(cx, "set-auto-compact", "Auto-compact", compact_text, move || auto_compact_menu(&sid, compact)).into_any_element(),
             None => kv("Auto-compact", compact_text).into_any_element(),
+        };
+        let chrome_row = match settable.clone() {
+            Some(sid) => pick_row(cx, "set-chrome", "Claude in Chrome", if chrome { "On" } else { "Off" }.into(), move || chrome_menu(&sid, chrome)).into_any_element(),
+            None => kv("Claude in Chrome", if chrome { "On" } else { "Off" }.into()).into_any_element(),
         };
         let advisor_row = match settable {
             Some(sid) => pick_row(cx, "set-advisor", "Advisor", advisor_text, move || advisor_menu(&sid, advisor.as_deref())).into_any_element(),
@@ -436,7 +440,7 @@ impl Workspace {
             .px(px(8.0))
             .child(meter("CONTEXT", ctx_fraction, ctx_caption, None))
             .child(cache)
-            .child(div().flex().flex_col().gap(px(2.0)).child(compact_row).child(advisor_row))
+            .child(div().flex().flex_col().gap(px(2.0)).child(compact_row).child(advisor_row).child(chrome_row))
     }
 }
 
@@ -445,6 +449,10 @@ fn auto_compact_menu(sid: &Id, current: Option<bool>) -> Vec<MenuItem> {
 }
 
 /// Off, the two aliases, and "Other…" (ticked for any other model) which asks for a name.
+fn chrome_menu(sid: &Id, current: bool) -> Vec<MenuItem> {
+    [(true, "On"), (false, "Off")].into_iter().map(|(on, name)| MenuItem::new(format!("{}{name}", tick(current == on)), Act::SetChrome(sid.clone(), on))).collect()
+}
+
 fn advisor_menu(sid: &Id, current: Option<&str>) -> Vec<MenuItem> {
     const ALIASES: [(&str, &str); 2] = [("opus", "Opus"), ("sonnet", "Sonnet")];
     let current = current.and_then(advisor_alias);

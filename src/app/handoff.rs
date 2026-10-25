@@ -119,16 +119,7 @@ impl Workspace {
     /// The old process ends and a new one resumes the same conversation. The shell and cards belong to the session,
     /// so they stay.
     fn restart_handed_off(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let was_shown = self.active_id().is_some_and(|a| a == id);
-        let shell = self.shells.remove(id);
-        self.live.retain(|l| l.id != id); // dropping the view closes the old process
-        self.resume(id, window, cx);
-        if let Some(shell) = shell {
-            self.shells.insert(id.into(), shell);
-        }
-        if was_shown {
-            self.show_session(id, window, cx);
-        }
+        self.restart_session(id, window, cx);
         let to_name = self.store.active_account().map_or_else(|| "the active account".into(), |a| a.name());
         self.set_handover(id, Some(to_name), cx);
     }
