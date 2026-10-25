@@ -311,6 +311,10 @@ impl TerminalView {
                                 v.type_in(t, cx);
                                 (!last.is_empty()).then_some((marker, before))
                             }
+                            Step::Erase(n) => {
+                                v.send(vec![0x7f; *n], cx);
+                                None
+                            }
                             Step::Image(path, _) => {
                                 clipboard.get_or_insert_with(|| cx.read_from_clipboard());
                                 let before = v.marks(&Marker::Image);
@@ -342,6 +346,10 @@ impl TerminalView {
         self.handover = None;
         self.handing = false;
         crate::terminal::trace::note(&self.terminal.tag, self.terminal.born.elapsed(), "prompt ready");
+        let erase = self.draft.take_erase();
+        if erase > 0 {
+            self.send(vec![0x7f; erase], cx);
+        }
         let (rest, sent) = self.draft.take();
         self.type_in(&rest, cx);
         if sent {

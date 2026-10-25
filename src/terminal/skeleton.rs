@@ -24,6 +24,8 @@ pub struct Draft {
     images: Vec<PathBuf>,
     /// How many images were handed over, which is the number Claude Code gives the next.
     shown: usize,
+    /// Backspaces into the frozen text, not yet sent: Claude Code's prompt already holds that text and must erase it too.
+    erase: usize,
 }
 
 /// One piece of the draft as it is typed into Claude Code.
@@ -32,6 +34,8 @@ pub enum Step {
     Text(String),
     /// An image file, and the number Claude Code will show it as.
     Image(PathBuf, usize),
+    /// This many backspaces.
+    Erase(usize),
 }
 
 /// `[Image #n] ` at the start of `s`: n and the chip's length. Claude Code puts a space after its chip, so the chip
@@ -70,11 +74,16 @@ impl Draft {
 
     /// Where an `[Image #n]` ends at the cursor (and is not frozen) starts.
     fn chip_before(&self) -> Option<usize> {
-        let head = &self.text[self.frozen..self.at];
+        self.chip_before_from(self.frozen)
+    }
+
+    /// Where an `[Image #n]` that ends at the cursor and starts at or after `lo` starts.
+    fn chip_before_from(&self, lo: usize) -> Option<usize> {
+        let head = &self.text[lo..self.at];
         let i = head.rfind("[Image #")?;
         let tail = &head[i + 8..];
         let digits = tail.strip_suffix("] ").or_else(|| tail.strip_suffix(']'))?;
-        (!digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())).then_some(self.frozen + i)
+        (!digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())).then_some(lo + i)
     }
 
     /// Where an `[Image #n]` starting at the cursor ends.
@@ -89,7 +98,22 @@ impl Draft {
         } else if let (false, true, Some(c)) = (self.sent, self.at > self.frozen, self.text[..self.at].chars().next_back()) {
             self.at -= c.len_utf8();
             self.text.remove(self.at);
+        } else if let (false, true, None, Some(c)) = (self.sent, self.at == self.frozen, self.chip_before_from(0), self.text[..self.at].chars().next_back()) {
+            self.erase_frozen(self.at - c.len_utf8());
         }
+    }
+
+    /// Erase the frozen text from `start` to the cursor, which stands at its end: Claude Code's prompt holds that text
+    /// too, so it gets a backspace per character. shortcut: a range with an image chip is left alone, because Claude
+    /// Code deletes a chip whole and that is not tracked here.
+    fn erase_frozen(&mut self, start: usize) {
+        let gone = &self.text[start..self.frozen];
+        if gone.contains("[Image #") {
+            return;
+        }
+        self.erase += gone.chars().count();
+        self.text.drain(start..self.frozen);
+        (self.frozen, self.at) = (start, start);
     }
 
     pub fn delete(&mut self) {
@@ -126,8 +150,12 @@ impl Draft {
 
     /// Where the word before the cursor starts (words are split by whitespace); never into the frozen text.
     fn word_before(&self) -> usize {
-        let head = self.text[self.frozen..self.at].trim_end();
-        self.frozen + head.trim_end_matches(|c: char| !c.is_whitespace()).len()
+        self.word_before_from(self.frozen)
+    }
+
+    fn word_before_from(&self, lo: usize) -> usize {
+        let head = self.text[lo..self.at].trim_end();
+        lo + head.trim_end_matches(|c: char| !c.is_whitespace()).len()
     }
 
     /// Where the word after the cursor ends.
@@ -146,7 +174,13 @@ impl Draft {
     }
 
     pub fn delete_word_back(&mut self) {
-        if !self.sent {
+        if self.sent {
+            return;
+        }
+        if self.at == self.frozen {
+            let start = self.chip_before_from(0).unwrap_or_else(|| self.word_before_from(0));
+            self.erase_frozen(start);
+        } else {
             let start = self.chip_before().unwrap_or_else(|| self.word_before());
             self.text.drain(start..self.at);
             self.at = start;
@@ -163,10 +197,16 @@ impl Draft {
     /// Delete back to the start of the line (the line break itself when already there).
     pub fn kill_to_line_start(&mut self) {
         if !self.sent {
-            let line = self.text[..self.at].rfind('\n').map_or(0, |i| i + 1).max(self.frozen);
-            let start = if line == self.at { self.at.saturating_sub(1).max(self.frozen) } else { line };
-            self.text.drain(start..self.at);
-            self.at = start;
+            // At the frozen text's end there is nothing of the user's own before the cursor, so go into the frozen text.
+            let lo = if self.at == self.frozen { 0 } else { self.frozen };
+            let line = self.text[..self.at].rfind('\n').map_or(0, |i| i + 1).max(lo);
+            let start = if line == self.at { self.at.saturating_sub(1).max(lo) } else { line };
+            if start < self.frozen {
+                self.erase_frozen(start);
+            } else {
+                self.text.drain(start..self.at);
+                self.at = start;
+            }
         }
     }
 
@@ -283,7 +323,15 @@ impl Draft {
         if !plain.is_empty() {
             steps.push(Step::Text(plain));
         }
+        if self.erase > 0 {
+            steps.push(Step::Erase(std::mem::take(&mut self.erase)));
+        }
         steps
+    }
+
+    /// Backspaces into the frozen text that Claude Code has not been sent yet.
+    pub fn take_erase(&mut self) -> usize {
+        std::mem::take(&mut self.erase)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -529,11 +577,12 @@ mod tests {
         let mut d = Draft::default();
         d.insert("hello world");
         d.next_steps();
-        typed(&mut d, "ctrl-backspace ctrl-u");
-        assert_eq!(d.text, "hello world");
         d.insert("x yz");
-        typed(&mut d, "ctrl-backspace ctrl-backspace ctrl-backspace");
+        typed(&mut d, "ctrl-backspace ctrl-backspace");
         assert_eq!(d.text, "hello world");
+        typed(&mut d, "ctrl-backspace");
+        assert_eq!(d.text, "hello ");
+        assert_eq!(d.take_erase(), 5);
     }
 
     #[test]
@@ -579,15 +628,38 @@ mod tests {
         let mut d = Draft::default();
         d.insert("abc");
         assert_eq!(d.next_steps(), [Step::Text("abc".into())]);
-        d.backspace();
         d.left();
         d.home();
         d.insert("de");
         d.left();
         d.left();
         d.left();
-        d.backspace();
         assert_eq!(d.text, "abcde");
         assert_eq!(d.take(), ("de".to_string(), false));
+    }
+
+    #[test]
+    fn backspace_into_frozen_text_is_sent_on() {
+        let mut d = Draft::default();
+        d.insert("abcdef");
+        d.next_steps();
+        d.insert("g");
+        d.backspace();
+        d.backspace();
+        d.backspace();
+        assert_eq!(d.text, "abcd");
+        assert_eq!(d.next_steps(), [Step::Erase(2)]);
+        assert_eq!(d.next_steps(), []);
+        d.backspace();
+        assert_eq!(d.take_erase(), 1);
+        assert_eq!(d.text, "abc");
+        d.insert(" de fg");
+        d.next_steps();
+        typed(&mut d, "ctrl-backspace");
+        assert_eq!(d.text, "abc de ");
+        assert_eq!(d.next_steps(), [Step::Erase(2)]);
+        typed(&mut d, "ctrl-u");
+        assert_eq!(d.text, "");
+        assert_eq!(d.take_erase(), 7);
     }
 }

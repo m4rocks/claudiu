@@ -216,6 +216,7 @@ impl Workspace {
         self.remember(&id);
         self.selected = Some(id.clone());
         self.main = Main::Terminals;
+        self.sync_github(window, cx);
         self.persist_layout();
         self.focus_active(window, cx);
         cx.notify();

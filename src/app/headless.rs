@@ -206,6 +206,14 @@ fn sessions_and_shell() {
     });
     assert!(ws.read_with(&cx, |ws, _| ws.live.len() == before + 1 && ws.active.is_some()), "Ask Claude opens a session");
     assert!(ws.read_with(&cx, |ws, _| ws.right_gh.is_some() && ws.gh.len() == 1), "the right sidebar keeps following the same project");
+    // A new session in another folder: the open GitHub view moves to that folder.
+    let other = tempfile::tempdir().unwrap();
+    let other_cwd = other.path().to_path_buf();
+    step(&mut cx, &|ws, w, cx| ws.new_claude(other_cwd.clone(), w, cx));
+    assert!(
+        ws.read_with(&cx, |ws, _| ws.gh.len() == 2 && ws.right_gh.as_ref().and_then(|id| ws.gh_pane(id)).is_some_and(|p| platform::path_key(&p.cwd) == platform::path_key(&other_cwd))),
+        "GitHub follows a new session"
+    );
 }
 
 #[test]
