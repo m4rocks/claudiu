@@ -331,6 +331,11 @@ fn sessions_and_shell() {
     assert!(ws.read_with(&cx, |ws, _| !ws.store.data.layout.right_hidden), "shown again");
     step(&mut cx, &|ws, w, cx| ws.open_github(cwd.clone(), w, cx));
     assert!(ws.read_with(&cx, |ws, _| ws.gh.len() == 1), "one github pane per folder");
+    // A running Claude session in the folder takes the request itself, so close the leftovers to see a new one start.
+    let leftovers: Vec<Id> = ws.read_with(&cx, |ws, _| ws.live.iter().map(|l| l.id.clone()).collect());
+    for id in leftovers {
+        step(&mut cx, &|ws, w, cx| ws.close_live(&id, w, cx));
+    }
     let before = ws.read_with(&cx, |ws, _| ws.live.len());
     step(&mut cx, &|ws, _w, cx| {
         let view = ws.gh[0].view.clone();
