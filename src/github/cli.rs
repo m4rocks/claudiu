@@ -234,6 +234,12 @@ impl Gh {
         serde_json::from_str(&out).map_err(|e| Error::other(format!("unexpected answer from gh: {e}")))
     }
 
+    /// The title and state GitHub holds for an issue or pull request.
+    pub fn item_status(&self, repo: &RepoRef, number: u32) -> Result<(String, super::model::State), Error> {
+        let answer = self.rest("GET", &format!("repos/{}/issues/{number}", repo.full()), None)?;
+        super::model::parse_status(&answer).ok_or_else(|| Error::other("unexpected answer from GitHub"))
+    }
+
     /// `gh pr checkout <n>` in this folder.
     pub fn checkout(&self, number: u32) -> Result<String, Error> {
         self.run(&["pr", "checkout", &number.to_string()], None)?;

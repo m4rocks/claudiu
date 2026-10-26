@@ -267,7 +267,6 @@ fn own_tools(off: &[&str]) -> Vec<Value> {
             "properties": {
                 "kind": { "type": "string", "enum": ["issue", "pull"], "description": "issue or pull (a pull request)" },
                 "number": { "type": "integer", "description": "The issue or pull request number" },
-                "title": { "type": "string", "description": "Its title, if you know it (optional)" },
             },
             "required": ["kind", "number"],
         },
@@ -392,8 +391,7 @@ fn attach_github(params: &Value, record: &str, dir: &Path) -> Value {
         Ok(item) => item,
         Err(e) => return e,
     };
-    let title = args["title"].as_str().and_then(clean_title);
-    match append_line(dir, record, &json!({ "pull": pull, "number": number, "title": title })) {
+    match append_line(dir, record, &json!({ "pull": pull, "number": number })) {
         Ok(()) => reply(&format!("{} #{number} attached.", if pull { "Pull request" } else { "Issue" }), false),
         Err(e) => reply(&format!("could not attach: {e}"), true),
     }
@@ -429,10 +427,15 @@ fn detach_github(params: &Value, record: &str, dir: &Path) -> Value {
 
 /// One JSON line for Claudiu to pick up, in the file of the calling session.
 fn append_line(dir: &Path, record: &str, line: &Value) -> std::io::Result<()> {
-    use std::io::Write as _;
     std::fs::create_dir_all(dir)?;
     let path = dir.join(format!("{}.jsonl", crate::datadir::safe_file_stem(record)));
-    writeln!(std::fs::OpenOptions::new().create(true).append(true).open(path)?, "{line}")
+    write_line(&mut std::fs::OpenOptions::new().create(true).append(true).open(path)?, line)
+}
+
+/// The line goes out in one write: `writeln!` on a bare file writes it in many pieces, and `read_attached` could
+/// catch half a line and drop it.
+fn write_line(out: &mut impl std::io::Write, line: &Value) -> std::io::Result<()> {
+    out.write_all(format!("{line}\n").as_bytes())
 }
 
 /// Ask Claudiu to show this session together with another one (`verb` "link"), or to stop. Claudiu checks that the
@@ -557,6 +560,25 @@ mod tests {
     }
 
     #[test]
+    fn a_line_for_claudiu_is_written_in_one_piece() {
+        #[derive(Default)]
+        struct Writes(Vec<Vec<u8>>);
+        impl std::io::Write for Writes {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.push(buf.to_vec());
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut out = Writes::default();
+        write_line(&mut out, &json!({ "pull": false, "number": 71, "title": "New-session defaults" })).unwrap();
+        assert_eq!(out.0.len(), 1, "a reader between two writes would see half a line");
+        assert!(out.0[0].ends_with(b"\n"));
+    }
+
+    #[test]
     fn the_session_reaching_tools_are_forwarded_and_the_bookkeeping_ones_are_loaded_upfront() {
         let tmp = tempfile::tempdir().unwrap();
         let call = |name: &str| json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":{"id":"x"}}});
@@ -649,7 +671,7 @@ mod tests {
         let errors: Vec<_> = r.iter().map(|x| x["result"]["isError"].as_bool().unwrap()).collect();
         assert_eq!(errors, [false, false, true, true, true]);
         let lines: Vec<Attached> = std::fs::read_to_string(tmp.path().join("attach/s1.jsonl")).unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect();
-        assert_eq!(lines, [Attached { pull: false, number: 52, title: Some("Right sidebar".into()) }, Attached { pull: true, number: 7, title: None }]);
+        assert_eq!(lines, [Attached { pull: false, number: 52, title: None, state: None }, Attached { pull: true, number: 7, title: None, state: None }]);
         assert_eq!(talk(&[call(json!({"kind":"issue","number":1}))], "", tmp.path())[0]["result"]["isError"], true);
         assert!(allowed_tools(&[]).contains(&"mcp__claudiu__attach_github".to_string()));
     }
@@ -664,7 +686,7 @@ mod tests {
         let line = std::fs::read_to_string(tmp.path().join("attach/s1.jsonl")).unwrap();
         assert_eq!(line.lines().count(), 1);
         assert_eq!(parse_attachment(line.lines().next().unwrap()), Some(Attachment::Link("abc-123".into())));
-        assert_eq!(parse_attachment(r#"{"pull":true,"number":7,"title":null}"#), Some(Attachment::Github(Attached { pull: true, number: 7, title: None })));
+        assert_eq!(parse_attachment(r#"{"pull":true,"number":7,"title":null}"#), Some(Attachment::Github(Attached { pull: true, number: 7, title: None, state: None })));
         assert_eq!(parse_attachment(r#"{"unlink":"x"}"#), Some(Attachment::Unlink("x".into())));
         assert_eq!(parse_attachment(r#"{"detach":{"pull":false,"number":3}}"#), Some(Attachment::Detach { pull: false, number: 3 }));
         assert_eq!(parse_attachment(r#"{"detach":{"number":3}}"#), None);

@@ -15,6 +15,7 @@ use gpui::{Animation, AnimationExt};
 use crate::app::{Act, GitOp, MenuItem, SideDrag, Workspace};
 use crate::panels::widgets::{Trigger, button};
 use crate::platform::Editor;
+use crate::github::model::State;
 use crate::store::{Attached, Id, Project, SessionKind, SessionRecord};
 use crate::panels::theme::{self, hsla};
 use crate::panels::widgets::{countdown, icon, icon_button, meter, section_label, tick};
@@ -347,7 +348,12 @@ impl Workspace {
         for a in attached {
             let (pull, number) = (a.pull, a.number);
             let owner = id.cloned();
-            let title = a.title.map_or_else(|| format!("#{number}"), |t| format!("#{number}  {t}"));
+            let title = match (a.title, a.state) {
+                (None, _) => format!("#{number}"),
+                (Some(t), Some(State::Closed)) => format!("#{number}  {t} (closed)"),
+                (Some(t), Some(State::Merged)) => format!("#{number}  {t} (merged)"),
+                (Some(t), _) => format!("#{number}  {t}"),
+            };
             let key = format!("attached-{pull}-{number}");
             rows = rows.child(removable_row(
                 cx,

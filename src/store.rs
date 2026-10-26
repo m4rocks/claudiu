@@ -44,8 +44,11 @@ pub enum ExternalState {
 pub struct Attached {
     pub pull: bool,
     pub number: u32,
+    /// Both come from GitHub (`app/attached_sync.rs`), never from the model.
     #[serde(default)]
     pub title: Option<String>,
+    #[serde(default)]
+    pub state: Option<crate::github::model::State>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
