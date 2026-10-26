@@ -96,6 +96,7 @@ impl Workspace {
     /// no unsaved edits, is opened afresh, since a buffer keeps the highlighting it was made with. For a renamed folder,
     /// every tab inside it follows, and its open folders stay open.
     fn follow_rename(&mut self, id: &Id, from: &std::path::Path, to: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        self.retarget_history(id, from, &to);
         if to.is_dir() {
             self.follow_folder_rename(id, from, &to, cx);
             return;
@@ -145,6 +146,7 @@ impl Workspace {
             let _ = this.update(cx, |ws, cx| {
                 match done {
                     Ok(()) => {
+                        ws.forget_history(&id, &path);
                         while let Some(ix) = ws.panes.get(&id).and_then(|p| p.tabs.iter().position(|t| crate::platform::is_same_or_under(&t.path, &path))) {
                             ws.close_tab(&id, ix, cx);
                         }

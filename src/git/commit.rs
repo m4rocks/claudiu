@@ -61,9 +61,9 @@ impl Pending {
     }
 }
 
-/// Blocking.
+/// Blocking. Runs every few seconds beside Claude's own git commands, so it must not take `index.lock` to refresh the index.
 pub fn pending(cwd: &Path) -> Result<Pending, String> {
-    let changes = !git(cwd, &["status", "--porcelain"], None)?.trim().is_empty();
+    let changes = !git(cwd, &["--no-optional-locks", "status", "--porcelain"], None)?.trim().is_empty();
     let unpushed = match git(cwd, &["rev-list", "--count", "@{u}..HEAD"], None) {
         Ok(count) => count.trim() != "0",
         // No upstream: the first push publishes the branch, if there is an origin and a commit to publish.

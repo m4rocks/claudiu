@@ -278,3 +278,24 @@ mod icon_tests {
         assert!(used > 20, "found only {used} icon uses; the scan is broken");
     }
 }
+
+#[cfg(test)]
+mod source_tests {
+    /// A NUL byte in a source file makes git treat it as binary, hiding it from diffs and blame.
+    #[test]
+    fn no_source_file_holds_a_nul_byte() {
+        fn walk(dir: &std::path::Path, bad: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, bad);
+                } else if path.extension().is_some_and(|e| e == "rs") && std::fs::read(&path).unwrap().contains(&0) {
+                    bad.push(path);
+                }
+            }
+        }
+        let mut bad = vec![];
+        walk(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut bad);
+        assert!(bad.is_empty(), "NUL byte in {bad:?}; write '\0' instead");
+    }
+}

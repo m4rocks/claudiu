@@ -104,7 +104,7 @@ impl Workspace {
         let id = id.clone();
         cx.spawn_in(window, async move |this, cx| {
             let read = path.clone();
-            let (contents, exists) = cx.background_executor().spawn(async move { (files::read(&read), read.exists()) }).await;
+            let (contents, now) = cx.background_executor().spawn(async move { (files::read(&read), files::stamp(&read)) }).await;
             let _ = this.update_in(cx, |ws, window, cx| {
                 let Some(tab) = ws.panes.get_mut(&id).and_then(|p| p.tabs.iter_mut().find(|t| t.path == path)) else { return };
                 match contents {
@@ -118,8 +118,12 @@ impl Workspace {
                         (tab.format, tab.stamp, tab.dirty, tab.conflict) = (format, Some(stamp), false, None);
                         ws.sync_with_server(&id, &path, true, cx);
                     }
-                    // Grew too large, stopped being text, or vanished: keep what is shown and let the user decide.
-                    _ => tab.conflict = Some(if exists { Conflict::Changed } else { Conflict::Deleted }),
+                    // Grew too large, stopped being text, or vanished: keep what is shown and let the user decide. The
+                    // stamp moves on so the once-a-second check does not read the same file again until it changes.
+                    _ => {
+                        tab.conflict = Some(if now.is_some() { Conflict::Changed } else { Conflict::Deleted });
+                        tab.stamp = now.or(tab.stamp);
+                    }
                 }
                 cx.notify();
             });

@@ -29,7 +29,10 @@ pub fn changed_lines(file: &Path) -> Vec<Change> {
         return vec![];
     };
     let mut options = DiffOptions::new();
-    options.pathspec(relative).context_lines(0).include_untracked(true).show_untracked_content(true);
+    // The path is one file, not a pattern: `[id].tsx` or `a*b` must not also match their neighbours. Git paths use `/`.
+    let relative = relative.to_string_lossy();
+    let relative = if cfg!(windows) { relative.replace('\\', "/") } else { relative.into_owned() };
+    options.pathspec(relative).disable_pathspec_match(true).context_lines(0).include_untracked(true).show_untracked_content(true);
     // A repository without commits has no HEAD tree: everything in it is new.
     let head = repo.head().ok().and_then(|h| h.peel_to_tree().ok());
     let Ok(diff) = repo.diff_tree_to_workdir_with_index(head.as_ref(), Some(&mut options)) else { return vec![] };
@@ -103,6 +106,21 @@ b
 B
 ").unwrap();
         assert_eq!(changed_lines(&file), vec![Change { lines: 1..2, kind: Kind::Modified }]);
+    }
+
+    #[test]
+    fn a_name_with_glob_characters_is_not_a_pattern() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = dunce::canonicalize(tmp.path()).unwrap();
+        let repo = Repository::init(&dir).unwrap();
+        std::fs::write(dir.join("[ab].txt"), "x
+").unwrap();
+        std::fs::write(dir.join("a.txt"), "x
+").unwrap();
+        commit_all(&repo);
+        std::fs::write(dir.join("a.txt"), "changed
+").unwrap();
+        assert_eq!(changed_lines(&dir.join("[ab].txt")), vec![], "a.txt's change is not [ab].txt's");
     }
 
     #[test]

@@ -40,8 +40,10 @@ pub struct EditorPane {
     /// Tree ids of the listed folders with nothing in them, which the tree would otherwise take for files, since it
     /// counts an item with no children as one.
     pub empty_folders: std::sync::Arc<HashSet<String>>,
-    /// A listing is on its way; refreshes wait for it.
+    /// A listing is on its way. A refresh asked for meanwhile sets `relist`, because the walk under way may have
+    /// passed the change already.
     pub listing: bool,
+    pub relist: bool,
     /// Quick open or find in files, while it is up.
     pub picker: Option<super::picker::Picker>,
     /// Language servers by program name; dropping the pane (the session ended) stops them.
@@ -186,6 +188,7 @@ impl Workspace {
                 expanded: HashSet::new(),
                 empty_folders: Default::default(),
                 listing: false,
+                relist: false,
                 picker: None,
                 servers: HashMap::new(),
                 _sub: sub,
@@ -201,13 +204,18 @@ impl Workspace {
     pub(super) fn refresh_files(&mut self, cx: &mut Context<Self>) {
         let Some(id) = self.active_id().filter(|_| self.editor_mode).cloned() else { return };
         let Some(root) = self.store.session(&id).map(|s| s.cwd.clone()) else { return };
-        let Some(pane) = self.panes.get_mut(&id).filter(|p| !p.listing) else { return };
+        let Some(pane) = self.panes.get_mut(&id) else { return };
+        if pane.listing {
+            pane.relist = true;
+            return;
+        }
         pane.listing = true;
         cx.spawn(async move |this, cx| {
             let listing = cx.background_executor().spawn(async move { files::list(&root, LIST_LIMIT) }).await;
             let _ = this.update(cx, |ws, cx| {
                 let Some(pane) = ws.panes.get_mut(&id) else { return };
                 pane.listing = false;
+                let relist = std::mem::take(&mut pane.relist);
                 pane.changed = std::sync::Arc::new(listing.changed);
                 pane.truncated = listing.truncated;
                 pane.root = listing.root;
@@ -224,6 +232,9 @@ impl Workspace {
                     pane.relative = std::sync::Arc::new(all.iter().map(|f| super::picker::relative(f, &pane.root)).collect());
                     pane.files = std::sync::Arc::new(all);
                     pane.nodes = listing.nodes;
+                }
+                if relist {
+                    ws.refresh_files(cx);
                 }
                 cx.notify();
             });

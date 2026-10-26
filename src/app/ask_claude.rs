@@ -1,6 +1,8 @@
 //! The editor's right-click requests to Claude: explain, fix or test the selected lines, or fix the problem a language
 //! server reports on the clicked line. Each one sends the reference and the request to Claude as the next message (`send_to_claude`).
 
+use std::path::Path;
+
 use super::*;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -32,6 +34,12 @@ impl Workspace {
     /// into a session of its own.
     pub(super) fn running_claude(&self, cx: &App) -> Option<Id> {
         self.active_id().filter(|id| self.is_running(id, cx) && self.store.session(id).is_some_and(|r| r.kind == SessionKind::Claude)).cloned()
+    }
+
+    /// `running_claude`, when it works in `folder` (or inside it, or around it). A request about another repository,
+    /// or another worktree of this one, must not land in a session that would act on the wrong files.
+    pub(super) fn running_claude_in(&self, folder: &Path, cx: &App) -> Option<Id> {
+        self.running_claude(cx).filter(|id| self.store.session(id).is_some_and(|r| works_in(&r.cwd, folder)))
     }
 
     /// Ask the Claude session `id` to take `text` as the user's next message, then move the keyboard to its terminal.
@@ -100,5 +108,25 @@ mod tests {
             "@a.rs#L3: Fix this problem: mismatched types expected `u8`",
             "the request stays on one line"
         );
+    }
+}
+
+/// Whether a session started in `session` is working on `folder`.
+fn works_in(session: &Path, folder: &Path) -> bool {
+    crate::platform::is_same_or_under(session, folder) || crate::platform::is_same_or_under(folder, session)
+}
+
+#[cfg(test)]
+mod folder_tests {
+    use super::works_in;
+    use std::path::Path;
+
+    #[test]
+    fn a_session_works_in_its_folder_and_those_around_and_inside_it_only() {
+        assert!(works_in(Path::new("/p/app"), Path::new("/p/app")));
+        assert!(works_in(Path::new("/p/app/crates/x"), Path::new("/p/app")), "started in a sub-folder of the repository");
+        assert!(works_in(Path::new("/p"), Path::new("/p/app")), "started above the repository");
+        assert!(!works_in(Path::new("/p/other"), Path::new("/p/app")));
+        assert!(!works_in(Path::new("/p/app-wt"), Path::new("/p/app")), "another worktree is not this one");
     }
 }

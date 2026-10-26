@@ -10,13 +10,20 @@ use crate::github::model::State;
 
 /// Between asking about everything again.
 const REFRESH_EVERY: Duration = Duration::from_secs(120);
-/// Between tries while some item has no answer yet (no `gh`, no network, not a GitHub folder).
+/// Between tries while some item has no answer yet; doubles with each try that left one unanswered (no `gh`, no
+/// network, not a GitHub folder), up to `REFRESH_EVERY`.
 const RETRY_EVERY: Duration = Duration::from_secs(15);
 
 #[derive(Default)]
 pub struct Sync {
     last_try: Option<Instant>,
     running: bool,
+    /// Tries in a row that left an item unanswered.
+    failures: u32,
+}
+
+fn retry_wait(failures: u32) -> Duration {
+    RETRY_EVERY.saturating_mul(2u32.saturating_pow(failures)).min(REFRESH_EVERY)
 }
 
 /// One answer: the session, which item, and what GitHub said.
@@ -24,7 +31,7 @@ type Answer = (Id, bool, u32, String, State);
 
 impl Sync {
     fn due(&self, some_unanswered: bool) -> bool {
-        let wait = if some_unanswered { RETRY_EVERY } else { REFRESH_EVERY };
+        let wait = if some_unanswered { retry_wait(self.failures) } else { REFRESH_EVERY };
         !self.running && self.last_try.is_none_or(|t| t.elapsed() >= wait)
     }
 }
@@ -36,12 +43,14 @@ impl Workspace {
             .data
             .sessions
             .iter()
+            // A session whose folder is gone cannot be asked about (and would never be answered).
+            .filter(|s| s.cwd.is_dir())
             .filter_map(|s| {
                 let items: Vec<_> = s.claude.as_ref()?.attached.iter().map(|a| (a.pull, a.number)).collect();
                 (!items.is_empty()).then(|| (s.id.clone(), s.cwd.clone(), items))
             })
             .collect();
-        let some_unanswered = self.store.data.sessions.iter().filter_map(|s| s.claude.as_ref()).flat_map(|m| &m.attached).any(|a| a.state.is_none());
+        let some_unanswered = self.unanswered_items();
         if asks.is_empty() || !self.attached_sync.due(some_unanswered) {
             return;
         }
@@ -54,6 +63,7 @@ impl Workspace {
                 let changed = answers.into_iter().fold(false, |c, (id, pull, number, title, state)| {
                     ws.edit_attached(&id, |list| links::set_status(list, pull, number, &title, state)) | c
                 });
+                ws.attached_sync.failures = if ws.unanswered_items() { ws.attached_sync.failures + 1 } else { 0 };
                 if changed {
                     ws.store.mark_dirty();
                     cx.notify();
@@ -61,6 +71,12 @@ impl Workspace {
             });
         })
         .detach();
+    }
+
+    /// Whether some attached item of a session with a folder has no answer from GitHub yet.
+    fn unanswered_items(&self) -> bool {
+        let sessions = self.store.data.sessions.iter().filter(|s| s.cwd.is_dir());
+        sessions.filter_map(|s| s.claude.as_ref()).flat_map(|m| &m.attached).any(|a| a.state.is_none())
     }
 }
 
@@ -82,4 +98,18 @@ fn ask_github(asks: Vec<(Id, PathBuf, Vec<(bool, u32)>)>) -> Vec<Answer> {
         }
     }
     answers
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retrying_backs_off_to_the_normal_pace() {
+        assert_eq!(retry_wait(0), Duration::from_secs(15));
+        assert_eq!(retry_wait(1), Duration::from_secs(30));
+        assert_eq!(retry_wait(2), Duration::from_secs(60));
+        assert_eq!(retry_wait(3), REFRESH_EVERY);
+        assert_eq!(retry_wait(u32::MAX), REFRESH_EVERY, "no overflow");
+    }
 }

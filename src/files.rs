@@ -118,21 +118,30 @@ pub enum Contents {
 pub const MAX_LINES: usize = 50_000;
 pub const MAX_BYTES: u64 = 8 * 1024 * 1024;
 
-pub fn read(path: &Path) -> std::io::Result<Contents> {
-    let meta = std::fs::metadata(path)?;
+/// A file's text exactly as stored, when the editor would open it.
+fn read_stored(path: &Path, meta: &std::fs::Metadata) -> std::io::Result<Result<String, Contents>> {
     if meta.len() > MAX_BYTES {
-        return Ok(Contents::TooLarge);
+        return Ok(Err(Contents::TooLarge));
     }
-    // Taken before reading: a write that lands in between shows up as a change on the next check.
-    let stamp = Stamp::of(&meta);
     let bytes = std::fs::read(path)?;
     if bytes.iter().take(8000).any(|b| *b == 0) {
-        return Ok(Contents::NotText);
+        return Ok(Err(Contents::NotText));
     }
-    let Ok(text) = String::from_utf8(bytes) else { return Ok(Contents::NotText) };
+    let Ok(text) = String::from_utf8(bytes) else { return Ok(Err(Contents::NotText)) };
     if text.lines().count() > MAX_LINES {
-        return Ok(Contents::TooLarge);
+        return Ok(Err(Contents::TooLarge));
     }
+    Ok(Ok(text))
+}
+
+pub fn read(path: &Path) -> std::io::Result<Contents> {
+    let meta = std::fs::metadata(path)?;
+    // Taken before reading: a write that lands in between shows up as a change on the next check.
+    let stamp = Stamp::of(&meta);
+    let text = match read_stored(path, &meta)? {
+        Ok(text) => text,
+        Err(refused) => return Ok(refused),
+    };
     let lf = text.matches('\n').count();
     // Mixed line ends are left as they are, so saving changes only what was edited.
     let crlf = lf > 0 && text.matches("\r\n").count() == lf;
@@ -478,7 +487,8 @@ pub fn search(files: &[PathBuf], query: &str, limit: usize, stale: &dyn Fn() -> 
         if stale() {
             return hits;
         }
-        let Ok(Contents::Text { text, .. }) = read(path) else { continue };
+        // Line numbers and trimmed lines come out the same as in the editor, which only changes line ends and indents.
+        let Ok(Ok(text)) = std::fs::metadata(path).and_then(|meta| read_stored(path, &meta)) else { continue };
         for (line, l) in text.lines().enumerate().filter(|(_, l)| l.to_lowercase().contains(&needle)) {
             if hits.len() == limit {
                 return hits;
@@ -602,6 +612,20 @@ mod tests {
         assert!(ranked("zzz").is_empty());
         assert_eq!(ranked("").len(), paths.len(), "an empty query lists everything");
         assert_eq!(rank_paths("s", &paths, 2).len(), 2);
+    }
+
+    #[test]
+    fn find_in_files_reports_the_lines_the_editor_shows() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("tabs.rs");
+        fs::write(&file, "fn a() {
+	let total = 1;
+}
+").unwrap();
+        let hits = search(&[file.clone()], "total", 100, &|| false);
+        assert_eq!(hits, [Hit { path: file.clone(), line: 1, text: "let total = 1;".into() }]);
+        let Ok(Contents::Text { text, .. }) = read(&file) else { panic!("readable") };
+        assert_eq!(text.lines().nth(hits[0].line).unwrap().trim(), hits[0].text, "the editor has the same line there");
     }
 
     #[test]
@@ -754,7 +778,8 @@ nothing
     #[test]
     fn creates_a_file_and_never_overwrites_one() {
         let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path();
+        let root = dunce::canonicalize(tmp.path()).unwrap();
+        let root = root.as_path();
         fs::create_dir(root.join("src")).unwrap();
         let made = create_file(root, &root.join("src"), "new.rs").unwrap();
         assert_eq!(made, root.join("src/new.rs"));
@@ -771,7 +796,8 @@ nothing
     #[test]
     fn creates_a_folder_and_never_over_anything() {
         let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path();
+        let root = dunce::canonicalize(tmp.path()).unwrap();
+        let root = root.as_path();
         let made = create_folder(root, root, "lib").unwrap();
         assert_eq!(made, root.join("lib"));
         assert!(made.is_dir());
@@ -789,7 +815,8 @@ nothing
     #[test]
     fn renames_in_place_and_never_over_another_file() {
         let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path();
+        let root = dunce::canonicalize(tmp.path()).unwrap();
+        let root = root.as_path();
         fs::create_dir(root.join("src")).unwrap();
         fs::write(root.join("src/a.rs"), "a").unwrap();
         fs::write(root.join("src/b.rs"), "b").unwrap();

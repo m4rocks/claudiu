@@ -648,7 +648,7 @@ impl Workspace {
             }
             Act::FixGitWithClaude(cwd) => {
                 let prompt = "Claudiu's Pull or Commit & Push just failed in this repository because of a merge conflict,                     a diverged branch or a rejected push. Run git status, fix it (resolve conflicts keeping the intent of both sides,                     finish the merge or rebase, then push if the push was rejected).                     Ask me whenever a conflict is ambiguous or you are unsure which side to keep.";
-                match self.running_claude(cx) {
+                match self.running_claude_in(&cwd, cx) {
                     Some(id) => self.send_to_claude(&id, prompt, window, cx),
                     None => {
                         // No session to ask: a short-lived one on a mid-sized model.
