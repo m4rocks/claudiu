@@ -816,7 +816,7 @@ fn settings_body(page: SettingsPage, modal: &Modal, cx: &mut Context<Workspace>)
             let plan_trimmed = trimmed.contains(&Trim::PlanMode);
             let mut list = div().flex().flex_col().gap(px(8.0));
             list = list.child(faint(
-                "Applies to new sessions. Running sessions keep their tools. Resumed sessions get the new tools, and the old instructions stay until their next compaction.                  Claudiu only turns things off. Anything off in your Claude Code settings stays off."
+                "Applies to new sessions. Running sessions keep their tools. Resumed sessions get the new tools, and the old instructions stay until their next compaction.                  These switches edit Claude Code's own settings.json, for every account and for Claude Code outside Claudiu. Claudiu only turns things off; anything you turned off yourself stays off."
                     .to_string(),
             ));
             for (heading, items) in Trim::GROUPS {

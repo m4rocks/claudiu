@@ -41,22 +41,13 @@ impl Workspace {
             spec.env.push((crate::visual::VISUAL_ENV.into(), crate::visual::file(record_id).to_string_lossy().into_owned()));
             spec.env.push((crate::claude::ask::ASK_ENV.into(), crate::claude::ask::request_file(record_id).to_string_lossy().into_owned()));
         }
-        match claude::trim::prepare(claude_session_id, &self.store.data.settings.trimmed_tools) {
-            Ok(Some(file)) => spec.args.extend(["--settings".into(), file.to_string_lossy().into_owned()]),
-            Ok(None) => {}
-            Err(_) => {
-                // Once per run, whichever launch path hits it: the session still starts, with every tool.
-                if !std::mem::replace(&mut self.trim_failure_shown, true) {
-                    self.toast("Couldn't apply the Claude Code tool settings; new sessions start with every tool.", true, cx);
-                }
-            }
-        }
         if chrome {
             spec.args.push("--chrome".into());
         }
         spec.env.push(("CLAUDE_CODE_NO_FLICKER".into(), "1".into())); // fullscreen renderer, per process
         spec.env.push(("CLAUDE_CODE_AUTO_CONNECT_IDE".into(), "false".into()));
         spec.env.push(("CLAUDE_CODE_IDE_SKIP_AUTO_INSTALL".into(), "1".into()));
+        self.sync_configs_now(cx);
         if let Some(acct) = self.store.session_account(record_id) {
             spec.env.push((usage::ACCOUNT_ENV.into(), acct.id.clone()));
             spec.env.extend(Self::account_env(acct));

@@ -120,6 +120,22 @@ impl Workspace {
                 s.new_session = claude::defaults::NewSessionDefaults { model: model_name.unwrap_or_default(), effort, permission_mode: permission };
                 let trimmed = claude::trim::normalized(&trimmed);
                 let claudiu_off = mcp::normalized_features(&claudiu_off);
+                // The trims go into Claude Code's own settings.json (every account gets the file through config_sync).
+                // When that fails the old trims stay, so what the page shows is what Claude Code has.
+                let mut trim_error = None;
+                let mut trimmed = trimmed;
+                if s.trimmed_tools != trimmed {
+                    let written = claude::claude_home()
+                        .ok_or_else(|| std::io::Error::other("Claude Code's folder was not found"))
+                        .and_then(|home| claude::trim::write_global(&home.join("settings.json"), &trimmed, &s.applied_trims));
+                    match written {
+                        Ok(owned) => s.applied_trims = owned,
+                        Err(e) => {
+                            trim_error = Some(e);
+                            trimmed = s.trimmed_tools.clone();
+                        }
+                    }
+                }
                 let tools_changed = s.trimmed_tools != trimmed || s.claudiu_tools_off != claudiu_off;
                 s.trimmed_tools = trimmed;
                 s.claudiu_tools_off = claudiu_off;
@@ -127,7 +143,9 @@ impl Workspace {
                 self.shell = platform::default_shell(s.shell.as_deref());
                 self.claude_exe = claude::discover(s.claude_path.as_deref());
                 self.store.mark_dirty();
-                if tools_changed {
+                if let Some(e) = trim_error {
+                    self.toast(format!("Settings saved, but Claude Code's settings.json could not be changed ({e}), so the tool trims stay as they were."), true, cx);
+                } else if tools_changed {
                     self.toast("Settings saved. Tool changes apply to new sessions; resumed sessions keep the old instructions until their next compaction.", false, cx);
                 } else {
                     self.toast("Settings saved. Open sessions keep their current shell.", false, cx);

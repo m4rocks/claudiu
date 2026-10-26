@@ -136,6 +136,7 @@ impl Workspace {
         self.remember_open(cx);
         self.ingest_usage(cx);
         self.sync_attached(cx);
+        self.sync_configs(cx);
         self.refresh_files(cx);
         self.refresh_marks(cx);
         self.lower_tool_priority(cx);

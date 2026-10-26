@@ -30,6 +30,7 @@ use crate::updater::UpdateState;
 
 mod alt_accounts;
 mod attached_sync;
+mod config_sync;
 mod ask_claude;
 mod background;
 mod cross;
@@ -395,7 +396,6 @@ pub struct Workspace {
     /// The Settings category last shown. Kept here because opening Settings builds the modal anew; not saved to disk.
     pub settings_page: SettingsPage,
     /// Whether this run already said it couldn't write a session's tool settings file (said at most once).
-    trim_failure_shown: bool,
     pub menu: Option<Menu>,
     pub toast: Option<Toast>,
     pub toast_serial: u64,
@@ -424,6 +424,8 @@ pub struct Workspace {
     pub last_swap: std::time::Instant,
     /// Attached issues and pull requests are asked about on GitHub from time to time, see `attached_sync.rs`.
     pub attached_sync: attached_sync::Sync,
+    /// The shared Claude Code settings are kept equal across accounts, see `config_sync.rs`.
+    pub config_sync: config_sync::Runner,
     /// Sessions asked to open another with a first message; each waits for the user's yes (`cross.rs`).
     pub pending_starts: Vec<cross::PendingStart>,
     pub drag_pos: Option<gpui::Point<gpui::Pixels>>,
@@ -497,7 +499,6 @@ impl Workspace {
             modal: None,
             modal_focus: cx.focus_handle(),
             settings_page: SettingsPage::default(),
-            trim_failure_shown: false,
             menu: None,
             toast: None,
             toast_serial: 0,
@@ -519,6 +520,7 @@ impl Workspace {
             slide_gen: 0,
             last_swap: std::time::Instant::now(),
             attached_sync: Default::default(),
+            config_sync: Default::default(),
             pending_starts: vec![],
             update: UpdateState::default(),
             scanning: false,
@@ -838,11 +840,10 @@ impl Workspace {
                     title: "Add an account?".into(),
                     body: "Only sign in to accounts you own. Sharing or pooling logins, or using several accounts to get around \
                            usage limits, can break Anthropic's terms.\n\n\
-                           The new account uses your main Claude Code setup. Settings, CLAUDE.md and keybindings are copied from ~/.claude \
-                           before each session starts, so a change made in the account (like /model) stays there and is replaced \
-                           at the next start. Agents, skills, plugins and session history are shared with ~/.claude, so changes to \
-                           those reach it. Only the login is separate. Claudiu creates this account's folder and never writes to \
-                           ~/.claude."
+                           The new account uses your main Claude Code setup. Settings, CLAUDE.md, keybindings, MCP servers and project trust \\
+                           are kept the same in every account, both ways: a change made here (like /model) also changes ~/.claude and \\
+                           your other accounts, and the other way round. Agents, skills, plugins and session history are shared with \\
+                           ~/.claude. Only the login is separate. Claudiu creates this account's folder."
                         .into(),
                     confirm: "Add and sign in".into(),
                     danger: false,

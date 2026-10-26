@@ -9,6 +9,7 @@
 pub mod accounts;
 pub mod ask;
 pub mod bridge;
+pub mod config_sync;
 pub mod defaults;
 pub mod mcp;
 pub mod plugin;

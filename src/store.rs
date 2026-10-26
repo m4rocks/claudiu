@@ -260,6 +260,9 @@ pub struct Settings {
     /// nothing is trimmed, which is also what a state file from before this setting loads as.
     #[serde(default)]
     pub trimmed_tools: Vec<crate::claude::trim::Trim>,
+    /// The lines Claudiu added to Claude Code's `settings.json` for those trims, so turning one off removes only them.
+    #[serde(default)]
+    pub applied_trims: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
