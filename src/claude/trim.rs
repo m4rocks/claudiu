@@ -32,8 +32,8 @@ pub enum Trim {
 
 /// What turning an item off does in the settings file.
 enum Effect {
-    /// A settings key set to `true`.
-    Flag(&'static str),
+    /// Settings keys set to the given values.
+    Keys(&'static [(&'static str, bool)]),
     /// Tool names added to `permissions.deny`.
     Deny(&'static [&'static str]),
 }
@@ -89,11 +89,11 @@ impl Trim {
 
     fn effect(self) -> Effect {
         match self {
-            Self::BundledSkills => Effect::Flag("disableBundledSkills"),
-            Self::Workflows => Effect::Flag("disableWorkflows"),
-            Self::RemoteControl => Effect::Flag("disableRemoteControl"),
-            Self::ClaudeAiConnectors => Effect::Flag("disableClaudeAiConnectors"),
-            Self::Artifacts => Effect::Flag("disableArtifact"),
+            Self::BundledSkills => Effect::Keys(&[("disableBundledSkills", true)]),
+            Self::Workflows => Effect::Keys(&[("disableWorkflows", true)]),
+            Self::RemoteControl => Effect::Keys(&[("disableRemoteControl", true)]),
+            Self::ClaudeAiConnectors => Effect::Keys(&[("disableClaudeAiConnectors", true)]),
+            Self::Artifacts => Effect::Keys(&[("enableArtifact", false), ("disableArtifact", true)]),
             Self::PlanMode => Effect::Deny(&["EnterPlanMode", "ExitPlanMode"]),
             Self::AskUserQuestion => Effect::Deny(&["AskUserQuestion"]),
             Self::ScheduledTasks => Effect::Deny(&["CronCreate", "CronDelete", "CronList"]),
@@ -120,8 +120,10 @@ pub fn settings_json(trimmed: &[Trim]) -> Option<String> {
     let mut deny: Vec<&str> = Vec::new();
     for t in normalized(trimmed) {
         match t.effect() {
-            Effect::Flag(key) => {
-                settings.insert(key.into(), Value::Bool(true));
+            Effect::Keys(keys) => {
+                for (key, value) in keys {
+                    settings.insert((*key).into(), Value::Bool(*value));
+                }
             }
             Effect::Deny(names) => deny.extend(names),
         }
@@ -158,6 +160,12 @@ mod tests {
     fn a_flag_and_a_tool_group_give_the_flag_and_exactly_their_denies() {
         let v: Value = serde_json::from_str(&settings_json(&[PlanMode, Workflows]).unwrap()).unwrap();
         assert_eq!(v, json!({ "disableWorkflows": true, "permissions": { "deny": ["EnterPlanMode", "ExitPlanMode"] } }));
+    }
+
+    #[test]
+    fn artifacts_are_turned_off_with_the_current_key_and_the_deprecated_one() {
+        let v: Value = serde_json::from_str(&settings_json(&[Artifacts]).unwrap()).unwrap();
+        assert_eq!(v, json!({ "enableArtifact": false, "disableArtifact": true }));
     }
 
     #[test]
