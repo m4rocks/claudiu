@@ -17,7 +17,7 @@ impl Workspace {
     }
 
     /// Run `f` on the attached items of a session; true when it changed anything.
-    fn edit_attached(&mut self, id: &str, f: impl FnOnce(&mut Vec<Attached>) -> bool) -> bool {
+    pub(super) fn edit_attached(&mut self, id: &str, f: impl FnOnce(&mut Vec<Attached>) -> bool) -> bool {
         self.store.session_mut(id).and_then(|s| s.claude.as_mut()).is_some_and(|meta| f(&mut meta.attached))
     }
 
@@ -86,16 +86,23 @@ fn remove_id(list: &mut Vec<Id>, id: &str) -> bool {
     list.len() != before
 }
 
+/// What GitHub says about an attached item. True when the title or state differs from what is kept.
+pub(super) fn set_status(list: &mut [Attached], pull: bool, number: u32, title: &str, state: crate::github::model::State) -> bool {
+    let Some(have) = list.iter_mut().find(|a| a.pull == pull && a.number == number) else { return false };
+    if have.title.as_deref() == Some(title) && have.state == Some(state) {
+        return false;
+    }
+    have.title = Some(title.to_string());
+    have.state = Some(state);
+    true
+}
+
 /// Most items one session keeps; the oldest go first.
 const MAX_ATTACHED: usize = 20;
 
-/// Add an attached item unless it is there already (a later title fills in a missing one). True when anything changed.
+/// Add an attached item unless it is there already. True when anything changed.
 pub(super) fn attach(list: &mut Vec<Attached>, item: Attached) -> bool {
-    if let Some(have) = list.iter_mut().find(|a| a.pull == item.pull && a.number == item.number) {
-        if have.title.is_none() && item.title.is_some() {
-            have.title = item.title;
-            return true;
-        }
+    if list.iter().any(|a| a.pull == item.pull && a.number == item.number) {
         return false;
     }
     list.push(item);
@@ -117,26 +124,37 @@ mod attach_tests {
         assert_eq!(l, ["b"]);
     }
 
-    fn item(pull: bool, number: u32, title: Option<&str>) -> Attached {
-        Attached { pull, number, title: title.map(String::from) }
+    fn item(pull: bool, number: u32) -> Attached {
+        Attached { pull, number, title: None, state: None }
     }
 
     #[test]
-    fn an_item_is_attached_once_and_may_gain_a_title() {
+    fn an_item_is_attached_once() {
         let mut list = vec![];
-        assert!(attach(&mut list, item(false, 5, None)));
-        assert!(!attach(&mut list, item(false, 5, None)), "same item again");
-        assert!(attach(&mut list, item(true, 5, None)), "a pull request is not the issue with that number");
-        assert!(attach(&mut list, item(false, 5, Some("Fix it"))), "title filled in");
-        assert!(!attach(&mut list, item(false, 5, Some("Other"))), "an existing title stays");
-        assert_eq!(list, [item(false, 5, Some("Fix it")), item(true, 5, None)]);
+        assert!(attach(&mut list, item(false, 5)));
+        assert!(!attach(&mut list, item(false, 5)), "same item again");
+        assert!(attach(&mut list, item(true, 5)), "a pull request is not the issue with that number");
+        assert_eq!(list, [item(false, 5), item(true, 5)]);
+    }
+
+    #[test]
+    fn github_status_updates_only_what_changed() {
+        use crate::github::model::State;
+        let mut list = vec![item(false, 5)];
+        assert!(set_status(&mut list, false, 5, "Fix it", State::Open));
+        assert!(!set_status(&mut list, false, 5, "Fix it", State::Open), "same answer again");
+        assert!(set_status(&mut list, false, 5, "Fix it properly", State::Open), "renamed on GitHub");
+        assert!(set_status(&mut list, false, 5, "Fix it properly", State::Closed), "closed on GitHub");
+        assert!(!set_status(&mut list, true, 5, "Other", State::Open), "no such pull request attached");
+        assert_eq!(list[0].title.as_deref(), Some("Fix it properly"));
+        assert_eq!(list[0].state, Some(State::Closed));
     }
 
     #[test]
     fn the_oldest_items_drop_off() {
         let mut list = vec![];
         for n in 1..=(MAX_ATTACHED as u32 + 3) {
-            attach(&mut list, item(false, n, None));
+            attach(&mut list, item(false, n));
         }
         assert_eq!(list.len(), MAX_ATTACHED);
         assert_eq!(list[0].number, 4);

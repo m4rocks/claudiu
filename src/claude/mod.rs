@@ -9,8 +9,11 @@
 pub mod accounts;
 pub mod ask;
 pub mod bridge;
+pub mod config_sync;
+pub mod defaults;
 pub mod mcp;
 pub mod plugin;
+pub mod trim;
 pub mod usage;
 
 use std::fs::{self, File};

@@ -1,67 +1,50 @@
-# CLAUDE.md — Claudiu
+# CLAUDE.md
 
-The code is the source of truth. This file holds only rules.
+Claudiu is a native Rust + GPUI desktop app that manages sessions around the user's existing `claude` CLI.
 
-Maintain Claudiu as if you'll own it for years: prefer durable fixes over quick ones, push back when a request would hurt its long-term health, and leave the code simpler and easier to navigate than you found it (one job per module, names that are unambiguous and greppable, no dead or duplicate code, references updated when you move things).
+## Settings
+
+- Tracker: GitHub issues in m4rocks/claudiu
+- Tests: when a cheap test seam exists
+- Commits: only when the maintainer says
+- Pushes and pull requests: only when the maintainer says
+- Closing issues: ask first
+- Subagents: only when the maintainer asks
+
+## Working here
+
+GitHub issues hold intent, one issue per feature with a checklist in its body; the code and the maintainer decide what is true.
+Check off items the code already does. Add entries for requests that aren't listed, and for problems you notice outside the task, rather than fixing those in passing, so every diff stays reviewable. Order is a suggestion: if a request seems to depend on unfinished work, say so in one line and continue.
+
+Care about the project's long-term health, not just the request in front of you. When a request would harm it, say so plainly and early, give your own recommendation, and don't agree just to be agreeable. Hold your position if the pushback brings no new information. Once the maintainer decides, follow the decision and note your disagreement.
+
+Ask the maintainer about product direction, scope, and anything irreversible or outward-facing, such as pushing, deleting data, adding a dependency or closing issues, unless the settings above allow it. Ask through the harness's structured question tool when it has one, recommended option first; otherwise ask one question per message with numbered options. Decide everything reversible yourself and report it. Ask a question only when you can't continue without a decision. Finishing a change is not such a point: report it in a line or two and stop, and leave committing and pushing to the settings or the maintainer's word.
+
+The maintainer can override any setting for a single request, for example "go autonomous, commit and push everything" or "ask before each commit"; the override lasts until that request is done.
+
+When a task finishes, say once what changed, what you skipped or couldn't check, and any risk. After that, follow the maintainer's current topic: raise finished work again only when the current topic affects it or they ask, and keep options about it out of questions on other subjects.
+
+When the m4 skills are installed, route requests through them even when phrased casually, because they carry the steps that keep work consistent: a bug or error goes through m4:fix, building or changing behavior through m4:do, reviewing a diff through m4:tidy, planning through m4:shape, explaining code through m4:explore, and a repeated correction through m4:harden. One-line edits are made directly. Before writing prose that lands somewhere, such as docs, a README, comments, commit or pull request text, tracker entries, or a message to another person, run m4:unslop on the draft. In chat replies, follow its rules without invoking it.
+
+Work inline; spawn subagents only as the settings allow, except the plan review in m4:shape, because they spend tokens the maintainer wants to spend deliberately.
+
+## Code
+
+People who don't use agents read and maintain this code, so aim for code that is obviously correct to a newcomer. Rank choices by correctness, then how easily the code reads and tests, then size; a one-liner that needs decoding is not simple.
+
+Build only what was asked: features, options and configuration nobody requested wait until someone needs them. How the requested thing is built is open. For non-trivial logic, weigh more than one shape and pick the one whose correctness is most obvious, even if it is unconventional. Before writing new code, look for it in this repo, then the standard library and platform, then installed dependencies.
+
+Before editing, find every place the change must reach (callers, tests, fixtures, config, exports) and finish all of them. When a better structure would make the task simpler, use it in this change; when it is bigger than the task, do the task and add the redesign to the tracker with a one-line reason. Keep validation of untrusted input, error handling that prevents data loss, security and accessibility, including in code you move.
+
+Comments explain why something non-obvious is true, such as a known limit and when it will matter. When code needs a comment to say what it does, rename or restructure it instead. Leave existing comments in code you don't change. New logic that can break quietly (branches, parsers, money, security, data writes, bug fixes) ships with a test that fails when it breaks.
+
+Leave nothing behind but the change: no summary files, commented-out code, debug logs or session scripts. When a test fails, fix the code, or ask if the test's expectation looks wrong. Update the README in the same commit when user-visible behavior changes.
 
 ## Boundaries
 
-- Claudiu is a native Rust + GPUI desktop app that manages sessions around the user's existing `claude` CLI. Claude Code owns the agent experience; Claudiu owns the workspace.
-- Never call the Anthropic API. Never implement or embed authentication, API keys or subscription login. Never impersonate Claude Desktop.
-- Never type into a PTY on the user's behalf.
-- Never run `claude -p` from Claudiu. Background one-shot text goes through the running session's mod.
-- Never edit the main account's `~/.claude`. Alt accounts are separate folders passed with `CLAUDE_CONFIG_DIR`.
-- Never write into Claude Code's private data or depend on undocumented transcript (JSONL) schemas. Prefer documented CLI interfaces and documented mod hooks.
-- Do not edit Claude Code's settings files. A feature may ask Claude Code to change its own settings (such as `/model`) through the mod.
-- Claude Code's own TUI is the only conversation view. Do not recreate its UI or protocol.
-- Do not intercept Claude Code shortcuts. Reserve only explicit, documented Claudiu-global shortcuts.
-- Never delete Claude Code session data as a side effect. Hiding a Claudiu entry must not delete a transcript.
-- Nothing leaves the machine by default: no transcripts, project files, source, credentials, environment variables or API keys go to any Claudiu server.
-- Do not log terminal contents. Persist environment variables only on explicit user opt-in.
-- Use public crates and APIs; do not copy Zed source. Respect licenses.
+Claudiu types into a session's terminal in one place. In editor mode, moving the keyboard to the terminal while lines are selected pastes `@path#L12-30: ` into Claude Code's input box, and leaving without typing erases it again (`terminal/view/typing.rs`, `app/selection_reference.rs`). It does this only while the cursor is in that input box. It stays a deliberate exception: messages, settings changes and every other request reach Claude Code through the mod, not the terminal. Any further typing into a PTY needs the maintainer's decision first.
 
-## Platforms and architecture
+## Enforced rules
 
-- Windows and macOS are the primary targets. Isolate platform code behind small abstractions; the core model makes no Windows-only assumptions.
-- Use `alacritty_terminal` as the terminal core unless a clearly superior compatible option is demonstrated.
-- Each Claude session has exactly one PTY. Switching sessions never terminates, suspends or alters another session's PTY.
-- Keep terminal emulation, process management, persistence, Claude discovery and GPUI rendering in separate modules. Persistence stays independent of GPUI.
-- Never block the GPUI thread with filesystem scans or process I/O. Use background tasks and send compact state updates.
-- Use platform application-data directories through a crate. Never hardcode paths, separators or home directories. Store Claudiu metadata apart from Claude Code data.
-- Favor simple, debuggable code over premature abstraction. Do not over-engineer persistence before the session lifecycle is proven.
-
-## Sessions and projects
-
-- A session is a persistent record of a Claude Code process. A shell belongs to a Claude session as a panel, never as its own sidebar entry.
-- Exited sessions stay in history.
-- Startup reconciliation never deletes a record because an external record is unreadable. Mark it stale or unknown instead.
-- Projects are Git-first. A plain folder is supported but is not the primary abstraction.
-- Do not scan the filesystem for repositories without an explicit user choice.
-- Resume through documented Claude Code CLI mechanisms. Do not reconstruct conversations.
-- A click on a session must never restart a long-running process.
-
-## Terminal correctness (critical)
-
-Claude Code must behave as in a capable terminal, not a line-oriented shell. Test at least: Alt+P, Shift+Tab, Ctrl+C/D/Z, arrow keys, Home/End, modified keys, mouse, selection, paste, multiline input, resize, Unicode and emoji, ANSI colors, hyperlinks, alternate screen, scrollback, title changes, bell and image paste.
-
-## Process lifecycle
-
-- Handle spawn errors, PTY initialization, resize, stdin, output, exit, graceful and forced termination, shutdown and orphaned children.
-- Closing the window must not silently kill Claude sessions.
-- Sessions that were running come back at the next start. Sessions the user closed do not.
-
-## Usage and limits
-
-- Never invent a value. Show a neutral unavailable or stale state instead.
-- Do not present limits as exact when Claude Code does not expose them.
-- Do not build a separate Anthropic subscription API integration to obtain them.
-- Account-wide meters must not change when the user switches sessions.
-
-## UI
-
-- Dark-first, minimal, dense without feeling cramped, keyboard-friendly, subtle in animation. Native, not a web wrapper.
-- Use the Claude Desktop / Clawd icon as the application identity, never a generic terminal icon.
-- Do not overuse cards, gradients, large rounded rectangles or decoration.
-- Conveniences support the core product. Do not turn Claudiu into a generic IDE.
-- Keep the Visual panel's `visual::ui::PROMPT`, `default_css` and `Css::set` in step.
-- Every icon used must be listed in `icon_assets!`; a test enforces it.
+| Rule | Enforced by |
+|---|---|

@@ -13,7 +13,7 @@ const NODE: &str = "claudiu-ui";
 
 /// The description of the `show_visual` tool. Keep it in step with `parse::default_css` and the properties
 /// `Css::set` understands.
-pub const PROMPT: &str = r#"Draws Markdown in Claudiu's Visual panel, beside the terminal. Use it when something is easier to see than to read: a dashboard, a comparison, a layout, a timeline, a diagram, a chart, a status board, a mock-up, or a structured walkthrough. The panel fills while you write the call, so put the most important part first. Each call adds a new card to the panel. The user sees the drawing and not the markup, so keep your normal reply short and say the key facts there without repeating the content.
+pub const PROMPT: &str = r#"Draws Markdown in Claudiu's Visual panel, beside the terminal. Use it unasked instead of typing a table, comparison, flow, architecture, before/after, status board, timeline, chart or mock-up into the terminal. The panel fills while you write the call, so put the most important part first. Each call adds a new card to the panel. The user sees the drawing and not the markup, so keep your normal reply short and say the key facts there without repeating the content.
 
 `content` is ordinary Markdown (headings, lists, tables, code, links, emphasis). Where a drawing helps, put it in a fenced block with the info string `ui`; Markdown and `ui` blocks mix freely, with prose before and after and several blocks per call. The block holds HTML with inline CSS, and Claudiu draws it in the app's own dark style. The result is static (no clicking, no scripts).
 

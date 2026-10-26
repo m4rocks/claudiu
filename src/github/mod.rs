@@ -145,6 +145,26 @@ mod render {
 }
 
 #[cfg(test)]
+mod tabs {
+    use super::model::*;
+    use super::view::*;
+    use gpui::{AppContext, TestAppContext};
+
+    #[test]
+    fn opening_a_pull_request_selects_the_pull_requests_tab() {
+        let mut cx = TestAppContext::single();
+        cx.update(|app| gpui_kit::init(app));
+        let (window, view) = cx
+            .update(|app| gpui_kit::open_window(Default::default(), app, |window, app| app.new(|cx| GithubView::new(".".into(), "x".into(), None, window, cx))))
+            .unwrap();
+        for (kind, number) in [(Kind::Pull, 7), (Kind::Issue, 3)] {
+            cx.update_window(window, |_, window, app| view.update(app, |v, cx| v.open_item(kind, number, window, cx))).unwrap();
+            assert_eq!(view.read_with(&cx, |v, _| v.kind), kind);
+        }
+    }
+}
+
+#[cfg(test)]
 mod schema {
     //! Sends every mutation with made-up ids: GitHub validates the query text (variable types, field names)
     //! before it looks anything up, so a type mismatch fails here while a good query only reports an unknown

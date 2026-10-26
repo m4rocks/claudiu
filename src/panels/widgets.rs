@@ -226,6 +226,28 @@ pub fn icon_button(id: impl Into<SharedString>, glyph: IconName) -> Stateful<Div
         .child(icon(glyph, 14.0))
 }
 
+/// A Ctrl shortcut (Cmd on macOS) as the keyboard shows it: `shortcut("Shift+N")` is `Ctrl+Shift+N`, or `⌘⇧N` on macOS.
+pub fn shortcut(keys: &str) -> String {
+    shortcut_for(cfg!(target_os = "macos"), keys)
+}
+
+fn shortcut_for(macos: bool, keys: &str) -> String {
+    if macos { format!("⌘{}", keys.replace("Shift+", "⇧")) } else { format!("Ctrl+{keys}") }
+}
+
+/// The small key label drawn beside a control while Ctrl (Cmd) is held.
+pub fn key_hint(keys: &str) -> Div {
+    div()
+        .flex_none()
+        .px(px(4.0))
+        .rounded(px(4.0))
+        .bg(hsla(0x26262a))
+        .text_size(crate::panels::scale::px(10.5))
+        .text_color(hsla(theme::TEXT_DIM))
+        .whitespace_nowrap()
+        .child(shortcut(keys))
+}
+
 /// Monogram avatar: the first letter of `seed` on a color picked from it, so each account keeps its color.
 pub fn avatar(seed: &str, size: f32) -> Div {
     const COLORS: [u32; 6] = [theme::ACCENT, 0x61afef, 0x98c379, 0xc678dd, 0xe5c07b, 0x56b6c2];
@@ -354,6 +376,14 @@ pub fn fade_in<E: gpui::IntoElement + Styled + 'static>(el: E, key: impl Into<Sh
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shortcut_names_the_platform_modifier() {
+        assert_eq!(shortcut_for(false, "Shift+N"), "Ctrl+Shift+N");
+        assert_eq!(shortcut_for(false, ","), "Ctrl+,");
+        assert_eq!(shortcut_for(true, "Shift+N"), "⌘⇧N");
+        assert_eq!(shortcut_for(true, "3"), "⌘3");
+    }
 
     #[test]
     fn time_formats() {

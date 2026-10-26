@@ -46,6 +46,32 @@ pub fn commit_and_push(complete: Complete, cwd: &Path) -> Result<String, String>
     }
 }
 
+/// What Commit & Push would have to do in a folder.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Pending {
+    /// Changed or new files in the working tree.
+    pub changes: bool,
+    /// Commits origin hasn't got, or a branch origin doesn't have yet.
+    pub unpushed: bool,
+}
+
+impl Pending {
+    pub fn any(self) -> bool {
+        self.changes || self.unpushed
+    }
+}
+
+/// Blocking. Runs every few seconds beside Claude's own git commands, so it must not take `index.lock` to refresh the index.
+pub fn pending(cwd: &Path) -> Result<Pending, String> {
+    let changes = !git(cwd, &["--no-optional-locks", "status", "--porcelain"], None)?.trim().is_empty();
+    let unpushed = match git(cwd, &["rev-list", "--count", "@{u}..HEAD"], None) {
+        Ok(count) => count.trim() != "0",
+        // No upstream: the first push publishes the branch, if there is an origin and a commit to publish.
+        Err(_) => has_origin(cwd) && git(cwd, &["rev-parse", "--verify", "-q", "HEAD"], None).is_ok(),
+    };
+    Ok(Pending { changes, unpushed })
+}
+
 /// `git pull` with the user's own pull config (merge / rebase / ff-only). Blocking.
 pub fn pull(cwd: &Path) -> Result<String, String> {
     let out = git(cwd, &["pull"], None)?;
@@ -279,6 +305,33 @@ mod tests {
         commit_and_push(&no_model, &a).unwrap();
         assert_eq!(pull(&b).unwrap(), "Pulled");
         assert!(b.join("two.txt").exists());
+    }
+
+    #[test]
+    fn pending_work_is_changes_or_commits_origin_lacks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (root, a) = (tmp.path(), tmp.path().join("a"));
+        git(root, &["init", "-q", "--bare", "remote.git"], None).unwrap();
+        git(root, &["clone", "-q", "remote.git", "a"], None).unwrap();
+        assert_eq!(pending(&a).unwrap(), Pending::default(), "an empty clone has nothing to do");
+        commit(&a, "one.txt");
+        assert_eq!(pending(&a).unwrap(), Pending { changes: false, unpushed: true }, "a branch origin doesn't have yet");
+        commit_and_push(&no_model, &a).unwrap();
+        assert!(!pending(&a).unwrap().any(), "pushed and clean");
+        commit(&a, "two.txt");
+        assert_eq!(pending(&a).unwrap(), Pending { changes: false, unpushed: true }, "a commit origin lacks");
+        git(&a, &["push", "-q"], None).unwrap();
+        std::fs::write(a.join("three.txt"), "x").unwrap();
+        assert_eq!(pending(&a).unwrap(), Pending { changes: true, unpushed: false }, "a new file");
+    }
+
+    #[test]
+    fn a_folder_without_origin_has_nothing_to_push() {
+        let tmp = tempfile::tempdir().unwrap();
+        git(tmp.path(), &["init", "-q", "c"], None).unwrap();
+        let c = tmp.path().join("c");
+        commit(&c, "c.txt");
+        assert!(!pending(&c).unwrap().any());
     }
 
     #[test]

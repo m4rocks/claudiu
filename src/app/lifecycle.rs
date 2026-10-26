@@ -16,6 +16,7 @@ pub fn tidy_leftovers() {
     datadir::prune(names, 7 * 86_400);
     datadir::prune(attached, 7 * 86_400);
     datadir::prune(mcp_configs, 7 * 86_400);
+    datadir::prune(crate::claude::trim::settings_dir(), 7 * 86_400);
     // Titles are copied into the store on the next tick, so an old file is only a duplicate.
     datadir::prune(titles, 7 * 86_400);
     datadir::prune(usage::snapshot_dir(), 30 * 86_400);
@@ -41,17 +42,25 @@ impl Workspace {
             v.is_running() && v.is_working() && self.store.session(&l.id).is_some_and(|r| r.kind == SessionKind::Claude)
         });
         let working = working.count();
-        if working == 0 {
+        let unsaved = self.unsaved(None);
+        if working == 0 && unsaved == 0 {
             self.finalize(cx);
             return true;
         }
-        self.modal = Some(Modal::Confirm {
-            title: "Quit Claudiu?".into(),
-            body: format!(
+        let mut body = Vec::new();
+        if working > 0 {
+            body.push(format!(
                 "{working} Claude session{} still working. Quitting interrupts {} — sessions stay in your history and can be resumed.",
                 if working == 1 { " is" } else { "s are" },
                 if working == 1 { "it" } else { "them" }
-            ),
+            ));
+        }
+        if unsaved > 0 {
+            body.push(format!("{unsaved} file{} in the editor {} unsaved changes that will be lost.", super::editing::plural(unsaved), if unsaved == 1 { "has" } else { "have" }));
+        }
+        self.modal = Some(Modal::Confirm {
+            title: "Quit Claudiu?".into(),
+            body: body.join(" "),
             confirm: "Quit anyway".into(),
             danger: true,
             act: Act::ConfirmQuit,

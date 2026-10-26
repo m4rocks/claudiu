@@ -87,7 +87,8 @@ pub struct Terminal {
     start_error: Arc<Mutex<Option<String>>>,
     cols: AtomicU32,
     rows: AtomicU32,
-    /// The child's process id (Unix; 0 until it exists), so closing can make sure it ends.
+    /// The child's process id (0 until it exists), so closing can make sure it ends (Unix) and its tools can be
+    /// lowered in priority (Windows).
     pid: Arc<AtomicU32>,
     /// When it was made, and what to call it in the start-up trace (`trace.rs`).
     pub born: Instant,
@@ -121,8 +122,8 @@ fn start_pty(
         .map_err(|_| anyhow::anyhow!("the pseudo terminal could not be created"))??;
     #[cfg(unix)]
     pid.store(pty.child().id(), Ordering::Relaxed);
-    #[cfg(not(unix))]
-    let _ = pid;
+    #[cfg(windows)]
+    pid.store(pty.child_watcher().pid().map_or(0, |p| p.get()), Ordering::Relaxed);
     let event_loop = EventLoop::new(term, listener, pty, true, false)?;
     let sender = event_loop.channel();
     event_loop.spawn();
@@ -197,6 +198,12 @@ impl Terminal {
             }
         });
         (this, rx)
+    }
+
+    /// The child's process id, once it exists.
+    #[cfg(windows)]
+    pub fn process_id(&self) -> Option<u32> {
+        Some(self.pid.load(Ordering::Relaxed)).filter(|&pid| pid != 0)
     }
 
     /// Why the child could not be started, for a terminal made by `spawn_deferred`.
