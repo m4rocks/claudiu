@@ -14,7 +14,8 @@ test('applies the settings Claudiu asks for, once each, and not the ones sent be
   })
   on('session.id', () => ({ value: 's1' }))
   on('session.model', () => ({ value: 'claude-haiku-5-5' }))
-  on('config.list', () => ({ value: [] }))
+  const precomputeRow = { key: 'precomputeCompactionEnabled', label: 'Precompute compaction', kind: 'boolean', value: true, provider: { plugin: 'engine', tier: 'core' }, isLocked: false }
+  on('config.list', () => ({ value: [precomputeRow] }) as any)
   on('settings.read', () => ({ value: {} }))
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
   on('config.set', (_$, e) => {
@@ -37,16 +38,54 @@ test('applies the settings Claudiu asks for, once each, and not the ones sent be
       { seq: 7, key: 'advisor', value: 'opus' },
       { seq: 8, key: 'advisor', value: 'rm -rf /' }, // not a model name
       { seq: 9, key: 'theme', value: 'light' }, // not a setting Claudiu sets
+      { seq: 10, key: 'precompute_compact', value: false },
     ],
   })
   await clock.advance(1000)
-  expect(sets).toEqual([['autoCompact', false]])
+  expect(sets).toEqual([['autoCompact', false], ['precomputeCompactionEnabled', false]])
   expect(ran).toEqual(['advisor opus'])
   const snap = JSON.parse(writes.at(-1)!.text)
   expect(snap.advisor).toBe('opus')
   expect(snap.advisor_active).toBe('opus')
   expect(snap.auto_compact).toBe(false)
+  expect(snap.precompute_compact).toBe(false)
 
   await clock.advance(3000)
-  expect(sets.length + ran.length).toBe(2) // handled once
+  expect(sets.length + ran.length).toBe(3) // handled once
+})
+
+test('sends a message Claudiu asks for as the person’s own words, once', async ($, on) => {
+  mock.env(on, { CLAUDIU_CTL_FILE: 'ctl/me.json', CLAUDIU_USAGE_DIR: 'usage' })
+  const clock = mock.clock(on)
+  let file = JSON.stringify({ cmds: [{ seq: 1, key: 'prompt', value: 'from an earlier run' }] })
+  const sent: unknown[] = []
+  on('fs.read', () => ({ value: file }))
+  on('fs.write', () => ({ value: undefined }))
+  on('session.id', () => ({ value: 's1' }))
+  on('session.model', () => ({ value: 'claude-haiku-5-5' }))
+  on('config.list', () => ({ value: [] }) as any)
+  on('settings.read', () => ({ value: {} }))
+  on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  on('prompt.submit', (_$, e) => {
+    sent.push([e.text, e.origin])
+    return { drop: 'test' }
+  })
+
+  await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+  await clock.advance(1000)
+  expect(sent).toEqual([])
+
+  file = JSON.stringify({
+    cmds: [
+      { seq: 1, key: 'prompt', value: 'from an earlier run' },
+      { seq: 2, key: 'prompt', value: '@src/a.rs#L3-9: Explain this code.' },
+      { seq: 3, key: 'prompt', value: '   ' }, // nothing to say
+      { seq: 4, key: 'prompt', value: 42 }, // not text
+    ],
+  })
+  await clock.advance(1000)
+  expect(sent).toEqual([['@src/a.rs#L3-9: Explain this code.', { kind: 'plugin', name: expect.anything(), asUser: true }]])
+
+  await clock.advance(3000)
+  expect(sent.length).toBe(1) // handled once
 })

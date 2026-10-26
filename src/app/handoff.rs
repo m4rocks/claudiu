@@ -1,11 +1,13 @@
 //! Hand-off: a running Claude session moves to the active account. Claude Code can't change the account of a running
 //! process, so the session compacts itself (the mod runs `/compact`), then its process is replaced by a new one that
 //! resumes the same conversation under the active account. The Claudiu session is the same record and keeps its shell
-//! and cards; the old process ends. The left sidebar's warning only switches the account; the right sidebar offers
+//! and cards; the old process ends. The record remembers its new account, so it starts there from then on. The left sidebar's warning only switches the account; the right sidebar offers
 //! the hand-off for a session that runs under another one.
 
 use super::*;
 use crate::claude::usage::Snapshot;
+use crate::terminal::view::Handover;
+use std::time::Instant;
 
 /// Used share of a limit at which the left sidebar shows its notice.
 pub const HIGH: f32 = 0.95;
@@ -17,6 +19,8 @@ pub struct Handoff {
     pub asked: i64,
     /// Set once the mod reports a compaction after `asked`.
     pub compacted: bool,
+    /// The skeleton counts from here, across the restart.
+    pub since: Instant,
 }
 
 /// The left sidebar notice: the active account is at `HIGH` of a limit. It only reports; the user picks any account.
@@ -79,8 +83,9 @@ impl Workspace {
     /// Confirmed: the session asks to compact, and its skeleton says it is handing over.
     pub fn start_handoff(&mut self, id: &str, cx: &mut Context<Self>) {
         let to_name = self.store.active_account().map_or_else(|| "the active account".into(), |a| a.name());
-        self.handoffs.insert(id.into(), Handoff { asked: crate::store::now(), compacted: false });
-        self.set_handover(id, Some(to_name), cx);
+        let since = Instant::now();
+        self.handoffs.insert(id.into(), Handoff { asked: crate::store::now(), compacted: false, since });
+        self.set_handover(id, Some(Handover { to: to_name, since }), cx);
         usage::send_ctl(&usage::ctl_file(id), "compact", serde_json::json!(true));
     }
 
@@ -98,18 +103,19 @@ impl Workspace {
     /// compacts is given up on.
     pub fn finish_handoffs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let t = crate::store::now();
-        let due: Vec<(Id, bool)> = self
+        let due: Vec<(Id, bool, Instant)> = self
             .handoffs
             .iter()
-            .filter_map(|(id, h)| if h.compacted { Some((id.clone(), true)) } else if t - h.asked > TIMEOUT_SECS { Some((id.clone(), false)) } else { None })
+            .filter(|(_, h)| h.compacted || t - h.asked > TIMEOUT_SECS)
+            .map(|(id, h)| (id.clone(), h.compacted, h.since))
             .collect();
-        for (id, compacted) in due {
+        for (id, compacted, since) in due {
             self.handoffs.remove(&id);
             if !compacted {
                 self.set_handover(&id, None, cx);
                 self.toast("The hand-off was cancelled: the session did not compact.", true, cx);
             } else if self.is_running(&id, cx) {
-                self.restart_handed_off(&id, window, cx);
+                self.restart_handed_off(&id, since, window, cx);
             } else {
                 self.set_handover(&id, None, cx);
             }
@@ -118,17 +124,21 @@ impl Workspace {
 
     /// The old process ends and a new one resumes the same conversation. The shell and cards belong to the session,
     /// so they stay.
-    fn restart_handed_off(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+    fn restart_handed_off(&mut self, id: &str, since: Instant, window: &mut Window, cx: &mut Context<Self>) {
+        let to = self.store.active_account().map(|a| a.id.clone());
+        if let Some(meta) = self.store.session_mut(id).and_then(|r| r.claude.as_mut()) {
+            meta.account = to;
+        }
         self.restart_session(id, window, cx);
         let to_name = self.store.active_account().map_or_else(|| "the active account".into(), |a| a.name());
-        self.set_handover(id, Some(to_name), cx);
+        self.set_handover(id, Some(Handover { to: to_name, since }), cx);
     }
 
     /// The skeleton says "Handing over to …" while this is set; the new process clears it once its prompt is ready.
-    fn set_handover(&self, id: &str, label: Option<String>, cx: &mut App) {
+    fn set_handover(&self, id: &str, handover: Option<Handover>, cx: &mut App) {
         if let Some(view) = self.live_view(id) {
             view.update(cx, |v, cx| {
-                v.handover = label;
+                v.handover = handover;
                 cx.notify();
             });
         }

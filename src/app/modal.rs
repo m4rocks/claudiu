@@ -91,7 +91,7 @@ impl Workspace {
                 let name = input.read(cx).value().split_whitespace().collect::<Vec<_>>().join("-");
                 if name.is_empty() { Act::Dismiss } else { Act::CreateBranch(cwd, name) }
             }
-            Some(Modal::Settings { shell, claude, model, effort, permission, updates, background, chrome, scale, trimmed, claudiu_off, list_focus }) => {
+            Some(Modal::Settings { shell, claude, model, effort, permission, updates, chrome, scale, trimmed, claudiu_off, list_focus }) => {
                 let clean = |s: &str| s.trim().trim_matches('"').to_string();
                 let (shell_t, claude_t) = (clean(shell.read(cx).value().as_ref()), clean(claude.read(cx).value().as_ref()));
                 let model_name = claude::defaults::parse_model(model.read(cx).value().as_ref());
@@ -104,7 +104,7 @@ impl Workspace {
                 if let Some((page, field, msg)) = paths.or(bad_model) {
                     self.settings_page = page;
                     field.update(cx, |s, cx| s.focus(window, cx));
-                    self.modal = Some(Modal::Settings { shell, claude, model, effort, permission, updates, background, chrome, scale, trimmed, claudiu_off, list_focus });
+                    self.modal = Some(Modal::Settings { shell, claude, model, effort, permission, updates, chrome, scale, trimmed, claudiu_off, list_focus });
                     self.toast(msg, true, cx);
                     return;
                 }
@@ -116,8 +116,6 @@ impl Workspace {
                     s.update_url = (!updates).then(String::new);
                 }
                 s.scale = (scale != 100).then_some(scale);
-                let background_changed = s.background_compact != background;
-                s.background_compact = background;
                 s.chrome_default = chrome;
                 s.new_session = claude::defaults::NewSessionDefaults { model: model_name.unwrap_or_default(), effort, permission_mode: permission };
                 let trimmed = claude::trim::normalized(&trimmed);
@@ -129,9 +127,6 @@ impl Workspace {
                 self.shell = platform::default_shell(s.shell.as_deref());
                 self.claude_exe = claude::discover(s.claude_path.as_deref());
                 self.store.mark_dirty();
-                if background_changed {
-                    self.send_to_running_claude("background_compact", background.into(), cx);
-                }
                 if tools_changed {
                     self.toast("Settings saved. Tool changes apply to new sessions; resumed sessions keep the old instructions until their next compaction.", false, cx);
                 } else {
@@ -143,16 +138,6 @@ impl Workspace {
         };
         self.focus_active(window, cx);
         self.act(act, window, cx);
-    }
-
-    /// Sends a settings request to the mod of every running Claude session (see `usage::send_ctl`).
-    fn send_to_running_claude(&self, key: &str, value: serde_json::Value, cx: &App) {
-        for live in &self.live {
-            let claude = self.store.session(&live.id).is_some_and(|r| r.kind == SessionKind::Claude);
-            if claude && self.is_running(&live.id, cx) {
-                usage::send_ctl(&usage::ctl_file(&live.id), key, value.clone());
-            }
-        }
     }
 
     /// The editor "Open in" uses: the last one picked if it is still installed, else the first one found.

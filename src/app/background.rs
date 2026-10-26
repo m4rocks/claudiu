@@ -60,6 +60,7 @@ impl Workspace {
                 let update = this.update_in(cx, |ws, window, cx| {
                     ws.serve_requests(requests, window, cx);
                     ws.finish_handoffs(window, cx);
+                    ws.check_open_files(window, cx);
                     ws.update_activity(window, cx, &statuses)
                 });
                 if update.is_err() {
@@ -134,9 +135,28 @@ impl Workspace {
         self.refresh_live(cx);
         self.remember_open(cx);
         self.ingest_usage(cx);
-        self.refresh_files(cx);
         self.sync_attached(cx);
+        self.refresh_files(cx);
+        self.refresh_marks(cx);
+        self.lower_tool_priority(cx);
+        self.refresh_pending(cx);
         cx.notify();
+    }
+
+    /// Windows: keep what the running Claude sessions start (builds, tests) from starving the other sessions.
+    fn lower_tool_priority(&self, cx: &mut Context<Self>) {
+        #[cfg(windows)]
+        {
+            let claude_pids: Vec<u32> = self
+                .live
+                .iter()
+                .filter(|l| self.store.session(&l.id).is_some_and(|r| r.kind == SessionKind::Claude))
+                .filter_map(|l| l.view.read(cx).terminal.process_id())
+                .collect();
+            cx.background_executor().spawn(async move { crate::priority::lower_tool_priority(&claude_pids) }).detach();
+        }
+        #[cfg(not(windows))]
+        let _ = cx;
     }
 
     /// Terminal sessions live only in CURRENT SESSION: once a shell's process is gone and its pane has been

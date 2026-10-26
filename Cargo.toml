@@ -1,6 +1,6 @@
 [package]
 name = "claudiu"
-version = "0.5.5"
+version = "0.6.0"
 edition = "2024"
 description = "A native workspace for Claude Code sessions: real PTYs, projects, and session history"
 repository = "https://github.com/m4rocks/claudiu"
@@ -14,13 +14,33 @@ dunce = "1.0.5"
 futures = "0.3.34"
 git2 = { version = "0.21.0", default-features = false }
 gpui = { package = "gpui-pre", version = "=0.3.8" }
-gpui-kit = { version = "0.7.1", default-features = false, features = ["component", "assets"] }
+gpui-kit = { version = "0.7.1", default-features = false, features = [
+    "component",
+    "assets",
+    # Editor mode's syntax highlighting; each grammar adds to the binary, so only these.
+    "tree-sitter-bash",
+    "tree-sitter-css",
+    "tree-sitter-html",
+    "tree-sitter-javascript",
+    "tree-sitter-markdown",
+    "tree-sitter-markdown-inline",
+    "tree-sitter-rust",
+    "tree-sitter-toml",
+    "tree-sitter-tsx",
+    "tree-sitter-typescript",
+    "tree-sitter-yaml",
+] }
 raw-window-handle = "0.6"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
+# The same versions gpui-kit's editor uses for its LSP hooks; editor mode's language servers (`lsp`) speak through them.
+lsp-types = "0.97.0"
+url = "2.5.8"
 image = { version = "0.25", default-features = false, features = ["png", "bmp", "jpeg", "gif", "webp"] }
 ureq = "3.4.2"
 time = { version = "0.3.55", features = ["parsing"] }
+# Gleam is not among gpui-kit's grammars; registered in `app::editor_mode::register_languages`.
+tree-sitter-gleam = "1.0.0"
 uuid = { version = "1.27.0", features = ["v4"] }
 velopack = "1.2.161"
 which = "8.0.6"
@@ -40,7 +60,7 @@ strip = true
 
 [target."cfg(windows)".dependencies]
 junction = "2.1.0"
-windows-sys = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging", "Win32_Foundation", "Win32_Security", "Win32_System_DataExchange", "Win32_System_Memory"] }
+windows-sys = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging", "Win32_Foundation", "Win32_Security", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

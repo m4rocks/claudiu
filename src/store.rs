@@ -258,10 +258,6 @@ pub struct Settings {
     /// UI scale in percent (text and terminal font); 100 when unset.
     #[serde(default)]
     pub scale: Option<u32>,
-    /// Claudiu's background compaction, for sessions whose Claude Code does not offer its own: the mod drafts the
-    /// compaction summary ahead of time. Off unless chosen, since a draft that goes unused still costs tokens.
-    #[serde(default)]
-    pub background_compact: bool,
     /// Whether new Claude sessions start with Claude in Chrome (`--chrome`); each session can still switch it.
     #[serde(default)]
     pub chrome_default: bool,

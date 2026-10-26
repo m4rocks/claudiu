@@ -242,7 +242,6 @@ pub enum Modal {
         effort: Option<Effort>,
         permission: Option<PermissionMode>,
         updates: bool,
-        background: bool,
         chrome: bool,
         scale: u32,
         /// Claude Code features and tools turned off (Claude Code tools page).
@@ -420,9 +419,9 @@ pub struct Workspace {
     pub slides: HashMap<Id, crate::panels::sidebar::Slide>,
     pub slide_gen: u64,
     /// When a drag last reordered the sidebar, see `pointer_moved`.
+    pub last_swap: std::time::Instant,
     /// Attached issues and pull requests are asked about on GitHub from time to time, see `attached_sync.rs`.
     pub attached_sync: attached_sync::Sync,
-    pub last_swap: std::time::Instant,
     pub drag_pos: Option<gpui::Point<gpui::Pixels>>,
     pub update: UpdateState,
     pub scanning: bool,
@@ -514,8 +513,8 @@ impl Workspace {
             shortcuts_wait: 0,
             slides: HashMap::new(),
             slide_gen: 0,
-            attached_sync: Default::default(),
             last_swap: std::time::Instant::now(),
+            attached_sync: Default::default(),
             update: UpdateState::default(),
             scanning: false,
             quitting: false,
@@ -671,7 +670,6 @@ impl Workspace {
                     s.claude_path.as_ref().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default(),
                 );
                 let updates = s.update_url.as_deref() != Some("");
-                let background = s.background_compact;
                 let chrome = s.chrome_default;
                 let claude_hint = self.claude_exe.as_ref().map_or("not found".to_string(), |p| p.to_string_lossy().into_owned());
                 let defaults = s.new_session.clone();
@@ -680,7 +678,7 @@ impl Workspace {
                 let shell = self.modal_input(&shell_t, &platform::default_shell(None).0, window, cx);
                 let list_focus = cx.focus_handle();
                 window.focus(&list_focus, cx);
-                self.modal = Some(Modal::Settings { shell, claude, model, effort: defaults.effort, permission: defaults.permission_mode, updates, background, chrome, scale: crate::panels::scale::percent(), trimmed: self.store.data.settings.trimmed_tools.clone(), claudiu_off: self.store.data.settings.claudiu_tools_off.clone(), list_focus });
+                self.modal = Some(Modal::Settings { shell, claude, model, effort: defaults.effort, permission: defaults.permission_mode, updates, chrome, scale: crate::panels::scale::percent(), trimmed: self.store.data.settings.trimmed_tools.clone(), claudiu_off: self.store.data.settings.claudiu_tools_off.clone(), list_focus });
             }
             Act::PickEffort(choice) => {
                 if let Some(Modal::Settings { effort, .. }) = self.modal.as_mut() {

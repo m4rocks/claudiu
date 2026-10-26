@@ -38,7 +38,6 @@ impl Workspace {
             spec.env.push(("CLAUDIU_NAME_FILE".into(), mcp::name_file(claude_session_id).to_string_lossy().into_owned()));
             spec.env.push((usage::USAGE_DIR_ENV.into(), usage::snapshot_dir().to_string_lossy().into_owned()));
             spec.env.push((usage::CTL_ENV.into(), usage::ctl_file(record_id).to_string_lossy().into_owned()));
-            spec.env.push((usage::BG_COMPACT_ENV.into(), if self.store.data.settings.background_compact { "1" } else { "0" }.into()));
             spec.env.push((crate::visual::VISUAL_ENV.into(), crate::visual::file(record_id).to_string_lossy().into_owned()));
             spec.env.push((crate::claude::ask::ASK_ENV.into(), crate::claude::ask::request_file(record_id).to_string_lossy().into_owned()));
         }

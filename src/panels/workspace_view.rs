@@ -753,12 +753,11 @@ impl Render for Workspace {
 }
 
 /// The Settings dialog's body: the category list on the left and the chosen page on the right.
-/// `toggles` are Check for updates, Background compaction and Claude in Chrome, in that order.
 fn settings_body(page: SettingsPage, modal: &Modal, cx: &mut Context<Workspace>) -> AnyElement {
-    let Modal::Settings { shell, claude, model, effort, permission, updates, background, chrome, scale, trimmed, claudiu_off, list_focus } = modal else {
+    let Modal::Settings { shell, claude, model, effort, permission, updates, chrome, scale, trimmed, claudiu_off, list_focus } = modal else {
         return div().into_any_element();
     };
-    let (updates, background, chrome, scale) = (*updates, *background, *chrome, *scale);
+    let (updates, chrome, scale) = (*updates, *chrome, *scale);
     let scaled = crate::panels::scale::px;
     let faint = |text: String| div().text_size(scaled(11.0)).text_color(hsla(theme::TEXT_FAINT)).child(text);
     let field = |label: &str, input: &Entity<InputState>| {
@@ -812,15 +811,7 @@ fn settings_body(page: SettingsPage, modal: &Modal, cx: &mut Context<Workspace>)
             .child(settings_toggle("settings-chrome", "Claude in Chrome for new sessions", chrome, |m| match m {
                 Modal::Settings { chrome, .. } => Some(chrome),
                 _ => None,
-            }, cx))
-            .child(settings_toggle("settings-background-compact", "Background compaction", background, |m| match m {
-                Modal::Settings { background, .. } => Some(background),
-                _ => None,
-            }, cx))
-            .child(faint(
-                "Drafts the compaction summary before the context fills, so auto-compact doesn't pause the session.                  Used where Claude Code doesn't offer its own; an unused draft still costs tokens."
-                    .to_string(),
-            )),
+            }, cx)),
         SettingsPage::ClaudeTools => {
             let plan_trimmed = trimmed.contains(&Trim::PlanMode);
             let mut list = div().flex().flex_col().gap(px(8.0));

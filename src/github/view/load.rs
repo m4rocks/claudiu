@@ -235,6 +235,8 @@ impl GithubView {
         self.mode = Mode::Browse;
         self.editing = None;
         self.popup = None;
+        // The tab strip and the list behind the detail follow the item, so Back lands on the item's own list.
+        self.select_kind(kind, window, cx);
         self.composer.update(cx, |s, cx| s.set_value("", window, cx));
         let mut state = DetailState::new(kind, number);
         // Show the list row's facts at once; the skeleton stands in for the rest until the answer comes.

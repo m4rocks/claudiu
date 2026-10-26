@@ -33,7 +33,8 @@ pub fn valid_model_name(name: &str) -> bool {
     !name.is_empty() && name.len() <= 60 && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
-/// Ask the mod of a running session to change a setting: `auto_compact` (bool) or `advisor` (a model name or `off`).
+/// Ask the mod of a running session to change a setting: `auto_compact` or `precompute_compact` (bool), `advisor` (a
+/// model name or `off`), or `prompt` (a message for the session to send once it is idle).
 /// The file keeps the latest few commands, each with a number that only goes up, so none is lost if two come within
 /// the mod's one-second look and none is applied twice.
 pub fn send_ctl(file: &Path, key: &str, value: serde_json::Value) {
@@ -68,6 +69,9 @@ pub struct Snapshot {
     /// The `/config` auto-compact switch.
     #[serde(default)]
     pub auto_compact: Option<bool>,
+    /// The `/config` "Precompute compaction" switch (background compaction); `None` while Claude Code does not offer it.
+    #[serde(default)]
+    pub precompute_compact: Option<bool>,
     /// The `advisorModel` setting (`opus`, `sonnet`, ...); `None` when the advisor is off.
     #[serde(default)]
     pub advisor: Option<String>,
@@ -107,7 +111,7 @@ mod tests {
       "context_fraction": 0.028, "context_tokens": 28062, "context_window": 1000000,
       "five_hour": {"utilization": 0.67, "resets_at": 1792659600, "seen_at": 1000},
       "seven_day": {"utilization": 0.22, "resets_at": 1793167200, "seen_at": 1000},
-      "auto_compact": true, "advisor": "opus", "advisor_active": "opus", "compact_at": 167000, "compacted_at": 1500
+      "auto_compact": true, "precompute_compact": false, "advisor": "opus", "advisor_active": "opus", "compact_at": 167000, "compacted_at": 1500
     }"#;
 
     #[test]
@@ -139,7 +143,7 @@ mod tests {
         assert_eq!(s.seven_day.as_ref().unwrap().resets_at, Some(1793167200));
         assert_eq!((s.context_tokens, s.context_window), (Some(28062), Some(1_000_000)));
         assert_eq!((s.auto_compact, s.advisor.as_deref(), s.advisor_active.as_deref(), s.compact_at), (Some(true), Some("opus"), Some("opus"), Some(167_000)));
-        assert_eq!(s.compacted_at, Some(1500));
+        assert_eq!((s.compacted_at, s.precompute_compact), (Some(1500), Some(false)));
     }
 
     #[test]

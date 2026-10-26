@@ -114,6 +114,11 @@ fn apply_to_meta(meta: &mut ClaudeMeta, snap: &Snapshot) -> bool {
         meta.auto_compact = snap.auto_compact;
         changed = true;
     }
+    // `None` is real too: Claude Code lists the row only while its feature flag is on.
+    if meta.precompute_compact != snap.precompute_compact {
+        meta.precompute_compact = snap.precompute_compact;
+        changed = true;
+    }
     if meta.compact_at != snap.compact_at {
         meta.compact_at = snap.compact_at;
         changed = true;
@@ -143,5 +148,16 @@ mod tests {
         let later = snap(r#"{"session_id":"s","five_hour":null,"seven_day":null,"context_fraction":null,"context_tokens":null,"context_window":null,"model":null,"captured_at":3}"#);
         assert!(apply_to_meta(&mut meta, &later), "advisor off is a real change");
         assert_eq!((meta.context_tokens, meta.auto_compact, meta.advisor.clone()), (Some(500), Some(true), None));
+    }
+
+    #[test]
+    fn background_compaction_is_offered_only_while_the_mod_reports_it() {
+        let mut meta = ClaudeMeta::default();
+        let offered = snap(r#"{"session_id":"s","five_hour":null,"seven_day":null,"context_fraction":null,"context_tokens":null,"context_window":null,"model":null,"captured_at":1,"precompute_compact":true}"#);
+        assert!(apply_to_meta(&mut meta, &offered));
+        assert_eq!(meta.precompute_compact, Some(true));
+        let withdrawn = snap(r#"{"session_id":"s","five_hour":null,"seven_day":null,"context_fraction":null,"context_tokens":null,"context_window":null,"model":null,"captured_at":2}"#);
+        assert!(apply_to_meta(&mut meta, &withdrawn), "Claude Code stopped listing the row: the switch goes away");
+        assert_eq!(meta.precompute_compact, None);
     }
 }

@@ -13,7 +13,7 @@ use crate::app::{Act, Activity, MenuItem, SideDrag, Workspace};
 use crate::store::{ExternalState, Id, Project, SessionKind, SessionRecord, now};
 use crate::panels::theme::{self, hsla};
 use gpui_kit::assets::IconName;
-use crate::panels::widgets::{Trigger, ago, avatar, button, clawd, countdown, icon, icon_button, meter, section_label, tick};
+use crate::panels::widgets::{Trigger, ago, avatar, button, clawd, countdown, icon, icon_button, key_hint, meter, section_label, shortcut, tick};
 
 pub const SIDEBAR_W: f32 = 284.0;
 pub const SIDEBAR_MIN: f32 = 220.0;
@@ -290,6 +290,7 @@ impl Workspace {
         let click_id = id.clone();
         let menu_id = id.clone();
         let close_id = id.clone();
+        let middle_id = id.clone();
         let archive_id = id.clone();
         let dot =session_dot(row.dot, row.scope, &id);
         div()
@@ -341,7 +342,12 @@ impl Workspace {
                     .child(if row.archived { "archived".to_string() } else if row.stale { "stale".to_string() } else { row.right }),
             )
             .when(row.running, |d| {
-                d.child(
+                // A middle click ends a running session, like its ×.
+                d.on_mouse_up(
+                    MouseButton::Middle,
+                    cx.listener(move |ws, _: &gpui::MouseUpEvent, window, cx| ws.act(Act::CloseLive(middle_id.clone()), window, cx)),
+                )
+                .child(
                     icon_button(gpui::SharedString::from(format!("close-{}-{close_id}", row.scope)), IconName::X)
                         .invisible()
                         .group_hover("row", |s| s.visible())
@@ -386,13 +392,21 @@ impl Workspace {
         let filter = self.project_filter().map(|p| p.id.clone());
 
         // ---- RUNNING
-        let running: Vec<Row> = self
-            .live
+        let numbered = self.running_ids(cx);
+        let running: Vec<Row> = numbered
             .iter()
-            .filter(|l| l.view.read(cx).is_running())
-            .filter_map(|l| self.store.session(&l.id))
+            .filter_map(|id| self.store.session(id))
             .filter(|r| self.listed(&q, filter.as_ref(), r))
-            .map(|r| self.row_for(r, true, true))
+            .map(|r| {
+                let mut row = self.row_for(r, true, true);
+                // Numbered among all running sessions, so a search or project filter doesn't renumber them.
+                if self.shortcuts_shown
+                    && let Some(n) = numbered.iter().position(|id| *id == r.id).filter(|&i| i < 9)
+                {
+                    row.right = shortcut(&(n + 1).to_string());
+                }
+                row
+            })
             .collect();
 
         // ---- RECENT: everything else, newest first
@@ -579,6 +593,7 @@ impl Workspace {
     fn render_sidebar_header(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         // With a project chosen a new session starts there (and the button says so); with "All projects" it asks.
         let filter = self.project_filter().map(|p| p.name.clone());
+        let hints = self.shortcuts_shown;
         let label = match filter {
             Some(name) => format!("+ New in {}", if name.chars().count() > 12 { format!("{}…", name.chars().take(11).collect::<String>()) } else { name }),
             None => "+ New".to_string(),
@@ -598,6 +613,7 @@ impl Workspace {
                     .px(px(2.0))
                     .child(clawd(24.0))
                     .child(div().flex_1().text_size(crate::panels::scale::px(13.0)).font_weight(FontWeight::BOLD).text_color(hsla(theme::TEXT)).child("CLAUDIU"))
+                    .when(hints, |d| d.child(key_hint(",")))
                     .child(icon_button("settings", IconName::Settings).occlude().on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::OpenSettings, window, cx)))),
             )
             .child(
@@ -618,7 +634,8 @@ impl Workspace {
                                 ws.open_dropdown(at, items, cx);
                             }
                         },
-                    )),
+                    ))
+                    .when(hints, |d| d.items_center().child(key_hint("Shift+N"))),
             )
             .child(self.render_project_filter(cx))
             .child(
@@ -626,7 +643,8 @@ impl Workspace {
                     Input::new(&self.search_input)
                         .h(px(26.0))
                         .text_size(crate::panels::scale::px(12.5))
-                        .prefix(div().text_color(hsla(theme::TEXT_FAINT)).child(icon(IconName::Search, 14.0))),
+                        .prefix(div().text_color(hsla(theme::TEXT_FAINT)).child(icon(IconName::Search, 14.0)))
+                        .when(hints, |i| i.suffix(key_hint("Shift+F"))),
                 ),
             )
     }

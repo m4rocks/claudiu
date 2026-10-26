@@ -16,8 +16,6 @@
 //   Markdown to `CLAUDIU_VISUAL_FILE` so the panel fills live.
 // - One-shot completions: runs requests from `CLAUDIU_ASK_FILE` (commit messages, session titles) with
 //   `$.model.complete`, on this session's own client, so Claudiu needs no `claude -p`.
-// - Background compaction, where Claude Code does not offer its own: with Claudiu's setting on (`CLAUDIU_BG_COMPACT`,
-//   then the ctl file), drafts the compaction summary ahead of time and swaps it in at the automatic compaction.
 
 // ---- Constants ----------------------------------------------------------------------------------------------------
 
@@ -35,25 +33,6 @@ const VISUAL_TOOL = 'mcp__claudiu__show_visual'
 // The /config row for background compaction ("Precompute compaction"). Claude Code lists it only while a server-side
 // flag enables the feature; without the row the setting does nothing, so Claudiu offers the switch only with it.
 const PRECOMPUTE_ROW = 'precomputeCompactionEnabled'
-// Claudiu's own background compaction drafts once the context passes this share of the auto-compact threshold, and
-// throws the draft away when more than DRAFT_TAIL of the threshold arrived after it: compacting would then shrink too
-// little, and the engine's own compaction does better.
-const DRAFT_AT = 0.85
-const DRAFT_TAIL = 0.35
-const DRAFT_TRIES = 2 // drafts that may fail between two compactions before the fallback waits for the next one
-const DRAFT_PROMPT = `This conversation is about to be compacted: everything above will be replaced by your summary, \
-and work continues from the summary alone. Write that summary now. Do not call any tools.
-
-Cover, in this order:
-1. What the user asked for and why, quoting them where the wording matters.
-2. Decisions made and the reasons for them.
-3. Files, functions and commands involved, with paths and the key code or output.
-4. Errors met and how they were resolved.
-5. What is done, what is in progress, and the next step.
-
-Be complete about facts and brief in wording. Reply with the summary only.`
-const DRAFT_HEADER = 'This session continues an earlier conversation that ran out of context. The summary below covers ' +
-  'the earlier part; the messages after it are kept as they were.\n\n'
 
 // ---- Per-process state --------------------------------------------------------------------------------------------
 
@@ -77,17 +56,13 @@ let activeAdvisor = null // the advisor the current conversation declared; a mod
 let activeSession = null // the Claude session id activeAdvisor belongs to (/clear starts a new one)
 
 // The token count auto-compaction runs at (null while it is off). It only changes with settings, the model or the
-// environment, and the breakdown it comes from is a local estimate, so it is read again at most once a minute or
-// after a setting changed.
+// environment, and the breakdown it comes from is a local estimate, so it is read again at most once a minute, after
+// a setting changed, or when the model changed: each model has its own compaction window.
 let compactAt = null
 let compactRead = 0
+let compactModel = null // the model compactAt belongs to
 let compactedAt = null // when this session last compacted (seconds), so Claudiu can finish a hand-off
 
-// Background compaction fallback.
-let bgCompact = null // Claudiu's setting; null until the first session.start reads the one it launched with
-let draft = null // { session, model, prints, tokens, summary }: a summary of the first prints.length messages
-let drafting = false
-let draftTries = 0 // since the last compaction
 
 // A session id as a file name.
 const stem = id => String(id).replace(/[^A-Za-z0-9_-]/g, '_')
@@ -99,8 +74,10 @@ function secs(iso) {
 }
 
 async function threshold($, fresh) {
-  if (!fresh && Date.now() - compactRead < 60_000) return compactAt
+  const model = await $.session.model().catch(() => null)
+  if (!fresh && model === compactModel && Date.now() - compactRead < 60_000) return compactAt
   compactRead = Date.now()
+  compactModel = model
   const usage = await $.session.usage({ breakdown: 'summary' }).catch(() => null)
   const b = usage?.context.breakdown
   if (b) compactAt = b.isAutoCompactEnabled ? (b.autoCompactThreshold ?? null) : null
@@ -224,9 +201,6 @@ async function applyCtlCommand($, c, override) {
     // Fails while Claude Code does not list the row; the report then keeps saying it is not offered.
     const set = await $.config.set({ key: PRECOMPUTE_ROW, value: c.value }).then(() => true, () => false)
     if (set) override.precompute_compact = c.value
-  } else if (c.key === 'background_compact' && typeof c.value === 'boolean') {
-    bgCompact = c.value
-    if (!bgCompact) draft = null
   } else if (c.key === 'prompt' && typeof c.value === 'string' && c.value.trim() !== '' && c.value.length <= PROMPT_MAX) {
     // A turn of its own once the session is idle, which can be a whole turn away: not awaited, so the commands
     // behind it in the file are not held up.
@@ -261,8 +235,6 @@ async function compactForHandoff($) {
     await $.command.run({ command: 'compact' }).catch(() => {})
   } else if (!('skip' in result)) {
     // This plugin's own hooks don't see its own call.
-    draft = null
-    draftTries = 0
     await noteCompaction($)
   }
 }
@@ -359,83 +331,6 @@ async function answerAsk($) {
   }
 }
 
-// ---- Background compaction ----------------------------------------------------------------------------------------
-
-// What identifies a message across `$.session.messages()` and a compaction's input. Tool results are named by id
-// alone: the engine may clear their text in place.
-function fingerprint(m) {
-  const uses = (m.toolUses ?? []).map(u => u.tool_use_id).join(',')
-  const results = (m.toolResults ?? []).map(r => r.tool_use_id).join(',')
-  return [m.role, uses, results, m.text ?? ''].join('\u0000')
-}
-
-// The context's size now. `turn.complete` comes before the turn's last response is measured, so the last
-// session.measure can be a response behind.
-async function contextTokens($) {
-  const usage = await $.session.usage().catch(() => null)
-  return usage?.context?.tokens ?? measured?.context?.tokens ?? null
-}
-
-// How many leading messages a fork summarises: all but the reply that ended the last turn, since the fork replays
-// the request that reply answered.
-function coveredCount(rows) {
-  let n = rows.length
-  while (n > 0 && rows[n - 1].role === 'assistant') n -= 1
-  return n
-}
-
-// After a turn: draft a summary once the context nears the threshold, unless Claude Code lists its own setting.
-// The fork runs from a timer, so the next turn neither waits for it nor aborts it.
-async function onTurnComplete($, e, next) {
-  const r = await next(e)
-  if (e.agentId || !bgCompact || draft || drafting || draftTries >= DRAFT_TRIES) return r
-  const tokens = await contextTokens($)
-  const at = await threshold($, false)
-  if (!(at > 0 && tokens >= at * DRAFT_AT && tokens < at)) return r
-  const rows = (await $.config.list().catch(() => [])) ?? []
-  if (rows.some(row => row.key === PRECOMPUTE_ROW)) return r
-
-  const messages = await $.session.messages().catch(() => null)
-  const count = Array.isArray(messages) ? coveredCount(messages) : 0
-  if (count < 2) return r
-  drafting = true
-  draftTries += 1
-  $.clock.after(0, () => writeDraft($, messages.slice(0, count), tokens).finally(() => { drafting = false }))
-  return r
-}
-
-async function writeDraft($, covered, tokens) {
-  try {
-    const session = await $.session.id()
-    const model = await $.session.model()
-    const reply = await $.model.fork({ prompt: DRAFT_PROMPT })
-    if (!reply.isAnswered || !reply.text.trim()) return
-    if ((await $.session.id()) !== session || !bgCompact) return // /clear, or switched off, while it ran
-    draft = { session, model, prints: covered.map(fingerprint), tokens, summary: reply.text.trim() }
-  } catch {
-    // A failed draft leaves the engine's own compaction to run.
-  }
-}
-
-// The draft as the automatic compaction's result, or null to let the engine compact. The draft is used only when the
-// conversation still starts with exactly what it summarised, under the same session and model, and what arrived
-// after it is small; the messages after it keep their handles, so they stand as the engine's own.
-async function swapInDraft($, e) {
-  if (e.trigger !== 'auto' || e.agentId || !draft) return null
-  const d = draft
-  if ((await $.session.id().catch(() => null)) !== d.session) return null
-  if ((await $.session.model().catch(() => null)) !== d.model) return null
-  const n = d.prints.length
-  if (e.messages.length < n || !d.prints.every((p, i) => p === fingerprint(e.messages[i]))) return null
-  const first = e.messages[n]
-  if (first && first.role === 'user' && first.toolResults?.length) return null // would answer a summarised tool use
-  const at = compactAt ?? 0
-  const now = (await contextTokens($)) ?? Infinity
-  if (!(at > 0 && now - d.tokens <= at * DRAFT_TAIL)) return null
-  const summary = { role: 'user', text: DRAFT_HEADER + d.summary, toolUses: [] }
-  return { messages: [summary, ...e.messages.slice(n)] }
-}
-
 // ---- Session name -------------------------------------------------------------------------------------------------
 
 // Applies the name Claudiu writes to CLAUDIU_NAME_FILE with /rename: once per name and Claude session.
@@ -490,11 +385,7 @@ async function onConfigSet($, e, next) {
 // installs nothing, so it is not a compaction here.
 async function onSessionCompact($, e, next) {
   if (e.trigger === 'precompute') return next(e)
-  const r = (await swapInDraft($, e).catch(() => null)) ?? (await next(e))
-  if (!e.agentId) {
-    draft = null
-    draftTries = 0
-  }
+  const r = await next(e)
   await noteCompaction($)
   return r
 }
@@ -588,9 +479,6 @@ async function* onTurnStep($, e, next) {
 
 async function onSessionStart($, e, next) {
   const r = await next(e)
-  // Only the first time: a later start (/clear, resume) must keep what Claudiu switched since, as that ctl command
-  // is not replayed.
-  bgCompact ??= (await $.env.get('CLAUDIU_BG_COMPACT')) === '1'
   await report($)
   await applyCtl($)
 
@@ -607,7 +495,6 @@ export function register(on) {
   on('command.run', onCommandRun)
   on('config.set', onConfigSet)
   on('session.compact', onSessionCompact)
-  on('turn.complete', onTurnComplete)
   on('tool.call', { tool: 'mcp__claudiu__set_model' }, onSetModel)
   on('tool.call', { tool: VISUAL_TOOL }, onShowVisual)
   on('turn.step', onTurnStep)

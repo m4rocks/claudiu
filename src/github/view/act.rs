@@ -22,6 +22,16 @@ impl GithubView {
         self.query_input.update(cx, |s, cx| s.set_value(shown, window, cx));
     }
 
+    /// Switch the Issues / Pull requests tab: show that kind's search and load its list if it hasn't been.
+    pub(super) fn select_kind(&mut self, kind: Kind, window: &mut Window, cx: &mut Context<Self>) {
+        self.kind = kind;
+        let q = self.queries[idx(kind)].clone();
+        self.set_query_text(&q, window, cx);
+        if !self.lists[idx(kind)].loaded {
+            self.load_list(kind, false, window, cx);
+        }
+    }
+
     pub fn act(&mut self, act: GhAct, window: &mut Window, cx: &mut Context<Self>) {
         // Choosing anything closes an open picker, except the multi-select ones that stay for more clicks.
         if !matches!(act, GhAct::ToggleLabel(_) | GhAct::ToggleAssignee(_) | GhAct::ToggleReviewer(_) | GhAct::Popup(..)) {
@@ -35,14 +45,9 @@ impl GithubView {
             GhAct::Retry => self.connect(window, cx),
             GhAct::SignIn => cx.emit(GhEvent::SignIn),
             GhAct::SetKind(k) => {
-                self.kind = k;
                 self.detail = None;
                 self.mode = Mode::Browse;
-                let q = self.queries[idx(k)].clone();
-                self.set_query_text(&q, window, cx);
-                if !self.lists[idx(k)].loaded {
-                    self.load_list(k, false, window, cx);
-                }
+                self.select_kind(k, window, cx);
             }
             GhAct::SetQuery(q) => {
                 let q = q.split_whitespace().collect::<Vec<_>>().join(" ");

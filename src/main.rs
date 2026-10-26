@@ -5,9 +5,11 @@ mod claude;
 mod datadir;
 mod files;
 mod git;
+mod lsp;
 mod github;
 mod panels;
 mod platform;
+mod priority;
 mod store;
 mod terminal;
 mod updater;
@@ -22,7 +24,7 @@ gpui_kit::assets::icon_assets!(
     AppIcons,
     [
         WindowMinimize, WindowMaximize, WindowRestore, WindowClose, Archive, ArchiveRestore, ArrowDownToLine, ArrowLeft, Brackets, Check, ChevronDown, ChevronRight,
-        CircleCheck, CircleDot, CircleSlash, CircleX, Clock, Ellipsis, Eye, ExternalLink, FolderOpen, GitBranch, GitCommitHorizontal, GitMerge, GitPullRequest,
+        CircleCheck, CircleDot, CircleSlash, CircleX, Clock, Ellipsis, Eye, ExternalLink, File, FileText, Folder, FolderOpen, GitBranch, GitCommitHorizontal, GitMerge, GitPullRequest,
         GitPullRequestClosed, GitPullRequestDraft, HeartPlus, LoaderCircle, Lock, MessageSquare, FileCode, PanelBottom, PanelLeft, PanelRight, Pencil, RefreshCw, Search,
         Settings, Terminal, X
     ]
@@ -113,6 +115,8 @@ fn main() {
         std::process::exit(claude::mcp::run());
     }
     install_crash_log();
+    #[cfg(windows)]
+    priority::restore_own_priority();
     // Velopack install/update hooks must run before anything else. A no-op for dev builds.
     velopack::VelopackApp::build().run();
 
@@ -125,6 +129,7 @@ fn main() {
 
     gpui_kit::application().with_assets(AppIcons).run(move |cx: &mut App| {
         gpui_kit::init(cx);
+        app::register_languages();
         gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, cx);
         // Claudiu-global shortcuts. Deliberately Ctrl+Shift (Cmd+Shift on macOS) so every plain Ctrl/Alt
         // chord, e.g. Alt+P, still reaches Claude Code untouched.
@@ -141,7 +146,25 @@ fn main() {
             KeyBinding::new("secondary-,", OpenSettings, None),
             KeyBinding::new("secondary-shift-]", SwapFocus, None),
             KeyBinding::new("secondary-shift-e", ToggleEditor, None),
+            // Only over the editor pane: elsewhere Ctrl+P belongs to Claude Code.
+            KeyBinding::new("secondary-p", app::QuickOpen, Some("EditorPane")),
+            KeyBinding::new("secondary-s", app::SaveFile, Some("EditorPane")),
+            KeyBinding::new("ctrl-g", app::GoToLine, Some("EditorPane")),
+            // VS Code's keys: Alt+arrows move by word on macOS.
+            KeyBinding::new(if cfg!(target_os = "macos") { "ctrl--" } else { "alt-left" }, app::GoBack, Some("EditorPane")),
+            KeyBinding::new(if cfg!(target_os = "macos") { "ctrl-shift--" } else { "alt-right" }, app::GoForward, Some("EditorPane")),
+            // The editor answers it from its language server; Ctrl+click (Cmd+click) does the same.
+            KeyBinding::new("f12", gpui_kit::component::input::GoToDefinition, Some("Input")),
             KeyBinding::new("ctrl-tab", NextSession, None),
+            KeyBinding::new("secondary-1", app::ShowSession(1), None),
+            KeyBinding::new("secondary-2", app::ShowSession(2), None),
+            KeyBinding::new("secondary-3", app::ShowSession(3), None),
+            KeyBinding::new("secondary-4", app::ShowSession(4), None),
+            KeyBinding::new("secondary-5", app::ShowSession(5), None),
+            KeyBinding::new("secondary-6", app::ShowSession(6), None),
+            KeyBinding::new("secondary-7", app::ShowSession(7), None),
+            KeyBinding::new("secondary-8", app::ShowSession(8), None),
+            KeyBinding::new("secondary-9", app::ShowSession(9), None),
             KeyBinding::new("ctrl-shift-tab", PrevSession, None),
         ]);
         // The text-input library binds these globally (focus traversal, copy, select all, ...). A focused

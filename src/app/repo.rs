@@ -22,6 +22,7 @@ impl Workspace {
                 // The branch shown in the top bar follows a pull, switch or new branch.
                 ws.store.refresh_git();
                 ws.store.save_if_dirty();
+                ws.refresh_pending(cx);
                 match result {
                     Ok(summary) => ws.toast(summary, false, cx),
                     Err(fail) => match fail.conflict_in {
@@ -36,6 +37,24 @@ impl Workspace {
                         }
                         None => ws.toast(fail.msg, true, cx),
                     },
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Re-read, off the UI thread, whether Commit & Push has anything to do in the shown session's folder.
+    pub(super) fn refresh_pending(&mut self, cx: &mut Context<Self>) {
+        let cwd = self.active_cwd();
+        cx.spawn(async move |this, cx| {
+            let dir = cwd.clone();
+            let pending = cx.background_executor().spawn(async move { crate::git::commit::pending(&dir) }).await;
+            let _ = this.update(cx, |ws, cx| {
+                // The shown session may have changed meanwhile; its own read replaces this one.
+                let now = pending.ok().map(|p| (cwd, p));
+                if ws.pending != now {
+                    ws.pending = now;
+                    cx.notify();
                 }
             });
         })
