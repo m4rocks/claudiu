@@ -276,6 +276,17 @@ pub fn parse_item(v: &Value) -> Option<Item> {
     })
 }
 
+/// Title and state out of REST `repos/{owner}/{name}/issues/{number}`, which answers for pull requests too.
+pub fn parse_status(v: &Value) -> Option<(String, State)> {
+    let title = v["title"].as_str()?.to_string();
+    let state = match v["state"].as_str()? {
+        "open" => State::Open,
+        _ if !v["pull_request"]["merged_at"].is_null() => State::Merged,
+        _ => State::Closed,
+    };
+    Some((title, state))
+}
+
 pub fn parse_page(data: &Value) -> Page {
     let s = &data["search"];
     Page {
@@ -628,6 +639,17 @@ pub fn scoped(repo: &str, kind: Kind, q: &str) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn status_reads_title_and_whether_it_is_open_closed_or_merged() {
+        let open = json!({"title": "Fix it", "state": "open"});
+        assert_eq!(parse_status(&open), Some(("Fix it".into(), State::Open)));
+        let closed = json!({"title": "Fix it", "state": "closed", "pull_request": {"merged_at": null}});
+        assert_eq!(parse_status(&closed), Some(("Fix it".into(), State::Closed)));
+        let merged = json!({"title": "Fix it", "state": "closed", "pull_request": {"merged_at": "2026-10-01T10:00:00Z"}});
+        assert_eq!(parse_status(&merged), Some(("Fix it".into(), State::Merged)));
+        assert_eq!(parse_status(&json!({"message": "Not Found"})), None);
+    }
 
     #[test]
     fn qualifiers_are_edited_in_place() {

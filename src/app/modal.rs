@@ -55,6 +55,24 @@ impl Workspace {
                 }
                 Act::Dismiss
             }
+            Some(Modal::FileName { id, purpose, input }) => {
+                let name = input.read(cx).value().trim().to_string();
+                if let Err(why) = self.apply_file_name(&id, &purpose, &name, window, cx) {
+                    self.modal = Some(Modal::FileName { id, purpose, input });
+                    self.toast(why, true, cx);
+                    return;
+                }
+                Act::Dismiss
+            }
+            Some(Modal::GoToLine { id, input }) => {
+                let text = input.read(cx).value().to_string();
+                if let Err(why) = self.go_to_line(&id, &text, window, cx) {
+                    self.modal = Some(Modal::GoToLine { id, input });
+                    self.toast(why, true, cx);
+                    return;
+                }
+                Act::Dismiss
+            }
             Some(Modal::Advisor { id, input }) => {
                 let name = input.read(cx).value().trim().to_lowercase();
                 if name.is_empty() {
@@ -73,15 +91,20 @@ impl Workspace {
                 let name = input.read(cx).value().split_whitespace().collect::<Vec<_>>().join("-");
                 if name.is_empty() { Act::Dismiss } else { Act::CreateBranch(cwd, name) }
             }
-            Some(Modal::Settings { shell, claude, updates, scale }) => {
+            Some(Modal::Settings { shell, claude, model, effort, permission, updates, chrome, scale, trimmed, claudiu_off, list_focus }) => {
                 let clean = |s: &str| s.trim().trim_matches('"').to_string();
                 let (shell_t, claude_t) = (clean(shell.read(cx).value().as_ref()), clean(claude.read(cx).value().as_ref()));
-                let bad = [("Shell", &shell_t), ("Claude path", &claude_t)]
+                let model_name = claude::defaults::parse_model(model.read(cx).value().as_ref());
+                // In category order, then top to bottom: the first bad field decides which page the dialog shows.
+                let paths = [("Shell", &shell, &shell_t), ("Claude path", &claude, &claude_t)]
                     .into_iter()
-                    .find(|(_, t)| !t.is_empty() && platform::resolve_program(t).is_none());
-                if let Some((what, t)) = bad {
-                    let msg = format!("{what}: “{t}” is not a file or a program on PATH");
-                    self.modal = Some(Modal::Settings { shell, claude, updates, scale });
+                    .find(|(_, _, t)| !t.is_empty() && platform::resolve_program(t).is_none())
+                    .map(|(what, field, t)| (SettingsPage::General, field.clone(), format!("{what}: “{t}” is not a file or a program on PATH")));
+                let bad_model = model_name.is_err().then(|| (SettingsPage::Sessions, model.clone(), "Use a model alias or id (letters, digits, . _ -).".to_string()));
+                if let Some((page, field, msg)) = paths.or(bad_model) {
+                    self.settings_page = page;
+                    field.update(cx, |s, cx| s.focus(window, cx));
+                    self.modal = Some(Modal::Settings { shell, claude, model, effort, permission, updates, chrome, scale, trimmed, claudiu_off, list_focus });
                     self.toast(msg, true, cx);
                     return;
                 }
@@ -93,11 +116,40 @@ impl Workspace {
                     s.update_url = (!updates).then(String::new);
                 }
                 s.scale = (scale != 100).then_some(scale);
+                s.chrome_default = chrome;
+                s.new_session = claude::defaults::NewSessionDefaults { model: model_name.unwrap_or_default(), effort, permission_mode: permission };
+                let trimmed = claude::trim::normalized(&trimmed);
+                let claudiu_off = mcp::normalized_features(&claudiu_off);
+                // The trims go into Claude Code's own settings.json (every account gets the file through config_sync).
+                // When that fails the old trims stay, so what the page shows is what Claude Code has.
+                let mut trim_error = None;
+                let mut trimmed = trimmed;
+                if s.trimmed_tools != trimmed {
+                    let written = claude::claude_home()
+                        .ok_or_else(|| std::io::Error::other("Claude Code's folder was not found"))
+                        .and_then(|home| claude::trim::write_global(&home.join("settings.json"), &trimmed, &s.applied_trims));
+                    match written {
+                        Ok(owned) => s.applied_trims = owned,
+                        Err(e) => {
+                            trim_error = Some(e);
+                            trimmed = s.trimmed_tools.clone();
+                        }
+                    }
+                }
+                let tools_changed = s.trimmed_tools != trimmed || s.claudiu_tools_off != claudiu_off;
+                s.trimmed_tools = trimmed;
+                s.claudiu_tools_off = claudiu_off;
                 crate::panels::scale::set(scale);
                 self.shell = platform::default_shell(s.shell.as_deref());
                 self.claude_exe = claude::discover(s.claude_path.as_deref());
                 self.store.mark_dirty();
-                self.toast("Settings saved. Open sessions keep their current shell.", false, cx);
+                if let Some(e) = trim_error {
+                    self.toast(format!("Settings saved, but Claude Code's settings.json could not be changed ({e}), so the tool trims stay as they were."), true, cx);
+                } else if tools_changed {
+                    self.toast("Settings saved. Tool changes apply to new sessions; resumed sessions keep the old instructions until their next compaction.", false, cx);
+                } else {
+                    self.toast("Settings saved. Open sessions keep their current shell.", false, cx);
+                }
                 Act::Dismiss
             }
             None => return,

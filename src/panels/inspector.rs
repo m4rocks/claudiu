@@ -10,14 +10,15 @@ use gpui::{
 
 use std::time::Duration;
 
-use gpui::{Animation, AnimationExt};
+use gpui::{Animation, AnimationExt, prelude::FluentBuilder};
 
 use crate::app::{Act, GitOp, MenuItem, SideDrag, Workspace};
 use crate::panels::widgets::{Trigger, button};
 use crate::platform::Editor;
+use crate::github::model::State;
 use crate::store::{Attached, Id, Project, SessionKind, SessionRecord};
 use crate::panels::theme::{self, hsla};
-use crate::panels::widgets::{countdown, icon, icon_button, meter, section_label, tick};
+use crate::panels::widgets::{countdown, icon, icon_button, key_hint, meter, section_label, tick};
 use gpui_kit::assets::IconName;
 
 /// What the top bar and the right sidebar describe: the shown session and the folder and project it is in.
@@ -36,7 +37,7 @@ impl Workspace {
     }
 
     pub fn render_right(&mut self, window_w: f32, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let open = self.right_reveal.step(!self.store.data.layout.right_hidden, window);
+        let open = self.right_reveal.step(!self.store.data.layout.right_hidden && !self.editing(), window);
         if open <= 0.0 {
             return None;
         }
@@ -272,6 +273,7 @@ impl Workspace {
         let target = shown.project.as_ref().map(|p| p.path.clone()).or_else(|| shown.cwd.clone());
         let repo = shown.project.as_ref().filter(|p| p.git.is_some()).and(shown.cwd.clone());
         let busy = self.git_busy;
+        let hints = self.shortcuts_shown;
 
         let mut actions = div().flex().flex_col().gap(px(1.0));
         if let Some(target) = target {
@@ -302,6 +304,14 @@ impl Workspace {
                         )),
                 );
             }
+            // Editor mode works on the shown session's folder, so it needs a session; also in the top bar.
+            if id.is_some() {
+                actions = actions.child(
+                    row("editor-mode", IconName::FileCode, "Editor mode")
+                        .when(hints, |d| d.child(key_hint("Shift+E")))
+                        .on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::ToggleEditor, window, cx))),
+                );
+            }
             actions = actions.child(
                 row("reveal", IconName::FolderOpen, "Open folder")
                     .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::Reveal(target.clone()), window, cx))),
@@ -318,7 +328,10 @@ impl Workspace {
                 }
             };
             // The commit message is written through the running session's mod, so it needs one.
+            // Until it has been read, assume there is work.
+            let nothing_to_do = self.pending.as_ref().is_some_and(|(dir, p)| *dir == repo && !p.any());
             let commit = match id.filter(|_| running && claude) {
+                Some(_) if nothing_to_do && busy.is_none() => dim_row("commit-push", IconName::GitCommitHorizontal, "Commit & Push · nothing to commit or push"),
                 Some(id) => {
                     let id = id.clone();
                     git_row(cx, "commit-push", IconName::GitCommitHorizontal, "Commit & Push", "Committing…", GitOp::CommitPush, Box::new(move |cwd| Act::CommitPush(id.clone(), cwd)))
@@ -331,12 +344,14 @@ impl Workspace {
             let open = self.shells.get(&id).is_some_and(|p| p.open);
             actions = actions.child(
                 row("shell", IconName::Terminal, if open { "Hide shell" } else { "Show shell" })
+                    .when(hints, |d| d.child(key_hint("J")))
                     .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::ToggleShell(id.clone()), window, cx))),
             );
         }
         let cwd = self.active_cwd();
         actions.child(
             row("github", IconName::GitPullRequest, "GitHub")
+                .when(hints, |d| d.child(key_hint("Shift+G")))
                 .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::OpenGithub { cwd: cwd.clone() }, window, cx))),
         )
     }
@@ -347,7 +362,12 @@ impl Workspace {
         for a in attached {
             let (pull, number) = (a.pull, a.number);
             let owner = id.cloned();
-            let title = a.title.map_or_else(|| format!("#{number}"), |t| format!("#{number}  {t}"));
+            let title = match (a.title, a.state) {
+                (None, _) => format!("#{number}"),
+                (Some(t), Some(State::Closed)) => format!("#{number}  {t} (closed)"),
+                (Some(t), Some(State::Merged)) => format!("#{number}  {t} (merged)"),
+                (Some(t), _) => format!("#{number}  {t}"),
+            };
             let key = format!("attached-{pull}-{number}");
             rows = rows.child(removable_row(
                 cx,
@@ -411,9 +431,9 @@ impl Workspace {
 
         // The figures come from the snapshot the session's mod reports.
         let meta = shown.rec.as_ref().filter(|r| r.kind == SessionKind::Claude).and_then(|r| r.claude.as_ref());
-        let (compact, advisor, active, chrome, known) = match meta {
-            Some(m) => (m.auto_compact, m.advisor.clone(), m.advisor_active.clone(), m.chrome, true),
-            None => (None, None, None, false, false),
+        let (compact, precompute, advisor, active, chrome, known) = match meta {
+            Some(m) => (m.auto_compact, m.precompute_compact, m.advisor.clone(), m.advisor_active.clone(), m.chrome, true),
+            None => (None, None, None, None, false, false),
         };
         let advisor = advisor.map(|a| a.to_lowercase());
         let active = active.map(|a| a.to_lowercase());
@@ -425,6 +445,14 @@ impl Workspace {
             Some(sid) => pick_row(cx, "set-auto-compact", "Auto-compact", compact_text, move || auto_compact_menu(&sid, compact)).into_any_element(),
             None => kv("Auto-compact", compact_text).into_any_element(),
         };
+        // Only while Claude Code offers the setting; without its feature flag the setting does nothing.
+        let precompute_row = precompute.map(|on| {
+            let text = if on { "On" } else { "Off" }.to_string();
+            match settable.clone() {
+                Some(sid) => pick_row(cx, "set-precompute-compact", "Background compaction", text, move || precompute_compact_menu(&sid, on)).into_any_element(),
+                None => kv("Background compaction", text).into_any_element(),
+            }
+        });
         let chrome_row = match settable.clone() {
             Some(sid) => pick_row(cx, "set-chrome", "Claude in Chrome", if chrome { "On" } else { "Off" }.into(), move || chrome_menu(&sid, chrome)).into_any_element(),
             None => kv("Claude in Chrome", if chrome { "On" } else { "Off" }.into()).into_any_element(),
@@ -440,12 +468,16 @@ impl Workspace {
             .px(px(8.0))
             .child(meter("CONTEXT", ctx_fraction, ctx_caption, None))
             .child(cache)
-            .child(div().flex().flex_col().gap(px(2.0)).child(compact_row).child(advisor_row).child(chrome_row))
+            .child(div().flex().flex_col().gap(px(2.0)).child(compact_row).children(precompute_row).child(advisor_row).child(chrome_row))
     }
 }
 
 fn auto_compact_menu(sid: &Id, current: Option<bool>) -> Vec<MenuItem> {
     [(true, "On"), (false, "Off")].into_iter().map(|(on, name)| MenuItem::new(format!("{}{name}", tick(current == Some(on))), Act::SetAutoCompact(sid.clone(), on))).collect()
+}
+
+fn precompute_compact_menu(sid: &Id, current: bool) -> Vec<MenuItem> {
+    [(true, "On"), (false, "Off")].into_iter().map(|(on, name)| MenuItem::new(format!("{}{name}", tick(current == on)), Act::SetPrecomputeCompact(sid.clone(), on))).collect()
 }
 
 /// Off, the two aliases, and "Other…" (ticked for any other model) which asks for a name.
@@ -636,6 +668,7 @@ mod tests {
         let sid = "s".to_string();
         assert_eq!(labels(&auto_compact_menu(&sid, Some(false))), ["    On", "✓  Off"]);
         assert_eq!(labels(&auto_compact_menu(&sid, None)), ["    On", "    Off"]);
+        assert_eq!(labels(&precompute_compact_menu(&sid, true)), ["✓  On", "    Off"]);
         assert_eq!(labels(&advisor_menu(&sid, None)), ["✓  Off", "    Opus", "    Sonnet", "    Other…"]);
         assert_eq!(labels(&advisor_menu(&sid, Some("sonnet"))), ["    Off", "    Opus", "✓  Sonnet", "    Other…"]);
         assert_eq!(labels(&advisor_menu(&sid, Some("claude-opus-5-5"))), ["    Off", "✓  Opus", "    Sonnet", "    Other…"]);

@@ -113,6 +113,7 @@ impl Element for TerminalElement {
         let mut preedit_at = None;
 
         {
+            let hovered = self.view.read(cx).hovered_link.clone();
             let terminal = &self.view.read(cx).terminal;
             let term = terminal.term.lock();
             let content = term.renderable_content();
@@ -204,8 +205,9 @@ impl Element for TerminalElement {
                 }
 
                 // Text
+                let hovered_link = hovered.as_ref().is_some_and(|(r, columns)| *r == row && columns.as_ref().is_some_and(|c| c.contains(&col)));
                 let underline =
-                    cell.flags.intersects(Flags::ALL_UNDERLINES) || cell.hyperlink().is_some();
+                    cell.flags.intersects(Flags::ALL_UNDERLINES) || cell.hyperlink().is_some() || hovered_link;
                 let ch = cell.c;
                 if cell.flags.contains(Flags::HIDDEN) || (ch == ' ' && !underline) || ch == '\0' {
                     continue;

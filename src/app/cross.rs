@@ -1,6 +1,7 @@
 //! Sessions reaching other sessions: a Claude Code session can list, search and read the others and open a new one.
-//! The MCP helper files the request (`claude/bridge.rs`) and Claudiu answers it on its next tick, with no dialog (product
-//! owner decision).
+//! The MCP helper files the request (`claude/bridge.rs`) and Claudiu answers it on its next tick. Listing, searching and
+//! reading answer at once; opening a session with a first message of its own asks the user first, since that is a
+//! prompt the user never wrote.
 
 use super::*;
 use crate::claude::bridge::{self, Request};
@@ -9,6 +10,23 @@ use serde_json::Value;
 /// Longest first message a session may hand over: it travels on a Windows command line, which is limited to about
 /// 32,000 characters.
 const MAX_PROMPT: usize = 2000;
+
+/// A `start_code_session` request that waits for the user's answer to its dialog.
+pub struct PendingStart {
+    req: Request,
+    /// The dialog is up (it needs the one modal slot, which another dialog may hold).
+    shown: bool,
+}
+
+/// Longest part of the first message the dialog quotes.
+const SHOWN_PROMPT: usize = 600;
+
+/// What the dialog says about the session a session wants to open.
+fn start_question(asker: &str, folder: &std::path::Path, prompt: &str) -> String {
+    let quoted: String = prompt.chars().take(SHOWN_PROMPT).collect();
+    let more = if prompt.chars().count() > SHOWN_PROMPT { "…" } else { "" };
+    format!("“{asker}” wants to open a new Claude Code session in {} with this first message:\n\n{quoted}{more}", folder.to_string_lossy())
+}
 
 /// `2026-10-22 09:10 UTC` for a Unix time (days since 1970 turned into a calendar date, no time crate needed).
 fn utc(ts: i64) -> String {
@@ -66,10 +84,66 @@ impl Workspace {
     /// work is refused with the reason.
     pub(super) fn serve_requests(&mut self, requests: Vec<Request>, window: &mut Window, cx: &mut Context<Self>) {
         for mut req in requests.into_iter().filter(|r| r.deadline > crate::store::now()) {
-            let result = self.prepare(&mut req).and_then(|()| self.run_request(&req, window, cx));
+            let prepared = self.prepare(&mut req);
+            if prepared.is_ok() && wants_confirmation(&req) {
+                self.pending_starts.push(PendingStart { req, shown: false });
+                continue;
+            }
+            let result = prepared.and_then(|()| self.run_request(&req, window, cx));
             let ok = result.is_ok();
             answer(&req, ok, result.unwrap_or_else(|e| e));
         }
+        self.settle_pending_starts(window, cx);
+    }
+
+    /// Once a second: drop the requests nobody waits for, show the next dialog when the modal slot is free, and tell the
+    /// session when its dialog was closed without a yes.
+    fn settle_pending_starts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let now = crate::store::now();
+        self.pending_starts.retain(|p| p.req.deadline > now);
+        let asking = match &self.modal {
+            Some(Modal::Confirm { act: Act::ConfirmStartSession(id), .. }) => Some(id.clone()),
+            _ => None,
+        };
+        let mut declined = vec![];
+        self.pending_starts.retain(|p| {
+            let gone = p.shown && asking.as_deref() != Some(p.req.id.as_str());
+            if gone {
+                declined.push(p.req.clone());
+            }
+            !gone
+        });
+        for req in declined {
+            answer(&req, false, "The user declined.");
+        }
+        if self.modal.is_some() {
+            return;
+        }
+        let Some(p) = self.pending_starts.iter_mut().find(|p| !p.shown) else { return };
+        p.shown = true;
+        let requester = p.req.from.split_once(':').map_or(p.req.from.as_str(), |(_, id)| id);
+        let asker = self.store.session(requester).map_or_else(|| "A session".to_string(), |s| s.display_title().to_string());
+        let folder = PathBuf::from(p.req.args["folder"].as_str().unwrap_or_default());
+        let prompt = p.req.args["prompt"].as_str().unwrap_or_default().trim().to_string();
+        self.modal = Some(Modal::Confirm {
+            title: "Start a Claude Code session?".into(),
+            body: start_question(&asker, &folder, &prompt),
+            confirm: "Start session".into(),
+            danger: false,
+            act: Act::ConfirmStartSession(p.req.id.clone()),
+        });
+        window.focus(&self.modal_focus, cx);
+        cx.notify();
+    }
+
+    /// The user said yes to a waiting `start_code_session`.
+    pub(super) fn confirm_start(&mut self, req_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.modal = None;
+        let Some(ix) = self.pending_starts.iter().position(|p| p.req.id == req_id) else { return };
+        let req = self.pending_starts.remove(ix).req;
+        let result = self.run_request(&req, window, cx);
+        let ok = result.is_ok();
+        answer(&req, ok, result.unwrap_or_else(|e| e));
     }
 
     /// Check what starting a session needs and resolve the folder into `req.args["folder"]`.
@@ -157,7 +231,7 @@ impl Workspace {
                 let before = self.selected.clone();
                 // A prompt that looks like a flag must not become one.
                 let leading = prompt.map(|p| if p.starts_with('-') { format!(" {p}") } else { p }).into_iter().collect();
-                self.new_claude_with(cwd.clone(), leading, window, cx);
+                self.new_claude_with(cwd.clone(), leading, Starter::OtherSession, window, cx);
                 match self.selected.clone().filter(|s| Some(s) != before.as_ref()) {
                     Some(id) => {
                         // A session started from another one is linked with it from the start.
@@ -181,5 +255,37 @@ mod tests {
         assert_eq!(utc(0), "1970-01-01 00:00 UTC");
         assert_eq!(utc(1_782_119_400), "2026-06-22 09:10 UTC");
         assert_eq!(utc(951_782_400 + 3600), "2000-02-29 01:00 UTC");
+    }
+}
+
+/// A new session with a first message of its own is a prompt the user did not write.
+fn wants_confirmation(req: &Request) -> bool {
+    req.tool == "start_code_session" && req.args["prompt"].as_str().is_some_and(|p| !p.trim().is_empty())
+}
+
+#[cfg(test)]
+mod start_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn request(tool: &str, args: Value) -> Request {
+        Request { id: "r".into(), from: "code:s".into(), tool: tool.into(), args, deadline: 0 }
+    }
+
+    #[test]
+    fn only_a_session_with_a_first_message_needs_the_users_yes() {
+        assert!(wants_confirmation(&request("start_code_session", json!({"folder": "/p", "prompt": "do it"}))));
+        assert!(!wants_confirmation(&request("start_code_session", json!({"folder": "/p"}))), "no prompt, nothing to approve");
+        assert!(!wants_confirmation(&request("start_code_session", json!({"folder": "/p", "prompt": "  "}))));
+        assert!(!wants_confirmation(&request("read_code_session", json!({"prompt": "x"}))));
+    }
+
+    #[test]
+    fn the_dialog_quotes_a_long_message_in_part() {
+        let long = "x".repeat(SHOWN_PROMPT + 50);
+        let text = start_question("Fix build", std::path::Path::new("/p"), &long);
+        assert!(text.starts_with("“Fix build” wants to open a new Claude Code session in /p"));
+        assert!(text.ends_with(&format!("{}…", "x".repeat(SHOWN_PROMPT))));
+        assert!(!start_question("a", std::path::Path::new("/p"), "short").contains('…'));
     }
 }

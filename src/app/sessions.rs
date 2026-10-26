@@ -2,22 +2,35 @@
 
 use super::*;
 
+/// Item `n` (from 1) of `items`.
+fn numbered<T>(items: &[T], n: usize) -> Option<&T> {
+    items.get(n.checked_sub(1)?)
+}
+
+/// How long Ctrl (Cmd) is held alone before the sidebar shows the session shortcuts.
+const SHORTCUT_HOLD: Duration = Duration::from_millis(400);
+
 impl Workspace {
     /// Per-process additions to a Claude launch; nothing in the user's Claude Code config changes:
     /// the mod (`--plugin-dir`, which reports usage and status), the tab-title MCP server (`--mcp-config`, its
-    /// tools pre-allowed), and IDE integration switched off through environment variables.
+    /// tools pre-allowed), and IDE integration switched off through environment variables. `chrome` adds Claude in
+    /// Chrome (`--chrome`).
     fn with_helpers(
-        &self,
+        &mut self,
         mut spec: SpawnSpec,
         claude_session_id: &str,
         record_id: &str,
+        chrome: bool,
+        cx: &mut Context<Self>,
     ) -> SpawnSpec {
         let started = std::time::Instant::now();
         // Diagnostics for the start-up trace (`terminal/trace.rs`): start without Claudiu's MCP server or mod to see what they cost.
         let without = |name: &str| crate::terminal::trace::on() && std::env::var_os(name).is_some();
-        if let Ok(config) = mcp::prepare(claude_session_id, record_id).and_then(|c| if without("CLAUDIU_NO_MCP") { Err(std::io::Error::other("off")) } else { Ok(c) }) {
+        let settings = &self.store.data.settings;
+        let off = mcp::tools_off(&settings.claudiu_tools_off, &settings.trimmed_tools);
+        if let Ok(config) = mcp::prepare(claude_session_id, record_id, &off).and_then(|c| if without("CLAUDIU_NO_MCP") { Err(std::io::Error::other("off")) } else { Ok(c) }) {
             spec.args.push("--allowedTools".into());
-            spec.args.extend(mcp::allowed_tools());
+            spec.args.extend(mcp::allowed_tools(&off));
             spec.args.extend(["--mcp-config".into(), config.to_string_lossy().into_owned()]);
         }
         if let Ok(dir) = claude::plugin::install().and_then(|d| if without("CLAUDIU_NO_MOD") { Err(std::io::Error::other("off")) } else { Ok(d) }) {
@@ -28,13 +41,14 @@ impl Workspace {
             spec.env.push((crate::visual::VISUAL_ENV.into(), crate::visual::file(record_id).to_string_lossy().into_owned()));
             spec.env.push((crate::claude::ask::ASK_ENV.into(), crate::claude::ask::request_file(record_id).to_string_lossy().into_owned()));
         }
-        if self.store.session(record_id).and_then(|r| r.claude.as_ref()).is_some_and(|m| m.chrome) {
+        if chrome {
             spec.args.push("--chrome".into());
         }
         spec.env.push(("CLAUDE_CODE_NO_FLICKER".into(), "1".into())); // fullscreen renderer, per process
         spec.env.push(("CLAUDE_CODE_AUTO_CONNECT_IDE".into(), "false".into()));
         spec.env.push(("CLAUDE_CODE_IDE_SKIP_AUTO_INSTALL".into(), "1".into()));
-        if let Some(acct) = self.store.active_account() {
+        self.sync_configs_now(cx);
+        if let Some(acct) = self.store.session_account(record_id) {
             spec.env.push((usage::ACCOUNT_ENV.into(), acct.id.clone()));
             spec.env.extend(Self::account_env(acct));
         }
@@ -87,12 +101,12 @@ impl Workspace {
     }
 
     pub fn new_claude(&mut self, cwd: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        self.new_claude_with(cwd, vec![], window, cx);
+        self.new_claude_with(cwd, vec![], Starter::User, window, cx);
     }
 
     /// `leading` goes before every other argument: the initial prompt must come ahead of the variadic
     /// `--allowedTools` / `--mcp-config` flags, or they would swallow it.
-    pub(super) fn new_claude_with(&mut self, cwd: PathBuf, leading: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn new_claude_with(&mut self, cwd: PathBuf, mut leading: Vec<String>, by: Starter, window: &mut Window, cx: &mut Context<Self>) {
         let Some(exe) = self.claude_exe.clone() else {
             self.toast("Could not find the `claude` CLI. Install Claude Code, or set its path in Settings.", true, cx);
             return;
@@ -100,8 +114,12 @@ impl Workspace {
         let session_id = new_id();
         let record_id = new_id();
         let mut spec = claude::new_session_spec(&exe, &cwd, &session_id);
+        let settings = &self.store.data.settings;
+        let defaults = claude::defaults::flags(&settings.new_session, settings.trimmed_tools.contains(&claude::trim::Trim::PlanMode), &leading, by);
+        leading.extend(defaults);
         spec.args.splice(0..0, leading);
-        let spec = self.with_helpers(spec, &session_id, &record_id);
+        let chrome = self.store.data.settings.chrome_default;
+        let spec = self.with_helpers(spec, &session_id, &record_id, chrome, cx);
         let record = SessionRecord {
             id: record_id,
             kind: SessionKind::Claude,
@@ -116,6 +134,7 @@ impl Workspace {
             hidden: false,
             claude: Some(ClaudeMeta {
                 session_id,
+                chrome,
                 ..Default::default()
             }),
         };
@@ -143,7 +162,7 @@ impl Workspace {
         if let Some(name) = rec.chosen_title() {
             spec.args.extend(["--name".into(), name.into()]);
         }
-        let spec = self.with_helpers(spec, &meta.session_id, &rec.id);
+        let spec = self.with_helpers(spec, &meta.session_id, &rec.id, meta.chrome, cx);
         self.start(rec, spec, false, window, cx);
     }
 
@@ -196,6 +215,7 @@ impl Workspace {
             move |ws: &mut Workspace, _view, ev: &TerminalEvent, window, cx| match ev {
                 TerminalEvent::Exited(code) => ws.on_exit(&sub_id, *code, window, cx),
                 TerminalEvent::Bell => {}
+                TerminalEvent::OpenPath(path, line) => ws.open_from_terminal(&sub_id, path, *line, window, cx),
             },
         );
         let claude_name = spec.args.iter().position(|a| a == "--name").and_then(|i| spec.args.get(i + 1)).cloned();
@@ -203,11 +223,17 @@ impl Workspace {
         if let Some(cid) = self.store.session(&id).and_then(|r| r.claude_id()) {
             mcp::write_name(cid, claude_name.as_deref());
         }
-        let account = self.store.active_account().map_or_else(|| MAIN_ACCOUNT.into(), |a| a.id.clone());
+        // The account `with_helpers` chose: kept, so the session starts there again after closing or a restart.
+        let account = self.store.session_account(&id).map_or_else(|| MAIN_ACCOUNT.into(), |a| a.id.clone());
+        if let Some(meta) = self.store.session_mut(&id).and_then(|r| r.claude.as_mut()) {
+            meta.account = Some(account.clone());
+        }
+        let _focus = self.watch_terminal_focus(&id, &view, window, cx);
         self.live.push(Live {
             id: id.clone(),
             view,
             _sub: sub,
+            _focus,
             claude_name,
             title_stamp: None,
             account,
@@ -324,6 +350,7 @@ impl Workspace {
         let was_active = self.active_id().is_some_and(|a| a == id);
         self.live.retain(|l| l.id != id); // dropping the view drops the Terminal, which closes the PTY
         self.shells.remove(id);
+        self.panes.remove(id);
         self.visuals.remove(id);
         self.recent.retain(|r| r != id);
         // Closing the shown session goes back to the one shown before it; otherwise stay where we are.
@@ -348,13 +375,45 @@ impl Workspace {
         cx.notify();
     }
 
+    /// The running sessions, in the sidebar's order.
+    pub fn running_ids(&self, cx: &App) -> Vec<Id> {
+        self.live.iter().filter(|l| l.view.read(cx).is_running()).map(|l| l.id.clone()).collect()
+    }
+
+    /// Show running session number `n` (from 1), as the sidebar numbers them while Ctrl is held.
+    pub fn show_numbered(&mut self, n: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(id) = numbered(&self.running_ids(cx), n).cloned() {
+            self.show_session(&id, window, cx);
+        }
+    }
+
+    /// Ctrl (Cmd) alone, held for a moment, shows the sessions' numbers; anything else hides them. Quick chords such as
+    /// Ctrl+C never show them, since the key is let go before the wait ends.
+    pub fn modifiers_changed(&mut self, modifiers: &gpui::Modifiers, cx: &mut Context<Self>) {
+        self.shortcuts_wait += 1;
+        if self.shortcuts_shown {
+            self.shortcuts_shown = false;
+            cx.notify();
+        }
+        let alone = modifiers.secondary() && !modifiers.shift && !modifiers.alt && !(modifiers.control && modifiers.platform);
+        if !alone {
+            return;
+        }
+        let wait = self.shortcuts_wait;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(SHORTCUT_HOLD).await;
+            let _ = this.update(cx, |ws, cx| {
+                if ws.shortcuts_wait == wait {
+                    ws.shortcuts_shown = true;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
     pub fn cycle(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
-        let running: Vec<Id> = self
-            .live
-            .iter()
-            .filter(|l| l.view.read(cx).is_running())
-            .map(|l| l.id.clone())
-            .collect();
+        let running = self.running_ids(cx);
         if running.is_empty() {
             return;
         }
@@ -393,5 +452,19 @@ impl Workspace {
         }
         let tokens = meta.context_tokens?;
         Some((claude::context_fraction(tokens), tokens, false, None))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::numbered;
+
+    #[test]
+    fn numbers_count_from_one() {
+        let running = ["a", "b", "c"];
+        assert_eq!(numbered(&running, 1), Some(&"a"));
+        assert_eq!(numbered(&running, 3), Some(&"c"));
+        assert_eq!(numbered(&running, 4), None, "no fourth session");
+        assert_eq!(numbered(&running, 0), None);
     }
 }

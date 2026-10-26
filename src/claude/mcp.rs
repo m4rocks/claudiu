@@ -13,12 +13,81 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
+use serde::{Deserialize, Serialize};
+
+use crate::claude::trim::Trim;
 use crate::store::Attached;
 
 pub const FLAG: &str = "--mcp-title";
 pub const SESSION_ENV: &str = "CLAUDIU_SESSION";
 /// Claudiu's own id of the session. Unlike Claude's session id it survives `/clear`.
 pub const RECORD_ENV: &str = "CLAUDIU_RECORD";
+/// Comma-separated names of what the server leaves out of this session (see `tools_off`). Missing means nothing is off.
+pub const TOOLS_OFF_ENV: &str = "CLAUDIU_TOOLS_OFF";
+
+/// A group of Claudiu's tools the user can switch off (Settings → Claudiu tools). `set_tab_title` has no switch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Feature {
+    Visual,
+    Github,
+    Sessions,
+    Model,
+}
+
+impl Feature {
+    /// In the order the page lists them.
+    pub const ALL: [Feature; 4] = [Self::Visual, Self::Github, Self::Sessions, Self::Model];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Visual => "Visual panel",
+            Self::Github => "GitHub sidebar",
+            Self::Sessions => "Other sessions",
+            Self::Model => "Model switch",
+        }
+    }
+
+    /// The name in `CLAUDIU_TOOLS_OFF`.
+    fn name(self) -> &'static str {
+        match self {
+            Self::Visual => "visual",
+            Self::Github => "github",
+            Self::Sessions => "sessions",
+            Self::Model => "model",
+        }
+    }
+}
+
+/// `features` in the page's order, without repeats: how they are stored, so equal sets compare equal.
+pub fn normalized_features(features: &[Feature]) -> Vec<Feature> {
+    Feature::ALL.into_iter().filter(|f| features.contains(f)).collect()
+}
+
+/// What the server leaves out of a session: the features switched off, plus `ask_user_question` and `artifacts` when
+/// those Claude Code tools are trimmed, so Claudiu's own text stops naming them.
+pub fn tools_off(features: &[Feature], trimmed: &[Trim]) -> Vec<&'static str> {
+    let mut off: Vec<&'static str> = normalized_features(features).into_iter().map(Feature::name).collect();
+    off.extend(trimmed.contains(&Trim::AskUserQuestion).then_some("ask_user_question"));
+    off.extend(trimmed.contains(&Trim::Artifacts).then_some("artifacts"));
+    off
+}
+
+/// The feature a tool belongs to; `set_tab_title` belongs to none.
+fn feature_of(tool: &str) -> Option<&'static str> {
+    match tool {
+        "show_visual" => Some("visual"),
+        "attach_github" | "detach_github" => Some("github"),
+        "link_session" | "unlink_session" => Some("sessions"),
+        "set_model" => Some("model"),
+        _ if BRIDGE_TOOLS.contains(&tool) => Some("sessions"),
+        _ => None,
+    }
+}
+
+fn is_off(off: &[&str], tool: &str) -> bool {
+    feature_of(tool).is_some_and(|f| off.contains(&f))
+}
 
 /// Tools the model uses to tell Claudiu something about itself; none of them reads or starts another session.
 const OWN_TOOLS: [&str; 6] = ["set_tab_title", "attach_github", "detach_github", "link_session", "unlink_session", "show_visual"];
@@ -28,36 +97,69 @@ const BRIDGE_TOOLS: [&str; 5] = ["list_code_sessions", "read_code_session", "sea
 
 /// `mcp__<server>__<tool>` names allowed per process so Claude Code adds no prompt of its own: renaming the tab is
 /// harmless, and the cross-session tools are limited to what the user asks of the model.
-pub fn allowed_tools() -> Vec<String> {
-    OWN_TOOLS.iter().copied().chain(BRIDGE_TOOLS).map(|t| format!("mcp__claudiu__{t}")).collect()
+pub fn allowed_tools(off: &[&str]) -> Vec<String> {
+    OWN_TOOLS.iter().copied().chain(BRIDGE_TOOLS).filter(|t| !is_off(off, t)).map(|t| format!("mcp__claudiu__{t}")).collect()
 }
 
 const BRIDGE_INSTRUCTIONS: &str = " Claudiu also has tools that reach your other sessions: list_code_sessions, read_code_session, \
-search_sessions, search_projects (the user's projects) and start_code_session (opens a new Claude Code session). They act at once. \
-Use them only when the user asks you to look at, hand work to or continue in another session, or to work in a project.";
+search_sessions, search_projects and start_code_session. They act at once. Use them only when the user asks you to look at, hand \
+work to or continue in another session, or to work in a project; search_sessions may also be used unasked to find a session to link.";
 
-const LINK_INSTRUCTIONS: &str = " Claudiu shows related sessions together. When this work continues, builds on or was \
-prompted by another Claude Code session (the user says so, or you recognise it), find it with search_sessions \
-and call link_session with its id, once per pair. When a link no longer fits (the work went elsewhere, or it was linked by mistake), \
-call unlink_session with the id. Both are silent and change nothing else.";
+const LINK_INSTRUCTIONS: &str = " Claudiu shows related sessions together. When this work continues or builds on another \
+Claude Code session (the user says so, or you recognise it), find it with search_sessions and call link_session once per pair; \
+call unlink_session when a link no longer fits. Both are silent.";
 
 /// What makes the model call `show_visual` (the tool's own description teaches the dialect, and stays deferred).
-const VISUAL_INSTRUCTIONS: &str = " Visual: Claudiu draws a Visual panel beside this terminal. When something is easier to see than to \
-read (a diagram, a comparison, a table, a chart, a dashboard, a mock-up, a structured walkthrough), call show_visual with Markdown and \
-the panel fills as you write it. If its schema is not loaded yet, load it first with ToolSearch (select:mcp__claudiu__show_visual).";
+const VISUAL_INSTRUCTIONS: &str = " Visual: Claudiu has a Visual panel beside this terminal. When a reply would hold a table, \
+a comparison, a flow of 3+ steps, an architecture, a before/after, several statuses or a chart, draw that part with show_visual \
+unasked (private, no approval) and reply in a few lines. Not for short answers or code.";
+
+const ARTIFACT_INSTRUCTIONS: &str = " Artifacts are for pages to share.";
+
+const VISUAL_LOADING: &str = " Load it first with ToolSearch (select:mcp__claudiu__show_visual) if needed.";
 
 /// What makes the model call `attach_github`.
-const GITHUB_INSTRUCTIONS: &str = " GitHub: attach_github is silent and costs nothing, and its description says when to call it; detach_github takes an item off again when it no longer belongs. If its schema is not loaded yet, load it first with ToolSearch (select:mcp__claudiu__attach_github).";
+const GITHUB_INSTRUCTIONS: &str = " GitHub: call attach_github (silent, free) for each issue or pull request you work on, \
+as its description says; detach_github takes one off again.";
 
-const INSTRUCTIONS: &str = "You are running inside Claudiu, which shows a tab title for this session. Call the \
-set_tab_title tool with a short title (2-5 words, no quotes) once you understand the user's first request. After \
-that, call it again only when the current task or scope changes and the title no longer fits. Also call it \
-whenever the user asks you to rename or retitle this session or tab (use the name they gave). Don't call it again \
-with the same or a near-identical title, and never twice in a row for the same reason (if the user ran /rename \
-themselves, the title is already set; leave it). Don't mention the tool unless the user asked for a rename.\
- Never switch models on your own. Before calling set_model, ask the user with the AskUserQuestion tool which \
-model and effort they want, unless they just named them explicitly. The switch applies from your next request; \
-after calling set_model, end your turn and ask the user to confirm before continuing, so the session itself switches.";
+const TITLE_INSTRUCTIONS: &str = "You are running inside Claudiu, which shows a tab title for this session. Call \
+set_tab_title (2-5 words, no quotes) once you understand the user's first request, again only when the task changes \
+and the title no longer fits, and whenever the user asks for a rename (use their name). Never repeat a near-identical \
+title; if the user ran /rename, leave it. Don't mention the tool unless asked.";
+
+/// What makes the model ask before it calls `set_model`; `ask` is how it asks.
+fn model_instructions(ask: &str) -> String {
+    format!(
+        " Never switch models on your own: before set_model, ask {ask} which model and effort, unless the user \
+just named them. After set_model, end your turn and ask the user to confirm before continuing, so the switch applies."
+    )
+}
+
+/// The `initialize` reply's instructions: the tab-title text, then the text of each feature that is not off.
+fn instructions(off: &[&str]) -> String {
+    let on = |name: &str| !off.contains(&name);
+    let mut text = TITLE_INSTRUCTIONS.to_string();
+    if on("model") {
+        text += &model_instructions(if on("ask_user_question") { "with AskUserQuestion" } else { "the user" });
+    }
+    if on("github") {
+        text += GITHUB_INSTRUCTIONS;
+    }
+    if on("sessions") {
+        text += LINK_INSTRUCTIONS;
+    }
+    if on("visual") {
+        text += VISUAL_INSTRUCTIONS;
+        if on("artifacts") {
+            text += ARTIFACT_INSTRUCTIONS;
+        }
+        text += VISUAL_LOADING;
+    }
+    if on("sessions") {
+        text += BRIDGE_INSTRUCTIONS;
+    }
+    text
+}
 
 fn titles_dir() -> PathBuf {
     crate::datadir::data_dir().join("titles")
@@ -99,12 +201,15 @@ pub fn run() -> i32 {
     let session = std::env::var(SESSION_ENV).unwrap_or_default();
     let record = std::env::var(RECORD_ENV).unwrap_or_else(|_| session.clone());
     let from = format!("code:{record}");
-    serve(std::io::stdin().lock(), std::io::stdout().lock(), &session, &record, &crate::datadir::data_dir(), |tool, args| crate::claude::bridge::ask(&from, tool, args));
+    let off_env = std::env::var(TOOLS_OFF_ENV).unwrap_or_default();
+    let off: Vec<&str> = off_env.split(',').map(str::trim).filter(|n| !n.is_empty()).collect();
+    serve(std::io::stdin().lock(), std::io::stdout().lock(), &session, &record, &crate::datadir::data_dir(), &off, |tool, args| crate::claude::bridge::ask(&from, tool, args));
     0
 }
 
-/// `ask` carries a cross-session request to Claudiu and waits for the user's answer.
-fn serve(input: impl BufRead, mut out: impl Write, session: &str, record: &str, data: &Path, ask: impl Fn(&str, &Value) -> Result<String, String>) {
+/// `off` names what this session leaves out (see `tools_off`): those tools are neither listed nor callable and their
+/// instruction text is dropped. `ask` carries a cross-session request to Claudiu and waits for the user's answer.
+fn serve(input: impl BufRead, mut out: impl Write, session: &str, record: &str, data: &Path, off: &[&str], ask: impl Fn(&str, &Value) -> Result<String, String>) {
     for line in input.lines().map_while(Result::ok) {
         let Ok(msg) = serde_json::from_str::<Value>(&line) else { continue };
         // Notifications (no id) and responses (no method) need no answer.
@@ -114,11 +219,11 @@ fn serve(input: impl BufRead, mut out: impl Write, session: &str, record: &str, 
                 "protocolVersion": msg["params"]["protocolVersion"].as_str().unwrap_or("2025-06-18"),
                 "capabilities": { "tools": {} },
                 "serverInfo": { "name": "claudiu", "version": env!("CARGO_PKG_VERSION") },
-                "instructions": format!("{INSTRUCTIONS}{GITHUB_INSTRUCTIONS}{LINK_INSTRUCTIONS}{VISUAL_INSTRUCTIONS}{BRIDGE_INSTRUCTIONS}"),
+                "instructions": instructions(off),
             })),
             "ping" => Ok(json!({})),
-            "tools/list" => Ok(json!({ "tools": own_tools().into_iter().chain(bridge_tools()).collect::<Vec<_>>() })),
-            "tools/call" => Ok(match msg["params"]["name"].as_str() {
+            "tools/list" => Ok(json!({ "tools": own_tools(off).into_iter().chain(bridge_tools()).filter(|t| !is_off(off, t["name"].as_str().unwrap_or_default())).collect::<Vec<_>>() })),
+            "tools/call" => Ok(match msg["params"]["name"].as_str().filter(|tool| !is_off(off, tool)) {
                 Some("set_tab_title") => set_title(&msg["params"], session, &data.join("titles")),
                 Some("attach_github") => attach_github(&msg["params"], record, &attach_dir(data)),
                 Some("detach_github") => detach_github(&msg["params"], record, &attach_dir(data)),
@@ -144,7 +249,7 @@ fn serve(input: impl BufRead, mut out: impl Write, session: &str, record: &str, 
 }
 
 /// The tools that tell Claudiu something about the session.
-fn own_tools() -> Vec<Value> {
+fn own_tools(off: &[&str]) -> Vec<Value> {
     let link = json!({
         "name": "link_session",
         "description": "Link this session to another one, so Claudiu shows them together in the sidebar. Use it when this work continues, builds on or was prompted by another Claude Code session. Find the id with search_sessions. Silent; once per pair.",
@@ -156,13 +261,12 @@ fn own_tools() -> Vec<Value> {
     });
     let attach = json!({
         "name": "attach_github",
-        "description": "Show a GitHub issue or pull request of this session's project in Claudiu's sidebar. Call this every time you read, view, search, open, comment on or push anything about a GitHub issue or pull request, including when the user only asks to see it. Also call it when the user names one by number or link. Call it once per item, before running the next command. It changes nothing on GitHub.",
+        "description": "Show a GitHub issue or pull request of this session's project in Claudiu's sidebar. Call it once per item, before your next command, whenever you read, open, comment on, create or push to one, or the user names or asks to see one. Not for every result of a list or search. It changes nothing on GitHub.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "kind": { "type": "string", "enum": ["issue", "pull"], "description": "issue or pull (a pull request)" },
                 "number": { "type": "integer", "description": "The issue or pull request number" },
-                "title": { "type": "string", "description": "Its title, if you know it (optional)" },
             },
             "required": ["kind", "number"],
         },
@@ -218,7 +322,10 @@ fn own_tools() -> Vec<Value> {
                 },
             })), attach, detach, json!({
                 "name": "set_model",
-                "description": "Switch this session's model and/or effort from your next request on, even mid-turn. Always ask the user first with the AskUserQuestion tool (which model, which effort) unless they just named them explicitly; never switch on your own. Claude Code also keeps the choice as the user's default model/effort.",
+                "description": format!(
+                    "Switch this session's model and/or effort from your next request on, even mid-turn. Always ask the user first{} (which model, which effort) unless they just named them explicitly; never switch on your own. Claude Code also keeps the choice as the user's default model/effort.",
+                    if off.contains(&"ask_user_question") { "" } else { " with the AskUserQuestion tool" }
+                ),
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -247,7 +354,7 @@ fn bridge_tools() -> Vec<Value> {
         ),
         tool(
             "search_sessions",
-            format!("Search the user's Claude Code sessions by words in their title, project or folder. Returns id, title, project and created/updated times of the best matches; pass an id to link_session.{CONFIRM}"),
+            format!("Search the user's Claude Code sessions by words in their title, project or folder. Returns id, title, project and created/updated times of the best matches; pass an id to link_session. Read-only: use it when the user asks, or unasked to find a session to link."),
             json!({ "query": { "type": "string", "description": "Words to look for (optional: without it, the most recent)" } }),
         ),
         tool(
@@ -255,7 +362,7 @@ fn bridge_tools() -> Vec<Value> {
             format!("Search the user's projects (name, folder, git branch) by words. Pass a project's name as the folder of start_code_session.{CONFIRM}"),
             json!({ "query": { "type": "string", "description": "Words to look for (optional: without it, every project)" } }),
         ),
-        tool("start_code_session", format!("Open a new Claude Code session, optionally with a first prompt.{CONFIRM}"), target),
+        tool("start_code_session", format!("Open a new Claude Code session, optionally with a first prompt. With a prompt, the user is asked to approve it first; without one, it opens at once.{CONFIRM}"), target),
     ]
 }
 
@@ -284,8 +391,7 @@ fn attach_github(params: &Value, record: &str, dir: &Path) -> Value {
         Ok(item) => item,
         Err(e) => return e,
     };
-    let title = args["title"].as_str().and_then(clean_title);
-    match append_line(dir, record, &json!({ "pull": pull, "number": number, "title": title })) {
+    match append_line(dir, record, &json!({ "pull": pull, "number": number })) {
         Ok(()) => reply(&format!("{} #{number} attached.", if pull { "Pull request" } else { "Issue" }), false),
         Err(e) => reply(&format!("could not attach: {e}"), true),
     }
@@ -321,10 +427,15 @@ fn detach_github(params: &Value, record: &str, dir: &Path) -> Value {
 
 /// One JSON line for Claudiu to pick up, in the file of the calling session.
 fn append_line(dir: &Path, record: &str, line: &Value) -> std::io::Result<()> {
-    use std::io::Write as _;
     std::fs::create_dir_all(dir)?;
     let path = dir.join(format!("{}.jsonl", crate::datadir::safe_file_stem(record)));
-    writeln!(std::fs::OpenOptions::new().create(true).append(true).open(path)?, "{line}")
+    write_line(&mut std::fs::OpenOptions::new().create(true).append(true).open(path)?, line)
+}
+
+/// The line goes out in one write: `writeln!` on a bare file writes it in many pieces, and `read_attached` could
+/// catch half a line and drop it.
+fn write_line(out: &mut impl std::io::Write, line: &Value) -> std::io::Result<()> {
+    out.write_all(format!("{line}\n").as_bytes())
 }
 
 /// Ask Claudiu to show this session together with another one (`verb` "link"), or to stop. Claudiu checks that the
@@ -345,11 +456,15 @@ fn link_session(params: &Value, record: &str, dir: &Path, verb: &str) -> Value {
 }
 
 /// Write the per-session MCP config and return its path (for `--mcp-config`).
-pub fn prepare(claude_session_id: &str, record_id: &str) -> std::io::Result<PathBuf> {
+pub fn prepare(claude_session_id: &str, record_id: &str, off: &[&str]) -> std::io::Result<PathBuf> {
+    let mut env = json!({ SESSION_ENV: claude_session_id, RECORD_ENV: record_id });
+    if !off.is_empty() {
+        env[TOOLS_OFF_ENV] = off.join(",").into();
+    }
     let config = json!({ "mcpServers": { "claudiu": {
         "command": std::env::current_exe()?.to_string_lossy(),
         "args": [FLAG],
-        "env": { SESSION_ENV: claude_session_id, RECORD_ENV: record_id },
+        "env": env,
     }}});
     let path = config_dir().join(format!("{}.json", crate::datadir::safe_file_stem(claude_session_id)));
     crate::datadir::write_atomic(&path, &config.to_string())?;
@@ -429,15 +544,38 @@ pub fn cleanup_dirs() -> [PathBuf; 4] {
 mod tests {
     use super::*;
 
-    fn talk_with(requests: &[Value], session: &str, dir: &Path, ask: impl Fn(&str, &Value) -> Result<String, String>) -> Vec<Value> {
+    fn talk_off(requests: &[Value], session: &str, dir: &Path, off: &[&str], ask: impl Fn(&str, &Value) -> Result<String, String>) -> Vec<Value> {
         let input: String = requests.iter().map(|r| format!("{r}\n")).collect();
         let mut out = Vec::new();
-        serve(input.as_bytes(), &mut out, session, session, dir, ask);
+        serve(input.as_bytes(), &mut out, session, session, dir, off, ask);
         String::from_utf8(out).unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect()
+    }
+
+    fn talk_with(requests: &[Value], session: &str, dir: &Path, ask: impl Fn(&str, &Value) -> Result<String, String>) -> Vec<Value> {
+        talk_off(requests, session, dir, &[], ask)
     }
 
     fn talk(requests: &[Value], session: &str, dir: &Path) -> Vec<Value> {
         talk_with(requests, session, dir, |_, _| Err("no".into()))
+    }
+
+    #[test]
+    fn a_line_for_claudiu_is_written_in_one_piece() {
+        #[derive(Default)]
+        struct Writes(Vec<Vec<u8>>);
+        impl std::io::Write for Writes {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.push(buf.to_vec());
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut out = Writes::default();
+        write_line(&mut out, &json!({ "pull": false, "number": 71, "title": "New-session defaults" })).unwrap();
+        assert_eq!(out.0.len(), 1, "a reader between two writes would see half a line");
+        assert!(out.0[0].ends_with(b"\n"));
     }
 
     #[test]
@@ -462,8 +600,8 @@ mod tests {
         assert_eq!(r[1]["result"]["isError"], false);
         assert_eq!(r[2]["result"]["content"][0]["text"], "The user declined.");
         assert_eq!(r[2]["result"]["isError"], true);
-        assert_eq!(allowed_tools().len(), BRIDGE_TOOLS.len() + OWN_TOOLS.len());
-        assert!(allowed_tools().contains(&"mcp__claudiu__show_visual".to_string()));
+        assert_eq!(allowed_tools(&[]).len(), BRIDGE_TOOLS.len() + OWN_TOOLS.len());
+        assert!(allowed_tools(&[]).contains(&"mcp__claudiu__show_visual".to_string()));
     }
 
     #[test]
@@ -533,9 +671,9 @@ mod tests {
         let errors: Vec<_> = r.iter().map(|x| x["result"]["isError"].as_bool().unwrap()).collect();
         assert_eq!(errors, [false, false, true, true, true]);
         let lines: Vec<Attached> = std::fs::read_to_string(tmp.path().join("attach/s1.jsonl")).unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect();
-        assert_eq!(lines, [Attached { pull: false, number: 52, title: Some("Right sidebar".into()) }, Attached { pull: true, number: 7, title: None }]);
+        assert_eq!(lines, [Attached { pull: false, number: 52, title: None, state: None }, Attached { pull: true, number: 7, title: None, state: None }]);
         assert_eq!(talk(&[call(json!({"kind":"issue","number":1}))], "", tmp.path())[0]["result"]["isError"], true);
-        assert!(allowed_tools().contains(&"mcp__claudiu__attach_github".to_string()));
+        assert!(allowed_tools(&[]).contains(&"mcp__claudiu__attach_github".to_string()));
     }
 
     #[test]
@@ -548,7 +686,7 @@ mod tests {
         let line = std::fs::read_to_string(tmp.path().join("attach/s1.jsonl")).unwrap();
         assert_eq!(line.lines().count(), 1);
         assert_eq!(parse_attachment(line.lines().next().unwrap()), Some(Attachment::Link("abc-123".into())));
-        assert_eq!(parse_attachment(r#"{"pull":true,"number":7,"title":null}"#), Some(Attachment::Github(Attached { pull: true, number: 7, title: None })));
+        assert_eq!(parse_attachment(r#"{"pull":true,"number":7,"title":null}"#), Some(Attachment::Github(Attached { pull: true, number: 7, title: None, state: None })));
         assert_eq!(parse_attachment(r#"{"unlink":"x"}"#), Some(Attachment::Unlink("x".into())));
         assert_eq!(parse_attachment(r#"{"detach":{"pull":false,"number":3}}"#), Some(Attachment::Detach { pull: false, number: 3 }));
         assert_eq!(parse_attachment(r#"{"detach":{"number":3}}"#), None);
@@ -564,5 +702,94 @@ mod tests {
         assert_eq!(r[1]["result"]["isError"], true);
         assert_eq!(std::fs::read_to_string(tmp.path().join("titles/s.txt")).unwrap().len(), 60);
         assert_eq!(talk(&[call(json!({"title":"hi"}))], "", tmp.path())[0]["result"]["isError"], true);
+    }
+
+    /// The tool names and the instruction text a server with `off` hands out.
+    fn offer(off: &[&str]) -> (Vec<String>, String) {
+        let tmp = tempfile::tempdir().unwrap();
+        let r = talk_off(
+            &[json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}), json!({"jsonrpc":"2.0","id":2,"method":"tools/list"})],
+            "s",
+            tmp.path(),
+            off,
+            |_, _| Err("no".into()),
+        );
+        let names = r[1]["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect();
+        (names, r[0]["result"]["instructions"].as_str().unwrap().to_string())
+    }
+
+    #[test]
+    fn with_nothing_off_the_server_offers_every_tool_and_all_the_text() {
+        let (names, text) = offer(&[]);
+        assert_eq!(names.len(), 12);
+        for part in [TITLE_INSTRUCTIONS, GITHUB_INSTRUCTIONS, LINK_INSTRUCTIONS, VISUAL_INSTRUCTIONS, BRIDGE_INSTRUCTIONS] {
+            assert!(text.contains(part));
+        }
+        assert!(text.contains("ask with AskUserQuestion which model") && text.contains("Artifacts are for pages to share."));
+    }
+
+    #[test]
+    fn each_feature_takes_its_tools_and_its_text_away() {
+        let (names, text) = offer(&["visual"]);
+        assert!(!names.contains(&"show_visual".to_string()) && names.len() == 11);
+        assert!(!text.contains("Visual:") && !text.contains("show_visual"));
+
+        let (names, text) = offer(&["github"]);
+        assert!(!names.iter().any(|n| n.ends_with("_github")) && names.len() == 10);
+        assert!(!text.contains("attach_github"));
+
+        let (names, text) = offer(&["sessions"]);
+        for gone in ["link_session", "unlink_session", "list_code_sessions", "read_code_session", "search_sessions", "search_projects", "start_code_session"] {
+            assert!(!names.contains(&gone.to_string()), "{gone}");
+        }
+        assert_eq!(names.len(), 5);
+        assert!(!text.contains("link_session") && !text.contains("start_code_session"));
+
+        let (names, text) = offer(&["model"]);
+        assert!(!names.contains(&"set_model".to_string()) && names.len() == 11);
+        assert!(!text.contains("set_model") && !text.contains("Never switch models"));
+    }
+
+    #[test]
+    fn the_tab_title_tool_and_text_stay_with_every_feature_off() {
+        let (names, text) = offer(&["visual", "github", "sessions", "model"]);
+        assert_eq!(names, ["set_tab_title"]);
+        assert_eq!(text, TITLE_INSTRUCTIONS);
+    }
+
+    #[test]
+    fn a_call_for_an_off_tool_is_unknown_and_never_reaches_claudiu() {
+        let tmp = tempfile::tempdir().unwrap();
+        let call = |name: &str| json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":{"id":"x"}}});
+        let r = talk_off(&[call("list_code_sessions"), call("attach_github")], "s", tmp.path(), &["sessions", "github"], |_, _| panic!("ask must not be called"));
+        for reply in &r {
+            assert_eq!((reply["result"]["isError"].as_bool(), reply["result"]["content"][0]["text"].as_str()), (Some(true), Some("unknown tool")));
+        }
+        assert!(!tmp.path().join("attach").exists(), "nothing was attached");
+    }
+
+    #[test]
+    fn allowed_tools_leaves_out_the_tools_of_features_that_are_off() {
+        assert_eq!(allowed_tools(&["github", "sessions"]), ["mcp__claudiu__set_tab_title", "mcp__claudiu__show_visual"]);
+    }
+
+    #[test]
+    fn trimming_ask_user_question_or_artifacts_changes_the_wording() {
+        let (_, text) = offer(&["ask_user_question", "artifacts"]);
+        assert!(!text.contains("AskUserQuestion") && text.contains("ask the user which model") && !text.contains("Artifacts"));
+        assert!(text.contains("Visual:"), "the Visual text itself stays");
+        let tmp = tempfile::tempdir().unwrap();
+        let described = |off: &[&str]| {
+            let r = talk_off(&[json!({"jsonrpc":"2.0","id":1,"method":"tools/list"})], "s", tmp.path(), off, |_, _| Err("no".into()));
+            r[0]["result"]["tools"].as_array().unwrap().iter().find(|t| t["name"] == "set_model").unwrap()["description"].as_str().unwrap().to_string()
+        };
+        assert!(described(&[]).contains("AskUserQuestion"));
+        assert!(!described(&["ask_user_question"]).contains("AskUserQuestion"));
+    }
+
+    #[test]
+    fn the_off_list_comes_from_both_settings_in_the_pages_order() {
+        assert_eq!(tools_off(&[], &[]), Vec::<&str>::new());
+        assert_eq!(tools_off(&[Feature::Model, Feature::Visual, Feature::Visual], &[Trim::Artifacts, Trim::PlanMode, Trim::AskUserQuestion]), ["visual", "model", "ask_user_question", "artifacts"]);
     }
 }

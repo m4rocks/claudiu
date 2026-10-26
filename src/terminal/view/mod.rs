@@ -3,6 +3,7 @@
 
 mod element;
 mod mouse;
+mod paths;
 mod typing;
 
 use element::TerminalElement;
@@ -38,6 +39,9 @@ use crate::panels::theme;
 pub enum TerminalEvent {
     Exited(Option<i32>),
     Bell,
+    /// Ctrl+click on a file path in the text, or on a `file:` link: the path as written (maybe relative to the
+    /// session's folder), and its line (1-based) when one was given.
+    OpenPath(String, Option<usize>),
 }
 
 #[derive(Clone, Copy)]
@@ -47,6 +51,12 @@ struct Metrics {
     origin: Point<Pixels>,
     /// How far the rows are drawn below their cells while scrolling between two lines.
     shift: Pixels,
+}
+
+/// A session moving to another account: who to, and when it began (the old process compacts first, then restarts).
+pub struct Handover {
+    pub to: String,
+    pub since: Instant,
 }
 
 pub struct TerminalView {
@@ -76,10 +86,27 @@ pub struct TerminalView {
     font_size: Pixels,
     /// Show a startup animation until the program first draws something (set for Claude sessions).
     pub loading: bool,
-    /// The account the session is handing over to: the skeleton says so until the new process is ready.
-    pub handover: Option<String>,
+    /// The skeleton says the session is handing over until the new process is ready.
+    pub handover: Option<Handover>,
     /// Whether a pane currently shows this terminal (kept up to date by the workspace's render).
     pub visible: bool,
+    /// A line Claudiu put into Claude's input for the user (`insert_reference`), until it is kept or taken back.
+    reference: Option<Inserted>,
+    /// While Ctrl is held over a link: its viewport row and the columns to underline (none when it is drawn as a link already).
+    hovered_link: Option<(usize, Option<std::ops::Range<usize>>)>,
+}
+
+/// What Ctrl+click opens.
+enum Link {
+    /// A file path and the line it names.
+    File(String, Option<usize>),
+    Url(String),
+}
+
+struct Inserted {
+    chars: usize,
+    /// The user typed or pasted after it, so it can no longer be erased without erasing their text too.
+    typed: bool,
 }
 
 impl EventEmitter<TerminalEvent> for TerminalView {}
@@ -166,6 +193,8 @@ impl TerminalView {
             loading: false,
             handover: None,
             visible: true,
+            reference: None,
+            hovered_link: None,
         }
     }
 
@@ -378,7 +407,7 @@ impl Render for TerminalView {
             }
         }
         let phase = match (&self.handover, self.handing, self.last_output) {
-            (Some(to), _, _) => format!("Handing over to {to}…"),
+            (Some(h), _, _) => format!("Handing over to {}…", h.to),
             (None, true, _) => "Handing your message to Claude Code…".into(),
             (None, false, Some(_)) => "Loading skills, plugins and MCP servers…".into(),
             (None, false, None) => "Starting Claude Code…".into(),
@@ -405,13 +434,15 @@ impl Render for TerminalView {
             .on_mouse_up(MouseButton::Middle, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
+            .when(self.hovered_link.is_some(), |d| d.cursor_pointer())
             .on_scroll_wheel(cx.listener(Self::on_scroll))
             .child(TerminalElement { view: cx.entity() })
             .when(self.loading || self.handover.is_some(), |d| {
                 let (cols, rows) = self.terminal.size();
                 let (cell_w, line_h) = self.metrics.map_or((8.0, LINE_H), |m| (f32::from(m.cell_w), f32::from(m.line_h)));
                 let grid = skeleton::Grid { cell_w, line_h, cols, rows };
-                d.child(skeleton::overlay(&self.draft, self.terminal.born.elapsed(), &phase, grid))
+                let since = self.handover.as_ref().map_or(self.terminal.born, |h| h.since);
+                d.child(skeleton::overlay(&self.draft, since.elapsed(), &phase, grid))
             })
     }
 }

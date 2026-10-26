@@ -44,8 +44,11 @@ pub enum ExternalState {
 pub struct Attached {
     pub pull: bool,
     pub number: u32,
+    /// Both come from GitHub (`app/attached_sync.rs`), never from the model.
     #[serde(default)]
     pub title: Option<String>,
+    #[serde(default)]
+    pub state: Option<crate::github::model::State>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -69,9 +72,16 @@ pub struct ClaudeMeta {
     pub auto_compact: Option<bool>,
     #[serde(default)]
     pub advisor: Option<String>,
+    /// Background compaction ("Precompute compaction" in `/config`); `None` while Claude Code does not offer it.
+    #[serde(default)]
+    pub precompute_compact: Option<bool>,
     /// Claude in Chrome: the session is (re)started with `--chrome`. Claudiu's own choice, so it survives restarts.
     #[serde(default)]
     pub chrome: bool,
+    /// The account this conversation runs under. It starts there again after closing it or restarting Claudiu, until a
+    /// hand-off moves it. `None` until Claudiu first starts it.
+    #[serde(default)]
+    pub account: Option<Id>,
     /// The advisor declared for the current conversation. A model change is saved in `advisor` at once but only
     /// becomes `advisor_active` on `/clear` or `/compact`; turning the advisor off/on changes it immediately.
     #[serde(default)]
@@ -162,18 +172,6 @@ pub struct AccountUsage {
     pub seven_day: Option<RateLimit>,
 }
 
-impl AccountUsage {
-    /// The higher of the 5-hour and 7-day use that still applies at `now`; a window past its reset counts as 0.
-    pub fn peak(&self, now: i64) -> f32 {
-        [&self.five_hour, &self.seven_day]
-            .into_iter()
-            .flatten()
-            .filter(|l| l.resets_at.is_none_or(|r| r > now))
-            .filter_map(|l| l.utilization)
-            .fold(0.0, f32::max)
-    }
-}
-
 impl Account {
     pub fn is_main(&self) -> bool {
         self.dir.is_none()
@@ -248,6 +246,23 @@ pub struct Settings {
     /// UI scale in percent (text and terminal font); 100 when unset.
     #[serde(default)]
     pub scale: Option<u32>,
+    /// Whether new Claude sessions start with Claude in Chrome (`--chrome`); each session can still switch it.
+    #[serde(default)]
+    pub chrome_default: bool,
+    /// Model, effort and permission mode for new Claude sessions; empty fields leave Claude Code's own default.
+    #[serde(default)]
+    pub new_session: crate::claude::defaults::NewSessionDefaults,
+    /// Parts of Claudiu's own MCP server switched off for new sessions (`claude/mcp.rs`). Empty means everything is on,
+    /// which is also what a state file from before this setting loads as.
+    #[serde(default)]
+    pub claudiu_tools_off: Vec<crate::claude::mcp::Feature>,
+    /// Claude Code features and tools switched off for the sessions Claudiu starts (`claude/trim.rs`). Empty means
+    /// nothing is trimmed, which is also what a state file from before this setting loads as.
+    #[serde(default)]
+    pub trimmed_tools: Vec<crate::claude::trim::Trim>,
+    /// The lines Claudiu added to Claude Code's `settings.json` for those trims, so turning one off removes only them.
+    #[serde(default)]
+    pub applied_trims: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -350,6 +365,14 @@ impl Store {
     /// The account new sessions use; falls back to the main one if the chosen alt was removed.
     pub fn active_account(&self) -> Option<&Account> {
         self.data.active_account.as_deref().and_then(|id| self.account(id)).or_else(|| self.account(MAIN_ACCOUNT))
+    }
+
+    /// The account a session starts under: its own while that account exists, else the active one.
+    pub fn session_account(&self, session_id: &str) -> Option<&Account> {
+        self.session(session_id)
+            .and_then(|r| r.claude.as_ref()?.account.as_deref())
+            .and_then(|id| self.account(id))
+            .or_else(|| self.active_account())
     }
 
     pub fn mark_dirty(&mut self) {
@@ -725,16 +748,6 @@ mod tests {
     }
 
     #[test]
-    fn peak_usage_ignores_windows_that_have_reset() {
-        let lim = |u: f32, reset: Option<i64>| Some(RateLimit { utilization: Some(u), resets_at: reset, seen_at: 0 });
-        let u = AccountUsage { five_hour: lim(0.9, Some(100)), seven_day: lim(0.4, Some(1000)) };
-        assert_eq!(u.peak(50), 0.9);
-        assert_eq!(u.peak(500), 0.4, "the 5-hour window reset");
-        assert_eq!(u.peak(5000), 0.0);
-        assert_eq!(AccountUsage::default().peak(0), 0.0, "unknown counts as unused");
-    }
-
-    #[test]
     fn usage_from_before_accounts_moves_into_the_main_account() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("s.json");
@@ -746,6 +759,36 @@ mod tests {
         s.save();
         assert!(fs::read_to_string(&path).unwrap().contains("\"account\""), "older versions require the field");
         assert_eq!(Store::load(path).data.accounts.len(), 1, "migrates once");
+    }
+
+    #[test]
+    fn a_session_starts_under_its_own_account_while_that_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut s = Store::load(tmp.path().join("s.json"));
+        s.data.accounts.push(Account { id: "alt".into(), ..Default::default() });
+        s.data.active_account = Some("alt".into());
+        let session = |id: &str, account: Option<&str>| SessionRecord {
+            id: id.into(),
+            kind: SessionKind::Claude,
+            title: "Claude".into(),
+            custom_title: None,
+            auto_title: None,
+            cwd: PathBuf::from("/w"),
+            project_id: None,
+            created_at: 1,
+            last_active: 1,
+            exit_code: None,
+            hidden: false,
+            claude: Some(ClaudeMeta { session_id: id.into(), account: account.map(Into::into), ..Default::default() }),
+        };
+        s.add_session(session("main-owned", Some(MAIN_ACCOUNT)));
+        s.add_session(session("never-started", None));
+        s.add_session(session("removed-owner", Some("gone")));
+        let account = |s: &Store, id: &str| s.session_account(id).map(|a| a.id.clone());
+        assert_eq!(account(&s, "main-owned").as_deref(), Some(MAIN_ACCOUNT), "not the active alt");
+        assert_eq!(account(&s, "never-started").as_deref(), Some("alt"));
+        assert_eq!(account(&s, "removed-owner").as_deref(), Some("alt"));
+        assert_eq!(account(&s, "not-yet-stored").as_deref(), Some("alt"), "a new session");
     }
 
     #[test]

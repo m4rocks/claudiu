@@ -88,6 +88,18 @@ impl TerminalView {
             return;
         };
 
+        // Ctrl+click on a path or link opens it even when the program (Claude Code's full-screen view) has asked for the
+        // mouse; any other click goes to the program.
+        if event.button == MouseButton::Left && event.modifiers.control {
+            if let Some((link, _)) = self.link_at(point, col) {
+                match link {
+                    Link::File(path, line) => cx.emit(TerminalEvent::OpenPath(path, line)),
+                    Link::Url(url) => cx.open_url(&url),
+                }
+                return;
+            }
+        }
+
         if self.mouse_reporting(&event.modifiers) {
             let button = match event.button {
                 MouseButton::Left => 0,
@@ -101,13 +113,6 @@ impl TerminalView {
 
         match event.button {
             MouseButton::Left => {
-                if event.modifiers.control {
-                    let link = self.terminal.term.lock().grid()[point].hyperlink();
-                    if let Some(link) = link {
-                        cx.open_url(link.uri());
-                        return;
-                    }
-                }
                 let ty = match event.click_count {
                     1 => SelectionType::Simple,
                     2 => SelectionType::Semantic,
@@ -151,7 +156,35 @@ impl TerminalView {
         }
     }
 
+    /// The file path or link under `point` (at viewport `column`), and the columns to underline for it.
+    fn link_at(&self, point: GridPoint, column: usize) -> Option<(Link, Option<std::ops::Range<usize>>)> {
+        let (hyperlink, row) = {
+            let term = self.terminal.term.lock();
+            let grid = term.grid();
+            let row = &grid[point.line];
+            (grid[point].hyperlink(), (0..grid.columns()).map(|c| row[Column(c)].c).collect::<String>())
+        };
+        if let Some(link) = hyperlink {
+            let file = url::Url::parse(link.uri()).ok().filter(|u| u.scheme() == "file").and_then(|u| u.to_file_path().ok());
+            // Cells of a link are underlined already.
+            return Some((match file {
+                Some(path) => Link::File(path.to_string_lossy().into_owned(), None),
+                None => Link::Url(link.uri().to_string()),
+            }, None));
+        }
+        let (path, line, columns) = paths::path_at(&row, column)?;
+        Some((Link::File(path, line), Some(columns)))
+    }
+
     pub(super) fn on_mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let hovered = self
+            .grid_point(event.position)
+            .filter(|_| event.modifiers.control)
+            .and_then(|(point, _, col, row)| self.link_at(point, col).map(|(_, columns)| (row, columns)));
+        if hovered != self.hovered_link {
+            self.hovered_link = hovered;
+            cx.notify();
+        }
         if self.mouse_reporting(&event.modifiers) {
             let mode = self.mode();
             let any_motion = mode.contains(TermMode::MOUSE_MOTION);
