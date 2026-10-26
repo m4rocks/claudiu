@@ -201,6 +201,11 @@ pub fn run() -> i32 {
     let session = std::env::var(SESSION_ENV).unwrap_or_default();
     let record = std::env::var(RECORD_ENV).unwrap_or_else(|_| session.clone());
     let from = format!("code:{record}");
+    if !session.is_empty() {
+        let config = config_file(&session);
+        let _ = mark_in_use(&config);
+        keep_config_fresh(config);
+    }
     let off_env = std::env::var(TOOLS_OFF_ENV).unwrap_or_default();
     let off: Vec<&str> = off_env.split(',').map(str::trim).filter(|n| !n.is_empty()).collect();
     serve(std::io::stdin().lock(), std::io::stdout().lock(), &session, &record, &crate::datadir::data_dir(), &off, |tool, args| crate::claude::bridge::ask(&from, tool, args));
@@ -466,9 +471,32 @@ pub fn prepare(claude_session_id: &str, record_id: &str, off: &[&str]) -> std::i
         "args": [FLAG],
         "env": env,
     }}});
-    let path = config_dir().join(format!("{}.json", crate::datadir::safe_file_stem(claude_session_id)));
+    let path = config_file(claude_session_id);
     crate::datadir::write_atomic(&path, &config.to_string())?;
     Ok(path)
+}
+
+fn config_file(claude_session_id: &str) -> PathBuf {
+    config_dir().join(format!("{}.json", crate::datadir::safe_file_stem(claude_session_id)))
+}
+
+/// How often a running server marks its config as in use. Well under the week after which `app/lifecycle.rs` prunes it.
+const CONFIG_REFRESH: std::time::Duration = std::time::Duration::from_secs(86_400);
+
+/// Bump the modification time of an existing file so an age-based prune keeps it. Never creates the file.
+fn mark_in_use(path: &Path) -> std::io::Result<()> {
+    std::fs::OpenOptions::new().write(true).open(path)?.set_modified(std::time::SystemTime::now())
+}
+
+/// Claude Code reads the config again whenever it reconnects to the server, which can be long after the session
+/// started, so a server that is still running keeps its own config from being pruned.
+fn keep_config_fresh(path: PathBuf) {
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(CONFIG_REFRESH);
+            let _ = mark_in_use(&path);
+        }
+    });
 }
 
 /// `(claude session id stem, title, written at)` for every title Claude has set. The timestamp changes on every
@@ -557,6 +585,26 @@ mod tests {
 
     fn talk(requests: &[Value], session: &str, dir: &Path) -> Vec<Value> {
         talk_with(requests, session, dir, |_, _| Err("no".into()))
+    }
+
+    #[test]
+    fn a_config_in_use_survives_the_prune() {
+        let dir = std::env::temp_dir().join(format!("claudiu-mcp-prune-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let running = dir.join("running.json");
+        let stale = dir.join("stale.json");
+        let eight_days_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(8 * 86_400);
+        for file in [&running, &stale] {
+            std::fs::write(file, "{}").unwrap();
+            std::fs::File::options().write(true).open(file).unwrap().set_modified(eight_days_ago).unwrap();
+        }
+        mark_in_use(&running).unwrap();
+        crate::datadir::prune(dir.clone(), 7 * 86_400);
+        assert!(running.exists(), "a config its server keeps fresh is not pruned");
+        assert!(!stale.exists(), "an unused config still is");
+        assert!(mark_in_use(&dir.join("gone.json")).is_err());
+        assert!(!dir.join("gone.json").exists(), "marking never creates the file");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
