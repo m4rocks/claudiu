@@ -165,6 +165,8 @@ pub enum Act {
     /// The shown session runs under another account: restart it under the active one (asks first, see `handoff.rs`).
     Handoff,
     ConfirmHandoff(Id),
+    /// A session's request to open another one with a first message, by request id (see `cross.rs`).
+    ConfirmStartSession(String),
     /// Shows the sharing warning, then `ConfirmAddAccount`.
     AddAccount,
     ConfirmAddAccount,
@@ -422,6 +424,8 @@ pub struct Workspace {
     pub last_swap: std::time::Instant,
     /// Attached issues and pull requests are asked about on GitHub from time to time, see `attached_sync.rs`.
     pub attached_sync: attached_sync::Sync,
+    /// Sessions asked to open another with a first message; each waits for the user's yes (`cross.rs`).
+    pub pending_starts: Vec<cross::PendingStart>,
     pub drag_pos: Option<gpui::Point<gpui::Pixels>>,
     pub update: UpdateState,
     pub scanning: bool,
@@ -515,6 +519,7 @@ impl Workspace {
             slide_gen: 0,
             last_swap: std::time::Instant::now(),
             attached_sync: Default::default(),
+            pending_starts: vec![],
             update: UpdateState::default(),
             scanning: false,
             quitting: false,
@@ -823,6 +828,7 @@ impl Workspace {
                 self.toast("Switched. New and resumed sessions use this account; running sessions keep theirs.", false, cx);
             }
             Act::Handoff => self.ask_handoff(window, cx),
+            Act::ConfirmStartSession(req_id) => self.confirm_start(&req_id, window, cx),
             Act::ConfirmHandoff(id) => {
                 self.modal = None;
                 self.start_handoff(&id, cx);

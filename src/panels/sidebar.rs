@@ -19,8 +19,6 @@ pub const SIDEBAR_W: f32 = 284.0;
 pub const SIDEBAR_MIN: f32 = 220.0;
 pub const SIDEBAR_MAX: f32 = 520.0;
 /// The account warning's entrance: its height at the end of the expand (the box grows to it), and its duration.
-const OFFER_H: f32 = 72.0;
-const OFFER_MS: u64 = 260;
 /// Entries shown under RECENT before the rest go behind OLDER.
 const RECENT_LIMIT: usize = 12;
 
@@ -728,7 +726,6 @@ impl Workspace {
     fn render_footer(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let t = now();
         let usage = self.store.active_account().map(|a| a.usage.clone()).unwrap_or_default();
-        let offer = self.switch_offer();
 
         // Captions are short: two meters share a row.
         let limit = |label: &str, l: &Option<crate::store::RateLimit>| -> Div {
@@ -758,29 +755,6 @@ impl Workspace {
             .pb(px(8.0))
             .border_t_1()
             .border_color(hsla(theme::BORDER))
-            // Stays while the limit is high (no toast); the button only opens the account menu.
-            .children(offer.map(|o| {
-                let ease = || Animation::new(Duration::from_millis(OFFER_MS)).with_easing(ease_out_quint());
-                // Slides up into place while the section above it grows upward (the box is clipped from below).
-                let body = div()
-                    .relative()
-                    .flex()
-                    .flex_col()
-                    .gap(px(6.0))
-                    .child(div().text_size(crate::panels::scale::px(12.0)).text_color(hsla(theme::WARN)).child(o))
-                    .child(button("switch-offer", "Choose account", true).dropdown(cx, |ws, at, _window, cx| {
-                        let items = ws.account_menu();
-                        ws.open_dropdown(at, items, cx);
-                    }))
-                    .with_animation("switch-offer-slide", ease(), |d, t| d.top(px((1.0 - t) * 14.0)).opacity(t));
-                div()
-                    .flex()
-                    .flex_col()
-                    .justify_end()
-                    .overflow_hidden()
-                    .child(body)
-                    .with_animation("switch-offer-expand", ease(), |d, t| if t < 1.0 { d.h(px(OFFER_H * t)) } else { d })
-            }))
             .child(self.render_account_switcher(cx))
             .child(pair(limit("5 HOUR", &usage.five_hour), limit("7 DAY", &usage.seven_day)))
     }

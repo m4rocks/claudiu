@@ -9,7 +9,8 @@
 // - Sidebar settings: applies auto-compact, background compaction and advisor changes sent through
 //   `CLAUDIU_CTL_FILE`, the same as the user choosing them in /config or typing /advisor (which Claude Code saves).
 // - Messages: sends a message Claudiu asks for through the same file (the editor's Ask Claude) as the user's own words,
-//   when the session is idle. Nothing is typed into the terminal.
+//   when the session is idle, without typing into the terminal. (Claudiu itself pastes the editor's `@file#L`
+//   reference into Claude's input box; that is not done here.)
 // - Usage and status: reports context, the 5-hour and 7-day limits, auto-compact, background compaction, advisor and
 //   the last command to `CLAUDIU_USAGE_DIR/<claude session id>.json`. No tokens are spent.
 // - Visual panel: answers `show_visual` in-process and, while the model is still writing the call, streams its

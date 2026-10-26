@@ -40,6 +40,10 @@ Comments explain why something non-obvious is true, such as a known limit and wh
 
 Leave nothing behind but the change: no summary files, commented-out code, debug logs or session scripts. When a test fails, fix the code, or ask if the test's expectation looks wrong. Update the README in the same commit when user-visible behavior changes.
 
+## Boundaries
+
+Claudiu types into a session's terminal in one place. In editor mode, moving the keyboard to the terminal while lines are selected pastes `@path#L12-30: ` into Claude Code's input box, and leaving without typing erases it again (`terminal/view/typing.rs`, `app/selection_reference.rs`). It does this only while the cursor is in that input box. It stays a deliberate exception: messages, settings changes and every other request reach Claude Code through the mod, not the terminal. Any further typing into a PTY needs the maintainer's decision first.
+
 ## Enforced rules
 
 | Rule | Enforced by |

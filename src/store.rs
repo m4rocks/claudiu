@@ -172,18 +172,6 @@ pub struct AccountUsage {
     pub seven_day: Option<RateLimit>,
 }
 
-impl AccountUsage {
-    /// The higher of the 5-hour and 7-day use that still applies at `now`; a window past its reset counts as 0.
-    pub fn peak(&self, now: i64) -> f32 {
-        [&self.five_hour, &self.seven_day]
-            .into_iter()
-            .flatten()
-            .filter(|l| l.resets_at.is_none_or(|r| r > now))
-            .filter_map(|l| l.utilization)
-            .fold(0.0, f32::max)
-    }
-}
-
 impl Account {
     pub fn is_main(&self) -> bool {
         self.dir.is_none()
@@ -754,16 +742,6 @@ mod tests {
         let b = Store::load(path);
         assert_eq!(b.data.sessions.len(), 1);
         assert_eq!(b.data.sessions[0].id, "cl");
-    }
-
-    #[test]
-    fn peak_usage_ignores_windows_that_have_reset() {
-        let lim = |u: f32, reset: Option<i64>| Some(RateLimit { utilization: Some(u), resets_at: reset, seen_at: 0 });
-        let u = AccountUsage { five_hour: lim(0.9, Some(100)), seven_day: lim(0.4, Some(1000)) };
-        assert_eq!(u.peak(50), 0.9);
-        assert_eq!(u.peak(500), 0.4, "the 5-hour window reset");
-        assert_eq!(u.peak(5000), 0.0);
-        assert_eq!(AccountUsage::default().peak(0), 0.0, "unknown counts as unused");
     }
 
     #[test]

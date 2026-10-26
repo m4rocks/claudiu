@@ -63,7 +63,16 @@ fn run() {
     serve(&mut cx, take());
     assert!(h.join().unwrap().unwrap_err().contains("No project or folder"));
 
+    // A first message of its own needs the user's yes: a closed dialog is a refusal, and nothing was started.
     let live_before = ws.read_with(&cx, |ws, _| ws.live.len());
+    let h = ask(from_session.clone(), "start_code_session", json!({"folder": cwd.to_string_lossy(), "prompt": "do the thing"}));
+    serve(&mut cx, take());
+    assert!(ws.read_with(&cx, |ws, _| matches!(ws.modal, Some(Modal::Confirm { act: Act::ConfirmStartSession(_), .. }))), "the user was not asked");
+    step(&mut cx, &|ws, w, cx| ws.act(Act::Dismiss, w, cx));
+    step(&mut cx, &|ws, w, cx| ws.serve_requests(vec![], w, cx));
+    assert_eq!(h.join().unwrap().unwrap_err(), "The user declined.");
+    assert_eq!(ws.read_with(&cx, |ws, _| ws.live.len()), live_before, "a declined request started a session");
+
     let h = ask(from_session.clone(), "start_code_session", json!({"folder": cwd.to_string_lossy()}));
     serve(&mut cx, take());
     let text = h.join().unwrap().unwrap();

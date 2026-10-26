@@ -362,7 +362,7 @@ fn bridge_tools() -> Vec<Value> {
             format!("Search the user's projects (name, folder, git branch) by words. Pass a project's name as the folder of start_code_session.{CONFIRM}"),
             json!({ "query": { "type": "string", "description": "Words to look for (optional: without it, every project)" } }),
         ),
-        tool("start_code_session", format!("Open a new Claude Code session, optionally with a first prompt.{CONFIRM}"), target),
+        tool("start_code_session", format!("Open a new Claude Code session, optionally with a first prompt. With a prompt, the user is asked to approve it first; without one, it opens at once.{CONFIRM}"), target),
     ]
 }
 
