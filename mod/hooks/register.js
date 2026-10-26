@@ -6,6 +6,8 @@
 //   switches too. Claude Code saves those as the user's default.
 // - Session name: applies the name Claudiu writes to `CLAUDIU_NAME_FILE` with /rename, which Claude Code queues
 //   until the session is idle.
+// - Sidebar settings: applies auto-compact, background compaction and advisor changes sent through
+//   `CLAUDIU_CTL_FILE`, the same as the user choosing them in /config or typing /advisor (which Claude Code saves).
 // - Messages: sends a message Claudiu asks for through the same file (the editor's Ask Claude) as the user's own words,
 //   when the session is idle, without typing into the terminal. (Claudiu itself pastes the editor's `@file#L`
 //   reference into Claude's input box; that is not done here.)
@@ -40,6 +42,7 @@ let named = null // `${claude session id}\n${name}` last applied with /rename
 let namePoll // watches CLAUDIU_NAME_FILE
 let ctlPoll // watches CLAUDIU_CTL_FILE
 let ctlSeen = null // highest command number handled; null until the file was first read (older ones are not replayed)
+let pendingAdvisor = null // an advisor change Claude Code refused (see setAdvisor), tried again until it goes through
 let askPoll // watches CLAUDIU_ASK_FILE
 let askSeen = null // id of the last request looked at
 let asking = false // a completion is running; a poll that finds another request waits for it
@@ -104,8 +107,9 @@ function advisorAlias(value) {
 }
 
 // Writes this session's usage and status report for Claudiu's sidebar. `fresh` re-reads the compaction threshold now.
+// `override` carries a value Claudiu just asked for, so the sidebar updates before the host has refreshed its cache.
 // Every read is best effort: a failed one is left out, and reporting never fails a hook.
-async function report($, fresh = false) {
+async function report($, fresh = false, override = {}) {
   try {
     const dir = await $.env.get('CLAUDIU_USAGE_DIR')
     if (!dir) return
@@ -124,6 +128,9 @@ async function report($, fresh = false) {
     const precompute = rows.find(r => r.key === PRECOMPUTE_ROW)?.value
     let precomputeCompact = typeof precompute === 'boolean' ? precompute : null
     let advisor = advisorAlias(await setting($, 'advisorModel'))
+    if ('auto_compact' in override) autoCompact = override.auto_compact
+    if ('precompute_compact' in override) precomputeCompact = override.precompute_compact
+    if ('advisor' in override) advisor = override.advisor
 
     // A different model only reaches the running conversation on /clear or /compact. Off and on take effect at once,
     // so a null or newly named advisor replaces the active one; a model-to-model change keeps the old one.
@@ -174,24 +181,50 @@ async function applyCtl($) {
       ctlSeen = cmds.reduce((top, c) => Math.max(top, c.seq), 0)
       return
     }
+    const override = {}
+    if (pendingAdvisor !== null) await setAdvisor($, pendingAdvisor, override)
     const pending = cmds.filter(c => c.seq > ctlSeen).sort((a, b) => a.seq - b.seq)
     for (const c of pending) {
       ctlSeen = c.seq
-      await applyCtlCommand($, c)
+      await applyCtlCommand($, c, override)
     }
+    if (Object.keys(override).length > 0) await report($, true, override)
   } catch {
     // A bad file must not disturb the session.
   }
 }
 
-async function applyCtlCommand($, c) {
-  if (c.key === 'prompt' && typeof c.value === 'string' && c.value.trim() !== '' && c.value.length <= PROMPT_MAX) {
+async function applyCtlCommand($, c, override) {
+  if (c.key === 'auto_compact' && typeof c.value === 'boolean') {
+    await $.config.set({ key: 'autoCompact', value: c.value }).catch(() => {})
+    override.auto_compact = c.value
+  } else if (c.key === 'precompute_compact' && typeof c.value === 'boolean') {
+    // Fails while Claude Code does not list the row; the report then keeps saying it is not offered.
+    const set = await $.config.set({ key: PRECOMPUTE_ROW, value: c.value }).then(() => true, () => false)
+    if (set) override.precompute_compact = c.value
+  } else if (c.key === 'prompt' && typeof c.value === 'string' && c.value.trim() !== '' && c.value.length <= PROMPT_MAX) {
     // A turn of its own once the session is idle, which can be a whole turn away: not awaited, so the commands
     // behind it in the file are not held up.
     void $.prompt.submit({ text: c.value, asUser: true }).catch(() => {})
   } else if (c.key === 'compact' && c.value === true) {
     await compactForHandoff($)
+  } else if (c.key === 'advisor' && typeof c.value === 'string' && /^[A-Za-z0-9._-]{1,60}$/.test(c.value)) {
+    await setAdvisor($, c.value, override)
   }
+}
+
+// Claude Code refuses a plugin's slash command after the person stopped a turn, until they type again
+// ("refused: the session was stopped and nobody has sent input since"). That change is kept and tried again on the
+// next look, and the new advisor is only reported once it went through. Any other failure drops the change.
+async function setAdvisor($, value, override) {
+  pendingAdvisor = null
+  try {
+    await $.command.run({ command: 'advisor', args: value })
+  } catch (e) {
+    if (String(e?.message ?? e).includes('refused')) pendingAdvisor = value
+    return
+  }
+  override.advisor = advisorAlias(value)
 }
 
 // Claudiu's hand-off waits for this compaction. Between turns it compacts at once: `/compact` from a plugin would be

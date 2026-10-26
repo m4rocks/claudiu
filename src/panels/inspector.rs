@@ -431,36 +431,29 @@ impl Workspace {
 
         // The figures come from the snapshot the session's mod reports.
         let meta = shown.rec.as_ref().filter(|r| r.kind == SessionKind::Claude).and_then(|r| r.claude.as_ref());
-        // What the session runs with now, and what its next start will have (`store::Launch`).
-        let (compact, precompute, advisor, running_advisor, chrome, known) = match meta {
+        let (compact, precompute, advisor, active, chrome, known) = match meta {
             Some(m) => (m.auto_compact, m.precompute_compact, m.advisor.clone(), m.advisor_active.clone(), m.chrome, true),
             None => (None, None, None, None, false, false),
         };
-        let next = meta.map(|m| m.launch.clone()).unwrap_or_default();
         let advisor = advisor.map(|a| a.to_lowercase());
-        let running_advisor = running_advisor.or_else(|| advisor.clone()).map(|a| a.to_lowercase());
-        let next_advisor = next.advisor.as_deref().map(str::to_lowercase).or_else(|| advisor.clone());
-        let compact_text = if known { switch_display(compact, next.auto_compact) } else { "—".into() };
-        let advisor_text = if known { advisor_display(running_advisor.as_deref(), next_advisor.as_deref()) } else { "—".into() };
-        let compact = next.auto_compact.or(compact);
-        let advisor = next_advisor;
-        let settable = id.filter(|_| meta.is_some()).cloned();
-        let chrome_settable = settable.clone().filter(|_| running);
+        let active = active.map(|a| a.to_lowercase());
+        let compact_text = compact.map_or("—", |v| if v { "On" } else { "Off" }).to_string();
+        let advisor_text = if known { advisor_display(advisor.as_deref(), active.as_deref()) } else { "—".into() };
+        let settable = id.filter(|_| meta.is_some() && running).cloned();
 
         let compact_row = match settable.clone() {
             Some(sid) => pick_row(cx, "set-auto-compact", "Auto-compact", compact_text, move || auto_compact_menu(&sid, compact)).into_any_element(),
             None => kv("Auto-compact", compact_text).into_any_element(),
         };
         // Only while Claude Code offers the setting; without its feature flag the setting does nothing.
-        let precompute_row = precompute.map(|running_on| {
-            let text = switch_display(Some(running_on), next.precompute_compact);
-            let on = next.precompute_compact.unwrap_or(running_on);
+        let precompute_row = precompute.map(|on| {
+            let text = if on { "On" } else { "Off" }.to_string();
             match settable.clone() {
                 Some(sid) => pick_row(cx, "set-precompute-compact", "Background compaction", text, move || precompute_compact_menu(&sid, on)).into_any_element(),
                 None => kv("Background compaction", text).into_any_element(),
             }
         });
-        let chrome_row = match chrome_settable {
+        let chrome_row = match settable.clone() {
             Some(sid) => pick_row(cx, "set-chrome", "Claude in Chrome", if chrome { "On" } else { "Off" }.into(), move || chrome_menu(&sid, chrome)).into_any_element(),
             None => kv("Claude in Chrome", if chrome { "On" } else { "Off" }.into()).into_any_element(),
         };
@@ -519,23 +512,11 @@ fn advisor_alias(value: &str) -> Option<&str> {
     }
 }
 
-/// `Opus`, or `Opus → Sonnet` while the session runs one advisor and the next start (or `/clear`, `/compact`) brings another.
-fn advisor_display(running: Option<&str>, next: Option<&str>) -> String {
-    let name = |a: Option<&str>| a.and_then(advisor_alias).map_or_else(|| "Off".to_string(), advisor_name);
-    let (running, next) = (name(running), name(next));
-    if running == next { running } else { format!("{running} → {next}") }
-}
-
-/// `On`, or `On → Off` while the next start changes it. `None` for the running value means Claude Code has not said.
-fn switch_display(running: Option<bool>, next: Option<bool>) -> String {
-    let name = |v: bool| if v { "On" } else { "Off" };
-    match (running, next) {
-        (None, None) => "—".into(),
-        (Some(r), None) => name(r).into(),
-        (None, Some(n)) => format!("— → {}", name(n)),
-        (Some(r), Some(n)) if r == n => name(r).into(),
-        (Some(r), Some(n)) => format!("{} → {}", name(r), name(n)),
-    }
+/// `Opus`, or `Opus → Sonnet` while the saved setting waits for `/clear` or `/compact`.
+fn advisor_display(saved: Option<&str>, active: Option<&str>) -> String {
+    let Some(saved) = saved.and_then(advisor_alias) else { return "Off".into() };
+    let active = active.and_then(advisor_alias).unwrap_or(saved);
+    if active == saved { advisor_name(active) } else { format!("{} → {}", advisor_name(active), advisor_name(saved)) }
 }
 
 fn advisor_name(alias: &str) -> String {
@@ -696,13 +677,7 @@ mod tests {
         assert_eq!(labels(&advisor_menu(&sid, Some("my-model"))), ["    Off", "    Opus", "    Sonnet", "✓  Other…"]);
         assert_eq!(advisor_display(None, None), "Off");
         assert_eq!(advisor_display(Some("sonnet"), Some("sonnet")), "Sonnet");
-        assert_eq!(advisor_display(Some("claude-opus-5-5"), Some("sonnet")), "Opus → Sonnet");
-        assert_eq!(advisor_display(Some("opus"), None), "Opus → Off");
-        assert_eq!(advisor_display(None, Some("opus")), "Off → Opus");
-        assert_eq!(switch_display(None, None), "—");
-        assert_eq!(switch_display(Some(true), None), "On");
-        assert_eq!(switch_display(Some(true), Some(true)), "On");
-        assert_eq!(switch_display(Some(true), Some(false)), "On → Off");
-        assert_eq!(switch_display(None, Some(false)), "— → Off");
+        assert_eq!(advisor_display(Some("sonnet"), Some("claude-opus-5-5")), "Opus → Sonnet");
+        assert_eq!(advisor_display(Some("opus"), None), "Opus");
     }
 }

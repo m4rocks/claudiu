@@ -134,7 +134,7 @@ pub enum Act {
     },
     /// Have the running session's own mod (Haiku) write a new title from what was said in it.
     RegenTitle(Id),
-    /// Choose a setting for the next start or resume of a session (see `store::Launch`).
+    /// Change a setting of a running session through its mod (see `usage::send_ctl`).
     SetAutoCompact(Id, bool),
     SetPrecomputeCompact(Id, bool),
     SetAdvisor(Id, String),
@@ -715,12 +715,23 @@ impl Workspace {
                 self.toast("Project removed. Its sessions are kept.", false, cx);
             }
             Act::SetAutoCompact(id, on) => {
-                self.set_launch(&id, |launch| launch.auto_compact = Some(on));
-                self.toast(format!("Auto-compact will be {} when this session next starts or resumes.", if on { "on" } else { "off" }), false, cx);
+                // Show the choice at once; the mod's next snapshot confirms or corrects it.
+                if let Some(meta) = self.store.session_mut(&id).and_then(|s| s.claude.as_mut()) {
+                    meta.auto_compact = Some(on);
+                }
+                self.store.mark_dirty();
+                cx.notify();
+                usage::send_ctl(&usage::ctl_file(&id), "auto_compact", on.into());
+                self.toast(format!("Turning auto-compact {}…", if on { "on" } else { "off" }), false, cx);
             }
             Act::SetPrecomputeCompact(id, on) => {
-                self.set_launch(&id, |launch| launch.precompute_compact = Some(on));
-                self.toast(format!("Background compaction will be {} when this session next starts or resumes.", if on { "on" } else { "off" }), false, cx);
+                if let Some(meta) = self.store.session_mut(&id).and_then(|s| s.claude.as_mut()) {
+                    meta.precompute_compact = Some(on);
+                }
+                self.store.mark_dirty();
+                cx.notify();
+                usage::send_ctl(&usage::ctl_file(&id), "precompute_compact", on.into());
+                self.toast(format!("Turning background compaction {}…", if on { "on" } else { "off" }), false, cx);
             }
             Act::SetChrome(id, on) => {
                 if let Some(meta) = self.store.session_mut(&id).and_then(|s| s.claude.as_mut()) {
@@ -731,12 +742,40 @@ impl Workspace {
                 self.toast(format!("Claude in Chrome {}. Session restarted.", if on { "on" } else { "off" }), false, cx);
             }
             Act::SetAdvisor(id, model) => {
-                let note = if model == "off" { "Advisor will be off".to_string() } else { format!("Advisor will be {model}") };
-                self.set_launch(&id, |launch| launch.advisor = Some(model));
-                self.toast(format!("{note} when this session next starts or resumes."), false, cx);
+                // The saved setting changes at once, but a different model only reaches the current conversation on
+                // /clear or /compact; switching the advisor off or on does apply right away.
+                let saved = (model != "off").then(|| model.clone());
+                let mut pending = false;
+                let mut was_off = false;
+                if let Some(meta) = self.store.session_mut(&id).and_then(|s| s.claude.as_mut()) {
+                    let active = meta.advisor_active.clone().or_else(|| meta.advisor.clone());
+                    was_off = active.is_none();
+                    pending = !was_off && saved.as_deref() != active.as_deref();
+                    meta.advisor = saved.clone();
+                    if saved.is_none() {
+                        meta.advisor_active = None;
+                    } else if was_off {
+                        meta.advisor_active = saved.clone();
+                    } else {
+                        meta.advisor_active = active;
+                    }
+                }
+                self.store.mark_dirty();
+                cx.notify();
+                usage::send_ctl(&usage::ctl_file(&id), "advisor", model.clone().into());
+                let note = if model == "off" {
+                    "Advisor off.".to_string()
+                } else if pending {
+                    format!("Advisor will switch to {model} after /clear or /compact.")
+                } else if was_off {
+                    format!("Advisor on ({model}).")
+                } else {
+                    format!("Advisor set to {model}.")
+                };
+                self.toast(note, false, cx);
             }
             Act::AskAdvisor(id) => {
-                let current = self.store.session(&id).and_then(|s| s.claude.as_ref()).and_then(|m| m.launch.advisor.clone().or_else(|| m.advisor.clone())).unwrap_or_default();
+                let current = self.store.session(&id).and_then(|s| s.claude.as_ref()).and_then(|m| m.advisor.clone()).unwrap_or_default();
                 let input = self.modal_input(&current, "opus, sonnet, off, or a model id", window, cx);
                 self.modal = Some(Modal::Advisor { id, input });
             }

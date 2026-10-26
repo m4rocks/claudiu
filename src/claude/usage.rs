@@ -33,8 +33,8 @@ pub fn valid_model_name(name: &str) -> bool {
     !name.is_empty() && name.len() <= 60 && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
-/// Ask the mod of a running session to do something: `prompt` (a message for the session to send once it is idle) or
-/// `compact` (the hand-off's compaction).
+/// Ask the mod of a running session to change a setting: `auto_compact` or `precompute_compact` (bool), `advisor` (a
+/// model name or `off`), or `prompt` (a message for the session to send once it is idle).
 /// The file keeps the latest few commands, each with a number that only goes up, so none is lost if two come within
 /// the mod's one-second look and none is applied twice.
 pub fn send_ctl(file: &Path, key: &str, value: serde_json::Value) {
@@ -119,7 +119,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let file = tmp.path().join("ctl/me.json");
         for i in 0..10 {
-            send_ctl(&file, "prompt", serde_json::json!(format!("m{i}")));
+            send_ctl(&file, "advisor", serde_json::json!(format!("m{i}")));
         }
         let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
         let cmds = v["cmds"].as_array().unwrap();
