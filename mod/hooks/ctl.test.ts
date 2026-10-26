@@ -1,21 +1,16 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-test('applies the settings Claudiu asks for, once each, and not the ones sent before it started', async ($, on) => {
+test('ignores the sidebar commands that used to change Claude Code settings, and never writes them', async ($, on) => {
   mock.env(on, { CLAUDIU_CTL_FILE: 'ctl/me.json', CLAUDIU_USAGE_DIR: 'usage' })
   const clock = mock.clock(on)
-  let file = JSON.stringify({ cmds: [{ seq: 5, key: 'advisor', value: 'sonnet' }] }) // from an earlier run
+  let file = JSON.stringify({ cmds: [] })
   const sets: unknown[] = []
   const ran: string[] = []
-  const writes: { path: string; text: string }[] = []
   on('fs.read', () => ({ value: file }))
-  on('fs.write', (_$, e) => {
-    writes.push({ path: e.path, text: e.text })
-    return { value: undefined }
-  })
+  on('fs.write', () => ({ value: undefined }))
   on('session.id', () => ({ value: 's1' }))
   on('session.model', () => ({ value: 'claude-haiku-5-5' }))
-  const precomputeRow = { key: 'precomputeCompactionEnabled', label: 'Precompute compaction', kind: 'boolean', value: true, provider: { plugin: 'engine', tier: 'core' }, isLocked: false }
-  on('config.list', () => ({ value: [precomputeRow] }) as any)
+  on('config.list', () => ({ value: [] }) as any)
   on('settings.read', () => ({ value: {} }))
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
   on('config.set', (_$, e) => {
@@ -29,29 +24,19 @@ test('applies the settings Claudiu asks for, once each, and not the ones sent be
 
   await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
   await clock.advance(1000)
-  expect(ran).toEqual([]) // seq 5 predates this process
 
+  // Auto-compact, background compaction and advisor now reach Claude Code through the launch-time --settings file, so
+  // a command for them (say, from an older Claudiu) must not save anything to the user's own config.
   file = JSON.stringify({
     cmds: [
-      { seq: 5, key: 'advisor', value: 'sonnet' },
-      { seq: 6, key: 'auto_compact', value: false },
-      { seq: 7, key: 'advisor', value: 'opus' },
-      { seq: 8, key: 'advisor', value: 'rm -rf /' }, // not a model name
-      { seq: 9, key: 'theme', value: 'light' }, // not a setting Claudiu sets
-      { seq: 10, key: 'precompute_compact', value: false },
+      { seq: 1, key: 'auto_compact', value: false },
+      { seq: 2, key: 'advisor', value: 'opus' },
+      { seq: 3, key: 'precompute_compact', value: false },
     ],
   })
-  await clock.advance(1000)
-  expect(sets).toEqual([['autoCompact', false], ['precomputeCompactionEnabled', false]])
-  expect(ran).toEqual(['advisor opus'])
-  const snap = JSON.parse(writes.at(-1)!.text)
-  expect(snap.advisor).toBe('opus')
-  expect(snap.advisor_active).toBe('opus')
-  expect(snap.auto_compact).toBe(false)
-  expect(snap.precompute_compact).toBe(false)
-
   await clock.advance(3000)
-  expect(sets.length + ran.length).toBe(3) // handled once
+  expect(sets).toEqual([])
+  expect(ran).toEqual([])
 })
 
 test('sends a message Claudiu asks for as the person’s own words, once', async ($, on) => {

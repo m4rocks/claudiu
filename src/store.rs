@@ -51,6 +51,19 @@ pub struct Attached {
     pub state: Option<crate::github::model::State>,
 }
 
+/// What the sidebar chose for the next start of a session. It reaches Claude Code in the per-session `--settings`
+/// file (`claude::trim`), so Claude Code's own config is never written; `None` leaves the user's setting alone.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Launch {
+    #[serde(default)]
+    pub auto_compact: Option<bool>,
+    #[serde(default)]
+    pub precompute_compact: Option<bool>,
+    /// A model alias or id; `"off"` turns the advisor off.
+    #[serde(default)]
+    pub advisor: Option<String>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ClaudeMeta {
     pub session_id: String,
@@ -75,6 +88,9 @@ pub struct ClaudeMeta {
     /// Background compaction ("Precompute compaction" in `/config`); `None` while Claude Code does not offer it.
     #[serde(default)]
     pub precompute_compact: Option<bool>,
+    /// Sidebar choices that apply when this session next starts or resumes.
+    #[serde(default)]
+    pub launch: Launch,
     /// Claude in Chrome: the session is (re)started with `--chrome`. Claudiu's own choice, so it survives restarts.
     #[serde(default)]
     pub chrome: bool,

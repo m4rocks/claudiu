@@ -1,4 +1,5 @@
-//! Claude Code features and tools the user trimmed (Settings → Claude Code tools), applied per process through
+//! Claude Code features and tools the user trimmed (Settings → Claude Code tools) and a session's sidebar choices
+//! (auto-compact, background compaction, advisor), applied per process through
 //! `--settings <file>`; nothing in the user's own Claude Code config changes.
 //!
 //! A feature flag such as `disableWorkflows` removes the feature, its tools and Claude Code's instructions about it.
@@ -9,6 +10,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
+
+use crate::store::Launch;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -113,10 +116,20 @@ pub fn normalized(trimmed: &[Trim]) -> Vec<Trim> {
     Trim::ALL.into_iter().filter(|t| trimmed.contains(t)).collect()
 }
 
-/// The contents of the `--settings` file for these trims, or `None` when nothing is trimmed. It holds only what
-/// was trimmed: an item left on has no key, so the user's own Claude Code settings still decide it.
-pub fn settings_json(trimmed: &[Trim]) -> Option<String> {
+/// The contents of the `--settings` file for these trims and the session's sidebar choices, or `None` when there
+/// is neither. It holds only what was chosen: an item left alone has no key, so the user's own Claude Code settings
+/// still decide it.
+pub fn settings_json(trimmed: &[Trim], launch: &Launch) -> Option<String> {
     let mut settings = Map::new();
+    if let Some(on) = launch.auto_compact {
+        settings.insert("autoCompactEnabled".into(), Value::Bool(on));
+    }
+    if let Some(on) = launch.precompute_compact {
+        settings.insert("precomputeCompactionEnabled".into(), Value::Bool(on));
+    }
+    if let Some(model) = &launch.advisor {
+        settings.insert("advisorModel".into(), Value::String(model.clone()));
+    }
     let mut deny: Vec<&str> = Vec::new();
     for t in normalized(trimmed) {
         match t.effect() {
@@ -138,9 +151,9 @@ pub fn settings_dir() -> PathBuf {
     crate::datadir::data_dir().join("settings")
 }
 
-/// Writes the settings file of a session and returns its path for `--settings`; `Ok(None)` when nothing is trimmed.
-pub fn prepare(claude_session_id: &str, trimmed: &[Trim]) -> std::io::Result<Option<PathBuf>> {
-    let Some(json) = settings_json(trimmed) else { return Ok(None) };
+/// Writes the settings file of a session and returns its path for `--settings`; `Ok(None)` when it would be empty.
+pub fn prepare(claude_session_id: &str, trimmed: &[Trim], launch: &Launch) -> std::io::Result<Option<PathBuf>> {
+    let Some(json) = settings_json(trimmed, launch) else { return Ok(None) };
     let path = settings_dir().join(format!("{}.json", crate::datadir::safe_file_stem(claude_session_id)));
     crate::datadir::write_atomic(&path, &json)?;
     Ok(Some(path))
@@ -153,32 +166,42 @@ mod tests {
 
     #[test]
     fn nothing_trimmed_gives_no_settings() {
-        assert_eq!(settings_json(&[]), None);
+        assert_eq!(settings_json(&[], &Launch::default()), None);
     }
 
     #[test]
     fn a_flag_and_a_tool_group_give_the_flag_and_exactly_their_denies() {
-        let v: Value = serde_json::from_str(&settings_json(&[PlanMode, Workflows]).unwrap()).unwrap();
+        let v: Value = serde_json::from_str(&settings_json(&[PlanMode, Workflows], &Launch::default()).unwrap()).unwrap();
         assert_eq!(v, json!({ "disableWorkflows": true, "permissions": { "deny": ["EnterPlanMode", "ExitPlanMode"] } }));
     }
 
     #[test]
     fn artifacts_are_turned_off_with_the_current_key_and_the_deprecated_one() {
-        let v: Value = serde_json::from_str(&settings_json(&[Artifacts]).unwrap()).unwrap();
+        let v: Value = serde_json::from_str(&settings_json(&[Artifacts], &Launch::default()).unwrap()).unwrap();
         assert_eq!(v, json!({ "enableArtifact": false, "disableArtifact": true }));
     }
 
     #[test]
     fn items_left_on_have_no_key() {
-        let v: Value = serde_json::from_str(&settings_json(&[ScheduledTasks]).unwrap()).unwrap();
+        let v: Value = serde_json::from_str(&settings_json(&[ScheduledTasks], &Launch::default()).unwrap()).unwrap();
         assert_eq!(v, json!({ "permissions": { "deny": ["CronCreate", "CronDelete", "CronList"] } }));
-        let v: Value = serde_json::from_str(&settings_json(&[BundledSkills]).unwrap()).unwrap();
+        let v: Value = serde_json::from_str(&settings_json(&[BundledSkills], &Launch::default()).unwrap()).unwrap();
         assert_eq!(v, json!({ "disableBundledSkills": true }), "no permissions key without a denied tool");
     }
 
     #[test]
+    fn sidebar_choices_are_written_with_claude_codes_own_keys_and_only_when_set() {
+        let launch = Launch { auto_compact: Some(false), precompute_compact: Some(true), advisor: Some("off".into()) };
+        let v: Value = serde_json::from_str(&settings_json(&[], &launch).unwrap()).unwrap();
+        assert_eq!(v, json!({ "autoCompactEnabled": false, "precomputeCompactionEnabled": true, "advisorModel": "off" }));
+        let only_advisor = Launch { advisor: Some("sonnet".into()), ..Launch::default() };
+        let v: Value = serde_json::from_str(&settings_json(&[PlanMode], &only_advisor).unwrap()).unwrap();
+        assert_eq!(v, json!({ "advisorModel": "sonnet", "permissions": { "deny": ["EnterPlanMode", "ExitPlanMode"] } }));
+    }
+
+    #[test]
     fn order_and_repeats_do_not_matter() {
-        assert_eq!(settings_json(&[NotebookEdit, PlanMode, PlanMode]), settings_json(&[PlanMode, NotebookEdit]));
+        assert_eq!(settings_json(&[NotebookEdit, PlanMode, PlanMode], &Launch::default()), settings_json(&[PlanMode, NotebookEdit], &Launch::default()));
         assert_eq!(normalized(&[ReportFindings, Workflows, Workflows]), [Workflows, ReportFindings]);
     }
 

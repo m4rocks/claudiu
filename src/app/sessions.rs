@@ -11,6 +11,15 @@ fn numbered<T>(items: &[T], n: usize) -> Option<&T> {
 const SHORTCUT_HOLD: Duration = Duration::from_millis(400);
 
 impl Workspace {
+    /// Store a sidebar choice for the session's next start. Nothing is sent to the running process, and nothing in
+    /// Claude Code's config is written.
+    pub(super) fn set_launch(&mut self, id: &str, change: impl FnOnce(&mut crate::store::Launch)) {
+        if let Some(meta) = self.store.session_mut(id).and_then(|s| s.claude.as_mut()) {
+            change(&mut meta.launch);
+            self.store.mark_dirty();
+        }
+    }
+
     /// Per-process additions to a Claude launch; nothing in the user's Claude Code config changes:
     /// the mod (`--plugin-dir`, which reports usage and status), the tab-title MCP server (`--mcp-config`, its
     /// tools pre-allowed), and IDE integration switched off through environment variables. `chrome` adds Claude in
@@ -41,7 +50,8 @@ impl Workspace {
             spec.env.push((crate::visual::VISUAL_ENV.into(), crate::visual::file(record_id).to_string_lossy().into_owned()));
             spec.env.push((crate::claude::ask::ASK_ENV.into(), crate::claude::ask::request_file(record_id).to_string_lossy().into_owned()));
         }
-        match claude::trim::prepare(claude_session_id, &self.store.data.settings.trimmed_tools) {
+        let launch = self.store.session(record_id).and_then(|s| s.claude.as_ref()).map(|m| m.launch.clone()).unwrap_or_default();
+        match claude::trim::prepare(claude_session_id, &self.store.data.settings.trimmed_tools, &launch) {
             Ok(Some(file)) => spec.args.extend(["--settings".into(), file.to_string_lossy().into_owned()]),
             Ok(None) => {}
             Err(_) => {
