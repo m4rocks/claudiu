@@ -98,13 +98,9 @@ mod tests {
         let repo = Repository::init(&dir).unwrap();
         std::fs::create_dir_all(dir.join("src").join("deep")).unwrap();
         let file = dir.join("src").join("deep").join("f.txt");
-        std::fs::write(&file, "a
-b
-").unwrap();
+        std::fs::write(&file, "a\nb\n").unwrap();
         commit_all(&repo);
-        std::fs::write(&file, "a
-B
-").unwrap();
+        std::fs::write(&file, "a\nB\n").unwrap();
         assert_eq!(changed_lines(&file), vec![Change { lines: 1..2, kind: Kind::Modified }]);
     }
 
@@ -113,13 +109,10 @@ B
         let tmp = tempfile::tempdir().unwrap();
         let dir = dunce::canonicalize(tmp.path()).unwrap();
         let repo = Repository::init(&dir).unwrap();
-        std::fs::write(dir.join("[ab].txt"), "x
-").unwrap();
-        std::fs::write(dir.join("a.txt"), "x
-").unwrap();
+        std::fs::write(dir.join("[ab].txt"), "x\n").unwrap();
+        std::fs::write(dir.join("a.txt"), "x\n").unwrap();
         commit_all(&repo);
-        std::fs::write(dir.join("a.txt"), "changed
-").unwrap();
+        std::fs::write(dir.join("a.txt"), "changed\n").unwrap();
         assert_eq!(changed_lines(&dir.join("[ab].txt")), vec![], "a.txt's change is not [ab].txt's");
     }
 
