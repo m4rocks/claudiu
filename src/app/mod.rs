@@ -799,9 +799,11 @@ impl Workspace {
                     title: "Add an account?".into(),
                     body: "Only sign in to accounts you own. Sharing or pooling logins, or using several accounts to get around \
                            usage limits, can break Anthropic's terms.\n\n\
-                           The new account shares your main Claude Code setup: settings, CLAUDE.md, agents, skills, plugins and \
-                           session history. Changes made while using it (like /model) change your main setup too. \
-                           Only the login is kept separate. Claudiu creates this account's folder; your main ~/.claude is not modified."
+                           The new account uses your main Claude Code setup. Settings, CLAUDE.md and keybindings are copied from ~/.claude \
+                           before each session starts, so a change made in the account (like /model) stays there and is replaced \
+                           at the next start. Agents, skills, plugins and session history are shared with ~/.claude, so changes to \
+                           those reach it. Only the login is separate. Claudiu creates this account's folder and never writes to \
+                           ~/.claude."
                         .into(),
                     confirm: "Add and sign in".into(),
                     danger: false,

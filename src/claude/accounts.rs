@@ -1,7 +1,8 @@
 //! Alt accounts. Each is a Claude Code config folder (`CLAUDE_CONFIG_DIR`) inside Claudiu's data dir that holds
-//! only its own login (`.credentials.json`, `.claude.json`); every other entry links back to the main
-//! `~/.claude`, so settings, instructions, agents, skills, plugins and session history are shared.
-//! The main account is the user's normal Claude Code: launched without `CLAUDE_CONFIG_DIR`, never written to.
+//! only its own login (`.credentials.json`, `.claude.json`). Settings, `CLAUDE.md` and keybindings are copied from
+//! the main `~/.claude` before each launch; folders (agents, skills, plugins, session history) link back to it.
+//! The main account is the user's normal Claude Code: launched without `CLAUDE_CONFIG_DIR`. Claudiu never writes
+//! to its folder.
 
 use std::ffi::OsStr;
 use std::fs;
@@ -12,6 +13,9 @@ use serde::Deserialize;
 
 /// Entries that belong to one login and are never shared.
 const OWN: &[&str] = &[".credentials.json", "backups", "daemon", "daemon.log"];
+
+/// Top-level files copied from the main folder into each alt, one way.
+const SYNCED_FILES: &[&str] = &["settings.json", "CLAUDE.md", "keybindings.json"];
 
 pub fn root() -> PathBuf {
     crate::datadir::data_dir().join("accounts")
@@ -27,63 +31,67 @@ fn is_own(name: &OsStr) -> bool {
     OWN.contains(&n.as_ref()) || n.starts_with(".claude.json")
 }
 
-/// A new, empty alt folder with the shared entries already linked.
+/// A new alt folder with the shared entries already in place.
 pub fn create(main: &Path) -> io::Result<PathBuf> {
     let dir = root().join(crate::store::new_id());
     fs::create_dir_all(&dir)?;
-    link_shared(main, &dir)?;
+    sync_shared(main, &dir)?;
     Ok(dir)
 }
 
-/// Link every shared entry of `main` that `alt` doesn't have yet. Runs before each launch, so entries Claude
-/// Code adds to the main folder later are picked up too. Returns the last error but links what it can.
-pub fn link_shared(main: &Path, alt: &Path) -> io::Result<()> {
+/// Bring `alt` up to date with `main`, one way; nothing is ever written to `main`. Runs before each launch, so
+/// entries Claude Code adds to the main folder later are picked up too. Returns the last error but does what it can.
+/// - Config files (`SYNCED_FILES`) are copied, so an alt session that saves one changes only its own copy. The copy
+///   replaces the alt's file every time: it may still be a leftover hard link to main's file, and writing through
+///   that would change main.
+/// - Folders are linked to main's, so skills, agents, plugins and session history are the same for every account.
+/// - Anything else at the top level (command history, caches, the server-pushed limits) is the alt's own.
+pub fn sync_shared(main: &Path, alt: &Path) -> io::Result<()> {
     let mut result = Ok(());
+    for name in SYNCED_FILES {
+        if let Err(e) = copy_config_file(&main.join(name), &alt.join(name)) {
+            result = Err(e);
+        }
+    }
     for e in fs::read_dir(main)?.flatten() {
         let name = e.file_name();
-        let dst = alt.join(&name);
         let src = e.path();
-        if is_own(&name) {
+        if is_own(&name) || !src.is_dir() {
             continue;
         }
-        if let Ok(meta) = fs::symlink_metadata(&dst) {
-            // A hard-linked file that a program saved by replacing it is now a separate copy: rejoin it.
-            if meta.is_file() && !meta.file_type().is_symlink() && src.is_file() {
-                let r = rejoin(&src, &dst);
-                if r.is_err() {
-                    result = r;
-                }
-            }
-            // shortcut: any other entry the alt already has (e.g. a folder Claude Code made first) is left alone.
+        let dst = alt.join(&name);
+        // shortcut: a folder the alt already has (e.g. one Claude Code made first) is left alone.
+        if fs::symlink_metadata(&dst).is_ok() {
             continue;
         }
-        let r = if src.is_dir() { link_dir(&src, &dst) } else { link_file(&src, &dst) };
-        if r.is_err() {
-            result = r;
+        if let Err(e) = link_dir(&src, &dst) {
+            result = Err(e);
         }
     }
     result
 }
 
-/// The newer of the two copies wins: an alt's change is written into the main file (in place, so other
-/// hard links to it see it), then the alt's copy is replaced by a link to main again.
-/// The losing copy is kept in the alt's own `backups` folder first.
-fn rejoin(main: &Path, alt: &Path) -> io::Result<()> {
-    let mtime = |p: &Path| fs::metadata(p).and_then(|m| m.modified());
-    let (m, a) = (mtime(main)?, mtime(alt)?);
-    if m == a {
-        return Ok(()); // still one file (or identical): nothing to do
-    }
-    let (loser, side) = if a > m { (main, "main") } else { (alt, "alt") };
-    let name = main.file_name().unwrap_or_default().to_string_lossy();
-    let backups = alt.parent().unwrap_or(alt).join("backups");
-    fs::create_dir_all(&backups)?;
-    fs::copy(loser, backups.join(format!("{name}.{side}.{}.bak", crate::store::now())))?;
-    if a > m {
-        fs::copy(alt, main)?;
-    }
-    fs::remove_file(alt)?;
-    link_file(main, alt)
+/// Make `dst` a plain copy of `src`; when `src` is gone, remove `dst`. Whatever the alt changed in its copy is
+/// replaced: the alt follows main, never the other way.
+fn copy_config_file(src: &Path, dst: &Path) -> io::Result<()> {
+    let bytes = match fs::read(src) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return match fs::remove_file(dst) {
+                Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+                _ => Ok(()),
+            };
+        }
+        // Unreadable for now (say, locked while Claude Code saves it): keep what the alt has.
+        Err(e) => return Err(e),
+    };
+    // Written beside the target and renamed over it, which replaces the directory entry and never writes through a
+    // link: `dst` may still be a hard link to main's file from an earlier version of Claudiu.
+    let tmp = dst.with_extension("claudiu-tmp");
+    fs::write(&tmp, bytes)?;
+    fs::rename(&tmp, dst).inspect_err(|_| {
+        let _ = fs::remove_file(&tmp);
+    })
 }
 
 #[cfg(windows)]
@@ -92,20 +100,8 @@ fn link_dir(src: &Path, dst: &Path) -> io::Result<()> {
     junction::create(src, dst)
 }
 
-#[cfg(windows)]
-fn link_file(src: &Path, dst: &Path) -> io::Result<()> {
-    // shortcut: without Developer Mode file symlinks fail and a hard link is used; a program that saves the main
-    // file by replacing it leaves the alt on the old copy until the alt is re-created.
-    std::os::windows::fs::symlink_file(src, dst).or_else(|_| fs::hard_link(src, dst))
-}
-
 #[cfg(unix)]
 fn link_dir(src: &Path, dst: &Path) -> io::Result<()> {
-    std::os::unix::fs::symlink(src, dst)
-}
-
-#[cfg(unix)]
-fn link_file(src: &Path, dst: &Path) -> io::Result<()> {
     std::os::unix::fs::symlink(src, dst)
 }
 
@@ -162,25 +158,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn alt_shares_everything_but_the_login_and_removal_keeps_main_intact() {
+    fn alt_shares_folders_copies_config_and_keeps_its_own_login_and_removal_keeps_main_intact() {
         let tmp = tempfile::tempdir().unwrap();
         let (main, alt) = (tmp.path().join("main"), tmp.path().join("alt"));
         fs::create_dir_all(main.join("projects/p")).unwrap();
         fs::create_dir_all(&alt).unwrap();
-        for f in ["settings.json", ".credentials.json", ".claude.json", ".claude.json.backup"] {
+        for f in ["settings.json", "history.jsonl", ".credentials.json", ".claude.json", ".claude.json.backup"] {
             fs::write(main.join(f), f).unwrap();
         }
-        link_shared(&main, &alt).unwrap();
+        sync_shared(&main, &alt).unwrap();
         assert_eq!(fs::read_to_string(alt.join("settings.json")).unwrap(), "settings.json");
+        assert!(!alt.join("history.jsonl").exists(), "other top-level files are the alt's own");
         assert!(!alt.join(".credentials.json").exists() && !alt.join(".claude.json").exists() && !alt.join(".claude.json.backup").exists());
 
-        // Writes through the alt land in main.
+        // Folders are shared: writes through the alt land in main.
         fs::write(alt.join("projects/p/s.jsonl"), "x").unwrap();
         assert!(main.join("projects/p/s.jsonl").is_file());
 
-        // The alt's own login stays its own; re-linking is idempotent.
+        // The alt's own login stays its own; syncing again is harmless.
         fs::write(alt.join(".credentials.json"), "alt").unwrap();
-        link_shared(&main, &alt).unwrap();
+        sync_shared(&main, &alt).unwrap();
+        assert_eq!(fs::read_to_string(alt.join(".credentials.json")).unwrap(), "alt");
 
         delete(&alt).unwrap();
         assert!(!alt.exists());
@@ -190,34 +188,54 @@ mod tests {
     }
 
     #[test]
-    fn a_replaced_file_link_is_rejoined_with_the_newer_content_winning() {
+    fn config_flows_from_main_to_the_alt_and_never_back() {
         let tmp = tempfile::tempdir().unwrap();
         let (main, alt) = (tmp.path().join("main"), tmp.path().join("alt"));
         fs::create_dir_all(&main).unwrap();
         fs::create_dir_all(&alt).unwrap();
-        fs::write(main.join("settings.json"), "old").unwrap();
-        // The alt's copy was saved by replacing it, later than main.
+        fs::write(main.join("settings.json"), "main v1").unwrap();
+        // What the old scheme left behind: the alt's file is a hard link to main's.
+        fs::hard_link(main.join("settings.json"), alt.join("settings.json")).unwrap();
+
+        sync_shared(&main, &alt).unwrap();
         fs::write(alt.join("settings.json"), "alt edit").unwrap();
-        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
-        fs::File::options().write(true).open(alt.join("settings.json")).unwrap().set_modified(later).unwrap();
+        assert_eq!(fs::read_to_string(main.join("settings.json")).unwrap(), "main v1", "an edit in the alt must not reach main");
 
-        link_shared(&main, &alt).unwrap();
-        assert_eq!(fs::read_to_string(main.join("settings.json")).unwrap(), "alt edit");
-        assert!(fs::read_dir(alt.join("backups")).unwrap().next().is_some(), "main's old copy is backed up");
+        // The next launch replaces the alt's edit with main's file.
+        sync_shared(&main, &alt).unwrap();
+        assert_eq!(fs::read_to_string(alt.join("settings.json")).unwrap(), "main v1");
 
-        // Rejoined: a later write to main shows in the alt.
-        fs::write(main.join("settings.json"), "main edit").unwrap();
-        assert_eq!(fs::read_to_string(alt.join("settings.json")).unwrap(), "main edit");
+        // Main changed, even by replacing the file: the alt follows.
+        fs::write(main.join("settings.json.new"), "main v2").unwrap();
+        fs::rename(main.join("settings.json.new"), main.join("settings.json")).unwrap();
+        sync_shared(&main, &alt).unwrap();
+        assert_eq!(fs::read_to_string(alt.join("settings.json")).unwrap(), "main v2");
+    }
 
-        // Main newer: the alt's own copy is backed up before it is replaced.
-        fs::remove_file(alt.join("settings.json")).unwrap();
-        fs::write(alt.join("settings.json"), "alt only").unwrap();
-        let earlier = std::time::SystemTime::now() - std::time::Duration::from_secs(600);
-        fs::File::options().write(true).open(alt.join("settings.json")).unwrap().set_modified(earlier).unwrap();
-        link_shared(&main, &alt).unwrap();
-        assert_eq!(fs::read_to_string(alt.join("settings.json")).unwrap(), "main edit");
-        let saved = fs::read_dir(alt.join("backups")).unwrap().flatten().any(|e| fs::read_to_string(e.path()).unwrap() == "alt only");
-        assert!(saved, "the alt's copy is backed up");
+    #[test]
+    fn a_main_file_that_cannot_be_read_leaves_the_alts_copy_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (main, alt) = (tmp.path().join("main"), tmp.path().join("alt"));
+        fs::create_dir_all(main.join("settings.json")).unwrap(); // reading a folder fails, like a locked file
+        fs::create_dir_all(&alt).unwrap();
+        fs::write(alt.join("settings.json"), "alt").unwrap();
+        assert!(sync_shared(&main, &alt).is_err());
+        assert_eq!(fs::read_to_string(alt.join("settings.json")).unwrap(), "alt");
+        assert!(!alt.join("settings.claudiu-tmp").exists());
+    }
+
+    #[test]
+    fn a_config_file_removed_from_main_is_removed_from_the_alt() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (main, alt) = (tmp.path().join("main"), tmp.path().join("alt"));
+        fs::create_dir_all(&main).unwrap();
+        fs::create_dir_all(&alt).unwrap();
+        fs::write(main.join("CLAUDE.md"), "rules").unwrap();
+        sync_shared(&main, &alt).unwrap();
+        assert!(alt.join("CLAUDE.md").is_file());
+        fs::remove_file(main.join("CLAUDE.md")).unwrap();
+        sync_shared(&main, &alt).unwrap();
+        assert!(!alt.join("CLAUDE.md").exists());
     }
 
     #[test]

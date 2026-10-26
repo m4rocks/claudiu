@@ -8,7 +8,7 @@ impl Workspace {
         let Some(dir) = acct.dir.as_ref() else { return vec![] };
         if let Some(main) = claude::claude_home() {
             let _ = std::fs::create_dir_all(dir);
-            let _ = accounts::link_shared(&main, dir);
+            let _ = accounts::sync_shared(&main, dir);
         }
         accounts::env(dir)
     }
