@@ -157,7 +157,7 @@ impl Workspace {
                 let before = self.selected.clone();
                 // A prompt that looks like a flag must not become one.
                 let leading = prompt.map(|p| if p.starts_with('-') { format!(" {p}") } else { p }).into_iter().collect();
-                self.new_claude_with(cwd.clone(), leading, window, cx);
+                self.new_claude_with(cwd.clone(), leading, Starter::OtherSession, window, cx);
                 match self.selected.clone().filter(|s| Some(s) != before.as_ref()) {
                     Some(id) => {
                         // A session started from another one is linked with it from the start.

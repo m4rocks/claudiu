@@ -69,9 +69,16 @@ pub struct ClaudeMeta {
     pub auto_compact: Option<bool>,
     #[serde(default)]
     pub advisor: Option<String>,
+    /// Background compaction ("Precompute compaction" in `/config`); `None` while Claude Code does not offer it.
+    #[serde(default)]
+    pub precompute_compact: Option<bool>,
     /// Claude in Chrome: the session is (re)started with `--chrome`. Claudiu's own choice, so it survives restarts.
     #[serde(default)]
     pub chrome: bool,
+    /// The account this conversation runs under. It starts there again after closing it or restarting Claudiu, until a
+    /// hand-off moves it. `None` until Claudiu first starts it.
+    #[serde(default)]
+    pub account: Option<Id>,
     /// The advisor declared for the current conversation. A model change is saved in `advisor` at once but only
     /// becomes `advisor_active` on `/clear` or `/compact`; turning the advisor off/on changes it immediately.
     #[serde(default)]
@@ -248,6 +255,24 @@ pub struct Settings {
     /// UI scale in percent (text and terminal font); 100 when unset.
     #[serde(default)]
     pub scale: Option<u32>,
+    /// Claudiu's background compaction, for sessions whose Claude Code does not offer its own: the mod drafts the
+    /// compaction summary ahead of time. Off unless chosen, since a draft that goes unused still costs tokens.
+    #[serde(default)]
+    pub background_compact: bool,
+    /// Whether new Claude sessions start with Claude in Chrome (`--chrome`); each session can still switch it.
+    #[serde(default)]
+    pub chrome_default: bool,
+    /// Model, effort and permission mode for new Claude sessions; empty fields leave Claude Code's own default.
+    #[serde(default)]
+    pub new_session: crate::claude::defaults::NewSessionDefaults,
+    /// Parts of Claudiu's own MCP server switched off for new sessions (`claude/mcp.rs`). Empty means everything is on,
+    /// which is also what a state file from before this setting loads as.
+    #[serde(default)]
+    pub claudiu_tools_off: Vec<crate::claude::mcp::Feature>,
+    /// Claude Code features and tools switched off for the sessions Claudiu starts (`claude/trim.rs`). Empty means
+    /// nothing is trimmed, which is also what a state file from before this setting loads as.
+    #[serde(default)]
+    pub trimmed_tools: Vec<crate::claude::trim::Trim>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -350,6 +375,14 @@ impl Store {
     /// The account new sessions use; falls back to the main one if the chosen alt was removed.
     pub fn active_account(&self) -> Option<&Account> {
         self.data.active_account.as_deref().and_then(|id| self.account(id)).or_else(|| self.account(MAIN_ACCOUNT))
+    }
+
+    /// The account a session starts under: its own while that account exists, else the active one.
+    pub fn session_account(&self, session_id: &str) -> Option<&Account> {
+        self.session(session_id)
+            .and_then(|r| r.claude.as_ref()?.account.as_deref())
+            .and_then(|id| self.account(id))
+            .or_else(|| self.active_account())
     }
 
     pub fn mark_dirty(&mut self) {
@@ -746,6 +779,36 @@ mod tests {
         s.save();
         assert!(fs::read_to_string(&path).unwrap().contains("\"account\""), "older versions require the field");
         assert_eq!(Store::load(path).data.accounts.len(), 1, "migrates once");
+    }
+
+    #[test]
+    fn a_session_starts_under_its_own_account_while_that_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut s = Store::load(tmp.path().join("s.json"));
+        s.data.accounts.push(Account { id: "alt".into(), ..Default::default() });
+        s.data.active_account = Some("alt".into());
+        let session = |id: &str, account: Option<&str>| SessionRecord {
+            id: id.into(),
+            kind: SessionKind::Claude,
+            title: "Claude".into(),
+            custom_title: None,
+            auto_title: None,
+            cwd: PathBuf::from("/w"),
+            project_id: None,
+            created_at: 1,
+            last_active: 1,
+            exit_code: None,
+            hidden: false,
+            claude: Some(ClaudeMeta { session_id: id.into(), account: account.map(Into::into), ..Default::default() }),
+        };
+        s.add_session(session("main-owned", Some(MAIN_ACCOUNT)));
+        s.add_session(session("never-started", None));
+        s.add_session(session("removed-owner", Some("gone")));
+        let account = |s: &Store, id: &str| s.session_account(id).map(|a| a.id.clone());
+        assert_eq!(account(&s, "main-owned").as_deref(), Some(MAIN_ACCOUNT), "not the active alt");
+        assert_eq!(account(&s, "never-started").as_deref(), Some("alt"));
+        assert_eq!(account(&s, "removed-owner").as_deref(), Some("alt"));
+        assert_eq!(account(&s, "not-yet-stored").as_deref(), Some("alt"), "a new session");
     }
 
     #[test]

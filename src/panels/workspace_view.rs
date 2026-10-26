@@ -1,21 +1,24 @@
 //! Main area (the shown session / home), overlays (menu, modal, toast), and the root `Render`.
 
 use gpui::{
-    AnyElement, ClickEvent, Context, FontWeight, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
+    AnyElement, Entity, ClickEvent, Context, FontWeight, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
     ParentElement, Render, StatefulInteractiveElement, Styled, Window, anchored, deferred, div, prelude::FluentBuilder,
     px, rgba,
 };
 
+use crate::claude::defaults::{Effort, PermissionMode};
+use crate::claude::mcp::Feature;
+use crate::claude::trim::Trim;
 use crate::app::{
-    Act, CloseSession, GitOp, FocusSearch, ImportProject, Main, Modal, NewClaude, NextSession, OpenGithub, OpenSettings, PrevSession, ShellDrag, SwapFocus,
+    Act, CloseSession, SettingsPage, GitOp, FocusSearch, ImportProject, Main, MenuItem, Modal, NewClaude, NextSession, OpenGithub, OpenSettings, PrevSession, ShellDrag, SwapFocus,
     ToggleEditor, ToggleRight, ToggleShell, ToggleSidebar, Workspace, SHELL_HEIGHT,
 };
-use gpui_kit::component::{TitleBar, input::Input};
+use gpui_kit::component::{TitleBar, input::{Input, InputState}};
 use crate::store::{SessionKind, now};
 use crate::panels::theme::{self, hsla};
 use crate::updater::Status;
 use gpui_kit::assets::IconName;
-use crate::panels::widgets::{Trigger, ago, button, clawd, danger_button, fade_in, icon, icon_button, section_label, short_path, spinner};
+use crate::panels::widgets::{Trigger, ago, button, clawd, danger_button, fade_in, icon, icon_button, key_hint, section_label, short_path, shortcut, spinner, tick};
 
 impl Workspace {
     // ------------------------------------------------------------------ top bar
@@ -25,6 +28,7 @@ impl Workspace {
         // Git actions live in the right sidebar; the branch pill here needs the repository of the session's own folder.
         let repo = project.as_ref().filter(|p| p.git.is_some()).and(cwd.clone());
         let busy = self.git_busy;
+        let hints = self.shortcuts_shown;
 
         let title = rec.as_ref().map(|r| r.display_title().to_string()).unwrap_or_else(|| "Claudiu".into());
         let branch = project.as_ref().and_then(|p| p.git.as_ref()).and_then(|g| g.branch.clone());
@@ -53,6 +57,7 @@ impl Workspace {
                             .occlude()
                             .on_click(cx.listener(|ws, _: &ClickEvent, _w, cx| ws.toggle_left(cx))),
                     )
+                    .when(hints, |d| d.child(key_hint("Shift+B")))
                     .child(
                         div()
                             .min_w_0()
@@ -96,13 +101,18 @@ impl Workspace {
                 div()
                     .flex()
                     .flex_none()
+                    .items_center()
+                    .gap(px(if hints { 4.0 } else { 0.0 }))
                     .occlude()
+                    .when(hints, |d| d.child(key_hint("Shift+E")))
                     .child(icon_button("toggle-editor", IconName::FileCode).on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::ToggleEditor, window, cx))))
+                    .when(hints, |d| d.child(key_hint("J")))
                     .child(icon_button("toggle-shell", IconName::PanelBottom).on_click(cx.listener(|ws, _: &ClickEvent, window, cx| {
                         if let Some(id) = ws.active.clone() {
                             ws.act(Act::ToggleShell(id), window, cx)
                         }
                     })))
+                    .when(hints, |d| d.child(key_hint("Shift+R")))
                     .child(icon_button("toggle-right", IconName::PanelRight).on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.toggle_right(window, cx)))),
             ))
     }
@@ -261,7 +271,7 @@ impl Workspace {
     // ------------------------------------------------------------------ details & home
 
     fn render_home(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let shortcut = |keys: &str, what: &str| {
+        let shortcut_row = |keys: &str, what: &str| {
             div()
                 .flex()
                 .justify_between()
@@ -333,10 +343,10 @@ impl Workspace {
                     .flex()
                     .flex_col()
                     .gap(px(4.0))
-                    .child(shortcut("Ctrl+Shift+N", "New code session"))
-                    .child(shortcut("Ctrl+`", "Show or hide shell"))
-                    .child(shortcut("Ctrl+Tab", "Next session"))
-                    .child(shortcut("Ctrl+Shift+W", "End session")),
+                    .child(shortcut_row(&shortcut("Shift+N"), "New code session"))
+                    .child(shortcut_row(&shortcut("J"), "Show or hide shell"))
+                    .child(shortcut_row("Ctrl+Tab", "Next session"))
+                    .child(shortcut_row(&shortcut("Shift+W"), "End session")),
             )
     }
 
@@ -348,6 +358,7 @@ impl Workspace {
         let mut card = div()
             .id("menu")
             .occlude()
+            .cursor_default()
             .w(px(232.0))
             .min_w(menu.min_w)
             .p(px(4.0))
@@ -399,7 +410,7 @@ impl Workspace {
                     .on_mouse_down(MouseButton::Right, cx.listener(close))
                     .child(anchored().position(pos).snap_to_window_with_margin(px(8.0)).child(fade_in(card, "menu-in", 110, 0.0))),
             )
-            .with_priority(10)
+            .with_priority(25)
             .into_any_element(),
         )
     }
@@ -414,71 +425,7 @@ impl Workspace {
                 confirm.clone(),
                 *danger,
             ),
-            Modal::Settings { shell, claude, updates, scale } => {
-                let toggle = |on: bool| if on { "On" } else { "Off" };
-                (
-                    "Settings".into(),
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(10.0))
-                        .child(div().flex().flex_col().gap(px(4.0)).child(section_label("SHELL".to_string())).child(Input::new(shell)))
-                        .child(div().flex().flex_col().gap(px(4.0)).child(section_label("CLAUDE CODE PATH".to_string())).child(Input::new(claude)))
-                        .child(
-                            div()
-                                .h(px(32.0))
-                                .px(px(10.0))
-                                .flex()
-                                .items_center()
-                                .justify_between()
-                                .rounded(px(6.0))
-                                .bg(hsla(0x111111))
-                                .border_1()
-                                .border_color(hsla(0x242424))
-                                .text_size(px(13.0))
-                                .child("Scale (text and terminal)")
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap(px(10.0))
-                                        .child(scale_step("scale-down", "−", -(crate::panels::scale::STEP as i32), cx))
-                                        .child(div().w(px(40.0)).flex().justify_center().child(format!("{scale}%")))
-                                        .child(scale_step("scale-up", "+", crate::panels::scale::STEP as i32, cx)),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .id("settings-updates")
-                                .h(px(32.0))
-                                .px(px(10.0))
-                                .flex()
-                                .items_center()
-                                .justify_between()
-                                .rounded(px(6.0))
-                                .bg(hsla(0x111111))
-                                .border_1()
-                                .border_color(hsla(0x242424))
-                                .text_size(crate::panels::scale::px(13.0))
-                                .cursor_pointer()
-                                .child("Check for updates")
-                                .child(div().text_color(hsla(if *updates { theme::ACCENT } else { theme::TEXT_FAINT })).child(toggle(*updates)))
-                                .on_click(cx.listener(|ws, _: &ClickEvent, _w, cx| {
-                                    if let Some(Modal::Settings { updates, .. }) = ws.modal.as_mut() {
-                                        *updates = !*updates;
-                                    }
-                                    cx.notify();
-                                })),
-                        )
-                        .child(div().text_size(crate::panels::scale::px(11.0)).text_color(hsla(theme::TEXT_FAINT)).child(format!(
-                            "Claudiu {} · An independent project, not affiliated with, endorsed by or sponsored by Anthropic. Claude is a trademark of Anthropic.",
-                            env!("CARGO_PKG_VERSION")
-                        )))
-                        .into_any_element(),
-                    "Save".into(),
-                    false,
-                )
-            }
+            Modal::Settings { .. } => ("Settings".into(), settings_body(self.settings_page, modal, cx), "Save".into(), false),
             Modal::Advisor { input, .. } => (
                 "Advisor model".into(),
                 div()
@@ -491,6 +438,22 @@ impl Workspace {
                 "Set".into(),
                 false,
             ),
+            Modal::FileName { purpose, input, .. } => (
+                match purpose {
+                    crate::app::NameFor::FileIn(_) => "New file",
+                    crate::app::NameFor::FolderIn(_) => "New folder",
+                    crate::app::NameFor::Rename(_) => "Rename",
+                }
+                .into(),
+                Input::new(input).into_any_element(),
+                match purpose {
+                    crate::app::NameFor::FileIn(_) | crate::app::NameFor::FolderIn(_) => "Create",
+                    crate::app::NameFor::Rename(_) => "Rename",
+                }
+                .into(),
+                false,
+            ),
+            Modal::GoToLine { input, .. } => ("Go to line".into(), Input::new(input).into_any_element(), "Go".into(), false),
             Modal::Rename { input, .. } | Modal::NewBranch { input, .. } => (
                 if matches!(modal, Modal::NewBranch { .. }) { "New branch" } else { "Rename session" }.into(),
                 Input::new(input).into_any_element(),
@@ -502,7 +465,11 @@ impl Workspace {
             .id("modal-card")
             .occlude()
             .track_focus(&self.modal_focus)
-            .w(px(if matches!(modal, Modal::Settings { .. }) { 520.0 } else { 420.0 }))
+            .when(matches!(modal, Modal::Settings { .. }), |c| {
+                // One size for every page, growing with Scale.
+                c.w(crate::panels::scale::px(720.0)).h(crate::panels::scale::px(480.0))
+            })
+            .when(!matches!(modal, Modal::Settings { .. }), |c| c.w(px(420.0)))
             .p(px(20.0))
             .rounded(px(12.0))
             .bg(hsla(0x151515))
@@ -512,6 +479,7 @@ impl Workspace {
             .flex()
             .flex_col()
             .gap(px(12.0))
+            .capture_key_down(cx.listener(|ws, ev: &KeyDownEvent, window, cx| ws.settings_key(ev, window, cx)))
             .on_key_down(cx.listener(|ws, ev: &KeyDownEvent, window, cx| {
                 let key = ev.keystroke.key.as_str();
                 match (key, ws.modal.as_ref()) {
@@ -573,6 +541,8 @@ impl Workspace {
                 div().absolute().bottom(px(18.0)).right(px(18.0)).child(
                     fade_in(
                     div()
+                        .occlude()
+                        .cursor_default()
                         .max_w(px(420.0))
                         .px(px(14.0))
                         .py(px(10.0))
@@ -635,7 +605,7 @@ impl Render for Workspace {
         }
         let right = self.render_right(f32::from(window.viewport_size().width), window, cx);
         let shell = self.render_shell(window, cx);
-        let editor = self.render_editor_pane(window, cx);
+        let editor = self.render_editor_pane(cx);
         let window_w = f32::from(window.viewport_size().width);
         let main: AnyElement = match &self.main {
             Main::Terminals => self.render_session(cx),
@@ -672,11 +642,17 @@ impl Render for Workspace {
                 }
             }))
             .on_action(cx.listener(|ws, _: &NextSession, window, cx| ws.cycle(1, window, cx)))
+            .on_action(cx.listener(|ws, a: &crate::app::ShowSession, window, cx| ws.show_numbered(a.0, window, cx)))
+            .on_modifiers_changed(cx.listener(|ws, ev: &gpui::ModifiersChangedEvent, _w, cx| ws.modifiers_changed(&ev.modifiers, cx)))
             .on_action(cx.listener(|ws, _: &PrevSession, window, cx| ws.cycle(-1, window, cx)))
             .on_action(cx.listener(|ws, _: &ToggleSidebar, _w, cx| ws.toggle_left(cx)))
             .on_action(cx.listener(|ws, _: &ToggleRight, window, cx| ws.toggle_right(window, cx)))
             .on_action(cx.listener(|ws, _: &FocusSearch, window, cx| {
-                ws.editor_mode = false;
+                // In editor mode the search that fits is the session's files.
+                if ws.editing() {
+                    ws.open_picker(crate::app::picker::PickerKind::Text, window, cx);
+                    return;
+                }
                 ws.store.data.layout.sidebar_visible = true;
                 ws.search_input.update(cx, |s, cx| s.focus(window, cx));
                 cx.notify();
@@ -774,6 +750,235 @@ impl Render for Workspace {
             .children(modal)
             .children(toast)
     }
+}
+
+/// The Settings dialog's body: the category list on the left and the chosen page on the right.
+/// `toggles` are Check for updates, Background compaction and Claude in Chrome, in that order.
+fn settings_body(page: SettingsPage, modal: &Modal, cx: &mut Context<Workspace>) -> AnyElement {
+    let Modal::Settings { shell, claude, model, effort, permission, updates, background, chrome, scale, trimmed, claudiu_off, list_focus } = modal else {
+        return div().into_any_element();
+    };
+    let (updates, background, chrome, scale) = (*updates, *background, *chrome, *scale);
+    let scaled = crate::panels::scale::px;
+    let faint = |text: String| div().text_size(scaled(11.0)).text_color(hsla(theme::TEXT_FAINT)).child(text);
+    let field = |label: &str, input: &Entity<InputState>| {
+        div().flex().flex_col().gap(px(4.0)).child(section_label(label.to_string())).child(Input::new(input))
+    };
+    let content = match page {
+        SettingsPage::General => div()
+            .flex()
+            .flex_col()
+            .gap(px(10.0))
+            .child(field("SHELL", shell))
+            .child(field("CLAUDE CODE PATH", claude))
+            .child(
+                div()
+                    .h(px(32.0))
+                    .px(px(10.0))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .rounded(px(6.0))
+                    .bg(hsla(0x111111))
+                    .border_1()
+                    .border_color(hsla(0x242424))
+                    .text_size(px(13.0))
+                    .child("Scale (text and terminal)")
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(10.0))
+                            .child(scale_step("scale-down", "−", -(crate::panels::scale::STEP as i32), cx))
+                            .child(div().w(px(40.0)).flex().justify_center().child(format!("{scale}%")))
+                            .child(scale_step("scale-up", "+", crate::panels::scale::STEP as i32, cx)),
+                    ),
+            )
+            .child(settings_toggle("settings-updates", "Check for updates", updates, |m| match m {
+                Modal::Settings { updates, .. } => Some(updates),
+                _ => None,
+            }, cx)),
+        SettingsPage::Sessions => div()
+            .flex()
+            .flex_col()
+            .gap(px(10.0))
+            .child(field("MODEL FOR NEW SESSIONS", model))
+            .child(picker_row("settings-effort", "Effort", *effort, &Effort::ALL, Effort::name, Act::PickEffort, cx))
+            .child(picker_row("settings-permission", "Permission mode", *permission, &PermissionMode::ALL, PermissionMode::name, Act::PickPermission, cx))
+            .children((*permission == Some(PermissionMode::BypassPermissions)).then(|| faint("Every new session will run commands and edit files without asking.".to_string())))
+            .children((*permission == Some(PermissionMode::Plan) && trimmed.contains(&Trim::PlanMode)).then(|| {
+                faint("Plan mode is off under Claude Code tools, so new sessions start in Claude Code's default mode.".to_string())
+            }))
+            .child(settings_toggle("settings-chrome", "Claude in Chrome for new sessions", chrome, |m| match m {
+                Modal::Settings { chrome, .. } => Some(chrome),
+                _ => None,
+            }, cx))
+            .child(settings_toggle("settings-background-compact", "Background compaction", background, |m| match m {
+                Modal::Settings { background, .. } => Some(background),
+                _ => None,
+            }, cx))
+            .child(faint(
+                "Drafts the compaction summary before the context fills, so auto-compact doesn't pause the session.                  Used where Claude Code doesn't offer its own; an unused draft still costs tokens."
+                    .to_string(),
+            )),
+        SettingsPage::ClaudeTools => {
+            let plan_trimmed = trimmed.contains(&Trim::PlanMode);
+            let mut list = div().flex().flex_col().gap(px(8.0));
+            list = list.child(faint(
+                "Applies to new sessions. Running sessions keep their tools. Resumed sessions get the new tools, and the old instructions stay until their next compaction.                  Claudiu only turns things off. Anything off in your Claude Code settings stays off."
+                    .to_string(),
+            ));
+            for (heading, items) in Trim::GROUPS {
+                list = list.child(div().mt(px(4.0)).child(section_label(heading.to_string())));
+                for &item in items {
+                    list = list.child(switch_row(("settings-trim", item as usize), item.label(), !trimmed.contains(&item), move |ws| {
+                        if let Some(Modal::Settings { trimmed, .. }) = ws.modal.as_mut() {
+                            flip(trimmed, item);
+                        }
+                    }, cx));
+                }
+            }
+            if plan_trimmed {
+                list = list.child(faint("With Plan mode off, Claude can't leave plan mode itself; press Shift+Tab.".to_string()));
+            }
+            list
+        }
+        SettingsPage::ClaudiuTools => {
+            let mut list = div().flex().flex_col().gap(px(8.0)).child(faint(
+                "Applies to new sessions. Running sessions keep their tools. Resumed sessions get the new tools, and the old instructions stay until their next compaction."
+                    .to_string(),
+            ));
+            for feature in Feature::ALL {
+                list = list.child(switch_row(("settings-claudiu", feature as usize), feature.label(), !claudiu_off.contains(&feature), move |ws| {
+                    if let Some(Modal::Settings { claudiu_off, .. }) = ws.modal.as_mut() {
+                        flip(claudiu_off, feature);
+                    }
+                }, cx));
+            }
+            list
+        }
+        SettingsPage::About => div().child(faint(format!(
+            "Claudiu {} · An independent project, not affiliated with, endorsed by or sponsored by Anthropic. Claude is a trademark of Anthropic.",
+            env!("CARGO_PKG_VERSION")
+        ))),
+    };
+    let categories = SettingsPage::ALL.into_iter().enumerate().fold(
+        div().id("settings-categories").track_focus(list_focus).w(scaled(160.0)).flex_none().flex().flex_col().gap(px(2.0)),
+        |list, (i, p)| {
+            let selected = p == page;
+            let focus = list_focus.clone();
+            list.child(
+                div()
+                    .id(("settings-category", i))
+                    .h(scaled(28.0))
+                    .px(px(10.0))
+                    .flex()
+                    .items_center()
+                    .rounded(px(6.0))
+                    .text_size(scaled(13.0))
+                    .text_color(hsla(if selected { theme::ACCENT } else { theme::TEXT_DIM }))
+                    .when(selected, |d| d.bg(hsla(0x1f1f1f)))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(hsla(0x1f1f1f)))
+                    .child(p.label())
+                    .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
+                        ws.settings_page = p;
+                        window.focus(&focus, cx);
+                        cx.notify();
+                    })),
+            )
+        },
+    );
+    div()
+        .flex_1()
+        .min_h_0()
+        .flex()
+        .gap(px(16.0))
+        .child(categories)
+        .child(div().id("settings-page").flex_1().min_w_0().overflow_y_scroll().child(content))
+        .into_any_element()
+}
+
+/// An On/Off row in the Settings modal; `field` picks the flag it flips.
+fn settings_toggle(id: &'static str, label: &'static str, on: bool, field: fn(&mut Modal) -> Option<&mut bool>, cx: &mut Context<Workspace>) -> impl IntoElement {
+    switch_row(id, label, on, move |ws| {
+        if let Some(flag) = ws.modal.as_mut().and_then(field) {
+            *flag = !*flag;
+        }
+    }, cx)
+}
+
+/// A row that opens a menu of `options` under itself; the first entry, "Claude Code default", clears the choice.
+fn picker_row<T: Copy + PartialEq + 'static>(
+    id: &'static str,
+    label: &'static str,
+    current: Option<T>,
+    options: &'static [T],
+    name: fn(T) -> &'static str,
+    pick: fn(Option<T>) -> Act,
+    cx: &mut Context<Workspace>,
+) -> impl IntoElement {
+    const DEFAULT: &str = "Claude Code default";
+    div()
+        .id(id)
+        .h(px(32.0))
+        .px(px(10.0))
+        .flex()
+        .items_center()
+        .justify_between()
+        .rounded(px(6.0))
+        .bg(hsla(0x111111))
+        .border_1()
+        .border_color(hsla(0x242424))
+        .text_size(crate::panels::scale::px(13.0))
+        .cursor_pointer()
+        .child(label)
+        .child(div().text_color(hsla(if current.is_some() { theme::ACCENT } else { theme::TEXT_FAINT })).child(current.map_or(DEFAULT, name)))
+        .dropdown(cx, move |ws, at, _window, cx| {
+            let items = std::iter::once(MenuItem::new(format!("{}{DEFAULT}", tick(current.is_none())), pick(None)))
+                .chain(options.iter().map(|&o| MenuItem::new(format!("{}{}", tick(current == Some(o)), name(o)), pick(Some(o)))))
+                .collect();
+            ws.open_dropdown(at, items, cx);
+        })
+}
+
+/// Adds `item` to `items`, or removes it when it is there.
+fn flip<T: PartialEq>(items: &mut Vec<T>, item: T) {
+    match items.iter().position(|i| *i == item) {
+        Some(at) => {
+            items.remove(at);
+        }
+        None => items.push(item),
+    }
+}
+
+/// An On/Off row that runs `flip` on the workspace when clicked.
+fn switch_row(
+    id: impl Into<gpui::ElementId>,
+    label: &'static str,
+    on: bool,
+    flip: impl Fn(&mut Workspace) + 'static,
+    cx: &mut Context<Workspace>,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .h(px(32.0))
+        .px(px(10.0))
+        .flex()
+        .items_center()
+        .justify_between()
+        .rounded(px(6.0))
+        .bg(hsla(0x111111))
+        .border_1()
+        .border_color(hsla(0x242424))
+        .text_size(crate::panels::scale::px(13.0))
+        .cursor_pointer()
+        .child(label)
+        .child(div().text_color(hsla(if on { theme::ACCENT } else { theme::TEXT_FAINT })).child(if on { "On" } else { "Off" }))
+        .on_click(cx.listener(move |ws, _: &ClickEvent, _w, cx| {
+            flip(ws);
+            cx.notify();
+        }))
 }
 
 /// A − / + button in the Settings modal that moves the scale by `by` percent, within the allowed range.

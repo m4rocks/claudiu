@@ -17,6 +17,7 @@ use crate::claude::accounts;
 use crate::claude;
 use crate::panels::sidebar::{SIDEBAR_MAX, SIDEBAR_MIN, SIDEBAR_W};
 use crate::github::view::{GhEvent, GithubView};
+use crate::claude::defaults::{Effort, PermissionMode, Starter};
 use crate::claude::mcp;
 use crate::platform::{self, Editor};
 use crate::{claude::usage, datadir};
@@ -28,24 +29,36 @@ use crate::terminal::view::{TerminalEvent, TerminalView};
 use crate::updater::UpdateState;
 
 mod alt_accounts;
+mod ask_claude;
 mod background;
 mod cross;
+pub mod editing;
 mod editor_mode;
 mod github_pane;
 mod handoff;
 #[cfg(test)]
 mod headless;
 mod ingest;
+mod file_ops;
 mod layout;
+mod language_servers;
 mod lifecycle;
 mod links;
 mod modal;
+mod navigation;
+pub mod picker;
 mod repo;
+mod selection_reference;
 mod sessions;
+mod settings;
 mod titles;
 mod visuals;
 
-pub use editor_mode::EditorPane;
+pub use editor_mode::{EditorPane, Tab, register_languages};
+pub use ask_claude::Ask;
+pub use editor_mode::EditorCommand;
+pub use file_ops::NameFor;
+pub use settings::SettingsPage;
 
 actions!(
     claudiu,
@@ -67,8 +80,22 @@ actions!(
         ShowAllApps,
         OpenSettings,
         ToggleEditor,
+        QuickOpen,
+        SaveFile,
+        AskExplain,
+        AskFix,
+        AskTests,
+        AskFixProblem,
+        GoToLine,
+        GoBack,
+        GoForward,
     ]
 );
+
+/// Ctrl+1 to Ctrl+9 (Cmd on macOS): show the running session with that number, counted down the sidebar's RUNNING list.
+#[derive(Clone, Debug, PartialEq, gpui::Action)]
+#[action(namespace = claudiu, no_json)]
+pub struct ShowSession(pub usize);
 
 /// Every user-triggerable operation, so buttons, menus and shortcuts share one code path.
 #[derive(Clone, Debug)]
@@ -84,6 +111,10 @@ pub enum Act {
     Select(Id),
     Resume(Id),
     CloseLive(Id),
+    /// End the session although its editor has unsaved files (the user confirmed).
+    ConfirmCloseLive(Id),
+    /// Close an editor tab and drop its unsaved edits (the user confirmed).
+    DiscardTab(Id, PathBuf),
     Rename(Id),
     /// Hide (true) or restore (false) a session in the sidebar. Archived sessions still turn up in search.
     Archive(Id, bool),
@@ -92,6 +123,10 @@ pub enum Act {
     OpenEditor(Editor, PathBuf),
     ImportProject,
     OpenSettings,
+    /// A choice in the Settings dialog's effort or permission-mode picker (None = Claude Code's default); kept in the
+    /// dialog until Save.
+    PickEffort(Option<Effort>),
+    PickPermission(Option<PermissionMode>),
     /// The project's GitHub issues and pull requests.
     OpenGithub {
         cwd: PathBuf,
@@ -100,6 +135,7 @@ pub enum Act {
     RegenTitle(Id),
     /// Change a setting of a running session through its mod (see `usage::send_ctl`).
     SetAutoCompact(Id, bool),
+    SetPrecomputeCompact(Id, bool),
     SetAdvisor(Id, String),
     /// Turn Claude in Chrome on or off; the session restarts to apply it.
     SetChrome(Id, bool),
@@ -135,6 +171,12 @@ pub enum Act {
     SignIn(Id),
     RemoveAccount(Id),
     ConfirmRemoveAccount(Id),
+    /// Editor mode's file tree: ask for a file name (new or renamed), ask before deleting, delete.
+    AskFileName(Id, NameFor),
+    AskDelete(Id, PathBuf),
+    ConfirmDelete(Id, PathBuf),
+    /// An entry of the editor's right-click menu.
+    Editor(EditorCommand),
 }
 
 impl MenuItem {
@@ -173,6 +215,15 @@ pub enum Modal {
         id: Id,
         input: Entity<InputState>,
     },
+    FileName {
+        id: Id,
+        purpose: NameFor,
+        input: Entity<InputState>,
+    },
+    GoToLine {
+        id: Id,
+        input: Entity<InputState>,
+    },
     NewBranch {
         cwd: PathBuf,
         input: Entity<InputState>,
@@ -185,8 +236,20 @@ pub enum Modal {
     Settings {
         shell: Entity<InputState>,
         claude: Entity<InputState>,
+        /// Model for new sessions (Sessions page); empty = Claude Code's default.
+        model: Entity<InputState>,
+        effort: Option<Effort>,
+        permission: Option<PermissionMode>,
         updates: bool,
+        background: bool,
+        chrome: bool,
         scale: u32,
+        /// Claude Code features and tools turned off (Claude Code tools page).
+        trimmed: Vec<crate::claude::trim::Trim>,
+        /// Claudiu tools turned off (Claudiu tools page).
+        claudiu_off: Vec<crate::claude::mcp::Feature>,
+        /// Focus of the category list, which has the keyboard when the dialog opens.
+        list_focus: FocusHandle,
     },
 }
 
@@ -217,6 +280,7 @@ pub struct Live {
     pub id: Id,
     pub view: Entity<TerminalView>,
     pub _sub: Subscription,
+    pub _focus: [Subscription; 2],
     /// The session name Claude Code was last given (`--name` or `/rename`), so a changed title is sent once.
     pub claude_name: Option<String>,
     /// When Claude last called the title tool. A later call (e.g. after `/clear`, which starts a nameless
@@ -321,8 +385,15 @@ pub struct Workspace {
     pub search: String,
     pub search_input: Entity<InputState>,
     pub root_focus: FocusHandle,
+    /// Set when an Ask Claude request moves the keyboard to the terminal, so that arrival doesn't also put the editor's
+    /// selection into Claude's input (`selection_reference`).
+    pub(crate) skip_selection_reference: bool,
     pub modal: Option<Modal>,
     pub modal_focus: FocusHandle,
+    /// The Settings category last shown. Kept here because opening Settings builds the modal anew; not saved to disk.
+    pub settings_page: SettingsPage,
+    /// Whether this run already said it couldn't write a session's tool settings file (said at most once).
+    trim_failure_shown: bool,
     pub menu: Option<Menu>,
     pub toast: Option<Toast>,
     pub toast_serial: u64,
@@ -341,6 +412,10 @@ pub struct Workspace {
     /// Pointer position at the last drag-over check, see `pointer_moved`.
     /// Sidebar reorder animation: last drawn order of the running rows, and the slides in flight.
     pub prev_current: Vec<Id>,
+    /// Ctrl (Cmd on macOS) has been held a moment, so the running rows show their Ctrl+number shortcut.
+    pub shortcuts_shown: bool,
+    /// Bumped whenever the modifier keys change, so a pending reveal of the shortcuts is dropped.
+    pub shortcuts_wait: u64,
     pub slides: HashMap<Id, crate::panels::sidebar::Slide>,
     pub slide_gen: u64,
     /// When a drag last reordered the sidebar, see `pointer_moved`.
@@ -358,6 +433,8 @@ pub struct Workspace {
     /// Sessions that are working or waiting for the user; absent = idle and already seen.
     pub activity: HashMap<Id, Activity>,
     pub git_busy: Option<GitOp>,
+    /// What Commit & Push would do in the shown session's folder, as last read; `None` until it has been.
+    pub pending: Option<(PathBuf, crate::git::commit::Pending)>,
 }
 
 impl Workspace {
@@ -410,8 +487,11 @@ impl Workspace {
             search: String::new(),
             search_input,
             root_focus: cx.focus_handle(),
+            skip_selection_reference: false,
             modal: None,
             modal_focus: cx.focus_handle(),
+            settings_page: SettingsPage::default(),
+            trim_failure_shown: false,
             menu: None,
             toast: None,
             toast_serial: 0,
@@ -427,6 +507,8 @@ impl Workspace {
             dragging: None,
             drag_pos: None,
             prev_current: Vec::new(),
+            shortcuts_shown: false,
+            shortcuts_wait: 0,
             slides: HashMap::new(),
             slide_gen: 0,
             last_swap: std::time::Instant::now(),
@@ -439,6 +521,7 @@ impl Workspace {
             restored: false,
             activity: HashMap::new(),
             git_busy: None,
+            pending: None,
             store,
         };
         // Everything from a previous run is history until clicked. Keep the highlight only if it still exists.
@@ -485,9 +568,20 @@ impl Workspace {
             Act::NewClaude { cwd } => self.new_claude(cwd, window, cx),
             Act::ToggleShell(id) => self.toggle_shell(&id, window, cx),
             Act::ToggleEditor => self.toggle_editor(window, cx),
+            Act::Editor(command) => self.run_editor_command(command, window, cx),
             Act::Select(id) => self.show_session(&id, window, cx),
             Act::Resume(id) => self.resume(&id, window, cx),
-            Act::CloseLive(id) => self.close_live(&id, window, cx),
+            Act::CloseLive(id) => self.request_close_live(&id, window, cx),
+            Act::ConfirmCloseLive(id) => {
+                self.modal = None;
+                self.close_live(&id, window, cx)
+            }
+            Act::DiscardTab(id, path) => {
+                self.modal = None;
+                if let Some(ix) = self.panes.get(&id).and_then(|p| p.tabs.iter().position(|t| t.path == path)) {
+                    self.close_tab(&id, ix, cx);
+                }
+            }
             Act::Rename(id) => {
                 let text = self
                     .store
@@ -551,14 +645,20 @@ impl Workspace {
             }
             Act::FixGitWithClaude(cwd) => {
                 let prompt = "Claudiu's Pull or Commit & Push just failed in this repository because of a merge conflict,                     a diverged branch or a rejected push. Run git status, fix it (resolve conflicts keeping the intent of both sides,                     finish the merge or rebase, then push if the push was rejected).                     Ask me whenever a conflict is ambiguous or you are unsure which side to keep.";
-                let args = ["--model", "claude-sonnet-5-5", "--effort", "medium"];
-                let leading = std::iter::once(prompt).chain(args).map(String::from).collect();
-                let before = self.selected.clone();
-                self.new_claude_with(cwd, leading, window, cx);
-                if self.selected != before
-                    && let Some(id) = self.selected.clone() {
-                        self.ephemeral.insert(id);
+                match self.running_claude(cx) {
+                    Some(id) => self.send_to_claude(&id, prompt, window, cx),
+                    None => {
+                        // No session to ask: a short-lived one on a mid-sized model.
+                        let args = ["--model", "claude-sonnet-5-5", "--effort", "medium"];
+                        let leading = std::iter::once(prompt).chain(args).map(String::from).collect();
+                        let before = self.selected.clone();
+                        self.new_claude_with(cwd, leading, Starter::FixGit, window, cx);
+                        if self.selected != before
+                            && let Some(id) = self.selected.clone() {
+                                self.ephemeral.insert(id);
+                            }
                     }
+                }
             }
             Act::OpenSettings => {
                 let s = &self.store.data.settings;
@@ -567,10 +667,26 @@ impl Workspace {
                     s.claude_path.as_ref().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default(),
                 );
                 let updates = s.update_url.as_deref() != Some("");
+                let background = s.background_compact;
+                let chrome = s.chrome_default;
                 let claude_hint = self.claude_exe.as_ref().map_or("not found".to_string(), |p| p.to_string_lossy().into_owned());
+                let defaults = s.new_session.clone();
                 let claude = self.modal_input(&claude_t, &claude_hint, window, cx);
+                let model = self.modal_input(defaults.model.as_deref().unwrap_or_default(), "Claude Code default", window, cx);
                 let shell = self.modal_input(&shell_t, &platform::default_shell(None).0, window, cx);
-                self.modal = Some(Modal::Settings { shell, claude, updates, scale: crate::panels::scale::percent() });
+                let list_focus = cx.focus_handle();
+                window.focus(&list_focus, cx);
+                self.modal = Some(Modal::Settings { shell, claude, model, effort: defaults.effort, permission: defaults.permission_mode, updates, background, chrome, scale: crate::panels::scale::percent(), trimmed: self.store.data.settings.trimmed_tools.clone(), claudiu_off: self.store.data.settings.claudiu_tools_off.clone(), list_focus });
+            }
+            Act::PickEffort(choice) => {
+                if let Some(Modal::Settings { effort, .. }) = self.modal.as_mut() {
+                    *effort = choice;
+                }
+            }
+            Act::PickPermission(choice) => {
+                if let Some(Modal::Settings { permission, .. }) = self.modal.as_mut() {
+                    *permission = choice;
+                }
             }
             Act::NewBranch(cwd) => {
                 let input = self.modal_input("", "", window, cx);
@@ -600,6 +716,15 @@ impl Workspace {
                 cx.notify();
                 usage::send_ctl(&usage::ctl_file(&id), "auto_compact", on.into());
                 self.toast(format!("Turning auto-compact {}…", if on { "on" } else { "off" }), false, cx);
+            }
+            Act::SetPrecomputeCompact(id, on) => {
+                if let Some(meta) = self.store.session_mut(&id).and_then(|s| s.claude.as_mut()) {
+                    meta.precompute_compact = Some(on);
+                }
+                self.store.mark_dirty();
+                cx.notify();
+                usage::send_ctl(&usage::ctl_file(&id), "precompute_compact", on.into());
+                self.toast(format!("Turning background compaction {}…", if on { "on" } else { "off" }), false, cx);
             }
             Act::SetChrome(id, on) => {
                 if let Some(meta) = self.store.session_mut(&id).and_then(|s| s.claude.as_mut()) {
@@ -742,6 +867,9 @@ impl Workspace {
                 });
                 window.focus(&self.modal_focus, cx);
             }
+            Act::AskFileName(id, purpose) => self.ask_file_name(id, purpose, window, cx),
+            Act::AskDelete(id, path) => self.ask_delete(id, path, window, cx),
+            Act::ConfirmDelete(id, path) => self.delete_path(id, path, cx),
             Act::ConfirmRemoveAccount(id) => {
                 self.modal = None;
                 if let Some(dir) = self.store.account(&id).and_then(|a| a.dir.clone()) {
