@@ -1,6 +1,6 @@
 [package]
 name = "claudiu"
-version = "0.6.0"
+version = "0.6.1"
 edition = "2024"
 description = "A native workspace for Claude Code sessions: real PTYs, projects, and session history"
 repository = "https://github.com/m4rocks/claudiu"
@@ -60,7 +60,7 @@ strip = true
 
 [target."cfg(windows)".dependencies]
 junction = "2.1.0"
-windows-sys = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging", "Win32_Foundation", "Win32_Security", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp"] }
+windows-sys = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging", "Win32_Foundation", "Win32_Security", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_System_Threading"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

@@ -176,14 +176,14 @@ fn main() {
         #[cfg(target_os = "macos")]
         cx.bind_keys([KeyBinding::new("cmd-q", Quit, None), KeyBinding::new("cmd-h", HideApp, None), KeyBinding::new("cmd-alt-h", HideOthers, None)]);
 
-        let bounds = Bounds::centered(None, size(px(1280.0), px(800.0)), cx);
+        let bounds = app::saved_window_bounds(cx).unwrap_or_else(|| WindowBounds::Windowed(Bounds::centered(None, size(px(1280.0), px(800.0)), cx)));
         // AppKit's standard window buttons are 14 px tall; center them in the top bar so the
         // traffic lights line up with its controls (and get equal space above and below).
         let traffic_light_y = (panels::theme::TOPBAR_HEIGHT - 14.0) / 2.0;
         // Opened through gpui_kit so the window gets the component library's Root (text inputs need it).
         let (window, workspace) = gpui_kit::open_window(
             WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                window_bounds: Some(bounds),
                 window_min_size: Some(size(px(720.0), px(420.0))),
                 titlebar: Some(TitlebarOptions {
                     title: Some("Claudiu".into()),

@@ -216,12 +216,12 @@ impl GithubView {
         (out, loading)
     }
 
-    pub(super) fn render_popup(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub(super) fn render_popup(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let popup = self.popup.as_ref()?;
         let (items, loading) = self.popup_items(&popup.kind);
         let needle = popup.filter.read(cx).value().to_lowercase();
         let searchable = !matches!(popup.kind, PopKind::Merge | PopKind::CloseReason | PopKind::Claude | PopKind::More | PopKind::React(_) | PopKind::Comment(..) | PopKind::FilterSort | PopKind::FilterReview | PopKind::FilterChecks);
-        let mut list = div().id("gh-pop-list").flex().flex_col().max_h(px(320.0)).overflow_y_scroll();
+        let mut list = popup.scroll.wire(div().id("gh-pop-list"), window).flex().flex_col().max_h(px(320.0));
         let mut shown = 0;
         for (i, it) in items.into_iter().enumerate() {
             if searchable && !needle.is_empty() && !it.label.to_lowercase().contains(&needle) {

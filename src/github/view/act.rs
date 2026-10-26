@@ -261,7 +261,7 @@ impl GithubView {
             }
         });
         filter.update(cx, |s, cx| s.focus(window, cx));
-        self.popup = Some(Popup { kind, pos, filter, _sub: sub });
+        self.popup = Some(Popup { kind, pos, filter, scroll: Default::default(), _sub: sub });
     }
 
     pub(super) fn comment(&mut self, close: Option<bool>, window: &mut Window, cx: &mut Context<Self>) {

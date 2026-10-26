@@ -205,8 +205,30 @@ pub struct Account {
     pub usage: AccountUsage,
 }
 
+/// Where the window was last left, in logical pixels. `w`/`h` are the restore size while `maximized`.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WindowGeom {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    pub maximized: bool,
+}
+
+impl WindowGeom {
+    /// Whether the window's center lies on one of the `displays` (x, y, w, h). A monitor that was unplugged or
+    /// rearranged since would otherwise open the window out of reach.
+    pub fn on_screen(&self, displays: &[(f32, f32, f32, f32)]) -> bool {
+        let (cx, cy) = (self.x + self.w / 2.0, self.y + self.h / 2.0);
+        displays.iter().any(|&(x, y, w, h)| cx >= x && cx < x + w && cy >= y && cy < y + h)
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Layout {
+    /// Last window size and position; the default centered window when unset.
+    #[serde(default)]
+    pub window: Option<WindowGeom>,
     pub selected_session: Option<Id>,
     pub sidebar_visible: bool,
     /// No longer used (the "Other sessions" group is gone); still written because older Claudiu versions require it.
@@ -806,5 +828,33 @@ mod tests {
         assert!(c.data.projects.is_empty());
         assert_eq!(c.active_account().map(|a| a.id.as_str()), Some(MAIN_ACCOUNT), "main account always exists");
         assert!(path.with_extension("json.corrupt").exists(), "corrupt state is preserved, not destroyed");
+    }
+
+    #[test]
+    fn window_geometry_survives_a_save_and_old_state_files_load_without_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("s.json");
+        let mut a = Store::load(path.clone());
+        assert_eq!(a.data.layout.window, None, "a first run has nothing saved");
+        let geom = WindowGeom { x: 40.0, y: 30.0, w: 900.0, h: 600.0, maximized: true };
+        a.data.layout.window = Some(geom);
+        a.save();
+        assert_eq!(Store::load(path.clone()).data.layout.window, Some(geom));
+
+        let mut value: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        value["layout"].as_object_mut().unwrap().remove("window");
+        fs::write(&path, value.to_string()).unwrap();
+        assert_eq!(Store::load(path).data.layout.window, None, "state from before this setting loads");
+    }
+
+    #[test]
+    fn a_window_is_restored_only_where_a_display_still_shows_it() {
+        let geom = |x| WindowGeom { x, y: 100.0, w: 1000.0, h: 700.0, maximized: false };
+        let primary = (0.0, 0.0, 1920.0, 1080.0);
+        let right = (1920.0, 0.0, 1920.0, 1080.0);
+        assert!(geom(100.0).on_screen(&[primary]));
+        assert!(geom(2000.0).on_screen(&[primary, right]));
+        assert!(!geom(2000.0).on_screen(&[primary]), "the second monitor was unplugged");
+        assert!(!geom(100.0).on_screen(&[]), "no display reported");
     }
 }

@@ -139,13 +139,13 @@ impl Workspace {
         self.sync_configs(cx);
         self.refresh_files(cx);
         self.refresh_marks(cx);
-        self.lower_tool_priority(cx);
+        self.raise_claude_priority(cx);
         self.refresh_pending(cx);
         cx.notify();
     }
 
-    /// Windows: keep what the running Claude sessions start (builds, tests) from starving the other sessions.
-    fn lower_tool_priority(&self, cx: &mut Context<Self>) {
+    /// Windows: run the Claude sessions above the builds and tests they start.
+    fn raise_claude_priority(&self, cx: &mut Context<Self>) {
         #[cfg(windows)]
         {
             let claude_pids: Vec<u32> = self
@@ -154,7 +154,7 @@ impl Workspace {
                 .filter(|l| self.store.session(&l.id).is_some_and(|r| r.kind == SessionKind::Claude))
                 .filter_map(|l| l.view.read(cx).terminal.process_id())
                 .collect();
-            cx.background_executor().spawn(async move { crate::priority::lower_tool_priority(&claude_pids) }).detach();
+            cx.background_executor().spawn(async move { crate::priority::raise_claude_priority(&claude_pids) }).detach();
         }
         #[cfg(not(windows))]
         let _ = cx;

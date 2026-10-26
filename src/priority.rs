@@ -1,64 +1,18 @@
-//! Windows only: run the programs Claude Code starts (bash, cargo, rustc, test binaries) below normal priority, so a
-//! heavy build in one session cannot starve the other sessions' `claude` processes. A child inherits its parent's
-//! priority class, so lowering a program once also covers what it starts later.
+//! Windows only: run the `claude` processes at above normal priority, so a heavy build in one session cannot slow
+//! the sessions down. Only `claude` itself is raised. Windows gives a child the normal class unless its parent is
+//! below normal, so bash, cargo and rustc start at normal priority and stay as they are.
 
-/// Every process below `roots` in the parent/child tree, not including the roots. `processes` holds
-/// `(pid, parent pid)` pairs. The `apps` and everything they started are left out: Claudiu itself may have been
-/// started from a Claude session, and must not end up slower than the sessions it shows.
-#[cfg_attr(not(windows), allow(dead_code))]
-fn descendants(roots: &[u32], processes: &[(u32, u32)], apps: &[u32]) -> Vec<u32> {
-    let mut found: Vec<u32> = Vec::new();
-    let mut parents: Vec<u32> = roots.to_vec();
-    while let Some(parent) = parents.pop() {
-        for &(pid, parent_pid) in processes {
-            // Process ids get reused, so a stale parent id can make the tree loop back on itself.
-            if parent_pid == parent && !roots.contains(&pid) && !apps.contains(&pid) && !found.contains(&pid) {
-                found.push(pid);
-                parents.push(pid);
-            }
-        }
-    }
-    found
-}
-
-/// Lower everything the given `claude` processes have started to below normal priority. The `claude` processes
-/// themselves stay as they are, and so do descendants that already run at a non-default priority.
+/// Raise the given `claude` processes to above normal priority. A process that already runs at another class was set
+/// by the user or another tool and is left alone.
 #[cfg(windows)]
-pub fn lower_tool_priority(claude_pids: &[u32]) {
-    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
-    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
-        CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
-    };
+pub fn raise_claude_priority(claude_pids: &[u32]) {
+    use windows_sys::Win32::Foundation::CloseHandle;
     use windows_sys::Win32::System::Threading::{
-        BELOW_NORMAL_PRIORITY_CLASS, GetPriorityClass, NORMAL_PRIORITY_CLASS, OpenProcess,
+        ABOVE_NORMAL_PRIORITY_CLASS, GetPriorityClass, NORMAL_PRIORITY_CLASS, OpenProcess,
         PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_INFORMATION, SetPriorityClass,
     };
 
-    if claude_pids.is_empty() {
-        return;
-    }
-    let mut processes: Vec<(u32, u32)> = Vec::new();
-    let mut apps: Vec<u32> = Vec::new();
-    // SAFETY: `entry` is initialised with its size as the API requires, and the snapshot handle is closed below.
-    unsafe {
-        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-        if snapshot == INVALID_HANDLE_VALUE {
-            return;
-        }
-        let mut entry: PROCESSENTRY32W = std::mem::zeroed();
-        entry.dwSize = size_of::<PROCESSENTRY32W>() as u32;
-        let mut more = Process32FirstW(snapshot, &mut entry) != 0;
-        while more {
-            processes.push((entry.th32ProcessID, entry.th32ParentProcessID));
-            let name = String::from_utf16_lossy(&entry.szExeFile);
-            if name.trim_end_matches('\0').eq_ignore_ascii_case("claudiu.exe") {
-                apps.push(entry.th32ProcessID);
-            }
-            more = Process32NextW(snapshot, &mut entry) != 0;
-        }
-        CloseHandle(snapshot);
-    }
-    for pid in descendants(claude_pids, &processes, &apps) {
+    for &pid in claude_pids {
         // SAFETY: the handle is checked for null before use and closed after.
         unsafe {
             let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SET_INFORMATION, 0, pid);
@@ -66,15 +20,15 @@ pub fn lower_tool_priority(claude_pids: &[u32]) {
                 continue;
             }
             if GetPriorityClass(handle) == NORMAL_PRIORITY_CLASS {
-                SetPriorityClass(handle, BELOW_NORMAL_PRIORITY_CLASS);
+                SetPriorityClass(handle, ABOVE_NORMAL_PRIORITY_CLASS);
             }
             CloseHandle(handle);
         }
     }
 }
 
-/// A process started from a Claude session inherits the tools' lowered priority; Claudiu, its window included, runs
-/// at normal priority whatever started it.
+/// Claudiu started from a session of an older version can have inherited a lowered priority; it runs at normal
+/// priority whatever started it.
 #[cfg(windows)]
 pub fn restore_own_priority() {
     use windows_sys::Win32::System::Threading::{
@@ -86,46 +40,5 @@ pub fn restore_own_priority() {
         if GetPriorityClass(me) == BELOW_NORMAL_PRIORITY_CLASS {
             SetPriorityClass(me, NORMAL_PRIORITY_CLASS);
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn finds_children_and_grandchildren_but_not_the_root() {
-        // claude 10 -> bash 11 -> cargo 12 -> rustc 13; 20 is another program's tree.
-        let processes = [(10, 1), (11, 10), (12, 11), (13, 12), (20, 1), (21, 20)];
-        let mut found = descendants(&[10], &processes, &[]);
-        found.sort();
-        assert_eq!(found, vec![11, 12, 13]);
-    }
-
-    #[test]
-    fn leaves_other_claude_processes_alone() {
-        // Two claude processes under the same parent: neither is a descendant of the other.
-        let processes = [(10, 1), (30, 1), (11, 10), (31, 30)];
-        let mut found = descendants(&[10, 30], &processes, &[]);
-        found.sort();
-        assert_eq!(found, vec![11, 31]);
-    }
-
-    #[test]
-    fn leaves_claudiu_and_what_it_started_alone() {
-        // claude 10 -> bash 11 -> claudiu 12 -> claude 13; the tools below the nested Claudiu are its own business.
-        let processes = [(10, 1), (11, 10), (12, 11), (13, 12), (14, 11)];
-        let mut found = descendants(&[10], &processes, &[12]);
-        found.sort();
-        assert_eq!(found, vec![11, 14]);
-    }
-
-    #[test]
-    fn a_reused_pid_cannot_loop_forever() {
-        // 11 claims 12 as its parent and 12 claims 11, so the tree below 10 loops.
-        let processes = [(10, 1), (11, 10), (12, 11), (11, 12)];
-        let mut found = descendants(&[10], &processes, &[]);
-        found.sort();
-        assert_eq!(found, vec![11, 12]);
     }
 }

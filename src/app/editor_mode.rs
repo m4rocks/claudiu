@@ -19,6 +19,10 @@ pub struct EditorPane {
     pub tree: Entity<TreeState>,
     /// Open files, in the order they were opened, and the one shown.
     pub tabs: Vec<Tab>,
+    /// Smooth wheel scrolling of the tab bar.
+    pub tabs_scroll: crate::panels::glide::Smooth,
+    /// Smooth wheel scrolling of the file tree.
+    pub tree_scroll: crate::panels::glide::Smooth,
     pub active: Option<usize>,
     /// The listing the tree was last given, to skip redrawing it when nothing changed, and the folder it lists.
     pub nodes: Vec<Node>,
@@ -65,6 +69,8 @@ pub struct Tab {
     pub dirty: bool,
     /// The lines that differ from the last commit, as of the last read or save of the file (`git::lines`).
     pub marks: std::sync::Arc<Vec<crate::git::lines::Change>>,
+    /// The smooth wheel scrolling of the text (see `panels::editor_pane::change_marks`, which also hosts it).
+    pub follow: std::rc::Rc<std::cell::RefCell<crate::panels::glide::Follow>>,
     /// A save is being written; the disk check leaves the tab alone until it lands, so the save isn't taken for a
     /// change from outside.
     pub saving: bool,
@@ -171,10 +177,13 @@ impl Workspace {
                     };
                 }
             });
+            let tree_scroll = crate::panels::glide::Smooth::around(tree.read(cx).scroll_handle().0.borrow().base_handle.clone());
             let pane = EditorPane {
                 focus: cx.focus_handle(),
                 tree,
                 tabs: vec![],
+                tabs_scroll: crate::panels::glide::Smooth::horizontal(),
+                tree_scroll,
                 active: None,
                 nodes: vec![],
                 root: PathBuf::new(),
@@ -333,7 +342,7 @@ impl Workspace {
                 let opened = pane.tabs.iter().position(|t| t.path == path);
                 let ix = opened.unwrap_or_else(|| {
                     let language = language.filter(|_| note.is_none());
-                    pane.tabs.push(Tab { path: path.clone(), buffer, note, format, stamp, dirty: false, marks: Default::default(), saving: false, conflict: None, language, version: 0, server: None, _sub: sub });
+                    pane.tabs.push(Tab { path: path.clone(), buffer, note, format, stamp, dirty: false, marks: Default::default(), follow: Default::default(), saving: false, conflict: None, language, version: 0, server: None, _sub: sub });
                     pane.tabs.len() - 1
                 });
                 pane.active = Some(ix);

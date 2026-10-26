@@ -218,7 +218,7 @@ impl Render for GithubView {
             Phase::Loading if self.lists.iter().any(|l| l.loaded) => self.render_ready(window, cx),
             other => self.render_state(other, cx),
         };
-        let popup = self.render_popup(cx);
+        let popup = self.render_popup(window, cx);
         div()
             .id("github")
             .key_context("Github")

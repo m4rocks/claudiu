@@ -14,6 +14,7 @@ use crate::app::picker::{Picker, PickerKind, relative};
 use crate::app::editing::Conflict;
 use crate::files::Change;
 use crate::app::{Act, Ask, AskExplain, AskFix, AskFixProblem, AskTests, EditorCommand, EditorPane, MenuItem, GoBack, GoForward, GoToLine, QuickOpen, SaveFile, Tab, Workspace};
+use crate::panels::glide::Follow;
 use crate::panels::theme::{self, hsla};
 use crate::panels::widgets::{button, icon};
 use crate::platform::path_key;
@@ -21,12 +22,12 @@ use crate::platform::path_key;
 const TREE_W: f32 = 240.0;
 
 impl Workspace {
-    pub fn render_editor_pane(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub fn render_editor_pane(&mut self, window: &mut gpui::Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let ws = cx.entity().downgrade();
         let menu_ws = ws.clone();
         let server = self.active_id().cloned().and_then(|id| self.server_status(&id));
         let (id, pane) = self.shown_pane(cx)?;
-        let tabs = render_tabs(&id, pane, cx);
+        let tabs = render_tabs(&id, pane, window, cx);
         let changed = pane.changed.clone();
         let empty_folders = pane.empty_folders.clone();
         let tree_id = id.clone();
@@ -105,7 +106,7 @@ impl Workspace {
                             let _ = menu_ws.update(cx, |ws, cx| ws.open_menu(at, editor_menu(), cx));
                             menu
                         }))
-                        .child(change_marks(tab.buffer.clone(), tab.marks.clone())),
+                        .child(change_marks(tab.buffer.clone(), tab.marks.clone(), tab.follow.clone())),
                 )
                 .children(server.map(|s| {
                     div()
@@ -172,7 +173,7 @@ impl Workspace {
                                 ws.open_menu(ev.position, items, cx);
                             }
                         }))
-                        .child(div().flex_1().min_h_0().child(files))
+                        .child(pane.tree_scroll.watch(div().id("file-tree").flex_1().min_h_0(), window).child(files))
                         .children(truncated),
                 )
                 .child(
@@ -214,19 +215,48 @@ fn editor_menu() -> Vec<MenuItem> {
     items
 }
 
+/// The text scrolls through the editor's own offset, which the editor clamps itself. The wheel is taken before the editor
+/// sees it and eased here, one frame at a time; the canvas below hosts it because it is painted every frame, over the editor.
+fn glide_text(buffer: &gpui::Entity<EditorState>, follow: &std::cell::RefCell<Follow>, window: &mut gpui::Window, cx: &mut gpui::App) {
+    let here = f32::from(buffer.read(cx).scroll_offset().y);
+    if let Some((y, more)) = follow.borrow_mut().frame(here, window.scale_factor()) {
+        buffer.update(cx, |editor, cx| editor.set_scroll_offset(gpui::point(editor.scroll_offset().x, px(y)), cx));
+        if more {
+            window.request_animation_frame();
+        }
+    }
+}
+
 /// A bar at the editor's left edge, over the line numbers, for each line that differs from the last commit. The editor
 /// has no gutter of its own to draw in, so this paints over it and asks the editor where each line is, which
 /// follows scrolling, soft wrapping and folds. Changes are as of the last save (`Tab::marks`).
-fn change_marks(buffer: gpui::Entity<EditorState>, marks: std::sync::Arc<Vec<LineChange>>) -> impl IntoElement {
+fn change_marks(buffer: gpui::Entity<EditorState>, marks: std::sync::Arc<Vec<LineChange>>, follow: std::rc::Rc<std::cell::RefCell<Follow>>) -> impl IntoElement {
     const BAR_WIDTH: f32 = 3.0;
     gpui::canvas(
         |_, _, _| (),
-        move |_, _, window, cx| {
+        move |viewport, _, window, cx| {
+            glide_text(&buffer, &follow, window, cx);
+            let (wheel_buffer, wheel_follow) = (buffer.clone(), follow.clone());
+            window.on_mouse_event(move |ev: &gpui::ScrollWheelEvent, phase, window, cx| {
+                if phase != gpui::DispatchPhase::Capture || !viewport.contains(&ev.position) || ev.modifiers.modified() {
+                    return;
+                }
+                if ev.delta.precise() {
+                    wheel_follow.borrow_mut().cancel();
+                    return;
+                }
+                let here = f32::from(wheel_buffer.read(cx).scroll_offset().y);
+                let by = f32::from(ev.delta.pixel_delta(window.line_height()).y) * crate::panels::glide::NOTCH;
+                wheel_follow.borrow_mut().wheel(here, by);
+                cx.stop_propagation();
+                window.refresh();
+            });
             let editor = buffer.read(cx);
             let (Some(area), Some(visible)) = (editor.text_bounds(), editor.visible_row_range()) else { return };
             let text = editor.text();
             let lines = text.lines_len();
-            window.with_content_mask(Some(gpui::ContentMask { bounds: area }), |window| {
+            // Clip to what is on screen: the editor's text area is the whole scrolled content, which moves away from the view.
+            window.with_content_mask(Some(gpui::ContentMask { bounds: viewport }), |window| {
                 for mark in marks.iter() {
                     let color = match mark.kind {
                         Kind::Added => hsla(theme::OK),
@@ -236,13 +266,16 @@ fn change_marks(buffer: gpui::Entity<EditorState>, marks: std::sync::Arc<Vec<Lin
                     if mark.kind == Kind::Deleted {
                         // A removal has no line of its own: a short bar on the border between the two lines it was between.
                         let at = mark.lines.start.min(lines.saturating_sub(1));
+                        if at < visible.start || at > visible.end {
+                            continue;
+                        }
                         if let Some(top) = editor.range_to_bounds(&(text.line_start_offset(at)..text.line_start_offset(at))) {
                             window.paint_quad(gpui::fill(gpui::Bounds::new(gpui::point(area.origin.x, top.origin.y - px(1.0)), gpui::size(px(BAR_WIDTH * 2.0), px(2.0))), color));
                         }
                         continue;
                     }
-                    // A line cannot lie below the rows on screen, so the rest of a long change is skipped.
-                    for line in mark.lines.clone().take_while(|&l| l <= visible.end && l < lines) {
+                    // Lines above the screen would be placed at its top edge, and none lies below the rows on screen.
+                    for line in (mark.lines.start.max(visible.start)..mark.lines.end).take_while(|&l| l <= visible.end && l < lines) {
                         let (start, end) = (text.line_start_offset(line), text.line_end_offset(line));
                         if let Some(bounds) = editor.range_to_bounds(&(start..end)) {
                             window.paint_quad(gpui::fill(gpui::Bounds::new(gpui::point(area.origin.x, bounds.origin.y), gpui::size(px(BAR_WIDTH), bounds.size.height)), color));
@@ -258,7 +291,7 @@ fn change_marks(buffer: gpui::Entity<EditorState>, marks: std::sync::Arc<Vec<Lin
     .size_full()
 }
 
-fn render_tabs(id: &crate::store::Id, pane: &EditorPane, cx: &mut Context<Workspace>) -> AnyElement {
+fn render_tabs(id: &crate::store::Id, pane: &EditorPane, window: &mut gpui::Window, cx: &mut Context<Workspace>) -> AnyElement {
     let tabs = pane.tabs.iter().enumerate().map(|(i, tab)| {
         let shown = pane.active == Some(i);
         let name = tab.path.file_name().map_or_else(|| tab.path.to_string_lossy(), |n| n.to_string_lossy()).to_string();
@@ -300,12 +333,11 @@ fn render_tabs(id: &crate::store::Id, pane: &EditorPane, cx: &mut Context<Worksp
                     })),
             )
     });
-    div()
-        .id("tabs")
+    pane.tabs_scroll
+        .wire(div().id("tabs"), window)
         .flex_none()
         .h(px(30.0))
         .flex()
-        .overflow_x_scroll()
         .border_b_1()
         .border_color(hsla(theme::BORDER))
         .children(tabs)

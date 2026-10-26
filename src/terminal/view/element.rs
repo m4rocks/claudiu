@@ -95,12 +95,14 @@ impl Element for TerminalElement {
         let terminal = &self.view.read(cx).terminal;
         terminal.resize(cols, rows, f32::from(cell_w), f32::from(line_h));
         let frac = self.view.read(cx).frac;
+        // The shift is a whole number of device pixels, so the rows' text and their backgrounds move together.
+        let shift = px(crate::panels::glide::snap(f32::from(line_h * frac), window.scale_factor()));
         self.view.update(cx, |v, _| {
             v.metrics = Some(Metrics {
                 cell_w,
                 line_h,
                 origin: bounds.origin,
-                shift: line_h * frac,
+                shift,
             });
         });
         // Where row 0 of the cells below is drawn (one row higher while the line above is peeking in).
@@ -127,7 +129,7 @@ impl Element for TerminalElement {
             // Between two lines the view is shifted down by `frac` of a line and the line above shows in the gap.
             let extra = (frac > 0.0 && term.grid().display_offset() < term.history_size()).then(|| Line(-offset - 1));
             let top = extra.is_some() as usize;
-            top_y = bounds.origin.y + line_h * frac - line_h * top as f32;
+            top_y = bounds.origin.y + shift - line_h * top as f32;
             let cell_origin = |row: usize, col: usize| point(bounds.origin.x + cell_w * col as f32, top_y + line_h * row as f32);
             let above = extra.into_iter().flat_map(|l| (0..cols as usize).map(move |c| (l, c))).map(|(l, c)| (&term.grid()[l][Column(c)], GridPoint::new(l, Column(c))));
 

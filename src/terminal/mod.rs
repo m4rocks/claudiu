@@ -87,8 +87,8 @@ pub struct Terminal {
     start_error: Arc<Mutex<Option<String>>>,
     cols: AtomicU32,
     rows: AtomicU32,
-    /// The child's process id (0 until it exists), so closing can make sure it ends (Unix) and its tools can be
-    /// lowered in priority (Windows).
+    /// The child's process id (0 until it exists), so closing can make sure it ends (Unix) and it can be
+    /// raised in priority (Windows).
     pid: Arc<AtomicU32>,
     /// When it was made, and what to call it in the start-up trace (`trace.rs`).
     pub born: Instant,

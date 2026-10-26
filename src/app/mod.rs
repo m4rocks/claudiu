@@ -58,6 +58,7 @@ mod visuals;
 
 pub use editor_mode::{EditorPane, Tab, register_languages};
 pub use ask_claude::Ask;
+pub use lifecycle::saved_window_bounds;
 pub use editor_mode::EditorCommand;
 pub use file_ops::NameFor;
 pub use settings::SettingsPage;
@@ -395,6 +396,8 @@ pub struct Workspace {
     pub modal_focus: FocusHandle,
     /// The Settings category last shown. Kept here because opening Settings builds the modal anew; not saved to disk.
     pub settings_page: SettingsPage,
+    /// Smooth wheel scrolling of the settings page.
+    pub settings_scroll: crate::panels::glide::Smooth,
     /// Whether this run already said it couldn't write a session's tool settings file (said at most once).
     pub menu: Option<Menu>,
     pub toast: Option<Toast>,
@@ -499,6 +502,7 @@ impl Workspace {
             modal: None,
             modal_focus: cx.focus_handle(),
             settings_page: SettingsPage::default(),
+            settings_scroll: Default::default(),
             menu: None,
             toast: None,
             toast_serial: 0,

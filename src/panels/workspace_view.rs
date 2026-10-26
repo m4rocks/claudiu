@@ -416,7 +416,7 @@ impl Workspace {
     }
 
     /// One labelled text field of the settings modal; `hint` is the default shown while it is empty.
-    fn render_modal(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn render_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let modal = self.modal.as_ref()?;
         let (title, body, confirm_label, danger): (String, gpui::AnyElement, String, bool) = match modal {
             Modal::Confirm { title, body, confirm, danger, .. } => (
@@ -425,7 +425,7 @@ impl Workspace {
                 confirm.clone(),
                 *danger,
             ),
-            Modal::Settings { .. } => ("Settings".into(), settings_body(self.settings_page, modal, cx), "Save".into(), false),
+            Modal::Settings { .. } => ("Settings".into(), settings_body(self.settings_page, modal, &self.settings_scroll, window, cx), "Save".into(), false),
             Modal::Advisor { input, .. } => (
                 "Advisor model".into(),
                 div()
@@ -577,6 +577,7 @@ impl Render for Workspace {
             window.set_window_title(&title);
             self.window_title = title;
         }
+        self.remember_window(window);
 
         // Editor mode hides both sidebars without changing the remembered layout, so leaving it brings them back.
         let left_open = self.left_reveal.step(self.store.data.layout.sidebar_visible && !self.editing(), window);
@@ -605,14 +606,14 @@ impl Render for Workspace {
         }
         let right = self.render_right(f32::from(window.viewport_size().width), window, cx);
         let shell = self.render_shell(window, cx);
-        let editor = self.render_editor_pane(cx);
+        let editor = self.render_editor_pane(window, cx);
         let window_w = f32::from(window.viewport_size().width);
         let main: AnyElement = match &self.main {
             Main::Terminals => self.render_session(cx),
             Main::Home => self.render_home(cx).into_any_element(),
         };
         let menu = self.render_menu(cx);
-        let modal = self.render_modal(cx);
+        let modal = self.render_modal(window, cx);
         let toast = self.render_toast(cx);
         // The top bar's own background is the gutter above the panels; only an update banner needs real space.
         let content_top = if banner.is_some() { theme::PANEL_GAP } else { 0.0 };
@@ -753,7 +754,7 @@ impl Render for Workspace {
 }
 
 /// The Settings dialog's body: the category list on the left and the chosen page on the right.
-fn settings_body(page: SettingsPage, modal: &Modal, cx: &mut Context<Workspace>) -> AnyElement {
+fn settings_body(page: SettingsPage, modal: &Modal, scroll: &crate::panels::glide::Smooth, window: &mut Window, cx: &mut Context<Workspace>) -> AnyElement {
     let Modal::Settings { shell, claude, model, effort, permission, updates, chrome, scale, trimmed, claudiu_off, list_focus } = modal else {
         return div().into_any_element();
     };
@@ -886,7 +887,7 @@ fn settings_body(page: SettingsPage, modal: &Modal, cx: &mut Context<Workspace>)
         .flex()
         .gap(px(16.0))
         .child(categories)
-        .child(div().id("settings-page").flex_1().min_w_0().overflow_y_scroll().child(content))
+        .child(scroll.wire(div().id("settings-page").flex_1().min_w_0(), window).child(content))
         .into_any_element()
 }
 

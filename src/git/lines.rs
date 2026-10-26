@@ -2,9 +2,11 @@
 //! count, and a file Git doesn't know yet is all new.
 
 use std::ops::Range;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use git2::{DiffOptions, Repository};
+
+use crate::platform::{is_same_or_under, normalize};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Kind {
@@ -25,9 +27,10 @@ pub struct Change {
 pub fn changed_lines(file: &Path) -> Vec<Change> {
     let Some(dir) = file.parent() else { return vec![] };
     let Ok(repo) = Repository::discover(dir) else { return vec![] };
-    let Some(relative) = repo.workdir().and_then(|root| file.strip_prefix(root).or_else(|_| file.strip_prefix(dunce::simplified(root))).ok()) else {
-        return vec![];
-    };
+    let Some(root) = repo.workdir().filter(|root| is_same_or_under(file, root)) else { return vec![] };
+    // Cut the repository's folders off by count, not by text: libgit2 reports the folder's real casing, which on Windows
+    // may differ from how the file was reached.
+    let relative: PathBuf = normalize(file).components().skip(normalize(root).components().count()).collect();
     let mut options = DiffOptions::new();
     // The path is one file, not a pattern: `[id].tsx` or `a*b` must not also match their neighbours. Git paths use `/`.
     let relative = relative.to_string_lossy();
@@ -134,5 +137,23 @@ mod tests {
         let file = tmp.path().join("f.txt");
         std::fs::write(&file, "x\n").unwrap();
         assert_eq!(changed_lines(&file), vec![]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_file_reached_through_a_differently_cased_folder_is_found() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = dunce::canonicalize(tmp.path()).unwrap();
+        let repo = Repository::init(&dir).unwrap();
+        let file = dir.join("f.txt");
+        std::fs::write(&file, "a
+b
+").unwrap();
+        commit_all(&repo);
+        std::fs::write(&file, "a
+B
+").unwrap();
+        let shouted = std::path::PathBuf::from(dir.to_string_lossy().to_uppercase()).join("f.txt");
+        assert_eq!(changed_lines(&shouted), vec![Change { lines: 1..2, kind: Kind::Modified }]);
     }
 }

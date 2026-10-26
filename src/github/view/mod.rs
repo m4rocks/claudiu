@@ -149,6 +149,7 @@ pub struct Popup {
     pub kind: PopKind,
     pub pos: Point<Pixels>,
     pub filter: Entity<InputState>,
+    pub scroll: crate::panels::glide::Smooth,
     _sub: Subscription,
 }
 
