@@ -60,7 +60,7 @@ impl Workspace {
         let to_name = self.store.active_account().map_or_else(|| "the active account".into(), |a| a.name());
         let since = Instant::now();
         self.handoffs.insert(id.into(), Handoff { asked: crate::store::now(), compacted: false, since });
-        self.set_handover(id, Some(Handover { to: to_name, since }), cx);
+        self.set_handover(id, Some(Handover { message: format!("Handing over to {to_name}…"), since }), cx);
         usage::send_ctl(&usage::ctl_file(id), "compact", serde_json::json!(true));
     }
 
@@ -106,11 +106,11 @@ impl Workspace {
         }
         self.restart_session(id, window, cx);
         let to_name = self.store.active_account().map_or_else(|| "the active account".into(), |a| a.name());
-        self.set_handover(id, Some(Handover { to: to_name, since }), cx);
+        self.set_handover(id, Some(Handover { message: format!("Handing over to {to_name}…"), since }), cx);
     }
 
     /// The skeleton says "Handing over to …" while this is set; the new process clears it once its prompt is ready.
-    fn set_handover(&self, id: &str, handover: Option<Handover>, cx: &mut App) {
+    pub(super) fn set_handover(&self, id: &str, handover: Option<Handover>, cx: &mut App) {
         if let Some(view) = self.live_view(id) {
             view.update(cx, |v, cx| {
                 v.handover = handover;

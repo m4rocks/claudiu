@@ -24,7 +24,7 @@ gpui_kit::assets::icon_assets!(
     AppIcons,
     [
         WindowMinimize, WindowMaximize, WindowRestore, WindowClose, Archive, ArchiveRestore, ArrowDownToLine, ArrowLeft, Brackets, Check, ChevronDown, ChevronRight,
-        CircleCheck, CircleDot, CircleSlash, CircleX, Clock, Ellipsis, Eye, ExternalLink, File, FileText, Folder, FolderOpen, GitBranch, GitCommitHorizontal, GitMerge, GitPullRequest,
+        CircleCheck, CircleDot, CircleSlash, CircleX, Clock, Ellipsis, Eye, ExternalLink, File, FileText, Folder, FolderGit2, FolderOpen, GitBranch, GitCommitHorizontal, GitMerge, GitPullRequest,
         GitPullRequestClosed, GitPullRequestDraft, HeartPlus, LoaderCircle, Lock, MessageSquare, FileCode, PanelBottom, PanelLeft, PanelRight, Pencil, RefreshCw, Search,
         Settings, Terminal, X
     ]

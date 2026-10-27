@@ -191,6 +191,32 @@ pub fn is_same_or_under(child: &Path, parent: &Path) -> bool {
     c == p || c.starts_with(&format!("{p}/"))
 }
 
+/// Whether a process with this id is running right now.
+#[cfg(windows)]
+pub fn process_running(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+    use windows_sys::Win32::System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    // SAFETY: the handle is checked for null before use and closed after.
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            return false;
+        }
+        let mut code = 0;
+        let read = GetExitCodeProcess(handle, &mut code);
+        CloseHandle(handle);
+        read != 0 && code == STILL_ACTIVE as u32
+    }
+}
+
+/// Whether a process with this id is running right now.
+#[cfg(unix)]
+pub fn process_running(pid: u32) -> bool {
+    // Signal 0 only checks; EPERM means the process exists but belongs to someone else.
+    // SAFETY: `kill` with signal 0 sends nothing.
+    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM) }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Editor {
     VsCode,
@@ -283,6 +309,12 @@ mod tests {
         let exe = std::env::current_exe().unwrap();
         assert_eq!(resolve_program(exe.to_str().unwrap()), Some(exe));
         assert_eq!(resolve_program("definitely-not-a-program-xyz"), None);
+    }
+
+    #[test]
+    fn this_process_is_running_and_a_huge_pid_is_not() {
+        assert!(process_running(std::process::id()));
+        assert!(!process_running(u32::MAX - 1));
     }
 
     #[test]
