@@ -396,7 +396,7 @@ fn attach_github(params: &Value, record: &str, dir: &Path) -> Value {
         Ok(item) => item,
         Err(e) => return e,
     };
-    match append_line(dir, record, &json!({ "pull": pull, "number": number })) {
+    match write_line(dir, record, &json!({ "pull": pull, "number": number })) {
         Ok(()) => reply(&format!("{} #{number} attached.", if pull { "Pull request" } else { "Issue" }), false),
         Err(e) => reply(&format!("could not attach: {e}"), true),
     }
@@ -424,23 +424,17 @@ fn detach_github(params: &Value, record: &str, dir: &Path) -> Value {
         Ok(item) => item,
         Err(e) => return e,
     };
-    match append_line(dir, record, &json!({ "detach": { "pull": pull, "number": number } })) {
+    match write_line(dir, record, &json!({ "detach": { "pull": pull, "number": number } })) {
         Ok(()) => reply(&format!("{} #{number} detached.", if pull { "Pull request" } else { "Issue" }), false),
         Err(e) => reply(&format!("could not detach: {e}"), true),
     }
 }
 
-/// One JSON line for Claudiu to pick up, in the file of the calling session.
-fn append_line(dir: &Path, record: &str, line: &Value) -> std::io::Result<()> {
-    std::fs::create_dir_all(dir)?;
-    let path = dir.join(format!("{}.jsonl", crate::datadir::safe_file_stem(record)));
-    write_line(&mut std::fs::OpenOptions::new().create(true).append(true).open(path)?, line)
-}
-
-/// The line goes out in one write: `writeln!` on a bare file writes it in many pieces, and `read_attached` could
-/// catch half a line and drop it.
-fn write_line(out: &mut impl std::io::Write, line: &Value) -> std::io::Result<()> {
-    out.write_all(format!("{line}\n").as_bytes())
+/// One JSON line for Claudiu to pick up. Each call gets its own file, written whole and renamed into place, so
+/// `read_attached` never reads a file that is still being written.
+fn write_line(dir: &Path, record: &str, line: &Value) -> std::io::Result<()> {
+    let name = format!("{}.{}.jsonl", crate::datadir::safe_file_stem(record), crate::store::new_id());
+    crate::datadir::write_atomic(&dir.join(name), &format!("{line}\n"))
 }
 
 /// Ask Claudiu to show this session together with another one (`verb` "link"), or to stop. Claudiu checks that the
@@ -454,7 +448,7 @@ fn link_session(params: &Value, record: &str, dir: &Path, verb: &str) -> Value {
     if id == record {
         return reply("that is this session itself", true);
     }
-    match append_line(dir, record, &json!({ verb: id })) {
+    match write_line(dir, record, &json!({ verb: id })) {
         Ok(()) => reply(if verb == "link" { "Linked." } else { "Unlinked." }, false),
         Err(e) => reply(&format!("could not {verb}: {e}"), true),
     }
@@ -525,25 +519,26 @@ pub enum Attachment {
     Detach { pull: bool, number: u32 },
 }
 
-/// `(record id stem, item)` for everything attached since the last call. Each file is renamed before it is
-/// read, so a line written meanwhile lands in a fresh file instead of being lost.
+/// `(record id stem, item)` for everything attached since the last call.
 pub fn read_attached() -> Vec<(String, Attachment)> {
-    let dir = attach_dir(&crate::datadir::data_dir());
-    let Ok(entries) = std::fs::read_dir(&dir) else { return vec![] };
+    read_attached_in(&attach_dir(&crate::datadir::data_dir()))
+}
+
+/// Files are complete when listed (see `write_line`), so each one is read and then removed. A line written after
+/// the listing is left for the next call.
+fn read_attached_in(dir: &Path) -> Vec<(String, Attachment)> {
+    let Ok(entries) = std::fs::read_dir(dir) else { return vec![] };
     let mut out = vec![];
     for e in entries.flatten() {
         let path = e.path();
         if path.extension().and_then(|x| x.to_str()) != Some("jsonl") {
             continue;
         }
-        let Some(stem) = path.file_stem().map(|s| s.to_string_lossy().into_owned()) else { continue };
-        let taken = path.with_extension("taken");
-        if std::fs::rename(&path, &taken).is_err() {
-            continue;
-        }
-        let text = std::fs::read_to_string(&taken).unwrap_or_default();
-        let _ = std::fs::remove_file(&taken);
-        out.extend(text.lines().filter_map(parse_attachment).map(|a| (stem.clone(), a)));
+        // Named `<record>.<unique>.jsonl`; record ids never contain a dot.
+        let Some(record) = path.file_stem().and_then(|s| s.to_str()).and_then(|s| s.split('.').next()) else { continue };
+        let Ok(text) = std::fs::read_to_string(&path) else { continue };
+        let _ = std::fs::remove_file(&path);
+        out.extend(text.lines().filter_map(parse_attachment).map(|a| (record.to_string(), a)));
     }
     out
 }
@@ -605,25 +600,6 @@ mod tests {
         assert!(mark_in_use(&dir.join("gone.json")).is_err());
         assert!(!dir.join("gone.json").exists(), "marking never creates the file");
         std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn a_line_for_claudiu_is_written_in_one_piece() {
-        #[derive(Default)]
-        struct Writes(Vec<Vec<u8>>);
-        impl std::io::Write for Writes {
-            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-                self.0.push(buf.to_vec());
-                Ok(buf.len())
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-        let mut out = Writes::default();
-        write_line(&mut out, &json!({ "pull": false, "number": 71, "title": "New-session defaults" })).unwrap();
-        assert_eq!(out.0.len(), 1, "a reader between two writes would see half a line");
-        assert!(out.0[0].ends_with(b"\n"));
     }
 
     #[test]
@@ -718,10 +694,42 @@ mod tests {
         );
         let errors: Vec<_> = r.iter().map(|x| x["result"]["isError"].as_bool().unwrap()).collect();
         assert_eq!(errors, [false, false, true, true, true]);
-        let lines: Vec<Attached> = std::fs::read_to_string(tmp.path().join("attach/s1.jsonl")).unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect();
-        assert_eq!(lines, [Attached { pull: false, number: 52, title: None, state: None }, Attached { pull: true, number: 7, title: None, state: None }]);
+        let items: Vec<Attachment> = read_attached_in(&tmp.path().join("attach")).into_iter().map(|(_, a)| a).collect();
+        assert_eq!(items.len(), 2);
+        assert!(items.contains(&Attachment::Github(Attached { pull: false, number: 52, title: None, state: None })));
+        assert!(items.contains(&Attachment::Github(Attached { pull: true, number: 7, title: None, state: None })));
         assert_eq!(talk(&[call(json!({"kind":"issue","number":1}))], "", tmp.path())[0]["result"]["isError"], true);
         assert!(allowed_tools(&[]).contains(&"mcp__claudiu__attach_github".to_string()));
+    }
+
+    #[test]
+    fn a_line_written_while_claudiu_reads_the_attach_dir_is_not_lost() {
+        let tmp = tempfile::tempdir().unwrap();
+        let total = 300;
+        let mut seen = 0;
+        std::thread::scope(|s| {
+            let writer = s.spawn(|| {
+                for n in 0..total {
+                    write_line(tmp.path(), "s1", &json!({ "link": format!("id-{n}") })).unwrap();
+                }
+            });
+            while !writer.is_finished() {
+                seen += read_attached_in(tmp.path()).len();
+            }
+        });
+        seen += read_attached_in(tmp.path()).len();
+        assert_eq!(seen, total);
+    }
+
+    #[test]
+    fn a_line_still_being_written_is_left_for_the_next_read() {
+        let tmp = tempfile::tempdir().unwrap();
+        let unfinished = tmp.path().join("s1.abc.tmp");
+        std::fs::write(&unfinished, "").unwrap();
+        assert!(read_attached_in(tmp.path()).is_empty());
+        std::fs::write(&unfinished, "{\"link\":\"x\"}\n").unwrap();
+        std::fs::rename(&unfinished, tmp.path().join("s1.abc.jsonl")).unwrap();
+        assert_eq!(read_attached_in(tmp.path()), [("s1".to_string(), Attachment::Link("x".into()))]);
     }
 
     #[test]
@@ -731,9 +739,7 @@ mod tests {
         let r = talk(&[call(json!("abc-123")), call(json!("")), call(json!("../x")), call(json!("s1")), call(json!(5))], "s1", tmp.path());
         let errors: Vec<_> = r.iter().map(|x| x["result"]["isError"].as_bool().unwrap()).collect();
         assert_eq!(errors, [false, true, true, true, true], "bad ids and a link to itself are refused");
-        let line = std::fs::read_to_string(tmp.path().join("attach/s1.jsonl")).unwrap();
-        assert_eq!(line.lines().count(), 1);
-        assert_eq!(parse_attachment(line.lines().next().unwrap()), Some(Attachment::Link("abc-123".into())));
+        assert_eq!(read_attached_in(&tmp.path().join("attach")), [("s1".to_string(), Attachment::Link("abc-123".into()))]);
         assert_eq!(parse_attachment(r#"{"pull":true,"number":7,"title":null}"#), Some(Attachment::Github(Attached { pull: true, number: 7, title: None, state: None })));
         assert_eq!(parse_attachment(r#"{"unlink":"x"}"#), Some(Attachment::Unlink("x".into())));
         assert_eq!(parse_attachment(r#"{"detach":{"pull":false,"number":3}}"#), Some(Attachment::Detach { pull: false, number: 3 }));
