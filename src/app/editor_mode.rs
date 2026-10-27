@@ -241,7 +241,8 @@ impl Workspace {
     /// List the shown session's folder again (files Claude added, changed marks), off the UI thread.
     pub(super) fn refresh_files(&mut self, cx: &mut Context<Self>) {
         let Some(id) = self.active_id().filter(|_| self.editor_mode).cloned() else { return };
-        let Some(root) = self.store.session(&id).map(|s| s.cwd.clone()) else { return };
+        // A worktree that Claude Code is still making has no folder to list yet.
+        let Some(root) = self.store.session(&id).map(|s| s.cwd.clone()).filter(|root| root.is_dir()) else { return };
         let Some(pane) = self.panes.get_mut(&id) else { return };
         if pane.listing {
             pane.relist = true;
@@ -257,6 +258,7 @@ impl Workspace {
                 let relist = std::mem::take(&mut pane.relist);
                 pane.changed = std::sync::Arc::new(listing.changed);
                 pane.truncated = listing.truncated;
+                let moved = !pane.root.as_os_str().is_empty() && pane.root != listing.root;
                 pane.root = listing.root;
                 if pane.nodes != listing.nodes {
                     let items = tree_items(&listing.nodes, &pane.expanded);
@@ -272,6 +274,13 @@ impl Workspace {
                     pane.relative = std::sync::Arc::new(all.iter().map(|f| super::picker::relative(f, &pane.root)).collect());
                     pane.files = std::sync::Arc::new(all);
                     pane.nodes = listing.nodes;
+                }
+                if moved {
+                    // The session went to another folder: the old watcher watches the wrong one.
+                    if let Some(pane) = ws.panes.get_mut(&id) {
+                        pane.watcher = None;
+                    }
+                    ws.watch_folder(&id, cx);
                 }
                 if relist {
                     ws.refresh_files(cx);

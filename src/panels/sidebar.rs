@@ -292,7 +292,7 @@ impl Workspace {
 
     fn session_menu(&self, rec: &SessionRecord, running: bool) -> Vec<MenuItem> {
         let mut items = vec![];
-        let item = |label: &str, act: Act, danger: bool, sep: bool| MenuItem { label: label.into(), hint: None, act, danger, disabled: false, separator_before: sep };
+        let item = |label: &str, act: Act, danger: bool, sep: bool| MenuItem { label: label.into(), hint: None, act, danger, disabled: false, separator_before: sep, remove: None, icon: None };
         if running {
             items.push(item("Switch to session", Act::Select(rec.id.clone()), false, false));
         } else if rec.kind == SessionKind::Claude {
@@ -320,7 +320,7 @@ impl Workspace {
     }
 
     fn project_menu(&self, p: &Project) -> Vec<MenuItem> {
-        let item = |label: String, act: Act, danger: bool, sep: bool| MenuItem { label, hint: None, act, danger, disabled: false, separator_before: sep };
+        let item = |label: String, act: Act, danger: bool, sep: bool| MenuItem { label, hint: None, act, danger, disabled: false, separator_before: sep, remove: None, icon: None };
         let mut items = vec![item("New Claude session here".into(), Act::NewClaude { cwd: p.path.clone() }, false, false)];
         if p.git.is_some() {
             items.push(item("GitHub issues & PRs".into(), Act::OpenGithub { cwd: p.path.clone() }, false, true));
@@ -631,7 +631,7 @@ impl Workspace {
 
     /// "+ Code session" with no project chosen: pick where it starts.
     fn new_session_menu(&self) -> Vec<MenuItem> {
-        let item = |label: String, hint: Option<String>, act: Act, disabled: bool, sep: bool| MenuItem { label, hint, act, danger: false, disabled, separator_before: sep };
+        let item = |label: String, hint: Option<String>, act: Act, disabled: bool, sep: bool| MenuItem { label, hint, act, danger: false, disabled, separator_before: sep, remove: None, icon: None };
         let mut items = vec![item("Start the session in…".into(), None, Act::Dismiss, true, false)];
         items.extend(self.store.data.projects.iter().map(|p| item(p.name.clone(), Some(crate::panels::widgets::short_path(&p.path)), Act::NewClaude { cwd: p.path.clone() }, false, false)));
         items.push(item("Add project…".into(), None, Act::ImportProject, false, true));
@@ -664,7 +664,7 @@ impl Workspace {
                 cx,
                 move |ws, at, _w, cx| {
                     let chosen = ws.project_filter().map(|p| p.id.clone());
-                    let item = |label: String, act: Act, sep: bool| MenuItem { label, hint: None, act, danger: false, disabled: false, separator_before: sep };
+                    let item = |label: String, act: Act, sep: bool| MenuItem { label, hint: None, act, danger: false, disabled: false, separator_before: sep, remove: None, icon: None };
                     let mut items = vec![item(format!("{}All projects", tick(chosen.is_none())), Act::FilterProject(None), false)];
                     items.extend(ws.store.data.projects.iter().map(|p| item(format!("{}{}", tick(chosen.as_ref() == Some(&p.id)), p.name), Act::FilterProject(Some(p.id.clone())), false)));
                     items.push(item("Add project…".into(), Act::ImportProject, true));
@@ -831,6 +831,8 @@ impl Workspace {
             danger,
             disabled: false,
             separator_before: sep,
+            remove: None,
+            icon: None,
         };
         let accounts = &self.store.data.accounts;
         let mut items: Vec<MenuItem> = accounts
