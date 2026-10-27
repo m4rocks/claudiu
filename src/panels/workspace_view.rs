@@ -774,6 +774,7 @@ fn settings_body(page: SettingsPage, modal: &Modal, scroll: &crate::panels::glid
             .gap(px(10.0))
             .child(field("SHELL", shell))
             .child(field("CLAUDE CODE PATH", claude))
+            .child(div().flex().child(button("settings-check-setup", "Check setup", false).on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::OpenSetup, window, cx)))))
             .child(
                 div()
                     .h(px(32.0))

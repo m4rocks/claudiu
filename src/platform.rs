@@ -51,7 +51,139 @@ pub fn home_dir() -> Option<PathBuf> {
 
 /// PATH lookup (honors PATHEXT on Windows).
 pub fn find_executable(name: &str) -> Option<PathBuf> {
-    which::which(name).ok()
+    let found = which::which(name).ok();
+    #[cfg(target_os = "macos")]
+    let found = found.or_else(|| {
+        let path = LOGIN_PATH.lock().ok()?.clone()?;
+        which::which_in(name, Some(path), std::env::current_dir().ok()?).ok()
+    });
+    found
+}
+
+/// The PATH of the user's login shell, as `reload_path` last read it. A Finder-launched app gets a minimal PATH, and
+/// the environment of a running process is not changed here (`set_var` is unsafe beside other threads on Unix), so
+/// `find_executable` looks here as well. Sessions already start through the login shell (`through_login_shell`).
+#[cfg(target_os = "macos")]
+static LOGIN_PATH: std::sync::Mutex<Option<std::ffi::OsString>> = std::sync::Mutex::new(None);
+
+/// Look for the PATH again, for a tool installed since Claudiu started or one that only the shell's startup files
+/// put on the PATH. Windows reads the system and user PATH from the registry and uses it for this process and the
+/// programs it starts. macOS asks the login shell (blocking, up to a few seconds). Call it off the UI thread.
+pub fn reload_path() {
+    #[cfg(target_os = "windows")]
+    {
+        use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
+        let system = registry_path(HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment");
+        let user = registry_path(HKEY_CURRENT_USER, "Environment");
+        // Without either value the PATH stays as it is.
+        if system.is_none() && user.is_none() {
+            return;
+        }
+        let registry: Vec<PathBuf> = [system, user].into_iter().flatten().flat_map(|text| std::env::split_paths(&text).collect::<Vec<_>>()).collect();
+        let current = std::env::var_os("PATH").unwrap_or_default();
+        // SAFETY: on Windows `set_var` is safe to call from any thread (std's documentation says so).
+        unsafe { std::env::set_var("PATH", rebuilt_path(&registry, &current)) };
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(text) = login_shell_path() {
+            let shell_dirs: Vec<PathBuf> = std::env::split_paths(&text).collect();
+            let current = std::env::var_os("PATH").unwrap_or_default();
+            if let Ok(mut slot) = LOGIN_PATH.lock() {
+                *slot = Some(rebuilt_path(&shell_dirs, &current));
+            }
+        }
+    }
+}
+
+/// Ask the user's login shell for its PATH. Interactive (`-i`) so `.zshrc` runs too, which is where nvm and friends
+/// add theirs.
+#[cfg(target_os = "macos")]
+fn login_shell_path() -> Option<std::ffi::OsString> {
+    let shell = std::env::var_os("SHELL").filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/zsh".into());
+    path_from_shell(&shell, &print_path_script(), std::time::Duration::from_secs(5))
+}
+
+#[cfg(any(target_os = "macos", test))]
+const PATH_BEGIN: &str = "<<claudiu-path";
+#[cfg(any(target_os = "macos", test))]
+const PATH_END: &str = "claudiu-path>>";
+
+/// A shell command that prints `$PATH` between the markers. `printf` and the quoting mean the same in sh, bash, zsh
+/// and fish (which joins its PATH list with colons inside quotes).
+#[cfg(any(target_os = "macos", test))]
+fn print_path_script() -> String {
+    format!("printf '%s%s%s' '{PATH_BEGIN}' \"$PATH\" '{PATH_END}'")
+}
+
+/// Run `script` in `shell` as a login shell and return the PATH it printed. Startup files may print anything, so the
+/// PATH sits between markers. A shell that has not answered after `wait` is killed and gives `None`, as does any shell
+/// that fails to run it.
+#[cfg(any(target_os = "macos", test))]
+fn path_from_shell(shell: &OsStr, script: &str, wait: std::time::Duration) -> Option<std::ffi::OsString> {
+    use std::io::Read;
+    let mut child = Command::new(shell)
+        .args(["-l", "-i", "-c", script])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let mut stdout = child.stdout.take()?;
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut text = String::new();
+        let _ = stdout.read_to_string(&mut text);
+        let _ = sender.send(text);
+    });
+    let output = receiver.recv_timeout(wait);
+    // Killing a shell that already ended is harmless, and it must not be left running if it did not.
+    let _ = child.kill();
+    let _ = child.wait();
+    path_between_markers(&output.ok()?).map(std::ffi::OsString::from)
+}
+
+/// The text between the markers, ignoring whatever the shell's startup files printed around them.
+#[cfg(any(target_os = "macos", test))]
+fn path_between_markers(output: &str) -> Option<&str> {
+    let after = output.split_once(PATH_BEGIN)?.1;
+    Some(after.split_once(PATH_END)?.0)
+}
+
+/// The registry's directories first, then whatever this process had that the registry lacks (for example folders a
+/// launcher added for Claudiu alone). Each directory appears once.
+fn rebuilt_path(registry: &[PathBuf], current: &OsStr) -> std::ffi::OsString {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    for dir in registry.iter().cloned().chain(std::env::split_paths(current)) {
+        if !dir.as_os_str().is_empty() && !dirs.iter().any(|seen| path_key(seen) == path_key(&dir)) {
+            dirs.push(dir);
+        }
+    }
+    std::env::join_paths(dirs).unwrap_or_else(|_| current.to_owned())
+}
+
+/// The `Path` value under a registry key, with `%VARIABLES%` already expanded.
+#[cfg(target_os = "windows")]
+fn registry_path(root: windows_sys::Win32::System::Registry::HKEY, subkey: &str) -> Option<String> {
+    use windows_sys::Win32::System::Registry::{RRF_RT_REG_EXPAND_SZ, RRF_RT_REG_SZ, RegGetValueW};
+    let subkey: Vec<u16> = subkey.encode_utf16().chain(Some(0)).collect();
+    let name: Vec<u16> = "Path".encode_utf16().chain(Some(0)).collect();
+    let kinds = RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ;
+    let mut bytes = 0u32;
+    // SAFETY: both calls get NUL-terminated names and a buffer of the size they report.
+    unsafe {
+        if RegGetValueW(root, subkey.as_ptr(), name.as_ptr(), kinds, std::ptr::null_mut(), std::ptr::null_mut(), &mut bytes) != 0 {
+            return None;
+        }
+        let mut text = vec![0u16; (bytes as usize).div_ceil(2)];
+        bytes = (text.len() * 2) as u32;
+        if RegGetValueW(root, subkey.as_ptr(), name.as_ptr(), kinds, std::ptr::null_mut(), text.as_mut_ptr().cast(), &mut bytes) != 0 {
+            return None;
+        }
+        // The reported size includes the closing NUL.
+        text.truncate((bytes as usize / 2).saturating_sub(1));
+        Some(String::from_utf16_lossy(&text))
+    }
 }
 
 /// A program typed by the user: an existing file, or a name found on PATH.
@@ -277,6 +409,64 @@ fn expand_env(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_rebuilt_path_lists_the_registry_first_and_keeps_the_rest_once() {
+        let dir = |name: &str| PathBuf::from(name);
+        let current = std::env::join_paths(["extra", "shared", "extra"]).unwrap();
+        let rebuilt = rebuilt_path(&[dir("fresh"), dir("shared"), dir("")], &current);
+        let dirs: Vec<PathBuf> = std::env::split_paths(&rebuilt).collect();
+        assert_eq!(dirs, vec![dir("fresh"), dir("shared"), dir("extra")]);
+        if cfg!(windows) {
+            let rebuilt = rebuilt_path(&[dir("C:/Tools/Bin")], std::ffi::OsStr::new("c:\\tools\\bin\\"));
+            assert_eq!(std::env::split_paths(&rebuilt).count(), 1, "the same folder in another case is one entry");
+        }
+    }
+
+    #[test]
+    fn a_shells_path_is_found_between_the_markers_whatever_else_it_printed() {
+        let output = format!("Last login: today
+Welcome!
+{PATH_BEGIN}/usr/bin:/opt/tools{PATH_END}
+bye
+");
+        assert_eq!(path_between_markers(&output), Some("/usr/bin:/opt/tools"));
+        assert_eq!(path_between_markers(&format!("{PATH_BEGIN}{PATH_END}")), Some(""));
+        assert_eq!(path_between_markers("the shell printed no markers"), None);
+        assert_eq!(path_between_markers(&format!("{PATH_BEGIN}/usr/bin")), None, "a cut-off answer is not used");
+    }
+
+    /// A shell that takes `-l -i -c`: `/bin/sh` on macOS, Git's bash on Windows (not the WSL launcher in System32,
+    /// which fails without a distribution). `None` when the machine has neither.
+    fn posix_shell() -> Option<PathBuf> {
+        let candidates = if cfg!(windows) { vec![PathBuf::from(expand_env(r"%ProgramFiles%\Git\bin\bash.exe"))] } else { vec![PathBuf::from("/bin/sh")] };
+        candidates.into_iter().find(|p| p.is_file())
+    }
+
+    #[test]
+    fn a_shell_answers_with_its_path_and_a_hung_one_is_given_up_on() {
+        let Some(bash) = posix_shell() else { return };
+        let asked = std::time::Instant::now();
+        let path = path_from_shell(bash.as_os_str(), &print_path_script(), std::time::Duration::from_secs(20)).expect("bash printed its PATH");
+        assert!(!path.is_empty());
+        assert!(asked.elapsed() < std::time::Duration::from_secs(20), "it answered, not timed out");
+
+        let hung = format!("sleep 30; {}", print_path_script());
+        let asked = std::time::Instant::now();
+        assert_eq!(path_from_shell(bash.as_os_str(), &hung, std::time::Duration::from_millis(500)), None);
+        assert!(asked.elapsed() < std::time::Duration::from_secs(10), "the wait ended at the timeout, not when the shell did");
+
+        assert_eq!(path_from_shell(OsStr::new("no-such-shell-xyz"), &print_path_script(), std::time::Duration::from_secs(1)), None);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn the_registry_path_of_this_machine_can_be_read() {
+        use windows_sys::Win32::System::Registry::HKEY_LOCAL_MACHINE;
+        let system = registry_path(HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment").expect("the system Path value exists");
+        assert!(!system.contains('%'), "variables are expanded: {system}");
+        assert!(system.to_lowercase().contains("system32"), "{system}");
+    }
 
     #[test]
     fn typed_programs_resolve_only_when_they_exist() {

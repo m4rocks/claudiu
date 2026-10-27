@@ -6,7 +6,7 @@ Claudiu is a native desktop app, written in Rust with [GPUI](https://gpui.rs), t
 
 ## What it does
 
-Each session is your own `claude` process in a real pseudo-terminal, so Claude Code's keys, mouse and paste work unchanged. Claudiu has no API keys and never calls the Anthropic API. Sign-in stays with Claude Code. A sidebar lists your projects and sessions. Ended sessions resume through `claude --resume`, and sessions that were running come back at the next start.
+Each session is your own `claude` process in a real pseudo-terminal, so Claude Code's keys, mouse and paste work unchanged. Claudiu has no API keys and never calls the Anthropic API. Sign-in stays with Claude Code. The first launch opens a setup window that checks for `claude` (required) and `gh` (optional), links to their install pages and installs nothing. Settings has a Check setup button to open it again. A sidebar lists your projects and sessions. Ended sessions resume through `claude --resume`, and sessions that were running come back at the next start.
 
 Around the terminal, Claudiu adds an editor mode (Ctrl+Shift+E) with files, tabs, search, Git change marks and language-server diagnostics, definitions and completion. It also adds usage and context meters, a GitHub pane for issues and pull requests through your `gh` login, defaults for the model, effort and permission mode of new sessions, and extra Claude accounts that share one configuration. Settings lists the rest.
 

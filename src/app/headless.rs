@@ -1220,3 +1220,34 @@ fn the_session_list_draws_rows_where_scrolling_brings_them() {
     let after = row_under_pointer(&mut cx);
     assert!(after > before + 20, "row {before} before scrolling, {after} after");
 }
+
+/// With no `claude` found, starting a session says so and offers the setup window; asking for it twice shows one.
+#[test]
+#[ignore]
+fn a_missing_claude_offers_the_setup_window() {
+    let data = tempfile::tempdir().unwrap();
+    unsafe { std::env::set_var("CLAUDIU_DATA_DIR", data.path()) };
+    let work = tempfile::tempdir().unwrap();
+    let mut cx = TestAppContext::single();
+    cx.update(|app| {
+        gpui_kit::init(app);
+        gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, app);
+    });
+    let (window, ws) = cx.update(|app| gpui_kit::open_window(Default::default(), app, |window, app| app.new(|cx| Workspace::new(window, vec![], cx)))).unwrap();
+
+    cx.update_window(window, |_, window, app| {
+        ws.update(app, |ws, cx| {
+            ws.claude_exe = None;
+            ws.new_claude(work.path().to_path_buf(), window, cx);
+        })
+    })
+    .unwrap();
+    let action = ws.read_with(&cx, |ws, _| ws.toast.as_ref().and_then(|t| t.action.as_ref().map(|(label, act)| (label.clone(), matches!(act, Act::OpenSetup)))));
+    assert_eq!(action, Some(("Check setup".to_string(), true)), "the toast offers the setup window");
+
+    for _ in 0..2 {
+        cx.update_window(window, |_, window, app| ws.update(app, |ws, cx| ws.act(Act::OpenSetup, window, cx))).unwrap();
+        cx.run_until_parked();
+    }
+    assert_eq!(cx.update(|app| app.windows().len()), 2, "the workspace and one setup window");
+}
