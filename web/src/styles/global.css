@@ -269,6 +269,20 @@
 		border-radius: 8px;
 		padding: 14px 16px;
 	}
+	/* the right-click capture keeps its lower part, where the menu is */
+	.shot.crop-bottom {
+		aspect-ratio: 700 / 400;
+		object-fit: cover;
+		object-position: bottom;
+	}
+	/* a real capture of the app, outlined like the other figures */
+	.shot {
+		display: block;
+		width: 100%;
+		height: auto;
+		border: 1px solid var(--color-rule);
+		border-radius: 8px;
+	}
 	.lbl {
 		font-size: 12px;
 		font-weight: 600;
@@ -360,11 +374,16 @@
 
 /* the parts, laid out where they sit in the Claudiu window */
 @layer components {
+	.stack {
+		display: flex;
+		flex-direction: column;
+		gap: 28px;
+		padding-block: 8px 96px;
+	}
 	.win {
 		display: grid;
-		margin-block: 8px 96px;
-		grid-template-columns: minmax(0, 1fr) minmax(0, 1.35fr) minmax(0, 1fr);
-		grid-template-areas: "tb tb tb" "p1 p2 p4" "p1 p2 p5" "p7 p3 p6" "p7 p3 p8" "sp sp sp";
+		grid-template-columns: repeat(3, minmax(0, 1fr));
+		grid-template-areas: "tb tb tb" "p1 p2 p3" "p4 p5 p6" "p7 p8 p8";
 		gap: 6px;
 		background: #131316;
 		padding: 0 6px 6px;
@@ -417,6 +436,27 @@
 	.win .p6 { grid-area: p6; }
 	.win .p7 { grid-area: p7; }
 	.win .p8 { grid-area: p8; }
+	.win.ed {
+		grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+		grid-template-areas: "tb tb" "e1 e1" "l1 a1";
+	}
+	.win.run {
+		grid-template-columns: minmax(0, 1fr) minmax(0, 1.5fr);
+		grid-template-areas: "tb tb" "r1 r3" "r2 r3";
+	}
+	.win.ed .l1 figure {
+		margin-top: 0;
+	}
+	.win.one {
+		grid-template-columns: minmax(0, 1fr);
+		grid-template-areas: "tb" "sp";
+	}
+	.win .e1 { grid-area: e1; }
+	.win .l1 { grid-area: l1; }
+	.win .a1 { grid-area: a1; }
+	.win .r1 { grid-area: r1; }
+	.win .r2 { grid-area: r2; }
+	.win .r3 { grid-area: r3; }
 	.win .sp {
 		grid-area: sp;
 		display: grid;
@@ -428,10 +468,24 @@
 		grid-row: 1 / span 3;
 		margin: 0;
 	}
+	@media (min-width: 640px) and (max-width: 1099px) {
+		.win.parts {
+			grid-template-columns: repeat(2, minmax(0, 1fr));
+			grid-template-areas: "tb tb" "p1 p2" "p3 p4" "p5 p6" "p7 p8";
+		}
+	}
 	@media (max-width: 899px) {
-		.win {
+		.win.parts {
 			grid-template-columns: minmax(0, 1fr);
-			grid-template-areas: "tb" "p1" "p2" "p3" "p4" "p5" "p6" "p7" "p8" "sp";
+			grid-template-areas: "tb" "p1" "p2" "p3" "p4" "p5" "p6" "p7" "p8";
+		}
+		.win.ed {
+			grid-template-columns: minmax(0, 1fr);
+			grid-template-areas: "tb" "e1" "l1" "a1";
+		}
+		.win.run {
+			grid-template-columns: minmax(0, 1fr);
+			grid-template-areas: "tb" "r1" "r2" "r3";
 		}
 		.win .sp {
 			grid-template-columns: minmax(0, 1fr);

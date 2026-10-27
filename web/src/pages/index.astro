@@ -42,7 +42,7 @@ const calls = [
 
 <Layout
     title="Claudiu — a desktop app for juggling Claude Code sessions"
-    description="Claudiu runs your own Claude Code CLI in a real terminal and keeps your sessions, projects, GitHub issues, accounts and usage in one native window, on Windows and macOS."
+    description="Claudiu runs your own Claude Code CLI in a real terminal and keeps your sessions, projects, GitHub issues, accounts and usage in one native window, with an editor beside the terminal, on Windows and macOS."
 >
     <header class="wrap head">
         <a href="#top" class="flex items-center gap-2.5 text-[15px] font-bold text-ink no-underline">
@@ -51,6 +51,7 @@ const calls = [
         </a>
         <nav aria-label="Manual">
             <a href="#parts" class="max-sm:hidden">Parts</a>
+            <a href="#editor" class="max-sm:hidden">Editor</a>
             <a href="#spec" class="max-sm:hidden">Specifications</a>
             <a href={repo}>Source</a>
         </nav>
@@ -58,17 +59,17 @@ const calls = [
 
     <main id="top">
         <!-- cover: title, spec table, exploded drawing -->
-        <section class="wrap grid items-start gap-x-16 gap-y-12 pt-14 pb-20 lg:grid-cols-[minmax(0,4fr)_minmax(0,8fr)] lg:pt-20">
+        <section class="wrap grid items-start gap-x-16 gap-y-12 pt-14 pb-14 lg:grid-cols-[minmax(0,4fr)_minmax(0,8fr)] lg:pt-20">
             <div class="flex flex-col gap-7">
                 <h1 class="text-[clamp(64px,8vw,96px)] leading-[0.92] font-extrabold tracking-[-0.04em]">Claudiu.</h1>
                 <p class="lede">
-                    A native window for every <b>Claude Code</b> session you run. Your own <code>claude</code>,
-                    in a real terminal, with only the parts around it.
+                    A native window for every <b>Claude Code</b> session. Your own <code>claude</code>,
+                    in a real terminal, with an editor beside it.
                 </p>
                 <div>
                     <table class="spec">
                         <tbody>
-                            <tr><th scope="row">Runs</th><td>your own <code>claude</code> CLI</td></tr>
+                            <tr><th scope="row">Editor</th><td>built in, <kbd>Ctrl</kbd> <kbd>Shift</kbd> <kbd>E</kbd></td></tr>
                             <tr><th scope="row">Platforms</th><td>Windows, macOS</td></tr>
                             <tr><th scope="row">Login</th><td>none, Claude Code's own</td></tr>
                             <tr><th scope="row">Your data</th><td>stays on your machine</td></tr>
@@ -102,13 +103,80 @@ const calls = [
                             <a href={`#p${n}`} data-k={n}><span class="disc">{n}</span>{t}</a>
                         ))}
                     </nav>
-                    <p class="cap"><b>Fig. 1</b>Claudiu on macOS, with demo sessions. Point at a number to find the part.</p>
+                    <p class="cap"><b>Fig. 1</b>Point at a number to find the part.</p>
                 </figcaption>
             </figure>
         </section>
 
 
-        <div class="wrap"><div class="win"><div class="tb"><span>Claudiu</span><span>Fig. 2 · each part where it sits in the window</span></div><section class="cell p1" id="p1" aria-labelledby="t1"><h2 id="t1"><span class="disc">1</span> One list. Every session.</h2><p>Running first, in the order you drag them; recent below; older folded away. Projects are a filter, not a tree, and what was running comes back after a restart.</p><figure><div class="panel"><div class="lbl">Running</div><div class="rowline"><span class="dot"></span>Fix the flaky sync test<span class="chip">pilotist</span></div><div class="rowline"><span class="dot"></span>Review PR 62<span class="chip">giolt</span></div><div class="lbl mt-3">Recent</div><div class="rowline"><span class="dot off"></span>Redesign<span class="chip">website</span></div><div class="lbl mt-3">Older · 23</div></div></figure></section><section class="cell p7" id="p7" aria-labelledby="t7"><h2 id="t7"><span class="disc">7</span> Several accounts, each with its own limits.</h2><p>Each account's 5-hour and 7-day limits stay in view. Alt accounts keep their own login and share your settings; use only accounts you own. Claudiu never sees a password.</p><figure><div class="panel"><div class="flex justify-between"><span class="lbl">5 hour</span><span class="text-[14px]">67% · resets in 2h 14m</span></div><div class="meter" style="--v:67%"><i></i></div><div class="mt-4 flex justify-between"><span class="lbl">7 day</span><span class="text-[14px]">34% · resets in 4d 8h</span></div><div class="meter" style="--v:34%"><i></i></div></div><table class="spec wide"><tbody><tr><th scope="row">Main</th><td>your normal <code>~/.claude</code></td></tr><tr><th scope="row">Alt</th><td>own login, shared settings and history</td></tr></tbody></table></figure></section><section class="cell p2" id="p2" aria-labelledby="t2"><h2 id="t2"><span class="disc">2</span> The real Claude Code.</h2><p>One real terminal per session, running your own <code>claude</code>. Alt+P, Shift+Tab, mouse and paste behave as in any terminal; Claudiu keeps only a few keys. On macOS, use Cmd.</p><figure><table class="spec wide keys"><tbody><tr><th scope="row"><kbd>Ctrl</kbd> <kbd>J</kbd></th><td>Shell under the session</td></tr><tr><th scope="row"><kbd>Ctrl</kbd> <kbd>Shift</kbd> <kbd>]</kbd></th><td>Keyboard between Claude and shell</td></tr><tr><th scope="row"><kbd>Ctrl</kbd> <kbd>Shift</kbd> <kbd>R</kbd></th><td>Right sidebar</td></tr><tr><th scope="row">Everything else</th><td>Goes to Claude Code</td></tr></tbody></table></figure></section><section class="cell p3" id="p3" aria-labelledby="t3"><h2 id="t3"><span class="disc">3</span> A shell under each session.</h2><p>A plain shell in the session's folder. It keeps running while you look elsewhere and ends with its session.</p><figure><svg class="w-full" viewBox="0 0 460 200" fill="none" aria-hidden="true"><rect x="1" y="1" width="458" height="118" rx="8" stroke="var(--color-ink)" stroke-width="1.5" /><rect x="1" y="131" width="458" height="68" rx="8" stroke="var(--color-ink)" stroke-width="1.5" /><g stroke="var(--color-faint)" stroke-width="1.5" stroke-linecap="round"><line x1="20" y1="28" x2="200" y2="28" /><line x1="20" y1="54" x2="320" y2="54" /><line x1="20" y1="158" x2="120" y2="158" /><line x1="20" y1="180" x2="240" y2="180" /></g><g stroke="var(--color-orange)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><line x1="200" y1="125" x2="260" y2="125" /><path d="m224 112 6-6 6 6" /><path d="m224 138 6 6 6-6" /></g></svg></figure></section><section class="cell p4" id="p4" aria-labelledby="t4"><h2 id="t4"><span class="disc">4</span> Status, without spending tokens.</h2><p>Context, prompt cache, auto-compact and advisor, reported by Claude Code itself.</p><figure><div class="panel"><div class="flex justify-between"><span class="lbl">Context</span><span class="text-[14px]">28k of 167k</span></div><div class="meter" style="--v:17%"><i></i></div><div class="scale" aria-hidden="true"><span>0</span><span>50</span><span>100</span></div><div class="rowline mt-2">Auto-compact<span class="chip">On</span></div><div class="rowline">Advisor<span class="chip">Opus</span></div></div></figure></section><section class="cell p5" id="p5" aria-labelledby="t5"><h2 id="t5"><span class="disc">5</span> Claude draws beside the terminal.</h2><p>Markdown and HTML with inline CSS, drawn natively as it streams. No scripts, no external images.</p><figure><div class="panel"><div class="flex justify-between"><span class="font-semibold">Roadmap</span><span class="note">drawing…</span></div>{[["Q1", "90%"], ["Q2", "55%"], ["Q3", "20%"]].map(([q, v]) => (<div class="mt-3 flex items-center gap-3 text-[14px]"><span class="w-6 text-dim">{q}</span><div class="meter mt-0 flex-1" style={`--v:${v}`}><i></i></div></div>))}</div></figure></section><section class="cell p6" id="p6" aria-labelledby="t6"><h2 id="t6"><span class="disc">6</span> Issues and PRs, beside the work.</h2><p>The project's issues and pull requests in a wide panel. Claude attaches the ones it works on.</p><figure><table class="spec wide"><tbody><tr><th scope="row">#59</th><td>Resizable sidebars</td></tr><tr><th scope="row">#61</th><td>Floating panels</td></tr><tr><th scope="row">PR 62</th><td>Fix session status settings</td></tr></tbody></table></figure></section><section class="cell p8" id="p8" aria-labelledby="t8"><h2 id="t8"><span class="disc">8</span> Sessions can reach each other.</h2><p>Read another session, search projects, start a session elsewhere. Only when you ask; all local.</p><figure><svg class="w-full" viewBox="0 0 460 120" fill="none" aria-hidden="true"><rect x="1" y="15" width="170" height="90" rx="8" stroke="var(--color-ink)" stroke-width="1.5" /><rect x="289" y="15" width="170" height="90" rx="8" stroke="var(--color-ink)" stroke-width="1.5" /><line x1="171" y1="60" x2="289" y2="60" stroke="var(--color-orange)" stroke-width="1.5" /><circle cx="230" cy="60" r="5" fill="var(--color-orange)" /><text x="20" y="56" fill="var(--color-ink)" font-size="15" font-weight="600">pilotist</text><text x="20" y="80" fill="var(--color-dim)" font-size="13">sync fix</text><text x="308" y="56" fill="var(--color-ink)" font-size="15" font-weight="600">giolt</text><text x="308" y="80" fill="var(--color-dim)" font-size="13">started from pilotist</text></svg></figure></section><section class="cell sp" id="spec" aria-labelledby="tspec"><h2 id="tspec">Specifications.</h2><p>Claudiu owns the workspace. Claude Code owns the agent.</p><div class="mt-auto"><table class="spec wide"><tbody><tr><th scope="row">Built with</th><td>Rust and GPUI, a native app, not a web wrapper</td></tr><tr><th scope="row">Terminal</th><td>one real PTY per session, ConPTY on Windows</td></tr><tr><th scope="row">Anthropic API</th><td>never called by Claudiu</td></tr><tr><th scope="row">Claude Code config</th><td>never edited by Claudiu</td></tr><tr><th scope="row">Uploads</th><td>none: transcripts, code and keys stay local</td></tr><tr><th scope="row">After a restart</th><td>running sessions come back</td></tr></tbody></table><a class="download" href={latest}><span>Download <small>Windows and macOS</small></span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 15V3"/><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/></svg></a><div class="mt-3 flex gap-6 text-[15px] text-dim"><a href={`${repo}/releases`}>All releases</a><a href={repo}>Source on GitHub</a></div></div></section></div></div>
+        <div class="wrap stack"><div class="win parts"><div class="tb"><span>Claudiu</span><span>Fig. 2 · the parts, in order</span></div><section class="cell p1" id="p1" aria-labelledby="t1"><h2 id="t1"><span class="disc">1</span> One list. Every session.</h2><p>Running first, recent below, older folded away. Projects are a filter, not a tree.</p><figure><div class="panel"><div class="lbl">Running</div><div class="rowline"><span class="dot"></span>Fix the flaky sync test<span class="chip">pilotist</span></div><div class="rowline"><span class="dot"></span>Review PR 62<span class="chip">giolt</span></div><div class="lbl mt-3">Recent</div><div class="rowline"><span class="dot off"></span>Redesign<span class="chip">website</span></div><div class="lbl mt-3">Older · 23</div></div></figure></section><section class="cell p7" id="p7" aria-labelledby="t7"><h2 id="t7"><span class="disc">7</span> Several accounts, each with its own limits.</h2><p>Each account's 5-hour and 7-day limits stay in view. Alt accounts keep their own login and share your settings. Use only accounts you own.</p><figure><div class="panel"><div class="flex justify-between"><span class="lbl">5 hour</span><span class="text-[14px]">67% · resets in 2h 14m</span></div><div class="meter" style="--v:67%"><i></i></div><div class="mt-4 flex justify-between"><span class="lbl">7 day</span><span class="text-[14px]">34% · resets in 4d 8h</span></div><div class="meter" style="--v:34%"><i></i></div></div></figure></section><section class="cell p2" id="p2" aria-labelledby="t2"><h2 id="t2"><span class="disc">2</span> The real Claude Code.</h2><p>One real terminal per session. Claudiu keeps only a few keys; the rest go to Claude Code.</p><figure><table class="spec wide keys"><tbody><tr><th scope="row"><kbd>Ctrl</kbd> <kbd>J</kbd></th><td>Shell under the session</td></tr><tr><th scope="row"><kbd>Ctrl</kbd> <kbd>Shift</kbd> <kbd>]</kbd></th><td>Keyboard between Claude and shell</td></tr><tr><th scope="row"><kbd>Ctrl</kbd> <kbd>Shift</kbd> <kbd>E</kbd></th><td>Editor beside the terminal</td></tr><tr><th scope="row"><kbd>Ctrl</kbd> <kbd>Shift</kbd> <kbd>R</kbd></th><td>Right sidebar</td></tr></tbody></table></figure></section><section class="cell p3" id="p3" aria-labelledby="t3"><h2 id="t3"><span class="disc">3</span> A shell under each session.</h2><p>A plain shell in the session's folder. It ends with its session.</p><figure><svg class="w-full" viewBox="0 0 460 200" fill="none" aria-hidden="true"><rect x="1" y="1" width="458" height="118" rx="8" stroke="var(--color-ink)" stroke-width="1.5" /><rect x="1" y="131" width="458" height="68" rx="8" stroke="var(--color-ink)" stroke-width="1.5" /><g stroke="var(--color-faint)" stroke-width="1.5" stroke-linecap="round"><line x1="20" y1="28" x2="200" y2="28" /><line x1="20" y1="54" x2="320" y2="54" /><line x1="20" y1="158" x2="120" y2="158" /><line x1="20" y1="180" x2="240" y2="180" /></g><g stroke="var(--color-orange)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><line x1="200" y1="125" x2="260" y2="125" /><path d="m224 112 6-6 6 6" /><path d="m224 138 6 6 6-6" /></g></svg></figure></section><section class="cell p4" id="p4" aria-labelledby="t4"><h2 id="t4"><span class="disc">4</span> Status, without spending tokens.</h2><p>Context, cache, auto-compact and advisor, from Claude Code itself.</p><figure><div class="panel"><div class="flex justify-between"><span class="lbl">Context</span><span class="text-[14px]">28k of 167k</span></div><div class="meter" style="--v:17%"><i></i></div><div class="scale" aria-hidden="true"><span>0</span><span>50</span><span>100</span></div><div class="rowline mt-2">Auto-compact<span class="chip">On</span></div><div class="rowline">Advisor<span class="chip">Opus</span></div></div></figure></section><section class="cell p5" id="p5" aria-labelledby="t5"><h2 id="t5"><span class="disc">5</span> Claude draws beside the terminal.</h2><p>Markdown and HTML, drawn natively as it streams. No scripts.</p><figure><div class="panel"><div class="flex justify-between"><span class="font-semibold">Roadmap</span><span class="note">drawing…</span></div>{[["Q1", "90%"], ["Q2", "55%"], ["Q3", "20%"]].map(([q, v]) => (<div class="mt-3 flex items-center gap-3 text-[14px]"><span class="w-6 text-dim">{q}</span><div class="meter mt-0 flex-1" style={`--v:${v}`}><i></i></div></div>))}</div></figure></section><section class="cell p6" id="p6" aria-labelledby="t6"><h2 id="t6"><span class="disc">6</span> Issues and PRs, beside the work.</h2><p>The project's issues and pull requests. Claude attaches the ones it works on.</p><figure><table class="spec wide"><tbody><tr><th scope="row">#59</th><td>Resizable sidebars</td></tr><tr><th scope="row">#61</th><td>Floating panels</td></tr><tr><th scope="row">PR 62</th><td>Fix session status settings</td></tr></tbody></table></figure></section><section class="cell p8" id="p8" aria-labelledby="t8"><h2 id="t8"><span class="disc">8</span> Sessions can reach each other.</h2><p>Read another session, search projects, start one elsewhere. Only when you ask.</p><figure><svg class="w-full" viewBox="0 0 460 120" fill="none" aria-hidden="true"><rect x="1" y="15" width="170" height="90" rx="8" stroke="var(--color-ink)" stroke-width="1.5" /><rect x="289" y="15" width="170" height="90" rx="8" stroke="var(--color-ink)" stroke-width="1.5" /><line x1="171" y1="60" x2="289" y2="60" stroke="var(--color-orange)" stroke-width="1.5" /><circle cx="230" cy="60" r="5" fill="var(--color-orange)" /><text x="20" y="56" fill="var(--color-ink)" font-size="15" font-weight="600">pilotist</text><text x="20" y="80" fill="var(--color-dim)" font-size="13">sync fix</text><text x="308" y="56" fill="var(--color-ink)" font-size="15" font-weight="600">giolt</text><text x="308" y="80" fill="var(--color-dim)" font-size="13">started from pilotist</text></svg></figure></section></div>
+
+        <div class="win ed" id="editor">
+            <div class="tb"><span>Claudiu · editor mode</span><span>Fig. 3 · files beside the terminal</span></div>
+
+            <section class="cell e1" aria-labelledby="te1">
+                <h2 id="te1">An editor beside the terminal.</h2>
+                <p>
+                    <kbd>Ctrl</kbd> <kbd>Shift</kbd> <kbd>E</kbd> opens the session's folder: file tree, tabs, quick open, find in files and Git change marks. Files Claude changes reload; your unsaved edits are never overwritten.
+                </p>
+                <figure>
+                    <img class="shot" src="/claudiu-editor.png" width="1600" height="540" alt="Claudiu in editor mode: Claude Code's terminal on the left, the session's file tree in the middle with sync.rs marked as changed, and sync.rs open on the right with highlighting and Git change marks in the gutter" loading="lazy" />
+                </figure>
+            </section>
+
+            <section class="cell l1" aria-labelledby="tl1">
+                <h2 id="tl1">The language servers you already have.</h2>
+                <p>Diagnostics, hover and go-to-definition, from the server on your <code>PATH</code>. Claudiu installs nothing.</p>
+                <figure>
+                    <table class="spec wide">
+                        <tbody>
+                            <tr><th scope="row">Rust</th><td><code>rust-analyzer</code></td></tr>
+                            <tr><th scope="row">TypeScript</th><td><code>tsc --lsp</code></td></tr>
+                            <tr><th scope="row">Gleam</th><td><code>gleam lsp</code></td></tr>
+                            <tr><th scope="row">Highlighting only</th><td>Markdown, TOML, YAML, Bash, HTML, CSS</td></tr>
+                        </tbody>
+                    </table>
+                </figure>
+            </section>
+
+            <section class="cell a1" aria-labelledby="ta1">
+                <h2 id="ta1">Ask Claude about what you selected.</h2>
+                <p>
+                    Right-click lines to have Claude explain, fix or test them. <kbd>Ctrl</kbd>-click a path in the terminal to open it here.
+                </p>
+                <figure>
+                    <img class="shot crop-bottom" src="/claudiu-editor-menu.png" width="700" height="620" alt="The editor's right-click menu: Go to Definition, Cut, Copy, Paste, Select All, then Ask Claude to explain this, fix this, write tests for this, and fix the problem on the line" loading="lazy" />
+                </figure>
+            </section>
+        </div>
+
+        <div class="win run">
+            <div class="tb"><span>Claudiu · running</span><span>Fig. 4 · under load</span></div>
+
+            <section class="cell r1" aria-labelledby="tr1">
+                <h2 id="tr1">Scrolling that keeps up.</h2>
+                <p>Wheel and trackpad glide in the terminal, sidebars and editor, and the editor no longer overshoots its ends.</p>
+
+            </section>
+
+            <section class="cell r2" aria-labelledby="tr2">
+                <h2 id="tr2">Quiet when nothing happens.</h2>
+                <p>The list draws only the rows in view, an idle window doesn't redraw, and saves happen in the background. On Windows, <code>claude</code> runs at above-normal priority.</p>
+
+            </section>
+
+            <section class="cell r3" aria-labelledby="tr3">
+                <h2 id="tr3">Settings, by category.</h2>
+                <p>Defaults for new sessions, 15 switches for Claude Code's bundled tools, one for each Claudiu feature.</p>
+                <figure>
+                    <img class="shot" src="/claudiu-settings.png" width="720" height="480" alt="Claudiu's settings dialog on the Claude Code tools page, listing switches for bundled skills, workflows, remote control, claude.ai connectors, artifacts and plan mode" loading="lazy" />
+                </figure>
+            </section>
+        </div>
+
+        <div class="win one">
+            <div class="tb"><span>Claudiu</span><span>Specifications</span></div>
+            <section class="cell sp" id="spec" aria-labelledby="tspec"><h2 id="tspec">Specifications.</h2><p>Claudiu owns the workspace. Claude Code owns the agent.</p><div class="mt-auto"><table class="spec wide"><tbody><tr><th scope="row">Built with</th><td>Rust and GPUI, not a web wrapper</td></tr><tr><th scope="row">Terminal</th><td>one real PTY per session; typed into only for the editor's <code>@path#L</code> reference</td></tr><tr><th scope="row">Anthropic API</th><td>never called by Claudiu</td></tr><tr><th scope="row">Claude Code data</th><td>transcripts never deleted; settings change only when you flip a switch</td></tr><tr><th scope="row">Network</th><td>GitHub only</td></tr><tr><th scope="row">Uploads</th><td>none</td></tr><tr><th scope="row">After a restart</th><td>running sessions come back</td></tr></tbody></table><a class="download" href={latest}><span>Download <small>Windows and macOS</small></span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 15V3"/><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/></svg></a><div class="mt-3 flex gap-6 text-[15px] text-dim"><a href={`${repo}/releases`}>All releases</a><a href={repo}>Source on GitHub</a></div></div></section></div></div>
     </main>
 
     <footer class="wrap head border-t border-b-0 text-[14px]">
