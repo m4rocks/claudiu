@@ -45,6 +45,8 @@ mod file_ops;
 mod layout;
 mod language_servers;
 mod lifecycle;
+mod line_actions;
+pub use line_actions::{EditLines, line_action_bindings};
 mod links;
 mod modal;
 mod navigation;
@@ -92,6 +94,7 @@ actions!(
         GoToLine,
         GoBack,
         GoForward,
+        CloseTab,
     ]
 );
 

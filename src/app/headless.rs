@@ -2,7 +2,7 @@
 //! hangs and panics when sessions start and switch and a shell panel opens. Spawns the real `claude` and shell.
 //! `cargo test -- --ignored headless`.
 use super::*;
-use gpui::TestAppContext;
+use gpui::{TestAppContext, VisualTestContext};
 
 fn run() {
     let data = tempfile::tempdir().unwrap();
@@ -382,7 +382,7 @@ fn starting_sessions_does_not_hang_or_panic() {
     }
 }
 
-/// Editor mode with a real rust-analyzer: diagnostics arrive, hover and go-to-definition answer, and a language whose
+/// Editor mode with a real rust-analyzer: diagnostics arrive, hover, go-to-definition and completion answer, and a language whose
 /// server isn't installed says so. Uses `rust-analyzer` from `CLAUDIU_TEST_RUST_ANALYZER_DIR` (prepended to PATH),
 /// else PATH. `cargo test -- --ignored language_servers`.
 fn language_servers_with_rust_analyzer() {
@@ -488,6 +488,29 @@ fn language_servers_with_rust_analyzer() {
     wait(&mut cx, "hover and definition", 60, &|_, _| found.borrow().is_some());
     assert!(hover.borrow().as_deref().is_some_and(|h| h.contains("fn helper")), "hover: {:?}", hover.borrow());
     assert_eq!(*found.borrow(), Some(0), "helper is defined on the first line");
+
+    // And as Ctrl+Space would: the word typed so far ("hel") is completed by the function.
+    let labels: Rc<RefCell<Option<Vec<String>>>> = Default::default();
+    cx.update_window(window, |_, window, app| {
+        let (provider, text) = {
+            let b = buffer.read(app);
+            (b.lsp().completion_provider.clone().unwrap(), b.text().clone())
+        };
+        let context = lsp_types::CompletionContext { trigger_kind: lsp_types::CompletionTriggerKind::INVOKED, trigger_character: None };
+        let reply = provider.completions(&text, at + 1, context, window, app);
+        let labels = labels.clone();
+        app.spawn(async move |_| {
+            let items = match reply.await.unwrap() {
+                lsp_types::CompletionResponse::Array(items) => items,
+                lsp_types::CompletionResponse::List(list) => list.items,
+            };
+            *labels.borrow_mut() = Some(items.into_iter().map(|i| i.label).collect());
+        })
+        .detach();
+    })
+    .unwrap();
+    wait(&mut cx, "completions", 60, &|_, _| labels.borrow().is_some());
+    assert!(labels.borrow().as_ref().unwrap().iter().any(|l| l.starts_with("helper")), "completions: {:?}", labels.borrow());
 
     // Ending the session ends its servers with it.
     act(&mut cx, &|ws, w, cx| ws.close_live(&id, w, cx));
@@ -711,6 +734,210 @@ fn file_operations() {
     t.join().unwrap();
 }
 
+/// The line actions on their real keys in an open file: they act on the line, one undo step each, and cut and copy
+/// keep working on a selection; Ctrl+W closes tabs. Runs the real `claude` in a new temporary folder, like `file_operations`.
+/// `cargo test -- --ignored line_actions`.
+fn line_actions_on_their_keys() {
+    let data = tempfile::tempdir().unwrap();
+    // SAFETY: set before any other thread reads the environment; this test owns the process.
+    unsafe { std::env::set_var("CLAUDIU_DATA_DIR", data.path()) };
+    let work = tempfile::tempdir().unwrap();
+    let root = dunce::canonicalize(work.path()).unwrap();
+    std::fs::write(root.join("lines.txt"), "one\ntwo\nthree\nfour\n").unwrap();
+
+    let mut cx = TestAppContext::single();
+    cx.update(|app| {
+        gpui_kit::init(app);
+        gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, app);
+        app.bind_keys(super::line_action_bindings());
+    });
+    let (window, ws) = cx
+        .update(|app| gpui_kit::open_window(Default::default(), app, |window, app| app.new(|cx| Workspace::new(window, vec![], cx))))
+        .unwrap();
+    cx.update_window(window, |_, window, _| window.activate_window()).unwrap();
+    let draw = |cx: &mut TestAppContext| {
+        cx.update_window(window, |_, window, app| window.draw(app).clear(app)).unwrap();
+        cx.run_until_parked();
+    };
+    let act = |cx: &mut TestAppContext, f: &dyn Fn(&mut Workspace, &mut Window, &mut Context<Workspace>)| {
+        cx.update_window(window, |_, window, app| ws.update(app, |ws, cx| f(ws, window, cx))).unwrap();
+        draw(cx);
+    };
+    let wait = |cx: &mut TestAppContext, what: &str, done: &dyn Fn(&Workspace, &App) -> bool| {
+        let t = std::time::Instant::now();
+        while !ws.read_with(cx, |ws, app| done(ws, app)) {
+            assert!(t.elapsed() < Duration::from_secs(60), "{what} never happened");
+            std::thread::sleep(Duration::from_millis(100));
+            draw(cx);
+        }
+    };
+    act(&mut cx, &|ws, w, cx| ws.new_claude(root.clone(), w, cx));
+    let id = ws.read_with(&cx, |ws, _| ws.active.clone().unwrap());
+    wait(&mut cx, "the session running", &|ws, app| ws.is_running(&id, app));
+    act(&mut cx, &|ws, w, cx| ws.toggle_editor(w, cx));
+    wait(&mut cx, "the editor pane", &|ws, _| ws.panes.contains_key(&id));
+    act(&mut cx, &|ws, w, cx| ws.open_file(&id, root.join("lines.txt"), None, w, cx));
+    wait(&mut cx, "the file open", &|ws, _| ws.panes[&id].shown().is_some());
+    let buffer = ws.read_with(&cx, |ws, _| ws.panes[&id].shown().unwrap().buffer.clone());
+    act(&mut cx, &|_, w, cx| buffer.update(cx, |b, cx| {
+        b.focus(w, cx);
+        b.set_selected_range(5..5, cx);
+    }));
+    let secondary = if cfg!(target_os = "macos") { "cmd" } else { "ctrl" };
+    let press = |cx: &mut TestAppContext, keys: &str| {
+        cx.dispatch_keystroke(window.into(), gpui::Keystroke::parse(&keys.replace("secondary", secondary)).unwrap());
+        draw(cx);
+    };
+    let text = |cx: &TestAppContext| buffer.read_with(cx, |b, _| b.value().to_string());
+    let selected = |cx: &TestAppContext| buffer.read_with(cx, |b, _| b.selected_range());
+    let clipboard = |cx: &mut TestAppContext| cx.update(|app| app.read_from_clipboard()).and_then(|c| c.text());
+
+    // Cut a line: it goes, with its newline, to the clipboard.
+    press(&mut cx, "secondary-x");
+    assert_eq!(text(&cx), "one\nthree\nfour\n");
+    assert_eq!(clipboard(&mut cx).as_deref(), Some("two\n"));
+
+    // Move it down, and one undo puts it back.
+    press(&mut cx, "alt-down");
+    assert_eq!(text(&cx), "one\nfour\nthree\n");
+    press(&mut cx, "secondary-z");
+    assert_eq!(text(&cx), "one\nthree\nfour\n", "moving a line is one undo step");
+
+    // Duplicate upwards, then select the line whole.
+    press(&mut cx, "shift-alt-up");
+    assert_eq!(text(&cx), "one\nthree\nthree\nfour\n");
+    press(&mut cx, "secondary-shift-up");
+    assert_eq!(selected(&cx), 4..10, "the line, whole, with its newline");
+
+    // With a selection, copy and cut are the editor's own.
+    press(&mut cx, "secondary-c");
+    assert_eq!(clipboard(&mut cx).as_deref(), Some("three\n"));
+    press(&mut cx, "secondary-x");
+    assert_eq!(text(&cx), "one\nthree\nfour\n");
+
+    press(&mut cx, "secondary-shift-k");
+    assert_eq!(text(&cx), "one\nfour\n");
+
+    // Ctrl+W closes the shown tab and hands the keyboard to the one now shown, so it can be pressed again.
+    std::fs::write(root.join("second.txt"), "two\n").unwrap();
+    act(&mut cx, &|ws, w, cx| ws.open_file(&id, root.join("second.txt"), None, w, cx));
+    wait(&mut cx, "the second file open", &|ws, _| ws.panes[&id].tabs.len() == 2);
+    cx.update(|app| app.bind_keys([gpui::KeyBinding::new("secondary-w", super::CloseTab, Some("EditorPane"))]));
+    press(&mut cx, "secondary-w");
+    assert_eq!(ws.read_with(&cx, |ws, _| ws.panes[&id].tabs.iter().map(|t| t.path.clone()).collect::<Vec<_>>()), [root.join("lines.txt")]);
+    let focused = ws.read_with(&cx, |ws, app| ws.panes[&id].shown().unwrap().buffer.read(app).focus_handle(app));
+    assert!(cx.update_window(window, |_, w, _| focused.is_focused(w)).unwrap(), "the tab now shown has the keyboard");
+    press(&mut cx, "secondary-w");
+    // lines.txt has unsaved edits, so closing it asks first.
+    assert!(ws.read_with(&cx, |ws, _| ws.modal.is_some() && ws.panes[&id].tabs.len() == 1));
+    act(&mut cx, &|ws, w, cx| ws.close_live(&id, w, cx));
+}
+
+#[test]
+#[ignore]
+fn line_actions() {
+    let t = std::thread::spawn(line_actions_on_their_keys);
+    let start = std::time::Instant::now();
+    while !t.is_finished() {
+        assert!(start.elapsed() < Duration::from_secs(180), "the workspace froze");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    t.join().unwrap();
+}
+
+
+/// Double-clicking a word in the editor selects it. Runs the real `claude` in a new temporary folder, like
+/// `file_operations`. `cargo test -- --ignored double_click`.
+fn double_click_in_the_editor() {
+    let data = tempfile::tempdir().unwrap();
+    // SAFETY: set before any other thread reads the environment; this test owns the process.
+    unsafe { std::env::set_var("CLAUDIU_DATA_DIR", data.path()) };
+    let work = tempfile::tempdir().unwrap();
+    let root = dunce::canonicalize(work.path()).unwrap();
+    std::fs::write(root.join("words.txt"), "hello brave world\nsecond line\n").unwrap();
+
+    let mut cx = TestAppContext::single();
+    cx.update(|app| {
+        gpui_kit::init(app);
+        gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, app);
+    });
+    let (window, ws) = cx
+        .update(|app| gpui_kit::open_window(Default::default(), app, |window, app| app.new(|cx| Workspace::new(window, vec![], cx))))
+        .unwrap();
+    cx.update_window(window, |_, window, _| window.activate_window()).unwrap();
+    let draw = |cx: &mut TestAppContext| {
+        cx.update_window(window, |_, window, app| window.draw(app).clear(app)).unwrap();
+        cx.run_until_parked();
+    };
+    let act = |cx: &mut TestAppContext, f: &dyn Fn(&mut Workspace, &mut Window, &mut Context<Workspace>)| {
+        cx.update_window(window, |_, window, app| ws.update(app, |ws, cx| f(ws, window, cx))).unwrap();
+        draw(cx);
+    };
+    let wait = |cx: &mut TestAppContext, what: &str, done: &dyn Fn(&Workspace, &App) -> bool| {
+        let t = std::time::Instant::now();
+        while !ws.read_with(cx, |ws, app| done(ws, app)) {
+            assert!(t.elapsed() < Duration::from_secs(60), "{what} never happened");
+            std::thread::sleep(Duration::from_millis(100));
+            draw(cx);
+        }
+    };
+    act(&mut cx, &|ws, w, cx| ws.new_claude(root.clone(), w, cx));
+    let id = ws.read_with(&cx, |ws, _| ws.active.clone().unwrap());
+    wait(&mut cx, "the session running", &|ws, app| ws.is_running(&id, app));
+    act(&mut cx, &|ws, w, cx| ws.toggle_editor(w, cx));
+    wait(&mut cx, "the editor pane", &|ws, _| ws.panes.contains_key(&id));
+    act(&mut cx, &|ws, w, cx| ws.open_file(&id, root.join("words.txt"), None, w, cx));
+    wait(&mut cx, "the file open", &|ws, _| ws.panes[&id].shown().is_some());
+    let buffer = ws.read_with(&cx, |ws, _| ws.panes[&id].shown().unwrap().buffer.clone());
+    act(&mut cx, &|ws, w, cx| { let f = ws.panes[&id].focus.clone(); w.focus(&f, cx); });
+    draw(&mut cx);
+
+    // The middle of "brave", as a person would click it.
+    // The panes slide into place; click once the text has stopped moving.
+    let place = |cx: &mut TestAppContext| buffer.read_with(cx, |b, _| b.range_to_bounds(&(8..9)));
+    let mut bounds = place(&mut cx).expect("the text is laid out");
+    for _ in 0..200 {
+        std::thread::sleep(Duration::from_millis(50));
+        cx.executor().advance_clock(Duration::from_millis(50));
+        draw(&mut cx);
+        let now = place(&mut cx).expect("the text is laid out");
+        if now == bounds {
+            break;
+        }
+        bounds = now;
+    }
+    let at = bounds.center();
+    let mut visual = gpui::VisualTestContext::from_window(window.into(), &cx);
+    let none = gpui::Modifiers::default();
+    for click_count in [1, 2] {
+        visual.simulate_event(gpui::MouseDownEvent { position: at, modifiers: none, button: gpui::MouseButton::Left, click_count, first_mouse: false });
+        visual.simulate_event(gpui::MouseUpEvent { position: at, modifiers: none, button: gpui::MouseButton::Left, click_count });
+    }
+    assert_eq!(buffer.read_with(&visual, |b, _| b.selected_range()), 6..11, "the word under the pointer");
+
+    // Holding the second press and dragging selects whole words, forwards and backwards.
+    let centre = |cx: &VisualTestContext, offset: usize| buffer.read_with(cx, |b, _| b.range_to_bounds(&(offset..offset + 1))).unwrap().center();
+    for (from, to, selected) in [(8, 14, 6..17), (14, 2, 0..17)] {
+        let (start, end) = (centre(&visual, from), centre(&visual, to));
+        visual.simulate_event(gpui::MouseDownEvent { position: start, modifiers: none, button: gpui::MouseButton::Left, click_count: 2, first_mouse: false });
+        visual.simulate_event(gpui::MouseMoveEvent { position: end, modifiers: none, pressed_button: Some(gpui::MouseButton::Left) });
+        visual.simulate_event(gpui::MouseUpEvent { position: end, modifiers: none, button: gpui::MouseButton::Left, click_count: 2 });
+        assert_eq!(buffer.read_with(&visual, |b, _| b.selected_range()), selected, "double-click on offset {from}, drag to {to}");
+    }
+    act(&mut cx, &|ws, w, cx| ws.close_live(&id, w, cx));
+}
+
+#[test]
+#[ignore]
+fn double_click() {
+    let t = std::thread::spawn(double_click_in_the_editor);
+    let start = std::time::Instant::now();
+    while !t.is_finished() {
+        assert!(start.elapsed() < Duration::from_secs(180), "the workspace froze");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    t.join().unwrap();
+}
 /// A changed file in a repository gets marks in the editor's gutter (see `panels::editor_pane::change_marks`).
 #[test]
 #[ignore]

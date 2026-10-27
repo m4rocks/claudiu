@@ -13,7 +13,7 @@ use gpui_kit::component::tree::tree;
 use crate::app::picker::{Picker, PickerKind, relative};
 use crate::app::editing::Conflict;
 use crate::files::Change;
-use crate::app::{Act, Ask, AskExplain, AskFix, AskFixProblem, AskTests, EditorCommand, EditorPane, MenuItem, GoBack, GoForward, GoToLine, QuickOpen, SaveFile, Tab, Workspace};
+use crate::app::{Act, Ask, AskExplain, AskFix, AskFixProblem, AskTests, EditorCommand, EditorPane, MenuItem, GoBack, GoForward, GoToLine, QuickOpen, SaveFile, Tab, Workspace, CloseTab};
 use crate::panels::glide::Follow;
 use crate::panels::theme::{self, hsla};
 use crate::panels::widgets::{button, icon};
@@ -136,6 +136,8 @@ impl Workspace {
                 .on_action(cx.listener(|ws, _: &GoToLine, window, cx| ws.ask_go_to_line(window, cx)))
                 .on_action(cx.listener(|ws, _: &GoBack, window, cx| ws.go_back(window, cx)))
                 .on_action(cx.listener(|ws, _: &GoForward, window, cx| ws.go_forward(window, cx)))
+                .on_action(cx.listener(|ws, _: &CloseTab, window, cx| ws.close_shown_tab(window, cx)))
+                .on_action(cx.listener(|ws, a: &crate::app::EditLines, window, cx| ws.edit_lines(a.0, window, cx)))
                 .on_action(cx.listener(|ws, _: &AskExplain, window, cx| ws.ask_claude(Ask::Explain, window, cx)))
                 .on_action(cx.listener(|ws, _: &AskFix, window, cx| ws.ask_claude(Ask::Fix, window, cx)))
                 .on_action(cx.listener(|ws, _: &AskTests, window, cx| ws.ask_claude(Ask::Tests, window, cx)))

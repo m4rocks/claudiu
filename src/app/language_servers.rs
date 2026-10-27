@@ -5,10 +5,12 @@ use std::path::Path;
 use std::rc::Rc;
 
 use futures::StreamExt;
-use gpui_kit::component::input::{DefinitionProvider, HoverProvider, Rope, RopeExt};
+use gpui_kit::component::input::{CompletionProvider, DefinitionProvider, HoverProvider, Rope, RopeExt};
 use lsp_types::notification::{DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, DidSaveTextDocument};
-use lsp_types::request::{GotoDefinition, HoverRequest};
-use lsp_types::{GotoDefinitionResponse, LocationLink, TextDocumentIdentifier, TextDocumentPositionParams, Uri};
+use lsp_types::request::{Completion, GotoDefinition, HoverRequest};
+use lsp_types::{
+    CompletionItem, CompletionResponse, CompletionTextEdit, GotoDefinitionResponse, LocationLink, TextDocumentIdentifier, TextDocumentPositionParams, Uri,
+};
 
 use super::*;
 use crate::lsp::{self, Event, Server};
@@ -104,7 +106,7 @@ impl Workspace {
         }
     }
 
-    /// Tell the server about an open tab, and let the tab ask it for hover and definitions.
+    /// Tell the server about an open tab, and let the tab ask it for hover, definitions and completions.
     fn open_in_server(&mut self, id: &Id, path: &Path, server: &Rc<Server>, cx: &mut Context<Self>) {
         let ws = cx.entity().downgrade();
         let Some(tab) = self.panes.get_mut(id).and_then(|p| p.tabs.iter_mut().find(|t| t.path == path)) else { return };
@@ -114,12 +116,13 @@ impl Workspace {
             text_document: lsp_types::TextDocumentItem::new(uri.clone(), lsp::language_id(language).into(), tab.version, text),
         });
         tab.server = Some(server.clone());
-        let doc = Rc::new(Document { server: server.clone(), uri });
         let (owner, current) = (id.clone(), path.to_path_buf());
+        let doc = Rc::new(Document { server: server.clone(), uri, ws: ws.clone(), owner: owner.clone(), path: current.clone() });
         tab.buffer.update(cx, |b, _| {
             let lsp = b.lsp_mut();
             lsp.hover_provider = Some(doc.clone());
-            lsp.definition_provider = Some(doc);
+            lsp.definition_provider = Some(doc.clone());
+            lsp.completion_provider = Some(doc);
             // A definition in another file opens that file's tab; one in this file is a plain jump.
             lsp.show_document = Some(Rc::new(move |params, window, cx| {
                 let Some(target) = lsp::path_of(&params.uri).filter(|t| path_key(t) != path_key(&current)) else { return false };
@@ -162,6 +165,20 @@ impl Workspace {
             });
         })
         .detach();
+    }
+
+    /// Send `text` as the tab's contents now, for a request that must be answered about what is on screen; `sync_with_server`
+    /// waits for typing to pause. Takes the text because the editor asking is being updated and can't be read.
+    fn send_text_now(&mut self, id: &Id, path: &Path, text: String, cx: &mut Context<Self>) {
+        let Some(tab) = self.panes.get_mut(id).and_then(|p| p.tabs.iter_mut().find(|t| t.path == path)) else { return };
+        let (Some(server), Some(uri)) = (tab.server.clone(), lsp::uri(path)) else { return };
+        // A send still waiting on its delay sees the newer version and stands down.
+        tab.version += 1;
+        server.notify::<DidChangeTextDocument>(lsp_types::DidChangeTextDocumentParams {
+            text_document: lsp_types::VersionedTextDocumentIdentifier::new(uri, tab.version),
+            content_changes: vec![lsp_types::TextDocumentContentChangeEvent { range: None, range_length: None, text }],
+        });
+        self.pull_diagnostics(id, path, cx);
     }
 
     /// Ask a server that doesn't send diagnostics for the tab's (see `lsp::Kind::pull_diagnostics`).
@@ -225,10 +242,14 @@ fn show_diagnostics(tab: &Tab, mut diagnostics: Vec<lsp_types::Diagnostic>, cx: 
     });
 }
 
-/// One open file as the editor's hover and definition provider.
+/// One open file as the editor's hover, definition and completion provider.
 struct Document {
     server: Rc<Server>,
     uri: Uri,
+    /// The tab's place in the workspace, so a request can first bring the server's copy of the text up to date.
+    ws: gpui::WeakEntity<Workspace>,
+    owner: Id,
+    path: PathBuf,
 }
 
 impl Document {
@@ -278,6 +299,58 @@ impl DefinitionProvider for Document {
     }
 }
 
+impl CompletionProvider for Document {
+    fn completions(
+        &self,
+        text: &Rope,
+        offset: usize,
+        _: lsp_types::CompletionContext,
+        _: &mut Window,
+        cx: &mut App,
+    ) -> gpui::Task<anyhow::Result<CompletionResponse>> {
+        let _ = self.ws.update(cx, |ws, cx| ws.send_text_now(&self.owner, &self.path, text.to_string(), cx));
+        let reply = self.server.request::<Completion>(lsp_types::CompletionParams {
+            text_document_position: self.at(text, offset),
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+            // Every request is the user's own (see `is_completion_trigger`); the editor filters the answer by the word typed.
+            context: Some(lsp_types::CompletionContext { trigger_kind: lsp_types::CompletionTriggerKind::INVOKED, trigger_character: None }),
+        });
+        let (utf16, text) = (self.server.counts_utf16(), text.clone());
+        cx.background_spawn(async move {
+            let reply = reply.await.map_err(anyhow::Error::msg)?;
+            Ok(CompletionResponse::Array(completion_items(reply, utf16, &text)))
+        })
+    }
+
+    /// Completion opens on Ctrl+Space only; typing doesn't start it.
+    fn is_completion_trigger(&self, _: usize, _: &str, _: &mut App) -> bool {
+        false
+    }
+}
+
+/// A server's completions, with the columns of their edits in characters as the editor counts them.
+fn completion_items(reply: Option<CompletionResponse>, utf16: bool, text: &Rope) -> Vec<CompletionItem> {
+    let mut items = match reply {
+        None => vec![],
+        Some(CompletionResponse::Array(items)) => items,
+        Some(CompletionResponse::List(list)) => list.items,
+    };
+    if utf16 {
+        for item in &mut items {
+            match &mut item.text_edit {
+                Some(CompletionTextEdit::Edit(edit)) => edit.range = range_in_chars(text, edit.range),
+                Some(CompletionTextEdit::InsertAndReplace(edit)) => {
+                    edit.insert = range_in_chars(text, edit.insert);
+                    edit.replace = range_in_chars(text, edit.replace);
+                }
+                None => {}
+            }
+        }
+    }
+    items
+}
+
 /// Servers answer with locations or links; the editor takes links.
 fn links(reply: Option<GotoDefinitionResponse>) -> Vec<LocationLink> {
     let link = |l: lsp_types::Location| LocationLink { origin_selection_range: None, target_uri: l.uri, target_range: l.range, target_selection_range: l.range };
@@ -286,5 +359,39 @@ fn links(reply: Option<GotoDefinitionResponse>) -> Vec<LocationLink> {
         Some(GotoDefinitionResponse::Scalar(l)) => vec![link(l)],
         Some(GotoDefinitionResponse::Array(ls)) => ls.into_iter().map(link).collect(),
         Some(GotoDefinitionResponse::Link(ls)) => ls,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lsp_types::{Position, Range, TextEdit};
+
+    fn edit_at(range: Range) -> CompletionItem {
+        CompletionItem { label: "ab".into(), text_edit: Some(CompletionTextEdit::Edit(TextEdit::new(range, "ab".into()))), ..Default::default() }
+    }
+
+    #[test]
+    fn completion_edits_count_columns_in_characters() {
+        // "ab" starts at character 5 but UTF-16 unit 6, because the emoji is two units.
+        let text = Rope::from("let 😀ab = 1;");
+        let from_server = Range::new(Position::new(0, 6), Position::new(0, 8));
+        let reply = || Some(CompletionResponse::Array(vec![edit_at(from_server)]));
+
+        let converted = completion_items(reply(), true, &text);
+        let Some(CompletionTextEdit::Edit(edit)) = &converted[0].text_edit else { panic!("an edit stays an edit") };
+        assert_eq!(edit.range, Range::new(Position::new(0, 5), Position::new(0, 7)));
+
+        let kept = completion_items(reply(), false, &text);
+        let Some(CompletionTextEdit::Edit(edit)) = &kept[0].text_edit else { panic!("an edit stays an edit") };
+        assert_eq!(edit.range, from_server, "a server counting in characters needs no conversion");
+    }
+
+    #[test]
+    fn completion_replies_become_one_list() {
+        let text = Rope::from("");
+        assert!(completion_items(None, true, &text).is_empty());
+        let list = lsp_types::CompletionList { is_incomplete: false, items: vec![CompletionItem { label: "a".into(), ..Default::default() }] };
+        assert_eq!(completion_items(Some(CompletionResponse::List(list)), true, &text)[0].label, "a");
     }
 }

@@ -188,6 +188,7 @@ impl InputModeKind for EditorMode {
         element
             .on_action(window.listener_for(entity, InputBaseState::on_action_toggle_code_actions))
             .on_action(window.listener_for(entity, InputBaseState::on_action_go_to_definition))
+            .on_action(window.listener_for(entity, InputBaseState::on_action_trigger_completion))
     }
 }
 

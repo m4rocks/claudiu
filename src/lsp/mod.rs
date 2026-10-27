@@ -178,6 +178,8 @@ impl Server {
                     "publishDiagnostics": {},
                     "hover": {"contentFormat": ["markdown", "plaintext"]},
                     "definition": {"linkSupport": true},
+                    // Plain text only: the editor inserts an item's text as it comes, so no snippets.
+                    "completion": {"contextSupport": true, "completionItem": {"snippetSupport": false}},
                 },
             },
         });
@@ -311,6 +313,7 @@ mod tests {
                 match m["method"].as_str() {
                     Some("initialize") => {
                         assert_eq!(m["params"]["capabilities"]["textDocument"]["diagnostic"], json!({}), "pull diagnostics are offered");
+                        assert_eq!(m["params"]["capabilities"]["textDocument"]["completion"]["completionItem"]["snippetSupport"], json!(false), "snippets are declined");
                         rpc::write_message(&mut to_client, &json!({"jsonrpc": "2.0", "id": "cfg", "method": "workspace/configuration", "params": {"items": [{}, {}]}})).unwrap();
                         reply(&mut to_client, json!({"capabilities": {}}));
                     }

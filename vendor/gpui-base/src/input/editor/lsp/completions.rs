@@ -9,7 +9,7 @@ use lsp_types::{
 use ropey::Rope;
 use std::{cell::RefCell, ops::Range, rc::Rc, time::Duration};
 
-use crate::input::InputBaseState;
+use crate::input::{InputBaseState, TriggerCompletion};
 
 /// Default debounce duration for inline completions.
 const DEFAULT_INLINE_COMPLETION_DEBOUNCE: Duration = Duration::from_millis(300);
@@ -102,6 +102,21 @@ pub trait CompletionProvider {
     fn is_completion_trigger(&self, offset: usize, new_text: &str, cx: &mut App) -> bool;
 }
 
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// Where the word that ends at byte `cursor` begins; `cursor` itself when it follows no word.
+fn word_start(text: &Rope, cursor: usize) -> usize {
+    let word_len: usize = text
+        .chars_at(cursor)
+        .reversed()
+        .take_while(|&c| is_word_char(c))
+        .map(char::len_utf8)
+        .sum();
+    cursor - word_len
+}
+
 pub(crate) struct InlineCompletion {
     /// Completion item to display as an inline completion suggestion
     pub(crate) item: Option<InlineCompletionItem>,
@@ -147,10 +162,6 @@ impl InputBaseState<EditorMode> {
             return;
         };
 
-        if !provider.is_completion_trigger(start, new_text, cx) {
-            return;
-        }
-
         // `trigger_start_offset` latches where the word a menu was opened for
         // begins, so later keystrokes refine the same query instead of starting
         // over at each character. It only describes this edit while the edit
@@ -159,7 +170,7 @@ impl InputBaseState<EditorMode> {
         // the word keeps it; typing somewhere else, or into a document that
         // has since been replaced, starts a new query at this edit instead of
         // handing the provider text the user never typed as a prefix.
-        let completion = &self.extras.context_menu_content.completion;
+        let completion = &mut self.extras.context_menu_content.completion;
         let latched = completion.trigger_start_offset.filter(|&latched| {
             latched <= start
                 && start <= latched + completion.query.len()
@@ -169,11 +180,66 @@ impl InputBaseState<EditorMode> {
                     .query
                     .starts_with(self.text.slice(latched..start).to_string().as_str())
         });
+        // A menu the user asked for (`TriggerCompletion`) has no trigger
+        // character to ask the provider about, so it follows the word it was
+        // opened on as that word grows.
+        if latched.is_none() {
+            completion.invoked = false;
+        }
+        let follows_invoked_word =
+            completion.invoked && !new_text.is_empty() && new_text.chars().all(is_word_char);
+        if !follows_invoked_word && !provider.is_completion_trigger(start, new_text, cx) {
+            return;
+        }
+
         let start_offset = latched.unwrap_or(start);
         if new_offset < start_offset {
             return;
         }
+        self.request_completions(
+            start_offset,
+            new_offset,
+            lsp_types::CompletionTriggerKind::TRIGGER_CHARACTER,
+            window,
+            cx,
+        );
+    }
 
+    /// Opens the menu for the word before the cursor, as the user asked for it.
+    pub(crate) fn on_action_trigger_completion(
+        &mut self,
+        _: &TriggerCompletion,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.extras.lsp.completion_provider.is_none() {
+            return;
+        }
+        let cursor = self.cursor();
+        let start = word_start(&self.text, cursor);
+        self.extras.context_menu_content.completion.invoked = true;
+        self.request_completions(
+            start,
+            cursor,
+            lsp_types::CompletionTriggerKind::INVOKED,
+            window,
+            cx,
+        );
+    }
+
+    /// Asks the provider for the completions at `new_offset` and opens the menu on its answer,
+    /// filtering by the text from `start_offset`.
+    fn request_completions(
+        &mut self,
+        start_offset: usize,
+        new_offset: usize,
+        trigger_kind: lsp_types::CompletionTriggerKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(provider) = self.extras.lsp.completion_provider.clone() else {
+            return;
+        };
         let query = self
             .text_for_range(
                 self.range_to_utf16(&(start_offset..new_offset)),
@@ -183,21 +249,18 @@ impl InputBaseState<EditorMode> {
             )
             .map(|s| s.trim().to_string())
             .unwrap_or_default();
-        self.extras
-            .context_menu_content
-            .completion
-            .trigger_start_offset = Some(start_offset);
-        self.extras
-            .context_menu_content
-            .completion
-            .query
-            .clone_from(&query);
+        let completion = &mut self.extras.context_menu_content.completion;
+        completion.trigger_start_offset = Some(start_offset);
+        completion.query.clone_from(&query);
 
         let completion_context = CompletionContext {
-            trigger_kind: lsp_types::CompletionTriggerKind::TRIGGER_CHARACTER,
-            trigger_character: Some(query),
+            trigger_kind,
+            trigger_character: (trigger_kind
+                == lsp_types::CompletionTriggerKind::TRIGGER_CHARACTER)
+                .then_some(query),
         };
 
+        let text = self.text.clone();
         let provider_responses =
             provider.completions(&self.text, new_offset, completion_context, window, cx);
         self.extras.context_menu_task = cx.spawn_in(window, async move |editor, cx| {
@@ -221,7 +284,11 @@ impl InputBaseState<EditorMode> {
 
             editor
                 .update_in(cx, |editor, window, cx| {
-                    if !editor.focus_handle.is_focused(window) {
+                    // An answer about text the user has since edited or left would open a menu for the wrong place.
+                    if !editor.focus_handle.is_focused(window)
+                        || editor.cursor() != new_offset
+                        || editor.text != text
+                    {
                         return;
                     }
 
@@ -274,6 +341,7 @@ impl InputBaseState<EditorMode> {
         };
         let handled = handler(kind, action, window, cx);
         if handled && closes_overlay {
+            self.extras.context_menu_content.completion.invoked = false;
             self.hide_context_menu(cx);
         }
         handled
@@ -379,5 +447,20 @@ impl InputBaseState<EditorMode> {
         let completion_text = completion_item.insert_text;
         self.replace_text_in_range_silent(Some(range_utf16), &completion_text, window, cx);
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn word_start_walks_back_over_the_word_before_the_cursor() {
+        let text = Rope::from("let wörld_1 = x.fo");
+        let end = text.len();
+        assert_eq!(word_start(&text, end), "let wörld_1 = x.".len(), "stops at the dot");
+        assert_eq!(word_start(&text, "let wörld_1".len()), "let ".len(), "multi-byte letters belong to the word");
+        assert_eq!(word_start(&text, "let ".len()), "let ".len(), "after a space no word ends here");
+        assert_eq!(word_start(&text, 0), 0);
     }
 }

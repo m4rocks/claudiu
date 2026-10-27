@@ -5,7 +5,7 @@ use gpui::{Context, Window};
 use ropey::Rope;
 use sum_tree::Bias;
 
-use super::{InputBaseState, RopeExt as _};
+use super::{InputBaseState, RopeExt as _, cursor::CursorSelection};
 use crate::text_boundary::word_range_from_chars;
 
 /// Unique identifier for a cursor/selection.
@@ -40,6 +40,23 @@ impl<M: InputModeKind> InputBaseState<M> {
         self.set_selection(range.start, range.end);
         self.selected_word_range = Some(*self.active_selection());
         cx.notify()
+    }
+
+    /// Where the end of a drag that began with a double click lands: on the edge of the word under the pointer, so the
+    /// selection grows by whole words. Inside the word first selected the offset stays as it is.
+    ///
+    /// The offset is the UTF-8 offset.
+    pub(super) fn snap_to_word_edge(&self, offset: usize, selected_word: &CursorSelection) -> usize {
+        let Some(word) = TextSelector::word_range(&self.text, offset) else {
+            return offset;
+        };
+        if offset < selected_word.start {
+            word.start
+        } else if offset >= selected_word.end {
+            word.end
+        } else {
+            offset
+        }
     }
 
     /// Select the line at the given offset on triple-click.

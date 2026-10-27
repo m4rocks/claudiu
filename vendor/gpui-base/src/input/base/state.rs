@@ -116,6 +116,7 @@ actions!(
         MoveToNextWord,
         Escape,
         ToggleCodeActions,
+        TriggerCompletion,
         Search,
         Replace,
         GoToDefinition,
@@ -3022,6 +3023,40 @@ impl<M: InputModeKind> InputBaseState<M> {
         (*self.selections.active()).into()
     }
 
+    /// Whether more than one cursor is active; [`Self::selected_range`] and [`Self::cursor`] read only the active one.
+    pub fn has_multiple_cursors(&self) -> bool {
+        !self.selections.is_single()
+    }
+
+    /// Select from `anchor` to `cursor`, which may come first (a selection made backwards), and scroll the cursor
+    /// into view. Drops any extra cursors.
+    pub fn select_range(&mut self, anchor: usize, cursor: usize, cx: &mut Context<Self>) {
+        self.undo_manager.break_transaction_coalescing();
+        self.selections.remove_all_but_active();
+        self.set_selection(anchor.min(cursor), anchor.max(cursor));
+        self.active_selection_mut().reversed = cursor < anchor;
+        self.scroll_to(cursor, None, cx);
+        cx.notify();
+    }
+
+    /// Replace the bytes in `range` with `text` as one undo step of its own. Does nothing when the input can't be edited.
+    pub fn replace_range(
+        &mut self,
+        range: std::ops::Range<usize>,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.is_editable() {
+            return;
+        }
+        self.undo_manager.break_transaction_coalescing();
+        self.undo_manager.set_pending_intent(EditIntent::Atomic);
+        let range = self.range_to_utf16(&range);
+        self.replace_text_in_range_silent(Some(range), text, window, cx);
+        self.undo_manager.break_transaction_coalescing();
+    }
+
     pub fn select_all(&mut self, _: &mut Window, cx: &mut Context<Self>) {
         self.undo_manager.break_transaction_coalescing();
         self.selections.remove_all_but_active();
@@ -3228,6 +3263,10 @@ impl<M: InputModeKind> InputBaseState<M> {
         self.cursor_line_end_affinity = line_end_affinity;
         let offset = self.cursor_boundary(offset, Bias::Left);
         let word_range = self.selected_word_range;
+        let offset = match &word_range {
+            Some(word) => self.snap_to_word_edge(offset, word),
+            None => offset,
+        };
         Self::extend_selection(self.active_selection_mut(), offset, word_range);
         let range = self.normalize_token_range(self.selected_range());
         self.set_selection(range.start, range.end);
@@ -4664,6 +4703,80 @@ mod tests {
                     assert_eq!(state.value(), "中a中a");
                     assert_eq!(provider.starts.borrow().as_slice(), &[4]);
                     assert_eq!(provider.queries.borrow().as_slice(), &[(7, "中".into())]);
+                });
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn test_invoked_completion_asks_for_the_word_before_the_cursor_and_follows_it(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::input::{CompletionProvider, EditorState};
+        use gpui::Task;
+        use lsp_types::{CompletionContext, CompletionResponse, CompletionTriggerKind};
+        use std::cell::RefCell;
+
+        #[derive(Default)]
+        struct Provider {
+            requests: RefCell<Vec<(usize, CompletionTriggerKind, Option<String>)>>,
+        }
+
+        impl CompletionProvider for Provider {
+            fn is_completion_trigger(&self, _: usize, _: &str, _: &mut App) -> bool {
+                false
+            }
+
+            fn completions(
+                &self,
+                _: &Rope,
+                offset: usize,
+                trigger: CompletionContext,
+                _: &mut Window,
+                _: &mut App,
+            ) -> Task<anyhow::Result<CompletionResponse>> {
+                self.requests
+                    .borrow_mut()
+                    .push((offset, trigger.trigger_kind, trigger.trigger_character));
+                Task::ready(Ok(CompletionResponse::Array(vec![])))
+            }
+        }
+
+        cx.update(crate::init);
+        let mut editor = None;
+        let window = cx.open_window(size(px(400.), px(100.)), |window, cx| {
+            editor = Some(cx.new(|cx| EditorState::new(window, cx).default_value("let fé")));
+            gpui::EmptyView
+        });
+        let editor = editor.unwrap();
+        let provider = Rc::new(Provider::default());
+        window
+            .update(cx, |_, window, cx| {
+                editor.update(cx, |state, cx| {
+                    state.extras.lsp.completion_provider = Some(provider.clone());
+                    state.set_cursor_to(state.value().len());
+
+                    // Typing alone never opens a menu for this provider.
+                    state.replace_text_in_range(None, "o", window, cx);
+                    assert!(provider.requests.borrow().is_empty());
+
+                    state.on_action_trigger_completion(&crate::input::TriggerCompletion, window, cx);
+                    let word_start = "let ".len();
+                    assert_eq!(
+                        provider.requests.borrow().as_slice(),
+                        &[(state.value().len(), CompletionTriggerKind::INVOKED, None)]
+                    );
+                    assert_eq!(
+                        state.extras.context_menu_content.completion.trigger_start_offset,
+                        Some(word_start)
+                    );
+
+                    // The word growing asks again; anything else ends the follow.
+                    state.replace_text_in_range(None, "o", window, cx);
+                    assert_eq!(provider.requests.borrow().len(), 2);
+                    state.replace_text_in_range(None, " ", window, cx);
+                    state.replace_text_in_range(None, "x", window, cx);
+                    assert_eq!(provider.requests.borrow().len(), 2);
                 });
             })
             .unwrap();

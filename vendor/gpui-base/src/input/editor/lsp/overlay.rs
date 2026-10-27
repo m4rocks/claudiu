@@ -10,6 +10,8 @@ pub struct CompletionMenuState {
     pub trigger_start_offset: Option<usize>,
     pub query: String,
     pub items: Vec<CompletionItem>,
+    /// Opened by `TriggerCompletion` rather than by typing, so it follows its word as it grows.
+    pub(super) invoked: bool,
     revision: u64,
 }
 
@@ -187,7 +189,6 @@ impl InputBaseState<EditorMode> {
             }
         } else if let Some(insert_text) = item.insert_text.as_ref() {
             new_text.clone_from(insert_text);
-            range = range.end..range.end;
         }
         self.completion_inserting = true;
         let range = self.range_to_utf16(&range);

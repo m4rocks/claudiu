@@ -144,6 +144,22 @@ impl Workspace {
         }
     }
 
+    /// Ctrl+W: close the shown tab, asking first when it has unsaved edits. The closed editor had the keyboard, so it
+    /// goes to the tab now shown (or the pane), and the key works again.
+    pub fn close_shown_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.active_id().cloned() else { return };
+        let Some(ix) = self.panes.get(&id).and_then(|p| p.active) else { return };
+        self.request_close_tab(&id, ix, window, cx);
+        if self.modal.is_some() {
+            return;
+        }
+        let Some(pane) = self.panes.get(&id) else { return };
+        match pane.shown().map(|t| t.buffer.clone()) {
+            Some(buffer) => buffer.update(cx, |b, cx| b.focus(window, cx)),
+            None => window.focus(&pane.focus, cx),
+        }
+    }
+
     /// Close tab `ix`, asking first when it has unsaved edits.
     pub fn request_close_tab(&mut self, id: &Id, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(tab) = self.panes.get(id).and_then(|p| p.tabs.get(ix)) else { return };

@@ -150,11 +150,14 @@ fn main() {
             KeyBinding::new("secondary-p", app::QuickOpen, Some("EditorPane")),
             KeyBinding::new("secondary-s", app::SaveFile, Some("EditorPane")),
             KeyBinding::new("ctrl-g", app::GoToLine, Some("EditorPane")),
+            KeyBinding::new("secondary-w", app::CloseTab, Some("EditorPane")),
             // VS Code's keys: Alt+arrows move by word on macOS.
             KeyBinding::new(if cfg!(target_os = "macos") { "ctrl--" } else { "alt-left" }, app::GoBack, Some("EditorPane")),
             KeyBinding::new(if cfg!(target_os = "macos") { "ctrl-shift--" } else { "alt-right" }, app::GoForward, Some("EditorPane")),
             // The editor answers it from its language server; Ctrl+click (Cmd+click) does the same.
             KeyBinding::new("f12", gpui_kit::component::input::GoToDefinition, Some("Input")),
+            // Completions for the word before the cursor, from the file's language server.
+            KeyBinding::new("ctrl-space", gpui_kit::base::input::TriggerCompletion, Some("Input")),
             KeyBinding::new("ctrl-tab", NextSession, None),
             KeyBinding::new("secondary-1", app::ShowSession(1), None),
             KeyBinding::new("secondary-2", app::ShowSession(2), None),
@@ -167,6 +170,7 @@ fn main() {
             KeyBinding::new("secondary-9", app::ShowSession(9), None),
             KeyBinding::new("ctrl-shift-tab", PrevSession, None),
         ]);
+        cx.bind_keys(app::line_action_bindings());
         // The text-input library binds these globally (focus traversal, copy, select all, ...). A focused
         // terminal must receive them as plain keys, so unbind them inside the Terminal context.
         cx.bind_keys(
