@@ -67,6 +67,7 @@ pub use lifecycle::saved_window_bounds;
 pub use editor_mode::EditorCommand;
 pub use file_ops::NameFor;
 pub use settings::SettingsPage;
+pub use worktrees::WorktreesPage;
 
 actions!(
     claudiu,
@@ -125,8 +126,6 @@ pub enum Act {
         folder: PathBuf,
         base: Base,
     },
-    /// Add the worktree folder to this repository's .gitignore.
-    IgnoreWorktrees(PathBuf),
     /// Ask before removing a worktree. A running session in it refuses.
     RemoveWorktree {
         main_checkout: PathBuf,
@@ -137,6 +136,9 @@ pub enum Act {
         folder: PathBuf,
         discard: bool,
     },
+    /// Ask before deleting a folder in Claudiu's worktrees folder that git no longer lists.
+    AskDeleteUnlisted(PathBuf),
+    ConfirmDeleteUnlisted(PathBuf),
     /// Show or hide the shell under a Claude session's terminal (started on first use, in the session's folder).
     ToggleShell(Id),
     /// Turn editor mode on or off for the shown session (see `editor_mode.rs`).
@@ -441,6 +443,8 @@ pub struct Workspace {
     pub modal_focus: FocusHandle,
     /// The Settings category last shown. Kept here because opening Settings builds the modal anew; not saved to disk.
     pub settings_page: SettingsPage,
+    /// What the Worktrees page of Settings shows. Not saved to disk.
+    pub worktrees_page: worktrees::WorktreesPage,
     /// Smooth wheel scrolling of the settings page.
     pub settings_scroll: crate::panels::glide::Smooth,
     /// Whether this run already said it couldn't write a session's tool settings file (said at most once).
@@ -557,6 +561,7 @@ impl Workspace {
             modal: None,
             modal_focus: cx.focus_handle(),
             settings_page: SettingsPage::default(),
+            worktrees_page: Default::default(),
             settings_scroll: Default::default(),
             menu: None,
             toast: None,
@@ -652,17 +657,19 @@ impl Workspace {
                 self.switch_shown(folder, base, true, window, cx)
             }
             Act::RemoveWorktree { main_checkout, folder } => self.ask_remove_worktree(main_checkout, folder, cx),
+            Act::AskDeleteUnlisted(folder) => self.ask_delete_unlisted(folder, cx),
+            Act::ConfirmDeleteUnlisted(folder) => {
+                self.worktrees_page.asking = None;
+                self.run_git(GitOp::Worktree, move || Ok(crate::git::worktree::delete_unlisted(&folder)?), cx);
+            }
             Act::ConfirmRemoveWorktree { main_checkout, folder, discard } => {
+                self.worktrees_page.asking = None;
                 self.run_git(
                     GitOp::Worktree,
                     move || Ok(crate::git::worktree::remove(&main_checkout, &folder, discard, Duration::from_secs(10))?),
                     cx,
                 );
             }
-            Act::IgnoreWorktrees(main_checkout) => match crate::git::worktree::ignore(&main_checkout) {
-                Ok(()) => self.toast("Added .claude/worktrees/ to .gitignore. The change is not committed.", false, cx),
-                Err(e) => self.toast(format!("Could not change .gitignore: {e}"), true, cx),
-            },
             Act::ToggleShell(id) => self.toggle_shell(&id, window, cx),
             Act::ToggleEditor => self.toggle_editor(window, cx),
             Act::Editor(command) => self.run_editor_command(command, window, cx),
@@ -776,6 +783,7 @@ impl Workspace {
                 let shell = self.modal_input(&shell_t, &platform::default_shell(None).0, window, cx);
                 let list_focus = cx.focus_handle();
                 window.focus(&list_focus, cx);
+                self.set_settings_page(self.settings_page, cx);
                 self.modal = Some(Modal::Settings { shell, claude, model, effort: defaults.effort, permission: defaults.permission_mode, updates, chrome, scale: crate::panels::scale::percent(), trimmed: self.store.data.settings.trimmed_tools.clone(), claudiu_off: self.store.data.settings.claudiu_tools_off.clone(), list_focus });
             }
             Act::PickEffort(choice) => {

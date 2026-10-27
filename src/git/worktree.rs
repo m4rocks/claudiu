@@ -1,7 +1,6 @@
-//! Sessions in git worktrees. Claudiu makes a worktree with `git worktree add` in the folder Claude Code uses for its own
-//! (`claude --worktree`), so the two kinds sit together; a session moves into one by resuming there (see `app/switch.rs`).
-//! This file holds the names, the folders, making and removing them, and the `.gitignore` line that keeps those folders
-//! out of `git status`.
+//! Sessions in git worktrees. Claudiu makes a worktree with `git worktree add` in its own data folder, outside the
+//! repository, so `git status` never lists it; a session moves into one by resuming there (see `app/switch.rs`). This
+//! file holds the names, the folders, and making, finding and removing worktrees.
 
 use std::path::{Path, PathBuf};
 
@@ -11,8 +10,8 @@ use super::GitInfo;
 use super::commit::{git, has_origin, origin_default_branch};
 use crate::platform::path_key;
 
-/// Where the worktree called `name` goes, relative to the repository's main checkout. Claude Code uses it too.
-const FOLDER: &str = ".claude/worktrees";
+/// The folder in Claudiu's data folder that holds one folder of worktrees per repository.
+const STORE: &str = "worktrees";
 
 /// What a new worktree's branch starts from.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -24,8 +23,24 @@ pub enum Base {
     Current,
 }
 
+fn store() -> PathBuf {
+    let data = crate::datadir::data_dir();
+    // Git lists a worktree under its real path, and `block_of` matches folders by path. A data folder reached through a
+    // link (macOS temp folders, a moved home) must be spelled the way git spells it.
+    dunce::canonicalize(&data).unwrap_or(data).join(STORE)
+}
+
+/// Where the worktrees of one repository go: its name, so a person can tell the folders apart, and a hash of its path,
+/// so two repositories with the same name don't share a folder.
+fn repo_folder(main_checkout: &Path) -> PathBuf {
+    let name = main_checkout.file_name().map_or_else(|| "repo".into(), |n| crate::datadir::safe_file_stem(&n.to_string_lossy()));
+    // FNV-1a is fixed by definition, so a repository keeps its folder across Claudiu versions.
+    let hash = path_key(main_checkout).bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3));
+    store().join(format!("{name}-{:08x}", hash as u32))
+}
+
 pub fn folder(main_checkout: &Path, name: &str) -> PathBuf {
-    main_checkout.join(FOLDER).join(name)
+    repo_folder(main_checkout).join(name)
 }
 
 /// The name becomes a folder and a branch, so it is refused rather than rewritten when it holds anything else.
@@ -88,9 +103,49 @@ pub fn folders(git: &GitInfo) -> Vec<&Path> {
     std::iter::once(main).chain(others).collect()
 }
 
-/// Only the folders in `.claude/worktrees` are removed from Claudiu: a worktree made anywhere else is the user's own.
+/// Only the folders Claudiu made are removed from Claudiu: a worktree made anywhere else, `claude --worktree`'s in
+/// `.claude/worktrees` included, is the user's own.
 pub fn removable(main_checkout: &Path, folder: &Path) -> bool {
-    folder.parent().is_some_and(|parent| path_key(parent) == path_key(&main_checkout.join(FOLDER)))
+    folder.parent().is_some_and(|parent| path_key(parent) == path_key(&repo_folder(main_checkout)))
+}
+
+/// A worktree folder in Claudiu's data folder, found by looking at the disk.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Stored {
+    pub folder: PathBuf,
+    /// The repository's main checkout; none when it is gone, was moved, or git no longer lists this folder.
+    pub main_checkout: Option<PathBuf>,
+}
+
+/// Every worktree folder in Claudiu's data folder, by path. Blocking.
+pub fn stored() -> Vec<Stored> {
+    let subfolders = |parent: &Path| -> Vec<PathBuf> {
+        std::fs::read_dir(parent).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect()
+    };
+    let mut found: Vec<Stored> = subfolders(&store())
+        .iter()
+        .flat_map(|repo| subfolders(repo))
+        .map(|folder| Stored { main_checkout: main_checkout_of(&folder).filter(|main| removable(main, &folder)), folder })
+        .collect();
+    found.sort_by_key(|s| path_key(&s.folder));
+    found
+}
+
+/// The main checkout of the repository a worktree folder belongs to, while both still exist.
+fn main_checkout_of(folder: &Path) -> Option<PathBuf> {
+    let common = Repository::open(folder).ok()?.commondir().parent()?.to_path_buf();
+    common.is_dir().then_some(common)
+}
+
+/// Delete a folder from Claudiu's data folder that git no longer lists, which `remove` cannot handle. Blocking.
+pub fn delete_unlisted(folder: &Path) -> Result<String, String> {
+    let in_store = folder.parent().and_then(Path::parent).is_some_and(|p| path_key(p) == path_key(&store()));
+    if !in_store {
+        return Err(format!("{} is not in Claudiu's worktrees folder, so Claudiu leaves it alone.", folder.display()));
+    }
+    let name = folder.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+    std::fs::remove_dir_all(folder).map_err(|e| format!("Could not delete {name}: {e}"))?;
+    Ok(format!("Deleted the folder {name}."))
 }
 
 /// What removing a worktree throws away.
@@ -109,7 +164,7 @@ impl Leftovers {
 }
 
 /// A typed name that names an existing worktree folder switches into it; one that only an existing branch has is
-/// refused, so every branch in `.claude/worktrees` is one Claudiu made and removal may delete it once merged.
+/// refused, so every branch in Claudiu's worktrees folder is one Claudiu made and removal may delete it once merged.
 pub fn check_unused(main_checkout: &Path, name: &str) -> Result<(), String> {
     if folder(main_checkout, name).exists() || !branch_exists(main_checkout, name) {
         Ok(())
@@ -163,7 +218,7 @@ pub fn leftovers(folder: &Path) -> Result<Leftovers, String> {
 /// running. Returns a line for a toast. Blocking.
 pub fn remove(main_checkout: &Path, folder: &Path, discard: bool, grace: std::time::Duration) -> Result<String, String> {
     if !removable(main_checkout, folder) {
-        return Err(format!("{} is not in .claude/worktrees, so Claudiu leaves it alone.", folder.display()));
+        return Err(format!("{} is not in Claudiu's worktrees folder, so Claudiu leaves it alone.", folder.display()));
     }
     let deadline = std::time::Instant::now() + grace;
     let name = folder.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
@@ -261,25 +316,6 @@ fn lock_pid(reason: &str) -> Option<u32> {
     reason.rsplit_once("(pid ")?.1.strip_suffix(')')?.parse().ok()
 }
 
-/// Whether git already ignores the worktree folders in the repository at `main_checkout`.
-pub fn is_ignored(main_checkout: &Path) -> bool {
-    Repository::open(main_checkout)
-        .and_then(|repo| repo.is_path_ignored(Path::new(FOLDER).join("probe")))
-        .unwrap_or(false)
-}
-
-/// Add the worktree folder to the repository's `.gitignore` (made if missing), on a line of its own.
-pub fn ignore(main_checkout: &Path) -> std::io::Result<()> {
-    let file = main_checkout.join(".gitignore");
-    let mut text = std::fs::read_to_string(&file).or_else(|e| if e.kind() == std::io::ErrorKind::NotFound { Ok(String::new()) } else { Err(e) })?;
-    if !text.is_empty() && !text.ends_with('\n') {
-        text.push_str(if text.contains("\r\n") { "\r\n" } else { "\n" });
-    }
-    text.push_str(FOLDER);
-    text.push_str(if text.contains("\r\n") { "/\r\n" } else { "/\n" });
-    std::fs::write(file, text)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -305,9 +341,25 @@ mod tests {
         assert_eq!(generate_name(0, |_| true), "worktree-0");
     }
 
+    /// Points Claudiu's data folder at a throwaway one for the rest of the test run. A repository's worktrees go in a
+    /// folder named after its path, so the tests do not meet each other there.
+    fn use_throwaway_data_folder() -> PathBuf {
+        static DATA: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+        let data = DATA.get_or_init(|| {
+            let data = tempfile::tempdir().unwrap();
+            // SAFETY: set once, before the tests that need it start threads of their own.
+            unsafe { std::env::set_var("CLAUDIU_DATA_DIR", data.path()) };
+            data
+        });
+        dunce::canonicalize(data.path()).unwrap().join(STORE)
+    }
+
     #[test]
-    fn folder_is_under_the_main_checkout() {
-        assert_eq!(folder(Path::new("/p/app"), "fix"), Path::new("/p/app/.claude/worktrees/fix"));
+    fn folder_is_in_the_data_folder_under_a_name_that_tells_repositories_apart() {
+        let store = use_throwaway_data_folder();
+        // The hash is part of the folder name on disk, so it must not change between versions.
+        assert_eq!(folder(Path::new("/p/app"), "fix"), store.join("app-2908e76a").join("fix"));
+        assert_ne!(folder(Path::new("/q/app"), "fix"), folder(Path::new("/p/app"), "fix"), "same name, other repository");
     }
 
     fn info(root: &str, main: &str, worktrees: &[&str], unborn: bool) -> GitInfo {
@@ -353,12 +405,16 @@ mod tests {
 
     #[test]
     fn only_claudes_worktree_folders_are_removable() {
+        use_throwaway_data_folder();
         let main = Path::new("/p");
-        assert!(removable(main, Path::new("/p/.claude/worktrees/fix")));
+        let ours = folder(main, "fix");
+        assert!(removable(main, &ours));
         assert!(!removable(main, Path::new("/p")), "the main checkout");
         assert!(!removable(main, Path::new("/p-feature")), "a worktree made elsewhere");
-        assert!(!removable(main, Path::new("/p/.claude/worktrees/fix/src")), "a folder inside one");
-        assert!(!removable(main, Path::new("/p/.claude/worktrees")));
+        assert!(!removable(main, Path::new("/p/.claude/worktrees/fix")), "one made by claude --worktree");
+        assert!(!removable(main, &ours.join("src")), "a folder inside one");
+        assert!(!removable(main, ours.parent().unwrap()));
+        assert!(!removable(Path::new("/q"), &ours), "another repository's");
     }
 
     #[test]
@@ -380,7 +436,8 @@ mod tests {
         for args in [&["init", "-q", "-b", "main"][..], &["config", "user.email", "t@t"], &["config", "user.name", "t"], &["commit", "-q", "--allow-empty", "-m", "one"]] {
             git(&main, args, None).unwrap();
         }
-        let folder = main.join(".claude/worktrees/fix");
+        use_throwaway_data_folder();
+        let folder = folder(&main, "fix");
         git(&main, &["worktree", "add", "-q", "-b", "worktree-fix", &folder.to_string_lossy()], None).unwrap();
         (main, folder)
     }
@@ -429,7 +486,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (main, folder) = repo_with_worktree(tmp.path());
         assert_eq!(uncommitted(&main).unwrap(), 0);
-        // What Claude Code leaves in a checkout: its settings, and the worktree folders themselves.
+        // What Claude Code leaves in a checkout: its settings, and the worktrees `claude --worktree` makes.
+        std::fs::create_dir_all(main.join(".claude")).unwrap();
         std::fs::write(main.join(".claude/settings.local.json"), "{}").unwrap();
         assert_eq!(uncommitted(&main).unwrap(), 0, ".claude/ is not the user's work");
         std::fs::write(main.join("mine.txt"), "x").unwrap();
@@ -520,8 +578,29 @@ mod tests {
     fn only_claudes_folders_are_ever_removed() {
         let tmp = tempfile::tempdir().unwrap();
         let (main, _) = repo_with_worktree(tmp.path());
-        assert!(remove(&main, &main, true, NO_WAIT).unwrap_err().contains("not in .claude/worktrees"));
+        assert!(remove(&main, &main, true, NO_WAIT).unwrap_err().contains("not in Claudiu's worktrees folder"));
         assert!(main.exists());
+    }
+
+    #[test]
+    fn stored_folders_know_their_repository_until_it_is_gone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (main, folder) = repo_with_worktree(tmp.path());
+        let ours = |found: Vec<Stored>| found.into_iter().find(|s| s.folder == folder).expect("the worktree is listed");
+        assert_eq!(ours(stored()).main_checkout, Some(main.clone()));
+
+        std::fs::remove_dir_all(&main).unwrap();
+        assert_eq!(ours(stored()).main_checkout, None, "a worktree whose repository was deleted");
+    }
+
+    #[test]
+    fn only_folders_in_the_data_folder_are_deleted_when_git_does_not_list_them() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_, folder) = repo_with_worktree(tmp.path());
+        let elsewhere = tmp.path().join("main");
+        assert!(delete_unlisted(&elsewhere).unwrap_err().contains("not in Claudiu's worktrees folder"));
+        assert!(elsewhere.exists());
+        assert!(delete_unlisted(&folder).is_ok() && !folder.exists());
     }
 
     #[test]
@@ -531,28 +610,5 @@ mod tests {
         git(&main, &["worktree", "lock", "--reason", "on a usb stick", &folder.to_string_lossy()], None).unwrap();
         assert!(remove(&main, &folder, true, NO_WAIT).unwrap_err().contains("locked"));
         assert!(folder.exists());
-    }
-
-    #[test]
-    fn ignore_line_is_added_once_on_its_own_line() {
-        let tmp = tempfile::tempdir().unwrap();
-        Repository::init(tmp.path()).unwrap();
-        assert!(!is_ignored(tmp.path()));
-
-        std::fs::write(tmp.path().join(".gitignore"), "target").unwrap();
-        ignore(tmp.path()).unwrap();
-        assert_eq!(std::fs::read_to_string(tmp.path().join(".gitignore")).unwrap(), "target\n.claude/worktrees/\n");
-        assert!(is_ignored(tmp.path()));
-    }
-
-    #[test]
-    fn ignore_creates_the_file_and_keeps_crlf() {
-        let tmp = tempfile::tempdir().unwrap();
-        ignore(tmp.path()).unwrap();
-        assert_eq!(std::fs::read_to_string(tmp.path().join(".gitignore")).unwrap(), ".claude/worktrees/\n");
-
-        std::fs::write(tmp.path().join(".gitignore"), "target\r\n").unwrap();
-        ignore(tmp.path()).unwrap();
-        assert_eq!(std::fs::read_to_string(tmp.path().join(".gitignore")).unwrap(), "target\r\n.claude/worktrees/\r\n");
     }
 }

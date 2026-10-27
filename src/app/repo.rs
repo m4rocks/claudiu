@@ -23,6 +23,10 @@ impl Workspace {
                 ws.store.refresh_git();
                 ws.store.save_if_dirty();
                 ws.refresh_pending(cx);
+                // The Worktrees page of Settings lists what a removal just deleted.
+                if op == GitOp::Worktree && ws.settings_page == SettingsPage::Worktrees {
+                    ws.load_stored_worktrees(cx);
+                }
                 match result {
                     Ok(summary) => ws.toast(summary, false, cx),
                     Err(fail) => match fail.conflict_in {

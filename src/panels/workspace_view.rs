@@ -457,7 +457,7 @@ impl Workspace {
                 confirm.clone(),
                 *danger,
             ),
-            Modal::Settings { .. } => ("Settings".into(), settings_body(self.settings_page, modal, &self.settings_scroll, window, cx), "Save".into(), false),
+            Modal::Settings { .. } => ("Settings".into(), settings_body(self.settings_page, modal, &self.worktrees_page, &self.settings_scroll, window, cx), "Save".into(), false),
             Modal::Advisor { input, .. } => (
                 "Advisor model".into(),
                 div()
@@ -496,7 +496,7 @@ impl Workspace {
                         .flex()
                         .flex_col()
                         .gap(px(10.0))
-                        .child(div().text_size(crate::panels::scale::px(12.0)).text_color(hsla(theme::TEXT_DIM)).child("The session moves into it and keeps its history. Claudiu makes a folder under .claude/worktrees with a new branch of this name."))
+                        .child(div().text_size(crate::panels::scale::px(12.0)).text_color(hsla(theme::TEXT_DIM)).child("The session moves into it and keeps its history. Claudiu makes a folder for it in its own data folder, outside your repository, with a new branch of this name."))
                         .child(Input::new(input))
                         .child(
                             div()
@@ -813,7 +813,7 @@ impl Render for Workspace {
 }
 
 /// The Settings dialog's body: the category list on the left and the chosen page on the right.
-fn settings_body(page: SettingsPage, modal: &Modal, scroll: &crate::panels::glide::Smooth, window: &mut Window, cx: &mut Context<Workspace>) -> AnyElement {
+fn settings_body(page: SettingsPage, modal: &Modal, worktrees: &crate::app::WorktreesPage, scroll: &crate::panels::glide::Smooth, window: &mut Window, cx: &mut Context<Workspace>) -> AnyElement {
     let Modal::Settings { shell, claude, model, effort, permission, updates, chrome, scale, trimmed, claudiu_off, list_focus } = modal else {
         return div().into_any_element();
     };
@@ -908,6 +908,7 @@ fn settings_body(page: SettingsPage, modal: &Modal, scroll: &crate::panels::glid
             }
             list
         }
+        SettingsPage::Worktrees => worktrees_page(worktrees, cx),
         SettingsPage::About => div().child(faint(format!(
             "Claudiu {} · An independent project, not affiliated with, endorsed by or sponsored by Anthropic. Claude is a trademark of Anthropic.",
             env!("CARGO_PKG_VERSION")
@@ -933,9 +934,8 @@ fn settings_body(page: SettingsPage, modal: &Modal, scroll: &crate::panels::glid
                     .hover(|s| s.bg(hsla(0x1f1f1f)))
                     .child(p.label())
                     .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
-                        ws.settings_page = p;
+                        ws.set_settings_page(p, cx);
                         window.focus(&focus, cx);
-                        cx.notify();
                     })),
             )
         },
@@ -948,6 +948,89 @@ fn settings_body(page: SettingsPage, modal: &Modal, scroll: &crate::panels::glid
         .child(categories)
         .child(scroll.wire(div().id("settings-page").flex_1().min_w_0(), window).child(content))
         .into_any_element()
+}
+
+/// The Worktrees page: the worktree folders Claudiu made, by repository, each to show in the file manager or remove.
+fn worktrees_page(page: &crate::app::WorktreesPage, cx: &mut Context<Workspace>) -> gpui::Div {
+    let scaled = crate::panels::scale::px;
+    let faint = |text: String| div().text_size(scaled(11.0)).text_color(hsla(theme::TEXT_FAINT)).child(text);
+    let reveal = if cfg!(target_os = "macos") { "Show in Finder" } else { "Show in File Explorer" };
+    let mut list = div().flex().flex_col().gap(px(8.0)).child(faint(
+        "Worktrees Claudiu made live in its own data folder, outside your repositories. Removing one here asks the same question as the x in the top-bar menu.".to_string(),
+    ));
+    let Some(stored) = &page.stored else { return list.child(faint("Looking…".to_string())) };
+    if stored.is_empty() {
+        return list.child(faint("No worktrees yet. Make one from the worktree button in the top bar.".to_string()));
+    }
+    let mut group: Option<&std::path::Path> = None;
+    for (i, item) in stored.iter().enumerate() {
+        let repo_folder = item.folder.parent();
+        if group != repo_folder {
+            group = repo_folder;
+            let heading = match &item.main_checkout {
+                Some(main) => main.to_string_lossy().into_owned(),
+                None => format!("{} (repository not found)", repo_folder.and_then(|p| p.file_name()).unwrap_or_default().to_string_lossy()),
+            };
+            list = list.child(div().mt(px(4.0)).child(section_label(heading)));
+        }
+        let name = item.folder.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        let (folder, remove) = (item.folder.clone(), item.main_checkout.clone());
+        let revealed = folder.clone();
+        let asked = page.asking.as_ref().filter(|a| a.folder == item.folder);
+        let ask = match remove {
+            Some(main_checkout) => Act::RemoveWorktree { main_checkout, folder: folder.clone() },
+            None => Act::AskDeleteUnlisted(folder.clone()),
+        };
+        let row = div()
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .px(px(10.0))
+            .py(px(6.0))
+            .rounded(px(6.0))
+            .bg(hsla(0x111111))
+            .border_1()
+            .border_color(hsla(0x242424))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(10.0))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(div().text_size(scaled(13.0)).child(name))
+                            .child(faint(item.folder.to_string_lossy().into_owned()).overflow_hidden().text_ellipsis().whitespace_nowrap()),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .gap(px(6.0))
+                            .child(button(format!("worktree-reveal-{i}"), reveal, false).on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::Reveal(revealed.clone()), window, cx))))
+                            .child(button(format!("worktree-remove-{i}"), "Remove", false).on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(ask.clone(), window, cx)))),
+                    ),
+            );
+        list = list.child(match asked {
+            None => row,
+            Some(asked) => {
+                let act = asked.act.clone();
+                let confirm = if asked.danger { danger_button(format!("worktree-confirm-{i}"), asked.confirm.clone()) } else { button(format!("worktree-confirm-{i}"), asked.confirm.clone(), true) };
+                row.child(faint(asked.body.clone())).child(
+                    div()
+                        .flex()
+                        .gap(px(6.0))
+                        .child(button(format!("worktree-cancel-{i}"), "Cancel", false).on_click(cx.listener(|ws, _: &ClickEvent, _window, cx| {
+                            ws.worktrees_page.asking = None;
+                            cx.notify();
+                        })))
+                        .child(confirm.on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(act.clone(), window, cx)))),
+                )
+            }
+        });
+    }
+    list
 }
 
 /// An On/Off row in the Settings modal; `field` picks the flag it flips.

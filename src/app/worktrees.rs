@@ -9,7 +9,46 @@ use crate::git::worktree;
 use crate::panels::widgets::tick;
 use crate::platform::path_key;
 
+/// What the Worktrees page of Settings shows.
+#[derive(Default)]
+pub struct WorktreesPage {
+    /// The worktree folders in Claudiu's data folder; none until the first look at the disk ends.
+    pub stored: Option<Vec<worktree::Stored>>,
+    /// The removal the page is asking the user to confirm.
+    pub asking: Option<Asked>,
+}
+
+/// A removal question shown inside a row of the Worktrees page, so the dialog's unsaved fields stay where they are.
+pub struct Asked {
+    pub folder: PathBuf,
+    pub body: String,
+    pub confirm: String,
+    pub danger: bool,
+    pub act: Act,
+}
+
 impl Workspace {
+    /// Show a page of the Settings dialog. The Worktrees page looks at the disk every time it opens.
+    pub(crate) fn set_settings_page(&mut self, page: SettingsPage, cx: &mut Context<Self>) {
+        self.settings_page = page;
+        self.worktrees_page.asking = None;
+        if page == SettingsPage::Worktrees {
+            self.load_stored_worktrees(cx);
+        }
+        cx.notify();
+    }
+
+    pub(super) fn load_stored_worktrees(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let found = cx.background_executor().spawn(async move { worktree::stored() }).await;
+            let _ = this.update(cx, |ws, cx| {
+                ws.worktrees_page.stored = Some(found);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     pub(super) fn ask_worktree(&mut self, main_checkout: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         let input = self.modal_input("", "Name, or leave blank for a random one", window, cx);
         self.modal = Some(Modal::NewWorktree { main_checkout, input, base: Base::default() });
@@ -55,21 +94,30 @@ impl Workspace {
         self.live.iter().filter_map(|l| self.store.session(&l.id)).filter(|s| crate::platform::is_same_or_under(&s.cwd, folder)).max_by_key(|s| s.last_active)
     }
 
-    /// Ask whether to remove `folder`, after reading what it holds. A running session in it refuses: it has to leave first.
-    pub(super) fn ask_remove_worktree(&mut self, main_checkout: PathBuf, folder: PathBuf, cx: &mut Context<Self>) {
+    /// Whether a running session is in `folder`, which refuses removing it with a toast.
+    fn refuse_while_running(&mut self, folder: &Path, cx: &mut Context<Self>) -> bool {
         let name = folder.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        if let Some(inside) = self.running_in(&folder) {
-            let title = inside.display_title().to_string();
-            self.toast(format!("“{title}” is in {name}. Switch it to main first."), true, cx);
+        let Some(inside) = self.running_in(folder) else { return false };
+        let title = inside.display_title().to_string();
+        self.toast(format!("“{title}” is in {name}. Switch it to main first."), true, cx);
+        true
+    }
+
+    /// Ask whether to remove `folder`, after reading what it holds. A running session in it refuses: it has to leave first.
+    /// The question appears in the Worktrees page while Settings is open, and in a dialog otherwise.
+    pub(super) fn ask_remove_worktree(&mut self, main_checkout: PathBuf, folder: PathBuf, cx: &mut Context<Self>) {
+        if self.refuse_while_running(&folder, cx) {
             return;
         }
+        let name = folder.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         cx.spawn(async move |this, cx| {
             let dir = folder.clone();
             let found = cx.background_executor().spawn(async move { worktree::leftovers(&dir) }).await;
             let _ = this.update(cx, |ws, cx| match found {
                 Ok(left) => {
                     let (title, body, confirm, danger) = removal_question(&name, left);
-                    ws.modal = Some(Modal::Confirm { title, body, confirm, danger, act: Act::ConfirmRemoveWorktree { main_checkout, folder, discard: left.files > 0 } });
+                    let act = Act::ConfirmRemoveWorktree { main_checkout, folder: folder.clone(), discard: left.files > 0 };
+                    ws.show_removal_question(folder, title, body, confirm, danger, act);
                     cx.notify();
                 }
                 Err(e) => ws.toast(e, true, cx),
@@ -78,7 +126,26 @@ impl Workspace {
         .detach();
     }
 
-    /// A session that ran in `cwd` has ended: offer to remove its worktree when it is in .claude/worktrees and no
+    /// Ask whether to delete a folder of Claudiu's that git no longer lists, so only the folder can go.
+    pub(super) fn ask_delete_unlisted(&mut self, folder: PathBuf, cx: &mut Context<Self>) {
+        if self.refuse_while_running(&folder, cx) {
+            return;
+        }
+        let name = folder.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let body = "Git no longer lists this worktree, so Claudiu cannot say what is in it. The folder and everything in it will be deleted.".to_string();
+        self.show_removal_question(folder.clone(), format!("Delete the folder {name}?"), body, "Delete".into(), true, Act::ConfirmDeleteUnlisted(folder));
+        cx.notify();
+    }
+
+    fn show_removal_question(&mut self, folder: PathBuf, title: String, body: String, confirm: String, danger: bool, act: Act) {
+        if matches!(self.modal, Some(Modal::Settings { .. })) {
+            self.worktrees_page.asking = Some(Asked { folder, body, confirm, danger, act });
+        } else {
+            self.modal = Some(Modal::Confirm { title, body, confirm, danger, act });
+        }
+    }
+
+    /// A session that ran in `cwd` has ended: offer to remove its worktree when Claudiu made it and no
     /// other session is still in it.
     pub(super) fn offer_worktree_removal(&mut self, cwd: &Path, project: Option<&str>, cx: &mut Context<Self>) {
         let Some(git) = project.and_then(|id| self.store.project(id)).and_then(|p| p.git.clone()) else { return };
