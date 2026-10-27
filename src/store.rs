@@ -323,6 +323,63 @@ pub struct Store {
     path: PathBuf,
     pub data: Data,
     dirty: bool,
+    writer: Writer,
+}
+
+/// Writes the state files on one background thread, in the order they were handed over, so the UI never waits on the
+/// disk and an older copy never lands after a newer one. It skips a write that would leave a file as it already is.
+struct Writer {
+    jobs: std::sync::mpsc::Sender<Job>,
+    /// Set by the thread when a write fails: the store's data is not all on disk, and the next save writes it again.
+    failed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+enum Job {
+    Write(Vec<(PathBuf, String)>),
+    /// Answered once every write handed over before it has been made.
+    Flush(std::sync::mpsc::Sender<()>),
+}
+
+impl Writer {
+    fn start() -> Self {
+        let (jobs, queue) = std::sync::mpsc::channel::<Job>();
+        let failed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let failing = failed.clone();
+        // It ends once the store is dropped and what was handed over is written.
+        std::thread::spawn(move || {
+            let mut on_disk: std::collections::HashMap<PathBuf, String> = Default::default();
+            for job in queue {
+                match job {
+                    Job::Write(files) => {
+                        for (path, text) in files {
+                            if on_disk.get(&path) == Some(&text) {
+                                continue;
+                            }
+                            if write_atomic(&path, &text) {
+                                on_disk.insert(path, text);
+                            } else {
+                                on_disk.remove(&path);
+                                failing.store(true, std::sync::atomic::Ordering::SeqCst);
+                            }
+                        }
+                    }
+                    Job::Flush(done) => {
+                        let _ = done.send(());
+                    }
+                }
+            }
+        });
+        Self { jobs, failed }
+    }
+}
+
+/// Written beside the file and moved over it, so a crash mid-write never leaves half a file.
+fn write_atomic(path: &Path, text: &str) -> bool {
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, text).is_ok() && fs::rename(&tmp, path).is_ok()
 }
 
 impl Store {
@@ -377,7 +434,7 @@ impl Store {
             let usage = std::mem::take(&mut data.account);
             data.accounts.insert(0, Account { id: MAIN_ACCOUNT.into(), usage, ..Default::default() });
         }
-        Self { path, data, dirty: false }
+        Self { path, data, dirty: false, writer: Writer::start() }
     }
 
     pub fn account(&self, id: &str) -> Option<&Account> {
@@ -401,25 +458,31 @@ impl Store {
         self.dirty = true;
     }
 
+    /// Hands the data to the background writer when it changed since the last save (or that save failed); the call
+    /// returns before anything reaches the disk.
     pub fn save_if_dirty(&mut self) {
+        if self.writer.failed.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            self.dirty = true;
+        }
         if self.dirty {
-            self.save();
+            self.hand_over();
         }
     }
 
+    /// Writes the data and waits until it is on disk, for when the process may end right after (quitting).
     pub fn save(&mut self) {
-        if let Some(parent) = self.path.parent() {
-            let _ = fs::create_dir_all(parent);
+        self.hand_over();
+        let (done, wait) = std::sync::mpsc::channel();
+        if self.writer.jobs.send(Job::Flush(done)).is_err() || wait.recv().is_err() || self.writer.failed.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            self.dirty = true;
         }
-        let write = |path: &Path, text: serde_json::Result<String>| {
-            let tmp = path.with_extension("json.tmp");
-            text.is_ok_and(|t| fs::write(&tmp, t).is_ok() && fs::rename(&tmp, path).is_ok())
-        };
+    }
+
+    fn hand_over(&mut self) {
         let accounts = AccountsFile { accounts: self.data.accounts.clone(), active: self.data.active_account.clone() };
-        let ok = write(&accounts_path(&self.path), serde_json::to_string_pretty(&accounts));
-        if write(&self.path, serde_json::to_string_pretty(&self.data)) && ok {
-            self.dirty = false;
-        }
+        let (Ok(accounts), Ok(state)) = (serde_json::to_string_pretty(&accounts), serde_json::to_string_pretty(&self.data)) else { return };
+        let files = vec![(accounts_path(&self.path), accounts), (self.path.clone(), state)];
+        self.dirty = self.writer.jobs.send(Job::Write(files)).is_err();
     }
 
     pub fn project(&self, id: &str) -> Option<&Project> {
@@ -638,6 +701,28 @@ mod tests {
 
     fn project(id: &str, path: &str) -> Project {
         Project { id: id.into(), name: id.into(), path: PathBuf::from(path), git: None, collapsed: false, added_at: 0 }
+    }
+
+    #[test]
+    fn saves_land_in_the_order_made_and_a_failed_one_is_tried_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let mut s = Store::load(path.clone());
+        for name in ["first", "second", "third"] {
+            s.add_project(&dir.path().join(name));
+            s.save_if_dirty();
+        }
+        s.save();
+        let names = |p: &Path| Store::load(p.to_path_buf()).data.projects.iter().map(|p| p.name.clone()).collect::<Vec<_>>();
+        assert_eq!(names(&path), ["first", "second", "third"]);
+
+        // A folder where the file should be: every write fails, and the store keeps its changes to write again.
+        let blocked = dir.path().join("blocked");
+        fs::create_dir_all(blocked.join("state.json")).unwrap();
+        let mut b = Store::load(blocked.join("state.json"));
+        b.mark_dirty();
+        b.save();
+        assert!(b.dirty);
     }
 
     #[test]

@@ -236,7 +236,7 @@ fn change_marks(buffer: gpui::Entity<EditorState>, marks: std::sync::Arc<Vec<Lin
         |_, _, _| (),
         move |viewport, _, window, cx| {
             glide_text(&buffer, &follow, window, cx);
-            let (wheel_buffer, wheel_follow) = (buffer.clone(), follow.clone());
+            let (wheel_buffer, wheel_follow, view) = (buffer.clone(), follow.clone(), window.current_view());
             window.on_mouse_event(move |ev: &gpui::ScrollWheelEvent, phase, window, cx| {
                 if phase != gpui::DispatchPhase::Capture || !viewport.contains(&ev.position) || ev.modifiers.modified() {
                     return;
@@ -249,7 +249,8 @@ fn change_marks(buffer: gpui::Entity<EditorState>, marks: std::sync::Arc<Vec<Lin
                 let by = f32::from(ev.delta.pixel_delta(window.line_height()).y) * crate::panels::glide::NOTCH;
                 wheel_follow.borrow_mut().wheel(here, by);
                 cx.stop_propagation();
-                window.refresh();
+                // Only this view: a refresh would redraw every cached one too.
+                cx.notify(view);
             });
             let editor = buffer.read(cx);
             let (Some(area), Some(visible)) = (editor.text_bounds(), editor.visible_row_range()) else { return };
@@ -483,4 +484,90 @@ fn centered(text: String) -> AnyElement {
         .text_color(hsla(theme::TEXT_FAINT))
         .child(text)
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{AppContext, Entity, TestAppContext, Window, point};
+
+    struct Pane {
+        buffer: Entity<EditorState>,
+        follow: std::rc::Rc<std::cell::RefCell<Follow>>,
+    }
+
+    impl gpui::Render for Pane {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .size_full()
+                .relative()
+                .child(Editor::new(&self.buffer).h_full())
+                .child(change_marks(self.buffer.clone(), Default::default(), self.follow.clone()))
+        }
+    }
+
+    /// Where the editor drew its text this frame, as an offset from the top of its view. The editor's own offset is
+    /// clamped after drawing, so it can't show a frame drawn past the end.
+    fn drawn(pane: &Entity<Pane>, cx: &mut TestAppContext) -> f32 {
+        pane.read_with(cx, |pane, app| {
+            let editor = pane.buffer.read(app);
+            f32::from(editor.text_bounds().unwrap().origin.y - editor.input_bounds().origin.y)
+        })
+    }
+
+    #[test]
+    fn a_wheel_glide_into_either_end_never_draws_past_it() {
+        let mut cx = TestAppContext::single();
+        cx.update(gpui_kit::init);
+        let (window, pane) = cx
+            .update(|app| {
+                gpui_kit::open_window(Default::default(), app, |window, app| {
+                    let buffer = app.new(|cx| EditorState::new(window, cx));
+                    let text: String = (0..300).map(|i| format!("line {i}\n")).collect();
+                    buffer.update(app, |b, cx| b.set_value(text, window, cx));
+                    app.new(|_| Pane { buffer, follow: Default::default() })
+                })
+            })
+            .unwrap();
+        let draw = |cx: &mut TestAppContext| {
+            cx.update_window(window, |_, window, app| window.draw(app).clear(app)).unwrap();
+            cx.run_until_parked();
+        };
+        let scroll_to = |y: f32, cx: &mut TestAppContext| {
+            pane.update(cx, |pane, cx| pane.buffer.update(cx, |b, cx| b.set_scroll_offset(point(px(0.0), px(y)), cx)));
+            draw(cx);
+            draw(cx);
+        };
+        // Turns the wheel `notches` times (negative scrolls down) and returns every offset drawn while it glides.
+        let glide = |notches: f32, cx: &mut TestAppContext| {
+            cx.update_window(window, |_, window, app| {
+                let at = point(px(200.0), px(200.0));
+                window.dispatch_event(gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent { position: at, pressed_button: None, modifiers: Default::default() }), app);
+                let wheel = gpui::ScrollWheelEvent { position: at, delta: gpui::ScrollDelta::Lines(point(0.0, notches)), modifiers: Default::default(), touch_phase: gpui::TouchPhase::Moved };
+                window.dispatch_event(gpui::PlatformInput::ScrollWheel(wheel), app);
+            })
+            .unwrap();
+            let mut seen = Vec::new();
+            for _ in 0..60 {
+                std::thread::sleep(std::time::Duration::from_millis(8));
+                draw(cx);
+                seen.push(drawn(&pane, cx));
+            }
+            seen
+        };
+        draw(&mut cx);
+        scroll_to(-1.0e6, &mut cx);
+        let bottom = drawn(&pane, &mut cx);
+        assert!(bottom < -1000.0, "the editor never scrolled: {bottom}");
+
+        scroll_to(bottom + 60.0, &mut cx);
+        let seen = glide(-20.0, &mut cx);
+        assert!(seen.iter().all(|&y| y >= bottom), "drew past the bottom at {bottom}: {seen:?}");
+        assert_eq!(seen.last(), Some(&bottom), "{seen:?}");
+
+        scroll_to(-60.0, &mut cx);
+        let seen = glide(20.0, &mut cx);
+        assert!(seen.iter().all(|&y| y <= 0.0), "drew past the top: {seen:?}");
+        assert_eq!(seen.last(), Some(&0.0), "{seen:?}");
+    }
 }

@@ -916,3 +916,80 @@ fn the_editors_text_eases_to_a_wheel_notch() {
     let first_move = seen.iter().copied().find(|&o| o != 0.0).unwrap();
     assert!(first_move.abs() < end.abs() / 2.0, "the first frame jumped to {first_move} of {end}: {seen:?}");
 }
+
+/// The session list builds only the rows in view, yet scrolling a long list brings each row to where the pointer finds
+/// it, and the row under the pointer is the one marked for its buttons.
+#[test]
+#[ignore]
+fn the_session_list_draws_rows_where_scrolling_brings_them() {
+    let data = tempfile::tempdir().unwrap();
+    unsafe { std::env::set_var("CLAUDIU_DATA_DIR", data.path()) };
+    let mut cx = TestAppContext::single();
+    cx.update(|app| {
+        gpui_kit::init(app);
+        gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, app);
+    });
+    let (window, ws) = cx.update(|app| gpui_kit::open_window(Default::default(), app, |window, app| app.new(|cx| Workspace::new(window, vec![], cx)))).unwrap();
+    let draw = |cx: &mut TestAppContext| {
+        cx.update_window(window, |_, window, app| window.draw(app).clear(app)).unwrap();
+        cx.run_until_parked();
+    };
+    draw(&mut cx);
+    // Newer than any real session the startup scan may add, so these come first, s000 at the top.
+    cx.update(|app| {
+        ws.update(app, |ws, cx| {
+            for i in 0..300 {
+                ws.store.data.sessions.push(crate::store::SessionRecord {
+                    id: format!("s{i:03}"),
+                    kind: SessionKind::Claude,
+                    title: format!("Session {i}"),
+                    custom_title: None,
+                    auto_title: None,
+                    cwd: PathBuf::from("/nowhere"),
+                    project_id: None,
+                    created_at: 0,
+                    last_active: 4_000_000_000 - i,
+                    exit_code: None,
+                    hidden: false,
+                    claude: None,
+                });
+            }
+            ws.store.data.layout.older_open = true;
+            cx.notify();
+        })
+    });
+    draw(&mut cx);
+    let at = gpui::point(gpui::px(120.0), gpui::px(400.0));
+    // The pointer may sit in the gap between two rows, so a second spot a little lower is tried. It moves a pixel
+    // sideways too: a row drawn under a still pointer learns it is hovered from the next move.
+    let row_under_pointer = |cx: &mut TestAppContext| {
+        let mut key = None;
+        for (x, y) in [(121.0, 400.0), (120.0, 400.0), (121.0, 406.0), (120.0, 406.0)] {
+            if key.is_some() {
+                break;
+            }
+            let position = gpui::point(gpui::px(x), gpui::px(y));
+            cx.update_window(window, |_, window, app| {
+                window.dispatch_event(gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent { position, pressed_button: None, modifiers: Default::default() }), app);
+            })
+            .unwrap();
+            draw(cx);
+            key = ws.read_with(cx, |ws, _| ws.hovered_row.clone());
+        }
+        let key = key.expect("a row under the pointer");
+        key.strip_prefix("row-rec-s").and_then(|n| n.parse::<usize>().ok()).unwrap_or_else(|| panic!("not one of the test's rows: {key}"))
+    };
+    let before = row_under_pointer(&mut cx);
+    cx.update_window(window, |_, window, app| {
+        let wheel = gpui::ScrollWheelEvent { position: at, delta: gpui::ScrollDelta::Lines(gpui::point(0.0, -40.0)), modifiers: Default::default(), touch_phase: gpui::TouchPhase::Moved };
+        window.dispatch_event(gpui::PlatformInput::ScrollWheel(wheel), app);
+    })
+    .unwrap();
+    for _ in 0..60 {
+        std::thread::sleep(Duration::from_millis(16));
+        cx.update_window(window, |_, window, app| window.simulate_next_frame(app)).unwrap();
+        draw(&mut cx);
+    }
+    let after = row_under_pointer(&mut cx);
+    assert!(after > before + 20, "row {before} before scrolling, {after} after");
+}

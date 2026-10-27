@@ -22,7 +22,7 @@ pub const SIDEBAR_MAX: f32 = 520.0;
 /// Entries shown under RECENT before the rest go behind OLDER.
 const RECENT_LIMIT: usize = 12;
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 struct Row {
     id: Id,
     /// What the leading status dot shows.
@@ -82,7 +82,15 @@ fn lifted<T: Styled>(el: T) -> T {
 }
 
 /// Height of a session row plus the gap between rows.
-const ROW_PITCH: f32 = 29.0;
+const ROW_PITCH: f32 = ROW_H + LIST_GAP;
+/// Heights of the list's parts, fixed so where each one sits is known before anything is drawn (see `visible_items`).
+const ROW_H: f32 = 25.0;
+const HEADER_H: f32 = 20.0;
+const NOTE_H: f32 = 24.0;
+const SPACER_H: f32 = 10.0;
+const LIST_GAP: f32 = 2.0;
+/// Drawn beyond each edge of the view. The list is rebuilt for every frame its offset moves, so one row is enough.
+const OVERSCAN: f32 = ROW_H + LIST_GAP;
 const SLIDE_MS: u64 = 160;
 
 /// A row or project block that just changed places: it starts `from` px away from its new slot and slides in.
@@ -112,23 +120,26 @@ fn slid(el: impl IntoElement + gpui::Styled + 'static, id: &Id, slide: Option<Sl
     }
 }
 
+/// How long one pulse of a working session's dot takes.
+const PULSE: Duration = Duration::from_millis(1200);
+/// How often the dot is redrawn while it pulses (see `Workspace::start_pulse`). A gpui animation would redraw the
+/// whole window every frame for as long as any session works.
+pub const PULSE_STEP: Duration = Duration::from_millis(100);
+
+/// The working dot's opacity `elapsed` into the pulse, which repeats every `PULSE`.
+fn pulse_opacity(elapsed: Duration) -> f32 {
+    let t = (elapsed.as_millis() % PULSE.as_millis()) as f32 / PULSE.as_millis() as f32;
+    pulsating_between(0.35, 1.0)(t)
+}
+
 /// The leading status dot: a small circle whose fill (and, when working, pulse) says what the session is doing.
-fn session_dot(state: SessionDot, scope: &'static str, id: &str) -> AnyElement {
+fn session_dot(state: SessionDot) -> AnyElement {
+    static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
     let dot = match state {
         SessionDot::Attention => div().size(px(7.0)).rounded_full().bg(hsla(theme::ACCENT)),
-        SessionDot::Working => div().size(px(7.0)).rounded_full().bg(hsla(0xc8c8c8)),
+        SessionDot::Working => div().size(px(7.0)).rounded_full().bg(hsla(0xc8c8c8)).opacity(pulse_opacity(START.get_or_init(Instant::now).elapsed())),
         SessionDot::Active => div().size(px(7.0)).rounded_full().bg(hsla(theme::TEXT_DIM)),
         SessionDot::Inactive => div().size(px(7.0)).rounded_full().border_1().border_color(hsla(0x3d3d43)),
-    };
-    let dot = if state == SessionDot::Working {
-        dot.with_animation(
-            SharedString::from(format!("dot-{scope}-{id}")),
-            Animation::new(Duration::from_millis(1200)).repeat().with_easing(pulsating_between(0.35, 1.0)),
-            |d, t| d.opacity(t),
-        )
-        .into_any_element()
-    } else {
-        dot.into_any_element()
     };
     div().w(px(14.0)).h(px(14.0)).flex_none().flex().items_center().justify_center().child(dot).into_any_element()
 }
@@ -139,6 +150,75 @@ fn move_to<T>(v: &mut [T], from: usize, to: usize) {
         v[from..=to].rotate_left(1);
     } else {
         v[to..=from].rotate_right(1);
+    }
+}
+
+/// The items stacked `gap` apart that overlap `from..to`, each with its top, and the height of the whole stack.
+fn visible_items(heights: &[f32], gap: f32, from: f32, to: f32) -> (Vec<(usize, f32)>, f32) {
+    let mut shown = vec![];
+    let mut y = 0.0;
+    for (ix, h) in heights.iter().enumerate() {
+        if y < to && y + h > from {
+            shown.push((ix, y));
+        }
+        y += h + gap;
+    }
+    (shown, (y - gap).max(0.0))
+}
+
+/// One part of the session list, top to bottom.
+#[derive(Clone, PartialEq)]
+enum Item {
+    Header(&'static str, Option<String>),
+    /// A line of text standing in for rows that aren't there.
+    Note(&'static str),
+    Spacer,
+    /// A session; `reorder` lets it be dragged among the others (the running ones).
+    Session { row: Row, reorder: bool },
+    Older { count: usize, open: bool },
+}
+
+impl Item {
+    fn height(&self) -> f32 {
+        match self {
+            Item::Header(..) | Item::Older { .. } => HEADER_H,
+            Item::Note(_) => NOTE_H,
+            Item::Spacer => SPACER_H,
+            Item::Session { .. } => ROW_H,
+        }
+    }
+}
+
+/// Everything the session list shows, worked out on each drawing of the workspace (see `render_sidebar`).
+#[derive(Clone, PartialEq, Default)]
+pub struct ListModel {
+    items: Vec<Item>,
+    /// The session being dragged, drawn lifted.
+    dragging: Option<Id>,
+    /// The UI scale (Settings), which sizes the rows' text.
+    scale: u32,
+}
+
+/// The session list as its own view, so gpui reuses its last drawing on frames that don't change it: terminal output,
+/// editor scrolling and the right panel's animations redraw the window, and rebuilding every row for each of those
+/// frames was most of their cost. It draws the workspace's `ListModel` and nothing else of its state, so comparing
+/// the model tells when the drawing is out of date.
+pub struct SessionList {
+    ws: WeakEntity<Workspace>,
+}
+
+impl SessionList {
+    pub fn new(ws: WeakEntity<Workspace>) -> Self {
+        Self { ws }
+    }
+}
+
+impl Render for SessionList {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        match self.ws.upgrade() {
+            Some(ws) => ws.update(cx, |ws, cx| ws.render_session_list(window, cx)),
+            None => div().into_any_element(),
+        }
     }
 }
 
@@ -260,13 +340,13 @@ impl Workspace {
 
     /// A session row you can drag: onto a project header to file it there and, in CURRENT SESSION (`reorder`),
     /// over other rows to reorder them live.
-    fn session_row(&self, row: Row, reorder: bool, cx: &mut Context<Self>) -> Stateful<Div> {
+    fn session_row(&self, row: Row, reorder: bool, list: gpui::EntityId, cx: &mut Context<Self>) -> Stateful<Div> {
         let id = row.id.clone();
         let ws = cx.entity().downgrade();
         let this = id.clone();
-        self.render_row(row, cx)
+        self.render_row(row, list, cx)
             .on_drag(DragSession(id.clone()), move |d, _, _, cx| begin_drag(&ws, &d.0, cx))
-            .when(self.dragging.as_ref() == Some(&id), lifted)
+            .when(self.list_model.dragging.as_ref() == Some(&id), lifted)
             .when(reorder, |d| {
                 d.on_drag_move(cx.listener(move |ws, ev: &DragMoveEvent<DragSession>, _w, cx| {
                     let from = ev.drag(cx).0.clone();
@@ -283,21 +363,39 @@ impl Workspace {
             })
     }
 
-    fn render_row(&self, row: Row, cx: &mut Context<Self>) -> Stateful<Div> {
+    /// `list` is the view the row is drawn in, redrawn when the pointer enters or leaves the row.
+    fn render_row(&self, row: Row, list: gpui::EntityId, cx: &mut Context<Self>) -> Stateful<Div> {
         let id = row.id.clone();
         let click_id = id.clone();
         let menu_id = id.clone();
         let close_id = id.clone();
         let middle_id = id.clone();
         let archive_id = id.clone();
-        let dot =session_dot(row.dot, row.scope, &id);
+        let dot = session_dot(row.dot);
+        let key = gpui::SharedString::from(format!("row-{}-{}", row.scope, id));
+        // Only the row under the pointer gets its × or archive button; the others keep the space empty. Building a
+        // hidden button on every row cost more than the rest of the row.
+        let hovered = self.hovered_row.as_ref() == Some(&key);
+        let ws = cx.entity().downgrade();
+        let hover_key = key.clone();
         div()
-            .id(gpui::SharedString::from(format!("row-{}-{}", row.scope, id)))
+            .id(key)
             .group("row")
+            .on_hover(move |inside, _window, cx| {
+                let changed = ws
+                    .update(cx, |ws, _| {
+                        let now = if *inside { Some(hover_key.clone()) } else { ws.hovered_row.clone().filter(|k| *k != hover_key) };
+                        std::mem::replace(&mut ws.hovered_row, now.clone()) != now
+                    })
+                    .unwrap_or(false);
+                if changed {
+                    cx.notify(list);
+                }
+            })
             .flex()
             .items_center()
             .gap(px(7.0))
-            .h(px(25.0))
+            .h(px(ROW_H))
             .pl(px(if row.indent { 22.0 } else { 10.0 }))
             .pr(px(6.0))
             .mx(px(5.0))
@@ -345,7 +443,11 @@ impl Workspace {
                     MouseButton::Middle,
                     cx.listener(move |ws, _: &gpui::MouseUpEvent, window, cx| ws.act(Act::CloseLive(middle_id.clone()), window, cx)),
                 )
-                .child(
+            })
+            .when(!hovered, |d| d.child(div().flex_none().size(px(22.0))))
+            .when(hovered && row.running, |d| {
+                d.child(
+                    // Still shown by hover style: a list that scrolled under a still pointer leaves the old row marked.
                     icon_button(gpui::SharedString::from(format!("close-{}-{close_id}", row.scope)), IconName::X)
                         .invisible()
                         .group_hover("row", |s| s.visible())
@@ -355,7 +457,7 @@ impl Workspace {
                         })),
                 )
             })
-            .when(!row.running, |d| {
+            .when(hovered && !row.running, |d| {
                 let archive = !row.archived;
                 d.child(
                     icon_button(gpui::SharedString::from(format!("archive-{}-{archive_id}", row.scope)), if archive { IconName::Archive } else { IconName::ArchiveRestore })
@@ -379,9 +481,27 @@ impl Workspace {
         self.store.data.layout.project_filter.as_ref().and_then(|id| self.store.project(id))
     }
 
-    /// One list of Claude Code sessions: what is running first (in the order you arranged them), then the most
-    /// recent, with the rest behind "Older". The project filter narrows all of it.
+    /// The sidebar: header, the session list (its own cached view, see `SessionList`), and the usage footer.
     pub fn render_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let model = self.list_model(cx);
+        let changed = model != self.list_model;
+        self.list_model = model;
+        let me = cx.entity().downgrade();
+        let list = self.session_list.get_or_insert_with(|| cx.new(|_| SessionList::new(me))).clone();
+        // A changed list is drawn afresh; otherwise its last drawing is reused, unless the list asked to be drawn
+        // again itself (it scrolled, or the pointer moved to another row).
+        let list = if changed {
+            div().flex_1().min_h_0().child(list).into_any_element()
+        } else {
+            div().flex_1().min_h_0().child(list.cached(gpui::StyleRefinement::default().size_full())).into_any_element()
+        };
+        self.sidebar_frame(list, window, cx)
+    }
+
+    /// One list of Claude Code sessions: what is running first (in the order you arranged them), then the most
+    /// recent, with the rest behind "Older". The project filter narrows all of it. Rows behind a closed "Older" are
+    /// counted, not built.
+    fn list_model(&mut self, cx: &mut Context<Self>) -> ListModel {
         if self.dragging.is_some() && !cx.has_active_drag() {
             self.dragging = None;
         }
@@ -406,25 +526,6 @@ impl Workspace {
                 row
             })
             .collect();
-
-        // ---- RECENT: everything else, newest first
-        let mut recent: Vec<(i64, Row)> = vec![];
-        for rec in self.store.data.sessions.iter().filter(|s| s.kind == SessionKind::Claude && (searching || !s.hidden) && self.listed(&q, filter.as_ref(), s)) {
-            if !self.is_running(&rec.id, cx) {
-                let mut row = self.row_for(rec, false, true);
-                row.scope = "rec";
-                recent.push((rec.last_active, row));
-            }
-        }
-        recent.sort_by_key(|(t, _)| std::cmp::Reverse(*t));
-        let older = recent.split_off(recent.len().min(if searching { usize::MAX } else { RECENT_LIMIT }));
-
-        let mut body = div().flex().flex_col().gap(px(2.0));
-        body = body.child(self.section_header("RUNNING", Some(running.len().to_string()), None::<Stateful<Div>>));
-        if running.is_empty() {
-            let text = if searching || filter.is_some() { "Nothing running matches" } else { "Nothing running. Start a session." };
-            body = body.child(div().px(px(14.0)).py(px(4.0)).text_size(crate::panels::scale::px(12.0)).text_color(hsla(theme::TEXT_FAINT)).child(text));
-        }
         let ids: Vec<Id> = running.iter().map(|r| r.id.clone()).collect();
         if is_reorder(&self.prev_current, &ids) {
             self.slide_gen += 1;
@@ -435,43 +536,97 @@ impl Workspace {
             }
         }
         self.prev_current = ids;
-        for row in running {
-            let (id, slide) = (row.id.clone(), self.slides.get(&row.id).copied());
-            body = body.child(slid(self.session_row(row, true, cx), &id, slide));
-        }
 
+        // ---- RECENT: everything else, newest first
+        let mut recent: Vec<&SessionRecord> = self
+            .store
+            .data
+            .sessions
+            .iter()
+            .filter(|s| s.kind == SessionKind::Claude && (searching || !s.hidden) && !numbered.contains(&s.id) && self.listed(&q, filter.as_ref(), s))
+            .collect();
+        recent.sort_by_key(|r| std::cmp::Reverse(r.last_active));
+        let older = recent.split_off(recent.len().min(if searching { usize::MAX } else { RECENT_LIMIT }));
+        let history = |rec: &SessionRecord| {
+            let mut row = self.row_for(rec, false, true);
+            row.scope = "rec";
+            Item::Session { row, reorder: false }
+        };
+
+        let mut items = vec![Item::Header("RUNNING", Some(running.len().to_string()))];
+        if running.is_empty() {
+            items.push(Item::Note(if searching || filter.is_some() { "Nothing running matches" } else { "Nothing running. Start a session." }));
+        }
+        items.extend(running.into_iter().map(|row| Item::Session { row, reorder: true }));
         if !recent.is_empty() || !older.is_empty() {
-            body = body.child(div().h(px(10.0))).child(self.section_header("RECENT", None, None::<Stateful<Div>>));
-            for (_, row) in recent {
-                body = body.child(self.session_row(row, false, cx));
-            }
+            items.extend([Item::Spacer, Item::Header("RECENT", None)]);
+            items.extend(recent.into_iter().map(history));
         } else if searching || filter.is_some() {
-            body = body.child(div().px(px(14.0)).py(px(4.0)).text_size(crate::panels::scale::px(12.0)).text_color(hsla(theme::TEXT_FAINT)).child("No sessions match"));
+            items.push(Item::Note("No sessions match"));
         }
         if !older.is_empty() {
             let open = self.store.data.layout.older_open;
-            body = body.child(
-                div()
-                    .id("older-header")
-                    .flex()
-                    .items_center()
-                    .gap(px(5.0))
-                    .px(px(14.0))
-                    .h(px(20.0))
-                    .cursor_pointer()
-                    .child(div().text_color(hsla(theme::TEXT_FAINT)).child(icon(if open { IconName::ChevronDown } else { IconName::ChevronRight }, 12.0)))
-                    .child(section_label("OLDER"))
-                    .child(div().text_size(crate::panels::scale::px(10.5)).text_color(hsla(theme::TEXT_FAINT)).child(older.len().to_string()))
-                    .on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::ToggleOlder, window, cx))),
-            );
+            items.push(Item::Older { count: older.len(), open });
             if open {
-                for (_, row) in older {
-                    body = body.child(self.session_row(row, false, cx));
-                }
+                items.extend(older.into_iter().map(history));
             }
         }
+        ListModel { items, dragging: self.dragging.clone(), scale: crate::panels::scale::percent() }
+    }
 
-        self.sidebar_frame(body, window, cx)
+    /// The session list's own view (see `SessionList`): the parts of `list_model` in view, each at its place.
+    pub fn render_session_list(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let list = window.current_view();
+        let scroll = self.sidebar_scroll.wire(div().id("sidebar-scroll").size_full(), window).pb(px(8.0));
+        // Where the view stands now (the glide has just moved it). The window's height stands in for the list's: the
+        // list's own is only known from the frame before, which is too short right after the window grows.
+        let tall = f32::from(window.viewport_size().height);
+        let heights: Vec<f32> = self.list_model.items.iter().map(Item::height).collect();
+        let total = heights.iter().sum::<f32>() + LIST_GAP * heights.len().saturating_sub(1) as f32;
+        // A list that just got shorter is still scrolled to where the longer one was; gpui moves it back within the
+        // new end only while laying it out, after this, so the rows are picked from where it will stand.
+        let top = (-f32::from(self.sidebar_scroll.handle().offset().y)).min((total - tall).max(0.0));
+        let (shown, _) = visible_items(&heights, LIST_GAP, top - OVERSCAN, top + tall + OVERSCAN);
+        let mut stack = div().relative().w_full().h(px(total));
+        for (ix, y) in shown {
+            let el = self.list_item(self.list_model.items[ix].clone(), list, cx);
+            stack = stack.child(div().absolute().top(px(y)).left_0().right_0().child(el));
+        }
+        scroll.child(stack).into_any_element()
+    }
+
+    fn list_item(&self, item: Item, list: gpui::EntityId, cx: &mut Context<Self>) -> AnyElement {
+        match item {
+            Item::Header(label, count) => self.section_header(label, count, None::<Stateful<Div>>).into_any_element(),
+            Item::Note(text) => div()
+                .h(px(NOTE_H))
+                .flex()
+                .items_center()
+                .px(px(14.0))
+                .text_size(crate::panels::scale::px(12.0))
+                .text_color(hsla(theme::TEXT_FAINT))
+                .child(text)
+                .into_any_element(),
+            Item::Spacer => div().h(px(SPACER_H)).into_any_element(),
+            Item::Session { row, reorder: true } => {
+                let (id, slide) = (row.id.clone(), self.slides.get(&row.id).copied());
+                slid(self.session_row(row, true, list, cx), &id, slide)
+            }
+            Item::Session { row, reorder: false } => self.session_row(row, false, list, cx).into_any_element(),
+            Item::Older { count, open } => div()
+                .id("older-header")
+                .flex()
+                .items_center()
+                .gap(px(5.0))
+                .px(px(14.0))
+                .h(px(HEADER_H))
+                .cursor_pointer()
+                .child(div().text_color(hsla(theme::TEXT_FAINT)).child(icon(if open { IconName::ChevronDown } else { IconName::ChevronRight }, 12.0)))
+                .child(section_label("OLDER"))
+                .child(div().text_size(crate::panels::scale::px(10.5)).text_color(hsla(theme::TEXT_FAINT)).child(count.to_string()))
+                .on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::ToggleOlder, window, cx)))
+                .into_any_element(),
+        }
     }
 
     /// "+ Code session" with no project chosen: pick where it starts.
@@ -534,7 +689,7 @@ impl Workspace {
     }
 
     /// The sidebar chrome around either list: header, scrolling body, usage footer.
-    fn sidebar_frame(&mut self, body: Div, window: &mut Window, cx: &mut Context<Self>) -> Stateful<Div> {
+    fn sidebar_frame(&mut self, list: impl IntoElement, window: &mut Window, cx: &mut Context<Self>) -> Stateful<Div> {
         let width = self.left_width(f32::from(window.viewport_size().width));
         // The right edge is the drag handle: it fills the gutter with a small visible grip.
         let handle_center = theme::PANEL_GAP / 2.0 + 3.0;
@@ -582,7 +737,7 @@ impl Workspace {
                     .border_color(hsla(theme::PANEL_BORDER))
                     .bg(hsla(theme::SIDEBAR_BG))
                     .child(self.render_sidebar_header(cx))
-                    .child(self.sidebar_scroll.wire(div().id("sidebar-scroll").flex_1().min_h_0(), window).pb(px(8.0)).child(body))
+                    .child(list)
                     .child(self.render_footer(cx)),
             )
             .child(handle)
@@ -654,7 +809,7 @@ impl Workspace {
             .justify_between()
             .px(px(14.0))
             .pr(px(10.0))
-            .h(px(20.0))
+            .h(px(HEADER_H))
             .child(
                 div()
                     .flex()
@@ -778,7 +933,19 @@ fn plan_label(plan: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_reorder, move_to};
+    use super::{PULSE, is_reorder, move_to, pulse_opacity, visible_items};
+    use std::time::Duration;
+
+    #[test]
+    fn the_working_dot_fades_between_its_bounds_and_repeats_each_pulse() {
+        for ms in (0..2400).step_by(50) {
+            let o = pulse_opacity(Duration::from_millis(ms));
+            assert!((0.35..=1.0).contains(&o), "{o} at {ms} ms");
+            assert_eq!(o, pulse_opacity(Duration::from_millis(ms) + PULSE));
+        }
+        // gpui's breathing curve: brightest a quarter of the way through, dimmest at three quarters.
+        assert!(pulse_opacity(PULSE / 4) > 0.99 && pulse_opacity(PULSE * 3 / 4) < 0.36);
+    }
 
     #[test]
     fn moved_item_takes_the_targets_slot() {
@@ -796,5 +963,16 @@ mod tests {
         assert!(!is_reorder(&ids(&["a", "b"]), &ids(&["a", "b"])));
         assert!(!is_reorder(&ids(&["a", "b"]), &ids(&["a", "c"])));
         assert!(!is_reorder(&ids(&["a"]), &ids(&["a", "b"])));
+    }
+
+    #[test]
+    fn only_items_overlapping_the_view_are_drawn_at_their_place_in_the_stack() {
+        // Five items of 10, 20, 10, 10, 10 px stacked 2 px apart sit at 0, 12, 34, 46 and 58; the stack is 68 tall.
+        let heights = [10.0, 20.0, 10.0, 10.0, 10.0];
+        assert_eq!(visible_items(&heights, 2.0, 15.0, 40.0), (vec![(1, 12.0), (2, 34.0)], 68.0));
+        // An item ending exactly where the view starts is out of it; one starting inside is in.
+        assert_eq!(visible_items(&heights, 2.0, 44.0, 47.0).0, vec![(3, 46.0)]);
+        assert_eq!(visible_items(&heights, 2.0, -100.0, 1000.0).0.len(), 5);
+        assert_eq!(visible_items(&[], 2.0, 0.0, 100.0), (vec![], 0.0));
     }
 }

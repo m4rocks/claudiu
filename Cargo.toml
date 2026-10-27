@@ -1,6 +1,6 @@
 [package]
 name = "claudiu"
-version = "0.6.1"
+version = "0.6.2"
 edition = "2024"
 description = "A native workspace for Claude Code sessions: real PTYs, projects, and session history"
 repository = "https://github.com/m4rocks/claudiu"
@@ -36,6 +36,8 @@ serde_json = { version = "1.0.151", features = ["preserve_order"] }
 # The same versions gpui-kit's editor uses for its LSP hooks; editor mode's language servers (`lsp`) speak through them.
 lsp-types = "0.97.0"
 url = "2.5.8"
+# Editor mode's file tree follows its folder on disk; already in the build through gpui-kit.
+notify = "8.2.0"
 image = { version = "0.25", default-features = false, features = ["png", "bmp", "jpeg", "gif", "webp"] }
 ureq = "3.4.2"
 time = { version = "0.3.55", features = ["parsing"] }
@@ -77,3 +79,13 @@ incremental = true
 debug = false
 # gpui lays out and paints every element on every frame; unoptimised it makes a busy session visibly laggy.
 opt-level = 2
+
+# gpui-base 0.7.1 drew an editor's `set_scroll_offset` unclamped for one frame, so a wheel glide past either end
+# overshot and jumped back. Patched in `vendor/gpui-base` (`clamp_deferred_scroll_top` in src/input/base/element.rs);
+# drop this once gpui-kit releases the fix.
+[patch.crates-io]
+gpui-base = { path = "vendor/gpui-base" }
+
+[workspace]
+# Not a member, so `profile.dev.package."*"` still builds it optimised like the other dependencies.
+exclude = ["vendor"]

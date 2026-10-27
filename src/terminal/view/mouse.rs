@@ -271,16 +271,37 @@ impl TerminalView {
             return;
         }
         self.scroll_px -= whole as f32;
+        // The program scrolls itself, a whole line per step. Sent all at once, a notch's steps land as one jump;
+        // one per frame (see `wheel_step`), they roll the view a line at a time.
+        if notch {
+            self.wheel.add(whole, event.position, event.modifiers);
+            cx.notify();
+        } else {
+            self.send_wheel(whole, event.position, &event.modifiers);
+        }
+    }
 
-        if self.mouse_reporting(&event.modifiers) {
-            if let Some((_, _, col, row)) = self.grid_point(event.position) {
+    /// One frame of a notch's steps to the program.
+    pub(super) fn wheel_step(&mut self, window: &mut Window) {
+        let Some((step, position, mods)) = self.wheel.take() else { return };
+        self.send_wheel(step, position, &mods);
+        if !self.wheel.is_empty() {
+            window.request_animation_frame();
+        }
+    }
+
+    /// `whole` lines of wheel, up when positive, to a program that takes the wheel: as mouse reports, or as arrow
+    /// keys on its alternate screen.
+    fn send_wheel(&mut self, whole: i32, position: Point<Pixels>, mods: &Modifiers) {
+        if self.mouse_reporting(mods) {
+            if let Some((_, _, col, row)) = self.grid_point(position) {
                 let button = if whole > 0 { 64 } else { 65 };
                 for _ in 0..whole.unsigned_abs() {
-                    self.report_mouse(button, col, row, true, &event.modifiers, false);
+                    self.report_mouse(button, col, row, true, mods, false);
                 }
             }
         } else {
-            let app = mode.contains(TermMode::APP_CURSOR);
+            let app = self.mode().contains(TermMode::APP_CURSOR);
             let key = match (whole > 0, app) {
                 (true, true) => "\x1bOA",
                 (true, false) => "\x1b[A",
@@ -290,5 +311,55 @@ impl TerminalView {
             self.terminal
                 .write(key.repeat(whole.unsigned_abs() as usize).into_bytes());
         }
+    }
+}
+
+/// Wheel steps waiting to go to the program, one per frame; a turn the other way cancels steps still waiting.
+#[derive(Default)]
+pub(super) struct WheelSteps {
+    /// Lines left to send, up when positive.
+    left: i32,
+    /// Where the pointer was and which keys were held at the last notch.
+    at: Option<(Point<Pixels>, Modifiers)>,
+}
+
+impl WheelSteps {
+    fn add(&mut self, lines: i32, position: Point<Pixels>, mods: Modifiers) {
+        self.left += lines;
+        self.at = Some((position, mods));
+    }
+
+    /// The next single step, with where it happened.
+    fn take(&mut self) -> Option<(i32, Point<Pixels>, Modifiers)> {
+        let (position, mods) = self.at?;
+        if self.left == 0 {
+            return None;
+        }
+        let step = self.left.signum();
+        self.left -= step;
+        Some((step, position, mods))
+    }
+
+    fn is_empty(&self) -> bool {
+        self.left == 0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::WheelSteps;
+    use gpui::{Modifiers, point, px};
+
+    #[test]
+    fn a_notch_goes_out_a_line_at_a_time_and_a_turn_back_cancels_what_waits() {
+        let mut w = WheelSteps::default();
+        let at = point(px(1.0), px(2.0));
+        w.add(3, at, Modifiers::default());
+        assert_eq!(w.take().map(|s| s.0), Some(1));
+        assert!(!w.is_empty());
+        w.add(-3, at, Modifiers::default());
+        assert_eq!(w.take().map(|s| s.0), Some(-1), "two up were waiting, three down came: one down is left");
+        assert!(w.is_empty());
+        assert_eq!(w.take().map(|s| s.0), None);
     }
 }

@@ -423,6 +423,16 @@ pub struct Workspace {
     pub shortcuts_wait: u64,
     pub slides: HashMap<Id, crate::panels::sidebar::Slide>,
     pub slide_gen: u64,
+    /// The session list's own view, made on the sidebar's first drawing (see `panels::sidebar::SessionList`).
+    pub session_list: Option<Entity<crate::panels::sidebar::SessionList>>,
+    /// What the session list showed when last drawn.
+    pub list_model: crate::panels::sidebar::ListModel,
+    /// The sidebar row under the pointer, the only one built with its × or archive button.
+    pub hovered_row: Option<gpui::SharedString>,
+    /// The minute (Unix time / 60) of the last tick's redraw, see `tick`.
+    pub tick_minute: i64,
+    /// The working dot's pulse is running, see `start_pulse`.
+    pub pulsing: bool,
     /// When a drag last reordered the sidebar, see `pointer_moved`.
     pub last_swap: std::time::Instant,
     /// Attached issues and pull requests are asked about on GitHub from time to time, see `attached_sync.rs`.
@@ -522,6 +532,11 @@ impl Workspace {
             shortcuts_wait: 0,
             slides: HashMap::new(),
             slide_gen: 0,
+            session_list: None,
+            list_model: Default::default(),
+            hovered_row: None,
+            tick_minute: 0,
+            pulsing: false,
             last_swap: std::time::Instant::now(),
             attached_sync: Default::default(),
             config_sync: Default::default(),

@@ -977,7 +977,7 @@ dependencies = [
 
 [[package]]
 name = "claudiu"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -991,6 +991,7 @@ dependencies = [
  "junction",
  "libc",
  "lsp-types",
+ "notify",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
  "raw-window-handle",
@@ -2357,8 +2358,6 @@ dependencies = [
 [[package]]
 name = "gpui-base"
 version = "0.7.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3cf698677b253118459f552fe15513858c669d79a25837a94e480db2ae330050"
 dependencies = [
  "aho-corasick",
  "anyhow",

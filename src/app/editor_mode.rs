@@ -4,12 +4,20 @@
 use gpui_kit::component::input::{EditorState, InputEvent, Position, TabSize};
 use gpui_kit::component::tree::{TreeEvent, TreeItem, TreeState};
 
+use std::path::Path;
+
+use futures::StreamExt;
+
 use super::*;
 use super::editing::Conflict;
 use crate::files::{self, Contents, Node, Stamp};
 
 /// Most entries listed in the tree, so a session started in a huge plain folder (or the home folder) stays usable.
 const LIST_LIMIT: usize = 20_000;
+/// The shortest time between two listings the folder watcher asks for (see `EditorPane::listed_at`).
+const RELIST_GAP: Duration = Duration::from_secs(2);
+/// A watched folder is listed again this often even when its watcher reports nothing.
+const WATCHED_RELIST: Duration = Duration::from_secs(30);
 
 /// A session's files and editor. Never persisted; it goes away with the session.
 pub struct EditorPane {
@@ -52,6 +60,20 @@ pub struct EditorPane {
     pub picker: Option<super::picker::Picker>,
     /// Language servers by program name; dropping the pane (the session ended) stops them.
     pub servers: HashMap<&'static str, super::language_servers::ServerState>,
+    /// Tells the pane when its folder changes on disk (see `watch_folder`); while there is none, every tick lists
+    /// the folder again.
+    pub watcher: Option<notify::RecommendedWatcher>,
+    /// The repository's own folder, whose index and HEAD say when git's view of the files moved (a commit, a checkout).
+    pub git_dir: Option<PathBuf>,
+    /// The folders the tree lists; a change anywhere else (an ignored build folder) changes nothing it shows.
+    pub folders: HashSet<PathBuf>,
+    /// The watcher saw a change that the listing doesn't have yet.
+    pub stale: bool,
+    /// When the last listing arrived, so a stream of changes (Claude writing file after file) lists the folder at
+    /// most every `RELIST_GAP` rather than after each one.
+    pub listed_at: Option<std::time::Instant>,
+    /// A listing is set to follow once `RELIST_GAP` has passed.
+    pub relist_due: bool,
     pub _sub: Subscription,
 }
 
@@ -200,9 +222,16 @@ impl Workspace {
                 relist: false,
                 picker: None,
                 servers: HashMap::new(),
+                watcher: None,
+                git_dir: None,
+                folders: HashSet::new(),
+                stale: false,
+                listed_at: None,
+                relist_due: false,
                 _sub: sub,
             };
             self.panes.insert(id.clone(), pane);
+            self.watch_folder(&id, cx);
             self.refresh_files(cx);
         }
         let pane = self.panes.get(&id)?;
@@ -224,6 +253,7 @@ impl Workspace {
             let _ = this.update(cx, |ws, cx| {
                 let Some(pane) = ws.panes.get_mut(&id) else { return };
                 pane.listing = false;
+                pane.listed_at = Some(std::time::Instant::now());
                 let relist = std::mem::take(&mut pane.relist);
                 pane.changed = std::sync::Arc::new(listing.changed);
                 pane.truncated = listing.truncated;
@@ -237,6 +267,7 @@ impl Workspace {
                         t.set_selected_index(ix, cx);
                     });
                     pane.empty_folders = std::sync::Arc::new(empty_folders(&listing.nodes));
+                    pane.folders = folders_of(&listing.nodes);
                     let all = files::files_of(&listing.nodes);
                     pane.relative = std::sync::Arc::new(all.iter().map(|f| super::picker::relative(f, &pane.root)).collect());
                     pane.files = std::sync::Arc::new(all);
@@ -249,6 +280,105 @@ impl Workspace {
             });
         })
         .detach();
+    }
+
+    /// The tick's look at the shown pane's folder: listed again when its watcher saw a change, every time when it has
+    /// no watcher, and now and then regardless, since a watcher can go quiet without a word (network folders).
+    pub(super) fn refresh_if_stale(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.active_id().filter(|_| self.editor_mode).cloned() else { return };
+        let Some(pane) = self.panes.get_mut(&id) else { return };
+        let overdue = pane.listed_at.is_none_or(|t| t.elapsed() >= WATCHED_RELIST);
+        if pane.watcher.is_some() && !pane.stale && !overdue {
+            return;
+        }
+        pane.stale = false;
+        self.refresh_files(cx);
+    }
+
+    /// Watch the session's folder, so the tree and its change marks follow the disk as soon as it changes rather than
+    /// on the next tick, and an unchanged folder is never walked again.
+    fn watch_folder(&mut self, id: &Id, cx: &mut Context<Self>) {
+        let Some(root) = self.store.session(id).map(|s| s.cwd.clone()) else { return };
+        let (tx, mut rx) = futures::channel::mpsc::unbounded::<Vec<PathBuf>>();
+        let id = id.clone();
+        cx.spawn(async move |this, cx| {
+            // Starting a watch can take a while on a big tree (Linux adds one per folder), so it happens off the UI thread.
+            let started = cx
+                .background_executor()
+                .spawn(async move {
+                    use notify::Watcher;
+                    let root = dunce::canonicalize(&root).unwrap_or(root);
+                    let mut watcher = notify::recommended_watcher(move |ev: notify::Result<notify::Event>| {
+                        // An error says nothing of what changed, so it counts as any change (no paths).
+                        let paths = match ev {
+                            Ok(ev) if matches!(ev.kind, notify::EventKind::Access(_)) => return,
+                            Ok(ev) => ev.paths,
+                            Err(_) => vec![],
+                        };
+                        let _ = tx.unbounded_send(paths);
+                    })
+                    .ok()?;
+                    watcher.watch(&root, notify::RecursiveMode::Recursive).ok()?;
+                    // A session started below the repository's top doesn't contain `.git`, so it is watched on its own.
+                    let git_dir = git2::Repository::discover(&root).ok().and_then(|r| dunce::canonicalize(r.path()).ok());
+                    if let Some(dir) = git_dir.as_ref().filter(|d| !d.starts_with(&root)) {
+                        let _ = watcher.watch(dir, notify::RecursiveMode::NonRecursive);
+                        let _ = watcher.watch(&dir.join("refs"), notify::RecursiveMode::Recursive);
+                    }
+                    Some((watcher, git_dir))
+                })
+                .await;
+            let Some((watcher, git_dir)) = started else { return };
+            // The first listing ran while the watch was starting, so what changed in between is caught by one more.
+            let kept = this.update(cx, |ws, _| ws.panes.get_mut(&id).map(|p| (p.watcher, p.git_dir, p.stale) = (Some(watcher), git_dir, true)));
+            if !matches!(kept, Ok(Some(()))) {
+                return;
+            }
+            // Ends when the pane, and with it the watcher, goes away.
+            while let Some(mut paths) = rx.next().await {
+                // A save or a build touches many files at once: let the burst settle and take it as one change.
+                cx.background_executor().timer(Duration::from_millis(150)).await;
+                while let Ok(more) = rx.try_recv() {
+                    paths.extend(more);
+                }
+                if this.update(cx, |ws, cx| ws.on_folder_change(&id, &paths, cx)).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn on_folder_change(&mut self, id: &Id, paths: &[PathBuf], cx: &mut Context<Self>) {
+        let shown = self.active_id() == Some(id);
+        let Some(pane) = self.panes.get_mut(id) else { return };
+        // No paths: the watcher lost track (its buffer overflowed) and anything may have changed.
+        if !paths.is_empty() && !paths.iter().any(|p| change_matters(&pane.root, pane.git_dir.as_deref(), &pane.folders, pane.truncated, p)) {
+            return;
+        }
+        pane.stale = true;
+        if !shown {
+            return;
+        }
+        // Listed a moment ago: listed again once `RELIST_GAP` has passed, with whatever else changed by then.
+        let wait = pane.listed_at.map_or(Duration::ZERO, |t| RELIST_GAP.saturating_sub(t.elapsed()));
+        if wait.is_zero() {
+            self.refresh_if_stale(cx);
+        } else if !pane.relist_due {
+            pane.relist_due = true;
+            let id = id.clone();
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(wait).await;
+                let _ = this.update(cx, |ws, cx| {
+                    if let Some(p) = ws.panes.get_mut(&id) {
+                        p.relist_due = false;
+                    }
+                    ws.refresh_if_stale(cx);
+                });
+            })
+            .detach();
+        }
+        self.refresh_marks(cx);
     }
 
     /// Re-read, off the UI thread, which lines of the shown file differ from the last commit.
@@ -419,6 +549,34 @@ pub(super) fn tab_size(format: &files::Format) -> TabSize {
     }
 }
 
+fn folders_of(nodes: &[Node]) -> HashSet<PathBuf> {
+    let mut folders = HashSet::new();
+    for n in nodes {
+        if let Some(children) = &n.children {
+            folders.insert(n.path.clone());
+            folders.extend(folders_of(children));
+        }
+    }
+    folders
+}
+
+/// Whether a change at `path` can change what a pane listing `root` shows: something in a folder the tree lists, or
+/// in git's index or HEAD (the tree's change marks). A build writing into an ignored folder (`target`,
+/// `node_modules`) is neither, and must not set off a walk of the whole folder every moment it runs. With the
+/// listing incomplete or not there yet, every change counts.
+fn change_matters(root: &Path, git_dir: Option<&Path>, folders: &HashSet<PathBuf>, truncated: bool, path: &Path) -> bool {
+    if truncated || root.as_os_str().is_empty() {
+        return true;
+    }
+    let parent = path.parent();
+    if let Some(git) = git_dir.filter(|g| path.starts_with(g)) {
+        // The index and the branch the work tree is on; objects and logs churn without changing either.
+        let named = |names: &[&str]| path.file_name().is_some_and(|n| names.iter().any(|m| n == *m));
+        return (parent == Some(git) && named(&["index", "HEAD", "packed-refs"])) || path.starts_with(git.join("refs"));
+    }
+    parent.is_some_and(|dir| dir == root || folders.contains(dir))
+}
+
 fn empty_folders(nodes: &[Node]) -> HashSet<String> {
     let mut empty = HashSet::new();
     for n in nodes {
@@ -461,7 +619,29 @@ fn active_after_close(active: Option<usize>, closed: usize, left: usize) -> Opti
 
 #[cfg(test)]
 mod tests {
-    use super::active_after_close;
+    use super::{active_after_close, change_matters};
+    use std::collections::HashSet;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn only_changes_the_tree_or_its_marks_could_show_set_off_a_listing() {
+        let root = Path::new("/w");
+        let git = Path::new("/w/.git");
+        let folders: HashSet<PathBuf> = [PathBuf::from("/w/src")].into();
+        let matters = |p: &str| change_matters(root, Some(git), &folders, false, Path::new(p));
+        assert!(matters("/w/README.md"));
+        assert!(matters("/w/src/new.rs"));
+        assert!(matters("/w/src/sub"), "a folder made in a listed one");
+        assert!(!matters("/w/target/debug/build.o"), "an ignored folder, which the tree doesn't list");
+        assert!(matters("/w/.git/index"));
+        assert!(matters("/w/.git/HEAD"));
+        assert!(matters("/w/.git/refs/heads/main"), "a branch moved (a reset, a commit from another worktree)");
+        assert!(matters("/w/.git/packed-refs"));
+        assert!(!matters("/w/.git/objects/ab/cdef"));
+        assert!(!matters("/w/.git/logs/HEAD"));
+        assert!(change_matters(root, Some(git), &folders, true, Path::new("/w/target/x")), "a cut-short listing may miss any folder");
+        assert!(change_matters(Path::new(""), None, &folders, false, Path::new("/w/target/x")), "nothing listed yet");
+    }
 
     /// The highlighter falls back to plain text when a grammar or its query fails to load, so check that each language
     /// `files::language` names really colours code.

@@ -82,20 +82,50 @@ pub fn claude_home() -> Option<PathBuf> {
     std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from).or_else(|| home_dir().map(|h| h.join(".claude")))
 }
 
+/// One registry file as last read: its modified time and size, and what it said (session id, `updatedAt`, status).
+type StatusRecord = (Option<std::time::SystemTime>, u64, Option<(String, i64, String)>);
+
+/// The registry files `session_statuses` has read, so a file is parsed again only once it changes: the poll runs every
+/// second and most files sit unchanged between two polls. A file written in the last few seconds is always read
+/// again, since a timestamp may not have moved yet (coarse clocks) when a status of the same length replaced another.
+#[derive(Default)]
+pub struct StatusFiles(std::collections::HashMap<PathBuf, StatusRecord>);
+
 /// Claude Code's own per-process registry (`sessions/<pid>.json`) says whether each session is `busy`, `idle`
 /// or `waiting`. Read-only; returns session id → status, newest record winning (dead processes leave stale files).
-pub fn session_statuses(home: &Path) -> std::collections::HashMap<String, String> {
+pub fn session_statuses(home: &Path, seen: &mut StatusFiles) -> std::collections::HashMap<String, String> {
     let mut best: std::collections::HashMap<String, (i64, String)> = Default::default();
+    let mut present = std::collections::HashSet::new();
     for entry in fs::read_dir(home.join("sessions")).into_iter().flatten().flatten() {
-        let Ok(text) = fs::read_to_string(entry.path()) else { continue };
-        let Ok(v) = serde_json::from_str::<Value>(&text) else { continue };
-        let (Some(id), Some(status)) = (v.get("sessionId").and_then(Value::as_str), v.get("status").and_then(Value::as_str)) else { continue };
-        let at = v.get("updatedAt").and_then(Value::as_i64).unwrap_or(0);
-        if best.get(id).is_none_or(|(t, _)| at >= *t) {
-            best.insert(id.to_string(), (at, status.to_string()));
+        let path = entry.path();
+        // Asked of the file itself: what a directory listing reports on Windows can lag behind a write.
+        let Ok(meta) = fs::metadata(&path) else { continue };
+        let (modified, len) = (meta.modified().ok(), meta.len());
+        let settled = modified.and_then(|m| m.elapsed().ok()).is_some_and(|age| age > std::time::Duration::from_secs(3));
+        let record = match seen.0.get(&path) {
+            Some((m, l, said)) if settled && *m == modified && *l == len => said.clone(),
+            _ => {
+                let said = read_status(&path);
+                seen.0.insert(path.clone(), (modified, len, said.clone()));
+                said
+            }
+        };
+        present.insert(path);
+        let Some((id, at, status)) = record else { continue };
+        if best.get(&id).is_none_or(|(t, _)| at >= *t) {
+            best.insert(id, (at, status));
         }
     }
+    seen.0.retain(|path, _| present.contains(path));
     best.into_iter().map(|(k, (_, s))| (k, s)).collect()
+}
+
+fn read_status(path: &Path) -> Option<(String, i64, String)> {
+    let v = serde_json::from_str::<Value>(&fs::read_to_string(path).ok()?).ok()?;
+    let id = v.get("sessionId").and_then(Value::as_str)?;
+    let status = v.get("status").and_then(Value::as_str)?;
+    let at = v.get("updatedAt").and_then(Value::as_i64).unwrap_or(0);
+    Some((id.to_string(), at, status.to_string()))
 }
 
 pub struct ScanResult {
@@ -331,6 +361,24 @@ mod tests {
         assert_eq!(parse_rfc3339("1970-01-01T00:00:00Z"), Some(0));
         assert_eq!(parse_rfc3339("2026-10-05T14:10:53.395Z"), Some(1791209453));
         assert_eq!(parse_rfc3339("nope"), None);
+    }
+
+    #[test]
+    fn statuses_follow_registry_files_as_they_change_and_go() {
+        let home = tempfile::tempdir().unwrap();
+        let dir = home.path().join("sessions");
+        fs::create_dir(&dir).unwrap();
+        let write = |name: &str, status: &str| fs::write(dir.join(name), format!(r#"{{"sessionId":"s1","status":"{status}","updatedAt":1}}"#)).unwrap();
+        let mut seen = StatusFiles::default();
+        write("1.json", "busy");
+        assert_eq!(session_statuses(home.path(), &mut seen).get("s1").map(String::as_str), Some("busy"));
+        // Busy to idle: the same length, and a timestamp that hasn't moved.
+        let stamp = fs::metadata(dir.join("1.json")).unwrap().modified().unwrap();
+        write("1.json", "idle");
+        File::options().write(true).open(dir.join("1.json")).unwrap().set_modified(stamp).unwrap();
+        assert_eq!(session_statuses(home.path(), &mut seen).get("s1").map(String::as_str), Some("idle"));
+        fs::remove_file(dir.join("1.json")).unwrap();
+        assert!(session_statuses(home.path(), &mut seen).is_empty());
     }
 
     #[test]

@@ -46,17 +46,48 @@ impl Workspace {
         .detach();
     }
 
+    /// While a session works, its sidebar dot pulses: the session list is redrawn a few times a second (with the
+    /// window's top level, which reuses the other cached parts). It stops once nothing works.
+    fn start_pulse(&mut self, cx: &mut Context<Self>) {
+        if self.pulsing {
+            return;
+        }
+        self.pulsing = true;
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(crate::panels::sidebar::PULSE_STEP).await;
+                let working = this.update(cx, |ws, cx| {
+                    let working = ws.activity.values().any(|a| *a == Activity::Working);
+                    match &ws.session_list {
+                        Some(list) if working => list.update(cx, |_, cx| cx.notify()),
+                        _ => ws.pulsing = working,
+                    }
+                    working
+                });
+                if !matches!(working, Ok(true)) {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
     /// Once a second: derive each Claude session's `Activity` from its terminal output. When one stops working
     /// while the user isn't looking at it, mark it for attention, and if the whole window is in the
     /// background as well, flash the taskbar icon / bounce the dock icon.
     pub(super) fn start_activity_poll(&mut self, window: &Window, cx: &mut Context<Self>) {
         cx.spawn_in(window, async move |this, cx| {
+            let mut seen = claude::StatusFiles::default();
             loop {
                 cx.background_executor().timer(Duration::from_secs(1)).await;
-                let (statuses, requests) = cx
+                let (statuses, requests, back) = cx
                     .background_executor()
-                    .spawn(async { (claude::claude_home().map(|h| claude::session_statuses(&h)).unwrap_or_default(), crate::claude::bridge::take_requests()) })
+                    .spawn(async move {
+                        let statuses = claude::claude_home().map(|h| claude::session_statuses(&h, &mut seen)).unwrap_or_default();
+                        (statuses, crate::claude::bridge::take_requests(), seen)
+                    })
                     .await;
+                seen = back;
                 let update = this.update_in(cx, |ws, window, cx| {
                     ws.serve_requests(requests, window, cx);
                     ws.finish_handoffs(window, cx);
@@ -105,6 +136,9 @@ impl Workspace {
             self.activity = next;
             cx.notify();
         }
+        if self.activity.values().any(|a| *a == Activity::Working) {
+            self.start_pulse(cx);
+        }
         if flash {
             platform::request_attention(window);
         }
@@ -130,18 +164,25 @@ impl Workspace {
     }
 
     pub(super) fn tick(&mut self, cx: &mut Context<Self>) {
-        self.purge_dead_shells();
+        let purged = self.purge_dead_shells();
         self.store.save_if_dirty();
         self.refresh_live(cx);
         self.remember_open(cx);
         self.ingest_usage(cx);
         self.sync_attached(cx);
         self.sync_configs(cx);
-        self.refresh_files(cx);
+        self.refresh_if_stale(cx);
         self.refresh_marks(cx);
         self.raise_claude_priority(cx);
         self.refresh_pending(cx);
-        cx.notify();
+        // The steps above redraw when they change something. The sidebar's "5m ago" and the reset countdowns count
+        // in minutes, so they need a redraw only when the minute turns; the prompt cache's bar shrinks as it runs out.
+        let minute = crate::store::now() / 60;
+        let cache_running = self.selected_cache().is_some_and(|(_, left, _)| left > 0);
+        if purged || cache_running || minute != self.tick_minute {
+            self.tick_minute = minute;
+            cx.notify();
+        }
     }
 
     /// Windows: run the Claude sessions above the builds and tests they start.
@@ -162,19 +203,24 @@ impl Workspace {
 
     /// Terminal sessions live only in CURRENT SESSION: once a shell's process is gone and its pane has been
     /// closed or replaced, its record is dropped instead of lingering in project history.
-    pub(super) fn purge_dead_shells(&mut self) {
+    /// True when it dropped anything.
+    pub(super) fn purge_dead_shells(&mut self) -> bool {
         let keep: Vec<Id> = self.live.iter().map(|l| l.id.clone()).collect();
+        let before = self.store.data.sessions.len();
         self.store
             .data
             .sessions
             .retain(|s| s.kind != SessionKind::Shell || keep.contains(&s.id));
+        let mut purged = self.store.data.sessions.len() != before;
         if self
             .selected
             .as_ref()
             .is_some_and(|id| self.store.session(id).is_none())
         {
             self.selected = None;
+            purged = true;
         }
+        purged
     }
 
     /// Re-read transcripts of running Claude sessions so the context meter follows reality.

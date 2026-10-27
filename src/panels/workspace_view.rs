@@ -280,21 +280,15 @@ impl Workspace {
                 .child(div().text_size(crate::panels::scale::px(12.0)).text_color(hsla(theme::TEXT_FAINT)).child(keys.to_string()))
         };
         let mut recent = div().flex().flex_col().gap(px(2.0)).mt(px(26.0)).w(px(420.0));
-        // Newest first: (id, title, last active).
-        let mut sessions: Vec<(String, String, i64)> = self
-            .store
-            .data
-            .sessions
-            .iter()
-            .filter(|s| s.kind == SessionKind::Claude && !s.hidden)
-            .map(|s| (s.id.clone(), s.display_title().to_string(), s.last_active))
-            .collect();
-        sessions.sort_by_key(|s| std::cmp::Reverse(s.2));
+        // Newest first: (id, title, last active). Only the five shown are copied out of the store.
+        let mut newest: Vec<&crate::store::SessionRecord> = self.store.data.sessions.iter().filter(|s| s.kind == SessionKind::Claude && !s.hidden).collect();
+        newest.sort_by_key(|s| std::cmp::Reverse(s.last_active));
+        let sessions: Vec<(String, String, i64)> = newest.into_iter().take(5).map(|s| (s.id.clone(), s.display_title().to_string(), s.last_active)).collect();
         let t = now();
         if !sessions.is_empty() {
             recent = recent.child(div().mb(px(4.0)).child(section_label("RECENT")));
         }
-        for (i, (id, title, last_active)) in sessions.into_iter().take(5).enumerate() {
+        for (i, (id, title, last_active)) in sessions.into_iter().enumerate() {
             recent = recent.child(
                 div()
                     .id(gpui::SharedString::from(format!("recent-{i}")))

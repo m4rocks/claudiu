@@ -80,6 +80,9 @@ impl Workspace {
                         .collect()
                 })
                 .await;
+            if changed.is_empty() {
+                return;
+            }
             let _ = this.update_in(cx, |ws, window, cx| {
                 for (path, seen, now) in changed {
                     let Some(tab) = ws.panes.get_mut(&id).and_then(|p| p.tabs.iter_mut().find(|t| t.path == path)) else { continue };

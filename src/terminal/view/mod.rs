@@ -69,6 +69,8 @@ pub struct TerminalView {
     /// notch eases there (`panels/glide.rs`). Sub-line positions are drawn by shifting the rows.
     frac: f32,
     glide: Option<crate::panels::glide::Glide>,
+    /// A notch's steps for a program that scrolls itself (Claude Code's fullscreen view), see `wheel_step`.
+    wheel: mouse::WheelSteps,
     pub title: Option<String>,
     /// Output timing, for `is_working`: when output last arrived and when the current burst began.
     last_output: Option<Instant>,
@@ -180,6 +182,7 @@ impl TerminalView {
             scroll_px: 0.0,
             frac: 0.0,
             glide: None,
+            wheel: Default::default(),
             title: None,
             last_output: None,
             burst_start: None,
@@ -395,6 +398,7 @@ impl TerminalView {
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.glide_step(window);
+        self.wheel_step(window);
         if self.loading && self.exit_code.is_some() {
             self.loading = false;
             self.handover = None;

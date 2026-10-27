@@ -43,11 +43,11 @@ impl Workspace {
             .data
             .sessions
             .iter()
-            // A session whose folder is gone cannot be asked about (and would never be answered).
-            .filter(|s| s.cwd.is_dir())
             .filter_map(|s| {
                 let items: Vec<_> = s.claude.as_ref()?.attached.iter().map(|a| (a.pull, a.number)).collect();
-                (!items.is_empty()).then(|| (s.id.clone(), s.cwd.clone(), items))
+                // A session whose folder is gone cannot be asked about (and would never be answered). Checked last:
+                // it asks the disk, from the UI thread, and most sessions have nothing attached.
+                (!items.is_empty() && s.cwd.is_dir()).then(|| (s.id.clone(), s.cwd.clone(), items))
             })
             .collect();
         let some_unanswered = self.unanswered_items();
