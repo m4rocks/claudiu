@@ -108,7 +108,7 @@ impl Workspace {
     /// `--allowedTools` / `--mcp-config` flags, or they would swallow it.
     pub(super) fn new_claude_with(&mut self, cwd: PathBuf, mut leading: Vec<String>, by: Starter, window: &mut Window, cx: &mut Context<Self>) {
         let Some(exe) = self.claude_exe.clone() else {
-            self.toast("Could not find the `claude` CLI. Install Claude Code, or set its path in Settings.", true, cx);
+            self.show_toast("Could not find the `claude` CLI. Install Claude Code, or set its path in Settings.".into(), true, Some(("Check setup".into(), Act::OpenSetup)), cx);
             return;
         };
         let session_id = new_id();

@@ -69,7 +69,16 @@ impl Workspace {
                             .child(title),
                     )
                     .when_some(cwd, |d, p| {
-                        d.child(div().flex_none().text_size(crate::panels::scale::px(11.5)).text_color(hsla(theme::TEXT_FAINT)).child(short_path(&p)))
+                        d.child(
+                            div()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .text_size(crate::panels::scale::px(11.5))
+                                .text_color(hsla(theme::TEXT_FAINT))
+                                .child(short_path(&p)),
+                        )
                     })
                     .when_some(branch.zip(repo), |d, (b, repo)| {
                         // Click: switch branch or create one (see Workspace::open_branch_menu).
@@ -765,6 +774,7 @@ fn settings_body(page: SettingsPage, modal: &Modal, scroll: &crate::panels::glid
             .gap(px(10.0))
             .child(field("SHELL", shell))
             .child(field("CLAUDE CODE PATH", claude))
+            .child(div().flex().child(button("settings-check-setup", "Check setup", false).on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::OpenSetup, window, cx)))))
             .child(
                 div()
                     .h(px(32.0))

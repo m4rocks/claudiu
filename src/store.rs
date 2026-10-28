@@ -409,6 +409,12 @@ impl Store {
         dir.join("state.json")
     }
 
+    /// No state file yet: Claudiu has never run here. Ask before anything calls `load`, which moves a corrupt file aside
+    /// (a corrupt file still means the user has been here).
+    pub fn is_first_launch(path: &Path) -> bool {
+        !path.exists()
+    }
+
     /// Load tolerant of missing/corrupt files: a corrupt file is moved aside, never overwritten silently.
     pub fn load(path: PathBuf) -> Self {
         let mut data = Data { version: 1, layout: Layout { sidebar_visible: true, ..Default::default() }, ..Default::default() };
@@ -913,6 +919,18 @@ mod tests {
         assert!(c.data.projects.is_empty());
         assert_eq!(c.active_account().map(|a| a.id.as_str()), Some(MAIN_ACCOUNT), "main account always exists");
         assert!(path.with_extension("json.corrupt").exists(), "corrupt state is preserved, not destroyed");
+    }
+
+    #[test]
+    fn a_launch_is_the_first_only_while_there_is_no_state_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("state.json");
+        assert!(Store::is_first_launch(&path), "nothing saved yet");
+        Store::load(path.clone()).save();
+        assert!(!Store::is_first_launch(&path), "a saved state file ends the first launch");
+
+        fs::write(&path, "{ not json").unwrap();
+        assert!(!Store::is_first_launch(&path), "a corrupt state file still means Claudiu ran here");
     }
 
     #[test]
