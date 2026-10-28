@@ -8,7 +8,7 @@ Claudiu is a native Rust + GPUI desktop app that manages sessions around the use
 - Tests: when a cheap test seam exists
 - Commits: only when the maintainer says
 - Pushes and pull requests: only when the maintainer says
-- Closing issues: ask first
+- Closing issues: once a merged pull request has done every item on the issue's checklist; otherwise ask first
 - Subagents: only when the maintainer asks
 
 ## Working here
