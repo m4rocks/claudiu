@@ -1,6 +1,7 @@
 //! Overlays: toasts, the context menu, input modals, the editor choice and the project import.
 
 use super::*;
+use crate::git::worktree;
 use crate::panels::widgets::Dropdown;
 
 impl Workspace {
@@ -90,6 +91,23 @@ impl Workspace {
                 // Spaces aren't allowed in branch names; git reports anything else that is invalid.
                 let name = input.read(cx).value().split_whitespace().collect::<Vec<_>>().join("-");
                 if name.is_empty() { Act::Dismiss } else { Act::CreateBranch(cwd, name) }
+            }
+            Some(Modal::NewWorktree { main_checkout, input, base }) => {
+                let typed = input.read(cx).value().trim().to_string();
+                let root = worktree::root();
+                let name = if typed.is_empty() {
+                    Ok(worktree::generate_name(uuid::Uuid::new_v4().as_u128(), worktree::name_taken(&root, &main_checkout)))
+                } else {
+                    worktree::check_name(&typed).and_then(|()| worktree::check_unused(&root, &main_checkout, &typed)).map(|()| typed)
+                };
+                match name {
+                    Ok(name) => Act::SwitchWorktree { folder: worktree::folder(&root, &main_checkout, &name), base },
+                    Err(why) => {
+                        self.modal = Some(Modal::NewWorktree { main_checkout, input, base });
+                        self.toast(why, true, cx);
+                        return;
+                    }
+                }
             }
             Some(Modal::Settings { shell, claude, model, effort, permission, updates, chrome, scale, trimmed, claudiu_off, list_focus }) => {
                 let clean = |s: &str| s.trim().trim_matches('"').to_string();

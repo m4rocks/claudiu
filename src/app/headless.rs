@@ -1251,3 +1251,303 @@ fn a_missing_claude_offers_the_setup_window() {
     }
     assert_eq!(cx.update(|app| app.windows().len()), 2, "the workspace and one setup window");
 }
+
+/// The worktree dialog and the switch of a session between worktrees, with a stand-in for `claude`, so what Claude Code
+/// does in the new folder is not checked.
+fn switching_between_worktrees_in_the_workspace() {
+    let data = tempfile::tempdir().unwrap();
+    // SAFETY: set before any other thread reads the environment; this test owns the process.
+    // Canonical, because the worktrees go below it and git reports their folders that way.
+    unsafe { std::env::set_var("CLAUDIU_DATA_DIR", dunce::canonicalize(data.path()).unwrap()) };
+    // Claude Code's data directory, where the conversation of a session is looked for.
+    let home = tempfile::tempdir().unwrap();
+    // SAFETY: as above.
+    unsafe { std::env::set_var("CLAUDE_CONFIG_DIR", home.path()) };
+    let work = tempfile::tempdir().unwrap();
+    let repo_dir = dunce::canonicalize(work.path()).unwrap().join("proj");
+    let repo = git2::Repository::init(&repo_dir).unwrap();
+    {
+        let sig = git2::Signature::now("t", "t@t").unwrap();
+        let tree = repo.find_tree(repo.index().unwrap().write_tree().unwrap()).unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[]).unwrap();
+    }
+    let mut cx = TestAppContext::single();
+    cx.update(|app| {
+        gpui_kit::init(app);
+        gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, app);
+    });
+    let initial = vec![repo_dir.clone()];
+    let (window, ws) = cx
+        .update(|app| gpui_kit::open_window(Default::default(), app, |window, app| app.new(|cx| Workspace::new(window, initial, cx))))
+        .unwrap();
+    let step = |cx: &mut TestAppContext, f: &dyn Fn(&mut Workspace, &mut Window, &mut Context<Workspace>)| {
+        let t = std::time::Instant::now();
+        cx.update_window(window, |_, window, app| ws.update(app, |ws, cx| f(ws, window, cx))).unwrap();
+        let acted = t.elapsed();
+        for _ in 0..2 {
+            cx.update_window(window, |_, window, app| window.draw(app).clear(app)).unwrap();
+            cx.run_until_parked();
+        }
+        assert!(acted < Duration::from_millis(400), "the window was blocked for {acted:?}");
+    };
+
+    let wait = |cx: &mut TestAppContext, what: &str, done: &dyn Fn(&Workspace, &App) -> bool| {
+        let t = std::time::Instant::now();
+        let mut said = None;
+        while !ws.read_with(cx, |ws, app| done(ws, app)) {
+            said = ws.read_with(cx, |ws, _| ws.toast.as_ref().map(|t| t.text.clone())).or(said);
+            assert!(t.elapsed() < Duration::from_secs(30), "{what} never happened; the last toast said {said:?}");
+            std::thread::sleep(Duration::from_millis(100));
+            cx.executor().advance_clock(Duration::from_millis(100));
+            cx.update_window(window, |_, window, app| window.draw(app).clear(app)).unwrap();
+            cx.run_until_parked();
+        }
+    };
+    let active = |ws: &Workspace| ws.store.session(ws.active.as_ref().unwrap()).unwrap().clone();
+    // A stand-in for `claude` that shows a line and stays up whatever it is asked, since a real one would end at once on
+    // a conversation that is not its own.
+    let fake = work.path().join(if cfg!(windows) { "claude.cmd" } else { "claude" });
+    std::fs::write(&fake, if cfg!(windows) { "@echo off\r\necho ready\r\nping -n 120 127.0.0.1 >nul\r\n" } else { "#!/bin/sh\necho ready\nsleep 120\n" }).unwrap();
+    #[cfg(unix)]
+    std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    ws.update(&mut cx, |ws, _| ws.claude_exe = Some(fake.clone()));
+
+    // A new session starts in the main checkout. The menu is there but cannot switch until a session runs.
+    step(&mut cx, &|ws, w, cx| ws.act(Act::NewClaude { cwd: repo_dir.clone() }, w, cx));
+    assert!(ws.read_with(&cx, |ws, _| ws.modal.is_none() && ws.live.len() == 1));
+    let session = ws.read_with(&cx, |ws, _| active(ws));
+    assert_eq!(session.cwd, repo_dir);
+    // The conversation exists once Claude Code has had a prompt; the test stands one in, in Claude Code's own place.
+    let claude_id = session.claude_id().unwrap().to_string();
+    let transcript = home.path().join("projects/p").join(format!("{claude_id}.jsonl"));
+    std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+    std::fs::write(&transcript, "{\"type\":\"user\"}
+").unwrap();
+    wait(&mut cx, "the first screen", &|ws, app| ws.live.iter().all(|l| !l.view.read(app).is_loading() && !l.view.read(app).is_working()));
+
+    // A bad name keeps the dialog open; a typed one moves the session into the worktree Claude Code will make.
+    step(&mut cx, &|ws, w, cx| ws.act(Act::NewWorktree(repo_dir.clone()), w, cx));
+    step(&mut cx, &|ws, w, cx| {
+        let Some(Modal::NewWorktree { input, .. }) = &ws.modal else { panic!("no dialog") };
+        input.clone().update(cx, |i, cx| i.set_value("bad name", w, cx));
+        ws.submit_modal(w, cx);
+    });
+    assert!(ws.read_with(&cx, |ws, _| matches!(ws.modal, Some(Modal::NewWorktree { .. }))), "a bad name is refused");
+    step(&mut cx, &|ws, w, cx| {
+        let Some(Modal::NewWorktree { input, .. }) = &ws.modal else { panic!("no dialog") };
+        input.clone().update(cx, |i, cx| i.set_value("fix-login", w, cx));
+        ws.act(Act::PickBase(crate::git::worktree::Base::Current), w, cx);
+        ws.submit_modal(w, cx);
+    });
+    let worktree = crate::git::worktree::folder(&crate::git::worktree::root(), &repo_dir, "fix-login");
+    // The grid the pane draws terminals on. A new terminal starts at a default size until it is first laid out.
+    let grid = ws.read_with(&cx, |ws, app| ws.live_view(&session.id).unwrap().read(app).terminal.size());
+    assert_ne!(grid, (120, 32), "the window must not happen to match the default size");
+    // Until the new process is up, the session stays shown and running behind its skeleton, never an empty pane, and
+    // the skeleton sits on the pane's grid from the first frame on.
+    let moved_to = |folder: &std::path::Path, ws: &Workspace, app: &App| {
+        let loading = ws.live_view(&session.id).is_some_and(|v| v.read(app).is_loading());
+        assert_eq!(ws.live_view(&session.id).map(|v| v.read(app).terminal.size()), Some(grid), "mid-switch the skeleton is on another grid");
+        assert!(ws.active.as_ref() == Some(&session.id) && ws.is_running(&session.id, app), "mid-switch the session is not shown running");
+        let moved = ws.store.session(&session.id).is_some_and(|r| r.cwd == folder);
+        assert!(loading || moved, "mid-switch the pane has no skeleton");
+        moved && !loading
+    };
+    wait(&mut cx, "the switch", &|ws, app| moved_to(&worktree, ws, app));
+    let branch = std::process::Command::new("git").args(["branch", "--show-current"]).current_dir(&worktree).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&branch.stdout).trim(), "fix-login", "the branch is named as typed");
+    assert_eq!(ws.read_with(&cx, |ws, _| ws.live.len()), 1, "the same session, not a new one");
+    assert_eq!(ws.read_with(&cx, |ws, _| active(ws).id), session.id);
+    assert_eq!(ws.read_with(&cx, |ws, _| active(ws).claude_id().map(str::to_string)), Some(claude_id.clone()), "the same conversation");
+    assert_eq!(std::fs::read_to_string(&transcript).unwrap().lines().count(), 1, "making a worktree writes nothing to the conversation");
+
+    // The worktree is in Claudiu's data folder, so the repository has nothing new for git to list and nothing to offer.
+    assert!(worktree.starts_with(dunce::canonicalize(data.path()).unwrap().join("worktrees")), "{worktree:?}");
+    let status = std::process::Command::new("git").args(["status", "--porcelain"]).current_dir(&repo_dir).output().unwrap();
+    assert!(status.stdout.is_empty(), "the repository is untouched: {}", String::from_utf8_lossy(&status.stdout));
+    assert!(ws.read_with(&cx, |ws, _| ws.toast.as_ref().is_none_or(|t| t.action.is_none())), "no toast offers an action");
+
+    // Back to the main checkout, as a session that `claude --worktree` put in the worktree: Claude Code's record of the
+    // worktree would win over the folder, so one line is appended.
+    std::fs::write(worktree.join("wip.txt"), "x").unwrap();
+    std::fs::write(&transcript, "{\"type\":\"user\"}
+{\"type\":\"worktree-state\",\"worktreeSession\":{\"worktreeName\":\"fix-login\"},\"sessionId\":\"x\"}
+").unwrap();
+    wait(&mut cx, "the first screen again", &|ws, app| ws.live.iter().all(|l| !l.view.read(app).is_loading() && !l.view.read(app).is_working()));
+    step(&mut cx, &|ws, w, cx| ws.act(Act::SwitchWorktree { folder: repo_dir.clone(), base: Default::default() }, w, cx));
+    // The work file stays in the worktree the session leaves, so it asks first.
+    wait(&mut cx, "the question", &|ws, _| matches!(&ws.modal, Some(Modal::Confirm { body, .. }) if body.contains("1 uncommitted file stays")));
+    step(&mut cx, &|ws, w, cx| ws.submit_modal(w, cx));
+    wait(&mut cx, "the switch back", &|ws, app| moved_to(&repo_dir, ws, app));
+    assert!(!crate::claude::worktree_recorded(&transcript).unwrap(), "the transcript no longer names the worktree");
+    assert!(std::fs::read_to_string(&transcript).unwrap().lines().count() == 3);
+
+    // A restart (a switch, a hand-off) puts the new terminal on the pane's grid before its first frame, which is drawn
+    // before the terminal is laid out: on a default grid the skeleton's prompt would jump to the middle for a frame.
+    step(&mut cx, &|ws, w, cx| {
+        ws.restart_session(&session.id, w, cx);
+        assert_eq!(ws.live_view(&session.id).map(|v| v.read(cx).terminal.size()), Some(grid), "the new terminal starts on another grid");
+    });
+    wait(&mut cx, "the restart", &|ws, app| ws.live_view(&session.id).is_some_and(|v| !v.read(app).is_loading()));
+
+    // Mid-turn nothing changes: a session that has not shown its first screen is not idle.
+    step(&mut cx, &|ws, w, cx| ws.act(Act::SwitchWorktree { folder: worktree.clone(), base: Default::default() }, w, cx));
+    // Either the check ran before the screen was ready (told to wait) or after (switched); it never half-switches.
+    wait(&mut cx, "a settled state", &|ws, app| ws.is_running(&session.id, app) && ws.live_view(&session.id).is_some_and(|v| !v.read(app).is_loading()));
+
+    // A project without commits has a disabled "New worktree…".
+    let bare = dunce::canonicalize(work.path()).unwrap().join("bare");
+    git2::Repository::init(&bare).unwrap();
+    let bare_project = ws.update(&mut cx, |ws, _| ws.store.add_project(&bare));
+    let bare_cwd = bare.clone();
+    let at = crate::panels::widgets::Dropdown { pos: gpui::point(gpui::px(100.0), gpui::px(30.0)), min_w: gpui::px(0.0) };
+    step(&mut cx, &|ws, _w, cx| ws.open_worktree_menu(bare_project.clone(), bare_cwd.clone(), crate::panels::widgets::Dropdown { pos: at.pos, min_w: at.min_w }, cx));
+    let last = ws.read_with(&cx, |ws, _| ws.menu.as_ref().and_then(|m| m.items.last().map(|i| (i.label.clone(), i.disabled, i.hint.clone()))));
+    assert!(matches!(&last, Some((label, true, Some(hint))) if label == "New worktree…" && hint.contains("no commits")), "{last:?}");
+}
+
+#[test]
+#[ignore]
+fn switching_between_worktrees() {
+    let t = std::thread::spawn(switching_between_worktrees_in_the_workspace);
+    let start = std::time::Instant::now();
+    while !t.is_finished() {
+        assert!(start.elapsed() < Duration::from_secs(120), "the workspace froze");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    t.join().unwrap();
+}
+
+/// A running session refuses the removal of its worktree. Ending it offers the removal, and confirming removes the folder
+/// (with a real `claude` running in it until the session ends, which on Windows holds the folder until the process is gone).
+fn removing_a_worktree_when_its_session_ends() {
+    let data = tempfile::tempdir().unwrap();
+    // SAFETY: set before any other thread reads the environment; this test owns the process.
+    // Canonical, because the worktrees go below it and git reports their folders that way.
+    unsafe { std::env::set_var("CLAUDIU_DATA_DIR", dunce::canonicalize(data.path()).unwrap()) };
+    let work = tempfile::tempdir().unwrap();
+    let repo_dir = dunce::canonicalize(work.path()).unwrap().join("proj");
+    let git = |args: &[&str]| std::process::Command::new("git").args(args).current_dir(&repo_dir).output().unwrap();
+    std::fs::create_dir_all(&repo_dir).unwrap();
+    for args in [&["init", "-q", "-b", "main"][..], &["config", "user.email", "t@t"], &["config", "user.name", "t"], &["commit", "-q", "--allow-empty", "-m", "one"]] {
+        git(args);
+    }
+    let folder = crate::git::worktree::folder(&crate::git::worktree::root(), &repo_dir, "fix");
+    git(&["worktree", "add", "-q", "-b", "worktree-fix", &folder.to_string_lossy()]);
+
+    let mut cx = TestAppContext::single();
+    cx.update(|app| {
+        gpui_kit::init(app);
+        gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, app);
+    });
+    let initial = vec![repo_dir.clone()];
+    let (window, ws) = cx
+        .update(|app| gpui_kit::open_window(Default::default(), app, |window, app| app.new(|cx| Workspace::new(window, initial, cx))))
+        .unwrap();
+    let step = |cx: &mut TestAppContext, f: &dyn Fn(&mut Workspace, &mut Window, &mut Context<Workspace>)| {
+        cx.update_window(window, |_, window, app| ws.update(app, |ws, cx| f(ws, window, cx))).unwrap();
+        for _ in 0..2 {
+            cx.update_window(window, |_, window, app| window.draw(app).clear(app)).unwrap();
+            cx.run_until_parked();
+        }
+    };
+    let wait = |cx: &mut TestAppContext, what: &str, done: &dyn Fn(&Workspace) -> bool| {
+        let t = std::time::Instant::now();
+        while !ws.read_with(cx, |ws, _| done(ws)) {
+            assert!(t.elapsed() < Duration::from_secs(30), "{what} never happened: {:?}", ws.read_with(cx, |ws, _| ws.toast.as_ref().map(|t| t.text.clone())));
+            std::thread::sleep(Duration::from_millis(100));
+            cx.executor().advance_clock(Duration::from_millis(100));
+            cx.update_window(window, |_, window, app| window.draw(app).clear(app)).unwrap();
+            cx.run_until_parked();
+        }
+    };
+    // The worktree is known to the project once git has been read again.
+    step(&mut cx, &|ws, _w, _cx| ws.store.refresh_git());
+    // Settings lists the worktree folders in the data folder: the one git lists can be removed with git, a leftover
+    // folder of a repository that is gone only deleted.
+    let orphan = crate::git::worktree::root().join("old-00000001").join("stale");
+    std::fs::create_dir_all(&orphan).unwrap();
+    step(&mut cx, &|ws, w, cx| ws.act(Act::OpenSettings, w, cx));
+    wait(&mut cx, "the worktree rows", &|ws| ws.worktree_rows.len() == 2);
+    let rows = ws.read_with(&cx, |ws, _| ws.worktree_rows.clone());
+    let listed = rows.iter().find(|r| r.folder == folder).expect("the worktree git lists");
+    assert_eq!(listed.main_checkout.as_deref(), Some(repo_dir.as_path()));
+    assert_eq!(listed.label, repo_dir.display().to_string());
+    let stale = rows.iter().find(|r| r.folder == orphan).expect("the leftover folder");
+    assert_eq!((stale.main_checkout.as_ref(), stale.label.as_str()), (None, "old"));
+    step(&mut cx, &|ws, w, cx| ws.act(Act::ConfirmDeleteWorktreeFolder(orphan.clone()), w, cx));
+    wait(&mut cx, "the leftover folder to go", &|_| !orphan.exists());
+    step(&mut cx, &|ws, _w, _cx| ws.modal = None);
+    // A new session never starts inside a worktree; Fix-with-Claude is the one starter that keeps the folder it is given.
+    step(&mut cx, &|ws, w, cx| ws.new_claude_with(folder.clone(), vec![], crate::claude::defaults::Starter::FixGit, w, cx));
+    let id = ws.read_with(&cx, |ws, _| ws.active.clone().unwrap());
+
+    // Any other way of starting a session, asked to start inside the worktree, starts in the main checkout.
+    step(&mut cx, &|ws, w, cx| ws.new_claude(folder.clone(), w, cx));
+    let (other, started_in) = ws.read_with(&cx, |ws, _| (ws.active.clone().unwrap(), ws.store.session(ws.active.as_ref().unwrap()).unwrap().cwd.clone()));
+    assert_eq!(started_in, repo_dir);
+    step(&mut cx, &|ws, w, cx| ws.close_live(&other, w, cx));
+    step(&mut cx, &|ws, w, cx| ws.act(Act::Select(id.clone()), w, cx));
+
+    // The top-bar menu offers the removal for the session's own worktree, and not in the main checkout.
+    let project = ws.read_with(&cx, |ws, _| ws.store.data.projects[0].id.clone());
+    let menu_of = |cx: &mut TestAppContext, cwd: PathBuf| {
+        let at = crate::panels::widgets::Dropdown { pos: gpui::point(gpui::px(100.0), gpui::px(30.0)), min_w: gpui::px(0.0) };
+        step(cx, &|ws, _w, cx| ws.open_worktree_menu(project.clone(), cwd.clone(), crate::panels::widgets::Dropdown { pos: at.pos, min_w: at.min_w }, cx));
+        // Each row's label and whether it has an x.
+        ws.read_with(cx, |ws, _| ws.menu.as_ref().map(|m| m.items.iter().map(|i| (i.label.trim().to_string(), i.remove.is_some())).collect::<Vec<_>>()).unwrap_or_default())
+    };
+    for cwd in [folder.clone(), repo_dir.clone()] {
+        let rows = menu_of(&mut cx, cwd);
+        assert_eq!(rows[0].0, "Worktrees");
+        assert!(rows[1].0.contains("main checkout") && !rows[1].1, "the main checkout has no x: {rows:?}");
+        assert!(rows[2].0.contains("fix") && rows[2].1, "the worktree has an x: {rows:?}");
+        assert!(rows.last().is_some_and(|r| r.0 == "New worktree…" && !r.1), "{rows:?}");
+    }
+
+    // The x on the worktree a session is running in is refused, naming the session.
+    let own_x = ws.read_with(&cx, |ws, _| ws.menu.as_ref().and_then(|m| m.items[2].remove.clone()));
+    let Some(x) = own_x else { panic!("no x on the worktree's row") };
+    step(&mut cx, &|ws, w, cx| ws.act(x.clone(), w, cx));
+    let toast = ws.read_with(&cx, |ws, _| ws.toast.as_ref().map(|t| t.text.clone()));
+    assert!(toast.as_deref().is_some_and(|t| t.contains("is in fix. Switch it to main first.")), "{toast:?}");
+    assert!(folder.exists() && ws.read_with(&cx, |ws, _| ws.modal.is_none() && ws.live.len() == 1), "nothing changes");
+
+    // Ending the session by itself offers the removal.
+    step(&mut cx, &|ws, w, cx| ws.close_live(&id, w, cx));
+    wait(&mut cx, "the offer", &|ws| matches!(&ws.modal, Some(Modal::Confirm { act: Act::ConfirmRemoveWorktree { .. }, .. })));
+    step(&mut cx, &|ws, w, cx| ws.submit_modal(w, cx));
+    wait(&mut cx, "the folder to go", &|_| !folder.exists());
+    let toast = ws.read_with(&cx, |ws, _| ws.toast.as_ref().map(|t| t.text.clone()));
+    assert!(toast.as_deref().is_some_and(|t| t.contains("Removed worktree fix")), "{toast:?}");
+    assert!(!git(&["rev-parse", "--verify", "-q", "worktree-fix"]).status.success(), "the merged branch went with it");
+
+    // The branch menu has a title and an x on every local branch but the current one.
+    assert!(git(&["branch", "spare"]).status.success());
+    let at = crate::panels::widgets::Dropdown { pos: gpui::point(gpui::px(100.0), gpui::px(30.0)), min_w: gpui::px(0.0) };
+    step(&mut cx, &|ws, _w, cx| ws.open_branch_menu(repo_dir.clone(), crate::panels::widgets::Dropdown { pos: at.pos, min_w: at.min_w }, cx));
+    wait(&mut cx, "the branch menu", &|ws| ws.menu.is_some());
+    let rows = ws.read_with(&cx, |ws, _| ws.menu.as_ref().map(|m| m.items.iter().map(|i| (i.label.trim().to_string(), i.remove.clone())).collect::<Vec<_>>()).unwrap_or_default());
+    assert_eq!(rows[0].0, "Branches");
+    let spare = rows.iter().find(|r| r.0 == "spare").and_then(|r| r.1.clone());
+    assert!(spare.is_some(), "a local branch has an x: {rows:?}");
+    assert!(rows.iter().find(|r| r.0.starts_with('✓')).is_some_and(|r| r.1.is_none()), "the current branch has none: {rows:?}");
+
+    let x = spare.unwrap();
+    step(&mut cx, &|ws, w, cx| ws.act(x.clone(), w, cx));
+    wait(&mut cx, "the question", &|ws| matches!(&ws.modal, Some(Modal::Confirm { confirm, .. }) if confirm == "Delete"));
+    step(&mut cx, &|ws, w, cx| ws.submit_modal(w, cx));
+    wait(&mut cx, "the branch to go", &|_| !git(&["rev-parse", "--verify", "-q", "spare"]).status.success());
+}
+
+#[test]
+#[ignore]
+fn removing_a_worktree() {
+    let t = std::thread::spawn(removing_a_worktree_when_its_session_ends);
+    let start = std::time::Instant::now();
+    while !t.is_finished() {
+        assert!(start.elapsed() < Duration::from_secs(120), "the workspace froze");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    t.join().unwrap();
+}

@@ -9,7 +9,7 @@ use gpui::{
 use crate::claude::defaults::{Effort, PermissionMode};
 use crate::claude::mcp::Feature;
 use crate::claude::trim::Trim;
-use crate::app::{
+use crate::app::{WorktreeRow, 
     Act, CloseSession, SettingsPage, GitOp, FocusSearch, ImportProject, Main, MenuItem, Modal, NewClaude, NextSession, OpenGithub, OpenSettings, PrevSession, ShellDrag, SwapFocus,
     ToggleEditor, ToggleRight, ToggleShell, ToggleSidebar, Workspace, SHELL_HEIGHT,
 };
@@ -31,7 +31,10 @@ impl Workspace {
         let hints = self.shortcuts_shown;
 
         let title = rec.as_ref().map(|r| r.display_title().to_string()).unwrap_or_else(|| "Claudiu".into());
-        let branch = project.as_ref().and_then(|p| p.git.as_ref()).and_then(|g| g.branch.clone());
+        // The branch and the worktree of the session's own folder, which is not the project's folder for a worktree session.
+        let git = project.as_ref().and_then(|p| p.git.as_ref());
+        let branch = git.and_then(|g| cwd.as_deref().map_or(g.branch.as_deref(), |c| g.branch_at(c))).map(str::to_string);
+        let worktree = project.as_ref().zip(git).zip(cwd.as_deref()).and_then(|((p, g), c)| Some((p.id.clone(), c.to_path_buf(), crate::git::worktree::label(g, c)?)));
         // `.occlude()` on both groups: the bar is a Windows drag (HTCAPTION) area, which would otherwise swallow clicks on the buttons inside it.
         // The top bar spans the window and is drawn as the window background, not as a panel. macOS keeps its
         // traffic lights at the left (they are hidden in fullscreen); Windows/Linux get min/max/close at the right.
@@ -103,6 +106,30 @@ impl Workspace {
                                 .child(b)
                                 .child(tail)
                                 .dropdown(cx, move |ws, at, _w, cx| ws.open_branch_menu(repo.clone(), at, cx)),
+                        )
+                    })
+                    .when_some(worktree, |d, (project, cwd, label)| {
+                        // Click: the repository's worktrees and a new one (see Workspace::open_worktree_menu).
+                        d.child(
+                            div()
+                                .id("worktree")
+                                .occlude()
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .gap(px(4.0))
+                                .px(px(7.0))
+                                .py(px(1.0))
+                                .rounded(px(10.0))
+                                .bg(hsla(0x26262a))
+                                .text_size(crate::panels::scale::px(11.0))
+                                .text_color(hsla(theme::TEXT_DIM))
+                                .cursor_pointer()
+                                .hover(|s| s.bg(hsla(0x323236)).text_color(hsla(theme::TEXT)))
+                                .child(icon(IconName::FolderGit2, 12.0))
+                                .child(label)
+                                .child(icon(IconName::ChevronDown, 12.0))
+                                .dropdown(cx, move |ws, at, _w, cx| ws.open_worktree_menu(project.clone(), cwd.clone(), at, cx)),
                         )
                     }),
             )
@@ -330,7 +357,7 @@ impl Workspace {
                     .child(button("home-claude", "New", true).dropdown(
                         cx,
                         |ws, at, _w, cx| {
-                            let item = |label: String, act: Act, sep: bool| crate::app::MenuItem { label, hint: None, act, danger: false, disabled: false, separator_before: sep };
+                            let item = |label: String, act: Act, sep: bool| crate::app::MenuItem { label, hint: None, act, danger: false, disabled: false, separator_before: sep, remove: None, icon: None };
                             let mut items: Vec<_> = ws.store.data.projects.iter().map(|p| item(p.name.clone(), Act::NewClaude { cwd: p.path.clone() }, false)).collect();
                             let sep = !items.is_empty();
                             items.push(item("Add project…".into(), Act::ImportProject, sep));
@@ -388,8 +415,19 @@ impl Workspace {
                 .text_size(crate::panels::scale::px(12.5))
                 .text_color(hsla(color))
                 .gap(px(8.0))
+                .group(gpui::SharedString::from(format!("menu-row-{i}")))
                 .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(item.label.clone()))
-                .children(item.hint.clone().map(|h| div().flex_none().text_size(crate::panels::scale::px(11.0)).text_color(hsla(theme::TEXT_FAINT)).child(h)));
+                .children(item.icon.map(|name| icon(name, 12.0).text_color(hsla(theme::TEXT_FAINT))))
+                .children(item.hint.clone().map(|h| div().flex_none().text_size(crate::panels::scale::px(11.0)).text_color(hsla(theme::TEXT_FAINT)).child(h)))
+                .children(item.remove.clone().map(|remove| {
+                    icon_button(gpui::SharedString::from(format!("menu-remove-{i}")), IconName::X)
+                        .invisible()
+                        .group_hover(gpui::SharedString::from(format!("menu-row-{i}")), |s| s.visible())
+                        .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
+                            cx.stop_propagation();
+                            ws.act(remove.clone(), window, cx);
+                        }))
+                }));
             card = card.child(if item.disabled {
                 row
             } else {
@@ -428,7 +466,7 @@ impl Workspace {
                 confirm.clone(),
                 *danger,
             ),
-            Modal::Settings { .. } => ("Settings".into(), settings_body(self.settings_page, modal, &self.settings_scroll, window, cx), "Save".into(), false),
+            Modal::Settings { .. } => ("Settings".into(), settings_body(self.settings_page, modal, &self.worktree_rows, &self.settings_scroll, window, cx), "Save".into(), false),
             Modal::Advisor { input, .. } => (
                 "Advisor model".into(),
                 div()
@@ -456,6 +494,33 @@ impl Workspace {
                 .into(),
                 false,
             ),
+            Modal::NewWorktree { input, base, .. } => {
+                use crate::git::worktree::Base;
+                let choice = |id: &'static str, label: &'static str, this: Base| {
+                    button(id, label, *base == this).on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::PickBase(this), window, cx)))
+                };
+                (
+                    "New worktree".into(),
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(10.0))
+                        .child(div().text_size(crate::panels::scale::px(12.0)).text_color(hsla(theme::TEXT_DIM)).child("The session moves into it and keeps its history. Claudiu makes it in its own data folder, away from the repository, with a new branch of this name."))
+                        .child(Input::new(input))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(6.0))
+                                .child(div().text_size(crate::panels::scale::px(12.0)).text_color(hsla(theme::TEXT_FAINT)).child("Start from"))
+                                .child(choice("base-main", "Main", Base::Main))
+                                .child(choice("base-current", "Current branch", Base::Current)),
+                        )
+                        .into_any_element(),
+                    "Create and switch".into(),
+                    false,
+                )
+            }
             Modal::GoToLine { input, .. } => ("Go to line".into(), Input::new(input).into_any_element(), "Go".into(), false),
             Modal::Rename { input, .. } | Modal::NewBranch { input, .. } => (
                 if matches!(modal, Modal::NewBranch { .. }) { "New branch" } else { "Rename session" }.into(),
@@ -757,7 +822,7 @@ impl Render for Workspace {
 }
 
 /// The Settings dialog's body: the category list on the left and the chosen page on the right.
-fn settings_body(page: SettingsPage, modal: &Modal, scroll: &crate::panels::glide::Smooth, window: &mut Window, cx: &mut Context<Workspace>) -> AnyElement {
+fn settings_body(page: SettingsPage, modal: &Modal, worktrees: &[WorktreeRow], scroll: &crate::panels::glide::Smooth, window: &mut Window, cx: &mut Context<Workspace>) -> AnyElement {
     let Modal::Settings { shell, claude, model, effort, permission, updates, chrome, scale, trimmed, claudiu_off, list_focus } = modal else {
         return div().into_any_element();
     };
@@ -850,6 +915,24 @@ fn settings_body(page: SettingsPage, modal: &Modal, scroll: &crate::panels::glid
                         flip(claudiu_off, feature);
                     }
                 }, cx));
+            }
+            list
+        }
+        SettingsPage::Worktrees => {
+            let mut list = div().flex().flex_col().gap(px(8.0)).child(faint(
+                "The worktrees Claudiu makes are kept in its data folder, away from your repositories. Removing one asks first, and a session in it has to leave first."
+                    .to_string(),
+            ));
+            if worktrees.is_empty() {
+                list = list.child(faint("No worktrees yet.".to_string()));
+            }
+            let mut repo = None;
+            for (i, row) in worktrees.iter().enumerate() {
+                if repo != Some(&row.repo) {
+                    repo = Some(&row.repo);
+                    list = list.child(div().mt(px(4.0)).child(section_label(row.label.clone())));
+                }
+                list = list.child(worktree_row(i, row, cx));
             }
             list
         }
@@ -975,6 +1058,38 @@ fn switch_row(
             flip(ws);
             cx.notify();
         }))
+}
+
+/// One worktree folder on the Settings page, with the buttons that show it in the file manager and remove it.
+fn worktree_row(i: usize, row: &WorktreeRow, cx: &mut Context<Workspace>) -> impl IntoElement {
+    let name = row.folder.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let remove = match &row.main_checkout {
+        Some(main_checkout) => Act::RemoveWorktree { main_checkout: main_checkout.clone(), folder: row.folder.clone() },
+        None => Act::DeleteWorktreeFolder(row.folder.clone()),
+    };
+    let reveal = Act::Reveal(row.folder.clone());
+    div()
+        .min_h(px(32.0))
+        .px(px(10.0))
+        .py(px(4.0))
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap(px(8.0))
+        .rounded(px(6.0))
+        .bg(hsla(0x111111))
+        .border_1()
+        .border_color(hsla(0x242424))
+        .text_size(crate::panels::scale::px(13.0))
+        .child(div().min_w_0().overflow_hidden().child(name))
+        .child(
+            div()
+                .flex()
+                .flex_none()
+                .gap(px(6.0))
+                .child(button(format!("worktree-reveal-{i}"), "Show in file manager", false).on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(reveal.clone(), window, cx))))
+                .child(button(format!("worktree-remove-{i}"), "Remove", false).on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(remove.clone(), window, cx)))),
+        )
 }
 
 /// A − / + button in the Settings modal that moves the scale by `by` percent, within the allowed range.

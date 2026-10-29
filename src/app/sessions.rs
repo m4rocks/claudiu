@@ -107,6 +107,8 @@ impl Workspace {
     /// `leading` goes before every other argument: the initial prompt must come ahead of the variadic
     /// `--allowedTools` / `--mcp-config` flags, or they would swallow it.
     pub(super) fn new_claude_with(&mut self, cwd: PathBuf, mut leading: Vec<String>, by: Starter, window: &mut Window, cx: &mut Context<Self>) {
+        // A new session starts in the main checkout, not in a linked worktree. Fix-with-Claude works where the failure was.
+        let cwd = if by == Starter::FixGit { cwd } else { self.outside_linked_worktree(cwd) };
         let Some(exe) = self.claude_exe.clone() else {
             self.show_toast("Could not find the `claude` CLI. Install Claude Code, or set its path in Settings.".into(), true, Some(("Check setup".into(), Act::OpenSetup)), cx);
             return;
@@ -141,12 +143,26 @@ impl Workspace {
         self.start(record, spec, true, window, cx);
     }
 
+    /// `cwd`, or the project's main checkout when `cwd` is inside one of its linked worktrees.
+    fn outside_linked_worktree(&self, cwd: PathBuf) -> PathBuf {
+        let git = self.store.project_for_cwd(&cwd).and_then(|id| self.store.project(&id)).and_then(|p| p.git.as_ref());
+        match git.and_then(|g| g.folder_of(&cwd).filter(|f| !g.is_main(f)).map(|_| g.main_checkout())) {
+            Some(main) if main.is_dir() => main.to_path_buf(),
+            _ => cwd,
+        }
+    }
+
     /// Resume a Claude session through `claude --resume`. Reuses the history record.
     pub fn resume(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         if self.is_running(id, cx) {
             self.show_session(id, window, cx);
             return;
         }
+        self.relaunch(id, window, cx);
+    }
+
+    /// `claude --resume` in the record's folder. A running view of the session is replaced, which ends its process.
+    pub(super) fn relaunch(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(rec) = self.store.session(id).cloned() else {
             return;
         };
@@ -157,7 +173,8 @@ impl Workspace {
             self.toast("Could not find the `claude` CLI.", true, cx);
             return;
         };
-        let mut spec = claude::resume_spec(&exe, &rec.cwd, &meta.session_id);
+        let cwd = self.resume_cwd(&rec, cx);
+        let mut spec = claude::resume_spec(&exe, &cwd, &meta.session_id);
         // Hand Claudiu's tab title to Claude Code so its own name (prompt box, /resume, Remote Control) matches.
         if let Some(name) = rec.chosen_title() {
             spec.args.extend(["--name".into(), name.into()]);
@@ -166,12 +183,33 @@ impl Workspace {
         self.start(rec, spec, false, window, cx);
     }
 
+    /// Where a resumed session starts: its folder, or its project's main checkout when the folder is gone (Claude Code's
+    /// exit prompt removes a worktree). Claude Code then tells the user in the session that the worktree is gone.
+    fn resume_cwd(&mut self, rec: &SessionRecord, cx: &mut Context<Self>) -> PathBuf {
+        if rec.cwd.is_dir() {
+            return rec.cwd.clone();
+        }
+        let project = rec.project_id.as_ref().and_then(|id| self.store.project(id));
+        let fallback = project.map(|p| p.git.as_ref().map_or(p.path.as_path(), |g| g.main_checkout()).to_path_buf()).filter(|p| p.is_dir());
+        match fallback {
+            Some(main) => {
+                let short = crate::panels::widgets::short_path;
+                self.toast(format!("{} is gone, so the session starts in {}.", short(&rec.cwd), short(&main)), false, cx);
+                // The record follows, so the shell, the files and the next resume start there too.
+                if let Some(r) = self.store.session_mut(&rec.id) {
+                    r.cwd = main.clone();
+                }
+                main
+            }
+            None => rec.cwd.clone(),
+        }
+    }
+
     /// End the session's process and resume the same conversation. The shell and cards belong to the session, so they stay.
     pub(super) fn restart_session(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         let was_shown = self.active_id().is_some_and(|a| a == id);
         let shell = self.shells.remove(id);
-        self.live.retain(|l| l.id != id); // dropping the view closes the old process
-        self.resume(id, window, cx);
+        self.relaunch(id, window, cx);
         if let Some(shell) = shell {
             self.shells.insert(id.into(), shell);
         }
@@ -193,7 +231,9 @@ impl Workspace {
         let loading = record.kind == SessionKind::Claude;
         record.exit_code = None;
         record.last_active = now();
-        // Re-resuming: drop the previous (exited) terminal view for this record.
+        // The pane's grid: from the view this one replaces, or the one shown there now.
+        let layout = self.live_view(&id).or_else(|| self.active.as_ref().and_then(|a| self.live_view(a))).and_then(|v| v.read(cx).layout());
+        // Drop the previous terminal view for this record: an exited one, or a running one whose process this ends.
         self.live.retain(|l| l.id != id);
         self.purge_dead_shells();
         self.transcript_mtimes.remove(&id);
@@ -206,6 +246,9 @@ impl Workspace {
         let view = cx.new(|cx| {
             let mut v = TerminalView::new(terminal, rx, cx);
             v.loading = loading;
+            if let Some(layout) = layout {
+                v.take_layout(layout);
+            }
             v
         });
         let sub_id = id.clone();
@@ -343,7 +386,17 @@ impl Workspace {
         window.focus(&self.root_focus, cx);
     }
 
+    /// End a session. One that ran in a Claude Code worktree no other session uses then gets the offer to remove it,
+    /// since Claude Code's own prompt only appears when a session exits with `/exit`.
     pub(super) fn close_live(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let was_in = self.store.session(id).map(|s| (s.cwd.clone(), s.project_id.clone()));
+        self.end_live(id, window, cx);
+        if let Some((cwd, project)) = was_in {
+            self.offer_worktree_removal(&cwd, project.as_deref(), cx);
+        }
+    }
+
+    pub(super) fn end_live(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         if self.logins.remove(id) {
             self.refresh_accounts(cx);
         }

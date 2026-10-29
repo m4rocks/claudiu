@@ -383,7 +383,7 @@ fn write_atomic(path: &Path, text: &str) -> bool {
 }
 
 impl Store {
-    /// Platform app-data location, e.g. `%LOCALAPPDATA%\m4rocks\Claudiu\data\state.json`.
+    /// Platform app-data location, e.g. `%LOCALAPPDATA%\m4rocks\Claudiu\data\state.json` (`Claudiu Dev` in a debug build).
     pub fn default_path() -> PathBuf {
         // Tests (and anyone running a second copy) can keep their state away from the real one.
         if let Some(dir) = std::env::var_os("CLAUDIU_DATA_DIR") {
@@ -393,13 +393,16 @@ impl Store {
         // On Windows the Velopack install root is `%LOCALAPPDATA%\Claudiu`, and running Setup.exe over it wipes
         // everything inside, so the data lives under an organization folder beside it instead.
         let org = if cfg!(windows) { "m4rocks" } else { "" };
-        let Some(dirs) = directories::ProjectDirs::from("", org, "Claudiu") else { return PathBuf::from("claudiu-state.json") };
+        // A debug build (`cargo run`) keeps its own folder: two apps on one folder take each other's request files (#84).
+        let app = if cfg!(debug_assertions) { "Claudiu Dev" } else { "Claudiu" };
+        let Some(dirs) = directories::ProjectDirs::from("", org, app) else { return PathBuf::from("claudiu-state.json") };
         let dir = dirs.data_local_dir().to_path_buf();
         #[cfg(windows)]
         {
             static MIGRATE: std::sync::Once = std::sync::Once::new();
             MIGRATE.call_once(|| {
-                let old = directories::ProjectDirs::from("", "", "Claudiu").map(|d| d.data_local_dir().to_path_buf());
+                // Only the released app has data at the old place; a debug build must not move it.
+                let old = directories::ProjectDirs::from("", "", "Claudiu").filter(|_| !cfg!(debug_assertions)).map(|d| d.data_local_dir().to_path_buf());
                 if let Some(old) = old.filter(|o| o.join("state.json").exists() && !dir.join("state.json").exists()) {
                     // Same volume, so a rename moves everything at once; if it fails the app starts fresh, the old folder untouched.
                     let _ = fs::create_dir_all(dir.parent().unwrap_or(&dir)).and_then(|_| fs::rename(&old, &dir));
@@ -688,6 +691,12 @@ pub fn reconcile(data: &mut Data, external: &[ExternalSession], scan_ok: bool) -
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_worktree_toggle_saved_by_an_earlier_version_is_ignored() {
+        let settings: Settings = serde_json::from_str(r#"{"worktree_sessions":true}"#).unwrap();
+        assert_eq!(settings, Settings::default());
+    }
+
     use super::*;
 
     fn ext(id: &str, cwd: &str, title: &str, last: i64) -> ExternalSession {
