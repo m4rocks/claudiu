@@ -88,6 +88,8 @@ fn run() {
     serve(&mut cx, take());
     assert!(h.join().unwrap().unwrap().contains("latest terminal output"));
     step(&mut cx, &|ws, w, cx| ws.close_live(&id, w, cx));
+    // Closing goes to the home screen; the ended session is picked from the sidebar.
+    step(&mut cx, &|ws, w, cx| ws.act(Act::Select(id.clone()), w, cx));
 }
 
 /// Sessions, the shell panel and the GitHub view, with the real `claude` and shell but no model calls.
@@ -1293,6 +1295,39 @@ fn switching_between_worktrees_in_the_workspace() {
 ").unwrap();
     wait(&mut cx, "the first screen", &|ws, app| ws.live.iter().all(|l| !l.view.read(app).is_loading() && !l.view.read(app).is_working()));
 
+    // Files open in the editor when the session moves: two are committed, so the new worktree has them, and one is
+    // ignored, so it only exists in the main checkout.
+    let cli = |args: &[&str]| assert!(std::process::Command::new("git").args(["-c", "user.name=t", "-c", "user.email=t@t"]).args(args).current_dir(&repo_dir).status().unwrap().success());
+    std::fs::write(repo_dir.join(".gitignore"), "only_main.txt\n").unwrap();
+    std::fs::write(repo_dir.join("same.txt"), "committed\n").unwrap();
+    std::fs::write(repo_dir.join("dirty.txt"), "committed\n").unwrap();
+    std::fs::write(repo_dir.join("only_main.txt"), "ignored\n").unwrap();
+    cli(&["add", "."]);
+    cli(&["commit", "-q", "-m", "files"]);
+    let id = session.id.clone();
+    step(&mut cx, &|ws, w, cx| ws.toggle_editor(w, cx));
+    wait(&mut cx, "listing the folder", &|ws, _| ws.panes.get(&id).is_some_and(|p| p.nodes.iter().any(|n| n.name == "same.txt")));
+    for name in ["same.txt", "dirty.txt", "only_main.txt"] {
+        step(&mut cx, &|ws, w, cx| ws.open_file(&id, repo_dir.join(name), None, w, cx));
+    }
+    wait(&mut cx, "the three tabs", &|ws, _| ws.panes[&id].tabs.len() == 3);
+    step(&mut cx, &|ws, w, cx| {
+        let tab = ws.panes[&id].tabs.iter().find(|t| t.path.ends_with("dirty.txt")).unwrap();
+        tab.buffer.clone().update(cx, |b, cx| b.replace_all("edited\n", w, cx));
+    });
+    assert!(ws.read_with(&cx, |ws, _| ws.panes[&id].tabs.iter().any(|t| t.path.ends_with("dirty.txt") && t.dirty)), "the edit marks the tab");
+    let tab_paths = |ws: &Workspace| ws.panes[&id].tabs.iter().map(|t| t.path.clone()).collect::<Vec<_>>();
+    let canonical = |p: &std::path::Path| dunce::canonicalize(p).unwrap();
+    assert_eq!(ws.read_with(&cx, |ws, _| ws.panes[&id].root.clone()), canonical(&repo_dir), "the file tree starts at the main checkout");
+
+    // A shell is open under the session at a height of the user's choosing.
+    step(&mut cx, &|ws, w, cx| {
+        ws.toggle_shell(&id, w, cx);
+        ws.shells.get_mut(&id).unwrap().height = 333.0;
+    });
+    let shell = |ws: &Workspace| ws.shells.get(&id).map(|p| (p.view.entity_id(), p.open, p.height));
+    let (shell_before, ..) = ws.read_with(&cx, |ws, _| shell(ws)).unwrap();
+
     // A bad name keeps the dialog open; a typed one moves the session into the worktree Claude Code will make.
     step(&mut cx, &|ws, w, cx| ws.act(Act::NewWorktree(repo_dir.clone()), w, cx));
     step(&mut cx, &|ws, w, cx| {
@@ -1308,6 +1343,8 @@ fn switching_between_worktrees_in_the_workspace() {
         ws.submit_modal(w, cx);
     });
     let worktree = crate::git::worktree::folder(&repo_dir, "fix-login");
+    let skeleton = |ws: &Workspace, app: &App| ws.live_view(&session.id).and_then(|v| v.read(app).handover.as_ref().map(|h| h.message.clone()));
+    assert_eq!(ws.read_with(&cx, |ws, app| skeleton(ws, app)).as_deref(), Some("Switching to fix-login…"), "the skeleton names the worktree");
     // The grid the pane draws terminals on. A new terminal starts at a default size until it is first laid out.
     let grid = ws.read_with(&cx, |ws, app| ws.live_view(&session.id).unwrap().read(app).terminal.size());
     assert_ne!(grid, (120, 32), "the window must not happen to match the default size");
@@ -1329,6 +1366,18 @@ fn switching_between_worktrees_in_the_workspace() {
     assert_eq!(ws.read_with(&cx, |ws, _| active(ws).claude_id().map(str::to_string)), Some(claude_id.clone()), "the same conversation");
     assert_eq!(std::fs::read_to_string(&transcript).unwrap().lines().count(), 1, "making a worktree writes nothing to the conversation");
 
+    // The shell is a new one, open and as tall as before.
+    let (shell_now, open, height) = ws.read_with(&cx, |ws, _| shell(ws)).expect("the session still has a shell");
+    assert!(shell_now != shell_before && open && height == 333.0, "a fresh shell, open at {height}");
+
+    // The editor follows the session: a clean tab whose file the worktree has moves with it, one with unsaved edits or
+    // whose file the worktree lacks stays where it was and the user is told, and the file tree shows the worktree.
+    let (in_worktree, in_main) = (canonical(&worktree), canonical(&repo_dir));
+    assert_eq!(ws.read_with(&cx, |ws, _| tab_paths(ws)), [in_worktree.join("same.txt"), in_main.join("dirty.txt"), in_main.join("only_main.txt")], "tabs after the switch");
+    assert!(ws.read_with(&cx, |ws, _| ws.toast.as_ref().is_some_and(|t| t.text.contains("2 open files stay"))), "the toast counts the tabs that stayed");
+    wait(&mut cx, "the file tree at the worktree", &|ws, _| ws.panes[&id].root == in_worktree && ws.panes[&id].nodes.iter().any(|n| n.name == "same.txt"));
+    assert_eq!(ws.read_with(&cx, |ws, _| ws.panes[&id].tabs.iter().find(|t| t.path.ends_with("dirty.txt")).map(|t| t.dirty)), Some(true), "the unsaved edit is kept");
+
     // The worktree is outside the repository, so git has nothing to list there and no .gitignore line is offered.
     let status = std::process::Command::new("git").args(["status", "--porcelain"]).current_dir(&repo_dir).output().unwrap();
     assert!(status.stdout.is_empty(), "the main checkout is unchanged: {}", String::from_utf8_lossy(&status.stdout));
@@ -1344,8 +1393,17 @@ fn switching_between_worktrees_in_the_workspace() {
     step(&mut cx, &|ws, w, cx| ws.act(Act::SwitchWorktree { folder: repo_dir.clone(), base: Default::default() }, w, cx));
     // The work file stays in the worktree the session leaves, so it asks first.
     wait(&mut cx, "the question", &|ws, _| matches!(&ws.modal, Some(Modal::Confirm { body, .. }) if body.contains("1 uncommitted file stays")));
+    step(&mut cx, &|ws, w, cx| ws.act(Act::Dismiss, w, cx));
+    assert!(ws.read_with(&cx, |ws, app| ws.modal.is_none() && skeleton(ws, app).is_none() && active(ws).cwd == worktree), "cancelling leaves the session where it was, with no skeleton");
+    step(&mut cx, &|ws, w, cx| ws.act(Act::SwitchWorktree { folder: repo_dir.clone(), base: Default::default() }, w, cx));
+    wait(&mut cx, "the question again", &|ws, _| matches!(&ws.modal, Some(Modal::Confirm { .. })));
     step(&mut cx, &|ws, w, cx| ws.submit_modal(w, cx));
+    assert_eq!(ws.read_with(&cx, |ws, app| skeleton(ws, app)).as_deref(), Some("Switching to the main checkout…"));
     wait(&mut cx, "the switch back", &|ws, app| moved_to(&repo_dir, ws, app));
+    // The tab that moved into the worktree moves back; the ones that stayed in the main checkout are not under the
+    // tree's root any more, so they stay.
+    assert_eq!(ws.read_with(&cx, |ws, _| tab_paths(ws)), [in_main.join("same.txt"), in_main.join("dirty.txt"), in_main.join("only_main.txt")], "tabs after the switch back");
+    wait(&mut cx, "the file tree at the main checkout", &|ws, _| ws.panes[&id].root == in_main);
     assert!(!crate::claude::worktree_recorded(&transcript).unwrap(), "the transcript no longer names the worktree");
     assert!(std::fs::read_to_string(&transcript).unwrap().lines().count() == 3);
 
