@@ -1,7 +1,7 @@
 //! Switching a running session into another working tree of its repository, the way a session switches branches.
 //! The process ends and `claude --resume` continues the same conversation in the target folder; the Claudiu session
 //! (its title, cards, place in the sidebar) is the same record, whose folder is now the target's. A new worktree is
-//! made with git first (`worktree::add`).
+//! made with git first (`worktree::add`), in Claudiu's data folder.
 //!
 //! A session that Claude Code itself put in a worktree (`claude --worktree`) has that worktree recorded in its
 //! transcript, and Claude Code restores it on every resume, which wins over the folder `claude` is started in. So
@@ -124,13 +124,12 @@ impl Workspace {
         let Some(claude_id) = rec.claude_id().map(str::to_string) else { return };
         let Some(git) = rec.project_id.as_ref().and_then(|p| self.store.project(p)).and_then(|p| p.git.clone()) else { return };
         let main = git.main_checkout().to_path_buf();
-        let created = !folder.exists();
         let message = switching_message(&git, &folder);
         cx.spawn_in(window, async move |this, cx| {
             let (target, main_checkout) = (folder.clone(), main.clone());
             let ready = cx.background_executor().spawn(async move { prepare(&main_checkout, &target, base, &transcript, &claude_id) }).await;
             let _ = this.update_in(cx, |ws, window, cx| match ready {
-                Ok(()) => ws.move_into(&id, folder, message, created.then_some(main), window, cx),
+                Ok(()) => ws.move_into(&id, folder, message, window, cx),
                 Err(why) => {
                     ws.set_handover(&id, None, cx);
                     ws.toast(format!("Couldn't switch: {why}."), true, cx);
@@ -140,9 +139,8 @@ impl Workspace {
         .detach();
     }
 
-    /// The old process ends and a new one resumes the conversation in `folder`, as a restart does. `offer_ignore_in` is
-    /// the main checkout when this switch made the worktree: its folders may need a `.gitignore` line.
-    fn move_into(&mut self, id: &str, folder: PathBuf, message: String, offer_ignore_in: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+    /// The old process ends and a new one resumes the conversation in `folder`, as a restart does.
+    fn move_into(&mut self, id: &str, folder: PathBuf, message: String, window: &mut Window, cx: &mut Context<Self>) {
         // Closed while the target was readied.
         if !self.is_running(id, cx) {
             return;
@@ -160,14 +158,6 @@ impl Workspace {
             self.show_session(id, window, cx);
         }
         self.store.refresh_git();
-        if let Some(main) = offer_ignore_in.filter(|main| !worktree::is_ignored(main)) {
-            self.show_toast(
-                "Git will list the new worktree folders as untracked files.".into(),
-                false,
-                Some(("Add to .gitignore".into(), Act::IgnoreWorktrees(main))),
-                cx,
-            );
-        }
     }
 
     /// A shell in the session's folder where there was one, open and as tall as before.

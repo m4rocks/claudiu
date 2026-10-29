@@ -9,7 +9,7 @@ use gpui::{
 use crate::claude::defaults::{Effort, PermissionMode};
 use crate::claude::mcp::Feature;
 use crate::claude::trim::Trim;
-use crate::app::{
+use crate::app::{WorktreeRow, 
     Act, CloseSession, SettingsPage, GitOp, FocusSearch, ImportProject, Main, MenuItem, Modal, NewClaude, NextSession, OpenGithub, OpenSettings, PrevSession, ShellDrag, SwapFocus,
     ToggleEditor, ToggleRight, ToggleShell, ToggleSidebar, Workspace, SHELL_HEIGHT,
 };
@@ -466,7 +466,7 @@ impl Workspace {
                 confirm.clone(),
                 *danger,
             ),
-            Modal::Settings { .. } => ("Settings".into(), settings_body(self.settings_page, modal, &self.settings_scroll, window, cx), "Save".into(), false),
+            Modal::Settings { .. } => ("Settings".into(), settings_body(self.settings_page, modal, &self.worktree_rows, &self.settings_scroll, window, cx), "Save".into(), false),
             Modal::Advisor { input, .. } => (
                 "Advisor model".into(),
                 div()
@@ -505,7 +505,7 @@ impl Workspace {
                         .flex()
                         .flex_col()
                         .gap(px(10.0))
-                        .child(div().text_size(crate::panels::scale::px(12.0)).text_color(hsla(theme::TEXT_DIM)).child("The session moves into it and keeps its history. Claudiu makes a folder under .claude/worktrees with a new branch of this name."))
+                        .child(div().text_size(crate::panels::scale::px(12.0)).text_color(hsla(theme::TEXT_DIM)).child("The session moves into it and keeps its history. Claudiu makes it in its own data folder, away from the repository, with a new branch of this name."))
                         .child(Input::new(input))
                         .child(
                             div()
@@ -822,7 +822,7 @@ impl Render for Workspace {
 }
 
 /// The Settings dialog's body: the category list on the left and the chosen page on the right.
-fn settings_body(page: SettingsPage, modal: &Modal, scroll: &crate::panels::glide::Smooth, window: &mut Window, cx: &mut Context<Workspace>) -> AnyElement {
+fn settings_body(page: SettingsPage, modal: &Modal, worktrees: &[WorktreeRow], scroll: &crate::panels::glide::Smooth, window: &mut Window, cx: &mut Context<Workspace>) -> AnyElement {
     let Modal::Settings { shell, claude, model, effort, permission, updates, chrome, scale, trimmed, claudiu_off, list_focus } = modal else {
         return div().into_any_element();
     };
@@ -915,6 +915,24 @@ fn settings_body(page: SettingsPage, modal: &Modal, scroll: &crate::panels::glid
                         flip(claudiu_off, feature);
                     }
                 }, cx));
+            }
+            list
+        }
+        SettingsPage::Worktrees => {
+            let mut list = div().flex().flex_col().gap(px(8.0)).child(faint(
+                "The worktrees Claudiu makes are kept in its data folder, away from your repositories. Removing one asks first, and a session in it has to leave first."
+                    .to_string(),
+            ));
+            if worktrees.is_empty() {
+                list = list.child(faint("No worktrees yet.".to_string()));
+            }
+            let mut repo = None;
+            for (i, row) in worktrees.iter().enumerate() {
+                if repo != Some(&row.repo) {
+                    repo = Some(&row.repo);
+                    list = list.child(div().mt(px(4.0)).child(section_label(row.label.clone())));
+                }
+                list = list.child(worktree_row(i, row, cx));
             }
             list
         }
@@ -1040,6 +1058,38 @@ fn switch_row(
             flip(ws);
             cx.notify();
         }))
+}
+
+/// One worktree folder on the Settings page, with the buttons that show it in the file manager and remove it.
+fn worktree_row(i: usize, row: &WorktreeRow, cx: &mut Context<Workspace>) -> impl IntoElement {
+    let name = row.folder.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let remove = match &row.main_checkout {
+        Some(main_checkout) => Act::RemoveWorktree { main_checkout: main_checkout.clone(), folder: row.folder.clone() },
+        None => Act::DeleteWorktreeFolder(row.folder.clone()),
+    };
+    let reveal = Act::Reveal(row.folder.clone());
+    div()
+        .min_h(px(32.0))
+        .px(px(10.0))
+        .py(px(4.0))
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap(px(8.0))
+        .rounded(px(6.0))
+        .bg(hsla(0x111111))
+        .border_1()
+        .border_color(hsla(0x242424))
+        .text_size(crate::panels::scale::px(13.0))
+        .child(div().min_w_0().overflow_hidden().child(name))
+        .child(
+            div()
+                .flex()
+                .flex_none()
+                .gap(px(6.0))
+                .child(button(format!("worktree-reveal-{i}"), "Show in file manager", false).on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(reveal.clone(), window, cx))))
+                .child(button(format!("worktree-remove-{i}"), "Remove", false).on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(remove.clone(), window, cx)))),
+        )
 }
 
 /// A − / + button in the Settings modal that moves the scale by `by` percent, within the allowed range.

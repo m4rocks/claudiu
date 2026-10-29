@@ -1257,7 +1257,8 @@ fn a_missing_claude_offers_the_setup_window() {
 fn switching_between_worktrees_in_the_workspace() {
     let data = tempfile::tempdir().unwrap();
     // SAFETY: set before any other thread reads the environment; this test owns the process.
-    unsafe { std::env::set_var("CLAUDIU_DATA_DIR", data.path()) };
+    // Canonical, because the worktrees go below it and git reports their folders that way.
+    unsafe { std::env::set_var("CLAUDIU_DATA_DIR", dunce::canonicalize(data.path()).unwrap()) };
     // Claude Code's data directory, where the conversation of a session is looked for.
     let home = tempfile::tempdir().unwrap();
     // SAFETY: as above.
@@ -1338,7 +1339,7 @@ fn switching_between_worktrees_in_the_workspace() {
         ws.act(Act::PickBase(crate::git::worktree::Base::Current), w, cx);
         ws.submit_modal(w, cx);
     });
-    let worktree = repo_dir.join(".claude/worktrees/fix-login");
+    let worktree = crate::git::worktree::folder(&crate::git::worktree::root(), &repo_dir, "fix-login");
     // The grid the pane draws terminals on. A new terminal starts at a default size until it is first laid out.
     let grid = ws.read_with(&cx, |ws, app| ws.live_view(&session.id).unwrap().read(app).terminal.size());
     assert_ne!(grid, (120, 32), "the window must not happen to match the default size");
@@ -1360,11 +1361,11 @@ fn switching_between_worktrees_in_the_workspace() {
     assert_eq!(ws.read_with(&cx, |ws, _| active(ws).claude_id().map(str::to_string)), Some(claude_id.clone()), "the same conversation");
     assert_eq!(std::fs::read_to_string(&transcript).unwrap().lines().count(), 1, "making a worktree writes nothing to the conversation");
 
-    // Git would list the new folders, so a toast offers the .gitignore line; taking it adds the line and not again.
-    let offered = ws.read_with(&cx, |ws, _| ws.toast.as_ref().and_then(|t| t.action.clone()));
-    let Some((_, Act::IgnoreWorktrees(main_checkout))) = offered else { panic!("no .gitignore offer") };
-    step(&mut cx, &|ws, w, cx| ws.act(Act::IgnoreWorktrees(main_checkout.clone()), w, cx));
-    assert_eq!(std::fs::read_to_string(repo_dir.join(".gitignore")).unwrap().lines().collect::<Vec<_>>(), [".claude/worktrees/"]);
+    // The worktree is in Claudiu's data folder, so the repository has nothing new for git to list and nothing to offer.
+    assert!(worktree.starts_with(dunce::canonicalize(data.path()).unwrap().join("worktrees")), "{worktree:?}");
+    let status = std::process::Command::new("git").args(["status", "--porcelain"]).current_dir(&repo_dir).output().unwrap();
+    assert!(status.stdout.is_empty(), "the repository is untouched: {}", String::from_utf8_lossy(&status.stdout));
+    assert!(ws.read_with(&cx, |ws, _| ws.toast.as_ref().is_none_or(|t| t.action.is_none())), "no toast offers an action");
 
     // Back to the main checkout, as a session that `claude --worktree` put in the worktree: Claude Code's record of the
     // worktree would win over the folder, so one line is appended.
@@ -1422,7 +1423,8 @@ fn switching_between_worktrees() {
 fn removing_a_worktree_when_its_session_ends() {
     let data = tempfile::tempdir().unwrap();
     // SAFETY: set before any other thread reads the environment; this test owns the process.
-    unsafe { std::env::set_var("CLAUDIU_DATA_DIR", data.path()) };
+    // Canonical, because the worktrees go below it and git reports their folders that way.
+    unsafe { std::env::set_var("CLAUDIU_DATA_DIR", dunce::canonicalize(data.path()).unwrap()) };
     let work = tempfile::tempdir().unwrap();
     let repo_dir = dunce::canonicalize(work.path()).unwrap().join("proj");
     let git = |args: &[&str]| std::process::Command::new("git").args(args).current_dir(&repo_dir).output().unwrap();
@@ -1430,7 +1432,7 @@ fn removing_a_worktree_when_its_session_ends() {
     for args in [&["init", "-q", "-b", "main"][..], &["config", "user.email", "t@t"], &["config", "user.name", "t"], &["commit", "-q", "--allow-empty", "-m", "one"]] {
         git(args);
     }
-    let folder = repo_dir.join(".claude/worktrees/fix");
+    let folder = crate::git::worktree::folder(&crate::git::worktree::root(), &repo_dir, "fix");
     git(&["worktree", "add", "-q", "-b", "worktree-fix", &folder.to_string_lossy()]);
 
     let mut cx = TestAppContext::single();
@@ -1461,6 +1463,21 @@ fn removing_a_worktree_when_its_session_ends() {
     };
     // The worktree is known to the project once git has been read again.
     step(&mut cx, &|ws, _w, _cx| ws.store.refresh_git());
+    // Settings lists the worktree folders in the data folder: the one git lists can be removed with git, a leftover
+    // folder of a repository that is gone only deleted.
+    let orphan = crate::git::worktree::root().join("old-00000001").join("stale");
+    std::fs::create_dir_all(&orphan).unwrap();
+    step(&mut cx, &|ws, w, cx| ws.act(Act::OpenSettings, w, cx));
+    wait(&mut cx, "the worktree rows", &|ws| ws.worktree_rows.len() == 2);
+    let rows = ws.read_with(&cx, |ws, _| ws.worktree_rows.clone());
+    let listed = rows.iter().find(|r| r.folder == folder).expect("the worktree git lists");
+    assert_eq!(listed.main_checkout.as_deref(), Some(repo_dir.as_path()));
+    assert_eq!(listed.label, repo_dir.display().to_string());
+    let stale = rows.iter().find(|r| r.folder == orphan).expect("the leftover folder");
+    assert_eq!((stale.main_checkout.as_ref(), stale.label.as_str()), (None, "old"));
+    step(&mut cx, &|ws, w, cx| ws.act(Act::ConfirmDeleteWorktreeFolder(orphan.clone()), w, cx));
+    wait(&mut cx, "the leftover folder to go", &|_| !orphan.exists());
+    step(&mut cx, &|ws, _w, _cx| ws.modal = None);
     // A new session never starts inside a worktree; Fix-with-Claude is the one starter that keeps the folder it is given.
     step(&mut cx, &|ws, w, cx| ws.new_claude_with(folder.clone(), vec![], crate::claude::defaults::Starter::FixGit, w, cx));
     let id = ws.read_with(&cx, |ws, _| ws.active.clone().unwrap());

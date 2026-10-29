@@ -1,5 +1,6 @@
 //! Git worktrees in the app: the dialog for a new one, the top-bar menu that switches the shown session between them
-//! (see `switch.rs`), and removing them. Claudiu makes the worktrees with git (see `git/worktree.rs`).
+//! (see `switch.rs`), removing them, and the Worktrees page of Settings. Claudiu makes the worktrees with git (see
+//! `git/worktree.rs`).
 
 use std::path::Path;
 
@@ -8,6 +9,18 @@ use crate::git::GitInfo;
 use crate::git::worktree;
 use crate::panels::widgets::tick;
 use crate::platform::path_key;
+
+/// A worktree folder in Claudiu's data folder, as a row of the Worktrees page in Settings.
+#[derive(Clone, Debug)]
+pub struct WorktreeRow {
+    /// The repository's folder under the worktrees root; rows of one repository follow each other.
+    pub repo: String,
+    /// What the page calls the repository: its main checkout when a project of Claudiu's has it, else its name.
+    pub label: String,
+    pub folder: PathBuf,
+    /// Set when git lists the folder as a worktree of a project Claudiu knows; the folder can then be removed with git.
+    pub main_checkout: Option<PathBuf>,
+}
 
 impl Workspace {
     pub(super) fn ask_worktree(&mut self, main_checkout: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
@@ -19,6 +32,7 @@ impl Workspace {
     pub fn open_worktree_menu(&mut self, project: Id, cwd: PathBuf, at: crate::panels::widgets::Dropdown, cx: &mut Context<Self>) {
         let Some(git) = self.store.project(&project).and_then(|p| p.git.clone()) else { return };
         let here = git.folder_of(&cwd).map(path_key);
+        let root = worktree::root();
         // A switch restarts the process, so it needs one that is running.
         let can_switch = self.active_id().is_some_and(|id| self.is_running(id, cx));
         let mut title = MenuItem::new("Worktrees", Act::Dismiss);
@@ -29,7 +43,7 @@ impl Workspace {
             let name = worktree::label(&git, folder).unwrap_or_default();
             let running = self.live.iter().any(|l| self.store.session(&l.id).is_some_and(|s| same_folder(&git, &s.cwd, folder)));
             let own = here.as_deref() == Some(path_key(folder).as_str());
-            let remove = worktree::removable(git.main_checkout(), folder).then(|| Act::RemoveWorktree { main_checkout: git.main_checkout().to_path_buf(), folder: folder.to_path_buf() });
+            let remove = worktree::removable(&root, git.main_checkout(), folder).then(|| Act::RemoveWorktree { main_checkout: git.main_checkout().to_path_buf(), folder: folder.to_path_buf() });
             MenuItem {
                 label: format!("{}{name}{}", tick(own), if running { "  ●" } else { "" }),
                 hint: git.branch_in(folder).map(str::to_string),
@@ -55,6 +69,48 @@ impl Workspace {
         self.live.iter().filter_map(|l| self.store.session(&l.id)).filter(|s| crate::platform::is_same_or_under(&s.cwd, folder)).max_by_key(|s| s.last_active)
     }
 
+    /// Read the worktree folders in the data folder for the Settings page, off the UI thread.
+    pub(super) fn refresh_worktree_rows(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let made = cx.background_executor().spawn(async move { worktree::made(&worktree::root()) }).await;
+            let _ = this.update(cx, |ws, cx| {
+                ws.worktree_rows = ws.rows_for(made);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn rows_for(&self, made: Vec<worktree::Made>) -> Vec<WorktreeRow> {
+        let root = worktree::root();
+        let gits: Vec<&GitInfo> = self.store.data.projects.iter().filter_map(|p| p.git.as_ref()).collect();
+        made.into_iter()
+            .map(|m| {
+                let owner = gits.iter().find(|g| worktree::belongs_to(&root, g.main_checkout(), &m.folder));
+                let listed = owner.filter(|g| g.worktrees.iter().chain([&g.root]).any(|w| path_key(w) == path_key(&m.folder)));
+                let label = owner.map_or_else(|| worktree::repo_name(&m.repo).to_string(), |g| g.main_checkout().display().to_string());
+                WorktreeRow { repo: m.repo, label, folder: m.folder, main_checkout: listed.map(|g| g.main_checkout().to_path_buf()) }
+            })
+            .collect()
+    }
+
+    /// The Settings page's Remove on a folder git doesn't list: nothing but the folder is deleted, so it asks first.
+    pub(super) fn ask_delete_worktree_folder(&mut self, folder: PathBuf, cx: &mut Context<Self>) {
+        let name = folder.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        if let Some(inside) = self.running_in(&folder) {
+            let title = inside.display_title().to_string();
+            self.toast(format!("“{title}” is in {name}. Switch it to main first."), true, cx);
+            return;
+        }
+        self.modal = Some(Modal::Confirm {
+            title: format!("Delete folder {name}?"),
+            body: "Git no longer lists this worktree, or its repository is gone. The folder and everything in it is deleted.".into(),
+            confirm: "Delete".into(),
+            danger: true,
+            act: Act::ConfirmDeleteWorktreeFolder(folder),
+        });
+    }
+
     /// Ask whether to remove `folder`, after reading what it holds. A running session in it refuses: it has to leave first.
     pub(super) fn ask_remove_worktree(&mut self, main_checkout: PathBuf, folder: PathBuf, cx: &mut Context<Self>) {
         let name = folder.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
@@ -78,11 +134,11 @@ impl Workspace {
         .detach();
     }
 
-    /// A session that ran in `cwd` has ended: offer to remove its worktree when it is in .claude/worktrees and no
-    /// other session is still in it.
+    /// A session that ran in `cwd` has ended: offer to remove its worktree when Claudiu made it and no other session is
+    /// still in it.
     pub(super) fn offer_worktree_removal(&mut self, cwd: &Path, project: Option<&str>, cx: &mut Context<Self>) {
         let Some(git) = project.and_then(|id| self.store.project(id)).and_then(|p| p.git.clone()) else { return };
-        let Some(folder) = git.folder_of(cwd).filter(|f| worktree::removable(git.main_checkout(), f) && f.is_dir()) else { return };
+        let Some(folder) = git.folder_of(cwd).filter(|f| worktree::removable(&worktree::root(), git.main_checkout(), f) && f.is_dir()) else { return };
         if self.running_in(folder).is_none() {
             self.ask_remove_worktree(git.main_checkout().to_path_buf(), folder.to_path_buf(), cx);
         }

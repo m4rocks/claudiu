@@ -1,7 +1,6 @@
-//! Sessions in git worktrees. Claudiu makes a worktree with `git worktree add` in the folder Claude Code uses for its own
-//! (`claude --worktree`), so the two kinds sit together; a session moves into one by resuming there (see `app/switch.rs`).
-//! This file holds the names, the folders, making and removing them, and the `.gitignore` line that keeps those folders
-//! out of `git status`.
+//! Sessions in git worktrees. Claudiu makes a worktree with `git worktree add` in its own data folder, away from the
+//! repository, so `git status` never lists it; a session moves into one by resuming there (see `app/switch.rs`).
+//! This file holds the names, the folders, and making and removing them.
 
 use std::path::{Path, PathBuf};
 
@@ -11,8 +10,10 @@ use super::GitInfo;
 use super::commit::{git, has_origin, origin_default_branch};
 use crate::platform::path_key;
 
-/// Where the worktree called `name` goes, relative to the repository's main checkout. Claude Code uses it too.
-const FOLDER: &str = ".claude/worktrees";
+/// Where Claudiu keeps the worktrees it makes: one folder per repository, one folder per worktree inside it.
+pub fn root() -> PathBuf {
+    crate::datadir::data_dir().join("worktrees")
+}
 
 /// What a new worktree's branch starts from.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -24,8 +25,51 @@ pub enum Base {
     Current,
 }
 
-pub fn folder(main_checkout: &Path, name: &str) -> PathBuf {
-    main_checkout.join(FOLDER).join(name)
+/// The folder under `root` that holds a repository's worktrees: its name, and a hash of its path to tell apart two
+/// repositories of the same name. FNV-1a is written out because the folder must come out the same on every run.
+fn repo_folder(root: &Path, main_checkout: &Path) -> PathBuf {
+    let hash = path_key(main_checkout).bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3));
+    let name = main_checkout.file_name().map_or_else(|| "repo".to_string(), |n| crate::datadir::safe_file_stem(&n.to_string_lossy()));
+    root.join(format!("{name}-{:08x}", hash as u32))
+}
+
+/// Where the worktree called `name` of this repository goes.
+pub fn folder(root: &Path, main_checkout: &Path, name: &str) -> PathBuf {
+    repo_folder(root, main_checkout).join(name)
+}
+
+/// A worktree folder under `root`, as the Worktrees page lists it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Made {
+    /// The repository's folder name under `root`, such as `app-1a2b3c4d`.
+    pub repo: String,
+    pub folder: PathBuf,
+}
+
+/// Every worktree folder under `root`, by repository and then name. Blocking.
+pub fn made(root: &Path) -> Vec<Made> {
+    let folders_in = |dir: &Path| {
+        let mut found: Vec<PathBuf> = std::fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect();
+        found.sort();
+        found
+    };
+    folders_in(root)
+        .into_iter()
+        .flat_map(|repo| {
+            let name = repo.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            folders_in(&repo).into_iter().map(move |folder| Made { repo: name.clone(), folder })
+        })
+        .collect()
+}
+
+/// The repository's name in a folder from `repo_folder`, without the hash.
+pub fn repo_name(repo_folder: &str) -> &str {
+    repo_folder.rsplit_once('-').map_or(repo_folder, |(name, _)| name)
+}
+
+/// Whether `folder` is the worktree folder `repo_folder` holds for this repository.
+pub fn belongs_to(root: &Path, main_checkout: &Path, folder: &Path) -> bool {
+    folder.parent().is_some_and(|parent| path_key(parent) == path_key(&repo_folder(root, main_checkout)))
 }
 
 /// The name becomes a folder and a branch, so it is refused rather than rewritten when it holds anything else.
@@ -88,9 +132,10 @@ pub fn folders(git: &GitInfo) -> Vec<&Path> {
     std::iter::once(main).chain(others).collect()
 }
 
-/// Only the folders in `.claude/worktrees` are removed from Claudiu: a worktree made anywhere else is the user's own.
-pub fn removable(main_checkout: &Path, folder: &Path) -> bool {
-    folder.parent().is_some_and(|parent| path_key(parent) == path_key(&main_checkout.join(FOLDER)))
+/// Only the folders Claudiu made are removed from Claudiu: a worktree made anywhere else, or in `.claude/worktrees` by
+/// an earlier version or by Claude Code, is the user's own.
+pub fn removable(root: &Path, main_checkout: &Path, folder: &Path) -> bool {
+    belongs_to(root, main_checkout, folder)
 }
 
 /// What removing a worktree throws away.
@@ -109,9 +154,9 @@ impl Leftovers {
 }
 
 /// A typed name that names an existing worktree folder switches into it; one that only an existing branch has is
-/// refused, so every branch in `.claude/worktrees` is one Claudiu made and removal may delete it once merged.
-pub fn check_unused(main_checkout: &Path, name: &str) -> Result<(), String> {
-    if folder(main_checkout, name).exists() || !branch_exists(main_checkout, name) {
+/// refused, so every branch of a worktree Claudiu made is one Claudiu made and removal may delete it once merged.
+pub fn check_unused(root: &Path, main_checkout: &Path, name: &str) -> Result<(), String> {
+    if folder(root, main_checkout, name).exists() || !branch_exists(main_checkout, name) {
         Ok(())
     } else {
         Err(format!("A branch called {name} already exists. Pick another name."))
@@ -119,9 +164,9 @@ pub fn check_unused(main_checkout: &Path, name: &str) -> Result<(), String> {
 }
 
 /// For `generate_name`: the folder or a local branch of that name exists.
-pub fn name_taken(main_checkout: &Path) -> impl Fn(&str) -> bool + '_ {
+pub fn name_taken<'a>(root: &'a Path, main_checkout: &'a Path) -> impl Fn(&str) -> bool + 'a {
     let repo = Repository::open(main_checkout).ok();
-    move |name| folder(main_checkout, name).exists() || repo.as_ref().is_some_and(|r| r.find_branch(name, git2::BranchType::Local).is_ok())
+    move |name| folder(root, main_checkout, name).exists() || repo.as_ref().is_some_and(|r| r.find_branch(name, git2::BranchType::Local).is_ok())
 }
 
 fn branch_exists(main_checkout: &Path, name: &str) -> bool {
@@ -161,9 +206,9 @@ pub fn leftovers(folder: &Path) -> Result<Leftovers, String> {
 /// Remove the worktree, and its branch when that is fully merged. `discard` lets git delete changed and new files.
 /// A Claude session that was just ended, and the programs it started, get `grace` to exit before they count as still
 /// running. Returns a line for a toast. Blocking.
-pub fn remove(main_checkout: &Path, folder: &Path, discard: bool, grace: std::time::Duration) -> Result<String, String> {
-    if !removable(main_checkout, folder) {
-        return Err(format!("{} is not in .claude/worktrees, so Claudiu leaves it alone.", folder.display()));
+pub fn remove(root: &Path, main_checkout: &Path, folder: &Path, discard: bool, grace: std::time::Duration) -> Result<String, String> {
+    if !removable(root, main_checkout, folder) {
+        return Err(format!("{} was not made by Claudiu, so Claudiu leaves it alone.", folder.display()));
     }
     let deadline = std::time::Instant::now() + grace;
     let name = folder.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
@@ -188,6 +233,20 @@ pub fn remove(main_checkout: &Path, folder: &Path, discard: bool, grace: std::ti
         message.push_str(" Its folder is still in use by a program, such as a terminal or a tool Claude started. Delete it once that ends.");
     }
     Ok(message)
+}
+
+/// Delete a worktree folder that git no longer lists, or whose repository is gone, so `git worktree remove` can't.
+/// Only a folder Claudiu made, two levels under `root`, is deleted. Blocking.
+pub fn delete_folder(root: &Path, folder: &Path, grace: std::time::Duration) -> Result<String, String> {
+    let made_here = folder.parent().and_then(Path::parent).is_some_and(|dir| path_key(dir) == path_key(root));
+    if !made_here {
+        return Err(format!("{} was not made by Claudiu, so Claudiu leaves it alone.", folder.display()));
+    }
+    if delete_leftover(folder, std::time::Instant::now() + grace) {
+        Ok(format!("Deleted {}.", folder.display()))
+    } else {
+        Err(format!("{} is still in use by a program. Delete it once that ends.", folder.display()))
+    }
 }
 
 /// `git worktree remove`, tried again while programs that are shutting down still hold something in the folder. On
@@ -261,25 +320,6 @@ fn lock_pid(reason: &str) -> Option<u32> {
     reason.rsplit_once("(pid ")?.1.strip_suffix(')')?.parse().ok()
 }
 
-/// Whether git already ignores the worktree folders in the repository at `main_checkout`.
-pub fn is_ignored(main_checkout: &Path) -> bool {
-    Repository::open(main_checkout)
-        .and_then(|repo| repo.is_path_ignored(Path::new(FOLDER).join("probe")))
-        .unwrap_or(false)
-}
-
-/// Add the worktree folder to the repository's `.gitignore` (made if missing), on a line of its own.
-pub fn ignore(main_checkout: &Path) -> std::io::Result<()> {
-    let file = main_checkout.join(".gitignore");
-    let mut text = std::fs::read_to_string(&file).or_else(|e| if e.kind() == std::io::ErrorKind::NotFound { Ok(String::new()) } else { Err(e) })?;
-    if !text.is_empty() && !text.ends_with('\n') {
-        text.push_str(if text.contains("\r\n") { "\r\n" } else { "\n" });
-    }
-    text.push_str(FOLDER);
-    text.push_str(if text.contains("\r\n") { "/\r\n" } else { "/\n" });
-    std::fs::write(file, text)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -306,8 +346,45 @@ mod tests {
     }
 
     #[test]
-    fn folder_is_under_the_main_checkout() {
-        assert_eq!(folder(Path::new("/p/app"), "fix"), Path::new("/p/app/.claude/worktrees/fix"));
+    fn a_worktree_goes_under_the_root_in_a_folder_per_repository() {
+        let root = Path::new("/d/worktrees");
+        // The hash is FNV-1a of the repository path, worked out apart from this code.
+        assert_eq!(folder(root, Path::new("/p/app"), "fix"), Path::new("/d/worktrees/app-2908e76a/fix"));
+        // Two repositories of one name get two folders.
+        assert_ne!(folder(root, Path::new("/q/app"), "fix"), folder(root, Path::new("/p/app"), "fix"));
+        // The hash is the last dash-separated part, so a name with dashes keeps them.
+        assert_eq!(repo_name("app-2908e76a"), "app");
+        assert_eq!(repo_name("my-app-2908e76a"), "my-app");
+    }
+
+    #[test]
+    fn the_root_lists_every_worktree_folder_by_repository() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        for dir in ["b-00000001/two", "b-00000001/one", "a-00000002/x"] {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        std::fs::write(root.join("a-00000002/file.txt"), "not a worktree").unwrap();
+        let listed: Vec<(String, String)> = made(root).into_iter().map(|m| (m.repo, m.folder.file_name().unwrap().to_string_lossy().into_owned())).collect();
+        assert_eq!(listed, [("a-00000002", "x"), ("b-00000001", "one"), ("b-00000001", "two")].map(|(r, f)| (r.to_string(), f.to_string())));
+        assert!(made(&root.join("missing")).is_empty());
+    }
+
+    #[test]
+    fn a_folder_is_deleted_only_two_levels_under_the_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("worktrees");
+        let ours = root.join("app-00000001/gone");
+        std::fs::create_dir_all(&ours).unwrap();
+        std::fs::write(ours.join("f.txt"), "x").unwrap();
+        let theirs = tmp.path().join("elsewhere");
+        std::fs::create_dir_all(&theirs).unwrap();
+        for refused in [&theirs, &root, &root.join("app-00000001")] {
+            assert!(delete_folder(&root, refused, NO_WAIT).unwrap_err().contains("was not made by Claudiu"), "{refused:?}");
+            assert!(refused.exists());
+        }
+        delete_folder(&root, &ours, NO_WAIT).unwrap();
+        assert!(!ours.exists() && root.join("app-00000001").exists());
     }
 
     fn info(root: &str, main: &str, worktrees: &[&str], unborn: bool) -> GitInfo {
@@ -352,13 +429,14 @@ mod tests {
     }
 
     #[test]
-    fn only_claudes_worktree_folders_are_removable() {
-        let main = Path::new("/p");
-        assert!(removable(main, Path::new("/p/.claude/worktrees/fix")));
-        assert!(!removable(main, Path::new("/p")), "the main checkout");
-        assert!(!removable(main, Path::new("/p-feature")), "a worktree made elsewhere");
-        assert!(!removable(main, Path::new("/p/.claude/worktrees/fix/src")), "a folder inside one");
-        assert!(!removable(main, Path::new("/p/.claude/worktrees")));
+    fn only_the_folders_claudiu_made_are_removable() {
+        let (root, main) = (Path::new("/d/worktrees"), Path::new("/p/app"));
+        assert!(removable(root, main, &folder(root, main, "fix")));
+        assert!(!removable(root, main, main), "the main checkout");
+        assert!(!removable(root, main, Path::new("/p/app-feature")), "a worktree made elsewhere");
+        assert!(!removable(root, main, Path::new("/p/app/.claude/worktrees/fix")), "one made by Claude Code or an earlier version");
+        assert!(!removable(root, main, &folder(root, main, "fix").join("src")), "a folder inside one");
+        assert!(!removable(root, main, &folder(root, Path::new("/q/app"), "fix")), "another repository's");
     }
 
     #[test]
@@ -373,14 +451,19 @@ mod tests {
         assert_eq!(lock_pid("claude session x"), None);
     }
 
-    /// A repository with a commit and a worktree `fix` in Claude Code's folder, made with the real `git`.
+    /// Where a test keeps the worktrees it makes, in place of Claudiu's data folder.
+    fn root_in(tmp: &Path) -> PathBuf {
+        dunce::canonicalize(tmp).unwrap().join("data")
+    }
+
+    /// A repository with a commit and a worktree `fix` in the worktrees folder, made with the real `git`.
     fn repo_with_worktree(tmp: &Path) -> (PathBuf, PathBuf) {
         let main = dunce::canonicalize(tmp).unwrap().join("main");
         std::fs::create_dir_all(&main).unwrap();
         for args in [&["init", "-q", "-b", "main"][..], &["config", "user.email", "t@t"], &["config", "user.name", "t"], &["commit", "-q", "--allow-empty", "-m", "one"]] {
             git(&main, args, None).unwrap();
         }
-        let folder = main.join(".claude/worktrees/fix");
+        let folder = folder(&root_in(tmp), &main, "fix");
         git(&main, &["worktree", "add", "-q", "-b", "worktree-fix", &folder.to_string_lossy()], None).unwrap();
         (main, folder)
     }
@@ -391,13 +474,13 @@ mod tests {
         let (main, _) = repo_with_worktree(tmp.path());
         git(&main, &["commit", "-q", "--allow-empty", "-m", "two"], None).unwrap();
         // No origin: both bases start from the current commit.
-        let made = folder(&main, "fix-login");
+        let made = folder(&root_in(tmp.path()), &main, "fix-login");
         add(&main, &made, Base::Main).unwrap();
         assert_eq!(git(&made, &["branch", "--show-current"], None).unwrap().trim(), "fix-login");
         assert_eq!(git(&made, &["rev-parse", "HEAD"], None).unwrap(), git(&main, &["rev-parse", "HEAD"], None).unwrap());
         // A branch of that name already exists.
         git(&main, &["branch", "kept"], None).unwrap();
-        assert!(add(&main, &folder(&main, "kept"), Base::Current).is_err());
+        assert!(add(&main, &folder(&root_in(tmp.path()), &main, "kept"), Base::Current).is_err());
     }
 
     #[test]
@@ -405,11 +488,12 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (main, _) = repo_with_worktree(tmp.path());
         git(&main, &["branch", "kept"], None).unwrap();
-        assert_eq!(check_unused(&main, "new-one"), Ok(()));
-        assert_eq!(check_unused(&main, "kept"), Err("A branch called kept already exists. Pick another name.".into()));
+        assert_eq!(check_unused(&root_in(tmp.path()), &main, "new-one"), Ok(()));
+        assert_eq!(check_unused(&root_in(tmp.path()), &main, "kept"), Err("A branch called kept already exists. Pick another name.".into()));
         // The worktree `fix` exists, on its branch `worktree-fix`: typing its folder name switches into it.
-        assert_eq!(check_unused(&main, "fix"), Ok(()));
-        let taken = name_taken(&main);
+        assert_eq!(check_unused(&root_in(tmp.path()), &main, "fix"), Ok(()));
+        let root = root_in(tmp.path());
+        let taken = name_taken(&root, &main);
         assert!(taken("kept") && taken("fix") && taken("main") && !taken("new-one"));
     }
 
@@ -429,7 +513,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (main, folder) = repo_with_worktree(tmp.path());
         assert_eq!(uncommitted(&main).unwrap(), 0);
-        // What Claude Code leaves in a checkout: its settings, and the worktree folders themselves.
+        // What Claude Code leaves in a checkout: its settings.
+        std::fs::create_dir_all(main.join(".claude")).unwrap();
         std::fs::write(main.join(".claude/settings.local.json"), "{}").unwrap();
         assert_eq!(uncommitted(&main).unwrap(), 0, ".claude/ is not the user's work");
         std::fs::write(main.join("mine.txt"), "x").unwrap();
@@ -442,7 +527,7 @@ mod tests {
     fn a_merged_worktree_goes_with_its_branch() {
         let tmp = tempfile::tempdir().unwrap();
         let (main, folder) = repo_with_worktree(tmp.path());
-        let message = remove(&main, &folder, false, NO_WAIT).unwrap();
+        let message = remove(&root_in(tmp.path()), &main, &folder, false, NO_WAIT).unwrap();
         assert!(message.contains("merged branch worktree-fix"), "{message}");
         assert!(!folder.exists());
         assert!(git(&main, &["rev-parse", "--verify", "-q", "worktree-fix"], None).is_err(), "the branch is gone");
@@ -454,11 +539,11 @@ mod tests {
         let (main, folder) = repo_with_worktree(tmp.path());
         git(&folder, &["commit", "-q", "--allow-empty", "-m", "work"], None).unwrap();
         std::fs::write(folder.join("new.txt"), "x").unwrap();
-        let refused = remove(&main, &folder, false, NO_WAIT).unwrap_err();
+        let refused = remove(&root_in(tmp.path()), &main, &folder, false, NO_WAIT).unwrap_err();
         assert!(refused.contains("untracked") || refused.contains("modified"), "{refused}");
         assert!(folder.exists());
 
-        let message = remove(&main, &folder, true, NO_WAIT).unwrap();
+        let message = remove(&root_in(tmp.path()), &main, &folder, true, NO_WAIT).unwrap();
         assert!(message.contains("branch worktree-fix is kept"), "{message}");
         assert!(!folder.exists());
         assert!(git(&main, &["rev-parse", "--verify", "-q", "worktree-fix"], None).is_ok(), "the commits are still reachable");
@@ -471,13 +556,13 @@ mod tests {
         let lock = |pid: u32| git(&main, &["worktree", "lock", "--reason", &format!("claude session fix (pid {pid})"), &folder.to_string_lossy()], None).unwrap();
 
         lock(std::process::id());
-        let refused = remove(&main, &folder, false, NO_WAIT).unwrap_err();
+        let refused = remove(&root_in(tmp.path()), &main, &folder, false, NO_WAIT).unwrap_err();
         assert!(refused.contains("still running"), "{refused}");
         assert!(folder.exists());
 
         git(&main, &["worktree", "unlock", &folder.to_string_lossy()], None).unwrap();
         lock(u32::MAX - 1);
-        remove(&main, &folder, false, NO_WAIT).unwrap();
+        remove(&root_in(tmp.path()), &main, &folder, false, NO_WAIT).unwrap();
         assert!(!folder.exists());
     }
 
@@ -496,7 +581,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (main, folder) = repo_with_worktree(tmp.path());
         let mut holder = run_in(&folder, 60);
-        let message = remove(&main, &folder, false, std::time::Duration::from_millis(500)).unwrap();
+        let message = remove(&root_in(tmp.path()), &main, &folder, false, std::time::Duration::from_millis(500)).unwrap();
         assert!(message.contains("merged branch worktree-fix") && message.contains("still in use"), "{message}");
         let listing = git(&main, &["worktree", "list", "--porcelain"], None).unwrap();
         assert!(block_of(&listing, &folder).is_none(), "git no longer lists it");
@@ -511,7 +596,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (main, folder) = repo_with_worktree(tmp.path());
         let mut holder = run_in(&folder, 3);
-        let message = remove(&main, &folder, false, std::time::Duration::from_secs(15)).unwrap();
+        let message = remove(&root_in(tmp.path()), &main, &folder, false, std::time::Duration::from_secs(15)).unwrap();
         assert!(!message.contains("still in use") && !folder.exists(), "{message}");
         holder.wait().unwrap();
     }
@@ -520,7 +605,7 @@ mod tests {
     fn only_claudes_folders_are_ever_removed() {
         let tmp = tempfile::tempdir().unwrap();
         let (main, _) = repo_with_worktree(tmp.path());
-        assert!(remove(&main, &main, true, NO_WAIT).unwrap_err().contains("not in .claude/worktrees"));
+        assert!(remove(&root_in(tmp.path()), &main, &main, true, NO_WAIT).unwrap_err().contains("was not made by Claudiu"));
         assert!(main.exists());
     }
 
@@ -529,30 +614,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (main, folder) = repo_with_worktree(tmp.path());
         git(&main, &["worktree", "lock", "--reason", "on a usb stick", &folder.to_string_lossy()], None).unwrap();
-        assert!(remove(&main, &folder, true, NO_WAIT).unwrap_err().contains("locked"));
+        assert!(remove(&root_in(tmp.path()), &main, &folder, true, NO_WAIT).unwrap_err().contains("locked"));
         assert!(folder.exists());
-    }
-
-    #[test]
-    fn ignore_line_is_added_once_on_its_own_line() {
-        let tmp = tempfile::tempdir().unwrap();
-        Repository::init(tmp.path()).unwrap();
-        assert!(!is_ignored(tmp.path()));
-
-        std::fs::write(tmp.path().join(".gitignore"), "target").unwrap();
-        ignore(tmp.path()).unwrap();
-        assert_eq!(std::fs::read_to_string(tmp.path().join(".gitignore")).unwrap(), "target\n.claude/worktrees/\n");
-        assert!(is_ignored(tmp.path()));
-    }
-
-    #[test]
-    fn ignore_creates_the_file_and_keeps_crlf() {
-        let tmp = tempfile::tempdir().unwrap();
-        ignore(tmp.path()).unwrap();
-        assert_eq!(std::fs::read_to_string(tmp.path().join(".gitignore")).unwrap(), ".claude/worktrees/\n");
-
-        std::fs::write(tmp.path().join(".gitignore"), "target\r\n").unwrap();
-        ignore(tmp.path()).unwrap();
-        assert_eq!(std::fs::read_to_string(tmp.path().join(".gitignore")).unwrap(), "target\r\n.claude/worktrees/\r\n");
     }
 }

@@ -94,13 +94,14 @@ impl Workspace {
             }
             Some(Modal::NewWorktree { main_checkout, input, base }) => {
                 let typed = input.read(cx).value().trim().to_string();
+                let root = worktree::root();
                 let name = if typed.is_empty() {
-                    Ok(worktree::generate_name(uuid::Uuid::new_v4().as_u128(), worktree::name_taken(&main_checkout)))
+                    Ok(worktree::generate_name(uuid::Uuid::new_v4().as_u128(), worktree::name_taken(&root, &main_checkout)))
                 } else {
-                    worktree::check_name(&typed).and_then(|()| worktree::check_unused(&main_checkout, &typed)).map(|()| typed)
+                    worktree::check_name(&typed).and_then(|()| worktree::check_unused(&root, &main_checkout, &typed)).map(|()| typed)
                 };
                 match name {
-                    Ok(name) => Act::SwitchWorktree { folder: worktree::folder(&main_checkout, &name), base },
+                    Ok(name) => Act::SwitchWorktree { folder: worktree::folder(&root, &main_checkout, &name), base },
                     Err(why) => {
                         self.modal = Some(Modal::NewWorktree { main_checkout, input, base });
                         self.toast(why, true, cx);

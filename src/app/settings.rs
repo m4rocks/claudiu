@@ -11,11 +11,12 @@ pub enum SettingsPage {
     Sessions,
     ClaudeTools,
     ClaudiuTools,
+    Worktrees,
     About,
 }
 
 impl SettingsPage {
-    pub const ALL: [SettingsPage; 5] = [Self::General, Self::Sessions, Self::ClaudeTools, Self::ClaudiuTools, Self::About];
+    pub const ALL: [SettingsPage; 6] = [Self::General, Self::Sessions, Self::ClaudeTools, Self::ClaudiuTools, Self::Worktrees, Self::About];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -23,6 +24,7 @@ impl SettingsPage {
             Self::Sessions => "Sessions",
             Self::ClaudeTools => "Claude Code tools",
             Self::ClaudiuTools => "Claudiu tools",
+            Self::Worktrees => "Worktrees",
             Self::About => "About",
         }
     }
@@ -84,9 +86,10 @@ mod tests {
     #[test]
     fn next_and_prev_walk_the_list_and_stop_at_the_ends() {
         assert_eq!(General.next(), Sessions);
-        assert_eq!(ClaudiuTools.next(), About);
+        assert_eq!(ClaudiuTools.next(), Worktrees);
+        assert_eq!(Worktrees.next(), About);
         assert_eq!(About.next(), About);
-        assert_eq!(About.prev(), ClaudiuTools);
+        assert_eq!(About.prev(), Worktrees);
         assert_eq!(Sessions.prev(), General);
         assert_eq!(General.prev(), General);
     }
