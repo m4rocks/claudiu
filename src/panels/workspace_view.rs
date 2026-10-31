@@ -37,6 +37,9 @@ impl Workspace {
         // traffic lights at the left (they are hidden in fullscreen); Windows/Linux get min/max/close at the right.
         let left_pad = if cfg!(target_os = "macos") && !window.is_fullscreen() { 80.0 } else { 10.0 };
         TitleBar::new()
+            // Linux draws its own close button, which would otherwise drop the window without asking about working
+            // sessions or saving the layout. Going through Quit is the same path as Ctrl+Q and the OS close.
+            .on_close_window(|_, window, cx| window.dispatch_action(Box::new(crate::app::Quit), cx))
             .h(px(theme::TOPBAR_HEIGHT))
             .pl(px(left_pad))
             .bg(hsla(theme::APP_BG))

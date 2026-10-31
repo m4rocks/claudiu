@@ -1,6 +1,6 @@
 # Claudiu
 
-Claudiu is a native desktop app, written in Rust with [GPUI](https://gpui.rs), that runs several [Claude Code](https://code.claude.com) sessions in one window on Windows and macOS. It is a personal project with rough edges. Issues and pull requests are welcome.
+Claudiu is a native desktop app, written in Rust with [GPUI](https://gpui.rs), that runs several [Claude Code](https://code.claude.com) sessions in one window on Windows, macOS and Linux. It is a personal project with rough edges. Issues and pull requests are welcome.
 
 > **Claudiu is an independent project. It is not affiliated with, endorsed by or sponsored by Anthropic.** Claude and Claude Code are trademarks of Anthropic.
 
@@ -14,16 +14,23 @@ Ctrl+Shift (Cmd+Shift on macOS) plus a letter drives the app. Everything else re
 
 ## What it touches
 
-Claudiu never deletes a transcript. It writes to Claude Code's own data only to change the settings you switch in Claudiu, as `/config` does, and to sync shared files between accounts. Nothing is uploaded and terminal contents are never logged. The only network use is GitHub: the update check (off with `"settings": { "update_url": "" }` in `state.json`) and the GitHub pane. State lives in `%LOCALAPPDATA%\m4rocks\Claudiu\data` on Windows and `~/Library/Application Support/Claudiu` on macOS, and crashes go to `crash.log` there.
+Claudiu never deletes a transcript. It writes to Claude Code's own data only to change the settings you switch in Claudiu, as `/config` does, and to sync shared files between accounts. Nothing is uploaded and terminal contents are never logged. The only network use is GitHub: the update check (off with `"settings": { "update_url": "" }` in `state.json`) and the GitHub pane. State lives in `%LOCALAPPDATA%\m4rocks\Claudiu\data` on Windows, `~/Library/Application Support/Claudiu` on macOS and `~/.local/share/claudiu` on Linux, and crashes go to `crash.log` there.
 
 ## Known gaps
 
 - macOS is lightly tested, and the build isn't notarized, so Gatekeeper complains on first launch.
+- Linux is new and lightly tested. An app started from the desktop sees only the session's PATH, so tools that only your shell's startup files add (nvm, for one) aren't found.
 - Quitting ends running PTYs. Sessions stay resumable, but live processes don't survive a restart.
 
 ## Development
 
-You need stable Rust. On Windows you also need Visual Studio Build Tools (C++) and the Windows SDK. Tasks go through [just](https://just.systems); run `just` to list them.
+You need stable Rust. On Windows you also need Visual Studio Build Tools (C++) and the Windows SDK. On Linux you need the headers GPUI builds against; on Debian or Ubuntu:
+
+```sh
+sudo apt install libfontconfig-dev libwayland-dev libx11-xcb-dev libxcb1-dev libxkbcommon-x11-dev libvulkan1 zlib1g-dev
+```
+
+Tasks go through [just](https://just.systems); run `just` to list them.
 
 ```sh
 just run     # dev build: shows stderr, never checks for updates
@@ -39,4 +46,4 @@ The repository has four parts:
 - `web/` is the Astro site.
 - `vendor/gpui-base/` is a patched copy of the editor crate. `Cargo.toml` says what the patch changes and when to drop it.
 
-`CLAUDE.md` has the conventions for contributing. Releases use [Velopack](https://velopack.io) and GitHub Releases: bump `version` in `Cargo.toml`, then `git tag vX.Y.Z && git push --tags`. `scripts\package.ps1` builds a local installer.
+`CLAUDE.md` has the conventions for contributing. Releases use [Velopack](https://velopack.io) and GitHub Releases: bump `version` in `Cargo.toml`, then `git tag vX.Y.Z && git push --tags`. `scripts\package.ps1` builds a local installer. The Linux release is an AppImage.
