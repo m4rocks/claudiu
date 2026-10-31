@@ -362,13 +362,13 @@ impl Workspace {
         for a in attached {
             let (pull, number) = (a.pull, a.number);
             let owner = id.cloned();
-            let title = match (a.title, a.state) {
-                (None, _) => format!("#{number}"),
-                (Some(t), Some(State::Closed)) => format!("#{number}  {t} (closed)"),
-                (Some(t), Some(State::Merged)) => format!("#{number}  {t} (merged)"),
-                (Some(t), _) => format!("#{number}  {t}"),
-            };
             let key = format!("attached-{pull}-{number}");
+            let title = match (a.title, a.state) {
+                (None, _) => pending_title(number, &key),
+                (Some(t), Some(State::Closed)) => format!("#{number}  {t} (closed)").into_any_element(),
+                (Some(t), Some(State::Merged)) => format!("#{number}  {t} (merged)").into_any_element(),
+                (Some(t), _) => format!("#{number}  {t}").into_any_element(),
+            };
             rows = rows.child(removable_row(
                 cx,
                 self.leaving.contains(&key),
@@ -531,7 +531,28 @@ fn group(label: &str, body: impl IntoElement) -> Div {
     div().flex().flex_col().gap(px(4.0)).child(div().px(px(8.0)).child(section_label(label.to_string()))).child(body)
 }
 
-fn base_row(id: impl Into<SharedString>, glyph: IconName, label: impl Into<SharedString>) -> Stateful<Div> {
+/// How long the grey bar of an item still waiting for its title pulses. Then it rests, because an item GitHub never
+/// answers for (no `gh`, signed out, not a GitHub folder) would otherwise keep redrawing the window forever.
+const PENDING_PULSE: Duration = Duration::from_secs(10);
+/// Pulses in `PENDING_PULSE`, so the bar ends the pulse where it began.
+const PENDING_PULSES: f32 = 8.0;
+
+/// The bar's opacity `t` (0 to 1) through `PENDING_PULSE`: full at both ends, dipping to 0.45 in between.
+fn pending_opacity(t: f32) -> f32 {
+    0.725 + 0.275 * (t * PENDING_PULSES * std::f32::consts::TAU).cos()
+}
+
+/// `#12` with a grey bar where the title will be, until GitHub answers.
+fn pending_title(number: u32, key: &str) -> AnyElement {
+    let bar = div().flex_none().h(px(8.0)).w(px(96.0)).rounded(px(4.0)).bg(hsla(0x1f1f21)).with_animation(
+        SharedString::from(format!("pending-{key}")),
+        Animation::new(PENDING_PULSE).with_easing(pending_opacity),
+        |d, opacity| d.opacity(opacity),
+    );
+    div().flex().items_center().gap(px(8.0)).child(format!("#{number}")).child(bar).into_any_element()
+}
+
+fn base_row(id: impl Into<SharedString>, glyph: IconName, label: impl IntoElement) -> Stateful<Div> {
     div()
         .id(id.into())
         .h(px(26.0))
@@ -542,15 +563,15 @@ fn base_row(id: impl Into<SharedString>, glyph: IconName, label: impl Into<Share
         .rounded(px(6.0))
         .text_size(crate::panels::scale::px(12.5))
         .child(div().flex_none().text_color(hsla(theme::TEXT_DIM)).child(icon(glyph, 14.0)))
-        .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(label.into()))
+        .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(label))
 }
 
-fn row(id: impl Into<SharedString>, glyph: IconName, label: impl Into<SharedString>) -> Stateful<Div> {
+fn row(id: impl Into<SharedString>, glyph: IconName, label: impl IntoElement) -> Stateful<Div> {
     base_row(id, glyph, label).text_color(hsla(theme::TEXT)).cursor_pointer().hover(|s| s.bg(hsla(theme::ROW_HOVER)))
 }
 
 /// The row as it looks while its action is unavailable: no hover, no pointer (give it no click handler either).
-fn dim_row(id: impl Into<SharedString>, glyph: IconName, label: impl Into<SharedString>) -> Stateful<Div> {
+fn dim_row(id: impl Into<SharedString>, glyph: IconName, label: impl IntoElement) -> Stateful<Div> {
     base_row(id, glyph, label).text_color(hsla(theme::TEXT_FAINT)).cursor_default()
 }
 
@@ -561,7 +582,7 @@ fn removable_row(
     leaving: bool,
     key: String,
     glyph: IconName,
-    title: String,
+    title: impl IntoElement,
     open: impl Fn(&mut Workspace, &mut Window, &mut Context<Workspace>) + 'static,
     remove: impl Fn(&mut Workspace) + 'static,
 ) -> impl IntoElement {
@@ -657,6 +678,14 @@ mod tests {
     fn both_row_kinds_can_be_built() {
         row("a", IconName::Terminal, "A");
         dim_row("b", IconName::Terminal, "B");
+    }
+
+    #[test]
+    fn the_pending_bar_pulses_and_rests_at_full_opacity() {
+        assert!((pending_opacity(0.0) - 1.0).abs() < 1e-5);
+        assert!((pending_opacity(1.0) - 1.0).abs() < 1e-5, "it stays this way once the animation is over");
+        assert!((pending_opacity(0.5 / PENDING_PULSES) - 0.45).abs() < 1e-5, "the dip comes mid-pulse");
+        assert!((0..=1000).all(|i| (0.45 - 1e-5..=1.0 + 1e-5).contains(&pending_opacity(i as f32 / 1000.0))));
     }
 
     fn labels(items: &[MenuItem]) -> Vec<&str> {
