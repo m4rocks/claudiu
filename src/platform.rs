@@ -152,6 +152,7 @@ fn path_between_markers(output: &str) -> Option<&str> {
 
 /// The registry's directories first, then whatever this process had that the registry lacks (for example folders a
 /// launcher added for Claudiu alone). Each directory appears once.
+#[cfg(any(target_os = "windows", target_os = "macos", test))]
 fn rebuilt_path(registry: &[PathBuf], current: &OsStr) -> std::ffi::OsString {
     let mut dirs: Vec<PathBuf> = Vec::new();
     for dir in registry.iter().cloned().chain(std::env::split_paths(current)) {
