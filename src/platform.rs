@@ -78,6 +78,10 @@ fn family_from_fc_match(output: &str) -> Option<String> {
     Some(output.trim()).filter(|family| !family.is_empty()).map(String::from)
 }
 
+/// The window class Linux desktops match to the launcher entry (`StartupWMClass` in the AppImage's .desktop file) to
+/// pick the dock and panel icon. Without it a window gets a generic one. Other platforms ignore it.
+pub const APP_ID: &str = "Claudiu";
+
 pub fn home_dir() -> Option<PathBuf> {
     directories::BaseDirs::new().map(|d| d.home_dir().to_path_buf())
 }

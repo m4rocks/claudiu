@@ -43,6 +43,7 @@ pub fn window_options(cx: &App) -> WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, window, cx))),
         window_min_size: Some(window),
         is_resizable: false,
+        app_id: Some(crate::platform::APP_ID.into()),
         titlebar: Some(TitlebarOptions { title: Some("Set up Claudiu".into()), ..Default::default() }),
         ..Default::default()
     }

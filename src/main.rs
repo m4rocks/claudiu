@@ -132,6 +132,7 @@ fn open_main_window(initial: Vec<std::path::PathBuf>, cx: &mut App) -> MainWindo
             }),
             // The top bar owns dragging and double-click (see TitleBar::window_options).
             app_owns_titlebar_drag: true,
+            app_id: Some(platform::APP_ID.into()),
             // Linux: the top bar draws min/max/close itself instead of the window manager adding a second bar above
             // it. A compositor without client-side decorations keeps its own bar. Other platforms ignore this.
             window_decorations: Some(gpui::WindowDecorations::Client),
