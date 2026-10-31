@@ -22,7 +22,7 @@ use super::model::*;
 use crate::panels::widgets::Trigger;
 use super::view::*;
 use crate::store::now;
-use crate::terminal::view::FONT;
+use crate::platform::monospace_font;
 use crate::panels::theme::{self, hsla};
 use gpui_kit::assets::IconName;
 use crate::panels::widgets::{ago, avatar, button, button_disabled, button_leading, danger_button, fade_in, icon, icon_button, section_label};

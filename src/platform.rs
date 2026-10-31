@@ -45,6 +45,39 @@ pub fn through_login_shell(program: String, args: Vec<String>) -> (String, Vec<S
     }
 }
 
+/// The fixed-width font for terminals and code. GPUI matches family names exactly and, when one is missing, falls
+/// back to a proportional UI font, which breaks a terminal's grid; so Linux uses the monospace family fontconfig
+/// picks for the desktop instead of naming one that may not be installed.
+pub fn monospace_font() -> &'static str {
+    #[cfg(target_os = "windows")]
+    {
+        "Cascadia Mono"
+    }
+    #[cfg(target_os = "macos")]
+    {
+        "Menlo"
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        static FAMILY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        FAMILY.get_or_init(|| fontconfig_monospace().unwrap_or_else(|| "DejaVu Sans Mono".into()))
+    }
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+fn fontconfig_monospace() -> Option<String> {
+    let output = Command::new("fc-match").args(["--format=%{family[0]}", "monospace"]).stderr(Stdio::null()).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    family_from_fc_match(&String::from_utf8_lossy(&output.stdout))
+}
+
+#[cfg(any(not(any(target_os = "windows", target_os = "macos")), test))]
+fn family_from_fc_match(output: &str) -> Option<String> {
+    Some(output.trim()).filter(|family| !family.is_empty()).map(String::from)
+}
+
 pub fn home_dir() -> Option<PathBuf> {
     directories::BaseDirs::new().map(|d| d.home_dir().to_path_buf())
 }
@@ -487,6 +520,14 @@ bye
     #[cfg(windows)]
     fn verbatim_prefix_is_stripped() {
         assert_eq!(clean_path(Path::new(r"\\?\C:\x\y")), PathBuf::from(r"C:\x\y"));
+    }
+
+    #[test]
+    fn the_monospace_family_is_what_fc_match_printed() {
+        assert_eq!(family_from_fc_match("DejaVu Sans Mono"), Some("DejaVu Sans Mono".to_string()));
+        assert_eq!(family_from_fc_match("  Fira Mono\n"), Some("Fira Mono".to_string()));
+        assert_eq!(family_from_fc_match(""), None, "no answer keeps the default");
+        assert_eq!(family_from_fc_match(" \n"), None);
     }
 
     #[test]
