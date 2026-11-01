@@ -19,6 +19,7 @@ use crate::panels::sidebar::{SIDEBAR_MAX, SIDEBAR_MIN, SIDEBAR_W};
 use crate::github::view::{GhEvent, GithubView};
 use crate::claude::defaults::{Effort, PermissionMode, Starter};
 use crate::claude::mcp;
+use crate::git::worktree::Base;
 use crate::platform::{self, Editor};
 use crate::{claude::usage, datadir};
 use crate::store::{
@@ -58,6 +59,8 @@ mod settings;
 mod setup;
 mod titles;
 mod visuals;
+mod switch;
+mod worktrees;
 
 pub use editor_mode::{EditorPane, Tab, register_languages};
 pub use ask_claude::Ask;
@@ -65,6 +68,7 @@ pub use lifecycle::saved_window_bounds;
 pub use editor_mode::EditorCommand;
 pub use file_ops::NameFor;
 pub use settings::SettingsPage;
+pub use worktrees::WorktreesPage;
 pub use setup::{Mode as SetupMode, SetupEvent, SetupView, window_options as setup_window_options};
 
 actions!(
@@ -111,6 +115,32 @@ pub enum Act {
     NewClaude {
         cwd: PathBuf,
     },
+    /// The worktree dialog for a repository's main checkout (see `worktrees.rs`).
+    NewWorktree(PathBuf),
+    PickBase(Base),
+    /// Move the shown session into this working tree of its project (`base` is for a worktree that does not exist yet).
+    SwitchWorktree {
+        folder: PathBuf,
+        base: Base,
+    },
+    /// `SwitchWorktree`, after the user agreed to leave uncommitted files behind.
+    ConfirmSwitch {
+        folder: PathBuf,
+        base: Base,
+    },
+    /// Ask before removing a worktree. A running session in it refuses.
+    RemoveWorktree {
+        main_checkout: PathBuf,
+        folder: PathBuf,
+    },
+    ConfirmRemoveWorktree {
+        main_checkout: PathBuf,
+        folder: PathBuf,
+        discard: bool,
+    },
+    /// Ask before deleting a folder in Claudiu's worktrees folder that git no longer lists.
+    AskDeleteUnlisted(PathBuf),
+    ConfirmDeleteUnlisted(PathBuf),
     /// Show or hide the shell under a Claude session's terminal (started on first use, in the session's folder).
     ToggleShell(Id),
     /// Turn editor mode on or off for the shown session (see `editor_mode.rs`).
@@ -157,6 +187,9 @@ pub enum Act {
     CommitPush(Id, PathBuf),
     Pull(PathBuf),
     SwitchBranch(PathBuf, String),
+    /// Read what deleting the local branch would lose, then ask.
+    DeleteBranch(PathBuf, String),
+    ConfirmDeleteBranch(PathBuf, String),
     /// Ask for a name, then `CreateBranch`.
     NewBranch(PathBuf),
     CreateBranch(PathBuf, String),
@@ -194,7 +227,7 @@ pub enum Act {
 impl MenuItem {
     /// A plain entry: not dangerous, enabled, no hint, no separator above.
     pub fn new(label: impl Into<String>, act: Act) -> Self {
-        Self { label: label.into(), hint: None, act, danger: false, disabled: false, separator_before: false }
+        Self { label: label.into(), hint: None, detail: None, act, danger: false, disabled: false, separator_before: false, remove: None, icon: None }
     }
 }
 
@@ -202,11 +235,17 @@ pub struct MenuItem {
     pub label: String,
     /// Faint text on the right that is never cut, so a long `label` is shortened with "…" instead.
     pub hint: Option<String>,
+    /// Faint second line under the label, for text too long to sit beside it (a project path).
+    pub detail: Option<String>,
     pub act: Act,
     pub danger: bool,
     /// Shown greyed out and does nothing when clicked.
     pub disabled: bool,
     pub separator_before: bool,
+    /// Shows an x on the row while the pointer is over it; clicking it runs this instead of `act`.
+    pub remove: Option<Act>,
+    /// Drawn before the hint.
+    pub icon: Option<gpui_kit::assets::IconName>,
 }
 
 pub struct Menu {
@@ -239,6 +278,12 @@ pub enum Modal {
     NewBranch {
         cwd: PathBuf,
         input: Entity<InputState>,
+    },
+    /// Empty name = a generated one.
+    NewWorktree {
+        main_checkout: PathBuf,
+        input: Entity<InputState>,
+        base: Base,
     },
     Advisor {
         id: Id,
@@ -273,9 +318,11 @@ pub enum Main {
 /// What a running Claude session is doing, as shown by its sidebar dot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Activity {
-    /// Output is streaming (pulsing dot).
+    /// Output is streaming (spinning icon).
     Working,
-    /// Finished working while the user was looking elsewhere (orange dot).
+    /// Claude Code stopped to wait for the user, a question or a permission (question mark).
+    Waiting,
+    /// Finished working while the user was looking elsewhere (check mark).
     Attention,
 }
 
@@ -285,6 +332,7 @@ pub enum GitOp {
     CommitPush,
     Pull,
     Branch,
+    Worktree,
 }
 
 pub struct Live {
@@ -403,6 +451,8 @@ pub struct Workspace {
     pub modal_focus: FocusHandle,
     /// The Settings category last shown. Kept here because opening Settings builds the modal anew; not saved to disk.
     pub settings_page: SettingsPage,
+    /// What the Worktrees page of Settings shows. Not saved to disk.
+    pub worktrees_page: worktrees::WorktreesPage,
     /// Smooth wheel scrolling of the settings page.
     pub settings_scroll: crate::panels::glide::Smooth,
     /// Whether this run already said it couldn't write a session's tool settings file (said at most once).
@@ -436,10 +486,12 @@ pub struct Workspace {
     pub list_model: crate::panels::sidebar::ListModel,
     /// The sidebar row under the pointer, the only one built with its × or archive button.
     pub hovered_row: Option<gpui::SharedString>,
+    /// Running rows the pointer just left, whose × slot is still shrinking away (see `shrink_close_slot`).
+    pub unhovered_rows: std::collections::HashSet<gpui::SharedString>,
     /// The minute (Unix time / 60) of the last tick's redraw, see `tick`.
     pub tick_minute: i64,
-    /// The working dot's pulse is running, see `start_pulse`.
-    pub pulsing: bool,
+    /// The working icon's spin is running, see `start_spin`.
+    pub spinning: bool,
     /// When a drag last reordered the sidebar, see `pointer_moved`.
     pub last_swap: std::time::Instant,
     /// Attached issues and pull requests are asked about on GitHub from time to time, see `attached_sync.rs`.
@@ -521,6 +573,7 @@ impl Workspace {
             modal: None,
             modal_focus: cx.focus_handle(),
             settings_page: SettingsPage::default(),
+            worktrees_page: Default::default(),
             settings_scroll: Default::default(),
             menu: None,
             toast: None,
@@ -544,8 +597,9 @@ impl Workspace {
             session_list: None,
             list_model: Default::default(),
             hovered_row: None,
+            unhovered_rows: Default::default(),
             tick_minute: 0,
-            pulsing: false,
+            spinning: false,
             last_swap: std::time::Instant::now(),
             attached_sync: Default::default(),
             config_sync: Default::default(),
@@ -605,6 +659,31 @@ impl Workspace {
         self.menu = None;
         match act {
             Act::NewClaude { cwd } => self.new_claude(cwd, window, cx),
+            Act::NewWorktree(main_checkout) => self.ask_worktree(main_checkout, window, cx),
+            Act::PickBase(choice) => {
+                if let Some(Modal::NewWorktree { base, .. }) = self.modal.as_mut() {
+                    *base = choice;
+                }
+            }
+            Act::SwitchWorktree { folder, base } => self.switch_shown(folder, base, false, window, cx),
+            Act::ConfirmSwitch { folder, base } => {
+                self.modal = None;
+                self.switch_shown(folder, base, true, window, cx)
+            }
+            Act::RemoveWorktree { main_checkout, folder } => self.ask_remove_worktree(main_checkout, folder, cx),
+            Act::AskDeleteUnlisted(folder) => self.ask_delete_unlisted(folder, cx),
+            Act::ConfirmDeleteUnlisted(folder) => {
+                self.worktrees_page.asking = None;
+                self.run_git(GitOp::Worktree, move || Ok(crate::git::worktree::delete_unlisted(&folder)?), cx);
+            }
+            Act::ConfirmRemoveWorktree { main_checkout, folder, discard } => {
+                self.worktrees_page.asking = None;
+                self.run_git(
+                    GitOp::Worktree,
+                    move || Ok(crate::git::worktree::remove(&main_checkout, &folder, discard, Duration::from_secs(10))?),
+                    cx,
+                );
+            }
             Act::ToggleShell(id) => self.toggle_shell(&id, window, cx),
             Act::ToggleEditor => self.toggle_editor(window, cx),
             Act::Editor(command) => self.run_editor_command(command, window, cx),
@@ -682,6 +761,10 @@ impl Workspace {
             Act::SwitchBranch(cwd, name) => {
                 self.run_git(GitOp::Branch, move || Ok(crate::git::commit::switch_branch(&cwd, &name)?), cx)
             }
+            Act::DeleteBranch(cwd, name) => self.ask_delete_branch(cwd, name, cx),
+            Act::ConfirmDeleteBranch(cwd, name) => {
+                self.run_git(GitOp::Branch, move || Ok(crate::git::commit::delete_branch(&cwd, &name)?), cx)
+            }
             Act::FixGitWithClaude(cwd) => {
                 let prompt = "Claudiu's Pull or Commit & Push just failed in this repository because of a merge conflict, a diverged branch or a rejected push. Run git status, fix it (resolve conflicts keeping the intent of both sides, finish the merge or rebase, then push if the push was rejected). Ask me whenever a conflict is ambiguous or you are unsure which side to keep.";
                 match self.running_claude_in(&cwd, cx) {
@@ -715,6 +798,7 @@ impl Workspace {
                 let shell = self.modal_input(&shell_t, &platform::default_shell(None).0, window, cx);
                 let list_focus = cx.focus_handle();
                 window.focus(&list_focus, cx);
+                self.set_settings_page(self.settings_page, cx);
                 self.modal = Some(Modal::Settings { shell, claude, model, effort: defaults.effort, permission: defaults.permission_mode, updates, chrome, scale: crate::panels::scale::percent(), trimmed: self.store.data.settings.trimmed_tools.clone(), claudiu_off: self.store.data.settings.claudiu_tools_off.clone(), list_focus });
             }
             Act::PickEffort(choice) => {

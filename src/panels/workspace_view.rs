@@ -31,7 +31,10 @@ impl Workspace {
         let hints = self.shortcuts_shown;
 
         let title = rec.as_ref().map(|r| r.display_title().to_string()).unwrap_or_else(|| "Claudiu".into());
-        let branch = project.as_ref().and_then(|p| p.git.as_ref()).and_then(|g| g.branch.clone());
+        // The branch and the worktree of the session's own folder, which is not the project's folder for a worktree session.
+        let git = project.as_ref().and_then(|p| p.git.as_ref());
+        let branch = git.and_then(|g| cwd.as_deref().map_or(g.branch.as_deref(), |c| g.branch_at(c))).map(str::to_string);
+        let worktree = project.as_ref().zip(git).zip(cwd.as_deref()).and_then(|((p, g), c)| Some((p.id.clone(), c.to_path_buf(), crate::git::worktree::label(g, c)?)));
         // `.occlude()` on both groups: the bar is a Windows drag (HTCAPTION) area, which would otherwise swallow clicks on the buttons inside it.
         // The top bar spans the window and is drawn as the window background, not as a panel. macOS keeps its
         // traffic lights at the left (they are hidden in fullscreen); Windows/Linux get min/max/close at the right.
@@ -106,6 +109,30 @@ impl Workspace {
                                 .child(b)
                                 .child(tail)
                                 .dropdown(cx, move |ws, at, _w, cx| ws.open_branch_menu(repo.clone(), at, cx)),
+                        )
+                    })
+                    .when_some(worktree, |d, (project, cwd, label)| {
+                        // Click: the repository's worktrees and a new one (see Workspace::open_worktree_menu).
+                        d.child(
+                            div()
+                                .id("worktree")
+                                .occlude()
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .gap(px(4.0))
+                                .px(px(7.0))
+                                .py(px(1.0))
+                                .rounded(px(10.0))
+                                .bg(hsla(0x26262a))
+                                .text_size(crate::panels::scale::px(11.0))
+                                .text_color(hsla(theme::TEXT_DIM))
+                                .cursor_pointer()
+                                .hover(|s| s.bg(hsla(0x323236)).text_color(hsla(theme::TEXT)))
+                                .child(icon(IconName::FolderGit2, 12.0))
+                                .child(label)
+                                .child(icon(IconName::ChevronDown, 12.0))
+                                .dropdown(cx, move |ws, at, _w, cx| ws.open_worktree_menu(project.clone(), cwd.clone(), at, cx)),
                         )
                     }),
             )
@@ -333,7 +360,7 @@ impl Workspace {
                     .child(button("home-claude", "New", true).dropdown(
                         cx,
                         |ws, at, _w, cx| {
-                            let item = |label: String, act: Act, sep: bool| crate::app::MenuItem { label, hint: None, act, danger: false, disabled: false, separator_before: sep };
+                            let item = |label: String, act: Act, sep: bool| crate::app::MenuItem { label, hint: None, detail: None, act, danger: false, disabled: false, separator_before: sep, remove: None, icon: None };
                             let mut items: Vec<_> = ws.store.data.projects.iter().map(|p| item(p.name.clone(), Act::NewClaude { cwd: p.path.clone() }, false)).collect();
                             let sep = !items.is_empty();
                             items.push(item("Add project…".into(), Act::ImportProject, sep));
@@ -383,7 +410,7 @@ impl Workspace {
             let color = if item.disabled { theme::TEXT_FAINT } else if item.danger { theme::DANGER } else { theme::TEXT };
             let row = div()
                 .id(gpui::SharedString::from(format!("menu-{i}")))
-                .h(px(28.0))
+                .h(px(if item.detail.is_some() { 42.0 } else { 28.0 }))
                 .px(px(10.0))
                 .flex()
                 .items_center()
@@ -391,8 +418,27 @@ impl Workspace {
                 .text_size(crate::panels::scale::px(12.5))
                 .text_color(hsla(color))
                 .gap(px(8.0))
-                .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(item.label.clone()))
-                .children(item.hint.clone().map(|h| div().flex_none().text_size(crate::panels::scale::px(11.0)).text_color(hsla(theme::TEXT_FAINT)).child(h)));
+                .group(gpui::SharedString::from(format!("menu-row-{i}")))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().child(item.label.clone()))
+                        .children(item.detail.clone().map(|d| div().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(crate::panels::scale::px(11.0)).text_color(hsla(theme::TEXT_FAINT)).child(d))),
+                )
+                .children(item.icon.map(|name| icon(name, 12.0).text_color(hsla(theme::TEXT_FAINT))))
+                .children(item.hint.clone().map(|h| div().flex_none().text_size(crate::panels::scale::px(11.0)).text_color(hsla(theme::TEXT_FAINT)).child(h)))
+                .children(item.remove.clone().map(|remove| {
+                    icon_button(gpui::SharedString::from(format!("menu-remove-{i}")), IconName::X)
+                        .invisible()
+                        .group_hover(gpui::SharedString::from(format!("menu-row-{i}")), |s| s.visible())
+                        .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
+                            cx.stop_propagation();
+                            ws.act(remove.clone(), window, cx);
+                        }))
+                }));
             card = card.child(if item.disabled {
                 row
             } else {
@@ -431,7 +477,7 @@ impl Workspace {
                 confirm.clone(),
                 *danger,
             ),
-            Modal::Settings { .. } => ("Settings".into(), settings_body(self.settings_page, modal, &self.settings_scroll, window, cx), "Save".into(), false),
+            Modal::Settings { .. } => ("Settings".into(), settings_body(self.settings_page, modal, &self.worktrees_page, &self.settings_scroll, window, cx), "Save".into(), false),
             Modal::Advisor { input, .. } => (
                 "Advisor model".into(),
                 div()
@@ -459,6 +505,33 @@ impl Workspace {
                 .into(),
                 false,
             ),
+            Modal::NewWorktree { input, base, .. } => {
+                use crate::git::worktree::Base;
+                let choice = |id: &'static str, label: &'static str, this: Base| {
+                    button(id, label, *base == this).on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::PickBase(this), window, cx)))
+                };
+                (
+                    "New worktree".into(),
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(10.0))
+                        .child(div().text_size(crate::panels::scale::px(12.0)).text_color(hsla(theme::TEXT_DIM)).child("The session moves into it and keeps its history. Claudiu makes a folder for it in its own data folder, outside your repository, with a new branch of this name."))
+                        .child(Input::new(input))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(6.0))
+                                .child(div().text_size(crate::panels::scale::px(12.0)).text_color(hsla(theme::TEXT_FAINT)).child("Start from"))
+                                .child(choice("base-main", "Main", Base::Main))
+                                .child(choice("base-current", "Current branch", Base::Current)),
+                        )
+                        .into_any_element(),
+                    "Create and switch".into(),
+                    false,
+                )
+            }
             Modal::GoToLine { input, .. } => ("Go to line".into(), Input::new(input).into_any_element(), "Go".into(), false),
             Modal::Rename { input, .. } | Modal::NewBranch { input, .. } => (
                 if matches!(modal, Modal::NewBranch { .. }) { "New branch" } else { "Rename session" }.into(),
@@ -760,7 +833,7 @@ impl Render for Workspace {
 }
 
 /// The Settings dialog's body: the category list on the left and the chosen page on the right.
-fn settings_body(page: SettingsPage, modal: &Modal, scroll: &crate::panels::glide::Smooth, window: &mut Window, cx: &mut Context<Workspace>) -> AnyElement {
+fn settings_body(page: SettingsPage, modal: &Modal, worktrees: &crate::app::WorktreesPage, scroll: &crate::panels::glide::Smooth, window: &mut Window, cx: &mut Context<Workspace>) -> AnyElement {
     let Modal::Settings { shell, claude, model, effort, permission, updates, chrome, scale, trimmed, claudiu_off, list_focus } = modal else {
         return div().into_any_element();
     };
@@ -856,6 +929,7 @@ fn settings_body(page: SettingsPage, modal: &Modal, scroll: &crate::panels::glid
             }
             list
         }
+        SettingsPage::Worktrees => worktrees_page(worktrees, cx),
         SettingsPage::About => div().child(faint(format!(
             "Claudiu {} · An independent project, not affiliated with, endorsed by or sponsored by Anthropic. Claude is a trademark of Anthropic.",
             env!("CARGO_PKG_VERSION")
@@ -881,9 +955,8 @@ fn settings_body(page: SettingsPage, modal: &Modal, scroll: &crate::panels::glid
                     .hover(|s| s.bg(hsla(0x1f1f1f)))
                     .child(p.label())
                     .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
-                        ws.settings_page = p;
+                        ws.set_settings_page(p, cx);
                         window.focus(&focus, cx);
-                        cx.notify();
                     })),
             )
         },
@@ -896,6 +969,89 @@ fn settings_body(page: SettingsPage, modal: &Modal, scroll: &crate::panels::glid
         .child(categories)
         .child(scroll.wire(div().id("settings-page").flex_1().min_w_0(), window).child(content))
         .into_any_element()
+}
+
+/// The Worktrees page: the worktree folders Claudiu made, by repository, each to show in the file manager or remove.
+fn worktrees_page(page: &crate::app::WorktreesPage, cx: &mut Context<Workspace>) -> gpui::Div {
+    let scaled = crate::panels::scale::px;
+    let faint = |text: String| div().text_size(scaled(11.0)).text_color(hsla(theme::TEXT_FAINT)).child(text);
+    let reveal = if cfg!(target_os = "macos") { "Show in Finder" } else { "Show in File Explorer" };
+    let mut list = div().flex().flex_col().gap(px(8.0)).child(faint(
+        "Worktrees Claudiu made live in its own data folder, outside your repositories. Removing one here asks the same question as the x in the top-bar menu.".to_string(),
+    ));
+    let Some(stored) = &page.stored else { return list.child(faint("Looking…".to_string())) };
+    if stored.is_empty() {
+        return list.child(faint("No worktrees yet. Make one from the worktree button in the top bar.".to_string()));
+    }
+    let mut group: Option<&std::path::Path> = None;
+    for (i, item) in stored.iter().enumerate() {
+        let repo_folder = item.folder.parent();
+        if group != repo_folder {
+            group = repo_folder;
+            let heading = match &item.main_checkout {
+                Some(main) => main.to_string_lossy().into_owned(),
+                None => format!("{} (repository not found)", repo_folder.and_then(|p| p.file_name()).unwrap_or_default().to_string_lossy()),
+            };
+            list = list.child(div().mt(px(4.0)).child(section_label(heading)));
+        }
+        let name = item.folder.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        let (folder, remove) = (item.folder.clone(), item.main_checkout.clone());
+        let revealed = folder.clone();
+        let asked = page.asking.as_ref().filter(|a| a.folder == item.folder);
+        let ask = match remove {
+            Some(main_checkout) => Act::RemoveWorktree { main_checkout, folder: folder.clone() },
+            None => Act::AskDeleteUnlisted(folder.clone()),
+        };
+        let row = div()
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .px(px(10.0))
+            .py(px(6.0))
+            .rounded(px(6.0))
+            .bg(hsla(0x111111))
+            .border_1()
+            .border_color(hsla(0x242424))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(10.0))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(div().text_size(scaled(13.0)).child(name))
+                            .child(faint(item.folder.to_string_lossy().into_owned()).overflow_hidden().text_ellipsis().whitespace_nowrap()),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .gap(px(6.0))
+                            .child(button(format!("worktree-reveal-{i}"), reveal, false).on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::Reveal(revealed.clone()), window, cx))))
+                            .child(button(format!("worktree-remove-{i}"), "Remove", false).on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(ask.clone(), window, cx)))),
+                    ),
+            );
+        list = list.child(match asked {
+            None => row,
+            Some(asked) => {
+                let act = asked.act.clone();
+                let confirm = if asked.danger { danger_button(format!("worktree-confirm-{i}"), asked.confirm.clone()) } else { button(format!("worktree-confirm-{i}"), asked.confirm.clone(), true) };
+                row.child(faint(asked.body.clone())).child(
+                    div()
+                        .flex()
+                        .gap(px(6.0))
+                        .child(button(format!("worktree-cancel-{i}"), "Cancel", false).on_click(cx.listener(|ws, _: &ClickEvent, _window, cx| {
+                            ws.worktrees_page.asking = None;
+                            cx.notify();
+                        })))
+                        .child(confirm.on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(act.clone(), window, cx)))),
+                )
+            }
+        });
+    }
+    list
 }
 
 /// An On/Off row in the Settings modal; `field` picks the flag it flips.

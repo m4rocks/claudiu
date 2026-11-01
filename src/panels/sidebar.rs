@@ -4,7 +4,7 @@
 use std::time::{Duration, Instant};
 
 use gpui::{
-    Animation, AnimationExt, AnyElement, AppContext, DragMoveEvent, SharedString, WeakEntity, ease_out_quint, pulsating_between, ClickEvent, Context, Div, FontWeight, InteractiveElement, IntoElement, MouseButton, MouseDownEvent, ParentElement, Pixels, Render,
+    Animation, AnimationExt, AnyElement, AppContext, DragMoveEvent, SharedString, WeakEntity, ease_out_quint, ClickEvent, Context, Div, FontWeight, InteractiveElement, IntoElement, MouseButton, MouseDownEvent, ParentElement, Pixels, Render,
     Stateful, StatefulInteractiveElement, Styled, Window, div, prelude::FluentBuilder, px,
 };
 
@@ -13,6 +13,7 @@ use crate::app::{Act, Activity, MenuItem, SideDrag, Workspace};
 use crate::store::{ExternalState, Id, Project, SessionKind, SessionRecord, now};
 use crate::panels::theme::{self, hsla};
 use gpui_kit::assets::IconName;
+use crate::panels::status_icon::{SessionDot, StatusIcon};
 use crate::panels::widgets::{Trigger, ago, avatar, button, clawd, countdown, icon, icon_button, key_hint, meter, section_label, shortcut, tick};
 
 pub const SIDEBAR_W: f32 = 284.0;
@@ -25,10 +26,14 @@ const RECENT_LIMIT: usize = 12;
 #[derive(Clone, PartialEq)]
 struct Row {
     id: Id,
-    /// What the leading status dot shows.
+    /// What the leading status icon shows.
     dot: SessionDot,
     title: String,
     right: String,
+    /// The project's name, on the first line of a running session's row.
+    project: String,
+    /// The branch checked out in the session's own working tree, on the last line of a running session's row.
+    branch: Option<String>,
     active: bool,
     dim: bool,
     running: bool,
@@ -37,19 +42,6 @@ struct Row {
     archived: bool,
     /// Which sidebar section renders the row; keeps element ids unique when a session shows in several.
     scope: &'static str,
-}
-
-/// The four states a sidebar session dot can show.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum SessionDot {
-    /// Claude finished while the row was not being watched.
-    Attention,
-    /// The process is running and streaming output.
-    Working,
-    /// Running and idle, with the user up to date.
-    Active,
-    /// The session is not running.
-    Inactive,
 }
 
 /// Drag payload: a running session row, dropped onto another to reorder.
@@ -81,17 +73,24 @@ fn lifted<T: Styled>(el: T) -> T {
     el.bg(hsla(theme::ROW_ACTIVE)).border_1().border_color(hsla(theme::TEXT_FAINT))
 }
 
-/// Height of a session row plus the gap between rows.
-const ROW_PITCH: f32 = ROW_H + LIST_GAP;
+/// Height of a running session's row plus the gap between rows.
+const ROW_PITCH: f32 = RUNNING_ROW_H + LIST_GAP;
 /// Heights of the list's parts, fixed so where each one sits is known before anything is drawn (see `visible_items`).
 const ROW_H: f32 = 25.0;
+/// A running session's row has three lines: project, title and branch.
+/// Its lines are 14 + 17 + 14 px with 2 px gaps (see `render_row`), which leaves 5.5 px above and below.
+const RUNNING_ROW_H: f32 = 60.0;
 const HEADER_H: f32 = 20.0;
 const NOTE_H: f32 = 24.0;
 const SPACER_H: f32 = 10.0;
 const LIST_GAP: f32 = 2.0;
 /// Drawn beyond each edge of the view. The list is rebuilt for every frame its offset moves, so one row is enough.
-const OVERSCAN: f32 = ROW_H + LIST_GAP;
+const OVERSCAN: f32 = RUNNING_ROW_H + LIST_GAP;
 const SLIDE_MS: u64 = 160;
+const CLOSE_SLIDE_MS: u64 = 140;
+/// Width of a row's close button, and the gap between a row's parts.
+const CLOSE_W: f32 = 22.0;
+const ROW_GAP: f32 = 7.0;
 
 /// A row or project block that just changed places: it starts `from` px away from its new slot and slides in.
 /// `epoch` makes each reorder a fresh animation.
@@ -118,30 +117,6 @@ fn slid(el: impl IntoElement + gpui::Styled + 'static, id: &Id, slide: Option<Sl
             .into_any_element(),
         None => el.into_any_element(),
     }
-}
-
-/// How long one pulse of a working session's dot takes.
-const PULSE: Duration = Duration::from_millis(1200);
-/// How often the dot is redrawn while it pulses (see `Workspace::start_pulse`). A gpui animation would redraw the
-/// whole window every frame for as long as any session works.
-pub const PULSE_STEP: Duration = Duration::from_millis(100);
-
-/// The working dot's opacity `elapsed` into the pulse, which repeats every `PULSE`.
-fn pulse_opacity(elapsed: Duration) -> f32 {
-    let t = (elapsed.as_millis() % PULSE.as_millis()) as f32 / PULSE.as_millis() as f32;
-    pulsating_between(0.35, 1.0)(t)
-}
-
-/// The leading status dot: a small circle whose fill (and, when working, pulse) says what the session is doing.
-fn session_dot(state: SessionDot) -> AnyElement {
-    static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
-    let dot = match state {
-        SessionDot::Attention => div().size(px(7.0)).rounded_full().bg(hsla(theme::ACCENT)),
-        SessionDot::Working => div().size(px(7.0)).rounded_full().bg(hsla(0xc8c8c8)).opacity(pulse_opacity(START.get_or_init(Instant::now).elapsed())),
-        SessionDot::Active => div().size(px(7.0)).rounded_full().bg(hsla(theme::TEXT_DIM)),
-        SessionDot::Inactive => div().size(px(7.0)).rounded_full().border_1().border_color(hsla(0x3d3d43)),
-    };
-    div().w(px(14.0)).h(px(14.0)).flex_none().flex().items_center().justify_center().child(dot).into_any_element()
 }
 
 /// Moves `v[from]` into the slot of `v[to]`, shifting the items in between.
@@ -184,6 +159,7 @@ impl Item {
             Item::Header(..) | Item::Older { .. } => HEADER_H,
             Item::Note(_) => NOTE_H,
             Item::Spacer => SPACER_H,
+            Item::Session { row, .. } if row.running => RUNNING_ROW_H,
             Item::Session { .. } => ROW_H,
         }
     }
@@ -227,6 +203,21 @@ fn reveal_label() -> &'static str {
 }
 
 impl Workspace {
+    /// Keeps a running row's × slot drawn while it shrinks away after the pointer left, then redraws the list without it.
+    fn shrink_close_slot(&mut self, key: SharedString, cx: &mut Context<Self>) {
+        self.unhovered_rows.insert(key.clone());
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_millis(CLOSE_SLIDE_MS)).await;
+            let _ = this.update(cx, |ws, cx| {
+                ws.unhovered_rows.remove(&key);
+                if let Some(list) = &ws.session_list {
+                    list.update(cx, |_, cx| cx.notify());
+                }
+            });
+        })
+        .detach();
+    }
+
     /// True when the pointer is somewhere new. A list shifting under a still pointer (a session ending, say) makes
     /// GPUI re-send a move at the same spot; that must not reorder anything.
     ///
@@ -260,26 +251,27 @@ impl Workspace {
             SessionDot::Inactive
         } else {
             match activity {
+                Some(Activity::Waiting) => SessionDot::Waiting,
                 Some(Activity::Attention) => SessionDot::Attention,
                 Some(Activity::Working) => SessionDot::Working,
                 None => SessionDot::Active,
             }
         };
         let stale = rec.claude.as_ref().is_some_and(|c| c.external == ExternalState::Missing);
+        let project = {
+            let p = self.project_name(rec.project_id.as_ref());
+            if p.is_empty() { rec.cwd.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default() } else { p }
+        };
+        let branch = running
+            .then(|| rec.project_id.as_ref().and_then(|id| self.store.project(id)).and_then(|p| p.git.as_ref()).and_then(|g| g.branch_at(&rec.cwd)).map(str::to_string))
+            .flatten();
         Row {
             id: rec.id.clone(),
             dot,
             title: rec.display_title().to_string(),
-            right: if with_project {
-                let p = self.project_name(rec.project_id.as_ref());
-                if p.is_empty() {
-                    rec.cwd.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
-                } else {
-                    p
-                }
-            } else {
-                ago(rec.last_active, now())
-            },
+            right: if with_project && !running { project.clone() } else { ago(rec.last_active, now()) },
+            project,
+            branch,
             active: self.selected.as_deref() == Some(rec.id.as_str()),
             dim: !running,
             running,
@@ -292,7 +284,7 @@ impl Workspace {
 
     fn session_menu(&self, rec: &SessionRecord, running: bool) -> Vec<MenuItem> {
         let mut items = vec![];
-        let item = |label: &str, act: Act, danger: bool, sep: bool| MenuItem { label: label.into(), hint: None, act, danger, disabled: false, separator_before: sep };
+        let item = |label: &str, act: Act, danger: bool, sep: bool| MenuItem { label: label.into(), hint: None, detail: None, act, danger, disabled: false, separator_before: sep, remove: None, icon: None };
         if running {
             items.push(item("Switch to session", Act::Select(rec.id.clone()), false, false));
         } else if rec.kind == SessionKind::Claude {
@@ -320,7 +312,7 @@ impl Workspace {
     }
 
     fn project_menu(&self, p: &Project) -> Vec<MenuItem> {
-        let item = |label: String, act: Act, danger: bool, sep: bool| MenuItem { label, hint: None, act, danger, disabled: false, separator_before: sep };
+        let item = |label: String, act: Act, danger: bool, sep: bool| MenuItem { label, hint: None, detail: None, act, danger, disabled: false, separator_before: sep, remove: None, icon: None };
         let mut items = vec![item("New Claude session here".into(), Act::NewClaude { cwd: p.path.clone() }, false, false)];
         if p.git.is_some() {
             items.push(item("GitHub issues & PRs".into(), Act::OpenGithub { cwd: p.path.clone() }, false, true));
@@ -371,21 +363,74 @@ impl Workspace {
         let close_id = id.clone();
         let middle_id = id.clone();
         let archive_id = id.clone();
-        let dot = session_dot(row.dot);
+        let dot = StatusIcon::new(format!("dot-{}-{}", row.scope, id), row.dot);
         let key = gpui::SharedString::from(format!("row-{}-{}", row.scope, id));
         // Only the row under the pointer gets its × or archive button; the others keep the space empty. Building a
         // hidden button on every row cost more than the rest of the row.
         let hovered = self.hovered_row.as_ref() == Some(&key);
+        let closing = !hovered && self.unhovered_rows.contains(&key);
+        let running = row.running;
         let ws = cx.entity().downgrade();
         let hover_key = key.clone();
+        let right_text = if row.archived { "archived".to_string() } else if row.stale { "stale".to_string() } else { row.right.clone() };
+        let right_color = hsla(if row.stale { theme::WARN } else { theme::TEXT_FAINT });
+        let title_color = hsla(if row.dim { theme::TEXT_DIM } else { theme::TEXT });
+        let ellipsis = |el: Div| el.min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis();
+        let content = if row.running {
+            // Project and age, then the title with the status icon, then the branch.
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(px(2.0))
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(6.0))
+                        .text_size(crate::panels::scale::px(11.0))
+                        .line_height(crate::panels::scale::px(14.0))
+                        .text_color(hsla(theme::TEXT_FAINT))
+                        .child(ellipsis(div().flex_1()).child(row.project.clone()))
+                        .child(div().flex_none().text_color(right_color).child(right_text)),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(7.0))
+                        .child(ellipsis(div().flex_1()).text_size(crate::panels::scale::px(13.0)).line_height(crate::panels::scale::px(17.0)).text_color(title_color).child(row.title.clone()))
+                        .child(dot),
+                )
+                .children(row.branch.clone().map(|b| ellipsis(div()).text_size(crate::panels::scale::px(11.0)).line_height(crate::panels::scale::px(14.0)).text_color(hsla(theme::TEXT_FAINT)).child(b)))
+                .into_any_element()
+        } else {
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .items_center()
+                .gap(px(7.0))
+                .child(dot)
+                .child(ellipsis(div().flex_1()).text_size(crate::panels::scale::px(13.0)).text_color(title_color).child(row.title.clone()))
+                .child(div().flex_none().max_w(px(96.0)).overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(crate::panels::scale::px(11.0)).text_color(right_color).child(right_text))
+                .into_any_element()
+        };
         div()
             .id(key)
             .group("row")
             .on_hover(move |inside, _window, cx| {
                 let changed = ws
-                    .update(cx, |ws, _| {
+                    .update(cx, |ws, cx| {
                         let now = if *inside { Some(hover_key.clone()) } else { ws.hovered_row.clone().filter(|k| *k != hover_key) };
-                        std::mem::replace(&mut ws.hovered_row, now.clone()) != now
+                        let moved = std::mem::replace(&mut ws.hovered_row, now.clone()) != now;
+                        if *inside {
+                            return ws.unhovered_rows.remove(&hover_key) || moved;
+                        }
+                        if running {
+                            ws.shrink_close_slot(hover_key.clone(), cx);
+                        }
+                        moved || running
                     })
                     .unwrap_or(false);
                 if changed {
@@ -394,8 +439,8 @@ impl Workspace {
             })
             .flex()
             .items_center()
-            .gap(px(7.0))
-            .h(px(ROW_H))
+            .gap(px(ROW_GAP))
+            .h(px(if row.running { RUNNING_ROW_H } else { ROW_H }))
             .pl(px(if row.indent { 22.0 } else { 10.0 }))
             .pr(px(6.0))
             .mx(px(5.0))
@@ -414,29 +459,7 @@ impl Workspace {
                     }
                 }),
             )
-            .child(dot)
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .text_size(crate::panels::scale::px(13.0))
-                    .text_color(hsla(if row.dim { theme::TEXT_DIM } else { theme::TEXT }))
-                    .child(row.title),
-            )
-            .child(
-                div()
-                    .flex_none()
-                    .max_w(px(96.0))
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .text_size(crate::panels::scale::px(11.0))
-                    .text_color(hsla(if row.stale { theme::WARN } else { theme::TEXT_FAINT }))
-                    .child(if row.archived { "archived".to_string() } else if row.stale { "stale".to_string() } else { row.right }),
-            )
+            .child(content)
             .when(row.running, |d| {
                 // A middle click ends a running session, like its ×.
                 d.on_mouse_up(
@@ -444,17 +467,35 @@ impl Workspace {
                     cx.listener(move |ws, _: &gpui::MouseUpEvent, window, cx| ws.act(Act::CloseLive(middle_id.clone()), window, cx)),
                 )
             })
-            .when(!hovered, |d| d.child(div().flex_none().size(px(22.0))))
-            .when(hovered && row.running, |d| {
+            .when(!hovered && !row.running, |d| d.child(div().flex_none().size(px(22.0))))
+            .when((hovered || closing) && row.running, |d| {
+                // The slot grows from nothing to the button's width, pushing the age to the left, and shrinks back
+                // the same way once the pointer leaves. Its margin cancels the row's gap when the slot is empty, so
+                // nothing jumps.
+                let slide_key = SharedString::from(format!("close-{}-{}-{close_id}", if closing { "hide" } else { "show" }, row.scope));
+                let button = icon_button(gpui::SharedString::from(format!("close-{}-{close_id}", row.scope)), IconName::X)
+                    // Shown by hover style: a list that scrolled under a still pointer leaves the old row marked.
+                    // While shrinking away the pointer is outside the row, so it is simply shown.
+                    .when(!closing, |b| b.invisible().group_hover("row", |s| s.visible()))
+                    .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
+                        cx.stop_propagation();
+                        ws.act(Act::CloseLive(close_id.clone()), window, cx);
+                    }));
                 d.child(
-                    // Still shown by hover style: a list that scrolled under a still pointer leaves the old row marked.
-                    icon_button(gpui::SharedString::from(format!("close-{}-{close_id}", row.scope)), IconName::X)
-                        .invisible()
-                        .group_hover("row", |s| s.visible())
-                        .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
-                            cx.stop_propagation();
-                            ws.act(Act::CloseLive(close_id.clone()), window, cx);
-                        })),
+                    div()
+                        .flex()
+                        .flex_none()
+                        .justify_end()
+                        .overflow_hidden()
+                        .child(button)
+                        .with_animation(
+                            slide_key,
+                            Animation::new(Duration::from_millis(CLOSE_SLIDE_MS)).with_easing(ease_out_quint()),
+                            move |d, t| {
+                            let open = if closing { 1.0 - t } else { t };
+                            d.w(px(CLOSE_W * open)).ml(px(-ROW_GAP * (1.0 - open)))
+                        },
+                        ),
                 )
             })
             .when(hovered && !row.running, |d| {
@@ -631,7 +672,7 @@ impl Workspace {
 
     /// "+ Code session" with no project chosen: pick where it starts.
     fn new_session_menu(&self) -> Vec<MenuItem> {
-        let item = |label: String, hint: Option<String>, act: Act, disabled: bool, sep: bool| MenuItem { label, hint, act, danger: false, disabled, separator_before: sep };
+        let item = |label: String, detail: Option<String>, act: Act, disabled: bool, sep: bool| MenuItem { label, hint: None, detail, act, danger: false, disabled, separator_before: sep, remove: None, icon: None };
         let mut items = vec![item("Start the session in…".into(), None, Act::Dismiss, true, false)];
         items.extend(self.store.data.projects.iter().map(|p| item(p.name.clone(), Some(crate::panels::widgets::short_path(&p.path)), Act::NewClaude { cwd: p.path.clone() }, false, false)));
         items.push(item("Add project…".into(), None, Act::ImportProject, false, true));
@@ -664,7 +705,7 @@ impl Workspace {
                 cx,
                 move |ws, at, _w, cx| {
                     let chosen = ws.project_filter().map(|p| p.id.clone());
-                    let item = |label: String, act: Act, sep: bool| MenuItem { label, hint: None, act, danger: false, disabled: false, separator_before: sep };
+                    let item = |label: String, act: Act, sep: bool| MenuItem { label, hint: None, detail: None, act, danger: false, disabled: false, separator_before: sep, remove: None, icon: None };
                     let mut items = vec![item(format!("{}All projects", tick(chosen.is_none())), Act::FilterProject(None), false)];
                     items.extend(ws.store.data.projects.iter().map(|p| item(format!("{}{}", tick(chosen.as_ref() == Some(&p.id)), p.name), Act::FilterProject(Some(p.id.clone())), false)));
                     items.push(item("Add project…".into(), Act::ImportProject, true));
@@ -827,10 +868,13 @@ impl Workspace {
         let item = |label: String, hint: Option<String>, act: Act, danger: bool, sep: bool| MenuItem {
             label,
             hint,
+            detail: None,
             act,
             danger,
             disabled: false,
             separator_before: sep,
+            remove: None,
+            icon: None,
         };
         let accounts = &self.store.data.accounts;
         let mut items: Vec<MenuItem> = accounts
@@ -933,18 +977,30 @@ fn plan_label(plan: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{PULSE, is_reorder, move_to, pulse_opacity, visible_items};
-    use std::time::Duration;
+    use super::{Item, ROW_H, RUNNING_ROW_H, Row, SessionDot, is_reorder, move_to, visible_items};
+
+    fn row(running: bool) -> Row {
+        Row {
+            id: "s".into(),
+            dot: SessionDot::Active,
+            title: String::new(),
+            right: String::new(),
+            project: String::new(),
+            branch: None,
+            active: false,
+            dim: false,
+            running,
+            indent: false,
+            stale: false,
+            archived: false,
+            scope: "cur",
+        }
+    }
 
     #[test]
-    fn the_working_dot_fades_between_its_bounds_and_repeats_each_pulse() {
-        for ms in (0..2400).step_by(50) {
-            let o = pulse_opacity(Duration::from_millis(ms));
-            assert!((0.35..=1.0).contains(&o), "{o} at {ms} ms");
-            assert_eq!(o, pulse_opacity(Duration::from_millis(ms) + PULSE));
-        }
-        // gpui's breathing curve: brightest a quarter of the way through, dimmest at three quarters.
-        assert!(pulse_opacity(PULSE / 4) > 0.99 && pulse_opacity(PULSE * 3 / 4) < 0.36);
+    fn a_running_session_gets_the_tall_row_and_a_recent_one_stays_short() {
+        assert_eq!(Item::Session { row: row(true), reorder: true }.height(), RUNNING_ROW_H);
+        assert_eq!(Item::Session { row: row(false), reorder: false }.height(), ROW_H);
     }
 
     #[test]

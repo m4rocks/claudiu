@@ -1,4 +1,6 @@
-//! Claude Code integration. Strictly read-only against Claude Code's data and never touches its config.
+//! Claude Code integration. Read-only against Claude Code's data, with one exception: `clear_recorded_worktree` appends a
+//! line to a transcript when a session that Claude Code put in a worktree moves to another folder. It never touches
+//! Claude Code's config.
 //! Launching/resuming uses documented CLI flags (`--session-id`, `--resume`); the transcript scan is a
 //! best-effort, tolerant *import* aid: every field is optional and any unparseable line is skipped.
 //!
@@ -158,6 +160,58 @@ pub fn scan_all(home: &Path) -> ScanResult {
 pub fn find_transcript(home: &Path, session_id: &str) -> Option<PathBuf> {
     let name = format!("{session_id}.jsonl");
     fs::read_dir(home.join("projects")).ok()?.flatten().map(|d| d.path().join(&name)).find(|p| p.is_file())
+}
+
+/// Whether the transcript's last `worktree-state` line names a worktree. Claude Code writes the line whenever a session
+/// enters or leaves one and restores it on every resume, which wins over the folder `claude` is started in.
+pub fn worktree_recorded(transcript: &Path) -> std::io::Result<bool> {
+    const CHUNK: u64 = 1 << 20;
+    let mut file = File::open(transcript)?;
+    let mut start = file.metadata()?.len();
+    let mut tail: Vec<u8> = vec![];
+    // The line repeats every few lines of a transcript, so the last one is nearly always in the final chunk.
+    while start > 0 {
+        let from = start.saturating_sub(CHUNK);
+        file.seek(SeekFrom::Start(from))?;
+        let mut chunk = vec![0; (start - from) as usize];
+        file.read_exact(&mut chunk)?;
+        chunk.extend(tail);
+        (tail, start) = (chunk, from);
+        let text = String::from_utf8_lossy(&tail);
+        // Unless the whole file is in view, the first line may be cut in half.
+        let whole = if start == 0 { &text[..] } else { text.split_once('\n').map_or("", |(_, rest)| rest) };
+        if let Some(recorded) = whole.lines().rev().find_map(worktree_state) {
+            return Ok(recorded);
+        }
+    }
+    Ok(false)
+}
+
+fn worktree_state(line: &str) -> Option<bool> {
+    if !line.contains("\"worktree-state\"") {
+        return None;
+    }
+    let v: Value = serde_json::from_str(line).ok()?;
+    (v["type"] == "worktree-state").then(|| !v["worktreeSession"].is_null())
+}
+
+/// Append the line Claude Code's own ExitWorktree writes, so that a resume starts in the folder `claude` is launched
+/// from. Only appends, and only while no process of the session runs. Blocking.
+pub fn clear_recorded_worktree(transcript: &Path, session_id: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut file = fs::OpenOptions::new().read(true).append(true).open(transcript)?;
+    let mut line = String::new();
+    if file.metadata()?.len() > 0 {
+        file.seek(SeekFrom::End(-1))?;
+        let mut last = [0u8];
+        file.read_exact(&mut last)?;
+        if last[0] != b'\n' {
+            line.push('\n');
+        }
+    }
+    line.push_str(&serde_json::json!({"type": "worktree-state", "worktreeSession": null, "sessionId": session_id}).to_string());
+    line.push('\n');
+    file.write_all(line.as_bytes())
 }
 
 pub struct SessionScan {
@@ -482,6 +536,47 @@ Claude: Found it.
         assert_eq!(r.sessions.len(), 1);
         assert!(find_transcript(tmp.path(), "id-1").is_some());
         assert!(find_transcript(tmp.path(), "nope").is_none());
+    }
+
+    #[test]
+    fn the_last_worktree_state_line_decides_and_clearing_appends_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        let entered = r#"{"type":"worktree-state","worktreeSession":{"worktreeName":"t1"},"sessionId":"s"}"#;
+        fs::write(&path, format!("{{\"type\":\"user\"}}
+{entered}
+{{\"type\":\"assistant\"}}")).unwrap();
+        assert!(worktree_recorded(&path).unwrap());
+
+        clear_recorded_worktree(&path, "s").unwrap();
+        assert!(!worktree_recorded(&path).unwrap(), "the appended null line is the last one");
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.starts_with(&format!("{{\"type\":\"user\"}}
+{entered}
+{{\"type\":\"assistant\"}}
+")), "a missing final newline is added and nothing else changes");
+        assert!(text.lines().last().unwrap().contains("\"worktreeSession\":null"));
+
+        fs::write(&path, format!("{entered}
+{{\"type\":\"user\"}}
+")).unwrap();
+        assert!(worktree_recorded(&path).unwrap());
+        fs::write(&path, "{\"type\":\"user\"}
+").unwrap();
+        assert!(!worktree_recorded(&path).unwrap(), "no line at all means no worktree");
+    }
+
+    #[test]
+    fn a_worktree_state_line_far_from_the_end_is_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        let filler = format!("{{\"type\":\"user\",\"text\":\"{}\"}}
+", "x".repeat(1000));
+        let state = r#"{"type":"worktree-state","worktreeSession":{"worktreeName":"t1"},"sessionId":"s"}"#;
+        fs::write(&path, format!("{state}
+{}", filler.repeat(3000))).unwrap();
+        assert!(fs::metadata(&path).unwrap().len() > 2 << 20);
+        assert!(worktree_recorded(&path).unwrap());
     }
 
     #[test]
