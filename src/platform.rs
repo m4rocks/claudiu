@@ -27,22 +27,30 @@ pub fn default_shell(custom: Option<&str>) -> (String, Vec<String>) {
     }
 }
 
-/// On macOS a GUI-launched app inherits a minimal PATH (no nvm/fnm/Homebrew node), so Claude Code hooks
-/// that call `node` fail. Run the program through the user's login shell so it sees their normal environment.
-/// Other platforms are returned unchanged.
+/// On macOS and Linux a desktop-launched app inherits a minimal PATH (no nvm, fnm or a Homebrew node), so Claude
+/// Code hooks that call `node` fail. Run the program through the user's login shell so it sees their normal
+/// environment. Windows is returned unchanged.
 pub fn through_login_shell(program: String, args: Vec<String>) -> (String, Vec<String>) {
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     {
-        let shell = std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/zsh".into());
+        let shell = login_shell();
         let script = if shell.ends_with("/fish") { "exec $argv" } else { r#"exec "$@""# };
         let mut wrapped = vec!["-l".into(), "-i".into(), "-c".into(), script.into(), "claudiu".into(), program];
         wrapped.extend(args);
         (shell, wrapped)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(unix))]
     {
         (program, args)
     }
+}
+
+/// `SHELL` when a desktop launch set it, otherwise the platform's usual login shell.
+#[cfg(unix)]
+fn login_shell() -> String {
+    std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| {
+        if cfg!(target_os = "macos") { "/bin/zsh" } else { "/bin/bash" }.into()
+    })
 }
 
 /// The fixed-width font for terminals and code. GPUI matches family names exactly and, when one is missing, falls
@@ -89,7 +97,7 @@ pub fn home_dir() -> Option<PathBuf> {
 /// PATH lookup (honors PATHEXT on Windows).
 pub fn find_executable(name: &str) -> Option<PathBuf> {
     let found = which::which(name).ok();
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     let found = found.or_else(|| {
         let path = LOGIN_PATH.lock().ok()?.clone()?;
         which::which_in(name, Some(path), std::env::current_dir().ok()?).ok()
@@ -97,15 +105,15 @@ pub fn find_executable(name: &str) -> Option<PathBuf> {
     found
 }
 
-/// The PATH of the user's login shell, as `reload_path` last read it. A Finder-launched app gets a minimal PATH, and
+/// The PATH of the user's login shell, as `reload_path` last read it. A desktop-launched app gets a minimal PATH, and
 /// the environment of a running process is not changed here (`set_var` is unsafe beside other threads on Unix), so
 /// `find_executable` looks here as well. Sessions already start through the login shell (`through_login_shell`).
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 static LOGIN_PATH: std::sync::Mutex<Option<std::ffi::OsString>> = std::sync::Mutex::new(None);
 
 /// Look for the PATH again, for a tool installed since Claudiu started or one that only the shell's startup files
 /// put on the PATH. Windows reads the system and user PATH from the registry and uses it for this process and the
-/// programs it starts. macOS asks the login shell (blocking, up to a few seconds). Call it off the UI thread.
+/// programs it starts. macOS and Linux ask the login shell (blocking, up to a few seconds). Call it off the UI thread.
 pub fn reload_path() {
     #[cfg(target_os = "windows")]
     {
@@ -121,7 +129,7 @@ pub fn reload_path() {
         // SAFETY: on Windows `set_var` is safe to call from any thread (std's documentation says so).
         unsafe { std::env::set_var("PATH", rebuilt_path(&registry, &current)) };
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     {
         if let Some(text) = login_shell_path() {
             let shell_dirs: Vec<PathBuf> = std::env::split_paths(&text).collect();
@@ -134,21 +142,21 @@ pub fn reload_path() {
 }
 
 /// Ask the user's login shell for its PATH. Interactive (`-i`) so `.zshrc` runs too, which is where nvm and friends
-/// add theirs.
-#[cfg(target_os = "macos")]
+/// add theirs. A bash login shell reads `.bashrc` only when its profile sources it, as the usual Linux skeleton
+/// does, and that file stops unless the shell is interactive.
+#[cfg(unix)]
 fn login_shell_path() -> Option<std::ffi::OsString> {
-    let shell = std::env::var_os("SHELL").filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/zsh".into());
-    path_from_shell(&shell, &print_path_script(), std::time::Duration::from_secs(5))
+    path_from_shell(std::ffi::OsStr::new(&login_shell()), &print_path_script(), std::time::Duration::from_secs(5))
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(unix, test))]
 const PATH_BEGIN: &str = "<<claudiu-path";
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(unix, test))]
 const PATH_END: &str = "claudiu-path>>";
 
 /// A shell command that prints `$PATH` between the markers. `printf` and the quoting mean the same in sh, bash, zsh
 /// and fish (which joins its PATH list with colons inside quotes).
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(unix, test))]
 fn print_path_script() -> String {
     format!("printf '%s%s%s' '{PATH_BEGIN}' \"$PATH\" '{PATH_END}'")
 }
@@ -156,7 +164,7 @@ fn print_path_script() -> String {
 /// Run `script` in `shell` as a login shell and return the PATH it printed. Startup files may print anything, so the
 /// PATH sits between markers. A shell that has not answered after `wait` is killed and gives `None`, as does any shell
 /// that fails to run it.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(unix, test))]
 fn path_from_shell(shell: &OsStr, script: &str, wait: std::time::Duration) -> Option<std::ffi::OsString> {
     use std::io::Read;
     let mut child = Command::new(shell)
@@ -181,7 +189,7 @@ fn path_from_shell(shell: &OsStr, script: &str, wait: std::time::Duration) -> Op
 }
 
 /// The text between the markers, ignoring whatever the shell's startup files printed around them.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(unix, test))]
 fn path_between_markers(output: &str) -> Option<&str> {
     let after = output.split_once(PATH_BEGIN)?.1;
     Some(after.split_once(PATH_END)?.0)
@@ -189,7 +197,7 @@ fn path_between_markers(output: &str) -> Option<&str> {
 
 /// The registry's directories first, then whatever this process had that the registry lacks (for example folders a
 /// launcher added for Claudiu alone). Each directory appears once.
-#[cfg(any(target_os = "windows", target_os = "macos", test))]
+#[cfg(any(windows, unix, test))]
 fn rebuilt_path(registry: &[PathBuf], current: &OsStr) -> std::ffi::OsString {
     let mut dirs: Vec<PathBuf> = Vec::new();
     for dir in registry.iter().cloned().chain(std::env::split_paths(current)) {
@@ -479,6 +487,44 @@ bye
     fn posix_shell() -> Option<PathBuf> {
         let candidates = if cfg!(windows) { vec![PathBuf::from(expand_env(r"%ProgramFiles%\Git\bin\bash.exe"))] } else { vec![PathBuf::from("/bin/sh")] };
         candidates.into_iter().find(|p| p.is_file())
+    }
+
+    #[test]
+    fn a_desktop_launch_starts_the_program_through_the_login_shell() {
+        let (program, args) = through_login_shell("/usr/bin/claude".into(), vec!["--resume".into(), "abc".into()]);
+        if cfg!(windows) {
+            assert_eq!(program, "/usr/bin/claude");
+            assert_eq!(args, ["--resume".to_string(), "abc".into()]);
+            return;
+        }
+        let shell = std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| {
+            if cfg!(target_os = "macos") { "/bin/zsh".into() } else { "/bin/bash".into() }
+        });
+        let script = if shell.ends_with("/fish") { "exec $argv" } else { r#"exec "$@""# };
+        assert_eq!(program, shell);
+        assert_eq!(args, vec!["-l".into(), "-i".into(), "-c".into(), script.into(), "claudiu".into(), "/usr/bin/claude".into(), "--resume".into(), "abc".into()]);
+    }
+
+    /// A tool that is not on this process's PATH, sitting in a directory recorded as the login shell's.
+    #[test]
+    #[cfg(unix)]
+    fn find_executable_uses_a_directory_only_the_login_shell_reported() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("claudiu-login-path-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let tool = dir.join("claudiu-login-path-probe");
+        std::fs::write(&tool, b"#!/bin/sh\n").unwrap();
+        let mut perms = std::fs::metadata(&tool).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&tool, perms).unwrap();
+
+        let previous = LOGIN_PATH.lock().unwrap().clone();
+        *LOGIN_PATH.lock().unwrap() = Some(dir.as_os_str().to_os_string());
+        let found = find_executable("claudiu-login-path-probe");
+        *LOGIN_PATH.lock().unwrap() = previous;
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(found, Some(tool));
     }
 
     #[test]
