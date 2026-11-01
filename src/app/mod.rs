@@ -223,7 +223,7 @@ pub enum Act {
 impl MenuItem {
     /// A plain entry: not dangerous, enabled, no hint, no separator above.
     pub fn new(label: impl Into<String>, act: Act) -> Self {
-        Self { label: label.into(), hint: None, act, danger: false, disabled: false, separator_before: false, remove: None, icon: None }
+        Self { label: label.into(), hint: None, detail: None, act, danger: false, disabled: false, separator_before: false, remove: None, icon: None }
     }
 }
 
@@ -231,6 +231,8 @@ pub struct MenuItem {
     pub label: String,
     /// Faint text on the right that is never cut, so a long `label` is shortened with "…" instead.
     pub hint: Option<String>,
+    /// Faint second line under the label, for text too long to sit beside it (a project path).
+    pub detail: Option<String>,
     pub act: Act,
     pub danger: bool,
     /// Shown greyed out and does nothing when clicked.

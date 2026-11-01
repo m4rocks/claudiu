@@ -348,7 +348,7 @@ impl Workspace {
                     .child(button("home-claude", "New", true).dropdown(
                         cx,
                         |ws, at, _w, cx| {
-                            let item = |label: String, act: Act, sep: bool| crate::app::MenuItem { label, hint: None, act, danger: false, disabled: false, separator_before: sep, remove: None, icon: None };
+                            let item = |label: String, act: Act, sep: bool| crate::app::MenuItem { label, hint: None, detail: None, act, danger: false, disabled: false, separator_before: sep, remove: None, icon: None };
                             let mut items: Vec<_> = ws.store.data.projects.iter().map(|p| item(p.name.clone(), Act::NewClaude { cwd: p.path.clone() }, false)).collect();
                             let sep = !items.is_empty();
                             items.push(item("Add project…".into(), Act::ImportProject, sep));
@@ -398,7 +398,7 @@ impl Workspace {
             let color = if item.disabled { theme::TEXT_FAINT } else if item.danger { theme::DANGER } else { theme::TEXT };
             let row = div()
                 .id(gpui::SharedString::from(format!("menu-{i}")))
-                .h(px(28.0))
+                .h(px(if item.detail.is_some() { 42.0 } else { 28.0 }))
                 .px(px(10.0))
                 .flex()
                 .items_center()
@@ -407,7 +407,15 @@ impl Workspace {
                 .text_color(hsla(color))
                 .gap(px(8.0))
                 .group(gpui::SharedString::from(format!("menu-row-{i}")))
-                .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(item.label.clone()))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().child(item.label.clone()))
+                        .children(item.detail.clone().map(|d| div().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(crate::panels::scale::px(11.0)).text_color(hsla(theme::TEXT_FAINT)).child(d))),
+                )
                 .children(item.icon.map(|name| icon(name, 12.0).text_color(hsla(theme::TEXT_FAINT))))
                 .children(item.hint.clone().map(|h| div().flex_none().text_size(crate::panels::scale::px(11.0)).text_color(hsla(theme::TEXT_FAINT)).child(h)))
                 .children(item.remove.clone().map(|remove| {
