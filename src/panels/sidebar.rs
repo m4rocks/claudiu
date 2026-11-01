@@ -29,6 +29,10 @@ struct Row {
     dot: SessionDot,
     title: String,
     right: String,
+    /// The project's name, on the first line of a running session's row.
+    project: String,
+    /// The branch checked out in the session's own working tree, on the last line of a running session's row.
+    branch: Option<String>,
     active: bool,
     dim: bool,
     running: bool,
@@ -81,16 +85,18 @@ fn lifted<T: Styled>(el: T) -> T {
     el.bg(hsla(theme::ROW_ACTIVE)).border_1().border_color(hsla(theme::TEXT_FAINT))
 }
 
-/// Height of a session row plus the gap between rows.
-const ROW_PITCH: f32 = ROW_H + LIST_GAP;
+/// Height of a running session's row plus the gap between rows.
+const ROW_PITCH: f32 = RUNNING_ROW_H + LIST_GAP;
 /// Heights of the list's parts, fixed so where each one sits is known before anything is drawn (see `visible_items`).
 const ROW_H: f32 = 25.0;
+/// A running session's row has three lines: project, title and branch.
+const RUNNING_ROW_H: f32 = 56.0;
 const HEADER_H: f32 = 20.0;
 const NOTE_H: f32 = 24.0;
 const SPACER_H: f32 = 10.0;
 const LIST_GAP: f32 = 2.0;
 /// Drawn beyond each edge of the view. The list is rebuilt for every frame its offset moves, so one row is enough.
-const OVERSCAN: f32 = ROW_H + LIST_GAP;
+const OVERSCAN: f32 = RUNNING_ROW_H + LIST_GAP;
 const SLIDE_MS: u64 = 160;
 
 /// A row or project block that just changed places: it starts `from` px away from its new slot and slides in.
@@ -184,6 +190,7 @@ impl Item {
             Item::Header(..) | Item::Older { .. } => HEADER_H,
             Item::Note(_) => NOTE_H,
             Item::Spacer => SPACER_H,
+            Item::Session { row, .. } if row.running => RUNNING_ROW_H,
             Item::Session { .. } => ROW_H,
         }
     }
@@ -266,20 +273,20 @@ impl Workspace {
             }
         };
         let stale = rec.claude.as_ref().is_some_and(|c| c.external == ExternalState::Missing);
+        let project = {
+            let p = self.project_name(rec.project_id.as_ref());
+            if p.is_empty() { rec.cwd.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default() } else { p }
+        };
+        let branch = running
+            .then(|| rec.project_id.as_ref().and_then(|id| self.store.project(id)).and_then(|p| p.git.as_ref()).and_then(|g| g.branch_at(&rec.cwd)).map(str::to_string))
+            .flatten();
         Row {
             id: rec.id.clone(),
             dot,
             title: rec.display_title().to_string(),
-            right: if with_project {
-                let p = self.project_name(rec.project_id.as_ref());
-                if p.is_empty() {
-                    rec.cwd.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
-                } else {
-                    p
-                }
-            } else {
-                ago(rec.last_active, now())
-            },
+            right: if with_project && !running { project.clone() } else { ago(rec.last_active, now()) },
+            project,
+            branch,
             active: self.selected.as_deref() == Some(rec.id.as_str()),
             dim: !running,
             running,
@@ -378,6 +385,49 @@ impl Workspace {
         let hovered = self.hovered_row.as_ref() == Some(&key);
         let ws = cx.entity().downgrade();
         let hover_key = key.clone();
+        let right_text = if row.archived { "archived".to_string() } else if row.stale { "stale".to_string() } else { row.right.clone() };
+        let right_color = hsla(if row.stale { theme::WARN } else { theme::TEXT_FAINT });
+        let title_color = hsla(if row.dim { theme::TEXT_DIM } else { theme::TEXT });
+        let ellipsis = |el: Div| el.min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis();
+        let content = if row.running {
+            // Project and age, then the title with the status dot, then the branch.
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(px(2.0))
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(6.0))
+                        .text_size(crate::panels::scale::px(11.0))
+                        .text_color(hsla(theme::TEXT_FAINT))
+                        .child(ellipsis(div().flex_1()).child(row.project.clone()))
+                        .child(div().flex_none().text_color(right_color).child(right_text)),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(7.0))
+                        .child(ellipsis(div().flex_1()).text_size(crate::panels::scale::px(13.0)).text_color(title_color).child(row.title.clone()))
+                        .child(dot),
+                )
+                .children(row.branch.clone().map(|b| ellipsis(div()).text_size(crate::panels::scale::px(11.0)).text_color(hsla(theme::TEXT_FAINT)).child(b)))
+                .into_any_element()
+        } else {
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .items_center()
+                .gap(px(7.0))
+                .child(dot)
+                .child(ellipsis(div().flex_1()).text_size(crate::panels::scale::px(13.0)).text_color(title_color).child(row.title.clone()))
+                .child(div().flex_none().max_w(px(96.0)).overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(crate::panels::scale::px(11.0)).text_color(right_color).child(right_text))
+                .into_any_element()
+        };
         div()
             .id(key)
             .group("row")
@@ -395,7 +445,7 @@ impl Workspace {
             .flex()
             .items_center()
             .gap(px(7.0))
-            .h(px(ROW_H))
+            .h(px(if row.running { RUNNING_ROW_H } else { ROW_H }))
             .pl(px(if row.indent { 22.0 } else { 10.0 }))
             .pr(px(6.0))
             .mx(px(5.0))
@@ -414,29 +464,7 @@ impl Workspace {
                     }
                 }),
             )
-            .child(dot)
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .text_size(crate::panels::scale::px(13.0))
-                    .text_color(hsla(if row.dim { theme::TEXT_DIM } else { theme::TEXT }))
-                    .child(row.title),
-            )
-            .child(
-                div()
-                    .flex_none()
-                    .max_w(px(96.0))
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .text_size(crate::panels::scale::px(11.0))
-                    .text_color(hsla(if row.stale { theme::WARN } else { theme::TEXT_FAINT }))
-                    .child(if row.archived { "archived".to_string() } else if row.stale { "stale".to_string() } else { row.right }),
-            )
+            .child(content)
             .when(row.running, |d| {
                 // A middle click ends a running session, like its ×.
                 d.on_mouse_up(
@@ -935,8 +963,32 @@ fn plan_label(plan: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{PULSE, is_reorder, move_to, pulse_opacity, visible_items};
+    use super::{Item, PULSE, ROW_H, RUNNING_ROW_H, Row, SessionDot, is_reorder, move_to, pulse_opacity, visible_items};
     use std::time::Duration;
+
+    fn row(running: bool) -> Row {
+        Row {
+            id: "s".into(),
+            dot: SessionDot::Active,
+            title: String::new(),
+            right: String::new(),
+            project: String::new(),
+            branch: None,
+            active: false,
+            dim: false,
+            running,
+            indent: false,
+            stale: false,
+            archived: false,
+            scope: "cur",
+        }
+    }
+
+    #[test]
+    fn a_running_session_gets_the_tall_row_and_a_recent_one_stays_short() {
+        assert_eq!(Item::Session { row: row(true), reorder: true }.height(), RUNNING_ROW_H);
+        assert_eq!(Item::Session { row: row(false), reorder: false }.height(), ROW_H);
+    }
 
     #[test]
     fn the_working_dot_fades_between_its_bounds_and_repeats_each_pulse() {
