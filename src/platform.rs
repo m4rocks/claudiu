@@ -502,7 +502,8 @@ bye
         });
         let script = if shell.ends_with("/fish") { "exec $argv" } else { r#"exec "$@""# };
         assert_eq!(program, shell);
-        assert_eq!(args, vec!["-l".into(), "-i".into(), "-c".into(), script.into(), "claudiu".into(), "/usr/bin/claude".into(), "--resume".into(), "abc".into()]);
+        let expected: Vec<String> = ["-l", "-i", "-c", script, "claudiu", "/usr/bin/claude", "--resume", "abc"].map(String::from).to_vec();
+        assert_eq!(args, expected);
     }
 
     /// A tool that is not on this process's PATH, sitting in a directory recorded as the login shell's.
