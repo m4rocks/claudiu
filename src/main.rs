@@ -15,7 +15,10 @@ mod terminal;
 mod updater;
 mod visual;
 
-use gpui::{App, Bounds, KeyBinding, TitlebarOptions, WindowBounds, WindowOptions, prelude::*, px, size};
+use std::cell::RefCell;
+use std::rc::Rc;
+
+use gpui::{AnyWindowHandle, App, Bounds, Entity, KeyBinding, TitlebarOptions, WindowBounds, WindowOptions, prelude::*, px, size};
 use gpui_kit::component::TitleBar;
 
 // The Lucide icons the app draws (`IconName::` anywhere in `src`) and the title bar's window controls. The test
@@ -109,6 +112,42 @@ fn install_crash_log() {
     }));
 }
 
+type MainWindow = (AnyWindowHandle, Entity<Workspace>);
+
+/// Open the main window with its workspace; closing it asks first when sessions are still working.
+fn open_main_window(initial: Vec<std::path::PathBuf>, cx: &mut App) -> MainWindow {
+    let bounds = app::saved_window_bounds(cx).unwrap_or_else(|| WindowBounds::Windowed(Bounds::centered(None, size(px(1280.0), px(800.0)), cx)));
+    // AppKit's standard window buttons are 14 px tall; center them in the top bar so the
+    // traffic lights line up with its controls (and get equal space above and below).
+    let traffic_light_y = (panels::theme::TOPBAR_HEIGHT - 14.0) / 2.0;
+    // Opened through gpui_kit so the window gets the component library's Root (text inputs need it).
+    let (window, workspace) = gpui_kit::open_window(
+        WindowOptions {
+            window_bounds: Some(bounds),
+            window_min_size: Some(size(px(720.0), px(420.0))),
+            titlebar: Some(TitlebarOptions {
+                title: Some("Claudiu".into()),
+                traffic_light_position: Some(gpui::point(px(14.0), px(traffic_light_y))),
+                ..TitleBar::title_bar_options()
+            }),
+            // The top bar owns dragging and double-click (see TitleBar::window_options).
+            app_owns_titlebar_drag: true,
+            app_id: Some(platform::APP_ID.into()),
+            // Linux: the top bar draws min/max/close itself instead of the window manager adding a second bar above
+            // it. A compositor without client-side decorations keeps its own bar. Other platforms ignore this.
+            window_decorations: Some(gpui::WindowDecorations::Client),
+            ..Default::default()
+        },
+        cx,
+        |window, cx| cx.new(|cx| Workspace::new(window, initial, cx)),
+    )
+    .expect("open window");
+    let closing = workspace.clone();
+    // Closing the window with live sessions asks first instead of silently killing them.
+    window.update(cx, |_, window, cx| window.on_window_should_close(cx, move |window, cx| closing.update(cx, |ws, cx| ws.request_quit(window, cx)))).ok();
+    (window, workspace)
+}
+
 fn main() {
     // Hidden helper mode: the MCP server that lets Claude name its own tab (see claude/mcp.rs).
     if std::env::args().nth(1).as_deref() == Some(claude::mcp::FLAG) {
@@ -180,40 +219,15 @@ fn main() {
         #[cfg(target_os = "macos")]
         cx.bind_keys([KeyBinding::new("cmd-q", Quit, None), KeyBinding::new("cmd-h", HideApp, None), KeyBinding::new("cmd-alt-h", HideOthers, None)]);
 
-        let bounds = app::saved_window_bounds(cx).unwrap_or_else(|| WindowBounds::Windowed(Bounds::centered(None, size(px(1280.0), px(800.0)), cx)));
-        // AppKit's standard window buttons are 14 px tall; center them in the top bar so the
-        // traffic lights line up with its controls (and get equal space above and below).
-        let traffic_light_y = (panels::theme::TOPBAR_HEIGHT - 14.0) / 2.0;
-        // Opened through gpui_kit so the window gets the component library's Root (text inputs need it).
-        let (window, workspace) = gpui_kit::open_window(
-            WindowOptions {
-                window_bounds: Some(bounds),
-                window_min_size: Some(size(px(720.0), px(420.0))),
-                titlebar: Some(TitlebarOptions {
-                    title: Some("Claudiu".into()),
-                    traffic_light_position: Some(gpui::point(px(14.0), px(traffic_light_y))),
-                    ..TitleBar::title_bar_options()
-                }),
-                // The top bar owns dragging and double-click (see TitleBar::window_options).
-                app_owns_titlebar_drag: true,
-                ..Default::default()
-            },
-            cx,
-            |window, cx| cx.new(|cx| Workspace::new(window, initial, cx)),
-        )
-        .expect("open window");
-
-        let quit_target = workspace.clone();
-        // Closing the window with live sessions asks first instead of silently killing them.
-        window
-            .update(cx, |_, window, cx| {
-                window.on_window_should_close(cx, move |window, cx| workspace.update(cx, |ws, cx| ws.request_quit(window, cx)));
-            })
-            .ok();
-
-        // Cmd+Q / the Quit menu item go through the same confirmation as closing the window.
+        // The main window, once there is one. Cmd+Q / the Quit menu item go through the same confirmation as closing it.
+        let main: Rc<RefCell<Option<MainWindow>>> = Rc::default();
+        let quit_main = main.clone();
         cx.on_action(move |_: &Quit, cx| {
-            let quit = window.update(cx, |_, window, cx| quit_target.update(cx, |ws, cx| ws.request_quit(window, cx))).unwrap_or(true);
+            let open = quit_main.borrow().clone();
+            let quit = match open {
+                Some((window, workspace)) => window.update(cx, |_, window, cx| workspace.update(cx, |ws, cx| ws.request_quit(window, cx))).unwrap_or(true),
+                None => true,
+            };
             if quit {
                 cx.quit();
             }
@@ -230,6 +244,25 @@ fn main() {
             }
         })
         .detach();
+
+        // A first launch (no state file) starts with the setup window alone. Asked before anything loads the store.
+        if store::Store::is_first_launch(&store::Store::default_path()) {
+            let (setup_window, setup) = gpui_kit::open_window(app::setup_window_options(cx), cx, |window, cx| {
+                cx.new(|cx| app::SetupView::new(app::SetupMode::FirstLaunch, None, window, cx))
+            })
+            .expect("open setup window");
+            cx.subscribe(&setup, move |_, ev: &app::SetupEvent, cx| {
+                let app::SetupEvent::Done(claude_path) = ev else { return };
+                // The main window opens before the setup window closes: closing the last window quits the app.
+                let (window, workspace) = open_main_window(initial.clone(), cx);
+                workspace.update(cx, |ws, cx| ws.apply_setup(claude_path.clone(), cx));
+                *main.borrow_mut() = Some((window, workspace));
+                setup_window.update(cx, |_, window, _| window.remove_window()).ok();
+            })
+            .detach();
+        } else {
+            *main.borrow_mut() = Some(open_main_window(initial, cx));
+        }
         cx.activate(true);
     });
 }

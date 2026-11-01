@@ -88,26 +88,29 @@ impl Workspace {
                     cx,
                 );
             }
-            GhEvent::SignIn => {
-                let Some(exe) = crate::github::cli::locate() else { return };
-                let home = platform::home_dir().unwrap_or_else(|| PathBuf::from("."));
-                let spec = SpawnSpec { program: exe.to_string_lossy().into_owned(), args: vec!["auth".into(), "login".into()], cwd: Some(home.clone()), ..Default::default() };
-                let record = SessionRecord {
-                    id: new_id(),
-                    kind: SessionKind::Shell,
-                    title: "GitHub sign in".into(),
-                    custom_title: None,
-                    auto_title: None,
-                    project_id: None,
-                    cwd: home,
-                    created_at: now(),
-                    last_active: now(),
-                    exit_code: None,
-                    hidden: false,
-                    claude: None,
-                };
-                self.start(record, spec, true, window, cx);
-            }
+            GhEvent::SignIn => self.sign_in_to_github(window, cx),
         }
+    }
+
+    /// `gh auth login` in a terminal tab.
+    pub(super) fn sign_in_to_github(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(exe) = crate::github::cli::locate() else { return };
+        let home = platform::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        let spec = SpawnSpec { program: exe.to_string_lossy().into_owned(), args: vec!["auth".into(), "login".into()], cwd: Some(home.clone()), ..Default::default() };
+        let record = SessionRecord {
+            id: new_id(),
+            kind: SessionKind::Shell,
+            title: "GitHub sign in".into(),
+            custom_title: None,
+            auto_title: None,
+            project_id: None,
+            cwd: home,
+            created_at: now(),
+            last_active: now(),
+            exit_code: None,
+            hidden: false,
+            claude: None,
+        };
+        self.start(record, spec, true, window, cx);
     }
 }

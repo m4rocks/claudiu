@@ -131,10 +131,6 @@ impl Focusable for TerminalView {
 /// A row's height at the terminal's 14 px font (`font_size * 1.35`, rounded); the skeleton prompt lines up with it.
 pub const LINE_H: f32 = 19.0;
 
-#[cfg(target_os = "windows")]
-pub const FONT: &str = "Cascadia Mono";
-#[cfg(not(target_os = "windows"))]
-pub const FONT: &str = "Menlo";
 
 /// What to look for on Claude Code's screen to know a piece of the draft arrived.
 enum Marker {
@@ -214,7 +210,7 @@ impl TerminalView {
             handing: false,
             exit_code: None,
             marked: None,
-            font_family: FONT,
+            font_family: crate::platform::monospace_font(),
             font_size: px(14.0),
             loading: false,
             handover: None,

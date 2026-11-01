@@ -344,13 +344,13 @@ impl GithubView {
 pub fn claude_prompt(which: &str, item: &Item) -> String {
     let (n, title, url) = (item.number, &item.title, &item.url);
     match (which, item.kind) {
-        ("investigate", _) => format!("Look into GitHub issue #{n} “{title}” ({url}). Read it with `gh issue view {n} --comments`, find the cause in this repository and explain it. Do not change any files yet."),
-        ("review", _) => format!("Review GitHub pull request #{n} “{title}” ({url}). Read it with `gh pr view {n} --comments` and `gh pr diff {n}`. Report bugs, risks and missing tests, most serious first. Do not push anything."),
-        ("address", _) => format!("Address the review feedback on GitHub pull request #{n} “{title}” ({url}). Read it with `gh pr view {n} --comments` and check out the branch with `gh pr checkout {n}`. Make the changes locally, but ask before pushing."),
-        ("summarize", Kind::Pull) => format!("Summarize GitHub pull request #{n} “{title}” ({url}) for me: what it changes, why, and what to check before merging. Use `gh pr view {n} --comments` and `gh pr diff {n}`."),
-        ("summarize", Kind::Issue) => format!("Summarize GitHub issue #{n} “{title}” ({url}) and its discussion for me. Use `gh issue view {n} --comments`."),
-        (_, Kind::Pull) => format!("Work on GitHub pull request #{n} “{title}” ({url}). Read it with `gh pr view {n} --comments`."),
-        _ => format!("Work on GitHub issue #{n} “{title}” ({url}). Read it first with `gh issue view {n} --comments`, then propose a short plan and implement it in this repository. Ask me if anything is unclear."),
+        ("investigate", _) => format!("Look into GitHub issue #{n} “{title}” ({url}). Read it with `gh issue view {n} --json title,body,comments`, find the cause in this repository and explain it. Do not change any files yet."),
+        ("review", _) => format!("Review GitHub pull request #{n} “{title}” ({url}). Read it with `gh pr view {n} --json title,body,comments` and `gh pr diff {n}`. Report bugs, risks and missing tests, most serious first. Do not push anything."),
+        ("address", _) => format!("Address the review feedback on GitHub pull request #{n} “{title}” ({url}). Read it with `gh pr view {n} --json title,body,comments` and check out the branch with `gh pr checkout {n}`. Make the changes locally, but ask before pushing."),
+        ("summarize", Kind::Pull) => format!("Summarize GitHub pull request #{n} “{title}” ({url}) for me: what it changes, why, and what to check before merging. Use `gh pr view {n} --json title,body,comments` and `gh pr diff {n}`."),
+        ("summarize", Kind::Issue) => format!("Summarize GitHub issue #{n} “{title}” ({url}) and its discussion for me. Use `gh issue view {n} --json title,body,comments`."),
+        (_, Kind::Pull) => format!("Work on GitHub pull request #{n} “{title}” ({url}). Read it with `gh pr view {n} --json title,body,comments`."),
+        _ => format!("Work on GitHub issue #{n} “{title}” ({url}). Read it first with `gh issue view {n} --json title,body,comments`, then propose a short plan and implement it in this repository. Ask me if anything is unclear."),
     }
 }
 

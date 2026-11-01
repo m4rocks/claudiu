@@ -383,7 +383,7 @@ fn write_atomic(path: &Path, text: &str) -> bool {
 }
 
 impl Store {
-    /// Platform app-data location, e.g. `%LOCALAPPDATA%\m4rocks\Claudiu\data\state.json`.
+    /// Platform app-data location, e.g. `%LOCALAPPDATA%\m4rocks\Claudiu\data\state.json` (`Claudiu Dev` in a debug build).
     pub fn default_path() -> PathBuf {
         // Tests (and anyone running a second copy) can keep their state away from the real one.
         if let Some(dir) = std::env::var_os("CLAUDIU_DATA_DIR") {
@@ -393,13 +393,16 @@ impl Store {
         // On Windows the Velopack install root is `%LOCALAPPDATA%\Claudiu`, and running Setup.exe over it wipes
         // everything inside, so the data lives under an organization folder beside it instead.
         let org = if cfg!(windows) { "m4rocks" } else { "" };
-        let Some(dirs) = directories::ProjectDirs::from("", org, "Claudiu") else { return PathBuf::from("claudiu-state.json") };
+        // A debug build (`cargo run`) keeps its own folder: two apps on one folder take each other's request files (#84).
+        let app = if cfg!(debug_assertions) { "Claudiu Dev" } else { "Claudiu" };
+        let Some(dirs) = directories::ProjectDirs::from("", org, app) else { return PathBuf::from("claudiu-state.json") };
         let dir = dirs.data_local_dir().to_path_buf();
         #[cfg(windows)]
         {
             static MIGRATE: std::sync::Once = std::sync::Once::new();
             MIGRATE.call_once(|| {
-                let old = directories::ProjectDirs::from("", "", "Claudiu").map(|d| d.data_local_dir().to_path_buf());
+                // Only the released app has data at the old place; a debug build must not move it.
+                let old = directories::ProjectDirs::from("", "", "Claudiu").filter(|_| !cfg!(debug_assertions)).map(|d| d.data_local_dir().to_path_buf());
                 if let Some(old) = old.filter(|o| o.join("state.json").exists() && !dir.join("state.json").exists()) {
                     // Same volume, so a rename moves everything at once; if it fails the app starts fresh, the old folder untouched.
                     let _ = fs::create_dir_all(dir.parent().unwrap_or(&dir)).and_then(|_| fs::rename(&old, &dir));
@@ -407,6 +410,12 @@ impl Store {
             });
         }
         dir.join("state.json")
+    }
+
+    /// No state file yet: Claudiu has never run here. Ask before anything calls `load`, which moves a corrupt file aside
+    /// (a corrupt file still means the user has been here).
+    pub fn is_first_launch(path: &Path) -> bool {
+        !path.exists()
     }
 
     /// Load tolerant of missing/corrupt files: a corrupt file is moved aside, never overwritten silently.
@@ -919,6 +928,18 @@ mod tests {
         assert!(c.data.projects.is_empty());
         assert_eq!(c.active_account().map(|a| a.id.as_str()), Some(MAIN_ACCOUNT), "main account always exists");
         assert!(path.with_extension("json.corrupt").exists(), "corrupt state is preserved, not destroyed");
+    }
+
+    #[test]
+    fn a_launch_is_the_first_only_while_there_is_no_state_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("state.json");
+        assert!(Store::is_first_launch(&path), "nothing saved yet");
+        Store::load(path.clone()).save();
+        assert!(!Store::is_first_launch(&path), "a saved state file ends the first launch");
+
+        fs::write(&path, "{ not json").unwrap();
+        assert!(!Store::is_first_launch(&path), "a corrupt state file still means Claudiu ran here");
     }
 
     #[test]

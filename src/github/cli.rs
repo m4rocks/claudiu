@@ -33,6 +33,30 @@ impl Error {
     }
 }
 
+/// What `gh auth status` says about this machine, for the setup window.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AuthState {
+    /// `gh` is not installed.
+    Missing,
+    SignedOut,
+    Ready,
+    /// `gh` ran but failed for another reason (offline, say); carries its message.
+    Unknown(String),
+}
+
+impl AuthState {
+    fn from_status(status: Result<String, Error>) -> Self {
+        match status {
+            Ok(_) => AuthState::Ready,
+            Err(e) => match e.kind {
+                ErrKind::NoCli => AuthState::Missing,
+                ErrKind::SignedOut => AuthState::SignedOut,
+                ErrKind::NotGithub | ErrKind::Other => AuthState::Unknown(e.msg),
+            },
+        }
+    }
+}
+
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.msg)
@@ -47,6 +71,14 @@ pub fn locate() -> Option<PathBuf> {
             .map(PathBuf::from)
             .find(|p| p.is_file())
     })
+}
+
+/// Find `gh` and ask it whether it is signed in. Blocking, for a background thread.
+pub fn check_auth() -> AuthState {
+    match locate() {
+        Some(exe) => Gh::new(exe, crate::platform::home_dir().unwrap_or_default()).auth_status(),
+        None => AuthState::Missing,
+    }
 }
 
 /// The GitHub repository a folder belongs to.
@@ -238,6 +270,11 @@ impl Gh {
     pub fn item_status(&self, repo: &RepoRef, number: u32) -> Result<(String, super::model::State), Error> {
         let answer = self.rest("GET", &format!("repos/{}/issues/{number}", repo.full()), None)?;
         super::model::parse_status(&answer).ok_or_else(|| Error::other("unexpected answer from GitHub"))
+    }
+
+    /// Whether `gh auth status` succeeds. Blocking; `cwd` does not matter for it.
+    pub fn auth_status(&self) -> AuthState {
+        AuthState::from_status(self.run(&["auth", "status"], None))
     }
 
     /// `gh pr checkout <n>` in this folder.
@@ -451,6 +488,21 @@ mod tests {
         assert_eq!(classify("To get started with GitHub CLI, please run:  gh auth login"), ErrKind::SignedOut);
         assert_eq!(classify("none of the git remotes configured for this repository point to a known GitHub host"), ErrKind::NotGithub);
         assert_eq!(classify("boom"), ErrKind::Other);
+    }
+
+    #[test]
+    fn auth_status_results_become_setup_states() {
+        // `Gh::run` classifies a failed call's text, so the same happens here.
+        let failed = |text: &str| Err(Error { kind: classify(text), msg: text.into() });
+        assert_eq!(AuthState::from_status(Ok("Logged in to github.com account octocat".into())), AuthState::Ready);
+        assert_eq!(AuthState::from_status(failed("You are not logged into any GitHub hosts. To log in, run: gh auth login")), AuthState::SignedOut);
+        assert_eq!(AuthState::from_status(failed("The token in keyring is invalid. To re-authenticate, run: gh auth login -h github.com")), AuthState::SignedOut);
+        assert_eq!(
+            AuthState::from_status(failed("error connecting to api.github.com")),
+            AuthState::Unknown("error connecting to api.github.com".into())
+        );
+        let not_installed = Err(Error { kind: ErrKind::NoCli, msg: "could not run gh".into() });
+        assert_eq!(AuthState::from_status(not_installed), AuthState::Missing);
     }
 
     #[test]

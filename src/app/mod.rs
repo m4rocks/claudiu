@@ -56,6 +56,7 @@ mod repo;
 mod selection_reference;
 mod sessions;
 mod settings;
+mod setup;
 mod titles;
 mod visuals;
 mod switch;
@@ -68,6 +69,7 @@ pub use editor_mode::EditorCommand;
 pub use file_ops::NameFor;
 pub use settings::SettingsPage;
 pub use worktrees::WorktreesPage;
+pub use setup::{Mode as SetupMode, SetupEvent, SetupView, window_options as setup_window_options};
 
 actions!(
     claudiu,
@@ -159,6 +161,8 @@ pub enum Act {
     OpenEditor(Editor, PathBuf),
     ImportProject,
     OpenSettings,
+    /// The setup window again, from Settings or the missing-`claude` toast (see `setup.rs`).
+    OpenSetup,
     /// A choice in the Settings dialog's effort or permission-mode picker (None = Claude Code's default); kept in the
     /// dialog until Save.
     PickEffort(Option<Effort>),
@@ -511,6 +515,8 @@ pub struct Workspace {
     pub git_busy: Option<GitOp>,
     /// What Commit & Push would do in the shown session's folder, as last read; `None` until it has been.
     pub pending: Option<(PathBuf, crate::git::commit::Pending)>,
+    /// The setup window while it is open, so a second request shows it instead of opening another.
+    setup_window: Option<gpui::AnyWindowHandle>,
 }
 
 impl Workspace {
@@ -608,6 +614,7 @@ impl Workspace {
             activity: HashMap::new(),
             git_busy: None,
             pending: None,
+            setup_window: None,
             store,
         };
         // Everything from a previous run is history until clicked. Keep the highlight only if it still exists.
@@ -775,6 +782,7 @@ impl Workspace {
                     }
                 }
             }
+            Act::OpenSetup => self.open_setup(window, cx),
             Act::OpenSettings => {
                 let s = &self.store.data.settings;
                 let (shell_t, claude_t) = (

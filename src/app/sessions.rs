@@ -110,7 +110,7 @@ impl Workspace {
         // A new session starts in the main checkout, not in a linked worktree. Fix-with-Claude works where the failure was.
         let cwd = if by == Starter::FixGit { cwd } else { self.outside_linked_worktree(cwd) };
         let Some(exe) = self.claude_exe.clone() else {
-            self.toast("Could not find the `claude` CLI. Install Claude Code, or set its path in Settings.", true, cx);
+            self.show_toast("Could not find the `claude` CLI. Install Claude Code, or set its path in Settings.".into(), true, Some(("Check setup".into(), Act::OpenSetup)), cx);
             return;
         };
         let session_id = new_id();
