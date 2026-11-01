@@ -314,9 +314,11 @@ pub enum Main {
 /// What a running Claude session is doing, as shown by its sidebar dot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Activity {
-    /// Output is streaming (pulsing dot).
+    /// Output is streaming (spinning icon).
     Working,
-    /// Finished working while the user was looking elsewhere (orange dot).
+    /// Claude Code stopped to wait for the user, a question or a permission (question mark).
+    Waiting,
+    /// Finished working while the user was looking elsewhere (check mark).
     Attention,
 }
 
@@ -480,10 +482,12 @@ pub struct Workspace {
     pub list_model: crate::panels::sidebar::ListModel,
     /// The sidebar row under the pointer, the only one built with its × or archive button.
     pub hovered_row: Option<gpui::SharedString>,
+    /// Running rows the pointer just left, whose × slot is still shrinking away (see `shrink_close_slot`).
+    pub unhovered_rows: std::collections::HashSet<gpui::SharedString>,
     /// The minute (Unix time / 60) of the last tick's redraw, see `tick`.
     pub tick_minute: i64,
-    /// The working dot's pulse is running, see `start_pulse`.
-    pub pulsing: bool,
+    /// The working icon's spin is running, see `start_spin`.
+    pub spinning: bool,
     /// When a drag last reordered the sidebar, see `pointer_moved`.
     pub last_swap: std::time::Instant,
     /// Attached issues and pull requests are asked about on GitHub from time to time, see `attached_sync.rs`.
@@ -587,8 +591,9 @@ impl Workspace {
             session_list: None,
             list_model: Default::default(),
             hovered_row: None,
+            unhovered_rows: Default::default(),
             tick_minute: 0,
-            pulsing: false,
+            spinning: false,
             last_swap: std::time::Instant::now(),
             attached_sync: Default::default(),
             config_sync: Default::default(),
