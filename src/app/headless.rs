@@ -1327,6 +1327,16 @@ fn switching_between_worktrees_in_the_workspace() {
     });
     let shell = |ws: &Workspace| ws.shells.get(&id).map(|p| (p.view.entity_id(), p.open, p.height));
     let (shell_before, ..) = ws.read_with(&cx, |ws, _| shell(ws)).unwrap();
+    // The panels ease open over `Reveal::MS` of real time, so the pane's grid keeps changing for that long; how far
+    // it has got depends on how fast the machine ran the steps above. The grid read below must be the settled one.
+    let pane_grid = |cx: &mut TestAppContext| ws.read_with(cx, |ws, app| ws.live_view(&session.id).map(|v| v.read(app).terminal.size()));
+    let mut last = None;
+    while last != Some(pane_grid(&mut cx)) {
+        last = Some(pane_grid(&mut cx));
+        std::thread::sleep(Duration::from_millis(crate::panels::widgets::Reveal::MS as u64 + 20));
+        cx.update_window(window, |_, window, app| window.draw(app).clear(app)).unwrap();
+        cx.run_until_parked();
+    }
 
     // A bad name keeps the dialog open; a typed one moves the session into the worktree Claude Code will make.
     step(&mut cx, &|ws, w, cx| ws.act(Act::NewWorktree(repo_dir.clone()), w, cx));
