@@ -19,7 +19,7 @@ Claudiu never deletes a transcript. It writes to Claude Code's own data only to 
 ## Known gaps
 
 - macOS is lightly tested, and the build isn't notarized, so Gatekeeper complains on first launch.
-- Linux is new and lightly tested. An app started from the desktop sees only the session's PATH, so tools that only your shell's startup files add (nvm, for one) aren't found.
+- Linux is new and lightly tested.
 - Quitting ends running PTYs. Sessions stay resumable, but live processes don't survive a restart.
 
 ## Development
