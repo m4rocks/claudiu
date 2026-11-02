@@ -23,6 +23,10 @@ impl Workspace {
                 ws.store.refresh_git();
                 ws.store.save_if_dirty();
                 ws.refresh_pending(cx);
+                // The Worktrees page of Settings lists what a removal just deleted.
+                if op == GitOp::Worktree && ws.settings_page == SettingsPage::Worktrees {
+                    ws.load_stored_worktrees(cx);
+                }
                 match result {
                     Ok(summary) => ws.toast(summary, false, cx),
                     Err(fail) => match fail.conflict_in {
@@ -117,20 +121,36 @@ impl Workspace {
         cx.notify();
         cx.spawn(async move |this, cx| {
             let dir = cwd.clone();
-            let result = cx.background_executor().spawn(async move { crate::git::commit::branches(&dir) }).await;
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let list = crate::git::commit::branches(&dir)?;
+                    let deletable = crate::git::commit::deletable_branches(&dir, list.current.as_deref());
+                    Ok::<_, String>((list, deletable))
+                })
+                .await;
             let _ = this.update(cx, |ws, cx| {
                 ws.git_busy = None;
                 match result {
-                    Ok((names, current)) => {
+                    Ok((list, deletable)) => {
+                        let mut items = vec![MenuItem::new("Branches", Act::Dismiss)];
+                        items[0].disabled = true;
                         // ponytail: the menu doesn't scroll, so only the most recently used branches are listed.
-                        let mut items: Vec<MenuItem> = names
-                            .into_iter()
-                            .take(15)
-                            .map(|name| MenuItem::new(format!("{}{name}", crate::panels::widgets::tick(current.as_deref() == Some(name.as_str()))), Act::SwitchBranch(cwd.clone(), name)))
-                            .collect();
-                        let first = items.is_empty();
-                        items.push(MenuItem { label: "New branch…".into(), hint: None, act: Act::NewBranch(cwd), danger: false, disabled: false, separator_before: !first });
-                        ws.open_dropdown(at, items, cx);
+                        items.extend(list.names.into_iter().take(15).map(|name| {
+                            let label = format!("{}{name}", crate::panels::widgets::tick(list.current.as_deref() == Some(name.as_str())));
+                            let held = list.elsewhere.iter().find(|h| h.branch == name);
+                            let hint = held.map(|h| format!("opens {}", h.tree));
+                            // Git won't check a branch out twice, so the row moves the session into the working tree that has it.
+                            let act = match held {
+                                Some(h) => Act::SwitchWorktree { folder: h.folder.clone(), base: Default::default() },
+                                None => Act::SwitchBranch(cwd.clone(), name.clone()),
+                            };
+                            // Remote-only branches have nothing local to delete.
+                            let remove = (held.is_none() && deletable.contains(&name)).then(|| Act::DeleteBranch(cwd.clone(), name.clone()));
+                            MenuItem { remove, hint, icon: held.map(|_| gpui_kit::assets::IconName::FolderGit2), ..MenuItem::new(label, act) }
+                        }));
+                        items.push(MenuItem { separator_before: true, ..MenuItem::new("New branch…", Act::NewBranch(cwd)) });
+                        ws.open_dropdown(crate::panels::widgets::Dropdown { min_w: at.min_w.max(gpui::px(300.0)), ..at }, items, cx);
                     }
                     Err(e) => ws.toast(e, true, cx),
                 }
@@ -138,5 +158,48 @@ impl Workspace {
             });
         })
         .detach();
+    }
+
+    /// Ask before deleting a local branch, after counting the commits only it has.
+    pub(super) fn ask_delete_branch(&mut self, cwd: PathBuf, name: String, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let (dir, branch) = (cwd.clone(), name.clone());
+            let lost = cx.background_executor().spawn(async move { crate::git::commit::commits_only_on(&dir, &branch) }).await;
+            let _ = this.update(cx, |ws, cx| match lost {
+                Ok(lost) => {
+                    let (title, body, confirm, danger) = delete_branch_question(&name, lost);
+                    ws.modal = Some(Modal::Confirm { title, body, confirm, danger, act: Act::ConfirmDeleteBranch(cwd, name) });
+                    cx.notify();
+                }
+                Err(e) => ws.toast(e, true, cx),
+            });
+        })
+        .detach();
+    }
+}
+
+/// The dialog's title, text, button and whether the button is red. Only the local branch goes; origin's copy stays.
+fn delete_branch_question(name: &str, lost: usize) -> (String, String, String, bool) {
+    let title = format!("Delete branch {name}?");
+    if lost == 0 {
+        return (title, "Every commit on it is also on another branch, so nothing is lost. A copy on origin is not deleted.".into(), "Delete".into(), false);
+    }
+    let commits = if lost == 1 { "1 commit is".to_string() } else { format!("{lost} commits are") };
+    (title, format!("{commits} on no other branch and will be lost."), "Delete anyway".into(), true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deleting_a_branch_is_plain_until_commits_would_be_lost() {
+        let (title, body, button, red) = delete_branch_question("fix", 0);
+        assert_eq!((title.as_str(), button.as_str(), red), ("Delete branch fix?", "Delete", false));
+        assert!(body.contains("nothing is lost"), "{body}");
+
+        let (_, body, button, red) = delete_branch_question("fix", 1);
+        assert_eq!((body.as_str(), button.as_str(), red), ("1 commit is on no other branch and will be lost.", "Delete anyway", true));
+        assert_eq!(delete_branch_question("fix", 3).1, "3 commits are on no other branch and will be lost.");
     }
 }

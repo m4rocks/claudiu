@@ -24,27 +24,33 @@ impl Workspace {
                 return;
             }
         } else {
-            let (program, args) = self.shell.clone();
             // A session's folder may be gone (temp dirs, deleted worktrees); CreateProcess then fails with "filename syntax is incorrect".
             let cwd = if rec.cwd.is_dir() { rec.cwd.clone() } else { platform::home_dir().unwrap_or(rec.cwd.clone()) };
-            let spec = SpawnSpec { program, args, cwd: Some(cwd), ..Default::default() };
-            let (terminal, rx) = TerminalView::spawn(&spec);
-            let view = cx.new(|cx| TerminalView::new(terminal, rx, cx));
-            let owner = id.to_string();
-            let sub = cx.subscribe_in(&view, window, move |ws: &mut Workspace, view, ev: &TerminalEvent, window, cx| {
-                if matches!(ev, TerminalEvent::Exited(_)) {
-                    if let Some(err) = view.read(cx).start_error() {
-                        ws.toast(format!("Could not start the shell: {err}"), true, cx);
-                    }
-                    ws.shells.remove(&owner);
-                    ws.focus_active(window, cx);
-                    cx.notify();
-                }
-            });
-            self.shells.insert(id.to_string(), ShellPanel { view, _sub: sub, open: true, height: SHELL_HEIGHT });
+            let panel = self.new_shell_panel(id, cwd, window, cx);
+            self.shells.insert(id.to_string(), panel);
         }
         self.focus_shell(window, cx);
         cx.notify();
+    }
+
+    /// A shell for the session, started in `cwd`. When the shell ends, its panel goes away, with a toast if it never started.
+    pub(super) fn new_shell_panel(&mut self, id: &str, cwd: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> ShellPanel {
+        let (program, args) = self.shell.clone();
+        let spec = SpawnSpec { program, args, cwd: Some(cwd), ..Default::default() };
+        let (terminal, rx) = TerminalView::spawn(&spec);
+        let view = cx.new(|cx| TerminalView::new(terminal, rx, cx));
+        let owner = id.to_string();
+        let sub = cx.subscribe_in(&view, window, move |ws: &mut Workspace, view, ev: &TerminalEvent, window, cx| {
+            if matches!(ev, TerminalEvent::Exited(_)) {
+                if let Some(err) = view.read(cx).start_error() {
+                    ws.toast(format!("Could not start the shell: {err}"), true, cx);
+                }
+                ws.shells.remove(&owner);
+                ws.focus_active(window, cx);
+                cx.notify();
+            }
+        });
+        ShellPanel { view, _sub: sub, open: true, height: SHELL_HEIGHT }
     }
 
     fn focus_shell(&self, window: &mut Window, cx: &mut Context<Self>) {

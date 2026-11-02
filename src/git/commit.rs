@@ -112,18 +112,39 @@ pub fn background_fetch(cwd: &Path) {
     }
 }
 
-fn has_origin(cwd: &Path) -> bool {
+pub(super) fn has_origin(cwd: &Path) -> bool {
     git(cwd, &["remote", "get-url", "origin"], None).is_ok()
 }
 
-/// Branches for the branch menu, most recently committed first: origin's (as of the last background fetch)
-/// plus local ones. Returns `(branches, current)`. Blocking.
-pub fn branches(cwd: &Path) -> Result<(Vec<String>, Option<String>), String> {
+/// A branch that a working tree has checked out.
+#[derive(Debug, PartialEq)]
+pub struct Held {
+    pub branch: String,
+    /// "main checkout" for the first working tree git lists, else the folder's name.
+    pub tree: String,
+    pub folder: PathBuf,
+}
+
+/// What the branch menu shows.
+#[derive(Debug, Default)]
+pub struct BranchList {
+    /// Origin's branches (as of the last background fetch) plus local ones, most recently committed first.
+    pub names: Vec<String>,
+    pub current: Option<String>,
+    /// Branches another working tree has checked out, with that tree's name. Git refuses to switch to these.
+    pub elsewhere: Vec<Held>,
+}
+
+/// Branches for the branch menu. Blocking.
+pub fn branches(cwd: &Path) -> Result<BranchList, String> {
     let refs = git(
         cwd,
         &["for-each-ref", "--sort=-committerdate", "--format=%(refname)", "refs/heads", "refs/remotes/origin"],
         None,
     )?;
+    let current = git(cwd, &["branch", "--show-current"], None).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    let worktrees = git(cwd, &["worktree", "list", "--porcelain"], None).unwrap_or_default();
+    let elsewhere = checked_out(&worktrees).into_iter().filter(|h| current.as_ref() != Some(&h.branch)).collect();
     let mut seen = std::collections::HashSet::new();
     let names = refs
         .lines()
@@ -131,8 +152,44 @@ pub fn branches(cwd: &Path) -> Result<(Vec<String>, Option<String>), String> {
         .filter(|n| *n != "HEAD" && seen.insert(n.to_string()))
         .map(str::to_string)
         .collect();
-    let current = git(cwd, &["branch", "--show-current"], None).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
-    Ok((names, current))
+    Ok(BranchList { names, current, elsewhere })
+}
+
+/// The local branches the branch menu may delete: not the current one, and not origin's default branch.
+pub fn deletable_branches(cwd: &Path, current: Option<&str>) -> Vec<String> {
+    let default = git(cwd, &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], None).ok().map(|s| s.trim().trim_start_matches("origin/").to_string());
+    let local = git(cwd, &["for-each-ref", "--format=%(refname:short)", "refs/heads"], None).unwrap_or_default();
+    local.lines().filter(|b| Some(*b) != current && Some(*b) != default.as_deref()).map(str::to_string).collect()
+}
+
+/// How many commits are on this branch and on no other local branch and no remote branch. Blocking.
+pub fn commits_only_on(cwd: &Path, branch: &str) -> Result<usize, String> {
+    // The glob after --exclude is relative to refs/heads, so origin/<branch> still counts as another place for the commits.
+    let count = git(cwd, &["rev-list", "--count", branch, "--not", &format!("--exclude={branch}"), "--branches", "--remotes"], None)?;
+    count.trim().parse().map_err(|_| format!("Could not count the commits on {branch}"))
+}
+
+/// Delete a local branch, whatever it holds. The caller has shown what would be lost. Blocking.
+pub fn delete_branch(cwd: &Path, branch: &str) -> Result<String, String> {
+    git(cwd, &["branch", "-D", "--", branch], None)?;
+    Ok(format!("Deleted branch {branch}"))
+}
+
+/// The branches that `git worktree list --porcelain` shows as checked out, each with the name of its working tree:
+/// "main checkout" for the first one listed, else the folder's name.
+fn checked_out(porcelain: &str) -> Vec<Held> {
+    let mut found = vec![];
+    for (i, block) in porcelain.split("
+
+").enumerate() {
+        let path = block.lines().find_map(|l| l.strip_prefix("worktree "));
+        let branch = block.lines().find_map(|l| l.strip_prefix("branch refs/heads/"));
+        if let (Some(path), Some(branch)) = (path, branch) {
+            let name = if i == 0 { "main checkout".to_string() } else { path.rsplit(['/', '\\']).next().unwrap_or(path).to_string() };
+            found.push(Held { branch: branch.to_string(), tree: name, folder: PathBuf::from(path) });
+        }
+    }
+    found
 }
 
 /// Switch branch; a branch that only exists on origin gets a local tracking branch. Blocking.
@@ -155,7 +212,7 @@ pub fn create_branch(cwd: &Path, name: &str) -> Result<String, String> {
 }
 
 /// `origin/<default>`: from the local `origin/HEAD` when set, else asked from the remote.
-fn origin_default_branch(cwd: &Path) -> Result<String, String> {
+pub(super) fn origin_default_branch(cwd: &Path) -> Result<String, String> {
     if let Ok(r) = git(cwd, &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], None) {
         return Ok(r.trim().to_string());
     }
@@ -188,7 +245,7 @@ fn clean_message(raw: &str) -> Option<String> {
     (!t.is_empty()).then(|| t.to_string())
 }
 
-fn git(cwd: &Path, args: &[&str], stdin: Option<&str>) -> Result<String, String> {
+pub(super) fn git(cwd: &Path, args: &[&str], stdin: Option<&str>) -> Result<String, String> {
     let mut cmd = Command::new("git");
     cmd.args(args).current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     // No terminal can answer a credential prompt: fail instead of hanging (GUI credential helpers still work).
@@ -212,6 +269,49 @@ fn git(cwd: &Path, args: &[&str], stdin: Option<&str>) -> Result<String, String>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn branches_checked_out_in_worktrees_are_found() {
+        let porcelain = "worktree /p
+HEAD aaa
+branch refs/heads/main
+
+worktree /p/.claude/worktrees/x
+HEAD bbb
+branch refs/heads/feature/login
+locked claude session x (pid 1)
+
+worktree /p/.claude/worktrees/d
+HEAD ccc
+detached
+";
+        let held = |b: &str, w: &str, f: &str| Held { branch: b.into(), tree: w.into(), folder: f.into() };
+        assert_eq!(checked_out(porcelain), [held("main", "main checkout", "/p"), held("feature/login", "x", "/p/.claude/worktrees/x")]);
+        assert!(checked_out("").is_empty());
+    }
+
+    #[test]
+    fn the_branch_menu_names_the_worktree_that_has_a_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let main = dunce::canonicalize(tmp.path()).unwrap().join("main");
+        std::fs::create_dir_all(&main).unwrap();
+        for args in [&["init", "-q", "-b", "main"][..], &["config", "user.email", "t@t"], &["config", "user.name", "t"], &["commit", "-q", "--allow-empty", "-m", "one"], &["branch", "spare"]] {
+            git(&main, args, None).unwrap();
+        }
+        let wt = tmp.path().join("wt");
+        git(&main, &["worktree", "add", "-q", "-b", "in-worktree", &wt.to_string_lossy()], None).unwrap();
+
+        let from_main = branches(&main).unwrap();
+        assert_eq!(from_main.current.as_deref(), Some("main"));
+        assert!(["spare", "main", "in-worktree"].iter().all(|b| from_main.names.contains(&b.to_string())), "{from_main:?}");
+        assert_eq!((from_main.elsewhere[0].branch.as_str(), from_main.elsewhere[0].tree.as_str()), ("in-worktree", "wt"));
+        assert_eq!(from_main.elsewhere.len(), 1);
+
+        let from_wt = branches(&wt).unwrap();
+        assert_eq!(from_wt.current.as_deref(), Some("in-worktree"));
+        assert!(from_wt.names.contains(&"main".to_string()), "{from_wt:?}");
+        assert_eq!((from_wt.elsewhere[0].branch.as_str(), from_wt.elsewhere[0].tree.as_str()), ("main", "main checkout"));
+    }
 
     #[test]
     fn fences_are_unwrapped() {
@@ -273,8 +373,7 @@ mod tests {
 
         git(root, &["clone", "-q", "remote.git", "b"], None).unwrap();
         background_fetch(&b);
-        let (names, current) = branches(&b).unwrap();
-        let default = current.unwrap();
+        let (names, default) = { let l = branches(&b).unwrap(); (l.names, l.current.unwrap()) };
         assert!(names.contains(&"feature".to_string()) && names.contains(&default), "{names:?}");
         switch_branch(&b, "feature").unwrap();
         assert!(b.join("two.txt").exists(), "origin-only branch is checked out");
@@ -286,7 +385,40 @@ mod tests {
         git(root, &["init", "-q", "c"], None).unwrap();
         commit(&c, "c.txt");
         create_branch(&c, "x").unwrap();
-        assert_eq!(branches(&c).unwrap().1.as_deref(), Some("x"));
+        assert_eq!(branches(&c).unwrap().current.as_deref(), Some("x"));
+    }
+
+    #[test]
+    fn a_branch_is_deletable_unless_current_or_default_and_reports_commits_nowhere_else() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (root, a) = (tmp.path(), tmp.path().join("a"));
+        git(root, &["init", "-q", "--bare", "remote.git"], None).unwrap();
+        git(root, &["clone", "-q", "remote.git", "a"], None).unwrap();
+        commit(&a, "one.txt");
+        git(&a, &["push", "-q", "-u", "origin", "HEAD"], None).unwrap();
+        git(&a, &["remote", "set-head", "origin", "-a"], None).unwrap();
+        let default = git(&a, &["branch", "--show-current"], None).unwrap().trim().to_string();
+
+        git(&a, &["switch", "-q", "-c", "pushed"], None).unwrap();
+        commit(&a, "two.txt");
+        git(&a, &["push", "-q", "origin", "pushed"], None).unwrap();
+        git(&a, &["switch", "-q", "-c", "local-only"], None).unwrap();
+        commit(&a, "three.txt");
+        commit(&a, "four.txt");
+        git(&a, &["switch", "-q", &default], None).unwrap();
+        git(&a, &["branch", "merged"], None).unwrap();
+
+        let mut names = deletable_branches(&a, Some(&default));
+        names.sort();
+        assert_eq!(names, ["local-only", "merged", "pushed"], "not the current or default branch");
+        assert!(!deletable_branches(&a, Some("pushed")).contains(&default), "origin's default is never offered");
+
+        assert_eq!(commits_only_on(&a, "merged").unwrap(), 0, "the default branch has them");
+        assert_eq!(commits_only_on(&a, "pushed").unwrap(), 0, "origin has them");
+        assert_eq!(commits_only_on(&a, "local-only").unwrap(), 2);
+
+        assert_eq!(delete_branch(&a, "local-only").unwrap(), "Deleted branch local-only");
+        assert!(!deletable_branches(&a, Some(&default)).contains(&"local-only".to_string()));
     }
 
     #[test]

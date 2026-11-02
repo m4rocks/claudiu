@@ -2,6 +2,10 @@
 
 use super::*;
 
+/// A wheel notch scrolls the terminal's scrollback this many times what the system reports for it. Lower than the
+/// panels' `glide::NOTCH`, because terminal lines are dense and 1.6 raced through the history.
+const TERMINAL_NOTCH: f32 = 0.8;
+
 impl TerminalView {
     pub(super) fn grid_point(&self, position: Point<Pixels>) -> Option<(GridPoint, Side, usize, usize)> {
         let m = self.metrics?;
@@ -230,7 +234,7 @@ impl TerminalView {
         let top = self.terminal.term.lock().history_size() as f32;
         let here = self.position();
         if notch {
-            crate::panels::glide::Glide::nudge(&mut self.glide, here, lines * crate::panels::glide::NOTCH, 0.0, top);
+            crate::panels::glide::Glide::nudge(&mut self.glide, here, lines * TERMINAL_NOTCH, 0.0, top);
         } else {
             self.glide = None;
             self.set_position((here + lines).clamp(0.0, top));

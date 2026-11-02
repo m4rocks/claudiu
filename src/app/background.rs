@@ -2,6 +2,18 @@
 
 use super::*;
 
+/// What a Claude session's row shows, given what Claude Code says it is doing, what the row showed before, and
+/// whether the user is looking at it. A question is shown even to someone looking at it, since only they can answer;
+/// a finished turn is shown only to someone who was elsewhere and clears once they look.
+fn next_activity(working: bool, waiting: bool, before: Option<Activity>, viewing: bool) -> Option<Activity> {
+    match (working, waiting, before) {
+        (true, _, _) => Some(Activity::Working),
+        (false, true, _) => Some(Activity::Waiting),
+        (false, false, Some(Activity::Working | Activity::Attention)) if !viewing => Some(Activity::Attention),
+        _ => None,
+    }
+}
+
 impl Workspace {
     /// Startup reconciliation: scan Claude Code's records off the UI thread, then merge.
     pub fn start_scan(&mut self, cx: &mut Context<Self>) {
@@ -46,21 +58,21 @@ impl Workspace {
         .detach();
     }
 
-    /// While a session works, its sidebar dot pulses: the session list is redrawn a few times a second (with the
+    /// While a session works, its sidebar icon spins: the session list is redrawn many times a second (with the
     /// window's top level, which reuses the other cached parts). It stops once nothing works.
-    fn start_pulse(&mut self, cx: &mut Context<Self>) {
-        if self.pulsing {
+    fn start_spin(&mut self, cx: &mut Context<Self>) {
+        if self.spinning {
             return;
         }
-        self.pulsing = true;
+        self.spinning = true;
         cx.spawn(async move |this, cx| {
             loop {
-                cx.background_executor().timer(crate::panels::sidebar::PULSE_STEP).await;
+                cx.background_executor().timer(crate::panels::status_icon::SPIN_STEP).await;
                 let working = this.update(cx, |ws, cx| {
                     let working = ws.activity.values().any(|a| *a == Activity::Working);
                     match &ws.session_list {
                         Some(list) if working => list.update(cx, |_, cx| cx.notify()),
-                        _ => ws.pulsing = working,
+                        _ => ws.spinning = working,
                     }
                     working
                 });
@@ -118,18 +130,12 @@ impl Workspace {
             let viewing = window_active && shown.as_deref() == Some(l.id.as_str());
             let status = self.store.session(&l.id).and_then(|r| statuses.get(r.claude_id()?));
             let working = status.map_or_else(|| view.is_working(), |s| s == "busy");
-            match (working, self.activity.get(&l.id)) {
-                (true, _) => {
-                    next.insert(l.id.clone(), Activity::Working);
-                }
-                (false, Some(Activity::Working)) if !viewing => {
-                    flash |= !window_active;
-                    next.insert(l.id.clone(), Activity::Attention);
-                }
-                (false, Some(Activity::Attention)) if !viewing => {
-                    next.insert(l.id.clone(), Activity::Attention);
-                }
-                _ => {}
+            let waiting = status.is_some_and(|s| s == "waiting");
+            let before = self.activity.get(&l.id).copied();
+            let now = next_activity(working, waiting, before, viewing);
+            flash |= !window_active && before == Some(Activity::Working) && matches!(now, Some(Activity::Attention | Activity::Waiting));
+            if let Some(now) = now {
+                next.insert(l.id.clone(), now);
             }
         }
         if next != self.activity {
@@ -137,7 +143,7 @@ impl Workspace {
             cx.notify();
         }
         if self.activity.values().any(|a| *a == Activity::Working) {
-            self.start_pulse(cx);
+            self.start_spin(cx);
         }
         if flash {
             platform::request_attention(window);
@@ -285,5 +291,38 @@ impl Workspace {
 
     pub fn check_updates(&mut self, cx: &mut Context<Self>) {
         crate::updater::check(self, cx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Activity, next_activity};
+
+    #[test]
+    fn busy_is_working_whatever_came_before() {
+        for before in [None, Some(Activity::Working), Some(Activity::Waiting), Some(Activity::Attention)] {
+            assert_eq!(next_activity(true, false, before, true), Some(Activity::Working));
+            assert_eq!(next_activity(true, false, before, false), Some(Activity::Working));
+        }
+    }
+
+    #[test]
+    fn a_question_shows_even_to_someone_looking_at_the_session() {
+        assert_eq!(next_activity(false, true, Some(Activity::Working), true), Some(Activity::Waiting));
+        assert_eq!(next_activity(false, true, None, false), Some(Activity::Waiting));
+    }
+
+    #[test]
+    fn a_finished_turn_waits_to_be_seen_and_clears_once_looked_at() {
+        assert_eq!(next_activity(false, false, Some(Activity::Working), false), Some(Activity::Attention));
+        assert_eq!(next_activity(false, false, Some(Activity::Attention), false), Some(Activity::Attention));
+        assert_eq!(next_activity(false, false, Some(Activity::Working), true), None);
+        assert_eq!(next_activity(false, false, Some(Activity::Attention), true), None);
+    }
+
+    #[test]
+    fn an_idle_session_nobody_is_owed_news_from_shows_nothing() {
+        assert_eq!(next_activity(false, false, None, false), None);
+        assert_eq!(next_activity(false, false, Some(Activity::Waiting), false), None);
     }
 }

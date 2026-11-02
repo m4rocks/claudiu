@@ -71,7 +71,7 @@ impl GithubView {
         if let Some(pr) = &d.pr {
             status = status.child(
                 div()
-                    .font_family(FONT)
+                    .font_family(monospace_font())
                     .text_size(crate::panels::scale::px(11.5))
                     .px(px(7.0))
                     .py(px(1.0))
@@ -422,7 +422,7 @@ impl GithubView {
             .gap(px(8.0))
             .px(px(4.0))
             .child(div().text_color(hsla(theme::TEXT_FAINT)).child(icon(IconName::GitCommitHorizontal, 14.0)))
-            .child(div().font_family(FONT).text_size(crate::panels::scale::px(11.5)).text_color(hsla(theme::ACCENT)).child(c.short.clone()))
+            .child(div().font_family(monospace_font()).text_size(crate::panels::scale::px(11.5)).text_color(hsla(theme::ACCENT)).child(c.short.clone()))
             .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(c.headline.clone()))
             .child(faint(format!("{} · {}", c.author, ago(c.created, t))))
     }
@@ -474,7 +474,7 @@ impl GithubView {
         }
         for (k, c) in r.comments.iter().enumerate() {
             let hunk: Vec<&str> = c.hunk.lines().rev().take(6).collect::<Vec<_>>().into_iter().rev().collect();
-            let mut code = div().flex().flex_col().font_family(FONT).text_size(crate::panels::scale::px(11.5)).bg(hsla(0x0e0e0f)).py(px(4.0)).overflow_hidden();
+            let mut code = div().flex().flex_col().font_family(monospace_font()).text_size(crate::panels::scale::px(11.5)).bg(hsla(0x0e0e0f)).py(px(4.0)).overflow_hidden();
             for l in hunk {
                 let bg = if l.starts_with('+') { Some(GREEN) } else if l.starts_with('-') { Some(RED) } else { None };
                 code = code.child(div().px(px(10.0)).whitespace_nowrap().when_some(bg, |d, c| d.bg(hsla(c).opacity(0.14))).child(if l.is_empty() { " ".to_string() } else { l.to_string() }));
@@ -489,7 +489,7 @@ impl GithubView {
                             .gap(px(8.0))
                             .px(px(12.0))
                             .py(px(6.0))
-                            .child(div().font_family(FONT).text_size(crate::panels::scale::px(11.5)).text_color(hsla(theme::TEXT_DIM)).child(format!("{}{}", c.path, c.line.map(|l| format!(":{l}")).unwrap_or_default())))
+                            .child(div().font_family(monospace_font()).text_size(crate::panels::scale::px(11.5)).text_color(hsla(theme::TEXT_DIM)).child(format!("{}{}", c.path, c.line.map(|l| format!(":{l}")).unwrap_or_default())))
                             .children(c.outdated.then(|| faint("outdated"))),
                     )
                     .child(code)

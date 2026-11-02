@@ -231,7 +231,7 @@ impl R {
             font.style = FontStyle::Italic;
         }
         if ctx.mono {
-            font.family = crate::terminal::view::FONT.into();
+            font.family = crate::platform::monospace_font().into();
         }
         let color = hsla(ctx.color);
         out.runs.push(TextRun {

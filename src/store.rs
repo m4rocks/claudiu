@@ -691,6 +691,12 @@ pub fn reconcile(data: &mut Data, external: &[ExternalSession], scan_ok: bool) -
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_worktree_toggle_saved_by_an_earlier_version_is_ignored() {
+        let settings: Settings = serde_json::from_str(r#"{"worktree_sessions":true}"#).unwrap();
+        assert_eq!(settings, Settings::default());
+    }
+
     use super::*;
 
     fn ext(id: &str, cwd: &str, title: &str, last: i64) -> ExternalSession {

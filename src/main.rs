@@ -27,7 +27,7 @@ gpui_kit::assets::icon_assets!(
     AppIcons,
     [
         WindowMinimize, WindowMaximize, WindowRestore, WindowClose, Archive, ArchiveRestore, ArrowDownToLine, ArrowLeft, Brackets, Check, ChevronDown, ChevronRight,
-        CircleCheck, CircleDot, CircleSlash, CircleX, Clock, Ellipsis, Eye, ExternalLink, File, FileText, Folder, FolderOpen, GitBranch, GitCommitHorizontal, GitMerge, GitPullRequest,
+        CircleCheck, CircleDot, CircleDotDashed, CircleQuestionMark, CircleSlash, CircleSmall, CircleX, Clock, Ellipsis, Eye, ExternalLink, File, FileText, Folder, FolderGit2, FolderOpen, GitBranch, GitCommitHorizontal, GitMerge, GitPullRequest,
         GitPullRequestClosed, GitPullRequestDraft, HeartPlus, LoaderCircle, Lock, MessageSquare, FileCode, PanelBottom, PanelLeft, PanelRight, Pencil, RefreshCw, Search,
         Settings, Terminal, X
     ]
@@ -132,6 +132,10 @@ fn open_main_window(initial: Vec<std::path::PathBuf>, cx: &mut App) -> MainWindo
             }),
             // The top bar owns dragging and double-click (see TitleBar::window_options).
             app_owns_titlebar_drag: true,
+            app_id: Some(platform::APP_ID.into()),
+            // Linux: the top bar draws min/max/close itself instead of the window manager adding a second bar above
+            // it. A compositor without client-side decorations keeps its own bar. Other platforms ignore this.
+            window_decorations: Some(gpui::WindowDecorations::Client),
             ..Default::default()
         },
         cx,

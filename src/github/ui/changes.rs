@@ -28,7 +28,7 @@ impl GithubView {
                 .cursor_pointer()
                 .hover(|s| s.bg(hsla(0x1c1c1d)))
                 .child(div().text_color(hsla(theme::TEXT_FAINT)).child(icon(if open { IconName::ChevronDown } else { IconName::ChevronRight }, 12.0)))
-                .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().font_family(FONT).text_size(crate::panels::scale::px(12.0)).child(f.path.clone()))
+                .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().font_family(monospace_font()).text_size(crate::panels::scale::px(12.0)).child(f.path.clone()))
                 .children((f.status != "modified").then(|| faint(f.status.clone())))
                 .child(div().text_size(crate::panels::scale::px(11.5)).text_color(hsla(GREEN)).child(format!("+{}", f.additions)))
                 .child(div().text_size(crate::panels::scale::px(11.5)).text_color(hsla(RED)).child(format!("−{}", f.deletions)))
@@ -47,7 +47,7 @@ impl GithubView {
         if f.no_patch {
             return div().p(px(12.0)).child(faint("No inline diff for this file (binary or too large). Open on GitHub to view it."));
         }
-        let mut lines = div().flex().flex_col().font_family(FONT).text_size(crate::panels::scale::px(11.5)).py(px(4.0));
+        let mut lines = div().flex().flex_col().font_family(monospace_font()).text_size(crate::panels::scale::px(11.5)).py(px(4.0));
         for l in f.lines.iter().take(if full { usize::MAX } else { SHOWN }) {
             let (bg, sign) = match l.kind {
                 DiffKind::Add => (Some(GREEN), "+"),

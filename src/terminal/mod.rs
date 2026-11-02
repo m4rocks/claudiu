@@ -339,4 +339,20 @@ mod tests {
         std::thread::sleep(Duration::from_secs(3));
         assert_ne!(unsafe { libc::kill(pid, 0) }, 0, "child must be gone");
     }
+
+    #[cfg(windows)]
+    #[test]
+    fn closing_ends_a_running_child() {
+        let spec = SpawnSpec { program: "ping.exe".into(), args: vec!["-n".into(), "60".into(), "127.0.0.1".into()], cwd: None, ..Default::default() };
+        let (t, _rx) = Terminal::spawn(&spec, 80, 24).unwrap();
+        let pid = t.process_id().unwrap();
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(crate::platform::process_running(pid));
+        drop(t);
+        let began = Instant::now();
+        while crate::platform::process_running(pid) {
+            assert!(began.elapsed() < Duration::from_secs(10), "the child outlived its terminal");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
 }

@@ -10,7 +10,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, macos-latest]
+        os: [windows-latest, macos-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -19,6 +19,9 @@ jobs:
       - name: Metal toolchain (macOS; GPUI compiles shaders)
         if: runner.os == 'macOS'
         run: xcrun -f metal >/dev/null 2>&1 || xcodebuild -downloadComponent MetalToolchain
+      - name: System libraries (Linux; GPUI's X11, Wayland and font backends)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libfontconfig-dev libwayland-dev libx11-xcb-dev libxcb1-dev libxkbcommon-x11-dev libvulkan1 zlib1g-dev
       - name: Build
         run: cargo build --locked
       - name: Install just

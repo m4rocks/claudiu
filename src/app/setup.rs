@@ -43,6 +43,7 @@ pub fn window_options(cx: &App) -> WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, window, cx))),
         window_min_size: Some(window),
         is_resizable: false,
+        app_id: Some(crate::platform::APP_ID.into()),
         titlebar: Some(TitlebarOptions { title: Some("Set up Claudiu".into()), ..Default::default() }),
         ..Default::default()
     }
@@ -110,7 +111,7 @@ impl SetupView {
         view
     }
 
-    /// Look for both tools off the UI thread, after reading the PATH again: a Finder-launched macOS app starts with a
+    /// Look for both tools off the UI thread, after reading the PATH again: a desktop-launched app starts with a
     /// minimal one, and a tool installed since Claudiu started is not on any.
     fn run_checks(&mut self, cx: &mut Context<Self>) {
         self.checked = None;

@@ -7,7 +7,6 @@ use std::time::Duration;
 use gpui::{Animation, AnimationExt, IntoElement, Keystroke, div, prelude::*, px};
 
 use crate::terminal::glyphs;
-use crate::terminal::view::FONT;
 use crate::panels::theme;
 
 /// The message being typed. Edits are by character; `at` is a byte offset on a character boundary.
@@ -444,7 +443,7 @@ pub fn overlay(draft: &Draft, elapsed: Duration, phase: &str, grid: Grid) -> imp
                 // Claude Code keeps its prompt at the bottom of the screen.
                 .justify_end()
                 .overflow_hidden()
-                .font_family(FONT)
+                .font_family(crate::platform::monospace_font())
                 .text_size(crate::panels::scale::px(14.0))
                 .line_height(px(lh))
                 .child(

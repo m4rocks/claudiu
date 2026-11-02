@@ -53,9 +53,18 @@ struct Metrics {
     shift: Pixels,
 }
 
-/// A session moving to another account: who to, and when it began (the old process compacts first, then restarts).
+/// Where a view was last drawn: its grid and cell size.
+#[derive(Clone, Copy)]
+pub struct Layout {
+    cols: u16,
+    rows: u16,
+    metrics: Metrics,
+}
+
+/// A session being moved while its process restarts: what the skeleton says, and when the move began (an account
+/// hand-off compacts the old process first, so it began earlier than the restart).
 pub struct Handover {
-    pub to: String,
+    pub message: String,
     pub since: Instant,
 }
 
@@ -88,7 +97,7 @@ pub struct TerminalView {
     font_size: Pixels,
     /// Show a startup animation until the program first draws something (set for Claude sessions).
     pub loading: bool,
-    /// The skeleton says the session is handing over until the new process is ready.
+    /// The skeleton says what the session is being moved to until the new process is ready.
     pub handover: Option<Handover>,
     /// Whether a pane currently shows this terminal (kept up to date by the workspace's render).
     pub visible: bool,
@@ -122,10 +131,6 @@ impl Focusable for TerminalView {
 /// A row's height at the terminal's 14 px font (`font_size * 1.35`, rounded); the skeleton prompt lines up with it.
 pub const LINE_H: f32 = 19.0;
 
-#[cfg(target_os = "windows")]
-pub const FONT: &str = "Cascadia Mono";
-#[cfg(not(target_os = "windows"))]
-pub const FONT: &str = "Menlo";
 
 /// What to look for on Claude Code's screen to know a piece of the draft arrived.
 enum Marker {
@@ -167,6 +172,20 @@ impl TerminalView {
         self.terminal.start_error()
     }
 
+    /// `None` until the view has been drawn.
+    pub fn layout(&self) -> Option<Layout> {
+        let (cols, rows) = self.terminal.size();
+        self.metrics.map(|metrics| Layout { cols, rows, metrics })
+    }
+
+    /// Start on the grid of a view in the same pane. A view's first frame is drawn before it is laid out, so a new one
+    /// would otherwise draw that frame, and the skeleton's prompt with it, on the default 120×32 grid.
+    pub fn take_layout(&mut self, layout: Layout) {
+        let Layout { cols, rows, metrics } = layout;
+        self.terminal.resize(cols, rows, f32::from(metrics.cell_w), f32::from(metrics.line_h));
+        self.metrics = Some(metrics);
+    }
+
     pub fn new(
         terminal: Terminal,
         rx: UnboundedReceiver<TermEvent>,
@@ -191,7 +210,7 @@ impl TerminalView {
             handing: false,
             exit_code: None,
             marked: None,
-            font_family: FONT,
+            font_family: crate::platform::monospace_font(),
             font_size: px(14.0),
             loading: false,
             handover: None,
@@ -411,7 +430,7 @@ impl Render for TerminalView {
             }
         }
         let phase = match (&self.handover, self.handing, self.last_output) {
-            (Some(h), _, _) => format!("Handing over to {}…", h.to),
+            (Some(h), _, _) => h.message.clone(),
             (None, true, _) => "Handing your message to Claude Code…".into(),
             (None, false, Some(_)) => "Loading skills, plugins and MCP servers…".into(),
             (None, false, None) => "Starting Claude Code…".into(),
@@ -452,6 +471,11 @@ impl Render for TerminalView {
 }
 
 impl TerminalView {
+    /// The skeleton is up: Claude Code is starting, or the session is being moved.
+    pub fn is_loading(&self) -> bool {
+        self.held()
+    }
+
     /// Input goes to the skeleton's draft, not the PTY: Claude Code is starting, or the session is handing over.
     fn held(&self) -> bool {
         self.loading || self.handover.is_some()

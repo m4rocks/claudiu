@@ -11,11 +11,12 @@ pub enum SettingsPage {
     Sessions,
     ClaudeTools,
     ClaudiuTools,
+    Worktrees,
     About,
 }
 
 impl SettingsPage {
-    pub const ALL: [SettingsPage; 5] = [Self::General, Self::Sessions, Self::ClaudeTools, Self::ClaudiuTools, Self::About];
+    pub const ALL: [SettingsPage; 6] = [Self::General, Self::Sessions, Self::ClaudeTools, Self::ClaudiuTools, Self::Worktrees, Self::About];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -23,6 +24,7 @@ impl SettingsPage {
             Self::Sessions => "Sessions",
             Self::ClaudeTools => "Claude Code tools",
             Self::ClaudiuTools => "Claudiu tools",
+            Self::Worktrees => "Worktrees",
             Self::About => "About",
         }
     }
@@ -53,8 +55,8 @@ impl Workspace {
         };
         let on_list = list_focus.is_focused(window);
         match ev.keystroke.key.as_str() {
-            "up" if on_list => self.settings_page = self.settings_page.prev(),
-            "down" if on_list => self.settings_page = self.settings_page.next(),
+            "up" if on_list => self.set_settings_page(self.settings_page.prev(), cx),
+            "down" if on_list => self.set_settings_page(self.settings_page.next(), cx),
             "enter" if on_list => self.submit_modal(window, cx),
             "tab" => {
                 let here = if on_list {
@@ -84,9 +86,10 @@ mod tests {
     #[test]
     fn next_and_prev_walk_the_list_and_stop_at_the_ends() {
         assert_eq!(General.next(), Sessions);
-        assert_eq!(ClaudiuTools.next(), About);
+        assert_eq!(ClaudiuTools.next(), Worktrees);
+        assert_eq!(Worktrees.next(), About);
         assert_eq!(About.next(), About);
-        assert_eq!(About.prev(), ClaudiuTools);
+        assert_eq!(About.prev(), Worktrees);
         assert_eq!(Sessions.prev(), General);
         assert_eq!(General.prev(), General);
     }
