@@ -1610,3 +1610,121 @@ fn a_missing_claude_offers_the_setup_window() {
     }
     assert_eq!(cx.update(|app| app.windows().len()), 2, "the workspace and one setup window");
 }
+
+/// A process that ends by itself closes the session the way the X does. A clean exit says nothing, a non-zero
+/// exit is a toast, and the worktree stays: Claude Code already asked on `/exit`, and the X is the path that offers.
+#[test]
+fn a_process_that_ends_closes_the_session_and_leaves_its_worktree() {
+    let data = tempfile::tempdir().unwrap();
+    unsafe { std::env::set_var("CLAUDIU_DATA_DIR", data.path()) };
+    let work = tempfile::tempdir().unwrap();
+    let repo_dir = dunce::canonicalize(work.path()).unwrap().join("proj");
+    let git = |args: &[&str]| std::process::Command::new("git").args(args).current_dir(&repo_dir).output().unwrap();
+    std::fs::create_dir_all(&repo_dir).unwrap();
+    for args in [&["init", "-q", "-b", "main"][..], &["config", "user.email", "t@t"], &["config", "user.name", "t"], &["commit", "-q", "--allow-empty", "-m", "one"]] {
+        git(args);
+    }
+    let folder = crate::git::worktree::folder(&repo_dir, "fix");
+    let added = git(&["worktree", "add", "-q", "-b", "worktree-fix", &folder.to_string_lossy()]);
+    assert!(added.status.success(), "{}", String::from_utf8_lossy(&added.stderr));
+
+    let mut cx = TestAppContext::single();
+    cx.update(|app| {
+        gpui_kit::init(app);
+        gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, app);
+    });
+    let (window, ws) = cx
+        .update(|app| gpui_kit::open_window(Default::default(), app, |window, app| app.new(|cx| Workspace::new(window, vec![repo_dir.clone()], cx))))
+        .unwrap();
+    let project = ws.read_with(&cx, |ws, _| ws.store.data.projects[0].id.clone());
+    let step = |cx: &mut TestAppContext, f: &dyn Fn(&mut Workspace, &mut Window, &mut Context<Workspace>)| {
+        cx.update_window(window, |_, window, app| ws.update(app, |ws, cx| f(ws, window, cx))).unwrap();
+        cx.update_window(window, |_, window, app| window.draw(app).clear(app)).unwrap();
+        cx.run_until_parked();
+    };
+    let exit_spec = |code: i32| -> SpawnSpec {
+        let args = if cfg!(windows) {
+            vec!["/c".into(), format!("exit {code}")]
+        } else {
+            vec!["-c".into(), format!("exit {code}")]
+        };
+        SpawnSpec { program: if cfg!(windows) { "cmd.exe" } else { "/bin/sh" }.into(), args, cwd: Some(folder.clone()), ..Default::default() }
+    };
+    let start_one = |cx: &mut TestAppContext, title: &str, spec: SpawnSpec| -> String {
+        let title = title.to_string();
+        let id = new_id();
+        let record = SessionRecord {
+            id: id.clone(),
+            kind: SessionKind::Claude,
+            title,
+            custom_title: None,
+            auto_title: None,
+            project_id: Some(project.clone()),
+            cwd: folder.clone(),
+            created_at: now(),
+            last_active: now(),
+            exit_code: None,
+            hidden: false,
+            // Present, so closing it keeps the history record instead of treating it as an empty new session.
+            claude: Some(ClaudeMeta { session_id: id.clone(), external: ExternalState::Present, ..Default::default() }),
+        };
+        step(cx, &|ws, w, cx| ws.start(record.clone(), spec.clone(), true, w, cx));
+        id
+    };
+    // Pump until the view is gone. A late removal dialog is spawned off the UI thread, so keep going after the close.
+    let until_closed = |cx: &mut TestAppContext, id: &str| {
+        let started = std::time::Instant::now();
+        loop {
+            step(cx, &|_, _, _| {});
+            let gone = ws.read_with(cx, |ws, _| ws.live_view(id).is_none());
+            if gone {
+                let rest = std::time::Instant::now();
+                while rest.elapsed() < Duration::from_secs(1) {
+                    step(cx, &|_, _, _| {});
+                    cx.executor().advance_clock(Duration::from_millis(50));
+                    std::thread::sleep(Duration::from_millis(50));
+                    let offered = ws.read_with(cx, |ws, _| ws.modal.is_some());
+                    assert!(!offered, "a process that ended by itself offered to remove the worktree");
+                }
+                return;
+            }
+            assert!(started.elapsed() < Duration::from_secs(10), "the session stayed open after its process ended");
+            cx.executor().advance_clock(Duration::from_millis(50));
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+
+    let clean = start_one(&mut cx, "Fix login", exit_spec(0));
+    until_closed(&mut cx, &clean);
+    let (code, toast) = ws.read_with(&cx, |ws, _| (ws.store.session(&clean).map(|s| s.exit_code), ws.toast.as_ref().map(|t| t.text.clone())));
+    assert_eq!(code, Some(Some(0)), "a clean exit is kept on the history record");
+    assert_eq!(toast, None, "a clean exit says nothing");
+    assert!(folder.exists(), "the worktree stays");
+
+    let bad = start_one(&mut cx, "Broken", exit_spec(1));
+    until_closed(&mut cx, &bad);
+    let (code, toast) = ws.read_with(&cx, |ws, _| (ws.store.session(&bad).map(|s| s.exit_code), ws.toast.as_ref().map(|t| t.text.clone())));
+    assert_eq!(code, Some(Some(1)));
+    assert_eq!(toast.as_deref(), Some("Broken ended (exit code 1)"));
+
+    let missing = new_id();
+    let record = SessionRecord {
+        id: missing.clone(),
+        kind: SessionKind::Claude,
+        title: "Missing".into(),
+        custom_title: None,
+        auto_title: None,
+        project_id: Some(project),
+        cwd: folder.clone(),
+        created_at: now(),
+        last_active: now(),
+        exit_code: None,
+        hidden: false,
+        claude: Some(ClaudeMeta { session_id: missing.clone(), external: ExternalState::Present, ..Default::default() }),
+    };
+    let spec = SpawnSpec { program: "definitely-not-a-real-program-claudiu".into(), args: vec![], cwd: Some(folder), ..Default::default() };
+    step(&mut cx, &|ws, w, cx| ws.start(record.clone(), spec.clone(), true, w, cx));
+    until_closed(&mut cx, &missing);
+    let toast = ws.read_with(&cx, |ws, _| ws.toast.as_ref().map(|t| t.text.clone()));
+    assert!(toast.as_deref().is_some_and(|t| t.starts_with("Could not start Missing:")), "{toast:?}");
+}

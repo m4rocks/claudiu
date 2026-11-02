@@ -187,39 +187,10 @@ impl Workspace {
 
     // ------------------------------------------------------------------ the shown session
 
-    fn render_session(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_session(&mut self, _cx: &mut Context<Self>) -> AnyElement {
         let blank = || div().size_full().bg(hsla(theme::TERMINAL_BG)).into_any_element();
         let Some(id) = self.active.clone() else { return blank() };
         let Some(term) = self.live_view(&id).cloned() else { return blank() };
-        let rec = self.store.session(&id).cloned();
-        let exit = term.read(cx).exit_code;
-        let is_claude = rec.as_ref().is_some_and(|r| r.kind == SessionKind::Claude);
-        let rid = id.clone();
-
-        let banner = exit.map(|code| {
-            let label = match code {
-                Some(0) | None => "Session ended".to_string(),
-                Some(c) => format!("Session ended (exit code {c})"),
-            };
-            div()
-                .absolute()
-                .bottom(px(12.0))
-                .left(px(12.0))
-                .right(px(12.0))
-                .flex()
-                .items_center()
-                .justify_between()
-                .px(px(12.0))
-                .py(px(8.0))
-                .rounded(px(8.0))
-                .bg(hsla(0x181818))
-                .border_1()
-                .border_color(hsla(0x2a2a2a))
-                .child(div().text_size(crate::panels::scale::px(12.5)).text_color(hsla(theme::TEXT_DIM)).child(label))
-                .children(is_claude.then(|| {
-                    button("ended-act", "Resume", true).on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::Resume(rid.clone()), window, cx)))
-                }))
-        });
 
         let pane = fade_in(
             div()
@@ -231,8 +202,7 @@ impl Workspace {
                 .min_w_0()
                 .min_h_0()
                 .bg(hsla(theme::TERMINAL_BG))
-                .child(div().flex_1().min_h_0().p(px(6.0)).child(term))
-                .children(banner),
+                .child(div().flex_1().min_h_0().p(px(6.0)).child(term)),
             format!("pane-in-{id}"),
             150,
             0.4,
