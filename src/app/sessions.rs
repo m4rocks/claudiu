@@ -342,21 +342,22 @@ impl Workspace {
         self.recent.push(id.clone());
     }
 
-    fn on_exit(&mut self, id: &str, code: Option<i32>, _window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(err) = self.live_view(id).and_then(|v| v.read(cx).start_error()) {
-            let program = self.store.session(id).map(|r| r.display_title().to_string()).unwrap_or_default();
-            self.toast(format!("Could not start {program}: {err}"), true, cx);
-        }
-        if self.logins.remove(id) {
-            self.refresh_accounts(cx);
-        }
+    /// The process ended by itself. Close the session the way the X does, so the terminal does not stay up behind a
+    /// "Session ended" bar. A non-zero exit is a toast, because that output goes away with the view; a clean exit
+    /// says nothing. This does not offer to remove a worktree: `/exit` already asked inside Claude Code, and the X
+    /// (`close_live`) is the path that kills the process before that prompt.
+    fn on_exit(&mut self, id: &str, code: Option<i32>, window: &mut Window, cx: &mut Context<Self>) {
+        let start_error = self.live_view(id).and_then(|v| v.read(cx).start_error());
+        let title = self.store.session(id).map(|r| r.display_title().to_string()).unwrap_or_else(|| "Session".into());
         if let Some(rec) = self.store.session_mut(id) {
             rec.exit_code = Some(code.unwrap_or(0));
-            rec.last_active = now();
         }
-        self.drop_if_empty(id);
-        self.store.save_if_dirty();
-        cx.notify();
+        self.end_live(id, window, cx);
+        if let Some(err) = start_error {
+            self.toast(format!("Could not start {title}: {err}"), true, cx);
+        } else if let Some(code) = code.filter(|c| *c != 0) {
+            self.toast(format!("{title} ended (exit code {code})"), true, cx);
+        }
     }
 
     /// Clicking a session: running -> show its terminal; past -> open it right away (no intermediate page).
