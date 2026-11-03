@@ -12,7 +12,7 @@ Around the terminal, Claudiu adds an editor mode (Ctrl+Shift+E) with files, tabs
 
 Ctrl+Shift (Cmd+Shift on macOS) plus a letter drives the app. Everything else reaches Claude Code. Editor mode finds `rust-analyzer`, `tsc --lsp` and `gleam` on your PATH and installs nothing.
 
-To reduce background rendering, an inactive window updates streaming terminal output at most four times a second, with a final update when output stops. Returning to the window restores the normal frame rate. Busy sidebar icons stop animating while the window is inactive, the sidebar is hidden, or editor mode hides it. Measurements and reproduction commands are in [PERFORMANCE.md](PERFORMANCE.md).
+To reduce background rendering, an inactive window updates streaming terminal output at most four times a second, with a final update when output stops. Returning to the window restores the normal frame rate. Busy sidebar icons stop animating while the window is inactive, the sidebar is hidden, or editor mode hides it.
 
 ## What it touches
 
