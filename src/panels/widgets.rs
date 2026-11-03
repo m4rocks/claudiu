@@ -213,6 +213,18 @@ pub fn spinner(id: impl Into<ElementId>, size: f32) -> AnimationElement<Icon> {
 }
 
 pub fn icon_button(id: impl Into<SharedString>, glyph: IconName) -> Stateful<Div> {
+    icon_button_base(id, glyph)
+        .text_color(hsla(theme::TEXT_DIM))
+        .cursor_pointer()
+        .hover(|s| s.bg(hsla(0x262626)).text_color(hsla(theme::TEXT)))
+}
+
+/// A dimmed icon button with no hover or click handler.
+pub fn icon_button_disabled(id: impl Into<SharedString>, glyph: IconName) -> Stateful<Div> {
+    icon_button_base(id, glyph).text_color(hsla(theme::TEXT_FAINT)).cursor_default()
+}
+
+fn icon_button_base(id: impl Into<SharedString>, glyph: IconName) -> Stateful<Div> {
     div()
         .id(id.into())
         .size(px(22.0))
@@ -220,9 +232,6 @@ pub fn icon_button(id: impl Into<SharedString>, glyph: IconName) -> Stateful<Div
         .items_center()
         .justify_center()
         .rounded(px(5.0))
-        .text_color(hsla(theme::TEXT_DIM))
-        .cursor_pointer()
-        .hover(|s| s.bg(hsla(0x262626)).text_color(hsla(theme::TEXT)))
         .child(icon(glyph, 14.0))
 }
 

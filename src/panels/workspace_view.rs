@@ -18,7 +18,7 @@ use crate::store::{SessionKind, now};
 use crate::panels::theme::{self, hsla};
 use crate::updater::Status;
 use gpui_kit::assets::IconName;
-use crate::panels::widgets::{Trigger, ago, button, clawd, danger_button, fade_in, icon, icon_button, key_hint, section_label, short_path, shortcut, spinner, tick};
+use crate::panels::widgets::{Trigger, ago, button, clawd, danger_button, fade_in, icon, icon_button, icon_button_disabled, key_hint, section_label, short_path, shortcut, spinner, tick};
 
 impl Workspace {
     // ------------------------------------------------------------------ top bar
@@ -29,6 +29,7 @@ impl Workspace {
         let repo = project.as_ref().filter(|p| p.git.is_some()).and(cwd.clone());
         let busy = self.git_busy;
         let hints = self.shortcuts_shown;
+        let session_active = self.active_id().is_some();
 
         let title = rec.as_ref().map(|r| r.display_title().to_string()).unwrap_or_else(|| "Claudiu".into());
         // The branch and the worktree of the session's own folder, which is not the project's folder for a worktree session.
@@ -143,8 +144,12 @@ impl Workspace {
                     .items_center()
                     .gap(px(if hints { 4.0 } else { 0.0 }))
                     .occlude()
-                    .when(hints, |d| d.child(key_hint("Shift+E")))
-                    .child(icon_button("toggle-editor", IconName::FileCode).on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::ToggleEditor, window, cx))))
+                    .when(hints && session_active, |d| d.child(key_hint("Shift+E")))
+                    .child(if session_active {
+                        icon_button("toggle-editor", IconName::FileCode).on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::ToggleEditor, window, cx)))
+                    } else {
+                        icon_button_disabled("toggle-editor", IconName::FileCode)
+                    })
                     .when(hints, |d| d.child(key_hint("J")))
                     .child(icon_button("toggle-shell", IconName::PanelBottom).on_click(cx.listener(|ws, _: &ClickEvent, window, cx| {
                         if let Some(id) = ws.active.clone() {
@@ -709,12 +714,18 @@ impl Render for Workspace {
             }))
             .on_action(cx.listener(|ws, _: &ImportProject, window, cx| ws.act(Act::ImportProject, window, cx)))
             .on_action(cx.listener(|ws, _: &OpenGithub, window, cx| {
-                let cwd = ws.active_cwd();
-                ws.act(Act::OpenGithub { cwd }, window, cx)
+                if ws.active_id().is_some() {
+                    let cwd = ws.active_cwd();
+                    ws.act(Act::OpenGithub { cwd }, window, cx)
+                }
             }))
             .on_action(cx.listener(|ws, _: &OpenSettings, window, cx| ws.act(Act::OpenSettings, window, cx)))
             .on_action(cx.listener(|ws, _: &SwapFocus, window, cx| ws.swap_focus(window, cx)))
-            .on_action(cx.listener(|ws, _: &ToggleEditor, window, cx| ws.act(Act::ToggleEditor, window, cx)))
+            .on_action(cx.listener(|ws, _: &ToggleEditor, window, cx| {
+                if ws.active_id().is_some() {
+                    ws.act(Act::ToggleEditor, window, cx)
+                }
+            }))
             .on_mouse_move(cx.listener(|ws, ev: &gpui::MouseMoveEvent, window, cx| {
                 if ws.shell_drag.is_none() && ws.right_drag.is_none() && ws.left_drag.is_none() {
                     return;

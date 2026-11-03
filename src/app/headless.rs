@@ -1704,6 +1704,17 @@ fn a_process_that_ends_closes_the_session_and_leaves_its_worktree() {
         }
     };
 
+    // Session-only shortcuts are inert on Home, even with a project available as a fallback folder.
+    step(&mut cx, &|ws, _, _| {
+        ws.main = Main::Home;
+        ws.active = None;
+        ws.toast = None;
+    });
+    cx.dispatch_action(window, ToggleEditor);
+    cx.dispatch_action(window, OpenGithub);
+    cx.run_until_parked();
+    assert!(ws.read_with(&cx, |ws, _| !ws.editor_mode && ws.gh.is_empty() && ws.right_gh.is_none() && ws.toast.is_none()), "disabled shortcuts must not open a view or show a toast");
+
     let clean = start_one(&mut cx, "Fix login", exit_spec(0));
     until_closed(&mut cx, &clean);
     let (code, toast) = ws.read_with(&cx, |ws, _| (ws.store.session(&clean).map(|s| s.exit_code), ws.toast.as_ref().map(|t| t.text.clone())));

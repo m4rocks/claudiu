@@ -276,7 +276,7 @@ impl Workspace {
         let hints = self.shortcuts_shown;
 
         let mut actions = div().flex().flex_col().gap(px(1.0));
-        if let Some(target) = target {
+        if let Some(target) = &target {
             // "Open in <editor>" plus a ▾ to pick another installed editor (remembered, see Act::OpenEditor).
             if let Some(editor) = self.preferred_editor() {
                 let (t, pick_target) = (target.clone(), target.clone());
@@ -304,14 +304,16 @@ impl Workspace {
                         )),
                 );
             }
-            // Editor mode works on the shown session's folder, so it needs a session; also in the top bar.
-            if id.is_some() {
-                actions = actions.child(
-                    row("editor-mode", IconName::FileCode, "Editor mode")
-                        .when(hints, |d| d.child(key_hint("Shift+E")))
-                        .on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::ToggleEditor, window, cx))),
-                );
-            }
+        }
+        // Keep session-only actions visible, but inert when no session is shown.
+        actions = actions.child(if id.is_some() {
+            row("editor-mode", IconName::FileCode, "Editor mode")
+                .when(hints, |d| d.child(key_hint("Shift+E")))
+                .on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::ToggleEditor, window, cx)))
+        } else {
+            dim_row("editor-mode", IconName::FileCode, "Editor mode")
+        });
+        if let Some(target) = target {
             actions = actions.child(
                 row("reveal", IconName::FolderOpen, "Open folder")
                     .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::Reveal(target.clone()), window, cx))),
@@ -349,11 +351,13 @@ impl Workspace {
             );
         }
         let cwd = self.active_cwd();
-        actions.child(
+        actions.child(if id.is_some() {
             row("github", IconName::GitPullRequest, "GitHub")
                 .when(hints, |d| d.child(key_hint("Shift+G")))
-                .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::OpenGithub { cwd: cwd.clone() }, window, cx))),
-        )
+                .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::OpenGithub { cwd: cwd.clone() }, window, cx)))
+        } else {
+            dim_row("github", IconName::GitPullRequest, "GitHub")
+        })
     }
 
     /// Issues and pull requests attached to the session: click to open, × to take off.
@@ -678,6 +682,8 @@ mod tests {
     fn both_row_kinds_can_be_built() {
         row("a", IconName::Terminal, "A");
         dim_row("b", IconName::Terminal, "B");
+        crate::panels::widgets::icon_button("c", IconName::FileCode);
+        crate::panels::widgets::icon_button_disabled("d", IconName::FileCode);
     }
 
     #[test]
