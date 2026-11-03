@@ -19,7 +19,7 @@ use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{RenderableCursor, TermMode};
 use alacritty_terminal::vte::ansi::CursorShape;
 use futures::StreamExt;
-use futures::channel::mpsc::UnboundedReceiver;
+use crate::terminal::EventReceiver;
 use gpui::{
     App, Bounds, ClipboardItem, Context, Element, ElementId, ElementInputHandler, Entity,
     EntityInputHandler, EventEmitter, FocusHandle, Focusable, Font, FontStyle, FontWeight, GlobalElementId, Hsla, InspectorElementId, IntoElement,
@@ -101,6 +101,10 @@ pub struct TerminalView {
     pub handover: Option<Handover>,
     /// Whether a pane currently shows this terminal (kept up to date by the workspace's render).
     pub visible: bool,
+    /// Inactive windows still show output, but do not need the foreground frame rate.
+    pub foreground: bool,
+    last_redraw: Option<Instant>,
+    redraw_task: Option<gpui::Task<()>>,
     /// A line Claudiu put into Claude's input for the user (`insert_reference`), until it is kept or taken back.
     reference: Option<Inserted>,
     /// While Ctrl is held over a link: its viewport row and the columns to underline (none when it is drawn as a link already).
@@ -164,7 +168,7 @@ fn save_pasted(image: &gpui::Image) -> Option<std::path::PathBuf> {
 impl TerminalView {
     /// Start the process in the background, so a slow start never freezes the window. A failure to start
     /// shows up as an exit with `start_error` set.
-    pub fn spawn(spec: &SpawnSpec) -> (Terminal, UnboundedReceiver<TermEvent>) {
+    pub fn spawn(spec: &SpawnSpec) -> (Terminal, EventReceiver) {
         Terminal::spawn_deferred(spec, 120, 32)
     }
 
@@ -188,7 +192,7 @@ impl TerminalView {
 
     pub fn new(
         terminal: Terminal,
-        rx: UnboundedReceiver<TermEvent>,
+        rx: EventReceiver,
         cx: &mut Context<Self>,
     ) -> Self {
         cx.spawn(async move |this, cx| pump(this, rx, cx).await)
@@ -215,6 +219,9 @@ impl TerminalView {
             loading: false,
             handover: None,
             visible: true,
+            foreground: true,
+            last_redraw: None,
+            redraw_task: None,
             reference: None,
             hovered_link: None,
         }
@@ -269,8 +276,23 @@ impl TerminalView {
                     self.trace_quiet(cx);
                 }
                 // Off-screen terminals only record the timing; a notify would redraw the whole window.
-                if self.visible {
+                if redraw_due(self.visible, self.foreground, self.last_redraw, t) {
+                    self.redraw_task = None;
+                    self.last_redraw = Some(t);
                     cx.notify()
+                } else if self.visible && self.redraw_task.is_none() {
+                    // Flush the final output even if the process falls silent before the next frame.
+                    let delay = Duration::from_millis(250).saturating_sub(t - self.last_redraw.unwrap());
+                    self.redraw_task = Some(cx.spawn(async move |this, cx| {
+                        cx.background_executor().timer(delay).await;
+                        let _ = this.update(cx, |v, cx| {
+                            v.redraw_task = None;
+                            if v.visible {
+                                v.last_redraw = Some(Instant::now());
+                                cx.notify();
+                            }
+                        });
+                    }));
                 }
             }
             TermEvent::PtyWrite(text) => self.terminal.write(text.into_bytes()),
@@ -414,6 +436,10 @@ impl TerminalView {
     }
 }
 
+fn redraw_due(visible: bool, foreground: bool, last: Option<Instant>, now: Instant) -> bool {
+    visible && (foreground || last.is_none_or(|last| now.duration_since(last) >= Duration::from_millis(250)))
+}
+
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.glide_step(window);
@@ -490,7 +516,7 @@ impl TerminalView {
 /// Drains terminal events, coalescing bursts so we redraw at most ~60 times a second.
 async fn pump(
     this: gpui::WeakEntity<TerminalView>,
-    mut rx: UnboundedReceiver<TermEvent>,
+    mut rx: EventReceiver,
     cx: &mut gpui::AsyncApp,
 ) {
     while let Some(first) = rx.next().await {
@@ -511,5 +537,84 @@ async fn pump(
         cx.background_executor()
             .timer(Duration::from_millis(16))
             .await;
+    }
+}
+
+#[cfg(test)]
+mod redraw_tests {
+    use super::*;
+    use futures::FutureExt;
+
+    #[test]
+    #[ignore = "manual performance measurement with wall-clock output"]
+    fn benchmark_terminal_notifications() {
+        for (visible, foreground) in [(true, true), (true, false), (false, false)] {
+            let mut cx = gpui::TestAppContext::single();
+            let (terminal, rx, listener, _) = Terminal::build(&SpawnSpec::default(), 80, 24);
+            let view = cx.update(|app| app.new(|cx| TerminalView::new(terminal, rx, cx)));
+            cx.update(|app| view.update(app, |v, _| {
+                v.visible = visible;
+                v.foreground = foreground;
+            }));
+            let mut notifications = cx.notifications(&view);
+            let start = Instant::now();
+            for _ in 0..60 {
+                alacritty_terminal::event::EventListener::send_event(&listener, TermEvent::Wakeup);
+                cx.run_until_parked();
+                std::thread::sleep(Duration::from_millis(17));
+                cx.executor().advance_clock(Duration::from_millis(17));
+                cx.run_until_parked();
+            }
+            let mut count = 0;
+            while notifications.next().now_or_never().flatten().is_some() { count += 1; }
+            println!("visible={visible} foreground={foreground} output_events=60 notifications={count} elapsed_ms={}", start.elapsed().as_millis());
+            if !visible { assert_eq!(count, 0); }
+            else if foreground { assert_eq!(count, 60); }
+            else { assert!(count <= 5, "background redraws: {count}"); }
+        }
+    }
+
+    #[test]
+    fn a_quiet_background_terminal_flushes_its_last_output() {
+        let mut cx = gpui::TestAppContext::single();
+        let (terminal, rx, _, _) = Terminal::build(&SpawnSpec::default(), 80, 24);
+        let view = cx.update(|app| app.new(|cx| TerminalView::new(terminal, rx, cx)));
+        let mut notifications = cx.notifications(&view);
+        cx.update(|app| view.update(app, |v, cx| {
+            v.foreground = false;
+            v.handle_event(TermEvent::Wakeup, cx);
+        }));
+        assert!(notifications.next().now_or_never().flatten().is_some());
+        cx.update(|app| view.update(app, |v, cx| v.handle_event(TermEvent::Wakeup, cx)));
+        assert!(notifications.next().now_or_never().is_none());
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_millis(251));
+        cx.run_until_parked();
+        assert!(notifications.next().now_or_never().flatten().is_some(), "the last output must be drawn without another PTY event");
+        cx.update(|app| view.update(app, |v, cx| {
+            v.visible = false;
+            v.handle_event(TermEvent::Wakeup, cx);
+        }));
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        assert!(notifications.next().now_or_never().is_none(), "hidden terminals do not redraw");
+    }
+
+    #[test]
+    fn inactive_output_is_limited_and_foreground_output_stays_responsive() {
+        let start = Instant::now();
+        for (visible, foreground, expected) in [(true, true, 1000), (true, false, 4), (false, true, 0), (false, false, 0)] {
+            let mut last = None;
+            let mut redraws = 0;
+            for ms in 0..1000 {
+                let now = start + Duration::from_millis(ms);
+                if redraw_due(visible, foreground, last, now) {
+                    last = Some(now);
+                    redraws += 1;
+                }
+            }
+            assert_eq!(redraws, expected);
+        }
+        assert!(redraw_due(true, true, Some(start), start), "activation and typing do not wait for the background limit");
     }
 }

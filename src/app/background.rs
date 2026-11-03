@@ -59,17 +59,17 @@ impl Workspace {
     }
 
     /// While a session works, its sidebar icon spins: the session list is redrawn many times a second (with the
-    /// window's top level, which reuses the other cached parts). It stops once nothing works.
-    fn start_spin(&mut self, cx: &mut Context<Self>) {
-        if self.spinning {
+    /// window's top level, which reuses the other cached parts). It stops when idle or out of view.
+    pub(crate) fn start_spin(&mut self, window: &Window, cx: &mut Context<Self>) {
+        if self.spinning || !self.spin_visible(window) {
             return;
         }
         self.spinning = true;
-        cx.spawn(async move |this, cx| {
+        cx.spawn_in(window, async move |this, cx| {
             loop {
                 cx.background_executor().timer(crate::panels::status_icon::SPIN_STEP).await;
-                let working = this.update(cx, |ws, cx| {
-                    let working = ws.activity.values().any(|a| *a == Activity::Working);
+                let working = this.update_in(cx, |ws, window, cx| {
+                    let working = ws.spin_visible(window);
                     match &ws.session_list {
                         Some(list) if working => list.update(cx, |_, cx| cx.notify()),
                         _ => ws.spinning = working,
@@ -82,6 +82,15 @@ impl Workspace {
             }
         })
         .detach();
+    }
+
+    fn spin_visible(&self, window: &Window) -> bool {
+        spin_visible(
+            self.activity.values().any(|a| *a == Activity::Working),
+            window.is_window_active(),
+            self.store.data.layout.sidebar_visible,
+            self.editing(),
+        )
     }
 
     /// Once a second: derive each Claude session's `Activity` from its terminal output. When one stops working
@@ -143,7 +152,7 @@ impl Workspace {
             cx.notify();
         }
         if self.activity.values().any(|a| *a == Activity::Working) {
-            self.start_spin(cx);
+            self.start_spin(window, cx);
         }
         if flash {
             platform::request_attention(window);
@@ -275,6 +284,9 @@ impl Workspace {
                     out
                 })
                 .await;
+            if out.is_empty() {
+                return;
+            }
             let _ = this.update(cx, |ws, cx| {
                 for (id, mtime, scan) in out {
                     if let Some(m) = mtime {
@@ -294,9 +306,27 @@ impl Workspace {
     }
 }
 
+fn spin_visible(working: bool, active: bool, sidebar: bool, editing: bool) -> bool {
+    working && active && sidebar && !editing
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Activity, next_activity};
+    use super::{Activity, next_activity, spin_visible};
+
+    #[test]
+    fn spin_only_runs_for_a_visible_busy_sidebar() {
+        for working in [false, true] {
+            for active in [false, true] {
+                for sidebar in [false, true] {
+                    for editing in [false, true] {
+                        assert_eq!(spin_visible(working, active, sidebar, editing),
+                            working && active && sidebar && !editing);
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn busy_is_working_whatever_came_before() {

@@ -634,6 +634,7 @@ impl Render for Workspace {
         self.remember_window(window);
 
         // Editor mode hides both sidebars without changing the remembered layout, so leaving it brings them back.
+        self.start_spin(window, cx);
         let left_open = self.left_reveal.step(self.store.data.layout.sidebar_visible && !self.editing(), window);
         let left_w = self.left_width(f32::from(window.viewport_size().width));
         let sidebar = (left_open > 0.0).then(|| {
@@ -652,11 +653,17 @@ impl Render for Workspace {
         let showing = if matches!(self.main, Main::Terminals) { self.active.as_ref() } else { None };
         for l in &self.live {
             let visible = showing == Some(&l.id);
-            l.view.update(cx, |v, _| v.visible = visible);
+            l.view.update(cx, |v, _| {
+                v.visible = visible;
+                v.foreground = window.is_window_active();
+            });
         }
         for (owner, p) in &self.shells {
             let visible = p.open && showing == Some(owner);
-            p.view.update(cx, |v, _| v.visible = visible);
+            p.view.update(cx, |v, _| {
+                v.visible = visible;
+                v.foreground = window.is_window_active();
+            });
         }
         let right = self.render_right(f32::from(window.viewport_size().width), window, cx);
         let shell = self.render_shell(window, cx);

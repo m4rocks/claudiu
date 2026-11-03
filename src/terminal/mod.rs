@@ -2,6 +2,8 @@
 //! Children: `glyphs` (block and box drawing), `keys` (keystrokes to VT bytes), `skeleton` (the stand-in prompt), `trace`
 //! (start-up timing) and `view` (the GPUI view over a `Terminal`).
 
+mod events;
+pub use events::{EventReceiver, Listener};
 pub mod glyphs;
 pub mod keys;
 pub mod skeleton;
@@ -22,17 +24,6 @@ use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::test::TermSize;
 use alacritty_terminal::term::{Config, Term};
 use alacritty_terminal::tty;
-use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
-
-/// Forwards alacritty events to whoever owns the receiving end (the GPUI view).
-#[derive(Clone)]
-pub struct Listener(UnboundedSender<Event>);
-
-impl EventListener for Listener {
-    fn send_event(&self, event: Event) {
-        let _ = self.0.unbounded_send(event);
-    }
-}
 
 /// Give child processes the environment of *this* terminal rather than whatever launched Claudiu.
 /// Call once at startup, before any threads exist (mutating the environment is not thread-safe).
@@ -131,9 +122,8 @@ fn start_pty(
 }
 
 impl Terminal {
-    fn build(spec: &SpawnSpec, cols: u16, rows: u16) -> (Self, UnboundedReceiver<Event>, Listener, WindowSize) {
-        let (tx, rx) = unbounded();
-        let listener = Listener(tx);
+    fn build(spec: &SpawnSpec, cols: u16, rows: u16) -> (Self, EventReceiver, Listener, WindowSize) {
+        let (listener, rx) = events::channel();
         let window_size = WindowSize { num_lines: rows, num_cols: cols, cell_width: 8, cell_height: 16 };
         let size = TermSize::new(cols as usize, rows as usize);
         let config = Config { scrolling_history: 10_000, ..Default::default() };
@@ -155,7 +145,7 @@ impl Terminal {
     /// Start the child and wait for it to exist (an unstartable program is an `Err`). The app itself uses
     /// `spawn_deferred`.
     #[cfg(test)]
-    pub fn spawn(spec: &SpawnSpec, cols: u16, rows: u16) -> anyhow::Result<(Self, UnboundedReceiver<Event>)> {
+    pub fn spawn(spec: &SpawnSpec, cols: u16, rows: u16) -> anyhow::Result<(Self, EventReceiver)> {
         let (this, rx, listener, window_size) = Self::build(spec, cols, rows);
         let sender = start_pty(spec, window_size, this.term.clone(), listener, &this.pid)?;
         *this.link.lock().unwrap() = Link::Ready(sender);
@@ -165,7 +155,7 @@ impl Terminal {
     /// Return at once and start the child on another thread: creating a process from a very large executable
     /// takes about a second, which would freeze the window. Input and resizes sent meanwhile are queued. If the
     /// child cannot start, the terminal reports an exit and `start_error` says why.
-    pub fn spawn_deferred(spec: &SpawnSpec, cols: u16, rows: u16) -> (Self, UnboundedReceiver<Event>) {
+    pub fn spawn_deferred(spec: &SpawnSpec, cols: u16, rows: u16) -> (Self, EventReceiver) {
         let (this, rx, listener, window_size) = Self::build(spec, cols, rows);
         let (spec, term, link, error) = (spec.clone(), this.term.clone(), Arc::downgrade(&this.link), this.start_error.clone());
         let (born, tag, pid) = (this.born, this.tag.clone(), this.pid.clone());
@@ -286,7 +276,7 @@ mod tests {
         }
     }
 
-    fn wait_for_exit(rx: &mut UnboundedReceiver<Event>) -> bool {
+    fn wait_for_exit(rx: &mut EventReceiver) -> bool {
         let deadline = Instant::now() + Duration::from_secs(15);
         while Instant::now() < deadline {
             while let Ok(ev) = rx.try_recv() {

@@ -4,6 +4,53 @@
 use super::*;
 use gpui::{TestAppContext, VisualTestContext};
 
+#[test]
+#[ignore = "isolated workspace scheduling measurement"]
+fn energy_sidebar_scheduling() {
+    use futures::{FutureExt, StreamExt};
+    struct OtherWindow;
+    impl gpui::Render for OtherWindow {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl gpui::IntoElement {
+            gpui::div()
+        }
+    }
+    let data = tempfile::tempdir().unwrap();
+    unsafe { std::env::set_var("CLAUDIU_DATA_DIR", data.path()) };
+    let mut cx = TestAppContext::single();
+    cx.update(gpui_kit::init);
+    let (window, ws) = cx.update(|app| gpui_kit::open_window(Default::default(), app,
+        |window, app| app.new(|cx| Workspace::new(window, vec![], cx)))).unwrap();
+    let (other, _) = cx.update(|app| gpui_kit::open_window(Default::default(), app,
+        |_, app| app.new(|_| OtherWindow))).unwrap();
+    for (visible, active) in [(true, true), (false, true), (true, true), (true, false), (true, true)] {
+        if !active {
+            cx.update_window(other, |_, window, _| window.activate_window()).unwrap();
+            cx.run_until_parked();
+        }
+        cx.update_window(window, |_, window, app| {
+            if active { window.activate_window(); }
+            ws.update(app, |ws, cx| {
+                ws.store.data.layout.sidebar_visible = visible;
+                ws.activity.insert("busy".into(), Activity::Working);
+                cx.notify();
+            });
+            window.draw(app).clear(app);
+        }).unwrap();
+        cx.run_until_parked();
+        let list = ws.read_with(&cx, |ws, _| ws.session_list.clone().unwrap());
+        let mut notifications = cx.notifications(&list);
+        for _ in 0..5 {
+            cx.executor().advance_clock(Duration::from_millis(40));
+            cx.run_until_parked();
+        }
+        let mut count = 0;
+        while notifications.next().now_or_never().flatten().is_some() { count += 1; }
+        println!("sidebar_visible={visible} active={active} interval_ms=200 spin_notifications={count}");
+        assert_eq!(count, if visible && active { 5 } else { 0 });
+        assert_eq!(ws.read_with(&cx, |ws, _| ws.spinning), visible && active);
+    }
+}
+
 fn run() {
     let data = tempfile::tempdir().unwrap();
     // SAFETY: set before any other thread reads the environment; this test owns the process.

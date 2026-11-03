@@ -12,6 +12,8 @@ Around the terminal, Claudiu adds an editor mode (Ctrl+Shift+E) with files, tabs
 
 Ctrl+Shift (Cmd+Shift on macOS) plus a letter drives the app. Everything else reaches Claude Code. Editor mode finds `rust-analyzer`, `tsc --lsp` and `gleam` on your PATH and installs nothing.
 
+To reduce background rendering, an inactive window updates streaming terminal output at most four times a second, with a final update when output stops. Returning to the window restores the normal frame rate. Busy sidebar icons stop animating while the window is inactive, the sidebar is hidden, or editor mode hides it. Measurements and reproduction commands are in [PERFORMANCE.md](PERFORMANCE.md).
+
 ## What it touches
 
 Claudiu never deletes a transcript. It writes to Claude Code's own data only to change the settings you switch in Claudiu, as `/config` does, to sync shared files between accounts, and to append one line to a transcript when a session that `claude --worktree` put in a worktree moves to another folder, so Claude Code knows it has left that worktree. Nothing is uploaded and terminal contents are never logged. The only network use is GitHub: the update check (off with `"settings": { "update_url": "" }` in `state.json`) and the GitHub pane. State lives in `%LOCALAPPDATA%\m4rocks\Claudiu\data` on Windows, `~/Library/Application Support/Claudiu` on macOS and `~/.local/share/claudiu` on Linux, and crashes go to `crash.log` there.

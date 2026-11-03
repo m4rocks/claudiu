@@ -650,6 +650,7 @@ impl Workspace {
         ws.start_fetch_loop(cx);
         ws.start_git_watch(cx);
         ws.start_activity_poll(window, cx);
+        cx.observe_window_activation(window, |_, _, cx| cx.notify()).detach();
         ws.check_updates(cx);
         window.focus(&ws.root_focus, cx);
         ws
