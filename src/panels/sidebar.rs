@@ -477,6 +477,8 @@ impl Workspace {
                     // Shown by hover style: a list that scrolled under a still pointer leaves the old row marked.
                     // While shrinking away the pointer is outside the row, so it is simply shown.
                     .when(!closing, |b| b.invisible().group_hover("row", |s| s.visible()))
+                    // Otherwise the row starts a drag when the pointer moves during the press, and the click is lost.
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
                         cx.stop_propagation();
                         ws.act(Act::CloseLive(close_id.clone()), window, cx);
@@ -504,6 +506,7 @@ impl Workspace {
                     icon_button(gpui::SharedString::from(format!("archive-{}-{archive_id}", row.scope)), if archive { IconName::Archive } else { IconName::ArchiveRestore })
                         .invisible()
                         .group_hover("row", |s| s.visible())
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
                             cx.stop_propagation();
                             ws.act(Act::Archive(archive_id.clone(), archive), window, cx);
