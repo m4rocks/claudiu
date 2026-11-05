@@ -4,14 +4,15 @@
 //! plain blocks, unknown CSS is ignored.
 //! `css` holds the CSS subset (colours, lengths, `Css`); this file holds the tree, the tag parser and entities.
 
+mod chart;
 mod css;
 pub use css::*;
 
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 
-use gpui::{Image, ImageFormat};
+use gpui::{Image, ImageFormat, SMOOTH_SVG_SCALE_FACTOR};
 
 use crate::panels::theme;
 
@@ -21,6 +22,8 @@ pub struct El {
     pub attrs: Vec<(String, String)>,
     pub css: Css,
     pub children: Vec<Node>,
+    /// This element's place among the block's interactive ones, so clicking one doesn't renumber those after it.
+    pub seq: usize,
 }
 
 impl El {
@@ -37,16 +40,33 @@ impl El {
         if let Some(n) = attrs.iter().find(|(n, _)| n == "cols").and_then(|(_, v)| v.parse().ok()) {
             css.cols = Some(n);
         }
-        Self { tag, attrs, css, children: vec![] }
+        Self { tag, attrs, css, children: vec![], seq: 0 }
     }
 }
 
-/// A drawing, rasterised once here (parsing runs off the UI thread) at twice its size so it stays sharp.
+/// A drawing: its size on screen, and the root `<svg>` from after its name, without a width or height.
 #[derive(Clone)]
 pub struct Svg {
-    pub image: Arc<Image>,
+    rest: String,
     pub w: f32,
     pub h: f32,
+}
+
+impl Svg {
+    /// The drawing as a bitmap of exactly the pixels it covers on a screen of this scale. A larger one is shrunk on the
+    /// GPU without filtering, which blurs small text. gpui rasterises at `SMOOTH_SVG_SCALE_FACTOR` times the size given.
+    pub fn image(&self, screen_scale: f32) -> Arc<Image> {
+        let scale = screen_scale / SMOOTH_SVG_SCALE_FACTOR;
+        let svg = format!("<svg width=\"{}\" height=\"{}\"{}", self.w * scale, self.h * scale, self.rest);
+        // A view is drawn on every frame. A new `Image` each time would be decoded and kept by gpui again, so the same
+        // drawing must give the same `Image`.
+        static CACHE: LazyLock<Mutex<HashMap<String, Arc<Image>>>> = LazyLock::new(Default::default);
+        let mut cache = CACHE.lock().unwrap();
+        if cache.len() > 64 {
+            cache.clear();
+        }
+        cache.entry(svg.clone()).or_insert_with(|| Arc::new(Image::from_bytes(ImageFormat::Svg, svg.into_bytes()))).clone()
+    }
 }
 
 #[derive(Clone)]
@@ -64,12 +84,30 @@ pub struct Tree {
     pub uid: u64,
 }
 
-const VOID: [&str; 8] = ["br", "hr", "img", "input", "meta", "link", "wbr", "col-group"];
+const VOID: [&str; 9] = ["br", "hr", "img", "input", "meta", "link", "wbr", "col-group", "series"];
 
 pub fn parse_tree(src: &str) -> Tree {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     src.hash(&mut h);
-    Tree { nodes: parse(src), uid: h.finish() }
+    let mut nodes = parse(src);
+    finish(&mut nodes, &mut 0);
+    Tree { nodes, uid: h.finish() }
+}
+
+/// Turns charts into drawings and numbers the elements a click can change.
+fn finish(nodes: &mut [Node], next: &mut usize) {
+    for n in nodes {
+        let Node::El(e) = n else { continue };
+        if e.tag == "chart" {
+            *n = Node::Svg(chart::chart(e));
+            continue;
+        }
+        if matches!(e.tag.as_str(), "button" | "details" | "tabs") {
+            e.seq = *next;
+            *next += 1;
+        }
+        finish(&mut e.children, next);
+    }
 }
 
 pub fn parse(src: &str) -> Vec<Node> {
@@ -332,6 +370,33 @@ pub fn svg_tokens(s: &str) -> String {
     out.replace("currentColor", &text).replace("currentcolor", &text)
 }
 
+/// The app's text font by name. The SVG renderer knows none of gpui's, and on its own draws text in Times New Roman.
+const SVG_FONT: &str = if cfg!(windows) {
+    "Segoe UI"
+} else if cfg!(target_os = "macos") {
+    "Helvetica Neue"
+} else {
+    "sans-serif"
+};
+
+/// Sets every `font-family` attribute to the app's font, so drawings read like the rest of the app. Monospace stays.
+fn svg_font(inner: &str) -> String {
+    let mut out = String::with_capacity(inner.len());
+    let mut rest = inner;
+    while let Some(at) = rest.find("font-family=") {
+        let value = at + "font-family=".len();
+        let quote = rest[value..].chars().next().filter(|c| matches!(c, '"' | '\''));
+        let end = quote.and_then(|q| rest[value + 1..].find(q)).map(|e| value + 1 + e);
+        let Some(end) = end else { break };
+        out.push_str(&rest[..value + 1]);
+        let family = &rest[value + 1..end];
+        out.push_str(if family.to_ascii_lowercase().contains("mono") { family } else { SVG_FONT });
+        rest = &rest[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Rebuilds the root `<svg>` with a namespace, a viewBox and a doubled pixel size, keeping the inner markup as written.
 fn svg_node(attrs: &[(String, String)], inner: &str) -> Option<Svg> {
     let get = |k: &str| attrs.iter().find(|(n, _)| n == k).map(|(_, v)| v.as_str());
@@ -356,26 +421,14 @@ fn svg_node(attrs: &[(String, String)], inner: &str) -> Option<Svg> {
     let view = vb.map_or_else(|| format!("0 0 {w} {h}"), |n| format!("{} {} {} {}", n[0], n[1], n[2], n[3]));
     let extra: String = attrs
         .iter()
-        .filter(|(n, _)| !matches!(n.as_str(), "width" | "height" | "viewbox" | "xmlns" | "xmlns:xlink" | "class" | "id"))
+        .filter(|(n, _)| !matches!(n.as_str(), "width" | "height" | "viewbox" | "xmlns" | "xmlns:xlink" | "class" | "id" | "font-family"))
         .map(|(n, v)| format!(" {}=\"{}\"", if n == "preserveaspectratio" { "preserveAspectRatio" } else { n }, v.replace('"', "&quot;")))
         .collect();
-    // Twice the size keeps it sharp on dense screens, but the bitmap stays under about 1600px a side.
-    let scale = (1600.0 / w.max(h)).clamp(1.0, 2.0);
-    let svg = svg_tokens(&format!(
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" viewBox=\"{view}\" width=\"{}\" height=\"{}\"{extra}>{inner}</svg>",
-        w * scale,
-        h * scale
+    let rest = svg_tokens(&format!(
+        " xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" viewBox=\"{view}\" font-family=\"{SVG_FONT}\"{extra}>{}</svg>",
+        svg_font(inner)
     ));
-    // The message is parsed again for every streamed chunk. A new `Image` each time would be decoded and kept by gpui
-    // again, so the same drawing must give the same `Image`.
-    static CACHE: Mutex<Option<HashMap<String, Arc<Image>>>> = Mutex::new(None);
-    let mut cache = CACHE.lock().ok()?;
-    let cache = cache.get_or_insert_with(HashMap::new);
-    if cache.len() > 64 {
-        cache.clear();
-    }
-    let image = cache.entry(svg.clone()).or_insert_with(|| Arc::new(Image::from_bytes(ImageFormat::Svg, svg.into_bytes()))).clone();
-    Some(Svg { image, w, h })
+    Some(Svg { rest, w, h })
 }
 
 #[cfg(test)]
@@ -476,6 +529,39 @@ mod tests {
     }
 
     #[test]
+    fn interactive_elements_keep_their_numbers_whatever_is_open() {
+        let tree = parse_tree("<details><button send=\"a\">A</button></details><tabs><tab></tab></tabs><p>x</p><button send=\"b\">B</button>");
+        let seq = |n: &Node| match n {
+            Node::El(e) => e.seq,
+            _ => panic!("element expected"),
+        };
+        let Node::El(details) = &tree.nodes[0] else { panic!("element expected") };
+        assert_eq!(seq(&tree.nodes[0]), 0);
+        assert_eq!(seq(&details.children[0]), 1, "numbered even while its section is closed");
+        assert_eq!(seq(&tree.nodes[1]), 2);
+        assert_eq!(seq(&tree.nodes[3]), 3);
+    }
+
+    #[test]
+    fn a_drawing_becomes_exactly_the_pixels_it_covers() {
+        let nodes = parse("<svg viewBox=\"0 0 200 100\" width=\"100\"><rect width=\"10\" height=\"10\"/></svg>");
+        let Node::Svg(Some(s)) = &nodes[0] else { panic!("svg expected") };
+        let renderer = gpui::SvgRenderer::new(Arc::new(()));
+        for (scale, w, h) in [(1.0, 100, 50), (1.5, 150, 75), (2.0, 200, 100)] {
+            let size = s.image(scale).to_image_data(renderer.clone()).unwrap().size(0);
+            assert_eq!((i32::from(size.width), i32::from(size.height)), (w, h), "at scale {scale}");
+        }
+    }
+
+    #[test]
+    fn svg_text_uses_the_app_font_and_keeps_monospace() {
+        assert_eq!(svg_font("<text font-family=\"Georgia, serif\">a</text>"), format!("<text font-family=\"{SVG_FONT}\">a</text>"));
+        assert_eq!(svg_font("<text font-family='system-ui'>a</text><text font-family=\"x\"/>"), format!("<text font-family='{SVG_FONT}'>a</text><text font-family=\"{SVG_FONT}\"/>"));
+        assert_eq!(svg_font("<text font-family=\"monospace\">a</text>"), "<text font-family=\"monospace\">a</text>");
+        assert_eq!(svg_font("<text font-family=\"cut off"), "<text font-family=\"cut off", "half a streamed drawing is left alone");
+    }
+
+    #[test]
     fn svg_tokens_and_size() {
         assert_eq!(svg_tokens("fill=\"var(--accent)\" stroke=\"var(--nope)\""), "fill=\"#d97757\" stroke=\"var(--nope)\"");
         assert!(svg_tokens("<g color=\"currentColor\">").contains("#e4e4e4"));
@@ -488,7 +574,7 @@ mod tests {
         // Parsed again (the next streamed chunk): the same drawing is the same image, so gpui does not decode it twice.
         let again = parse("<svg viewBox=\"0 0 200 100\" width=\"100\"><rect width=\"10\" height=\"10\"/></svg>");
         match (&nodes[0], &again[0]) {
-            (Node::Svg(Some(a)), Node::Svg(Some(b))) => assert!(Arc::ptr_eq(&a.image, &b.image)),
+            (Node::Svg(Some(a)), Node::Svg(Some(b))) => assert!(Arc::ptr_eq(&a.image(1.0), &b.image(1.0))),
             _ => panic!("svg expected"),
         }
         // Still streaming: a placeholder, and nothing after it is misread as markup.

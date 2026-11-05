@@ -103,9 +103,9 @@ impl Workspace {
         cx.notify();
     }
 
-    /// GitHub and the Visual panel are read and written in, so they share one wider, resizable width.
+    /// GitHub is read and written in, so it gets a wider, resizable width.
     fn right_wide(&self) -> bool {
-        self.right_gh.is_some() || self.visual_shown()
+        self.right_gh.is_some()
     }
 
     /// The right sidebar's current width: the remembered one for the menu or for GitHub, kept within bounds.

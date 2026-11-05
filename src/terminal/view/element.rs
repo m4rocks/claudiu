@@ -208,8 +208,10 @@ impl Element for TerminalElement {
 
                 // Text
                 let hovered_link = hovered.as_ref().is_some_and(|(r, columns)| *r == row && columns.as_ref().is_some_and(|c| c.contains(&col)));
-                let underline =
-                    cell.flags.intersects(Flags::ALL_UNDERLINES) || cell.hyperlink().is_some() || hovered_link;
+                let link = cell.hyperlink();
+                // Claude Code underlines a link it sees hovered; a row reserved for a card shows nothing of its own.
+                let reserved = link.as_ref().is_some_and(|l| l.uri().starts_with(INLINE_LINK));
+                let underline = !reserved && (cell.flags.intersects(Flags::ALL_UNDERLINES) || link.is_some() || hovered_link);
                 let ch = cell.c;
                 if cell.flags.contains(Flags::HIDDEN) || (ch == ' ' && !underline) || ch == '\0' {
                     continue;

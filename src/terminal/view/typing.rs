@@ -168,7 +168,7 @@ impl TerminalView {
     }
 
     /// Copies the selection; returns whether there was one.
-    pub fn copy(&mut self, cx: &mut Context<Self>) -> bool {
+    pub fn copy(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let mut term = self.terminal.term.lock();
         let text = term.selection_to_string().filter(|t| !t.is_empty());
         if text.is_some() {
@@ -179,6 +179,13 @@ impl TerminalView {
             Some(text) => {
                 cx.write_to_clipboard(ClipboardItem::new_string(text));
                 cx.notify();
+                true
+            }
+            // Text selected in a card: Ctrl+C copies it rather than interrupting Claude Code.
+            None if TextSelection::has_selection(window, cx) => {
+                let text = TextSelection::selected_text(window, cx);
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+                TextSelection::clear(window, cx);
                 true
             }
             None => false,
@@ -195,7 +202,7 @@ impl TerminalView {
         cx.notify();
     }
 
-    pub(super) fn on_key_down(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let ks = &event.keystroke;
         let m = &ks.modifiers;
         let key = ks.key.as_str();
@@ -211,7 +218,7 @@ impl TerminalView {
         let mac_paste = m.platform && !m.shift && !m.control && !m.alt && key == "v";
         // Every key handled here stops propagation, so the platform doesn't also deliver it as text.
         if mac_copy || copy_chord {
-            self.copy(cx);
+            self.copy(window, cx);
             cx.stop_propagation();
             return;
         }
@@ -221,7 +228,7 @@ impl TerminalView {
             return;
         }
         // Ctrl+C with a selection copies (like Windows Terminal); otherwise it is SIGINT as usual.
-        if m.control && !m.shift && !m.alt && key == "c" && self.copy(cx) {
+        if m.control && !m.shift && !m.alt && key == "c" && self.copy(window, cx) {
             cx.stop_propagation();
             return;
         }

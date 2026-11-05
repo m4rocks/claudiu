@@ -1,50 +1,55 @@
-//! The Visual panel: Markdown (and the `ui` dialect, `ui/`) the model draws beside the terminal.
+//! Cards: Markdown (and the `ui` dialect, `ui/`) the model draws inside the terminal.
 //!
 //! The model calls Claudiu's `show_visual` tool; the per-process mod answers it in-process and, while the model is
-//! still writing the call, streams what it has so far into `<data>/visual/<record id>.json` (`mod/hooks/register.js`).
-//! Claudiu polls that folder and keeps a stack of cards per session. Nothing goes through the PTY.
+//! still writing the call, streams what it has so far into `<data>/visual/<record id>--<call>.json`
+//! (`mod/hooks/register.js`). Claudiu polls that folder and hands each card to its session's terminal, which paints it
+//! over rows the mod reserves in the transcript (`terminal/view/cards.rs`). Nothing goes through the PTY.
+//!
+//! The transcript keeps every call's input, so the mod writes a card again when it next draws the call's row. That is
+//! what brings cards back after a restart: these files are a mailbox, not the record.
 
 pub mod ui;
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use serde::Deserialize;
 
-/// Env var holding the file the mod writes the card being drawn into.
-pub const VISUAL_ENV: &str = "CLAUDIU_VISUAL_FILE";
+/// Env var holding the start of the path of every card file of a session: the mod adds `<call>.json`.
+pub const VISUAL_ENV: &str = "CLAUDIU_VISUAL_PREFIX";
 
-/// Most cards kept per session; the oldest go first.
-pub const MAX_CARDS: usize = 20;
+/// Between a session's record id and a call's id in a file name. Neither contains it.
+const SEPARATOR: &str = "--";
 
 pub fn dir() -> PathBuf {
     crate::datadir::data_dir().join("visual")
 }
 
-/// The card file of one session, named by Claudiu's own record id (which survives `/clear`).
-pub fn file(record_id: &str) -> PathBuf {
-    dir().join(format!("{}.json", crate::datadir::safe_file_stem(record_id)))
+/// What the mod puts a call's id after: named by Claudiu's own record id, which survives `/clear`.
+pub fn prefix(record_id: &str) -> PathBuf {
+    dir().join(format!("{}{SEPARATOR}", crate::datadir::safe_file_stem(record_id)))
 }
 
-/// One `show_visual` call as the mod writes it: the same `call` until it is finished, `done` once it is.
+/// The file telling the mod how many terminal rows a card needs.
+pub fn rows_file(record_stem: &str, call: &str) -> PathBuf {
+    dir().join(format!("{record_stem}{SEPARATOR}{}.rows", crate::datadir::safe_file_stem(call)))
+}
+
+/// One `show_visual` call as the mod writes it.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Card {
     pub call: String,
     #[serde(default)]
-    pub title: String,
-    #[serde(default)]
     pub content: String,
-    #[serde(default)]
-    pub done: bool,
 }
 
 /// What a file looked like when it was last read.
 pub type Stamp = (SystemTime, u64);
 
-/// The cards that changed since `seen` (file stem and card), updating `seen`. Half-written or unreadable files are
-/// left for the next look.
-pub fn read_changed(dir: &std::path::Path, seen: &mut HashMap<String, Stamp>) -> Vec<(String, Card)> {
+/// The cards that changed since `seen` (their session's file stem and the card), updating `seen`. Half-written or
+/// unreadable files are left for the next look.
+pub fn read_changed(dir: &Path, seen: &mut HashMap<String, Stamp>) -> Vec<(String, Card)> {
     let Ok(entries) = std::fs::read_dir(dir) else { return vec![] };
     let mut out = vec![];
     for e in entries.flatten() {
@@ -53,69 +58,55 @@ pub fn read_changed(dir: &std::path::Path, seen: &mut HashMap<String, Stamp>) ->
             continue;
         }
         let Some(stem) = path.file_stem().and_then(|s| s.to_str()).map(str::to_string) else { continue };
+        let Some((record, _)) = stem.split_once(SEPARATOR) else { continue };
+        let record = record.to_string();
         let Ok(meta) = e.metadata() else { continue };
         let stamp = (meta.modified().unwrap_or(SystemTime::UNIX_EPOCH), meta.len());
         if seen.get(&stem) == Some(&stamp) {
             continue;
         }
         let Some(card) = std::fs::read_to_string(&path).ok().and_then(|t| serde_json::from_str::<Card>(&t).ok()) else { continue };
-        seen.insert(stem.clone(), stamp);
-        out.push((stem, card));
+        seen.insert(stem, stamp);
+        out.push((record, card));
     }
     out
-}
-
-/// Add a card, or replace the one with the same `call` (the stream of one tool call), keeping at most `MAX_CARDS`.
-/// Returns whether the call is new to the stack.
-pub fn upsert(cards: &mut Vec<Card>, card: Card) -> bool {
-    if let Some(slot) = cards.iter_mut().find(|c| c.call == card.call) {
-        *slot = card;
-        return false;
-    }
-    cards.push(card);
-    let extra = cards.len().saturating_sub(MAX_CARDS);
-    cards.drain(..extra);
-    true
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn card(call: &str, content: &str, done: bool) -> Card {
-        Card { call: call.into(), title: String::new(), content: content.into(), done }
-    }
-
     #[test]
-    fn a_call_replaces_its_own_card_and_the_stack_is_capped() {
-        let mut cards = vec![];
-        assert!(upsert(&mut cards, card("a", "# Hi", false)));
-        assert!(!upsert(&mut cards, card("a", "# Hi there", true)));
-        assert_eq!(cards, vec![card("a", "# Hi there", true)]);
-        for i in 0..30 {
-            upsert(&mut cards, card(&format!("c{i}"), "x", true));
-        }
-        assert_eq!(cards.len(), MAX_CARDS);
-        assert_eq!(cards.last().unwrap().call, "c29");
-        assert!(cards.iter().all(|c| c.call != "a"));
-    }
-
-    #[test]
-    fn only_changed_files_are_read_again_and_garbage_is_left_for_later() {
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(tmp.path().join("one.json"), r##"{"call":"t1","title":"T","content":"# A","done":false}"##).unwrap();
-        std::fs::write(tmp.path().join("bad.json"), r#"{"call":"#).unwrap();
-        std::fs::write(tmp.path().join("note.txt"), "x").unwrap();
+    fn each_call_of_a_session_is_read_and_only_changed_files_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let (one, two) = (dir.path().join("rec--c1.json"), dir.path().join("rec--c2.json"));
+        std::fs::write(&one, r##"{"call":"c1","content":"# One"}"##).unwrap();
+        std::fs::write(&two, r##"{"call":"c2","content":"# Two"}"##).unwrap();
         let mut seen = HashMap::new();
-        let got = read_changed(tmp.path(), &mut seen);
-        assert_eq!(got.len(), 1);
-        assert_eq!((got[0].0.as_str(), got[0].1.title.as_str(), got[0].1.done), ("one", "T", false));
-        assert!(read_changed(tmp.path(), &mut seen).is_empty(), "unchanged");
 
-        std::fs::write(tmp.path().join("one.json"), r##"{"call":"t1","title":"T","content":"# A longer one","done":true}"##).unwrap();
-        std::fs::write(tmp.path().join("bad.json"), r#"{"call":"t2","content":"ok","done":true}"#).unwrap();
-        let mut got = read_changed(tmp.path(), &mut seen);
-        got.sort_by(|a, b| a.0.cmp(&b.0));
-        assert_eq!(got.iter().map(|(s, c)| (s.as_str(), c.done)).collect::<Vec<_>>(), [("bad", true), ("one", true)]);
+        let mut first = read_changed(dir.path(), &mut seen);
+        first.sort_by(|a, b| a.1.call.cmp(&b.1.call));
+        assert_eq!(first.len(), 2, "two calls of one session are two cards");
+        assert_eq!((first[0].0.as_str(), first[0].1.content.as_str()), ("rec", "# One"));
+        assert!(read_changed(dir.path(), &mut seen).is_empty(), "nothing changed");
+
+        std::fs::write(&one, r##"{"call":"c1","content":"# One, longer"}"##).unwrap();
+        let again = read_changed(dir.path(), &mut seen);
+        assert_eq!(again.len(), 1);
+        assert_eq!(again[0].1.content, "# One, longer");
+    }
+
+    #[test]
+    fn half_written_files_wait_and_other_files_are_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let card = dir.path().join("rec--c1.json");
+        std::fs::write(&card, "{\"call\":\"c1\",\"cont").unwrap();
+        std::fs::write(dir.path().join("rec--c1.rows"), "12").unwrap();
+        std::fs::write(dir.path().join("old-format.json"), r#"{"call":"c0"}"#).unwrap();
+        let mut seen = HashMap::new();
+        assert!(read_changed(dir.path(), &mut seen).is_empty());
+
+        std::fs::write(&card, r#"{"call":"c1","content":"done"}"#).unwrap();
+        assert_eq!(read_changed(dir.path(), &mut seen).len(), 1);
     }
 }
