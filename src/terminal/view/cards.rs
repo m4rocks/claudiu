@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use super::*;
 use crate::visual::Card;
@@ -39,6 +40,11 @@ struct Shown {
 pub(super) struct Cards {
     shown: HashMap<String, Shown>,
     ui: Entity<CardUi>,
+    /// The height each card last wanted, read by the write that runs next, so a slow older write cannot leave its
+    /// height in the file after a newer one.
+    wanted_rows: Arc<Mutex<HashMap<String, usize>>>,
+    /// Held while a height is written, so writes to the file run one after another.
+    writing_rows: Arc<Mutex<()>>,
 }
 
 impl Cards {
@@ -53,7 +59,7 @@ impl Cards {
             cx.emit(TerminalEvent::SendText(e.text.clone()));
         })
         .detach();
-        Self { shown: HashMap::new(), ui }
+        Self { shown: HashMap::new(), ui, wanted_rows: Arc::default(), writing_rows: Arc::default() }
     }
 }
 
@@ -116,6 +122,7 @@ impl TerminalView {
             let Some(Shown { card, .. }) = self.cards.shown.get(&slot.call) else { continue };
             let scope = Scope { call: card.call.clone(), ui: self.cards.ui.clone() };
             let (call, view) = (card.call.clone(), view.clone());
+            let clear_view = view.clone();
             let body = div()
                 .absolute()
                 .left(margin)
@@ -137,6 +144,9 @@ impl TerminalView {
                     .h(m.line_h * slot.count as f32)
                     .overflow_hidden()
                     .block_mouse_except_scroll()
+                    .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                        clear_view.update(cx, |view, cx| view.clear_terminal_selection(cx)).ok();
+                    })
                     .child(body)
                     .into_any_element(),
             );
@@ -144,13 +154,29 @@ impl TerminalView {
         out
     }
 
+    /// A click on a card never reaches the terminal behind it, so its older selection is dropped here: Ctrl+C copies
+    /// the terminal's selection first, and would otherwise copy that instead of the card text now being selected.
+    fn clear_terminal_selection(&mut self, cx: &mut Context<Self>) {
+        if self.terminal.term.lock().selection.take().is_some() {
+            cx.notify();
+        }
+    }
+
     /// Tell the mod a card's height when it changes. Runs in a frame, so the file is written off the UI thread.
     fn note_card_rows(&mut self, call: &str, rows: usize, cx: &mut Context<Self>) {
         let Some(shown) = self.cards.shown.get_mut(call).filter(|s| s.rows != Some(rows) && rows > 0) else { return };
         shown.rows = Some(rows);
         let file = shown.rows_file.clone();
+        let call = call.to_string();
+        let wanted = self.cards.wanted_rows.clone();
+        let writing = self.cards.writing_rows.clone();
+        wanted.lock().unwrap_or_else(|e| e.into_inner()).insert(call.clone(), rows);
         cx.background_spawn(async move {
-            let _ = crate::datadir::write_atomic(&file, &rows.to_string());
+            let _one_at_a_time = writing.lock().unwrap_or_else(|e| e.into_inner());
+            let latest = wanted.lock().unwrap_or_else(|e| e.into_inner()).get(&call).copied();
+            if let Some(latest) = latest {
+                let _ = crate::datadir::write_atomic(&file, &latest.to_string());
+            }
         })
         .detach();
     }

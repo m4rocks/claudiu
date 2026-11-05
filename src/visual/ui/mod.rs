@@ -127,15 +127,10 @@ fn ui_node(source: &str) -> MarkdownNode {
 ```"))
 }
 
-/// A card's markdown view: the shared one, plus `ui` fences. (GitHub text does not get them.)
+/// A card's markdown view: the shared one, plus `ui` blocks. (GitHub text does not get them.)
 pub fn markdown(id: String, text: &str, scope: Scope) -> TextView {
     crate::github::ui::markdown(id, text)
-        .markdown_block_parser(|node, _| match node {
-            markdown_ast::Node::Code(c) if c.lang.as_deref() == Some("ui") => {
-                Some(MarkdownNode::new(NODE, parse::parse_tree(&c.value)).text(c.value.clone()).markdown(format!("```ui\n{}\n```", c.value)))
-            }
-            _ => None,
-        })
+        .markdown_block_parser(ui_block)
         .markdown_block_renderer(NODE, move |node, window, cx| match node.data::<Tree>() {
             Some(tree) => render::render(tree, &scope, window, cx),
             None => gpui::IntoElement::into_any_element(gpui::div()),
