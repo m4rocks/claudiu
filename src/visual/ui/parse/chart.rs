@@ -39,7 +39,7 @@ pub fn chart(el: &El) -> Option<Svg> {
 fn series(el: &El) -> Vec<Series> {
     // One bad value rejects the whole series: dropping it would shift the later values onto the wrong labels.
     let numbers = |s: &str| -> Option<Vec<f32>> {
-        s.trim().trim_end_matches(',').split(',').map(|v| v.trim().parse::<f32>().ok().filter(|v| v.is_finite())).collect()
+        s.trim().strip_suffix(',').unwrap_or(s.trim()).split(',').map(|v| v.trim().parse::<f32>().ok().filter(|v| v.is_finite())).collect()
     };
     let color = |n: usize| COLORS[n % COLORS.len()].to_string();
     let mut out: Vec<Series> = vec![];
@@ -201,6 +201,7 @@ mod tests {
         let e = el("<chart><series name=\"a\" values=\"1,2\"/><series name=\"b\" values=\"1,,3\"/></chart>");
         assert_eq!(series(&e).len(), 1, "only the whole series is kept");
         assert_eq!(series(&el("<chart values=\"1,2,\"></chart>"))[0].values, vec![1.0, 2.0], "a trailing comma is fine");
+        assert!(series(&el("<chart values=\"1,2,,\"></chart>")).is_empty(), "but only one");
     }
 
     #[test]
