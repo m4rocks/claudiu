@@ -107,22 +107,13 @@ impl Workspace {
 
     /// `leading` goes before every other argument: the initial prompt must come ahead of the variadic
     /// `--allowedTools` / `--mcp-config` flags, or they would swallow it.
-    pub(super) fn new_claude_with(&mut self, cwd: PathBuf, mut leading: Vec<String>, by: Starter, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn new_claude_with(&mut self, cwd: PathBuf, leading: Vec<String>, by: Starter, window: &mut Window, cx: &mut Context<Self>) {
         // A new session starts in the main checkout, not in a linked worktree. Fix-with-Claude works where the failure was.
         let cwd = if by == Starter::FixGit { cwd } else { self.outside_linked_worktree(cwd) };
-        let Some(exe) = self.claude_exe.clone() else {
-            self.show_toast("Could not find the `claude` CLI. Install Claude Code, or set its path in Settings.".into(), true, Some(("Check setup".into(), Act::OpenSetup)), cx);
-            return;
-        };
         let session_id = new_id();
         let record_id = new_id();
-        let mut spec = claude::new_session_spec(&exe, &cwd, &session_id);
-        let settings = &self.store.data.settings;
-        let defaults = claude::defaults::flags(&settings.new_session, settings.trimmed_tools.contains(&claude::trim::Trim::PlanMode), &leading, by);
-        leading.extend(defaults);
-        spec.args.splice(0..0, leading);
         let chrome = self.store.data.settings.chrome_default;
-        let spec = self.with_helpers(spec, &session_id, &record_id, chrome, cx);
+        let Some(spec) = self.fresh_spec(&cwd, &session_id, &record_id, chrome, leading, by, cx) else { return };
         let record = SessionRecord {
             id: record_id,
             kind: SessionKind::Claude,
@@ -142,6 +133,34 @@ impl Workspace {
             }),
         };
         self.start(record, spec, true, window, cx);
+    }
+
+    /// `claude --session-id` in `cwd` with the new-session defaults. None, with a toast, when `claude` isn't installed.
+    #[allow(clippy::too_many_arguments)]
+    fn fresh_spec(&mut self, cwd: &std::path::Path, session_id: &str, record_id: &str, chrome: bool, mut leading: Vec<String>, by: Starter, cx: &mut Context<Self>) -> Option<SpawnSpec> {
+        let Some(exe) = self.claude_exe.clone() else {
+            self.show_toast("Could not find the `claude` CLI. Install Claude Code, or set its path in Settings.".into(), true, Some(("Check setup".into(), Act::OpenSetup)), cx);
+            return None;
+        };
+        let mut spec = claude::new_session_spec(&exe, cwd, session_id);
+        let settings = &self.store.data.settings;
+        let defaults = claude::defaults::flags(&settings.new_session, settings.trimmed_tools.contains(&claude::trim::Trim::PlanMode), &leading, by);
+        leading.extend(defaults);
+        spec.args.splice(0..0, leading);
+        Some(self.with_helpers(spec, session_id, record_id, chrome, cx))
+    }
+
+    /// Start the session over under its own id in its folder. For a session with no conversation yet: `--resume` has
+    /// nothing to find, and nothing is lost. A running view of it is replaced, which ends its process.
+    pub(super) fn relaunch_empty(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(rec) = self.store.session(id).cloned() else { return };
+        let Some(meta) = rec.claude.clone() else { return };
+        let cwd = self.resume_cwd(&rec, cx);
+        let Some(mut spec) = self.fresh_spec(&cwd, &meta.session_id, &rec.id, meta.chrome, vec![], Starter::User, cx) else { return };
+        if let Some(name) = rec.chosen_title() {
+            spec.args.extend(["--name".into(), name.into()]);
+        }
+        self.start(rec, spec, false, window, cx);
     }
 
     /// `cwd`, or the project's main checkout when `cwd` is inside one of its linked worktrees.

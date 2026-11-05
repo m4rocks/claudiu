@@ -173,6 +173,35 @@ pub fn check_unused(main_checkout: &Path, name: &str) -> Result<(), String> {
     }
 }
 
+/// Where a name given by the model leads.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Target {
+    pub folder: PathBuf,
+    /// The folder does not exist yet; switching makes it.
+    pub new: bool,
+}
+
+/// What `wanted` names, seen from a session in `cwd`: `main`, a working tree of the repository by its folder name, or a
+/// new name. Switching to the tree the session is in is an error: it would only restart the process.
+pub fn resolve(git: &GitInfo, cwd: &Path, wanted: &str) -> Result<Target, String> {
+    let wanted = wanted.trim();
+    let listed = folders(git);
+    let existing = if wanted.eq_ignore_ascii_case("main") { listed.first().copied() } else { listed.into_iter().skip(1).find(|f| f.file_name().is_some_and(|n| n.to_string_lossy() == wanted)) };
+    let target = match existing {
+        Some(folder) => Target { folder: folder.to_path_buf(), new: false },
+        None => {
+            check_name(wanted)?;
+            let main = source(Some(git)).map_err(|why| format!("A new worktree can't be made: the project {why}."))?;
+            check_unused(main, wanted)?;
+            Target { folder: folder(main, wanted), new: true }
+        }
+    };
+    if git.folder_of(cwd).is_some_and(|here| path_key(here) == path_key(&target.folder)) {
+        return Err("This session is already in that worktree.".into());
+    }
+    Ok(target)
+}
+
 /// For `generate_name`: the folder or a local branch of that name exists.
 pub fn name_taken(main_checkout: &Path) -> impl Fn(&str) -> bool + '_ {
     let repo = Repository::open(main_checkout).ok();
@@ -380,6 +409,24 @@ mod tests {
         assert_eq!(source(Some(&info("/p", "/p", &[], false))), Ok(Path::new("/p")));
         // A project added from inside a linked worktree still branches from the main checkout.
         assert_eq!(source(Some(&info("/p/.claude/worktrees/a", "/p", &["/p"], false))), Ok(Path::new("/p")));
+    }
+
+    #[test]
+    fn a_name_from_the_model_leads_to_main_a_listed_tree_or_a_new_one() {
+        use_throwaway_data_folder();
+        let git = info("/p", "/p", &["/p/.claude/worktrees/fix"], false);
+        let main = Path::new("/p/src");
+        let ok = |wanted| resolve(&git, main, wanted);
+        assert_eq!(ok("fix"), Ok(Target { folder: "/p/.claude/worktrees/fix".into(), new: false }));
+        assert_eq!(ok("fresh"), Ok(Target { folder: folder(Path::new("/p"), "fresh"), new: true }));
+        // From inside `fix`, main is a real move and `fix` is not.
+        let in_fix = Path::new("/p/.claude/worktrees/fix/src");
+        assert_eq!(resolve(&git, in_fix, "MAIN"), Ok(Target { folder: "/p".into(), new: false }));
+        assert!(resolve(&git, in_fix, "fix").unwrap_err().contains("already in"));
+        assert!(ok("main").unwrap_err().contains("already in"));
+        // A name git would refuse is refused before anything is made, and a repository without commits has no source.
+        assert!(ok("bad name").is_err() && ok("").is_err());
+        assert!(resolve(&info("/p", "/p", &[], true), main, "fresh").unwrap_err().contains("no commits yet"));
     }
 
     #[test]
