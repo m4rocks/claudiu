@@ -5,8 +5,8 @@ use super::*;
 /// A wheel notch scrolls the terminal's scrollback this many times what the system reports for it. Lower than the
 /// panels' `glide::NOTCH`, because terminal lines are dense and 1.6 raced through the history.
 const TERMINAL_NOTCH: f32 = 0.8;
-/// The lines Windows reports for a wheel notch at its default setting.
-const NOTCH_LINES: f32 = 2.0;
+/// The wheel lines one mouse report stands for. At 1, each line Windows reports for a notch goes out as its own report.
+const NOTCH_LINES: f32 = 1.0;
 
 impl TerminalView {
     pub(super) fn grid_point(&self, position: Point<Pixels>) -> Option<(GridPoint, Side, usize, usize)> {
@@ -274,8 +274,8 @@ impl TerminalView {
             cx.notify();
             return;
         }
-        // A mouse report means one notch, as in other terminals. Claude Code reads several in a row as fast spinning and
-        // speeds up: three per notch moved its view 25 lines, one moves it 3.
+        // Claude Code reads several mouse reports in a row as fast spinning and speeds up: three per notch moved its view
+        // 25 lines, one moves it 3.
         let per_notch = if notch && self.mouse_reporting(&event.modifiers) { NOTCH_LINES } else { 1.0 };
         self.scroll_px += lines / per_notch;
         let whole = self.scroll_px.trunc() as i32;
