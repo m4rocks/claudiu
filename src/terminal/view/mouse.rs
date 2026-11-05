@@ -5,6 +5,8 @@ use super::*;
 /// A wheel notch scrolls the terminal's scrollback this many times what the system reports for it. Lower than the
 /// panels' `glide::NOTCH`, because terminal lines are dense and 1.6 raced through the history.
 const TERMINAL_NOTCH: f32 = 0.8;
+/// The lines Windows reports for a wheel notch at its default setting.
+const NOTCH_LINES: f32 = 3.0;
 
 impl TerminalView {
     pub(super) fn grid_point(&self, position: Point<Pixels>) -> Option<(GridPoint, Side, usize, usize)> {
@@ -128,7 +130,7 @@ impl TerminalView {
             }
             // Windows Terminal convention: right click copies when there is a selection, else pastes.
             MouseButton::Right => {
-                if !self.copy(cx) {
+                if !self.copy(window, cx) {
                     self.paste(cx);
                 }
             }
@@ -169,6 +171,9 @@ impl TerminalView {
             (grid[point].hyperlink(), (0..grid.columns()).map(|c| row[Column(c)].c).collect::<String>())
         };
         if let Some(link) = hyperlink {
+            if link.uri().starts_with(INLINE_LINK) {
+                return None;
+            }
             let file = url::Url::parse(link.uri()).ok().filter(|u| u.scheme() == "file").and_then(|u| u.to_file_path().ok());
             // Cells of a link are underlined already.
             return Some((match file {
@@ -269,7 +274,10 @@ impl TerminalView {
             cx.notify();
             return;
         }
-        self.scroll_px += lines;
+        // A mouse report means one notch, as in other terminals. Claude Code reads several in a row as fast spinning and
+        // speeds up: three per notch moved its view 25 lines, one moves it 3.
+        let per_notch = if notch && self.mouse_reporting(&event.modifiers) { NOTCH_LINES } else { 1.0 };
+        self.scroll_px += lines / per_notch;
         let whole = self.scroll_px.trunc() as i32;
         if whole == 0 {
             return;

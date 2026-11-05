@@ -41,7 +41,7 @@ impl Feature {
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Visual => "Visual panel",
+            Self::Visual => "Inline cards",
             Self::Github => "GitHub sidebar",
             Self::Sessions => "Other sessions",
             Self::Model => "Model switch",
@@ -110,9 +110,9 @@ Claude Code session (the user says so, or you recognise it), find it with search
 call unlink_session when a link no longer fits. Both are silent.";
 
 /// What makes the model call `show_visual` (the tool's own description teaches the dialect, and stays deferred).
-const VISUAL_INSTRUCTIONS: &str = " Visual: Claudiu has a Visual panel beside this terminal. When a reply would hold a table, \
-a comparison, a flow of 3+ steps, an architecture, a before/after, several statuses or a chart, draw that part with show_visual \
-unasked (private, no approval) and reply in a few lines. Not for short answers or code.";
+const VISUAL_INSTRUCTIONS: &str = " Visual: show_visual draws a card inside this terminal, under the call. Most replies need \
+none. When a reply does need a visual (a table, comparison, flow, architecture, before/after, status board or chart), prefer \
+show_visual over drawing it in text, unasked (private, no approval), and reply in a few lines.";
 
 const ARTIFACT_INSTRUCTIONS: &str = " Artifacts are for pages to share.";
 
@@ -235,7 +235,7 @@ fn serve(input: impl BufRead, mut out: impl Write, session: &str, record: &str, 
                 Some("link_session") => link_session(&msg["params"], record, &attach_dir(data), "link"),
                 Some("unlink_session") => link_session(&msg["params"], record, &attach_dir(data), "unlink"),
                 Some("set_model") => reply("Model switching isn't available in this session (Claudiu's mod isn't loaded).", true),
-                Some("show_visual") => reply("The Visual panel isn't available in this session (Claudiu's mod isn't loaded).", true),
+                Some("show_visual") => reply("Visuals aren't available in this session (Claudiu's mod isn't loaded).", true),
                 Some(tool) if BRIDGE_TOOLS.contains(&tool) => match ask(tool, &msg["params"]["arguments"]) {
                     Ok(text) => reply(&text, false),
                     Err(text) => reply(&text, true),

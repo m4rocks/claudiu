@@ -65,6 +65,12 @@ impl SelectableText {
         self
     }
 
+    /// Styles parts of the text, as `StyledText::with_runs` does.
+    pub fn runs(mut self, runs: Vec<gpui::TextRun>) -> Self {
+        self.styled_text = self.styled_text.with_runs(runs);
+        self
+    }
+
     /// Overrides the selection background, which defaults to the theme's
     /// `colors.selection` token.
     pub fn selection_color(mut self, color: Hsla) -> Self {

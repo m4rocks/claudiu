@@ -87,7 +87,8 @@ opt-level = 2
 # `TriggerCompletion` (Ctrl+Space) and has a menu opened that way follow its word as it grows
 # (`handle_completion_trigger` in src/input/editor/lsp/completions.rs). It also makes `has_multiple_cursors`, `select_range`
 # and `replace_range` public, which the line actions (src/app/line_actions.rs) edit through, and makes a drag that began
-# with a double click select whole words (`snap_to_word_edge` in src/input/base/selection.rs).
+# with a double click select whole words (`snap_to_word_edge` in src/input/base/selection.rs). `SelectableText::runs` lets
+# a card's text keep its styling while selectable.
 [patch.crates-io]
 gpui-base = { path = "vendor/gpui-base" }
 

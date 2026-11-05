@@ -92,7 +92,7 @@ pub struct Css {
 pub fn token(name: &str) -> Option<u32> {
     Some(match name {
         "bg" | "background" | "base" => theme::PANEL_BG,
-        "surface" | "card" => theme::ROW_HOVER,
+        "surface" | "card" => theme::TERMINAL_BG, // cards sit in the terminal and take its background
         "raised" | "surface2" => theme::ROW_ACTIVE,
         "border" => theme::BORDER,
         "text" | "fg" | "foreground" => theme::TEXT,
@@ -453,6 +453,8 @@ pub(super) fn default_css(tag: &str) -> &'static str {
         "progress" => "height:6px;border-radius:999px;background:raised;overflow:hidden;color:accent",
         "row" => "display:flex;gap:8px;align-items:center",
         "col" => "gap:6px",
+        "button" => "display:flex;flex-direction:column;align-self:flex-start;gap:2px;padding:6px 12px;border-radius:8px;background:raised;border:1px solid border",
+        "details" | "tabs" => "gap:8px",
         "grid" => "display:grid;gap:8px;grid-template-columns:repeat(3,1fr)",
         _ => "",
     }

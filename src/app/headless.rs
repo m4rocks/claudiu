@@ -344,23 +344,15 @@ fn sessions_and_shell() {
         assert_eq!(ws.left_width(700.0), SIDEBAR_MIN, "keeps room for the session in a small window");
         ws.left_drag = None;
     });
-    // The Visual panel: the first card a session's model draws opens it (wide, sharing GitHub's width), the same call
-    // keeps filling its card without reopening it, and a card for a session that is not shown only lists it.
+    // A card reaches the terminal of its session, and a card for a session that is not running is dropped.
     let shown = ws.read_with(&cx, |ws, _| ws.active.clone().unwrap());
     let stem = datadir::safe_file_stem(&shown);
-    let card = |content: &str, done: bool| crate::visual::Card { call: "c1".into(), title: "Plan".into(), content: content.into(), done };
-    assert!(ws.read_with(&cx, |ws, _| !ws.visual_shown()));
-    step(&mut cx, &|ws, _w, cx| ws.apply_visuals(vec![(stem.clone(), card("# Hi", false))], cx));
-    assert!(ws.read_with(&cx, |ws, _| ws.visual_shown() && ws.right_gh.is_none()), "a new card opens the panel");
-    assert_eq!(ws.read_with(&cx, |ws, _| ws.right_width(1600.0)), RIGHT_GH_W);
-    step(&mut cx, &|ws, _w, cx| ws.hide_visual(false, cx));
-    step(&mut cx, &|ws, _w, cx| ws.apply_visuals(vec![(stem.clone(), card("# Hi there", true))], cx));
-    assert!(ws.read_with(&cx, |ws, _| !ws.visual_shown() && ws.visual_cards().len() == 1 && ws.visual_cards()[0].done), "the same call updates its card and leaves the panel shut");
-    assert_eq!(ws.read_with(&cx, |ws, _| ws.right_width(1600.0)), RIGHT_MENU_W + 40.0);
-    step(&mut cx, &|ws, _w, cx| ws.show_visual(cx));
-    assert!(ws.read_with(&cx, |ws, _| ws.visual_shown()));
-    step(&mut cx, &|ws, _w, cx| ws.hide_visual(true, cx));
-    assert!(ws.read_with(&cx, |ws, _| ws.visual_cards().is_empty() && !ws.visual_shown()), "clearing forgets the cards");
+    let card = |call: &str| crate::visual::Card { call: call.into(), content: "# Hi".into() };
+    step(&mut cx, &|ws, _w, cx| ws.apply_visuals(vec![(stem.clone(), card("c1")), ("no-such-session".into(), card("c2"))], cx));
+    assert!(ws.read_with(&cx, |ws, cx| {
+        let view = ws.live_view(&shown).unwrap().read(cx);
+        view.has_card("c1") && !view.has_card("c2")
+    }));
     step(&mut cx, &|ws, w, cx| ws.open_github(cwd.clone(), w, cx));
     assert!(ws.read_with(&cx, |ws, _| ws.gh.len() == 1 && ws.right_gh.is_some()), "github shown in the right sidebar");
     assert_eq!(ws.read_with(&cx, |ws, _| ws.right_width(1600.0)), RIGHT_GH_W, "GitHub keeps its own width");

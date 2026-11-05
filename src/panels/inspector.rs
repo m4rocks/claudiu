@@ -44,7 +44,6 @@ impl Workspace {
         // The view the state asks for; the one drawn changes only after the old one has faded out.
         let desired = match self.right_gh.as_ref().filter(|id| self.gh_pane(id).is_some()) {
             Some(id) => format!("gh:{id}"),
-            None if self.visual_shown() => "visual".to_string(),
             None => "menu".to_string(),
         };
         const OUT_MS: f32 = 100.0;
@@ -110,10 +109,9 @@ impl Workspace {
                     .child(div().flex_1().min_h_0().child(view))
                     .into_any_element()
             }
-            None if shown_view == "visual" => self.render_visual_view(window, cx).into_any_element(),
             None => self.render_right_menu(window, cx).into_any_element(),
         };
-        // A different view (menu, GitHub project, Visual) fades in.
+        // A different view (menu, GitHub project) fades in.
         let body = div().flex_none().w(px(target)).h_full().opacity(fade).child(body);
         // Both views can be resized by their left edge; a small grip sits in the gutter.
         let handle_center = theme::PANEL_GAP / 2.0 + 3.0;
@@ -178,41 +176,6 @@ impl Workspace {
         )
     }
 
-    /// What the model drew for the shown session, newest card first; a card still being written says so.
-    fn render_visual_view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let cards: Vec<crate::visual::Card> = self.visual_cards().iter().rev().cloned().collect();
-        let header = div()
-            .flex()
-            .items_center()
-            .gap(px(6.0))
-            .flex_none()
-            .h(px(32.0))
-            .px(px(6.0))
-            .border_b_1()
-            .border_color(hsla(theme::BORDER))
-            .child(icon_button("visual-back", IconName::ArrowLeft).on_click(cx.listener(|ws, _: &ClickEvent, _w, cx| ws.hide_visual(false, cx))))
-            .child(div().flex_1().text_size(crate::panels::scale::px(12.5)).font_weight(FontWeight::MEDIUM).child(format!("Visual · {}", cards.len())))
-            .child(icon_button("visual-clear", IconName::X).on_click(cx.listener(|ws, _: &ClickEvent, _w, cx| ws.hide_visual(true, cx))));
-        let mut list = div().flex().flex_col().w_full();
-        for (n, card) in cards.iter().enumerate() {
-            let mut one = div().flex().flex_col().gap(px(8.0)).p(px(14.0));
-            if n > 0 {
-                one = one.border_t_1().border_color(hsla(theme::BORDER));
-            }
-            if !card.title.is_empty() || !card.done {
-                let mut head = div().flex().items_center().gap(px(8.0)).text_size(crate::panels::scale::px(12.5));
-                head = head.child(div().flex_1().min_w_0().font_weight(FontWeight::MEDIUM).child(card.title.clone()));
-                if !card.done {
-                    head = head.child(div().flex_none().text_color(hsla(theme::TEXT_FAINT)).child("drawing…"));
-                }
-                one = one.child(head);
-            }
-            one = one.child(div().text_size(crate::panels::scale::px(13.0)).child(crate::visual::ui::markdown(format!("visual-{}", card.call), &card.content)));
-            list = list.child(crate::panels::widgets::fade_in(one, format!("visual-card-{}", card.call), 220, 0.0));
-        }
-        div().flex().flex_col().size_full().child(header).child(self.visual_scroll.wire(div().id("visual-scroll").flex_1().min_h_0(), window).child(list))
-    }
-
     fn render_right_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let shown = self.shown();
         let id = self.active_id().cloned();
@@ -224,22 +187,6 @@ impl Workspace {
         let linked = (!links.is_empty()).then(|| self.linked_rows(id.as_ref(), links, cx));
         let away = id.as_deref().and_then(|i| self.session_away(i, cx));
         let status = self.status_rows(&shown, id.as_ref(), running, cx);
-        let drawn = self.visual_cards().len();
-        let visual = (drawn > 0).then(|| {
-            div().flex().flex_col().gap(px(1.0)).child(removable_row(
-                cx,
-                self.leaving.contains("visual-open"),
-                "visual-open".to_string(),
-                IconName::Eye,
-                format!("Visual · {drawn}"),
-                |ws, _window, cx| ws.show_visual(cx),
-                |ws| {
-                    if let Some(id) = ws.active_id().cloned() {
-                        ws.visuals.remove(&id);
-                    }
-                },
-            ))
-        });
         self.menu_scroll
             .wire(div().id("right-menu").size_full(), window)
             .flex()
@@ -261,7 +208,6 @@ impl Workspace {
                 group("ACCOUNT", body)
             }))
             .child(group("ACTIONS", actions))
-            .children(visual.map(|v| group("VISUAL", v)))
             .children(github.map(|g| group("GITHUB", g)))
             .children(linked.map(|l| group("LINKED", l)))
             .child(group("STATUS", status))
