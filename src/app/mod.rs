@@ -410,17 +410,12 @@ pub struct Workspace {
     pub gh: Vec<GhPane>,
     /// The GitHub view the right sidebar shows; `None` is its menu.
     pub right_gh: Option<Id>,
-    /// The right sidebar shows the Visual panel (when the shown session has cards and GitHub is not open).
-    pub right_visual: bool,
-    /// What each session's model drew in the Visual panel, oldest card first.
-    pub visuals: HashMap<Id, Vec<crate::visual::Card>>,
-    pub visual_scroll: crate::panels::glide::Smooth,
     pub right_drag: Option<SideDrag>,
     /// Right-sidebar rows whose × was clicked and that are shrinking away before their entry is removed.
     pub leaving: std::collections::HashSet<String>,
     pub left_reveal: crate::panels::widgets::Reveal,
     pub right_reveal: crate::panels::widgets::Reveal,
-    /// The right sidebar's animated width, and the view it currently shows ("menu", "visual" or "gh:<id>"):
+    /// The right sidebar's animated width, and the view it currently shows ("menu" or "gh:<id>"):
     /// a change of view fades the old one out, slides the width, then fades the new one in.
     pub right_w: crate::panels::widgets::Reveal,
     pub right_view: String,
@@ -548,9 +543,6 @@ impl Workspace {
             live: vec![],
             gh: vec![],
             right_gh: None,
-            right_visual: false,
-            visuals: HashMap::new(),
-            visual_scroll: Default::default(),
             right_drag: None,
             leaving: Default::default(),
             left_reveal: crate::panels::widgets::Reveal::new(store.data.layout.sidebar_visible),

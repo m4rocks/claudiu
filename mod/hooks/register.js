@@ -13,8 +13,9 @@
 //   reference into Claude's input box; that is not done here.)
 // - Usage and status: reports context, the 5-hour and 7-day limits, auto-compact, background compaction, advisor and
 //   the last command to `CLAUDIU_USAGE_DIR/<claude session id>.json`. No tokens are spent.
-// - Visual panel: answers `show_visual` in-process and, while the model is still writing the call, streams its
-//   Markdown to `CLAUDIU_VISUAL_FILE` so the panel fills live.
+// - Cards: answers `show_visual` in-process and, while the model is still writing the call, streams its Markdown to
+//   `CLAUDIU_VISUAL_PREFIX<call>.json`. Under each call it reserves rows, each with a link naming the call, and Claudiu
+//   paints the live card over them. Claudiu's measured height comes back in `CLAUDIU_VISUAL_PREFIX<call>.rows`.
 // - One-shot completions: runs requests from `CLAUDIU_ASK_FILE` (commit messages, session titles) with
 //   `$.model.complete`, on this session's own client, so Claudiu needs no `claude -p`.
 
@@ -27,6 +28,7 @@ const MODELS = {
   opus: 'claude-opus-5-5',
   fable: 'claude-fable-5-1',
 }
+const CARD_ROWS = 6 // reserved for a card until Claudiu has measured it
 const PROMPT_MAX = 20000 // characters of a message Claudiu asks the session to send (the editor's Ask Claude)
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']
 const ASK_MODELS = ['haiku', 'sonnet', 'opus']
@@ -46,6 +48,9 @@ let pendingAdvisor = null // an advisor change Claude Code refused (see setAdvis
 let askPoll // watches CLAUDIU_ASK_FILE
 let askSeen = null // id of the last request looked at
 let asking = false // a completion is running; a poll that finds another request waits for it
+const cardRows = new Map() // show_visual call id -> rows reserved for its card
+const published = new Set() // call ids whose card file this process wrote from the transcript
+let rowsPoll // watches the heights Claudiu measures
 let visualChain = Promise.resolve() // visual writes in order, without holding up the stream
 let lastVisual = null // id of the show_visual call being written, or last written
 
@@ -272,16 +277,10 @@ function partialString(json, key) {
   return out
 }
 
-// Queues a write of the Visual panel's file. Writes run one after another, and a failed one is dropped.
-function writeVisual($, file, call, title, content, done) {
-  const body = JSON.stringify({
-    call,
-    title: String(title ?? '').slice(0, 80),
-    content: String(content ?? '').slice(0, 200_000),
-    done,
-    at: Date.now(),
-  })
-  visualChain = visualChain.then(() => $.fs.write(file, body)).catch(() => {})
+// Queues a write of a card's file. Writes run one after another, and a failed one is dropped.
+function writeVisual($, prefix, call, content) {
+  const body = JSON.stringify({ call, content: String(content ?? '').slice(0, 200_000) })
+  visualChain = visualChain.then(() => $.fs.write(`${prefix}${call}.json`, body)).catch(() => {})
 }
 
 // ---- One-shot completions -----------------------------------------------------------------------------------------
@@ -439,27 +438,27 @@ async function onSetModel($, e) {
   }
 }
 
-// The model's show_visual call streams to the Visual panel while it is written. The call's arguments arrive as pieces
-// of JSON; the Markdown read out of them so far goes to the file a few times a second at most. The tool.call hook
-// writes the finished card.
+// The model's show_visual call streams to its card while it is written. The call's arguments arrive as pieces of JSON;
+// the Markdown read out of them so far goes to the file a few times a second at most. The tool.call hook writes the
+// finished card.
 async function onShowVisual($, e) {
-  const file = await $.env.get('CLAUDIU_VISUAL_FILE')
-  if (!file) {
-    return { result: "The Visual panel isn't available in this session (Claudiu's mod has no file for it).", isError: true }
+  const prefix = await $.env.get('CLAUDIU_VISUAL_PREFIX')
+  if (!prefix) {
+    return { result: "Visuals aren't available in this session (Claudiu's mod has no file for them).", isError: true }
   }
   if (typeof e.content !== 'string' || !e.content.trim()) return { result: 'content must be non-empty Markdown.', isError: true }
-  writeVisual($, file, e.tool_use_id ?? lastVisual ?? 'v' + Date.now(), e.title, e.content, true)
-  return { result: "Shown in Claudiu's Visual panel. Say the key facts in a short reply; don't repeat the content." }
+  writeVisual($, prefix, e.tool_use_id ?? lastVisual ?? 'v' + Date.now(), e.content)
+  return { result: "Shown inline in the terminal. Say the key facts in a short reply; don't repeat the content." }
 }
 
-// Applies the saved model and effort to this turn's steps, and streams a show_visual call to the Visual panel while
-// the model writes it. Sub-agent steps are left alone.
+// Applies the saved model and effort to this turn's steps, and streams a show_visual call to its card while the model
+// writes it. Sub-agent steps are left alone.
 async function* onTurnStep($, e, next) {
   const step = !e.agentId && (want.model || want.effort)
     ? { ...e, model: want.model ?? e.model, effort: want.effort ?? e.effort }
     : e
-  const file = e.agentId ? null : await $.env.get('CLAUDIU_VISUAL_FILE')
-  if (!file) return yield* next(step)
+  const prefix = e.agentId ? null : await $.env.get('CLAUDIU_VISUAL_PREFIX')
+  if (!prefix) return yield* next(step)
 
   const open = new Map() // block index -> the show_visual call being written there
   for await (const c of next(step)) {
@@ -471,11 +470,50 @@ async function* onTurnStep($, e, next) {
       v.json += c.json
       if (Date.now() - v.at >= 150) {
         v.at = Date.now()
-        writeVisual($, file, v.id, partialString(v.json, 'title'), partialString(v.json, 'content'), false)
+        writeVisual($, prefix, v.id, partialString(v.json, 'content'))
       }
     }
     yield c
   }
+}
+
+// Draws a show_visual call as its title and the rows its card covers. Each row's link names the call and the row, which
+// is how Claudiu finds them on screen, and the rows scroll and clip with the transcript. Drawing a call from an earlier
+// process writes its card again from the transcript: that is what brings cards back after a restart.
+async function onVisualRow($, e, next) {
+  if (e.props.tool !== VISUAL_TOOL || e.props.isErrored) return next(e)
+  const { Box, Link, Text } = $.ui.resolve(e)
+  const id = e.props.tool_use_id
+  if (!cardRows.has(id)) cardRows.set(id, CARD_ROWS)
+  if (!e.props.isRunning && !published.has(id) && e.props.input?.content) {
+    published.add(id)
+    const prefix = await $.env.get('CLAUDIU_VISUAL_PREFIX')
+    if (prefix) writeVisual($, prefix, id, e.props.input.content)
+  }
+  const links = Array.from({ length: cardRows.get(id) }, (_, i) =>
+    h(Link, { key: String(i), href: `claudiu://visual/${id}/${i}` }, ' '.repeat(16)))
+  return h(Box, { flexDirection: 'column' }, h(Text, { dimColor: true }, String(e.props.input?.title ?? 'Visual')), ...links)
+}
+
+// Claude Code folds MCP calls into one count line, which would hide a card's rows.
+function onVisualGroup($, e, next) {
+  if (!e.props.calls.some(c => c.tool === VISUAL_TOOL)) return next(e)
+  return next({ ...e, props: { ...e.props, isExpanded: true } })
+}
+
+// Reserves the rows Claudiu measured for each card drawn in this process.
+async function readCardRows($) {
+  const prefix = await $.env.get('CLAUDIU_VISUAL_PREFIX')
+  if (!prefix) return
+  let changed = false
+  for (const [id, rows] of [...cardRows]) {
+    const measured = parseInt(await $.fs.read(`${prefix}${id}.rows`).catch(() => ''), 10)
+    if (measured > 0 && measured !== rows) {
+      cardRows.set(id, measured)
+      changed = true
+    }
+  }
+  if (changed) $.ui.invalidate('ui.render')
 }
 
 async function onSessionStart($, e, next) {
@@ -487,6 +525,8 @@ async function onSessionStart($, e, next) {
   ctlPoll = $.clock.every(1000, () => applyCtl($))
   askPoll?.cancel()
   askPoll = $.clock.every(500, () => answerAsk($))
+  rowsPoll?.cancel()
+  rowsPoll = $.clock.every(200, () => readCardRows($))
   await watchSessionName($)
   return r
 }
@@ -498,6 +538,8 @@ export function register(on) {
   on('session.compact', onSessionCompact)
   on('tool.call', { tool: 'mcp__claudiu__set_model' }, onSetModel)
   on('tool.call', { tool: VISUAL_TOOL }, onShowVisual)
+  on('ui.render', { component: 'ToolUse' }, onVisualRow)
+  on('ui.render', { component: 'ToolGroup' }, onVisualGroup)
   on('turn.step', onTurnStep)
   on('session.start', onSessionStart)
 }

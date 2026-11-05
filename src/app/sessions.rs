@@ -38,13 +38,14 @@ impl Workspace {
             spec.env.push(("CLAUDIU_NAME_FILE".into(), mcp::name_file(claude_session_id).to_string_lossy().into_owned()));
             spec.env.push((usage::USAGE_DIR_ENV.into(), usage::snapshot_dir().to_string_lossy().into_owned()));
             spec.env.push((usage::CTL_ENV.into(), usage::ctl_file(record_id).to_string_lossy().into_owned()));
-            spec.env.push((crate::visual::VISUAL_ENV.into(), crate::visual::file(record_id).to_string_lossy().into_owned()));
+            spec.env.push((crate::visual::VISUAL_ENV.into(), crate::visual::prefix(record_id).to_string_lossy().into_owned()));
             spec.env.push((crate::claude::ask::ASK_ENV.into(), crate::claude::ask::request_file(record_id).to_string_lossy().into_owned()));
         }
         if chrome {
             spec.args.push("--chrome".into());
         }
         spec.env.push(("CLAUDE_CODE_NO_FLICKER".into(), "1".into())); // fullscreen renderer, per process
+        spec.env.push(("FORCE_HYPERLINK".into(), "1".into())); // Claude Code would print links as text otherwise; cards are found by theirs
         spec.env.push(("CLAUDE_CODE_AUTO_CONNECT_IDE".into(), "false".into()));
         spec.env.push(("CLAUDE_CODE_IDE_SKIP_AUTO_INSTALL".into(), "1".into()));
         self.sync_configs_now(cx);
@@ -278,6 +279,7 @@ impl Workspace {
                 TerminalEvent::Exited(code) => ws.on_exit(&sub_id, *code, window, cx),
                 TerminalEvent::Bell => {}
                 TerminalEvent::OpenPath(path, line) => ws.open_from_terminal(&sub_id, path, *line, window, cx),
+                TerminalEvent::SendText(text) => ws.send_to_claude(&sub_id, text, window, cx),
             },
         );
         let claude_name = spec.args.iter().position(|a| a == "--name").and_then(|i| spec.args.get(i + 1)).cloned();
@@ -424,7 +426,6 @@ impl Workspace {
         self.live.retain(|l| l.id != id); // dropping the view drops the Terminal, which closes the PTY
         self.shells.remove(id);
         self.panes.remove(id);
-        self.visuals.remove(id);
         self.recent.retain(|r| r != id);
         // Closing the shown session goes back to the one shown before it; otherwise stay where we are.
         if was_active {

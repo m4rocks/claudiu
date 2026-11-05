@@ -1,11 +1,14 @@
 //! GPUI view over a `Terminal`: paints the grid, turns GPUI input into VT input.
-//! Children: `typing` (keys, paste, IME), `mouse` (selection, reporting, scrolling), `element` (the paint pass).
+//! Children: `typing` (keys, paste, IME), `mouse` (selection, reporting, scrolling), `element` (the paint pass),
+//! `cards` (the model's cards over the transcript).
 
+mod cards;
 mod element;
 mod mouse;
 mod paths;
 mod typing;
 
+use cards::INLINE_LINK;
 use element::TerminalElement;
 
 use std::ops::Range;
@@ -28,6 +31,7 @@ use gpui::{
     TextRun, UTF16Selection, UnderlineStyle, Window, div, fill, outline, point, prelude::*, px, relative, size,
 };
 
+use gpui_kit::base::TextSelection;
 use gpui_kit::component::input;
 
 use crate::terminal::glyphs;
@@ -42,6 +46,8 @@ pub enum TerminalEvent {
     /// Ctrl+click on a file path in the text, or on a `file:` link: the path as written (maybe relative to the
     /// session's folder), and its line (1-based) when one was given.
     OpenPath(String, Option<usize>),
+    /// A card's button: text to send as the user's next message.
+    SendText(String),
 }
 
 #[derive(Clone, Copy)]
@@ -109,6 +115,7 @@ pub struct TerminalView {
     reference: Option<Inserted>,
     /// While Ctrl is held over a link: its viewport row and the columns to underline (none when it is drawn as a link already).
     hovered_link: Option<(usize, Option<std::ops::Range<usize>>)>,
+    cards: cards::Cards,
 }
 
 /// What Ctrl+click opens.
@@ -224,6 +231,7 @@ impl TerminalView {
             redraw_task: None,
             reference: None,
             hovered_link: None,
+            cards: cards::Cards::new(cx),
         }
     }
 
@@ -470,8 +478,8 @@ impl Render for TerminalView {
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key_down))
             // The Edit menu dispatches the text input's actions; a focused terminal answers them too.
-            .on_action(cx.listener(|this, _: &input::Copy, _, cx| {
-                this.copy(cx);
+            .on_action(cx.listener(|this, _: &input::Copy, window, cx| {
+                this.copy(window, cx);
             }))
             .on_action(cx.listener(|this, _: &input::Paste, _, cx| this.paste(cx)))
             .on_action(cx.listener(|this, _: &input::SelectAll, _, cx| this.select_all(cx)))
@@ -486,6 +494,7 @@ impl Render for TerminalView {
             .when(self.hovered_link.is_some(), |d| d.cursor_pointer())
             .on_scroll_wheel(cx.listener(Self::on_scroll))
             .child(TerminalElement { view: cx.entity() })
+            .children(self.inline_cards(cx))
             .when(self.loading || self.handover.is_some(), |d| {
                 let (cols, rows) = self.terminal.size();
                 let (cell_w, line_h) = self.metrics.map_or((8.0, LINE_H), |m| (f32::from(m.cell_w), f32::from(m.line_h)));

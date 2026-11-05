@@ -1,14 +1,19 @@
 //! Draws a parsed `ui` tree with native GPUI elements. A block is a column; `display:flex` or `grid` makes every child
 //! its own item; otherwise runs of inline content (text, `strong`, `a`, `code`…) become one wrapped paragraph.
-//! shortcut: text inside a paragraph is not selectable, and inline spans cannot change size (font-size on a block does).
+//! shortcut: a paragraph with a link is not selectable, and inline spans cannot change size (font-size on a block does).
 
 use gpui::{
-    AnyElement, App, Div, Font, FontStyle, FontWeight, Hsla, InteractiveText, IntoElement, Length, ParentElement, StrikethroughStyle, Styled,
-    StyledText, TextRun, UnderlineStyle, Window, div, img, px, relative,
+    AnyElement, App, Div, ElementId, Font, FontStyle, FontWeight, Hsla, InteractiveElement, InteractiveText, IntoElement, Length, ParentElement,
+    StatefulInteractiveElement, StrikethroughStyle, prelude::FluentBuilder, Styled, StyledText, TextRun, UnderlineStyle, Window, div, img, px, relative,
 };
+use gpui_kit::base::SelectableText;
 
 use super::parse::{Ax, Color, Css, Dir, Display, El, Len, Node, Svg, TextAlign, Tree, token};
+use super::{CardUi, Scope, SendText};
 use crate::panels::theme;
+
+/// The longest message the mod sends for a button (`PROMPT_MAX` in `mod/hooks/register.js`).
+const SEND_MAX: usize = 20_000;
 
 fn hsla(c: Color) -> Hsla {
     let mut h = theme::hsla(c.0);
@@ -83,10 +88,16 @@ struct R {
     font: Font,
     uid: u64,
     links: usize,
+    texts: usize,
+    screen_scale: f32,
+    scope: Scope,
+    /// What the user has clicked so far, as of this frame.
+    state: CardUi,
 }
 
-pub fn render(tree: &Tree, window: &mut Window, _cx: &mut App) -> AnyElement {
-    let mut r = R { font: window.text_style().font(), uid: tree.uid, links: 0 };
+pub fn render(tree: &Tree, scope: &Scope, window: &mut Window, cx: &mut App) -> AnyElement {
+    let state = scope.ui.read(cx).clone();
+    let mut r = R { font: window.text_style().font(), uid: tree.uid, links: 0, texts: 0, screen_scale: window.scale_factor(), scope: scope.clone(), state };
     let kids = r.children(&tree.nodes, false, &Ctx::root());
     div().flex().flex_col().gap(px(8.0)).my(px(4.0)).children(kids).into_any_element()
 }
@@ -104,7 +115,7 @@ impl R {
             match n {
                 Node::Text(_) => out.extend(self.paragraph(&[n], ctx)),
                 Node::El(e) => out.extend(self.element(e, ctx)),
-                Node::Svg(s) => out.push(svg(s.as_ref())),
+                Node::Svg(s) => out.push(svg(s.as_ref(), self.screen_scale)),
             }
         }
         self.flush(&mut run, ctx, &mut out);
@@ -124,6 +135,9 @@ impl R {
         let ctx = ctx.with(css, false);
         let flex = matches!(css.display, Some(Display::Flex | Display::Grid));
         let kids = match e.tag.as_str() {
+            "button" => return Some(self.button(e, &ctx)),
+            "details" => return Some(self.details(e, &ctx)),
+            "tabs" => return Some(self.tabs(e, &ctx)),
             "progress" => {
                 let num = |k: &str| e.attr(k).and_then(|v| v.trim().parse::<f32>().ok());
                 let share = (num("value").unwrap_or(0.0) / num("max").filter(|m| *m > 0.0).unwrap_or(100.0)).clamp(0.0, 1.0);
@@ -134,6 +148,95 @@ impl R {
             _ => self.children(&e.children, flex, &ctx),
         };
         Some(boxed(css).children(kids).into_any_element())
+    }
+
+    /// Identifies an interactive element across frames: card, block, and its place in the block.
+    fn key(&self, e: &El) -> String {
+        format!("{}/{}/{}", self.scope.call, self.uid, e.seq)
+    }
+
+    /// Sends its `send` text as the user's next message, once. That text is always on show, so a label can't hide
+    /// what a click does. A button with nothing valid to send is drawn inert.
+    fn button(&mut self, e: &El, ctx: &Ctx) -> AnyElement {
+        let kids = self.children(&e.children, false, ctx);
+        let send = e.attr("send").map(str::trim).filter(|s| !s.is_empty() && s.chars().count() <= SEND_MAX).map(str::to_string);
+        let Some(text) = send else { return boxed(&e.css).opacity(0.5).children(kids).into_any_element() };
+        let key = self.key(e);
+        let sent = self.state.is_sent(&key);
+        let hint = if sent { format!("Sent: {text}") } else { text.clone() };
+        let hint = div().text_size(crate::panels::scale::px(11.5)).text_color(tok("dim")).child(hint);
+        let body = boxed(&e.css).id(ElementId::Name(key.clone().into())).children(kids).child(hint);
+        if sent {
+            return body.opacity(0.6).into_any_element();
+        }
+        let ui = self.scope.ui.clone();
+        body.cursor_pointer()
+            .hover(|s| s.border_color(tok("accent")))
+            .on_click(move |_, _, cx| ui.update(cx, |_, cx| cx.emit(SendText { key: key.clone(), text: text.clone() })))
+            .into_any_element()
+    }
+
+    /// `<details>`: a `<summary>` line that opens and closes the rest.
+    fn details(&mut self, e: &El, ctx: &Ctx) -> AnyElement {
+        let key = self.key(e);
+        let open = self.state.is_open(&key).unwrap_or(e.attr("open").is_some());
+        let is_summary = |n: &&Node| matches!(n, Node::El(s) if s.tag == "summary");
+        let summary = e.children.iter().find(is_summary).map_or(vec![], |n| match n {
+            Node::El(s) => s.children.clone(),
+            _ => vec![],
+        });
+        let title = self.children(&summary, false, ctx);
+        let ui = self.scope.ui.clone();
+        let toggle_key = key.clone();
+        let head = div()
+            .id(ElementId::Name(key.into()))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(6.0))
+            .cursor_pointer()
+            .child(div().flex_none().text_color(tok("dim")).child(if open { "▾" } else { "▸" }))
+            .child(div().flex_1().min_w(px(0.0)).children(title))
+            .on_click(move |_, _, cx| ui.update(cx, |ui, cx| ui.set_open(&toggle_key, !open, cx)));
+        let mut body = vec![];
+        if open {
+            let rest: Vec<Node> = e.children.iter().filter(|n| !is_summary(n)).cloned().collect();
+            body = self.children(&rest, false, ctx);
+        }
+        boxed(&e.css).child(head).children(body).into_any_element()
+    }
+
+    /// `<tabs>`: one `<tab title="..">` shown at a time.
+    fn tabs(&mut self, e: &El, ctx: &Ctx) -> AnyElement {
+        let tabs: Vec<&El> = e
+            .children
+            .iter()
+            .filter_map(|n| match n {
+                Node::El(t) if t.tag == "tab" => Some(t.as_ref()),
+                _ => None,
+            })
+            .collect();
+        let key = self.key(e);
+        let chosen = self.state.tab(&key).min(tabs.len().saturating_sub(1));
+        let mut head = div().flex().flex_row().flex_wrap().gap(px(4.0));
+        for (n, tab) in tabs.iter().enumerate() {
+            let title = tab.attr("title").map_or_else(|| format!("Tab {}", n + 1), str::to_string);
+            let (ui, tab_key) = (self.scope.ui.clone(), key.clone());
+            head = head.child(
+                div()
+                    .id(ElementId::Name(format!("{key}/{n}").into()))
+                    .px(px(10.0))
+                    .py(px(3.0))
+                    .rounded(px(6.0))
+                    .cursor_pointer()
+                    .text_color(tok(if n == chosen { "text" } else { "dim" }))
+                    .when(n == chosen, |d| d.bg(tok("raised")))
+                    .child(title)
+                    .on_click(move |_, _, cx| ui.update(cx, |ui, cx| ui.set_tab(&tab_key, n, cx))),
+            );
+        }
+        let body = tabs.get(chosen).map_or(vec![], |tab| self.children(&tab.children, false, ctx));
+        boxed(&e.css).child(head).children(body).into_any_element()
     }
 
     fn list(&mut self, e: &El, ctx: &Ctx) -> Vec<AnyElement> {
@@ -179,10 +282,12 @@ impl R {
         if out.text.is_empty() {
             return None;
         }
-        let styled = StyledText::new(out.text).with_runs(out.runs);
         if out.links.is_empty() {
-            return Some(div().child(styled).into_any_element());
+            self.texts += 1;
+            let id = ElementId::Name(format!("ui-text/{}/{}/{}", self.scope.call, self.uid, self.texts).into());
+            return Some(div().child(SelectableText::new(id, out.text).runs(out.runs)).into_any_element());
         }
+        let styled = StyledText::new(out.text).with_runs(out.runs);
         self.links += 1;
         let (ranges, urls): (Vec<_>, Vec<_>) = out.links.into_iter().unzip();
         let id = ("ui-link", (self.uid as usize).wrapping_add(self.links));
@@ -246,9 +351,9 @@ impl R {
     }
 }
 
-fn svg(s: Option<&Svg>) -> AnyElement {
+fn svg(s: Option<&Svg>, screen_scale: f32) -> AnyElement {
     match s {
-        Some(s) => div().child(img(s.image.clone()).w(px(s.w)).h(px(s.h)).max_w(relative(1.0))).into_any_element(),
+        Some(s) => div().child(img(s.image(screen_scale)).w(px(s.w)).h(px(s.h)).max_w(relative(1.0))).into_any_element(),
         None => div()
             .flex()
             .items_center()
