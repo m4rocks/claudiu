@@ -93,7 +93,7 @@ fn is_off(off: &[&str], tool: &str) -> bool {
 const OWN_TOOLS: [&str; 6] = ["set_tab_title", "attach_github", "detach_github", "link_session", "unlink_session", "show_visual"];
 
 /// Tools that reach other sessions (`claude/bridge.rs`).
-const BRIDGE_TOOLS: [&str; 5] = ["list_code_sessions", "read_code_session", "search_sessions", "search_projects", "start_code_session"];
+const BRIDGE_TOOLS: [&str; 6] = ["list_code_sessions", "read_code_session", "search_sessions", "search_projects", "start_code_session", "switch_worktree"];
 
 /// `mcp__<server>__<tool>` names allowed per process so Claude Code adds no prompt of its own: renaming the tab is
 /// harmless, and the cross-session tools are limited to what the user asks of the model.
@@ -103,7 +103,9 @@ pub fn allowed_tools(off: &[&str]) -> Vec<String> {
 
 const BRIDGE_INSTRUCTIONS: &str = " Claudiu also has tools that reach your other sessions: list_code_sessions, read_code_session, \
 search_sessions, search_projects and start_code_session. They act at once. Use them only when the user asks you to look at, hand \
-work to or continue in another session, or to work in a project; search_sessions may also be used unasked to find a session to link.";
+work to or continue in another session, or to work in a project; search_sessions may also be used unasked to find a session to link. \
+switch_worktree moves this session into another git worktree of its project; call it only when the user asks for a worktree, and \
+end your turn once it is approved.";
 
 const LINK_INSTRUCTIONS: &str = " Claudiu shows related sessions together. When this work continues or builds on another \
 Claude Code session (the user says so, or you recognise it), find it with search_sessions and call link_session once per pair; \
@@ -368,6 +370,14 @@ fn bridge_tools() -> Vec<Value> {
             json!({ "query": { "type": "string", "description": "Words to look for (optional: without it, every project)" } }),
         ),
         tool("start_code_session", format!("Open a new Claude Code session, optionally with a first prompt. With a prompt, the user is asked to approve it first; without one, it opens at once.{CONFIRM}"), target),
+        tool(
+            "switch_worktree",
+            "Move this session into another git worktree of its project: `main` for the main checkout, the name of a worktree the project has, or a new name to make one. The user is asked to approve it first. Claudiu then restarts this session in that folder once your turn ends and the conversation continues there, so after the approval end your turn without more tool calls.".to_string(),
+            json!({
+                "worktree": { "type": "string", "description": "`main`, a worktree's name, or a new name (letters, digits, - and _)" },
+                "base": { "type": "string", "enum": ["main", "current"], "description": "For a new worktree: start from origin's default branch (main, the default) or from the commit the main checkout is on (current)" },
+            }),
+        ),
     ]
 }
 
@@ -616,7 +626,7 @@ mod tests {
         let names: Vec<_> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert_eq!(
             names,
-            ["set_tab_title", "attach_github", "detach_github", "set_model", "link_session", "unlink_session", "show_visual", "list_code_sessions", "read_code_session", "search_sessions", "search_projects", "start_code_session"]
+            ["set_tab_title", "attach_github", "detach_github", "set_model", "link_session", "unlink_session", "show_visual", "list_code_sessions", "read_code_session", "search_sessions", "search_projects", "start_code_session", "switch_worktree"]
         );
         let upfront: Vec<_> = tools.iter().filter(|t| t["_meta"]["anthropic/alwaysLoad"] == true).map(|t| t["name"].as_str().unwrap()).collect();
         assert_eq!(upfront, ["set_tab_title", "attach_github", "detach_github", "link_session", "unlink_session"], "show_visual and the session-reaching tools stay deferred");
@@ -775,7 +785,7 @@ mod tests {
     #[test]
     fn with_nothing_off_the_server_offers_every_tool_and_all_the_text() {
         let (names, text) = offer(&[]);
-        assert_eq!(names.len(), 12);
+        assert_eq!(names.len(), 13);
         for part in [TITLE_INSTRUCTIONS, GITHUB_INSTRUCTIONS, LINK_INSTRUCTIONS, VISUAL_INSTRUCTIONS, BRIDGE_INSTRUCTIONS] {
             assert!(text.contains(part));
         }
@@ -785,22 +795,22 @@ mod tests {
     #[test]
     fn each_feature_takes_its_tools_and_its_text_away() {
         let (names, text) = offer(&["visual"]);
-        assert!(!names.contains(&"show_visual".to_string()) && names.len() == 11);
+        assert!(!names.contains(&"show_visual".to_string()) && names.len() == 12);
         assert!(!text.contains("Visual:") && !text.contains("show_visual"));
 
         let (names, text) = offer(&["github"]);
-        assert!(!names.iter().any(|n| n.ends_with("_github")) && names.len() == 10);
+        assert!(!names.iter().any(|n| n.ends_with("_github")) && names.len() == 11);
         assert!(!text.contains("attach_github"));
 
         let (names, text) = offer(&["sessions"]);
-        for gone in ["link_session", "unlink_session", "list_code_sessions", "read_code_session", "search_sessions", "search_projects", "start_code_session"] {
+        for gone in ["link_session", "unlink_session", "list_code_sessions", "read_code_session", "search_sessions", "search_projects", "start_code_session", "switch_worktree"] {
             assert!(!names.contains(&gone.to_string()), "{gone}");
         }
         assert_eq!(names.len(), 5);
         assert!(!text.contains("link_session") && !text.contains("start_code_session"));
 
         let (names, text) = offer(&["model"]);
-        assert!(!names.contains(&"set_model".to_string()) && names.len() == 11);
+        assert!(!names.contains(&"set_model".to_string()) && names.len() == 12);
         assert!(!text.contains("set_model") && !text.contains("Never switch models"));
     }
 

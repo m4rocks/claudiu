@@ -112,6 +112,7 @@ impl Workspace {
                 let update = this.update_in(cx, |ws, window, cx| {
                     ws.serve_requests(requests, window, cx);
                     ws.finish_handoffs(window, cx);
+                    ws.run_pending_switches(&statuses, window, cx);
                     ws.check_open_files(window, cx);
                     ws.update_activity(window, cx, &statuses)
                 });

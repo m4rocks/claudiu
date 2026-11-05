@@ -47,11 +47,12 @@ fn inspect(claude_id: &str, folder: &Path, quiet: bool) -> Checked {
 
 /// Ready the target before the session moves: make the worktree when it is new, and clear a worktree Claude Code
 /// recorded, so the resume starts in the folder `claude` is launched in. Blocking.
-fn prepare(main_checkout: &Path, folder: &Path, base: Base, transcript: &Path, claude_id: &str) -> Result<(), String> {
+fn prepare(main_checkout: &Path, folder: &Path, base: Base, transcript: Option<&Path>, claude_id: &str) -> Result<(), String> {
     if !folder.exists() {
         worktree::add(main_checkout, folder, base).map_err(|e| format!("could not make the worktree: {}", e.trim()))?;
     }
-    clear_worktree_record(transcript, claude_id)
+    // Without a conversation there is nothing recorded to clear.
+    transcript.map_or(Ok(()), |t| clear_worktree_record(t, claude_id))
 }
 
 fn clear_worktree_record(transcript: &Path, claude_id: &str) -> Result<(), String> {
@@ -66,6 +67,11 @@ impl Workspace {
     /// confirmed leaving uncommitted files behind.
     pub(super) fn switch_shown(&mut self, folder: PathBuf, base: Base, asked: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(id) = self.active_id().cloned() else { return };
+        self.switch_session(id, folder, base, asked, window, cx);
+    }
+
+    /// Switch session `id` (shown or not) into `folder`.
+    pub(super) fn switch_session(&mut self, id: Id, folder: PathBuf, base: Base, asked: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(rec) = self.store.session(&id).cloned() else { return };
         let Some(claude_id) = rec.claude_id().map(str::to_string) else { return };
         let Some(git) = rec.project_id.as_ref().and_then(|p| self.store.project(p)).and_then(|p| p.git.clone()) else { return };
@@ -98,11 +104,6 @@ impl Workspace {
             self.toast(BUSY, false, cx);
             return;
         }
-        let Some(transcript) = checked.transcript else {
-            self.set_handover(&id, None, cx);
-            self.toast("Couldn't switch: this session has no conversation to resume yet.", true, cx);
-            return;
-        };
         if checked.uncommitted > 0 && !asked {
             self.set_handover(&id, None, cx);
             let files = if checked.uncommitted == 1 { "1 uncommitted file stays".to_string() } else { format!("{} uncommitted files stay", checked.uncommitted) };
@@ -112,24 +113,26 @@ impl Workspace {
                 body: format!("{files} in {name}. Your shell restarts."),
                 confirm: "Switch".into(),
                 danger: false,
-                act: Act::ConfirmSwitch { folder, base },
+                act: Act::ConfirmSwitch { id, folder, base },
             });
             return;
         }
-        self.perform_switch(id, folder, base, transcript, window, cx);
+        self.perform_switch(id, folder, base, checked.transcript, window, cx);
     }
 
-    fn perform_switch(&mut self, id: Id, folder: PathBuf, base: Base, transcript: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+    /// `transcript` is None for a session that has no conversation yet: it starts over in the folder, as a new session.
+    fn perform_switch(&mut self, id: Id, folder: PathBuf, base: Base, transcript: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(rec) = self.store.session(&id) else { return };
         let Some(claude_id) = rec.claude_id().map(str::to_string) else { return };
         let Some(git) = rec.project_id.as_ref().and_then(|p| self.store.project(p)).and_then(|p| p.git.clone()) else { return };
         let main = git.main_checkout().to_path_buf();
         let message = switching_message(&git, &folder);
+        let fresh = transcript.is_none();
         cx.spawn_in(window, async move |this, cx| {
             let (target, main_checkout) = (folder.clone(), main.clone());
-            let ready = cx.background_executor().spawn(async move { prepare(&main_checkout, &target, base, &transcript, &claude_id) }).await;
+            let ready = cx.background_executor().spawn(async move { prepare(&main_checkout, &target, base, transcript.as_deref(), &claude_id) }).await;
             let _ = this.update_in(cx, |ws, window, cx| match ready {
-                Ok(()) => ws.move_into(&id, folder, message, window, cx),
+                Ok(()) => ws.move_into(&id, folder, message, fresh, window, cx),
                 Err(why) => {
                     ws.set_handover(&id, None, cx);
                     ws.toast(format!("Couldn't switch: {why}."), true, cx);
@@ -139,8 +142,9 @@ impl Workspace {
         .detach();
     }
 
-    /// The old process ends and a new one resumes the conversation in `folder`, as a restart does.
-    fn move_into(&mut self, id: &str, folder: PathBuf, message: String, window: &mut Window, cx: &mut Context<Self>) {
+    /// The old process ends and a new one resumes the conversation in `folder`, as a restart does; `fresh` when there is
+    /// no conversation to resume.
+    fn move_into(&mut self, id: &str, folder: PathBuf, message: String, fresh: bool, window: &mut Window, cx: &mut Context<Self>) {
         // Closed while the target was readied.
         if !self.is_running(id, cx) {
             return;
@@ -151,7 +155,12 @@ impl Workspace {
         if let Some(r) = self.store.session_mut(id) {
             r.cwd = folder;
         }
-        self.relaunch(id, window, cx); // replacing the view ends the old process
+        // Replacing the view ends the old process.
+        if fresh {
+            self.relaunch_empty(id, window, cx);
+        } else {
+            self.relaunch(id, window, cx);
+        }
         self.set_handover(id, Some(Handover { message, since: Instant::now() }), cx);
         self.restore_shell(id, shell, window, cx);
         if was_shown {

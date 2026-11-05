@@ -125,6 +125,7 @@ pub enum Act {
     },
     /// `SwitchWorktree`, after the user agreed to leave uncommitted files behind.
     ConfirmSwitch {
+        id: Id,
         folder: PathBuf,
         base: Base,
     },
@@ -500,6 +501,8 @@ pub struct Workspace {
     pub config_sync: config_sync::Runner,
     /// Sessions asked to open another with a first message; each waits for the user's yes (`cross.rs`).
     pub pending_starts: Vec<cross::PendingStart>,
+    /// Worktree switches the user approved that a session asked for; each waits for the session's turn to end (`cross.rs`).
+    pub pending_switches: Vec<cross::PendingSwitch>,
     pub drag_pos: Option<gpui::Point<gpui::Pixels>>,
     pub update: UpdateState,
     pub scanning: bool,
@@ -604,6 +607,7 @@ impl Workspace {
             attached_sync: Default::default(),
             config_sync: Default::default(),
             pending_starts: vec![],
+            pending_switches: vec![],
             update: UpdateState::default(),
             scanning: false,
             quitting: false,
@@ -667,9 +671,9 @@ impl Workspace {
                 }
             }
             Act::SwitchWorktree { folder, base } => self.switch_shown(folder, base, false, window, cx),
-            Act::ConfirmSwitch { folder, base } => {
+            Act::ConfirmSwitch { id, folder, base } => {
                 self.modal = None;
-                self.switch_shown(folder, base, true, window, cx)
+                self.switch_session(id, folder, base, true, window, cx)
             }
             Act::RemoveWorktree { main_checkout, folder } => self.ask_remove_worktree(main_checkout, folder, cx),
             Act::AskDeleteUnlisted(folder) => self.ask_delete_unlisted(folder, cx),

@@ -18,6 +18,19 @@ pub struct PendingStart {
     shown: bool,
 }
 
+/// A worktree switch the user approved, waiting for the turn in which the session asked for it to end: the switch restarts
+/// the process that made the call.
+pub struct PendingSwitch {
+    id: Id,
+    folder: PathBuf,
+    base: crate::git::worktree::Base,
+    /// Unix seconds when the user approved it.
+    approved: i64,
+}
+
+/// How long an approved switch waits for the turn to end before it is given up.
+const SWITCH_PATIENCE_SECS: i64 = 300;
+
 /// Longest part of the first message the dialog quotes.
 const SHOWN_PROMPT: usize = 600;
 
@@ -26,6 +39,13 @@ fn start_question(asker: &str, folder: &std::path::Path, prompt: &str) -> String
     let quoted: String = prompt.chars().take(SHOWN_PROMPT).collect();
     let more = if prompt.chars().count() > SHOWN_PROMPT { "…" } else { "" };
     format!("“{asker}” wants to open a new Claude Code session in {} with this first message:\n\n{quoted}{more}", folder.to_string_lossy())
+}
+
+/// What the dialog says about the worktree a session wants to move into.
+fn switch_question(asker: &str, folder: &std::path::Path, new: bool) -> String {
+    let name = folder.file_name().map_or_else(|| folder.to_string_lossy().into_owned(), |n| n.to_string_lossy().into_owned());
+    let what = if new { format!("a new worktree, {name}") } else { format!("the worktree {name}") };
+    format!("“{asker}” wants to switch to {what}. Its process restarts once its turn ends, and the conversation continues there.")
 }
 
 /// `2026-10-22 09:10 UTC` for a Unix time (days since 1970 turned into a calendar date, no time crate needed).
@@ -124,14 +144,13 @@ impl Workspace {
         let requester = p.req.from.split_once(':').map_or(p.req.from.as_str(), |(_, id)| id);
         let asker = self.store.session(requester).map_or_else(|| "A session".to_string(), |s| s.display_title().to_string());
         let folder = PathBuf::from(p.req.args["folder"].as_str().unwrap_or_default());
-        let prompt = p.req.args["prompt"].as_str().unwrap_or_default().trim().to_string();
-        self.modal = Some(Modal::Confirm {
-            title: "Start a Claude Code session?".into(),
-            body: start_question(&asker, &folder, &prompt),
-            confirm: "Start session".into(),
-            danger: false,
-            act: Act::ConfirmStartSession(p.req.id.clone()),
-        });
+        let (title, body, confirm) = if p.req.tool == "switch_worktree" {
+            ("Switch worktree?", switch_question(&asker, &folder, p.req.args["new"].as_bool().unwrap_or(false)), "Switch")
+        } else {
+            let prompt = p.req.args["prompt"].as_str().unwrap_or_default().trim().to_string();
+            ("Start a Claude Code session?", start_question(&asker, &folder, &prompt), "Start session")
+        };
+        self.modal = Some(Modal::Confirm { title: title.into(), body, confirm: confirm.into(), danger: false, act: Act::ConfirmStartSession(p.req.id.clone()) });
         window.focus(&self.modal_focus, cx);
         cx.notify();
     }
@@ -146,8 +165,11 @@ impl Workspace {
         answer(&req, ok, result.unwrap_or_else(|e| e));
     }
 
-    /// Check what starting a session needs and resolve the folder into `req.args["folder"]`.
+    /// Check what the request needs. A new session's folder, or the worktree to switch to, is resolved into `req.args["folder"]`.
     fn prepare(&self, req: &mut Request) -> Result<(), String> {
+        if req.tool == "switch_worktree" {
+            return self.prepare_switch(req);
+        }
         if req.tool != "start_code_session" {
             return Ok(());
         }
@@ -160,6 +182,42 @@ impl Workspace {
             return Err(format!("The first message is too long ({MAX_PROMPT} characters at most). Shorten it, or write the details to a file and point to it."));
         }
         Ok(())
+    }
+
+    fn prepare_switch(&self, req: &mut Request) -> Result<(), String> {
+        let id = req.from.split_once(':').map_or(req.from.as_str(), |(_, id)| id);
+        let rec = self.store.session(id).ok_or("Claudiu doesn't know this session.")?;
+        let git = rec.project_id.as_ref().and_then(|p| self.store.project(p)).and_then(|p| p.git.as_ref()).ok_or("This session's project is not a git repository.")?;
+        let wanted = req.args["worktree"].as_str().unwrap_or_default();
+        let listed = crate::git::worktree::folders(git).into_iter().skip(1).filter_map(|f| f.file_name().map(|n| n.to_string_lossy().into_owned())).collect::<Vec<_>>();
+        let target = crate::git::worktree::resolve(git, &rec.cwd, wanted).map_err(|why| format!("{why} Worktrees: main{}{}.", if listed.is_empty() { "" } else { ", " }, listed.join(", ")))?;
+        req.args["folder"] = target.folder.to_string_lossy().into_owned().into();
+        req.args["new"] = target.new.into();
+        Ok(())
+    }
+
+    /// Start the approved switches whose session has ended its turn. Looks at Claude Code's own status, as a switch from
+    /// the menu does, so the call that asked is finished and answered first.
+    pub(super) fn run_pending_switches(&mut self, statuses: &std::collections::HashMap<String, String>, window: &mut Window, cx: &mut Context<Self>) {
+        let now = crate::store::now();
+        let pending = std::mem::take(&mut self.pending_switches);
+        for p in pending {
+            let claude_id = self.store.session(&p.id).and_then(|r| r.claude_id());
+            // Without a registry entry (older Claude Code) the terminal's own activity decides, as in `switch::inspect`.
+            let idle = match claude_id.and_then(|c| statuses.get(c)) {
+                Some(status) => status == "idle",
+                None => self.live_view(&p.id).is_some_and(|v| !v.read(cx).is_working()),
+            };
+            if now - p.approved > SWITCH_PATIENCE_SECS {
+                self.toast("The worktree switch was dropped: the session's turn did not end.", true, cx);
+            } else if !self.is_running(&p.id, cx) {
+                // Closed in the meantime: nothing to move.
+            } else if idle {
+                self.switch_session(p.id, p.folder, p.base, false, window, cx);
+            } else {
+                self.pending_switches.push(p);
+            }
+        }
     }
 
     /// Do what was asked.
@@ -241,6 +299,13 @@ impl Workspace {
                     None => Err("The session could not be started (is the `claude` CLI installed?).".into()),
                 }
             }
+            "switch_worktree" => {
+                let folder = folder.ok_or("No folder.")?;
+                let base = if req.args["base"].as_str() == Some("current") { crate::git::worktree::Base::Current } else { crate::git::worktree::Base::Main };
+                let name = folder.file_name().map_or_else(|| "the main checkout".into(), |n| n.to_string_lossy().into_owned());
+                self.pending_switches.push(PendingSwitch { id: requester_id.to_string(), folder, base, approved: crate::store::now() });
+                Ok(format!("Approved. Claudiu switches this session to {name} as soon as your turn ends, so end your turn now: reply in one line and make no more tool calls. The user's next message continues the same conversation there."))
+            }
             other => Err(format!("unknown tool {other}")),
         }
     }
@@ -258,9 +323,10 @@ mod tests {
     }
 }
 
-/// A new session with a first message of its own is a prompt the user did not write.
+/// A new session with a first message of its own is a prompt the user did not write, and a worktree switch restarts the
+/// session: both wait for the user's yes.
 fn wants_confirmation(req: &Request) -> bool {
-    req.tool == "start_code_session" && req.args["prompt"].as_str().is_some_and(|p| !p.trim().is_empty())
+    req.tool == "switch_worktree" || (req.tool == "start_code_session" && req.args["prompt"].as_str().is_some_and(|p| !p.trim().is_empty()))
 }
 
 #[cfg(test)]
@@ -278,6 +344,7 @@ mod start_tests {
         assert!(!wants_confirmation(&request("start_code_session", json!({"folder": "/p"}))), "no prompt, nothing to approve");
         assert!(!wants_confirmation(&request("start_code_session", json!({"folder": "/p", "prompt": "  "}))));
         assert!(!wants_confirmation(&request("read_code_session", json!({"prompt": "x"}))));
+        assert!(wants_confirmation(&request("switch_worktree", json!({"worktree": "fix"}))), "a switch always asks");
     }
 
     #[test]
