@@ -37,20 +37,22 @@ pub fn chart(el: &El) -> Option<Svg> {
 }
 
 fn series(el: &El) -> Vec<Series> {
-    let numbers = |s: &str| s.split(',').filter_map(|v| v.trim().parse::<f32>().ok()).filter(|v| v.is_finite()).collect::<Vec<_>>();
+    // One bad value rejects the whole series: dropping it would shift the later values onto the wrong labels.
+    let numbers = |s: &str| -> Option<Vec<f32>> {
+        s.trim().trim_end_matches(',').split(',').map(|v| v.trim().parse::<f32>().ok().filter(|v| v.is_finite())).collect()
+    };
     let color = |n: usize| COLORS[n % COLORS.len()].to_string();
     let mut out: Vec<Series> = vec![];
-    if let Some(values) = el.attr("values") {
-        out.push(Series { name: String::new(), values: numbers(values), color: el.attr("color").map_or(color(0), str::to_string) });
+    if let Some(values) = el.attr("values").and_then(numbers) {
+        out.push(Series { name: String::new(), values, color: el.attr("color").map_or(color(0), str::to_string) });
     }
     for child in &el.children {
         let Node::El(s) = child else { continue };
         if s.tag == "series" {
-            let values = numbers(s.attr("values").unwrap_or(""));
+            let Some(values) = numbers(s.attr("values").unwrap_or("")) else { continue };
             out.push(Series { name: s.attr("name").unwrap_or("").to_string(), values, color: s.attr("color").map_or(color(out.len()), str::to_string) });
         }
     }
-    out.retain(|s| !s.values.is_empty());
     out
 }
 
@@ -191,6 +193,14 @@ mod tests {
         assert_eq!((s[0].color.as_str(), s[1].color.as_str()), ("var(--accent)", "#123456"));
         assert!(legend(&s).0.contains("p50"));
         assert_eq!(legend(&s).1, LEGEND_H);
+    }
+
+    #[test]
+    fn a_series_with_a_bad_value_is_left_out_instead_of_shifting_its_values() {
+        assert!(series(&el("<chart values=\"1,x,3\"></chart>")).is_empty());
+        let e = el("<chart><series name=\"a\" values=\"1,2\"/><series name=\"b\" values=\"1,,3\"/></chart>");
+        assert_eq!(series(&e).len(), 1, "only the whole series is kept");
+        assert_eq!(series(&el("<chart values=\"1,2,\"></chart>"))[0].values, vec![1.0, 2.0], "a trailing comma is fine");
     }
 
     #[test]
