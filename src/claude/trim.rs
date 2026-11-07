@@ -206,8 +206,7 @@ impl Entry {
         }
     }
 
-    /// The entry an earlier `id` stood for, so it can be taken out again. The value is part of an env id because the
-    /// caps change between saves.
+    /// The entry an earlier `id` stood for, so it can be taken out again.
     fn from_id(id: &str) -> Option<Entry> {
         if let Some(rest) = id.strip_prefix("env:") {
             let (name, value) = rest.split_once('=')?;
@@ -310,27 +309,21 @@ fn remove(settings: &mut Map<String, Value>, entry: &Entry) {
     }
 }
 
-/// The caps and skills the user set on the Claude Code tools page. Empty means Claude Code's own behavior.
+/// The skills the user turned off on the Claude Code tools page. Empty leaves Claude Code's own behavior.
+///
+/// There are no output caps (`BASH_MAX_OUTPUT_LENGTH`, `CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS`): in measured runs on
+/// Claude Code 2.1.319, even a 10,000-character Bash cap cut Claude's normal batched reads, so it re-read them in
+/// smaller calls and used twice the tokens.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Limits {
-    /// Most characters of a Bash command's output that reach the model (`BASH_MAX_OUTPUT_LENGTH`).
-    #[serde(default)]
-    pub bash_output: Option<u32>,
-    /// Most tokens a single file read returns (`CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS`).
-    #[serde(default)]
-    pub file_read_tokens: Option<u32>,
     /// Skills Claude no longer sees (`skillOverrides` set to `off`); the user can still type them.
     #[serde(default)]
     pub skills_off: Vec<String>,
 }
 
 impl Limits {
-    /// The page's three text fields. Empty text leaves a cap unset. Skills are separated by commas or spaces.
-    pub fn parse(bash_output: &str, file_read_tokens: &str, skills: &str) -> Result<Limits, String> {
-        let number = |what: &str, text: &str| match text.trim() {
-            "" => Ok(None),
-            t => t.parse::<u32>().ok().filter(|n| *n > 0).map(Some).ok_or(format!("{what}: use a whole number above 0, or leave it empty.")),
-        };
+    /// The page's skills field: names separated by commas or spaces.
+    pub fn parse(skills: &str) -> Result<Limits, String> {
         let mut skills_off: Vec<String> = vec![];
         for name in skills.split([',', ' ', '\n']).map(str::trim).filter(|n| !n.is_empty()) {
             let valid = name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ':' | '.'));
@@ -341,19 +334,16 @@ impl Limits {
                 skills_off.push(name.to_string());
             }
         }
-        Ok(Limits { bash_output: number("Bash output", bash_output)?, file_read_tokens: number("File reads", file_read_tokens)?, skills_off })
+        Ok(Limits { skills_off })
     }
 
-    /// The fields as text, for the page.
-    pub fn texts(&self) -> (String, String, String) {
-        let number = |n: Option<u32>| n.map(|n| n.to_string()).unwrap_or_default();
-        (number(self.bash_output), number(self.file_read_tokens), self.skills_off.join(", "))
+    /// The skills field as text, for the page.
+    pub fn text(&self) -> String {
+        self.skills_off.join(", ")
     }
 
     fn entries(&self) -> Vec<Entry> {
-        let env = |name: &str, n: Option<u32>| n.map(|n| Entry::Env(name.into(), n.to_string()));
-        let caps = [env("BASH_MAX_OUTPUT_LENGTH", self.bash_output), env("CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS", self.file_read_tokens)];
-        caps.into_iter().flatten().chain(self.skills_off.iter().map(|name| Entry::Skill(name.clone()))).collect()
+        self.skills_off.iter().map(|name| Entry::Skill(name.clone())).collect()
     }
 }
 
@@ -512,62 +502,52 @@ mod tests {
         assert_eq!(Value::Object(s), json!({ "model": "sonnet" }));
     }
 
-    fn limits(bash: Option<u32>, file: Option<u32>, skills: &[&str]) -> Limits {
-        Limits { bash_output: bash, file_read_tokens: file, skills_off: skills.iter().map(|s| s.to_string()).collect() }
+    fn skills(names: &[&str]) -> Limits {
+        Limits { skills_off: names.iter().map(|s| s.to_string()).collect() }
     }
 
     #[test]
-    fn caps_and_skills_go_where_claude_code_reads_them() {
+    fn skills_turned_off_go_where_claude_code_reads_them() {
         let mut s = object(json!({ "skillOverrides": { "loop": "user-invocable-only" } }));
-        apply(&mut s, &[], &limits(Some(2000), Some(5000), &["dataviz", "m4:do"]), &[]);
-        assert_eq!(
-            Value::Object(s),
-            json!({
-                "env": { "BASH_MAX_OUTPUT_LENGTH": "2000", "CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS": "5000" },
-                "skillOverrides": { "loop": "user-invocable-only", "dataviz": "off", "m4:do": "off" }
-            })
-        );
+        apply(&mut s, &[], &skills(&["dataviz", "m4:do"]), &[]);
+        assert_eq!(Value::Object(s), json!({ "skillOverrides": { "loop": "user-invocable-only", "dataviz": "off", "m4:do": "off" } }));
     }
 
     #[test]
-    fn changing_a_cap_replaces_the_old_value_and_clearing_it_removes_it() {
-        let mut s = Map::new();
-        let owned = apply(&mut s, &[], &limits(Some(2000), None, &[]), &[]);
-        let owned = apply(&mut s, &[], &limits(Some(3000), None, &[]), &owned);
-        assert_eq!(Value::Object(s.clone()), json!({ "env": { "BASH_MAX_OUTPUT_LENGTH": "3000" } }));
-        apply(&mut s, &[], &Limits::default(), &owned);
-        assert!(s.is_empty());
-    }
-
-    #[test]
-    fn a_cap_or_skill_the_user_set_differently_is_kept_and_never_removed() {
-        let mut s = object(json!({ "env": { "BASH_MAX_OUTPUT_LENGTH": "9000" }, "skillOverrides": { "dataviz": "user-invocable-only" } }));
-        let owned = apply(&mut s, &[], &limits(Some(2000), None, &["dataviz"]), &[]);
+    fn a_skill_the_user_set_differently_is_kept_and_never_removed() {
+        let mut s = object(json!({ "skillOverrides": { "dataviz": "user-invocable-only" } }));
+        let owned = apply(&mut s, &[], &skills(&["dataviz"]), &[]);
         assert!(owned.is_empty(), "nothing was added, so nothing is claimed");
         apply(&mut s, &[], &Limits::default(), &owned);
-        assert_eq!(Value::Object(s), json!({ "env": { "BASH_MAX_OUTPUT_LENGTH": "9000" }, "skillOverrides": { "dataviz": "user-invocable-only" } }));
+        assert_eq!(Value::Object(s), json!({ "skillOverrides": { "dataviz": "user-invocable-only" } }));
     }
 
     #[test]
     fn turning_a_skill_back_on_removes_the_override_and_an_empty_block() {
         let mut s = Map::new();
-        let owned = apply(&mut s, &[], &limits(None, None, &["dataviz"]), &[]);
-        apply(&mut s, &[], &limits(None, None, &[]), &owned);
+        let owned = apply(&mut s, &[], &skills(&["dataviz"]), &[]);
+        apply(&mut s, &[], &skills(&[]), &owned);
         assert!(s.is_empty());
     }
 
     #[test]
-    fn the_limit_fields_are_parsed_with_empty_meaning_unset() {
-        assert_eq!(Limits::parse("", " ", "").unwrap(), Limits::default());
-        assert_eq!(Limits::parse("2000", "5000", "dataviz, m4:do  dataviz").unwrap(), limits(Some(2000), Some(5000), &["dataviz", "m4:do"]));
-        assert!(Limits::parse("0", "", "").unwrap_err().starts_with("Bash output"));
-        assert!(Limits::parse("", "ten", "").unwrap_err().starts_with("File reads"));
-        assert!(Limits::parse("", "", "a/b").unwrap_err().starts_with("Skills"));
+    fn the_skills_field_is_parsed_with_empty_meaning_none() {
+        assert_eq!(Limits::parse(" ").unwrap(), Limits::default());
+        assert_eq!(Limits::parse("dataviz, m4:do  dataviz").unwrap(), skills(&["dataviz", "m4:do"]));
+        assert!(Limits::parse("a/b").unwrap_err().starts_with("Skills"));
     }
 
     #[test]
-    fn the_fields_show_the_saved_limits_as_text() {
-        assert_eq!(limits(Some(2000), None, &["a", "b"]).texts(), ("2000".to_string(), String::new(), "a, b".to_string()));
+    fn a_cap_written_by_an_earlier_build_is_taken_out_on_the_next_save() {
+        let mut s = object(json!({ "env": { "BASH_MAX_OUTPUT_LENGTH": "2000", "FOO": "1" } }));
+        let owned = apply(&mut s, &[], &Limits::default(), &["env:BASH_MAX_OUTPUT_LENGTH=2000".to_string()]);
+        assert!(owned.is_empty());
+        assert_eq!(Value::Object(s), json!({ "env": { "FOO": "1" } }));
+    }
+
+    #[test]
+    fn the_field_shows_the_saved_skills_as_text() {
+        assert_eq!(skills(&["a", "b"]).text(), "a, b");
     }
 
     #[test]

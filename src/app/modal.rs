@@ -108,7 +108,7 @@ impl Workspace {
                     }
                 }
             }
-            Some(Modal::Settings { shell, claude, model, effort, permission, updates, chrome, scale, trimmed, claudiu_off, limit_fields, costly, list_focus }) => {
+            Some(Modal::Settings { shell, claude, model, effort, permission, updates, chrome, scale, trimmed, claudiu_off, skills_field, costly, list_focus }) => {
                 let clean = |s: &str| s.trim().trim_matches('"').to_string();
                 let (shell_t, claude_t) = (clean(shell.read(cx).value().as_ref()), clean(claude.read(cx).value().as_ref()));
                 let model_name = claude::defaults::parse_model(model.read(cx).value().as_ref());
@@ -118,17 +118,12 @@ impl Workspace {
                     .find(|(_, _, t)| !t.is_empty() && platform::resolve_program(t).is_none())
                     .map(|(what, field, t)| (SettingsPage::General, field.clone(), format!("{what}: “{t}” is not a file or a program on PATH")));
                 let bad_model = model_name.is_err().then(|| (SettingsPage::Sessions, model.clone(), "Use a model alias or id (letters, digits, . _ -).".to_string()));
-                let [bash_field, file_field, skills_field] = &limit_fields;
-                let limits = claude::trim::Limits::parse(bash_field.read(cx).value().as_ref(), file_field.read(cx).value().as_ref(), skills_field.read(cx).value().as_ref());
-                // The parser's message starts with the field it blames, which says which of the three to focus.
-                let bad_limits = limits.as_ref().err().map(|why| {
-                    let field = if why.starts_with("Bash") { bash_field } else if why.starts_with("File") { file_field } else { skills_field };
-                    (SettingsPage::ClaudeTools, field.clone(), why.clone())
-                });
+                let limits = claude::trim::Limits::parse(skills_field.read(cx).value().as_ref());
+                let bad_limits = limits.as_ref().err().map(|why| (SettingsPage::ClaudeTools, skills_field.clone(), why.clone()));
                 if let Some((page, field, msg)) = paths.or(bad_model).or(bad_limits) {
                     self.settings_page = page;
                     field.update(cx, |s, cx| s.focus(window, cx));
-                    self.modal = Some(Modal::Settings { shell, claude, model, effort, permission, updates, chrome, scale, trimmed, claudiu_off, limit_fields, costly, list_focus });
+                    self.modal = Some(Modal::Settings { shell, claude, model, effort, permission, updates, chrome, scale, trimmed, claudiu_off, skills_field, costly, list_focus });
                     self.toast(msg, true, cx);
                     return;
                 }
