@@ -52,6 +52,7 @@ const calls = [
         <nav aria-label="Manual">
             <a href="#parts" class="max-sm:hidden">Parts</a>
             <a href="#editor" class="max-sm:hidden">Editor</a>
+            <a href="#tokens" class="max-sm:hidden">Tokens</a>
             <a href="#spec" class="max-sm:hidden">Specifications</a>
             <a href={repo}>Source</a>
         </nav>
@@ -167,9 +168,61 @@ const calls = [
 
             <section class="cell r3" aria-labelledby="tr3">
                 <h2 id="tr3">Settings, by category.</h2>
-                <p>Defaults for new sessions, 15 switches for Claude Code's bundled tools, one for each Claudiu feature.</p>
+                <p>Defaults for new sessions, 20 switches for Claude Code's bundled tools with what each saves, one for each Claudiu feature.</p>
                 <figure>
                     <img class="shot" src="/claudiu-settings.png" width="720" height="480" alt="Claudiu's settings dialog on the Claude Code tools page, listing switches for bundled skills, workflows, remote control, claude.ai connectors, artifacts and plan mode" loading="lazy" />
+                </figure>
+            </section>
+        </div>
+
+        <div class="win tok" id="tokens">
+            <div class="tb"><span>Claudiu · token optimization</span><span>Fig. 5 · measured on Claude Code 2.1.319</span></div>
+
+            <section class="cell t1" aria-labelledby="tt1">
+                <h2 id="tt1">Fewer tokens in every request.</h2>
+                <p>Each switch on the Claude Code tools page shows what turning it off saves: high, medium or low. Setup offers to turn off six that coding rarely uses.</p>
+                <figure>
+                    <div class="panel">
+                        <div class="flex justify-between"><span class="lbl">Tokens saved per request</span><span class="lbl">alone</span></div>
+                        {[
+                            ["Artifacts", "13,390", "100%"],
+                            ["Bundled skills", "2,614", "19.5%"],
+                            ["claude.ai connectors", "1,694", "12.7%"],
+                            ["ScheduleWakeup", "1,692", "12.6%"],
+                            ["Advisor tool, if set", "1,358", "10.1%"],
+                            ["Git instructions", "830", "6.2%"],
+                            ["ReportFindings", "822", "6.1%"],
+                            ["Claude API skill", "464", "3.5%"],
+                            ["Background tasks", "408", "3%"],
+                            ["Explore and Plan agents", "334", "2.5%"],
+                        ].map(([name, saved, v]) => (
+                            <div class="mt-2 grid grid-cols-[12.5rem_minmax(0,1fr)_3.5rem] items-center gap-3 text-[14px]">
+                                <span class="text-dim">{name}</span>
+                                <div class="meter mt-0" style={`--v:${v}`}><i></i></div>
+                                <span class="text-right">{saved}</span>
+                            </div>
+                        ))}
+                        <div class="mt-2 grid grid-cols-[12.5rem_minmax(0,1fr)_3.5rem] items-center gap-3 text-[14px]">
+                            <span class="text-dim">Ten others</span>
+                            <span class="note">tools that load only on search</span>
+                            <span class="text-right">0–68</span>
+                        </div>
+                    </div>
+                </figure>
+            </section>
+
+            <section class="cell t2" aria-labelledby="tt2">
+                <h2 id="tt2">Measured on a real task.</h2>
+                <p>One change across 7 files, done by Sonnet 5.5 and graded by 30 tests the agent never saw.</p>
+                <figure>
+                    <table class="spec wide">
+                        <tbody>
+                            <tr><th scope="row">First request</th><td>34.3k tokens with no trims, 13.0k with the measured savers off</td></tr>
+                            <tr><th scope="row">Hidden tests</th><td>30 of 30 passed in every run, with or without trims</td></tr>
+                            <tr><th scope="row">Whole run</th><td>1.7% fewer input tokens, because the conversation is most of a long run</td></tr>
+                            <tr><th scope="row">Output caps</th><td>left empty, since capped runs took 32 and 40 tool calls instead of 13 and 14</td></tr>
+                        </tbody>
+                    </table>
                 </figure>
             </section>
         </div>

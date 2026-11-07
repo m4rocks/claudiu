@@ -451,6 +451,12 @@
 		grid-template-columns: minmax(0, 1fr);
 		grid-template-areas: "tb" "sp";
 	}
+	.win.tok {
+		grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
+		grid-template-areas: "tb tb" "t1 t2";
+	}
+	.win .t1 { grid-area: t1; }
+	.win .t2 { grid-area: t2; }
 	.win .e1 { grid-area: e1; }
 	.win .l1 { grid-area: l1; }
 	.win .a1 { grid-area: a1; }
@@ -486,6 +492,10 @@
 		.win.run {
 			grid-template-columns: minmax(0, 1fr);
 			grid-template-areas: "tb" "r1" "r2" "r3";
+		}
+		.win.tok {
+			grid-template-columns: minmax(0, 1fr);
+			grid-template-areas: "tb" "t1" "t2";
 		}
 		.win .sp {
 			grid-template-columns: minmax(0, 1fr);
