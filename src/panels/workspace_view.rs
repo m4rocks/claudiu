@@ -899,7 +899,7 @@ fn settings_body(page: SettingsPage, modal: &Modal, worktrees: &crate::app::Work
             for (heading, items) in Trim::GROUPS {
                 list = list.child(div().mt(px(4.0)).child(section_label(heading.to_string())));
                 for &item in items {
-                    let tag = item.saves_little().then_some("saves little");
+                    let tag = Some(item.saving().label());
                     list = list.child(switch_row(("settings-trim", item as usize), item.label(), tag, !trimmed.contains(&item), move |ws| {
                         if let Some(Modal::Settings { trimmed, .. }) = ws.modal.as_mut() {
                             flip(trimmed, item);

@@ -252,10 +252,10 @@ fn main() {
             })
             .expect("open setup window");
             cx.subscribe(&setup, move |_, ev: &app::SetupEvent, cx| {
-                let app::SetupEvent::Done(claude_path) = ev else { return };
+                let app::SetupEvent::Done { claude_path, recommended_trims } = ev else { return };
                 // The main window opens before the setup window closes: closing the last window quits the app.
                 let (window, workspace) = open_main_window(initial.clone(), cx);
-                workspace.update(cx, |ws, cx| ws.apply_setup(claude_path.clone(), cx));
+                workspace.update(cx, |ws, cx| ws.apply_setup(claude_path.clone(), *recommended_trims, cx));
                 *main.borrow_mut() = Some((window, workspace));
                 setup_window.update(cx, |_, window, _| window.remove_window()).ok();
             })
