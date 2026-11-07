@@ -285,6 +285,9 @@ pub struct Settings {
     /// The lines Claudiu added to Claude Code's `settings.json` for those trims, so turning one off removes only them.
     #[serde(default)]
     pub applied_trims: Vec<String>,
+    /// Output caps and turned-off skills for Claude Code (`claude/trim.rs`); empty leaves Claude Code's own behavior.
+    #[serde(default)]
+    pub limits: crate::claude::trim::Limits,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

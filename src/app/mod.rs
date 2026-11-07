@@ -305,6 +305,8 @@ pub enum Modal {
         trimmed: Vec<crate::claude::trim::Trim>,
         /// Claudiu tools turned off (Claudiu tools page).
         claudiu_off: Vec<crate::claude::mcp::Feature>,
+        /// Bash output cap, file read cap and skills to turn off, in that order (Claude Code tools page).
+        limit_fields: [Entity<InputState>; 3],
         /// Focus of the category list, which has the keyboard when the dialog opens.
         list_focus: FocusHandle,
     },
@@ -793,10 +795,16 @@ impl Workspace {
                 let claude = self.modal_input(&claude_t, &claude_hint, window, cx);
                 let model = self.modal_input(defaults.model.as_deref().unwrap_or_default(), "Claude Code default", window, cx);
                 let shell = self.modal_input(&shell_t, &platform::default_shell(None).0, window, cx);
+                let (bash_t, file_t, skills_t) = self.store.data.settings.limits.texts();
+                let limit_fields = [
+                    self.modal_input(&bash_t, "Claude Code default (30000)", window, cx),
+                    self.modal_input(&file_t, "Claude Code default", window, cx),
+                    self.modal_input(&skills_t, "none, e.g. dataviz, claude-api", window, cx),
+                ];
                 let list_focus = cx.focus_handle();
                 window.focus(&list_focus, cx);
                 self.set_settings_page(self.settings_page, cx);
-                self.modal = Some(Modal::Settings { shell, claude, model, effort: defaults.effort, permission: defaults.permission_mode, updates, chrome, scale: crate::panels::scale::percent(), trimmed: self.store.data.settings.trimmed_tools.clone(), claudiu_off: self.store.data.settings.claudiu_tools_off.clone(), list_focus });
+                self.modal = Some(Modal::Settings { shell, claude, model, effort: defaults.effort, permission: defaults.permission_mode, updates, chrome, scale: crate::panels::scale::percent(), trimmed: self.store.data.settings.trimmed_tools.clone(), claudiu_off: self.store.data.settings.claudiu_tools_off.clone(), limit_fields, list_focus });
             }
             Act::PickEffort(choice) => {
                 if let Some(Modal::Settings { effort, .. }) = self.modal.as_mut() {
