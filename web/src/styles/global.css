@@ -341,10 +341,13 @@
 	.meter.off i {
 		background: var(--color-faint);
 	}
+	.meter.accent i {
+		background: var(--color-orange);
+	}
 	.swatch {
 		width: 10px;
 		height: 10px;
-		background: var(--color-ink);
+		background: var(--color-orange);
 	}
 	.swatch.off {
 		background: var(--color-faint);

@@ -193,7 +193,7 @@ const calls = [
                                 <div class="lbl">{label}</div>
                                 {bars.map(([value, v, off]) => (
                                     <div class="mt-2 grid grid-cols-[minmax(0,1fr)_4rem] items-center gap-3 text-[14px]">
-                                        <div class={off ? "meter mt-0 off" : "meter mt-0"} style={`--v:${v}`}><i></i></div>
+                                        <div class={off ? "meter mt-0 off" : "meter mt-0 accent"} style={`--v:${v}`}><i></i></div>
                                         <span class="text-right">{value}</span>
                                     </div>
                                 ))}
