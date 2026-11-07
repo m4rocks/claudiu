@@ -29,24 +29,35 @@ pub enum Trim {
     DesignSync,
     NotebookEdit,
     ReportFindings,
+    GitInstructions,
+    ClaudeApiSkill,
+    ExplorePlanAgents,
+    AdvisorTool,
+    BackgroundTasks,
 }
 
 /// What turning an item off does in the settings file.
 enum Effect {
     /// Settings keys set to the given values.
     Keys(&'static [(&'static str, bool)]),
+    /// Variables set in the `env` block, which Claude Code applies to the session.
+    Env(&'static [(&'static str, &'static str)]),
     /// Tool names added to `permissions.deny`.
     Deny(&'static [&'static str]),
 }
 
 impl Trim {
     /// In the order the page lists them, grouped (see `GROUPS`).
-    pub const ALL: [Trim; 15] = [
+    pub const ALL: [Trim; 20] = [
         Self::BundledSkills,
+        Self::ClaudeApiSkill,
         Self::Workflows,
         Self::RemoteControl,
         Self::ClaudeAiConnectors,
         Self::Artifacts,
+        Self::ExplorePlanAgents,
+        Self::AdvisorTool,
+        Self::BackgroundTasks,
         Self::PlanMode,
         Self::AskUserQuestion,
         Self::ScheduledTasks,
@@ -57,15 +68,17 @@ impl Trim {
         Self::DesignSync,
         Self::NotebookEdit,
         Self::ReportFindings,
+        Self::GitInstructions,
     ];
 
     /// The page's groups: a heading and the items under it.
-    pub const GROUPS: [(&'static str, &'static [Trim]); 5] = [
-        ("FEATURES", &[Self::BundledSkills, Self::Workflows, Self::RemoteControl, Self::ClaudeAiConnectors, Self::Artifacts]),
+    pub const GROUPS: [(&'static str, &'static [Trim]); 6] = [
+        ("FEATURES", &[Self::BundledSkills, Self::ClaudeApiSkill, Self::Workflows, Self::RemoteControl, Self::ClaudeAiConnectors, Self::Artifacts]),
+        ("AGENTS AND TASKS", &[Self::ExplorePlanAgents, Self::AdvisorTool, Self::BackgroundTasks]),
         ("PLANNING", &[Self::PlanMode, Self::AskUserQuestion]),
         ("SCHEDULING", &[Self::ScheduledTasks, Self::ScheduleWakeup, Self::RemoteTrigger]),
         ("MESSAGING", &[Self::SendMessage, Self::PushNotification]),
-        ("OTHER", &[Self::DesignSync, Self::NotebookEdit, Self::ReportFindings]),
+        ("OTHER", &[Self::DesignSync, Self::NotebookEdit, Self::ReportFindings, Self::GitInstructions]),
     ];
 
     pub fn label(self) -> &'static str {
@@ -85,6 +98,11 @@ impl Trim {
             Self::DesignSync => "DesignSync",
             Self::NotebookEdit => "NotebookEdit",
             Self::ReportFindings => "ReportFindings",
+            Self::GitInstructions => "Git instructions",
+            Self::ClaudeApiSkill => "Claude API skill",
+            Self::ExplorePlanAgents => "Explore and Plan agents",
+            Self::AdvisorTool => "Advisor tool",
+            Self::BackgroundTasks => "Background tasks",
         }
     }
 
@@ -105,6 +123,11 @@ impl Trim {
             Self::DesignSync => Effect::Deny(&["DesignSync"]),
             Self::NotebookEdit => Effect::Deny(&["NotebookEdit"]),
             Self::ReportFindings => Effect::Deny(&["ReportFindings"]),
+            Self::GitInstructions => Effect::Keys(&[("includeGitInstructions", false)]),
+            Self::ClaudeApiSkill => Effect::Env(&[("CLAUDE_CODE_DISABLE_CLAUDE_API_SKILL", "1")]),
+            Self::ExplorePlanAgents => Effect::Env(&[("CLAUDE_CODE_DISABLE_EXPLORE_PLAN_AGENTS", "1")]),
+            Self::AdvisorTool => Effect::Env(&[("CLAUDE_CODE_DISABLE_ADVISOR_TOOL", "1")]),
+            Self::BackgroundTasks => Effect::Env(&[("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", "1")]),
         }
     }
 }
@@ -119,6 +142,7 @@ pub fn normalized(trimmed: &[Trim]) -> Vec<Trim> {
 enum Entry {
     Key(&'static str, bool),
     Deny(&'static str),
+    Env(&'static str, &'static str),
 }
 
 impl Entry {
@@ -127,6 +151,7 @@ impl Entry {
         match self {
             Entry::Key(key, _) => key.to_string(),
             Entry::Deny(name) => format!("deny:{name}"),
+            Entry::Env(name, _) => format!("env:{name}"),
         }
     }
 }
@@ -135,6 +160,7 @@ fn entries(trim: Trim) -> Vec<Entry> {
     match trim.effect() {
         Effect::Keys(keys) => keys.iter().map(|(key, value)| Entry::Key(key, *value)).collect(),
         Effect::Deny(names) => names.iter().map(|name| Entry::Deny(name)).collect(),
+        Effect::Env(vars) => vars.iter().map(|(name, value)| Entry::Env(name, value)).collect(),
     }
 }
 
@@ -145,6 +171,7 @@ fn present(settings: &Map<String, Value>, entry: Entry) -> bool {
             let list = settings.get("permissions").and_then(|p| p.get("deny")).and_then(Value::as_array);
             list.is_some_and(|list| list.iter().any(|v| v.as_str() == Some(name)))
         }
+        Entry::Env(name, value) => settings.get("env").and_then(|e| e.get(name)).and_then(Value::as_str) == Some(value),
     }
 }
 
@@ -159,6 +186,12 @@ fn add(settings: &mut Map<String, Value>, entry: Entry) {
                 && let Some(list) = permissions.entry("deny").or_insert_with(|| json!([])).as_array_mut()
             {
                 list.push(Value::String(name.into()));
+            }
+        }
+        Entry::Env(name, value) => {
+            let env = settings.entry("env").or_insert_with(|| json!({}));
+            if let Some(env) = env.as_object_mut() {
+                env.insert(name.into(), Value::String(value.into()));
             }
         }
     }
@@ -181,6 +214,15 @@ fn remove(settings: &mut Map<String, Value>, entry: Entry) {
             }
             if permissions.is_empty() {
                 settings.remove("permissions");
+            }
+        }
+        Entry::Env(name, value) => {
+            let Some(env) = settings.get_mut("env").and_then(Value::as_object_mut) else { return };
+            if env.get(name).and_then(Value::as_str) == Some(value) {
+                env.remove(name);
+            }
+            if env.is_empty() {
+                settings.remove("env");
             }
         }
     }
@@ -306,6 +348,35 @@ mod tests {
         std::fs::write(&path, "{ not json").unwrap();
         assert!(write_global(&path, &[Workflows], &[]).is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ not json");
+    }
+
+    #[test]
+    fn env_trims_go_in_the_env_block_beside_the_users_own_variables() {
+        let mut s = object(json!({ "env": { "FOO": "1" } }));
+        let owned = apply(&mut s, &[AdvisorTool, BackgroundTasks], &[]);
+        assert_eq!(
+            Value::Object(s.clone()),
+            json!({ "env": { "FOO": "1", "CLAUDE_CODE_DISABLE_ADVISOR_TOOL": "1", "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1" } })
+        );
+        apply(&mut s, &[], &owned);
+        assert_eq!(Value::Object(s), json!({ "env": { "FOO": "1" } }));
+    }
+
+    #[test]
+    fn an_env_block_that_claudiu_created_is_removed_when_it_ends_up_empty() {
+        let mut s = Map::new();
+        let owned = apply(&mut s, &[ExplorePlanAgents], &[]);
+        apply(&mut s, &[], &owned);
+        assert!(s.is_empty());
+    }
+
+    #[test]
+    fn git_instructions_are_turned_off_with_a_false_value_that_is_removed_again() {
+        let mut s = object(json!({ "model": "sonnet" }));
+        let owned = apply(&mut s, &[GitInstructions], &[]);
+        assert_eq!(Value::Object(s.clone()), json!({ "model": "sonnet", "includeGitInstructions": false }));
+        apply(&mut s, &[], &owned);
+        assert_eq!(Value::Object(s), json!({ "model": "sonnet" }));
     }
 
     #[test]
