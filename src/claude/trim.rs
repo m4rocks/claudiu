@@ -49,12 +49,12 @@ enum Effect {
 impl Trim {
     /// In the order the page lists them, grouped (see `GROUPS`).
     pub const ALL: [Trim; 20] = [
+        Self::Artifacts,
         Self::BundledSkills,
         Self::ClaudeApiSkill,
         Self::Workflows,
         Self::RemoteControl,
         Self::ClaudeAiConnectors,
-        Self::Artifacts,
         Self::ExplorePlanAgents,
         Self::AdvisorTool,
         Self::BackgroundTasks,
@@ -73,7 +73,7 @@ impl Trim {
 
     /// The page's groups: a heading and the items under it.
     pub const GROUPS: [(&'static str, &'static [Trim]); 6] = [
-        ("FEATURES", &[Self::BundledSkills, Self::ClaudeApiSkill, Self::Workflows, Self::RemoteControl, Self::ClaudeAiConnectors, Self::Artifacts]),
+        ("FEATURES", &[Self::Artifacts, Self::BundledSkills, Self::ClaudeApiSkill, Self::Workflows, Self::RemoteControl, Self::ClaudeAiConnectors]),
         ("AGENTS AND TASKS", &[Self::ExplorePlanAgents, Self::AdvisorTool, Self::BackgroundTasks]),
         ("PLANNING", &[Self::PlanMode, Self::AskUserQuestion]),
         ("SCHEDULING", &[Self::ScheduledTasks, Self::ScheduleWakeup, Self::RemoteTrigger]),
@@ -104,6 +104,24 @@ impl Trim {
             Self::AdvisorTool => "Advisor tool",
             Self::BackgroundTasks => "Background tasks",
         }
+    }
+
+    /// Turning it off saved under 100 tokens per request in a measured run (Claude Code 2.1.319): these tools load only
+    /// when Claude searches for them, so the switch removes the tool but hardly any tokens. The page tags them.
+    pub fn saves_little(self) -> bool {
+        matches!(
+            self,
+            Self::Workflows
+                | Self::RemoteControl
+                | Self::PlanMode
+                | Self::AskUserQuestion
+                | Self::ScheduledTasks
+                | Self::RemoteTrigger
+                | Self::SendMessage
+                | Self::PushNotification
+                | Self::DesignSync
+                | Self::NotebookEdit
+        )
     }
 
     fn effect(self) -> Effect {
@@ -520,6 +538,15 @@ mod tests {
     #[test]
     fn the_fields_show_the_saved_limits_as_text() {
         assert_eq!(limits(Some(2000), None, &["a", "b"]).texts(), ("2000".to_string(), String::new(), "a, b".to_string()));
+    }
+
+    #[test]
+    fn only_the_switches_measured_under_100_tokens_are_tagged_as_saving_little() {
+        let tagged: Vec<Trim> = Trim::ALL.into_iter().filter(|t| t.saves_little()).collect();
+        assert_eq!(
+            tagged,
+            [Workflows, RemoteControl, PlanMode, AskUserQuestion, ScheduledTasks, RemoteTrigger, SendMessage, PushNotification, DesignSync, NotebookEdit]
+        );
     }
 
     #[test]

@@ -899,7 +899,8 @@ fn settings_body(page: SettingsPage, modal: &Modal, worktrees: &crate::app::Work
             for (heading, items) in Trim::GROUPS {
                 list = list.child(div().mt(px(4.0)).child(section_label(heading.to_string())));
                 for &item in items {
-                    list = list.child(switch_row(("settings-trim", item as usize), item.label(), !trimmed.contains(&item), move |ws| {
+                    let tag = item.saves_little().then_some("saves little");
+                    list = list.child(switch_row(("settings-trim", item as usize), item.label(), tag, !trimmed.contains(&item), move |ws| {
                         if let Some(Modal::Settings { trimmed, .. }) = ws.modal.as_mut() {
                             flip(trimmed, item);
                         }
@@ -922,7 +923,7 @@ fn settings_body(page: SettingsPage, modal: &Modal, worktrees: &crate::app::Work
                     .to_string(),
             ));
             for feature in Feature::ALL {
-                list = list.child(switch_row(("settings-claudiu", feature as usize), feature.label(), !claudiu_off.contains(&feature), move |ws| {
+                list = list.child(switch_row(("settings-claudiu", feature as usize), feature.label(), None, !claudiu_off.contains(&feature), move |ws| {
                     if let Some(Modal::Settings { claudiu_off, .. }) = ws.modal.as_mut() {
                         flip(claudiu_off, feature);
                     }
@@ -1057,7 +1058,7 @@ fn worktrees_page(page: &crate::app::WorktreesPage, cx: &mut Context<Workspace>)
 
 /// An On/Off row in the Settings modal; `field` picks the flag it flips.
 fn settings_toggle(id: &'static str, label: &'static str, on: bool, field: fn(&mut Modal) -> Option<&mut bool>, cx: &mut Context<Workspace>) -> impl IntoElement {
-    switch_row(id, label, on, move |ws| {
+    switch_row(id, label, None, on, move |ws| {
         if let Some(flag) = ws.modal.as_mut().and_then(field) {
             *flag = !*flag;
         }
@@ -1108,10 +1109,11 @@ fn flip<T: PartialEq>(items: &mut Vec<T>, item: T) {
     }
 }
 
-/// An On/Off row that runs `flip` on the workspace when clicked.
+/// An On/Off row that runs `flip` on the workspace when clicked, with an optional faint `tag` after the label.
 fn switch_row(
     id: impl Into<gpui::ElementId>,
     label: &'static str,
+    tag: Option<&'static str>,
     on: bool,
     flip: impl Fn(&mut Workspace) + 'static,
     cx: &mut Context<Workspace>,
@@ -1129,7 +1131,9 @@ fn switch_row(
         .border_color(hsla(0x242424))
         .text_size(crate::panels::scale::px(13.0))
         .cursor_pointer()
-        .child(label)
+        .child(div().flex().items_center().gap(px(8.0)).child(label).children(tag.map(|tag| {
+            div().text_size(crate::panels::scale::px(11.0)).text_color(hsla(theme::TEXT_FAINT)).child(tag)
+        })))
         .child(div().text_color(hsla(if on { theme::ACCENT } else { theme::TEXT_FAINT })).child(if on { "On" } else { "Off" }))
         .on_click(cx.listener(move |ws, _: &ClickEvent, _w, cx| {
             flip(ws);
