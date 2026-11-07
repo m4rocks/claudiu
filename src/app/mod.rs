@@ -307,6 +307,8 @@ pub enum Modal {
         claudiu_off: Vec<crate::claude::mcp::Feature>,
         /// Bash output cap, file read cap and skills to turn off, in that order (Claude Code tools page).
         limit_fields: [Entity<InputState>; 3],
+        /// Settings found at open time that make Claude Code cost more (Claude Code tools page).
+        costly: Vec<crate::claude::costly::Finding>,
         /// Focus of the category list, which has the keyboard when the dialog opens.
         list_focus: FocusHandle,
     },
@@ -804,7 +806,7 @@ impl Workspace {
                 let list_focus = cx.focus_handle();
                 window.focus(&list_focus, cx);
                 self.set_settings_page(self.settings_page, cx);
-                self.modal = Some(Modal::Settings { shell, claude, model, effort: defaults.effort, permission: defaults.permission_mode, updates, chrome, scale: crate::panels::scale::percent(), trimmed: self.store.data.settings.trimmed_tools.clone(), claudiu_off: self.store.data.settings.claudiu_tools_off.clone(), limit_fields, list_focus });
+                self.modal = Some(Modal::Settings { shell, claude, model, effort: defaults.effort, permission: defaults.permission_mode, updates, chrome, scale: crate::panels::scale::percent(), trimmed: self.store.data.settings.trimmed_tools.clone(), claudiu_off: self.store.data.settings.claudiu_tools_off.clone(), limit_fields, costly: claude::costly::scan(), list_focus });
             }
             Act::PickEffort(choice) => {
                 if let Some(Modal::Settings { effort, .. }) = self.modal.as_mut() {

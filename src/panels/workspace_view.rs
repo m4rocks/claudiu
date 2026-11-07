@@ -822,7 +822,7 @@ impl Render for Workspace {
 
 /// The Settings dialog's body: the category list on the left and the chosen page on the right.
 fn settings_body(page: SettingsPage, modal: &Modal, worktrees: &crate::app::WorktreesPage, scroll: &crate::panels::glide::Smooth, window: &mut Window, cx: &mut Context<Workspace>) -> AnyElement {
-    let Modal::Settings { shell, claude, model, effort, permission, updates, chrome, scale, trimmed, claudiu_off, limit_fields, list_focus } = modal else {
+    let Modal::Settings { shell, claude, model, effort, permission, updates, chrome, scale, trimmed, claudiu_off, limit_fields, costly, list_focus } = modal else {
         return div().into_any_element();
     };
     let (updates, chrome, scale) = (*updates, *chrome, *scale);
@@ -884,6 +884,14 @@ fn settings_body(page: SettingsPage, modal: &Modal, worktrees: &crate::app::Work
         SettingsPage::ClaudeTools => {
             let plan_trimmed = trimmed.contains(&Trim::PlanMode);
             let mut list = div().flex().flex_col().gap(px(8.0));
+            for found in costly {
+                list = list.child(
+                    div()
+                        .text_size(scaled(11.0))
+                        .text_color(hsla(theme::WARN))
+                        .child(format!("{} is set in {}. {}", found.name, found.source, found.effect)),
+                );
+            }
             list = list.child(faint(
                 "Applies to new sessions. Running sessions keep their tools. Resumed sessions get the new tools, and the old instructions stay until their next compaction. These switches edit Claude Code's own settings.json, for every account and for Claude Code outside Claudiu. Claudiu only turns things off; anything you turned off yourself stays off."
                     .to_string(),
