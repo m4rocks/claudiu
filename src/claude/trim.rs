@@ -190,7 +190,7 @@ pub fn normalized(trimmed: &[Trim]) -> Vec<Trim> {
 enum Entry {
     Key(&'static str, bool),
     Deny(&'static str),
-    Env(String, String),
+    Env(&'static str, &'static str),
     /// A skill turned off in `skillOverrides`.
     Skill(String),
 }
@@ -208,10 +208,6 @@ impl Entry {
 
     /// The entry an earlier `id` stood for, so it can be taken out again.
     fn from_id(id: &str) -> Option<Entry> {
-        if let Some(rest) = id.strip_prefix("env:") {
-            let (name, value) = rest.split_once('=')?;
-            return Some(Entry::Env(name.into(), value.into()));
-        }
         if let Some(name) = id.strip_prefix("skill:") {
             return Some(Entry::Skill(name.into()));
         }
@@ -223,7 +219,7 @@ fn entries(trim: Trim) -> Vec<Entry> {
     match trim.effect() {
         Effect::Keys(keys) => keys.iter().map(|(key, value)| Entry::Key(key, *value)).collect(),
         Effect::Deny(names) => names.iter().map(|name| Entry::Deny(name)).collect(),
-        Effect::Env(vars) => vars.iter().map(|(name, value)| Entry::Env(name.to_string(), value.to_string())).collect(),
+        Effect::Env(vars) => vars.iter().map(|(name, value)| Entry::Env(name, value)).collect(),
     }
 }
 
@@ -234,7 +230,7 @@ fn present(settings: &Map<String, Value>, entry: &Entry) -> bool {
             let list = settings.get("permissions").and_then(|p| p.get("deny")).and_then(Value::as_array);
             list.is_some_and(|list| list.iter().any(|v| v.as_str() == Some(name)))
         }
-        Entry::Env(name, value) => settings.get("env").and_then(|e| e.get(name)).and_then(Value::as_str) == Some(value),
+        Entry::Env(name, value) => settings.get("env").and_then(|e| e.get(*name)).and_then(Value::as_str) == Some(*value),
         Entry::Skill(name) => settings.get("skillOverrides").and_then(|o| o.get(name)).and_then(Value::as_str) == Some("off"),
     }
 }
@@ -257,7 +253,7 @@ fn add(settings: &mut Map<String, Value>, entry: &Entry) {
         Entry::Env(name, value) => {
             let env = settings.entry("env").or_insert_with(|| json!({}));
             if let Some(env) = env.as_object_mut() {
-                env.entry(name.clone()).or_insert_with(|| Value::String(value.clone()));
+                env.entry(*name).or_insert_with(|| Value::String((*value).into()));
             }
         }
         Entry::Skill(name) => {
@@ -290,8 +286,8 @@ fn remove(settings: &mut Map<String, Value>, entry: &Entry) {
         }
         Entry::Env(name, value) => {
             let Some(env) = settings.get_mut("env").and_then(Value::as_object_mut) else { return };
-            if env.get(name).and_then(Value::as_str) == Some(value) {
-                env.remove(name);
+            if env.get(*name).and_then(Value::as_str) == Some(*value) {
+                env.remove(*name);
             }
             if env.is_empty() {
                 settings.remove("env");
@@ -348,7 +344,7 @@ impl Limits {
 }
 
 /// Put the trimmed items and limits into `settings` and take out the ones Claudiu added earlier (`applied`) that are
-/// no longer wanted. A line the user had before Claudiu (a tool they denied themselves, a cap they set) is never
+/// no longer wanted. A line the user had before Claudiu (a tool they denied themselves, a skill they set) is never
 /// recorded, so turning the trim off leaves it. Returns what Claudiu now owns, to pass back next time.
 pub fn apply(settings: &mut Map<String, Value>, trimmed: &[Trim], limits: &Limits, applied: &[String]) -> Vec<String> {
     let wanted: Vec<Entry> = normalized(trimmed).into_iter().flat_map(entries).chain(limits.entries()).collect();
@@ -535,14 +531,6 @@ mod tests {
         assert_eq!(Limits::parse(" ").unwrap(), Limits::default());
         assert_eq!(Limits::parse("dataviz, m4:do  dataviz").unwrap(), skills(&["dataviz", "m4:do"]));
         assert!(Limits::parse("a/b").unwrap_err().starts_with("Skills"));
-    }
-
-    #[test]
-    fn a_cap_written_by_an_earlier_build_is_taken_out_on_the_next_save() {
-        let mut s = object(json!({ "env": { "BASH_MAX_OUTPUT_LENGTH": "2000", "FOO": "1" } }));
-        let owned = apply(&mut s, &[], &Limits::default(), &["env:BASH_MAX_OUTPUT_LENGTH=2000".to_string()]);
-        assert!(owned.is_empty());
-        assert_eq!(Value::Object(s), json!({ "env": { "FOO": "1" } }));
     }
 
     #[test]

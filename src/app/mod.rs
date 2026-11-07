@@ -305,7 +305,7 @@ pub enum Modal {
         trimmed: Vec<crate::claude::trim::Trim>,
         /// Claudiu tools turned off (Claudiu tools page).
         claudiu_off: Vec<crate::claude::mcp::Feature>,
-        /// Bash output cap, file read cap and skills to turn off, in that order (Claude Code tools page).
+        /// Skills to turn off, separated by commas (Claude Code tools page).
         skills_field: Entity<InputState>,
         /// Settings found at open time that make Claude Code cost more (Claude Code tools page).
         costly: Vec<crate::claude::costly::Finding>,
