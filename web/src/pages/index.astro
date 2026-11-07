@@ -180,46 +180,36 @@ const calls = [
 
             <section class="cell t1" aria-labelledby="tt1">
                 <h2 id="tt1">Fewer tokens in every request.</h2>
-                <p>Each switch on the Claude Code tools page shows what turning it off saves: high, medium or low. Setup offers to turn off six that coding rarely uses.</p>
+                <p>Each switch on the Claude Code tools page shows what turning it off saves: high, medium or low. Setup offers to turn off six that coding rarely uses. Measured on Claude Code 2.1.319 with Sonnet 5.5, on one change across 7 files graded by 30 hidden tests.</p>
                 <figure>
                     <div class="panel">
-                        <div class="flex justify-between"><span class="lbl">Tokens saved per request</span><span class="lbl">alone</span></div>
+                        <div class="flex gap-4 text-[13px] text-dim"><span class="flex items-center gap-2"><i class="swatch off"></i>No trims</span><span class="flex items-center gap-2"><i class="swatch"></i>9 measured savers off</span></div>
                         {[
-                            ["Artifacts", "13,390", "100%"],
-                            ["Bundled skills", "2,614", "19.5%"],
-                            ["claude.ai connectors", "1,694", "12.7%"],
-                            ["ScheduleWakeup", "1,692", "12.6%"],
-                            ["Advisor tool, if set", "1,358", "10.1%"],
-                            ["Git instructions", "830", "6.2%"],
-                            ["ReportFindings", "822", "6.1%"],
-                            ["Claude API skill", "464", "3.5%"],
-                            ["Background tasks", "408", "3%"],
-                            ["Explore and Plan agents", "334", "2.5%"],
-                        ].map(([name, saved, v]) => (
-                            <div class="mt-2 grid grid-cols-[12.5rem_minmax(0,1fr)_3.5rem] items-center gap-3 text-[14px]">
-                                <span class="text-dim">{name}</span>
-                                <div class="meter mt-0" style={`--v:${v}`}><i></i></div>
-                                <span class="text-right">{saved}</span>
+                            ["First request, tokens", [["34.3k", "100%", true], ["13.0k", "37.9%", false]]],
+                            ["Hidden tests passed", [["30 / 30", "100%", true], ["30 / 30", "100%", false]]],
+                            ["Tool calls", [["13–14", "100%", true], ["14", "100%", false]]],
+                        ].map(([label, bars]) => (
+                            <div class="mt-4">
+                                <div class="lbl">{label}</div>
+                                {bars.map(([value, v, off]) => (
+                                    <div class="mt-2 grid grid-cols-[minmax(0,1fr)_4rem] items-center gap-3 text-[14px]">
+                                        <div class={off ? "meter mt-0 off" : "meter mt-0"} style={`--v:${v}`}><i></i></div>
+                                        <span class="text-right">{value}</span>
+                                    </div>
+                                ))}
                             </div>
                         ))}
-                        <div class="mt-2 grid grid-cols-[12.5rem_minmax(0,1fr)_3.5rem] items-center gap-3 text-[14px]">
-                            <span class="text-dim">Ten others</span>
-                            <span class="note">tools that load only on search</span>
-                            <span class="text-right">0–68</span>
-                        </div>
                     </div>
                 </figure>
             </section>
 
             <section class="cell t2" aria-labelledby="tt2">
                 <h2 id="tt2">Measured on a real task.</h2>
-                <p>One change across 7 files, done by Sonnet 5.5 and graded by 30 tests the agent never saw.</p>
+                <p>Two things the bars don't show.</p>
                 <figure>
                     <table class="spec wide">
                         <tbody>
-                            <tr><th scope="row">First request</th><td>34.3k tokens with no trims, 13.0k with the measured savers off</td></tr>
-                            <tr><th scope="row">Hidden tests</th><td>30 of 30 passed in every run, with or without trims</td></tr>
-                            <tr><th scope="row">Whole run</th><td>1.7% fewer input tokens, because the conversation is most of a long run</td></tr>
+                            <tr><th scope="row">Whole run</th><td>1.7% fewer input tokens than with a few trims, because the conversation is most of a long run</td></tr>
                             <tr><th scope="row">Output caps</th><td>left empty, since capped runs took 32 and 40 tool calls instead of 13 and 14</td></tr>
                         </tbody>
                     </table>

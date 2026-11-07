@@ -338,6 +338,17 @@
 		width: var(--v);
 		background: var(--color-ink);
 	}
+	.meter.off i {
+		background: var(--color-faint);
+	}
+	.swatch {
+		width: 10px;
+		height: 10px;
+		background: var(--color-ink);
+	}
+	.swatch.off {
+		background: var(--color-faint);
+	}
 	.scale {
 		display: flex;
 		justify-content: space-between;
