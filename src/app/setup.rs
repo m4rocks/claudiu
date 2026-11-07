@@ -82,6 +82,9 @@ pub struct SetupView {
     reload_path: fn(),
     /// The "recommended trims" switch; off until the user turns it on.
     recommended_trims: bool,
+    /// The cards scroll under a fixed header and buttons: the window has one size, and UI scale or a long error can
+    /// make them taller than it.
+    body_scroll: crate::panels::glide::Smooth,
     done: bool,
 }
 
@@ -110,7 +113,7 @@ impl SetupView {
                 view.update(cx, |view, cx| view.close(window, cx)).is_err()
             });
         }
-        let mut view = Self { mode, path_input, configured: current, path_error: None, checked: None, asked_again: false, checks: 0, reload_path, recommended_trims: false, done: false };
+        let mut view = Self { mode, path_input, configured: current, path_error: None, checked: None, asked_again: false, checks: 0, reload_path, recommended_trims: false, body_scroll: Default::default(), done: false };
         view.run_checks(cx);
         view
     }
@@ -226,26 +229,21 @@ impl SetupView {
     fn trims_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let on = self.recommended_trims;
         card()
-            .child(tool_title("Recommended trims", "OPTIONAL"))
+            .id("setup-recommended-trims")
+            .cursor_pointer()
             .child(
                 div()
-                    .id("setup-recommended-trims")
                     .flex()
                     .items_center()
                     .justify_between()
-                    .gap(px(12.0))
-                    .cursor_pointer()
-                    .text_size(crate::panels::scale::px(13.0))
-                    .child(div().min_w_0().child(
-                        "Turn off Claude Code features that add tokens to every request and that coding rarely uses: Artifacts, bundled skills, claude.ai connectors, ScheduleWakeup, ReportFindings and the Claude API skill.",
-                    ))
-                    .child(div().flex_none().text_color(hsla(if on { theme::ACCENT } else { theme::TEXT_FAINT })).child(if on { "On" } else { "Off" }))
-                    .on_click(cx.listener(|view, _: &ClickEvent, _, cx| {
-                        view.recommended_trims = !view.recommended_trims;
-                        cx.notify();
-                    })),
+                    .child(tool_title("Recommended trims", "OPTIONAL"))
+                    .child(div().text_size(crate::panels::scale::px(13.0)).text_color(hsla(if on { theme::ACCENT } else { theme::TEXT_FAINT })).child(if on { "On" } else { "Off" })),
             )
-            .child(faint("Settings → Claude Code tools changes them later. This edits Claude Code's own settings.json."))
+            .child(faint("Fewer tokens in every request. Change it later in Settings → Claude Code tools."))
+            .on_click(cx.listener(|view, _: &ClickEvent, _, cx| {
+                view.recommended_trims = !view.recommended_trims;
+                cx.notify();
+            }))
     }
 
     fn claude_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -301,7 +299,7 @@ impl SetupView {
 }
 
 impl Render for SetupView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let primary = if self.mode == Mode::Reopened {
             button("setup-done", "Close", true).on_click(cx.listener(|view, _: &ClickEvent, window, cx| view.close(window, cx)))
         } else if self.can_continue() {
@@ -331,11 +329,18 @@ impl Render for SetupView {
                             .child("Claudiu runs your own claude and reaches GitHub through your own gh. It installs nothing; this page only checks that they are there."),
                     ),
             )
-            .child(self.claude_row(cx))
-            .child(self.gh_row(cx))
-            .children(self.needs_restart_hint().then(|| faint(STILL_MISSING)))
-            .child(self.trims_row(cx))
-            .child(div().flex_1())
+            .child(
+                self.body_scroll.wire(div().id("setup-body").flex_1().min_h_0(), window).child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(14.0))
+                        .child(self.claude_row(cx))
+                        .child(self.gh_row(cx))
+                        .children(self.needs_restart_hint().then(|| faint(STILL_MISSING)))
+                        .child(self.trims_row(cx)),
+                ),
+            )
             .child(
                 div()
                     .flex()
