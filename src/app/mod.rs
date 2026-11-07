@@ -305,6 +305,10 @@ pub enum Modal {
         trimmed: Vec<crate::claude::trim::Trim>,
         /// Claudiu tools turned off (Claudiu tools page).
         claudiu_off: Vec<crate::claude::mcp::Feature>,
+        /// Skills to turn off, separated by commas (Claude Code tools page).
+        skills_field: Entity<InputState>,
+        /// Settings found at open time that make Claude Code cost more (Claude Code tools page).
+        costly: Vec<crate::claude::costly::Finding>,
         /// Focus of the category list, which has the keyboard when the dialog opens.
         list_focus: FocusHandle,
     },
@@ -793,10 +797,11 @@ impl Workspace {
                 let claude = self.modal_input(&claude_t, &claude_hint, window, cx);
                 let model = self.modal_input(defaults.model.as_deref().unwrap_or_default(), "Claude Code default", window, cx);
                 let shell = self.modal_input(&shell_t, &platform::default_shell(None).0, window, cx);
+                let skills_field = self.modal_input(&self.store.data.settings.limits.text(), "none, e.g. dataviz, claude-api", window, cx);
                 let list_focus = cx.focus_handle();
                 window.focus(&list_focus, cx);
                 self.set_settings_page(self.settings_page, cx);
-                self.modal = Some(Modal::Settings { shell, claude, model, effort: defaults.effort, permission: defaults.permission_mode, updates, chrome, scale: crate::panels::scale::percent(), trimmed: self.store.data.settings.trimmed_tools.clone(), claudiu_off: self.store.data.settings.claudiu_tools_off.clone(), list_focus });
+                self.modal = Some(Modal::Settings { shell, claude, model, effort: defaults.effort, permission: defaults.permission_mode, updates, chrome, scale: crate::panels::scale::percent(), trimmed: self.store.data.settings.trimmed_tools.clone(), claudiu_off: self.store.data.settings.claudiu_tools_off.clone(), skills_field, costly: claude::costly::scan(), list_focus });
             }
             Act::PickEffort(choice) => {
                 if let Some(Modal::Settings { effort, .. }) = self.modal.as_mut() {

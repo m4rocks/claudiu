@@ -46,11 +46,12 @@ impl Workspace {
     /// Keys for the open Settings dialog, seen before the focused control. Up and Down change the page and Enter saves
     /// only while the category list has focus; Tab and Shift+Tab cycle the list and the current page's text fields.
     pub(crate) fn settings_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(Modal::Settings { shell, claude, model, list_focus, .. }) = &self.modal else { return };
+        let Some(Modal::Settings { shell, claude, model, skills_field, list_focus, .. }) = &self.modal else { return };
         let list_focus = list_focus.clone();
         let fields = match self.settings_page {
             SettingsPage::General => vec![shell.clone(), claude.clone()],
             SettingsPage::Sessions => vec![model.clone()],
+            SettingsPage::ClaudeTools => vec![skills_field.clone()],
             _ => Vec::new(),
         };
         let on_list = list_focus.is_focused(window);

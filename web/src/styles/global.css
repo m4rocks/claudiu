@@ -440,10 +440,6 @@
 		grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
 		grid-template-areas: "tb tb" "e1 e1" "l1 a1";
 	}
-	.win.run {
-		grid-template-columns: minmax(0, 1fr) minmax(0, 1.5fr);
-		grid-template-areas: "tb tb" "r1 r3" "r2 r3";
-	}
 	.win.ed .l1 figure {
 		margin-top: 0;
 	}
@@ -451,12 +447,83 @@
 		grid-template-columns: minmax(0, 1fr);
 		grid-template-areas: "tb" "sp";
 	}
+	.win.tok {
+		grid-template-columns: minmax(0, 1fr);
+		grid-template-areas: "tb" "tk";
+	}
+	.win .tk {
+		grid-area: tk;
+		display: grid;
+		grid-template-columns: minmax(0, 4fr) minmax(0, 7fr);
+		column-gap: 56px;
+		align-items: center;
+		padding-block: 40px;
+	}
+	.tk-copy {
+		display: flex;
+		flex-direction: column;
+		gap: 22px;
+	}
+	.win .tk h2 {
+		font-size: clamp(40px, 5.2vw, 76px);
+		line-height: 0.95;
+		letter-spacing: -0.04em;
+	}
+	.tk-num {
+		display: block;
+		color: var(--color-orange);
+	}
+	.tk-fig svg {
+		display: block;
+		width: 100%;
+		height: auto;
+	}
+	.tk-fig .t-lbl {
+		font: 600 20px var(--font-sans);
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+		fill: var(--color-dim);
+	}
+	.tk-fig .t-in {
+		font: 700 26px var(--font-sans);
+		fill: var(--color-ink);
+	}
+	.tk-fig .t-in.dark {
+		fill: var(--color-paper);
+	}
+	@media (max-width: 640px) {
+		.tk-fig .t-lbl {
+			font-size: 36px;
+		}
+		.tk-fig .t-in {
+			font-size: 38px;
+		}
+		.tk-fig .t-cut {
+			font-size: 46px;
+		}
+	}
+	.tk-fig .t-cut {
+		font: 800 34px var(--font-sans);
+		letter-spacing: -0.02em;
+		fill: var(--color-orange);
+	}
+	@media (prefers-reduced-motion: no-preference) {
+		@supports (animation-timeline: view()) {
+			.tk-fig .cut {
+				animation: tk-cut linear both;
+				animation-timeline: view();
+				animation-range: entry 20% cover 45%;
+			}
+			@keyframes tk-cut {
+				from {
+					clip-path: inset(0 100% 0 0);
+				}
+			}
+		}
+	}
 	.win .e1 { grid-area: e1; }
 	.win .l1 { grid-area: l1; }
 	.win .a1 { grid-area: a1; }
-	.win .r1 { grid-area: r1; }
-	.win .r2 { grid-area: r2; }
-	.win .r3 { grid-area: r3; }
 	.win .sp {
 		grid-area: sp;
 		display: grid;
@@ -483,9 +550,10 @@
 			grid-template-columns: minmax(0, 1fr);
 			grid-template-areas: "tb" "e1" "l1" "a1";
 		}
-		.win.run {
+		.win .tk {
 			grid-template-columns: minmax(0, 1fr);
-			grid-template-areas: "tb" "r1" "r2" "r3";
+			row-gap: 36px;
+			padding-block: 28px;
 		}
 		.win .sp {
 			grid-template-columns: minmax(0, 1fr);

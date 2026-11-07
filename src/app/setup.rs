@@ -1,11 +1,12 @@
 //! The setup window: a short checklist of the two tools Claudiu runs (`claude`, required; `gh`, optional). It opens
 //! alone on a first launch (see `main.rs`) and again from Settings or the missing-`claude` toast. It installs nothing.
-//! It never owns the store: it hands the path the user typed back in `SetupEvent::Done`, and the main window applies it.
+//! It never owns the store: it hands the path the user typed and the recommended-trims choice back in `SetupEvent::Done`,
+//! and the main window applies them.
 
 use super::*;
 
 use gpui::{
-    Bounds, ClickEvent, EventEmitter, IntoElement, ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, TitlebarOptions,
+    Bounds, ClickEvent, EventEmitter, InteractiveElement, IntoElement, ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, TitlebarOptions,
     WindowBounds, WindowOptions, div, prelude::FluentBuilder, px, size,
 };
 use gpui_kit::assets::IconName;
@@ -31,8 +32,9 @@ pub enum Mode {
 }
 
 pub enum SetupEvent {
-    /// The user is done. Holds the `claude` path they gave, `None` for "find it yourself".
-    Done(Option<PathBuf>),
+    /// The user is done. `claude_path` is the path they gave, `None` for "find it yourself". `recommended_trims` asks
+    /// the main window to turn off `trim::RECOMMENDED` once, as if they were switched off in Settings.
+    Done { claude_path: Option<PathBuf>, recommended_trims: bool },
     /// Run `gh auth login` in a terminal tab of the main window (only sent in `Mode::Reopened`).
     SignIn,
 }
@@ -78,6 +80,11 @@ pub struct SetupView {
     checks: u64,
     /// Reads the PATH again before each check; `platform::reload_path`, except in tests.
     reload_path: fn(),
+    /// The "recommended trims" switch; off until the user turns it on.
+    recommended_trims: bool,
+    /// The cards scroll under a fixed header and buttons: the window has one size, and UI scale or a long error can
+    /// make them taller than it.
+    body_scroll: crate::panels::glide::Smooth,
     done: bool,
 }
 
@@ -106,7 +113,7 @@ impl SetupView {
                 view.update(cx, |view, cx| view.close(window, cx)).is_err()
             });
         }
-        let mut view = Self { mode, path_input, configured: current, path_error: None, checked: None, asked_again: false, checks: 0, reload_path, done: false };
+        let mut view = Self { mode, path_input, configured: current, path_error: None, checked: None, asked_again: false, checks: 0, reload_path, recommended_trims: false, body_scroll: Default::default(), done: false };
         view.run_checks(cx);
         view
     }
@@ -157,7 +164,7 @@ impl SetupView {
             return;
         }
         self.done = true;
-        cx.emit(SetupEvent::Done(self.path_to_hand_back(cx)));
+        cx.emit(SetupEvent::Done { claude_path: self.path_to_hand_back(cx), recommended_trims: self.recommended_trims });
     }
 
     /// Hand the path back and close the window. The window goes in a deferred step: the main window listens through a
@@ -219,6 +226,26 @@ impl SetupView {
         button(id, label, true).on_click(cx.listener(move |_, _: &ClickEvent, _, cx| cx.open_url(url)))
     }
 
+    fn trims_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let on = self.recommended_trims;
+        card()
+            .id("setup-recommended-trims")
+            .cursor_pointer()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(tool_title("Recommended trims", "OPTIONAL"))
+                    .child(div().text_size(crate::panels::scale::px(13.0)).text_color(hsla(if on { theme::ACCENT } else { theme::TEXT_FAINT })).child(if on { "On" } else { "Off" })),
+            )
+            .child(faint("Fewer tokens in every request. Change it later in Settings → Claude Code tools."))
+            .on_click(cx.listener(|view, _: &ClickEvent, _, cx| {
+                view.recommended_trims = !view.recommended_trims;
+                cx.notify();
+            }))
+    }
+
     fn claude_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let found = self.checked.as_ref().map(|found| &found.claude);
         let state = match found {
@@ -272,7 +299,7 @@ impl SetupView {
 }
 
 impl Render for SetupView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let primary = if self.mode == Mode::Reopened {
             button("setup-done", "Close", true).on_click(cx.listener(|view, _: &ClickEvent, window, cx| view.close(window, cx)))
         } else if self.can_continue() {
@@ -302,10 +329,18 @@ impl Render for SetupView {
                             .child("Claudiu runs your own claude and reaches GitHub through your own gh. It installs nothing; this page only checks that they are there."),
                     ),
             )
-            .child(self.claude_row(cx))
-            .child(self.gh_row(cx))
-            .children(self.needs_restart_hint().then(|| faint(STILL_MISSING)))
-            .child(div().flex_1())
+            .child(
+                self.body_scroll.wire(div().id("setup-body").flex_1().min_h_0(), window).child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(14.0))
+                        .child(self.claude_row(cx))
+                        .child(self.gh_row(cx))
+                        .children(self.needs_restart_hint().then(|| faint(STILL_MISSING)))
+                        .child(self.trims_row(cx)),
+                ),
+            )
             .child(
                 div()
                     .flex()
@@ -336,9 +371,9 @@ impl Workspace {
         };
         self.setup_window = Some(handle);
         cx.subscribe_in(&view, window, |ws: &mut Workspace, _, ev: &SetupEvent, window, cx| match ev {
-            SetupEvent::Done(path) => {
+            SetupEvent::Done { claude_path, recommended_trims } => {
                 ws.setup_window = None;
-                ws.apply_setup(path.clone(), cx);
+                ws.apply_setup(claude_path.clone(), *recommended_trims, cx);
             }
             SetupEvent::SignIn => {
                 window.activate_window();
@@ -348,14 +383,37 @@ impl Workspace {
         .detach();
     }
 
-    /// Use what the setup window ended with: its `claude` path (`None` clears it), looked for again, and saved. On a
-    /// first launch the save also creates the state file.
-    pub fn apply_setup(&mut self, claude_path: Option<PathBuf>, cx: &mut Context<Self>) {
+    /// Use what the setup window ended with: its `claude` path (`None` clears it), looked for again, and saved, and
+    /// the recommended trims when asked for. On a first launch the save also creates the state file.
+    pub fn apply_setup(&mut self, claude_path: Option<PathBuf>, recommended_trims: bool, cx: &mut Context<Self>) {
         self.store.data.settings.claude_path = claude_path;
         self.claude_exe = claude::discover(self.store.data.settings.claude_path.as_deref());
+        if recommended_trims {
+            self.add_recommended_trims(cx);
+        }
         self.store.mark_dirty();
         self.store.save();
         cx.notify();
+    }
+
+    /// Write the recommended trims into Claude Code's settings.json, as saving them in Settings would. When the file
+    /// can't be changed the trims stay as they were, so Settings shows what Claude Code has.
+    fn add_recommended_trims(&mut self, cx: &mut Context<Self>) {
+        let s = &mut self.store.data.settings;
+        let trimmed = claude::trim::with_recommended(&s.trimmed_tools);
+        if trimmed == s.trimmed_tools {
+            return;
+        }
+        let written = claude::claude_home()
+            .ok_or_else(|| std::io::Error::other("Claude Code's folder was not found"))
+            .and_then(|home| claude::trim::write_global(&home.join("settings.json"), &trimmed, &s.limits, &s.applied_trims));
+        match written {
+            Ok(owned) => {
+                s.applied_trims = owned;
+                s.trimmed_tools = trimmed;
+            }
+            Err(e) => self.toast(format!("Claude Code's settings.json could not be changed ({e}), so the recommended trims are not on."), true, cx),
+        }
     }
 }
 
@@ -385,8 +443,8 @@ mod tests {
         let log = handed_back.clone();
         let _watch = cx.update(|app| {
             app.subscribe(&view, move |_, ev: &SetupEvent, _| {
-                if let SetupEvent::Done(path) = ev {
-                    log.borrow_mut().push(path.clone());
+                if let SetupEvent::Done { claude_path, .. } = ev {
+                    log.borrow_mut().push(claude_path.clone());
                 }
             })
         });
@@ -417,8 +475,8 @@ mod tests {
         let log = handed_back.clone();
         let _watch = cx.update(|app| {
             app.subscribe(&view, move |_, ev: &SetupEvent, _| {
-                if let SetupEvent::Done(path) = ev {
-                    log.borrow_mut().push(path.clone());
+                if let SetupEvent::Done { claude_path, .. } = ev {
+                    log.borrow_mut().push(claude_path.clone());
                 }
             })
         });
@@ -449,6 +507,33 @@ mod tests {
                 assert_eq!(view.can_continue(), expected);
             });
         }
+    }
+
+    #[test]
+    fn the_recommended_trims_are_off_unless_the_user_turns_them_on() {
+        let mut cx = TestAppContext::single();
+        cx.update(gpui_kit::init);
+        let choices: Rc<RefCell<Vec<bool>>> = Rc::default();
+        for turn_on in [false, true] {
+            let (_, view) = cx
+                .update(|app| gpui_kit::open_window(Default::default(), app, |window, app| app.new(|cx| SetupView::with_reload(Mode::Reopened, None, || {}, window, cx))))
+                .unwrap();
+            let log = choices.clone();
+            let _watch = cx.update(|app| {
+                app.subscribe(&view, move |_, ev: &SetupEvent, _| {
+                    if let SetupEvent::Done { recommended_trims, .. } = ev {
+                        log.borrow_mut().push(*recommended_trims);
+                    }
+                })
+            });
+            view.update(&mut cx, |view, cx| {
+                if turn_on {
+                    view.recommended_trims = !view.recommended_trims;
+                }
+                view.finish(cx);
+            });
+        }
+        assert_eq!(*choices.borrow(), [false, true]);
     }
 
     #[test]

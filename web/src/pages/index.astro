@@ -52,6 +52,7 @@ const calls = [
         <nav aria-label="Manual">
             <a href="#parts" class="max-sm:hidden">Parts</a>
             <a href="#editor" class="max-sm:hidden">Editor</a>
+            <a href="#tokens" class="max-sm:hidden">Tokens</a>
             <a href="#spec" class="max-sm:hidden">Specifications</a>
             <a href={repo}>Source</a>
         </nav>
@@ -150,26 +151,63 @@ const calls = [
             </section>
         </div>
 
-        <div class="win run">
-            <div class="tb"><span>Claudiu · running</span><span>Fig. 4 · under load</span></div>
+        <div class="win tok" id="tokens">
+            <div class="tb"><span>Claudiu · token optimization</span><span>Fig. 4 · one request, drawn to scale</span></div>
 
-            <section class="cell r1" aria-labelledby="tr1">
-                <h2 id="tr1">Scrolling that keeps up.</h2>
-                <p>Wheel and trackpad glide in the terminal, sidebars and editor, and the editor no longer overshoots its ends.</p>
+            <section class="cell tk" aria-labelledby="ttk">
+                <div class="tk-copy">
+                    <h2 id="ttk"><span class="tk-num">&minus;21,300</span> tokens. Every request.</h2>
+                    <p>
+                        Claude Code sends its tools and instructions again with every call. The nine switches that measured
+                        highest cut a first request from 34.3k tokens to 13.0k. Over a 14-call task that works out to about
+                        300,000 tokens never sent, and the work came out just as correct.
+                    </p>
+                    <table class="spec wide">
+                        <tbody>
+                            <tr><th scope="row">Hidden tests</th><td>30 of 30 passed, before and after</td></tr>
+                            <tr><th scope="row">Tool calls</th><td>13–14 before, 14 after</td></tr>
+                            <tr><th scope="row">Measured on</th><td>Claude Code 2.1.319, Sonnet 5.5, one change across 7 files</td></tr>
+                        </tbody>
+                    </table>
+                </div>
 
-            </section>
+                <figure class="tk-fig">
+                    <svg viewBox="0 0 1000 640" role="img" aria-labelledby="fig4">
+                        <title id="fig4">A first request drawn to scale: 34.3k tokens with no trims, 13.0k with them; the 21,300 tokens cut are hatched, and the same cut repeats on each of 14 calls</title>
+                        <defs>
+                            <pattern id="hatch" width="12" height="12" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+                                <line x1="0" y1="0" x2="0" y2="12" stroke="var(--color-orange)" stroke-width="3" />
+                            </pattern>
+                            <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse">
+                                <path d="M0 0 10 5 0 10z" fill="var(--color-orange)" />
+                            </marker>
+                        </defs>
 
-            <section class="cell r2" aria-labelledby="tr2">
-                <h2 id="tr2">Quiet when nothing happens.</h2>
-                <p>The list draws only the rows in view, an idle window doesn't redraw, and saves happen in the background. On Windows, <code>claude</code> runs at above-normal priority.</p>
+                        <text class="t-lbl" x="40" y="30">No trims</text>
+                        
+                        <rect x="40" y="46" width="920" height="64" fill="var(--color-faint)" />
+                        <text class="t-in" x="940" y="89" text-anchor="end">34.3k tokens</text>
 
-            </section>
+                        <text class="t-lbl" x="40" y="160">Savers off</text>
+                        
+                        <rect x="40" y="176" width="349" height="64" fill="var(--color-ink)" />
+                        <text class="t-in dark" x="369" y="219" text-anchor="end">13.0k</text>
+                        <rect class="cut" x="389" y="176" width="571" height="64" fill="url(#hatch)" />
+                        <rect x="389" y="176" width="571" height="64" fill="none" stroke="var(--color-orange)" stroke-width="2" stroke-dasharray="8 6" />
 
-            <section class="cell r3" aria-labelledby="tr3">
-                <h2 id="tr3">Settings, by category.</h2>
-                <p>Defaults for new sessions, 15 switches for Claude Code's bundled tools, one for each Claudiu feature.</p>
-                <figure>
-                    <img class="shot" src="/claudiu-settings.png" width="720" height="480" alt="Claudiu's settings dialog on the Claude Code tools page, listing switches for bundled skills, workflows, remote control, claude.ai connectors, artifacts and plan mode" loading="lazy" />
+                        <g stroke="var(--color-faint)" stroke-width="1.5">
+                            <line x1="389" y1="244" x2="389" y2="300" />
+                            <line x1="960" y1="244" x2="960" y2="300" />
+                        </g>
+                        <line class="dim" x1="393" y1="284" x2="956" y2="284" stroke="var(--color-orange)" stroke-width="2.5" marker-start="url(#arrow)" marker-end="url(#arrow)" />
+                        <text class="t-cut" x="674" y="336" text-anchor="middle">&minus;21,300 per request</text>
+
+                        <text class="t-lbl" x="40" y="378">Each of 14 calls</text>
+                        <rect x="40" y="392" width="349" height="8" fill="var(--color-ink)" /><rect class="cut" x="389" y="392" width="571" height="8" fill="url(#hatch)" /><rect x="40" y="405" width="349" height="8" fill="var(--color-ink)" /><rect class="cut" x="389" y="405" width="571" height="8" fill="url(#hatch)" /><rect x="40" y="418" width="349" height="8" fill="var(--color-ink)" /><rect class="cut" x="389" y="418" width="571" height="8" fill="url(#hatch)" /><rect x="40" y="431" width="349" height="8" fill="var(--color-ink)" /><rect class="cut" x="389" y="431" width="571" height="8" fill="url(#hatch)" /><rect x="40" y="444" width="349" height="8" fill="var(--color-ink)" /><rect class="cut" x="389" y="444" width="571" height="8" fill="url(#hatch)" /><rect x="40" y="457" width="349" height="8" fill="var(--color-ink)" /><rect class="cut" x="389" y="457" width="571" height="8" fill="url(#hatch)" /><rect x="40" y="470" width="349" height="8" fill="var(--color-ink)" /><rect class="cut" x="389" y="470" width="571" height="8" fill="url(#hatch)" /><rect x="40" y="483" width="349" height="8" fill="var(--color-ink)" /><rect class="cut" x="389" y="483" width="571" height="8" fill="url(#hatch)" /><rect x="40" y="496" width="349" height="8" fill="var(--color-ink)" /><rect class="cut" x="389" y="496" width="571" height="8" fill="url(#hatch)" /><rect x="40" y="509" width="349" height="8" fill="var(--color-ink)" /><rect class="cut" x="389" y="509" width="571" height="8" fill="url(#hatch)" /><rect x="40" y="522" width="349" height="8" fill="var(--color-ink)" /><rect class="cut" x="389" y="522" width="571" height="8" fill="url(#hatch)" /><rect x="40" y="535" width="349" height="8" fill="var(--color-ink)" /><rect class="cut" x="389" y="535" width="571" height="8" fill="url(#hatch)" /><rect x="40" y="548" width="349" height="8" fill="var(--color-ink)" /><rect class="cut" x="389" y="548" width="571" height="8" fill="url(#hatch)" /><rect x="40" y="561" width="349" height="8" fill="var(--color-ink)" /><rect class="cut" x="389" y="561" width="571" height="8" fill="url(#hatch)" />
+                        <path d="M970 392h14v177h-14" fill="none" stroke="var(--color-orange)" stroke-width="2.5" />
+                        <text class="t-cut" x="674" y="620" text-anchor="middle">&asymp; 300,000 never sent</text>
+                    </svg>
+                    <figcaption><p class="cap"><b>Fig. 4</b>Hatched: what the trims remove from every request.</p></figcaption>
                 </figure>
             </section>
         </div>

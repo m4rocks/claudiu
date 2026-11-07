@@ -108,7 +108,7 @@ impl Workspace {
                     }
                 }
             }
-            Some(Modal::Settings { shell, claude, model, effort, permission, updates, chrome, scale, trimmed, claudiu_off, list_focus }) => {
+            Some(Modal::Settings { shell, claude, model, effort, permission, updates, chrome, scale, trimmed, claudiu_off, skills_field, costly, list_focus }) => {
                 let clean = |s: &str| s.trim().trim_matches('"').to_string();
                 let (shell_t, claude_t) = (clean(shell.read(cx).value().as_ref()), clean(claude.read(cx).value().as_ref()));
                 let model_name = claude::defaults::parse_model(model.read(cx).value().as_ref());
@@ -118,10 +118,12 @@ impl Workspace {
                     .find(|(_, _, t)| !t.is_empty() && platform::resolve_program(t).is_none())
                     .map(|(what, field, t)| (SettingsPage::General, field.clone(), format!("{what}: “{t}” is not a file or a program on PATH")));
                 let bad_model = model_name.is_err().then(|| (SettingsPage::Sessions, model.clone(), "Use a model alias or id (letters, digits, . _ -).".to_string()));
-                if let Some((page, field, msg)) = paths.or(bad_model) {
+                let limits = claude::trim::Limits::parse(skills_field.read(cx).value().as_ref());
+                let bad_limits = limits.as_ref().err().map(|why| (SettingsPage::ClaudeTools, skills_field.clone(), why.clone()));
+                if let Some((page, field, msg)) = paths.or(bad_model).or(bad_limits) {
                     self.settings_page = page;
                     field.update(cx, |s, cx| s.focus(window, cx));
-                    self.modal = Some(Modal::Settings { shell, claude, model, effort, permission, updates, chrome, scale, trimmed, claudiu_off, list_focus });
+                    self.modal = Some(Modal::Settings { shell, claude, model, effort, permission, updates, chrome, scale, trimmed, claudiu_off, skills_field, costly, list_focus });
                     self.toast(msg, true, cx);
                     return;
                 }
@@ -141,20 +143,23 @@ impl Workspace {
                 // When that fails the old trims stay, so what the page shows is what Claude Code has.
                 let mut trim_error = None;
                 let mut trimmed = trimmed;
-                if s.trimmed_tools != trimmed {
+                let mut limits = limits.unwrap_or_default();
+                if s.trimmed_tools != trimmed || s.limits != limits {
                     let written = claude::claude_home()
                         .ok_or_else(|| std::io::Error::other("Claude Code's folder was not found"))
-                        .and_then(|home| claude::trim::write_global(&home.join("settings.json"), &trimmed, &s.applied_trims));
+                        .and_then(|home| claude::trim::write_global(&home.join("settings.json"), &trimmed, &limits, &s.applied_trims));
                     match written {
                         Ok(owned) => s.applied_trims = owned,
                         Err(e) => {
                             trim_error = Some(e);
                             trimmed = s.trimmed_tools.clone();
+                            limits = s.limits.clone();
                         }
                     }
                 }
-                let tools_changed = s.trimmed_tools != trimmed || s.claudiu_tools_off != claudiu_off;
+                let tools_changed = s.trimmed_tools != trimmed || s.limits != limits || s.claudiu_tools_off != claudiu_off;
                 s.trimmed_tools = trimmed;
+                s.limits = limits;
                 s.claudiu_tools_off = claudiu_off;
                 crate::panels::scale::set(scale);
                 self.shell = platform::default_shell(s.shell.as_deref());
