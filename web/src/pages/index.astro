@@ -151,32 +151,8 @@ const calls = [
             </section>
         </div>
 
-        <div class="win run">
-            <div class="tb"><span>Claudiu · running</span><span>Fig. 4 · under load</span></div>
-
-            <section class="cell r1" aria-labelledby="tr1">
-                <h2 id="tr1">Scrolling that keeps up.</h2>
-                <p>Wheel and trackpad glide in the terminal, sidebars and editor, and the editor no longer overshoots its ends.</p>
-
-            </section>
-
-            <section class="cell r2" aria-labelledby="tr2">
-                <h2 id="tr2">Quiet when nothing happens.</h2>
-                <p>The list draws only the rows in view, an idle window doesn't redraw, and saves happen in the background. On Windows, <code>claude</code> runs at above-normal priority.</p>
-
-            </section>
-
-            <section class="cell r3" aria-labelledby="tr3">
-                <h2 id="tr3">Settings, by category.</h2>
-                <p>Defaults for new sessions, 20 switches for Claude Code's bundled tools with what each saves, one for each Claudiu feature.</p>
-                <figure>
-                    <img class="shot" src="/claudiu-settings.png" width="720" height="480" alt="Claudiu's settings dialog on the Claude Code tools page, listing switches for bundled skills, workflows, remote control, claude.ai connectors, artifacts and plan mode" loading="lazy" />
-                </figure>
-            </section>
-        </div>
-
         <div class="win tok" id="tokens">
-            <div class="tb"><span>Claudiu · token optimization</span><span>Fig. 5 · measured on Claude Code 2.1.319</span></div>
+            <div class="tb"><span>Claudiu · token optimization</span><span>Fig. 4 · measured on Claude Code 2.1.319</span></div>
 
             <section class="cell t1" aria-labelledby="tt1">
                 <h2 id="tt1">Fewer tokens in every request.</h2>
@@ -205,11 +181,12 @@ const calls = [
 
             <section class="cell t2" aria-labelledby="tt2">
                 <h2 id="tt2">Measured on a real task.</h2>
-                <p>Two things the bars don't show.</p>
+                <p>What the smaller request adds up to.</p>
                 <figure>
                     <table class="spec wide">
                         <tbody>
-                            <tr><th scope="row">Whole run</th><td>1.7% fewer input tokens than with a few trims, because the conversation is most of a long run</td></tr>
+                            <tr><th scope="row">Every request</th><td>21,300 fewer tokens, because Claude Code sends its tools and instructions again with every call</td></tr>
+                            <tr><th scope="row">A 14-call task</th><td>works out to about 300,000 fewer tokens, with the same 30 tests passing</td></tr>
                             <tr><th scope="row">Output caps</th><td>left empty, since capped runs took 32 and 40 tool calls instead of 13 and 14</td></tr>
                         </tbody>
                     </table>

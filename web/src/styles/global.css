@@ -454,10 +454,6 @@
 		grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
 		grid-template-areas: "tb tb" "e1 e1" "l1 a1";
 	}
-	.win.run {
-		grid-template-columns: minmax(0, 1fr) minmax(0, 1.5fr);
-		grid-template-areas: "tb tb" "r1 r3" "r2 r3";
-	}
 	.win.ed .l1 figure {
 		margin-top: 0;
 	}
@@ -474,9 +470,6 @@
 	.win .e1 { grid-area: e1; }
 	.win .l1 { grid-area: l1; }
 	.win .a1 { grid-area: a1; }
-	.win .r1 { grid-area: r1; }
-	.win .r2 { grid-area: r2; }
-	.win .r3 { grid-area: r3; }
 	.win .sp {
 		grid-area: sp;
 		display: grid;
@@ -502,10 +495,6 @@
 		.win.ed {
 			grid-template-columns: minmax(0, 1fr);
 			grid-template-areas: "tb" "e1" "l1" "a1";
-		}
-		.win.run {
-			grid-template-columns: minmax(0, 1fr);
-			grid-template-areas: "tb" "r1" "r2" "r3";
 		}
 		.win.tok {
 			grid-template-columns: minmax(0, 1fr);
