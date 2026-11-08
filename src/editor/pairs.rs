@@ -82,7 +82,7 @@ impl Editor {
 
     /// Whether `p` is inside a string or a comment, as the last colouring found. A comment runs to its line's end, so
     /// the end of it counts; a string's closing quote ends it.
-    fn syntax_at(&self, p: Pos) -> Syntax {
+    pub(super) fn syntax_at(&self, p: Pos) -> Syntax {
         let Some(spans) = self.spans.get(p.line) else { return Syntax::Code };
         spans
             .iter()

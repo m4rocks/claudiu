@@ -100,6 +100,10 @@ impl Editor {
                     self.each_cursor(Self::indent_lines);
                     true
                 }
+                ("enter", false) => {
+                    self.each_cursor(Self::newline);
+                    true
+                }
                 ("[", false) => {
                     self.each_cursor(Self::outdent);
                     true
@@ -121,6 +125,7 @@ impl Editor {
                 self.select(Selection::caret(self.sel.head));
                 true
             }
+            // Shift+Enter too, as in gpui-kit; Primary+Enter is below.
             "enter" if !m.control && !m.platform && !m.alt => {
                 self.each_cursor(Self::newline);
                 true
@@ -294,28 +299,30 @@ impl Editor {
         }
     }
 
-    /// Enter keeps the line's indentation, and adds a level after an opening bracket (putting a closing one that
-    /// follows the caret on its own line).
+    /// Enter, by gpui-kit's default rules as main's editor had them: the new line takes the line's leading whitespace,
+    /// and a level more when the text before the caret ends with `(`, `[` or `{` outside a string or a comment. With the
+    /// caret right between such a bracket and its closer, the closer goes onto a line of its own.
     pub(super) fn newline(&mut self) {
         let (a, b) = self.sel.range();
         let line = self.buffer.line(a.line);
-        let indent = &line[..self.buffer.indent_end(a.line).min(a.col)];
-        let before = line[..a.col].trim_end().chars().last();
-        let after = self.buffer.line(b.line)[b.col..].chars().next();
-        let opens = matches!(before, Some('{' | '(' | '['));
-        let unit = if indent.starts_with('\t') { "\t".to_string() } else { " ".repeat(self.indent_unit) };
-        let text = match (opens, after) {
-            (true, Some('}' | ')' | ']')) => {
-                let inner = format!("\n{indent}{unit}");
-                let text = format!("{inner}\n{indent}");
-                self.replace(a, b, &text, false);
-                let caret = Pos::new(a.line + 1, inner.len() - 1);
-                self.sel = Selection::caret(caret);
-                return;
-            }
-            (true, _) => format!("\n{indent}{unit}"),
-            _ => format!("\n{indent}"),
+        let indent = &line[..self.buffer.indent_end(a.line)];
+        let code = self.syntax_at(a) == super::Syntax::Code;
+        let opens = code && matches!(line[..a.col].trim_end().chars().last(), Some('{' | '(' | '['));
+        let pair = |o: char| match o {
+            '(' => ')',
+            '[' => ']',
+            _ => '}',
         };
+        let split = code && self.sel.is_empty() && line[..a.col].chars().last().is_some_and(|o| matches!(o, '{' | '(' | '[') && line[a.col..].starts_with(pair(o)));
+        let unit = if indent.starts_with('\t') { "\t".to_string() } else { " ".repeat(self.indent_unit) };
+        if split {
+            let inner = format!("\n{indent}{unit}");
+            let text = format!("{inner}\n{indent}");
+            self.replace(a, b, &text, false);
+            self.sel = Selection::caret(Pos::new(a.line + 1, inner.len() - 1));
+            return;
+        }
+        let text = if opens { format!("\n{indent}{unit}") } else { format!("\n{indent}") };
         self.replace(a, b, &text, false);
     }
 
@@ -470,6 +477,16 @@ mod tests {
         let mut e = editor("  a", 0, 3);
         e.newline();
         assert_eq!(e.buffer.text(), "  a\n  ");
+        let mut e = editor("f( )", 0, 3);
+        e.newline();
+        assert_eq!(e.buffer.text(), "f( \n  )", "a space between the brackets: a level more, the closer stays");
+        let mut e = editor("    ab", 0, 2);
+        e.newline();
+        assert_eq!(e.buffer.text(), "  \n      ab", "the new line takes the line's whole indent, even mid-indent, as gpui-kit's");
+        let mut e = editor("// see (", 0, 8);
+        e.spans = vec![vec![crate::editor::Span { bytes: 0..8, color: rune::Color::WHITE, syntax: crate::editor::Syntax::Comment }]];
+        e.newline();
+        assert_eq!(e.buffer.text(), "// see (\n", "a bracket in a comment opens nothing");
     }
 
     #[test]
