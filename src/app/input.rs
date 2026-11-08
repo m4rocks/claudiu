@@ -146,6 +146,7 @@ impl Workspace {
         for (owner, p) in &mut self.shells {
             changed |= pump(&mut p.view, p.open && showing.as_ref() == Some(owner));
         }
+        self.update_picker();
         let (edited, animating) = self.poll_editors();
         changed |= edited;
         if animating {

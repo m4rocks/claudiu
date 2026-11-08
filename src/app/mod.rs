@@ -1,7 +1,7 @@
 //! Workspace: the app's state, the `Act` table that menus, shortcuts and clicks all go through, and `new`. The methods
 //! are split by topic: `sessions` (start, show, close), `background` (timers and polls), `layout` (panels),
 //! `modal` (toasts, menus, modals), `repo` (git), `github_pane`, `alt_accounts`, `commands` (shortcuts and the menu
-//! bar), `input` (where keys and frames go), `editor_mode` with `editing` and `navigation` (files and an editor beside
+//! bar), `input` (where keys and frames go), `editor_mode` with `editing`, `navigation` and `picker` (files and an editor beside
 //! the terminal). Rendering lives in `panels/`.
 
 use std::collections::{HashMap, HashSet};
@@ -47,6 +47,7 @@ mod lifecycle;
 mod links;
 mod modal;
 mod navigation;
+pub mod picker;
 mod repo;
 pub mod rt;
 mod send;

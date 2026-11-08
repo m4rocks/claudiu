@@ -45,6 +45,7 @@ const CHORDS: &[(&str, Command)] = &[
 /// to Claude Code (Ctrl+P, Ctrl+G) or the terminal.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PaneCommand {
+    QuickOpen,
     SaveFile,
     GoToLine,
     CloseTab,
@@ -53,6 +54,7 @@ pub enum PaneCommand {
 }
 
 const PANE_CHORDS: &[(&str, PaneCommand)] = &[
+    ("secondary-p", PaneCommand::QuickOpen),
     ("secondary-s", PaneCommand::SaveFile),
     ("ctrl-g", PaneCommand::GoToLine),
     ("secondary-w", PaneCommand::CloseTab),
@@ -224,6 +226,11 @@ impl Workspace {
             Command::ToggleSidebar => self.toggle_left(),
             Command::ToggleRight => self.toggle_right(),
             Command::FocusSearch => {
+                // In editor mode the search that fits is the session's files.
+                if self.editing() {
+                    self.open_picker(super::picker::PickerKind::Text);
+                    return;
+                }
                 self.store.data.layout.sidebar_visible = true;
                 self.store.mark_dirty();
                 self.search.focused = true;
@@ -247,6 +254,7 @@ impl Workspace {
 
     pub fn pane_command(&mut self, c: PaneCommand) {
         match c {
+            PaneCommand::QuickOpen => self.open_picker(super::picker::PickerKind::Files),
             PaneCommand::SaveFile => self.save_shown(),
             PaneCommand::GoToLine => self.ask_go_to_line(),
             PaneCommand::CloseTab => self.close_shown_tab(),

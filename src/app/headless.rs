@@ -963,6 +963,51 @@ fn editor_mode_lists_opens_edits_and_saves_files() {
     assert!(!h.ws().panes.contains_key(&id), "closing the session drops its pane");
 }
 
+/// Quick open finds a file by its letters and opens it; find in files finds a line and opens the file there.
+#[test]
+fn quick_open_and_find_in_files_open_what_they_find() {
+    let mut h = Harness::new(|_| vec![]);
+    let cwd = h.work.join("project");
+    std::fs::create_dir_all(cwd.join("src")).unwrap();
+    std::fs::write(cwd.join("notes.md"), "# Notes\n").unwrap();
+    std::fs::write(cwd.join("src/code.rs"), "fn a() {}\nfn needle() {}\n").unwrap();
+    h.step(|ws| ws.new_claude(cwd.clone()));
+    let id = h.ws().active.clone().unwrap();
+    h.step(|ws| ws.toggle_editor());
+    h.wait("listing the folder", |ws| ws.panes[&id].files.len() == 2);
+    let picker = |h: &Harness| h.editor_pane(&id).picker.as_ref().map(|p| (p.kind, p.hits.iter().map(|hit| (hit.text.clone(), hit.line)).collect::<Vec<_>>()));
+
+    h.press(rune::Key::Command('p'), secondary);
+    h.settle();
+    assert!(h.drawn("picker") && h.drawn("picker-field"), "quick open is drawn: {:?}", h.keys());
+    h.type_text("notmd");
+    h.pump();
+    assert_eq!(picker(&h), Some((picker::PickerKind::Files, vec![("notes.md".to_string(), 0)])));
+    h.press(rune::Key::Enter, |_| {});
+    h.wait("opening the picked file", |ws| ws.panes[&id].shown().is_some_and(|t| t.path.ends_with("notes.md")));
+    assert!(picker(&h).is_none(), "choosing closes the picker");
+
+    h.press(rune::Key::Command('f'), |m| {
+        secondary(m);
+        m.shift = true;
+    });
+    assert_eq!(picker(&h).map(|p| p.0), Some(picker::PickerKind::Text), "the search shortcut finds in files in editor mode");
+    h.type_text("NEEDLE");
+    h.wait("find in files", |ws| ws.panes[&id].picker.as_ref().is_some_and(|p| !p.hits.is_empty()));
+    assert_eq!(picker(&h).unwrap().1, [("fn needle() {}".to_string(), 1)]);
+    h.settle();
+    assert!(h.drawn("picked-0"));
+    h.press(rune::Key::Enter, |_| {});
+    h.wait("opening the found file", |ws| ws.panes[&id].shown().is_some_and(|t| t.path.ends_with("code.rs")));
+    assert_eq!(h.shown_tab(&id).unwrap().editor.caret().line, 1, "the caret is on the found line");
+
+    // Escape closes it and gives the editor back the keyboard.
+    h.press(rune::Key::Command('p'), secondary);
+    h.press(rune::Key::Escape, |_| {});
+    assert!(picker(&h).is_none());
+    assert_eq!(h.ws().keys_to.as_deref(), Some(h.shown_tab(&id).unwrap().editor.key.as_str()));
+}
+
 /// A file at the editor's line limit opens and types without stalling, draws only the lines on screen, and a wheel
 /// notch eases the text down and stops at the end.
 #[test]

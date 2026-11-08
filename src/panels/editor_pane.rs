@@ -4,9 +4,10 @@
 use std::borrow::Cow;
 
 use rune::tok::motion;
-use rune::{Color, Cursor, El, GrowthSpec, PointerButton, ScrollSpec, Transition, Tx, col, el, row, text};
+use rune::{Color, Cursor, El, GrowthSpec, PointerButton, ScrollSpec, Transition, Tx, col, el, row, text, text_input};
 
 use crate::app::editor_mode::{TreeRow, relative, tree_key};
+use crate::app::picker::{Picker, PickerKind};
 use crate::app::{Conflict, EditorPane, Workspace};
 use crate::files::Change;
 use crate::panels::icons;
@@ -27,7 +28,7 @@ impl Workspace {
         let body = match pane.shown() {
             Some(tab) if tab.note.is_some() => centered(tab.note.clone().unwrap_or_default()),
             Some(tab) => {
-                let focused = self.keys_to.as_deref() == Some(tab.editor.key.as_str()) && self.modal.is_none() && !self.search.focused;
+                let focused = self.keys_to.as_deref() == Some(tab.editor.key.as_str()) && self.modal.is_none() && !self.search.focused && pane.picker.is_none();
                 let mut body = col().key(format!("editor-{}", tab.editor.key)).w_full().grow(1.0).shrink().min_h(0.0).transition(Transition::opacity());
                 if let Some(c) = tab.conflict {
                     body = body.child(conflict_bar(id, &tab.path, c));
@@ -36,7 +37,10 @@ impl Workspace {
             }
             None => centered(format!("Pick a file on the left, or press {}.", crate::panels::widgets::shortcut("P"))),
         };
-        let right = col().key("editor-right").grow(1.0).shrink().min_w(0.0).h_full().child(self.render_tabs(id, pane)).child(body);
+        let mut right = col().key("editor-right").grow(1.0).shrink().min_w(0.0).h_full().child(self.render_tabs(id, pane)).child(body);
+        if let Some(p) = &pane.picker {
+            right = right.child(render_picker(p, &pane.root));
+        }
         Some(
             row()
                 .key("editor-pane")
@@ -246,6 +250,86 @@ fn conflict_bar(id: &Id, path: &std::path::Path, conflict: Conflict) -> El {
         .transition(Transition::opacity().combined(Transition::offset(0.0, -6.0)))
         .child(label(message, 12.0, theme::WARN).shrink())
         .child(buttons)
+}
+
+/// Rows the picker shows at once; Up and Down scroll the rest into them.
+const PICKER_ROWS: usize = 12;
+
+/// The quick open / find in files box, floating near the top of the editor: a field over a list. Up and Down move,
+/// Enter opens, Escape closes.
+fn render_picker(p: &Picker, root: &std::path::Path) -> El {
+    let placeholder = match p.kind {
+        PickerKind::Files => "Go to file",
+        PickerKind::Text => "Find in files",
+    };
+    let field = text_input(&p.input, font(13.0, 400.0))
+        .key("picker-field")
+        .single_line()
+        .placeholder(placeholder, rgb(theme::TEXT_FAINT))
+        .color(rgb(theme::TEXT))
+        .caret(rgb(theme::ACCENT), rgb(theme::SELECTION))
+        .w_full()
+        .on_edit(|ws: &mut Workspace| match ws.active_id().cloned().and_then(|id| ws.panes.get_mut(&id)).and_then(|p| p.picker.as_mut()) {
+            Some(p) => &mut p.input,
+            // The picker closed between frames; a scratch field takes the edit.
+            None => &mut ws.search,
+        })
+        .on_submit(|ws: &mut Workspace, tx: &mut Tx| {
+            ws.choose_picked();
+            ws.after_input(tx);
+        })
+        .on_input_key(|ws: &mut Workspace, k: &rune::KeyEvent, tx: &mut Tx| {
+            let used = ws.picker_key(&k.key);
+            ws.after_input(tx);
+            used
+        });
+    let mut list = col().key("picker-list").w_full().gap(1.0);
+    let start = p.selected.saturating_sub(PICKER_ROWS - 1);
+    for (i, hit) in p.hits.iter().enumerate().skip(start).take(PICKER_ROWS) {
+        let (title, detail) = match p.kind {
+            PickerKind::Files => (hit.text.clone(), None),
+            PickerKind::Text => (format!("{}:{}", relative(&hit.path, root), hit.line + 1), Some(hit.text.clone())),
+        };
+        let mut r = col()
+            .key(format!("picked-{i}"))
+            .w_full()
+            .px(10.0)
+            .py(4.0)
+            .radius(5.0)
+            .cursor(Cursor::Pointer)
+            .role("option")
+            .hover(Color::WHITE.alpha(0.04))
+            .child(label(title, 12.5, theme::TEXT).truncate());
+        if i == p.selected {
+            r = r.fill(rgb(theme::ROW_ACTIVE));
+        }
+        if let Some(d) = detail {
+            r = r.child(label(d, 11.5, theme::TEXT_DIM).truncate());
+        }
+        list = list.child(r.on_press_tx(move |ws: &mut Workspace, tx: &mut Tx| {
+            ws.pick(i);
+            ws.choose_picked();
+            ws.after_input(tx);
+        }));
+    }
+    let empty = p.hits.is_empty() && !p.input.text.is_empty();
+    if empty {
+        list = list.child(label("Nothing found", 12.0, theme::TEXT_FAINT).px(10.0).py(4.0));
+    }
+    let card = col()
+        .key("picker")
+        .w(560.0)
+        .shrink()
+        .padding(6.0)
+        .gap(4.0)
+        .radius(8.0)
+        .fill(rgb(0x181818))
+        .border(1.0, rgb(0x2c2c2c))
+        .shadow(10.0, 32.0, Color::BLACK.alpha(0.5))
+        .transition(Transition::scale(0.97).combined(Transition::opacity()))
+        .child(row().key("picker-box").h(30.0).w_full().px(8.0).center_y().radius(6.0).fill(rgb(0x111113)).border(1.0, rgb(0x3a3a40)).child(field))
+        .child(list);
+    row().key("picker-slot").pin(Some(0.0), Some(TABS_H + 4.0), Some(0.0), None).justify_center().px(12.0).child(card)
 }
 
 /// Source code, prose, or anything else.

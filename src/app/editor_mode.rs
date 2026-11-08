@@ -59,6 +59,8 @@ pub struct EditorPane {
     pub recent: Vec<PathBuf>,
     /// Folders the user opened, kept open across refreshes.
     pub expanded: HashSet<PathBuf>,
+    /// Quick open or find in files, while it is up.
+    pub picker: Option<super::picker::Picker>,
     /// A listing is on its way. A refresh asked for meanwhile sets `relist`, because the walk under way may have
     /// passed the change already.
     pub listing: bool,
@@ -178,6 +180,7 @@ impl Workspace {
             forward: vec![],
             recent: vec![],
             expanded: HashSet::new(),
+            picker: None,
             listing: false,
             relist: false,
             watcher: None,
