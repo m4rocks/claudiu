@@ -1041,6 +1041,13 @@ fn a_long_file_opens_draws_only_what_shows_and_scrolls() {
     }
     let per_key = t.elapsed() / 20;
     assert!(per_key < Duration::from_millis(100), "a keystroke in a long file took {per_key:?}");
+    let t = Instant::now();
+    for _ in 0..20 {
+        h.press(rune::Key::Down, |m| m.alt = true);
+    }
+    let per_move = t.elapsed() / 20;
+    assert!(per_move < Duration::from_millis(100), "moving a line in a long file took {per_move:?}");
+    assert_eq!(h.shown_tab(&id).unwrap().editor.caret().line, 20, "the line moved down twenty times");
 
     let (x, y) = h.rt.find(&key).expect("the editor is drawn");
     h.rt.pointer_move(x, y);
@@ -1080,8 +1087,13 @@ fn fake_language_server(root: &Path, heard: std::sync::Arc<Mutex<Vec<(String, St
                 "textDocument/hover" => json!({"contents": {"kind": "markdown", "value": "```rust\nfn alpha()\n```"}}),
                 "textDocument/definition" => json!({"uri": uri, "range": range(0, 3, 8)}),
                 "textDocument/completion" => json!([{"label": "alpha", "textEdit": {"range": range(1, 21, 23), "newText": "alpha"}}, {"label": "other"}]),
-                "shutdown" => Value::Null,
-                "exit" => return,
+                "shutdown" | "exit" => {
+                    heard.lock().unwrap().push((method.clone(), String::new()));
+                    if method == "exit" {
+                        return;
+                    }
+                    Value::Null
+                }
                 _ => {
                     let text = m["params"]["contentChanges"][0]["text"].as_str().or(m["params"]["textDocument"]["text"].as_str()).unwrap_or_default();
                     heard.lock().unwrap().push((method.clone(), text.to_string()));
@@ -1165,6 +1177,10 @@ fn a_language_server_checks_describes_completes_and_finds() {
     h.wait("the server hearing the save", heard_of("textDocument/didSave", ""));
     h.step(|ws| ws.close_tab(&id, 0));
     h.wait("the server hearing the close", heard_of("textDocument/didClose", ""));
+
+    // Ending the session ends its server.
+    h.step(|ws| ws.close_live(&id));
+    h.wait("the server told to exit", heard_of("exit", ""));
 }
 
 /// Right-clicking the editor opens its menu; asking Claude about the selected lines sends `@path#L..` and the request
