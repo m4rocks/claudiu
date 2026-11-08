@@ -147,6 +147,9 @@ pub struct Editor {
     /// When the caret last moved or the text changed, which starts its blink over; and whether it shows.
     blink_from: Instant,
     caret_on: bool,
+    /// Where an Alt+press was, as a row and a cell (past the end of a short row too): dragging from it selects a
+    /// block (`cursors`).
+    block_from: Option<(usize, usize)>,
     /// The press did its work already (folded a block, added a cursor), so dragging selects nothing.
     pub press_done: bool,
 }
@@ -191,6 +194,7 @@ impl Editor {
             row_end: false,
             gutter_hover: false,
             press_done: false,
+            block_from: None,
             blink_from: Instant::now(),
             caret_on: true,
         };
@@ -365,6 +369,13 @@ impl Editor {
     /// The text position under a point of the editor's area.
     pub fn pos_at(&self, x: f32, y: f32) -> Pos {
         self.pos_and_row_end_at(x, y).0
+    }
+
+    /// The row and cell under a point, counting cells past the end of the row's text.
+    fn row_cell_at(&self, x: f32, y: f32) -> (usize, usize) {
+        let m = self.metrics();
+        let row = (((y + self.scroll[1]) / m.line_h).floor().max(0.0) as usize).min(self.row_count() - 1);
+        (row, ((x - self.gutter_w() + self.scroll[0]) / m.cell_w).round().max(0.0) as usize)
     }
 
     /// The text position under a point, and whether it is the end of a row that wraps (`at_row_cell`).

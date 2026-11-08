@@ -3,6 +3,8 @@
 //! below each. Typing, deleting, Enter, Tab and every caret move then act at each cursor, as one undo step that restores
 //! them all. Escape, a plain click or any jump (go to line, a search step) leaves only the main cursor, the first one.
 //!
+//! Alt+Shift+drag selects a block, one selection per row; so does dragging on after an Alt+click.
+//!
 //! An edit runs once per cursor, from the last in the text to the first, through the same code as a single cursor;
 //! `replace` moves the cursors not being edited along with the text.
 
@@ -135,6 +137,41 @@ impl Editor {
     /// The carets of the cursors besides the main one, and whether each shows at the end of the row above a wrap.
     pub(super) fn other_heads(&self) -> impl Iterator<Item = (Pos, bool)> + '_ {
         self.others.iter().map(|c| (c.sel.head, c.row_end))
+    }
+
+    /// Alt+Shift+press (Ctrl+Alt also on Linux): the caret goes there, and dragging selects a block from there
+    /// (`drag_block`).
+    pub fn start_block(&mut self, x: f32, y: f32) {
+        let p = self.pos_at(x, y);
+        self.select(Selection::caret(p));
+        self.block_from = Some(self.row_cell_at(x, y));
+    }
+
+    /// Alt+click: dragging on from here selects a block.
+    pub fn start_block_here(&mut self, x: f32, y: f32) {
+        self.block_from = Some(self.row_cell_at(x, y));
+    }
+
+    /// Dragging after an Alt+press: one selection per row from the press to the pointer, over the same cells, as
+    /// gpui-kit's `build_columnar_selection`. Cells past a short row's end still count, so the block keeps its width;
+    /// each row selects what it has of it.
+    pub fn drag_block(&mut self, x: f32, y: f32) {
+        let Some((row0, cell0)) = self.block_from else { return };
+        let (row1, cell1) = self.row_cell_at(x, y);
+        // A press that hasn't moved yet keeps the cursor an Alt+click added.
+        if (row1, cell1) == (row0, cell0) {
+            return;
+        }
+        let (top, bottom) = (row0.min(row1), row0.max(row1));
+        let (left, right) = (cell0.min(cell1), cell0.max(cell1));
+        let rows: Vec<Selection> = (top..=bottom)
+            .map(|row| Selection { anchor: self.at_row_cell(row, left).0, head: self.at_row_cell(row, right).0 })
+            .collect();
+        self.buffer.break_typing();
+        self.set_cursors(&rows);
+        self.goal = None;
+        self.wake_caret();
+        self.dirty = true;
     }
 
     /// Escape with several cursors: only the main one stays. Whether there were others.
@@ -340,6 +377,22 @@ mod tests {
         e.set_cursors(&[Selection::caret(Pos::new(1, 0)), Selection::caret(Pos::new(0, 1))]);
         type_text(&mut e, "!");
         assert_eq!(e.sel, Selection::caret(Pos::new(1, 1)), "the main cursor stays the main one");
+    }
+
+    #[test]
+    fn a_block_selects_the_same_cells_on_every_row_and_what_a_short_row_has() {
+        let mut e = editor("|abcdef\nab\nabcdef");
+        e.area = [800.0, 400.0];
+        let (m, gutter) = (e.metrics(), e.gutter_w());
+        let at = |row: f32, cell: f32| (gutter + m.cell_w * cell, m.line_h * (row + 0.5));
+        let (x, y) = at(0.0, 1.0);
+        e.start_block(x, y);
+        let (x, y) = at(2.0, 4.0);
+        e.drag_block(x, y);
+        let texts: Vec<String> = e.cursors().iter().map(|s| e.buffer.slice(s.range().0, s.range().1)).collect();
+        assert_eq!(texts, ["bcd", "b", "bcd"], "the short row selects what it has of the block");
+        e.each_cursor(|e| e.insert("X", true));
+        assert_eq!(e.buffer.text(), "aXef\naX\naXef");
     }
 
     #[test]

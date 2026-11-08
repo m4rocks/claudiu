@@ -329,19 +329,27 @@ fn handlers(root: El, key: String) -> El {
         let definition = if cfg!(target_os = "macos") { mods.logo && !mods.ctrl } else { mods.ctrl && !mods.logo };
         ws.focus_editor(&k2);
         if let Some(e) = ws.editor_mut(&k2) {
+            // Alt+Shift starts a block selection; Linux also takes Ctrl+Alt, as gpui-kit did.
+            let block = mods.alt && (mods.shift || (cfg!(target_os = "linux") && mods.ctrl));
             if d.phase == rune::Phase::Down {
                 e.press_done = false;
+                e.block_from = None;
                 if let Some(line) = e.fold_at(d.x, d.y) {
                     e.press_done = true;
                     e.toggle_fold(line);
-                } else if mods.alt && !mods.shift && !definition && d.clicks == 1 {
-                    // Alt+click adds a cursor, as in main's editor.
+                } else if block {
+                    e.press_done = true;
+                    e.start_block(d.x, d.y);
+                } else if mods.alt && !definition && d.clicks == 1 {
+                    // Alt+click adds a cursor, as in main's editor; dragging on from it selects a block.
                     e.press_done = true;
                     let p = e.pos_at(d.x, d.y);
                     e.add_cursor_at(p);
+                    e.start_block_here(d.x, d.y);
                 }
             }
             match d.phase {
+                rune::Phase::Move | rune::Phase::Up if e.press_done => e.drag_block(d.x, d.y),
                 _ if e.press_done => {}
                 rune::Phase::Down if definition => {
                     let p = e.pos_at(d.x, d.y);
