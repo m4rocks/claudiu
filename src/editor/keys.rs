@@ -246,7 +246,7 @@ impl Editor {
 
     /// Home, as in main's editor (gpui-kit's `start_of_line_at`): the start of the row the caret shows on, and from
     /// there the start of the line.
-    fn home(&self, p: Pos) -> Pos {
+    pub(super) fn home(&self, p: Pos) -> Pos {
         let start = self.row_bytes(p.line, self.shown_row(p)).start;
         Pos::new(p.line, if p.col == start { 0 } else { start })
     }

@@ -443,6 +443,70 @@ mod tests {
         }
     }
 
+    // The next five are tests main's vendored gpui-base added (vendor/gpui-base/src/input/base/state.rs on main).
+
+    #[test]
+    fn multi_cursor_escape_collapses() {
+        let mut e = editor("|a\n|b\n|c");
+        assert!(e.single_cursor());
+        assert_eq!(e.cursors().len(), 1);
+    }
+
+    #[test]
+    fn multi_cursor_paste_distributes_lines() {
+        let mut e = editor("|1\n|2\n|3");
+        e.paste_text("x\ny\nz");
+        assert_eq!(shown(&e), "x|1\ny|2\nz|3", "one clipboard line per cursor");
+    }
+
+    #[test]
+    fn multi_cursor_selection_commands() {
+        let mut e = editor("on|e two three\none t|wo three\non|e two three");
+        e.each_cursor(|e| {
+            let to = e.home(e.sel.head);
+            e.select(Selection { anchor: e.sel.anchor, head: to });
+        });
+        assert_eq!(shown(&e), "|one two three\n|one two three\n|one two three");
+        // Selecting to the start of the text, outside the per-cursor loop, leaves the main cursor only.
+        let mut e = editor("on|e two three\none t|wo three\non|e two three");
+        e.select(Selection { anchor: e.sel.anchor, head: Pos::default() });
+        assert_eq!(e.cursors().iter().map(|s| s.head).collect::<Vec<_>>(), [Pos::default()]);
+    }
+
+    #[test]
+    fn multi_cursor_replace_selection() {
+        let mut e = editor("|a\n|b\n|c");
+        e.each_cursor(|e| {
+            let to = e.next_visible(e.sel.head);
+            e.select(Selection { anchor: e.sel.anchor, head: to });
+        });
+        let ranges: Vec<(Pos, Pos)> = e.cursors().iter().map(|s| s.range()).collect();
+        assert_eq!(ranges, [(Pos::new(0, 0), Pos::new(0, 1)), (Pos::new(1, 0), Pos::new(1, 1)), (Pos::new(2, 0), Pos::new(2, 1))]);
+        type_text(&mut e, "x");
+        assert_eq!(shown(&e), "x|\nx|\nx|");
+    }
+
+    #[test]
+    fn alt_drag_selects_a_block_and_replaces_each_row() {
+        for shift in [false, true] {
+            let mut e = editor("|abcd\nabcd\nabcd");
+            e.area = [800.0, 400.0];
+            let (m, gutter) = (e.metrics(), e.gutter_w());
+            let at = |row: f32, cell: f32| (gutter + m.cell_w * cell, m.line_h * (row + 0.5));
+            let (x, y) = at(0.0, 1.0);
+            if shift {
+                e.start_block(x, y);
+            } else {
+                e.add_cursor_at(e.pos_at(x, y));
+                e.start_block_here(x, y);
+            }
+            let (x, y) = at(2.0, 3.0);
+            e.drag_block(x, y);
+            type_text(&mut e, "X");
+            assert_eq!(shown(&e), "aX|d\naX|d\naX|d", "shift {shift}");
+        }
+    }
+
     #[test]
     fn multi_cursor_word_movement() {
         let mut e = editor("on|e two three\none t|wo three\non|e two three");
