@@ -5,6 +5,7 @@
 
 pub mod assist;
 pub mod buffer;
+mod cursors;
 mod display;
 mod element;
 pub mod highlight;
@@ -83,7 +84,11 @@ enum Grain {
 
 pub struct Editor {
     pub buffer: Buffer,
+    /// The main cursor's selection; `others` holds the rest (`cursors`).
     pub sel: Selection,
+    others: Vec<cursors::Cursor>,
+    /// An edit is running at each cursor in turn (`each_cursor`), so selecting doesn't drop the others.
+    at_each: bool,
     /// Up and Down keep the caret in this column, so it comes back after a short line.
     goal: Option<usize>,
     /// Finds this editor again from its handlers.
@@ -142,8 +147,8 @@ pub struct Editor {
     /// When the caret last moved or the text changed, which starts its blink over; and whether it shows.
     blink_from: Instant,
     caret_on: bool,
-    /// The button went down on a fold chevron: the press folded or opened a block and selects nothing.
-    pub pressed_fold: bool,
+    /// The press did its work already (folded a block, added a cursor), so dragging selects nothing.
+    pub press_done: bool,
 }
 
 impl Editor {
@@ -151,6 +156,8 @@ impl Editor {
         let mut e = Self {
             buffer: Buffer::new(text),
             sel: Selection::default(),
+            others: vec![],
+            at_each: false,
             goal: None,
             key: key.into(),
             font_size: 13.0,
@@ -183,7 +190,7 @@ impl Editor {
             folds: vec![],
             row_end: false,
             gutter_hover: false,
-            pressed_fold: false,
+            press_done: false,
             blink_from: Instant::now(),
             caret_on: true,
         };
@@ -241,6 +248,9 @@ impl Editor {
     /// Show `sel`, ending a typing run and forgetting the Up/Down column.
     pub fn select(&mut self, sel: Selection) {
         self.sel = Selection { anchor: self.buffer.clamp(sel.anchor), head: self.buffer.clamp(sel.head) };
+        if !self.at_each {
+            self.others.clear();
+        }
         self.goal = None;
         self.row_end = false;
         self.wake_caret();
@@ -262,6 +272,7 @@ impl Editor {
         let (a, b) = if a <= b { (a, b) } else { (b, a) };
         let end = self.buffer.replace(a, b, text, self.sel, typing);
         self.relayout_edit(a.line, b.line, end.line);
+        self.move_cursors(a, b, end);
         move_colours(&mut self.spans, a, b, end);
         self.adjust_pairs(a, b, end);
         self.sel = Selection::caret(end);
@@ -284,18 +295,18 @@ impl Editor {
     pub fn undo(&mut self) {
         // History doesn't keep which closers were typed for the user.
         self.pairs.clear();
-        if let Some(sel) = self.buffer.undo() {
+        if let Some(cursors) = self.buffer.undo() {
             self.after_history();
-            self.sel = Selection { anchor: self.buffer.clamp(sel.anchor), head: self.buffer.clamp(sel.head) };
+            self.set_cursors(&cursors);
             self.after_edit();
         }
     }
 
     pub fn redo(&mut self) {
         self.pairs.clear();
-        if let Some(sel) = self.buffer.redo() {
+        if let Some(cursors) = self.buffer.redo() {
             self.after_history();
-            self.sel = Selection { anchor: self.buffer.clamp(sel.anchor), head: self.buffer.clamp(sel.head) };
+            self.set_cursors(&cursors);
             self.after_edit();
         }
     }
@@ -369,9 +380,11 @@ impl Editor {
     pub fn set_area(&mut self, w: f32, h: f32) {
         if self.area != [w, h] {
             self.area = [w, h];
-            if self.wrap_width_changed() {
-                self.relayout();
-            }
+            self.dirty = true;
+        }
+        // The gutter, and with it the text's width, also grows with the line count and the font's scale.
+        if self.wrap_width_changed() {
+            self.relayout();
             self.dirty = true;
         }
         self.center_caret();
@@ -535,6 +548,7 @@ impl Editor {
     }
 
     /// Whether the caret is in the on half of its blink.
+    #[cfg(test)]
     pub fn caret_shown(&self) -> bool {
         self.caret_on
     }
@@ -572,9 +586,21 @@ impl Editor {
     }
 
     /// Text from the clipboard, with a pasted file's `\r\n` line ends made `\n`.
+    /// With several cursors and as many lines as cursors, each cursor gets one line, in order (gpui-kit's rule);
+    /// otherwise each gets the whole text.
     pub fn paste_text(&mut self, text: &str) {
         let text = text.replace("\r\n", "\n").replace('\r', "\n");
-        self.insert(&text, false);
+        let lines: Vec<&str> = text.split('\n').collect();
+        let count = self.others.len() + 1;
+        if count > 1 && lines.len() == count {
+            // `each_cursor` goes from the last cursor in the text to the first.
+            let mut next = count;
+            return self.each_cursor(|e| {
+                next -= 1;
+                e.insert(lines[next], false);
+            });
+        }
+        self.each_cursor(|e| e.insert(&text, false));
     }
 }
 

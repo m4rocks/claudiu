@@ -149,8 +149,9 @@ impl Editor {
                 }
             }
         }
-        // Rows laid out for other text than this edit started from are wrapped whole.
-        if self.rows.breaks.len() + end != self.buffer.line_count() + b {
+        // Rows laid out for other text than this edit started from, or for another width (a line count with one more
+        // digit widens the gutter), are wrapped whole.
+        if self.rows.breaks.len() + end != self.buffer.line_count() + b || self.wrap_width_changed() {
             return self.relayout();
         }
         self.rows.rewrap(&self.buffer, a, b + 1, end + 1, &self.folds);
@@ -283,6 +284,14 @@ impl Editor {
         let text = self.buffer.line(p.line);
         let shift = if k == 0 { 0 } else { indent };
         columns(&text[..p.col.min(text.len())]) - columns(&text[..start]) + shift
+    }
+
+    /// Where the cursors besides the main one show: their row and cell.
+    pub(super) fn other_carets(&self) -> Vec<(usize, usize)> {
+        self.other_heads().map(|(p, row_end)| {
+            let k = self.row_in_line(p, row_end);
+            (self.line_row(p.line) + k, self.cell_in_row(p, k))
+        }).collect()
     }
 
     /// The cell `p` shows at on its row.

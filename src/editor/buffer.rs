@@ -46,12 +46,13 @@ struct Edit {
     inserted: String,
 }
 
-/// What one undo takes back: its edits in the order they were made, and the selection before and after them.
+/// What one undo takes back: its edits in the order they were made, and the cursors before and after them (the
+/// first is the main one; there are more after an edit at several cursors).
 #[derive(Clone, Debug)]
 struct Step {
     edits: Vec<Edit>,
-    before: Selection,
-    after: Selection,
+    before: Vec<Selection>,
+    after: Vec<Selection>,
     /// A run of typing grows this step while the user keeps typing (see `Buffer::replace`).
     typing: bool,
     at: Instant,
@@ -71,12 +72,20 @@ pub struct Buffer {
     /// The step id of the text when it was last loaded or saved (0 is the text as loaded).
     saved_id: u64,
     next_id: u64,
+    /// An edit at several cursors is under way (`begin_group`): its replacements make one step.
+    group: Option<Group>,
+}
+
+/// The cursors an edit at several cursors started from, and whether it has made its step yet.
+struct Group {
+    before: Vec<Selection>,
+    started: bool,
 }
 
 impl Buffer {
     /// `text` with `\n` line breaks (a file's `\r\n` is turned into `\n` before it gets here).
     pub fn new(text: &str) -> Self {
-        Self { lines: text.split('\n').map(str::to_string).collect(), undo: vec![], redo: vec![], version: 0, saved_id: 0, next_id: 1 }
+        Self { lines: text.split('\n').map(str::to_string).collect(), undo: vec![], redo: vec![], version: 0, saved_id: 0, next_id: 1, group: None }
     }
 
     fn current_id(&self) -> u64 {
@@ -172,15 +181,28 @@ impl Buffer {
         let removed = self.slice(a, b);
         let end = self.splice(a, b, text);
         let edit = Edit { at: a, removed, inserted: text.to_string() };
-        let after = Selection::caret(end);
+        let after = vec![Selection::caret(end)];
         self.redo.clear();
         let now = Instant::now();
         // A new line is a step of its own, neither joining the typing before it nor letting the next keystroke join it.
         let typing = typing && !text.contains('\n');
-        let joins = typing
-            && self.undo.last().is_some_and(|s| s.typing && s.after == before && before.is_empty() && now.duration_since(s.at) < TYPING_PAUSE);
+        // In a group, every replacement after the first goes into the step the first made or joined.
+        let in_group = self.group.as_ref().is_some_and(|g| g.started);
+        let before = match &mut self.group {
+            Some(g) => {
+                g.started = true;
+                g.before.clone()
+            }
+            None => vec![before],
+        };
+        let joins = in_group
+            || typing
+                && self.undo.last().is_some_and(|s| {
+                    s.typing && s.after == before && before.iter().all(Selection::is_empty) && now.duration_since(s.at) < TYPING_PAUSE
+                });
         match self.undo.last_mut() {
             Some(step) if joins => {
+                step.typing &= typing;
                 step.edits.push(edit);
                 step.after = after;
                 step.at = now;
@@ -194,6 +216,20 @@ impl Buffer {
         end
     }
 
+    /// Make the replacements until `end_group` one undo step, from the cursors `before` (the main one first).
+    pub fn begin_group(&mut self, before: Vec<Selection>) {
+        self.group = Some(Group { before, started: false });
+    }
+
+    /// The edit at several cursors is done and left them at `after`.
+    pub fn end_group(&mut self, after: Vec<Selection>) {
+        if self.group.take().is_some_and(|g| g.started)
+            && let Some(step) = self.undo.last_mut()
+        {
+            step.after = after;
+        }
+    }
+
     /// Ends the typing run, so the next keystroke starts a new undo step (the caret moved, or the file was saved).
     pub fn break_typing(&mut self) {
         if let Some(step) = self.undo.last_mut() {
@@ -201,26 +237,26 @@ impl Buffer {
         }
     }
 
-    /// Take back the last step; the selection to show, or `None` with nothing to undo.
-    pub fn undo(&mut self) -> Option<Selection> {
+    /// Take back the last step; the cursors to show, the main one first, or `None` with nothing to undo.
+    pub fn undo(&mut self) -> Option<Vec<Selection>> {
         let step = self.undo.pop()?;
         for e in step.edits.iter().rev() {
             let end = Self::end_of(e.at, &e.inserted);
             self.splice(e.at, end, &e.removed);
         }
-        let before = step.before;
+        let before = step.before.clone();
         self.redo.push(step);
         Some(before)
     }
 
-    pub fn redo(&mut self) -> Option<Selection> {
+    pub fn redo(&mut self) -> Option<Vec<Selection>> {
         let mut step = self.redo.pop()?;
         for e in &step.edits {
             let end = Self::end_of(e.at, &e.removed);
             self.splice(e.at, end, &e.inserted);
         }
         step.typing = false;
-        let after = step.after;
+        let after = step.after.clone();
         self.undo.push(step);
         Some(after)
     }
@@ -345,9 +381,9 @@ mod tests {
         let mut b = Buffer::new("hello\nworld");
         b.replace(Pos::new(0, 0), Pos::new(1, 0), "", caret(1, 0), false);
         assert_eq!(b.text(), "world");
-        assert_eq!(b.undo(), Some(caret(1, 0)));
+        assert_eq!(b.undo(), Some(vec![caret(1, 0)]));
         assert_eq!(b.text(), "hello\nworld");
-        assert_eq!(b.redo(), Some(caret(0, 0)));
+        assert_eq!(b.redo(), Some(vec![caret(0, 0)]));
         assert_eq!(b.text(), "world");
         assert!(b.redo().is_none(), "nothing more to redo");
     }

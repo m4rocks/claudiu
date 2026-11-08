@@ -52,11 +52,17 @@ impl Editor {
         }
         // Emacs keys that macOS text fields share: Ctrl+A and Ctrl+E go to the line's ends.
         if MAC && m.control && !m.platform && !m.alt && matches!(key, "a" | "e") {
-            let p = self.sel.head;
-            let (target, row_end) = if key == "a" { (self.home(p), false) } else { self.end(p) };
-            let anchor = if shift { self.sel.anchor } else { target };
-            self.select(Selection { anchor, head: target });
-            self.row_end = row_end;
+            self.each_cursor(|e| {
+                let p = e.sel.head;
+                let (target, row_end) = if key == "a" { (e.home(p), false) } else { e.end(p) };
+                let anchor = if shift { e.sel.anchor } else { target };
+                e.select(Selection { anchor, head: target });
+                e.row_end = row_end;
+            });
+            return true;
+        }
+        if let Some(rows) = add_cursor_key(&m, key) {
+            self.add_cursor_vertical(rows);
             return true;
         }
         if let Some(action) = line_action(&m, key) {
@@ -91,51 +97,69 @@ impl Editor {
                     true
                 }
                 ("]", false) => {
-                    self.indent_lines();
+                    self.each_cursor(Self::indent_lines);
                     true
                 }
                 ("[", false) => {
-                    self.outdent();
+                    self.each_cursor(Self::outdent);
                     true
                 }
                 ("z", true) | ("y", false) => {
                     self.redo();
                     true
                 }
-                ("left" | "right" | "up" | "down" | "home" | "end" | "backspace" | "delete", _) => self.motion_key(ks),
+                ("left" | "right" | "up" | "down" | "home" | "end" | "backspace" | "delete", _) => self.motion_at_each(ks),
                 _ => false,
             };
         }
-        if self.motion_key(ks) {
+        if self.motion_at_each(ks) {
             return true;
         }
         match key {
+            "escape" if self.single_cursor() => true,
             "escape" if !self.sel.is_empty() => {
                 self.select(Selection::caret(self.sel.head));
                 true
             }
             "enter" if !m.control && !m.platform && !m.alt => {
-                self.newline();
+                self.each_cursor(Self::newline);
                 true
             }
             "tab" if !m.control && !m.platform && !m.alt => {
-                if shift {
-                    self.outdent();
-                } else {
-                    self.tab();
-                }
+                self.each_cursor(if shift { Self::outdent } else { Self::tab });
                 true
             }
             _ => match typed(ks) {
                 Some(text) => {
-                    if !self.type_paired(&text) {
-                        self.insert(&text, true);
-                    }
+                    self.each_cursor(|e| {
+                        if !e.type_paired(&text) {
+                            e.insert(&text, true);
+                        }
+                    });
                     true
                 }
                 None => false,
             },
         }
+    }
+
+    /// A caret move or a deleting key at every cursor. Moves to the start or end of the whole text leave one cursor,
+    /// as in gpui-kit.
+    fn motion_at_each(&mut self, ks: &Keystroke) -> bool {
+        let key = ks.key.as_str();
+        if !matches!(key, "left" | "right" | "up" | "down" | "pageup" | "pagedown" | "home" | "end" | "backspace" | "delete") {
+            return false;
+        }
+        let m = ks.modifiers;
+        let to_end = MAC && m.platform && !m.control && !m.alt;
+        let doc = if MAC { to_end } else { m.control && !m.alt };
+        let whole_text = (to_end && matches!(key, "up" | "down")) || (doc && matches!(key, "home" | "end"));
+        if whole_text {
+            return self.motion_key(ks);
+        }
+        let mut used = false;
+        self.each_cursor(|e| used |= e.motion_key(ks));
+        used
     }
 
     /// Caret moves, selection, and the keys that delete.
@@ -233,7 +257,7 @@ impl Editor {
 
     /// Backspace: the selection, else the character (a run of indenting spaces back to the tab stop), the word or the
     /// line before the caret.
-    fn backspace(&mut self, by_word: bool, to_start: bool) {
+    pub(super) fn backspace(&mut self, by_word: bool, to_start: bool) {
         if !self.sel.is_empty() {
             return self.insert("", false);
         }
@@ -253,7 +277,7 @@ impl Editor {
         }
     }
 
-    fn delete_forward(&mut self, by_word: bool, to_end: bool) {
+    pub(super) fn delete_forward(&mut self, by_word: bool, to_end: bool) {
         if !self.sel.is_empty() {
             return self.insert("", false);
         }
@@ -272,7 +296,7 @@ impl Editor {
 
     /// Enter keeps the line's indentation, and adds a level after an opening bracket (putting a closing one that
     /// follows the caret on its own line).
-    fn newline(&mut self) {
+    pub(super) fn newline(&mut self) {
         let (a, b) = self.sel.range();
         let line = self.buffer.line(a.line);
         let indent = &line[..self.buffer.indent_end(a.line).min(a.col)];
@@ -296,7 +320,7 @@ impl Editor {
     }
 
     /// Tab: a level of indentation at the caret, or onto every line a selection touches.
-    fn tab(&mut self) {
+    pub(super) fn tab(&mut self) {
         if self.sel.is_empty() {
             return self.insert(&" ".repeat(self.indent_unit), false);
         }
@@ -305,7 +329,7 @@ impl Editor {
 
     /// A level of indentation onto every line the selection touches, or the caret's (Primary+], and Tab over a
     /// selection).
-    fn indent_lines(&mut self) {
+    pub(super) fn indent_lines(&mut self) {
         let (first, last) = self.touched_lines();
         let unit = " ".repeat(self.indent_unit);
         self.reindent(first, last, |line| Some(format!("{unit}{line}")));
@@ -313,7 +337,7 @@ impl Editor {
 
     /// Shift+Tab and Primary+[: a level of indentation off every line the selection touches, or the caret's. A line
     /// that doesn't start with a whole level keeps what it has.
-    fn outdent(&mut self) {
+    pub(super) fn outdent(&mut self) {
         let (first, last) = self.touched_lines();
         let unit = " ".repeat(self.indent_unit);
         self.reindent(first, last, |line| line.strip_prefix(unit.as_str()).map(str::to_string));
@@ -350,6 +374,20 @@ impl Editor {
 
     /// The text to copy: the selection, or with none the caret's whole line. With `cut`, that text goes too.
     pub fn take_for_clipboard(&mut self, cut: bool) -> String {
+        // With several cursors, what they select, one after another on lines of its own.
+        let mut selected: Vec<Selection> = self.cursors().into_iter().filter(|s| !s.is_empty()).collect();
+        if !self.others.is_empty() && !selected.is_empty() {
+            selected.sort_by_key(|s| s.range());
+            let text = selected.iter().map(|s| self.buffer.slice(s.range().0, s.range().1)).collect::<Vec<_>>().join("\n");
+            if cut {
+                self.each_cursor(|e| {
+                    if !e.sel.is_empty() {
+                        e.insert("", false);
+                    }
+                });
+            }
+            return text;
+        }
         let (a, b, text) = if self.sel.is_empty() {
             let line = self.sel.head.line;
             let sel = self.line_selection(line, line);
@@ -372,6 +410,17 @@ impl Editor {
             false => {}
         }
         text
+    }
+}
+
+/// The keys that add a cursor a row above (-1) or below (1) each, as gpui-kit bound them: Cmd+Alt+Up / Down on
+/// macOS and Ctrl+Alt elsewhere. Not on Linux, where gpui-kit used Shift+Alt, which main gave to duplicating lines.
+fn add_cursor_key(m: &Modifiers, key: &str) -> Option<isize> {
+    let held = if MAC { m.platform && m.alt && !m.control } else { cfg!(target_os = "windows") && m.control && m.alt && !m.platform };
+    match key {
+        "up" if held && !m.shift => Some(-1),
+        "down" if held && !m.shift => Some(1),
+        _ => None,
     }
 }
 

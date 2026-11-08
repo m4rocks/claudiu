@@ -1498,6 +1498,57 @@ fn a_long_line_wraps_and_a_block_folds_from_its_chevron() {
     assert!(h.drawn(&format!("{key}/l2")), "a second click shows them again");
 }
 
+/// Several cursors, as in main's editor: Alt+click adds one where it lands and the add-cursor key one below; typing
+/// goes in at each, one undo takes it all back, and Escape leaves only the first cursor.
+#[test]
+fn alt_click_and_the_add_cursor_key_type_at_several_cursors() {
+    use crate::editor::buffer::Pos;
+    let mut h = Harness::new(|_| vec![]);
+    let cwd = h.work.clone();
+    let file = cwd.join("many.txt");
+    std::fs::write(&file, "one\ntwo\nthree\nfour\n").unwrap();
+    h.step(|ws| ws.new_claude(cwd.clone()));
+    let id = h.ws().active.clone().unwrap();
+    h.step(|ws| ws.toggle_editor());
+    h.step(|ws| ws.open_file(&id, file.clone(), None));
+    h.wait("opening", |ws| ws.panes[&id].shown().is_some());
+    h.settle();
+    let key = h.shown_tab(&id).unwrap().editor.key.clone();
+    let (editor, _) = h.rt.presented(&key).unwrap();
+    let (row, _) = h.rt.presented(&format!("{key}/l2")).unwrap();
+    let e = &h.shown_tab(&id).unwrap().editor;
+    let y = row[1] + row[3] / 2.0;
+    let x = (0..2000).map(|x| x as f32).find(|&x| e.pos_at(x, y - editor[1]) == Pos::new(2, 0)).unwrap() + editor[0];
+    h.step(|ws| ws.focus_pane());
+    h.rt.pointer_move(x, y);
+    h.rt.physical_input(rune::PhysicalInput::Modifiers(rune::Mods { alt: true, ..Default::default() }));
+    h.rt.pointer_down(x, y);
+    h.rt.pointer_up(x, y);
+    h.pump();
+    h.rt.physical_input(rune::PhysicalInput::Modifiers(rune::Mods::default()));
+    h.pump();
+    let heads = |h: &Harness| h.shown_tab(&id).unwrap().editor.cursors().iter().map(|s| s.head).collect::<Vec<_>>();
+    assert_eq!(heads(&h), [Pos::new(0, 0), Pos::new(2, 0)], "the Alt+click added a cursor and kept the first");
+
+    let add_below = |m: &mut rune::Mods| {
+        m.alt = true;
+        if cfg!(target_os = "macos") { m.logo = true } else { m.ctrl = true }
+    };
+    if cfg!(any(target_os = "macos", target_os = "windows")) {
+        h.press(rune::Key::Down, add_below);
+        assert_eq!(heads(&h), [Pos::new(0, 0), Pos::new(2, 0), Pos::new(1, 0), Pos::new(3, 0)], "a cursor below each");
+    }
+    h.type_text("> ");
+    let text = h.shown_tab(&id).unwrap().editor.buffer.text();
+    let expected = if cfg!(any(target_os = "macos", target_os = "windows")) { "> one\n> two\n> three\n> four\n" } else { "> one\ntwo\n> three\nfour\n" };
+    assert_eq!(text, expected);
+
+    h.press(rune::Key::Text("z".into()), |m| if cfg!(target_os = "macos") { m.logo = true } else { m.ctrl = true });
+    assert_eq!(h.shown_tab(&id).unwrap().editor.buffer.text(), "one\ntwo\nthree\nfour\n", "one undo takes back every cursor's typing");
+    h.press(rune::Key::Escape, |_| {});
+    assert_eq!(heads(&h), [Pos::new(0, 0)], "Escape leaves the first cursor");
+}
+
 /// The caret blinks while the editor has the keyboard, as in main's editor: on while it moves, then off and on every
 /// half second. Once the keyboard is elsewhere it stays on and nothing wakes the app for it.
 #[test]

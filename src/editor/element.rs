@@ -5,6 +5,7 @@ use std::hash::{Hash, Hasher};
 
 use rune::{Color, Cursor, El, Family, TextStyle, el, text};
 
+use super::buffer::Pos;
 use super::{Editor, Mark, Span, columns};
 use crate::app::Workspace;
 use crate::panels::widgets::icon;
@@ -32,8 +33,8 @@ struct LinePaint {
     text: String,
     rows: Vec<Row>,
     spans: Vec<Span>,
-    /// The selected cells, when the selection touches this line (a trailing cell shows its line break).
-    selected: Option<(usize, usize)>,
+    /// The selected cells, for each selection touching this line (a trailing cell shows its line break).
+    selected: Vec<(usize, usize)>,
     /// Underlined problems: from and to cell, and whether it is an error.
     problems: Vec<(usize, usize, bool)>,
     /// Search matches: from and to cell, and whether it is the current one.
@@ -45,7 +46,7 @@ struct LinePaint {
 impl LinePaint {
     fn version(&self, m: Metrics) -> u64 {
         let mut h = std::collections::hash_map::DefaultHasher::new();
-        (m.cell_w.to_bits(), m.line_h.to_bits(), &self.text, &self.rows, self.selected, &self.problems, &self.found, &self.guides).hash(&mut h);
+        (m.cell_w.to_bits(), m.line_h.to_bits(), &self.text, &self.rows, &self.selected, &self.problems, &self.found, &self.guides).hash(&mut h);
         for s in &self.spans {
             (&s.bytes, s.color).hash(&mut h);
         }
@@ -82,7 +83,7 @@ impl LinePaint {
             }
             out.push(mark);
         }
-        if let Some((at, w)) = self.selected.and_then(|(a, b)| clip(a, b)) {
+        for (at, w) in self.selected.iter().filter_map(|&(a, b)| clip(a, b)) {
             out.push(el().absolute(at, 0.0).size(w, m.line_h).fill(theme::rgb(theme::SELECTION)));
         }
         // The text in runs of one colour, each placed at its cell so tabs and wide characters line up.
@@ -154,7 +155,7 @@ impl Editor {
         // A whole number of device pixels, so text and its backgrounds move together.
         let top = crate::panels::glide::snap(top_row as f32 * m.line_h - self.scroll[1], scale);
         let y_of = |row: usize| m.line_h * (row - top_row) as f32;
-        let (sel_a, sel_b) = self.sel.range();
+        let selections: Vec<(Pos, Pos)> = self.cursors().iter().filter(|s| !s.is_empty()).map(|s| s.range()).collect();
         let caret = self.sel.head;
         let caret_row = self.caret_row();
 
@@ -192,11 +193,15 @@ impl Editor {
                 }
             }
             let text_ = self.buffer.line(line);
-            let selected = (!self.sel.is_empty() && sel_a.line <= line && line <= sel_b.line).then(|| {
-                let a = if line == sel_a.line { columns(&text_[..sel_a.col]) } else { 0 };
-                let b = if line == sel_b.line { columns(&text_[..sel_b.col]) } else { columns(text_) + 1 };
-                (a, b)
-            });
+            let selected = selections
+                .iter()
+                .filter(|(a, b)| a.line <= line && line <= b.line)
+                .map(|(sel_a, sel_b)| {
+                    let a = if line == sel_a.line { columns(&text_[..sel_a.col]) } else { 0 };
+                    let b = if line == sel_b.line { columns(&text_[..sel_b.col]) } else { columns(text_) + 1 };
+                    (a, b)
+                })
+                .collect();
             let problems = self
                 .problems
                 .iter()
@@ -243,6 +248,12 @@ impl Editor {
                 );
             }
             // The bar stays laid out while it blinks off, so the input method keeps its place.
+            for (row, cell) in self.other_carets() {
+                if focused && self.caret_on && (top_row..last_row).contains(&row) {
+                    let x = (cell as f32 * m.cell_w - self.scroll[0]).round();
+                    body = body.child(el().absolute(x - super::CARET_W / 2.0, top + y_of(row)).size(super::CARET_W, m.line_h).fill(theme::rgb(theme::ACCENT)));
+                }
+            }
             let bar = el().absolute(x - super::CARET_W / 2.0, y).size(super::CARET_W, m.line_h);
             body = body.child(match focused {
                 true if self.caret_on => bar.fill(theme::rgb(theme::ACCENT)).ime_cursor(),
@@ -319,14 +330,19 @@ fn handlers(root: El, key: String) -> El {
         ws.focus_editor(&k2);
         if let Some(e) = ws.editor_mut(&k2) {
             if d.phase == rune::Phase::Down {
-                e.pressed_fold = false;
+                e.press_done = false;
                 if let Some(line) = e.fold_at(d.x, d.y) {
-                    e.pressed_fold = true;
+                    e.press_done = true;
                     e.toggle_fold(line);
+                } else if mods.alt && !mods.shift && !definition && d.clicks == 1 {
+                    // Alt+click adds a cursor, as in main's editor.
+                    e.press_done = true;
+                    let p = e.pos_at(d.x, d.y);
+                    e.add_cursor_at(p);
                 }
             }
             match d.phase {
-                _ if e.pressed_fold => {}
+                _ if e.press_done => {}
                 rune::Phase::Down if definition => {
                     let p = e.pos_at(d.x, d.y);
                     e.mouse_down(d.x, d.y, 1, false);
