@@ -25,7 +25,30 @@ impl Editor {
     pub fn on_key(&mut self, ks: &Keystroke, tx: &mut Tx) -> bool {
         let m = ks.modifiers;
         let key = ks.key.as_str();
+        let plain = !m.control && !m.platform && !m.alt && !m.shift;
+        self.hover = None;
+        if plain && self.completion_key(key) {
+            return true;
+        }
+        let used = self.key_inner(ks, tx);
+        // Typing on narrows the completion list; moving off the word closes it.
+        self.filter_completions();
+        used
+    }
+
+    fn key_inner(&mut self, ks: &Keystroke, tx: &mut Tx) -> bool {
+        let m = ks.modifiers;
+        let key = ks.key.as_str();
         let shift = m.shift;
+        // Ctrl+Space on every platform, as in VS Code: completions for the word at the caret.
+        if m.control && !m.alt && !m.platform && !shift && key == "space" {
+            self.requests.push(super::assist::Request::Complete(self.sel.head));
+            return true;
+        }
+        if key == "f12" && !m.control && !m.platform && !m.alt && !shift {
+            self.requests.push(super::assist::Request::Definition(self.sel.head));
+            return true;
+        }
         if primary(&m) && !m.alt {
             return match (key, shift) {
                 ("a", false) => {

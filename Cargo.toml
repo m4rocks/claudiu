@@ -15,6 +15,8 @@ futures = "0.3.34"
 # Editor mode's file tree follows its folder on disk.
 notify = "8.2.0"
 git2 = { version = "0.21.0", default-features = false }
+# The types editor mode's language servers (`lsp`) speak.
+lsp-types = "0.97.0"
 # The UI: views, layout, text, springs and the native window. Pre-release, so pinned to a commit of its `dev` branch.
 rune = { git = "https://github.com/anomalyco/rune", rev = "a7f276c3630f85a06a0230295da4d2bd172d8d3b", features = ["native-file-dialog"] }
 rune-kit = { git = "https://github.com/anomalyco/rune", rev = "a7f276c3630f85a06a0230295da4d2bd172d8d3b", features = ["markdown"] }

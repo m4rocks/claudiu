@@ -1,8 +1,9 @@
 //! The text editor editor mode shows files in: one `Editor` per open file. It draws only the lines on screen, each
 //! row memoized on what it shows, so a file of tens of thousands of lines types and scrolls like a short one.
 //! Children: `buffer` (the text and its undo history), `keys` (what a key does), `element` (drawing and the mouse),
-//! `highlight` (syntax colours).
+//! `highlight` (syntax colours), `assist` (what a language server adds: the hover card, completion, definitions).
 
+pub mod assist;
 pub mod buffer;
 mod element;
 pub mod highlight;
@@ -90,6 +91,13 @@ pub struct Editor {
     pub edited: bool,
     /// Work for the frame (the clipboard); taken after each handler.
     pub fx: Vec<crate::app::rt::Fx>,
+    /// What to ask the file's language server, taken after each handler (`assist`).
+    pub requests: Vec<assist::Request>,
+    /// The word under the pointer, and a count that tells one rest of the pointer from the next.
+    hover_word: Option<(Pos, Pos)>,
+    hover_serial: u64,
+    pub hover: Option<assist::HoverCard>,
+    pub completion: Option<assist::Completion>,
 }
 
 impl Editor {
@@ -115,6 +123,11 @@ impl Editor {
             dirty: true,
             edited: false,
             fx: vec![],
+            requests: vec![],
+            hover_word: None,
+            hover_serial: 0,
+            hover: None,
+            completion: None,
         }
     }
 
@@ -240,7 +253,7 @@ impl Editor {
     }
 
     /// Where the text starts, right of the gutter.
-    fn gutter_w(&self) -> f32 {
+    pub fn gutter_w(&self) -> f32 {
         let digits = self.buffer.line_count().to_string().len().max(3);
         (self.metrics().cell_w * digits as f32 + GUTTER_PAD * 2.0).round()
     }
@@ -257,7 +270,7 @@ impl Editor {
     }
 
     /// The text position under a point of the editor's area.
-    fn pos_at(&self, x: f32, y: f32) -> Pos {
+    pub fn pos_at(&self, x: f32, y: f32) -> Pos {
         let m = self.metrics();
         let line = ((y + self.scroll[1]) / m.line_h).floor().max(0.0) as usize;
         let line = line.min(self.buffer.line_count() - 1);
@@ -349,6 +362,8 @@ impl Editor {
     /// A press at `x`, `y`: the `clicks`th of a run selects a character, word or line; `extend` (Shift) keeps the anchor.
     pub fn mouse_down(&mut self, x: f32, y: f32, clicks: u32, extend: bool) {
         let p = self.pos_at(x, y);
+        self.completion = None;
+        self.hover = None;
         let anchor = if extend { self.sel.anchor } else { p };
         match clicks {
             2 => {

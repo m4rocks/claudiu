@@ -42,6 +42,7 @@ impl Workspace {
                 }
                 tab.dirty = tab.editor.buffer.is_dirty();
                 tab.conflict = None;
+                self.tell_server_saved(id, path);
                 self.refresh_marks();
             }
             (Ok(_), None) => {}
@@ -105,6 +106,7 @@ impl Workspace {
                         tab.editor.set_text(&text);
                         tab.editor.edited = false;
                         (tab.format, tab.stamp, tab.dirty, tab.conflict) = (format, Some(stamp), false, None);
+                        ws.sync_with_server(&id, &path, true);
                         ws.refresh_marks();
                     }
                     // Grew too large, stopped being text, or vanished: keep what is shown and let the user decide. The

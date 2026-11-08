@@ -1061,6 +1061,142 @@ fn a_long_file_opens_draws_only_what_shows_and_scrolls() {
     assert!(h.drawn(&format!("{key}/l{}", crate::files::MAX_LINES - 1)), "the end is on screen");
 }
 
+/// A stand-in language server on the other end of two pipes, for the file `main.rs` in `root`: it reports a problem
+/// when the file opens, describes `alpha`, says `alpha` is defined on the first line, offers `alpha` as a completion,
+/// and keeps the notifications it hears (method and text) in `heard`.
+fn fake_language_server(root: &Path, heard: std::sync::Arc<Mutex<Vec<(String, String)>>>) -> (crate::lsp::Server, futures::channel::mpsc::UnboundedReceiver<crate::lsp::Event>) {
+    use crate::lsp::rpc;
+    use serde_json::{Value, json};
+    let (server_in, client_out) = std::io::pipe().unwrap();
+    let (client_in, mut server_out) = std::io::pipe().unwrap();
+    let uri = crate::lsp::uri(&root.join("main.rs")).unwrap().as_str().to_string();
+    let range = |line: u32, from: u32, to: u32| json!({"start": {"line": line, "character": from}, "end": {"line": line, "character": to}});
+    std::thread::spawn(move || {
+        let mut input = std::io::BufReader::new(server_in);
+        while let Ok(Some(m)) = rpc::read_message(&mut input) {
+            let method = m["method"].as_str().unwrap_or_default().to_string();
+            let result = match method.as_str() {
+                "initialize" => json!({"capabilities": {}}),
+                "textDocument/hover" => json!({"contents": {"kind": "markdown", "value": "```rust\nfn alpha()\n```"}}),
+                "textDocument/definition" => json!({"uri": uri, "range": range(0, 3, 8)}),
+                "textDocument/completion" => json!([{"label": "alpha", "textEdit": {"range": range(1, 21, 23), "newText": "alpha"}}, {"label": "other"}]),
+                "shutdown" => Value::Null,
+                "exit" => return,
+                _ => {
+                    let text = m["params"]["contentChanges"][0]["text"].as_str().or(m["params"]["textDocument"]["text"].as_str()).unwrap_or_default();
+                    heard.lock().unwrap().push((method.clone(), text.to_string()));
+                    if method == "textDocument/didOpen" {
+                        let d = json!({"uri": uri, "diagnostics": [{"range": range(1, 21, 23), "message": "cannot find `al`", "severity": 1}]});
+                        rpc::write_message(&mut server_out, &json!({"jsonrpc": "2.0", "method": "textDocument/publishDiagnostics", "params": d})).unwrap();
+                    }
+                    continue;
+                }
+            };
+            rpc::write_message(&mut server_out, &json!({"jsonrpc": "2.0", "id": m["id"], "result": result})).unwrap();
+        }
+    });
+    let (events, incoming) = futures::channel::mpsc::unbounded();
+    let server = crate::lsp::Server::connect(client_in, client_out, None::<std::io::Empty>, root, false, events).unwrap();
+    (server, incoming)
+}
+
+/// A file's language server underlines its problems, describes what the pointer rests on, completes the word at the
+/// caret, finds definitions, and hears every edit, save and close.
+#[test]
+fn a_language_server_checks_describes_completes_and_finds() {
+    use crate::editor::buffer::{Pos, Selection};
+    let mut h = Harness::new(|_| vec![]);
+    let cwd = h.work.clone();
+    let main = cwd.join("main.rs");
+    std::fs::write(&main, "fn alpha() {}\nfn main() { alpha(); al }\n").unwrap();
+    h.step(|ws| ws.new_claude(cwd.clone()));
+    let id = h.ws().active.clone().unwrap();
+    h.step(|ws| ws.toggle_editor());
+    let heard = std::sync::Arc::new(Mutex::new(vec![]));
+    let (server, incoming) = fake_language_server(&cwd, heard.clone());
+    h.step(|ws| {
+        language_servers::forward_events(ws.rt.mailbox(), id.clone(), "rust-analyzer", incoming);
+        ws.on_server_started(&id, crate::lsp::kind_for("rust").unwrap(), Ok(server));
+    });
+    h.step(|ws| ws.open_file(&id, main.clone(), None));
+    h.wait("the server's problem", |ws| ws.panes[&id].shown().is_some_and(|t| !t.editor.problems.is_empty()));
+    let problem = &h.shown_tab(&id).unwrap().editor.problems[0];
+    assert_eq!((problem.from, problem.to, problem.error), (Pos::new(1, 21), Pos::new(1, 23), true), "the problem underlines `al`");
+    let opened: Vec<String> = heard.lock().unwrap().iter().filter(|(m, _)| m == "textDocument/didOpen").map(|(_, t)| t.clone()).collect();
+    assert_eq!(opened, ["fn alpha() {}\nfn main() { alpha(); al }\n"], "the server got the file's text once");
+    h.settle();
+    assert_eq!(h.ws().server_status(&id).as_deref(), Some("rust-analyzer"));
+    assert!(h.drawn("server-status"));
+
+    // Resting the pointer on `alpha` shows what the server says about it.
+    let key = h.shown_tab(&id).unwrap().editor.key.clone();
+    let (editor, _) = h.rt.presented(&key).expect("the editor is drawn");
+    let (line, _) = h.rt.presented(&format!("{key}/l1")).expect("the second line is drawn");
+    let y = line[1] + line[3] / 2.0;
+    let e = &h.shown_tab(&id).unwrap().editor;
+    let x = (0..2000).map(|x| x as f32).find(|&x| e.pos_at(x, y - editor[1]) == Pos::new(1, 13)).expect("a point over `alpha`");
+    h.rt.pointer_move(editor[0] + x, y);
+    h.pump();
+    h.wait("the hover card", |ws| ws.panes[&id].shown().and_then(|t| t.editor.hover.as_ref()).is_some_and(|c| c.docs.is_some()));
+    let card = h.shown_tab(&id).unwrap().editor.hover.clone().unwrap();
+    assert_eq!((card.at, card.docs.as_deref()), (Pos::new(1, 12), Some("```rust\nfn alpha()\n```")));
+
+    // F12 on the call goes to where `alpha` is defined.
+    h.step(|ws| ws.panes.get_mut(&id).unwrap().shown_mut().unwrap().editor.select(Selection::caret(Pos::new(1, 14))));
+    h.press(rune::Key::Function(12), |_| {});
+    h.wait("going to the definition", |ws| ws.panes[&id].shown().is_some_and(|t| t.editor.caret() == Pos::new(0, 3)));
+
+    // Ctrl+Space after `al` lists what the server offers; Enter writes the choice over the word.
+    h.step(|ws| ws.panes.get_mut(&id).unwrap().shown_mut().unwrap().editor.select(Selection::caret(Pos::new(1, 23))));
+    h.press(rune::Key::Text(" ".into()), |m| m.ctrl = true);
+    h.wait("the completion list", |ws| ws.panes[&id].shown().is_some_and(|t| t.editor.completion.is_some()));
+    h.settle();
+    h.press(rune::Key::Enter, |_| {});
+    let edited = "fn alpha() {}\nfn main() { alpha(); alpha }\n";
+    assert_eq!(h.shown_text(&id), edited, "the completion replaced `al`");
+
+    // The server hears the edit once typing pauses, then the save and the close.
+    let heard_of = |method: &'static str, text: &'static str| {
+        let heard = heard.clone();
+        move |_: &Workspace| heard.lock().unwrap().iter().any(|(m, t)| m == method && t == text)
+    };
+    h.wait("the server hearing the edit", heard_of("textDocument/didChange", edited));
+    h.press(rune::Key::Command('s'), secondary);
+    h.wait("the server hearing the save", heard_of("textDocument/didSave", ""));
+    h.step(|ws| ws.close_tab(&id, 0));
+    h.wait("the server hearing the close", heard_of("textDocument/didClose", ""));
+}
+
+/// The real servers on PATH: gleam's reports a type error, and one that isn't installed says so. Starts programs from
+/// the machine, so it runs on request: `cargo test -- --ignored real_language_servers`.
+#[test]
+#[ignore]
+fn real_language_servers_start_and_report() {
+    let mut h = Harness::new(|_| vec![]);
+    let cwd = h.work.clone();
+    std::fs::create_dir_all(cwd.join("src")).unwrap();
+    std::fs::write(cwd.join("gleam.toml"), "name = \"probe\"\nversion = \"1.0.0\"\n").unwrap();
+    std::fs::write(cwd.join("src/probe.gleam"), "pub fn main() -> Int {\n  \"not a number\"\n}\n").unwrap();
+    std::fs::write(cwd.join("probe.ts"), "export const n: number = \"x\";\n").unwrap();
+    h.step(|ws| ws.new_claude(cwd.clone()));
+    let id = h.ws().active.clone().unwrap();
+    h.step(|ws| ws.toggle_editor());
+    let settled = |ws: &Workspace| ws.server_status(&ws.active.clone().unwrap()).is_some_and(|s| !s.contains("starting"));
+    for (file, program) in [("src/probe.gleam", "gleam"), ("probe.ts", "tsc")] {
+        h.step(|ws| ws.open_file(&id, cwd.join(file), None));
+        h.wait(&format!("{program} starting"), settled);
+        let status = h.ws().server_status(&id).unwrap();
+        eprintln!("{program}: {status}");
+        if crate::platform::find_executable(program).is_none() {
+            assert_eq!(status, format!("{program} isn't installed, so this file has no diagnostics or hover."));
+            continue;
+        }
+        assert_eq!(status, program);
+        h.wait(&format!("{program}'s type error"), |ws| ws.panes[&id].shown().is_some_and(|t| t.editor.problems.iter().any(|p| p.error)));
+        eprintln!("{program} says: {:?}", h.shown_tab(&id).unwrap().editor.problems[0].message);
+    }
+}
+
 mod github {
     use super::*;
     use crate::github::cli::*;

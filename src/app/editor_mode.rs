@@ -79,6 +79,8 @@ pub struct EditorPane {
     pub listed_at: Option<std::time::Instant>,
     /// A listing is set to follow once `RELIST_GAP` has passed.
     pub relist_due: bool,
+    /// The language servers this session started, by program (see `lsp::KINDS`).
+    pub servers: HashMap<&'static str, super::language_servers::ServerState>,
 }
 
 impl EditorPane {
@@ -129,6 +131,10 @@ pub struct Tab {
     pub conflict: Option<Conflict>,
     /// The highlighter's name for the file's language (see `files::language`), which also picks its language server.
     pub language: Option<&'static str>,
+    /// The text's version as its language server last heard it (see `language_servers::sync_with_server`).
+    pub version: i32,
+    /// The language server that has this file open, once it is running.
+    pub server: Option<std::sync::Arc<crate::lsp::Server>>,
 }
 
 impl Workspace {
@@ -189,6 +195,7 @@ impl Workspace {
             stale: false,
             listed_at: None,
             relist_due: false,
+            servers: HashMap::new(),
         };
         self.panes.insert(id.clone(), pane);
         self.watch_folder(&id);
@@ -388,7 +395,7 @@ impl Workspace {
         let opened = pane.tabs.iter().position(|t| t.path == path);
         let ix = opened.unwrap_or_else(|| {
             let language = files::language(&path).filter(|_| note.is_none());
-            pane.tabs.push(Tab { path: path.clone(), editor, note, format, stamp, dirty: false, saving: false, conflict: None, language });
+            pane.tabs.push(Tab { path: path.clone(), editor, note, format, stamp, dirty: false, saving: false, conflict: None, language, version: 0, server: None });
             pane.tabs.len() - 1
         });
         pane.active = Some(ix);
@@ -396,6 +403,7 @@ impl Workspace {
             self.focus_pane();
         }
         if opened.is_none() {
+            self.attach_server(id, &path);
             self.refresh_marks();
         }
     }
@@ -403,7 +411,7 @@ impl Workspace {
     /// Close tab `ix`; the tab to its right is shown next, or the last one.
     pub fn close_tab(&mut self, id: &Id, ix: usize) {
         let Some(pane) = self.panes.get_mut(id).filter(|p| ix < p.tabs.len()) else { return };
-        pane.tabs.remove(ix);
+        Self::tell_server_closed(&pane.tabs.remove(ix));
         pane.active = active_after_close(pane.active, ix, pane.tabs.len());
         if self.active_id() == Some(id) && self.editing() {
             self.focus_pane();
@@ -423,12 +431,20 @@ impl Workspace {
     }
 
     /// After every handler: an edited tab is marked unsaved (or clean again, undone back to what is saved).
+    /// Its language server hears of the change once typing pauses.
     pub(super) fn note_edits(&mut self) {
-        for tab in self.panes.values_mut().flat_map(|p| p.tabs.iter_mut()) {
-            if std::mem::take(&mut tab.editor.edited) {
-                // A tab whose user kept their version over a change on disk stays unsaved until it is saved.
-                tab.dirty = tab.editor.buffer.is_dirty() || tab.stamp.is_none();
+        let mut edited = vec![];
+        for (id, pane) in &mut self.panes {
+            for tab in &mut pane.tabs {
+                if std::mem::take(&mut tab.editor.edited) {
+                    // A tab whose user kept their version over a change on disk stays unsaved until it is saved.
+                    tab.dirty = tab.editor.buffer.is_dirty() || tab.stamp.is_none();
+                    edited.push((id.clone(), tab.path.clone()));
+                }
             }
+        }
+        for (id, path) in edited {
+            self.sync_with_server(&id, &path, false);
         }
     }
 

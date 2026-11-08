@@ -11,7 +11,7 @@ use crate::panels::theme;
 use crate::terminal::view::Metrics;
 
 /// The editor's font at `size` points.
-fn font(size: f32) -> TextStyle {
+pub(super) fn font(size: f32) -> TextStyle {
     TextStyle::new(size, 400.0).family(Family::Named(crate::platform::monospace_font()))
 }
 
@@ -167,6 +167,8 @@ impl Editor {
             let bar = el().absolute(x - 1.0, y).size(2.0, m.line_h);
             body = body.child(if focused { bar.fill(theme::rgb(theme::ACCENT)).ime_cursor() } else { bar });
         }
+        let body_area = [(self.area[0] - gutter).max(0.0), self.area[1]];
+        body = body.children(self.render_assist(m.cell_w, m.line_h, first, top, body_area));
 
         let root = el()
             .key(key.clone())
@@ -192,21 +194,49 @@ fn mark_bar(mark: Mark, y: f32, m: Metrics) -> El {
 
 /// The mouse and wheel, routed to the editor by its key.
 fn handlers(root: El, key: String) -> El {
-    let (k1, k2, k3) = (key.clone(), key.clone(), key);
+    let (k1, k2, k3, k4, k5) = (key.clone(), key.clone(), key.clone(), key.clone(), key);
     root.on_layout(move |ws: &mut Workspace, r: [f32; 4]| {
         if let Some(e) = ws.editor_mut(&k1) {
             e.set_area(r[2], r[3]);
         }
     })
     .on_drag(move |ws: &mut Workspace, d: &mut rune::Drag, tx: &mut rune::Tx| {
-        let extend = tx.mods().shift;
+        let mods = tx.mods();
+        let extend = mods.shift;
+        // Cmd+click (Ctrl+click elsewhere) goes to the definition of what was clicked, as in VS Code.
+        let definition = if cfg!(target_os = "macos") { mods.logo && !mods.ctrl } else { mods.ctrl && !mods.logo };
         ws.focus_editor(&k2);
         if let Some(e) = ws.editor_mut(&k2) {
             match d.phase {
+                rune::Phase::Down if definition => {
+                    let p = e.pos_at(d.x, d.y);
+                    e.mouse_down(d.x, d.y, 1, false);
+                    e.requests.push(super::assist::Request::Definition(p));
+                }
                 rune::Phase::Down => e.mouse_down(d.x, d.y, d.clicks, extend),
                 rune::Phase::Move => e.mouse_drag(d.x, d.y),
                 rune::Phase::Up => e.mouse_drag(d.x, d.y),
             }
+        }
+        ws.after_input(tx);
+    })
+    .on_pointer_move_local(move |ws: &mut Workspace, p: rune::PointerEvent, tx: &mut rune::Tx| {
+        if let Some(e) = ws.editor_mut(&k4) {
+            // Over the line numbers there is no word to tell about.
+            if p.x < e.gutter_w() {
+                e.pointer_left();
+            } else {
+                e.pointer_moved(p.x, p.y);
+            }
+            if !e.dirty && e.requests.is_empty() {
+                tx.live_only();
+            }
+        }
+        ws.after_input(tx);
+    })
+    .on_hover_change(move |ws: &mut Workspace, inside: bool, tx: &mut rune::Tx| {
+        if !inside && let Some(e) = ws.editor_mut(&k5) {
+            e.pointer_left();
         }
         ws.after_input(tx);
     })

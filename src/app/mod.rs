@@ -42,6 +42,7 @@ mod handoff;
 mod headless;
 mod ingest;
 mod input;
+pub mod language_servers;
 mod layout;
 mod lifecycle;
 mod links;

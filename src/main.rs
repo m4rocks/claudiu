@@ -6,6 +6,7 @@ mod datadir;
 mod editor;
 mod files;
 mod git;
+mod lsp;
 mod github;
 mod panels;
 mod platform;

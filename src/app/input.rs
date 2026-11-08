@@ -81,10 +81,15 @@ impl Workspace {
 
     /// Move the `Tx` work the editors queued (the clipboard) to the workspace's.
     fn drain_editors(&mut self) {
+        let mut requests = vec![];
         for tab in self.panes.values_mut().flat_map(|p| p.tabs.iter_mut()) {
             for f in tab.editor.fx.drain(..) {
                 self.rt.with_tx(f);
             }
+            requests.extend(tab.editor.requests.drain(..).map(|r| (tab.editor.key.clone(), r)));
+        }
+        for (key, request) in requests {
+            self.serve_editor(&key, request);
         }
     }
 

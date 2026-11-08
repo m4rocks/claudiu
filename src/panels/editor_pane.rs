@@ -33,7 +33,11 @@ impl Workspace {
                 if let Some(c) = tab.conflict {
                     body = body.child(conflict_bar(id, &tab.path, c));
                 }
-                body.child(el().w_full().grow(1.0).shrink().min_h(0.0).child(tab.editor.render(focused, crate::panels::scale::screen())))
+                body = body.child(el().w_full().grow(1.0).shrink().min_h(0.0).child(tab.editor.render(focused, crate::panels::scale::screen())));
+                match self.server_status(id) {
+                    Some(status) => body.child(status_line(status)),
+                    None => body,
+                }
             }
             None => centered(format!("Pick a file on the left, or press {}.", crate::panels::widgets::shortcut("P"))),
         };
@@ -340,6 +344,19 @@ fn file_icon(path: &std::path::Path) -> &'static rune::Icon {
         None if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("txt")) => &icons::FILE_TEXT,
         None => &icons::FILE,
     }
+}
+
+/// The language server's state, under the editor.
+fn status_line(status: String) -> El {
+    row()
+        .key("server-status")
+        .w_full()
+        .h(22.0)
+        .px(12.0)
+        .center_y()
+        .border_sides([1.0, 0.0, 0.0, 0.0], rgb(theme::BORDER))
+        .transition(Transition::opacity())
+        .child(label(status, 11.0, theme::TEXT_FAINT).truncate())
 }
 
 fn centered(message: String) -> El {
