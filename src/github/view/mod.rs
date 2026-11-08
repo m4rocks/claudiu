@@ -9,9 +9,11 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use gpui::{AppContext, Context, Entity, EventEmitter, FocusHandle, Focusable, Pixels, Point, SharedString, Subscription, Window};
-use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
+use rune::TextEdit;
 use serde_json::{Value, json};
+
+use crate::app::Workspace;
+use crate::app::rt::Mailbox;
 
 use super::cli::{self, ErrKind, Gh, RepoRef};
 use super::model::*;
@@ -147,10 +149,9 @@ pub enum PopKind {
 
 pub struct Popup {
     pub kind: PopKind,
-    pub pos: Point<Pixels>,
-    pub filter: Entity<InputState>,
-    pub scroll: crate::panels::glide::Smooth,
-    _sub: Subscription,
+    /// The key of the button it opens under.
+    pub anchor: String,
+    pub filter: TextEdit,
 }
 
 #[derive(Default)]
@@ -168,6 +169,8 @@ pub enum GhAct {
     SignIn,
     SetKind(Kind),
     SetQuery(String),
+    /// Search with what the search field holds (Return in it).
+    SubmitQuery,
     SetState(Option<&'static str>),
     Open(Kind, u32),
     Back,
@@ -202,14 +205,16 @@ pub enum GhAct {
     Lock(bool),
     ToggleFile(String),
     ShowAllLines(String),
-    Popup(PopKind, Point<Pixels>),
-    ClosePopup,
+    Popup(PopKind, String),
     Claude(&'static str),
     Checkout,
     Escape,
 }
 
 pub struct GithubView {
+    /// The pane's id in the workspace, so background answers find it again.
+    pub id: String,
+    mailbox: Mailbox<Workspace>,
     pub cwd: PathBuf,
     pub project: String,
     gh: Option<Gh>,
@@ -218,41 +223,31 @@ pub struct GithubView {
     pub info: Option<RepoInfo>,
     pub kind: Kind,
     pub queries: [String; 2],
-    pub query_input: Entity<InputState>,
+    pub query_input: TextEdit,
     pub lists: [ListState; 2],
     pub detail: Option<DetailState>,
     pub mode: Mode,
-    pub composer: Entity<TextareaState>,
-    pub edit_title: Entity<InputState>,
-    pub edit_body: Entity<TextareaState>,
+    pub composer: TextEdit,
+    pub edit_title: TextEdit,
+    pub edit_body: TextEdit,
     pub editing: Option<Edit>,
-    pub new_title: Entity<InputState>,
-    pub new_body: Entity<TextareaState>,
-    pub new_head: Entity<InputState>,
-    pub new_base: Entity<InputState>,
+    pub new_title: TextEdit,
+    pub new_body: TextEdit,
+    pub new_head: TextEdit,
+    pub new_base: TextEdit,
     pub draft_labels: Vec<Label>,
     pub draft_assignees: Vec<User>,
     pub popup: Option<Popup>,
     pub options: Options,
     pub merge_method: &'static str,
     pub busy: Option<String>,
-    /// Width of the pane in pixels, set by the workspace each frame; decides side-by-side or stacked.
-    pub width: f32,
-    pub focus: FocusHandle,
     list_seq: [u64; 2],
     detail_seq: u64,
     last_refresh: std::time::Instant,
-    /// Smooth wheel scrolling of the list, the detail and the new-item form.
-    pub scrolls: [crate::panels::glide::Smooth; 3],
-    _subs: Vec<Subscription>,
-}
-
-impl EventEmitter<GhEvent> for GithubView {}
-
-impl Focusable for GithubView {
-    fn focus_handle(&self, _: &gpui::App) -> FocusHandle {
-        self.focus.clone()
-    }
+    /// What the pane asks of the workspace, and what needs the frame (opening a link, copying); both are taken after
+    /// each handler.
+    pub events: Vec<GhEvent>,
+    pub fx: Vec<crate::app::rt::Fx>,
 }
 
 const DEFAULT_QUERY: &str = "is:open";
@@ -261,30 +256,28 @@ fn idx(kind: Kind) -> usize {
     if kind == Kind::Issue { 0 } else { 1 }
 }
 
+/// A text field holding `value`, with the keyboard when `focused`.
+pub fn field(value: &str, focused: bool) -> TextEdit {
+    let mut edit = TextEdit::new(value);
+    edit.set_caret(value.len());
+    edit.focused = focused;
+    edit
+}
+
+/// The comment box under an item.
+pub fn composer_field(value: &str) -> TextEdit {
+    field(value, false)
+}
+
 fn is_web(url: &str) -> bool {
     url.starts_with("https://") || url.starts_with("http://")
 }
 
 impl GithubView {
-    pub fn new(cwd: PathBuf, project: String, gh: Option<Gh>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let query_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search, e.g. is:open label:bug author:@me"));
-        let mut subs = vec![];
-        subs.push(cx.subscribe_in(&query_input, window, |v: &mut Self, input, ev: &InputEvent, window, cx| {
-            if matches!(ev, InputEvent::PressEnter { .. }) {
-                let q = input.read(cx).value().to_string();
-                v.act(GhAct::SetQuery(q), window, cx);
-            }
-        }));
-        let composer = cx.new(|cx| TextareaState::new(window, cx).auto_grow(4, 14).placeholder("Leave a comment (Markdown)"));
-        let edit_body = cx.new(|cx| TextareaState::new(window, cx).auto_grow(4, 16));
-        let new_body = cx.new(|cx| TextareaState::new(window, cx).auto_grow(8, 18).placeholder("Describe it (Markdown)"));
-        let edit_title = cx.new(|cx| InputState::new(window, cx));
-        let new_title = cx.new(|cx| InputState::new(window, cx).placeholder("Title"));
-        let new_head = cx.new(|cx| InputState::new(window, cx).placeholder("Branch with your changes"));
-        let new_base = cx.new(|cx| InputState::new(window, cx).placeholder("Branch to merge into"));
-        let focus = cx.focus_handle();
-
+    pub fn new(id: String, mailbox: Mailbox<Workspace>, cwd: PathBuf, project: String, gh: Option<Gh>) -> Self {
         let mut view = Self {
+            id,
+            mailbox,
             cwd,
             project,
             phase: if gh.is_some() { Phase::Loading } else { Phase::NoCli },
@@ -293,39 +286,46 @@ impl GithubView {
             info: None,
             kind: Kind::Issue,
             queries: [DEFAULT_QUERY.into(), DEFAULT_QUERY.into()],
-            query_input,
+            query_input: field(DEFAULT_QUERY, false),
             lists: [ListState::default(), ListState::default()],
             detail: None,
             mode: Mode::Browse,
-            composer,
-            edit_title,
-            edit_body,
+            composer: composer_field(""),
+            edit_title: field("", false),
+            edit_body: field("", false),
             editing: None,
-            new_title,
-            new_body,
-            new_head,
-            new_base,
+            new_title: field("", false),
+            new_body: field("", false),
+            new_head: field("", false),
+            new_base: field("", false),
             draft_labels: vec![],
             draft_assignees: vec![],
             popup: None,
             options: Options::default(),
             merge_method: "MERGE",
             busy: None,
-            width: 900.0,
-            focus,
             list_seq: [0; 2],
             detail_seq: 0,
             last_refresh: std::time::Instant::now(),
-            scrolls: Default::default(),
-            _subs: subs,
+            events: vec![],
+            fx: vec![],
         };
-        // Coming back to the pane refreshes it (at most every 5 seconds, and not while the user is mid-edit).
-        let focus_sub = cx.on_focus_in(&view.focus, window, |v: &mut Self, window, cx| v.refresh_on_return(window, cx));
-        view._subs.push(focus_sub);
-        view.query_input.update(cx, |s, cx| s.set_value(DEFAULT_QUERY, window, cx));
-        view.load_cache(window, cx);
-        view.start_refresh_loop(window, cx);
+        view.load_cache();
+        view.start_refresh_loop();
         view
+    }
+
+    /// Run `work` off the UI thread, then `done` on this view with its result (if the view is still there).
+    pub(super) fn run<T: Send + 'static>(&self, work: impl FnOnce() -> T + Send + 'static, done: impl FnOnce(&mut Self, T) + Send + 'static) {
+        let (id, mailbox) = (self.id.clone(), self.mailbox.clone());
+        std::thread::spawn(move || {
+            let out = work();
+            mailbox.send(move |ws: &mut Workspace| {
+                if let Some(v) = ws.gh_view_mut(&id) {
+                    done(v, out);
+                }
+            });
+        });
     }
 
     /// Changes whenever the detail side shows something else, so it fades in again.

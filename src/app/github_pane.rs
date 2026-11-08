@@ -7,43 +7,70 @@ impl Workspace {
         self.gh.iter().find(|p| p.id == id)
     }
 
+    pub fn gh_view_mut(&mut self, id: &str) -> Option<&mut GithubView> {
+        self.gh.iter_mut().find(|p| p.id == id).map(|p| &mut p.view)
+    }
+
+    /// The text field `which` picks in pane `id`. A pane that is gone hands out a scratch field (the search's), which
+    /// can only happen between a pane closing and the next frame.
+    pub fn gh_field(&mut self, id: &str, which: fn(&mut GithubView) -> &mut rune::TextEdit) -> &mut rune::TextEdit {
+        match self.gh.iter().position(|p| p.id == id) {
+            Some(i) => which(&mut self.gh[i].view),
+            None => &mut self.search,
+        }
+    }
+
+    /// Run what the GitHub panes asked for since the last handler, and hand their `Tx` work to the frame.
+    pub(super) fn drain_github(&mut self) {
+        let mut events = vec![];
+        for p in &mut self.gh {
+            events.extend(p.view.events.drain(..).map(|e| (p.id.clone(), e)));
+            for f in p.view.fx.drain(..) {
+                self.rt.with_tx(f);
+            }
+        }
+        for (pane, ev) in events {
+            self.on_gh_event(&pane, &ev);
+        }
+    }
+
     /// Show the project's GitHub view in the right sidebar and move the keyboard into it.
-    pub fn open_github(&mut self, cwd: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        let id = self.github_pane(cwd, window, cx);
+    pub fn open_github(&mut self, cwd: PathBuf) {
+        let id = self.github_pane(cwd);
         self.right_gh = Some(id.clone());
         self.store.data.layout.right_hidden = false;
         self.store.mark_dirty();
-        if let Some(p) = self.gh_pane(&id) {
-            let handle = p.view.read(cx).focus.clone();
-            window.focus(&handle, cx);
-        }
-        cx.notify();
+        // The pane takes keys through its own fields; the terminal lets go of them.
+        self.keys_to = None;
+        self.blur = true;
     }
 
     /// An attached issue or pull request was clicked: show it in the GitHub view of the shown session's project.
-    pub fn open_attached(&mut self, pull: bool, number: u32, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn open_attached(&mut self, pull: bool, number: u32) {
         let cwd = self.active_cwd();
-        self.open_github(cwd, window, cx);
+        self.open_github(cwd);
         let kind = if pull { crate::github::model::Kind::Pull } else { crate::github::model::Kind::Issue };
-        if let Some(view) = self.right_gh.as_ref().and_then(|id| self.gh_pane(id)).map(|p| p.view.clone()) {
-            view.update(cx, |v, cx| v.open_item(kind, number, window, cx));
+        if let Some(id) = self.right_gh.clone()
+            && let Some(p) = self.gh.iter_mut().find(|p| p.id == id)
+        {
+            p.view.open_item(kind, number);
         }
     }
 
     /// While the right sidebar shows GitHub, it follows the shown session to that session's project (no focus change).
-    pub(super) fn sync_github(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn sync_github(&mut self) {
         // Only the panel on screen follows; other projects' panes are made when the panel opens.
         if self.right_gh.is_none() {
             return;
         }
         let Some(id) = self.active.clone() else { return };
         if let Some(cwd) = self.store.session(&id).map(|s| s.cwd.clone()) {
-            self.right_gh = Some(self.github_pane(cwd, window, cx));
+            self.right_gh = Some(self.github_pane(cwd));
         }
     }
 
     /// The project's GitHub view (one per project), created on first use.
-    pub(super) fn github_pane(&mut self, cwd: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Id {
+    pub(super) fn github_pane(&mut self, cwd: PathBuf) -> Id {
         let project = self.store.project_for_cwd(&cwd).and_then(|id| self.store.project(&id)).cloned();
         let root = project.as_ref().map(|p| p.path.clone()).unwrap_or(cwd);
         let key = platform::path_key(&root);
@@ -55,29 +82,22 @@ impl Workspace {
                     .or_else(|| root.file_name().map(|n| n.to_string_lossy().into_owned()))
                     .unwrap_or_else(|| "GitHub".into());
                 let id = new_id();
-                let view = cx.new(|cx| GithubView::new(root.clone(), name.clone(), crate::github::cli::locate().map(|exe| crate::github::cli::Gh::new(exe, root.clone())), window, cx));
-                let sub_id = id.clone();
-                let sub = cx.subscribe_in(&view, window, move |ws: &mut Workspace, _view, ev: &GhEvent, window, cx| ws.on_gh_event(&sub_id, ev, window, cx));
-                // Returning to the window refreshes the pane, but only the one that is on screen.
-                let (shown, watched) = (id.clone(), view.clone());
-                let active = cx.observe_window_activation(window, move |ws: &mut Workspace, window, cx| {
-                    if window.is_window_active() && ws.right_gh.as_ref() == Some(&shown) && !ws.store.data.layout.right_hidden {
-                        watched.update(cx, |v, cx| v.refresh_on_return(window, cx));
-                    }
-                });
-                self.gh.push(GhPane { id: id.clone(), cwd: root, project: name, view, _sub: sub, _active: active });
+                let gh = crate::github::cli::locate().map(|exe| crate::github::cli::Gh::new(exe, root.clone()));
+                let view = GithubView::new(id.clone(), self.rt.mailbox(), root.clone(), name.clone(), gh);
+                self.gh.push(GhPane { id: id.clone(), cwd: root, project: name, view });
                 id
             }
         }
     }
 
-    fn on_gh_event(&mut self, pane: &str, ev: &GhEvent, window: &mut Window, cx: &mut Context<Self>) {
+    /// Run what a GitHub pane asked for.
+    pub(crate) fn on_gh_event(&mut self, pane: &str, ev: &GhEvent) {
         let Some(cwd) = self.gh_pane(pane).map(|p| p.cwd.clone()) else { return };
         match ev {
-            GhEvent::Toast { text, error } => self.toast(text.clone(), *error, cx),
-            GhEvent::AskClaude(prompt) => match self.running_claude_in(&cwd, cx) {
-                Some(id) => self.send_to_claude(&id, prompt, window, cx),
-                None => self.new_claude_with(cwd, vec![prompt.clone()], Starter::User, window, cx),
+            GhEvent::Toast { text, error } => self.toast(text.clone(), *error),
+            GhEvent::AskClaude(prompt) => match self.running_claude_in(&cwd) {
+                Some(id) => self.send_to_claude(&id, prompt),
+                None => self.new_claude_with(cwd, vec![prompt.clone()], Starter::User),
             },
             GhEvent::Checkout(number) => {
                 let Some(exe) = crate::github::cli::locate() else { return };
@@ -85,15 +105,14 @@ impl Workspace {
                 self.run_git(
                     GitOp::Branch,
                     move || crate::github::cli::Gh::new(exe, cwd).checkout(number).map_err(|e| e.msg.into()),
-                    cx,
                 );
             }
-            GhEvent::SignIn => self.sign_in_to_github(window, cx),
+            GhEvent::SignIn => self.sign_in_to_github(),
         }
     }
 
     /// `gh auth login` in a terminal tab.
-    pub(super) fn sign_in_to_github(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn sign_in_to_github(&mut self) {
         let Some(exe) = crate::github::cli::locate() else { return };
         let home = platform::home_dir().unwrap_or_else(|| PathBuf::from("."));
         let spec = SpawnSpec { program: exe.to_string_lossy().into_owned(), args: vec!["auth".into(), "login".into()], cwd: Some(home.clone()), ..Default::default() };
@@ -111,6 +130,6 @@ impl Workspace {
             hidden: false,
             claude: None,
         };
-        self.start(record, spec, true, window, cx);
+        self.start_session(record, spec, true);
     }
 }

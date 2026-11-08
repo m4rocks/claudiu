@@ -1,6 +1,6 @@
 //! Pixel-exact drawing for block elements (U+2580..259F) and box drawing (U+2500..257F).
 //! Fonts leave gaps between rows/cells for these; terminals draw them as rectangles instead so
-//! logos, borders and rules join seamlessly. Pure geometry, no GPUI types.
+//! logos, borders and rules join seamlessly. Pure geometry, no UI types.
 
 /// A rectangle inside a cell, in cell-local pixels, with an opacity multiplier for shades.
 #[derive(Debug, Clone, Copy, PartialEq)]

@@ -373,14 +373,7 @@ mod tests {
     /// Points Claudiu's data folder at a throwaway one for the rest of the test run. A repository's worktrees go in a
     /// folder named after its path, so the tests do not meet each other there.
     fn use_throwaway_data_folder() -> PathBuf {
-        static DATA: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
-        let data = DATA.get_or_init(|| {
-            let data = tempfile::tempdir().unwrap();
-            // SAFETY: set once, before the tests that need it start threads of their own.
-            unsafe { std::env::set_var("CLAUDIU_DATA_DIR", data.path()) };
-            data
-        });
-        dunce::canonicalize(data.path()).unwrap().join(STORE)
+        crate::datadir::use_throwaway_folders().0.join(STORE)
     }
 
     #[test]

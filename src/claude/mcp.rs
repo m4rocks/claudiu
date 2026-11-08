@@ -361,7 +361,7 @@ fn bridge_tools() -> Vec<Value> {
         ),
         tool(
             "search_sessions",
-            format!("Search the user's Claude Code sessions by words in their title, project or folder. Returns id, title, project and created/updated times of the best matches; pass an id to link_session. Read-only: use it when the user asks, or unasked to find a session to link."),
+            "Search the user's Claude Code sessions by words in their title, project or folder. Returns id, title, project and created/updated times of the best matches; pass an id to link_session. Read-only: use it when the user asks, or unasked to find a session to link.".to_string(),
             json!({ "query": { "type": "string", "description": "Words to look for (optional: without it, the most recent)" } }),
         ),
         tool(

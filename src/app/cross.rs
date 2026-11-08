@@ -102,23 +102,23 @@ impl Workspace {
 
     /// Answer the requests that arrived since the last tick (not those whose asker has given up). One that can't
     /// work is refused with the reason.
-    pub(super) fn serve_requests(&mut self, requests: Vec<Request>, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn serve_requests(&mut self, requests: Vec<Request>) {
         for mut req in requests.into_iter().filter(|r| r.deadline > crate::store::now()) {
             let prepared = self.prepare(&mut req);
             if prepared.is_ok() && wants_confirmation(&req) {
                 self.pending_starts.push(PendingStart { req, shown: false });
                 continue;
             }
-            let result = prepared.and_then(|()| self.run_request(&req, window, cx));
+            let result = prepared.and_then(|()| self.run_request(&req));
             let ok = result.is_ok();
             answer(&req, ok, result.unwrap_or_else(|e| e));
         }
-        self.settle_pending_starts(window, cx);
+        self.settle_pending_starts();
     }
 
     /// Once a second: drop the requests nobody waits for, show the next dialog when the modal slot is free, and tell the
     /// session when its dialog was closed without a yes.
-    fn settle_pending_starts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn settle_pending_starts(&mut self) {
         let now = crate::store::now();
         self.pending_starts.retain(|p| p.req.deadline > now);
         let asking = match &self.modal {
@@ -151,16 +151,14 @@ impl Workspace {
             ("Start a Claude Code session?", start_question(&asker, &folder, &prompt), "Start session")
         };
         self.modal = Some(Modal::Confirm { title: title.into(), body, confirm: confirm.into(), danger: false, act: Act::ConfirmStartSession(p.req.id.clone()) });
-        window.focus(&self.modal_focus, cx);
-        cx.notify();
     }
 
     /// The user said yes to a waiting `start_code_session`.
-    pub(super) fn confirm_start(&mut self, req_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn confirm_start(&mut self, req_id: &str) {
         self.modal = None;
         let Some(ix) = self.pending_starts.iter().position(|p| p.req.id == req_id) else { return };
         let req = self.pending_starts.remove(ix).req;
-        let result = self.run_request(&req, window, cx);
+        let result = self.run_request(&req);
         let ok = result.is_ok();
         answer(&req, ok, result.unwrap_or_else(|e| e));
     }
@@ -198,7 +196,7 @@ impl Workspace {
 
     /// Start the approved switches whose session has ended its turn. Looks at Claude Code's own status, as a switch from
     /// the menu does, so the call that asked is finished and answered first.
-    pub(super) fn run_pending_switches(&mut self, statuses: &std::collections::HashMap<String, String>, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn run_pending_switches(&mut self, statuses: &std::collections::HashMap<String, String>) {
         let now = crate::store::now();
         let pending = std::mem::take(&mut self.pending_switches);
         for p in pending {
@@ -206,14 +204,14 @@ impl Workspace {
             // Without a registry entry (older Claude Code) the terminal's own activity decides, as in `switch::inspect`.
             let idle = match claude_id.and_then(|c| statuses.get(c)) {
                 Some(status) => status == "idle",
-                None => self.live_view(&p.id).is_some_and(|v| !v.read(cx).is_working()),
+                None => self.live_view(&p.id).is_some_and(|v| !v.is_working()),
             };
             if now - p.approved > SWITCH_PATIENCE_SECS {
-                self.toast("The worktree switch was dropped: the session's turn did not end.", true, cx);
-            } else if !self.is_running(&p.id, cx) {
+                self.toast("The worktree switch was dropped: the session's turn did not end.", true);
+            } else if !self.is_running(&p.id) {
                 // Closed in the meantime: nothing to move.
             } else if idle {
-                self.switch_session(p.id, p.folder, p.base, false, window, cx);
+                self.switch_session(p.id, p.folder, p.base, false);
             } else {
                 self.pending_switches.push(p);
             }
@@ -221,7 +219,7 @@ impl Workspace {
     }
 
     /// Do what was asked.
-    pub(super) fn run_request(&mut self, req: &Request, window: &mut Window, cx: &mut Context<Self>) -> Result<String, String> {
+    pub(super) fn run_request(&mut self, req: &Request) -> Result<String, String> {
         let id = req.args["id"].as_str().unwrap_or_default().to_string();
         let count = |key: &str, default: u64, max: u64| req.args[key].as_u64().unwrap_or(default).clamp(1, max) as usize;
         let requester_id = req.from.split_once(':').map_or(req.from.as_str(), |(_, id)| id);
@@ -236,7 +234,7 @@ impl Workspace {
                     .take(50)
                     .map(|s| {
                         let project = self.store.project_for_cwd(&s.cwd).and_then(|p| self.store.project(&p)).map_or_else(|| s.cwd.to_string_lossy().into_owned(), |p| p.name.clone());
-                        let state = if self.is_running(&s.id, cx) { "running" } else { "ended" };
+                        let state = if self.is_running(&s.id) { "running" } else { "ended" };
                         let me = req.from == format!("code:{}", s.id);
                         format!("- id {} · {} · {project} · {state} · {}{}", s.id, s.display_title(), stamps(s.created_at, s.last_active), if me { " · this session" } else { "" })
                     })
@@ -280,8 +278,8 @@ impl Workspace {
             }
             "read_code_session" => {
                 let rec = self.store.session(&id).filter(|s| s.kind == SessionKind::Claude).ok_or("No session with that id.")?;
-                let view = self.live_view(&id).filter(|v| v.read(cx).is_running()).ok_or_else(|| format!("The session “{}” has ended; only running sessions can be read.", rec.display_title()))?;
-                let text = view.read(cx).tail_text(count("lines", 120, 400));
+                let view = self.live_view(&id).filter(|v| v.is_running()).ok_or_else(|| format!("The session “{}” has ended; only running sessions can be read.", rec.display_title()))?;
+                let text = view.tail_text(count("lines", 120, 400));
                 Ok(format!("Session “{}” ({}), latest terminal output:\n\n{text}", rec.display_title(), stamps(rec.created_at, rec.last_active)))
             }
             "start_code_session" => {
@@ -289,7 +287,7 @@ impl Workspace {
                 let before = self.selected.clone();
                 // A prompt that looks like a flag must not become one.
                 let leading = prompt.map(|p| if p.starts_with('-') { format!(" {p}") } else { p }).into_iter().collect();
-                self.new_claude_with(cwd.clone(), leading, Starter::OtherSession, window, cx);
+                self.new_claude_with(cwd.clone(), leading, Starter::OtherSession);
                 match self.selected.clone().filter(|s| Some(s) != before.as_ref()) {
                     Some(id) => {
                         // A session started from another one is linked with it from the start.

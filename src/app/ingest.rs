@@ -8,13 +8,10 @@ use crate::claude::usage::Snapshot;
 
 impl Workspace {
     /// Costs no tokens; the files are tiny.
-    pub(super) fn ingest_usage(&mut self, cx: &mut Context<Self>) {
-        cx.spawn(async move |this, cx| {
-            let (snaps, titles, items) = cx
-                .background_executor()
-                .spawn(async move { (usage::read_snapshots(&usage::snapshot_dir()), mcp::read_titles(), mcp::read_attached()) })
-                .await;
-            let _ = this.update(cx, |ws, cx| {
+    pub(super) fn ingest_usage(&mut self) {
+        self.rt.spawn(
+            move || { (usage::read_snapshots(&usage::snapshot_dir()), mcp::read_titles(), mcp::read_attached()) },
+            move |ws: &mut Workspace, (snaps, titles, items)| {
                 let mut changed = false;
                 changed |= titles.into_iter().fold(false, |c, (stem, title, stamp)| ws.apply_title(&stem, title, stamp) | c);
                 changed |= snaps.iter().fold(false, |c, snap| ws.apply_snapshot(snap) | c);
@@ -22,11 +19,9 @@ impl Workspace {
                 changed |= items.into_iter().fold(false, |c, (stem, item)| ws.apply_attachment(&stem, item) | c);
                 if changed {
                     ws.store.mark_dirty();
-                    cx.notify();
                 }
-            });
-        })
-        .detach();
+            },
+        );
     }
 
     /// A title Claude chose for its session through the MCP tool.

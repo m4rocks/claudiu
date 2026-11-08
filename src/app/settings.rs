@@ -1,7 +1,7 @@
 //! The pages of the Settings dialog and its keyboard handling.
 
 use super::*;
-use gpui::KeyDownEvent;
+use crate::terminal::keys::Keystroke;
 
 /// A category in the Settings dialog's list, in display order.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -43,40 +43,38 @@ impl SettingsPage {
 }
 
 impl Workspace {
-    /// Keys for the open Settings dialog, seen before the focused control. Up and Down change the page and Enter saves
-    /// only while the category list has focus; Tab and Shift+Tab cycle the list and the current page's text fields.
-    pub(crate) fn settings_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(Modal::Settings { shell, claude, model, skills_field, list_focus, .. }) = &self.modal else { return };
-        let list_focus = list_focus.clone();
-        let fields = match self.settings_page {
-            SettingsPage::General => vec![shell.clone(), claude.clone()],
-            SettingsPage::Sessions => vec![model.clone()],
-            SettingsPage::ClaudeTools => vec![skills_field.clone()],
-            _ => Vec::new(),
+    /// Keys for the open Settings dialog that no text field took. Up and Down change the page and Enter saves while no
+    /// field has the keyboard (the category list has it); Tab and Shift+Tab cycle the list and the page's text fields.
+    pub(crate) fn settings_key(&mut self, ks: &Keystroke) -> bool {
+        let fields: &[usize] = match self.settings_page {
+            SettingsPage::General => &[0, 1],
+            SettingsPage::Sessions => &[2],
+            SettingsPage::ClaudeTools => &[3],
+            _ => &[],
         };
-        let on_list = list_focus.is_focused(window);
-        match ev.keystroke.key.as_str() {
-            "up" if on_list => self.set_settings_page(self.settings_page.prev(), cx),
-            "down" if on_list => self.set_settings_page(self.settings_page.next(), cx),
-            "enter" if on_list => self.submit_modal(window, cx),
-            "tab" => {
-                let here = if on_list {
-                    Some(0)
-                } else {
-                    fields.iter().position(|f| f.read(cx).focus_handle(cx).is_focused(window)).map(|i| i + 1)
-                };
-                let Some(here) = here else { return };
+        let focused = (0..4).find(|n| modal_field(&mut self.modal, *n).is_some_and(|f| f.focused));
+        let on_list = focused.is_none();
+        let plain = !ks.modifiers.control && !ks.modifiers.alt && !ks.modifiers.platform;
+        match ks.key.as_str() {
+            "up" if on_list && plain => self.set_settings_page(self.settings_page.prev()),
+            "down" if on_list && plain => self.set_settings_page(self.settings_page.next()),
+            "tab" if plain => {
+                // Stop 0 is the list, then the page's fields in order.
+                let here = focused.and_then(|f| fields.iter().position(|x| *x == f)).map_or(0, |i| i + 1);
                 let stops = fields.len() + 1;
-                let there = if ev.keystroke.modifiers.shift { (here + stops - 1) % stops } else { (here + 1) % stops };
-                match there.checked_sub(1) {
-                    None => window.focus(&list_focus, cx),
-                    Some(i) => fields[i].update(cx, |s, cx| s.focus(window, cx)),
+                let there = if ks.modifiers.shift { (here + stops - 1) % stops } else { (here + 1) % stops };
+                for n in 0..4 {
+                    if let Some(f) = modal_field(&mut self.modal, n) {
+                        f.focused = there.checked_sub(1).map(|i| fields[i]) == Some(n);
+                    }
+                }
+                if there == 0 {
+                    self.blur = true;
                 }
             }
-            _ => return,
+            _ => return false,
         }
-        cx.stop_propagation();
-        cx.notify();
+        true
     }
 }
 

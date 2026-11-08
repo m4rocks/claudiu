@@ -24,9 +24,9 @@ pub struct Handoff {
 impl Workspace {
     /// The right sidebar offer: a running session that runs under another account than the active one.
     /// Returns the account it runs under, and the active account's name.
-    pub fn session_away(&self, id: &str, cx: &App) -> Option<(String, String)> {
+    pub fn session_away(&self, id: &str) -> Option<(String, String)> {
         let live = self.live.iter().find(|l| l.id == id)?;
-        if !self.is_running(id, cx) {
+        if !self.is_running(id) {
             return None;
         }
         let active = self.store.active_account()?;
@@ -38,8 +38,8 @@ impl Workspace {
     }
 
     /// The right sidebar button. Asks first; the shown session is compacted and restarted under the active account.
-    pub fn ask_handoff(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let shown = self.active_id().cloned().filter(|id| self.is_running(id, cx) && self.store.session(id).is_some_and(|r| r.claude.is_some()));
+    pub fn ask_handoff(&mut self) {
+        let shown = self.active_id().cloned().filter(|id| self.is_running(id) && self.store.session(id).is_some_and(|r| r.claude.is_some()));
         let Some(id) = shown else { return };
         let to_name = self.store.active_account().map_or_else(|| "the active account".into(), |a| a.name());
         self.modal = Some(Modal::Confirm {
@@ -52,15 +52,14 @@ impl Workspace {
             danger: false,
             act: Act::ConfirmHandoff(id),
         });
-        window.focus(&self.modal_focus, cx);
     }
 
     /// Confirmed: the session asks to compact, and its skeleton says it is handing over.
-    pub fn start_handoff(&mut self, id: &str, cx: &mut Context<Self>) {
+    pub fn start_handoff(&mut self, id: &str) {
         let to_name = self.store.active_account().map_or_else(|| "the active account".into(), |a| a.name());
         let since = Instant::now();
         self.handoffs.insert(id.into(), Handoff { asked: crate::store::now(), compacted: false, since });
-        self.set_handover(id, Some(Handover { message: format!("Handing over to {to_name}…"), since }), cx);
+        self.set_handover(id, Some(Handover { message: format!("Handing over to {to_name}…"), since }));
         usage::send_ctl(&usage::ctl_file(id), "compact", serde_json::json!(true));
     }
 
@@ -76,7 +75,7 @@ impl Workspace {
 
     /// Runs each second with the window: a compacted session is restarted under the active account; one that never
     /// compacts is given up on.
-    pub fn finish_handoffs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn finish_handoffs(&mut self) {
         let t = crate::store::now();
         let due: Vec<(Id, bool, Instant)> = self
             .handoffs
@@ -87,35 +86,32 @@ impl Workspace {
         for (id, compacted, since) in due {
             self.handoffs.remove(&id);
             if !compacted {
-                self.set_handover(&id, None, cx);
-                self.toast("The hand-off was cancelled: the session did not compact.", true, cx);
-            } else if self.is_running(&id, cx) {
-                self.restart_handed_off(&id, since, window, cx);
+                self.set_handover(&id, None);
+                self.toast("The hand-off was cancelled: the session did not compact.", true);
+            } else if self.is_running(&id) {
+                self.restart_handed_off(&id, since);
             } else {
-                self.set_handover(&id, None, cx);
+                self.set_handover(&id, None);
             }
         }
     }
 
     /// The old process ends and a new one resumes the same conversation. The shell and cards belong to the session,
     /// so they stay.
-    fn restart_handed_off(&mut self, id: &str, since: Instant, window: &mut Window, cx: &mut Context<Self>) {
+    fn restart_handed_off(&mut self, id: &str, since: Instant) {
         let to = self.store.active_account().map(|a| a.id.clone());
         if let Some(meta) = self.store.session_mut(id).and_then(|r| r.claude.as_mut()) {
             meta.account = to;
         }
-        self.restart_session(id, window, cx);
+        self.restart_session(id);
         let to_name = self.store.active_account().map_or_else(|| "the active account".into(), |a| a.name());
-        self.set_handover(id, Some(Handover { message: format!("Handing over to {to_name}…"), since }), cx);
+        self.set_handover(id, Some(Handover { message: format!("Handing over to {to_name}…"), since }));
     }
 
     /// The skeleton says "Handing over to …" while this is set; the new process clears it once its prompt is ready.
-    pub(super) fn set_handover(&self, id: &str, handover: Option<Handover>, cx: &mut App) {
-        if let Some(view) = self.live_view(id) {
-            view.update(cx, |v, cx| {
-                v.handover = handover;
-                cx.notify();
-            });
+    pub(super) fn set_handover(&mut self, id: &str, handover: Option<Handover>) {
+        if let Some(view) = self.terminal_mut(id) {
+            view.handover = handover;
         }
     }
 }

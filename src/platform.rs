@@ -53,9 +53,39 @@ fn login_shell() -> String {
     })
 }
 
-/// The fixed-width font for terminals and code. GPUI matches family names exactly and, when one is missing, falls
-/// back to a proportional UI font, which breaks a terminal's grid; so Linux uses the monospace family fontconfig
-/// picks for the desktop instead of naming one that may not be installed.
+/// The fixed-width font for terminals and code. A missing family falls back to a proportional UI font, which breaks
+/// a terminal's grid; so Linux uses the monospace family fontconfig picks for the desktop instead of naming one that
+/// may not be installed.
+/// The UI font: the system's own on macOS and Windows, Inter (built into Rune) elsewhere.
+pub fn ui_font() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "system-ui"
+    } else if cfg!(target_os = "windows") {
+        "Segoe UI"
+    } else {
+        "Inter"
+    }
+}
+
+/// Show `path` in the file manager: selected in its folder on macOS and Windows, its folder opened elsewhere.
+pub fn reveal(path: &Path) {
+    let mut cmd = if cfg!(target_os = "macos") {
+        let mut c = Command::new("open");
+        c.arg("-R").arg(path);
+        c
+    } else if cfg!(target_os = "windows") {
+        let mut c = Command::new("explorer");
+        c.arg(format!("/select,{}", path.display()));
+        c
+    } else {
+        let mut c = Command::new("xdg-open");
+        c.arg(if path.is_dir() { path } else { path.parent().unwrap_or(path) });
+        c
+    };
+    no_window(&mut cmd);
+    let _ = cmd.spawn();
+}
+
 pub fn monospace_font() -> &'static str {
     #[cfg(target_os = "windows")]
     {
@@ -253,7 +283,7 @@ pub fn spawn_detached(program: &Path, args: &[&OsStr]) -> std::io::Result<()> {
 }
 
 /// Put an image on the clipboard as a bitmap, which is what Claude Code's image paste reads on Windows (it asks
-/// .NET's `Clipboard.GetImage`, and gpui's clipboard write only offers the registered `PNG` format). Returns whether
+/// .NET's `Clipboard.GetImage`, which does not read the registered `PNG` format a plain image copy offers). Returns whether
 /// it worked; replaces whatever the clipboard held.
 #[cfg(target_os = "windows")]
 pub fn set_clipboard_bitmap(encoded: &[u8]) -> bool {
@@ -315,17 +345,48 @@ pub fn no_window(cmd: &mut Command) {
     let _ = cmd;
 }
 
+/// macOS: give ⌘Q to the app menu item titled `ours` and drop AppKit's own Quit, which ends the app without asking.
+/// AppKit keeps the first item that claims a key equivalent, and Rune's menu always has its Quit, so the app's item
+/// gets no ⌘Q until this. Returns false while the menu bar isn't built yet. Does nothing elsewhere.
+pub fn take_quit_key(ours: &str) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        use objc2::MainThreadMarker;
+        use objc2::sel;
+        use objc2_app_kit::NSApplication;
+        let Some(mtm) = MainThreadMarker::new() else { return false };
+        let app = NSApplication::sharedApplication(mtm);
+        let Some(menu) = app.mainMenu().and_then(|root| root.itemAtIndex(0)).and_then(|top| top.submenu()) else { return false };
+        let items: Vec<_> = (0..menu.numberOfItems()).filter_map(|i| menu.itemAtIndex(i)).collect();
+        let quit = items.iter().find(|i| i.action() == Some(sel!(terminate:)));
+        let mine = items.iter().find(|i| i.title().to_string() == ours);
+        let (Some(quit), Some(mine)) = (quit, mine) else { return false };
+        mine.setKeyEquivalent(&quit.keyEquivalent());
+        mine.setKeyEquivalentModifierMask(quit.keyEquivalentModifierMask());
+        menu.removeItem(quit);
+        // The separator that stood above it would end the menu.
+        if let Some(last) = menu.itemAtIndex(menu.numberOfItems() - 1).filter(|i| i.isSeparatorItem()) {
+            menu.removeItem(&last);
+        }
+        true
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = ours;
+        true
+    }
+}
+
 /// Ask the OS to draw attention to the app while it is in the background: taskbar flash (Windows, until the
 /// window is focused) or a dock bounce (macOS). Call only when the window is not active.
-pub fn request_attention(window: &gpui::Window) {
+pub fn request_attention(window: &rune::WindowHandle) {
     let _ = window;
     #[cfg(target_os = "windows")]
     {
-        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        use raw_window_handle::RawWindowHandle;
         use windows_sys::Win32::UI::WindowsAndMessaging::{FLASHW_TIMERNOFG, FLASHW_TRAY, FLASHWINFO, FlashWindowEx};
-        if let Ok(handle) = HasWindowHandle::window_handle(window)
-            && let RawWindowHandle::Win32(h) = handle.as_raw()
-        {
+        let _ = window.with_raw_handle(|handle| {
+            let RawWindowHandle::Win32(h) = handle.as_raw() else { return };
             let info = FLASHWINFO {
                 cbSize: size_of::<FLASHWINFO>() as u32,
                 hwnd: h.hwnd.get() as _,
@@ -335,7 +396,7 @@ pub fn request_attention(window: &gpui::Window) {
             };
             // SAFETY: `info` is fully initialised and outlives the call; the HWND is our own window.
             unsafe { FlashWindowEx(&info) };
-        }
+        });
     }
     #[cfg(target_os = "macos")]
     {

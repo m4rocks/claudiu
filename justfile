@@ -5,7 +5,7 @@ set windows-shell := ["powershell.exe", "-NoLogo", "-Command"]
 default:
     @just --list
 
-# ---- App (Rust + GPUI) ----------------------------------------------------------------------------
+# ---- App (Rust + Rune) ----------------------------------------------------------------------------
 
 # Build the app.
 build:

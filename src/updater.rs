@@ -7,7 +7,6 @@
 
 use std::time::Duration;
 
-use gpui::{Context, Window};
 use velopack::{UpdateCheck, UpdateInfo, UpdateManager, sources::GithubSource};
 
 use crate::app::Workspace;
@@ -41,75 +40,61 @@ fn repo_url(ws: &Workspace) -> Option<String> {
     }
 }
 
-/// Look for a newer release in the background.
-pub fn check(ws: &mut Workspace, cx: &mut Context<Workspace>) {
+/// Look for a newer release in the background, and again every six hours while the app stays open.
+pub fn check(ws: &mut Workspace) {
+    ws.rt.after(Duration::from_secs(6 * 3600), check);
     let Some(url) = repo_url(ws) else { return };
     // Once an update is downloading or downloaded, a re-check would only throw that away.
     if matches!(ws.update.status, Status::Checking | Status::Downloading | Status::Ready { .. }) {
         return;
     }
     let previous = std::mem::replace(&mut ws.update.status, Status::Checking);
-    cx.spawn(async move |this, cx| {
-        let result = cx
-            .background_executor()
-            .spawn(async move {
-                let manager = UpdateManager::new(GithubSource::new(&url, None, false), None, None).map_err(|e| e.to_string())?;
-                let check = manager.check_for_updates().map_err(|e| e.to_string())?;
-                Ok::<_, String>((manager, check))
-            })
-            .await;
-        let _ = this.update(cx, |ws, cx| {
-            match result {
-                Ok((manager, UpdateCheck::UpdateAvailable(info))) => {
-                    ws.update.status = Status::Available { version: info.TargetFullRelease.Version.clone() };
-                    ws.update.manager = Some(manager);
-                    ws.update.info = Some(*info);
-                }
-                Ok(_) => ws.update.status = Status::UpToDate,
-                // A failed re-check (e.g. offline) keeps an update already offered.
-                Err(_) if matches!(previous, Status::Available { .. }) => ws.update.status = previous,
-                // Not installed via Velopack (dev build / portable): nothing to do, and nothing to show.
-                Err(_) => ws.update.status = Status::Idle,
+    ws.rt.spawn(
+        move || {
+            let manager = UpdateManager::new(GithubSource::new(&url, None, false), None, None).map_err(|e| e.to_string())?;
+            let check = manager.check_for_updates().map_err(|e| e.to_string())?;
+            Ok::<_, String>((manager, check))
+        },
+        move |ws: &mut Workspace, result| match result {
+            Ok((manager, UpdateCheck::UpdateAvailable(info))) => {
+                ws.update.status = Status::Available { version: info.TargetFullRelease.Version.clone() };
+                ws.update.manager = Some(manager);
+                ws.update.info = Some(*info);
             }
-            cx.notify();
-        });
-        // Re-check periodically while the app stays open.
-        cx.background_executor().timer(Duration::from_secs(6 * 3600)).await;
-        let _ = this.update(cx, check);
-    })
-    .detach();
+            Ok(_) => ws.update.status = Status::UpToDate,
+            // A failed re-check (e.g. offline) keeps an update already offered.
+            Err(_) if matches!(previous, Status::Available { .. }) => ws.update.status = previous,
+            // Not installed via Velopack (dev build / portable): nothing to do, and nothing to show.
+            Err(_) => ws.update.status = Status::Idle,
+        },
+    );
 }
 
 /// Download (first click) then apply and restart (second click).
-pub fn install(ws: &mut Workspace, _window: &mut Window, cx: &mut Context<Workspace>) {
+pub fn install(ws: &mut Workspace) {
     let (Some(manager), Some(info)) = (ws.update.manager.clone(), ws.update.info.clone()) else { return };
     match ws.update.status.clone() {
         Status::Available { version } => {
             ws.update.status = Status::Downloading;
-            cx.spawn(async move |this, cx| {
-                let m = manager.clone();
-                let i = info.clone();
-                let result = cx.background_executor().spawn(async move { m.download_updates(&i, None).map_err(|e| e.to_string()) }).await;
-                let _ = this.update(cx, |ws, cx| {
+            ws.rt.spawn(
+                move || manager.download_updates(&info, None).map_err(|e| e.to_string()),
+                move |ws: &mut Workspace, result| {
                     ws.update.status = match result {
                         Ok(()) => Status::Ready { version },
                         Err(e) => Status::Error(e),
                     };
                     if let Status::Error(e) = &ws.update.status {
                         let msg = format!("Update failed: {e}");
-                        ws.toast(msg, true, cx);
+                        ws.toast(msg, true);
                     }
-                    cx.notify();
-                });
-            })
-            .detach();
-            cx.notify();
+                },
+            );
         }
         Status::Ready { .. } => {
             // Persist state, then hand over to the updater; it restarts Claudiu into the new version.
-            ws.finalize(cx);
+            ws.finalize();
             if let Err(e) = manager.apply_updates_and_restart(&info) {
-                ws.toast(format!("Could not apply update: {e}"), true, cx);
+                ws.toast(format!("Could not apply update: {e}"), true);
             }
         }
         _ => {}

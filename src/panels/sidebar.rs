@@ -1,27 +1,31 @@
 //! Left sidebar: one list of Claude Code sessions (running first, then recent, then older), a project filter, and
 //! the account usage meters.
 
-use std::time::{Duration, Instant};
+use rune::tok::motion;
+use rune::{Color, Cursor, El, Phase, PointerButton, ScrollSpec, Transition, Tx, col, el, row, text, text_input};
 
-use gpui::{
-    Animation, AnimationExt, AnyElement, AppContext, DragMoveEvent, SharedString, WeakEntity, ease_out_quint, ClickEvent, Context, Div, FontWeight, InteractiveElement, IntoElement, MouseButton, MouseDownEvent, ParentElement, Pixels, Render,
-    Stateful, StatefulInteractiveElement, Styled, Window, div, prelude::FluentBuilder, px,
-};
-
-use gpui_kit::component::input::Input;
-use crate::app::{Act, Activity, MenuItem, SideDrag, Workspace};
+use crate::app::{Act, Activity, MenuAnchor, MenuItem, SideDrag, Workspace};
+use crate::panels::icons;
+use crate::panels::status_icon::{SessionDot, status_icon};
+use crate::panels::theme::{self, rgb};
+use crate::panels::widgets::{ago, avatar, clawd, countdown, font, icon, icon_button, key_hint, label, meter, section_label, shortcut, tick};
 use crate::store::{ExternalState, Id, Project, SessionKind, SessionRecord, now};
-use crate::panels::theme::{self, hsla};
-use gpui_kit::assets::IconName;
-use crate::panels::status_icon::{SessionDot, StatusIcon};
-use crate::panels::widgets::{Trigger, ago, avatar, button, clawd, countdown, icon, icon_button, key_hint, meter, section_label, shortcut, tick};
 
 pub const SIDEBAR_W: f32 = 284.0;
 pub const SIDEBAR_MIN: f32 = 220.0;
 pub const SIDEBAR_MAX: f32 = 520.0;
-/// The account warning's entrance: its height at the end of the expand (the box grows to it), and its duration.
 /// Entries shown under RECENT before the rest go behind OLDER.
 const RECENT_LIMIT: usize = 12;
+
+/// Heights of the list's rows. A running session's row has three lines: project, title and branch.
+const ROW_H: f32 = 25.0;
+const RUNNING_ROW_H: f32 = 60.0;
+const HEADER_H: f32 = 20.0;
+const NOTE_H: f32 = 24.0;
+const SPACER_H: f32 = 10.0;
+const LIST_GAP: f32 = 2.0;
+/// Height of a running session's row plus the gap between rows: how far a dragged row moves to pass one.
+const ROW_PITCH: f32 = RUNNING_ROW_H + LIST_GAP;
 
 #[derive(Clone, PartialEq)]
 struct Row {
@@ -37,86 +41,16 @@ struct Row {
     active: bool,
     dim: bool,
     running: bool,
-    indent: bool,
     stale: bool,
     archived: bool,
-    /// Which sidebar section renders the row; keeps element ids unique when a session shows in several.
+    /// Which sidebar section renders the row; keeps element keys unique when a session shows in several.
     scope: &'static str,
 }
 
-/// Drag payload: a running session row, dropped onto another to reorder.
-struct DragSession(Id);
-
-/// The drag view GPUI requires. It draws nothing: the dragged row itself stays in the list (lifted, see
-/// `lifted`) and slides to wherever the cursor is, so it can never leave its list.
-struct DragGhost;
-
-impl Render for DragGhost {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div()
-    }
-}
-
-/// Marks `id` as the item being dragged and builds the (invisible) drag view.
-fn begin_drag(ws: &WeakEntity<Workspace>, id: &Id, cx: &mut gpui::App) -> gpui::Entity<DragGhost> {
-    ws.update(cx, |ws, cx| {
-        ws.dragging = Some(id.clone());
-        ws.drag_pos = None;
-        cx.notify();
-    })
-    .ok();
-    cx.new(|_| DragGhost)
-}
-
-/// Style of the row or header being dragged.
-fn lifted<T: Styled>(el: T) -> T {
-    el.bg(hsla(theme::ROW_ACTIVE)).border_1().border_color(hsla(theme::TEXT_FAINT))
-}
-
-/// Height of a running session's row plus the gap between rows.
-const ROW_PITCH: f32 = RUNNING_ROW_H + LIST_GAP;
-/// Heights of the list's parts, fixed so where each one sits is known before anything is drawn (see `visible_items`).
-const ROW_H: f32 = 25.0;
-/// A running session's row has three lines: project, title and branch.
-/// Its lines are 14 + 17 + 14 px with 2 px gaps (see `render_row`), which leaves 5.5 px above and below.
-const RUNNING_ROW_H: f32 = 60.0;
-const HEADER_H: f32 = 20.0;
-const NOTE_H: f32 = 24.0;
-const SPACER_H: f32 = 10.0;
-const LIST_GAP: f32 = 2.0;
-/// Drawn beyond each edge of the view. The list is rebuilt for every frame its offset moves, so one row is enough.
-const OVERSCAN: f32 = RUNNING_ROW_H + LIST_GAP;
-const SLIDE_MS: u64 = 160;
-const CLOSE_SLIDE_MS: u64 = 140;
-/// Width of a row's close button, and the gap between a row's parts.
-const CLOSE_W: f32 = 22.0;
-const ROW_GAP: f32 = 7.0;
-
-/// A row or project block that just changed places: it starts `from` px away from its new slot and slides in.
-/// `epoch` makes each reorder a fresh animation.
-#[derive(Clone, Copy)]
-pub struct Slide {
-    from: f32,
-    epoch: u64,
-}
-
 /// True when `new` holds the same items as `prev` in a different order (not an add or remove).
+#[cfg(test)]
 fn is_reorder(prev: &[Id], new: &[Id]) -> bool {
     prev != new && prev.len() == new.len() && new.iter().all(|i| prev.contains(i))
-}
-
-/// Wraps `el` in the slide-in animation when `slide` is set.
-fn slid(el: impl IntoElement + gpui::Styled + 'static, id: &Id, slide: Option<Slide>) -> AnyElement {
-    match slide {
-        Some(Slide { from, epoch }) => el
-            .with_animation(
-                SharedString::from(format!("slide-{id}-{epoch}")),
-                Animation::new(Duration::from_millis(SLIDE_MS)).with_easing(ease_out_quint()),
-                move |d, t| d.relative().top(px(from * (1.0 - t))),
-            )
-            .into_any_element(),
-        None => el.into_any_element(),
-    }
 }
 
 /// Moves `v[from]` into the slot of `v[to]`, shifting the items in between.
@@ -128,17 +62,10 @@ fn move_to<T>(v: &mut [T], from: usize, to: usize) {
     }
 }
 
-/// The items stacked `gap` apart that overlap `from..to`, each with its top, and the height of the whole stack.
-fn visible_items(heights: &[f32], gap: f32, from: f32, to: f32) -> (Vec<(usize, f32)>, f32) {
-    let mut shown = vec![];
-    let mut y = 0.0;
-    for (ix, h) in heights.iter().enumerate() {
-        if y < to && y + h > from {
-            shown.push((ix, y));
-        }
-        y += h + gap;
-    }
-    (shown, (y - gap).max(0.0))
+/// Where a running row dragged `dy` points from slot `start` lands, among `count` rows.
+fn drag_target(start: usize, dy: f32, count: usize) -> usize {
+    let moved = (dy / ROW_PITCH).round() as isize;
+    (start as isize + moved).clamp(0, count.saturating_sub(1) as isize) as usize
 }
 
 /// One part of the session list, top to bottom.
@@ -154,6 +81,7 @@ enum Item {
 }
 
 impl Item {
+    #[cfg(test)]
     fn height(&self) -> f32 {
         match self {
             Item::Header(..) | Item::Older { .. } => HEADER_H,
@@ -165,73 +93,17 @@ impl Item {
     }
 }
 
-/// Everything the session list shows, worked out on each drawing of the workspace (see `render_sidebar`).
-#[derive(Clone, PartialEq, Default)]
-pub struct ListModel {
-    items: Vec<Item>,
-    /// The session being dragged, drawn lifted.
-    dragging: Option<Id>,
-    /// The UI scale (Settings), which sizes the rows' text.
-    scale: u32,
-}
-
-/// The session list as its own view, so gpui reuses its last drawing on frames that don't change it: terminal output,
-/// editor scrolling and the right panel's animations redraw the window, and rebuilding every row for each of those
-/// frames was most of their cost. It draws the workspace's `ListModel` and nothing else of its state, so comparing
-/// the model tells when the drawing is out of date.
-pub struct SessionList {
-    ws: WeakEntity<Workspace>,
-}
-
-impl SessionList {
-    pub fn new(ws: WeakEntity<Workspace>) -> Self {
-        Self { ws }
-    }
-}
-
-impl Render for SessionList {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        match self.ws.upgrade() {
-            Some(ws) => ws.update(cx, |ws, cx| ws.render_session_list(window, cx)),
-            None => div().into_any_element(),
-        }
-    }
-}
-
 fn reveal_label() -> &'static str {
     if cfg!(target_os = "macos") { "Reveal in Finder" } else { "Show in Explorer" }
 }
 
+/// Run `act` from a click, then hand its effects to the frame.
+fn act(ws: &mut Workspace, a: Act, tx: &mut Tx) {
+    ws.act(a);
+    ws.after_input(tx);
+}
+
 impl Workspace {
-    /// Keeps a running row's × slot drawn while it shrinks away after the pointer left, then redraws the list without it.
-    fn shrink_close_slot(&mut self, key: SharedString, cx: &mut Context<Self>) {
-        self.unhovered_rows.insert(key.clone());
-        cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(Duration::from_millis(CLOSE_SLIDE_MS)).await;
-            let _ = this.update(cx, |ws, cx| {
-                ws.unhovered_rows.remove(&key);
-                if let Some(list) = &ws.session_list {
-                    list.update(cx, |_, cx| cx.notify());
-                }
-            });
-        })
-        .detach();
-    }
-
-    /// True when the pointer is somewhere new. A list shifting under a still pointer (a session ending, say) makes
-    /// GPUI re-send a move at the same spot; that must not reorder anything.
-    ///
-    /// Also false while the previous swap is still sliding: rows are hit-tested where they are painted, so a row
-    /// mid-slide sits under the pointer and would be swapped straight back (flicker).
-    fn pointer_moved(&mut self, pos: gpui::Point<Pixels>) -> bool {
-        if self.last_swap.elapsed() < Duration::from_millis(SLIDE_MS + 40) {
-            return false;
-        }
-        let moved = self.drag_pos != Some(pos);
-        self.drag_pos = Some(pos);
-        moved
-    }
-
     fn project_name(&self, id: Option<&Id>) -> String {
         id.and_then(|i| self.store.project(i)).map(|p| p.name.clone()).unwrap_or_default()
     }
@@ -244,7 +116,7 @@ impl Workspace {
             || (rec.kind == SessionKind::Shell && "shell terminal".contains(q))
     }
 
-    fn row_for(&self, rec: &SessionRecord, running: bool, with_project: bool) -> Row {
+    fn row_for(&self, rec: &SessionRecord, running: bool) -> Row {
         let activity = self.activity.get(&rec.id).copied();
         // Anything running is at least active; Claude's own status upgrades it to working or attention.
         let dot = if !running {
@@ -269,22 +141,21 @@ impl Workspace {
             id: rec.id.clone(),
             dot,
             title: rec.display_title().to_string(),
-            right: if with_project && !running { project.clone() } else { ago(rec.last_active, now()) },
+            right: if !running { project.clone() } else { ago(rec.last_active, now()) },
             project,
             branch,
             active: self.selected.as_deref() == Some(rec.id.as_str()),
             dim: !running,
             running,
-            indent: !with_project,
             stale,
             archived: rec.hidden,
-            scope: if with_project { "cur" } else { "prj" },
+            scope: "cur",
         }
     }
 
     fn session_menu(&self, rec: &SessionRecord, running: bool) -> Vec<MenuItem> {
         let mut items = vec![];
-        let item = |label: &str, act: Act, danger: bool, sep: bool| MenuItem { label: label.into(), hint: None, detail: None, act, danger, disabled: false, separator_before: sep, remove: None, icon: None };
+        let item = |label: &str, act: Act, danger: bool, sep: bool| MenuItem { danger, separator_before: sep, ..MenuItem::new(label, act) };
         if running {
             items.push(item("Switch to session", Act::Select(rec.id.clone()), false, false));
         } else if rec.kind == SessionKind::Claude {
@@ -311,8 +182,8 @@ impl Workspace {
         items
     }
 
-    fn project_menu(&self, p: &Project) -> Vec<MenuItem> {
-        let item = |label: String, act: Act, danger: bool, sep: bool| MenuItem { label, hint: None, detail: None, act, danger, disabled: false, separator_before: sep, remove: None, icon: None };
+    pub(crate) fn project_menu(&self, p: &Project) -> Vec<MenuItem> {
+        let item = |label: String, act: Act, danger: bool, sep: bool| MenuItem { danger, separator_before: sep, ..MenuItem::new(label, act) };
         let mut items = vec![item("New Claude session here".into(), Act::NewClaude { cwd: p.path.clone() }, false, false)];
         if p.git.is_some() {
             items.push(item("GitHub issues & PRs".into(), Act::OpenGithub { cwd: p.path.clone() }, false, true));
@@ -330,191 +201,6 @@ impl Workspace {
         items
     }
 
-    /// A session row you can drag: onto a project header to file it there and, in CURRENT SESSION (`reorder`),
-    /// over other rows to reorder them live.
-    fn session_row(&self, row: Row, reorder: bool, list: gpui::EntityId, cx: &mut Context<Self>) -> Stateful<Div> {
-        let id = row.id.clone();
-        let ws = cx.entity().downgrade();
-        let this = id.clone();
-        self.render_row(row, list, cx)
-            .on_drag(DragSession(id.clone()), move |d, _, _, cx| begin_drag(&ws, &d.0, cx))
-            .when(self.list_model.dragging.as_ref() == Some(&id), lifted)
-            .when(reorder, |d| {
-                d.on_drag_move(cx.listener(move |ws, ev: &DragMoveEvent<DragSession>, _w, cx| {
-                    let from = ev.drag(cx).0.clone();
-                    if from == this || !ev.bounds.contains(&ev.event.position) || !ws.pointer_moved(ev.event.position) {
-                        return;
-                    }
-                    let at = |id: &Id| ws.live.iter().position(|l| l.id == *id);
-                    if let (Some(from), Some(to)) = (at(&from), at(&this)) {
-                        move_to(&mut ws.live, from, to);
-                        ws.last_swap = Instant::now();
-                        cx.notify();
-                    }
-                }))
-            })
-    }
-
-    /// `list` is the view the row is drawn in, redrawn when the pointer enters or leaves the row.
-    fn render_row(&self, row: Row, list: gpui::EntityId, cx: &mut Context<Self>) -> Stateful<Div> {
-        let id = row.id.clone();
-        let click_id = id.clone();
-        let menu_id = id.clone();
-        let close_id = id.clone();
-        let middle_id = id.clone();
-        let archive_id = id.clone();
-        let dot = StatusIcon::new(format!("dot-{}-{}", row.scope, id), row.dot);
-        let key = gpui::SharedString::from(format!("row-{}-{}", row.scope, id));
-        // Only the row under the pointer gets its × or archive button; the others keep the space empty. Building a
-        // hidden button on every row cost more than the rest of the row.
-        let hovered = self.hovered_row.as_ref() == Some(&key);
-        let closing = !hovered && self.unhovered_rows.contains(&key);
-        let running = row.running;
-        let ws = cx.entity().downgrade();
-        let hover_key = key.clone();
-        let right_text = if row.archived { "archived".to_string() } else if row.stale { "stale".to_string() } else { row.right.clone() };
-        let right_color = hsla(if row.stale { theme::WARN } else { theme::TEXT_FAINT });
-        let title_color = hsla(if row.dim { theme::TEXT_DIM } else { theme::TEXT });
-        let ellipsis = |el: Div| el.min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis();
-        let content = if row.running {
-            // Project and age, then the title with the status icon, then the branch.
-            div()
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .flex_col()
-                .gap(px(2.0))
-                .child(
-                    div()
-                        .flex()
-                        .gap(px(6.0))
-                        .text_size(crate::panels::scale::px(11.0))
-                        .line_height(crate::panels::scale::px(14.0))
-                        .text_color(hsla(theme::TEXT_FAINT))
-                        .child(ellipsis(div().flex_1()).child(row.project.clone()))
-                        .child(div().flex_none().text_color(right_color).child(right_text)),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(7.0))
-                        .child(ellipsis(div().flex_1()).text_size(crate::panels::scale::px(13.0)).line_height(crate::panels::scale::px(17.0)).text_color(title_color).child(row.title.clone()))
-                        .child(dot),
-                )
-                .children(row.branch.clone().map(|b| ellipsis(div()).text_size(crate::panels::scale::px(11.0)).line_height(crate::panels::scale::px(14.0)).text_color(hsla(theme::TEXT_FAINT)).child(b)))
-                .into_any_element()
-        } else {
-            div()
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .items_center()
-                .gap(px(7.0))
-                .child(dot)
-                .child(ellipsis(div().flex_1()).text_size(crate::panels::scale::px(13.0)).text_color(title_color).child(row.title.clone()))
-                .child(div().flex_none().max_w(px(96.0)).overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(crate::panels::scale::px(11.0)).text_color(right_color).child(right_text))
-                .into_any_element()
-        };
-        div()
-            .id(key)
-            .group("row")
-            .on_hover(move |inside, _window, cx| {
-                let changed = ws
-                    .update(cx, |ws, cx| {
-                        let now = if *inside { Some(hover_key.clone()) } else { ws.hovered_row.clone().filter(|k| *k != hover_key) };
-                        let moved = std::mem::replace(&mut ws.hovered_row, now.clone()) != now;
-                        if *inside {
-                            return ws.unhovered_rows.remove(&hover_key) || moved;
-                        }
-                        if running {
-                            ws.shrink_close_slot(hover_key.clone(), cx);
-                        }
-                        moved || running
-                    })
-                    .unwrap_or(false);
-                if changed {
-                    cx.notify(list);
-                }
-            })
-            .flex()
-            .items_center()
-            .gap(px(ROW_GAP))
-            .h(px(if row.running { RUNNING_ROW_H } else { ROW_H }))
-            .pl(px(if row.indent { 22.0 } else { 10.0 }))
-            .pr(px(6.0))
-            .mx(px(5.0))
-            .rounded(px(6.0))
-            .cursor_pointer()
-            .when(row.active, |d| d.bg(hsla(theme::ROW_ACTIVE)))
-            .hover(|s| s.bg(hsla(theme::ROW_HOVER)))
-            .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::Select(click_id.clone()), window, cx)))
-            .on_mouse_down(
-                MouseButton::Right,
-                cx.listener(move |ws, ev: &MouseDownEvent, _window, cx| {
-                    if let Some(rec) = ws.store.session(&menu_id).cloned() {
-                        let running = ws.is_running(&menu_id, cx);
-                        let items = ws.session_menu(&rec, running);
-                        ws.open_menu(ev.position, items, cx);
-                    }
-                }),
-            )
-            .child(content)
-            .when(row.running, |d| {
-                // A middle click ends a running session, like its ×.
-                d.on_mouse_up(
-                    MouseButton::Middle,
-                    cx.listener(move |ws, _: &gpui::MouseUpEvent, window, cx| ws.act(Act::CloseLive(middle_id.clone()), window, cx)),
-                )
-            })
-            .when(!hovered && !row.running, |d| d.child(div().flex_none().size(px(22.0))))
-            .when((hovered || closing) && row.running, |d| {
-                // The slot grows from nothing to the button's width, pushing the age to the left, and shrinks back
-                // the same way once the pointer leaves. Its margin cancels the row's gap when the slot is empty, so
-                // nothing jumps.
-                let slide_key = SharedString::from(format!("close-{}-{}-{close_id}", if closing { "hide" } else { "show" }, row.scope));
-                let button = icon_button(gpui::SharedString::from(format!("close-{}-{close_id}", row.scope)), IconName::X)
-                    // Shown by hover style: a list that scrolled under a still pointer leaves the old row marked.
-                    // While shrinking away the pointer is outside the row, so it is simply shown.
-                    .when(!closing, |b| b.invisible().group_hover("row", |s| s.visible()))
-                    // Otherwise the row starts a drag when the pointer moves during the press, and the click is lost.
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
-                        cx.stop_propagation();
-                        ws.act(Act::CloseLive(close_id.clone()), window, cx);
-                    }));
-                d.child(
-                    div()
-                        .flex()
-                        .flex_none()
-                        .justify_end()
-                        .overflow_hidden()
-                        .child(button)
-                        .with_animation(
-                            slide_key,
-                            Animation::new(Duration::from_millis(CLOSE_SLIDE_MS)).with_easing(ease_out_quint()),
-                            move |d, t| {
-                            let open = if closing { 1.0 - t } else { t };
-                            d.w(px(CLOSE_W * open)).ml(px(-ROW_GAP * (1.0 - open)))
-                        },
-                        ),
-                )
-            })
-            .when(hovered && !row.running, |d| {
-                let archive = !row.archived;
-                d.child(
-                    icon_button(gpui::SharedString::from(format!("archive-{}-{archive_id}", row.scope)), if archive { IconName::Archive } else { IconName::ArchiveRestore })
-                        .invisible()
-                        .group_hover("row", |s| s.visible())
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
-                            cx.stop_propagation();
-                            ws.act(Act::Archive(archive_id.clone(), archive), window, cx);
-                        })),
-                )
-            })
-    }
-
     /// Code sessions shown in the list: matching the search, and in the project filter when there is one.
     fn listed(&self, q: &str, filter: Option<&Id>, rec: &SessionRecord) -> bool {
         self.matches(q, rec) && filter.is_none_or(|f| rec.project_id.as_ref() == Some(f))
@@ -525,42 +211,22 @@ impl Workspace {
         self.store.data.layout.project_filter.as_ref().and_then(|id| self.store.project(id))
     }
 
-    /// The sidebar: header, the session list (its own cached view, see `SessionList`), and the usage footer.
-    pub fn render_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let model = self.list_model(cx);
-        let changed = model != self.list_model;
-        self.list_model = model;
-        let me = cx.entity().downgrade();
-        let list = self.session_list.get_or_insert_with(|| cx.new(|_| SessionList::new(me))).clone();
-        // A changed list is drawn afresh; otherwise its last drawing is reused, unless the list asked to be drawn
-        // again itself (it scrolled, or the pointer moved to another row).
-        let list = if changed {
-            div().flex_1().min_h_0().child(list).into_any_element()
-        } else {
-            div().flex_1().min_h_0().child(list.cached(gpui::StyleRefinement::default().size_full())).into_any_element()
-        };
-        self.sidebar_frame(list, window, cx)
-    }
-
     /// One list of Claude Code sessions: what is running first (in the order you arranged them), then the most
     /// recent, with the rest behind "Older". The project filter narrows all of it. Rows behind a closed "Older" are
     /// counted, not built.
-    fn list_model(&mut self, cx: &mut Context<Self>) -> ListModel {
-        if self.dragging.is_some() && !cx.has_active_drag() {
-            self.dragging = None;
-        }
-        let q = self.search.trim().to_lowercase();
+    fn list_items(&self) -> Vec<Item> {
+        let q = self.search.text.trim().to_lowercase();
         let searching = !q.is_empty();
         let filter = self.project_filter().map(|p| p.id.clone());
 
         // ---- RUNNING
-        let numbered = self.running_ids(cx);
+        let numbered = self.running_ids();
         let running: Vec<Row> = numbered
             .iter()
             .filter_map(|id| self.store.session(id))
             .filter(|r| self.listed(&q, filter.as_ref(), r))
             .map(|r| {
-                let mut row = self.row_for(r, true, true);
+                let mut row = self.row_for(r, true);
                 // Numbered among all running sessions, so a search or project filter doesn't renumber them.
                 if self.shortcuts_shown
                     && let Some(n) = numbered.iter().position(|id| *id == r.id).filter(|&i| i < 9)
@@ -570,16 +236,6 @@ impl Workspace {
                 row
             })
             .collect();
-        let ids: Vec<Id> = running.iter().map(|r| r.id.clone()).collect();
-        if is_reorder(&self.prev_current, &ids) {
-            self.slide_gen += 1;
-            for (new, id) in ids.iter().enumerate() {
-                if let Some(old) = self.prev_current.iter().position(|x| x == id).filter(|&old| old != new && self.dragging.as_ref() != Some(id)) {
-                    self.slides.insert(id.clone(), Slide { from: (old as f32 - new as f32) * ROW_PITCH, epoch: self.slide_gen });
-                }
-            }
-        }
-        self.prev_current = ids;
 
         // ---- RECENT: everything else, newest first
         let mut recent: Vec<&SessionRecord> = self
@@ -592,7 +248,7 @@ impl Workspace {
         recent.sort_by_key(|r| std::cmp::Reverse(r.last_active));
         let older = recent.split_off(recent.len().min(if searching { usize::MAX } else { RECENT_LIMIT }));
         let history = |rec: &SessionRecord| {
-            let mut row = self.row_for(rec, false, true);
+            let mut row = self.row_for(rec, false);
             row.scope = "rec";
             Item::Session { row, reorder: false }
         };
@@ -615,322 +271,394 @@ impl Workspace {
                 items.extend(older.into_iter().map(history));
             }
         }
-        ListModel { items, dragging: self.dragging.clone(), scale: crate::panels::scale::percent() }
-    }
-
-    /// The session list's own view (see `SessionList`): the parts of `list_model` in view, each at its place.
-    pub fn render_session_list(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let list = window.current_view();
-        let scroll = self.sidebar_scroll.wire(div().id("sidebar-scroll").size_full(), window).pb(px(8.0));
-        // Where the view stands now (the glide has just moved it). The window's height stands in for the list's: the
-        // list's own is only known from the frame before, which is too short right after the window grows.
-        let tall = f32::from(window.viewport_size().height);
-        let heights: Vec<f32> = self.list_model.items.iter().map(Item::height).collect();
-        let total = heights.iter().sum::<f32>() + LIST_GAP * heights.len().saturating_sub(1) as f32;
-        // A list that just got shorter is still scrolled to where the longer one was; gpui moves it back within the
-        // new end only while laying it out, after this, so the rows are picked from where it will stand.
-        let top = (-f32::from(self.sidebar_scroll.handle().offset().y)).min((total - tall).max(0.0));
-        let (shown, _) = visible_items(&heights, LIST_GAP, top - OVERSCAN, top + tall + OVERSCAN);
-        let mut stack = div().relative().w_full().h(px(total));
-        for (ix, y) in shown {
-            let el = self.list_item(self.list_model.items[ix].clone(), list, cx);
-            stack = stack.child(div().absolute().top(px(y)).left_0().right_0().child(el));
-        }
-        scroll.child(stack).into_any_element()
-    }
-
-    fn list_item(&self, item: Item, list: gpui::EntityId, cx: &mut Context<Self>) -> AnyElement {
-        match item {
-            Item::Header(label, count) => self.section_header(label, count, None::<Stateful<Div>>).into_any_element(),
-            Item::Note(text) => div()
-                .h(px(NOTE_H))
-                .flex()
-                .items_center()
-                .px(px(14.0))
-                .text_size(crate::panels::scale::px(12.0))
-                .text_color(hsla(theme::TEXT_FAINT))
-                .child(text)
-                .into_any_element(),
-            Item::Spacer => div().h(px(SPACER_H)).into_any_element(),
-            Item::Session { row, reorder: true } => {
-                let (id, slide) = (row.id.clone(), self.slides.get(&row.id).copied());
-                slid(self.session_row(row, true, list, cx), &id, slide)
-            }
-            Item::Session { row, reorder: false } => self.session_row(row, false, list, cx).into_any_element(),
-            Item::Older { count, open } => div()
-                .id("older-header")
-                .flex()
-                .items_center()
-                .gap(px(5.0))
-                .px(px(14.0))
-                .h(px(HEADER_H))
-                .cursor_pointer()
-                .child(div().text_color(hsla(theme::TEXT_FAINT)).child(icon(if open { IconName::ChevronDown } else { IconName::ChevronRight }, 12.0)))
-                .child(section_label("OLDER"))
-                .child(div().text_size(crate::panels::scale::px(10.5)).text_color(hsla(theme::TEXT_FAINT)).child(count.to_string()))
-                .on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::ToggleOlder, window, cx)))
-                .into_any_element(),
-        }
-    }
-
-    /// "+ Code session" with no project chosen: pick where it starts.
-    fn new_session_menu(&self) -> Vec<MenuItem> {
-        let item = |label: String, detail: Option<String>, act: Act, disabled: bool, sep: bool| MenuItem { label, hint: None, detail, act, danger: false, disabled, separator_before: sep, remove: None, icon: None };
-        let mut items = vec![item("Start the session in…".into(), None, Act::Dismiss, true, false)];
-        items.extend(self.store.data.projects.iter().map(|p| item(p.name.clone(), Some(crate::panels::widgets::short_path(&p.path)), Act::NewClaude { cwd: p.path.clone() }, false, false)));
-        items.push(item("Add project…".into(), None, Act::ImportProject, false, true));
         items
     }
 
-    /// The project filter: a chip that lists the projects, and (with a project chosen) a ⋯ button for its actions.
-    fn render_project_filter(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let current = self.project_filter().cloned();
-        let name = current.as_ref().map_or("All projects".to_string(), |p| p.name.clone());
-        let chip = div()
-            .id("project-filter")
-            .flex_1()
-            .min_w_0()
-            .h(px(24.0))
-            .px(px(6.0))
-            .flex()
-            .items_center()
-            .gap(px(6.0))
-            .rounded(px(6.0))
-            .bg(hsla(0x141414))
-            .cursor_pointer()
-            .hover(|s| s.bg(hsla(0x1b1b1b)))
-            .text_size(crate::panels::scale::px(12.0))
-            .text_color(hsla(if current.is_some() { theme::TEXT } else { theme::TEXT_DIM }))
-            .child(icon(IconName::FolderOpen, 13.0))
-            .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(name))
-            .child(div().flex_none().text_color(hsla(theme::TEXT_FAINT)).child(icon(IconName::ChevronDown, 12.0)))
-            .dropdown(
-                cx,
-                move |ws, at, _w, cx| {
-                    let chosen = ws.project_filter().map(|p| p.id.clone());
-                    let item = |label: String, act: Act, sep: bool| MenuItem { label, hint: None, detail: None, act, danger: false, disabled: false, separator_before: sep, remove: None, icon: None };
-                    let mut items = vec![item(format!("{}All projects", tick(chosen.is_none())), Act::FilterProject(None), false)];
-                    items.extend(ws.store.data.projects.iter().map(|p| item(format!("{}{}", tick(chosen.as_ref() == Some(&p.id)), p.name), Act::FilterProject(Some(p.id.clone())), false)));
-                    items.push(item("Add project…".into(), Act::ImportProject, true));
-                    ws.open_dropdown(at, items, cx);
-                },
-            );
-        div()
-            .occlude()
-            .flex()
-            .items_center()
-            .gap(px(4.0))
-            .child(chip)
-            .when_some(current, |d, p| {
-                d.child(icon_button("project-more", IconName::Ellipsis).dropdown(
-                    cx,
-                    move |ws, at, _w, cx| {
-                        let items = ws.project_menu(&p);
-                        ws.open_dropdown(at, items, cx);
-                    },
-                ))
+    /// The running rows shown, in order: what a dragged row moves among.
+    fn shown_running(&self) -> Vec<Id> {
+        self.list_items()
+            .into_iter()
+            .filter_map(|i| match i {
+                Item::Session { row, reorder: true } => Some(row.id),
+                _ => None,
             })
+            .collect()
     }
 
-    /// The sidebar chrome around either list: header, scrolling body, usage footer.
-    fn sidebar_frame(&mut self, list: impl IntoElement, window: &mut Window, cx: &mut Context<Self>) -> Stateful<Div> {
-        let width = self.left_width(f32::from(window.viewport_size().width));
+    /// A running row was dragged `dy` points from where it started: move it to the slot under the pointer, among the
+    /// rows shown. `start` is its place when the drag began.
+    fn drag_row(&mut self, id: &str, start: usize, dy: f32) {
+        let shown = self.shown_running();
+        let Some(now) = shown.iter().position(|s| s == id) else { return };
+        let to = drag_target(start, dy, shown.len());
+        if to == now {
+            return;
+        }
+        let at = |ws: &Workspace, id: &str| ws.live.iter().position(|l| l.id == id);
+        if let (Some(from), Some(to)) = (at(self, id), at(self, &shown[to])) {
+            move_to(&mut self.live, from, to);
+        }
+    }
+
+    /// The sidebar: header, the session list and the usage footer, sliding in and out from the left.
+    pub fn render_sidebar(&self) -> El {
+        let visible = self.store.data.layout.sidebar_visible;
+        let width = self.left_width(self.window_size.0);
+        let spin = self.spin_visible();
+        let items = self.list_items();
+        let mut list = col().key("sidebar-list").w_full().gap(LIST_GAP).pb(8.0);
+        for item in items {
+            list = list.child(self.list_item(item, spin));
+        }
+        let scroll = col().key("sidebar-scroll").w_full().grow(1.0).shrink().min_h(0.0).scroll(ScrollSpec { stick_bottom: false }).child(list);
+        let panel = col()
+            .key("sidebar-panel")
+            .w(width)
+            .h_full()
+            .radius(theme::PANEL_RADIUS)
+            .clip_rounded(theme::PANEL_RADIUS)
+            .border(1.0, rgb(theme::PANEL_BORDER))
+            .fill(rgb(theme::SIDEBAR_BG))
+            .child(self.sidebar_header())
+            .child(scroll)
+            .child(self.sidebar_footer());
         // The right edge is the drag handle: it fills the gutter with a small visible grip.
-        let handle_center = theme::PANEL_GAP / 2.0 + 3.0;
-        let handle = div()
-            .id("left-resize")
-            .group("left-resize")
-            .absolute()
-            .top_0()
-            .right(px(-handle_center))
-            .w(px(6.0))
+        let handle = row()
+            .key("left-resize")
+            .pin(None, Some(0.0), Some(-(theme::PANEL_GAP / 2.0 + 3.0)), Some(0.0))
+            .w(6.0)
+            .center()
+            .cursor(Cursor::ResizeColumn)
+            .hover_group()
+            .on_drag(|ws: &mut Workspace, d: &mut rune::Drag, tx: &mut Tx| {
+                match d.phase {
+                    Phase::Down => ws.left_drag = Some(SideDrag { size: ws.left_width(ws.window_size.0) }),
+                    Phase::Move => ws.drag_left(d.dx),
+                    Phase::Up => ws.left_drag = None,
+                }
+                ws.after_input(tx);
+            })
+            .child(el().w(2.0).h(28.0).radius(1.0).fill(rgb(0x2b2b30)).group_color(rgb(0x4a4a52)));
+        let mut outer = row()
+            .key("sidebar")
             .h_full()
-            .flex()
-            .items_center()
-            .justify_center()
-            .cursor_col_resize()
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |ws, ev: &MouseDownEvent, _w, cx| {
-                    ws.left_drag = Some(SideDrag { x: f32::from(ev.position.x), width });
-                    cx.notify();
-                }),
-            )
-            .child(
-                div()
-                    .w(px(2.0))
-                    .h(px(28.0))
-                    .rounded_full()
-                    .bg(hsla(0x2b2b30))
-                    .group_hover("left-resize", |s| s.bg(hsla(0x4a4a52))),
-            );
-        div()
-            .id("sidebar")
-            .relative()
-            .flex_none()
-            .w(px(width))
-            .h_full()
-            .child(
-                div()
-                    .size_full()
-                    .flex()
-                    .flex_col()
-                    .rounded(px(theme::PANEL_RADIUS))
-                    .overflow_hidden()
-                    .border_1()
-                    .border_color(hsla(theme::PANEL_BORDER))
-                    .bg(hsla(theme::SIDEBAR_BG))
-                    .child(self.render_sidebar_header(cx))
-                    .child(list)
-                    .child(self.render_footer(cx)),
-            )
-            .child(handle)
+            .w(if visible { width + theme::PANEL_GAP } else { 0.0 })
+            .clip_rounded(0.0)
+            .motion(motion::GLIDE)
+            .child(col().key("sidebar-inner").w(width).h_full().child(panel).child(handle).opacity(if visible { 1.0 } else { 0.0 }).motion(motion::GLIDE));
+        if self.left_drag.is_some() {
+            outer = outer.instant_changes();
+        }
+        outer
     }
 
-    fn render_sidebar_header(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn list_item(&self, item: Item, spin: bool) -> El {
+        match item {
+            Item::Header(label, count) => section_header(label, count),
+            Item::Note(t) => row().key(format!("note-{t}")).h(NOTE_H).center_y().px(14.0).child(label(t, 12.0, theme::TEXT_FAINT)),
+            Item::Spacer => el().key("spacer").h(SPACER_H),
+            Item::Session { row, reorder } => self.session_row(row, reorder, spin),
+            Item::Older { count, open } => row()
+                .key("older-header")
+                .h(HEADER_H)
+                .center_y()
+                .gap(5.0)
+                .px(14.0)
+                .cursor(Cursor::Pointer)
+                .role("button")
+                .on_press_tx(|ws: &mut Workspace, tx: &mut Tx| act(ws, Act::ToggleOlder, tx))
+                .child(icon(&icons::CHEVRON_RIGHT, 12.0, theme::TEXT_FAINT).rotate(if open { 90.0 } else { 0.0 }).motion(motion::SNAP))
+                .child(section_label("OLDER"))
+                .child(label(count.to_string(), 10.5, theme::TEXT_FAINT)),
+        }
+    }
+
+    fn session_row(&self, row_: Row, reorder: bool, spin: bool) -> El {
+        let key = format!("row-{}-{}", row_.scope, row_.id);
+        let dragging = self.dragging.as_ref().filter(|d| d.id == row_.id);
+        let right_text = if row_.archived { "archived".to_string() } else if row_.stale { "stale".to_string() } else { row_.right.clone() };
+        let right_color = if row_.stale { theme::WARN } else { theme::TEXT_FAINT };
+        let title_color = if row_.dim { theme::TEXT_DIM } else { theme::TEXT };
+        let dot = status_icon(&format!("dot-{}-{}", row_.scope, row_.id), row_.dot, spin);
+        let title = text(row_.title.clone()).font(font(13.0, 400.0)).color(rgb(title_color)).truncate().grow(1.0).shrink();
+        // The × or archive button sits over the row's right end, shown while the pointer is on the row; what is
+        // there otherwise (the age) fades out under it.
+        let (corner_icon, corner_act) = if row_.running {
+            (&icons::X, Act::CloseLive(row_.id.clone()))
+        } else if row_.archived {
+            (&icons::ARCHIVE_RESTORE, Act::Archive(row_.id.clone(), false))
+        } else {
+            (&icons::ARCHIVE, Act::Archive(row_.id.clone(), true))
+        };
+        let corner = icon_button(corner_icon)
+            .key(format!("{key}-corner"))
+            .group_opacity(0.0, 1.0)
+            .help(if row_.running { "End session" } else if row_.archived { "Unarchive" } else { "Archive" })
+            .on_press_tx(move |ws: &mut Workspace, tx: &mut Tx| act(ws, corner_act.clone(), tx));
+        let right = label(right_text, 11.0, right_color).group_opacity(1.0, 0.0).max_w(96.0).truncate();
+        let content = if row_.running {
+            // Project and age, then the title with the status icon, then the branch.
+            let mut c = col()
+                .grow(1.0)
+                .shrink()
+                .gap(2.0)
+                .child(row().w_full().gap(6.0).child(label(row_.project.clone(), 11.0, theme::TEXT_FAINT).truncate().grow(1.0).shrink()).child(right))
+                .child(row().w_full().center_y().gap(7.0).child(title).child(dot));
+            if let Some(b) = row_.branch.clone() {
+                c = c.child(row().gap(4.0).center_y().child(icon(&icons::GIT_BRANCH, 11.0, theme::TEXT_FAINT)).child(label(b, 11.0, theme::TEXT_FAINT).truncate().shrink()));
+            }
+            c
+        } else {
+            row().grow(1.0).shrink().center_y().gap(7.0).child(dot).child(title).child(right.mr(22.0))
+        };
+        let corner_slot = row().pin(None, Some(0.0), Some(4.0), if row_.running { None } else { Some(0.0) }).center_y().mt(if row_.running { 4.0 } else { 0.0 }).child(corner);
+        let mut r = row()
+            .key(key)
+            .h(if row_.running { RUNNING_ROW_H } else { ROW_H })
+            .center_y()
+            .gap(7.0)
+            .pl(10.0)
+            .pr(6.0)
+            .mx(5.0)
+            .radius(6.0)
+            .cursor(Cursor::Pointer)
+            .role("button")
+            .hover_group()
+            .hover(Color::WHITE.alpha(0.035))
+            .motion(motion::REFLOW)
+            .child(content)
+            .child(corner_slot);
+        if row_.active {
+            r = r.fill(rgb(theme::ROW_ACTIVE));
+        }
+        let menu_id = row_.id.clone();
+        r = r.on_secondary_press(move |ws: &mut Workspace, p: rune::PointerPress, tx: &mut Tx| {
+            if let Some(rec) = ws.store.session(&menu_id).cloned() {
+                let running = ws.is_running(&menu_id);
+                let items = ws.session_menu(&rec, running);
+                ws.open_menu(MenuAnchor::Point(p.x, p.y), 0.0, items);
+            }
+            ws.after_input(tx);
+        });
+        if !reorder {
+            let id = row_.id.clone();
+            return r.on_press_tx(move |ws: &mut Workspace, tx: &mut Tx| act(ws, Act::Select(id.clone()), tx));
+        }
+        if let Some(d) = dragging {
+            // Lifted: it follows the pointer while the others make room.
+            r = r.fill(rgb(theme::ROW_ACTIVE)).border(1.0, rgb(theme::TEXT_FAINT)).offset(0.0, d.dy).shadow(6.0, 18.0, Color::BLACK.alpha(0.45)).raise();
+        }
+        let id = row_.id.clone();
+        r.pointer_buttons([PointerButton::Primary, PointerButton::Middle]).on_drag(move |ws: &mut Workspace, d: &mut rune::Drag, tx: &mut Tx| {
+            let middle = tx.button() == PointerButton::Middle;
+            match d.phase {
+                Phase::Down if !middle => {
+                    d.data = ws.shown_running().iter().position(|s| *s == id).unwrap_or(0) as f32;
+                }
+                Phase::Move if !middle && d.dy.abs() > 4.0 => {
+                    ws.drag_row(&id, d.data as usize, d.dy);
+                    // The row is drawn at its new slot; the offset keeps it under the pointer.
+                    let shown = ws.shown_running();
+                    let slot = shown.iter().position(|s| *s == id).unwrap_or(0) as f32;
+                    ws.dragging = Some(crate::app::RowDrag { id: id.clone(), dy: d.dy - (slot - d.data) * ROW_PITCH });
+                }
+                Phase::Up => {
+                    let was_drag = ws.dragging.take().is_some();
+                    if middle {
+                        // A middle click ends a running session, like its ×.
+                        ws.act(Act::CloseLive(id.clone()));
+                    } else if !was_drag && !d.cancelled() {
+                        ws.act(Act::Select(id.clone()));
+                    }
+                }
+                _ => {}
+            }
+            ws.after_input(tx);
+        })
+    }
+
+    /// "+ New" with no project chosen: pick where it starts.
+    fn new_session_menu(&self) -> Vec<MenuItem> {
+        let mut items = vec![MenuItem { disabled: true, ..MenuItem::new("Start the session in…", Act::Dismiss) }];
+        items.extend(self.store.data.projects.iter().map(|p| MenuItem {
+            detail: Some(crate::panels::widgets::short_path(&p.path)),
+            icon: Some(&icons::FOLDER),
+            ..MenuItem::new(p.name.clone(), Act::NewClaude { cwd: p.path.clone() })
+        }));
+        items.push(MenuItem { separator_before: true, icon: Some(&icons::PLUS), ..MenuItem::new("Add project…", Act::ImportProject) });
+        items
+    }
+
+    fn sidebar_header(&self) -> El {
         // With a project chosen a new session starts there (and the button says so); with "All projects" it asks.
         let filter = self.project_filter().map(|p| p.name.clone());
         let hints = self.shortcuts_shown;
-        let label = match filter {
-            Some(name) => format!("+ New in {}", if name.chars().count() > 12 { format!("{}…", name.chars().take(11).collect::<String>()) } else { name }),
-            None => "+ New".to_string(),
+        let label_text = match filter {
+            Some(name) => format!("New in {}", if name.chars().count() > 12 { format!("{}…", name.chars().take(11).collect::<String>()) } else { name }),
+            None => "New".to_string(),
         };
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(8.0))
-            .px(px(8.0))
-            .pt(px(8.0))
-            .pb(px(8.0))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .px(px(2.0))
-                    .child(clawd(24.0))
-                    .child(div().flex_1().text_size(crate::panels::scale::px(13.0)).font_weight(FontWeight::BOLD).text_color(hsla(theme::TEXT)).child("CLAUDIU"))
-                    .when(hints, |d| d.child(key_hint(",")))
-                    .child(icon_button("settings", IconName::Settings).occlude().on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::OpenSettings, window, cx)))),
-            )
-            .child(
-                div()
-                    .occlude()
-                    .flex()
-                    .gap(px(6.0))
-                    .child(button("new-claude", label, true).dropdown(
-                        cx,
-                        |ws, at, window, cx| match ws.project_filter().map(|p| p.path.clone()) {
-                            Some(cwd) => ws.act(Act::NewClaude { cwd }, window, cx),
-                            None if ws.store.data.projects.is_empty() => {
-                                let cwd = ws.active_cwd();
-                                ws.act(Act::NewClaude { cwd }, window, cx)
-                            }
-                            None => {
-                                let items = ws.new_session_menu();
-                                ws.open_dropdown(at, items, cx);
-                            }
-                        },
-                    ))
-                    .when(hints, |d| d.items_center().child(key_hint("Shift+N"))),
-            )
-            .child(self.render_project_filter(cx))
-            .child(
-                div().occlude().child(
-                    Input::new(&self.search_input)
-                        .h(px(26.0))
-                        .text_size(crate::panels::scale::px(12.5))
-                        .prefix(div().text_color(hsla(theme::TEXT_FAINT)).child(icon(IconName::Search, 14.0)))
-                        .when(hints, |i| i.suffix(key_hint("Shift+F"))),
-                ),
-            )
+        let mut title = row()
+            .center_y()
+            .gap(8.0)
+            .px(2.0)
+            .child(clawd(24.0))
+            .child(text("CLAUDIU").font(font(13.0, 700.0).tracking(0.6)).color(rgb(theme::TEXT)).grow(1.0));
+        if hints {
+            title = title.child(key_hint(",").key("hint-settings"));
+        }
+        title = title.child(icon_button(&icons::SETTINGS).key("settings").help("Settings").on_press_tx(|ws: &mut Workspace, tx: &mut Tx| act(ws, Act::OpenSettings, tx)));
+        let new = crate::panels::widgets::button_leading(&icons::PLUS, label_text, true).key("new-claude").on_press_tx(|ws: &mut Workspace, tx: &mut Tx| {
+            match ws.project_filter().map(|p| p.path.clone()) {
+                Some(cwd) => ws.act(Act::NewClaude { cwd }),
+                None if ws.store.data.projects.is_empty() => {
+                    let cwd = ws.active_cwd();
+                    ws.act(Act::NewClaude { cwd })
+                }
+                None => {
+                    let items = ws.new_session_menu();
+                    ws.open_menu(MenuAnchor::Key("new-claude".into()), 240.0, items);
+                }
+            }
+            ws.after_input(tx);
+        });
+        let mut new_row = row().center_y().gap(6.0).child(new);
+        if hints {
+            new_row = new_row.child(key_hint("Shift+N").key("hint-new"));
+        }
+        let search_field = text_input(&self.search, font(12.5, 400.0))
+            .key("search")
+            .single_line()
+            .placeholder("Search sessions and projects", rgb(theme::TEXT_FAINT))
+            .color(rgb(theme::TEXT))
+            .caret(rgb(theme::ACCENT), rgb(theme::SELECTION))
+            .grow(1.0)
+            .shrink()
+            .on_edit(|ws: &mut Workspace| &mut ws.search)
+            .on_submit(|ws: &mut Workspace, tx: &mut Tx| {
+                ws.focus_active();
+                ws.after_input(tx);
+            })
+            .on_input_key(|ws: &mut Workspace, k: &rune::KeyEvent, tx: &mut Tx| {
+                // Escape empties the search, then gives the keyboard back to the session.
+                if k.key != rune::Key::Escape {
+                    return false;
+                }
+                if ws.search.text.is_empty() {
+                    ws.focus_active();
+                } else {
+                    ws.search.clear();
+                }
+                ws.after_input(tx);
+                true
+            });
+        let mut search = row()
+            .key("search-box")
+            .h(26.0)
+            .px(8.0)
+            .gap(6.0)
+            .center_y()
+            .radius(6.0)
+            .fill(rgb(0x141414))
+            .border(1.0, rgb(if self.search.focused { 0x3a3a40 } else { 0x1f1f22 }))
+            .motion(motion::SNAP)
+            .child(icon(&icons::SEARCH, 13.0, theme::TEXT_FAINT))
+            .child(search_field);
+        if hints {
+            search = search.child(key_hint("Shift+F").key("hint-search"));
+        }
+        col().gap(8.0).px(8.0).pt(8.0).pb(8.0).child(title).child(new_row).child(self.project_filter_chip()).child(search)
     }
 
-    fn section_header(&self, label: &str, count: Option<String>, trailing: Option<Stateful<Div>>) -> Div {
-        div()
-            .flex()
-            .items_center()
-            .justify_between()
-            .px(px(14.0))
-            .pr(px(10.0))
-            .h(px(HEADER_H))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .child(section_label(label.to_string()))
-                    .when_some(count, |d, c| d.child(div().text_size(crate::panels::scale::px(10.5)).text_color(hsla(theme::TEXT_FAINT)).child(c))),
-            )
-            .when_some(trailing, |d, t| d.child(t))
+    /// The project filter: a chip that lists the projects, and (with a project chosen) a ⋯ button for its actions.
+    fn project_filter_chip(&self) -> El {
+        let current = self.project_filter().cloned();
+        let name = current.as_ref().map_or("All projects".to_string(), |p| p.name.clone());
+        let chip = row()
+            .key("project-filter")
+            .grow(1.0)
+            .shrink()
+            .h(24.0)
+            .px(6.0)
+            .gap(6.0)
+            .center_y()
+            .radius(6.0)
+            .fill(rgb(0x141414))
+            .hover(Color::WHITE.alpha(0.03))
+            .cursor(Cursor::Pointer)
+            .role("button")
+            .child(icon(&icons::FOLDER_OPEN, 13.0, if current.is_some() { theme::TEXT } else { theme::TEXT_DIM }))
+            .child(label(name, 12.0, if current.is_some() { theme::TEXT } else { theme::TEXT_DIM }).truncate().grow(1.0).shrink())
+            .child(icon(&icons::CHEVRON_DOWN, 12.0, theme::TEXT_FAINT))
+            .on_press_tx(|ws: &mut Workspace, tx: &mut Tx| {
+                let chosen = ws.project_filter().map(|p| p.id.clone());
+                let mut items = vec![MenuItem::new(format!("{}All projects", tick(chosen.is_none())), Act::FilterProject(None))];
+                items.extend(ws.store.data.projects.iter().map(|p| MenuItem::new(format!("{}{}", tick(chosen.as_ref() == Some(&p.id)), p.name), Act::FilterProject(Some(p.id.clone())))));
+                items.push(MenuItem { separator_before: true, ..MenuItem::new("Add project…", Act::ImportProject) });
+                ws.open_menu(MenuAnchor::Key("project-filter".into()), 0.0, items);
+                ws.after_input(tx);
+            });
+        let mut r = row().center_y().gap(4.0).child(chip);
+        if let Some(p) = current {
+            r = r.child(icon_button(&icons::ELLIPSIS).key("project-more").help("Project actions").on_press_tx(move |ws: &mut Workspace, tx: &mut Tx| {
+                let items = ws.project_menu(&p);
+                ws.open_menu(MenuAnchor::Key("project-more".into()), 220.0, items);
+                ws.after_input(tx);
+            }));
+        }
+        r
     }
 
     /// Switch account, add one, or sign in again / remove the active alt (shown greyed out for the main account).
     fn account_menu(&self) -> Vec<MenuItem> {
         let active = self.store.active_account().map(|a| a.id.clone());
-        let item = |label: String, hint: Option<String>, act: Act, danger: bool, sep: bool| MenuItem {
-            label,
-            hint,
-            detail: None,
-            act,
-            danger,
-            disabled: false,
-            separator_before: sep,
-            remove: None,
-            icon: None,
-        };
         let accounts = &self.store.data.accounts;
         let mut items: Vec<MenuItem> = accounts
             .iter()
             .map(|a| {
                 let mark = tick(active.as_ref() == Some(&a.id));
-                item(format!("{mark}{}", a.name()), Some(account_hint(a)), Act::SwitchAccount(a.id.clone()), false, false)
+                MenuItem { hint: Some(account_hint(a)), ..MenuItem::new(format!("{mark}{}", a.name()), Act::SwitchAccount(a.id.clone())) }
             })
             .collect();
-        items.push(item("Add account…".into(), None, Act::AddAccount, false, true));
+        items.push(MenuItem { separator_before: true, ..MenuItem::new("Add account…", Act::AddAccount) });
         let id = active.unwrap_or_default();
         let main = self.store.active_account().is_none_or(|a| a.is_main());
-        for (label, act, danger) in [
-            ("Sign in to this account again…", Act::SignIn(id.clone()), false),
-            ("Remove this account…", Act::RemoveAccount(id), true),
-        ] {
-            items.push(MenuItem { disabled: main, ..item(label.into(), None, act, danger, false) });
-        }
+        items.push(MenuItem { disabled: main, ..MenuItem::new("Sign in to this account again…", Act::SignIn(id.clone())) });
+        items.push(MenuItem { disabled: main, danger: true, ..MenuItem::new("Remove this account…", Act::RemoveAccount(id)) });
         items
     }
 
-    fn render_account_switcher(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+    fn account_switcher(&self) -> El {
         let acct = self.store.active_account();
         let name = acct.map_or_else(|| "Main account".to_string(), |a| a.name());
         // `Pro · Alt`, so the row says which kind of account is in use.
         let plan = acct.map(account_hint).unwrap_or_default();
-        div()
-            .id("account-switcher")
-            .flex()
-            .items_center()
-            .gap(px(8.0))
-            .h(px(26.0))
-            .mx(px(-5.0))
-            .px(px(5.0))
-            .rounded(px(6.0))
-            .cursor_pointer()
-            .hover(|s| s.bg(hsla(theme::ROW_HOVER)))
-            .dropdown(cx, |ws, at, _window, cx| {
+        row()
+            .key("account-switcher")
+            .h(26.0)
+            .mx(-5.0)
+            .px(5.0)
+            .gap(8.0)
+            .center_y()
+            .radius(6.0)
+            .cursor(Cursor::Pointer)
+            .role("button")
+            .hover(Color::WHITE.alpha(0.035))
+            .on_press_tx(|ws: &mut Workspace, tx: &mut Tx| {
                 let items = ws.account_menu();
-                ws.open_dropdown(at, items, cx);
+                ws.open_menu(MenuAnchor::Key("account-switcher".into()), 0.0, items);
+                ws.after_input(tx);
             })
             .child(avatar(&name, 18.0))
-            .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(crate::panels::scale::px(12.5)).text_color(hsla(theme::TEXT)).child(name))
-            .child(div().flex_none().text_size(crate::panels::scale::px(10.5)).text_color(hsla(theme::TEXT_FAINT)).child(plan))
-            .child(div().flex_none().text_color(hsla(theme::TEXT_FAINT)).child(icon(IconName::ChevronDown, 12.0)))
+            .child(label(name, 12.5, theme::TEXT).truncate().grow(1.0).shrink())
+            .child(label(plan, 10.5, theme::TEXT_FAINT))
+            .child(icon(&icons::CHEVRON_DOWN, 12.0, theme::TEXT_FAINT))
     }
 
-    fn render_footer(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn sidebar_footer(&self) -> El {
         let t = now();
         let usage = self.store.active_account().map(|a| a.usage.clone()).unwrap_or_default();
-
         // Captions are short: two meters share a row.
-        let limit = |label: &str, l: &Option<crate::store::RateLimit>| -> Div {
+        let limit = |key: &str, label: &str, l: &Option<crate::store::RateLimit>| -> El {
             match l {
                 Some(l) => match (l.resets_at, l.utilization) {
                     (Some(reset), util) if reset > t => {
@@ -938,31 +666,39 @@ impl Workspace {
                         if t - l.seen_at > 900 {
                             caption.push_str(&format!(" · {} ago", ago(l.seen_at, t)));
                         }
-                        meter(label, util, caption, None)
+                        meter(key, label, util, caption, None)
                     }
-                    (Some(_), _) => meter(label, None, "reset · unknown".into(), None),
-                    (None, util) => meter(label, util, format!("seen {} ago", ago(l.seen_at, t)), None),
+                    (Some(_), _) => meter(key, label, None, "reset · unknown".into(), None),
+                    (None, util) => meter(key, label, util, format!("seen {} ago", ago(l.seen_at, t)), None),
                 },
-                None => meter(label, None, "after first message".into(), None),
+                None => meter(key, label, None, "after first message".into(), None),
             }
         };
-
-        let pair = |a: Div, b: Div| div().flex().gap(px(12.0)).child(a.flex_1().min_w_0()).child(b.flex_1().min_w_0());
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(8.0))
-            .px(px(14.0))
-            .pt(px(6.0))
-            .pb(px(8.0))
-            .border_t_1()
-            .border_color(hsla(theme::BORDER))
-            .child(self.render_account_switcher(cx))
-            .child(pair(limit("5 HOUR", &usage.five_hour), limit("7 DAY", &usage.seven_day)))
+        col()
+            .gap(8.0)
+            .px(14.0)
+            .pt(6.0)
+            .pb(8.0)
+            .border_sides([1.0, 0.0, 0.0, 0.0], rgb(theme::BORDER))
+            .child(self.account_switcher())
+            .child(
+                row()
+                    .gap(12.0)
+                    .child(limit("meter-5h", "5 HOUR", &usage.five_hour).grow(1.0).shrink())
+                    .child(limit("meter-7d", "7 DAY", &usage.seven_day).grow(1.0).shrink()),
+            )
     }
 }
 
-/// `email · Pro (Main)` for the menu.
+fn section_header(label_text: &str, count: Option<String>) -> El {
+    let mut left = row().center_y().gap(6.0).child(section_label(label_text.to_string()));
+    if let Some(c) = count {
+        // The count rolls to its new value.
+        left = left.child(label(c, 10.5, theme::TEXT_FAINT).key(format!("count-{label_text}")).transition(Transition::opacity()));
+    }
+    row().key(format!("header-{label_text}")).h(HEADER_H).center_y().justify_between().pl(14.0).pr(10.0).child(left)
+}
+
 /// `Pro · Main`, shown right of the email in the account menu.
 fn account_hint(a: &crate::store::Account) -> String {
     a.plan.as_deref().map_or(kind_label(a).to_string(), |p| format!("{} · {}", plan_label(p), kind_label(a)))
@@ -980,7 +716,7 @@ fn plan_label(plan: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Item, ROW_H, RUNNING_ROW_H, Row, SessionDot, is_reorder, move_to, visible_items};
+    use super::{Item, ROW_H, RUNNING_ROW_H, Row, SessionDot, drag_target, is_reorder, move_to};
 
     fn row(running: bool) -> Row {
         Row {
@@ -993,7 +729,6 @@ mod tests {
             active: false,
             dim: false,
             running,
-            indent: false,
             stale: false,
             archived: false,
             scope: "cur",
@@ -1025,13 +760,12 @@ mod tests {
     }
 
     #[test]
-    fn only_items_overlapping_the_view_are_drawn_at_their_place_in_the_stack() {
-        // Five items of 10, 20, 10, 10, 10 px stacked 2 px apart sit at 0, 12, 34, 46 and 58; the stack is 68 tall.
-        let heights = [10.0, 20.0, 10.0, 10.0, 10.0];
-        assert_eq!(visible_items(&heights, 2.0, 15.0, 40.0), (vec![(1, 12.0), (2, 34.0)], 68.0));
-        // An item ending exactly where the view starts is out of it; one starting inside is in.
-        assert_eq!(visible_items(&heights, 2.0, 44.0, 47.0).0, vec![(3, 46.0)]);
-        assert_eq!(visible_items(&heights, 2.0, -100.0, 1000.0).0.len(), 5);
-        assert_eq!(visible_items(&[], 2.0, 0.0, 100.0), (vec![], 0.0));
+    fn a_dragged_row_passes_a_neighbour_halfway_over_it_and_stays_in_the_list() {
+        let pitch = RUNNING_ROW_H + super::LIST_GAP;
+        assert_eq!(drag_target(1, pitch * 0.4, 4), 1, "not yet halfway");
+        assert_eq!(drag_target(1, pitch * 0.6, 4), 2);
+        assert_eq!(drag_target(1, -pitch * 0.6, 4), 0);
+        assert_eq!(drag_target(1, pitch * 9.0, 4), 3, "past the end lands last");
+        assert_eq!(drag_target(0, -pitch * 9.0, 4), 0);
     }
 }

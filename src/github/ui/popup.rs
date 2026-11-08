@@ -216,72 +216,68 @@ impl GithubView {
         (out, loading)
     }
 
-    pub(super) fn render_popup(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub(super) fn render_popup(&self) -> Option<El> {
         let popup = self.popup.as_ref()?;
         let (items, loading) = self.popup_items(&popup.kind);
-        let needle = popup.filter.read(cx).value().to_lowercase();
+        let needle = popup.filter.text.to_lowercase();
         let searchable = !matches!(popup.kind, PopKind::Merge | PopKind::CloseReason | PopKind::Claude | PopKind::More | PopKind::React(_) | PopKind::Comment(..) | PopKind::FilterSort | PopKind::FilterReview | PopKind::FilterChecks);
-        let mut list = popup.scroll.wire(div().id("gh-pop-list"), window).flex().flex_col().max_h(px(320.0));
+        let mut list = col().key("gh-pop-list").w_full().max_h(320.0).scroll(ScrollSpec { stick_bottom: false });
         let mut shown = 0;
         for (i, it) in items.into_iter().enumerate() {
             if searchable && !needle.is_empty() && !it.label.to_lowercase().contains(&needle) {
                 continue;
             }
             shown += 1;
-            list = list.child(
-                div()
-                    .id(SharedString::from(format!("gh-pop-{i}")))
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .h(px(28.0))
-                    .px(px(10.0))
-                    .rounded(px(5.0))
-                    .cursor_pointer()
-                    .text_size(crate::panels::scale::px(12.5))
-                    .hover(|s| s.bg(hsla(0x252525)))
-                    .child(div().w(px(12.0)).flex_none().text_color(hsla(theme::ACCENT)).children((it.checked == Some(true)).then(|| icon(IconName::Check, 13.0))))
-                    .children(it.swatch.map(|c| div().size(px(10.0)).flex_none().rounded_full().bg(hsla(c))))
-                    .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(it.label))
-                    .children(it.hint.map(faint))
-                    .on_click(go(cx, it.act)),
-            );
+            let mut r = row()
+                .key(format!("gh-pop-{i}"))
+                .w_full()
+                .h(28.0)
+                .px(10.0)
+                .gap(8.0)
+                .center_y()
+                .radius(5.0)
+                .cursor(Cursor::Pointer)
+                .role("menuitem")
+                .hover(Color::WHITE.alpha(0.06))
+                .child(row().w(12.0).child(if it.checked == Some(true) { icon(&icons::CHECK, 13.0, theme::ACCENT) } else { el() }));
+            if let Some(c) = it.swatch {
+                r = r.child(el().size(10.0, 10.0).radius(5.0).fill(rgb(c)));
+            }
+            r = r.child(label(it.label, 12.5, theme::TEXT).truncate().grow(1.0).shrink());
+            if let Some(h) = it.hint {
+                r = r.child(faint(h));
+            }
+            list = list.child(r.on_press_tx(go(&self.id, it.act)));
         }
         if loading {
-            list = list.child(div().px(px(10.0)).py(px(6.0)).child(dim("Loading…")));
+            list = list.child(row().px(10.0).py(6.0).gap(8.0).center_y().child(spinner(12.0, theme::TEXT_DIM)).child(dim("Loading…")));
         } else if shown == 0 {
-            list = list.child(div().px(px(10.0)).py(px(6.0)).child(dim("Nothing matches")));
+            list = list.child(el().px(10.0).py(6.0).child(dim("Nothing matches")));
         }
-        let card = div()
-            .id("gh-popup")
-            .occlude()
-            .w(px(272.0))
-            .p(px(4.0))
-            .rounded(px(8.0))
-            .bg(hsla(0x181818))
-            .border_1()
-            .border_color(hsla(0x2c2c2c))
-            .shadow_lg()
-            .flex()
-            .flex_col()
-            .gap(px(4.0))
-            .when(searchable, |d| d.child(div().p(px(2.0)).child(Input::new(&popup.filter).h(px(28.0)).text_size(crate::panels::scale::px(12.5)))))
-            .child(list);
-        let close = cx.listener(|v: &mut GithubView, _: &MouseDownEvent, window, cx| v.act(GhAct::ClosePopup, window, cx));
-        Some(
-            deferred(
-                div()
-                    .absolute()
-                    .top_0()
-                    .left_0()
-                    .size_full()
-                    .occlude()
-                    .on_mouse_down(MouseButton::Left, close)
-                    .child(anchored().position(popup.pos).snap_to_window_with_margin(px(8.0)).child(fade_in(card, format!("gh-pop-in-{:?}", popup.kind), 110, 0.0))),
-            )
-            .with_priority(5)
-            .into_any_element(),
-        )
+        let pane = self.id.clone();
+        let mut card = col()
+            .key(format!("gh-popup-{:?}", popup.kind))
+            .w(272.0)
+            .padding(4.0)
+            .gap(4.0)
+            .radius(9.0)
+            .fill(rgb(0x18181a))
+            .border(1.0, rgb(0x2c2c30))
+            .shadow(10.0, 28.0, Color::BLACK.alpha(0.5))
+            .role("menu")
+            .transition(Transition::scale(0.96).combined(Transition::opacity()))
+            .modal(true, move |ws: &mut Workspace| {
+                if let Some(v) = ws.gh_view_mut(&pane) {
+                    v.popup = None;
+                }
+            });
+        if searchable {
+            card = card.child(el().padding(2.0).child(gh_input(&self.id, "gh-pop-filter", &popup.filter, |v| match v.popup.as_mut() {
+                Some(p) => &mut p.filter,
+                None => &mut v.query_input,
+            }, "Filter", false, None)));
+        }
+        Some(card.child(list).anchored(popup.anchor.clone(), rune::Side::Bottom, rune::Align::Start, 4.0))
     }
 }
 

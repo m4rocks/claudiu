@@ -2,7 +2,6 @@
 //! `commit` is the Commit & Push flow built on top of it.
 
 pub mod commit;
-pub mod lines;
 pub mod worktree;
 
 use std::path::{Path, PathBuf};

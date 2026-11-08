@@ -1,18 +1,15 @@
-//! The status icon at the start of a session row: one Lucide circle per state, spinning while Claude works. When the
-//! state changes, the old icon turns, shrinks and fades away while the new one does the same in reverse.
+//! The status icon at the start of a session row: one Lucide circle per state, turning while Claude works. When the
+//! state changes, the old icon shrinks and fades away while the new one grows in (each state's icon is its own keyed
+//! element, so Rune's enter and exit transitions do the morph).
 
-use std::f32::consts::{FRAC_PI_2, TAU};
-use std::sync::OnceLock;
-use std::time::{Duration, Instant};
+use rune::{El, Icon, Transition, el, row};
 
-use gpui::{Animation, AnimationExt, AnyElement, App, Hsla, IntoElement, ParentElement, RenderOnce, SharedString, Styled, Window, div, ease_out_quint, px};
-use gpui_kit::assets::IconName;
-
-use crate::panels::theme::{self, hsla};
+use crate::panels::icons;
+use crate::panels::theme::{self, rgb};
 use crate::panels::widgets::icon;
 
 /// What a session row's status icon shows.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum SessionDot {
     /// Claude Code is waiting for the user: a question or a permission.
     Waiting,
@@ -26,116 +23,44 @@ pub enum SessionDot {
     Inactive,
 }
 
-/// The icon's square, and how long one turn of the working icon takes.
+/// The icon's square, and how long one turn of the working icon takes (seconds).
 const SLOT: f32 = 14.0;
-const SPIN: Duration = Duration::from_millis(1600);
-/// How often the working icon is redrawn (see `Workspace::start_spin`). A gpui animation would redraw the whole
-/// window every frame for as long as any session works.
-pub const SPIN_STEP: Duration = Duration::from_millis(40);
-/// How long one icon takes to turn into the next.
-const MORPH: Duration = Duration::from_millis(280);
-
-/// How far the working icon has turned `elapsed` into its spin, in radians; repeats every `SPIN`.
-fn spin_angle(elapsed: Duration) -> f32 {
-    (elapsed.as_millis() % SPIN.as_millis()) as f32 / SPIN.as_millis() as f32 * TAU
-}
-
-/// How one icon is drawn: its size and opacity as a fraction of the resting look, and an extra turn.
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct Look {
-    scale: f32,
-    opacity: f32,
-    turn: f32,
-}
-
-impl Look {
-    const REST: Look = Look { scale: 1.0, opacity: 1.0, turn: 0.0 };
-}
-
-/// The old and the new icon `t` (0 to 1) of the way through a morph. The new one ends at `Look::REST`, so nothing
-/// jumps when the morph is over and the plain icon takes its place.
-fn morph_frame(t: f32) -> (Look, Look) {
-    let old = Look { scale: 1.0 - 0.6 * t, opacity: 1.0 - t, turn: t * FRAC_PI_2 };
-    let new = Look { scale: 0.4 + 0.6 * t, opacity: t, turn: (t - 1.0) * FRAC_PI_2 };
-    (old, new)
-}
+const SPIN: f64 = 1.6;
 
 /// One state's icon and color. `None` is the not-running ring, which is drawn rather than loaded.
-fn icon_of(state: SessionDot) -> Option<(IconName, u32)> {
+fn icon_of(state: SessionDot) -> Option<(&'static Icon, u32)> {
     match state {
-        SessionDot::Waiting => Some((IconName::CircleQuestionMark, theme::WARN)),
-        SessionDot::Attention => Some((IconName::CircleCheck, theme::ACCENT)),
-        SessionDot::Working => Some((IconName::CircleDotDashed, 0xc8c8c8)),
-        SessionDot::Active => Some((IconName::CircleSmall, theme::TEXT_DIM)),
+        SessionDot::Waiting => Some((&icons::CIRCLE_QUESTION_MARK, theme::WARN)),
+        SessionDot::Attention => Some((&icons::CIRCLE_CHECK, theme::ACCENT)),
+        SessionDot::Working => Some((&icons::CIRCLE_DOT_DASHED, 0xc8c8c8)),
+        SessionDot::Active => Some((&icons::CIRCLE_SMALL, theme::TEXT_DIM)),
         SessionDot::Inactive => None,
     }
 }
 
-/// `state` drawn with `look`, centered in the slot.
-fn glyph(state: SessionDot, look: Look) -> AnyElement {
-    static START: OnceLock<Instant> = OnceLock::new();
+fn name(state: SessionDot) -> &'static str {
+    match state {
+        SessionDot::Waiting => "waiting",
+        SessionDot::Attention => "attention",
+        SessionDot::Working => "working",
+        SessionDot::Active => "active",
+        SessionDot::Inactive => "inactive",
+    }
+}
+
+/// A row's status icon. `key` must be the same on every frame for the row and differ between rows. `spin` is false
+/// while nobody can see the window, so a working icon stops asking for frames.
+pub fn status_icon(key: &str, state: SessionDot, spin: bool) -> El {
     let drawn = match icon_of(state) {
-        Some((name, color)) => {
-            let spin = if state == SessionDot::Working { spin_angle(START.get_or_init(Instant::now).elapsed()) } else { 0.0 };
-            let color: Hsla = hsla(color).opacity(look.opacity);
-            icon(name, SLOT * look.scale).text_color(color).rotate(gpui::radians(spin + look.turn)).into_any_element()
-        }
-        None => div().size(px(7.0 * look.scale)).rounded_full().border_1().border_color(hsla(0x3d3d43).opacity(look.opacity)).into_any_element(),
+        Some((glyph, color)) => icon(glyph, SLOT, color),
+        None => el().size(7.0, 7.0).radius(3.5).border(1.0, rgb(0x3d3d43)),
     };
-    div().absolute().inset_0().flex().items_center().justify_center().child(drawn).into_any_element()
-}
-
-/// What the icon showed last, kept across redraws so a change of state can be told from a redraw.
-struct Memory {
-    shown: SessionDot,
-    /// The state before the last change, until `MORPH` after it.
-    from: Option<SessionDot>,
-    changed: Instant,
-    /// Counts the changes, so each morph is a new animation.
-    epoch: u64,
-}
-
-/// A row's status icon. `id` must be the same on every redraw of the row and differ between rows.
-#[derive(IntoElement)]
-pub struct StatusIcon {
-    id: SharedString,
-    state: SessionDot,
-}
-
-impl StatusIcon {
-    pub fn new(id: impl Into<SharedString>, state: SessionDot) -> Self {
-        Self { id: id.into(), state }
+    let morph = Transition::scale(0.4).combined(Transition::opacity());
+    let mut shown = row().key(format!("{key}-{}", name(state))).absolute(0.0, 0.0).size(SLOT, SLOT).center().transition(morph).child(drawn);
+    if state == SessionDot::Working && spin {
+        shown = shown.looping(rune::LoopSpec::rotation(SPIN));
     }
-}
-
-impl RenderOnce for StatusIcon {
-    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let Self { id, state } = self;
-        let memory = window.use_keyed_state(id.clone(), cx, move |_, _| Memory { shown: state, from: None, changed: Instant::now(), epoch: 0 });
-        let (from, epoch) = memory.update(cx, |m, _| {
-            if m.shown != state {
-                m.from = Some(m.shown);
-                m.shown = state;
-                m.changed = Instant::now();
-                m.epoch += 1;
-            }
-            (m.from.filter(|_| m.changed.elapsed() < MORPH), m.epoch)
-        });
-        let slot = div().relative().flex_none().size(px(SLOT));
-        match from {
-            None => slot.child(glyph(state, Look::REST)).into_any_element(),
-            Some(from) => slot
-                .with_animation(
-                    SharedString::from(format!("{id}-morph-{epoch}")),
-                    Animation::new(MORPH).with_easing(ease_out_quint()),
-                    move |slot, t| {
-                        let (old, new) = morph_frame(t);
-                        slot.child(glyph(from, old)).child(glyph(state, new))
-                    },
-                )
-                .into_any_element(),
-        }
-    }
+    row().key(key.to_string()).size(SLOT, SLOT).center().child(shown)
 }
 
 #[cfg(test)]
@@ -143,36 +68,41 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_morph_starts_on_the_old_icon_and_ends_on_the_new_one_at_rest() {
-        let (old, new) = morph_frame(0.0);
-        assert_eq!(old, Look::REST);
-        assert_eq!(new.opacity, 0.0);
-        let (old, new) = morph_frame(1.0);
-        assert_eq!(old.opacity, 0.0);
-        assert_eq!(new, Look::REST);
-    }
-
-    #[test]
-    fn halfway_through_both_icons_are_partly_visible() {
-        let (old, new) = morph_frame(0.5);
-        assert!(old.opacity > 0.0 && new.opacity > 0.0);
-        assert!(old.scale < 1.0 && new.scale < 1.0);
-    }
-
-    #[test]
-    fn the_working_icon_turns_once_per_spin_and_repeats() {
-        assert_eq!(spin_angle(Duration::ZERO), 0.0);
-        let quarter = spin_angle(SPIN / 4);
-        assert!((quarter - FRAC_PI_2).abs() < 1e-3, "a quarter of the spin is {quarter} radians");
-        let (early, later) = (spin_angle(Duration::from_millis(300)), spin_angle(Duration::from_millis(300) + SPIN * 3));
-        assert!((early - later).abs() < 1e-4);
-    }
-
-    #[test]
     fn only_a_session_that_is_not_running_draws_a_ring_instead_of_an_icon() {
         for state in [SessionDot::Waiting, SessionDot::Attention, SessionDot::Working, SessionDot::Active] {
             assert!(icon_of(state).is_some(), "{state:?}");
         }
         assert!(icon_of(SessionDot::Inactive).is_none());
+    }
+
+    fn view(state: &(SessionDot, bool), _: &mut rune::Cx<(SessionDot, bool)>) -> El {
+        row().padding(20.0).child(status_icon("dot", state.0, state.1))
+    }
+
+    #[test]
+    fn a_change_of_state_crossfades_the_icons_and_ends_on_the_new_one() {
+        let mut rt = rune::Runtime::new((SessionDot::Active, true), view, (100.0, 100.0), rune::Env::new(true, 2.0));
+        rt.frame(1.0 / 60.0);
+        assert!(rt.find("dot-active").is_some());
+        rt.update(|s, _| s.0 = SessionDot::Waiting);
+        rt.frame(1.0 / 60.0);
+        assert!(rt.find("dot-waiting").is_some(), "the new icon is in at once");
+        assert!(rt.presented("dot-active").is_some(), "the old one is still fading out");
+        rt.settle_all();
+        rt.frame(1.0 / 60.0);
+        assert!(rt.presented("dot-active").is_none(), "the old icon is gone once the morph ends");
+        assert!(rt.find("dot-waiting").is_some());
+    }
+
+    #[test]
+    fn the_working_icon_turns_only_while_it_may_spin() {
+        for spin in [true, false] {
+            let mut rt = rune::Runtime::new((SessionDot::Working, spin), view, (100.0, 100.0), rune::Env::new(true, 2.0));
+            let mut busy = false;
+            for _ in 0..60 {
+                busy = rt.frame(1.0 / 60.0);
+            }
+            assert_eq!(busy, spin, "asks for frames only while it spins (spin = {spin})");
+        }
     }
 }

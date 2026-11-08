@@ -1,5 +1,5 @@
-//! The `ui` dialect: forgiving HTML and a CSS subset, turned into a tree the renderer draws. No GPUI here (apart from
-//! the SVG bitmap type), so everything below is testable. The input is whatever the model has streamed so far, so
+//! The `ui` dialect: forgiving HTML and a CSS subset, turned into a tree the renderer draws. No UI here (apart from
+//! the SVG bitmap), so everything below is testable. The input is whatever the model has streamed so far, so
 //! nothing may be an error: an open tag cut short is dropped, open elements close at the end, unknown tags become
 //! plain blocks, unknown CSS is ignored.
 //! `css` holds the CSS subset (colours, lengths, `Css`); this file holds the tree, the tag parser and entities.
@@ -12,7 +12,6 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, LazyLock, Mutex};
 
-use gpui::{Image, ImageFormat, SMOOTH_SVG_SCALE_FACTOR};
 
 use crate::panels::theme;
 
@@ -53,19 +52,19 @@ pub struct Svg {
 }
 
 impl Svg {
-    /// The drawing as a bitmap of exactly the pixels it covers on a screen of this scale. A larger one is shrunk on the
-    /// GPU without filtering, which blurs small text. gpui rasterises at `SMOOTH_SVG_SCALE_FACTOR` times the size given.
-    pub fn image(&self, screen_scale: f32) -> Arc<Image> {
-        let scale = screen_scale / SMOOTH_SVG_SCALE_FACTOR;
-        let svg = format!("<svg width=\"{}\" height=\"{}\"{}", self.w * scale, self.h * scale, self.rest);
-        // A view is drawn on every frame. A new `Image` each time would be decoded and kept by gpui again, so the same
-        // drawing must give the same `Image`.
-        static CACHE: LazyLock<Mutex<HashMap<String, Arc<Image>>>> = LazyLock::new(Default::default);
-        let mut cache = CACHE.lock().unwrap();
+    /// The drawing as a bitmap of exactly the pixels it covers on a screen of this scale, decoded off the UI thread.
+    pub fn image(&self, screen_scale: f32) -> rune::Image {
+        let svg = format!("<svg width=\"{}\" height=\"{}\"{}", self.w, self.h, self.rest);
+        // A view is built on every frame, and Rune keeps an image only while a handle to it lives: the same drawing
+        // must give the same handle, so it is decoded once.
+        static IMAGES: LazyLock<rune::ImageCache> = LazyLock::new(|| rune::ImageCache::new(Arc::new(crate::app::rt::wake)));
+        static CACHE: LazyLock<Mutex<HashMap<(String, u32), rune::Image>>> = LazyLock::new(Default::default);
+        let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
         if cache.len() > 64 {
             cache.clear();
         }
-        cache.entry(svg.clone()).or_insert_with(|| Arc::new(Image::from_bytes(ImageFormat::Svg, svg.into_bytes()))).clone()
+        let size = self.w.max(self.h);
+        cache.entry((svg.clone(), screen_scale.to_bits())).or_insert_with(|| IMAGES.svg(svg.into_bytes(), size, screen_scale)).clone()
     }
 }
 
@@ -370,7 +369,7 @@ pub fn svg_tokens(s: &str) -> String {
     out.replace("currentColor", &text).replace("currentcolor", &text)
 }
 
-/// The app's text font by name. The SVG renderer knows none of gpui's, and on its own draws text in Times New Roman.
+/// The app's text font by name. The SVG renderer knows none of the app's, and on its own draws text in Times New Roman.
 const SVG_FONT: &str = if cfg!(windows) {
     "Segoe UI"
 } else if cfg!(target_os = "macos") {
@@ -546,10 +545,9 @@ mod tests {
     fn a_drawing_becomes_exactly_the_pixels_it_covers() {
         let nodes = parse("<svg viewBox=\"0 0 200 100\" width=\"100\"><rect width=\"10\" height=\"10\"/></svg>");
         let Node::Svg(Some(s)) = &nodes[0] else { panic!("svg expected") };
-        let renderer = gpui::SvgRenderer::new(Arc::new(()));
         for (scale, w, h) in [(1.0, 100, 50), (1.5, 150, 75), (2.0, 200, 100)] {
-            let size = s.image(scale).to_image_data(renderer.clone()).unwrap().size(0);
-            assert_eq!((i32::from(size.width), i32::from(size.height)), (w, h), "at scale {scale}");
+            let size = s.image(scale).wait().expect("the drawing decodes");
+            assert_eq!((size[0], size[1]), (w, h), "at scale {scale}");
         }
     }
 
@@ -571,10 +569,10 @@ mod tests {
             _ => panic!("svg expected"),
         }
         assert_eq!(el(&nodes[1]).tag, "p");
-        // Parsed again (the next streamed chunk): the same drawing is the same image, so gpui does not decode it twice.
+        // Parsed again (the next streamed chunk): the same drawing is the same image, so it is not decoded twice.
         let again = parse("<svg viewBox=\"0 0 200 100\" width=\"100\"><rect width=\"10\" height=\"10\"/></svg>");
         match (&nodes[0], &again[0]) {
-            (Node::Svg(Some(a)), Node::Svg(Some(b))) => assert!(Arc::ptr_eq(&a.image(1.0), &b.image(1.0))),
+            (Node::Svg(Some(a)), Node::Svg(Some(b))) => assert_eq!(a.image(1.0).id(), b.image(1.0).id()),
             _ => panic!("svg expected"),
         }
         // Still streaming: a placeholder, and nothing after it is misread as markup.

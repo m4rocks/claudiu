@@ -1,5 +1,5 @@
 //! Claudiu's own persisted state (projects, session history, cached usage, layout).
-//! Independent of GPUI. Claude Code's data is only ever *read* (see `claude/`) and merged in here.
+//! Independent of the UI. Claude Code's data is only ever *read* (see `claude/`) and merged in here.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -216,11 +216,11 @@ pub struct WindowGeom {
 }
 
 impl WindowGeom {
-    /// Whether the window's center lies on one of the `displays` (x, y, w, h). A monitor that was unplugged or
-    /// rearranged since would otherwise open the window out of reach.
-    pub fn on_screen(&self, displays: &[(f32, f32, f32, f32)]) -> bool {
+    /// Which of the `displays` (x, y, w, h) holds the window's center. A monitor that was unplugged or rearranged since
+    /// would otherwise open the window out of reach.
+    pub fn display_of(&self, displays: &[(f32, f32, f32, f32)]) -> Option<usize> {
         let (cx, cy) = (self.x + self.w / 2.0, self.y + self.h / 2.0);
-        displays.iter().any(|&(x, y, w, h)| cx >= x && cx < x + w && cy >= y && cy < y + h)
+        displays.iter().position(|&(x, y, w, h)| cx >= x && cx < x + w && cy >= y && cy < y + h)
     }
 }
 
@@ -967,9 +967,10 @@ mod tests {
         let geom = |x| WindowGeom { x, y: 100.0, w: 1000.0, h: 700.0, maximized: false };
         let primary = (0.0, 0.0, 1920.0, 1080.0);
         let right = (1920.0, 0.0, 1920.0, 1080.0);
-        assert!(geom(100.0).on_screen(&[primary]));
-        assert!(geom(2000.0).on_screen(&[primary, right]));
-        assert!(!geom(2000.0).on_screen(&[primary]), "the second monitor was unplugged");
-        assert!(!geom(100.0).on_screen(&[]), "no display reported");
+        assert_eq!(geom(100.0).display_of(&[primary]), Some(0));
+        assert_eq!(geom(2000.0).display_of(&[primary, right]), Some(1));
+        assert_eq!(geom(2000.0).display_of(&[primary]), None, "the second monitor was unplugged");
+        assert_eq!(geom(100.0).display_of(&[]), None, "no display reported");
     }
+
 }

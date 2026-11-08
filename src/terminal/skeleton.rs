@@ -4,7 +4,9 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use gpui::{Animation, AnimationExt, IntoElement, Keystroke, div, prelude::*, px};
+use rune::{El, Family, TextStyle, col, el, row, text};
+
+use crate::terminal::keys::Keystroke;
 
 use crate::terminal::glyphs;
 use crate::panels::theme;
@@ -408,8 +410,8 @@ pub struct Grid {
 
 /// Over the terminal until Claude Code is ready: laid out like its start screen (prompt box between two rules) on the
 /// terminal's own grid, at the bottom where Claude Code keeps it, with what is being loaded above it. `phase` says what is going on.
-pub fn overlay(draft: &Draft, elapsed: Duration, phase: &str, grid: Grid) -> impl IntoElement {
-    let (text, dim, faint) = (theme::hsla(theme::TEXT), theme::hsla(theme::TEXT_DIM), theme::hsla(theme::TEXT_FAINT));
+pub fn overlay(draft: &Draft, elapsed: Duration, phase: &str, grid: Grid) -> El {
+    let (fg, dim, faint) = (theme::rgb(theme::TEXT), theme::rgb(theme::TEXT_DIM), theme::rgb(theme::TEXT_FAINT));
     let lh = grid.line_h;
     let hint = if draft.sent {
         "Queued: it goes to Claude Code the moment it is ready · Esc takes it back"
@@ -418,72 +420,44 @@ pub fn overlay(draft: &Draft, elapsed: Duration, phase: &str, grid: Grid) -> imp
     } else {
         "Enter queues it · Shift+Enter for a new line"
     };
+    let font = TextStyle::new(crate::panels::scale::px(14.0), 400.0).family(Family::Named(crate::platform::monospace_font())).lh(lh);
+    let line = |s: String, color: rune::Color| text(s).font(font).color(color);
+    let width = (grid.cell_w * f32::from(grid.cols)).round();
     // A rule is drawn the way the terminal draws `─` (a rectangle per cell, `glyphs.rs`), not as font glyphs, whose
     // edges overlap and show as bright dots.
     let (rule_y, rule_h) = glyphs::rects('─', grid.cell_w.round(), lh).and_then(|r| r.first().map(|r| (r.y, r.h))).unwrap_or((lh / 2.0, 1.0));
-    let rule = move || {
-        div().relative().flex_none().h(px(lh)).child(
-            div().absolute().left_0().top(px(rule_y)).h(px(rule_h)).w(px((grid.cell_w * f32::from(grid.cols)).round())).bg(faint),
-        )
-    };
-    let rows = draft.rows((grid.cols as usize).saturating_sub(2));
-    // The terminal fills whole rows only, so the grid ends above the window's bottom edge: the skeleton stops there too.
-    div()
-        .absolute()
-        .inset_0()
-        .overflow_hidden()
-        .bg(theme::hsla(theme::TERMINAL_BG))
+    let rule = || el().h(lh).w(width).child(el().absolute(0.0, rule_y).h(rule_h).w(width).fill(faint));
+    // Ping-pong through the frames like Claude Code does, ten steps a second.
+    let i = ((elapsed.as_millis() / 120) % 10) as usize;
+    let frame = FRAMES[if i < 6 { i } else { 10 - i }];
+    let mut body = col()
+        .w(width)
+        .h(lh * f32::from(grid.rows))
+        // Claude Code keeps its prompt at the bottom of the screen.
+        .justify_end()
+        .clip_rounded(0.0)
         .child(
-            div()
-                .relative()
-                .w(px((grid.cell_w * f32::from(grid.cols)).round()))
-                .h(px(lh * f32::from(grid.rows)))
-                .flex()
-                .flex_col()
-                // Claude Code keeps its prompt at the bottom of the screen.
-                .justify_end()
-                .overflow_hidden()
-                .font_family(crate::platform::monospace_font())
-                .text_size(crate::panels::scale::px(14.0))
-                .line_height(px(lh))
-                .child(
-                    div()
-                        .flex()
-                        .flex_none()
-                        .gap(px(8.0))
-                        .pb(px(lh))
-                        .pl(px(14.0))
-                        .text_color(dim)
-                        .child(div().text_color(theme::hsla(theme::ACCENT)).with_animation(
-                            "claude-loading",
-                            Animation::new(Duration::from_millis(1200)).repeat(),
-                            |d, t| {
-                                // Ping-pong through the frames like Claude Code does.
-                                let i = ((t * 10.0) as usize).min(9);
-                                d.child(FRAMES[if i < 6 { i } else { 10 - i }])
-                            },
-                        ))
-                        .child(format!("{phase} {}s", elapsed.as_secs())),
-                )
-                .child(rule())
-                .children(rows.into_iter().enumerate().map(|(i, (before, under, after))| {
-                    div()
-                        .flex()
-                        .flex_none()
-                        .h(px(lh))
-                        .whitespace_nowrap()
-                        .text_color(if draft.sent { dim } else { text })
-                        .child(if i == 0 { "❯ " } else { "  " })
-                        .child(before.to_string())
-                        .when_some(under, |d, c| {
-                            // The cursor: a block over the character it stands on (hidden once queued).
-                            d.child(div().when(!draft.sent, |d| d.bg(text).text_color(theme::hsla(theme::TERMINAL_BG))).child(c.to_string()))
-                                .child(after.to_string())
-                        })
-                }))
-                .child(rule())
-                .child(div().flex_none().h(px(lh)).whitespace_nowrap().text_color(faint).child(format!("  {hint}"))),
+            row()
+                .gap(8.0)
+                .pb(lh)
+                .pl(14.0)
+                .child(line(frame.to_string(), theme::rgb(theme::ACCENT)))
+                .child(line(format!("{phase} {}s", elapsed.as_secs()), dim)),
         )
+        .child(rule());
+    for (i, (before, under, after)) in draft.rows((grid.cols as usize).saturating_sub(2)).into_iter().enumerate() {
+        let color = if draft.sent { dim } else { fg };
+        let mut r = row().h(lh).child(line(format!("{}{before}", if i == 0 { "❯ " } else { "  " }), color));
+        if let Some(c) = under {
+            // The cursor: a block over the character it stands on (hidden once queued).
+            let cell = line(c.to_string(), if draft.sent { color } else { theme::rgb(theme::TERMINAL_BG) });
+            r = r.child(if draft.sent { cell } else { el().fill(fg).child(cell) }).child(line(after.to_string(), color));
+        }
+        body = body.child(r);
+    }
+    body = body.child(rule()).child(row().h(lh).child(line(format!("  {hint}"), faint)));
+    // The terminal fills whole rows only, so the grid ends above the window's bottom edge: the skeleton stops there too.
+    el().absolute(0.0, 0.0).w_full().h_full().clip_rounded(0.0).fill(theme::rgb(theme::TERMINAL_BG)).child(body)
 }
 
 #[cfg(test)]

@@ -1,1715 +1,146 @@
-//! Drives the real workspace on gpui's test platform (no window opens) with a throwaway data folder, to catch
-//! hangs and panics when sessions start and switch and a shell panel opens. Spawns the real `claude` and shell.
-//! `cargo test -- --ignored headless`.
+//! Drives the real workspace through Rune's headless runtime (no window opens) with throwaway data and Claude Code
+//! folders, to catch hangs and panics when sessions start, switch and end. Sessions run a stand-in for `claude`
+//! that prints a line and waits, so no test talks to a model or reads the user's own Claude Code data. Each test has
+//! a state file of its own; the folders around it are the test run's (`datadir::use_throwaway_folders`).
 use super::*;
-use gpui::{TestAppContext, VisualTestContext};
+use std::path::Path;
+use std::sync::{Mutex, MutexGuard};
+use std::time::Instant;
 
-#[test]
-#[ignore = "isolated workspace scheduling measurement"]
-fn energy_sidebar_scheduling() {
-    use futures::{FutureExt, StreamExt};
-    struct OtherWindow;
-    impl gpui::Render for OtherWindow {
-        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl gpui::IntoElement {
-            gpui::div()
-        }
-    }
-    let data = tempfile::tempdir().unwrap();
-    unsafe { std::env::set_var("CLAUDIU_DATA_DIR", data.path()) };
-    let mut cx = TestAppContext::single();
-    cx.update(gpui_kit::init);
-    let (window, ws) = cx.update(|app| gpui_kit::open_window(Default::default(), app,
-        |window, app| app.new(|cx| Workspace::new(window, vec![], cx)))).unwrap();
-    let (other, _) = cx.update(|app| gpui_kit::open_window(Default::default(), app,
-        |_, app| app.new(|_| OtherWindow))).unwrap();
-    for (visible, active) in [(true, true), (false, true), (true, true), (true, false), (true, true)] {
-        if !active {
-            cx.update_window(other, |_, window, _| window.activate_window()).unwrap();
-            cx.run_until_parked();
-        }
-        cx.update_window(window, |_, window, app| {
-            if active { window.activate_window(); }
-            ws.update(app, |ws, cx| {
-                ws.store.data.layout.sidebar_visible = visible;
-                ws.activity.insert("busy".into(), Activity::Working);
-                cx.notify();
-            });
-            window.draw(app).clear(app);
-        }).unwrap();
-        cx.run_until_parked();
-        let list = ws.read_with(&cx, |ws, _| ws.session_list.clone().unwrap());
-        let mut notifications = cx.notifications(&list);
-        for _ in 0..5 {
-            cx.executor().advance_clock(Duration::from_millis(40));
-            cx.run_until_parked();
-        }
-        let mut count = 0;
-        while notifications.next().now_or_never().flatten().is_some() { count += 1; }
-        println!("sidebar_visible={visible} active={active} interval_ms=200 spin_notifications={count}");
-        assert_eq!(count, if visible && active { 5 } else { 0 });
-        assert_eq!(ws.read_with(&cx, |ws, _| ws.spinning), visible && active);
-    }
+/// The tests share the run's data folder (the cross-session requests, the list of running sessions), so they take
+/// turns.
+static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
+
+struct Harness {
+    rt: rune::Runtime<Workspace>,
+    /// Where the test's projects and the stand-in `claude` live (canonical, so paths compare equal).
+    work: PathBuf,
+    /// Claude Code's data folder, where a conversation is looked for.
+    home: PathBuf,
+    _dirs: [tempfile::TempDir; 2],
+    // Last: the runtime and its terminals go before the next test may start.
+    _turn: MutexGuard<'static, ()>,
 }
 
-fn run() {
-    let data = tempfile::tempdir().unwrap();
-    // SAFETY: set before any other thread reads the environment; this test owns the process.
-    unsafe { std::env::set_var("CLAUDIU_DATA_DIR", data.path()) };
-    let work = tempfile::tempdir().unwrap();
-    let mut cx = TestAppContext::single();
-    cx.update(|app| {
-        gpui_kit::init(app);
-        gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, app);
-    });
-    let (window, ws) = cx
-        .update(|app| {
-            gpui_kit::open_window(Default::default(), app, |window, app| app.new(|cx| Workspace::new(window, vec![], cx)))
-        })
-        .unwrap();
-    let draw = |cx: &mut TestAppContext| {
-        cx.update_window(window, |_, window, app| window.draw(app).clear(app)).unwrap();
-        cx.run_until_parked();
-    };
-    let step = |cx: &mut TestAppContext, f: &dyn Fn(&mut Workspace, &mut Window, &mut Context<Workspace>)| {
-        let t = std::time::Instant::now();
-        cx.update_window(window, |_, window, app| ws.update(app, |ws, cx| f(ws, window, cx))).unwrap();
-        let acted = t.elapsed();
-        draw(cx);
-        draw(cx);
-        // Starting a process must never run on the UI thread (a big `claude.exe` took a second to create).
-        assert!(acted < Duration::from_millis(400), "the window was blocked for {acted:?}");
-    };
-    let cwd = work.path().to_path_buf();
-    draw(&mut cx);
-    step(&mut cx, &|ws, w, cx| ws.new_claude(cwd.clone(), w, cx));
-    let id = ws.read_with(&cx, |ws, _| ws.active.clone().expect("a session is shown"));
-    // Cross-session tools are answered on the spot, and one that can't work says why.
-    use serde_json::{Value, json};
-    let ask = |from: String, tool: &'static str, args: Value| std::thread::spawn(move || crate::claude::bridge::ask(&from, tool, &args));
-    let take = || loop {
-        if let Some(r) = crate::claude::bridge::take_requests().pop() {
-            break r;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    };
-    let serve = |cx: &mut TestAppContext, req: crate::claude::bridge::Request| step(cx, &|ws, w, cx| ws.serve_requests(vec![req.clone()], w, cx));
-    let from_session = format!("code:{id}");
-
-    let h = ask(from_session.clone(), "list_code_sessions", json!({}));
-    serve(&mut cx, take());
-    let text = h.join().unwrap().unwrap();
-    assert!(text.contains(&id) && text.contains("this session"), "{text}");
-
-    // A request whose asker gave up is dropped.
-    let stale = crate::claude::bridge::Request { id: "late".into(), from: from_session.clone(), tool: "start_code_session".into(), args: json!({"folder": cwd.to_string_lossy()}), deadline: now() - 1 };
-    let before = ws.read_with(&cx, |ws, _| ws.live.len());
-    serve(&mut cx, stale);
-    assert_eq!(ws.read_with(&cx, |ws, _| ws.live.len()), before, "an expired request was carried out");
-
-    let h = ask(from_session.clone(), "start_code_session", json!({"folder": "no-such-project"}));
-    serve(&mut cx, take());
-    assert!(h.join().unwrap().unwrap_err().contains("No project or folder"));
-
-    // A first message of its own needs the user's yes: a closed dialog is a refusal, and nothing was started.
-    let live_before = ws.read_with(&cx, |ws, _| ws.live.len());
-    let h = ask(from_session.clone(), "start_code_session", json!({"folder": cwd.to_string_lossy(), "prompt": "do the thing"}));
-    serve(&mut cx, take());
-    assert!(ws.read_with(&cx, |ws, _| matches!(ws.modal, Some(Modal::Confirm { act: Act::ConfirmStartSession(_), .. }))), "the user was not asked");
-    step(&mut cx, &|ws, w, cx| ws.act(Act::Dismiss, w, cx));
-    step(&mut cx, &|ws, w, cx| ws.serve_requests(vec![], w, cx));
-    assert_eq!(h.join().unwrap().unwrap_err(), "The user declined.");
-    assert_eq!(ws.read_with(&cx, |ws, _| ws.live.len()), live_before, "a declined request started a session");
-
-    let h = ask(from_session.clone(), "start_code_session", json!({"folder": cwd.to_string_lossy()}));
-    serve(&mut cx, take());
-    let text = h.join().unwrap().unwrap();
-    assert_eq!(ws.read_with(&cx, |ws, _| ws.live.len()), live_before + 1);
-    let code_id = text.split("(id ").nth(1).and_then(|t| t.split(')').next()).unwrap().to_string();
-    let t = std::time::Instant::now();
-    while ws.read_with(&cx, |ws, cx| ws.live_view(&code_id).is_none_or(|v| v.read(cx).tail_text(40).is_empty())) {
-        assert!(t.elapsed() < Duration::from_secs(60), "the session drew nothing to read");
-        std::thread::sleep(Duration::from_millis(200));
-        draw(&mut cx);
-    }
-    let h = ask(from_session.clone(), "read_code_session", json!({"id": code_id}));
-    serve(&mut cx, take());
-    assert!(h.join().unwrap().unwrap().contains("latest terminal output"));
-    step(&mut cx, &|ws, w, cx| ws.close_live(&id, w, cx));
-    // Closing goes to the home screen; the ended session is picked from the sidebar.
-    step(&mut cx, &|ws, w, cx| ws.act(Act::Select(id.clone()), w, cx));
-}
-
-/// Sessions, the shell panel and the GitHub view, with the real `claude` and shell but no model calls.
-fn sessions_and_shell() {
-    let data = tempfile::tempdir().unwrap();
-    // SAFETY: set before any other thread reads the environment; this test owns the process.
-    unsafe { std::env::set_var("CLAUDIU_DATA_DIR", data.path()) };
-    let work = tempfile::tempdir().unwrap();
-    let mut cx = TestAppContext::single();
-    cx.update(|app| {
-        gpui_kit::init(app);
-        gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, app);
-    });
-    let (window, ws) = cx
-        .update(|app| {
-            gpui_kit::open_window(Default::default(), app, |window, app| app.new(|cx| Workspace::new(window, vec![], cx)))
-        })
-        .unwrap();
-    let step = |cx: &mut TestAppContext, f: &dyn Fn(&mut Workspace, &mut Window, &mut Context<Workspace>)| {
-        let t = std::time::Instant::now();
-        cx.update_window(window, |_, window, app| ws.update(app, |ws, cx| f(ws, window, cx))).unwrap();
-        let acted = t.elapsed();
-        for _ in 0..2 {
-            cx.update_window(window, |_, window, app| window.draw(app).clear(app)).unwrap();
-            cx.run_until_parked();
-        }
-        assert!(acted < Duration::from_millis(400), "the window was blocked for {acted:?}");
-    };
-    let cwd = work.path().to_path_buf();
-    step(&mut cx, &|ws, w, cx| ws.new_claude(cwd.clone(), w, cx));
-    let first = ws.read_with(&cx, |ws, _| ws.active.clone().expect("a session is shown"));
-    // A filter on a project that no longer exists filters nothing; the list still draws.
-    step(&mut cx, &|ws, w, cx| ws.act(Act::FilterProject(Some("gone".into())), w, cx));
-    assert!(ws.read_with(&cx, |ws, _| ws.project_filter().is_none()));
-    step(&mut cx, &|ws, w, cx| ws.act(Act::FilterProject(None), w, cx));
-    // The shell under a Claude session: starts on first use, survives switching away, goes with its session.
-    step(&mut cx, &|ws, w, cx| ws.toggle_shell(&first, w, cx));
-    assert!(ws.read_with(&cx, |ws, _| ws.shells.get(&first).is_some_and(|p| p.open)), "shell opened");
-    step(&mut cx, &|ws, w, cx| ws.new_claude(cwd.clone(), w, cx));
-    let second = ws.read_with(&cx, |ws, _| ws.active.clone().unwrap());
-    assert_ne!(first, second);
-    assert!(ws.read_with(&cx, |ws, _| ws.shells.contains_key(&first) && !ws.shells.contains_key(&second)), "the shell stays with its own session");
-    step(&mut cx, &|ws, w, cx| ws.toggle_shell(&first, w, cx));
-    assert!(ws.read_with(&cx, |ws, _| ws.active.as_deref() == Some(first.as_str()) && ws.shells[&first].open), "from another session, it shows the session and its shell");
-    step(&mut cx, &|ws, w, cx| ws.toggle_shell(&first, w, cx));
-    assert!(ws.read_with(&cx, |ws, _| !ws.shells[&first].open), "toggled shut");
-    step(&mut cx, &|ws, w, cx| ws.toggle_shell(&first, w, cx));
-    // Dragging the divider resizes the panel within bounds.
-    step(&mut cx, &|ws, _w, _cx| {
-        ws.shell_drag = Some(ShellDrag { id: first.clone(), y: 500.0, height: SHELL_HEIGHT });
-        ws.drag_shell(400.0, 900.0);
-        assert_eq!(ws.shells[&first].height, SHELL_HEIGHT + 100.0);
-        ws.drag_shell(10.0, 900.0);
-        assert_eq!(ws.shells[&first].height, 700.0, "keeps room for the terminal");
-        ws.drag_shell(5000.0, 900.0);
-        assert_eq!(ws.shells[&first].height, SHELL_MIN);
-        ws.shell_drag = None;
-    });
-    // Editor mode: the shown session keeps its terminal and process, its folder is listed, and files open beside it.
-    std::fs::write(cwd.join("notes.md"), "# Notes\n").unwrap();
-    std::fs::write(cwd.join("big.txt"), "let x = 1; // a line of ordinary code\n".repeat(crate::files::MAX_LINES)).unwrap();
-    let wait = |cx: &mut TestAppContext, what: &str, done: &dyn Fn(&Workspace, &App) -> bool| {
-        let t = std::time::Instant::now();
-        while !ws.read_with(cx, |ws, app| done(ws, app)) {
-            assert!(t.elapsed() < Duration::from_secs(20), "{what} never happened");
-            // Timers (find in files waits for typing to pause) only fire as the test clock moves.
-            cx.executor().advance_clock(Duration::from_millis(50));
-            cx.update_window(window, |_, window, app| window.draw(app).clear(app)).unwrap();
-            cx.run_until_parked();
-        }
-    };
-    let term = ws.read_with(&cx, |ws, _| ws.live_view(&first).unwrap().entity_id());
-    let (live, sidebars) = ws.read_with(&cx, |ws, _| (ws.live.len(), (ws.store.data.layout.sidebar_visible, ws.store.data.layout.right_hidden)));
-    step(&mut cx, &|ws, w, cx| ws.toggle_editor(w, cx));
-    wait(&mut cx, "listing the folder", &|ws, _| ws.panes.get(&first).is_some_and(|p| p.nodes.iter().any(|n| n.name == "notes.md")));
-    assert!(ws.read_with(&cx, |ws, app| ws.editor_mode
-        && ws.live.len() == live
-        && ws.live_view(&first).unwrap().entity_id() == term
-        && ws.is_running(&first, app)), "the terminal keeps running in editor mode");
-    step(&mut cx, &|ws, w, cx| ws.open_file(&first, cwd.join("notes.md"), None, w, cx));
-    wait(&mut cx, "opening a file", &|ws, _| ws.panes[&first].shown().is_some());
-    // The keyboard moves to the opened file, inside the pane, so the pane's shortcuts (Ctrl+P) reach it.
-    cx.update_window(window, |_, window, app| {
-        let pane = &ws.read(app).panes[&first];
-        assert!(pane.shown().unwrap().buffer.read(app).focus_handle(app).is_focused(window) && pane.focus.contains_focused(window, app));
-    })
-    .unwrap();
-    assert_eq!(ws.read_with(&cx, |ws, app| ws.panes[&first].shown().unwrap().buffer.read(app).value().to_string()), "# Notes\n");
-    let t = std::time::Instant::now();
-    step(&mut cx, &|ws, w, cx| ws.open_file(&first, cwd.join("big.txt"), None, w, cx));
-    wait(&mut cx, "opening a large file", &|ws, _| ws.panes[&first].shown().is_some_and(|t| t.path.ends_with("big.txt")));
-    eprintln!("a {}-line file opened and drew in {:?}", crate::files::MAX_LINES, t.elapsed());
-    assert!(ws.read_with(&cx, |ws, _| ws.panes[&first].shown().unwrap().note.is_none()), "a file at the line limit opens");
-    // Quick open finds a file by name; find in files finds a line and opens the file there.
-    let typed = |cx: &mut TestAppContext, kind: crate::app::picker::PickerKind, text: &'static str| {
-        step(cx, &|ws, w, cx| {
-            ws.open_picker(kind, w, cx);
-            let input = ws.panes[&first].picker.as_ref().unwrap().input.clone();
-            input.update(cx, |i, cx| i.set_value(text, w, cx));
-            ws.update_picker(&first, cx);
-        });
-    };
-    typed(&mut cx, crate::app::picker::PickerKind::Files, "notmd");
-    wait(&mut cx, "quick open", &|ws, _| ws.panes[&first].picker.as_ref().is_some_and(|p| !p.hits.is_empty()));
-    assert_eq!(ws.read_with(&cx, |ws, _| ws.panes[&first].picker.as_ref().unwrap().hits[0].text.clone()), "notes.md");
-    step(&mut cx, &|ws, w, cx| ws.choose_picked(w, cx));
-    wait(&mut cx, "opening the picked file", &|ws, _| ws.panes[&first].shown().is_some_and(|t| t.path.ends_with("notes.md")));
-    assert!(ws.read_with(&cx, |ws, _| ws.panes[&first].picker.is_none()), "choosing closes the picker");
-    std::fs::write(cwd.join("code.rs"), "fn a() {}\nfn needle() {}\n").unwrap();
-    step(&mut cx, &|ws, _w, cx| ws.refresh_files(cx));
-    wait(&mut cx, "listing the new file", &|ws, _| ws.panes[&first].nodes.iter().any(|n| n.name == "code.rs"));
-    typed(&mut cx, crate::app::picker::PickerKind::Text, "NEEDLE");
-    wait(&mut cx, "find in files", &|ws, _| ws.panes[&first].picker.as_ref().is_some_and(|p| !p.hits.is_empty()));
-    assert_eq!(ws.read_with(&cx, |ws, _| ws.panes[&first].picker.as_ref().unwrap().hits[0].line), 1);
-    step(&mut cx, &|ws, w, cx| ws.choose_picked(w, cx));
-    wait(&mut cx, "opening the found file", &|ws, _| ws.panes[&first].shown().is_some_and(|t| t.path.ends_with("code.rs")));
-    assert_eq!(ws.read_with(&cx, |ws, app| ws.panes[&first].shown().unwrap().buffer.read(app).cursor_position().line), 1, "the cursor is on the found line");
-    // Each file opened has a tab; opening one again shows its tab, and closing a tab shows its neighbour.
-    let tabs = |ws: &Workspace| ws.panes[&first].tabs.iter().map(|t| t.path.file_name().unwrap().to_string_lossy().to_string()).collect::<Vec<_>>();
-    assert_eq!(ws.read_with(&cx, |ws, _| tabs(ws)), ["notes.md", "big.txt", "code.rs"]);
-    step(&mut cx, &|ws, w, cx| ws.open_file(&first, cwd.join("notes.md"), None, w, cx));
-    assert!(ws.read_with(&cx, |ws, _| ws.panes[&first].tabs.len() == 3 && ws.panes[&first].active == Some(0)), "reopening shows the open tab");
-    step(&mut cx, &|ws, _w, cx| ws.close_tab(&first, 0, cx));
-    assert_eq!(ws.read_with(&cx, |ws, _| (tabs(ws), ws.panes[&first].active)), (vec!["big.txt".to_string(), "code.rs".into()], Some(0)));
-    // Editing: an edit marks the tab, saving writes it; a change on disk reloads a clean tab, and with unsaved edits it
-    // becomes a conflict that never overwrites either side until the user picks.
-    let code = cwd.join("code.rs");
-    let buffer = |ws: &Workspace| ws.panes[&first].shown().unwrap().buffer.clone();
-    let shown_tab = |ws: &Workspace, f: &dyn Fn(&crate::app::Tab) -> bool| ws.panes[&first].shown().is_some_and(f);
-    step(&mut cx, &|ws, w, cx| ws.open_file(&first, code.clone(), None, w, cx));
-    step(&mut cx, &|ws, w, cx| buffer(ws).update(cx, |b, cx| b.replace_all("fn mine() {}\n", w, cx)));
-    assert!(ws.read_with(&cx, |ws, _| shown_tab(ws, &|t| t.dirty)), "an edit marks the tab");
-    step(&mut cx, &|ws, _w, cx| ws.save_shown(cx));
-    wait(&mut cx, "saving", &|ws, _| shown_tab(ws, &|t| !t.dirty));
-    assert_eq!(std::fs::read_to_string(&code).unwrap(), "fn mine() {}\n");
-    std::fs::write(&code, "fn by_claude() {}\n// a longer file than before\n").unwrap();
-    wait(&mut cx, "reloading a clean tab", &|ws, app| {
-        ws.panes[&first].shown().unwrap().buffer.read(app).value().starts_with("fn by_claude")
-    });
-    step(&mut cx, &|ws, w, cx| buffer(ws).update(cx, |b, cx| b.replace_all("fn unsaved() {}\n", w, cx)));
-    std::fs::write(&code, "fn by_claude_again() {}\n").unwrap();
-    wait(&mut cx, "the conflict", &|ws, _| shown_tab(ws, &|t| t.conflict == Some(crate::app::editing::Conflict::Changed)));
-    assert_eq!(ws.read_with(&cx, |ws, app| buffer(ws).read(app).value().to_string()), "fn unsaved() {}\n", "unsaved edits stay");
-    step(&mut cx, &|ws, _w, cx| ws.save_shown(cx));
-    wait(&mut cx, "the refused save", &|ws, _| ws.toast.as_ref().is_some_and(|t| t.text.starts_with("Not saved")));
-    assert_eq!(std::fs::read_to_string(&code).unwrap(), "fn by_claude_again() {}\n", "Claude's change is not overwritten");
-    step(&mut cx, &|ws, _w, cx| ws.keep_mine(&first, &code, cx));
-    step(&mut cx, &|ws, _w, cx| ws.save_shown(cx));
-    wait(&mut cx, "saving over the change", &|ws, _| shown_tab(ws, &|t| !t.dirty && t.stamp.is_some()));
-    assert_eq!(std::fs::read_to_string(&code).unwrap(), "fn unsaved() {}\n", "keeping mine and saving writes mine");
-    // Unsaved edits are never dropped without asking: closing the tab, or ending its session, asks first.
-    step(&mut cx, &|ws, w, cx| buffer(ws).update(cx, |b, cx| b.replace_all("fn later() {}\n", w, cx)));
-    step(&mut cx, &|ws, w, cx| {
-        let ix = ws.panes[&first].active.unwrap();
-        ws.request_close_tab(&first, ix, w, cx);
-    });
-    assert!(ws.read_with(&cx, |ws, _| matches!(ws.modal, Some(Modal::Confirm { act: Act::DiscardTab(..), .. })) && ws.panes[&first].tabs.len() == 2), "closing a dirty tab asks");
-    step(&mut cx, &|ws, w, cx| ws.act(Act::Dismiss, w, cx));
-    step(&mut cx, &|ws, w, cx| ws.act(Act::CloseLive(first.clone()), w, cx));
-    assert!(ws.read_with(&cx, |ws, _| matches!(ws.modal, Some(Modal::Confirm { act: Act::ConfirmCloseLive(_), .. })) && ws.live_view(&first).is_some()), "ending the session asks");
-    step(&mut cx, &|ws, w, cx| ws.act(Act::Dismiss, w, cx));
-    assert_eq!(std::fs::read_to_string(&code).unwrap(), "fn unsaved() {}\n", "nothing was saved by asking");
-    // Claude Code first asks whether to trust this new folder. That is a menu, where a pasted line break could pick an
-    // answer, so moving there with lines selected puts nothing in (`selection_reference` covers Claude's input box).
-    cx.update_window(window, |_, window, _| window.activate_window()).unwrap();
-    step(&mut cx, &|ws, w, cx| buffer(ws).update(cx, |b, cx| {
-        b.focus(w, cx);
-        b.select_all(w, cx);
-    }));
-    step(&mut cx, &|ws, w, cx| ws.focus_active(w, cx));
-    assert!(ws.read_with(&cx, |ws, app| !ws.live_view(&first).unwrap().read(app).tail_text(40).contains("@code.rs")));
-    step(&mut cx, &|ws, w, cx| ws.toggle_editor(w, cx));
-    assert!(ws.read_with(&cx, |ws, _| !ws.editor_mode && (ws.store.data.layout.sidebar_visible, ws.store.data.layout.right_hidden) == sidebars), "leaving editor mode brings the sidebars back as they were");
-    // Asking for a sidebar in editor mode leaves it and shows that sidebar, even one that was hidden before.
-    step(&mut cx, &|ws, w, cx| {
-        ws.store.data.layout.sidebar_visible = false;
-        ws.toggle_editor(w, cx);
-        ws.toggle_left(cx);
-    });
-    assert!(ws.read_with(&cx, |ws, _| !ws.editor_mode && ws.store.data.layout.sidebar_visible), "the sidebar shows");
-    step(&mut cx, &|ws, w, cx| ws.close_live(&first, w, cx));
-    assert!(ws.read_with(&cx, |ws, _| !ws.shells.contains_key(&first)), "closing the session drops its shell");
-    assert!(ws.read_with(&cx, |ws, _| !ws.panes.contains_key(&first)), "closing the session drops its editor pane");
-    // The GitHub view lives in the right sidebar: one per folder, it widens the sidebar, "Ask Claude" starts a session.
-    assert_eq!(ws.read_with(&cx, |ws, _| ws.right_width(1600.0)), RIGHT_MENU_W, "the menu starts at its default width");
-    // Both sidebars can be dragged; the menu and the GitHub view each remember their own width.
-    step(&mut cx, &|ws, _w, _cx| {
-        ws.right_drag = Some(SideDrag { x: 1000.0, width: RIGHT_MENU_W });
-        ws.drag_right(960.0, 1600.0);
-        assert_eq!(ws.right_width(1600.0), RIGHT_MENU_W + 40.0);
-        ws.drag_right(5000.0, 1600.0);
-        assert_eq!(ws.right_width(1600.0), RIGHT_MENU_MIN);
-        ws.drag_right(-5000.0, 1600.0);
-        assert_eq!(ws.right_width(1600.0), RIGHT_MENU_MAX);
-        ws.drag_right(960.0, 1600.0);
-        ws.right_drag = None;
-        assert_eq!(ws.left_width(1600.0), SIDEBAR_W);
-        ws.left_drag = Some(SideDrag { x: 300.0, width: SIDEBAR_W });
-        ws.drag_left(350.0, 1600.0);
-        assert_eq!(ws.left_width(1600.0), SIDEBAR_W + 50.0);
-        ws.drag_left(0.0, 1600.0);
-        assert_eq!(ws.left_width(1600.0), SIDEBAR_MIN);
-        ws.drag_left(5000.0, 1600.0);
-        assert_eq!(ws.left_width(1600.0), SIDEBAR_MAX);
-        assert_eq!(ws.left_width(700.0), SIDEBAR_MIN, "keeps room for the session in a small window");
-        ws.left_drag = None;
-    });
-    // A card reaches the terminal of its session, and a card for a session that is not running is dropped.
-    let shown = ws.read_with(&cx, |ws, _| ws.active.clone().unwrap());
-    let stem = datadir::safe_file_stem(&shown);
-    let card = |call: &str| crate::visual::Card { call: call.into(), content: "# Hi".into() };
-    step(&mut cx, &|ws, _w, cx| ws.apply_visuals(vec![(stem.clone(), card("c1")), ("no-such-session".into(), card("c2"))], cx));
-    assert!(ws.read_with(&cx, |ws, cx| {
-        let view = ws.live_view(&shown).unwrap().read(cx);
-        view.has_card("c1") && !view.has_card("c2")
-    }));
-    step(&mut cx, &|ws, w, cx| ws.open_github(cwd.clone(), w, cx));
-    assert!(ws.read_with(&cx, |ws, _| ws.gh.len() == 1 && ws.right_gh.is_some()), "github shown in the right sidebar");
-    assert_eq!(ws.read_with(&cx, |ws, _| ws.right_width(1600.0)), RIGHT_GH_W, "GitHub keeps its own width");
-    step(&mut cx, &|ws, _w, _cx| {
-        ws.right_drag = Some(SideDrag { x: 1000.0, width: RIGHT_GH_W });
-        ws.drag_right(900.0, 1600.0);
-        assert_eq!(ws.right_width(1600.0), RIGHT_GH_W + 100.0);
-        ws.drag_right(5000.0, 1600.0);
-        assert_eq!(ws.right_width(1600.0), RIGHT_GH_MIN);
-        ws.drag_right(-5000.0, 1600.0);
-        assert_eq!(ws.right_width(1600.0), 1040.0, "keeps room for the session");
-        ws.right_drag = None;
-    });
-    step(&mut cx, &|ws, w, cx| ws.toggle_right(w, cx));
-    assert!(ws.read_with(&cx, |ws, _| ws.store.data.layout.right_hidden), "hidden");
-    step(&mut cx, &|ws, w, cx| ws.toggle_right(w, cx));
-    assert!(ws.read_with(&cx, |ws, _| !ws.store.data.layout.right_hidden), "shown again");
-    step(&mut cx, &|ws, w, cx| ws.open_github(cwd.clone(), w, cx));
-    assert!(ws.read_with(&cx, |ws, _| ws.gh.len() == 1), "one github pane per folder");
-    // A running Claude session in the folder takes the request itself, so close the leftovers to see a new one start.
-    let leftovers: Vec<Id> = ws.read_with(&cx, |ws, _| ws.live.iter().map(|l| l.id.clone()).collect());
-    for id in leftovers {
-        step(&mut cx, &|ws, w, cx| ws.close_live(&id, w, cx));
-    }
-    let before = ws.read_with(&cx, |ws, _| ws.live.len());
-    step(&mut cx, &|ws, _w, cx| {
-        let view = ws.gh[0].view.clone();
-        view.update(cx, |_, cx| cx.emit(crate::github::view::GhEvent::AskClaude("explain issue 1".into())));
-    });
-    assert!(ws.read_with(&cx, |ws, _| ws.live.len() == before + 1 && ws.active.is_some()), "Ask Claude opens a session");
-    assert!(ws.read_with(&cx, |ws, _| ws.right_gh.is_some() && ws.gh.len() == 1), "the right sidebar keeps following the same project");
-    // A new session in another folder: the open GitHub view moves to that folder.
-    let other = tempfile::tempdir().unwrap();
-    let other_cwd = other.path().to_path_buf();
-    step(&mut cx, &|ws, w, cx| ws.new_claude(other_cwd.clone(), w, cx));
-    assert!(
-        ws.read_with(&cx, |ws, _| ws.gh.len() == 2 && ws.right_gh.as_ref().and_then(|id| ws.gh_pane(id)).is_some_and(|p| platform::path_key(&p.cwd) == platform::path_key(&other_cwd))),
-        "GitHub follows a new session"
-    );
-}
-
-#[test]
-#[ignore]
-fn sessions_and_the_shell_panel() {
-    let t = std::thread::spawn(sessions_and_shell);
-    let start = std::time::Instant::now();
-    while !t.is_finished() {
-        assert!(start.elapsed() < Duration::from_secs(120), "the workspace froze");
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    t.join().unwrap();
-}
-
-#[test]
-#[ignore]
-fn starting_sessions_does_not_hang_or_panic() {
-    let (tx, rx) = std::sync::mpsc::channel();
-    let t = std::thread::spawn(move || {
-        run();
-        tx.send(()).ok();
-    });
-    if rx.recv_timeout(std::time::Duration::from_secs(480)).is_err() {
-        // Either it froze (the bug) or the run panicked (the sender dropped).
-        match t.is_finished() {
-            true => t.join().unwrap(),
-            false => panic!("the workspace froze while starting sessions"),
-        }
-    }
-}
-
-/// Editor mode with a real rust-analyzer: diagnostics arrive, hover, go-to-definition and completion answer, and a language whose
-/// server isn't installed says so. Uses `rust-analyzer` from `CLAUDIU_TEST_RUST_ANALYZER_DIR` (prepended to PATH),
-/// else PATH. `cargo test -- --ignored language_servers`.
-fn language_servers_with_rust_analyzer() {
-    use std::cell::RefCell;
-    use std::rc::Rc;
-    let data = tempfile::tempdir().unwrap();
-    // SAFETY: set before any other thread reads the environment; this test owns the process.
-    unsafe {
-        std::env::set_var("CLAUDIU_DATA_DIR", data.path());
-        if let Some(dir) = std::env::var_os("CLAUDIU_TEST_RUST_ANALYZER_DIR") {
-            let mut paths = vec![PathBuf::from(dir)];
-            paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()));
-            std::env::set_var("PATH", std::env::join_paths(paths).unwrap());
-        }
-    }
-    let work = tempfile::tempdir().unwrap();
-    let root = dunce::canonicalize(work.path()).unwrap();
-    std::fs::create_dir_all(root.join("src")).unwrap();
-    std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"probe\"\nversion = \"0.1.0\"\nedition = \"2021\"\n").unwrap();
-    let code = "fn helper() -> u32 {\n    1\n}\n\nfn main() {\n    let n: u32 = helper();\n    let s: u32 = \"not a number\";\n}\n";
-    std::fs::write(root.join("src/main.rs"), code).unwrap();
-    std::fs::write(root.join("probe.gleam"), "pub fn main() { 1 }\n").unwrap();
-
-    let mut cx = TestAppContext::single();
-    cx.update(|app| {
-        gpui_kit::init(app);
-        gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, app);
-    });
-    let (window, ws) = cx
-        .update(|app| gpui_kit::open_window(Default::default(), app, |window, app| app.new(|cx| Workspace::new(window, vec![], cx))))
-        .unwrap();
-    let draw = |cx: &mut TestAppContext| {
-        cx.update_window(window, |_, window, app| window.draw(app).clear(app)).unwrap();
-        cx.run_until_parked();
-    };
-    let act = |cx: &mut TestAppContext, f: &dyn Fn(&mut Workspace, &mut Window, &mut Context<Workspace>)| {
-        cx.update_window(window, |_, window, app| ws.update(app, |ws, cx| f(ws, window, cx))).unwrap();
-        draw(cx);
-    };
-    let wait = |cx: &mut TestAppContext, what: &str, secs: u64, done: &dyn Fn(&Workspace, &App) -> bool| {
-        let t = std::time::Instant::now();
-        while !ws.read_with(cx, |ws, app| done(ws, app)) {
-            assert!(t.elapsed() < Duration::from_secs(secs), "{what} never happened: {:?}", ws.read_with(cx, |ws, _| ws.active.clone().and_then(|id| ws.server_status(&id))));
-            std::thread::sleep(Duration::from_millis(100));
-            cx.executor().advance_clock(Duration::from_millis(100));
-            draw(cx);
-        }
-    };
-    act(&mut cx, &|ws, w, cx| ws.new_claude(root.clone(), w, cx));
-    let id = ws.read_with(&cx, |ws, _| ws.active.clone().unwrap());
-    act(&mut cx, &|ws, w, cx| ws.toggle_editor(w, cx));
-    wait(&mut cx, "the editor pane", 20, &|ws, _| ws.panes.contains_key(&id));
-
-    act(&mut cx, &|ws, w, cx| ws.open_file(&id, root.join("probe.gleam"), None, w, cx));
-    wait(&mut cx, "gleam's status", 20, &|ws, _| ws.server_status(&id).is_some_and(|s| !s.contains("starting")));
-    if crate::platform::find_executable("gleam").is_none() {
-        assert_eq!(ws.read_with(&cx, |ws, _| ws.server_status(&id)).unwrap(), "gleam isn't installed, so this file has no diagnostics or hover.");
-    }
-
-    // TypeScript's server comes with the compiler from npm (a `.cmd` on Windows), and is asked for its diagnostics.
-    std::fs::write(root.join("probe.ts"), "export function f() {
-	const n: number = \"x\";
-	return n;
-}
-").unwrap();
-    act(&mut cx, &|ws, w, cx| ws.open_file(&id, root.join("probe.ts"), None, w, cx));
-    wait(&mut cx, "typescript's status", 20, &|ws, _| ws.server_status(&id).is_some_and(|s| !s.contains("starting")));
-    if crate::platform::find_executable("tsc").is_none() {
-        assert_eq!(ws.read_with(&cx, |ws, _| ws.server_status(&id)).unwrap(), "tsc isn't installed, so this file has no diagnostics or hover.");
-    } else {
-        assert_eq!(ws.read_with(&cx, |ws, _| ws.server_status(&id)).as_deref(), Some("tsc"));
-        let ts = ws.read_with(&cx, |ws, _| ws.panes[&id].shown().unwrap().buffer.clone());
-        wait(&mut cx, "a TypeScript diagnostic", 60, &|_, app| ts.read(app).diagnostics().is_some_and(|d| d.iter().any(|e| e.message.contains("not assignable"))));
-    }
-
-    act(&mut cx, &|ws, w, cx| ws.open_file(&id, root.join("src/main.rs"), None, w, cx));
-    wait(&mut cx, "rust-analyzer starting", 60, &|ws, _| ws.server_status(&id).is_some_and(|s| s == "rust-analyzer"));
-    let buffer = ws.read_with(&cx, |ws, _| ws.panes[&id].shown().unwrap().buffer.clone());
-    wait(&mut cx, "a diagnostic", 240, &|_, app| {
-        let messages: Vec<String> = buffer.read(app).diagnostics().map(|d| d.iter().map(|e| e.message.to_string()).collect()).unwrap_or_default();
-        messages.iter().any(|m| m.contains("u32"))
-    });
-
-    // Ask the editor's own providers, as a hover and an F12 would.
-    let at = code.find("helper();").unwrap() + 2;
-    let hover: Rc<RefCell<Option<String>>> = Default::default();
-    let found: Rc<RefCell<Option<u32>>> = Default::default();
-    cx.update_window(window, |_, window, app| {
-        let (lsp_hover, lsp_def, text) = {
-            let b = buffer.read(app);
-            (b.lsp().hover_provider.clone().unwrap(), b.lsp().definition_provider.clone().unwrap(), b.text().clone())
-        };
-        let (h, d) = (lsp_hover.hover(&text, at, window, app), lsp_def.definitions(&text, at, window, app));
-        let (hover, found) = (hover.clone(), found.clone());
-        app.spawn(async move |_| {
-            let h = h.await.unwrap().map(|h| format!("{:?}", h.contents));
-            *hover.borrow_mut() = Some(h.unwrap_or_default());
-            *found.borrow_mut() = d.await.unwrap().first().map(|l| l.target_selection_range.start.line);
-        })
-        .detach();
-    })
-    .unwrap();
-    wait(&mut cx, "hover and definition", 60, &|_, _| found.borrow().is_some());
-    assert!(hover.borrow().as_deref().is_some_and(|h| h.contains("fn helper")), "hover: {:?}", hover.borrow());
-    assert_eq!(*found.borrow(), Some(0), "helper is defined on the first line");
-
-    // And as Ctrl+Space would: the word typed so far ("hel") is completed by the function.
-    let labels: Rc<RefCell<Option<Vec<String>>>> = Default::default();
-    cx.update_window(window, |_, window, app| {
-        let (provider, text) = {
-            let b = buffer.read(app);
-            (b.lsp().completion_provider.clone().unwrap(), b.text().clone())
-        };
-        let context = lsp_types::CompletionContext { trigger_kind: lsp_types::CompletionTriggerKind::INVOKED, trigger_character: None };
-        let reply = provider.completions(&text, at + 1, context, window, app);
-        let labels = labels.clone();
-        app.spawn(async move |_| {
-            let items = match reply.await.unwrap() {
-                lsp_types::CompletionResponse::Array(items) => items,
-                lsp_types::CompletionResponse::List(list) => list.items,
-            };
-            *labels.borrow_mut() = Some(items.into_iter().map(|i| i.label).collect());
-        })
-        .detach();
-    })
-    .unwrap();
-    wait(&mut cx, "completions", 60, &|_, _| labels.borrow().is_some());
-    assert!(labels.borrow().as_ref().unwrap().iter().any(|l| l.starts_with("helper")), "completions: {:?}", labels.borrow());
-
-    // Ending the session ends its servers with it.
-    act(&mut cx, &|ws, w, cx| ws.close_live(&id, w, cx));
-    assert!(ws.read_with(&cx, |ws, _| !ws.panes.contains_key(&id)));
-}
-
-#[test]
-#[ignore]
-fn language_servers() {
-    let t = std::thread::spawn(language_servers_with_rust_analyzer);
-    let start = std::time::Instant::now();
-    while !t.is_finished() {
-        assert!(start.elapsed() < Duration::from_secs(300), "the workspace froze");
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    t.join().unwrap();
-}
-
-/// Lines selected in the editor go into Claude's input as `@file#L..` when the keyboard moves to Claude, and come back
-/// out when it leaves without typing. Runs the real `claude` in this repository, which Claude Code already trusts (a
-/// new folder stops at its trust and import questions), on a file under `target`. `cargo test -- --ignored selection_reference`.
-fn selection_reference_in_claudes_input() {
-    let data = tempfile::tempdir().unwrap();
-    // SAFETY: set before any other thread reads the environment; this test owns the process.
-    unsafe { std::env::set_var("CLAUDIU_DATA_DIR", data.path()) };
-    let root = dunce::canonicalize(env!("CARGO_MANIFEST_DIR")).unwrap();
-    let work = tempfile::tempdir_in(root.join("target")).unwrap();
-    let code = work.path().join("code.rs");
-    std::fs::write(&code, "fn a() {}
-fn b() {}
-fn c() {}
-").unwrap();
-    let mention = format!("@{}#L2", crate::app::picker::relative(&dunce::canonicalize(&code).unwrap(), &root));
-
-    let mut cx = TestAppContext::single();
-    cx.update(|app| {
-        gpui_kit::init(app);
-        gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, app);
-    });
-    let (window, ws) = cx
-        .update(|app| gpui_kit::open_window(Default::default(), app, |window, app| app.new(|cx| Workspace::new(window, vec![], cx))))
-        .unwrap();
-    // Focus changes are only reported in an active window.
-    cx.update_window(window, |_, window, _| window.activate_window()).unwrap();
-    let draw = |cx: &mut TestAppContext| {
-        cx.update_window(window, |_, window, app| window.draw(app).clear(app)).unwrap();
-        cx.run_until_parked();
-    };
-    let act = |cx: &mut TestAppContext, f: &dyn Fn(&mut Workspace, &mut Window, &mut Context<Workspace>)| {
-        cx.update_window(window, |_, window, app| ws.update(app, |ws, cx| f(ws, window, cx))).unwrap();
-        draw(cx);
-    };
-    let wait = |cx: &mut TestAppContext, what: &str, done: &dyn Fn(&Workspace, &App) -> bool| {
-        let t = std::time::Instant::now();
-        while !ws.read_with(cx, |ws, app| done(ws, app)) {
-            assert!(t.elapsed() < Duration::from_secs(60), "{what} never happened");
-            std::thread::sleep(Duration::from_millis(100));
-            draw(cx);
-        }
-    };
-    act(&mut cx, &|ws, w, cx| ws.new_claude(root.clone(), w, cx));
-    let id = ws.read_with(&cx, |ws, _| ws.active.clone().unwrap());
-    let screen = |ws: &Workspace, app: &App| ws.live_view(&id).unwrap().read(app).tail_text(40);
-    wait(&mut cx, "Claude's input box", &|ws, app| screen(ws, app).contains('❯') && !ws.live_view(&id).unwrap().read(app).loading);
-    act(&mut cx, &|ws, w, cx| ws.toggle_editor(w, cx));
-    wait(&mut cx, "the editor pane", &|ws, _| ws.panes.contains_key(&id));
-    act(&mut cx, &|ws, w, cx| ws.open_file(&id, dunce::canonicalize(&code).unwrap(), None, w, cx));
-    wait(&mut cx, "opening the file", &|ws, _| ws.panes[&id].shown().is_some());
-    let buffer = ws.read_with(&cx, |ws, _| ws.panes[&id].shown().unwrap().buffer.clone());
-    act(&mut cx, &|_, w, cx| buffer.update(cx, |b, cx| {
-        b.focus(w, cx);
-        b.set_selected_range(10..20, cx);
-    }));
-
-    act(&mut cx, &|ws, w, cx| ws.focus_active(w, cx));
-    wait(&mut cx, "the reference in Claude's input", &|ws, app| screen(ws, app).contains(&mention));
-    act(&mut cx, &|_, w, cx| buffer.update(cx, |b, cx| b.focus(w, cx)));
-    wait(&mut cx, "the untouched reference taken back", &|ws, app| !screen(ws, app).contains(&mention));
-
-    // Typed after: it stays, and coming back with the same lines selected doesn't add it again.
-    act(&mut cx, &|ws, w, cx| ws.focus_active(w, cx));
-    wait(&mut cx, "the reference again", &|ws, app| screen(ws, app).contains(&mention));
-    act(&mut cx, &|ws, _w, cx| ws.live_view(&id).unwrap().update(cx, |v, cx| v.paste_text("explain", cx)));
-    wait(&mut cx, "the typed request", &|ws, app| screen(ws, app).contains("explain"));
-    act(&mut cx, &|_, w, cx| buffer.update(cx, |b, cx| b.focus(w, cx)));
-    act(&mut cx, &|ws, w, cx| ws.focus_active(w, cx));
-    std::thread::sleep(Duration::from_secs(1));
-    draw(&mut cx);
-    assert_eq!(ws.read_with(&cx, |ws, app| screen(ws, app).matches(&mention).count()), 1, "kept once: {}", ws.read_with(&cx, |ws, app| screen(ws, app)));
-
-    // After text the user typed first, the reference follows it on the same line.
-    act(&mut cx, &|_, w, cx| buffer.update(cx, |b, cx| {
-        b.focus(w, cx);
-        b.set_selected_range(0..20, cx);
-    }));
-    act(&mut cx, &|ws, w, cx| ws.focus_active(w, cx));
-    let both = format!("@{}#L1-2", crate::app::picker::relative(&dunce::canonicalize(&code).unwrap(), &root));
-    wait(&mut cx, "the second reference", &|ws, app| screen(ws, app).contains(&both));
-    let lines = ws.read_with(&cx, |ws, app| screen(ws, app));
-    // After the user's text, on the same line with a space: the user starts a new line themselves when they want one.
-    // Words only: Claude Code wraps a long input line onto the next row, padding the row it leaves.
-    let words = lines.split_whitespace().collect::<Vec<_>>().join(" ");
-    assert!(words.contains(&format!("explain {both}:")), "after the typed text: {lines}");
-    act(&mut cx, &|ws, w, cx| ws.close_live(&id, w, cx));
-}
-
-#[test]
-#[ignore]
-fn selection_reference() {
-    let t = std::thread::spawn(selection_reference_in_claudes_input);
-    let start = std::time::Instant::now();
-    while !t.is_finished() {
-        assert!(start.elapsed() < Duration::from_secs(180), "the workspace froze");
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    t.join().unwrap();
-}
-
-/// Creating, renaming and deleting from the file tree, with open tabs following along. Runs the real `claude` in a new
-/// temporary folder (not under `target`, which Git ignores, so the tree would list nothing); it waits at the folder
-/// trust question, which is enough for the editor.
-/// `cargo test -- --ignored file_operations`.
-fn file_operations_in_the_tree() {
-    let data = tempfile::tempdir().unwrap();
-    // SAFETY: set before any other thread reads the environment; this test owns the process.
-    unsafe { std::env::set_var("CLAUDIU_DATA_DIR", data.path()) };
-    let work = tempfile::tempdir().unwrap();
-    let root = dunce::canonicalize(work.path()).unwrap();
-    std::fs::write(root.join("code.rs"), "fn a() {}
-").unwrap();
-    std::fs::create_dir(root.join("sub")).unwrap();
-    std::fs::write(root.join("sub/inner.rs"), "fn b() {}
-").unwrap();
-
-    let mut cx = TestAppContext::single();
-    cx.update(|app| {
-        gpui_kit::init(app);
-        gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, app);
-    });
-    let (window, ws) = cx
-        .update(|app| gpui_kit::open_window(Default::default(), app, |window, app| app.new(|cx| Workspace::new(window, vec![], cx))))
-        .unwrap();
-    let draw = |cx: &mut TestAppContext| {
-        cx.update_window(window, |_, window, app| window.draw(app).clear(app)).unwrap();
-        cx.run_until_parked();
-    };
-    let act = |cx: &mut TestAppContext, f: &dyn Fn(&mut Workspace, &mut Window, &mut Context<Workspace>)| {
-        cx.update_window(window, |_, window, app| ws.update(app, |ws, cx| f(ws, window, cx))).unwrap();
-        draw(cx);
-    };
-    let wait = |cx: &mut TestAppContext, what: &str, done: &dyn Fn(&Workspace, &App) -> bool| {
-        let t = std::time::Instant::now();
-        while !ws.read_with(cx, |ws, app| done(ws, app)) {
-            assert!(t.elapsed() < Duration::from_secs(60), "{what} never happened");
-            std::thread::sleep(Duration::from_millis(100));
-            draw(cx);
-        }
-    };
-    let name = |cx: &mut TestAppContext, purpose: NameFor, name: &'static str| -> Result<(), String> {
-        let id = ws.read_with(cx, |ws, _| ws.active.clone().unwrap());
-        let out = std::cell::RefCell::new(Ok(()));
-        act(cx, &|ws, w, cx| *out.borrow_mut() = ws.apply_file_name(&id, &purpose, name, w, cx));
-        out.into_inner()
-    };
-    let shown = |ws: &Workspace, id: &Id| ws.panes[id].shown().map(|t| t.path.clone());
-
-    act(&mut cx, &|ws, w, cx| ws.new_claude(root.clone(), w, cx));
-    let id = ws.read_with(&cx, |ws, _| ws.active.clone().unwrap());
-    wait(&mut cx, "the session running", &|ws, app| ws.is_running(&id, app));
-    act(&mut cx, &|ws, w, cx| ws.toggle_editor(w, cx));
-    wait(&mut cx, "the files listed", &|ws, _| ws.panes.get(&id).is_some_and(|p| !p.nodes.is_empty()));
-
-    // A new file opens in the editor; a bad or taken name is refused and nothing is written.
-    name(&mut cx, NameFor::FileIn(root.join("sub")), "made.rs").unwrap();
-    wait(&mut cx, "the new file open", &|ws, _| shown(ws, &id) == Some(root.join("sub/made.rs")));
-    assert!(name(&mut cx, NameFor::FileIn(root.clone()), "a/b.rs").is_err());
-    assert!(name(&mut cx, NameFor::FileIn(root.clone()), "code.rs").is_err());
-    assert_eq!(std::fs::read_to_string(root.join("code.rs")).unwrap(), "fn a() {}
-");
-
-    // A new folder shows in the tree; a taken name is refused.
-    name(&mut cx, NameFor::FolderIn(root.join("sub")), "deeper").unwrap();
-    assert!(root.join("sub/deeper").is_dir());
-    wait(&mut cx, "the new folder listed", &|ws, _| ws.panes[&id].nodes.iter().filter(|n| n.path == root.join("sub")).flat_map(|n| n.children.iter().flatten()).any(|n| n.path == root.join("sub/deeper")));
-    assert!(name(&mut cx, NameFor::FolderIn(root.join("sub")), "deeper").is_err());
-
-    // A rename keeps the tab; one that changes the language reopens it.
-    act(&mut cx, &|ws, w, cx| ws.open_file(&id, root.join("code.rs"), None, w, cx));
-    wait(&mut cx, "code.rs open", &|ws, _| shown(ws, &id) == Some(root.join("code.rs")));
-    name(&mut cx, NameFor::Rename(root.join("code.rs")), "renamed.rs").unwrap();
-    wait(&mut cx, "the tab following the rename", &|ws, _| shown(ws, &id) == Some(root.join("renamed.rs")));
-    name(&mut cx, NameFor::Rename(root.join("renamed.rs")), "renamed.txt").unwrap();
-    wait(&mut cx, "the tab reopened as text", &|ws, _| {
-        ws.panes[&id].shown().is_some_and(|t| t.path == root.join("renamed.txt") && t.language.is_none())
-    });
-    assert_eq!(ws.read_with(&cx, |ws, _| ws.panes[&id].tabs.iter().filter(|t| t.path.ends_with("renamed.txt")).count()), 1);
-
-    // Renaming a folder takes its open tabs along.
-    act(&mut cx, &|ws, w, cx| ws.open_file(&id, root.join("sub/inner.rs"), None, w, cx));
-    wait(&mut cx, "inner.rs open", &|ws, _| shown(ws, &id) == Some(root.join("sub/inner.rs")));
-    name(&mut cx, NameFor::Rename(root.join("sub")), "moved").unwrap();
-    wait(&mut cx, "the tab following the folder", &|ws, _| shown(ws, &id) == Some(root.join("moved/inner.rs")));
-
-    // Deleting a folder closes the tabs inside it.
-    act(&mut cx, &|ws, _w, cx| ws.delete_path(id.clone(), root.join("moved"), cx));
-    wait(&mut cx, "the folder's tabs closed", &|ws, _| ws.panes[&id].tabs.iter().all(|t| !t.path.starts_with(root.join("moved"))));
-    assert!(!root.join("moved").exists());
-    assert!(root.join("renamed.txt").exists(), "only the folder went");
-    act(&mut cx, &|ws, w, cx| ws.close_live(&id, w, cx));
-}
-
-#[test]
-#[ignore]
-fn file_operations() {
-    let t = std::thread::spawn(file_operations_in_the_tree);
-    let start = std::time::Instant::now();
-    while !t.is_finished() {
-        assert!(start.elapsed() < Duration::from_secs(180), "the workspace froze");
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    t.join().unwrap();
-}
-
-/// The line actions on their real keys in an open file: they act on the line, one undo step each, and cut and copy
-/// keep working on a selection; Ctrl+W closes tabs. Runs the real `claude` in a new temporary folder, like `file_operations`.
-/// `cargo test -- --ignored line_actions`.
-fn line_actions_on_their_keys() {
-    let data = tempfile::tempdir().unwrap();
-    // SAFETY: set before any other thread reads the environment; this test owns the process.
-    unsafe { std::env::set_var("CLAUDIU_DATA_DIR", data.path()) };
-    let work = tempfile::tempdir().unwrap();
-    let root = dunce::canonicalize(work.path()).unwrap();
-    std::fs::write(root.join("lines.txt"), "one\ntwo\nthree\nfour\n").unwrap();
-
-    let mut cx = TestAppContext::single();
-    cx.update(|app| {
-        gpui_kit::init(app);
-        gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, app);
-        app.bind_keys(super::line_action_bindings());
-    });
-    let (window, ws) = cx
-        .update(|app| gpui_kit::open_window(Default::default(), app, |window, app| app.new(|cx| Workspace::new(window, vec![], cx))))
-        .unwrap();
-    cx.update_window(window, |_, window, _| window.activate_window()).unwrap();
-    let draw = |cx: &mut TestAppContext| {
-        cx.update_window(window, |_, window, app| window.draw(app).clear(app)).unwrap();
-        cx.run_until_parked();
-    };
-    let act = |cx: &mut TestAppContext, f: &dyn Fn(&mut Workspace, &mut Window, &mut Context<Workspace>)| {
-        cx.update_window(window, |_, window, app| ws.update(app, |ws, cx| f(ws, window, cx))).unwrap();
-        draw(cx);
-    };
-    let wait = |cx: &mut TestAppContext, what: &str, done: &dyn Fn(&Workspace, &App) -> bool| {
-        let t = std::time::Instant::now();
-        while !ws.read_with(cx, |ws, app| done(ws, app)) {
-            assert!(t.elapsed() < Duration::from_secs(60), "{what} never happened");
-            std::thread::sleep(Duration::from_millis(100));
-            draw(cx);
-        }
-    };
-    act(&mut cx, &|ws, w, cx| ws.new_claude(root.clone(), w, cx));
-    let id = ws.read_with(&cx, |ws, _| ws.active.clone().unwrap());
-    wait(&mut cx, "the session running", &|ws, app| ws.is_running(&id, app));
-    act(&mut cx, &|ws, w, cx| ws.toggle_editor(w, cx));
-    wait(&mut cx, "the editor pane", &|ws, _| ws.panes.contains_key(&id));
-    act(&mut cx, &|ws, w, cx| ws.open_file(&id, root.join("lines.txt"), None, w, cx));
-    wait(&mut cx, "the file open", &|ws, _| ws.panes[&id].shown().is_some());
-    let buffer = ws.read_with(&cx, |ws, _| ws.panes[&id].shown().unwrap().buffer.clone());
-    act(&mut cx, &|_, w, cx| buffer.update(cx, |b, cx| {
-        b.focus(w, cx);
-        b.set_selected_range(5..5, cx);
-    }));
-    let secondary = if cfg!(target_os = "macos") { "cmd" } else { "ctrl" };
-    let press = |cx: &mut TestAppContext, keys: &str| {
-        cx.dispatch_keystroke(window.into(), gpui::Keystroke::parse(&keys.replace("secondary", secondary)).unwrap());
-        draw(cx);
-    };
-    let text = |cx: &TestAppContext| buffer.read_with(cx, |b, _| b.value().to_string());
-    let selected = |cx: &TestAppContext| buffer.read_with(cx, |b, _| b.selected_range());
-    let clipboard = |cx: &mut TestAppContext| cx.update(|app| app.read_from_clipboard()).and_then(|c| c.text());
-
-    // Cut a line: it goes, with its newline, to the clipboard.
-    press(&mut cx, "secondary-x");
-    assert_eq!(text(&cx), "one\nthree\nfour\n");
-    assert_eq!(clipboard(&mut cx).as_deref(), Some("two\n"));
-
-    // Move it down, and one undo puts it back.
-    press(&mut cx, "alt-down");
-    assert_eq!(text(&cx), "one\nfour\nthree\n");
-    press(&mut cx, "secondary-z");
-    assert_eq!(text(&cx), "one\nthree\nfour\n", "moving a line is one undo step");
-
-    // Duplicate upwards, then select the line whole.
-    press(&mut cx, "shift-alt-up");
-    assert_eq!(text(&cx), "one\nthree\nthree\nfour\n");
-    press(&mut cx, "secondary-shift-up");
-    assert_eq!(selected(&cx), 4..10, "the line, whole, with its newline");
-
-    // With a selection, copy and cut are the editor's own.
-    press(&mut cx, "secondary-c");
-    assert_eq!(clipboard(&mut cx).as_deref(), Some("three\n"));
-    press(&mut cx, "secondary-x");
-    assert_eq!(text(&cx), "one\nthree\nfour\n");
-
-    press(&mut cx, "secondary-shift-k");
-    assert_eq!(text(&cx), "one\nfour\n");
-
-    // Ctrl+W closes the shown tab and hands the keyboard to the one now shown, so it can be pressed again.
-    std::fs::write(root.join("second.txt"), "two\n").unwrap();
-    act(&mut cx, &|ws, w, cx| ws.open_file(&id, root.join("second.txt"), None, w, cx));
-    wait(&mut cx, "the second file open", &|ws, _| ws.panes[&id].tabs.len() == 2);
-    cx.update(|app| app.bind_keys([gpui::KeyBinding::new("secondary-w", super::CloseTab, Some("EditorPane"))]));
-    press(&mut cx, "secondary-w");
-    assert_eq!(ws.read_with(&cx, |ws, _| ws.panes[&id].tabs.iter().map(|t| t.path.clone()).collect::<Vec<_>>()), [root.join("lines.txt")]);
-    let focused = ws.read_with(&cx, |ws, app| ws.panes[&id].shown().unwrap().buffer.read(app).focus_handle(app));
-    assert!(cx.update_window(window, |_, w, _| focused.is_focused(w)).unwrap(), "the tab now shown has the keyboard");
-    press(&mut cx, "secondary-w");
-    // lines.txt has unsaved edits, so closing it asks first.
-    assert!(ws.read_with(&cx, |ws, _| ws.modal.is_some() && ws.panes[&id].tabs.len() == 1));
-    act(&mut cx, &|ws, w, cx| ws.close_live(&id, w, cx));
-}
-
-#[test]
-#[ignore]
-fn line_actions() {
-    let t = std::thread::spawn(line_actions_on_their_keys);
-    let start = std::time::Instant::now();
-    while !t.is_finished() {
-        assert!(start.elapsed() < Duration::from_secs(180), "the workspace froze");
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    t.join().unwrap();
-}
-
-
-/// Double-clicking a word in the editor selects it. Runs the real `claude` in a new temporary folder, like
-/// `file_operations`. `cargo test -- --ignored double_click`.
-fn double_click_in_the_editor() {
-    let data = tempfile::tempdir().unwrap();
-    // SAFETY: set before any other thread reads the environment; this test owns the process.
-    unsafe { std::env::set_var("CLAUDIU_DATA_DIR", data.path()) };
-    let work = tempfile::tempdir().unwrap();
-    let root = dunce::canonicalize(work.path()).unwrap();
-    std::fs::write(root.join("words.txt"), "hello brave world\nsecond line\n").unwrap();
-
-    let mut cx = TestAppContext::single();
-    cx.update(|app| {
-        gpui_kit::init(app);
-        gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, app);
-    });
-    let (window, ws) = cx
-        .update(|app| gpui_kit::open_window(Default::default(), app, |window, app| app.new(|cx| Workspace::new(window, vec![], cx))))
-        .unwrap();
-    cx.update_window(window, |_, window, _| window.activate_window()).unwrap();
-    let draw = |cx: &mut TestAppContext| {
-        cx.update_window(window, |_, window, app| window.draw(app).clear(app)).unwrap();
-        cx.run_until_parked();
-    };
-    let act = |cx: &mut TestAppContext, f: &dyn Fn(&mut Workspace, &mut Window, &mut Context<Workspace>)| {
-        cx.update_window(window, |_, window, app| ws.update(app, |ws, cx| f(ws, window, cx))).unwrap();
-        draw(cx);
-    };
-    let wait = |cx: &mut TestAppContext, what: &str, done: &dyn Fn(&Workspace, &App) -> bool| {
-        let t = std::time::Instant::now();
-        while !ws.read_with(cx, |ws, app| done(ws, app)) {
-            assert!(t.elapsed() < Duration::from_secs(60), "{what} never happened");
-            std::thread::sleep(Duration::from_millis(100));
-            draw(cx);
-        }
-    };
-    act(&mut cx, &|ws, w, cx| ws.new_claude(root.clone(), w, cx));
-    let id = ws.read_with(&cx, |ws, _| ws.active.clone().unwrap());
-    wait(&mut cx, "the session running", &|ws, app| ws.is_running(&id, app));
-    act(&mut cx, &|ws, w, cx| ws.toggle_editor(w, cx));
-    wait(&mut cx, "the editor pane", &|ws, _| ws.panes.contains_key(&id));
-    act(&mut cx, &|ws, w, cx| ws.open_file(&id, root.join("words.txt"), None, w, cx));
-    wait(&mut cx, "the file open", &|ws, _| ws.panes[&id].shown().is_some());
-    let buffer = ws.read_with(&cx, |ws, _| ws.panes[&id].shown().unwrap().buffer.clone());
-    act(&mut cx, &|ws, w, cx| { let f = ws.panes[&id].focus.clone(); w.focus(&f, cx); });
-    draw(&mut cx);
-
-    // The middle of "brave", as a person would click it.
-    // The panes slide into place; click once the text has stopped moving.
-    let place = |cx: &mut TestAppContext| buffer.read_with(cx, |b, _| b.range_to_bounds(&(8..9)));
-    let mut bounds = place(&mut cx).expect("the text is laid out");
-    for _ in 0..200 {
-        std::thread::sleep(Duration::from_millis(50));
-        cx.executor().advance_clock(Duration::from_millis(50));
-        draw(&mut cx);
-        let now = place(&mut cx).expect("the text is laid out");
-        if now == bounds {
-            break;
-        }
-        bounds = now;
-    }
-    let at = bounds.center();
-    let mut visual = gpui::VisualTestContext::from_window(window.into(), &cx);
-    let none = gpui::Modifiers::default();
-    for click_count in [1, 2] {
-        visual.simulate_event(gpui::MouseDownEvent { position: at, modifiers: none, button: gpui::MouseButton::Left, click_count, first_mouse: false });
-        visual.simulate_event(gpui::MouseUpEvent { position: at, modifiers: none, button: gpui::MouseButton::Left, click_count });
-    }
-    assert_eq!(buffer.read_with(&visual, |b, _| b.selected_range()), 6..11, "the word under the pointer");
-
-    // Holding the second press and dragging selects whole words, forwards and backwards.
-    let centre = |cx: &VisualTestContext, offset: usize| buffer.read_with(cx, |b, _| b.range_to_bounds(&(offset..offset + 1))).unwrap().center();
-    for (from, to, selected) in [(8, 14, 6..17), (14, 2, 0..17)] {
-        let (start, end) = (centre(&visual, from), centre(&visual, to));
-        visual.simulate_event(gpui::MouseDownEvent { position: start, modifiers: none, button: gpui::MouseButton::Left, click_count: 2, first_mouse: false });
-        visual.simulate_event(gpui::MouseMoveEvent { position: end, modifiers: none, pressed_button: Some(gpui::MouseButton::Left) });
-        visual.simulate_event(gpui::MouseUpEvent { position: end, modifiers: none, button: gpui::MouseButton::Left, click_count: 2 });
-        assert_eq!(buffer.read_with(&visual, |b, _| b.selected_range()), selected, "double-click on offset {from}, drag to {to}");
-    }
-    act(&mut cx, &|ws, w, cx| ws.close_live(&id, w, cx));
-}
-
-#[test]
-#[ignore]
-fn double_click() {
-    let t = std::thread::spawn(double_click_in_the_editor);
-    let start = std::time::Instant::now();
-    while !t.is_finished() {
-        assert!(start.elapsed() < Duration::from_secs(180), "the workspace froze");
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    t.join().unwrap();
-}
-/// A changed file in a repository gets marks in the editor's gutter (see `panels::editor_pane::change_marks`).
-#[test]
-#[ignore]
-fn git_change_marks_are_painted() {
-    let data = tempfile::tempdir().unwrap();
-    unsafe { std::env::set_var("CLAUDIU_DATA_DIR", data.path()) };
-    let work = tempfile::tempdir().unwrap();
-    let cwd = dunce::canonicalize(work.path()).unwrap();
-    let repo = git2::Repository::init(&cwd).unwrap();
-    std::fs::create_dir_all(cwd.join("src")).unwrap();
-    let file = cwd.join("src").join("a.txt");
-    std::fs::write(&file, "one\ntwo\nthree\nfour\n").unwrap();
-    {
-        let mut index = repo.index().unwrap();
-        index.add_all(["*"], git2::IndexAddOption::DEFAULT, None).unwrap();
-        index.write().unwrap();
-        let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
-        let sig = git2::Signature::now("t", "t@t").unwrap();
-        repo.commit(Some("HEAD"), &sig, &sig, "c", &tree, &[]).unwrap();
-    }
-    std::fs::write(&file, "one\nTWO\nthree\nfour\nfive\n").unwrap();
-    let mut cx = TestAppContext::single();
-    cx.update(|app| {
-        gpui_kit::init(app);
-        gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, app);
-    });
-    let (window, ws) = cx.update(|app| gpui_kit::open_window(Default::default(), app, |window, app| app.new(|cx| Workspace::new(window, vec![], cx)))).unwrap();
-    let draw = |cx: &mut TestAppContext| {
-        cx.update_window(window, |_, window, app| window.draw(app).clear(app)).unwrap();
-        cx.run_until_parked();
-    };
-    let step = |cx: &mut TestAppContext, f: &dyn Fn(&mut Workspace, &mut Window, &mut Context<Workspace>)| {
-        cx.update_window(window, |_, window, app| ws.update(app, |ws, cx| f(ws, window, cx))).unwrap();
-        draw(cx);
-        draw(cx);
-    };
-    draw(&mut cx);
-    step(&mut cx, &|ws, w, cx| ws.new_claude(cwd.clone(), w, cx));
-    let id = ws.read_with(&cx, |ws, _| ws.active.clone().unwrap());
-    step(&mut cx, &|ws, w, cx| ws.toggle_editor(w, cx));
-    step(&mut cx, &|ws, w, cx| ws.open_file(&id, file.clone(), None, w, cx));
-    for _ in 0..100 {
-        cx.executor().advance_clock(Duration::from_millis(50));
-        draw(&mut cx);
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    // Each change is painted as a bar at the editor's left edge, above everything the editor drew.
-    let (marks, bars) = cx
-        .update_window(window, |_, window, app| {
-            let marks = ws.read(app).panes[&id].shown().unwrap().marks.clone();
-            let bars: Vec<_> = window.painted_quads().into_iter().filter(|q| q.bounds.size.width.0 < 8.0 && q.bounds.size.height.0 > 8.0).collect();
-            (marks, bars)
-        })
-        .unwrap();
-    assert_eq!(marks.len(), 2, "{marks:?}");
-    assert_eq!(bars.len(), 2, "one bar for the changed line and one for the added line");
-}
-
-/// Scrolled down a long file, only the changes on screen get a bar, each beside its own line.
-#[test]
-#[ignore]
-fn git_change_marks_follow_scrolling() {
-    let data = tempfile::tempdir().unwrap();
-    unsafe { std::env::set_var("CLAUDIU_DATA_DIR", data.path()) };
-    let work = tempfile::tempdir().unwrap();
-    let cwd = dunce::canonicalize(work.path()).unwrap();
-    let repo = git2::Repository::init(&cwd).unwrap();
-    std::fs::create_dir_all(cwd.join("src")).unwrap();
-    let file = cwd.join("src").join("a.txt");
-    let base: String = (1..=150).map(|n| format!("line {n}\n")).collect();
-    std::fs::write(&file, &base).unwrap();
-    {
-        let mut index = repo.index().unwrap();
-        index.add_all(["*"], git2::IndexAddOption::DEFAULT, None).unwrap();
-        index.write().unwrap();
-        let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
-        let sig = git2::Signature::now("t", "t@t").unwrap();
-        repo.commit(Some("HEAD"), &sig, &sig, "c", &tree, &[]).unwrap();
-    }
-    let mut edited = base.replace("line 2
-", "TWO
-").replace("line 5
-", "
-").replace("line 120
-", "CHANGED
-").replace("line 121
-", "");
-    edited.push_str("extra
-");
-    std::fs::write(&file, edited).unwrap();
-    let mut cx = TestAppContext::single();
-    cx.update(|app| {
-        gpui_kit::init(app);
-        gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, app);
-    });
-    let (window, ws) = cx.update(|app| gpui_kit::open_window(Default::default(), app, |window, app| app.new(|cx| Workspace::new(window, vec![], cx)))).unwrap();
-    let draw = |cx: &mut TestAppContext| {
-        cx.update_window(window, |_, window, app| window.draw(app).clear(app)).unwrap();
-        cx.run_until_parked();
-    };
-    let step = |cx: &mut TestAppContext, f: &dyn Fn(&mut Workspace, &mut Window, &mut Context<Workspace>)| {
-        cx.update_window(window, |_, window, app| ws.update(app, |ws, cx| f(ws, window, cx))).unwrap();
-        draw(cx);
-        draw(cx);
-    };
-    draw(&mut cx);
-    step(&mut cx, &|ws, w, cx| ws.new_claude(cwd.clone(), w, cx));
-    let id = ws.read_with(&cx, |ws, _| ws.active.clone().unwrap());
-    step(&mut cx, &|ws, w, cx| ws.toggle_editor(w, cx));
-    step(&mut cx, &|ws, w, cx| ws.open_file(&id, file.clone(), Some(119), w, cx));
-    for _ in 0..100 {
-        cx.executor().advance_clock(Duration::from_millis(50));
-        draw(&mut cx);
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    // Each change is painted as a bar at the editor's left edge, above everything the editor drew.
-    let (marks, bars) = cx
-        .update_window(window, |_, window, app| {
-            let marks = ws.read(app).panes[&id].shown().unwrap().marks.clone();
-            let bars: Vec<_> = window.painted_quads().into_iter().filter(|q| q.bounds.size.width.0 < 8.0 && q.bounds.size.height.0 > 8.0).collect();
-            (marks, bars)
-        })
-        .unwrap();
-    assert_eq!(marks.len(), 4, "{marks:?}");
-    assert_eq!(bars.len(), 1, "only the change at line 120 is on screen: {bars:?}");
-}
-
-/// A wheel notch over the editor text moves it a little each frame instead of all at once.
-#[test]
-#[ignore]
-fn the_editors_text_eases_to_a_wheel_notch() {
-    let data = tempfile::tempdir().unwrap();
-    unsafe { std::env::set_var("CLAUDIU_DATA_DIR", data.path()) };
-    let work = tempfile::tempdir().unwrap();
-    let cwd = dunce::canonicalize(work.path()).unwrap();
-    let repo = git2::Repository::init(&cwd).unwrap();
-    std::fs::create_dir_all(cwd.join("src")).unwrap();
-    let file = cwd.join("src").join("a.txt");
-    let base: String = (1..=150).map(|n| format!("line {n}\n")).collect();
-    std::fs::write(&file, &base).unwrap();
-    {
-        let mut index = repo.index().unwrap();
-        index.add_all(["*"], git2::IndexAddOption::DEFAULT, None).unwrap();
-        index.write().unwrap();
-        let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
-        let sig = git2::Signature::now("t", "t@t").unwrap();
-        repo.commit(Some("HEAD"), &sig, &sig, "c", &tree, &[]).unwrap();
-    }
-    let mut edited = base.replace("line 2
-", "TWO
-").replace("line 5
-", "
-").replace("line 120
-", "CHANGED
-").replace("line 121
-", "");
-    edited.push_str("extra
-");
-    std::fs::write(&file, edited).unwrap();
-    let mut cx = TestAppContext::single();
-    cx.update(|app| {
-        gpui_kit::init(app);
-        gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, app);
-    });
-    let (window, ws) = cx.update(|app| gpui_kit::open_window(Default::default(), app, |window, app| app.new(|cx| Workspace::new(window, vec![], cx)))).unwrap();
-    let draw = |cx: &mut TestAppContext| {
-        cx.update_window(window, |_, window, app| window.draw(app).clear(app)).unwrap();
-        cx.run_until_parked();
-    };
-    let step = |cx: &mut TestAppContext, f: &dyn Fn(&mut Workspace, &mut Window, &mut Context<Workspace>)| {
-        cx.update_window(window, |_, window, app| ws.update(app, |ws, cx| f(ws, window, cx))).unwrap();
-        draw(cx);
-        draw(cx);
-    };
-    draw(&mut cx);
-    step(&mut cx, &|ws, w, cx| ws.new_claude(cwd.clone(), w, cx));
-    let id = ws.read_with(&cx, |ws, _| ws.active.clone().unwrap());
-    step(&mut cx, &|ws, w, cx| ws.toggle_editor(w, cx));
-    step(&mut cx, &|ws, w, cx| ws.open_file(&id, file.clone(), None, w, cx));
-    for _ in 0..40 {
-        cx.executor().advance_clock(Duration::from_millis(50));
-        draw(&mut cx);
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    let buffer = ws.read_with(&cx, |ws, _| ws.panes[&id].shown().unwrap().buffer.clone());
-    let offset = |cx: &TestAppContext| f32::from(buffer.read_with(cx, |b, _| b.scroll_offset().y));
-    assert_eq!(offset(&cx), 0.0, "a file opens at its top");
-    cx.update_window(window, |_, window, app| {
-        let at = gpui::point(gpui::px(1000.0), gpui::px(400.0));
-        window.dispatch_event(gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent { position: at, pressed_button: None, modifiers: Default::default() }), app);
-        let wheel = gpui::ScrollWheelEvent { position: at, delta: gpui::ScrollDelta::Lines(gpui::point(0.0, -3.0)), modifiers: Default::default(), touch_phase: gpui::TouchPhase::Moved };
-        window.dispatch_event(gpui::PlatformInput::ScrollWheel(wheel), app);
-    })
-    .unwrap();
-    let mut seen = vec![];
-    for _ in 0..60 {
-        std::thread::sleep(Duration::from_millis(16));
-        draw(&mut cx);
-        seen.push(offset(&cx));
-    }
-    let end = *seen.last().unwrap();
-    assert!(end < -20.0, "the text never scrolled: {seen:?}");
-    let first_move = seen.iter().copied().find(|&o| o != 0.0).unwrap();
-    assert!(first_move.abs() < end.abs() / 2.0, "the first frame jumped to {first_move} of {end}: {seen:?}");
-}
-
-/// The session list builds only the rows in view, yet scrolling a long list brings each row to where the pointer finds
-/// it, and the row under the pointer is the one marked for its buttons.
-#[test]
-#[ignore]
-fn the_session_list_draws_rows_where_scrolling_brings_them() {
-    let data = tempfile::tempdir().unwrap();
-    unsafe { std::env::set_var("CLAUDIU_DATA_DIR", data.path()) };
-    let mut cx = TestAppContext::single();
-    cx.update(|app| {
-        gpui_kit::init(app);
-        gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, app);
-    });
-    let (window, ws) = cx.update(|app| gpui_kit::open_window(Default::default(), app, |window, app| app.new(|cx| Workspace::new(window, vec![], cx)))).unwrap();
-    let draw = |cx: &mut TestAppContext| {
-        cx.update_window(window, |_, window, app| window.draw(app).clear(app)).unwrap();
-        cx.run_until_parked();
-    };
-    draw(&mut cx);
-    // Newer than any real session the startup scan may add, so these come first, s000 at the top.
-    cx.update(|app| {
-        ws.update(app, |ws, cx| {
-            for i in 0..300 {
-                ws.store.data.sessions.push(crate::store::SessionRecord {
-                    id: format!("s{i:03}"),
-                    kind: SessionKind::Claude,
-                    title: format!("Session {i}"),
-                    custom_title: None,
-                    auto_title: None,
-                    cwd: PathBuf::from("/nowhere"),
-                    project_id: None,
-                    created_at: 0,
-                    last_active: 4_000_000_000 - i,
-                    exit_code: None,
-                    hidden: false,
-                    claude: None,
-                });
-            }
-            ws.store.data.layout.older_open = true;
-            cx.notify();
-        })
-    });
-    draw(&mut cx);
-    let at = gpui::point(gpui::px(120.0), gpui::px(400.0));
-    // The pointer may sit in the gap between two rows, so a second spot a little lower is tried. It moves a pixel
-    // sideways too: a row drawn under a still pointer learns it is hovered from the next move.
-    let row_under_pointer = |cx: &mut TestAppContext| {
-        let mut key = None;
-        for (x, y) in [(121.0, 400.0), (120.0, 400.0), (121.0, 406.0), (120.0, 406.0)] {
-            if key.is_some() {
-                break;
-            }
-            let position = gpui::point(gpui::px(x), gpui::px(y));
-            cx.update_window(window, |_, window, app| {
-                window.dispatch_event(gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent { position, pressed_button: None, modifiers: Default::default() }), app);
-            })
-            .unwrap();
-            draw(cx);
-            key = ws.read_with(cx, |ws, _| ws.hovered_row.clone());
-        }
-        let key = key.expect("a row under the pointer");
-        key.strip_prefix("row-rec-s").and_then(|n| n.parse::<usize>().ok()).unwrap_or_else(|| panic!("not one of the test's rows: {key}"))
-    };
-    let before = row_under_pointer(&mut cx);
-    cx.update_window(window, |_, window, app| {
-        let wheel = gpui::ScrollWheelEvent { position: at, delta: gpui::ScrollDelta::Lines(gpui::point(0.0, -40.0)), modifiers: Default::default(), touch_phase: gpui::TouchPhase::Moved };
-        window.dispatch_event(gpui::PlatformInput::ScrollWheel(wheel), app);
-    })
-    .unwrap();
-    for _ in 0..60 {
-        std::thread::sleep(Duration::from_millis(16));
-        cx.update_window(window, |_, window, app| window.simulate_next_frame(app)).unwrap();
-        draw(&mut cx);
-    }
-    let after = row_under_pointer(&mut cx);
-    assert!(after > before + 20, "row {before} before scrolling, {after} after");
-}
-
-/// The worktree dialog and the switch of a session between worktrees, with a stand-in for `claude`, so what Claude Code
-/// does in the new folder is not checked.
-fn switching_between_worktrees_in_the_workspace() {
-    let data = tempfile::tempdir().unwrap();
-    // SAFETY: set before any other thread reads the environment; this test owns the process.
-    unsafe { std::env::set_var("CLAUDIU_DATA_DIR", data.path()) };
-    // Claude Code's data directory, where the conversation of a session is looked for.
-    let home = tempfile::tempdir().unwrap();
-    // SAFETY: as above.
-    unsafe { std::env::set_var("CLAUDE_CONFIG_DIR", home.path()) };
-    let work = tempfile::tempdir().unwrap();
-    let repo_dir = dunce::canonicalize(work.path()).unwrap().join("proj");
-    let repo = git2::Repository::init(&repo_dir).unwrap();
-    {
-        let sig = git2::Signature::now("t", "t@t").unwrap();
-        let tree = repo.find_tree(repo.index().unwrap().write_tree().unwrap()).unwrap();
-        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[]).unwrap();
-    }
-    let mut cx = TestAppContext::single();
-    cx.update(|app| {
-        gpui_kit::init(app);
-        gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, app);
-    });
-    let initial = vec![repo_dir.clone()];
-    let (window, ws) = cx
-        .update(|app| gpui_kit::open_window(Default::default(), app, |window, app| app.new(|cx| Workspace::new(window, initial, cx))))
-        .unwrap();
-    let step = |cx: &mut TestAppContext, f: &dyn Fn(&mut Workspace, &mut Window, &mut Context<Workspace>)| {
-        let t = std::time::Instant::now();
-        cx.update_window(window, |_, window, app| ws.update(app, |ws, cx| f(ws, window, cx))).unwrap();
-        let acted = t.elapsed();
-        for _ in 0..2 {
-            cx.update_window(window, |_, window, app| window.draw(app).clear(app)).unwrap();
-            cx.run_until_parked();
-        }
-        assert!(acted < Duration::from_millis(400), "the window was blocked for {acted:?}");
-    };
-
-    let wait = |cx: &mut TestAppContext, what: &str, done: &dyn Fn(&Workspace, &App) -> bool| {
-        let t = std::time::Instant::now();
-        let mut said = None;
-        while !ws.read_with(cx, |ws, app| done(ws, app)) {
-            said = ws.read_with(cx, |ws, _| ws.toast.as_ref().map(|t| t.text.clone())).or(said);
-            assert!(t.elapsed() < Duration::from_secs(30), "{what} never happened; the last toast said {said:?}");
-            std::thread::sleep(Duration::from_millis(100));
-            cx.executor().advance_clock(Duration::from_millis(100));
-            cx.update_window(window, |_, window, app| window.draw(app).clear(app)).unwrap();
-            cx.run_until_parked();
-        }
-    };
-    let active = |ws: &Workspace| ws.store.session(ws.active.as_ref().unwrap()).unwrap().clone();
-    // A stand-in for `claude` that shows a line and stays up whatever it is asked, since a real one would end at once on
-    // a conversation that is not its own.
-    let fake = work.path().join(if cfg!(windows) { "claude.cmd" } else { "claude" });
-    std::fs::write(&fake, if cfg!(windows) { "@echo off\r\necho ready\r\nping -n 120 127.0.0.1 >nul\r\n" } else { "#!/bin/sh\necho ready\nsleep 120\n" }).unwrap();
+/// A stand-in for `claude` that shows a line and stays up whatever it is asked.
+fn fake_claude(dir: &Path) -> PathBuf {
+    let fake = dir.join(if cfg!(windows) { "claude.cmd" } else { "claude" });
+    let script = if cfg!(windows) { "@echo off\r\necho ready\r\nping -n 60 127.0.0.1 >nul\r\n" } else { "#!/bin/sh\necho ready\nsleep 60\n" };
+    std::fs::write(&fake, script).unwrap();
     #[cfg(unix)]
     std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-    ws.update(&mut cx, |ws, _| ws.claude_exe = Some(fake.clone()));
-
-    // A new session starts in the main checkout. The menu is there but cannot switch until a session runs.
-    step(&mut cx, &|ws, w, cx| ws.act(Act::NewClaude { cwd: repo_dir.clone() }, w, cx));
-    assert!(ws.read_with(&cx, |ws, _| ws.modal.is_none() && ws.live.len() == 1));
-    let session = ws.read_with(&cx, |ws, _| active(ws));
-    assert_eq!(session.cwd, repo_dir);
-    // The conversation exists once Claude Code has had a prompt; the test stands one in, in Claude Code's own place.
-    let claude_id = session.claude_id().unwrap().to_string();
-    let transcript = home.path().join("projects/p").join(format!("{claude_id}.jsonl"));
-    std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
-    std::fs::write(&transcript, "{\"type\":\"user\"}
-").unwrap();
-    wait(&mut cx, "the first screen", &|ws, app| ws.live.iter().all(|l| !l.view.read(app).is_loading() && !l.view.read(app).is_working()));
-
-    // Files open in the editor when the session moves: two are committed, so the new worktree has them, and one is
-    // ignored, so it only exists in the main checkout.
-    let cli = |args: &[&str]| assert!(std::process::Command::new("git").args(["-c", "user.name=t", "-c", "user.email=t@t"]).args(args).current_dir(&repo_dir).status().unwrap().success());
-    std::fs::write(repo_dir.join(".gitignore"), "only_main.txt\n").unwrap();
-    std::fs::write(repo_dir.join("same.txt"), "committed\n").unwrap();
-    std::fs::write(repo_dir.join("dirty.txt"), "committed\n").unwrap();
-    std::fs::write(repo_dir.join("only_main.txt"), "ignored\n").unwrap();
-    cli(&["add", "."]);
-    cli(&["commit", "-q", "-m", "files"]);
-    let id = session.id.clone();
-    step(&mut cx, &|ws, w, cx| ws.toggle_editor(w, cx));
-    wait(&mut cx, "listing the folder", &|ws, _| ws.panes.get(&id).is_some_and(|p| p.nodes.iter().any(|n| n.name == "same.txt")));
-    for name in ["same.txt", "dirty.txt", "only_main.txt"] {
-        step(&mut cx, &|ws, w, cx| ws.open_file(&id, repo_dir.join(name), None, w, cx));
-    }
-    wait(&mut cx, "the three tabs", &|ws, _| ws.panes[&id].tabs.len() == 3);
-    step(&mut cx, &|ws, w, cx| {
-        let tab = ws.panes[&id].tabs.iter().find(|t| t.path.ends_with("dirty.txt")).unwrap();
-        tab.buffer.clone().update(cx, |b, cx| b.replace_all("edited\n", w, cx));
-    });
-    assert!(ws.read_with(&cx, |ws, _| ws.panes[&id].tabs.iter().any(|t| t.path.ends_with("dirty.txt") && t.dirty)), "the edit marks the tab");
-    let tab_paths = |ws: &Workspace| ws.panes[&id].tabs.iter().map(|t| t.path.clone()).collect::<Vec<_>>();
-    let canonical = |p: &std::path::Path| dunce::canonicalize(p).unwrap();
-    assert_eq!(ws.read_with(&cx, |ws, _| ws.panes[&id].root.clone()), canonical(&repo_dir), "the file tree starts at the main checkout");
-
-    // A shell is open under the session at a height of the user's choosing.
-    step(&mut cx, &|ws, w, cx| {
-        ws.toggle_shell(&id, w, cx);
-        ws.shells.get_mut(&id).unwrap().height = 333.0;
-    });
-    let shell = |ws: &Workspace| ws.shells.get(&id).map(|p| (p.view.entity_id(), p.open, p.height));
-    let (shell_before, ..) = ws.read_with(&cx, |ws, _| shell(ws)).unwrap();
-    // The panels ease open over `Reveal::MS` of real time, so the pane's grid keeps changing for that long; how far
-    // it has got depends on how fast the machine ran the steps above. The grid read below must be the settled one.
-    let pane_grid = |cx: &mut TestAppContext| ws.read_with(cx, |ws, app| ws.live_view(&session.id).map(|v| v.read(app).terminal.size()));
-    let mut last = None;
-    while last != Some(pane_grid(&mut cx)) {
-        last = Some(pane_grid(&mut cx));
-        std::thread::sleep(Duration::from_millis(crate::panels::widgets::Reveal::MS as u64 + 20));
-        cx.update_window(window, |_, window, app| window.draw(app).clear(app)).unwrap();
-        cx.run_until_parked();
-    }
-
-    // A bad name keeps the dialog open; a typed one moves the session into the worktree Claude Code will make.
-    step(&mut cx, &|ws, w, cx| ws.act(Act::NewWorktree(repo_dir.clone()), w, cx));
-    step(&mut cx, &|ws, w, cx| {
-        let Some(Modal::NewWorktree { input, .. }) = &ws.modal else { panic!("no dialog") };
-        input.clone().update(cx, |i, cx| i.set_value("bad name", w, cx));
-        ws.submit_modal(w, cx);
-    });
-    assert!(ws.read_with(&cx, |ws, _| matches!(ws.modal, Some(Modal::NewWorktree { .. }))), "a bad name is refused");
-    step(&mut cx, &|ws, w, cx| {
-        let Some(Modal::NewWorktree { input, .. }) = &ws.modal else { panic!("no dialog") };
-        input.clone().update(cx, |i, cx| i.set_value("fix-login", w, cx));
-        ws.act(Act::PickBase(crate::git::worktree::Base::Current), w, cx);
-        ws.submit_modal(w, cx);
-    });
-    let worktree = crate::git::worktree::folder(&repo_dir, "fix-login");
-    let skeleton = |ws: &Workspace, app: &App| ws.live_view(&session.id).and_then(|v| v.read(app).handover.as_ref().map(|h| h.message.clone()));
-    assert_eq!(ws.read_with(&cx, |ws, app| skeleton(ws, app)).as_deref(), Some("Switching to fix-login…"), "the skeleton names the worktree");
-    // The grid the pane draws terminals on. A new terminal starts at a default size until it is first laid out.
-    let grid = ws.read_with(&cx, |ws, app| ws.live_view(&session.id).unwrap().read(app).terminal.size());
-    assert_ne!(grid, (120, 32), "the window must not happen to match the default size");
-    // Until the new process is up, the session stays shown and running behind its skeleton, never an empty pane, and
-    // the skeleton sits on the pane's grid from the first frame on.
-    let moved_to = |folder: &std::path::Path, ws: &Workspace, app: &App| {
-        let loading = ws.live_view(&session.id).is_some_and(|v| v.read(app).is_loading());
-        assert_eq!(ws.live_view(&session.id).map(|v| v.read(app).terminal.size()), Some(grid), "mid-switch the skeleton is on another grid");
-        assert!(ws.active.as_ref() == Some(&session.id) && ws.is_running(&session.id, app), "mid-switch the session is not shown running");
-        let moved = ws.store.session(&session.id).is_some_and(|r| r.cwd == folder);
-        assert!(loading || moved, "mid-switch the pane has no skeleton");
-        moved && !loading
-    };
-    wait(&mut cx, "the switch", &|ws, app| moved_to(&worktree, ws, app));
-    let branch = std::process::Command::new("git").args(["branch", "--show-current"]).current_dir(&worktree).output().unwrap();
-    assert_eq!(String::from_utf8_lossy(&branch.stdout).trim(), "fix-login", "the branch is named as typed");
-    assert_eq!(ws.read_with(&cx, |ws, _| ws.live.len()), 1, "the same session, not a new one");
-    assert_eq!(ws.read_with(&cx, |ws, _| active(ws).id), session.id);
-    assert_eq!(ws.read_with(&cx, |ws, _| active(ws).claude_id().map(str::to_string)), Some(claude_id.clone()), "the same conversation");
-    assert_eq!(std::fs::read_to_string(&transcript).unwrap().lines().count(), 1, "making a worktree writes nothing to the conversation");
-
-    // The shell is a new one, open and as tall as before.
-    let (shell_now, open, height) = ws.read_with(&cx, |ws, _| shell(ws)).expect("the session still has a shell");
-    assert!(shell_now != shell_before && open && height == 333.0, "a fresh shell, open at {height}");
-
-    // The editor follows the session: a clean tab whose file the worktree has moves with it, one with unsaved edits or
-    // whose file the worktree lacks stays where it was and the user is told, and the file tree shows the worktree.
-    let (in_worktree, in_main) = (canonical(&worktree), canonical(&repo_dir));
-    assert_eq!(ws.read_with(&cx, |ws, _| tab_paths(ws)), [in_worktree.join("same.txt"), in_main.join("dirty.txt"), in_main.join("only_main.txt")], "tabs after the switch");
-    assert!(ws.read_with(&cx, |ws, _| ws.toast.as_ref().is_some_and(|t| t.text.contains("2 open files stay"))), "the toast counts the tabs that stayed");
-    wait(&mut cx, "the file tree at the worktree", &|ws, _| ws.panes[&id].root == in_worktree && ws.panes[&id].nodes.iter().any(|n| n.name == "same.txt"));
-    assert_eq!(ws.read_with(&cx, |ws, _| ws.panes[&id].tabs.iter().find(|t| t.path.ends_with("dirty.txt")).map(|t| t.dirty)), Some(true), "the unsaved edit is kept");
-
-    // The worktree is outside the repository, so git has nothing to list there and no .gitignore line is offered.
-    let status = std::process::Command::new("git").args(["status", "--porcelain"]).current_dir(&repo_dir).output().unwrap();
-    assert!(status.stdout.is_empty(), "the main checkout is unchanged: {}", String::from_utf8_lossy(&status.stdout));
-    assert!(ws.read_with(&cx, |ws, _| ws.toast.as_ref().is_none_or(|t| t.action.is_none())), "no toast offers anything");
-
-    // Back to the main checkout, as a session that `claude --worktree` put in the worktree: Claude Code's record of the
-    // worktree would win over the folder, so one line is appended.
-    std::fs::write(worktree.join("wip.txt"), "x").unwrap();
-    std::fs::write(&transcript, "{\"type\":\"user\"}
-{\"type\":\"worktree-state\",\"worktreeSession\":{\"worktreeName\":\"fix-login\"},\"sessionId\":\"x\"}
-").unwrap();
-    wait(&mut cx, "the first screen again", &|ws, app| ws.live.iter().all(|l| !l.view.read(app).is_loading() && !l.view.read(app).is_working()));
-    step(&mut cx, &|ws, w, cx| ws.act(Act::SwitchWorktree { folder: repo_dir.clone(), base: Default::default() }, w, cx));
-    // The work file stays in the worktree the session leaves, so it asks first.
-    wait(&mut cx, "the question", &|ws, _| matches!(&ws.modal, Some(Modal::Confirm { body, .. }) if body.contains("1 uncommitted file stays")));
-    step(&mut cx, &|ws, w, cx| ws.act(Act::Dismiss, w, cx));
-    assert!(ws.read_with(&cx, |ws, app| ws.modal.is_none() && skeleton(ws, app).is_none() && active(ws).cwd == worktree), "cancelling leaves the session where it was, with no skeleton");
-    step(&mut cx, &|ws, w, cx| ws.act(Act::SwitchWorktree { folder: repo_dir.clone(), base: Default::default() }, w, cx));
-    wait(&mut cx, "the question again", &|ws, _| matches!(&ws.modal, Some(Modal::Confirm { .. })));
-    step(&mut cx, &|ws, w, cx| ws.submit_modal(w, cx));
-    assert_eq!(ws.read_with(&cx, |ws, app| skeleton(ws, app)).as_deref(), Some("Switching to the main checkout…"));
-    wait(&mut cx, "the switch back", &|ws, app| moved_to(&repo_dir, ws, app));
-    // The tab that moved into the worktree moves back; the ones that stayed in the main checkout are not under the
-    // tree's root any more, so they stay.
-    assert_eq!(ws.read_with(&cx, |ws, _| tab_paths(ws)), [in_main.join("same.txt"), in_main.join("dirty.txt"), in_main.join("only_main.txt")], "tabs after the switch back");
-    wait(&mut cx, "the file tree at the main checkout", &|ws, _| ws.panes[&id].root == in_main);
-    assert!(!crate::claude::worktree_recorded(&transcript).unwrap(), "the transcript no longer names the worktree");
-    assert!(std::fs::read_to_string(&transcript).unwrap().lines().count() == 3);
-
-    // A restart (a switch, a hand-off) puts the new terminal on the pane's grid before its first frame, which is drawn
-    // before the terminal is laid out: on a default grid the skeleton's prompt would jump to the middle for a frame.
-    step(&mut cx, &|ws, w, cx| {
-        ws.restart_session(&session.id, w, cx);
-        assert_eq!(ws.live_view(&session.id).map(|v| v.read(cx).terminal.size()), Some(grid), "the new terminal starts on another grid");
-    });
-    wait(&mut cx, "the restart", &|ws, app| ws.live_view(&session.id).is_some_and(|v| !v.read(app).is_loading()));
-
-    // Mid-turn nothing changes: a session that has not shown its first screen is not idle.
-    step(&mut cx, &|ws, w, cx| ws.act(Act::SwitchWorktree { folder: worktree.clone(), base: Default::default() }, w, cx));
-    // Either the check ran before the screen was ready (told to wait) or after (switched); it never half-switches.
-    wait(&mut cx, "a settled state", &|ws, app| ws.is_running(&session.id, app) && ws.live_view(&session.id).is_some_and(|v| !v.read(app).is_loading()));
-
-    // A project without commits has a disabled "New worktree…".
-    let bare = dunce::canonicalize(work.path()).unwrap().join("bare");
-    git2::Repository::init(&bare).unwrap();
-    let bare_project = ws.update(&mut cx, |ws, _| ws.store.add_project(&bare));
-    let bare_cwd = bare.clone();
-    let at = crate::panels::widgets::Dropdown { pos: gpui::point(gpui::px(100.0), gpui::px(30.0)), min_w: gpui::px(0.0) };
-    step(&mut cx, &|ws, _w, cx| ws.open_worktree_menu(bare_project.clone(), bare_cwd.clone(), crate::panels::widgets::Dropdown { pos: at.pos, min_w: at.min_w }, cx));
-    let last = ws.read_with(&cx, |ws, _| ws.menu.as_ref().and_then(|m| m.items.last().map(|i| (i.label.clone(), i.disabled, i.hint.clone()))));
-    assert!(matches!(&last, Some((label, true, Some(hint))) if label == "New worktree…" && hint.contains("no commits")), "{last:?}");
+    fake
 }
 
-#[test]
-#[ignore]
-fn switching_between_worktrees() {
-    let t = std::thread::spawn(switching_between_worktrees_in_the_workspace);
-    let start = std::time::Instant::now();
-    while !t.is_finished() {
-        assert!(start.elapsed() < Duration::from_secs(120), "the workspace froze");
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    t.join().unwrap();
-}
-
-/// A running session refuses the removal of its worktree. Ending it offers the removal, and confirming removes the folder
-/// (with a real `claude` running in it until the session ends, which on Windows holds the folder until the process is gone).
-fn removing_a_worktree_when_its_session_ends() {
-    let data = tempfile::tempdir().unwrap();
-    // SAFETY: set before any other thread reads the environment; this test owns the process.
-    unsafe { std::env::set_var("CLAUDIU_DATA_DIR", data.path()) };
-    let work = tempfile::tempdir().unwrap();
-    let repo_dir = dunce::canonicalize(work.path()).unwrap().join("proj");
-    let git = |args: &[&str]| std::process::Command::new("git").args(args).current_dir(&repo_dir).output().unwrap();
-    std::fs::create_dir_all(&repo_dir).unwrap();
+/// A git repository with one commit at `dir`.
+fn git_repo(dir: &Path) {
+    std::fs::create_dir_all(dir).unwrap();
     for args in [&["init", "-q", "-b", "main"][..], &["config", "user.email", "t@t"], &["config", "user.name", "t"], &["commit", "-q", "--allow-empty", "-m", "one"]] {
-        git(args);
+        assert!(git(dir, args).status.success(), "git {args:?}");
     }
-    let folder = crate::git::worktree::folder(&repo_dir, "fix");
-    let added = git(&["worktree", "add", "-q", "-b", "worktree-fix", &folder.to_string_lossy()]);
-    assert!(added.status.success(), "{}", String::from_utf8_lossy(&added.stderr));
+}
 
-    let mut cx = TestAppContext::single();
-    cx.update(|app| {
-        gpui_kit::init(app);
-        gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, app);
-    });
-    let initial = vec![repo_dir.clone()];
-    let (window, ws) = cx
-        .update(|app| gpui_kit::open_window(Default::default(), app, |window, app| app.new(|cx| Workspace::new(window, initial, cx))))
-        .unwrap();
-    let step = |cx: &mut TestAppContext, f: &dyn Fn(&mut Workspace, &mut Window, &mut Context<Workspace>)| {
-        cx.update_window(window, |_, window, app| ws.update(app, |ws, cx| f(ws, window, cx))).unwrap();
-        for _ in 0..2 {
-            cx.update_window(window, |_, window, app| window.draw(app).clear(app)).unwrap();
-            cx.run_until_parked();
+fn git(dir: &Path, args: &[&str]) -> std::process::Output {
+    std::process::Command::new("git").args(args).current_dir(dir).output().unwrap()
+}
+
+impl Harness {
+    /// The workspace in a 1600×900 window, with the projects `initial` makes in the work folder registered.
+    fn new(initial: impl FnOnce(&Path) -> Vec<PathBuf>) -> Self {
+        let turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+        let (_, home) = datadir::use_throwaway_folders();
+        let dirs = [tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap()];
+        let work = dunce::canonicalize(dirs[1].path()).unwrap();
+        let store = Store::load(dirs[0].path().join("state.json"));
+        let mut ws = Workspace::with_store(initial(&work), store);
+        ws.claude_exe = Some(fake_claude(&work));
+        ws.start();
+        let mut rt = rune::Runtime::new(ws, crate::panels::workspace_view::view, (1600.0, 900.0), rune::Env::new(true, 2.0));
+        // What `main` hands the app: keys no element took.
+        rt.on_key = Some(|ws: &mut Workspace, ev: &rune::KeyEvent, tx: &mut Tx| ws.on_key(ev, tx));
+        let mut h = Self { rt, work, home, _dirs: dirs, _turn: turn };
+        h.pump();
+        h
+    }
+
+    fn ws(&self) -> &Workspace {
+        &self.rt.state
+    }
+
+    /// Run `f` as a click or key would, then draw. Nothing a step starts may block the window.
+    fn step(&mut self, f: impl FnOnce(&mut Workspace)) {
+        let t = Instant::now();
+        self.rt.update(|ws, tx| {
+            f(ws);
+            ws.after_input(tx);
+        });
+        let acted = t.elapsed();
+        self.pump();
+        self.pump();
+        assert!(acted < Duration::from_millis(400), "the window was blocked for {acted:?}");
+    }
+
+    /// One frame: background answers and terminal output are taken in, then the view is drawn.
+    fn pump(&mut self) {
+        self.rt.update(|ws, tx| {
+            ws.poll(tx);
+        });
+        self.rt.frame(1.0 / 60.0);
+    }
+
+    fn wait(&mut self, what: &str, done: impl Fn(&Workspace) -> bool) {
+        let t = Instant::now();
+        let mut said = None;
+        while !done(self.ws()) {
+            said = self.ws().toast.as_ref().map(|t| t.text.clone()).or(said);
+            assert!(t.elapsed() < Duration::from_secs(30), "{what} never happened; the last toast said {said:?}");
+            std::thread::sleep(Duration::from_millis(50));
+            self.pump();
         }
-    };
-    let wait = |cx: &mut TestAppContext, what: &str, done: &dyn Fn(&Workspace) -> bool| {
-        let t = std::time::Instant::now();
-        while !ws.read_with(cx, |ws, _| done(ws)) {
-            assert!(t.elapsed() < Duration::from_secs(30), "{what} never happened: {:?}", ws.read_with(cx, |ws, _| ws.toast.as_ref().map(|t| t.text.clone())));
-            std::thread::sleep(Duration::from_millis(100));
-            cx.executor().advance_clock(Duration::from_millis(100));
-            cx.update_window(window, |_, window, app| window.draw(app).clear(app)).unwrap();
-            cx.run_until_parked();
+    }
+
+    /// Let springs and fades finish.
+    fn settle(&mut self) {
+        for _ in 0..90 {
+            self.pump();
         }
-    };
-    // The worktree is known to the project once git has been read again.
-    step(&mut cx, &|ws, _w, _cx| ws.store.refresh_git());
-    // A new session never starts inside a worktree; Fix-with-Claude is the one starter that keeps the folder it is given.
-    step(&mut cx, &|ws, w, cx| ws.new_claude_with(folder.clone(), vec![], crate::claude::defaults::Starter::FixGit, w, cx));
-    let id = ws.read_with(&cx, |ws, _| ws.active.clone().unwrap());
-
-    // Any other way of starting a session, asked to start inside the worktree, starts in the main checkout.
-    step(&mut cx, &|ws, w, cx| ws.new_claude(folder.clone(), w, cx));
-    let (other, started_in) = ws.read_with(&cx, |ws, _| (ws.active.clone().unwrap(), ws.store.session(ws.active.as_ref().unwrap()).unwrap().cwd.clone()));
-    assert_eq!(started_in, repo_dir);
-    step(&mut cx, &|ws, w, cx| ws.close_live(&other, w, cx));
-    step(&mut cx, &|ws, w, cx| ws.act(Act::Select(id.clone()), w, cx));
-
-    // The top-bar menu offers the removal for the session's own worktree, and not in the main checkout.
-    let project = ws.read_with(&cx, |ws, _| ws.store.data.projects[0].id.clone());
-    let menu_of = |cx: &mut TestAppContext, cwd: PathBuf| {
-        let at = crate::panels::widgets::Dropdown { pos: gpui::point(gpui::px(100.0), gpui::px(30.0)), min_w: gpui::px(0.0) };
-        step(cx, &|ws, _w, cx| ws.open_worktree_menu(project.clone(), cwd.clone(), crate::panels::widgets::Dropdown { pos: at.pos, min_w: at.min_w }, cx));
-        // Each row's label and whether it has an x.
-        ws.read_with(cx, |ws, _| ws.menu.as_ref().map(|m| m.items.iter().map(|i| (i.label.trim().to_string(), i.remove.is_some())).collect::<Vec<_>>()).unwrap_or_default())
-    };
-    for cwd in [folder.clone(), repo_dir.clone()] {
-        let rows = menu_of(&mut cx, cwd);
-        assert_eq!(rows[0].0, "Worktrees");
-        assert!(rows[1].0.contains("main checkout") && !rows[1].1, "the main checkout has no x: {rows:?}");
-        assert!(rows[2].0.contains("fix") && rows[2].1, "the worktree has an x: {rows:?}");
-        assert!(rows.last().is_some_and(|r| r.0 == "New worktree…" && !r.1), "{rows:?}");
     }
 
-    // The x on the worktree a session is running in is refused, naming the session.
-    let own_x = ws.read_with(&cx, |ws, _| ws.menu.as_ref().and_then(|m| m.items[2].remove.clone()));
-    let Some(x) = own_x else { panic!("no x on the worktree's row") };
-    step(&mut cx, &|ws, w, cx| ws.act(x.clone(), w, cx));
-    let toast = ws.read_with(&cx, |ws, _| ws.toast.as_ref().map(|t| t.text.clone()));
-    assert!(toast.as_deref().is_some_and(|t| t.contains("is in fix. Switch it to main first.")), "{toast:?}");
-    assert!(folder.exists() && ws.read_with(&cx, |ws, _| ws.modal.is_none() && ws.live.len() == 1), "nothing changes");
-
-    // Ending the session by itself offers the removal.
-    step(&mut cx, &|ws, w, cx| ws.close_live(&id, w, cx));
-    wait(&mut cx, "the offer", &|ws| matches!(&ws.modal, Some(Modal::Confirm { act: Act::ConfirmRemoveWorktree { .. }, .. })));
-    step(&mut cx, &|ws, w, cx| ws.submit_modal(w, cx));
-    wait(&mut cx, "the folder to go", &|_| !folder.exists());
-    let toast = ws.read_with(&cx, |ws, _| ws.toast.as_ref().map(|t| t.text.clone()));
-    assert!(toast.as_deref().is_some_and(|t| t.contains("Removed worktree fix")), "{toast:?}");
-    assert!(!git(&["rev-parse", "--verify", "-q", "worktree-fix"]).status.success(), "the merged branch went with it");
-
-    // The branch menu has a title and an x on every local branch but the current one.
-    assert!(git(&["branch", "spare"]).status.success());
-    let at = crate::panels::widgets::Dropdown { pos: gpui::point(gpui::px(100.0), gpui::px(30.0)), min_w: gpui::px(0.0) };
-    step(&mut cx, &|ws, _w, cx| ws.open_branch_menu(repo_dir.clone(), crate::panels::widgets::Dropdown { pos: at.pos, min_w: at.min_w }, cx));
-    wait(&mut cx, "the branch menu", &|ws| ws.menu.is_some());
-    let rows = ws.read_with(&cx, |ws, _| ws.menu.as_ref().map(|m| m.items.iter().map(|i| (i.label.trim().to_string(), i.remove.clone())).collect::<Vec<_>>()).unwrap_or_default());
-    assert_eq!(rows[0].0, "Branches");
-    let spare = rows.iter().find(|r| r.0 == "spare").and_then(|r| r.1.clone());
-    assert!(spare.is_some(), "a local branch has an x: {rows:?}");
-    assert!(rows.iter().find(|r| r.0.starts_with('✓')).is_some_and(|r| r.1.is_none()), "the current branch has none: {rows:?}");
-
-    let x = spare.unwrap();
-    step(&mut cx, &|ws, w, cx| ws.act(x.clone(), w, cx));
-    wait(&mut cx, "the question", &|ws| matches!(&ws.modal, Some(Modal::Confirm { confirm, .. }) if confirm == "Delete"));
-    step(&mut cx, &|ws, w, cx| ws.submit_modal(w, cx));
-    wait(&mut cx, "the branch to go", &|_| !git(&["rev-parse", "--verify", "-q", "spare"]).status.success());
-
-    // Settings lists the worktrees in Claudiu's data folder. Removing one asks inside the page, so the dialog stays open.
-    let listed = crate::git::worktree::folder(&repo_dir, "listed");
-    assert!(git(&["worktree", "add", "-q", "-b", "listed", &listed.to_string_lossy()]).status.success());
-    step(&mut cx, &|ws, w, cx| {
-        ws.act(Act::OpenSettings, w, cx);
-        ws.set_settings_page(SettingsPage::Worktrees, cx);
-    });
-    let shown = |ws: &Workspace| ws.worktrees_page.stored.as_ref().is_some_and(|s| s.iter().any(|w| w.folder == listed));
-    wait(&mut cx, "the page to list it", &shown);
-    let main_checkout = repo_dir.clone();
-    step(&mut cx, &|ws, w, cx| ws.act(Act::RemoveWorktree { main_checkout: main_checkout.clone(), folder: listed.clone() }, w, cx));
-    wait(&mut cx, "the question in the page", &|ws| ws.worktrees_page.asking.as_ref().is_some_and(|a| a.folder == listed));
-    assert!(ws.read_with(&cx, |ws, _| matches!(ws.modal, Some(Modal::Settings { .. }))), "the dialog stays open");
-    let confirm = ws.read_with(&cx, |ws, _| ws.worktrees_page.asking.as_ref().unwrap().act.clone());
-    step(&mut cx, &|ws, w, cx| ws.act(confirm.clone(), w, cx));
-    wait(&mut cx, "the folder to go", &|_| !listed.exists());
-    wait(&mut cx, "the page to drop it", &|ws| !shown(ws));
-}
-
-#[test]
-#[ignore]
-fn removing_a_worktree() {
-    let t = std::thread::spawn(removing_a_worktree_when_its_session_ends);
-    let start = std::time::Instant::now();
-    while !t.is_finished() {
-        assert!(start.elapsed() < Duration::from_secs(120), "the workspace froze");
-        std::thread::sleep(Duration::from_millis(100));
+    fn drawn(&self, key: &str) -> bool {
+        self.rt.find(key).is_some()
     }
-    t.join().unwrap();
-}
 
-/// With no `claude` found, starting a session says so and offers the setup window; asking for it twice shows one.
-#[test]
-#[ignore]
-fn a_missing_claude_offers_the_setup_window() {
-    let data = tempfile::tempdir().unwrap();
-    unsafe { std::env::set_var("CLAUDIU_DATA_DIR", data.path()) };
-    let work = tempfile::tempdir().unwrap();
-    let mut cx = TestAppContext::single();
-    cx.update(|app| {
-        gpui_kit::init(app);
-        gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, app);
-    });
-    let (window, ws) = cx.update(|app| gpui_kit::open_window(Default::default(), app, |window, app| app.new(|cx| Workspace::new(window, vec![], cx)))).unwrap();
-
-    cx.update_window(window, |_, window, app| {
-        ws.update(app, |ws, cx| {
-            ws.claude_exe = None;
-            ws.new_claude(work.path().to_path_buf(), window, cx);
-        })
-    })
-    .unwrap();
-    let action = ws.read_with(&cx, |ws, _| ws.toast.as_ref().and_then(|t| t.action.as_ref().map(|(label, act)| (label.clone(), matches!(act, Act::OpenSetup)))));
-    assert_eq!(action, Some(("Check setup".to_string(), true)), "the toast offers the setup window");
-
-    for _ in 0..2 {
-        cx.update_window(window, |_, window, app| ws.update(app, |ws, cx| ws.act(Act::OpenSetup, window, cx))).unwrap();
-        cx.run_until_parked();
+    fn keys(&self) -> Vec<String> {
+        self.rt.elements().iter().filter_map(|e| e.key.clone()).collect()
     }
-    assert_eq!(cx.update(|app| app.windows().len()), 2, "the workspace and one setup window");
-}
 
-/// A process that ends by itself closes the session the way the X does. A clean exit says nothing, a non-zero
-/// exit is a toast, and the worktree stays: Claude Code already asked on `/exit`, and the X is the path that offers.
-#[test]
-fn a_process_that_ends_closes_the_session_and_leaves_its_worktree() {
-    let data = tempfile::tempdir().unwrap();
-    unsafe { std::env::set_var("CLAUDIU_DATA_DIR", data.path()) };
-    let work = tempfile::tempdir().unwrap();
-    let repo_dir = dunce::canonicalize(work.path()).unwrap().join("proj");
-    let git = |args: &[&str]| std::process::Command::new("git").args(args).current_dir(&repo_dir).output().unwrap();
-    std::fs::create_dir_all(&repo_dir).unwrap();
-    for args in [&["init", "-q", "-b", "main"][..], &["config", "user.email", "t@t"], &["config", "user.name", "t"], &["commit", "-q", "--allow-empty", "-m", "one"]] {
-        git(args);
+    fn click(&mut self, key: &str) {
+        let (x, y) = self.rt.find(key).unwrap_or_else(|| panic!("{key} is not drawn"));
+        self.rt.pointer_move(x, y);
+        self.rt.pointer_down(x, y);
+        self.rt.pointer_up(x, y);
+        self.pump();
     }
-    let folder = crate::git::worktree::folder(&repo_dir, "fix");
-    let added = git(&["worktree", "add", "-q", "-b", "worktree-fix", &folder.to_string_lossy()]);
-    assert!(added.status.success(), "{}", String::from_utf8_lossy(&added.stderr));
 
-    let mut cx = TestAppContext::single();
-    cx.update(|app| {
-        gpui_kit::init(app);
-        gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, app);
-    });
-    let (window, ws) = cx
-        .update(|app| gpui_kit::open_window(Default::default(), app, |window, app| app.new(|cx| Workspace::new(window, vec![repo_dir.clone()], cx))))
-        .unwrap();
-    let project = ws.read_with(&cx, |ws, _| ws.store.data.projects[0].id.clone());
-    let step = |cx: &mut TestAppContext, f: &dyn Fn(&mut Workspace, &mut Window, &mut Context<Workspace>)| {
-        cx.update_window(window, |_, window, app| ws.update(app, |ws, cx| f(ws, window, cx))).unwrap();
-        cx.update_window(window, |_, window, app| window.draw(app).clear(app)).unwrap();
-        cx.run_until_parked();
-    };
-    let exit_spec = |code: i32| -> SpawnSpec {
-        let args = if cfg!(windows) {
-            vec!["/c".into(), format!("exit {code}")]
-        } else {
-            vec!["-c".into(), format!("exit {code}")]
-        };
-        SpawnSpec { program: if cfg!(windows) { "cmd.exe" } else { "/bin/sh" }.into(), args, cwd: Some(folder.clone()), ..Default::default() }
-    };
-    let start_one = |cx: &mut TestAppContext, title: &str, spec: SpawnSpec| -> String {
-        let title = title.to_string();
+    fn press(&mut self, key: rune::Key, mods: impl FnOnce(&mut rune::Mods)) {
+        let mut m = rune::Mods::default();
+        mods(&mut m);
+        self.rt.key(rune::KeyEvent { key, mods: m });
+        self.pump();
+    }
+
+    /// A session record in the first project, running `spec` instead of `claude`.
+    fn start_one(&mut self, title: &str, cwd: &Path, spec: SpawnSpec) -> Id {
         let id = new_id();
+        let project_id = self.ws().store.data.projects.first().map(|p| p.id.clone());
         let record = SessionRecord {
             id: id.clone(),
             kind: SessionKind::Claude,
-            title,
+            title: title.into(),
             custom_title: None,
             auto_title: None,
-            project_id: Some(project.clone()),
-            cwd: folder.clone(),
+            project_id,
+            cwd: cwd.to_path_buf(),
             created_at: now(),
             last_active: now(),
             exit_code: None,
@@ -1717,74 +148,1061 @@ fn a_process_that_ends_closes_the_session_and_leaves_its_worktree() {
             // Present, so closing it keeps the history record instead of treating it as an empty new session.
             claude: Some(ClaudeMeta { session_id: id.clone(), external: ExternalState::Present, ..Default::default() }),
         };
-        step(cx, &|ws, w, cx| ws.start(record.clone(), spec.clone(), true, w, cx));
+        self.step(|ws| ws.start_session(record, spec, true));
         id
+    }
+
+    /// The menu's rows: label and whether it has an x.
+    fn menu_rows(&self) -> Vec<(String, bool)> {
+        self.ws().menu.as_ref().map(|m| m.items.iter().map(|i| (i.label.trim().to_string(), i.remove.is_some())).collect()).unwrap_or_default()
+    }
+}
+
+fn exit_spec(code: i32, cwd: &Path) -> SpawnSpec {
+    let args = if cfg!(windows) { vec!["/c".into(), format!("exit {code}")] } else { vec!["-c".into(), format!("exit {code}")] };
+    SpawnSpec { program: if cfg!(windows) { "cmd.exe" } else { "/bin/sh" }.into(), args, cwd: Some(cwd.to_path_buf()), ..Default::default() }
+}
+
+fn idle(ws: &Workspace) -> bool {
+    ws.live.iter().all(|l| !l.view.is_loading() && !l.view.is_working())
+}
+
+/// The window draws its three columns, and the sidebar, the settings dialog and the shortcuts answer.
+#[test]
+fn the_workspace_draws_and_its_controls_answer() {
+    let mut h = Harness::new(|_| vec![]);
+    h.settle();
+    for key in ["topbar", "sidebar", "new-claude", "search-box", "settings"] {
+        assert!(h.drawn(key), "{key} is not drawn: {:?}", h.keys());
+    }
+
+    // The gear opens Settings; Escape closes it.
+    h.click("settings");
+    assert!(matches!(h.ws().modal, Some(Modal::Settings { .. })), "Settings did not open");
+    h.press(rune::Key::Escape, |_| {});
+    assert!(h.ws().modal.is_none(), "Escape did not close Settings");
+
+    // The sidebar shortcut hides the sidebar and shows it again.
+    let visible = h.ws().store.data.layout.sidebar_visible;
+    let secondary = |m: &mut rune::Mods| {
+        m.cmd = true;
+        m.shift = true;
+        if cfg!(target_os = "macos") { m.logo = true } else { m.ctrl = true }
     };
+    h.press(rune::Key::Command('b'), secondary);
+    assert_eq!(h.ws().store.data.layout.sidebar_visible, !visible, "the shortcut toggles the sidebar");
+    h.press(rune::Key::Command('b'), secondary);
+    assert_eq!(h.ws().store.data.layout.sidebar_visible, visible);
+
+    // A new session from the button: shown, running, and its row is in the sidebar.
+    let cwd = h.work.clone();
+    h.step(|ws| ws.new_claude(cwd));
+    let id = h.ws().active.clone().expect("a session is shown");
+    h.wait("the first screen", idle);
+    h.settle();
+    assert!(h.keys().iter().any(|k| k.starts_with("row-") && k.ends_with(&id)), "the session's row: {:?}", h.keys());
+    assert!(h.ws().is_running(&id));
+}
+
+/// Sessions and the shell under them, the sidebars' widths, cards and the GitHub view, with a stand-in `claude`.
+#[test]
+fn sessions_and_the_shell_panel() {
+    let mut h = Harness::new(|_| vec![]);
+    let cwd = h.work.clone();
+    h.step(|ws| ws.new_claude(cwd.clone()));
+    let first = h.ws().active.clone().expect("a session is shown");
+    // A filter on a project that no longer exists filters nothing; the list still draws.
+    h.step(|ws| ws.act(Act::FilterProject(Some("gone".into()))));
+    assert!(h.ws().project_filter().is_none());
+    h.step(|ws| ws.act(Act::FilterProject(None)));
+
+    // The shell under a Claude session: starts on first use, survives switching away, goes with its session.
+    h.step(|ws| ws.toggle_shell(&first));
+    assert!(h.ws().shells.get(&first).is_some_and(|p| p.open), "shell opened");
+    h.step(|ws| ws.new_claude(cwd.clone()));
+    let second = h.ws().active.clone().unwrap();
+    assert_ne!(first, second);
+    assert!(h.ws().shells.contains_key(&first) && !h.ws().shells.contains_key(&second), "the shell stays with its own session");
+    h.step(|ws| ws.toggle_shell(&first));
+    assert!(h.ws().active.as_deref() == Some(first.as_str()) && h.ws().shells[&first].open, "from another session, it shows the session and its shell");
+    h.step(|ws| ws.toggle_shell(&first));
+    assert!(!h.ws().shells[&first].open, "toggled shut");
+    h.step(|ws| ws.toggle_shell(&first));
+    h.settle();
+    assert!(h.drawn("shell-panel"), "the shell panel draws: {:?}", h.keys());
+
+    // Dragging the divider resizes the panel within bounds.
+    h.step(|ws| {
+        ws.shell_drag = Some(SideDrag { size: SHELL_HEIGHT });
+        ws.drag_shell(-100.0);
+        assert_eq!(ws.shells[&first].height, SHELL_HEIGHT + 100.0);
+        ws.drag_shell(-5000.0);
+        assert_eq!(ws.shells[&first].height, 700.0, "keeps room for the terminal");
+        ws.drag_shell(5000.0);
+        assert_eq!(ws.shells[&first].height, SHELL_MIN);
+        ws.shell_drag = None;
+    });
+    h.step(|ws| ws.close_live(&first));
+    assert!(!h.ws().shells.contains_key(&first), "closing the session drops its shell");
+
+    // Both sidebars can be dragged; the menu and the GitHub view each remember their own width.
+    assert_eq!(h.ws().right_width(1600.0), RIGHT_MENU_W, "the menu starts at its default width");
+    h.step(|ws| {
+        ws.right_drag = Some(SideDrag { size: RIGHT_MENU_W });
+        ws.drag_right(-40.0);
+        assert_eq!(ws.right_width(1600.0), RIGHT_MENU_W + 40.0);
+        ws.drag_right(5000.0);
+        assert_eq!(ws.right_width(1600.0), RIGHT_MENU_MIN);
+        ws.drag_right(-5000.0);
+        assert_eq!(ws.right_width(1600.0), RIGHT_MENU_MAX);
+        ws.drag_right(-40.0);
+        ws.right_drag = None;
+        assert_eq!(ws.left_width(1600.0), SIDEBAR_W);
+        ws.left_drag = Some(SideDrag { size: SIDEBAR_W });
+        ws.drag_left(50.0);
+        assert_eq!(ws.left_width(1600.0), SIDEBAR_W + 50.0);
+        ws.drag_left(-5000.0);
+        assert_eq!(ws.left_width(1600.0), SIDEBAR_MIN);
+        ws.drag_left(5000.0);
+        assert_eq!(ws.left_width(1600.0), SIDEBAR_MAX);
+        assert_eq!(ws.left_width(700.0), SIDEBAR_MIN, "keeps room for the session in a small window");
+        ws.left_drag = None;
+    });
+
+    // A card reaches the terminal of its session, and a card for a session that is not running is dropped.
+    let shown = h.ws().active.clone().unwrap();
+    let stem = datadir::safe_file_stem(&shown);
+    let card = |call: &str| crate::visual::Card { call: call.into(), content: "# Hi".into() };
+    h.step(|ws| ws.apply_visuals(vec![(stem.clone(), card("c1")), ("no-such-session".into(), card("c2"))]));
+    let view = h.ws().live_view(&shown).unwrap();
+    assert!(view.has_card("c1") && !view.has_card("c2"));
+
+    // The GitHub view lives in the right sidebar: one per folder, with its own width.
+    h.step(|ws| ws.open_github(cwd.clone()));
+    assert!(h.ws().gh.len() == 1 && h.ws().right_gh.is_some(), "github shown in the right sidebar");
+    assert_eq!(h.ws().right_width(1600.0), RIGHT_GH_W, "GitHub keeps its own width");
+    h.settle();
+    h.step(|ws| {
+        ws.right_drag = Some(SideDrag { size: RIGHT_GH_W });
+        ws.drag_right(-100.0);
+        assert_eq!(ws.right_width(1600.0), RIGHT_GH_W + 100.0);
+        ws.drag_right(5000.0);
+        assert_eq!(ws.right_width(1600.0), RIGHT_GH_MIN);
+        ws.drag_right(-5000.0);
+        assert_eq!(ws.right_width(1600.0), 1040.0, "keeps room for the session");
+        ws.right_drag = None;
+    });
+    h.step(|ws| ws.toggle_right());
+    assert!(h.ws().store.data.layout.right_hidden, "hidden");
+    h.step(|ws| ws.toggle_right());
+    assert!(!h.ws().store.data.layout.right_hidden, "shown again");
+    h.step(|ws| ws.open_github(cwd.clone()));
+    assert!(h.ws().gh.len() == 1, "one github pane per folder");
+
+    // A running Claude session in the folder takes the request itself, so close the leftovers to see a new one start.
+    let leftovers: Vec<Id> = h.ws().live.iter().map(|l| l.id.clone()).collect();
+    for id in leftovers {
+        h.step(|ws| ws.close_live(&id));
+    }
+    let before = h.ws().live.len();
+    let pane = h.ws().gh[0].id.clone();
+    h.step(|ws| ws.on_gh_event(&pane, &GhEvent::AskClaude("explain issue 1".into())));
+    assert!(h.ws().live.len() == before + 1 && h.ws().active.is_some(), "Ask Claude opens a session");
+    assert!(h.ws().right_gh.is_some() && h.ws().gh.len() == 1, "the right sidebar keeps following the same project");
+    // A new session in another folder: the open GitHub view moves to that folder.
+    let other = h.work.join("other");
+    std::fs::create_dir_all(&other).unwrap();
+    h.step(|ws| ws.new_claude(other.clone()));
+    let follows = h.ws().right_gh.as_ref().and_then(|id| h.ws().gh_pane(id)).is_some_and(|p| platform::path_key(&p.cwd) == platform::path_key(&other));
+    assert!(h.ws().gh.len() == 2 && follows, "GitHub follows a new session");
+    h.settle();
+}
+
+/// Cross-session tools are answered on the spot, and one that can't work says why.
+#[test]
+fn other_sessions_are_listed_started_and_read() {
+    use serde_json::{Value, json};
+    let mut h = Harness::new(|_| vec![]);
+    let cwd = h.work.clone();
+    h.step(|ws| ws.new_claude(cwd.clone()));
+    let id = h.ws().active.clone().expect("a session is shown");
+    let ask = |from: String, tool: &'static str, args: Value| std::thread::spawn(move || crate::claude::bridge::ask(&from, tool, &args));
+    let take = || loop {
+        if let Some(r) = crate::claude::bridge::take_requests().pop() {
+            break r;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let from = format!("code:{id}");
+
+    let asked = ask(from.clone(), "list_code_sessions", json!({}));
+    let req = take();
+    h.step(|ws| ws.serve_requests(vec![req]));
+    let text = asked.join().unwrap().unwrap();
+    assert!(text.contains(&id) && text.contains("this session"), "{text}");
+
+    // A request whose asker gave up is dropped.
+    let stale = crate::claude::bridge::Request { id: "late".into(), from: from.clone(), tool: "start_code_session".into(), args: json!({"folder": cwd.to_string_lossy()}), deadline: now() - 1 };
+    let before = h.ws().live.len();
+    h.step(|ws| ws.serve_requests(vec![stale]));
+    assert_eq!(h.ws().live.len(), before, "an expired request was carried out");
+
+    let asked = ask(from.clone(), "start_code_session", json!({"folder": "no-such-project"}));
+    let req = take();
+    h.step(|ws| ws.serve_requests(vec![req]));
+    assert!(asked.join().unwrap().unwrap_err().contains("No project or folder"));
+
+    // A first message of its own needs the user's yes: a closed dialog is a refusal, and nothing was started.
+    let asked = ask(from.clone(), "start_code_session", json!({"folder": cwd.to_string_lossy(), "prompt": "do the thing"}));
+    let req = take();
+    h.step(|ws| ws.serve_requests(vec![req]));
+    assert!(matches!(h.ws().modal, Some(Modal::Confirm { act: Act::ConfirmStartSession(_), .. })), "the user was not asked");
+    h.settle();
+    assert!(h.drawn("modal-card"), "the question is drawn: {:?}", h.keys());
+    h.step(|ws| ws.act(Act::Dismiss));
+    h.step(|ws| ws.serve_requests(vec![]));
+    assert_eq!(asked.join().unwrap().unwrap_err(), "The user declined.");
+    assert_eq!(h.ws().live.len(), before, "a declined request started a session");
+
+    let asked = ask(from.clone(), "start_code_session", json!({"folder": cwd.to_string_lossy()}));
+    let req = take();
+    h.step(|ws| ws.serve_requests(vec![req]));
+    let text = asked.join().unwrap().unwrap();
+    assert_eq!(h.ws().live.len(), before + 1);
+    let code_id = text.split("(id ").nth(1).and_then(|t| t.split(')').next()).unwrap().to_string();
+    // The stand-in prints one line at the top of a screen taller than 40 rows.
+    h.wait("output to read", |ws| ws.live_view(&code_id).is_some_and(|v| !v.tail_text(500).is_empty()));
+    let asked = ask(from.clone(), "read_code_session", json!({"id": code_id}));
+    let req = take();
+    h.step(|ws| ws.serve_requests(vec![req]));
+    assert!(asked.join().unwrap().unwrap().contains("latest terminal output"));
+    h.step(|ws| ws.close_live(&id));
+    // Closing goes to the home screen; the ended session is picked from the sidebar.
+    h.step(|ws| ws.act(Act::Select(id.clone())));
+}
+
+/// With no `claude` found, starting a session says so and offers the setup window; asking for it twice opens one.
+#[test]
+fn a_missing_claude_offers_the_setup_window() {
+    let mut h = Harness::new(|_| vec![]);
+    let cwd = h.work.clone();
+    h.step(|ws| {
+        ws.claude_exe = None;
+        ws.new_claude(cwd);
+    });
+    let action = h.ws().toast.as_ref().and_then(|t| t.action.as_ref().map(|(label, act)| (label.clone(), matches!(act, Act::OpenSetup))));
+    assert_eq!(action, Some(("Check setup".to_string(), true)), "the toast offers the setup window");
+    h.settle();
+    assert!(h.keys().iter().any(|k| k.starts_with("toast-")), "the toast is drawn: {:?}", h.keys());
+    for _ in 0..2 {
+        h.step(|ws| ws.act(Act::OpenSetup));
+    }
+    assert!(h.ws().setup_window.is_some() && h.ws().setup_serial == 1, "one setup window");
+}
+
+/// The setup window's Done reaches the workspace: the `claude` it found is used and saved, and the window is gone.
+#[test]
+fn the_setup_windows_answer_reaches_the_workspace() {
+    let mut h = Harness::new(|_| vec![]);
+    h.step(|ws| ws.claude_exe = None);
+    let fake = fake_claude(&h.work);
+    let hand_back = super::setup::to_workspace(h.ws().rt.mailbox(), super::setup::Mode::Reopened);
+    hand_back(super::setup::SetupEvent::Done { claude_path: Some(fake.clone()), recommended_trims: false });
+    h.wait("the answer to arrive", |ws| ws.claude_exe.is_some());
+    assert_eq!(h.ws().claude_exe.as_deref(), Some(fake.as_path()));
+    assert_eq!(h.ws().store.data.settings.claude_path.as_deref(), Some(fake.as_path()), "the path is saved");
+    assert!(h.ws().setup_window.is_none());
+}
+
+/// A process that ends by itself closes the session the way the X does. A clean exit says nothing, a non-zero
+/// exit is a toast, and the worktree stays: Claude Code already asked on `/exit`, and the X is the path that offers.
+#[test]
+fn a_process_that_ends_closes_the_session_and_leaves_its_worktree() {
+    let mut h = Harness::new(|work| {
+        git_repo(&work.join("proj"));
+        vec![work.join("proj")]
+    });
+    let repo_dir = h.work.join("proj");
+    let folder = crate::git::worktree::folder(&repo_dir, "fix");
+    let added = git(&repo_dir, &["worktree", "add", "-q", "-b", "worktree-fix", &folder.to_string_lossy()]);
+    assert!(added.status.success(), "{}", String::from_utf8_lossy(&added.stderr));
     // Pump until the view is gone. A late removal dialog is spawned off the UI thread, so keep going after the close.
-    let until_closed = |cx: &mut TestAppContext, id: &str| {
-        let started = std::time::Instant::now();
-        loop {
-            step(cx, &|_, _, _| {});
-            let gone = ws.read_with(cx, |ws, _| ws.live_view(id).is_none());
-            if gone {
-                let rest = std::time::Instant::now();
-                while rest.elapsed() < Duration::from_secs(1) {
-                    step(cx, &|_, _, _| {});
-                    cx.executor().advance_clock(Duration::from_millis(50));
-                    std::thread::sleep(Duration::from_millis(50));
-                    let offered = ws.read_with(cx, |ws, _| ws.modal.is_some());
-                    assert!(!offered, "a process that ended by itself offered to remove the worktree");
-                }
-                return;
-            }
-            assert!(started.elapsed() < Duration::from_secs(10), "the session stayed open after its process ended");
-            cx.executor().advance_clock(Duration::from_millis(50));
+    let until_closed = |h: &mut Harness, id: &str| {
+        h.wait("the session to close after its process ended", |ws| ws.live_view(id).is_none());
+        let rest = Instant::now();
+        while rest.elapsed() < Duration::from_secs(1) {
+            h.pump();
             std::thread::sleep(Duration::from_millis(50));
+            assert!(h.ws().modal.is_none(), "a process that ended by itself offered to remove the worktree");
         }
     };
 
     // Session-only shortcuts are inert on Home, even with a project available as a fallback folder.
-    step(&mut cx, &|ws, _, _| {
+    h.step(|ws| {
         ws.main = Main::Home;
         ws.active = None;
         ws.toast = None;
     });
-    cx.dispatch_action(window, ToggleEditor);
-    cx.dispatch_action(window, OpenGithub);
-    cx.run_until_parked();
-    assert!(ws.read_with(&cx, |ws, _| !ws.editor_mode && ws.gh.is_empty() && ws.right_gh.is_none() && ws.toast.is_none()), "disabled shortcuts must not open a view or show a toast");
+    h.step(|ws| ws.command(Command::OpenGithub));
+    assert!(h.ws().gh.is_empty() && h.ws().right_gh.is_none() && h.ws().toast.is_none(), "disabled shortcuts must not open a view or show a toast");
 
-    let clean = start_one(&mut cx, "Fix login", exit_spec(0));
-    until_closed(&mut cx, &clean);
-    let (code, toast) = ws.read_with(&cx, |ws, _| (ws.store.session(&clean).map(|s| s.exit_code), ws.toast.as_ref().map(|t| t.text.clone())));
+    let clean = h.start_one("Fix login", &folder, exit_spec(0, &folder));
+    until_closed(&mut h, &clean);
+    let (code, toast) = (h.ws().store.session(&clean).map(|s| s.exit_code), h.ws().toast.as_ref().map(|t| t.text.clone()));
     assert_eq!(code, Some(Some(0)), "a clean exit is kept on the history record");
     assert_eq!(toast, None, "a clean exit says nothing");
     assert!(folder.exists(), "the worktree stays");
 
-    let bad = start_one(&mut cx, "Broken", exit_spec(1));
-    until_closed(&mut cx, &bad);
-    let (code, toast) = ws.read_with(&cx, |ws, _| (ws.store.session(&bad).map(|s| s.exit_code), ws.toast.as_ref().map(|t| t.text.clone())));
+    let bad = h.start_one("Broken", &folder, exit_spec(1, &folder));
+    until_closed(&mut h, &bad);
+    let (code, toast) = (h.ws().store.session(&bad).map(|s| s.exit_code), h.ws().toast.as_ref().map(|t| t.text.clone()));
     assert_eq!(code, Some(Some(1)));
     assert_eq!(toast.as_deref(), Some("Broken ended (exit code 1)"));
 
-    let missing = new_id();
+    let spec = SpawnSpec { program: "definitely-not-a-real-program-claudiu".into(), args: vec![], cwd: Some(folder.clone()), ..Default::default() };
+    let missing = h.start_one("Missing", &folder, spec);
+    until_closed(&mut h, &missing);
+    let toast = h.ws().toast.as_ref().map(|t| t.text.clone());
+    assert!(toast.as_deref().is_some_and(|t| t.starts_with("Could not start Missing:")), "{toast:?}");
+}
+
+/// The worktree dialog and the switch of a session between worktrees. What Claude Code does in the new folder is not
+/// checked: the stand-in only prints a line.
+#[test]
+fn switching_between_worktrees() {
+    let mut h = Harness::new(|work| {
+        git_repo(&work.join("proj"));
+        vec![work.join("proj")]
+    });
+    let repo_dir = h.work.join("proj");
+    let active = |ws: &Workspace| ws.store.session(ws.active.as_ref().unwrap()).unwrap().clone();
+
+    // A new session starts in the main checkout.
+    h.step(|ws| ws.act(Act::NewClaude { cwd: repo_dir.clone() }));
+    assert!(h.ws().modal.is_none() && h.ws().live.len() == 1);
+    let session = active(h.ws());
+    assert_eq!(session.cwd, repo_dir);
+    // The conversation exists once Claude Code has had a prompt; the test stands one in, in Claude Code's own place.
+    let claude_id = session.claude_id().unwrap().to_string();
+    let transcript = h.home.join("projects/p").join(format!("{claude_id}.jsonl"));
+    std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+    std::fs::write(&transcript, "{\"type\":\"user\"}\n").unwrap();
+    h.wait("the first screen", idle);
+
+    // A shell is open under the session at a height of the user's choosing.
+    let id = session.id.clone();
+    h.step(|ws| {
+        ws.toggle_shell(&id);
+        ws.shells.get_mut(&id).unwrap().height = 333.0;
+    });
+    h.settle();
+    let grid = h.ws().live_view(&id).unwrap().terminal.size();
+    assert_ne!(grid, (120, 32), "the window must not happen to match the default size");
+
+    // A bad name keeps the dialog open; a typed one moves the session into the worktree Claude Code will make.
+    h.step(|ws| ws.act(Act::NewWorktree(repo_dir.clone())));
+    h.settle();
+    assert!(h.drawn("modal-card"), "the dialog draws: {:?}", h.keys());
+    h.step(|ws| {
+        modal_field(&mut ws.modal, 0).unwrap().replace_text("bad name");
+        ws.submit_modal();
+    });
+    assert!(matches!(h.ws().modal, Some(Modal::NewWorktree { .. })), "a bad name is refused");
+    h.step(|ws| {
+        modal_field(&mut ws.modal, 0).unwrap().replace_text("fix-login");
+        ws.act(Act::PickBase(crate::git::worktree::Base::Current));
+        ws.submit_modal();
+    });
+    let worktree = crate::git::worktree::folder(&repo_dir, "fix-login");
+    let skeleton = |ws: &Workspace| ws.live_view(&id).and_then(|v| v.handover.as_ref().map(|h| h.message.clone()));
+    assert_eq!(skeleton(h.ws()).as_deref(), Some("Switching to fix-login…"), "the skeleton names the worktree");
+    // Until the new process is up, the session stays shown and running behind its skeleton, never an empty pane, and
+    // the skeleton sits on the pane's grid from the first frame on.
+    let moved_to = |folder: &Path, ws: &Workspace| {
+        let loading = ws.live_view(&id).is_some_and(|v| v.is_loading());
+        assert_eq!(ws.live_view(&id).map(|v| v.terminal.size()), Some(grid), "mid-switch the skeleton is on another grid");
+        assert!(ws.active.as_ref() == Some(&id) && ws.is_running(&id), "mid-switch the session is not shown running");
+        let moved = ws.store.session(&id).is_some_and(|r| r.cwd == folder);
+        assert!(loading || moved, "mid-switch the pane has no skeleton");
+        moved && !loading
+    };
+    h.wait("the switch", |ws| moved_to(&worktree, ws));
+    let branch = git(&worktree, &["branch", "--show-current"]);
+    assert_eq!(String::from_utf8_lossy(&branch.stdout).trim(), "fix-login", "the branch is named as typed");
+    assert_eq!(h.ws().live.len(), 1, "the same session, not a new one");
+    assert_eq!(active(h.ws()).id, id);
+    assert_eq!(active(h.ws()).claude_id().map(str::to_string), Some(claude_id.clone()), "the same conversation");
+    assert_eq!(std::fs::read_to_string(&transcript).unwrap().lines().count(), 1, "making a worktree writes nothing to the conversation");
+    let shell = h.ws().shells.get(&id).map(|p| (p.open, p.height));
+    assert_eq!(shell, Some((true, 333.0)), "the shell is open and as tall as before");
+
+    // The worktree is outside the repository, so git has nothing to list there and no .gitignore line is offered.
+    let status = git(&repo_dir, &["status", "--porcelain"]);
+    assert!(status.stdout.is_empty(), "the main checkout is unchanged: {}", String::from_utf8_lossy(&status.stdout));
+    assert!(h.ws().toast.as_ref().is_none_or(|t| t.action.is_none()), "no toast offers anything");
+
+    // Back to the main checkout, as a session that `claude --worktree` put in the worktree: Claude Code's record of the
+    // worktree would win over the folder, so one line is appended.
+    std::fs::write(worktree.join("wip.txt"), "x").unwrap();
+    std::fs::write(&transcript, "{\"type\":\"user\"}\n{\"type\":\"worktree-state\",\"worktreeSession\":{\"worktreeName\":\"fix-login\"},\"sessionId\":\"x\"}\n").unwrap();
+    h.wait("the first screen again", idle);
+    h.step(|ws| ws.act(Act::SwitchWorktree { folder: repo_dir.clone(), base: Default::default() }));
+    // The work file stays in the worktree the session leaves, so it asks first.
+    h.wait("the question", |ws| matches!(&ws.modal, Some(Modal::Confirm { body, .. }) if body.contains("1 uncommitted file stays")));
+    h.step(|ws| ws.act(Act::Dismiss));
+    assert!(h.ws().modal.is_none() && skeleton(h.ws()).is_none() && active(h.ws()).cwd == worktree, "cancelling leaves the session where it was, with no skeleton");
+    h.step(|ws| ws.act(Act::SwitchWorktree { folder: repo_dir.clone(), base: Default::default() }));
+    h.wait("the question again", |ws| matches!(&ws.modal, Some(Modal::Confirm { .. })));
+    h.step(|ws| ws.submit_modal());
+    assert_eq!(skeleton(h.ws()).as_deref(), Some("Switching to the main checkout…"));
+    h.wait("the switch back", |ws| moved_to(&repo_dir, ws));
+    assert!(!crate::claude::worktree_recorded(&transcript).unwrap(), "the transcript no longer names the worktree");
+    assert_eq!(std::fs::read_to_string(&transcript).unwrap().lines().count(), 3);
+
+    // A restart (a switch, a hand-off) puts the new terminal on the pane's grid before its first frame.
+    h.step(|ws| {
+        ws.restart_session(&id);
+        assert_eq!(ws.live_view(&id).map(|v| v.terminal.size()), Some(grid), "the new terminal starts on another grid");
+    });
+    h.wait("the restart", |ws| ws.live_view(&id).is_some_and(|v| !v.is_loading()));
+
+    // Mid-turn nothing changes: either the check ran before the screen was ready (told to wait) or after (switched);
+    // it never half-switches.
+    h.step(|ws| ws.act(Act::SwitchWorktree { folder: worktree.clone(), base: Default::default() }));
+    h.wait("a settled state", |ws| ws.is_running(&id) && ws.live_view(&id).is_some_and(|v| !v.is_loading()));
+
+    // A project without commits has a disabled "New worktree…".
+    let bare = h.work.join("bare");
+    git2::Repository::init(&bare).unwrap();
+    let mut bare_project = String::new();
+    h.step(|ws| bare_project = ws.store.add_project(&bare));
+    h.step(|ws| ws.open_worktree_menu(bare_project.clone(), bare.clone(), MenuAnchor::Point(100.0, 30.0)));
+    let last = h.ws().menu.as_ref().and_then(|m| m.items.last().map(|i| (i.label.clone(), i.disabled, i.hint.clone())));
+    assert!(matches!(&last, Some((label, true, Some(hint))) if label == "New worktree…" && hint.contains("no commits")), "{last:?}");
+    h.settle();
+    assert!(h.keys().iter().any(|k| k.starts_with("menu-")), "the menu draws: {:?}", h.keys());
+}
+
+/// A running session refuses the removal of its worktree. Ending it offers the removal, and confirming removes the
+/// folder. Branches and the Settings page's worktrees are removed the same way.
+#[test]
+fn removing_a_worktree() {
+    let mut h = Harness::new(|work| {
+        git_repo(&work.join("proj"));
+        vec![work.join("proj")]
+    });
+    let repo_dir = h.work.join("proj");
+    let folder = crate::git::worktree::folder(&repo_dir, "fix");
+    let added = git(&repo_dir, &["worktree", "add", "-q", "-b", "worktree-fix", &folder.to_string_lossy()]);
+    assert!(added.status.success(), "{}", String::from_utf8_lossy(&added.stderr));
+    // The worktree is known to the project once git has been read again.
+    h.step(|ws| ws.store.refresh_git());
+    // A new session never starts inside a worktree; Fix-with-Claude is the one starter that keeps the folder it is given.
+    h.step(|ws| ws.new_claude_with(folder.clone(), vec![], Starter::FixGit));
+    let id = h.ws().active.clone().unwrap();
+    // Any other way of starting a session, asked to start inside the worktree, starts in the main checkout.
+    h.step(|ws| ws.new_claude(folder.clone()));
+    let other = h.ws().active.clone().unwrap();
+    assert_eq!(h.ws().store.session(&other).unwrap().cwd, repo_dir);
+    h.step(|ws| ws.close_live(&other));
+    h.step(|ws| ws.act(Act::Select(id.clone())));
+
+    // The top-bar menu offers the removal for the session's own worktree, and not in the main checkout.
+    let project = h.ws().store.data.projects[0].id.clone();
+    for cwd in [folder.clone(), repo_dir.clone()] {
+        h.step(|ws| ws.open_worktree_menu(project.clone(), cwd, MenuAnchor::Point(100.0, 30.0)));
+        let rows = h.menu_rows();
+        assert_eq!(rows[0].0, "Worktrees");
+        assert!(rows[1].0.contains("main checkout") && !rows[1].1, "the main checkout has no x: {rows:?}");
+        assert!(rows[2].0.contains("fix") && rows[2].1, "the worktree has an x: {rows:?}");
+        assert!(rows.last().is_some_and(|r| r.0 == "New worktree…" && !r.1), "{rows:?}");
+    }
+
+    // The x on the worktree a session is running in is refused, naming the session.
+    let x = h.ws().menu.as_ref().and_then(|m| m.items[2].remove.clone()).expect("an x on the worktree's row");
+    h.step(|ws| ws.act(x));
+    let toast = h.ws().toast.as_ref().map(|t| t.text.clone());
+    assert!(toast.as_deref().is_some_and(|t| t.contains("is in fix. Switch it to main first.")), "{toast:?}");
+    assert!(folder.exists() && h.ws().modal.is_none() && h.ws().live.len() == 1, "nothing changes");
+
+    // Ending the session by itself offers the removal.
+    h.step(|ws| ws.close_live(&id));
+    h.wait("the offer", |ws| matches!(&ws.modal, Some(Modal::Confirm { act: Act::ConfirmRemoveWorktree { .. }, .. })));
+    h.step(|ws| ws.submit_modal());
+    h.wait("the folder to go", |_| !folder.exists());
+    let toast = h.ws().toast.as_ref().map(|t| t.text.clone());
+    assert!(toast.as_deref().is_some_and(|t| t.contains("Removed worktree fix")), "{toast:?}");
+    assert!(!git(&repo_dir, &["rev-parse", "--verify", "-q", "worktree-fix"]).status.success(), "the merged branch went with it");
+
+    // The branch menu has a title and an x on every local branch but the current one.
+    assert!(git(&repo_dir, &["branch", "spare"]).status.success());
+    h.step(|ws| ws.open_branch_menu(repo_dir.clone(), MenuAnchor::Point(100.0, 30.0)));
+    h.wait("the branch menu", |ws| ws.menu.is_some());
+    let rows: Vec<(String, Option<Act>)> = h.ws().menu.as_ref().map(|m| m.items.iter().map(|i| (i.label.trim().to_string(), i.remove.clone())).collect()).unwrap_or_default();
+    assert_eq!(rows[0].0, "Branches");
+    let spare = rows.iter().find(|r| r.0 == "spare").and_then(|r| r.1.clone()).expect("a local branch has an x");
+    assert!(rows.iter().find(|r| r.0.starts_with('✓')).is_some_and(|r| r.1.is_none()), "the current branch has none");
+    h.step(|ws| ws.act(spare));
+    h.wait("the question", |ws| matches!(&ws.modal, Some(Modal::Confirm { confirm, .. }) if confirm == "Delete"));
+    h.step(|ws| ws.submit_modal());
+    h.wait("the branch to go", |_| !git(&repo_dir, &["rev-parse", "--verify", "-q", "spare"]).status.success());
+
+    // Settings lists the worktrees in Claudiu's data folder. Removing one asks inside the page, so the dialog stays open.
+    let listed = crate::git::worktree::folder(&repo_dir, "listed");
+    assert!(git(&repo_dir, &["worktree", "add", "-q", "-b", "listed", &listed.to_string_lossy()]).status.success());
+    h.step(|ws| {
+        ws.act(Act::OpenSettings);
+        ws.set_settings_page(SettingsPage::Worktrees);
+    });
+    let shown = |ws: &Workspace| ws.worktrees_page.stored.as_ref().is_some_and(|s| s.iter().any(|w| w.folder == listed));
+    h.wait("the page to list it", shown);
+    h.settle();
+    let main_checkout = repo_dir.clone();
+    h.step(|ws| ws.act(Act::RemoveWorktree { main_checkout, folder: listed.clone() }));
+    h.wait("the question in the page", |ws| ws.worktrees_page.asking.as_ref().is_some_and(|a| a.folder == listed));
+    assert!(matches!(h.ws().modal, Some(Modal::Settings { .. })), "the dialog stays open");
+    let confirm = h.ws().worktrees_page.asking.as_ref().unwrap().act.clone();
+    h.step(|ws| ws.act(confirm));
+    h.wait("the folder to go", |_| !listed.exists());
+    h.wait("the page to drop it", |ws| !shown(ws));
+}
+
+/// What the user types and pastes reaches the shown session's program, and a click on the terminal takes the
+/// keyboard back from a text field.
+#[test]
+fn typing_and_pasting_reach_the_session() {
+    let mut h = Harness::new(|_| vec![]);
+    // A plain terminal session (no start-up skeleton) running `cat`, which echoes what it is sent.
+    let cwd = h.work.clone();
+    let id = new_id();
     let record = SessionRecord {
-        id: missing.clone(),
-        kind: SessionKind::Claude,
-        title: "Missing".into(),
+        id: id.clone(),
+        kind: SessionKind::Shell,
+        title: "cat".into(),
         custom_title: None,
         auto_title: None,
-        project_id: Some(project),
-        cwd: folder.clone(),
+        project_id: None,
+        cwd: cwd.clone(),
         created_at: now(),
         last_active: now(),
         exit_code: None,
         hidden: false,
-        claude: Some(ClaudeMeta { session_id: missing.clone(), external: ExternalState::Present, ..Default::default() }),
+        claude: None,
     };
-    let spec = SpawnSpec { program: "definitely-not-a-real-program-claudiu".into(), args: vec![], cwd: Some(folder), ..Default::default() };
-    step(&mut cx, &|ws, w, cx| ws.start(record.clone(), spec.clone(), true, w, cx));
-    until_closed(&mut cx, &missing);
-    let toast = ws.read_with(&cx, |ws, _| ws.toast.as_ref().map(|t| t.text.clone()));
-    assert!(toast.as_deref().is_some_and(|t| t.starts_with("Could not start Missing:")), "{toast:?}");
+    let program = if cfg!(windows) { "more" } else { "/bin/cat" };
+    h.step(|ws| ws.start_session(record, SpawnSpec { program: program.into(), cwd: Some(cwd), ..Default::default() }, true));
+    h.settle();
+    assert!(h.ws().terminal_focused(&id), "a new session has the keyboard");
+    let shows = |h: &mut Harness, text: &str, what: &str| {
+        h.wait(what, |ws| ws.live_view(&id).is_some_and(|v| v.tail_text(500).contains(text)));
+    };
+
+    for c in "hello".chars() {
+        h.press(rune::Key::Text(c.to_string()), |_| {});
+    }
+    h.press(rune::Key::Enter, |_| {});
+    shows(&mut h, "hello", "the typed line to reach the program");
+
+    h.rt.paste("pasted-text");
+    h.pump();
+    h.press(rune::Key::Enter, |_| {});
+    shows(&mut h, "pasted-text", "the pasted text to reach the program");
+
+    // Settings takes the keyboard; once it is closed, a click on the terminal gives it back.
+    h.click("settings");
+    assert!(!h.ws().terminal_focused(&id));
+    h.press(rune::Key::Escape, |_| {});
+    h.click(&id);
+    assert!(h.ws().terminal_focused(&id), "the click gave the terminal the keyboard");
+    for c in "again".chars() {
+        h.press(rune::Key::Text(c.to_string()), |_| {});
+    }
+    h.press(rune::Key::Enter, |_| {});
+    shows(&mut h, "again", "typing after the click to reach the program");
+}
+
+/// A working session's icon turns only while someone can see it: the window is in front and the sidebar shown.
+/// Otherwise the window stops asking for frames.
+#[test]
+fn busy_icons_stop_asking_for_frames_when_nobody_can_see_them() {
+    let mut h = Harness::new(|_| vec![]);
+    let cwd = h.work.clone();
+    h.step(|ws| ws.new_claude(cwd));
+    let id = h.ws().active.clone().unwrap();
+    h.wait("the first screen", idle);
+    let animating = |h: &mut Harness, active: bool, sidebar: bool| {
+        h.step(|ws| {
+            ws.activity.insert(id.clone(), Activity::Working);
+            ws.window_active = active;
+            ws.store.data.layout.sidebar_visible = sidebar;
+        });
+        // Five seconds of frames: anything else that moved (a meter filling as usage arrives) has settled by then.
+        (0..300).all(|_| h.rt.frame(1.0 / 60.0))
+    };
+    assert!(animating(&mut h, true, true), "the icon turns in a window in front");
+    assert!(!animating(&mut h, false, true), "a window in the background asks for no frames");
+    assert!(!animating(&mut h, true, false), "nor does a hidden sidebar");
+}
+
+/// Quit (⌘Q, or closing the window) asks first while a Claude session is mid-turn, and quits at once otherwise.
+#[test]
+#[cfg(unix)] // The stand-in that keeps printing is a `sh` loop.
+fn quitting_asks_first_only_while_a_session_is_working() {
+    let mut h = Harness::new(|_| vec![]);
+    let quit_now = |h: &mut Harness| {
+        h.step(|ws| ws.modal = None);
+        h.rt.update(|ws, tx| ws.quit_or_ask(tx));
+        h.pump();
+        h.ws().quitting
+    };
+    // A session that streams output for as long as it runs, as Claude Code does mid-turn.
+    let cwd = h.work.clone();
+    let script = "while :; do echo working; sleep 0.1; done";
+    let spec = SpawnSpec { program: "/bin/sh".into(), args: vec!["-c".into(), script.into()], cwd: Some(cwd.clone()), ..Default::default() };
+    let id = h.start_one("Busy", &cwd, spec);
+    h.wait("the session to be working", |ws| ws.live_view(&id).is_some_and(|v| v.is_working()));
+    assert!(!quit_now(&mut h), "a working session holds the quit");
+    assert!(matches!(h.ws().modal, Some(Modal::Confirm { act: Act::ConfirmQuit, .. })), "and the user is asked");
+    h.settle();
+    assert!(h.drawn("modal-card"), "the question is drawn");
+    h.step(|ws| ws.act(Act::Dismiss));
+    assert!(!h.ws().quitting && h.ws().is_running(&id), "Cancel keeps everything running");
+
+    h.step(|ws| ws.close_live(&id));
+    assert!(quit_now(&mut h), "with nothing working it quits at once");
+    assert!(h.ws().modal.is_none());
+}
+
+/// Hundreds of sessions: the list scrolls under the wheel and keeps drawing rows where it brings them.
+#[test]
+fn the_session_list_draws_rows_where_scrolling_brings_them() {
+    let mut h = Harness::new(|_| vec![]);
+    h.step(|ws| {
+        for i in 0..300 {
+            ws.store.data.sessions.push(SessionRecord {
+                id: format!("s{i:03}"),
+                kind: SessionKind::Claude,
+                title: format!("Session {i}"),
+                custom_title: None,
+                auto_title: None,
+                cwd: PathBuf::from("/nowhere"),
+                project_id: None,
+                created_at: 0,
+                // Newer than anything else, so these come first, s000 at the top.
+                last_active: 4_000_000_000 - i,
+                exit_code: None,
+                hidden: false,
+                claude: None,
+            });
+        }
+        ws.store.data.layout.older_open = true;
+    });
+    h.settle();
+    let row_y = |h: &Harness, n: usize| h.keys().into_iter().find(|k| k.starts_with("row-") && k.ends_with(&format!("s{n:03}"))).and_then(|k| h.rt.find(&k)).map(|p| p.1);
+    let top = row_y(&h, 0).expect("the first row draws");
+    let (x, y) = h.rt.find("sidebar-scroll").expect("the list draws");
+    h.rt.pointer_move(x, y);
+    h.rt.wheel(x, y, -1200.0);
+    h.settle();
+    let moved = row_y(&h, 0);
+    assert!(moved.is_none_or(|m| m < top - 600.0), "the list did not scroll: the first row went from {top} to {moved:?}");
+    let shown = (1..300).filter(|n| row_y(&h, *n).is_some_and(|y| (0.0..900.0).contains(&y))).count();
+    assert!(shown > 10, "only {shown} rows are drawn where the list scrolled to");
+}
+
+mod github {
+    use super::*;
+    use crate::github::cli::*;
+    use crate::github::model::*;
+    use crate::github::view::*;
+    use serde_json::json;
+
+    impl Harness {
+        /// The GitHub pane opened on `cwd`, by id.
+        fn open_github_pane(&mut self, cwd: &Path) -> String {
+            let cwd = cwd.to_path_buf();
+            self.step(|ws| ws.open_github(cwd));
+            self.ws().right_gh.clone().expect("the GitHub pane is shown")
+        }
+
+        fn pane(&self, id: &str) -> &GithubView {
+            &self.ws().gh_pane(id).expect("the pane").view
+        }
+
+        fn with_pane(&mut self, id: &str, f: impl FnOnce(&mut GithubView)) {
+            let id = id.to_string();
+            self.step(move |ws| f(ws.gh_view_mut(&id).expect("the pane")));
+        }
+    }
+
+    #[test]
+    fn opening_a_pull_request_selects_the_pull_requests_tab() {
+        let mut h = Harness::new(|_| vec![]);
+        let work = h.work.clone();
+        let pane = h.open_github_pane(&work);
+        for (kind, number) in [(Kind::Pull, 7), (Kind::Issue, 3)] {
+            h.with_pane(&pane, |v| v.open_item(kind, number));
+            assert_eq!(h.pane(&pane).kind, kind);
+        }
+    }
+
+    /// Draws the pane in every state, at two widths, with real GitHub data, to catch panics in `github/ui`. Only
+    /// reads from GitHub. Needs a signed-in `gh`: `cargo test -- --ignored pane_draws_every_state`.
+    #[test]
+    #[ignore]
+    fn pane_draws_every_state() {
+        let gh = Gh::new(locate().expect("gh is installed"), std::env::current_dir().unwrap());
+        let (owner, name) = ("zed-industries", "zed");
+        let info = parse_repo(&gh.graphql(REPO_QUERY, json!({"owner": owner, "name": name})).unwrap()).unwrap();
+        let mut lists = vec![];
+        for kind in [Kind::Issue, Kind::Pull] {
+            let (q, qa, qb) = (scoped("zed-industries/zed", kind, "is:open"), scoped("zed-industries/zed", kind, "is:open"), scoped("zed-industries/zed", kind, "is:closed"));
+            lists.push(parse_page(&gh.graphql(LIST_QUERY, json!({"q": q, "qa": qa, "qb": qb, "after": null})).unwrap()));
+        }
+        let detail = |n: u32| parse_detail(&gh.graphql(detail_query_text(), json!({"owner": owner, "name": name, "number": n, "after": null})).unwrap()).unwrap();
+        let (issue, pull) = (detail(lists[0].items[0].number), detail(lists[1].items[0].number));
+        let repo = RepoRef { owner: owner.into(), name: name.into(), url: String::new(), host: None };
+        let files = parse_files(&pull_files(&gh, &repo, pull.item.number, 1).unwrap());
+
+        let mut h = Harness::new(|_| vec![]);
+        h.rt.set_viewport((2000.0, 1100.0), 2.0);
+        let work = h.work.clone();
+        let pane = h.open_github_pane(&work);
+        h.wait("the first look at the folder", |ws| ws.gh_pane(&pane).is_some_and(|p| p.view.phase != Phase::Loading));
+        for phase in [Phase::Loading, Phase::NoCli, Phase::SignedOut, Phase::NotGithub, Phase::Failed("boom".into())] {
+            h.with_pane(&pane, |v| v.phase = phase);
+            h.settle();
+        }
+        for width in [1100.0, 620.0] {
+            h.step(|ws| ws.store.data.layout.right_gh_w = Some(width));
+            h.with_pane(&pane, |v| {
+                v.phase = Phase::Ready;
+                v.info = Some(info.clone());
+                v.repo = Some(repo.clone());
+                for (i, p) in lists.iter().enumerate() {
+                    let l = &mut v.lists[i];
+                    (l.items, l.total, l.open, l.closed, l.loaded) = (p.items.clone(), p.total, p.open, p.closed, true);
+                }
+            });
+            h.settle();
+            for (kind, d) in [(Kind::Issue, &issue), (Kind::Pull, &pull)] {
+                for tab in [DetailTab::Conversation, DetailTab::Commits, DetailTab::Files] {
+                    h.with_pane(&pane, |v| {
+                        v.kind = kind;
+                        let mut s = DetailState::new(kind, d.item.number);
+                        (s.data, s.loading, s.tab) = (Some(d.clone()), false, tab);
+                        s.files = Some(files.clone());
+                        s.expanded = files.iter().map(|f| f.path.clone()).collect();
+                        v.detail = Some(s);
+                    });
+                    h.settle();
+                }
+            }
+            h.with_pane(&pane, |v| v.mode = Mode::New(Kind::Issue));
+            h.settle();
+            h.with_pane(&pane, |v| v.mode = Mode::New(Kind::Pull));
+            h.settle();
+            h.with_pane(&pane, |v| {
+                v.mode = Mode::Browse;
+                v.detail = None;
+            });
+        }
+    }
+
+    /// Every feature of the pane against a real, throwaway private repository on the signed-in account, driven through
+    /// the pane's own actions (`GithubView::act`). `cargo test -- --ignored every_feature_against_a_scratch_repo
+    /// --nocapture`. It CREATES a private repo (named `claudiu-gh-pane-test-<time>`) and tries to delete it at the end,
+    /// which needs the `delete_repo` scope; if that is missing, delete it by hand.
+    #[test]
+    #[ignore]
+    fn every_feature_against_a_scratch_repo() {
+        let exe = locate().expect("gh is installed");
+        let work = tempfile::tempdir().unwrap();
+        let setup = Gh::new(exe.clone(), work.path().to_path_buf());
+        let me = setup.rest("GET", "user", None).unwrap()["login"].as_str().unwrap().to_string();
+        let name = format!("claudiu-gh-pane-test-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs());
+        let full = format!("{me}/{name}");
+        eprintln!("scratch repository: {full}");
+        setup.rest("POST", "user/repos", Some(json!({"name": name, "private": true, "auto_init": true, "allow_auto_merge": true}))).unwrap();
+        std::thread::sleep(Duration::from_secs(3));
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&exe, work.path(), &setup, &me, &full)));
+
+        match setup.rest("DELETE", &format!("repos/{full}"), None) {
+            Ok(_) => eprintln!("scratch repository deleted"),
+            Err(e) => eprintln!("could not delete {full} ({}). Delete it by hand: gh repo delete {full} --yes", e.msg),
+        }
+        if let Err(e) = result {
+            std::panic::resume_unwind(e);
+        }
+    }
+
+    fn cmd(exe: &Path, dir: &Path, args: &[&str]) -> String {
+        let out = std::process::Command::new(exe).args(args).current_dir(dir).output().unwrap();
+        assert!(out.status.success(), "gh {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// The pane, driven by its actions, with every error toast it shows checked.
+    struct Rig {
+        h: Harness,
+        pane: String,
+    }
+
+    impl Rig {
+        fn view(&self) -> &GithubView {
+            self.h.pane(&self.pane)
+        }
+
+        /// Run until every background request has landed.
+        fn settle(&mut self) {
+            for _ in 0..600 {
+                self.h.pump();
+                let v = self.view();
+                let idle = v.busy.is_none()
+                    && v.lists.iter().all(|l| !l.loading)
+                    && v.detail.as_ref().is_none_or(|d| !d.loading && !d.files_loading && !d.more_loading);
+                if idle {
+                    // A few more frames: a finished request may have started the next one.
+                    for _ in 0..3 {
+                        self.h.pump();
+                    }
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            panic!("the pane never went idle");
+        }
+
+        /// Do `a`, wait, and assert that an error was shown only if `expect_error`.
+        fn act(&mut self, step: &str, a: GhAct, expect_error: bool) {
+            self.h.step(|ws| ws.toast = None);
+            self.h.with_pane(&self.pane.clone(), |v| v.act(a));
+            self.settle();
+            let error = self.h.ws().toast.as_ref().filter(|t| t.error).map(|t| t.text.clone());
+            eprintln!("  {step}{}", error.as_ref().map(|e| format!("  -> {e}")).unwrap_or_default());
+            if expect_error {
+                assert!(error.is_some(), "{step}: expected an error");
+            } else {
+                assert!(error.is_none(), "{step}: {error:?}");
+            }
+        }
+
+        fn text(&mut self, which: fn(&mut GithubView) -> &mut TextEdit, text: &str) {
+            let text = text.to_string();
+            self.h.with_pane(&self.pane.clone(), move |v| which(v).replace_text(&text));
+        }
+
+        /// GitHub's search index lags a few seconds behind changes: refresh until `cond` holds.
+        fn until(&mut self, what: &str, cond: impl Fn(&GithubView) -> bool) {
+            for _ in 0..15 {
+                if cond(self.view()) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_secs(3));
+                self.act("refresh (waiting for the search index)", GhAct::Refresh, false);
+            }
+            panic!("never became true: {what}");
+        }
+
+        fn detail(&self) -> Detail {
+            self.view().detail.as_ref().and_then(|d| d.data.clone()).expect("a detail is open")
+        }
+    }
+
+    fn run(exe: &Path, work: &Path, setup: &Gh, me: &str, full: &str) {
+        // Branches f1..f5 off main, each adding its own file, so nothing conflicts.
+        let main_sha = setup.rest("GET", &format!("repos/{full}/git/ref/heads/main"), None).unwrap()["object"]["sha"].as_str().unwrap().to_string();
+        for i in 1..=5 {
+            setup.rest("POST", &format!("repos/{full}/git/refs"), Some(json!({"ref": format!("refs/heads/f{i}"), "sha": main_sha}))).unwrap();
+            setup
+                .rest("PUT", &format!("repos/{full}/contents/f{i}.txt"), Some(json!({"message": format!("add f{i}"), "content": "aGVsbG8K", "branch": format!("f{i}")})))
+                .unwrap();
+        }
+        setup.rest("POST", &format!("repos/{full}/milestones"), Some(json!({"title": "M1"}))).unwrap();
+        setup.rest("PATCH", &format!("repos/{full}"), Some(json!({"allow_auto_merge": true}))).unwrap();
+        cmd(exe, work, &["repo", "clone", full, "clone"]);
+        let dir = dunce::canonicalize(work.join("clone")).unwrap();
+
+        let mut h = Harness::new(|_| vec![]);
+        let pane = h.open_github_pane(&dir);
+        let mut r = Rig { h, pane };
+        r.settle();
+        assert_eq!(r.view().phase.clone(), Phase::Ready, "connected");
+        assert!(r.view().info.as_ref().is_some_and(|i| i.can_write()), "write access");
+        assert_eq!(r.view().info.as_ref().map(|i| i.viewer.clone()).as_deref(), Some(me));
+        let at = || "gh-test-anchor".to_string();
+
+        eprintln!("issues");
+        r.act("new issue form", GhAct::New(Kind::Issue), false);
+        r.text(|v| &mut v.new_title, "Issue A");
+        r.text(|v| &mut v.new_body, "body of A");
+        r.act("create issue", GhAct::SubmitNew, false);
+        let d = r.detail();
+        assert_eq!((d.item.title.as_str(), d.body.as_str(), d.item.state), ("Issue A", "body of A", State::Open));
+        let issue_id = d.item.id.clone();
+        r.text(|v| &mut v.composer, "first comment");
+        r.act("comment", GhAct::Comment(None), false);
+        let first_comment = |r: &Rig| r.detail().timeline.iter().find_map(|e| if let Entry::Comment(c) = e { Some(c.clone()) } else { None });
+        let comment = first_comment(&r).expect("comment shown");
+        assert_eq!(comment.body, "first comment");
+        r.act("edit comment: start", GhAct::EditStart(Edit::Comment(comment.id.clone())), false);
+        r.text(|v| &mut v.edit_body, "edited comment");
+        r.act("edit comment: save", GhAct::EditSave, false);
+        let edited = first_comment(&r).unwrap();
+        assert!(edited.body == "edited comment" && edited.edited);
+        r.act("react to comment", GhAct::React(comment.id.clone(), "THUMBS_UP".into(), false), false);
+        assert!(first_comment(&r).unwrap().reactions.iter().any(|x| x.content == "THUMBS_UP" && x.mine));
+        r.act("react to issue", GhAct::React(issue_id.clone(), "HEART".into(), false), false);
+        assert!(r.detail().reactions.iter().any(|x| x.content == "HEART" && x.mine));
+        r.act("unreact", GhAct::React(issue_id.clone(), "HEART".into(), true), false);
+        assert!(r.detail().reactions.iter().all(|x| x.content != "HEART" || x.count == 0));
+
+        r.act("labels picker", GhAct::Popup(PopKind::Labels, at()), false);
+        let label = r.view().options.labels.clone().expect("labels loaded").into_iter().find(|l| l.name == "bug").expect("bug label");
+        r.act("add label", GhAct::ToggleLabel(label.clone()), false);
+        assert!(r.detail().item.labels.iter().any(|l| l.name == "bug"));
+        r.act("remove label", GhAct::ToggleLabel(label.clone()), false);
+        assert!(r.detail().item.labels.is_empty());
+        r.act("add label again", GhAct::ToggleLabel(label.clone()), false);
+
+        r.act("people picker", GhAct::Popup(PopKind::Assignees, at()), false);
+        let me_user = r.view().options.users.clone().expect("users loaded").into_iter().find(|u| u.login == me).expect("me among assignable users");
+        r.act("assign me", GhAct::ToggleAssignee(me_user.clone()), false);
+        assert!(r.detail().item.assignees.iter().any(|u| u.login == me));
+        r.act("unassign", GhAct::ToggleAssignee(me_user.clone()), false);
+        assert!(r.detail().item.assignees.is_empty());
+
+        r.act("milestone picker", GhAct::Popup(PopKind::Milestone, at()), false);
+        let ms = r.view().options.milestones.clone().expect("milestones loaded").into_iter().next().expect("M1");
+        r.act("set milestone", GhAct::SetMilestone(Some(ms.clone())), false);
+        assert_eq!(r.detail().item.milestone.as_ref().map(|m| m.1.as_str()), Some("M1"));
+        r.act("clear milestone", GhAct::SetMilestone(None), false);
+        assert!(r.detail().item.milestone.is_none());
+
+        r.act("edit title: start", GhAct::EditStart(Edit::Title), false);
+        r.text(|v| &mut v.edit_title, "Issue A (renamed)");
+        r.act("edit title: save", GhAct::EditSave, false);
+        assert_eq!(r.detail().item.title, "Issue A (renamed)");
+        assert_eq!(r.detail().body, "body of A", "editing the title leaves the body alone");
+        r.act("edit body: start", GhAct::EditStart(Edit::Body), false);
+        r.text(|v| &mut v.edit_body, "new body");
+        r.act("edit body: save", GhAct::EditSave, false);
+        assert_eq!((r.detail().body.as_str(), r.detail().item.title.as_str()), ("new body", "Issue A (renamed)"));
+
+        r.act("lock", GhAct::Lock(true), false);
+        assert!(r.detail().locked);
+        r.act("unlock", GhAct::Lock(false), false);
+        assert!(!r.detail().locked);
+        r.act("close as not planned", GhAct::CloseItem("NOT_PLANNED"), false);
+        assert!(r.detail().item.state == State::Closed && r.detail().item.not_planned);
+        r.act("reopen", GhAct::ReopenItem, false);
+        assert_eq!(r.detail().item.state, State::Open);
+        r.text(|v| &mut v.composer, "closing note");
+        r.act("comment and close", GhAct::Comment(Some(true)), false);
+        assert_eq!(r.detail().item.state, State::Closed);
+        r.act("reopen (2)", GhAct::ReopenItem, false);
+        r.act("delete comment", GhAct::DeleteComment(comment.id.clone()), false);
+        assert!(r.detail().timeline.iter().all(|e| !matches!(e, Entry::Comment(c) if c.id == comment.id)));
+
+        eprintln!("search and lists");
+        r.act("back to list", GhAct::Back, false);
+        r.act("search by label", GhAct::SetQuery("label:bug".into()), false);
+        assert!(r.view().lists[0].items.iter().any(|i| i.title.starts_with("Issue A")));
+        r.act("search no match", GhAct::SetQuery("label:enhancement".into()), false);
+        assert!(r.view().lists[0].items.is_empty());
+        r.act("text search", GhAct::SetQuery("renamed in:title".into()), false);
+        assert_eq!(r.view().lists[0].total, 1);
+        r.act("closed tab", GhAct::SetState(Some("closed")), false);
+        r.act("reset search", GhAct::SetQuery("is:open".into()), false);
+
+        eprintln!("pull requests");
+        r.act("pull requests tab", GhAct::SetKind(Kind::Pull), false);
+        let mut numbers = vec![];
+        for i in 1..=5 {
+            r.act("new pr form", GhAct::New(Kind::Pull), false);
+            r.text(|v| &mut v.new_title, &format!("PR {i}"));
+            r.text(|v| &mut v.new_body, "pr body");
+            r.text(|v| &mut v.new_head, &format!("f{i}"));
+            r.text(|v| &mut v.new_base, "main");
+            r.act(&format!("create PR {i}"), GhAct::SubmitNew, false);
+            let d = r.detail();
+            assert!(d.pr.is_some() && d.item.head == format!("f{i}") && d.item.base == "main");
+            numbers.push(d.item.number);
+        }
+        r.until("five open PRs", |v| v.lists[1].open == 5);
+
+        r.act("open PR 1", GhAct::Open(Kind::Pull, numbers[0]), false);
+        r.act("files tab", GhAct::Tab(DetailTab::Files), false);
+        let files = r.view().detail.as_ref().and_then(|d| d.files.clone()).expect("files loaded");
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "f1.txt");
+        assert!(files[0].lines.iter().any(|l| l.kind == DiffKind::Add));
+        r.act("toggle file", GhAct::ToggleFile("f1.txt".into()), false);
+        r.act("commits tab", GhAct::Tab(DetailTab::Commits), false);
+        r.act("conversation tab", GhAct::Tab(DetailTab::Conversation), false);
+        assert!(r.detail().timeline.iter().any(|e| matches!(e, Entry::Commit(_))));
+
+        r.act("to draft", GhAct::ToDraft, false);
+        assert!(r.detail().item.draft);
+        r.act("ready for review", GhAct::Ready, false);
+        assert!(!r.detail().item.draft);
+        r.text(|v| &mut v.composer, "review note");
+        r.act("review: comment", GhAct::Review("COMMENT"), false);
+        assert!(r.detail().timeline.iter().any(|e| matches!(e, Entry::Review(rv) if rv.state == "COMMENTED")));
+        r.act("review: approving your own PR is refused", GhAct::Review("APPROVE"), true);
+        r.act("pr label", GhAct::ToggleLabel(label.clone()), false);
+        assert!(r.detail().item.labels.iter().any(|l| l.name == "bug"));
+        r.act("pr assignee", GhAct::ToggleAssignee(me_user.clone()), false);
+        r.act("pr milestone", GhAct::SetMilestone(Some(ms.clone())), false);
+        r.act("pr title", GhAct::EditStart(Edit::Title), false);
+        r.text(|v| &mut v.edit_title, "PR 1 renamed");
+        r.act("pr title save", GhAct::EditSave, false);
+        assert_eq!(r.detail().item.title, "PR 1 renamed");
+        r.act("close pr", GhAct::CloseItem(""), false);
+        assert_eq!(r.detail().item.state, State::Closed);
+        r.act("reopen pr", GhAct::ReopenItem, false);
+        assert_eq!(r.detail().item.state, State::Open);
+
+        r.act("merge PR 1 (squash)", GhAct::Merge("SQUASH"), false);
+        assert_eq!(r.detail().item.state, State::Merged);
+        r.act("delete merged branch", GhAct::DeleteBranch, false);
+        assert!(setup.rest("GET", &format!("repos/{full}/branches/f1"), None).is_err(), "branch f1 is gone");
+
+        // PR 2 is now behind main.
+        r.act("open PR 2", GhAct::Open(Kind::Pull, numbers[1]), false);
+        r.act("update branch", GhAct::UpdateBranch, false);
+        r.act("merge PR 2 (merge commit)", GhAct::Merge("MERGE"), false);
+        assert_eq!(r.detail().item.state, State::Merged);
+        r.act("open PR 3", GhAct::Open(Kind::Pull, numbers[2]), false);
+        r.act("update branch (3)", GhAct::UpdateBranch, false);
+        r.act("merge PR 3 (rebase)", GhAct::Merge("REBASE"), false);
+        assert_eq!(r.detail().item.state, State::Merged);
+
+        r.act("open PR 4", GhAct::Open(Kind::Pull, numbers[3]), false);
+        // Free private repositories cannot use auto-merge ("not allowed"), and with no required checks it is pointless
+        // ("clean status"); either answer proves the call is well formed.
+        r.h.step(|ws| ws.toast = None);
+        r.h.with_pane(&r.pane.clone(), |v| v.act(GhAct::AutoMerge(true)));
+        r.settle();
+        let said = r.h.ws().toast.as_ref().map(|t| (t.text.clone(), t.error));
+        eprintln!("  auto-merge on: {said:?}");
+        assert!(said.as_ref().is_none_or(|t| !t.1 || t.0.contains("clean status") || t.0.contains("Auto merge is not allowed")), "{said:?}");
+
+        let pr4 = r.detail().item.id.clone();
+        r.act("react to PR", GhAct::React(pr4, "ROCKET".into(), false), false);
+        r.act("lock PR", GhAct::Lock(true), false);
+        r.act("unlock PR", GhAct::Lock(false), false);
+        r.act("ask claude prompt", GhAct::Claude("review"), false);
+        assert!(Gh::new(exe.to_path_buf(), dir.clone()).checkout(numbers[3]).is_ok(), "gh pr checkout");
+
+        eprintln!("merged and open lists");
+        r.act("back", GhAct::Back, false);
+        r.act("merged PRs", GhAct::SetQuery("is:merged".into()), false);
+        r.until("three merged PRs", |v| v.lists[1].items.len() == 3);
+        r.act("open PRs", GhAct::SetQuery("is:open".into()), false);
+        r.until("two open PRs", |v| v.lists[1].items.len() == 2);
+        r.act("refresh", GhAct::Refresh, false);
+        r.act("escape", GhAct::Escape, false);
+    }
 }

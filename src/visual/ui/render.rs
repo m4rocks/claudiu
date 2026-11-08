@@ -1,38 +1,27 @@
-//! Draws a parsed `ui` tree with native GPUI elements. A block is a column; `display:flex` or `grid` makes every child
-//! its own item; otherwise runs of inline content (text, `strong`, `a`, `code`…) become one wrapped paragraph.
-//! shortcut: a paragraph with a link is not selectable, and inline spans cannot change size (font-size on a block does).
+//! Draws a parsed `ui` tree with Rune elements. A block is a column; `display:flex` or `grid` makes every child its
+//! own item; otherwise runs of inline content (text, `strong`, `a`, `code`…) become one wrapped paragraph.
+//! Rune text doesn't inherit from its box, so the text properties a box sets (size, line height, alignment, wrapping)
+//! travel down in `Ctx` with the CSS ones. Inline spans cannot change size (font-size on a block does).
 
-use gpui::{
-    AnyElement, App, Div, ElementId, Font, FontStyle, FontWeight, Hsla, InteractiveElement, InteractiveText, IntoElement, Length, ParentElement,
-    StatefulInteractiveElement, StrikethroughStyle, prelude::FluentBuilder, Styled, StyledText, TextRun, UnderlineStyle, Window, div, img, px, relative,
-};
-use gpui_kit::base::SelectableText;
+use rune::{Cursor, El, Link, Span, TextStyle, col, el, rich, row, text};
 
-use super::parse::{Ax, Color, Css, Dir, Display, El, Len, Node, Svg, TextAlign, Tree, token};
-use super::{CardUi, Scope, SendText};
+use super::parse::{Ax, Color, Css, Dir, Display, El as Tag, Len, Node, Svg, TextAlign, Tree, token};
+use super::{CardUi, Scope};
+use crate::app::Workspace;
 use crate::panels::theme;
 
 /// The longest message the mod sends for a button (`PROMPT_MAX` in `mod/hooks/register.js`).
 const SEND_MAX: usize = 20_000;
 
-fn hsla(c: Color) -> Hsla {
-    let mut h = theme::hsla(c.0);
-    h.a = c.1;
-    h
+fn color(c: Color) -> rune::Color {
+    theme::rgb(c.0).alpha(c.1)
 }
 
-fn tok(name: &str) -> Hsla {
-    theme::hsla(token(name).unwrap_or(theme::TEXT))
+fn tok(name: &str) -> rune::Color {
+    theme::rgb(token(name).unwrap_or(theme::TEXT))
 }
 
-fn length(l: Len) -> Length {
-    match l {
-        Len::Px(x) => px(x).into(),
-        Len::Pct(p) => relative(p / 100.0).into(),
-    }
-}
-
-/// Text properties that flow down to descendants, so a run can be built without asking GPUI what it inherited.
+/// Text properties that flow down to descendants.
 #[derive(Clone)]
 struct Ctx {
     color: Color,
@@ -44,11 +33,28 @@ struct Ctx {
     /// Behind the text of an inline element only: a block's background belongs to its box.
     run_bg: Option<Color>,
     pre: bool,
+    size: f32,
+    line_height: Option<f32>,
+    align: Option<TextAlign>,
+    nowrap: bool,
 }
 
 impl Ctx {
     fn root() -> Self {
-        Self { color: Color(theme::TEXT, 1.0), weight: 400.0, italic: false, mono: false, underline: false, strike: false, run_bg: None, pre: false }
+        Self {
+            color: Color(theme::TEXT, 1.0),
+            weight: 400.0,
+            italic: false,
+            mono: false,
+            underline: false,
+            strike: false,
+            run_bg: None,
+            pre: false,
+            size: 13.0,
+            line_height: None,
+            align: None,
+            nowrap: false,
+        }
     }
 
     fn with(&self, css: &Css, inline: bool) -> Self {
@@ -61,6 +67,19 @@ impl Ctx {
             strike: css.strike.unwrap_or(self.strike),
             run_bg: if inline { css.bg.or(self.run_bg) } else { None },
             pre: css.pre.unwrap_or(self.pre),
+            size: if inline { self.size } else { css.size.unwrap_or(self.size) },
+            line_height: if inline { self.line_height } else { css.line_height.or(self.line_height) },
+            align: if inline { self.align } else { css.text_align.or(self.align) },
+            nowrap: if inline { self.nowrap } else { css.nowrap.unwrap_or(self.nowrap) },
+        }
+    }
+
+    fn style(&self) -> TextStyle {
+        let size = crate::panels::scale::px(self.size);
+        let style = TextStyle::new(size, 400.0);
+        match self.line_height {
+            Some(l) => style.lh((size * l).round()),
+            None => style,
         }
     }
 }
@@ -68,7 +87,8 @@ impl Ctx {
 #[derive(Default)]
 struct Inline {
     text: String,
-    runs: Vec<TextRun>,
+    spans: Vec<Span>,
+    strikes: Vec<(usize, usize)>,
     links: Vec<(std::ops::Range<usize>, String)>,
 }
 
@@ -84,26 +104,23 @@ fn is_inline(n: &Node) -> bool {
     }
 }
 
-struct R {
-    font: Font,
+struct R<'a> {
     uid: u64,
-    links: usize,
     texts: usize,
     screen_scale: f32,
-    scope: Scope,
+    scope: &'a Scope,
     /// What the user has clicked so far, as of this frame.
-    state: CardUi,
+    state: &'a CardUi,
 }
 
-pub fn render(tree: &Tree, scope: &Scope, window: &mut Window, cx: &mut App) -> AnyElement {
-    let state = scope.ui.read(cx).clone();
-    let mut r = R { font: window.text_style().font(), uid: tree.uid, links: 0, texts: 0, screen_scale: window.scale_factor(), scope: scope.clone(), state };
+pub fn render(tree: &Tree, scope: &Scope, state: &CardUi, screen_scale: f32) -> El {
+    let mut r = R { uid: tree.uid, texts: 0, screen_scale, scope, state };
     let kids = r.children(&tree.nodes, false, &Ctx::root());
-    div().flex().flex_col().gap(px(8.0)).my(px(4.0)).children(kids).into_any_element()
+    col().w_full().gap(8.0).my(4.0).children(kids)
 }
 
-impl R {
-    fn children(&mut self, nodes: &[Node], flex: bool, ctx: &Ctx) -> Vec<AnyElement> {
+impl R<'_> {
+    fn children(&mut self, nodes: &[Node], flex: bool, ctx: &Ctx) -> Vec<El> {
         let mut out = vec![];
         let mut run: Vec<&Node> = vec![];
         for n in nodes {
@@ -122,12 +139,12 @@ impl R {
         out
     }
 
-    fn flush(&mut self, run: &mut Vec<&Node>, ctx: &Ctx, out: &mut Vec<AnyElement>) {
+    fn flush(&mut self, run: &mut Vec<&Node>, ctx: &Ctx, out: &mut Vec<El>) {
         out.extend(self.paragraph(run, ctx));
         run.clear();
     }
 
-    fn element(&mut self, e: &El, ctx: &Ctx) -> Option<AnyElement> {
+    fn element(&mut self, e: &Tag, ctx: &Ctx) -> Option<El> {
         let css = &e.css;
         if css.display == Some(Display::None) {
             return None;
@@ -141,43 +158,78 @@ impl R {
             "progress" => {
                 let num = |k: &str| e.attr(k).and_then(|v| v.trim().parse::<f32>().ok());
                 let share = (num("value").unwrap_or(0.0) / num("max").filter(|m| *m > 0.0).unwrap_or(100.0)).clamp(0.0, 1.0);
-                vec![div().h_full().w(relative(share)).bg(hsla(ctx.color)).into_any_element()]
+                vec![el().h_full().w_frac(share).fill(color(ctx.color)).motion(rune::tok::motion::REFLOW)]
             }
             "hr" => vec![],
             "ul" | "ol" => self.list(e, &ctx),
+            _ if css.display == Some(Display::Grid) => return Some(self.grid(e, &ctx)),
             _ => self.children(&e.children, flex, &ctx),
         };
-        Some(boxed(css).children(kids).into_any_element())
+        Some(boxed(css).children(kids))
+    }
+
+    /// A grid: rows of `cols` equal columns, where `grid-column: span N` takes N of them.
+    fn grid(&mut self, e: &Tag, ctx: &Ctx) -> El {
+        let cols = e.css.cols.unwrap_or(1).max(1);
+        let gap_x = e.css.gap_x.unwrap_or(0.0);
+        let mut rows: Vec<El> = vec![];
+        let mut line: Vec<El> = vec![];
+        let mut used = 0;
+        for n in &e.children {
+            let span = match n {
+                Node::El(c) => c.css.col_span.unwrap_or(1).clamp(1, cols),
+                _ => 1,
+            };
+            let Some(cell) = self.children(std::slice::from_ref(n), true, ctx).into_iter().next() else { continue };
+            if used + span > cols && !line.is_empty() {
+                rows.push(grid_row(std::mem::take(&mut line), used.into(), cols.into(), gap_x));
+                used = 0;
+            }
+            line.push(el().grow(span as f32).shrink().min_w(0.0).child(cell));
+            used += span;
+        }
+        if !line.is_empty() {
+            rows.push(grid_row(line, used.into(), cols.into(), gap_x));
+        }
+        let mut b = boxed(&e.css);
+        // The rows stack; the box's own row gap separates them.
+        b = b.gaps(e.css.gap_y.unwrap_or(0.0), 0.0);
+        b.children(rows)
     }
 
     /// Identifies an interactive element across frames: card, block, and its place in the block.
-    fn key(&self, e: &El) -> String {
+    fn key(&self, e: &Tag) -> String {
         format!("{}/{}/{}", self.scope.call, self.uid, e.seq)
     }
 
     /// Sends its `send` text as the user's next message, once. That text is always on show, so a label can't hide
     /// what a click does. A button with nothing valid to send is drawn inert.
-    fn button(&mut self, e: &El, ctx: &Ctx) -> AnyElement {
+    fn button(&mut self, e: &Tag, ctx: &Ctx) -> El {
         let kids = self.children(&e.children, false, ctx);
         let send = e.attr("send").map(str::trim).filter(|s| !s.is_empty() && s.chars().count() <= SEND_MAX).map(str::to_string);
-        let Some(text) = send else { return boxed(&e.css).opacity(0.5).children(kids).into_any_element() };
+        let Some(message) = send else { return boxed(&e.css).opacity(0.5).children(kids) };
         let key = self.key(e);
         let sent = self.state.is_sent(&key);
-        let hint = if sent { format!("Sent: {text}") } else { text.clone() };
-        let hint = div().text_size(crate::panels::scale::px(11.5)).text_color(tok("dim")).child(hint);
-        let body = boxed(&e.css).id(ElementId::Name(key.clone().into())).children(kids).child(hint);
+        let hint = if sent { format!("Sent: {message}") } else { message.clone() };
+        let hint = text(hint).font(TextStyle::new(crate::panels::scale::px(11.5), 400.0)).color(tok("dim")).wrap();
+        let body = boxed(&e.css).key(format!("{}/{key}", self.scope.terminal)).children(kids).child(hint);
         if sent {
-            return body.opacity(0.6).into_any_element();
+            return body.opacity(0.6);
         }
-        let ui = self.scope.ui.clone();
-        body.cursor_pointer()
-            .hover(|s| s.border_color(tok("accent")))
-            .on_click(move |_, _, cx| ui.update(cx, |_, cx| cx.emit(SendText { key: key.clone(), text: text.clone() })))
-            .into_any_element()
+        let terminal = self.scope.terminal.clone();
+        body.cursor(Cursor::Pointer)
+            .hover(rune::Color::WHITE.alpha(0.04))
+            .press_scale(0.98)
+            .on_press_tx(move |ws: &mut Workspace, tx| {
+                if let Some(t) = ws.terminal_mut(&terminal) {
+                    t.card_send(&key, message.clone());
+                }
+                ws.after_input(tx);
+            })
     }
 
     /// `<details>`: a `<summary>` line that opens and closes the rest.
-    fn details(&mut self, e: &El, ctx: &Ctx) -> AnyElement {
+    fn details(&mut self, e: &Tag, ctx: &Ctx) -> El {
         let key = self.key(e);
         let open = self.state.is_open(&key).unwrap_or(e.attr("open").is_some());
         let is_summary = |n: &&Node| matches!(n, Node::El(s) if s.tag == "summary");
@@ -186,29 +238,36 @@ impl R {
             _ => vec![],
         });
         let title = self.children(&summary, false, ctx);
-        let ui = self.scope.ui.clone();
+        let terminal = self.scope.terminal.clone();
         let toggle_key = key.clone();
-        let head = div()
-            .id(ElementId::Name(key.into()))
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(6.0))
-            .cursor_pointer()
-            .child(div().flex_none().text_color(tok("dim")).child(if open { "▾" } else { "▸" }))
-            .child(div().flex_1().min_w(px(0.0)).children(title))
-            .on_click(move |_, _, cx| ui.update(cx, |ui, cx| ui.set_open(&toggle_key, !open, cx)));
+        let chevron = rune::icon(&crate::panels::icons::CHEVRON_RIGHT, 12.0)
+            .color(tok("dim"))
+            .rotate(if open { std::f32::consts::FRAC_PI_2 } else { 0.0 })
+            .rotate_motion(rune::tok::motion::SNAP);
+        let head = row()
+            .key(format!("{}/{key}", self.scope.terminal))
+            .center_y()
+            .gap(6.0)
+            .cursor(Cursor::Pointer)
+            .child(chevron)
+            .child(col().grow(1.0).shrink().min_w(0.0).children(title))
+            .on_press_tx(move |ws: &mut Workspace, tx| {
+                if let Some(t) = ws.terminal_mut(&terminal) {
+                    t.card_ui().set_open(&toggle_key, !open);
+                }
+                ws.after_input(tx);
+            });
         let mut body = vec![];
         if open {
             let rest: Vec<Node> = e.children.iter().filter(|n| !is_summary(n)).cloned().collect();
-            body = self.children(&rest, false, ctx);
+            body = self.children(&rest, false, ctx).into_iter().map(|b| b.transition(rune::Transition::opacity())).collect();
         }
-        boxed(&e.css).child(head).children(body).into_any_element()
+        boxed(&e.css).child(head).children(body)
     }
 
     /// `<tabs>`: one `<tab title="..">` shown at a time.
-    fn tabs(&mut self, e: &El, ctx: &Ctx) -> AnyElement {
-        let tabs: Vec<&El> = e
+    fn tabs(&mut self, e: &Tag, ctx: &Ctx) -> El {
+        let tabs: Vec<&Tag> = e
             .children
             .iter()
             .filter_map(|n| match n {
@@ -218,28 +277,35 @@ impl R {
             .collect();
         let key = self.key(e);
         let chosen = self.state.tab(&key).min(tabs.len().saturating_sub(1));
-        let mut head = div().flex().flex_row().flex_wrap().gap(px(4.0));
+        let mut head = row().flex_wrap().gap(4.0);
         for (n, tab) in tabs.iter().enumerate() {
             let title = tab.attr("title").map_or_else(|| format!("Tab {}", n + 1), str::to_string);
-            let (ui, tab_key) = (self.scope.ui.clone(), key.clone());
-            head = head.child(
-                div()
-                    .id(ElementId::Name(format!("{key}/{n}").into()))
-                    .px(px(10.0))
-                    .py(px(3.0))
-                    .rounded(px(6.0))
-                    .cursor_pointer()
-                    .text_color(tok(if n == chosen { "text" } else { "dim" }))
-                    .when(n == chosen, |d| d.bg(tok("raised")))
-                    .child(title)
-                    .on_click(move |_, _, cx| ui.update(cx, |ui, cx| ui.set_tab(&tab_key, n, cx))),
-            );
+            let (terminal, tab_key) = (self.scope.terminal.clone(), key.clone());
+            let mut t = row()
+                .key(format!("{}/{key}/{n}", self.scope.terminal))
+                .px(10.0)
+                .py(3.0)
+                .radius(6.0)
+                .cursor(Cursor::Pointer)
+                .hover(rune::Color::WHITE.alpha(0.04))
+                .motion(rune::tok::motion::SNAP)
+                .child(text(title).font(ctx.style()).color(tok(if n == chosen { "text" } else { "dim" })))
+                .on_press_tx(move |ws: &mut Workspace, tx| {
+                    if let Some(t) = ws.terminal_mut(&terminal) {
+                        t.card_ui().set_tab(&tab_key, n);
+                    }
+                    ws.after_input(tx);
+                });
+            if n == chosen {
+                t = t.fill(tok("raised"));
+            }
+            head = head.child(t);
         }
         let body = tabs.get(chosen).map_or(vec![], |tab| self.children(&tab.children, false, ctx));
-        boxed(&e.css).child(head).children(body).into_any_element()
+        boxed(&e.css).child(head).children(body)
     }
 
-    fn list(&mut self, e: &El, ctx: &Ctx) -> Vec<AnyElement> {
+    fn list(&mut self, e: &Tag, ctx: &Ctx) -> Vec<El> {
         let (ordered, mut n, mut out) = (e.tag == "ol", 0, vec![]);
         for child in &e.children {
             match child {
@@ -247,15 +313,13 @@ impl R {
                     n += 1;
                     let Some(body) = self.element(li, ctx) else { continue };
                     let marker = if ordered { format!("{n}.") } else { "•".to_string() };
-                    let mark = div().flex_none().min_w(px(14.0)).text_color(tok("dim")).child(marker);
+                    let mark = text(marker).font(ctx.style()).color(tok("dim"));
+                    let mark = row().min_w(14.0).child(mark);
                     out.push(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .gap(px(6.0))
-                            .child(if ordered { mark.text_right() } else { mark })
-                            .child(div().flex_1().min_w(px(0.0)).child(body))
-                            .into_any_element(),
+                        row()
+                            .gap(6.0)
+                            .child(if ordered { mark.justify_end() } else { mark })
+                            .child(col().grow(1.0).shrink().min_w(0.0).child(body)),
                     );
                 }
                 other => out.extend(self.children(std::slice::from_ref(other), false, ctx)),
@@ -265,33 +329,47 @@ impl R {
     }
 
     /// One wrapped block of text from a run of inline nodes; `None` when it has nothing to show.
-    fn paragraph(&mut self, nodes: &[&Node], ctx: &Ctx) -> Option<AnyElement> {
+    fn paragraph(&mut self, nodes: &[&Node], ctx: &Ctx) -> Option<El> {
         let mut out = Inline::default();
         for n in nodes {
             self.flatten(n, ctx, &mut out);
         }
         if !ctx.pre {
-            while out.text.ends_with([' ', '\n']) {
-                out.text.pop();
-                if let Some(last) = out.runs.last_mut() {
-                    last.len -= 1;
-                }
-            }
+            let trimmed = out.text.trim_end_matches([' ', '\n']).len();
+            out.text.truncate(trimmed);
         }
-        out.runs.retain(|r| r.len > 0);
         if out.text.is_empty() {
             return None;
         }
+        let end = out.text.len() as u32;
+        let spans: Vec<Span> = out
+            .spans
+            .into_iter()
+            .filter_map(|mut s| {
+                s.end = s.end.min(end);
+                (s.start < s.end).then_some(s)
+            })
+            .collect();
+        let strikes: Vec<_> = out.strikes.into_iter().filter(|(a, _)| *a < end as usize).map(|(a, b)| (a, b.min(end as usize), None)).collect();
+        let mut t = rich(out.text, spans).font(ctx.style()).color(color(ctx.color)).strikes(strikes);
+        t = if ctx.nowrap { t } else { t.wrap() };
+        t = match ctx.align {
+            Some(TextAlign::Center) => t.align(rune::Align::Center),
+            Some(TextAlign::Right) => t.align(rune::Align::End),
+            _ => t,
+        };
+        self.texts += 1;
+        t = t.key(format!("{}/ui-text/{}/{}/{}", self.scope.terminal, self.scope.call, self.uid, self.texts));
         if out.links.is_empty() {
-            self.texts += 1;
-            let id = ElementId::Name(format!("ui-text/{}/{}/{}", self.scope.call, self.uid, self.texts).into());
-            return Some(div().child(SelectableText::new(id, out.text).runs(out.runs)).into_any_element());
+            return Some(t.selectable(true).selection_color(theme::rgb(theme::SELECTION)));
         }
-        let styled = StyledText::new(out.text).with_runs(out.runs);
-        self.links += 1;
-        let (ranges, urls): (Vec<_>, Vec<_>) = out.links.into_iter().unzip();
-        let id = ("ui-link", (self.uid as usize).wrapping_add(self.links));
-        Some(div().child(InteractiveText::new(id, styled).on_click(ranges, move |i, _, cx| cx.open_url(&urls[i]))).into_any_element())
+        for (range, url) in out.links {
+            t = t.link(Link::new(range, url));
+        }
+        Some(t.on_link(|ws: &mut Workspace, url: &str, tx: &mut rune::Tx| {
+            let _ = tx.open_url(url);
+            ws.after_input(tx);
+        }))
     }
 
     fn flatten(&self, n: &Node, ctx: &Ctx, out: &mut Inline) {
@@ -330,66 +408,74 @@ impl R {
         if s.is_empty() {
             return;
         }
-        let mut font = self.font.clone();
-        font.weight = FontWeight(ctx.weight);
+        let (start, end) = (out.text.len(), out.text.len() + s.len());
+        let c = color(ctx.color);
+        let mut span = Span::new(start, end).weight(ctx.weight).color(c);
         if ctx.italic {
-            font.style = FontStyle::Italic;
+            span = span.italic();
         }
         if ctx.mono {
-            font.family = crate::platform::monospace_font().into();
+            span = span.mono();
         }
-        let color = hsla(ctx.color);
-        out.runs.push(TextRun {
-            len: s.len(),
-            font,
-            color,
-            background_color: ctx.run_bg.map(hsla),
-            underline: ctx.underline.then_some(UnderlineStyle { thickness: px(1.0), color: Some(color), wavy: false }),
-            strikethrough: ctx.strike.then_some(StrikethroughStyle { thickness: px(1.0), color: Some(color) }),
-        });
+        if let Some(bg) = ctx.run_bg {
+            span = span.bg(color(bg), 2.0);
+        }
+        if ctx.underline {
+            span = span.underline(c);
+        }
+        if ctx.strike {
+            out.strikes.push((start, end));
+        }
+        out.spans.push(span);
         out.text.push_str(s);
     }
 }
 
-fn svg(s: Option<&Svg>, screen_scale: f32) -> AnyElement {
+fn grid_row(cells: Vec<El>, used: usize, cols: usize, gap: f32) -> El {
+    let mut r = row().w_full().gap(gap).items_stretch();
+    r = r.children(cells);
+    // A short last row keeps its cells at the width of a full one.
+    if used < cols {
+        r = r.child(el().grow((cols - used) as f32));
+    }
+    r
+}
+
+fn svg(s: Option<&Svg>, screen_scale: f32) -> El {
     match s {
-        Some(s) => div().child(img(s.image(screen_scale)).w(px(s.w)).h(px(s.h)).max_w(relative(1.0))).into_any_element(),
-        None => div()
-            .flex()
-            .items_center()
-            .h(px(48.0))
-            .px(px(12.0))
-            .rounded(px(8.0))
-            .bg(tok("surface"))
-            .text_size(crate::panels::scale::px(12.0))
-            .text_color(tok("faint"))
-            .child("Drawing…")
-            .into_any_element(),
+        Some(s) => {
+            let image = s.image(screen_scale);
+            el().w(s.w).h(s.h).pixels(image.pixels()).transition(rune::Transition::opacity())
+        }
+        None => row()
+            .center_y()
+            .h(48.0)
+            .px(12.0)
+            .radius(8.0)
+            .fill(tok("surface"))
+            .child(text("Drawing…").font(TextStyle::new(crate::panels::scale::px(12.0), 400.0)).color(tok("faint")))
+            .looping(rune::LoopSpec::opacity(1.6, 0.0, 0.5, 1.0)),
     }
 }
 
-/// The element's own box: layout, size, spacing, colours and text size/alignment (which its descendants inherit).
-fn boxed(c: &Css) -> Div {
-    let mut d = div();
-    d = match c.display {
-        Some(Display::Flex) if c.dir == Some(Dir::Col) => d.flex().flex_col(),
-        Some(Display::Flex) => d.flex().flex_row(),
-        Some(Display::Grid) => d.grid().grid_cols(c.cols.unwrap_or(1)),
-        _ => d.flex().flex_col(),
+/// The element's own box: layout, size, spacing and colours.
+fn boxed(c: &Css) -> El {
+    let mut d = match c.display {
+        Some(Display::Flex) if c.dir != Some(Dir::Col) => row(),
+        _ => col(),
     };
     if c.wrap == Some(true) {
         d = d.flex_wrap();
     }
-    if let Some(g) = c.gap_x {
-        d = d.gap_x(px(g));
-    }
-    if let Some(g) = c.gap_y {
-        d = d.gap_y(px(g));
+    match (c.gap_x, c.gap_y) {
+        (None, None) => {}
+        (x, y) => d = d.gaps(y.unwrap_or(0.0), x.unwrap_or(0.0)),
     }
     d = match c.align {
         Some(Ax::Start) => d.items_start(),
         Some(Ax::Center) => d.items_center(),
         Some(Ax::End) => d.items_end(),
+        Some(Ax::Stretch) => d.items_stretch(),
         _ => d,
     };
     d = match c.justify {
@@ -408,65 +494,91 @@ fn boxed(c: &Css) -> Div {
     };
     if c.grow.is_some() || c.shrink.is_some() {
         let grow = c.grow.unwrap_or(0.0);
-        d.style().flex_grow = Some(grow);
-        d.style().flex_shrink = Some(c.shrink.unwrap_or(1.0));
         if grow > 0.0 {
-            d = d.flex_basis(relative(0.0));
+            d = d.grow(grow);
+        }
+        if c.shrink.unwrap_or(1.0) > 0.0 {
+            d = d.shrink();
         }
     }
-    for (set, w) in [(0, c.w), (1, c.h), (2, c.min_w), (3, c.max_w), (4, c.min_h), (5, c.max_h)] {
-        if let Some(l) = w.map(length) {
-            d = match set {
-                0 => d.w(l),
-                1 => d.h(l),
-                2 => d.min_w(l),
-                3 => d.max_w(l),
-                4 => d.min_h(l),
-                _ => d.max_h(l),
-            };
-        }
+    match c.w {
+        Some(Len::Px(x)) => d = d.w(x),
+        Some(Len::Pct(p)) => d = d.w_frac(p / 100.0),
+        None => {}
     }
-    if c.min_w.is_none() {
-        d = d.min_w(px(0.0));
+    if let Some(Len::Px(x)) = c.h {
+        d = d.h(x);
     }
-    let [pt, pr, pb, pl] = c.pad.map(|x| x.map(px));
-    let [mt, mr, mb, ml] = c.margin.map(|x| x.map(px));
-    let [bt, br, bb, bl] = c.border.map(|x| x.map(px));
-    macro_rules! side {
-        ($d:ident, $($m:ident = $v:expr),*) => { $(if let Some(v) = $v { $d = $d.$m(v); })* };
+    if let Some(Len::Px(x)) = c.min_w {
+        d = d.min_w(x);
+    } else {
+        d = d.min_w(0.0);
     }
-    side!(d, pt = pt, pr = pr, pb = pb, pl = pl, mt = mt, mr = mr, mb = mb, ml = ml, border_t = bt, border_r = br, border_b = bb, border_l = bl);
+    if let Some(Len::Px(x)) = c.max_w {
+        d = d.max_w(x);
+    }
+    if let Some(Len::Px(x)) = c.min_h {
+        d = d.min_h(x);
+    }
+    if let Some(Len::Px(x)) = c.max_h {
+        d = d.max_h(x);
+    }
+    let [pt, pr, pb, pl] = c.pad;
+    let [mt, mr, mb, ml] = c.margin;
+    if let Some(v) = pt {
+        d = d.pt(v);
+    }
+    if let Some(v) = pr {
+        d = d.pr(v);
+    }
+    if let Some(v) = pb {
+        d = d.pb(v);
+    }
+    if let Some(v) = pl {
+        d = d.pl(v);
+    }
+    if let Some(v) = mt {
+        d = d.mt(v);
+    }
+    if let Some(v) = mr {
+        d = d.mr(v);
+    }
+    if let Some(v) = mb {
+        d = d.mb(v);
+    }
+    if let Some(v) = ml {
+        d = d.ml(v);
+    }
     if c.border.iter().any(|b| b.is_some_and(|b| b > 0.0)) {
-        d = d.border_color(c.border_color.map_or_else(|| tok("border"), hsla));
+        let widths = c.border.map(|b| b.unwrap_or(0.0));
+        let border = c.border_color.map_or_else(|| tok("border"), color);
+        // Borders take no layout room in Rune; CSS boxes give them some, so the content keeps clear of them.
+        let [bt, br, bb, bl] = widths;
+        d = d.border_sides(widths, border);
+        if pt.is_none() {
+            d = d.pt(bt);
+        }
+        if pr.is_none() {
+            d = d.pr(br);
+        }
+        if pb.is_none() {
+            d = d.pb(bb);
+        }
+        if pl.is_none() {
+            d = d.pl(bl);
+        }
     }
     if let Some(bg) = c.bg {
-        d = d.bg(hsla(bg));
+        d = d.fill(color(bg));
     }
     if let Some(r) = c.radius {
-        d = d.rounded(px(r));
+        d = d.radius(r);
     }
     if let Some(o) = c.opacity {
         d = d.opacity(o.clamp(0.0, 1.0));
     }
     if c.clip == Some(true) {
-        d = d.overflow_hidden();
-    }
-    if let Some(s) = c.size {
-        d = d.text_size(crate::panels::scale::px(s));
-    }
-    if let Some(l) = c.line_height {
-        d = d.line_height(relative(l));
-    }
-    d = match c.text_align {
-        Some(TextAlign::Center) => d.text_center(),
-        Some(TextAlign::Right) => d.text_right(),
-        _ => d,
-    };
-    if c.nowrap == Some(true) {
-        d = d.whitespace_nowrap();
-    }
-    if let Some(n) = c.col_span {
-        d = d.col_span(n);
+        d = d.clip_rounded(c.radius.unwrap_or(0.0));
     }
     d
 }

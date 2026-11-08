@@ -6,6 +6,23 @@ pub fn data_dir() -> PathBuf {
     crate::store::Store::default_path().parent().map(Path::to_path_buf).unwrap_or_default()
 }
 
+/// Points Claudiu's data folder, and Claude Code's, at throwaway ones for the rest of the test run, and returns them.
+/// Set once and never changed: other tests read them from their own threads at any time.
+#[cfg(test)]
+pub fn use_throwaway_folders() -> (PathBuf, PathBuf) {
+    static DIRS: std::sync::OnceLock<(tempfile::TempDir, tempfile::TempDir)> = std::sync::OnceLock::new();
+    let (data, claude) = DIRS.get_or_init(|| {
+        let dirs = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        // SAFETY: set once, before the tests that need it start threads of their own.
+        unsafe {
+            std::env::set_var("CLAUDIU_DATA_DIR", dirs.0.path());
+            std::env::set_var("CLAUDE_CONFIG_DIR", dirs.1.path());
+        }
+        dirs
+    });
+    (dunce::canonicalize(data.path()).unwrap(), dunce::canonicalize(claude.path()).unwrap())
+}
+
 pub fn safe_file_stem(id: &str) -> String {
     id.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect()
 }

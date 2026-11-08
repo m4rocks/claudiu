@@ -1,5 +1,5 @@
 //! What the GitHub pane shows, parsed out of `gh` / GraphQL answers by hand: the unions in a timeline have dozens of
-//! event types, and anything unknown must simply be skipped rather than fail the whole page. No GPUI in here.
+//! event types, and anything unknown must simply be skipped rather than fail the whole page. No UI in here.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

@@ -8,9 +8,12 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+use rune::{El, el};
+
 use super::*;
+use crate::app::Workspace;
 use crate::visual::Card;
-use crate::visual::ui::{CardUi, Scope, SendText};
+use crate::visual::ui::{CardUi, Scope};
 
 /// What the links on reserved rows start with.
 pub(super) const INLINE_LINK: &str = "claudiu://visual/";
@@ -37,30 +40,15 @@ struct Shown {
     rows: Option<usize>,
 }
 
+#[derive(Default)]
 pub(super) struct Cards {
     shown: HashMap<String, Shown>,
-    ui: Entity<CardUi>,
+    pub(super) ui: CardUi,
     /// The height each card last wanted, read by the write that runs next, so a slow older write cannot leave its
     /// height in the file after a newer one.
     wanted_rows: Arc<Mutex<HashMap<String, usize>>>,
     /// Held while a height is written, so writes to the file run one after another.
     writing_rows: Arc<Mutex<()>>,
-}
-
-impl Cards {
-    /// Button clicks reach the session as `TerminalEvent::SendText`. A click only counts as sent once it could go.
-    pub(super) fn new(cx: &mut Context<TerminalView>) -> Self {
-        let ui = cx.new(|_| CardUi::default());
-        cx.observe(&ui, |_, _, cx| cx.notify()).detach();
-        cx.subscribe(&ui, |view, ui, e: &SendText, cx| {
-            if view.is_running() {
-                ui.update(cx, |ui, cx| ui.mark_sent(&e.key, cx));
-            }
-            cx.emit(TerminalEvent::SendText(e.text.clone()));
-        })
-        .detach();
-        Self { shown: HashMap::new(), ui, wanted_rows: Arc::default(), writing_rows: Arc::default() }
-    }
 }
 
 /// The call and card row a reserved row's link names.
@@ -84,15 +72,30 @@ fn slots(rows: impl Iterator<Item = Option<(String, usize)>>) -> Vec<Slot> {
 
 impl TerminalView {
     /// A card arrived from the mod, or changed. Its height goes to `rows_file`.
-    pub fn set_card(&mut self, card: Card, rows_file: PathBuf, cx: &mut Context<Self>) {
+    pub fn set_card(&mut self, card: Card, rows_file: PathBuf) {
         let rows = self.cards.shown.get(&card.call).and_then(|s| s.rows);
         self.cards.shown.insert(card.call.clone(), Shown { card, rows_file, rows });
-        cx.notify();
+        self.dirty = true;
     }
 
     #[cfg(test)]
     pub fn has_card(&self, call: &str) -> bool {
         self.cards.shown.contains_key(call)
+    }
+
+    /// What the user has done in this terminal's cards.
+    pub fn card_ui(&mut self) -> &mut CardUi {
+        self.dirty = true;
+        &mut self.cards.ui
+    }
+
+    /// A card's button: its text goes out as the user's next message. It counts as sent only once it could go.
+    pub fn card_send(&mut self, key: &str, text: String) {
+        if self.is_running() {
+            self.cards.ui.mark_sent(key);
+        }
+        self.events.push(TerminalEvent::SendText(text));
+        self.dirty = true;
     }
 
     fn visible_slots(&self) -> Vec<Slot> {
@@ -110,60 +113,54 @@ impl TerminalView {
     }
 
     /// The cards on screen, each clipped to the rows it has there. The mouse stops at them, but the wheel still scrolls
-    /// the transcript.
-    pub(super) fn inline_cards(&self, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
-        let Some(m) = self.metrics.filter(|_| !self.cards.shown.is_empty()) else { return vec![] };
-        let width = (m.cell_w * self.terminal.size().0.saturating_sub(4) as f32).min(px(MAX_WIDTH));
+    /// the transcript (a card takes no wheel, so it goes on to the terminal behind).
+    pub(super) fn inline_cards(&self, m: Metrics, shift: f32) -> Vec<El> {
+        if self.cards.shown.is_empty() {
+            return vec![];
+        }
+        let width = (m.cell_w * self.terminal.size().0.saturating_sub(4) as f32).min(MAX_WIDTH);
         let margin = m.cell_w * MARGIN_COLS;
-        let line_h = f32::from(m.line_h);
-        let view = cx.entity().downgrade();
+        let line_h = m.line_h;
         let mut out = vec![];
         for slot in self.visible_slots() {
             let Some(Shown { card, .. }) = self.cards.shown.get(&slot.call) else { continue };
-            let scope = Scope { call: card.call.clone(), ui: self.cards.ui.clone() };
-            let (call, view) = (card.call.clone(), view.clone());
-            let clear_view = view.clone();
-            let body = div()
-                .absolute()
-                .left(margin)
-                .top(-(m.line_h * slot.first as f32))
+            let scope = Scope { call: card.call.clone(), terminal: self.key.clone() };
+            let (call, term) = (card.call.clone(), self.key.clone());
+            let clear = self.key.clone();
+            let body = el()
+                .absolute(margin, -(line_h * slot.first as f32))
                 .w(width)
-                .text_size(crate::panels::scale::px(13.0))
-                .on_children_prepainted(move |bounds, _, cx| {
-                    let Some(height) = bounds.first().map(|b| f32::from(b.size.height)) else { return };
-                    let rows = (height / line_h).ceil() as usize;
-                    view.update(cx, |view, cx| view.note_card_rows(&call, rows, cx)).ok();
+                .on_layout(move |ws: &mut Workspace, r: [f32; 4]| {
+                    let rows = (r[3] / line_h).ceil() as usize;
+                    if let Some(t) = ws.terminal_mut(&term) {
+                        t.note_card_rows(&call, rows);
+                    }
                 })
-                .child(crate::visual::ui::markdown(format!("card-{}", card.call), &card.content, scope));
+                .child(crate::visual::ui::markdown(&format!("{}/card-{}", self.key, card.call), &card.content, &scope, &self.cards.ui));
             out.push(
-                div()
-                    .absolute()
-                    .left(px(0.))
-                    .top(m.line_h * slot.row as f32 + m.shift)
+                el().key(format!("{}/slot-{}-{}", self.key, slot.call, slot.first))
+                    .absolute(0.0, line_h * slot.row as f32 + shift)
                     .w(width + margin)
-                    .h(m.line_h * slot.count as f32)
-                    .overflow_hidden()
-                    .block_mouse_except_scroll()
-                    .on_mouse_down(MouseButton::Left, move |_, _, cx| {
-                        clear_view.update(cx, |view, cx| view.clear_terminal_selection(cx)).ok();
+                    .h(line_h * slot.count as f32)
+                    .clip_rounded(0.0)
+                    // A click on a card never reaches the terminal behind it, so its older selection is dropped here:
+                    // Ctrl+C copies the terminal's selection first, and would otherwise copy that instead of the card
+                    // text now being selected.
+                    .on_press(move |ws: &mut Workspace| {
+                        if let Some(t) = ws.terminal_mut(&clear)
+                            && t.terminal.term.lock().selection.take().is_some()
+                        {
+                            t.dirty = true;
+                        }
                     })
-                    .child(body)
-                    .into_any_element(),
+                    .child(body),
             );
         }
         out
     }
 
-    /// A click on a card never reaches the terminal behind it, so its older selection is dropped here: Ctrl+C copies
-    /// the terminal's selection first, and would otherwise copy that instead of the card text now being selected.
-    fn clear_terminal_selection(&mut self, cx: &mut Context<Self>) {
-        if self.terminal.term.lock().selection.take().is_some() {
-            cx.notify();
-        }
-    }
-
-    /// Tell the mod a card's height when it changes. Runs in a frame, so the file is written off the UI thread.
-    fn note_card_rows(&mut self, call: &str, rows: usize, cx: &mut Context<Self>) {
+    /// Tell the mod a card's height when it changes. The file is written off the UI thread.
+    fn note_card_rows(&mut self, call: &str, rows: usize) {
         let Some(shown) = self.cards.shown.get_mut(call).filter(|s| s.rows != Some(rows) && rows > 0) else { return };
         shown.rows = Some(rows);
         let file = shown.rows_file.clone();
@@ -171,14 +168,13 @@ impl TerminalView {
         let wanted = self.cards.wanted_rows.clone();
         let writing = self.cards.writing_rows.clone();
         wanted.lock().unwrap_or_else(|e| e.into_inner()).insert(call.clone(), rows);
-        cx.background_spawn(async move {
+        std::thread::spawn(move || {
             let _one_at_a_time = writing.lock().unwrap_or_else(|e| e.into_inner());
             let latest = wanted.lock().unwrap_or_else(|e| e.into_inner()).get(&call).copied();
             if let Some(latest) = latest {
                 let _ = crate::datadir::write_atomic(&file, &latest.to_string());
             }
-        })
-        .detach();
+        });
     }
 }
 

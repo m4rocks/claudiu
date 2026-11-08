@@ -16,12 +16,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Metal toolchain (macOS; GPUI compiles shaders)
-        if: runner.os == 'macOS'
-        run: xcrun -f metal >/dev/null 2>&1 || xcodebuild -downloadComponent MetalToolchain
-      - name: System libraries (Linux; GPUI's X11, Wayland and font backends)
+      - name: System libraries (Linux; Rune's Wayland and keyboard backends, and Vulkan)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libfontconfig-dev libwayland-dev libx11-xcb-dev libxcb1-dev libxkbcommon-x11-dev libvulkan1 zlib1g-dev
+        run: sudo apt-get update && sudo apt-get install -y libwayland-dev libxkbcommon-dev libvulkan1 zlib1g-dev
       - name: Build
         run: cargo build --locked
       - name: Install just

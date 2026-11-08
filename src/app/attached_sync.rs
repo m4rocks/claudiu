@@ -36,9 +36,12 @@ impl Sync {
     }
 }
 
+/// A session, its folder, and the items attached to it (`true` for a pull request) to ask GitHub about.
+type Ask = (Id, PathBuf, Vec<(bool, u32)>);
+
 impl Workspace {
-    pub(super) fn sync_attached(&mut self, cx: &mut Context<Self>) {
-        let asks: Vec<(Id, PathBuf, Vec<(bool, u32)>)> = self
+    pub(super) fn sync_attached(&mut self) {
+        let asks: Vec<Ask> = self
             .store
             .data
             .sessions
@@ -56,9 +59,9 @@ impl Workspace {
         }
         self.attached_sync.running = true;
         self.attached_sync.last_try = Some(Instant::now());
-        cx.spawn(async move |this, cx| {
-            let answers = cx.background_executor().spawn(async move { ask_github(asks) }).await;
-            let _ = this.update(cx, |ws, cx| {
+        self.rt.spawn(
+            move || { ask_github(asks) },
+            move |ws: &mut Workspace, answers| {
                 ws.attached_sync.running = false;
                 let changed = answers.into_iter().fold(false, |c, (id, pull, number, title, state)| {
                     ws.edit_attached(&id, |list| links::set_status(list, pull, number, &title, state)) | c
@@ -66,11 +69,9 @@ impl Workspace {
                 ws.attached_sync.failures = if ws.unanswered_items() { ws.attached_sync.failures + 1 } else { 0 };
                 if changed {
                     ws.store.mark_dirty();
-                    cx.notify();
                 }
-            });
-        })
-        .detach();
+            },
+        );
     }
 
     /// Whether some attached item of a session with a folder has no answer from GitHub yet.
@@ -81,7 +82,7 @@ impl Workspace {
 }
 
 /// Runs off the UI thread. An item `gh` cannot answer for keeps what it had.
-fn ask_github(asks: Vec<(Id, PathBuf, Vec<(bool, u32)>)>) -> Vec<Answer> {
+fn ask_github(asks: Vec<Ask>) -> Vec<Answer> {
     let Some(exe) = crate::github::cli::locate() else { return vec![] };
     let mut repos: HashMap<PathBuf, Option<(Gh, RepoRef)>> = HashMap::new();
     let mut answers = vec![];

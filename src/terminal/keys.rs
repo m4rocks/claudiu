@@ -1,9 +1,91 @@
-//! GPUI keystroke -> VT bytes. Pure function so it can be unit-tested.
+//! Keystroke -> VT bytes. Pure function so it can be unit-tested.
 //! Everything not handled here is forwarded to the program unchanged, so Claude Code
 //! shortcuts (Alt+P, Shift+Tab, ...) reach it exactly as they would in any terminal.
 
 use alacritty_terminal::term::TermMode;
-use gpui::Keystroke;
+use rune::{Key, KeyEvent};
+
+/// The modifier keys held with a key. `platform` is Cmd on macOS (the Windows key elsewhere).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Modifiers {
+    pub control: bool,
+    pub alt: bool,
+    pub shift: bool,
+    pub platform: bool,
+    pub function: bool,
+}
+
+impl Modifiers {
+    pub fn from_rune(m: rune::Mods) -> Self {
+        Self { control: m.ctrl, alt: m.alt, shift: m.shift, platform: m.logo, function: false }
+    }
+}
+
+/// One key press: the key by name ("a", "enter", "f5"), unshifted, and the text it types with its modifiers.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Keystroke {
+    pub modifiers: Modifiers,
+    pub key: String,
+    pub key_char: Option<String>,
+}
+
+impl Keystroke {
+    /// A Rune key event as a keystroke. `key_base` is the character the key types with no modifiers under the current
+    /// layout (`Tx::key_base`), which names a letter key whose text an Option or Ctrl chord changed (⌥P types `π`).
+    pub fn from_rune(ev: &KeyEvent, key_base: Option<char>) -> Option<Self> {
+        let modifiers = Modifiers::from_rune(ev.mods);
+        let named = |name: &str| Some(Self { modifiers, key: name.into(), key_char: None });
+        match &ev.key {
+            Key::Enter => named("enter"),
+            Key::Backspace => named("backspace"),
+            Key::Delete => named("delete"),
+            Key::Left => named("left"),
+            Key::Right => named("right"),
+            Key::Up => named("up"),
+            Key::Down => named("down"),
+            Key::Home => named("home"),
+            Key::End => named("end"),
+            Key::PageUp => named("pageup"),
+            Key::PageDown => named("pagedown"),
+            Key::Insert => named("insert"),
+            Key::Escape => named("escape"),
+            Key::Tab => named("tab"),
+            Key::Function(n) => named(&format!("f{n}")),
+            Key::Text(t) if t == " " => Some(Self { modifiers, key: "space".into(), key_char: Some(" ".into()) }),
+            Key::Text(t) => {
+                let key = key_base.map(|c| c.to_lowercase().to_string()).unwrap_or_else(|| t.to_lowercase());
+                Some(Self { modifiers, key, key_char: Some(t.clone()) })
+            }
+            Key::Command(c) => Some(Self { modifiers, key: c.to_string(), key_char: None }),
+            _ => None,
+        }
+    }
+
+    /// `"ctrl-shift-a"`, `"alt-left"`: modifiers then the key, joined by dashes. A single character types itself.
+    #[cfg(test)]
+    pub fn parse(spec: &str) -> Option<Self> {
+        let mut modifiers = Modifiers::default();
+        let parts: Vec<&str> = spec.split('-').collect();
+        let (key, mods) = match parts.split_last()? {
+            // "ctrl--" is Ctrl and the minus key.
+            (&"", rest) if spec.ends_with("--") => ("-", &rest[..rest.len().saturating_sub(1)]),
+            (key, rest) => (*key, rest),
+        };
+        for m in mods {
+            match *m {
+                "ctrl" => modifiers.control = true,
+                "alt" => modifiers.alt = true,
+                "shift" => modifiers.shift = true,
+                "cmd" | "super" | "platform" => modifiers.platform = true,
+                "fn" => modifiers.function = true,
+                _ => return None,
+            }
+        }
+        let typed = key.chars().count() == 1 && !modifiers.control && !modifiers.platform;
+        let key_char = typed.then(|| if modifiers.shift { key.to_uppercase() } else { key.to_string() });
+        Some(Self { modifiers, key: key.to_string(), key_char })
+    }
+}
 
 /// xterm modifier parameter: 1 + shift + 2*alt + 4*ctrl.
 fn mod_param(ks: &Keystroke) -> u8 {
@@ -156,7 +238,6 @@ pub fn encode(ks: &Keystroke, mode: TermMode) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::Modifiers;
 
     fn ks(key: &str, ch: Option<&str>, f: impl FnOnce(&mut Modifiers)) -> Keystroke {
         let mut modifiers = Modifiers::default();
@@ -235,6 +316,25 @@ mod tests {
         assert!(!is_text(&ks("c", None, |m| m.control = true)));
         assert!(!is_text(&ks("enter", None, |_| {})));
         assert!(!is_text(&ks("space", Some(" "), |_| {})));
+    }
+
+    #[test]
+    fn rune_keys_become_named_keystrokes() {
+        let mods = |f: fn(&mut rune::Mods)| {
+            let mut m = rune::Mods::default();
+            f(&mut m);
+            m
+        };
+        let ev = |key, m| KeyEvent { key, mods: m };
+        let option_p = Keystroke::from_rune(&ev(Key::Text("π".into()), mods(|m| m.alt = true)), Some('p')).unwrap();
+        assert_eq!(enc(option_p), b"\x1bp", "Option+P is Meta-P, not the π it types");
+        let ctrl_c = Keystroke::from_rune(&ev(Key::Text("c".into()), mods(|m| m.ctrl = true)), Some('c')).unwrap();
+        assert_eq!(enc(ctrl_c), [3]);
+        let shift_tab = Keystroke::from_rune(&ev(Key::Tab, mods(|m| m.shift = true)), None).unwrap();
+        assert_eq!(enc(shift_tab), b"\x1b[Z");
+        let space = Keystroke::from_rune(&ev(Key::Text(" ".into()), rune::Mods::default()), Some(' ')).unwrap();
+        assert_eq!(enc(space), b" ");
+        assert_eq!(Keystroke::from_rune(&ev(Key::Function(5), rune::Mods::default()), None).unwrap().key, "f5");
     }
 
     #[test]

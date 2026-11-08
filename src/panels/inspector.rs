@@ -3,29 +3,27 @@
 
 use std::path::PathBuf;
 
-use gpui::{
-    AnyElement, ClickEvent, Context, Div, FontWeight, InteractiveElement, IntoElement, MouseButton, MouseDownEvent, ParentElement, SharedString, Stateful,
-    StatefulInteractiveElement, Styled, Window, div, px,
-};
+use rune::tok::motion;
+use rune::{Color, Cursor, El, Phase, ScrollSpec, Transition, Tx, col, el, row as hbox};
 
-use std::time::Duration;
-
-use gpui::{Animation, AnimationExt, prelude::FluentBuilder};
-
-use crate::app::{Act, GitOp, MenuItem, SideDrag, Workspace};
-use crate::panels::widgets::{Trigger, button};
-use crate::platform::Editor;
+use crate::app::{Act, GitOp, MenuAnchor, MenuItem, SideDrag, Workspace};
 use crate::github::model::State;
+use crate::panels::icons;
+use crate::panels::theme::{self, rgb};
+use crate::panels::widgets::{button, countdown, icon, icon_button, key_hint, label, meter, section_label, tick};
+use crate::platform::Editor;
 use crate::store::{Attached, Id, Project, SessionKind, SessionRecord};
-use crate::panels::theme::{self, hsla};
-use crate::panels::widgets::{countdown, icon, icon_button, key_hint, meter, section_label, tick};
-use gpui_kit::assets::IconName;
 
 /// What the top bar and the right sidebar describe: the shown session and the folder and project it is in.
 pub struct Shown {
     pub rec: Option<SessionRecord>,
     pub cwd: Option<PathBuf>,
     pub project: Option<Project>,
+}
+
+fn act(ws: &mut Workspace, a: Act, tx: &mut Tx) {
+    ws.act(a);
+    ws.after_input(tx);
 }
 
 impl Workspace {
@@ -36,296 +34,201 @@ impl Workspace {
         Shown { rec, cwd, project }
     }
 
-    pub fn render_right(&mut self, window_w: f32, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let open = self.right_reveal.step(!self.store.data.layout.right_hidden && !self.editing(), window);
-        if open <= 0.0 {
-            return None;
-        }
-        // The view the state asks for; the one drawn changes only after the old one has faded out.
-        let desired = match self.right_gh.as_ref().filter(|id| self.gh_pane(id).is_some()) {
-            Some(id) => format!("gh:{id}"),
-            None => "menu".to_string(),
-        };
-        const OUT_MS: f32 = 100.0;
-        const IN_MS: f32 = 140.0;
-        let mut fade = 1.0;
-        if self.right_view != desired {
-            let t0 = *self.right_out.get_or_insert_with(std::time::Instant::now);
-            let e = t0.elapsed().as_secs_f32() * 1000.0;
-            if e >= OUT_MS || open < 1.0 {
-                self.right_view = desired.clone();
-                self.right_out = None;
-                self.right_in = std::time::Instant::now();
-            } else {
-                fade = 1.0 - e / OUT_MS;
-                window.request_animation_frame();
-            }
-        }
-        if self.right_view == desired {
-            // Fade in once the width has finished moving.
-            let e = self.right_in.elapsed().as_secs_f32() * 1000.0 - crate::panels::widgets::Reveal::MS;
-            if e < IN_MS {
-                fade = (e / IN_MS).max(0.0);
-                window.request_animation_frame();
-            }
-        }
-        let shown_view = self.right_view.clone();
-        let target = self.right_width_of(shown_view != "menu", window_w);
-        if self.right_drag.is_some() {
-            self.right_w.snap(target);
-        }
-        let width = self.right_w.to(target, window);
-        let github = shown_view
-            .strip_prefix("gh:")
-            .and_then(|id| self.gh_pane(id))
-            .map(|p| (p.view.clone(), p.project.clone()));
+    /// The right sidebar. It slides open and shut, and its width springs between the menu's and GitHub's; the two
+    /// views cross-fade.
+    pub fn render_right(&self) -> El {
+        let open = !self.store.data.layout.right_hidden;
+        let github = self.right_gh.as_ref().and_then(|id| self.gh_pane(id));
+        let width = self.right_width_of(github.is_some(), self.window_size.0);
         let body = match github {
-            Some((view, project)) => {
-                view.update(cx, |v, _| v.width = target);
-                div()
-                    .flex()
-                    .flex_col()
-                    .size_full()
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(6.0))
-                            .flex_none()
-                            .h(px(32.0))
-                            .px(px(6.0))
-                            .border_b_1()
-                            .border_color(hsla(theme::BORDER))
-                            .child(
-                                icon_button("right-back", IconName::ArrowLeft)
-                                    .on_click(cx.listener(|ws, _: &ClickEvent, window, cx| {
-                                        ws.right_gh = None;
-                                        ws.focus_active(window, cx);
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(div().text_size(crate::panels::scale::px(12.5)).font_weight(FontWeight::MEDIUM).child(format!("GitHub · {project}"))),
-                    )
-                    .child(div().flex_1().min_h_0().child(view))
-                    .into_any_element()
-            }
-            None => self.render_right_menu(window, cx).into_any_element(),
+            Some(p) => col()
+                .key(format!("right-gh-{}", p.id))
+                .w(width)
+                .h_full()
+                .transition(Transition::opacity())
+                .child(
+                    hbox()
+                        .h(32.0)
+                        .w_full()
+                        .px(6.0)
+                        .gap(6.0)
+                        .center_y()
+                        .border_sides([0.0, 0.0, 1.0, 0.0], rgb(theme::BORDER))
+                        .child(icon_button(&icons::ARROW_LEFT).key("right-back").help("Back").on_press_tx(|ws: &mut Workspace, tx: &mut Tx| {
+                            ws.right_gh = None;
+                            ws.focus_active();
+                            ws.after_input(tx);
+                        }))
+                        .child(label(format!("GitHub · {}", p.project), 12.5, theme::TEXT).truncate().shrink()),
+                )
+                .child(col().grow(1.0).shrink().min_h(0.0).w_full().child(p.view.render(width))),
+            None => self.render_right_menu().key("right-menu").w(width).h_full().transition(Transition::opacity()),
         };
-        // A different view (menu, GitHub project) fades in.
-        let body = div().flex_none().w(px(target)).h_full().opacity(fade).child(body);
         // Both views can be resized by their left edge; a small grip sits in the gutter.
-        let handle_center = theme::PANEL_GAP / 2.0 + 3.0;
-        let handle = Some(
-            div()
-                .id("right-resize")
-                .group("right-resize")
-                .absolute()
-                .top_0()
-                .left(px(-handle_center))
-                .w(px(6.0))
-                .h_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .cursor_col_resize()
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |ws, ev: &MouseDownEvent, _w, cx| {
-                        ws.right_drag = Some(SideDrag { x: f32::from(ev.position.x), width });
-                        cx.notify();
-                    }),
-                )
-                .child(
-                    div()
-                        .w(px(2.0))
-                        .h(px(28.0))
-                        .rounded_full()
-                        .bg(hsla(0x2b2b30))
-                        .group_hover("right-resize", |s| s.bg(hsla(0x4a4a52))),
-                ),
-        );
-        Some(
-            div()
-                .flex()
-                .flex_none()
-                .w(px((width + theme::PANEL_GAP) * open))
-                .h_full()
-                .overflow_hidden()
-                .justify_end()
-                .child(div().flex_none().w(px(theme::PANEL_GAP)))
-                .child(
-            div()
-                .id("right-sidebar")
-                .relative()
-                .flex_none()
-                .w(px(width))
-                .h_full()
-                .child(
-                    div()
-                        .size_full()
-                        .rounded(px(theme::PANEL_RADIUS))
-                        .overflow_hidden()
-                        .border_1()
-                        .border_color(hsla(theme::PANEL_BORDER))
-                        .bg(hsla(theme::SIDEBAR_BG))
-                        .child(body),
-                )
-                .children(handle),
-                )
-                .into_any_element(),
-        )
+        let handle = hbox()
+            .key("right-resize")
+            .pin(Some(-(theme::PANEL_GAP / 2.0 + 3.0)), Some(0.0), None, Some(0.0))
+            .w(6.0)
+            .center()
+            .cursor(Cursor::ResizeColumn)
+            .hover_group()
+            .on_drag(|ws: &mut Workspace, d: &mut rune::Drag, tx: &mut Tx| {
+                match d.phase {
+                    Phase::Down => {
+                        let wide = ws.right_gh.is_some();
+                        ws.right_drag = Some(SideDrag { size: ws.right_width_of(wide, ws.window_size.0) });
+                    }
+                    Phase::Move => ws.drag_right(d.dx),
+                    Phase::Up => ws.right_drag = None,
+                }
+                ws.after_input(tx);
+            })
+            .child(el().w(2.0).h(28.0).radius(1.0).fill(rgb(0x2b2b30)).group_color(rgb(0x4a4a52)));
+        let panel = col()
+            .key("right-panel")
+            .w(width)
+            .h_full()
+            .radius(theme::PANEL_RADIUS)
+            .clip_rounded(theme::PANEL_RADIUS)
+            .border(1.0, rgb(theme::PANEL_BORDER))
+            .fill(rgb(theme::SIDEBAR_BG))
+            .motion(motion::GLIDE)
+            .child(body);
+        let mut outer = hbox()
+            .key("right-sidebar")
+            .h_full()
+            .w(if open { width + theme::PANEL_GAP } else { 0.0 })
+            .clip_rounded(0.0)
+            .justify_end()
+            .motion(motion::GLIDE)
+            .child(col().key("right-inner").h_full().pl(theme::PANEL_GAP).opacity(if open { 1.0 } else { 0.0 }).motion(motion::GLIDE).child(panel).child(handle));
+        if self.right_drag.is_some() {
+            outer = outer.instant_changes();
+        }
+        outer
     }
 
-    fn render_right_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn render_right_menu(&self) -> El {
         let shown = self.shown();
         let id = self.active_id().cloned();
-        let running = id.as_ref().is_some_and(|id| self.is_running(id, cx));
-        let actions = self.action_rows(&shown, id.as_ref(), running, cx);
+        let running = id.as_ref().is_some_and(|id| self.is_running(id));
+        let mut menu = col().w_full().gap(10.0).padding(6.0);
+        if let Some((from, to_name)) = id.as_deref().and_then(|i| self.session_away(i)) {
+            // Fades in when the session turns out to be on another account.
+            let body = col()
+                .key("handoff")
+                .gap(6.0)
+                .px(8.0)
+                .transition(Transition::opacity())
+                .child(label(format!("This session runs on {from}."), 12.0, theme::WARN).wrap())
+                .child(button(format!("Hand off to {to_name}"), true).key("handoff-session").on_press_tx(|ws: &mut Workspace, tx: &mut Tx| act(ws, Act::Handoff, tx)));
+            menu = menu.child(group("ACCOUNT", body));
+        }
+        menu = menu.child(group("ACTIONS", self.action_rows(&shown, id.as_ref(), running)));
         let attached = id.as_deref().map(|i| self.attached_of(i)).unwrap_or_default();
-        let github = (!attached.is_empty()).then(|| self.attached_rows(id.as_ref(), attached, cx));
+        if !attached.is_empty() {
+            menu = menu.child(group("GITHUB", self.attached_rows(id.as_ref(), attached)));
+        }
         let links = id.as_deref().map(|i| self.links_of(i)).unwrap_or_default();
-        let linked = (!links.is_empty()).then(|| self.linked_rows(id.as_ref(), links, cx));
-        let away = id.as_deref().and_then(|i| self.session_away(i, cx));
-        let status = self.status_rows(&shown, id.as_ref(), running, cx);
-        self.menu_scroll
-            .wire(div().id("right-menu").size_full(), window)
-            .flex()
-            .flex_col()
-            .gap(px(10.0))
-            .p(px(6.0))
-            .children(away.map(|(from, to_name)| {
-                // Fades in when the session turns out to be on another account.
-                let body = div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(6.0))
-                    .px(px(8.0))
-                    .child(div().text_size(crate::panels::scale::px(12.0)).text_color(hsla(theme::WARN)).child(format!("This session runs on {from}.")))
-                    .child(button("handoff-session", format!("Hand off to {to_name}"), true).on_click(cx.listener(|ws, _: &ClickEvent, window, cx| {
-                        ws.act(Act::Handoff, window, cx)
-                    })))
-                    .with_animation("handoff-fade", Animation::new(Duration::from_millis(220)).with_easing(gpui::ease_out_quint()), |d, t| d.opacity(t));
-                group("ACCOUNT", body)
-            }))
-            .child(group("ACTIONS", actions))
-            .children(github.map(|g| group("GITHUB", g)))
-            .children(linked.map(|l| group("LINKED", l)))
-            .child(group("STATUS", status))
+        if !links.is_empty() {
+            menu = menu.child(group("LINKED", self.linked_rows(id.as_ref(), links)));
+        }
+        menu = menu.child(group("STATUS", self.status_rows(&shown, id.as_ref(), running)));
+        col().scroll(ScrollSpec { stick_bottom: false }).child(menu)
     }
 
     /// Open in the editor, the folder, git, the shell and the GitHub view.
-    fn action_rows(&self, shown: &Shown, id: Option<&Id>, running: bool, cx: &mut Context<Self>) -> Div {
+    fn action_rows(&self, shown: &Shown, id: Option<&Id>, running: bool) -> El {
         let claude = shown.rec.as_ref().is_some_and(|r| r.kind == SessionKind::Claude);
         let target = shown.project.as_ref().map(|p| p.path.clone()).or_else(|| shown.cwd.clone());
         let repo = shown.project.as_ref().filter(|p| p.git.is_some()).and(shown.cwd.clone());
         let busy = self.git_busy;
         let hints = self.shortcuts_shown;
 
-        let mut actions = div().flex().flex_col().gap(px(1.0));
+        let mut actions = col().w_full().gap(1.0);
         if let Some(target) = &target {
             // "Open in <editor>" plus a ▾ to pick another installed editor (remembered, see Act::OpenEditor).
             if let Some(editor) = self.preferred_editor() {
                 let (t, pick_target) = (target.clone(), target.clone());
                 actions = actions.child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .child(
-                            row("open-in", IconName::ExternalLink, format!("Open in {}", editor_name(editor)))
-                                .flex_1()
-                                .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::OpenEditor(editor, t.clone()), window, cx))),
-                        )
-                        .child(icon_button("open-in-pick", IconName::ChevronDown).dropdown(
-                            cx,
-                            move |ws, at, _w, cx| {
-                                let current = ws.preferred_editor();
-                                let items = ws
-                                    .editors
-                                    .iter()
-                                    .filter(|(_, found)| *found)
-                                    .map(|(e, _)| MenuItem::new(format!("{}{}", tick(current == Some(*e)), e.label()), Act::OpenEditor(*e, pick_target.clone())))
-                                    .collect();
-                                ws.open_dropdown(at, items, cx);
-                            },
-                        )),
+                    hbox()
+                        .w_full()
+                        .center_y()
+                        .child(row("open-in", &icons::EXTERNAL_LINK, format!("Open in {}", editor_name(editor))).grow(1.0).shrink().on_press_tx(move |ws: &mut Workspace, tx: &mut Tx| act(ws, Act::OpenEditor(editor, t.clone()), tx)))
+                        .child(icon_button(&icons::CHEVRON_DOWN).key("open-in-pick").help("Open in…").on_press_tx(move |ws: &mut Workspace, tx: &mut Tx| {
+                            let current = ws.preferred_editor();
+                            let items = ws.editors.iter().filter(|(_, found)| *found).map(|(e, _)| MenuItem::new(format!("{}{}", tick(current == Some(*e)), e.label()), Act::OpenEditor(*e, pick_target.clone()))).collect();
+                            ws.open_menu(MenuAnchor::Key("open-in-pick".into()), 0.0, items);
+                            ws.after_input(tx);
+                        })),
                 );
             }
-        }
-        // Keep session-only actions visible, but inert when no session is shown.
-        actions = actions.child(if id.is_some() {
-            row("editor-mode", IconName::FileCode, "Editor mode")
-                .when(hints, |d| d.child(key_hint("Shift+E")))
-                .on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::ToggleEditor, window, cx)))
-        } else {
-            dim_row("editor-mode", IconName::FileCode, "Editor mode")
-        });
-        if let Some(target) = target {
-            actions = actions.child(
-                row("reveal", IconName::FolderOpen, "Open folder")
-                    .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::Reveal(target.clone()), window, cx))),
-            );
+            let t = target.clone();
+            actions = actions.child(row("reveal", &icons::FOLDER_OPEN, "Open folder").on_press_tx(move |ws: &mut Workspace, tx: &mut Tx| act(ws, Act::Reveal(t.clone()), tx)));
         }
         if let Some(repo) = repo {
-            // One git operation at a time: while one runs, both rows are disabled.
-            let git_row = |cx: &mut Context<Self>, key: &'static str, glyph: IconName, label: &'static str, doing: &'static str, op: GitOp, make: Box<dyn Fn(PathBuf) -> Act>| {
-                if busy.is_some() {
-                    dim_row(key, glyph, if busy == Some(op) { doing } else { label })
+            // One git operation at a time: while one runs, both rows are disabled and the running one turns.
+            let git_row = |key: &'static str, glyph: &'static rune::Icon, text: &'static str, doing: &'static str, op: GitOp, make: Box<dyn Fn(PathBuf) -> Act>| {
+                if busy == Some(op) {
+                    dim_row(key, glyph, doing).child(crate::panels::widgets::spinner(12.0, theme::TEXT_FAINT))
+                } else if busy.is_some() {
+                    dim_row(key, glyph, text)
                 } else {
                     let repo = repo.clone();
-                    row(key, glyph, label).on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(make(repo.clone()), window, cx)))
+                    row(key, glyph, text).on_press_tx(move |ws: &mut Workspace, tx: &mut Tx| act(ws, make(repo.clone()), tx))
                 }
             };
             // The commit message is written through the running session's mod, so it needs one.
             // Until it has been read, assume there is work.
             let nothing_to_do = self.pending.as_ref().is_some_and(|(dir, p)| *dir == repo && !p.any());
             let commit = match id.filter(|_| running && claude) {
-                Some(_) if nothing_to_do && busy.is_none() => dim_row("commit-push", IconName::GitCommitHorizontal, "Commit & Push · nothing to commit or push"),
+                Some(_) if nothing_to_do && busy.is_none() => dim_row("commit-push", &icons::GIT_COMMIT_HORIZONTAL, "Commit & Push · nothing to commit or push"),
                 Some(id) => {
                     let id = id.clone();
-                    git_row(cx, "commit-push", IconName::GitCommitHorizontal, "Commit & Push", "Committing…", GitOp::CommitPush, Box::new(move |cwd| Act::CommitPush(id.clone(), cwd)))
+                    git_row("commit-push", &icons::GIT_COMMIT_HORIZONTAL, "Commit & Push", "Committing…", GitOp::CommitPush, Box::new(move |cwd| Act::CommitPush(id.clone(), cwd)))
                 }
-                None => dim_row("commit-push", IconName::GitCommitHorizontal, "Commit & Push · needs a running session"),
+                None => dim_row("commit-push", &icons::GIT_COMMIT_HORIZONTAL, "Commit & Push · needs a running session"),
             };
-            actions = actions.child(commit).child(git_row(cx, "pull", IconName::ArrowDownToLine, "Pull", "Pulling…", GitOp::Pull, Box::new(Act::Pull)));
+            actions = actions.child(commit).child(git_row("pull", &icons::ARROW_DOWN_TO_LINE, "Pull", "Pulling…", GitOp::Pull, Box::new(Act::Pull)));
         }
         if let (Some(id), true, true) = (id.cloned(), claude, running) {
             let open = self.shells.get(&id).is_some_and(|p| p.open);
-            actions = actions.child(
-                row("shell", IconName::Terminal, if open { "Hide shell" } else { "Show shell" })
-                    .when(hints, |d| d.child(key_hint("J")))
-                    .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::ToggleShell(id.clone()), window, cx))),
-            );
+            let mut r = row("shell", &icons::TERMINAL, if open { "Hide shell" } else { "Show shell" });
+            if hints {
+                r = r.child(key_hint("J").key("hint-shell-row"));
+            }
+            actions = actions.child(r.on_press_tx(move |ws: &mut Workspace, tx: &mut Tx| act(ws, Act::ToggleShell(id.clone()), tx)));
         }
         let cwd = self.active_cwd();
         actions.child(if id.is_some() {
-            row("github", IconName::GitPullRequest, "GitHub")
-                .when(hints, |d| d.child(key_hint("Shift+G")))
-                .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::OpenGithub { cwd: cwd.clone() }, window, cx)))
+            let mut r = row("github", &icons::GIT_PULL_REQUEST, "GitHub");
+            if hints {
+                r = r.child(key_hint("Shift+G").key("hint-github"));
+            }
+            r.on_press_tx(move |ws: &mut Workspace, tx: &mut Tx| act(ws, Act::OpenGithub { cwd: cwd.clone() }, tx))
         } else {
-            dim_row("github", IconName::GitPullRequest, "GitHub")
+            dim_row("github", &icons::GIT_PULL_REQUEST, "GitHub")
         })
     }
 
     /// Issues and pull requests attached to the session: click to open, × to take off.
-    fn attached_rows(&self, id: Option<&Id>, attached: Vec<Attached>, cx: &mut Context<Self>) -> Div {
-        let mut rows = div().flex().flex_col().gap(px(1.0));
+    fn attached_rows(&self, id: Option<&Id>, attached: Vec<Attached>) -> El {
+        let mut rows = col().w_full().gap(1.0);
         for a in attached {
             let (pull, number) = (a.pull, a.number);
             let owner = id.cloned();
             let key = format!("attached-{pull}-{number}");
             let title = match (a.title, a.state) {
-                (None, _) => pending_title(number, &key),
-                (Some(t), Some(State::Closed)) => format!("#{number}  {t} (closed)").into_any_element(),
-                (Some(t), Some(State::Merged)) => format!("#{number}  {t} (merged)").into_any_element(),
-                (Some(t), _) => format!("#{number}  {t}").into_any_element(),
+                (None, _) => pending_title(number),
+                (Some(t), Some(State::Closed)) => label(format!("#{number}  {t} (closed)"), 12.5, theme::TEXT_DIM).truncate().shrink(),
+                (Some(t), Some(State::Merged)) => label(format!("#{number}  {t} (merged)"), 12.5, theme::TEXT_DIM).truncate().shrink(),
+                (Some(t), _) => label(format!("#{number}  {t}"), 12.5, theme::TEXT).truncate().shrink(),
             };
             rows = rows.child(removable_row(
-                cx,
-                self.leaving.contains(&key),
                 key,
-                if pull { IconName::GitPullRequest } else { IconName::CircleDot },
+                if pull { &icons::GIT_PULL_REQUEST } else { &icons::CIRCLE_DOT },
                 title,
-                move |ws, window, cx| ws.open_attached(pull, number, window, cx),
+                move |ws| ws.open_attached(pull, number),
                 move |ws| {
                     if let Some(id) = &owner {
                         ws.detach(id, pull, number);
@@ -337,18 +240,15 @@ impl Workspace {
     }
 
     /// Sessions linked with this one: click to go there, × to unlink.
-    fn linked_rows(&self, id: Option<&Id>, links: Vec<(Id, String)>, cx: &mut Context<Self>) -> Div {
-        let mut rows = div().flex().flex_col().gap(px(1.0));
+    fn linked_rows(&self, id: Option<&Id>, links: Vec<(Id, String)>) -> El {
+        let mut rows = col().w_full().gap(1.0);
         for (other, title) in links {
             let (me, go, gone) = (id.cloned(), other.clone(), other.clone());
-            let key = format!("linked-{other}");
             rows = rows.child(removable_row(
-                cx,
-                self.leaving.contains(&key),
-                key,
-                IconName::Brackets,
-                title,
-                move |ws, window, cx| ws.act(Act::Select(go.clone()), window, cx),
+                format!("linked-{other}"),
+                &icons::BRACKETS,
+                label(title, 12.5, theme::TEXT).truncate().shrink(),
+                move |ws| ws.act(Act::Select(go.clone())),
                 move |ws| {
                     if let Some(me) = &me {
                         ws.unlink(me, &gone);
@@ -359,8 +259,8 @@ impl Workspace {
         rows
     }
 
-    /// Context and cache meters, and the two settings Claude Code keeps (dropdowns while the session runs).
-    fn status_rows(&self, shown: &Shown, id: Option<&Id>, running: bool, cx: &mut Context<Self>) -> Div {
+    /// Context and cache meters, and the settings Claude Code keeps (menus while the session runs).
+    fn status_rows(&self, shown: &Shown, id: Option<&Id>, running: bool) -> El {
         let (ctx_fraction, ctx_caption) = match self.selected_context() {
             Some((f, tokens, true, Some(full))) => (Some(f), format!("{}k of {}k tokens", tokens / 1000, full / 1000)),
             Some((f, tokens, true, None)) => (Some(f), format!("{}k tokens", tokens / 1000)),
@@ -369,14 +269,14 @@ impl Workspace {
         };
         // Fills with time left; goes red in the last fifth. Expired means the next message re-reads the whole context at full price.
         let cache = match self.selected_cache() {
-            Some((_, 0, _)) => meter("CACHE", Some(0.0), "expired".into(), None),
+            Some((_, 0, _)) => meter("meter-cache", "CACHE", Some(0.0), "expired".into(), None),
             Some((f, left, ttl)) => {
-                let tone = hsla(if f < 0.2 { theme::DANGER } else { theme::ACCENT });
+                let tone = rgb(if f < 0.2 { theme::DANGER } else { theme::ACCENT });
                 let window = if ttl >= 3600 { "1h" } else { "5m" };
                 let left = if left < 60 { "<1m".to_string() } else { countdown(left) };
-                meter("CACHE", Some(f), format!("{left} left of {window}"), Some(tone))
+                meter("meter-cache", "CACHE", Some(f), format!("{left} left of {window}"), Some(tone))
             }
-            None => meter("CACHE", None, "no session".into(), None),
+            None => meter("meter-cache", "CACHE", None, "no session".into(), None),
         };
 
         // The figures come from the snapshot the session's mod reports.
@@ -392,33 +292,33 @@ impl Workspace {
         let settable = id.filter(|_| meta.is_some() && running).cloned();
 
         let compact_row = match settable.clone() {
-            Some(sid) => pick_row(cx, "set-auto-compact", "Auto-compact", compact_text, move || auto_compact_menu(&sid, compact)).into_any_element(),
-            None => kv("Auto-compact", compact_text).into_any_element(),
+            Some(sid) => pick_row("set-auto-compact", "Auto-compact", compact_text, move || auto_compact_menu(&sid, compact)),
+            None => kv("Auto-compact", compact_text),
         };
+        let mut settings = col().w_full().gap(2.0).child(compact_row);
         // Only while Claude Code offers the setting; without its feature flag the setting does nothing.
-        let precompute_row = precompute.map(|on| {
-            let text = if on { "On" } else { "Off" }.to_string();
-            match settable.clone() {
-                Some(sid) => pick_row(cx, "set-precompute-compact", "Background compaction", text, move || precompute_compact_menu(&sid, on)).into_any_element(),
-                None => kv("Background compaction", text).into_any_element(),
-            }
-        });
-        let chrome_row = match settable.clone() {
-            Some(sid) => pick_row(cx, "set-chrome", "Claude in Chrome", if chrome { "On" } else { "Off" }.into(), move || chrome_menu(&sid, chrome)).into_any_element(),
-            None => kv("Claude in Chrome", if chrome { "On" } else { "Off" }.into()).into_any_element(),
+        if let Some(on) = precompute {
+            let t = if on { "On" } else { "Off" }.to_string();
+            settings = settings.child(match settable.clone() {
+                Some(sid) => pick_row("set-precompute-compact", "Background compaction", t, move || precompute_compact_menu(&sid, on)),
+                None => kv("Background compaction", t),
+            });
+        }
+        let advisor_row = match settable.clone() {
+            Some(sid) => pick_row("set-advisor", "Advisor", advisor_text, move || advisor_menu(&sid, advisor.as_deref())),
+            None => kv("Advisor", advisor_text),
         };
-        let advisor_row = match settable {
-            Some(sid) => pick_row(cx, "set-advisor", "Advisor", advisor_text, move || advisor_menu(&sid, advisor.as_deref())).into_any_element(),
-            None => kv("Advisor", advisor_text).into_any_element(),
+        let chrome_row = match settable {
+            Some(sid) => pick_row("set-chrome", "Claude in Chrome", if chrome { "On" } else { "Off" }.into(), move || chrome_menu(&sid, chrome)),
+            None => kv("Claude in Chrome", if chrome { "On" } else { "Off" }.into()),
         };
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(10.0))
-            .px(px(8.0))
-            .child(meter("CONTEXT", ctx_fraction, ctx_caption, None))
+        col()
+            .w_full()
+            .gap(10.0)
+            .px(8.0)
+            .child(meter("meter-context", "CONTEXT", ctx_fraction, ctx_caption, None))
             .child(cache)
-            .child(div().flex().flex_col().gap(px(2.0)).child(compact_row).children(precompute_row).child(advisor_row).child(chrome_row))
+            .child(settings.child(advisor_row).child(chrome_row))
     }
 }
 
@@ -477,139 +377,108 @@ fn advisor_name(alias: &str) -> String {
     }
 }
 
-fn group(label: &str, body: impl IntoElement) -> Div {
-    div().flex().flex_col().gap(px(4.0)).child(div().px(px(8.0)).child(section_label(label.to_string()))).child(body)
-}
-
-/// How long the grey bar of an item still waiting for its title pulses. Then it rests, because an item GitHub never
-/// answers for (no `gh`, signed out, not a GitHub folder) would otherwise keep redrawing the window forever.
-const PENDING_PULSE: Duration = Duration::from_secs(10);
-/// Pulses in `PENDING_PULSE`, so the bar ends the pulse where it began.
-const PENDING_PULSES: f32 = 8.0;
-
-/// The bar's opacity `t` (0 to 1) through `PENDING_PULSE`: full at both ends, dipping to 0.45 in between.
-fn pending_opacity(t: f32) -> f32 {
-    0.725 + 0.275 * (t * PENDING_PULSES * std::f32::consts::TAU).cos()
+fn group(title: &str, body: El) -> El {
+    col().w_full().gap(4.0).child(el().px(8.0).child(section_label(title.to_string()))).child(body)
 }
 
 /// `#12` with a grey bar where the title will be, until GitHub answers.
-fn pending_title(number: u32, key: &str) -> AnyElement {
-    let bar = div().flex_none().h(px(8.0)).w(px(96.0)).rounded(px(4.0)).bg(hsla(0x1f1f21)).with_animation(
-        SharedString::from(format!("pending-{key}")),
-        Animation::new(PENDING_PULSE).with_easing(pending_opacity),
-        |d, opacity| d.opacity(opacity),
-    );
-    div().flex().items_center().gap(px(8.0)).child(format!("#{number}")).child(bar).into_any_element()
+fn pending_title(number: u32) -> El {
+    hbox().center_y().gap(8.0).child(label(format!("#{number}"), 12.5, theme::TEXT)).child(el().h(8.0).w(96.0).radius(4.0).fill(rgb(0x1f1f21)))
 }
 
-fn base_row(id: impl Into<SharedString>, glyph: IconName, label: impl IntoElement) -> Stateful<Div> {
-    div()
-        .id(id.into())
-        .h(px(26.0))
-        .px(px(8.0))
-        .flex()
-        .items_center()
-        .gap(px(8.0))
-        .rounded(px(6.0))
-        .text_size(crate::panels::scale::px(12.5))
-        .child(div().flex_none().text_color(hsla(theme::TEXT_DIM)).child(icon(glyph, 14.0)))
-        .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(label))
+fn base_row(key: &str, glyph: &'static rune::Icon, title: impl Into<RowLabel>, color: u32) -> El {
+    let title = match title.into() {
+        RowLabel::Text(t) => label(t, 12.5, color).truncate().shrink(),
+        RowLabel::El(e) => *e,
+    };
+    hbox()
+        .key(key.to_string())
+        .h(26.0)
+        .w_full()
+        .px(8.0)
+        .gap(8.0)
+        .center_y()
+        .radius(6.0)
+        .child(icon(glyph, 14.0, theme::TEXT_DIM))
+        .child(hbox().grow(1.0).shrink().min_w(0.0).child(title))
 }
 
-fn row(id: impl Into<SharedString>, glyph: IconName, label: impl IntoElement) -> Stateful<Div> {
-    base_row(id, glyph, label).text_color(hsla(theme::TEXT)).cursor_pointer().hover(|s| s.bg(hsla(theme::ROW_HOVER)))
+/// What a row says: plain text, or a drawn label (a pending title).
+enum RowLabel {
+    Text(String),
+    El(Box<El>),
+}
+
+impl From<&str> for RowLabel {
+    fn from(s: &str) -> Self {
+        RowLabel::Text(s.to_string())
+    }
+}
+
+impl From<String> for RowLabel {
+    fn from(s: String) -> Self {
+        RowLabel::Text(s)
+    }
+}
+
+impl From<El> for RowLabel {
+    fn from(e: El) -> Self {
+        RowLabel::El(Box::new(e))
+    }
+}
+
+fn row(key: &str, glyph: &'static rune::Icon, title: impl Into<RowLabel>) -> El {
+    base_row(key, glyph, title, theme::TEXT).cursor(Cursor::Pointer).role("button").hover(Color::WHITE.alpha(0.04)).press_scale(0.985)
 }
 
 /// The row as it looks while its action is unavailable: no hover, no pointer (give it no click handler either).
-fn dim_row(id: impl Into<SharedString>, glyph: IconName, label: impl IntoElement) -> Stateful<Div> {
-    base_row(id, glyph, label).text_color(hsla(theme::TEXT_FAINT)).cursor_default()
+fn dim_row(key: &str, glyph: &'static rune::Icon, title: impl Into<RowLabel>) -> El {
+    base_row(key, glyph, title, theme::TEXT_FAINT).disabled(true)
 }
 
-/// A list row that does something when clicked and has a × that removes the entry.
-/// It grows in when first drawn; × shrinks it away (`leaving`) and removes the entry once it is gone, so the rows below slide.
-fn removable_row(
-    cx: &mut Context<Workspace>,
-    leaving: bool,
-    key: String,
-    glyph: IconName,
-    title: impl IntoElement,
-    open: impl Fn(&mut Workspace, &mut Window, &mut Context<Workspace>) + 'static,
-    remove: impl Fn(&mut Workspace) + 'static,
-) -> impl IntoElement {
-    use gpui::{Animation, AnimationExt};
-    const MS: u64 = 180;
+/// A list row that does something when clicked and has a × that removes the entry. It fades in when it arrives and
+/// out when removed, while the rows below slide up.
+fn removable_row(key: String, glyph: &'static rune::Icon, title: El, open: impl Fn(&mut Workspace) + 'static, remove: impl Fn(&mut Workspace) + 'static) -> El {
     let x = format!("remove-{key}");
-    let remove = std::rc::Rc::new(remove);
-    let gone_key = key.clone();
-    let anim_key = SharedString::from(format!("{}-{key}", if leaving { "leave" } else { "enter" }));
-    let row = row(key, glyph, title)
-        .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| open(ws, window, cx)))
-        .child(icon_button(x, IconName::X).on_click(cx.listener(move |ws, _: &ClickEvent, _w, cx| {
-            cx.stop_propagation();
-            if !ws.leaving.insert(gone_key.clone()) {
-                return;
-            }
-            let (remove, gone_key) = (remove.clone(), gone_key.clone());
-            cx.spawn(async move |this, cx| {
-                cx.background_executor().timer(std::time::Duration::from_millis(MS)).await;
-                let _ = this.update(cx, |ws, cx| {
-                    ws.leaving.remove(&gone_key);
-                    remove(ws);
-                    cx.notify();
-                });
-            })
-            .detach();
-            cx.notify();
-        })));
-    div().flex_none().overflow_hidden().child(row).with_animation(
-        anim_key,
-        Animation::new(std::time::Duration::from_millis(MS)).with_easing(gpui::ease_out_quint()),
-        move |d, t| {
-            let open = if leaving { 1.0 - t } else { t };
-            d.h(px(26.0 * open)).opacity(open)
-        },
-    )
+    row(&key, glyph, title)
+        .hover_group()
+        .motion(motion::REFLOW)
+        .transition(Transition::opacity().combined(Transition::offset(10.0, 0.0)))
+        .on_press_tx(move |ws: &mut Workspace, tx: &mut Tx| {
+            open(ws);
+            ws.after_input(tx);
+        })
+        .child(icon_button(&icons::X).key(x).group_opacity(0.0, 1.0).help("Remove").on_press_tx(move |ws: &mut Workspace, tx: &mut Tx| {
+            remove(ws);
+            ws.after_input(tx);
+        }))
 }
 
 /// A setting row that opens a menu (built when it is clicked): the value with a chevron, lit on hover.
-fn pick_row(cx: &mut Context<Workspace>, id: &'static str, label: &str, value: String, menu: impl Fn() -> Vec<MenuItem> + 'static) -> Stateful<Div> {
-    div()
-        .id(id)
-        .flex()
-        .items_center()
+fn pick_row(key: &'static str, title: &str, value: String, menu: impl Fn() -> Vec<MenuItem> + 'static) -> El {
+    hbox()
+        .key(key)
+        .w_full()
+        .h(22.0)
+        .mx(-6.0)
+        .px(6.0)
+        .gap(10.0)
+        .center_y()
         .justify_between()
-        .gap(px(10.0))
-        // Text lines up with the rows above; the hover background reaches out past it.
-        .h(px(22.0))
-        .mx(px(-6.0))
-        .px(px(6.0))
-        .rounded(px(5.0))
-        .cursor_pointer()
-        .hover(|s| s.bg(hsla(theme::ROW_HOVER)))
-        .text_size(crate::panels::scale::px(12.0))
-        .child(div().flex_none().text_color(hsla(theme::TEXT_DIM)).child(label.to_string()))
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(4.0))
-                .min_w_0()
-                .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(value))
-                .child(div().flex_none().text_color(hsla(theme::TEXT_FAINT)).child(icon(IconName::ChevronDown, 12.0))),
-        )
-        .dropdown(cx, move |ws, at, _w, cx| ws.open_dropdown(at, menu(), cx))
+        .radius(5.0)
+        .cursor(Cursor::Pointer)
+        .role("button")
+        .hover(Color::WHITE.alpha(0.04))
+        .child(label(title.to_string(), 12.0, theme::TEXT_DIM))
+        .child(hbox().center_y().gap(4.0).shrink().child(label(value, 12.0, theme::TEXT).truncate().shrink()).child(icon(&icons::CHEVRON_DOWN, 12.0, theme::TEXT_FAINT)))
+        .on_press_tx(move |ws: &mut Workspace, tx: &mut Tx| {
+            ws.open_menu(MenuAnchor::Key(key.into()), 0.0, menu());
+            ws.after_input(tx);
+        })
 }
 
-fn kv(label: &str, value: String) -> Div {
-    div()
-        .flex()
-        .items_center()
-        .justify_between()
-        .gap(px(10.0))
-        .h(px(22.0))
-        .text_size(crate::panels::scale::px(12.0))
-        .child(div().flex_none().text_color(hsla(theme::TEXT_DIM)).child(label.to_string()))
-        .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(value))
+fn kv(title: &str, value: String) -> El {
+    hbox().w_full().h(22.0).gap(10.0).center_y().justify_between().child(label(title.to_string(), 12.0, theme::TEXT_DIM)).child(label(value, 12.0, theme::TEXT).truncate().shrink())
 }
 
 fn editor_name(editor: Editor) -> &'static str {
@@ -622,23 +491,6 @@ fn editor_name(editor: Editor) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// gpui panics when a style is set twice (a hover on a row that already has one), so just building both is the check.
-    #[test]
-    fn both_row_kinds_can_be_built() {
-        row("a", IconName::Terminal, "A");
-        dim_row("b", IconName::Terminal, "B");
-        crate::panels::widgets::icon_button("c", IconName::FileCode);
-        crate::panels::widgets::icon_button_disabled("d", IconName::FileCode);
-    }
-
-    #[test]
-    fn the_pending_bar_pulses_and_rests_at_full_opacity() {
-        assert!((pending_opacity(0.0) - 1.0).abs() < 1e-5);
-        assert!((pending_opacity(1.0) - 1.0).abs() < 1e-5, "it stays this way once the animation is over");
-        assert!((pending_opacity(0.5 / PENDING_PULSES) - 0.45).abs() < 1e-5, "the dip comes mid-pulse");
-        assert!((0..=1000).all(|i| (0.45 - 1e-5..=1.0 + 1e-5).contains(&pending_opacity(i as f32 / 1000.0))));
-    }
 
     fn labels(items: &[MenuItem]) -> Vec<&str> {
         items.iter().map(|i| i.label.as_str()).collect()

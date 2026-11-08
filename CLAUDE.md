@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-Claudiu is a native Rust + GPUI desktop app that manages sessions around the user's existing `claude` CLI.
+Claudiu is a native Rust + Rune desktop app that manages sessions around the user's existing `claude` CLI.
 
 ## Settings
 

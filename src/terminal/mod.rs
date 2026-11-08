@@ -1,6 +1,6 @@
-//! Terminal emulation + PTY. No GPUI types here: one `Terminal` = one PTY = one `alacritty_terminal::Term`.
+//! Terminal emulation + PTY. No UI types here: one `Terminal` = one PTY = one `alacritty_terminal::Term`.
 //! Children: `glyphs` (block and box drawing), `keys` (keystrokes to VT bytes), `skeleton` (the stand-in prompt), `trace`
-//! (start-up timing) and `view` (the GPUI view over a `Terminal`).
+//! (start-up timing) and `view` (the Rune view over a `Terminal`).
 
 mod events;
 pub use events::{EventReceiver, Listener};

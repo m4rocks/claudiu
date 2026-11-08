@@ -1,6 +1,6 @@
 # Claudiu
 
-Claudiu is a native desktop app, written in Rust with [GPUI](https://gpui.rs), that runs several [Claude Code](https://code.claude.com) sessions in one window on Windows, macOS and Linux. It is a personal project with rough edges. Issues and pull requests are welcome.
+Claudiu is a native desktop app, written in Rust with [Rune](https://github.com/anomalyco/rune), that runs several [Claude Code](https://code.claude.com) sessions in one window on Windows, macOS and Linux. It is a personal project with rough edges. Issues and pull requests are welcome.
 
 > **Claudiu is an independent project. It is not affiliated with, endorsed by or sponsored by Anthropic.** Claude and Claude Code are trademarks of Anthropic.
 
@@ -20,16 +20,17 @@ Claudiu never deletes a transcript. It writes to Claude Code's own data only to 
 
 ## Known gaps
 
+- Editor mode (Ctrl+Shift+E) is not in this build yet; it returns in a later one.
 - macOS is lightly tested, and the build isn't notarized, so Gatekeeper complains on first launch.
 - Linux is new and lightly tested.
 - Quitting ends running PTYs. Sessions stay resumable, but live processes don't survive a restart.
 
 ## Development
 
-You need stable Rust. On Windows you also need Visual Studio Build Tools (C++) and the Windows SDK. On Linux you need the headers GPUI builds against; on Debian or Ubuntu:
+You need stable Rust. On Windows you also need Visual Studio Build Tools (C++) and the Windows SDK. On Linux you need the headers Rune builds against; on Debian or Ubuntu:
 
 ```sh
-sudo apt install libfontconfig-dev libwayland-dev libx11-xcb-dev libxcb1-dev libxkbcommon-x11-dev libvulkan1 zlib1g-dev
+sudo apt install libwayland-dev libxkbcommon-dev libvulkan1 zlib1g-dev
 ```
 
 Tasks go through [just](https://just.systems); run `just` to list them.
@@ -41,11 +42,10 @@ just lint    # clippy
 just ci      # what CI checks, plus the mod and the web build
 ```
 
-The repository has four parts:
+The repository has three parts:
 
 - `src/` is the app, including the MCP server that each session connects to.
 - `mod/` is the Claude Code plugin each session loads, which writes the usage snapshots.
 - `web/` is the Astro site.
-- `vendor/gpui-base/` is a patched copy of the editor crate. `Cargo.toml` says what the patch changes and when to drop it.
 
 `CLAUDE.md` has the conventions for contributing. Releases use [Velopack](https://velopack.io) and GitHub Releases: bump `version` in `Cargo.toml`, then `git tag vX.Y.Z && git push --tags`. `scripts\package.ps1` builds a local installer. The Linux release is an AppImage.
