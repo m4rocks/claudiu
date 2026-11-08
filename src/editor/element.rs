@@ -25,12 +25,14 @@ struct LinePaint {
     problems: Vec<(usize, usize, bool)>,
     /// Search matches: from and to cell, and whether it is the current one.
     found: Vec<(usize, usize, bool)>,
+    /// The cells of the line's indent guides.
+    guides: Vec<usize>,
 }
 
 impl LinePaint {
     fn version(&self, m: Metrics) -> u64 {
         let mut h = std::collections::hash_map::DefaultHasher::new();
-        (m.cell_w.to_bits(), m.line_h.to_bits(), &self.text, self.selected, &self.problems, &self.found).hash(&mut h);
+        (m.cell_w.to_bits(), m.line_h.to_bits(), &self.text, self.selected, &self.problems, &self.found, &self.guides).hash(&mut h);
         for s in &self.spans {
             (&s.bytes, s.color).hash(&mut h);
         }
@@ -40,6 +42,9 @@ impl LinePaint {
     fn build(self, m: Metrics, size: f32) -> El {
         let mut row = el().w_full().h(m.line_h);
         let x = |cell: usize| (m.cell_w * cell as f32).round();
+        for &cell in &self.guides {
+            row = row.child(el().absolute(x(cell), 0.0).size(1.0, m.line_h).fill(theme::rgb(theme::BORDER).alpha(0.85)));
+        }
         for &(a, b, current) in &self.found {
             let fill = if current { theme::rgb(theme::FOUND).alpha(0.45) } else { theme::rgb(theme::FOUND).alpha(0.18) };
             let mut mark = el().absolute(x(a), 0.0).size((x(b) - x(a)).max(m.cell_w), m.line_h).radius(2.0).fill(fill);
@@ -119,6 +124,7 @@ impl Editor {
 
         let mut numbers = el().absolute(0.0, top).w(gutter).h_full();
         let mut rows = el().absolute(-self.scroll[0].round(), top).w_full();
+        let mut guides: Vec<usize> = vec![];
         for line in first..last {
             let y = m.line_h * (line - first) as f32;
             let number_color = if line == caret.line { theme::TEXT_DIM } else { theme::TEXT_FAINT };
@@ -150,7 +156,8 @@ impl Editor {
                 })
                 .collect();
             let found = self.found_on(line, text_);
-            let paint = LinePaint { text: text_.to_string(), spans: self.spans.get(line).cloned().unwrap_or_default(), selected, problems, found };
+            guides = indent_guides(guides, text_, self.indent_unit);
+            let paint = LinePaint { text: text_.to_string(), spans: self.spans.get(line).cloned().unwrap_or_default(), selected, problems, found, guides: guides.clone() };
             let version = paint.version(m);
             rows = rows.child(el().absolute(0.0, y).w_full().child(rune::memo(format!("{key}/l{line}"), version, move || paint.build(m, size))));
         }
@@ -210,6 +217,16 @@ impl Editor {
             })
             .collect()
     }
+}
+
+/// A line's indent guides, in cells, as main's editor drew them: one at each level of its indent, starting at the
+/// first column; an empty line keeps `above`, the guides of the line above it.
+fn indent_guides(above: Vec<usize>, text: &str, unit: usize) -> Vec<usize> {
+    if text.is_empty() {
+        return above;
+    }
+    let indent = columns(&text[..text.len() - text.trim_start_matches([' ', '\t']).len()]);
+    (0..indent).step_by(unit.max(1)).collect()
 }
 
 /// The bar beside a changed line's number, or the wedge between two lines where some were deleted.
@@ -287,4 +304,18 @@ fn handlers(root: El, key: String) -> El {
         ws.after_input(tx);
         true
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::indent_guides;
+
+    #[test]
+    fn guides_mark_each_level_and_carry_over_empty_lines() {
+        assert_eq!(indent_guides(vec![], "    x", 2), [0, 2]);
+        assert_eq!(indent_guides(vec![], "   x", 2), [0, 2], "a part level still gets its guide");
+        assert_eq!(indent_guides(vec![0, 2], "", 2), [0, 2], "an empty line keeps the line above's");
+        assert_eq!(indent_guides(vec![0, 2], "x", 2), Vec::<usize>::new());
+        assert_eq!(indent_guides(vec![], "\tx", 4), [0], "a tab is four columns");
+    }
 }

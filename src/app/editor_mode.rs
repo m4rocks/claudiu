@@ -435,6 +435,9 @@ impl Workspace {
         let note = match contents {
             Ok(Contents::Text { text, format: f, stamp: s }) => {
                 editor.set_text(&text);
+                if f.tabs.as_ref().is_some_and(|t| t.hard) {
+                    editor.indent_unit = crate::editor::TAB_WIDTH;
+                }
                 (format, stamp) = (f, Some(s));
                 None
             }

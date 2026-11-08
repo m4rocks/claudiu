@@ -5,7 +5,7 @@ use rune::Tx;
 
 use super::buffer::{Pos, Selection};
 use super::lines::LineAction;
-use super::{Editor, TAB_WIDTH};
+use super::Editor;
 use crate::app::Workspace;
 use crate::terminal::keys::{Keystroke, Modifiers};
 
@@ -219,9 +219,6 @@ impl Editor {
             Pos::new(p.line, 0)
         } else if by_word {
             self.buffer.word_left(p)
-        } else if p.col > 0 && p.col <= self.buffer.indent_end(p.line) && self.buffer.line(p.line)[..p.col].bytes().all(|b| b == b' ') {
-            let col = self.column(p);
-            Pos::new(p.line, p.col - (col - 1) % TAB_WIDTH - 1)
         } else {
             self.buffer.prev(p)
         };
@@ -256,7 +253,7 @@ impl Editor {
         let before = line[..a.col].trim_end().chars().last();
         let after = self.buffer.line(b.line)[b.col..].chars().next();
         let opens = matches!(before, Some('{' | '(' | '['));
-        let unit = if indent.starts_with('\t') { "\t".to_string() } else { " ".repeat(TAB_WIDTH) };
+        let unit = if indent.starts_with('\t') { "\t".to_string() } else { " ".repeat(self.indent_unit) };
         let text = match (opens, after) {
             (true, Some('}' | ')' | ']')) => {
                 let inner = format!("\n{indent}{unit}");
@@ -272,30 +269,35 @@ impl Editor {
         self.replace(a, b, &text, false);
     }
 
-    /// Tab: spaces to the next tab stop, or a level of indentation for every selected line.
+    /// Tab: a level of indentation at the caret, or onto every line a selection touches.
     fn tab(&mut self) {
-        let (first, last) = self.selected_lines();
-        if self.sel.is_empty() || first == last && self.sel.range().0.col > self.buffer.indent_end(first) {
-            let col = self.column(self.sel.range().0);
-            return self.insert(&" ".repeat(TAB_WIDTH - col % TAB_WIDTH), false);
+        if self.sel.is_empty() {
+            return self.insert(&" ".repeat(self.indent_unit), false);
         }
         self.indent_lines();
     }
 
-    /// A level of indentation onto every selected line, or the caret's (Primary+], and Tab over several lines).
+    /// A level of indentation onto every line the selection touches, or the caret's (Primary+], and Tab over a
+    /// selection).
     fn indent_lines(&mut self) {
-        let (first, last) = self.selected_lines();
-        self.reindent(first, last, |line| Some(format!("{}{line}", " ".repeat(TAB_WIDTH))));
+        let (first, last) = self.touched_lines();
+        let unit = " ".repeat(self.indent_unit);
+        self.reindent(first, last, |line| Some(format!("{unit}{line}")));
     }
 
-    /// Shift+Tab: a level of indentation off every selected line, or the caret's.
+    /// Shift+Tab and Primary+[: a level of indentation off every line the selection touches, or the caret's. A line
+    /// that doesn't start with a whole level keeps what it has.
     fn outdent(&mut self) {
-        let (first, last) = self.selected_lines();
-        self.reindent(first, last, |line| {
-            let spaces = line.len() - line.trim_start_matches(' ').len();
-            let cut = if line.starts_with('\t') { 1 } else { spaces.min(TAB_WIDTH) };
-            (cut > 0).then(|| line[cut..].to_string())
-        });
+        let (first, last) = self.touched_lines();
+        let unit = " ".repeat(self.indent_unit);
+        self.reindent(first, last, |line| line.strip_prefix(unit.as_str()).map(str::to_string));
+    }
+
+    /// The lines from the selection's start to its end, the end's line included even when the selection only reaches
+    /// its start, as main's editor indented them.
+    fn touched_lines(&self) -> (usize, usize) {
+        let (a, b) = self.sel.range();
+        (a.line, b.line)
     }
 
     /// Rewrite lines `first..=last` with `change` (none: the line stays) as one undo step, keeping them selected.
@@ -388,23 +390,21 @@ mod tests {
     fn enter_keeps_the_indent_and_opens_a_block_between_brackets() {
         let mut e = editor("    if x {}", 0, 10);
         e.newline();
-        assert_eq!(e.buffer.text(), "    if x {\n        \n    }");
-        assert_eq!(e.caret(), Pos::new(1, 8));
+        assert_eq!(e.buffer.text(), "    if x {\n      \n    }", "one level is two spaces, as in main");
+        assert_eq!(e.caret(), Pos::new(1, 6));
         let mut e = editor("  a", 0, 3);
         e.newline();
         assert_eq!(e.buffer.text(), "  a\n  ");
     }
 
     #[test]
-    fn backspace_in_indentation_goes_back_to_the_tab_stop() {
-        let mut e = editor("      x", 0, 6);
+    fn backspace_takes_one_character_even_in_indentation() {
+        let mut e = editor("    x", 0, 4);
         e.backspace(false, false);
-        assert_eq!(e.buffer.text(), "    x");
-        e.backspace(false, false);
-        assert_eq!(e.buffer.text(), "x");
+        assert_eq!(e.buffer.text(), "   x", "as main's editor did");
         let mut e = editor("ab", 0, 2);
         e.backspace(false, false);
-        assert_eq!(e.buffer.text(), "a", "outside indentation, one character");
+        assert_eq!(e.buffer.text(), "a");
     }
 
     #[test]
@@ -412,11 +412,11 @@ mod tests {
         let mut e = editor("a\n  b\nc", 0, 0);
         e.select(Selection { anchor: Pos::new(0, 0), head: Pos::new(1, 3) });
         e.tab();
-        assert_eq!(e.buffer.text(), "    a\n      b\nc");
-        assert_eq!(e.sel, Selection { anchor: Pos::new(0, 4), head: Pos::new(1, 7) });
+        assert_eq!(e.buffer.text(), "  a\n    b\nc");
+        assert_eq!(e.sel, Selection { anchor: Pos::new(0, 2), head: Pos::new(1, 5) });
         e.outdent();
         e.outdent();
-        assert_eq!(e.buffer.text(), "a\nb\nc");
+        assert_eq!(e.buffer.text(), "a\nb\nc", "a line without a whole level keeps what it has");
         e.undo();
         assert_eq!(e.buffer.text(), "a\n  b\nc", "each outdent is one undo step");
         e.undo();
@@ -424,7 +424,14 @@ mod tests {
         assert_eq!(e.buffer.text(), "a\n  b\nc", "and so is the indent");
         let mut e = editor("ab", 0, 1);
         e.tab();
-        assert_eq!(e.buffer.text(), "a   b", "a caret inside text gets spaces to the tab stop");
+        assert_eq!(e.buffer.text(), "a  b", "a caret gets one level of spaces where it is");
+        let mut e = editor("ab\ncd", 0, 0);
+        e.select(Selection { anchor: Pos::new(0, 1), head: Pos::new(1, 0) });
+        e.tab();
+        assert_eq!(e.buffer.text(), "  ab\n  cd", "a selection indents every line it touches, the last one too");
+        let mut e = editor(" a", 0, 1);
+        e.outdent();
+        assert_eq!(e.buffer.text(), " a", "less than a level stays");
     }
 
     #[test]
@@ -458,8 +465,8 @@ mod tests {
     fn brackets_indent_and_outdent_the_caret_line_wherever_the_caret_is() {
         let mut e = editor("a\n  b", 1, 3);
         e.indent_lines();
-        assert_eq!(e.buffer.text(), "a\n      b");
-        assert_eq!(e.caret(), Pos::new(1, 7), "the caret stays on its letter");
+        assert_eq!(e.buffer.text(), "a\n    b");
+        assert_eq!(e.caret(), Pos::new(1, 5), "the caret stays on its letter");
         e.outdent();
         e.outdent();
         assert_eq!(e.buffer.text(), "a\nb");

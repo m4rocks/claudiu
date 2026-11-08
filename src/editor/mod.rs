@@ -115,6 +115,9 @@ pub struct Editor {
     /// The search bar's matches (`search`), highlighted while it is up, and the current one.
     pub found: Vec<(Pos, Pos)>,
     pub found_current: Option<usize>,
+    /// Spaces in a level of indentation: Tab, Shift+Tab and Enter after a bracket move by it. Two, as in main's
+    /// editor (gpui-kit's default), or `TAB_WIDTH` for a file indented with tabs, which the editor shows as spaces.
+    pub indent_unit: usize,
     /// Brackets and quotes the editor closed for the user, as where the opener and the closer are (`pairs`).
     pairs: Vec<(Pos, Pos)>,
 }
@@ -148,6 +151,7 @@ impl Editor {
             hover: None,
             completion: None,
             pairs: vec![],
+            indent_unit: 2,
             found: vec![],
             found_current: None,
         }
@@ -174,13 +178,6 @@ impl Editor {
     pub fn selected_text(&self) -> String {
         let (a, b) = self.sel.range();
         self.buffer.slice(a, b)
-    }
-
-    /// The first and last line (from 0) the selection covers; a selection ending at a line's start leaves that line out.
-    pub fn selected_lines(&self) -> (usize, usize) {
-        let (a, b) = self.sel.range();
-        let last = if b.line > a.line && b.col == 0 { b.line - 1 } else { b.line };
-        (a.line, last)
     }
 
     /// Put the caret at the start of `line` (from 0) and scroll it to a third of the way down.
@@ -562,16 +559,6 @@ mod tests {
         e.replace(Pos::new(0, 10), Pos::new(1, 0), "", false);
         assert_eq!(e.spans, [vec![c(0..3), c(4..10), c(13..14)], vec![c(0..4)]]);
         assert_eq!(e.buffer.text(), "let woxxrd = 1;\nnext");
-    }
-
-    #[test]
-    fn a_selection_ending_at_a_line_start_leaves_that_line_out() {
-        let mut e = Editor::new("e", "a\nb\nc");
-        e.select(Selection { anchor: Pos::new(0, 0), head: Pos::new(2, 0) });
-        assert_eq!(e.selected_lines(), (0, 1));
-        e.select(Selection { anchor: Pos::new(2, 1), head: Pos::new(1, 0) });
-        assert_eq!(e.selected_lines(), (1, 2));
-        assert_eq!(e.selected_text(), "b\nc");
     }
 
     #[test]
