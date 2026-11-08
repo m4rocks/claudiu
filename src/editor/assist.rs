@@ -28,7 +28,7 @@ pub enum Request {
 pub struct HoverCard {
     pub at: Pos,
     /// Problems the server reported there, then what it says about the word (Markdown).
-    pub problems: Vec<String>,
+    pub problems: Vec<super::Problem>,
     pub docs: Option<String>,
 }
 
@@ -93,8 +93,8 @@ impl Editor {
     }
 
     /// The problems reported at `p`.
-    pub fn problems_at(&self, p: Pos) -> Vec<String> {
-        self.problems.iter().filter(|d| d.from <= p && (p < d.to || d.from == d.to && p == d.from)).map(|d| d.message.clone()).collect()
+    pub fn problems_at(&self, p: Pos) -> Vec<super::Problem> {
+        self.problems.iter().filter(|d| d.from <= p && (p < d.to || d.from == d.to && p == d.from)).cloned().collect()
     }
 
     /// Show the card for the word at `at`, unless the pointer moved on (`serial`) or there is nothing to say.
@@ -208,7 +208,9 @@ impl Editor {
             let (x, y) = place(h.at);
             let mut card = col().key(format!("{}/hover", self.key)).max_w(520.0).padding(10.0).gap(8.0).radius(7.0).fill(rgb(0x18181a)).border(1.0, rgb(0x2c2c30)).shadow(8.0, 24.0, Color::BLACK.alpha(0.5)).transition(Transition::opacity());
             for p in &h.problems {
-                card = card.child(row().gap(6.0).child(el().size(6.0, 6.0).radius(3.0).fill(rgb(theme::DANGER)).mt(5.0)).child(label(p.clone(), 12.0, theme::TEXT).wrap().shrink()));
+                // The colour of its underline.
+                let dot = rgb(if p.error { theme::DANGER } else { theme::WARN });
+                card = card.child(row().gap(6.0).child(el().size(6.0, 6.0).radius(3.0).fill(dot).mt(5.0)).child(label(p.message.clone(), 12.0, theme::TEXT).wrap().shrink()));
             }
             if let Some(d) = &h.docs {
                 card = card.child(crate::panels::markdown::markdown(d).render(&crate::panels::markdown::style().body_font(font(12.0, 400.0))));
@@ -279,7 +281,7 @@ mod tests {
         e.show_hover(2, Pos::new(0, 4), None);
         assert!(e.hover.is_none(), "the pointer moved on since rest 2");
         e.show_hover(3, Pos::new(0, 4), Some("`i32`".into()));
-        assert_eq!(e.hover.as_ref().map(|h| h.problems.clone()), Some(vec!["unused".to_string()]));
+        assert_eq!(e.hover.as_ref().map(|h| h.problems.iter().map(|p| p.message.clone()).collect::<Vec<_>>()), Some(vec!["unused".to_string()]));
         e.pointer_left();
         assert!(e.hover.is_none());
         assert_eq!(e.word_start(Pos::new(0, 9)), Pos::new(0, 4));
