@@ -53,9 +53,10 @@ impl Editor {
         // Emacs keys that macOS text fields share: Ctrl+A and Ctrl+E go to the line's ends.
         if MAC && m.control && !m.platform && !m.alt && matches!(key, "a" | "e") {
             let p = self.sel.head;
-            let target = if key == "a" { self.home(p) } else { Pos::new(p.line, self.buffer.line(p.line).len()) };
+            let (target, row_end) = if key == "a" { (self.home(p), false) } else { self.end(p) };
             let anchor = if shift { self.sel.anchor } else { target };
             self.select(Selection { anchor, head: target });
+            self.row_end = row_end;
             return true;
         }
         if let Some(action) = line_action(&m, key) {
@@ -144,11 +145,16 @@ impl Editor {
         let to_end = MAC && m.platform && !m.control && !m.alt;
         let doc = if MAC { to_end } else { m.control && !m.alt };
         let p = self.sel.head;
+        let mut row_end = false;
         let target = match ks.key.as_str() {
             "left" if !self.sel.is_empty() && !m.shift && !by_word && !to_end => self.sel.range().0,
             "right" if !self.sel.is_empty() && !m.shift && !by_word && !to_end => self.sel.range().1,
             "left" if to_end => self.home(p),
-            "right" if to_end => Pos::new(p.line, self.buffer.line(p.line).len()),
+            "right" if to_end => {
+                let (end, at_row_end) = self.end(p);
+                row_end = at_row_end;
+                end
+            }
             "left" if by_word => self.buffer.word_left(p),
             "right" if by_word => self.buffer.word_right(p),
             "left" => self.buffer.prev(p),
@@ -162,7 +168,11 @@ impl Editor {
             "home" if doc => Pos::default(),
             "end" if doc => self.buffer.last(),
             "home" => self.home(p),
-            "end" => Pos::new(p.line, self.buffer.line(p.line).len()),
+            "end" => {
+                let (end, at_row_end) = self.end(p);
+                row_end = at_row_end;
+                end
+            }
             "backspace" => {
                 self.backspace(by_word, to_end);
                 return true;
@@ -175,32 +185,48 @@ impl Editor {
         };
         let anchor = if m.shift { self.sel.anchor } else { target };
         self.select(Selection { anchor, head: target });
+        self.row_end = row_end;
         true
     }
 
-    /// Home goes to where the line's text starts, and from there to the very start.
-    fn home(&self, p: Pos) -> Pos {
-        let indent = self.buffer.indent_end(p.line);
-        Pos::new(p.line, if p.col == indent { 0 } else { indent })
+    /// The row of the caret's line that `p` shows on: the caret may show at the end of the row above a break.
+    fn shown_row(&self, p: Pos) -> usize {
+        self.row_in_line(p, self.row_end && p == self.sel.head)
     }
 
-    /// The lines one page moves.
+    /// Home, as in main's editor (gpui-kit's `start_of_line_at`): the start of the row the caret shows on, and from
+    /// there the start of the line.
+    fn home(&self, p: Pos) -> Pos {
+        let start = self.row_bytes(p.line, self.shown_row(p)).start;
+        Pos::new(p.line, if p.col == start { 0 } else { start })
+    }
+
+    /// End: the end of the row the caret shows on, and from there the end of the line. Also whether that is the end
+    /// of a row that wraps, where the caret shows.
+    fn end(&self, p: Pos) -> (Pos, bool) {
+        let row = self.row_bytes(p.line, self.shown_row(p));
+        let line_end = self.buffer.line(p.line).len();
+        if p.col == row.end { (Pos::new(p.line, line_end), false) } else { (Pos::new(p.line, row.end), row.end < line_end) }
+    }
+
+    /// The rows one page moves.
     fn page(&self) -> isize {
         ((self.area[1] / self.metrics().line_h).floor() as isize - 2).max(1)
     }
 
-    /// Up or down by `lines`, keeping the column the caret started in.
-    fn vertical(&mut self, lines: isize, extend: bool) -> bool {
-        let p = self.sel.head;
-        let goal = self.goal.unwrap_or_else(|| self.column(p));
-        let last = self.buffer.line_count() - 1;
-        let target = match p.line.checked_add_signed(lines) {
-            None => Pos::default(),
-            Some(line) if line > last => self.buffer.last(),
-            Some(line) => self.at_column(line, goal),
+    /// Up or down by `rows` screen rows, keeping the cell the caret started in. Past the first row is the start of
+    /// the text, past the last its end.
+    fn vertical(&mut self, rows: isize, extend: bool) -> bool {
+        let goal = self.goal.unwrap_or_else(|| self.caret_cell());
+        let last = self.row_count() - 1;
+        let (target, row_end) = match self.caret_row().checked_add_signed(rows) {
+            None => (Pos::default(), false),
+            Some(row) if row > last => (self.buffer.last(), false),
+            Some(row) => self.at_row_cell(row, goal),
         };
         let anchor = if extend { self.sel.anchor } else { target };
         self.select(Selection { anchor, head: target });
+        self.row_end = row_end;
         self.goal = Some(goal);
         true
     }

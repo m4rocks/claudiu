@@ -176,10 +176,10 @@ impl Editor {
     }
 
     /// The card and the completion list, placed by the text they are about; `None` while neither is up.
-    pub(super) fn render_assist(&self, cell_w: f32, line_h: f32, top_line: usize, top: f32, area: [f32; 2]) -> Vec<El> {
+    pub(super) fn render_assist(&self, cell_w: f32, line_h: f32, top_row: usize, top: f32, area: [f32; 2]) -> Vec<El> {
         let place = |p: Pos| {
-            let x = (self.column(p) as f32 * cell_w - self.scroll[0]).max(0.0);
-            let y = top + line_h * (p.line as f32 - top_line as f32);
+            let x = (self.cell_of(p) as f32 * cell_w - self.scroll[0]).max(0.0);
+            let y = top + line_h * (self.row_of(p) as f32 - top_row as f32);
             (x, y)
         };
         let mut out = vec![];

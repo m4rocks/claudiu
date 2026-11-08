@@ -5,6 +5,7 @@
 
 pub mod assist;
 pub mod buffer;
+mod display;
 mod element;
 pub mod highlight;
 mod keys;
@@ -24,6 +25,8 @@ use buffer::{Buffer, Pos, Selection};
 pub const TAB_WIDTH: usize = 4;
 /// Left of the text: the change marks, then the line numbers, then this gap.
 const GUTTER_PAD: f32 = 14.0;
+/// The column right of the line numbers where a foldable block's chevron shows, as wide as gpui-kit's.
+const FOLD_W: f32 = 18.0;
 /// Lines kept between the caret and the top or bottom edge when the caret moves.
 const MARGIN_LINES: f32 = 3.0;
 
@@ -120,11 +123,22 @@ pub struct Editor {
     pub indent_unit: usize,
     /// Brackets and quotes the editor closed for the user, as where the opener and the closer are (`pairs`).
     pairs: Vec<(Pos, Pos)>,
+    /// The screen rows the lines take (`display`).
+    rows: display::Rows,
+    /// The blocks that can fold, as their first and last line, from the parser; and those folded.
+    fold_spots: Vec<(usize, usize)>,
+    folds: Vec<(usize, usize)>,
+    /// The caret sits on a row break and shows at the end of the row above it, not the start of the next.
+    row_end: bool,
+    /// The pointer is over the line numbers, where every fold chevron shows.
+    pub gutter_hover: bool,
+    /// The button went down on a fold chevron: the press folded or opened a block and selects nothing.
+    pub pressed_fold: bool,
 }
 
 impl Editor {
     pub fn new(key: impl Into<String>, text: &str) -> Self {
-        Self {
+        let mut e = Self {
             buffer: Buffer::new(text),
             sel: Selection::default(),
             goal: None,
@@ -154,7 +168,15 @@ impl Editor {
             indent_unit: 2,
             found: vec![],
             found_current: None,
-        }
+            rows: display::Rows::default(),
+            fold_spots: vec![],
+            folds: vec![],
+            row_end: false,
+            gutter_hover: false,
+            pressed_fold: false,
+        };
+        e.relayout();
+        e
     }
 
     fn metrics(&self) -> Metrics {
@@ -166,6 +188,9 @@ impl Editor {
         let caret = self.sel.head;
         self.buffer = Buffer::new(text);
         self.sel = Selection::caret(self.buffer.clamp(caret));
+        self.folds.clear();
+        self.fold_spots.clear();
+        self.relayout();
         self.edited = true;
         self.dirty = true;
     }
@@ -197,7 +222,7 @@ impl Editor {
         }
         self.center = false;
         let m = self.metrics();
-        self.scroll[1] = (self.sel.head.line as f32 * m.line_h - self.area[1] / 3.0).clamp(0.0, self.max_scroll_y());
+        self.scroll[1] = (self.caret_row() as f32 * m.line_h - self.area[1] / 3.0).clamp(0.0, self.max_scroll_y());
         self.dirty = true;
     }
 
@@ -205,6 +230,9 @@ impl Editor {
     pub fn select(&mut self, sel: Selection) {
         self.sel = Selection { anchor: self.buffer.clamp(sel.anchor), head: self.buffer.clamp(sel.head) };
         self.goal = None;
+        self.row_end = false;
+        // A caret sent into a folded block opens it, so it is never hidden.
+        self.unfold_at(self.sel.head.line);
         self.buffer.break_typing();
         self.reveal_caret();
         self.dirty = true;
@@ -220,6 +248,7 @@ impl Editor {
     pub fn replace(&mut self, a: Pos, b: Pos, text: &str, typing: bool) {
         let (a, b) = if a <= b { (a, b) } else { (b, a) };
         let end = self.buffer.replace(a, b, text, self.sel, typing);
+        self.relayout_edit(a.line, b.line, end.line);
         move_colours(&mut self.spans, a, b, end);
         self.adjust_pairs(a, b, end);
         self.sel = Selection::caret(end);
@@ -228,6 +257,7 @@ impl Editor {
 
     fn after_edit(&mut self) {
         self.goal = None;
+        self.row_end = false;
         self.marked = None;
         self.reveal_caret();
         self.dirty = true;
@@ -241,6 +271,7 @@ impl Editor {
         // History doesn't keep which closers were typed for the user.
         self.pairs.clear();
         if let Some(sel) = self.buffer.undo() {
+            self.after_history();
             self.sel = Selection { anchor: self.buffer.clamp(sel.anchor), head: self.buffer.clamp(sel.head) };
             self.after_edit();
         }
@@ -249,9 +280,18 @@ impl Editor {
     pub fn redo(&mut self) {
         self.pairs.clear();
         if let Some(sel) = self.buffer.redo() {
+            self.after_history();
             self.sel = Selection { anchor: self.buffer.clamp(sel.anchor), head: self.buffer.clamp(sel.head) };
             self.after_edit();
         }
+    }
+
+    /// Undo and redo don't say which lines they changed, so the folds open and every line wraps again; the parser
+    /// sends the fold candidates anew.
+    fn after_history(&mut self) {
+        self.folds.clear();
+        self.fold_spots.clear();
+        self.relayout();
     }
 
     // ---------------------------------------------------------------------------------------------- geometry
@@ -279,15 +319,19 @@ impl Editor {
     /// Where the text starts, right of the gutter.
     pub fn gutter_w(&self) -> f32 {
         let digits = self.buffer.line_count().to_string().len().max(3);
-        (self.metrics().cell_w * digits as f32 + GUTTER_PAD * 2.0).round()
+        (self.metrics().cell_w * digits as f32 + GUTTER_PAD * 2.0 + FOLD_W).round()
     }
 
     fn max_scroll_y(&self) -> f32 {
-        // The last line can scroll up to the top, as in most code editors.
-        (self.buffer.line_count().saturating_sub(1) as f32 * self.metrics().line_h).max(0.0)
+        // The last row can scroll up to the top, as in most code editors.
+        (self.row_count().saturating_sub(1) as f32 * self.metrics().line_h).max(0.0)
     }
 
     fn max_scroll_x(&self) -> f32 {
+        // Wrapped lines fit the width.
+        if self.rows_wrap() {
+            return 0.0;
+        }
         let m = self.metrics();
         let widest = (0..self.buffer.line_count()).map(|l| self.buffer.line(l).len()).max().unwrap_or(0);
         (widest as f32 * m.cell_w + m.cell_w * 4.0 - (self.area[0] - self.gutter_w())).max(0.0)
@@ -295,17 +339,25 @@ impl Editor {
 
     /// The text position under a point of the editor's area.
     pub fn pos_at(&self, x: f32, y: f32) -> Pos {
+        self.pos_and_row_end_at(x, y).0
+    }
+
+    /// The text position under a point, and whether it is the end of a row that wraps (`at_row_cell`).
+    fn pos_and_row_end_at(&self, x: f32, y: f32) -> (Pos, bool) {
         let m = self.metrics();
-        let line = ((y + self.scroll[1]) / m.line_h).floor().max(0.0) as usize;
-        let line = line.min(self.buffer.line_count() - 1);
-        let col = ((x - self.gutter_w() + self.scroll[0]) / m.cell_w).round().max(0.0) as usize;
-        self.at_column(line, col)
+        let row = ((y + self.scroll[1]) / m.line_h).floor().max(0.0) as usize;
+        let row = row.min(self.row_count() - 1);
+        let cell = ((x - self.gutter_w() + self.scroll[0]) / m.cell_w).round().max(0.0) as usize;
+        self.at_row_cell(row, cell)
     }
 
     /// The editor was laid out at `w` by `h` points.
     pub fn set_area(&mut self, w: f32, h: f32) {
         if self.area != [w, h] {
             self.area = [w, h];
+            if self.wrap_width_changed() {
+                self.relayout();
+            }
             self.dirty = true;
         }
         self.center_caret();
@@ -330,7 +382,7 @@ impl Editor {
             return;
         }
         let m = self.metrics();
-        let y = p.line as f32 * m.line_h;
+        let y = self.row_of(p) as f32 * m.line_h;
         let margin = (m.line_h * MARGIN_LINES).min(self.area[1] / 3.0);
         let top = self.glide.as_ref().map_or(self.scroll[1], |g| g.target);
         let mut to = top;
@@ -344,10 +396,12 @@ impl Editor {
             self.glide = None;
             self.scroll[1] = to;
         }
-        let x = self.column(p) as f32 * m.cell_w;
+        let x = self.cell_of(p) as f32 * m.cell_w;
         let text_w = self.area[0] - self.gutter_w();
         let pad = m.cell_w * 4.0;
-        if x - pad < self.scroll[0] {
+        if self.rows_wrap() {
+            self.scroll[0] = 0.0;
+        } else if x - pad < self.scroll[0] {
             self.scroll[0] = (x - pad).max(0.0);
         } else if x + pad > self.scroll[0] + text_w {
             self.scroll[0] = x + pad - text_w;
@@ -392,7 +446,7 @@ impl Editor {
 
     /// A press at `x`, `y`: the `clicks`th of a run selects a character, word or line; `extend` (Shift) keeps the anchor.
     pub fn mouse_down(&mut self, x: f32, y: f32, clicks: u32, extend: bool) {
-        let p = self.pos_at(x, y);
+        let (p, row_end) = self.pos_and_row_end_at(x, y);
         self.completion = None;
         self.hover = None;
         let anchor = if extend { self.sel.anchor } else { p };
@@ -409,6 +463,7 @@ impl Editor {
             _ => {
                 self.grain = Grain::Chars;
                 self.select(Selection { anchor, head: p });
+                self.row_end = row_end;
             }
         }
         self.marked = None;

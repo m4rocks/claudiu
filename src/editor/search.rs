@@ -24,7 +24,7 @@ impl Editor {
 
     /// The first line on screen.
     pub fn first_visible_line(&self) -> usize {
-        (self.scroll[1] / self.metrics().line_h).floor().max(0.0) as usize
+        self.row_line((self.scroll[1] / self.metrics().line_h).floor().max(0.0) as usize).0
     }
 
     /// Highlight `found`, `current` brighter, and with `reveal` bring the current one into view. Nothing is selected.

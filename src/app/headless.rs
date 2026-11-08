@@ -1444,6 +1444,60 @@ fn the_wheel_stops_at_both_ends_and_a_double_click_selects_a_word() {
     assert_eq!(e.buffer.slice(e.sel.range().0, e.sel.range().1), "line", "the word under the pointer");
 }
 
+/// As in main's editor, a line wider than the editor wraps onto more rows, and Down moves to its next row. A block's
+/// chevron shows while the pointer is over the gutter; clicking it hides the block's inner lines and clicking again
+/// shows them.
+#[test]
+fn a_long_line_wraps_and_a_block_folds_from_its_chevron() {
+    let mut h = Harness::new(|_| vec![]);
+    let cwd = h.work.clone();
+    let file = cwd.join("wrap.rs");
+    let long = format!("// {}", "word ".repeat(120));
+    std::fs::write(&file, format!("{long}\nfn main() {{\n    let a = 1;\n    let b = 2;\n}}\nfn after() {{}}\n")).unwrap();
+    h.step(|ws| ws.new_claude(cwd.clone()));
+    let id = h.ws().active.clone().unwrap();
+    h.step(|ws| ws.toggle_editor());
+    h.step(|ws| ws.open_file(&id, file.clone(), None));
+    h.wait("the parser finding `main`'s block", |ws| ws.panes[&id].shown().is_some_and(|t| t.editor.fold_spot(1) == Some((1, 4))));
+    h.settle();
+    let key = h.shown_tab(&id).unwrap().editor.key.clone();
+    let (editor, _) = h.rt.presented(&key).unwrap();
+    let (first, _) = h.rt.presented(&format!("{key}/l0")).unwrap();
+    let (second, _) = h.rt.presented(&format!("{key}/l1")).unwrap();
+    let line_h = second[3];
+    assert!(first[3] >= line_h * 3.0, "the long line takes several rows: {} for rows of {line_h}", first[3]);
+    assert!(first[0] + first[2] <= editor[0] + editor[2] + 0.5, "and fits the editor's width");
+    assert!((second[1] - (first[1] + first[3])).abs() < 0.5, "the next line starts below its last row");
+
+    h.step(|ws| ws.focus_pane());
+    h.press(rune::Key::Down, |_| {});
+    let caret = h.shown_tab(&id).unwrap().editor.caret();
+    assert_eq!(caret.line, 0, "Down goes to the long line's second row");
+    assert!(caret.col > 0);
+
+    // Over the gutter the chevron shows; a click folds the block, leaving its first and last lines.
+    let (gx, gy) = (editor[0] + 4.0, second[1] + line_h / 2.0);
+    h.rt.pointer_move(gx, gy);
+    h.pump();
+    let fold = format!("{key}/fold1");
+    let (x, y) = h.rt.find(&fold).expect("the chevron of `main`'s block");
+    h.rt.pointer_move(x, y);
+    h.rt.pointer_down(x, y);
+    h.rt.pointer_up(x, y);
+    h.settle();
+    assert!(h.shown_tab(&id).unwrap().editor.is_folded(1));
+    assert!(!h.drawn(&format!("{key}/l2")) && !h.drawn(&format!("{key}/l3")), "the block's inner lines are hidden");
+    let (closing, _) = h.rt.presented(&format!("{key}/l4")).unwrap();
+    assert!((closing[1] - (second[1] + line_h)).abs() < 0.5, "its last line comes right after its first");
+    assert_eq!(h.shown_tab(&id).unwrap().editor.caret().line, 0, "the click selected nothing");
+
+    h.rt.pointer_down(x, y);
+    h.rt.pointer_up(x, y);
+    h.settle();
+    assert!(!h.shown_tab(&id).unwrap().editor.is_folded(1));
+    assert!(h.drawn(&format!("{key}/l2")), "a second click shows them again");
+}
+
 /// Primary+F opens the search bar over the file: matches are counted and highlighted without moving the caret, Enter
 /// and Shift+Enter step through them, case can matter, the replace row replaces one or all as one undo step, and
 /// Escape gives the keyboard back to the editor.

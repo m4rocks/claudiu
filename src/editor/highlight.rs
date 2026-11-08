@@ -139,6 +139,36 @@ pub fn highlight(language: &str, text: &str) -> Option<Vec<Vec<Span>>> {
     Some(lines)
 }
 
+/// The blocks of `text` that can fold, as their first and last line, by gpui-kit's rule (`extract_fold_ranges`): every
+/// named node spanning three lines or more, outermost first, one per first line. `None` without a grammar.
+pub fn fold_spots(language: &str, text: &str) -> Option<Vec<(usize, usize)>> {
+    fn collect(node: tree_sitter::Node, spots: &mut Vec<(usize, usize)>) {
+        let (start, end) = (node.start_position().row, node.end_position().row);
+        if end.saturating_sub(start) < 2 {
+            return;
+        }
+        spots.push((start, end));
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            collect(child, spots);
+        }
+    }
+    let config = configs().get(language)?;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&config.language).ok()?;
+    let tree = parser.parse(text, None)?;
+    let root = tree.root_node();
+    let mut spots = vec![];
+    let mut cursor = root.walk();
+    for child in root.named_children(&mut cursor) {
+        collect(child, &mut spots);
+    }
+    // A stable sort keeps the outermost block first on each line.
+    spots.sort_by_key(|s| s.0);
+    spots.dedup_by_key(|s| s.0);
+    Some(spots)
+}
+
 /// Add a coloured stretch to a line, joined to the one before when it continues it in the same colour.
 fn push(line: &mut Vec<Span>, bytes: std::ops::Range<usize>, color: Color, syntax: Syntax) {
     match line.last_mut() {
@@ -201,5 +231,12 @@ mod tests {
         assert_eq!(lines[1][0], Span { bytes: 0..6, color: comment, syntax: Syntax::Comment });
         assert!(lines[1].iter().all(|s| s.bytes.end <= "two */ let x = 1;".len()));
         assert!(highlight("cobol", code).is_none());
+    }
+
+    #[test]
+    fn blocks_of_three_lines_or_more_fold_outermost_first() {
+        let code = "fn a() {\n    if x {\n        y();\n    }\n}\nfn b() {}\nstruct S {\n    f: u8,\n}\n";
+        assert_eq!(fold_spots("rust", code), Some(vec![(0, 4), (1, 3), (6, 8)]), "`fn b` is one line; `fn a`'s block starts on its line too");
+        assert_eq!(fold_spots("cobol", code), None);
     }
 }

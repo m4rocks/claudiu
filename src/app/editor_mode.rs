@@ -521,7 +521,7 @@ impl Workspace {
         (changed, animating)
     }
 
-    /// Work out the shown file's colours off the UI thread when its text changed since they were, one run at a time:
+    /// Work out the shown file's colours and foldable blocks off the UI thread when its text changed since they were, one run at a time:
     /// edits made meanwhile are coloured by the next run.
     fn colour_shown(&mut self) {
         let Some(id) = self.active_id().cloned() else { return };
@@ -535,13 +535,14 @@ impl Workspace {
         e.colouring = true;
         let (key, text) = (e.key.clone(), e.buffer.text());
         self.rt.spawn(
-            move || crate::editor::highlight::highlight(language, &text),
-            move |ws: &mut Workspace, spans| {
+            move || (crate::editor::highlight::highlight(language, &text), crate::editor::highlight::fold_spots(language, &text)),
+            move |ws: &mut Workspace, (spans, folds)| {
                 let Some(e) = ws.editor_mut(&key) else { return };
                 e.colouring = false;
-                // Colours for older text would put them a few letters off; the next frame asks again.
+                // Colours and folds for older text would be a few letters or lines off; the next frame asks again.
                 if e.buffer.version() == version {
                     e.spans = spans.unwrap_or_default();
+                    e.set_fold_spots(folds.unwrap_or_default());
                     e.coloured = Some(version);
                     e.dirty = true;
                 }
