@@ -121,7 +121,7 @@ impl Editor {
             );
             if let Ok(i) = self.marks.binary_search_by_key(&line, |(l, _)| *l) {
                 let mark = &self.marks[i].1;
-                numbers = numbers.child(mark_bar(*mark, y, m));
+                numbers = numbers.child(mark_bar(*mark, y, m).key(format!("{key}/mark{line}")));
             }
             let text_ = self.buffer.line(line);
             let selected = (!self.sel.is_empty() && sel_a.line <= line && line <= sel_b.line).then(|| {

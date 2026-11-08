@@ -1331,6 +1331,7 @@ fn the_tree_creates_renames_and_deletes_files() {
     assert!(src.join("c.rs").is_file() && !src.join("b.rs").exists());
     assert!(h.editor_pane(&id).tabs.iter().any(|t| t.path == src.join("c.rs")), "the tab follows the file");
     assert!(h.editor_pane(&id).tabs.iter().all(|t| t.path != src.join("b.rs")));
+    assert!(h.editor_pane(&id).recent.contains(&src.join("c.rs")) && !h.editor_pane(&id).recent.contains(&src.join("b.rs")), "recent files follow the rename");
 
     // Delete asks first, then removes the file and closes its tab.
     h.wait("the tree listing c.rs", |ws| ws.panes[&id].rows.iter().any(|r| r.name == "c.rs"));
@@ -1343,6 +1344,102 @@ fn the_tree_creates_renames_and_deletes_files() {
     assert!(src.join("c.rs").exists(), "nothing goes before the answer");
     h.step(|ws| ws.submit_modal());
     h.wait("deleting", |ws| !src.join("c.rs").exists() && ws.panes[&id].tabs.iter().all(|t| t.path != src.join("c.rs")));
+    let pane = h.editor_pane(&id);
+    assert!(pane.recent.iter().chain(pane.back.iter().map(|(p, _)| p)).all(|p| !p.starts_with(src.join("c.rs"))), "no place is left in the deleted file");
+}
+
+/// A file git knows gets a bar beside each changed line, drawn only for the lines on screen: scrolled to a later
+/// change, its bar shows and the first one's goes.
+#[test]
+fn git_change_marks_are_drawn_beside_their_lines_and_follow_scrolling() {
+    let mut h = Harness::new(|_| vec![]);
+    let cwd = h.work.join("repo");
+    git_repo(&cwd);
+    let file = cwd.join("a.txt");
+    let base: String = (1..=150).map(|n| format!("line {n}\n")).collect();
+    std::fs::write(&file, &base).unwrap();
+    assert!(git(&cwd, &["add", "."]).status.success() && git(&cwd, &["commit", "-qm", "base"]).status.success());
+    std::fs::write(&file, base.replace("line 2\n", "TWO\n").replace("line 120\n", "CHANGED\n")).unwrap();
+    h.step(|ws| ws.new_claude(cwd.clone()));
+    let id = h.ws().active.clone().unwrap();
+    h.step(|ws| ws.toggle_editor());
+    h.wait("listing", |ws| !ws.panes[&id].root.as_os_str().is_empty());
+    let file = h.editor_pane(&id).root.join("a.txt");
+    h.step(|ws| ws.open_file(&id, file.clone(), None));
+    h.wait("the marks", |ws| ws.panes[&id].shown().is_some_and(|t| !t.editor.marks.is_empty()));
+    h.settle();
+    let key = h.shown_tab(&id).unwrap().editor.key.clone();
+    assert_eq!(h.shown_tab(&id).unwrap().editor.marks, [(1, crate::editor::Mark::Modified), (119, crate::editor::Mark::Modified)]);
+    let bar = |h: &Harness, line: usize| h.drawn(&format!("{key}/mark{line}"));
+    assert!(bar(&h, 1) && !bar(&h, 119), "only the change on screen has a bar");
+    let (bar_rect, _) = h.rt.presented(&format!("{key}/mark1")).unwrap();
+    let (line_rect, _) = h.rt.presented(&format!("{key}/l1")).unwrap();
+    assert!((bar_rect[1] - line_rect[1]).abs() < 1.0 && bar_rect[3] > 8.0, "the bar runs beside its line: {bar_rect:?} {line_rect:?}");
+
+    h.step(|ws| ws.open_file(&id, file.clone(), Some(119)));
+    h.settle();
+    assert!(bar(&h, 119) && !bar(&h, 1), "scrolled down, the later change has the bar");
+}
+
+/// The wheel eases the text but never past its ends: up at the top it stays put, and down past the end it stops with
+/// the last line still on screen. A double click selects the word under the pointer.
+#[test]
+fn the_wheel_stops_at_both_ends_and_a_double_click_selects_a_word() {
+    let mut h = Harness::new(|_| vec![]);
+    let cwd = h.work.clone();
+    let file = cwd.join("lines.txt");
+    std::fs::write(&file, (0..300).map(|i| format!("line {i}\n")).collect::<String>()).unwrap();
+    h.step(|ws| ws.new_claude(cwd.clone()));
+    let id = h.ws().active.clone().unwrap();
+    h.step(|ws| ws.toggle_editor());
+    h.step(|ws| ws.open_file(&id, file.clone(), None));
+    h.wait("opening", |ws| ws.panes[&id].shown().is_some());
+    h.settle();
+    let key = h.shown_tab(&id).unwrap().editor.key.clone();
+    let scroll = |h: &Harness| h.shown_tab(&id).unwrap().editor.scroll[1];
+    let (x, y) = h.rt.find(&key).unwrap();
+    let wheel = |h: &mut Harness, dy: f32| {
+        h.rt.pointer_move(x, y);
+        h.rt.wheel_event(rune::WheelEvent::new(0.0, dy).at(x, y));
+        (0..40)
+            .map(|_| {
+                std::thread::sleep(Duration::from_millis(8));
+                h.pump();
+                scroll(h)
+            })
+            .collect::<Vec<f32>>()
+    };
+    let seen = wheel(&mut h, 360.0);
+    assert!(seen.iter().all(|&s| s == 0.0), "up at the top, nothing moves: {seen:?}");
+
+    let (line, _) = h.rt.presented(&format!("{key}/l0")).unwrap();
+    // The file ends with a line break, so its last line is the empty line 300, which may scroll up to the top.
+    let end = 300.0 * line[3];
+    let mut seen = vec![];
+    for _ in 0..8 {
+        seen.extend(wheel(&mut h, -3000.0));
+    }
+    assert!(seen.iter().all(|&s| s <= end + 0.5), "never past the end ({end}): {seen:?}");
+    assert!((seen.last().unwrap() - end).abs() < 0.5, "it reaches the end: {:?}", seen.last());
+    h.settle();
+    assert!(h.drawn(&format!("{key}/l300")), "the last line stays on screen");
+
+    // Back at the top, a double click on "line" of the first line selects that word.
+    h.press(rune::Key::Home, |m| if cfg!(target_os = "macos") { m.logo = true } else { m.ctrl = true });
+    h.settle();
+    let (row, _) = h.rt.presented(&format!("{key}/l0")).unwrap();
+    let (editor, _) = h.rt.presented(&key).unwrap();
+    let e = &h.shown_tab(&id).unwrap().editor;
+    let y = row[1] + row[3] / 2.0;
+    let x = (0..2000).map(|x| x as f32).find(|&x| e.pos_at(x, y - editor[1]) == crate::editor::buffer::Pos::new(0, 2)).unwrap() + editor[0];
+    for _ in 0..2 {
+        h.rt.pointer_move(x, y);
+        h.rt.pointer_down(x, y);
+        h.rt.pointer_up(x, y);
+    }
+    h.pump();
+    let e = &h.shown_tab(&id).unwrap().editor;
+    assert_eq!(e.buffer.slice(e.sel.range().0, e.sel.range().1), "line", "the word under the pointer");
 }
 
 /// The real servers on PATH: gleam's reports a type error, and one that isn't installed says so. Starts programs from

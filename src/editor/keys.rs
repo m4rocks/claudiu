@@ -412,6 +412,22 @@ mod tests {
     }
 
     #[test]
+    fn copy_and_cut_without_a_selection_take_the_whole_line() {
+        let mut e = editor("a\nbb\nc", 1, 1);
+        assert_eq!(e.take_for_clipboard(false), "bb\n");
+        assert_eq!((e.buffer.text().as_str(), e.caret()), ("a\nbb\nc", Pos::new(1, 1)), "copying leaves text and caret");
+        assert_eq!(e.take_for_clipboard(true), "bb\n");
+        assert_eq!(e.buffer.text(), "a\nc");
+        let mut e = editor("a\nb", 1, 1);
+        assert_eq!(e.take_for_clipboard(true), "b\n", "the last line too, with a line end");
+        assert_eq!(e.buffer.text(), "a", "and the line end before it goes");
+        let mut e = editor("abc", 0, 0);
+        e.select(Selection { anchor: Pos::new(0, 1), head: Pos::new(0, 2) });
+        assert_eq!(e.take_for_clipboard(true), "b", "a selection is cut as it is");
+        assert_eq!(e.buffer.text(), "ac");
+    }
+
+    #[test]
     fn line_actions_have_vs_codes_keys() {
         let action = |spec: &str| {
             let ks = Keystroke::parse(spec).unwrap();
