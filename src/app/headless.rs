@@ -1000,6 +1000,12 @@ fn quick_open_and_find_in_files_open_what_they_find() {
     h.press(rune::Key::Enter, |_| {});
     h.wait("opening the found file", |ws| ws.panes[&id].shown().is_some_and(|t| t.path.ends_with("code.rs")));
     assert_eq!(h.shown_tab(&id).unwrap().editor.caret().line, 1, "the caret is on the found line");
+    h.wait("colouring the Rust file", |ws| ws.panes[&id].shown().is_some_and(|t| t.editor.spans.len() == 3 && !t.editor.spans[1].is_empty()));
+    // Typing a new line moves the colours below it down with their lines until they are worked out again.
+    h.press(rune::Key::Home, |_| {});
+    h.press(rune::Key::Enter, |_| {});
+    let e = &h.shown_tab(&id).unwrap().editor;
+    assert!(e.spans.len() == 4 && !e.spans[2].is_empty(), "the colours follow their line: {:?}", e.spans);
 
     // Escape closes it and gives the editor back the keyboard.
     h.press(rune::Key::Command('p'), secondary);

@@ -25,6 +25,20 @@ url = "2.5.8"
 image = { version = "0.25", default-features = false, features = ["png", "bmp", "jpeg", "gif", "webp"] }
 ureq = "3.4.2"
 time = { version = "0.3.55", features = ["parsing"] }
+# Editor mode's syntax colours: the grammars of the languages `files::language` names, and their highlight queries.
+tree-sitter = "0.26"
+tree-sitter-highlight = "0.26"
+tree-sitter-bash = "0.23.3"
+tree-sitter-css = "0.23.2"
+tree-sitter-gleam = "1.0.0"
+tree-sitter-html = "0.23.2"
+tree-sitter-javascript = "0.23.1"
+tree-sitter-json = "0.24.8"
+tree-sitter-md = "0.5.4"
+tree-sitter-rust = "0.24.2"
+tree-sitter-toml-ng = "0.7.0"
+tree-sitter-typescript = "0.23.2"
+tree-sitter-yaml = "0.7.2"
 # How many cells a character takes in the editor (wide CJK and emoji take two).
 unicode-width = "0.2.2"
 uuid = { version = "1.27.0", features = ["v4"] }

@@ -441,8 +441,37 @@ impl Workspace {
         {
             animating = tab.editor.tick();
             changed |= std::mem::take(&mut tab.editor.dirty);
+            self.colour_shown();
         }
         (changed, animating)
+    }
+
+    /// Work out the shown file's colours off the UI thread when its text changed since they were, one run at a time:
+    /// edits made meanwhile are coloured by the next run.
+    fn colour_shown(&mut self) {
+        let Some(id) = self.active_id().cloned() else { return };
+        let Some(tab) = self.panes.get_mut(&id).and_then(|p| p.shown_mut()) else { return };
+        let Some(language) = tab.language else { return };
+        let e = &mut tab.editor;
+        let version = e.buffer.version();
+        if e.colouring || e.coloured == Some(version) {
+            return;
+        }
+        e.colouring = true;
+        let (key, text) = (e.key.clone(), e.buffer.text());
+        self.rt.spawn(
+            move || crate::editor::highlight::highlight(language, &text),
+            move |ws: &mut Workspace, spans| {
+                let Some(e) = ws.editor_mut(&key) else { return };
+                e.colouring = false;
+                // Colours for older text would put them a few letters off; the next frame asks again.
+                if e.buffer.version() == version {
+                    e.spans = spans.unwrap_or_default();
+                    e.coloured = Some(version);
+                    e.dirty = true;
+                }
+            },
+        );
     }
 
     /// Ctrl+click on a path in a session's terminal: open it in editor mode, at its line (from 1) when one was given.

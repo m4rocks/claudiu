@@ -1,9 +1,11 @@
 //! The text editor editor mode shows files in: one `Editor` per open file. It draws only the lines on screen, each
 //! row memoized on what it shows, so a file of tens of thousands of lines types and scrolls like a short one.
-//! Children: `buffer` (the text and its undo history), `keys` (what a key does), `element` (drawing and the mouse).
+//! Children: `buffer` (the text and its undo history), `keys` (what a key does), `element` (drawing and the mouse),
+//! `highlight` (syntax colours).
 
 pub mod buffer;
 mod element;
+pub mod highlight;
 mod keys;
 
 use std::ops::Range;
@@ -72,6 +74,9 @@ pub struct Editor {
     grain: Grain,
     /// Colours per line, from the highlighter; a line with none shows in the text colour.
     pub spans: Vec<Vec<Span>>,
+    /// The text version `spans` were worked out for, and whether the highlighter is at work.
+    pub coloured: Option<u64>,
+    pub colouring: bool,
     pub marks: Vec<(usize, Mark)>,
     pub problems: Vec<Problem>,
     /// The caret moved and must be scrolled into view once the editor knows its size.
@@ -101,6 +106,8 @@ impl Editor {
             marked: None,
             grain: Grain::Chars,
             spans: vec![],
+            coloured: None,
+            colouring: false,
             marks: vec![],
             problems: vec![],
             reveal: false,
@@ -120,7 +127,6 @@ impl Editor {
         let caret = self.sel.head;
         self.buffer = Buffer::new(text);
         self.sel = Selection::caret(self.buffer.clamp(caret));
-        self.spans.clear();
         self.edited = true;
         self.dirty = true;
     }
@@ -179,7 +185,9 @@ impl Editor {
 
     /// Replace `a..b` with `text` and put the caret after it.
     pub fn replace(&mut self, a: Pos, b: Pos, text: &str, typing: bool) {
+        let (a, b) = if a <= b { (a, b) } else { (b, a) };
         let end = self.buffer.replace(a, b, text, self.sel, typing);
+        move_colours(&mut self.spans, a, b, end);
         self.sel = Selection::caret(end);
         self.after_edit();
     }
@@ -190,8 +198,8 @@ impl Editor {
         self.reveal_caret();
         self.dirty = true;
         self.edited = true;
-        // The highlighter catches up after the edit; until then the edited lines keep colours that may be off by a few
-        // bytes, so they are clipped to the line rather than trusted.
+        // Undo and redo don't move colours (`move_colours`), so until the highlighter catches up some lines may keep
+        // colours a few letters off; drawing clips them to the line.
         self.spans.truncate(self.buffer.line_count());
     }
 
@@ -418,6 +426,41 @@ impl Editor {
     }
 }
 
+/// Keep the colours of text an edit moved (`a..b` replaced, the new text ending at `end`) with that text until the
+/// highlighter catches up: what was before `a` stays, what was after `b` moves to after `end`, a stretch the edit fell
+/// inside on one line grows or shrinks with it, and the new text has none.
+fn move_colours(spans: &mut Vec<Vec<Span>>, a: Pos, b: Pos, end: Pos) {
+    if a.line >= spans.len() {
+        return;
+    }
+    let none = vec![];
+    let after = spans.get(b.line).unwrap_or(&none);
+    let shift = |s: &Span| Span { bytes: s.bytes.start - b.col + end.col..s.bytes.end - b.col + end.col, color: s.color };
+    let mut first: Vec<Span> = vec![];
+    let mut last: Vec<Span> = vec![];
+    for s in &spans[a.line] {
+        if s.bytes.end <= a.col {
+            first.push(s.clone());
+        } else if a.line == b.line && end.line == a.line && s.bytes.start < a.col && s.bytes.end >= b.col {
+            // Typing inside a word keeps it coloured.
+            first.push(Span { bytes: s.bytes.start..s.bytes.end - b.col + end.col, color: s.color });
+        }
+    }
+    for s in after.iter().filter(|s| s.bytes.start >= b.col) {
+        last.push(shift(s));
+    }
+    let mut lines = vec![vec![]; end.line - a.line + 1];
+    if end.line == a.line {
+        first.extend(last);
+        lines[0] = first;
+    } else {
+        lines[0] = first;
+        lines[end.line - a.line] = last;
+    }
+    let old_end = (b.line + 1).min(spans.len());
+    spans.splice(a.line..old_end, lines);
+}
+
 /// The cells `text` takes from the start of a line.
 fn columns(text: &str) -> usize {
     text.chars().fold(0, |x, c| x + width(c, x))
@@ -442,6 +485,23 @@ mod tests {
         assert_eq!(e.at_column(1, 1), Pos::new(1, 0), "the near half of a wide character");
         assert_eq!(e.at_column(1, 2), Pos::new(1, 3));
         assert_eq!(e.at_column(0, 99), Pos::new(0, 3), "past the end is the end");
+    }
+
+    #[test]
+    fn colours_move_with_the_text_an_edit_moves() {
+        let c = |r: std::ops::Range<usize>| Span { bytes: r, color: Color::WHITE };
+        let mut e = Editor::new("e", "let word = 1;\nnext");
+        e.spans = vec![vec![c(0..3), c(4..8), c(11..12)], vec![c(0..4)]];
+        // Typing inside `word` keeps it coloured and moves what follows.
+        e.replace(Pos::new(0, 6), Pos::new(0, 6), "xx", true);
+        assert_eq!(e.spans, [vec![c(0..3), c(4..10), c(13..14)], vec![c(0..4)]]);
+        // A line break before `= 1;` takes its colours to the new line.
+        e.replace(Pos::new(0, 10), Pos::new(0, 10), "\n", false);
+        assert_eq!(e.spans, [vec![c(0..3), c(4..10)], vec![c(3..4)], vec![c(0..4)]]);
+        // Joining the lines again brings them back.
+        e.replace(Pos::new(0, 10), Pos::new(1, 0), "", false);
+        assert_eq!(e.spans, [vec![c(0..3), c(4..10), c(13..14)], vec![c(0..4)]]);
+        assert_eq!(e.buffer.text(), "let woxxrd = 1;\nnext");
     }
 
     #[test]
