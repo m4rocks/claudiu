@@ -154,11 +154,10 @@ impl Workspace {
         }
         self.update_picker();
         self.update_find();
-        let (edited, animating) = self.poll_editors();
+        let (edited, editor_next) = self.poll_editors();
         changed |= edited;
-        if animating {
-            let frame = Instant::now() + Duration::from_millis(16);
-            next = Some(next.map_or(frame, |n| n.min(frame)));
+        if let Some(at) = editor_next {
+            next = Some(next.map_or(at, |n| n.min(at)));
         }
         if let Some(at) = next {
             tx.wake_after(at.saturating_duration_since(Instant::now()).max(Duration::from_millis(1)));

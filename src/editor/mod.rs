@@ -14,6 +14,7 @@ mod pairs;
 mod search;
 
 use std::ops::Range;
+use std::time::{Duration, Instant};
 
 use rune::Color;
 
@@ -27,6 +28,12 @@ pub const TAB_WIDTH: usize = 4;
 const GUTTER_PAD: f32 = 14.0;
 /// The column right of the line numbers where a foldable block's chevron shows, as wide as gpui-kit's.
 const FOLD_W: f32 = 18.0;
+/// The caret blinks on and off this often, as in main's editor (gpui-kit's `BlinkCursor`)...
+const BLINK: Duration = Duration::from_millis(500);
+/// ...after staying on this long once it moves or the text changes.
+const BLINK_PAUSE: Duration = Duration::from_millis(300);
+/// The caret's width: gpui-kit's 1.5 points on macOS, and a whole 2 elsewhere so it isn't blurred.
+const CARET_W: f32 = if cfg!(target_os = "macos") { 1.5 } else { 2.0 };
 /// Lines kept between the caret and the top or bottom edge when the caret moves.
 const MARGIN_LINES: f32 = 3.0;
 
@@ -132,6 +139,9 @@ pub struct Editor {
     row_end: bool,
     /// The pointer is over the line numbers, where every fold chevron shows.
     pub gutter_hover: bool,
+    /// When the caret last moved or the text changed, which starts its blink over; and whether it shows.
+    blink_from: Instant,
+    caret_on: bool,
     /// The button went down on a fold chevron: the press folded or opened a block and selects nothing.
     pub pressed_fold: bool,
 }
@@ -174,6 +184,8 @@ impl Editor {
             row_end: false,
             gutter_hover: false,
             pressed_fold: false,
+            blink_from: Instant::now(),
+            caret_on: true,
         };
         e.relayout();
         e
@@ -231,6 +243,7 @@ impl Editor {
         self.sel = Selection { anchor: self.buffer.clamp(sel.anchor), head: self.buffer.clamp(sel.head) };
         self.goal = None;
         self.row_end = false;
+        self.wake_caret();
         // A caret sent into a folded block opens it, so it is never hidden.
         self.unfold_at(self.sel.head.line);
         self.buffer.break_typing();
@@ -258,6 +271,7 @@ impl Editor {
     fn after_edit(&mut self) {
         self.goal = None;
         self.row_end = false;
+        self.wake_caret();
         self.marked = None;
         self.reveal_caret();
         self.dirty = true;
@@ -507,7 +521,33 @@ impl Editor {
         };
         self.sel = sel;
         self.goal = None;
+        self.wake_caret();
         self.dirty = true;
+    }
+
+    // ---------------------------------------------------------------------------------------------- the caret's blink
+
+    /// The caret moved or the text changed: it shows, and starts blinking again after a pause.
+    fn wake_caret(&mut self) {
+        self.blink_from = Instant::now();
+        self.dirty |= !self.caret_on;
+        self.caret_on = true;
+    }
+
+    /// Whether the caret is in the on half of its blink.
+    pub fn caret_shown(&self) -> bool {
+        self.caret_on
+    }
+
+    /// Each frame while the editor has the keyboard in the active window: show or hide the caret for `now`, and
+    /// return when it next changes. Elsewhere it shows without blinking, so nothing wakes the app.
+    pub fn blink(&mut self, now: Instant, blinking: bool) -> Option<Instant> {
+        let (on, next) = if blinking { blink_at(now.saturating_duration_since(self.blink_from)) } else { (true, None) };
+        if on != self.caret_on {
+            self.caret_on = on;
+            self.dirty = true;
+        }
+        next.map(|wait| now + wait)
     }
 
     // ---------------------------------------------------------------------------------------------- the input method
@@ -536,6 +576,18 @@ impl Editor {
         let text = text.replace("\r\n", "\n").replace('\r', "\n");
         self.insert(&text, false);
     }
+}
+
+/// Whether the caret shows `since` its last move, and how long until that changes: on through the pause, then off
+/// and on for `BLINK` each, starting with off.
+fn blink_at(since: Duration) -> (bool, Option<Duration>) {
+    if since < BLINK_PAUSE {
+        return (true, Some(BLINK_PAUSE - since));
+    }
+    let blinking = since - BLINK_PAUSE;
+    let phase = blinking.as_millis() / BLINK.as_millis();
+    let into = Duration::from_millis((blinking.as_millis() % BLINK.as_millis()) as u64);
+    (phase % 2 == 1, Some(BLINK - into))
 }
 
 /// Keep the colours of text an edit moved (`a..b` replaced, the new text ending at `end`) with that text until the
@@ -597,6 +649,17 @@ mod tests {
         assert_eq!(e.at_column(1, 1), Pos::new(1, 0), "the near half of a wide character");
         assert_eq!(e.at_column(1, 2), Pos::new(1, 3));
         assert_eq!(e.at_column(0, 99), Pos::new(0, 3), "past the end is the end");
+    }
+
+    #[test]
+    fn the_caret_stays_on_through_the_pause_then_blinks_off_first() {
+        let ms = Duration::from_millis;
+        assert_eq!(blink_at(ms(0)), (true, Some(ms(300))));
+        assert_eq!(blink_at(ms(299)), (true, Some(ms(1))));
+        assert_eq!(blink_at(ms(300)), (false, Some(ms(500))));
+        assert_eq!(blink_at(ms(799)), (false, Some(ms(1))));
+        assert_eq!(blink_at(ms(800)), (true, Some(ms(500))));
+        assert_eq!(blink_at(ms(1300)), (false, Some(ms(500))));
     }
 
     #[test]

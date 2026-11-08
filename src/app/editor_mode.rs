@@ -3,6 +3,7 @@
 //! Saving and following changes on disk are in `editing.rs`; the pane is drawn by `panels/editor_pane.rs`.
 
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use super::editing::Conflict;
 use super::*;
@@ -507,18 +508,28 @@ impl Workspace {
         }
     }
 
-    /// Each frame: the shown editor's easing scroll moves on; whether it changed what shows, and wants another frame.
-    pub(super) fn poll_editors(&mut self) -> (bool, bool) {
+    /// Each frame: the shown editor's easing scroll moves on and its caret blinks. Whether that changed what shows,
+    /// and when the editor next needs a frame.
+    pub(super) fn poll_editors(&mut self) -> (bool, Option<Instant>) {
         let mut changed = false;
-        let mut animating = false;
+        let mut next = None;
+        let window_active = self.window_active;
+        let keys_to = self.keys_to.clone();
         if let Some(id) = self.active_id().filter(|_| self.editing()).cloned()
             && let Some(tab) = self.panes.get_mut(&id).and_then(|p| p.shown_mut())
         {
-            animating = tab.editor.tick();
+            let now = Instant::now();
+            if tab.editor.tick() {
+                next = Some(now + Duration::from_millis(16));
+            }
+            let blinking = window_active && keys_to.as_deref() == Some(tab.editor.key.as_str());
+            if let Some(at) = tab.editor.blink(now, blinking) {
+                next = Some(next.map_or(at, |n: Instant| n.min(at)));
+            }
             changed |= std::mem::take(&mut tab.editor.dirty);
             self.colour_shown();
         }
-        (changed, animating)
+        (changed, next)
     }
 
     /// Work out the shown file's colours and foldable blocks off the UI thread when its text changed since they were, one run at a time:

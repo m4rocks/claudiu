@@ -242,8 +242,13 @@ impl Editor {
                         .child(el().absolute(0.0, m.line_h - 2.0).size(width, 1.0).fill(fg)),
                 );
             }
-            let bar = el().absolute(x - 1.0, y).size(2.0, m.line_h);
-            body = body.child(if focused { bar.fill(theme::rgb(theme::ACCENT)).ime_cursor() } else { bar });
+            // The bar stays laid out while it blinks off, so the input method keeps its place.
+            let bar = el().absolute(x - super::CARET_W / 2.0, y).size(super::CARET_W, m.line_h);
+            body = body.child(match focused {
+                true if self.caret_on => bar.fill(theme::rgb(theme::ACCENT)).ime_cursor(),
+                true => bar.ime_cursor(),
+                false => bar,
+            });
         }
         let body_area = [(self.area[0] - gutter).max(0.0), self.area[1]];
         body = body.children(self.render_assist(m.cell_w, m.line_h, top_row, top, body_area));

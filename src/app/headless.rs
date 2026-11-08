@@ -1498,6 +1498,35 @@ fn a_long_line_wraps_and_a_block_folds_from_its_chevron() {
     assert!(h.drawn(&format!("{key}/l2")), "a second click shows them again");
 }
 
+/// The caret blinks while the editor has the keyboard, as in main's editor: on while it moves, then off and on every
+/// half second. Once the keyboard is elsewhere it stays on and nothing wakes the app for it.
+#[test]
+fn the_caret_blinks_only_while_the_editor_has_the_keyboard() {
+    let mut h = Harness::new(|_| vec![]);
+    let cwd = h.work.clone();
+    let file = cwd.join("blink.txt");
+    std::fs::write(&file, "one two\n").unwrap();
+    h.step(|ws| ws.new_claude(cwd.clone()));
+    let id = h.ws().active.clone().unwrap();
+    h.step(|ws| ws.toggle_editor());
+    h.step(|ws| ws.open_file(&id, file.clone(), None));
+    h.wait("opening", |ws| ws.panes[&id].shown().is_some());
+    h.step(|ws| ws.focus_pane());
+    h.press(rune::Key::Right, |_| {});
+    let shown = |h: &Harness| h.shown_tab(&id).unwrap().editor.caret_shown();
+    assert!(shown(&h), "on right after a move");
+    h.wait("the caret blinking off", |ws| ws.panes[&id].shown().is_some_and(|t| !t.editor.caret_shown()));
+    h.wait("and on again", |ws| ws.panes[&id].shown().is_some_and(|t| t.editor.caret_shown()));
+    h.wait("and off", |ws| ws.panes[&id].shown().is_some_and(|t| !t.editor.caret_shown()));
+    h.press(rune::Key::Right, |_| {});
+    assert!(shown(&h), "a move shows it at once");
+
+    let e = &mut h.rt.state.panes.get_mut(&id).unwrap().shown_mut().unwrap().editor;
+    let later = std::time::Instant::now() + Duration::from_secs(5);
+    assert_eq!(e.blink(later, false), None, "without the keyboard nothing is scheduled");
+    assert!(e.caret_shown());
+}
+
 /// Primary+F opens the search bar over the file: matches are counted and highlighted without moving the caret, Enter
 /// and Shift+Enter step through them, case can matter, the replace row replaces one or all as one undo step, and
 /// Escape gives the keyboard back to the editor.
