@@ -41,6 +41,7 @@ impl Editor {
         let opener = at;
         let closer = Pos::new(at.line, at.col + open.len_utf8());
         self.sel = Selection::caret(closer);
+        self.buffer.set_caret_after(self.sel);
         self.pairs.push((opener, closer));
         true
     }
@@ -81,14 +82,21 @@ impl Editor {
     }
 
     /// Whether `p` is inside a string or a comment, as the last colouring found. A comment runs to its line's end, so
-    /// the end of it counts; a string's closing quote ends it.
+    /// the end of it counts. A string's closing quote ends it, but a string still open at the line's end (unclosed, or
+    /// running on to the next line) holds the line's end too.
     pub(super) fn syntax_at(&self, p: Pos) -> Syntax {
         let Some(spans) = self.spans.get(p.line) else { return Syntax::Code };
+        let line = self.buffer.line(p.line);
+        let open_at_end = |s: &super::Span| {
+            let text = line.get(s.bytes.clone()).unwrap_or("");
+            let closed = text.len() >= 2 && text.chars().last().is_some_and(|c| matches!(c, '"' | '\'' | '`'));
+            s.bytes.end == line.len() && !closed
+        };
         spans
             .iter()
             .find(|s| match s.syntax {
                 Syntax::Code => false,
-                Syntax::String => s.bytes.start < p.col && p.col < s.bytes.end,
+                Syntax::String => s.bytes.start < p.col && (p.col < s.bytes.end || (p.col == s.bytes.end && open_at_end(s))),
                 Syntax::Comment => s.bytes.start < p.col && p.col <= s.bytes.end,
             })
             .map_or(Syntax::Code, |s| s.syntax)
@@ -170,6 +178,16 @@ mod tests {
         e.select(Selection::caret(Pos::new(0, 3)));
         assert!(e.type_paired("\""), "a quote closing the string steps over it");
         assert_eq!(e.caret(), Pos::new(0, 4));
+    }
+
+    #[test]
+    fn pair_redo_restores_interior_cursor() {
+        // gpui-kit's test of the same name.
+        let mut e = typed("", 0, "(");
+        e.undo();
+        assert_eq!((e.buffer.text().as_str(), e.caret()), ("", Pos::new(0, 0)));
+        e.redo();
+        assert_eq!((e.buffer.text().as_str(), e.caret()), ("()", Pos::new(0, 1)), "the caret is back between the pair");
     }
 
     #[test]

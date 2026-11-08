@@ -549,6 +549,122 @@ mod tests {
         assert_eq!(shown(&e), "x|b\nx|b");
     }
 
+    // Enter, indent, cut and paste: gpui-kit's tests of the same names in main's vendored gpui-base, which pass on
+    // main's GPUI build, with their text and expected values.
+
+    fn string_everywhere(e: &mut Editor) {
+        e.spans = (0..e.buffer.line_count())
+            .map(|l| vec![crate::editor::Span { bytes: 0..e.buffer.line(l).len(), color: rune::Color::WHITE, syntax: crate::editor::Syntax::String }])
+            .collect();
+    }
+
+    #[test]
+    fn enter_splits_brackets_and_redo_restores_the_inner_cursor() {
+        let mut e = editor("{|}");
+        e.newline();
+        assert_eq!(shown(&e), "{\n  |\n}");
+        type_text(&mut e, "x");
+        assert_eq!(shown(&e), "{\n  x|\n}");
+        let mut e = editor("{|}");
+        e.newline();
+        e.undo();
+        assert_eq!(shown(&e), "{|}");
+        e.redo();
+        assert_eq!(shown(&e), "{\n  |\n}");
+    }
+
+    #[test]
+    fn enter_smart_indent_after_brace_and_not_in_strings() {
+        let mut e = editor("fn main() {|");
+        e.newline();
+        assert_eq!(shown(&e), "fn main() {\n  |");
+        let mut e = editor("  x = {|");
+        string_everywhere(&mut e);
+        e.newline();
+        assert_eq!(shown(&e), "  x = {\n  |", "smart indent suppressed in strings");
+        let mut e = editor("{|}");
+        string_everywhere(&mut e);
+        e.newline();
+        assert_eq!(shown(&e), "{\n|}", "no split in strings");
+    }
+
+    #[test]
+    fn undo_manager_enter_is_atomic() {
+        let mut e = editor("|");
+        type_text(&mut e, "a");
+        e.newline();
+        type_text(&mut e, "b");
+        e.undo();
+        assert_eq!(e.buffer.text(), "a\n");
+        e.undo();
+        assert_eq!(e.buffer.text(), "a");
+        e.undo();
+        assert_eq!(e.buffer.text(), "");
+    }
+
+    #[test]
+    fn undo_manager_cut_and_repeated_pastes_are_distinct_transactions() {
+        let mut e = editor("|alpha beta gamma");
+        e.set_cursors(&[Selection { anchor: Pos::new(0, 6), head: Pos::new(0, 10) }]);
+        let cut = e.take_for_clipboard(true);
+        assert_eq!(e.buffer.text(), "alpha  gamma");
+        e.paste_text(&cut);
+        e.paste_text(&cut);
+        assert_eq!(e.buffer.text(), "alpha betabeta gamma");
+        e.undo();
+        assert_eq!(e.buffer.text(), "alpha beta gamma");
+        e.undo();
+        assert_eq!(e.buffer.text(), "alpha  gamma");
+        e.undo();
+        assert_eq!(e.buffer.text(), "alpha beta gamma");
+    }
+
+    #[test]
+    fn undo_manager_atomic_paste_isolated_from_typing() {
+        let mut e = editor("|");
+        type_text(&mut e, "a");
+        e.paste_text("P");
+        type_text(&mut e, "b");
+        assert_eq!(e.buffer.text(), "aPb");
+        e.undo();
+        assert_eq!(e.buffer.text(), "aP");
+        e.undo();
+        assert_eq!(e.buffer.text(), "a");
+        e.undo();
+        assert_eq!(e.buffer.text(), "");
+    }
+
+    #[test]
+    fn inline_outdent_only_removes_line_indentation() {
+        let mut e = editor("1|2\n1|2");
+        e.each_cursor(|e| e.tab());
+        assert_eq!(shown(&e), "1  |2\n1  |2");
+        e.each_cursor(|e| e.outdent());
+        assert_eq!(shown(&e), "1  |2\n1  |2");
+        let mut e = editor("  1|2\n  1|2");
+        e.each_cursor(|e| e.outdent());
+        assert_eq!(shown(&e), "1|2\n1|2");
+    }
+
+    #[test]
+    fn block_outdent_clamps_cursor_inside_indent_and_indent_tracks_edits() {
+        let mut e = editor("ab\n | cd");
+        e.outdent();
+        assert_eq!(shown(&e), "ab\n|cd");
+        let mut e = editor("|ab\n|cd\n|ef");
+        e.each_cursor(|e| e.indent_lines());
+        assert_eq!(shown(&e), "  |ab\n  |cd\n  |ef");
+        e.each_cursor(|e| e.outdent());
+        assert_eq!(shown(&e), "|ab\n|cd\n|ef");
+    }
+
+    #[test]
+    fn outdent_unindented_unicode_is_unchanged() {
+        let mut e = editor("|你好\n|世界");
+        e.each_cursor(|e| e.outdent());
+        assert_eq!(shown(&e), "|你好\n|世界");
+    }
+
     #[test]
     fn multi_cursor_word_movement() {
         let mut e = editor("on|e two three\none t|wo three\non|e two three");

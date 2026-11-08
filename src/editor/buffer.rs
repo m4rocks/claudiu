@@ -233,6 +233,16 @@ impl Buffer {
         }
     }
 
+    /// The last step left the caret at `sel` rather than after its text (between brackets the editor closed, inside a
+    /// block Enter opened), so redo puts it back there.
+    pub fn set_caret_after(&mut self, sel: Selection) {
+        if self.group.is_none()
+            && let Some(step) = self.undo.last_mut()
+        {
+            step.after = vec![sel];
+        }
+    }
+
     /// Ends the typing run, so the next keystroke starts a new undo step (the caret moved, or the file was saved).
     pub fn break_typing(&mut self) {
         if let Some(step) = self.undo.last_mut() {

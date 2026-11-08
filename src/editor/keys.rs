@@ -341,6 +341,7 @@ impl Editor {
             let text = format!("{inner}\n{indent}");
             self.replace(a, b, &text, false);
             self.sel = Selection::caret(Pos::new(a.line + 1, inner.len() - 1));
+            self.buffer.set_caret_after(self.sel);
             return;
         }
         let text = if opens { format!("\n{indent}{unit}") } else { format!("\n{indent}") };
