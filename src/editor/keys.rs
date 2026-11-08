@@ -50,6 +50,14 @@ impl Editor {
             self.requests.push(super::assist::Request::Definition(self.sel.head));
             return true;
         }
+        // Emacs keys that macOS text fields share: Ctrl+A and Ctrl+E go to the line's ends.
+        if MAC && m.control && !m.platform && !m.alt && matches!(key, "a" | "e") {
+            let p = self.sel.head;
+            let target = if key == "a" { self.home(p) } else { Pos::new(p.line, self.buffer.line(p.line).len()) };
+            let anchor = if shift { self.sel.anchor } else { target };
+            self.select(Selection { anchor, head: target });
+            return true;
+        }
         if let Some(action) = line_action(&m, key) {
             self.edit_lines(action);
             return true;
@@ -79,6 +87,14 @@ impl Editor {
                 }
                 ("z", false) => {
                     self.undo();
+                    true
+                }
+                ("]", false) => {
+                    self.indent_lines();
+                    true
+                }
+                ("[", false) => {
+                    self.outdent();
                     true
                 }
                 ("z", true) | ("y", false) => {
@@ -111,7 +127,9 @@ impl Editor {
             }
             _ => match typed(ks) {
                 Some(text) => {
-                    self.insert(&text, true);
+                    if !self.type_paired(&text) {
+                        self.insert(&text, true);
+                    }
                     true
                 }
                 None => false,
@@ -193,6 +211,9 @@ impl Editor {
         if !self.sel.is_empty() {
             return self.insert("", false);
         }
+        if !by_word && !to_start && let Some((a, b)) = self.pair_around_caret() {
+            return self.replace(a, b, "", true);
+        }
         let p = self.sel.head;
         let from = if to_start {
             Pos::new(p.line, 0)
@@ -258,6 +279,12 @@ impl Editor {
             let col = self.column(self.sel.range().0);
             return self.insert(&" ".repeat(TAB_WIDTH - col % TAB_WIDTH), false);
         }
+        self.indent_lines();
+    }
+
+    /// A level of indentation onto every selected line, or the caret's (Primary+], and Tab over several lines).
+    fn indent_lines(&mut self) {
+        let (first, last) = self.selected_lines();
         self.reindent(first, last, |line| Some(format!("{}{line}", " ".repeat(TAB_WIDTH))));
     }
 
@@ -425,6 +452,17 @@ mod tests {
         e.select(Selection { anchor: Pos::new(0, 1), head: Pos::new(0, 2) });
         assert_eq!(e.take_for_clipboard(true), "b", "a selection is cut as it is");
         assert_eq!(e.buffer.text(), "ac");
+    }
+
+    #[test]
+    fn brackets_indent_and_outdent_the_caret_line_wherever_the_caret_is() {
+        let mut e = editor("a\n  b", 1, 3);
+        e.indent_lines();
+        assert_eq!(e.buffer.text(), "a\n      b");
+        assert_eq!(e.caret(), Pos::new(1, 7), "the caret stays on its letter");
+        e.outdent();
+        e.outdent();
+        assert_eq!(e.buffer.text(), "a\nb");
     }
 
     #[test]

@@ -8,7 +8,7 @@ use std::sync::OnceLock;
 use rune::Color;
 use tree_sitter_highlight::{HighlightConfiguration, HighlightEvent, Highlighter};
 
-use super::Span;
+use super::{Span, Syntax};
 use crate::panels::theme;
 
 /// The names the highlight queries use that get a colour, and the colour. A query's longer name takes the colour of
@@ -115,7 +115,9 @@ pub fn highlight(language: &str, text: &str) -> Option<Vec<Vec<Span>>> {
             }
             HighlightEvent::Source { start, end } => {
                 let Some(&h) = stack.last() else { continue };
-                let color = theme::rgb(COLOURS[h].1);
+                let (name, colour) = COLOURS[h];
+                let color = theme::rgb(colour);
+                let syntax = if name.starts_with("string") { Syntax::String } else if name == "comment" { Syntax::Comment } else { Syntax::Code };
                 // A piece across line breaks (a block comment) is cut at each.
                 let mut line = starts.partition_point(|&s| s <= start) - 1;
                 let mut from = start;
@@ -123,7 +125,7 @@ pub fn highlight(language: &str, text: &str) -> Option<Vec<Vec<Span>>> {
                     let line_end = starts.get(line + 1).map_or(text.len(), |s| s - 1);
                     let to = end.min(line_end);
                     if to > from {
-                        push(&mut lines[line], from - starts[line]..to - starts[line], color);
+                        push(&mut lines[line], from - starts[line]..to - starts[line], color, syntax);
                     }
                     line += 1;
                     match starts.get(line) {
@@ -138,10 +140,10 @@ pub fn highlight(language: &str, text: &str) -> Option<Vec<Vec<Span>>> {
 }
 
 /// Add a coloured stretch to a line, joined to the one before when it continues it in the same colour.
-fn push(line: &mut Vec<Span>, bytes: std::ops::Range<usize>, color: Color) {
+fn push(line: &mut Vec<Span>, bytes: std::ops::Range<usize>, color: Color, syntax: Syntax) {
     match line.last_mut() {
-        Some(last) if last.bytes.end == bytes.start && last.color == color => last.bytes.end = bytes.end,
-        _ => line.push(Span { bytes, color }),
+        Some(last) if last.bytes.end == bytes.start && last.color == color && last.syntax == syntax => last.bytes.end = bytes.end,
+        _ => line.push(Span { bytes, color, syntax }),
     }
 }
 
@@ -195,8 +197,8 @@ mod tests {
         let code = "/* one\ntwo */ let x = 1;";
         let lines = highlight("rust", code).unwrap();
         let comment = theme::rgb(0x7f848e);
-        assert_eq!(lines[0], [Span { bytes: 0..6, color: comment }]);
-        assert_eq!(lines[1][0], Span { bytes: 0..6, color: comment });
+        assert_eq!(lines[0], [Span { bytes: 0..6, color: comment, syntax: Syntax::Comment }]);
+        assert_eq!(lines[1][0], Span { bytes: 0..6, color: comment, syntax: Syntax::Comment });
         assert!(lines[1].iter().all(|s| s.bytes.end <= "two */ let x = 1;".len()));
         assert!(highlight("cobol", code).is_none());
     }

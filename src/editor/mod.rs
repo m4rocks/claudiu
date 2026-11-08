@@ -9,6 +9,7 @@ mod element;
 pub mod highlight;
 mod keys;
 pub mod lines;
+mod pairs;
 
 use std::ops::Range;
 
@@ -30,6 +31,17 @@ const MARGIN_LINES: f32 = 3.0;
 pub struct Span {
     pub bytes: Range<usize>,
     pub color: Color,
+    /// What the highlighter named it: brackets and quotes typed inside a string or comment don't pair (`pairs`).
+    pub syntax: Syntax,
+}
+
+/// Whether a stretch of text is code, or the inside of a string or a comment.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Syntax {
+    #[default]
+    Code,
+    String,
+    Comment,
 }
 
 /// How a line differs from the last commit, drawn as a bar beside its number.
@@ -99,6 +111,8 @@ pub struct Editor {
     hover_serial: u64,
     pub hover: Option<assist::HoverCard>,
     pub completion: Option<assist::Completion>,
+    /// Brackets and quotes the editor closed for the user, as where the opener and the closer are (`pairs`).
+    pairs: Vec<(Pos, Pos)>,
 }
 
 impl Editor {
@@ -129,6 +143,7 @@ impl Editor {
             hover_serial: 0,
             hover: None,
             completion: None,
+            pairs: vec![],
         }
     }
 
@@ -203,6 +218,7 @@ impl Editor {
         let (a, b) = if a <= b { (a, b) } else { (b, a) };
         let end = self.buffer.replace(a, b, text, self.sel, typing);
         move_colours(&mut self.spans, a, b, end);
+        self.adjust_pairs(a, b, end);
         self.sel = Selection::caret(end);
         self.after_edit();
     }
@@ -219,6 +235,8 @@ impl Editor {
     }
 
     pub fn undo(&mut self) {
+        // History doesn't keep which closers were typed for the user.
+        self.pairs.clear();
         if let Some(sel) = self.buffer.undo() {
             self.sel = Selection { anchor: self.buffer.clamp(sel.anchor), head: self.buffer.clamp(sel.head) };
             self.after_edit();
@@ -226,6 +244,7 @@ impl Editor {
     }
 
     pub fn redo(&mut self) {
+        self.pairs.clear();
         if let Some(sel) = self.buffer.redo() {
             self.sel = Selection { anchor: self.buffer.clamp(sel.anchor), head: self.buffer.clamp(sel.head) };
             self.after_edit();
@@ -463,7 +482,7 @@ fn move_colours(spans: &mut Vec<Vec<Span>>, a: Pos, b: Pos, end: Pos) {
     }
     let none = vec![];
     let after = spans.get(b.line).unwrap_or(&none);
-    let shift = |s: &Span| Span { bytes: s.bytes.start - b.col + end.col..s.bytes.end - b.col + end.col, color: s.color };
+    let shift = |s: &Span| Span { bytes: s.bytes.start - b.col + end.col..s.bytes.end - b.col + end.col, ..s.clone() };
     let mut first: Vec<Span> = vec![];
     let mut last: Vec<Span> = vec![];
     for s in &spans[a.line] {
@@ -471,7 +490,7 @@ fn move_colours(spans: &mut Vec<Vec<Span>>, a: Pos, b: Pos, end: Pos) {
             first.push(s.clone());
         } else if a.line == b.line && end.line == a.line && s.bytes.start < a.col && s.bytes.end >= b.col {
             // Typing inside a word keeps it coloured.
-            first.push(Span { bytes: s.bytes.start..s.bytes.end - b.col + end.col, color: s.color });
+            first.push(Span { bytes: s.bytes.start..s.bytes.end - b.col + end.col, ..s.clone() });
         }
     }
     for s in after.iter().filter(|s| s.bytes.start >= b.col) {
@@ -517,7 +536,7 @@ mod tests {
 
     #[test]
     fn colours_move_with_the_text_an_edit_moves() {
-        let c = |r: std::ops::Range<usize>| Span { bytes: r, color: Color::WHITE };
+        let c = |r: std::ops::Range<usize>| Span { bytes: r, color: Color::WHITE, syntax: Syntax::Code };
         let mut e = Editor::new("e", "let word = 1;\nnext");
         e.spans = vec![vec![c(0..3), c(4..8), c(11..12)], vec![c(0..4)]];
         // Typing inside `word` keeps it coloured and moves what follows.
