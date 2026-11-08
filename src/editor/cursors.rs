@@ -665,6 +665,224 @@ mod tests {
         assert_eq!(shown(&e), "|你好\n|世界");
     }
 
+    // gpui-kit's undo manager tests (main's vendored gpui-base), with their keystrokes and expected text.
+
+    fn key_type(e: &mut Editor, text: &str) {
+        if !e.type_paired(text) {
+            e.insert(text, true);
+        }
+    }
+
+    fn undo_to(e: &mut Editor, expected: &[&str]) {
+        for want in expected {
+            e.undo();
+            assert_eq!(e.buffer.text(), *want);
+        }
+    }
+
+    #[test]
+    fn undo_manager_coalesces_adjacent_typing_and_long_unicode_typing_without_a_timer() {
+        let mut e = editor("|");
+        for part in ["The ", "quick ", "brown fox, ", "你好，世界 ", "🦀 jumps over 13 lazy dogs."] {
+            key_type(&mut e, part);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        undo_to(&mut e, &[""]);
+        e.redo();
+        assert_eq!(e.buffer.text(), "The quick brown fox, 你好，世界 🦀 jumps over 13 lazy dogs.");
+    }
+
+    #[test]
+    fn undo_manager_cursor_movement_splits_typing() {
+        let mut e = editor("|");
+        key_type(&mut e, "a");
+        key_type(&mut e, "b");
+        e.select(Selection::caret(e.prev_visible(e.sel.head)));
+        key_type(&mut e, "x");
+        assert_eq!(e.buffer.text(), "axb");
+        undo_to(&mut e, &["ab", ""]);
+    }
+
+    #[test]
+    fn undo_manager_splits_backward_and_forward_delete() {
+        let mut e = editor("ab|cd");
+        e.backspace(false, false);
+        e.delete_forward(false, false);
+        assert_eq!(e.buffer.text(), "ad");
+        undo_to(&mut e, &["acd", "abcd"]);
+    }
+
+    #[test]
+    fn undo_manager_coalesces_directional_character_deletes() {
+        let mut e = editor("abcd|");
+        e.backspace(false, false);
+        e.backspace(false, false);
+        assert_eq!(e.buffer.text(), "ab");
+        undo_to(&mut e, &["abcd"]);
+        assert_eq!(e.caret(), Pos::new(0, 4));
+        let mut e = editor("a|bcd");
+        e.delete_forward(false, false);
+        e.delete_forward(false, false);
+        assert_eq!(e.buffer.text(), "ad");
+        undo_to(&mut e, &["abcd"]);
+        assert_eq!(e.caret(), Pos::new(0, 1));
+    }
+
+    #[test]
+    fn undo_manager_keeps_rapid_lines_in_distinct_transactions() {
+        let mut e = editor("|");
+        key_type(&mut e, "a");
+        e.newline();
+        key_type(&mut e, "b");
+        e.newline();
+        key_type(&mut e, "c");
+        assert_eq!(e.buffer.text(), "a\nb\nc");
+        undo_to(&mut e, &["a\nb\n", "a\nb", "a\n", "a", ""]);
+    }
+
+    #[test]
+    fn undo_manager_word_and_line_deletes_do_not_coalesce() {
+        let mut e = editor("one two three|\nfour five");
+        e.backspace(true, false);
+        assert_eq!(e.buffer.text(), "one two \nfour five");
+        e.delete_forward(false, true);
+        e.delete_forward(false, false);
+        assert_eq!(e.buffer.text(), "one two four five");
+        undo_to(&mut e, &["one two \nfour five", "one two three\nfour five"]);
+    }
+
+    #[test]
+    fn undo_manager_selected_replacement_is_atomic_and_restored() {
+        let mut e = editor("abc|");
+        e.set_cursors(&[Selection { anchor: Pos::new(0, 1), head: Pos::new(0, 2) }]);
+        key_type(&mut e, "X");
+        key_type(&mut e, "z");
+        assert_eq!(e.buffer.text(), "aXzc");
+        undo_to(&mut e, &["aXc", "abc"]);
+        assert_eq!(e.sel, Selection { anchor: Pos::new(0, 1), head: Pos::new(0, 2) }, "undo brings the selection back");
+        e.redo();
+        assert_eq!((e.buffer.text().as_str(), e.caret()), ("aXc", Pos::new(0, 2)));
+    }
+
+    #[test]
+    fn undo_manager_noop_edit_breaks_coalescing_and_preserves_redo() {
+        let mut e = editor("|");
+        key_type(&mut e, "alpha");
+        e.insert("", true);
+        key_type(&mut e, "beta");
+        assert_eq!(e.buffer.text(), "alphabeta");
+        undo_to(&mut e, &["alpha", ""]);
+        let mut e = editor("a|bc");
+        key_type(&mut e, "X");
+        e.select(Selection::caret(Pos::default()));
+        e.insert("", false);
+        e.undo();
+        e.redo();
+        assert_eq!((e.buffer.text().as_str(), e.caret()), ("aXbc", Pos::new(0, 2)), "the no-op left redo alone");
+    }
+
+    #[test]
+    fn undo_manager_selection_movement_preserves_redo() {
+        let mut e = editor("|");
+        key_type(&mut e, "ab");
+        e.undo();
+        e.select(Selection::caret(Pos::default()));
+        e.redo();
+        assert_eq!(e.buffer.text(), "ab");
+        e.undo();
+        key_type(&mut e, "x");
+        e.redo();
+        assert_eq!(e.buffer.text(), "x");
+    }
+
+    #[test]
+    fn undo_manager_paste_and_composition_stand_alone() {
+        let mut e = editor("|");
+        key_type(&mut e, "a");
+        e.paste_text("P");
+        key_type(&mut e, "b");
+        assert_eq!(e.buffer.text(), "aPb");
+        undo_to(&mut e, &["aP", "a", ""]);
+        // An input method composes `ni` into 你; typing after it is its own step.
+        let mut e = editor("|");
+        e.ime(&rune::Ime::Preedit("n".into(), None));
+        e.ime(&rune::Ime::Preedit("ni".into(), None));
+        e.ime(&rune::Ime::Commit("你".into()));
+        key_type(&mut e, "a");
+        key_type(&mut e, "b");
+        assert_eq!(e.buffer.text(), "你ab");
+        undo_to(&mut e, &["你", ""]);
+        e.redo();
+        assert_eq!(e.buffer.text(), "你");
+    }
+
+    #[test]
+    fn word_delete_undo_restores_caret() {
+        let mut e = editor("hello|");
+        e.backspace(true, false);
+        e.undo();
+        assert_eq!(e.caret(), Pos::new(0, 5));
+    }
+
+    // gpui-kit's auto-close tests.
+
+    #[test]
+    fn auto_close_pairs_skips_and_undoes_as_one() {
+        let mut e = editor("|");
+        key_type(&mut e, "(");
+        assert_eq!(shown(&e), "(|)");
+        key_type(&mut e, "x");
+        assert_eq!(shown(&e), "(x|)");
+        let mut e = editor("(|)");
+        key_type(&mut e, ")");
+        assert_eq!(shown(&e), "()|");
+        let mut e = editor("don|");
+        key_type(&mut e, "'");
+        assert_eq!(shown(&e), "don'|");
+        let mut e = editor("中|");
+        key_type(&mut e, "'");
+        assert_eq!(shown(&e), "中'|", "CJK counts as a word");
+        let mut e = editor("\"hello|\"");
+        key_type(&mut e, "\"");
+        assert_eq!(shown(&e), "\"hello\"|");
+        let mut e = editor("|");
+        key_type(&mut e, "(");
+        e.undo();
+        assert_eq!(shown(&e), "|", "one undo removes the pair");
+        let mut e = editor("(a|)");
+        key_type(&mut e, "b");
+        key_type(&mut e, ")");
+        assert_eq!(shown(&e), "(ab)|");
+        e.undo();
+        assert_eq!(shown(&e), "(a|)", "stepping over records nothing");
+    }
+
+    #[test]
+    fn auto_close_backspace_and_comments() {
+        let mut e = editor("中(|)abc");
+        e.backspace(false, false);
+        assert_eq!(shown(&e), "中|abc");
+        let mut e = editor("{|}");
+        e.backspace(false, false);
+        assert_eq!(shown(&e), "|");
+        let mut e = editor("{d|}");
+        e.backspace(false, false);
+        assert_eq!(shown(&e), "{|}");
+        let comment = |e: &mut Editor| {
+            e.spans = vec![vec![crate::editor::Span { bytes: 0..e.buffer.line(0).len(), color: rune::Color::WHITE, syntax: crate::editor::Syntax::Comment }]];
+        };
+        // A blank line inside a block comment, which the highlighter leaves without colours.
+        let mut e = editor("/*\n|\n*/");
+        let span = |bytes| crate::editor::Span { bytes, color: rune::Color::WHITE, syntax: crate::editor::Syntax::Comment };
+        e.spans = vec![vec![span(0..2)], vec![], vec![span(0..2)]];
+        key_type(&mut e, "(");
+        assert_eq!(shown(&e), "/*\n(|\n*/", "in a comment every character is literal");
+        let mut e = editor("// (|)");
+        comment(&mut e);
+        key_type(&mut e, ")");
+        assert_eq!(shown(&e), "// ()|)", "a closer in a comment is typed, not stepped over");
+    }
+
     #[test]
     fn multi_cursor_word_movement() {
         let mut e = editor("on|e two three\none t|wo three\non|e two three");

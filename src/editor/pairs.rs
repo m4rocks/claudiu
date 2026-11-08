@@ -86,6 +86,9 @@ impl Editor {
     /// running on to the next line) holds the line's end too.
     pub(super) fn syntax_at(&self, p: Pos) -> Syntax {
         let Some(spans) = self.spans.get(p.line) else { return Syntax::Code };
+        if spans.is_empty() {
+            return self.syntax_between(p.line);
+        }
         let line = self.buffer.line(p.line);
         let open_at_end = |s: &super::Span| {
             let text = line.get(s.bytes.clone()).unwrap_or("");
@@ -100,6 +103,28 @@ impl Editor {
                 Syntax::Comment => s.bytes.start < p.col && p.col <= s.bytes.end,
             })
             .map_or(Syntax::Code, |s| s.syntax)
+    }
+
+    /// A line the highlighter left without colours (a blank line, say) is inside a block comment or a string when the
+    /// nearest coloured lines above and below are that comment or string running across it: the one above ends its line
+    /// in it and the one below starts in it. Looks a little way only.
+    fn syntax_between(&self, line: usize) -> Syntax {
+        const NEAR: usize = 50;
+        let above = (line.saturating_sub(NEAR)..line).rev().find_map(|l| self.spans.get(l).and_then(|s| s.last()).map(|s| (l, s)));
+        let below = (line + 1..(line + NEAR).min(self.spans.len())).find_map(|l| self.spans.get(l).and_then(|s| s.first()));
+        let Some(((l, a), b)) = above.zip(below) else { return Syntax::Code };
+        let text = self.buffer.line(l).get(a.bytes.clone()).unwrap_or("");
+        let runs_on = match a.syntax {
+            Syntax::Code => false,
+            // A line comment (`//`, `#`, `;`) ends with its line, and a block comment may close on it.
+            Syntax::Comment => {
+                let t = text.trim_start();
+                let line_comment = t.starts_with("//") || t.starts_with('#') || t.starts_with(';');
+                !line_comment && !t.ends_with("*/") && !t.ends_with("-->")
+            }
+            Syntax::String => !(text.len() >= 2 && text.ends_with(['"', '\'', '`'])),
+        };
+        if runs_on && a.syntax == b.syntax && a.bytes.end == self.buffer.line(l).len() && b.bytes.start == 0 { a.syntax } else { Syntax::Code }
     }
 
     /// Keep the pairs the editor closed in step with an edit that replaced `a..b` and ended at `end`. An edit between
@@ -188,6 +213,20 @@ mod tests {
         assert_eq!((e.buffer.text().as_str(), e.caret()), ("", Pos::new(0, 0)));
         e.redo();
         assert_eq!((e.buffer.text().as_str(), e.caret()), ("()", Pos::new(0, 1)), "the caret is back between the pair");
+    }
+
+    #[test]
+    fn a_blank_line_is_inside_a_block_comment_but_not_between_line_comments() {
+        let span = |bytes, syntax| Span { bytes, color: rune::Color::WHITE, syntax };
+        let mut e = Editor::new("e", "/* a\n\n b */");
+        e.spans = vec![vec![span(0..4, Syntax::Comment)], vec![], vec![span(0..5, Syntax::Comment)]];
+        assert_eq!(e.syntax_at(Pos::new(1, 0)), Syntax::Comment);
+        let mut e = Editor::new("e", "// a\n\n// b");
+        e.spans = vec![vec![span(0..4, Syntax::Comment)], vec![], vec![span(0..4, Syntax::Comment)]];
+        assert_eq!(e.syntax_at(Pos::new(1, 0)), Syntax::Code);
+        let mut e = Editor::new("e", "/* a */\n\n/* b */");
+        e.spans = vec![vec![span(0..7, Syntax::Comment)], vec![], vec![span(0..7, Syntax::Comment)]];
+        assert_eq!(e.syntax_at(Pos::new(1, 0)), Syntax::Code, "both comments closed on their lines");
     }
 
     #[test]

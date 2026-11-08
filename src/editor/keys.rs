@@ -253,7 +253,7 @@ impl Editor {
 
     /// End: the end of the row the caret shows on, and from there the end of the line. Also whether that is the end
     /// of a row that wraps, where the caret shows.
-    fn end(&self, p: Pos) -> (Pos, bool) {
+    pub(super) fn end(&self, p: Pos) -> (Pos, bool) {
         let row = self.row_bytes(p.line, self.shown_row(p));
         let line_end = self.buffer.line(p.line).len();
         if p.col == row.end { (Pos::new(p.line, line_end), false) } else { (Pos::new(p.line, row.end), row.end < line_end) }
@@ -316,7 +316,8 @@ impl Editor {
             self.next_visible(p)
         };
         if to != p {
-            self.replace(p, to, "", false);
+            // A character at a time joins a run of deletes; a word or the rest of the line stands alone.
+            self.replace(p, to, "", !by_word && !to_end);
         }
     }
 

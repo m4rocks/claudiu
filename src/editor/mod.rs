@@ -587,9 +587,10 @@ impl Editor {
                 true
             }
             rune::Ime::Commit(text) => {
-                self.marked = None;
+                // A composition undoes as one step of its own, as in gpui-kit; text committed without one is typing.
+                let composed = self.marked.take().is_some();
                 if !text.is_empty() {
-                    self.insert(text, true);
+                    self.insert(text, !composed);
                 }
                 self.dirty = true;
                 true

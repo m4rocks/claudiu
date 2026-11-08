@@ -1,7 +1,6 @@
 //! The text an editor holds, as lines without their line breaks, and the edits made to it with their undo history.
 //! Positions are a line and a byte offset in it, always on a character boundary. Pure data: no UI, no files.
 
-use std::time::{Duration, Instant};
 
 /// A place in the text: `line` from 0, `col` a byte offset into that line.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -53,15 +52,21 @@ struct Step {
     edits: Vec<Edit>,
     before: Vec<Selection>,
     after: Vec<Selection>,
-    /// A run of typing grows this step while the user keeps typing (see `Buffer::replace`).
-    typing: bool,
-    at: Instant,
+    /// A run of typing, of Backspace or of Delete grows this step while it goes on (see `Buffer::replace`); `None`
+    /// for an edit that stands alone.
+    run: Option<Run>,
     /// Names the text this step leaves behind, so undoing back to the saved text counts as unchanged.
     id: u64,
 }
 
-/// Typing within this long of the last keystroke undoes together with it.
-const TYPING_PAUSE: Duration = Duration::from_millis(1000);
+/// What a run of keystrokes that undo takes back together is doing. As in gpui-kit's undo manager, typing,
+/// deleting backwards and deleting forwards each make runs of their own, however long the pauses between keys.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Run {
+    Typing,
+    Backspace,
+    Delete,
+}
 
 pub struct Buffer {
     lines: Vec<String>,
@@ -176,19 +181,29 @@ impl Buffer {
     }
 
     /// Replace the text between `a` and `b` with `text`, as one undoable step from `before` to the caret after it.
-    /// `typing` joins it to the previous step when that was typing too, ended where this begins, and came moments
-    /// ago, so undo takes back a typed word rather than a letter.
+    /// A keystroke (`typing`) joins the step before when both type, both delete backwards or both delete forwards,
+    /// and the caret hasn't moved between them, so undo takes back a typed run rather than a letter. A line break, or
+    /// typing over a selection, stands alone. Replacing nothing with nothing changes nothing and only ends the run,
+    /// as in gpui-kit.
     pub fn replace(&mut self, a: Pos, b: Pos, text: &str, before: Selection, typing: bool) -> Pos {
         let (a, b) = if a <= b { (a, b) } else { (b, a) };
         let (a, b) = (self.clamp(a), self.clamp(b));
+        if a == b && text.is_empty() {
+            self.break_typing();
+            return a;
+        }
+        let run = match () {
+            _ if !typing || text.contains('\n') || !before.is_empty() => None,
+            _ if a == b => Some(Run::Typing),
+            _ if text.is_empty() && b == before.head => Some(Run::Backspace),
+            _ if text.is_empty() && a == before.head => Some(Run::Delete),
+            _ => None,
+        };
         let removed = self.slice(a, b);
         let end = self.splice(a, b, text);
         let edit = Edit { at: a, removed, inserted: text.to_string() };
         let after = vec![Selection::caret(end)];
         self.redo.clear();
-        let now = Instant::now();
-        // A new line is a step of its own, neither joining the typing before it nor letting the next keystroke join it.
-        let typing = typing && !text.contains('\n');
         // In a group, every replacement after the first goes into the step the first made or joined.
         let in_group = self.group.as_ref().is_some_and(|g| g.started);
         let before = match &mut self.group {
@@ -198,22 +213,19 @@ impl Buffer {
             }
             None => vec![before],
         };
-        let joins = in_group
-            || typing
-                && self.undo.last().is_some_and(|s| {
-                    s.typing && s.after == before && before.iter().all(Selection::is_empty) && now.duration_since(s.at) < TYPING_PAUSE
-                });
+        let joins = in_group || run.is_some() && self.undo.last().is_some_and(|s| s.run == run && s.after == before && before.iter().all(Selection::is_empty));
         match self.undo.last_mut() {
             Some(step) if joins => {
-                step.typing &= typing;
+                if step.run != run {
+                    step.run = None;
+                }
                 step.edits.push(edit);
                 step.after = after;
-                step.at = now;
             }
             _ => {
                 let id = self.next_id;
                 self.next_id += 1;
-                self.undo.push(Step { edits: vec![edit], before, after, typing, at: now, id });
+                self.undo.push(Step { edits: vec![edit], before, after, run, id });
             }
         }
         end
@@ -246,7 +258,7 @@ impl Buffer {
     /// Ends the typing run, so the next keystroke starts a new undo step (the caret moved, or the file was saved).
     pub fn break_typing(&mut self) {
         if let Some(step) = self.undo.last_mut() {
-            step.typing = false;
+            step.run = None;
         }
     }
 
@@ -272,7 +284,7 @@ impl Buffer {
             let new_end = self.splice(e.at, end, &e.inserted);
             self.changed.push((e.at, end, new_end));
         }
-        step.typing = false;
+        step.run = None;
         let after = step.after.clone();
         self.undo.push(step);
         Some(after)

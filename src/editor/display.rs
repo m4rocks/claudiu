@@ -394,6 +394,38 @@ mod tests {
     }
 
     #[test]
+    fn shift_end_respects_soft_wrap_end() {
+        // gpui-kit's test of the same name: from the end of a wrapped row, Shift+End selects to the end of the line.
+        let mut e = Editor::new("e", &"abcdef ".repeat(30));
+        e.rows.width = 20;
+        e.relayout_with_width();
+        let boundary = e.line_breaks(0).0[0];
+        e.select(crate::editor::buffer::Selection::caret(Pos::new(0, boundary)));
+        e.row_end = true;
+        let (end, _) = e.end(e.sel.head);
+        assert_eq!(end, Pos::new(0, e.buffer.line(0).len()));
+    }
+
+    #[test]
+    fn edits_and_search_hits_reveal_a_caret_far_off_screen() {
+        // gpui-kit's `edit_reveals_far_offscreen_caret` and `search_reveals_offscreen_wrapped_match`.
+        let text = format!("match\n{}{}match\n{}", "line\n".repeat(80), "wrapped text ".repeat(500), "line\n".repeat(80));
+        let mut e = Editor::new("e", &text);
+        e.set_area(720.0, 400.0);
+        let line_h = e.metrics().line_h;
+        let found = e.find_all("match", true);
+        e.show_found(found.clone(), Some(1), true);
+        let y = e.row_of(found[1].1) as f32 * line_h - e.scroll[1];
+        assert!(y >= 0.0 && y + line_h <= 400.0, "the wrapped match is on screen: {y}");
+        e.scroll[1] = 0.0;
+        let end = e.buffer.last();
+        e.sel = crate::editor::buffer::Selection::caret(end);
+        e.insert("X", true);
+        let y = e.caret_row() as f32 * line_h - e.scroll[1];
+        assert!(y >= 0.0 && y + line_h <= 400.0, "typing brings the caret back into view: {y}");
+    }
+
+    #[test]
     fn undo_and_redo_move_folds_as_edits_do() {
         let mut e = Editor::new("e", "a\nb\nc\nd\ne\nf\ng\nh");
         e.fold_spots = vec![(4, 7)];
