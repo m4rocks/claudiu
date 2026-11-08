@@ -52,7 +52,8 @@ impl Workspace {
     /// Whether a working session's sidebar icon turns: only while someone can see it, since every turning frame is
     /// drawn. Rune stops drawing a hidden or occluded window by itself.
     pub fn spin_visible(&self) -> bool {
-        spin_visible(self.activity.values().any(|a| *a == Activity::Working), self.window_active, self.store.data.layout.sidebar_visible)
+        // Editor mode hides the sidebar whatever its setting.
+        spin_visible(self.activity.values().any(|a| *a == Activity::Working), self.window_active, self.store.data.layout.sidebar_visible && !self.editing())
     }
 
     /// Once a second: derive each Claude session's `Activity` from its terminal output. When one stops working
@@ -71,6 +72,7 @@ impl Workspace {
                     ws.serve_requests(requests);
                     ws.finish_handoffs();
                     ws.run_pending_switches(&statuses);
+                    ws.check_open_files();
                     ws.update_activity(&statuses);
                     ws.start_activity_poll();
                 },
@@ -137,6 +139,8 @@ impl Workspace {
         self.ingest_usage();
         self.sync_attached();
         self.sync_configs();
+        self.refresh_if_stale();
+        self.refresh_marks();
         self.raise_claude_priority();
         self.refresh_pending();
         // The steps above redraw when they change something. The sidebar's "5m ago" and the reset countdowns count

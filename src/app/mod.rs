@@ -1,7 +1,8 @@
 //! Workspace: the app's state, the `Act` table that menus, shortcuts and clicks all go through, and `new`. The methods
 //! are split by topic: `sessions` (start, show, close), `background` (timers and polls), `layout` (panels),
 //! `modal` (toasts, menus, modals), `repo` (git), `github_pane`, `alt_accounts`, `commands` (shortcuts and the menu
-//! bar), `input` (where keys and frames go). Rendering lives in `panels/`.
+//! bar), `input` (where keys and frames go), `editor_mode` with `editing` and `navigation` (files and an editor beside
+//! the terminal). Rendering lives in `panels/`.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -33,6 +34,8 @@ pub mod commands;
 mod config_sync;
 mod background;
 mod cross;
+mod editing;
+pub mod editor_mode;
 mod github_pane;
 mod handoff;
 #[cfg(test)]
@@ -43,6 +46,7 @@ mod layout;
 mod lifecycle;
 mod links;
 mod modal;
+mod navigation;
 mod repo;
 pub mod rt;
 mod send;
@@ -55,6 +59,8 @@ mod switch;
 mod worktrees;
 
 pub use commands::Command;
+pub use editing::Conflict;
+pub use editor_mode::EditorPane;
 pub use lifecycle::{saved_window_geom, set_main_window, show_main_window};
 pub use settings::SettingsPage;
 pub use setup::open_first_setup;
@@ -97,7 +103,14 @@ pub enum Act {
     /// Click on a session row: live -> show it, history -> resume it.
     Select(Id),
     Resume(Id),
+    /// End a session, asking first when its editor has unsaved files.
     CloseLive(Id),
+    /// End it after the user agreed to lose those files' edits.
+    ConfirmCloseLive(Id),
+    /// Turn editor mode on or off for the shown session (see `editor_mode.rs`).
+    ToggleEditor,
+    /// Close the tab of this file after the user agreed to lose its unsaved edits.
+    DiscardTab(Id, PathBuf),
     Rename(Id),
     /// Hide (true) or restore (false) a session in the sidebar. Archived sessions still turn up in search.
     Archive(Id, bool),
@@ -231,6 +244,11 @@ pub enum Modal {
         id: Id,
         input: TextEdit,
     },
+    /// The line to put the shown tab's caret on, as `42` or `42:7`.
+    GoToLine {
+        id: Id,
+        input: TextEdit,
+    },
     /// Empty text = use the default.
     Settings {
         shell: TextEdit,
@@ -258,7 +276,7 @@ pub enum Modal {
 /// A field of the open modal, by its place: the dialog's only field is 0; Settings' are shell, claude, model, skills.
 pub fn modal_field(modal: &mut Option<Modal>, n: usize) -> Option<&mut TextEdit> {
     match (modal.as_mut()?, n) {
-        (Modal::Rename { input, .. } | Modal::NewBranch { input, .. } | Modal::NewWorktree { input, .. } | Modal::Advisor { input, .. }, 0) => Some(input),
+        (Modal::Rename { input, .. } | Modal::NewBranch { input, .. } | Modal::NewWorktree { input, .. } | Modal::Advisor { input, .. } | Modal::GoToLine { input, .. }, 0) => Some(input),
         (Modal::Settings { shell, .. }, 0) => Some(shell),
         (Modal::Settings { claude, .. }, 1) => Some(claude),
         (Modal::Settings { model, .. }, 2) => Some(model),
@@ -440,6 +458,12 @@ pub struct Workspace {
     setup_window: Option<rune::WindowHandle>,
     /// Counts the setup windows opened, for their keys.
     setup_serial: u64,
+    /// Editor mode is on: the shown session's files and an editor take the place of the sidebars.
+    pub editor_mode: bool,
+    /// Each running session's files and open tabs, made the first time editor mode shows it.
+    pub panes: HashMap<Id, EditorPane>,
+    /// Counts the editors made, for their keys.
+    pub editor_serial: u64,
 }
 
 impl HasRt for Workspace {
@@ -511,6 +535,9 @@ impl Workspace {
             status_files: Default::default(),
             setup_window: None,
             setup_serial: 0,
+            editor_mode: false,
+            panes: HashMap::new(),
+            editor_serial: 0,
             store,
         };
         // Everything from a previous run is history until clicked. Keep the highlight only if it still exists.
@@ -578,7 +605,18 @@ impl Workspace {
             Act::ToggleShell(id) => self.toggle_shell(&id),
             Act::Select(id) => self.show_session(&id),
             Act::Resume(id) => self.resume(&id),
-            Act::CloseLive(id) => self.close_live(&id),
+            Act::CloseLive(id) => self.request_close_live(&id),
+            Act::ConfirmCloseLive(id) => {
+                self.modal = None;
+                self.close_live(&id);
+            }
+            Act::ToggleEditor => self.toggle_editor(),
+            Act::DiscardTab(id, path) => {
+                self.modal = None;
+                if let Some(ix) = self.panes.get(&id).and_then(|p| p.tabs.iter().position(|t| t.path == path)) {
+                    self.close_tab(&id, ix);
+                }
+            }
             Act::Rename(id) => {
                 let text = self
                     .store
@@ -616,6 +654,8 @@ impl Workspace {
             }
             Act::ImportProject => self.import_project(),
             Act::OpenGithub { cwd } => {
+                // GitHub opens in the right sidebar, which editor mode hides.
+                self.editor_mode = false;
                 self.open_github(cwd)
             }
             Act::RegenTitle(id) => self.regen_title(&id),
@@ -784,7 +824,12 @@ impl Workspace {
             }
             Act::Dismiss => {
                 self.modal = None;
-                self.focus_active();
+                // A dialog opened from the editor (go to line, discard changes) gives the keyboard back to it.
+                if self.keys_in_pane() {
+                    self.focus_pane();
+                } else {
+                    self.focus_active();
+                }
             }
             Act::InstallUpdate => {
                 let ready = matches!(self.update.status, crate::updater::Status::Ready { .. });

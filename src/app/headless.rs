@@ -810,6 +810,206 @@ fn the_session_list_draws_rows_where_scrolling_brings_them() {
     assert!(shown > 10, "only {shown} rows are drawn where the list scrolled to");
 }
 
+/// Cmd on macOS, Ctrl elsewhere: the modifier of the app's shortcuts.
+fn secondary(m: &mut rune::Mods) {
+    m.cmd = true;
+    if cfg!(target_os = "macos") { m.logo = true } else { m.ctrl = true }
+}
+
+impl Harness {
+    fn editor_pane(&self, id: &str) -> &EditorPane {
+        self.ws().panes.get(id).expect("the session has an editor pane")
+    }
+
+    fn shown_tab(&self, id: &str) -> Option<&editor_mode::Tab> {
+        self.ws().panes.get(id).and_then(|p| p.shown())
+    }
+
+    fn shown_text(&self, id: &str) -> String {
+        self.shown_tab(id).map(|t| t.editor.buffer.text()).unwrap_or_default()
+    }
+
+    fn type_text(&mut self, text: &str) {
+        for c in text.chars() {
+            self.press(rune::Key::Text(c.to_string()), |_| {});
+        }
+    }
+}
+
+/// Editor mode: the shown session keeps its terminal; its folder's files are listed beside it and open in tabs; edits
+/// save; a change on disk reloads a clean tab and never overwrites unsaved edits; and nothing unsaved is dropped
+/// without asking.
+#[test]
+fn editor_mode_lists_opens_edits_and_saves_files() {
+    let mut h = Harness::new(|_| vec![]);
+    let cwd = h.work.join("project");
+    std::fs::create_dir_all(cwd.join("src")).unwrap();
+    std::fs::write(cwd.join("notes.md"), "# Notes\n").unwrap();
+    std::fs::write(cwd.join("src/code.rs"), "fn a() {}\nfn b() {}\n").unwrap();
+    h.step(|ws| ws.new_claude(cwd.clone()));
+    let id = h.ws().active.clone().expect("a session is shown");
+    h.wait("the first screen", idle);
+    let sidebars = (h.ws().store.data.layout.sidebar_visible, h.ws().store.data.layout.right_hidden);
+
+    h.press(rune::Key::Command('e'), |m| {
+        secondary(m);
+        m.shift = true;
+    });
+    assert!(h.ws().editing(), "Shift+E turns editor mode on");
+    h.wait("listing the folder", |ws| ws.panes.get(&id).is_some_and(|p| p.rows.iter().any(|r| r.name == "notes.md")));
+    h.settle();
+    assert!(h.drawn("editor-pane") && h.drawn("file-tree"), "the pane is drawn: {:?}", h.keys());
+    assert!(h.ws().is_running(&id) && h.drawn(&format!("pane-{id}")), "the terminal keeps running beside it");
+    let names: Vec<String> = h.editor_pane(&id).rows.iter().map(|r| r.name.clone()).collect();
+    assert_eq!(names, ["src", "notes.md"], "folders first, closed until opened");
+
+    // Folders open in place; a file opens in a tab with the keyboard.
+    let root = h.editor_pane(&id).root.clone();
+    h.click(&format!("tree-{}", platform::path_key(&root.join("src"))));
+    let names: Vec<String> = h.editor_pane(&id).rows.iter().map(|r| r.name.clone()).collect();
+    assert_eq!(names, ["src", "code.rs", "notes.md"]);
+    h.settle();
+    h.click(&format!("tree-{}", platform::path_key(&root.join("notes.md"))));
+    h.wait("opening a file", |ws| ws.panes[&id].shown().is_some());
+    h.settle();
+    assert_eq!(h.shown_text(&id), "# Notes\n");
+    let key = h.shown_tab(&id).unwrap().editor.key.clone();
+    assert_eq!(h.ws().keys_to.as_deref(), Some(key.as_str()), "the opened file has the keyboard");
+    assert!(h.drawn(&format!("{key}/l0")), "its first line is drawn");
+
+    // Typing edits it and marks the tab; the pane's Save writes it.
+    h.press(rune::Key::End, |_| {});
+    h.type_text(" and more");
+    assert_eq!(h.shown_text(&id), "# Notes and more\n");
+    assert!(h.shown_tab(&id).unwrap().dirty, "an edit marks the tab");
+    h.press(rune::Key::Command('s'), secondary);
+    h.wait("saving", |ws| ws.panes[&id].shown().is_some_and(|t| !t.dirty));
+    assert_eq!(std::fs::read_to_string(cwd.join("notes.md")).unwrap(), "# Notes and more\n");
+    // Undo back to what was loaded is a change from what is saved now.
+    h.press(rune::Key::Command('z'), secondary);
+    assert_eq!(h.shown_text(&id), "# Notes\n");
+    assert!(h.shown_tab(&id).unwrap().dirty);
+    h.press(rune::Key::Command('z'), |m| {
+        secondary(m);
+        m.shift = true;
+    });
+    assert!(!h.shown_tab(&id).unwrap().dirty, "redo back to the saved text is clean again");
+
+    // A change on disk reloads a clean tab; with unsaved edits it becomes a conflict that overwrites neither side.
+    let code = root.join("src/code.rs");
+    h.step(|ws| ws.open_file(&id, code.clone(), Some(1)));
+    h.wait("opening the second file", |ws| ws.panes[&id].shown().is_some_and(|t| t.path == code));
+    assert_eq!(h.shown_tab(&id).unwrap().editor.caret().line, 1, "it opens at the line asked for");
+    std::fs::write(&code, "fn by_claude() {}\n// longer than before\n").unwrap();
+    h.wait("reloading a clean tab", |ws| ws.panes[&id].shown().is_some_and(|t| t.editor.buffer.text().starts_with("fn by_claude")));
+    h.type_text("x");
+    std::fs::write(&code, "fn by_claude_again() {}\n").unwrap();
+    h.wait("the conflict", |ws| ws.panes[&id].shown().is_some_and(|t| t.conflict == Some(Conflict::Changed)));
+    h.settle();
+    assert!(h.drawn("conflict") && h.drawn("conflict-keep"), "the conflict is shown with its choices");
+    assert!(h.shown_text(&id).contains('x'), "unsaved edits stay");
+    h.press(rune::Key::Command('s'), secondary);
+    h.wait("the refused save", |ws| ws.toast.as_ref().is_some_and(|t| t.text.starts_with("Not saved")));
+    assert_eq!(std::fs::read_to_string(&code).unwrap(), "fn by_claude_again() {}\n", "Claude's change is not overwritten");
+    h.click("conflict-keep");
+    h.press(rune::Key::Command('s'), secondary);
+    h.wait("saving over the change", |ws| ws.panes[&id].shown().is_some_and(|t| !t.dirty && t.stamp.is_some()));
+    let mine = h.shown_text(&id);
+    assert_eq!(std::fs::read_to_string(&code).unwrap(), mine, "keeping mine and saving writes mine");
+
+    // Each file has one tab; unsaved edits are never dropped without asking.
+    let tabs = |h: &Harness| h.editor_pane(&id).tabs.iter().map(|t| t.path.file_name().unwrap().to_string_lossy().to_string()).collect::<Vec<_>>();
+    assert_eq!(tabs(&h), ["notes.md", "code.rs"]);
+    h.step(|ws| ws.open_file(&id, root.join("notes.md"), None));
+    assert_eq!((tabs(&h).len(), h.editor_pane(&id).active), (2, Some(0)), "opening an open file shows its tab");
+    h.type_text("!");
+    h.press(rune::Key::Command('w'), secondary);
+    assert!(matches!(h.ws().modal, Some(Modal::Confirm { act: Act::DiscardTab(..), .. })) && tabs(&h).len() == 2, "closing a dirty tab asks");
+    h.step(|ws| ws.act(Act::Dismiss));
+    assert_eq!(h.ws().keys_to.as_deref(), Some(h.shown_tab(&id).unwrap().editor.key.as_str()), "cancelling gives the editor the keyboard back");
+    h.step(|ws| ws.act(Act::CloseLive(id.clone())));
+    assert!(matches!(h.ws().modal, Some(Modal::Confirm { act: Act::ConfirmCloseLive(_), .. })) && h.ws().is_running(&id), "ending the session asks");
+    h.step(|ws| ws.act(Act::Dismiss));
+    h.press(rune::Key::Command('w'), secondary);
+    h.step(|ws| ws.submit_modal());
+    assert_eq!(tabs(&h), ["code.rs"], "discarding closes the tab");
+    assert_eq!(std::fs::read_to_string(cwd.join("notes.md")).unwrap(), "# Notes and more\n", "nothing was saved by asking");
+
+    // Back returns to the place the editor left.
+    h.step(|ws| ws.open_file(&id, root.join("notes.md"), None));
+    h.wait("reopening", |ws| ws.panes[&id].tabs.len() == 2);
+    let back = if cfg!(target_os = "macos") { (rune::Key::Text("-".into()), true) } else { (rune::Key::Left, false) };
+    h.press(back.0, |m| if back.1 { m.ctrl = true } else { m.alt = true });
+    assert!(h.shown_tab(&id).is_some_and(|t| t.path == code), "Back shows the file before");
+
+    // Leaving editor mode brings the sidebars back as they were; asking for a sidebar in it leaves it.
+    h.step(|ws| ws.toggle_editor());
+    assert_eq!((h.ws().editing(), (h.ws().store.data.layout.sidebar_visible, h.ws().store.data.layout.right_hidden)), (false, sidebars));
+    h.step(|ws| {
+        ws.store.data.layout.sidebar_visible = false;
+        ws.toggle_editor();
+        ws.toggle_left();
+    });
+    assert!(!h.ws().editing() && h.ws().store.data.layout.sidebar_visible, "the sidebar shows");
+
+    // Ctrl+click on a path in the terminal opens it in editor mode, at its line.
+    h.step(|ws| {
+        ws.open_in_editor_mode(&id, "src/code.rs", Some(1));
+    });
+    h.wait("the clicked file", |ws| ws.editing() && ws.panes[&id].shown().is_some_and(|t| t.path == code));
+
+    // The pane goes with its session.
+    h.step(|ws| ws.close_live(&id));
+    assert!(!h.ws().panes.contains_key(&id), "closing the session drops its pane");
+}
+
+/// A file at the editor's line limit opens and types without stalling, draws only the lines on screen, and a wheel
+/// notch eases the text down and stops at the end.
+#[test]
+fn a_long_file_opens_draws_only_what_shows_and_scrolls() {
+    let mut h = Harness::new(|_| vec![]);
+    let cwd = h.work.clone();
+    let big = cwd.join("big.rs");
+    std::fs::write(&big, "let x = 1; // a line of ordinary code\n".repeat(crate::files::MAX_LINES)).unwrap();
+    h.step(|ws| ws.new_claude(cwd.clone()));
+    let id = h.ws().active.clone().unwrap();
+    h.step(|ws| ws.toggle_editor());
+    let t = Instant::now();
+    h.step(|ws| ws.open_file(&id, big.clone(), None));
+    h.wait("opening the long file", |ws| ws.panes[&id].shown().is_some());
+    h.settle();
+    eprintln!("a {}-line file opened and drew in {:?}", crate::files::MAX_LINES, t.elapsed());
+    let key = h.shown_tab(&id).unwrap().editor.key.clone();
+    let drawn_lines = || h.keys().iter().filter(|k| k.starts_with(&format!("{key}/l"))).count();
+    let lines = drawn_lines();
+    assert!((10..120).contains(&lines), "{lines} lines are built for one screen");
+
+    let t = Instant::now();
+    for _ in 0..20 {
+        h.press(rune::Key::Text("y".into()), |_| {});
+    }
+    let per_key = t.elapsed() / 20;
+    assert!(per_key < Duration::from_millis(100), "a keystroke in a long file took {per_key:?}");
+
+    let (x, y) = h.rt.find(&key).expect("the editor is drawn");
+    h.rt.pointer_move(x, y);
+    let scroll = |h: &Harness| h.shown_tab(&id).unwrap().editor.scroll[1];
+    // Mouse wheel notches (not a trackpad's precise steps), down.
+    h.rt.wheel_event(rune::WheelEvent::new(0.0, -120.0).at(x, y));
+    let mut seen = vec![];
+    for _ in 0..40 {
+        std::thread::sleep(Duration::from_millis(8));
+        h.pump();
+        seen.push(scroll(&h));
+    }
+    assert!(seen.windows(2).all(|w| w[1] >= w[0]), "the scroll only moves down: {seen:?}");
+    assert!(seen[0] < *seen.last().unwrap() && *seen.last().unwrap() > 100.0, "the text eased down: {seen:?}");
+    h.press(rune::Key::End, |m| if cfg!(target_os = "macos") { m.logo = true } else { m.ctrl = true });
+    h.settle();
+    assert_eq!(h.shown_tab(&id).unwrap().editor.caret().line, crate::files::MAX_LINES, "the caret went to the end");
+    assert!(h.drawn(&format!("{key}/l{}", crate::files::MAX_LINES - 1)), "the end is on screen");
+}
+
 mod github {
     use super::*;
     use crate::github::cli::*;

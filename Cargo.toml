@@ -12,6 +12,8 @@ anyhow = "1.0.104"
 directories = "6.0.0"
 dunce = "1.0.5"
 futures = "0.3.34"
+# Editor mode's file tree follows its folder on disk.
+notify = "8.2.0"
 git2 = { version = "0.21.0", default-features = false }
 # The UI: views, layout, text, springs and the native window. Pre-release, so pinned to a commit of its `dev` branch.
 rune = { git = "https://github.com/anomalyco/rune", rev = "a7f276c3630f85a06a0230295da4d2bd172d8d3b", features = ["native-file-dialog"] }
@@ -23,6 +25,8 @@ url = "2.5.8"
 image = { version = "0.25", default-features = false, features = ["png", "bmp", "jpeg", "gif", "webp"] }
 ureq = "3.4.2"
 time = { version = "0.3.55", features = ["parsing"] }
+# How many cells a character takes in the editor (wide CJK and emoji take two).
+unicode-width = "0.2.2"
 uuid = { version = "1.27.0", features = ["v4"] }
 # 1.2.161 requires zip ^8.6. This release is the first published one that allows zip 9.
 velopack = "1.3.39-g8d2844f"

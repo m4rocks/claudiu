@@ -302,7 +302,8 @@ impl Workspace {
 
     /// The sidebar: header, the session list and the usage footer, sliding in and out from the left.
     pub fn render_sidebar(&self) -> El {
-        let visible = self.store.data.layout.sidebar_visible;
+        // Editor mode hides it without changing the remembered layout, so leaving brings it back.
+        let visible = self.store.data.layout.sidebar_visible && !self.editing();
         let width = self.left_width(self.window_size.0);
         let spin = self.spin_visible();
         let items = self.list_items();

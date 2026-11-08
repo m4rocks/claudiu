@@ -1,7 +1,8 @@
 //! Git awareness via libgit2 (`git2`): repository root, current branch, linked worktrees.
-//! `commit` is the Commit & Push flow built on top of it.
+//! `commit` is the Commit & Push flow built on top of it; `lines` finds the lines of a file that differ from HEAD.
 
 pub mod commit;
+pub mod lines;
 pub mod worktree;
 
 use std::path::{Path, PathBuf};

@@ -159,6 +159,7 @@ impl Workspace {
                 )
             }
             Modal::Rename { input, .. } => ("Rename session".into(), modal_input(0, input, ""), "Rename".into(), false),
+            Modal::GoToLine { input, .. } => ("Go to line".into(), modal_input(0, input, "Line, or line:column"), "Go".into(), false),
             Modal::NewBranch { input, .. } => ("New branch".into(), modal_input(0, input, "Branch name"), "Create".into(), false),
         };
         let ok = if danger { danger_button(confirm_label) } else { button(confirm_label, true) };

@@ -3,6 +3,8 @@
 mod app;
 mod claude;
 mod datadir;
+mod editor;
+mod files;
 mod git;
 mod github;
 mod panels;

@@ -49,6 +49,15 @@ impl Workspace {
                     Act::Dismiss
                 }
             }
+            Some(Modal::GoToLine { id, input }) => {
+                let text = input.text.as_str().to_string();
+                if let Err(why) = self.go_to_line(&id, &text) {
+                    self.modal = Some(Modal::GoToLine { id, input });
+                    self.toast(why, true);
+                }
+                // The editor has the keyboard again (`go_to_line`); the dialog's Dismiss would give it to the terminal.
+                return;
+            }
             Some(Modal::NewBranch { cwd, input }) => {
                 // Spaces aren't allowed in branch names; git reports anything else that is invalid.
                 let name = input.text.as_str().split_whitespace().collect::<Vec<_>>().join("-");

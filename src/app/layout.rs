@@ -74,15 +74,20 @@ impl Workspace {
         self.store.mark_dirty();
     }
 
+    /// In editor mode the sidebar is hidden whatever the remembered setting, so asking for it leaves editor mode and shows it.
     pub fn toggle_left(&mut self) {
+        let editing = self.editing();
         let layout = &mut self.store.data.layout;
-        layout.sidebar_visible = !layout.sidebar_visible;
+        layout.sidebar_visible = editing || !layout.sidebar_visible;
+        self.editor_mode = false;
         self.store.mark_dirty();
     }
 
     pub fn toggle_right(&mut self) {
+        let editing = self.editing();
         let layout = &mut self.store.data.layout;
-        layout.right_hidden = !layout.right_hidden;
+        layout.right_hidden = !editing && !layout.right_hidden;
+        self.editor_mode = false;
         self.store.mark_dirty();
         self.focus_active();
     }

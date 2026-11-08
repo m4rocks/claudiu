@@ -18,6 +18,7 @@ pub enum Command {
     SwapFocus,
     OpenGithub,
     OpenSettings,
+    ToggleEditor,
     /// Show the running session with this number, counted down the sidebar's RUNNING list.
     ShowSession(usize),
 }
@@ -35,9 +36,37 @@ const CHORDS: &[(&str, Command)] = &[
     ("secondary-shift-g", Command::OpenGithub),
     ("secondary-,", Command::OpenSettings),
     ("secondary-shift-]", Command::SwapFocus),
+    ("secondary-shift-e", Command::ToggleEditor),
     ("ctrl-tab", Command::NextSession),
     ("ctrl-shift-tab", Command::PrevSession),
 ];
+
+/// What a key does while the keyboard is in the editor pane (its editor or its file tree). Elsewhere these keys belong
+/// to Claude Code (Ctrl+P, Ctrl+G) or the terminal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PaneCommand {
+    SaveFile,
+    GoToLine,
+    CloseTab,
+    GoBack,
+    GoForward,
+}
+
+const PANE_CHORDS: &[(&str, PaneCommand)] = &[
+    ("secondary-s", PaneCommand::SaveFile),
+    ("ctrl-g", PaneCommand::GoToLine),
+    ("secondary-w", PaneCommand::CloseTab),
+    // VS Code's keys: Alt+arrows move by word on macOS.
+    (if cfg!(target_os = "macos") { "ctrl--" } else { "alt-left" }, PaneCommand::GoBack),
+    (if cfg!(target_os = "macos") { "ctrl-shift--" } else { "alt-right" }, PaneCommand::GoForward),
+];
+
+impl PaneCommand {
+    pub fn for_key(ks: &Keystroke) -> Option<PaneCommand> {
+        let chord = chord_of(ks);
+        PANE_CHORDS.iter().find(|(spec, _)| resolve(spec) == chord).map(|(_, c)| *c)
+    }
+}
 
 fn secondary() -> &'static str {
     if cfg!(target_os = "macos") { "cmd" } else { "ctrl" }
@@ -70,6 +99,8 @@ fn chord_of(ks: &Keystroke) -> String {
         "}" => "]",
         "~" => "`",
         "<" => ",",
+        // Shift+- types `_`.
+        "_" => "-",
         k => k,
     };
     parts.push(key);
@@ -106,6 +137,7 @@ impl Command {
             Command::OpenGithub => "mod+shift+g",
             Command::OpenSettings => "mod+,",
             Command::SwapFocus => "mod+shift+]",
+            Command::ToggleEditor => "mod+shift+e",
             _ => return None,
         })
     }
@@ -153,6 +185,7 @@ pub fn menu_bar() -> Vec<rune::MenuItem<Workspace>> {
         item("Toggle Right Sidebar", "View", Command::ToggleRight, |ws, tx| ws.run(Command::ToggleRight, tx)),
         item("Toggle Shell", "View", Command::ToggleShell, |ws, tx| ws.run(Command::ToggleShell, tx)),
         item("Swap Terminal and Shell", "View", Command::SwapFocus, |ws, tx| ws.run(Command::SwapFocus, tx)),
+        item("Editor Mode", "View", Command::ToggleEditor, |ws, tx| ws.run(Command::ToggleEditor, tx)),
         rune::MenuItem::separator().menu("View"),
         item("Search Sessions", "View", Command::FocusSearch, |ws, tx| ws.run(Command::FocusSearch, tx)),
         item("GitHub", "View", Command::OpenGithub, |ws, tx| ws.run(Command::OpenGithub, tx)),
@@ -204,6 +237,21 @@ impl Workspace {
             }
             Command::OpenSettings => self.act(Act::OpenSettings),
             Command::SwapFocus => self.swap_focus(),
+            Command::ToggleEditor => {
+                if self.active_id().is_some() {
+                    self.act(Act::ToggleEditor)
+                }
+            }
+        }
+    }
+
+    pub fn pane_command(&mut self, c: PaneCommand) {
+        match c {
+            PaneCommand::SaveFile => self.save_shown(),
+            PaneCommand::GoToLine => self.ask_go_to_line(),
+            PaneCommand::CloseTab => self.close_shown_tab(),
+            PaneCommand::GoBack => self.go_back(),
+            PaneCommand::GoForward => self.go_forward(),
         }
     }
 }
@@ -221,6 +269,14 @@ mod tests {
         for (spec, c) in CHORDS {
             assert_eq!(key(spec), Some(*c), "{spec}");
         }
+    }
+
+    #[test]
+    fn the_pane_keys_run_their_commands() {
+        for (spec, c) in PANE_CHORDS {
+            assert_eq!(PaneCommand::for_key(&Keystroke::parse(&resolve(spec)).unwrap()), Some(*c), "{spec}");
+        }
+        assert_eq!(PaneCommand::for_key(&Keystroke::parse("ctrl-p").unwrap()), None);
     }
 
     #[test]

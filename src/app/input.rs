@@ -37,6 +37,8 @@ impl Workspace {
     /// keyboard, and hand the queued `Tx` work (clipboard, dialogs, timers) to the frame.
     pub fn after_input(&mut self, tx: &mut Tx) {
         self.drain_terminals();
+        self.drain_editors();
+        self.note_edits();
         self.drain_github();
         if std::mem::take(&mut self.blur) {
             tx.blur();
@@ -77,6 +79,15 @@ impl Workspace {
         }
     }
 
+    /// Move the `Tx` work the editors queued (the clipboard) to the workspace's.
+    fn drain_editors(&mut self) {
+        for tab in self.panes.values_mut().flat_map(|p| p.tabs.iter_mut()) {
+            for f in tab.editor.fx.drain(..) {
+                self.rt.with_tx(f);
+            }
+        }
+    }
+
     fn on_terminal_event(&mut self, key: &str, ev: TerminalEvent) {
         if let Some(owner) = key.strip_prefix("shell:") {
             if let TerminalEvent::Exited(_) = ev {
@@ -91,13 +102,17 @@ impl Workspace {
         match ev {
             TerminalEvent::Exited(code) => self.on_exit(key, code),
             TerminalEvent::Bell => {}
-            TerminalEvent::OpenPath(path, _line) => self.open_from_terminal(key, &path),
+            TerminalEvent::OpenPath(path, line) => self.open_from_terminal(key, &path, line),
             TerminalEvent::SendText(text) => self.send_to_claude(key, &text),
         }
     }
 
-    /// Ctrl+click on a path in a terminal: open it in the "Open in" editor, or show it in the file manager.
-    fn open_from_terminal(&mut self, id: &str, path: &str) {
+    /// Ctrl+click on a path in a terminal: open it in editor mode beside the session, or for a folder or a file the
+    /// editor can't take, in the "Open in" editor or the file manager.
+    fn open_from_terminal(&mut self, id: &str, path: &str, line: Option<usize>) {
+        if self.open_in_editor_mode(&id.to_string(), path, line) {
+            return;
+        }
         let base = self.store.session(id).map(|s| s.cwd.clone()).unwrap_or_default();
         let full = base.join(path);
         if !full.exists() {
@@ -130,6 +145,12 @@ impl Workspace {
         }
         for (owner, p) in &mut self.shells {
             changed |= pump(&mut p.view, p.open && showing.as_ref() == Some(owner));
+        }
+        let (edited, animating) = self.poll_editors();
+        changed |= edited;
+        if animating {
+            let frame = Instant::now() + Duration::from_millis(16);
+            next = Some(next.map_or(frame, |n| n.min(frame)));
         }
         if let Some(at) = next {
             tx.wake_after(at.saturating_duration_since(Instant::now()).max(Duration::from_millis(1)));
@@ -170,7 +191,16 @@ impl Workspace {
         if self.search.focused {
             return false;
         }
+        if self.keys_in_pane()
+            && let Some(c) = commands::PaneCommand::for_key(ks)
+        {
+            self.pane_command(c);
+            return true;
+        }
         let Some(key) = self.keys_to.clone() else { return false };
+        if let Some(e) = self.editor_mut(&key) {
+            return e.on_key(ks, tx);
+        }
         match self.terminal_mut(&key) {
             Some(t) => t.on_key(ks, tx),
             None => false,
@@ -182,7 +212,10 @@ impl Workspace {
         if self.search.focused || self.modal.is_some() {
             return;
         }
-        if let Some(t) = self.keys_to.clone().and_then(|key| self.terminal_mut(&key)) {
+        let key = self.keys_to.clone().unwrap_or_default();
+        if let Some(e) = self.editor_mut(&key) {
+            e.paste_text(content.text());
+        } else if let Some(t) = self.terminal_mut(&key) {
             t.paste_content(content);
         }
         self.after_input(tx);
@@ -194,7 +227,10 @@ impl Workspace {
             return false;
         }
         let Some(key) = self.keys_to.clone() else { return false };
-        let used = self.terminal_mut(&key).is_some_and(|t| t.ime(ime));
+        let used = match self.editor_mut(&key) {
+            Some(e) => e.ime(ime),
+            None => self.terminal_mut(&key).is_some_and(|t| t.ime(ime)),
+        };
         self.after_input(tx);
         used
     }

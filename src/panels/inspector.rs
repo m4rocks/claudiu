@@ -37,7 +37,8 @@ impl Workspace {
     /// The right sidebar. It slides open and shut, and its width springs between the menu's and GitHub's; the two
     /// views cross-fade.
     pub fn render_right(&self) -> El {
-        let open = !self.store.data.layout.right_hidden;
+        // Editor mode hides it without changing the remembered layout, so leaving brings it back.
+        let open = !self.store.data.layout.right_hidden && !self.editing();
         let github = self.right_gh.as_ref().and_then(|id| self.gh_pane(id));
         let width = self.right_width_of(github.is_some(), self.window_size.0);
         let body = match github {
@@ -163,6 +164,16 @@ impl Workspace {
                         })),
                 );
             }
+            // Kept visible for every session, but inert when none is shown.
+            actions = actions.child(if id.is_some() {
+                let mut r = row("editor-mode", &icons::FILE_CODE, "Editor mode");
+                if hints {
+                    r = r.child(key_hint("Shift+E").key("hint-editor-row"));
+                }
+                r.on_press_tx(|ws: &mut Workspace, tx: &mut Tx| act(ws, Act::ToggleEditor, tx))
+            } else {
+                dim_row("editor-mode", &icons::FILE_CODE, "Editor mode")
+            });
             let t = target.clone();
             actions = actions.child(row("reveal", &icons::FOLDER_OPEN, "Open folder").on_press_tx(move |ws: &mut Workspace, tx: &mut Tx| act(ws, Act::Reveal(t.clone()), tx)));
         }

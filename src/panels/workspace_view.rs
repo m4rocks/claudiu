@@ -37,16 +37,18 @@ pub fn view(ws: &Workspace, cx: &mut Cx<Workspace>) -> El {
             Main::Terminals => ws.render_session(),
             Main::Home => ws.render_home(),
         });
-    let center = col().key("center").grow(1.0).shrink().min_w(0.0).h_full().child(main_panel).child(ws.render_shell());
-    let body = row()
-        .key("body")
-        .grow(1.0)
-        .shrink()
-        .min_h(0.0)
-        .w_full()
-        .child(ws.render_sidebar())
-        .child(center)
-        .child(ws.render_right());
+    let editor = ws.render_editor_pane();
+    let mut center = col().key("center").h_full().motion(motion::GLIDE).child(main_panel).child(ws.render_shell());
+    // In editor mode the terminal narrows to the left and the editor takes the rest.
+    center = match editor {
+        Some(_) => center.w((ws.window_size.0 * 0.36).clamp(380.0, 640.0)),
+        None => center.grow(1.0).shrink().min_w(0.0),
+    };
+    let mut body = row().key("body").grow(1.0).shrink().min_h(0.0).w_full().child(ws.render_sidebar()).child(center);
+    if let Some(editor) = editor {
+        body = body.child(el().key("editor-gap").w(theme::PANEL_GAP)).child(editor);
+    }
+    let body = body.child(ws.render_right());
     let mut stage = col().key("stage").grow(1.0).shrink().min_h(0.0).w_full().gap(theme::PANEL_GAP).px(theme::PANEL_GAP).pt(content_top).pb(theme::PANEL_GAP);
     if let Some(b) = banner {
         stage = stage.child(b);
@@ -115,6 +117,14 @@ impl Workspace {
             }));
         }
         let mut right = row().center_y().gap(if hints { 4.0 } else { 0.0 });
+        if hints && session_active {
+            right = right.child(key_hint("Shift+E").key("hint-editor"));
+        }
+        right = right.child(if session_active {
+            icon_button(&icons::FILE_CODE).key("toggle-editor").help("Editor mode").on_press_tx(|ws: &mut Workspace, tx: &mut Tx| act(ws, Act::ToggleEditor, tx))
+        } else {
+            icon_button_disabled(&icons::FILE_CODE).key("toggle-editor")
+        });
         if hints {
             right = right.child(key_hint("J").key("hint-shell"));
         }
