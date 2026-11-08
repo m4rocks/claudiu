@@ -36,6 +36,7 @@ mod config_sync;
 mod background;
 mod cross;
 mod editing;
+mod file_ops;
 pub mod editor_mode;
 mod github_pane;
 mod handoff;
@@ -65,6 +66,7 @@ mod worktrees;
 pub use ask_claude::Ask;
 pub use commands::Command;
 pub use editing::Conflict;
+pub use file_ops::NameFor;
 pub use editor_mode::{EditorCommand, EditorPane};
 pub use lifecycle::{saved_window_geom, set_main_window, show_main_window};
 pub use settings::SettingsPage;
@@ -118,6 +120,11 @@ pub enum Act {
     DiscardTab(Id, PathBuf),
     /// An entry of the editor's right-click menu.
     EditorMenu(EditorCommand),
+    /// Ask for a file or folder name in editor mode's tree (see `file_ops.rs`).
+    AskFileName(Id, NameFor),
+    /// Ask before deleting a file or folder from the tree, then `ConfirmDelete`.
+    AskDelete(Id, PathBuf),
+    ConfirmDelete(Id, PathBuf),
     Rename(Id),
     /// Hide (true) or restore (false) a session in the sidebar. Archived sessions still turn up in search.
     Archive(Id, bool),
@@ -251,6 +258,12 @@ pub enum Modal {
         id: Id,
         input: TextEdit,
     },
+    /// A name for a new file or folder in the tree, or a new name for one.
+    FileName {
+        id: Id,
+        purpose: NameFor,
+        input: TextEdit,
+    },
     /// The line to put the shown tab's caret on, as `42` or `42:7`.
     GoToLine {
         id: Id,
@@ -283,7 +296,7 @@ pub enum Modal {
 /// A field of the open modal, by its place: the dialog's only field is 0; Settings' are shell, claude, model, skills.
 pub fn modal_field(modal: &mut Option<Modal>, n: usize) -> Option<&mut TextEdit> {
     match (modal.as_mut()?, n) {
-        (Modal::Rename { input, .. } | Modal::NewBranch { input, .. } | Modal::NewWorktree { input, .. } | Modal::Advisor { input, .. } | Modal::GoToLine { input, .. }, 0) => Some(input),
+        (Modal::Rename { input, .. } | Modal::NewBranch { input, .. } | Modal::NewWorktree { input, .. } | Modal::Advisor { input, .. } | Modal::GoToLine { input, .. } | Modal::FileName { input, .. }, 0) => Some(input),
         (Modal::Settings { shell, .. }, 0) => Some(shell),
         (Modal::Settings { claude, .. }, 1) => Some(claude),
         (Modal::Settings { model, .. }, 2) => Some(model),
@@ -622,6 +635,12 @@ impl Workspace {
             }
             Act::ToggleEditor => self.toggle_editor(),
             Act::EditorMenu(command) => self.run_editor_command(command),
+            Act::AskFileName(id, purpose) => self.ask_file_name(id, purpose),
+            Act::AskDelete(id, path) => self.ask_delete(id, path),
+            Act::ConfirmDelete(id, path) => {
+                self.modal = None;
+                self.delete_path(id, path);
+            }
             Act::DiscardTab(id, path) => {
                 self.modal = None;
                 if let Some(ix) = self.panes.get(&id).and_then(|p| p.tabs.iter().position(|t| t.path == path)) {

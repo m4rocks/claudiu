@@ -58,6 +58,19 @@ impl Workspace {
                 // The editor has the keyboard again (`go_to_line`); the dialog's Dismiss would give it to the terminal.
                 return;
             }
+            Some(Modal::FileName { id, purpose, input }) => {
+                let name = input.text.as_str().trim().to_string();
+                if let Err(why) = self.apply_file_name(&id, &purpose, &name) {
+                    self.modal = Some(Modal::FileName { id, purpose, input });
+                    self.toast(why, true);
+                    return;
+                }
+                // A new file has the keyboard (`open_file`); otherwise the tree takes it back.
+                if !matches!(purpose, NameFor::FileIn(_)) {
+                    self.focus_pane();
+                }
+                return;
+            }
             Some(Modal::NewBranch { cwd, input }) => {
                 // Spaces aren't allowed in branch names; git reports anything else that is invalid.
                 let name = input.text.as_str().split_whitespace().collect::<Vec<_>>().join("-");

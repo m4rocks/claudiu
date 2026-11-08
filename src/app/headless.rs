@@ -1260,6 +1260,75 @@ fn selected_lines_are_named_in_claudes_input_until_the_keyboard_leaves() {
     assert_eq!(read().iter().filter(|&&b| b == 0x7f).count(), reference, "nothing more is erased");
 }
 
+/// The tree's right-click menu creates, renames and deletes files: a new file opens, a rename carries its open tab
+/// along, a delete asks first and closes the tab, and a name that would leave the folder or overwrite a file is refused.
+#[test]
+fn the_tree_creates_renames_and_deletes_files() {
+    let mut h = Harness::new(|_| vec![]);
+    let cwd = h.work.join("project");
+    std::fs::create_dir_all(cwd.join("src")).unwrap();
+    std::fs::write(cwd.join("src/a.rs"), "fn a() {}\n").unwrap();
+    std::fs::write(cwd.join("src/taken.rs"), "").unwrap();
+    h.step(|ws| ws.new_claude(cwd.clone()));
+    let id = h.ws().active.clone().unwrap();
+    h.step(|ws| ws.toggle_editor());
+    h.wait("listing", |ws| ws.panes[&id].rows.iter().any(|r| r.name == "src"));
+    h.settle();
+    let root = h.editor_pane(&id).root.clone();
+    let src = root.join("src");
+    let pick = |h: &mut Harness, label: &str| {
+        let rows: Vec<String> = h.menu_rows().into_iter().map(|(l, _)| l).collect();
+        let ix = rows.iter().position(|r| r == label).unwrap_or_else(|| panic!("no {label:?} in {rows:?}"));
+        let serial = h.ws().menu.as_ref().unwrap().serial;
+        h.click(&format!("menu-{serial}-{ix}"));
+    };
+    let name_it = |h: &mut Harness, name: &str| {
+        h.step(|ws| {
+            if let Some(f) = modal_field(&mut ws.modal, 0) {
+                *f = modal::field(name, true);
+            }
+        });
+        h.step(|ws| ws.submit_modal());
+    };
+
+    // New file in a folder, from the folder's row: it is made, the folder opens, and the file opens in a tab.
+    let (x, y) = h.rt.find(&format!("tree-{}", platform::path_key(&src))).unwrap();
+    h.rt.secondary_down(x, y);
+    h.rt.secondary_up(x, y);
+    h.settle();
+    pick(&mut h, "New file…");
+    name_it(&mut h, "b.rs");
+    assert!(src.join("b.rs").is_file());
+    h.wait("the new file's tab", |ws| ws.panes[&id].shown().is_some_and(|t| t.path == src.join("b.rs")));
+    assert!(h.editor_pane(&id).expanded.contains(&src), "its folder is open");
+
+    // Refused names keep the dialog open and touch nothing.
+    h.step(|ws| ws.act(Act::AskFileName(id.clone(), NameFor::Rename(src.join("b.rs")))));
+    name_it(&mut h, "taken.rs");
+    assert!(h.ws().modal.is_some(), "a name in use is refused");
+    name_it(&mut h, "../out.rs");
+    assert!(h.ws().modal.is_some() && !cwd.join("out.rs").exists(), "a name can't leave the folder");
+
+    // A rename carries the open tab with it.
+    name_it(&mut h, "c.rs");
+    assert!(h.ws().modal.is_none());
+    assert!(src.join("c.rs").is_file() && !src.join("b.rs").exists());
+    assert!(h.editor_pane(&id).tabs.iter().any(|t| t.path == src.join("c.rs")), "the tab follows the file");
+    assert!(h.editor_pane(&id).tabs.iter().all(|t| t.path != src.join("b.rs")));
+
+    // Delete asks first, then removes the file and closes its tab.
+    h.wait("the tree listing c.rs", |ws| ws.panes[&id].rows.iter().any(|r| r.name == "c.rs"));
+    h.settle();
+    let (x, y) = h.rt.find(&format!("tree-{}", platform::path_key(&src.join("c.rs")))).unwrap();
+    h.rt.secondary_down(x, y);
+    h.rt.secondary_up(x, y);
+    h.settle();
+    pick(&mut h, "Delete");
+    assert!(src.join("c.rs").exists(), "nothing goes before the answer");
+    h.step(|ws| ws.submit_modal());
+    h.wait("deleting", |ws| !src.join("c.rs").exists() && ws.panes[&id].tabs.iter().all(|t| t.path != src.join("c.rs")));
+}
+
 /// The real servers on PATH: gleam's reports a type error, and one that isn't installed says so. Starts programs from
 /// the machine, so it runs on request: `cargo test -- --ignored real_language_servers`.
 #[test]

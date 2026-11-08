@@ -286,13 +286,6 @@ impl Workspace {
         key == tree_key(id) || pane.tabs.iter().any(|t| t.editor.key == key)
     }
 
-    /// The editor that has the keyboard, in the shown pane.
-    pub fn focused_editor(&self) -> Option<&Editor> {
-        let key = self.keys_to.as_deref()?;
-        let (_, pane) = self.shown_pane()?;
-        pane.tabs.iter().map(|t| &t.editor).find(|e| e.key == key)
-    }
-
     /// Open or close a folder in the tree.
     pub fn toggle_folder(&mut self, path: &Path) {
         let Some(id) = self.active_id().cloned() else { return };

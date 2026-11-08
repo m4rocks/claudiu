@@ -93,6 +93,14 @@ impl Workspace {
             .h_full()
             .py(6.0)
             .border_sides([0.0, 1.0, 0.0, 0.0], rgb(theme::BORDER))
+            // Right-click below the rows (a row opens its own menu instead).
+            .on_secondary_press({
+                let id = id.clone();
+                move |ws: &mut Workspace, p: rune::PointerPress, tx: &mut Tx| {
+                    ws.open_file_menu(&id, None, true, p.x, p.y);
+                    ws.after_input(tx);
+                }
+            })
             .child(col().key(format!("tree-scroll-{id}")).w_full().grow(1.0).shrink().min_h(0.0).scroll(ScrollSpec { stick_bottom: false }).child(rows));
         if pane.truncated {
             tree = tree.child(label("Too many files to list them all here.", 11.0, theme::TEXT_FAINT).px(10.0).py(6.0).wrap());
@@ -211,7 +219,14 @@ fn tree_row(r: &TreeRow, shown: bool) -> El {
         out = out.child(text(b).font(font(crate::panels::scale::px(if r.folder { 8.0 } else { 11.0 }), 500.0)).color(rgb(color)));
     }
     let (path, folder) = (r.path.clone(), r.folder);
-    out.on_press_tx(move |ws: &mut Workspace, tx: &mut Tx| {
+    let menu_path = path.clone();
+    out.on_secondary_press(move |ws: &mut Workspace, p: rune::PointerPress, tx: &mut Tx| {
+        if let Some(id) = ws.active_id().cloned() {
+            ws.open_file_menu(&id, Some(&menu_path), folder, p.x, p.y);
+        }
+        ws.after_input(tx);
+    })
+    .on_press_tx(move |ws: &mut Workspace, tx: &mut Tx| {
         if folder {
             ws.toggle_folder(&path);
         } else if let Some(id) = ws.active_id().cloned() {

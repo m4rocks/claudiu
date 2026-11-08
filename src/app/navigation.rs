@@ -30,6 +30,22 @@ impl Workspace {
         }
     }
 
+    /// A file or folder was renamed: the places and recent files in it follow it.
+    pub(super) fn retarget_history(&mut self, id: &Id, from: &Path, to: &Path) {
+        let Some(pane) = self.panes.get_mut(id) else { return };
+        for path in pane.back.iter_mut().chain(pane.forward.iter_mut()).map(|(p, _)| p).chain(pane.recent.iter_mut()) {
+            moved_path(path, from, to);
+        }
+    }
+
+    /// A file or folder was deleted: nothing under it stays among the places and recent files.
+    pub(super) fn forget_history(&mut self, id: &Id, gone: &Path) {
+        let Some(pane) = self.panes.get_mut(id) else { return };
+        pane.back.retain(|(p, _)| !crate::platform::is_same_or_under(p, gone));
+        pane.forward.retain(|(p, _)| !crate::platform::is_same_or_under(p, gone));
+        pane.recent.retain(|p| !crate::platform::is_same_or_under(p, gone));
+    }
+
     pub fn go_back(&mut self) {
         self.step_through_places(true);
     }
@@ -92,6 +108,15 @@ fn push_kept(places: &mut Vec<(PathBuf, usize)>, place: (PathBuf, usize)) {
 }
 
 /// `42` or `42:7` (from 1, as people count) as a line and column from 0. Past the end is fine: the editor clamps it.
+/// `path` after `from` was renamed to `to`: the same when it is neither `from` nor inside it.
+pub(super) fn moved_path(path: &mut PathBuf, from: &Path, to: &Path) {
+    if path == from {
+        *path = to.to_path_buf();
+    } else if let Ok(rest) = path.strip_prefix(from) {
+        *path = to.join(rest);
+    }
+}
+
 fn parse_line(text: &str) -> Option<(usize, usize)> {
     let (line, column) = text.trim().split_once(':').unwrap_or((text.trim(), "1"));
     let (line, column): (usize, usize) = (line.trim().parse().ok()?, column.trim().parse().ok()?);
@@ -100,8 +125,20 @@ fn parse_line(text: &str) -> Option<(usize, usize)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_line, push_kept};
-    use std::path::PathBuf;
+    use super::{moved_path, parse_line, push_kept};
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn a_rename_moves_the_paths_in_it_only() {
+        let moved = |p: &str| {
+            let mut p = PathBuf::from(p);
+            moved_path(&mut p, Path::new("/r/src"), Path::new("/r/lib"));
+            p
+        };
+        assert_eq!(moved("/r/src"), PathBuf::from("/r/lib"));
+        assert_eq!(moved("/r/src/a.rs"), PathBuf::from("/r/lib/a.rs"));
+        assert_eq!(moved("/r/srcs/a.rs"), PathBuf::from("/r/srcs/a.rs"), "a folder that only starts the same");
+    }
 
     #[test]
     fn a_line_and_column_count_from_one() {

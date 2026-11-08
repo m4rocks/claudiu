@@ -3,7 +3,7 @@
 
 use rune::{Align, Color, Cursor, El, Side, Transition, Tx, col, el, row, text, text_input};
 
-use crate::app::{Act, MenuAnchor, Modal, Workspace, modal_field};
+use crate::app::{Act, MenuAnchor, Modal, NameFor, Workspace, modal_field};
 use crate::panels::icons;
 use crate::panels::theme::{self, rgb};
 use crate::panels::widgets::{button, danger_button, font, icon, icon_button, label};
@@ -160,6 +160,14 @@ impl Workspace {
             }
             Modal::Rename { input, .. } => ("Rename session".into(), modal_input(0, input, ""), "Rename".into(), false),
             Modal::GoToLine { input, .. } => ("Go to line".into(), modal_input(0, input, "Line, or line:column"), "Go".into(), false),
+            Modal::FileName { purpose, input, .. } => {
+                let (title, placeholder, ok) = match purpose {
+                    NameFor::FileIn(_) => ("New file", "name.ext", "Create"),
+                    NameFor::FolderIn(_) => ("New folder", "name", "Create"),
+                    NameFor::Rename(_) => ("Rename", "name", "Rename"),
+                };
+                (title.into(), modal_input(0, input, placeholder), ok.into(), false)
+            }
             Modal::NewBranch { input, .. } => ("New branch".into(), modal_input(0, input, "Branch name"), "Create".into(), false),
         };
         let ok = if danger { danger_button(confirm_label) } else { button(confirm_label, true) };

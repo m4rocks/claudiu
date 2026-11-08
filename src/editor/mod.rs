@@ -149,6 +149,7 @@ impl Editor {
         self.sel.head
     }
 
+    #[cfg(test)]
     pub fn selected_text(&self) -> String {
         let (a, b) = self.sel.range();
         self.buffer.slice(a, b)
