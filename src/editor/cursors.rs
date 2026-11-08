@@ -33,7 +33,7 @@ impl Editor {
     }
 
     /// Show `cursors`, the first as the main one (undo and redo bring back the cursors an edit started or ended with).
-    pub(super) fn set_cursors(&mut self, cursors: &[Selection]) {
+    pub fn set_cursors(&mut self, cursors: &[Selection]) {
         let clamp = |s: &Selection| Selection { anchor: self.buffer.clamp(s.anchor), head: self.buffer.clamp(s.head) };
         let mut all = cursors.iter().map(clamp);
         self.sel = all.next().unwrap_or_default();
@@ -393,6 +393,54 @@ mod tests {
         assert_eq!(texts, ["bcd", "b", "bcd"], "the short row selects what it has of the block");
         e.each_cursor(|e| e.insert("X", true));
         assert_eq!(e.buffer.text(), "aXef\naX\naXef");
+    }
+
+    #[test]
+    fn alt_drag_extends_upward_from_an_existing_cursor() {
+        let mut e = editor("abcd\nabcd\na|bcd");
+        e.area = [800.0, 400.0];
+        let (m, gutter) = (e.metrics(), e.gutter_w());
+        let x = gutter + m.cell_w;
+        // The Alt+press lands on the cursor already there, so it adds none, but dragging still makes a block.
+        e.add_cursor_at(e.pos_at(x, m.line_h * 2.5));
+        e.start_block_here(x, m.line_h * 2.5);
+        e.drag_block(x, m.line_h * 0.5);
+        assert_eq!(shown(&e), "a|bcd\na|bcd\na|bcd");
+    }
+
+    #[test]
+    fn alt_drag_over_a_short_row_keeps_the_block_width() {
+        let mut e = editor("|abcdef\nab\nabcdef");
+        e.area = [800.0, 400.0];
+        let (m, gutter) = (e.metrics(), e.gutter_w());
+        e.start_block(gutter + m.cell_w * 1.0, m.line_h * 0.5);
+        e.drag_block(gutter + m.cell_w * 5.0, m.line_h * 1.5);
+        let ranges: Vec<(Pos, Pos)> = e.cursors().iter().map(|s| s.range()).collect();
+        assert_eq!(ranges, [(Pos::new(0, 1), Pos::new(0, 5)), (Pos::new(1, 1), Pos::new(1, 2))], "the short row is clipped to its end");
+    }
+
+    #[test]
+    fn multi_cursor_actions_reveal_hidden_carets() {
+        let mut e = editor("ab\na|b\nab");
+        let actions: [fn(&mut Editor); 6] = [
+            |e| e.add_cursor_vertical(-1),
+            |e| e.add_cursor_vertical(1),
+            |e| e.each_cursor(|e| {
+                e.vertical(-1, true);
+            }),
+            |e| e.each_cursor(|e| {
+                e.vertical(1, true);
+            }),
+            |e| e.each_cursor(|e| e.insert("x", true)),
+            |e| e.each_cursor(|e| e.backspace(false, false)),
+        ];
+        for (i, act) in actions.iter().enumerate() {
+            let later = std::time::Instant::now() + std::time::Duration::from_millis(400);
+            e.blink(later, true);
+            assert!(!e.caret_shown(), "action {i} starts with the caret off");
+            act(&mut e);
+            assert!(e.caret_shown(), "action {i} shows the caret");
+        }
     }
 
     #[test]

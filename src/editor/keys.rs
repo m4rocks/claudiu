@@ -16,9 +16,14 @@ fn primary(m: &Modifiers) -> bool {
     if MAC { m.platform && !m.control } else { m.control && !m.platform }
 }
 
-/// The modifier that moves by words: Option on macOS, Ctrl elsewhere.
+/// The modifier that moves by words: Option on macOS, Ctrl elsewhere. Linux also selects by word with Alt+Shift, as
+/// gpui-kit bound it.
 fn word(m: &Modifiers) -> bool {
-    if MAC { m.alt && !m.platform && !m.control } else { m.control && !m.alt }
+    if MAC {
+        m.alt && !m.platform && !m.control
+    } else {
+        (m.control && !m.alt) || (cfg!(target_os = "linux") && m.alt && m.shift && !m.control)
+    }
 }
 
 impl Editor {
@@ -32,6 +37,10 @@ impl Editor {
             return true;
         }
         let used = self.key_inner(ks, tx);
+        // Any key the editor takes, even one that changes nothing (Copy), shows the caret, as in gpui-kit.
+        if used {
+            self.wake_caret();
+        }
         // Typing on narrows the completion list; moving off the word closes it.
         self.filter_completions();
         used
@@ -70,7 +79,10 @@ impl Editor {
             return true;
         }
         if let Some(action) = line_action(&m, key) {
-            self.edit_lines(action);
+            // As in main, line actions do nothing while several cursors are active.
+            if self.others.is_empty() {
+                self.edit_lines(action);
+            }
             return true;
         }
         if primary(&m) && !m.alt {
@@ -112,7 +124,12 @@ impl Editor {
                     self.each_cursor(Self::outdent);
                     true
                 }
-                ("z", true) | ("y", false) => {
+                // Redo is Cmd+Shift+Z on macOS and Ctrl+Y elsewhere, the keys gpui-kit bound.
+                ("z", true) if MAC => {
+                    self.redo();
+                    true
+                }
+                ("y", false) if !MAC => {
                     self.redo();
                     true
                 }
@@ -190,8 +207,8 @@ impl Editor {
             }
             "left" if by_word => self.buffer.word_left(p),
             "right" if by_word => self.buffer.word_right(p),
-            "left" => self.buffer.prev(p),
-            "right" => self.buffer.next(p),
+            "left" => self.prev_visible(p),
+            "right" => self.next_visible(p),
             "up" if to_end => Pos::default(),
             "down" if to_end => self.buffer.last(),
             "up" => return self.vertical(-1, m.shift),
@@ -249,7 +266,7 @@ impl Editor {
 
     /// Up or down by `rows` screen rows, keeping the cell the caret started in. Past the first row is the start of
     /// the text, past the last its end.
-    fn vertical(&mut self, rows: isize, extend: bool) -> bool {
+    pub(super) fn vertical(&mut self, rows: isize, extend: bool) -> bool {
         let goal = self.goal.unwrap_or_else(|| self.caret_cell());
         let last = self.row_count() - 1;
         let (target, row_end) = match self.caret_row().checked_add_signed(rows) {
@@ -279,7 +296,7 @@ impl Editor {
         } else if by_word {
             self.buffer.word_left(p)
         } else {
-            self.buffer.prev(p)
+            self.prev_visible(p)
         };
         if from != p {
             self.replace(from, p, "", !by_word && !to_start);
@@ -296,7 +313,7 @@ impl Editor {
         } else if by_word {
             self.buffer.word_right(p)
         } else {
-            self.buffer.next(p)
+            self.next_visible(p)
         };
         if to != p {
             self.replace(p, to, "", false);
@@ -385,9 +402,10 @@ impl Editor {
 
     /// The text to copy: the selection, or with none the caret's whole line. With `cut`, that text goes too.
     pub fn take_for_clipboard(&mut self, cut: bool) -> String {
-        // With several cursors, what they select, one after another on lines of its own.
+        // With several cursors, gpui-kit's own copy and cut: what they select, one after another on lines of its own,
+        // which is nothing when no cursor selects anything.
         let mut selected: Vec<Selection> = self.cursors().into_iter().filter(|s| !s.is_empty()).collect();
-        if !self.others.is_empty() && !selected.is_empty() {
+        if !self.others.is_empty() {
             selected.sort_by_key(|s| s.range());
             let text = selected.iter().map(|s| self.buffer.slice(s.range().0, s.range().1)).collect::<Vec<_>>().join("\n");
             if cut {

@@ -1557,6 +1557,19 @@ fn alt_click_and_the_add_cursor_key_type_at_several_cursors() {
 
     h.press(rune::Key::Escape, |_| {});
     assert_eq!(heads(&h), [Pos::new(0, 0)], "Escape leaves the first cursor");
+
+    // gpui-kit's `test_multi_cursor_platform_word_selection_dispatch`: the platform's select-word key at two cursors.
+    h.step(|ws| {
+        let e = &mut ws.panes.get_mut(&id).unwrap().shown_mut().unwrap().editor;
+        e.set_text("one two\none two");
+        e.set_cursors(&[crate::editor::buffer::Selection::caret(Pos::new(0, 4)), crate::editor::buffer::Selection::caret(Pos::new(1, 4))]);
+    });
+    h.press(rune::Key::Right, |m| {
+        m.shift = true;
+        if cfg!(any(target_os = "macos", target_os = "linux")) { m.alt = true } else { m.ctrl = true }
+    });
+    h.type_text("x");
+    assert_eq!(h.shown_tab(&id).unwrap().editor.buffer.text(), "one x\none x");
 }
 
 /// The caret blinks while the editor has the keyboard, as in main's editor: on while it moves, then off and on every
@@ -1581,6 +1594,11 @@ fn the_caret_blinks_only_while_the_editor_has_the_keyboard() {
     h.wait("and off", |ws| ws.panes[&id].shown().is_some_and(|t| !t.editor.caret_shown()));
     h.press(rune::Key::Right, |_| {});
     assert!(shown(&h), "a move shows it at once");
+    // A key the editor takes without changing anything, Copy, shows it too (gpui-kit's
+    // `test_consumed_keystrokes_keep_cursor_visible`).
+    h.wait("off again", |ws| ws.panes[&id].shown().is_some_and(|t| !t.editor.caret_shown()));
+    h.press(rune::Key::Text("c".into()), |m| if cfg!(target_os = "macos") { m.logo = true } else { m.ctrl = true });
+    assert!(shown(&h), "Copy shows the caret");
 
     let e = &mut h.rt.state.panes.get_mut(&id).unwrap().shown_mut().unwrap().editor;
     let later = std::time::Instant::now() + Duration::from_secs(5);

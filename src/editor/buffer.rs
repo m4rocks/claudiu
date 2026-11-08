@@ -74,6 +74,9 @@ pub struct Buffer {
     next_id: u64,
     /// An edit at several cursors is under way (`begin_group`): its replacements make one step.
     group: Option<Group>,
+    /// What the last undo or redo replaced, in order: where each replacement started, where the text it replaced
+    /// ended, and where the new text ends.
+    pub changed: Vec<(Pos, Pos, Pos)>,
 }
 
 /// The cursors an edit at several cursors started from, and whether it has made its step yet.
@@ -85,7 +88,7 @@ struct Group {
 impl Buffer {
     /// `text` with `\n` line breaks (a file's `\r\n` is turned into `\n` before it gets here).
     pub fn new(text: &str) -> Self {
-        Self { lines: text.split('\n').map(str::to_string).collect(), undo: vec![], redo: vec![], version: 0, saved_id: 0, next_id: 1, group: None }
+        Self { lines: text.split('\n').map(str::to_string).collect(), undo: vec![], redo: vec![], version: 0, saved_id: 0, next_id: 1, group: None, changed: vec![] }
     }
 
     fn current_id(&self) -> u64 {
@@ -240,9 +243,11 @@ impl Buffer {
     /// Take back the last step; the cursors to show, the main one first, or `None` with nothing to undo.
     pub fn undo(&mut self) -> Option<Vec<Selection>> {
         let step = self.undo.pop()?;
+        self.changed.clear();
         for e in step.edits.iter().rev() {
             let end = Self::end_of(e.at, &e.inserted);
-            self.splice(e.at, end, &e.removed);
+            let new_end = self.splice(e.at, end, &e.removed);
+            self.changed.push((e.at, end, new_end));
         }
         let before = step.before.clone();
         self.redo.push(step);
@@ -251,9 +256,11 @@ impl Buffer {
 
     pub fn redo(&mut self) -> Option<Vec<Selection>> {
         let mut step = self.redo.pop()?;
+        self.changed.clear();
         for e in &step.edits {
             let end = Self::end_of(e.at, &e.removed);
-            self.splice(e.at, end, &e.inserted);
+            let new_end = self.splice(e.at, end, &e.inserted);
+            self.changed.push((e.at, end, new_end));
         }
         step.typing = false;
         let after = step.after.clone();

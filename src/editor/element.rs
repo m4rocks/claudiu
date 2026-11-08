@@ -228,7 +228,8 @@ impl Editor {
 
         let mut body = el().absolute(gutter, 0.0).size((self.area[0] - gutter).max(0.0), self.area[1]).clip_rounded(0.0);
         let caret_line_row = self.line_row(caret.line);
-        if focused && self.sel.is_empty() && caret_line_row < last_row && caret_line_row >= top_row {
+        let caret_hidden = self.hidden(caret.line);
+        if focused && self.sel.is_empty() && !caret_hidden && caret_line_row < last_row && caret_line_row >= top_row {
             let h = m.line_h * (self.line_breaks(caret.line).0.len() + 1) as f32;
             body = body.child(el().absolute(0.0, top + y_of(caret_line_row)).w_full().h(h).fill(theme::rgb(theme::ROW_ACTIVE)));
         }
@@ -240,7 +241,8 @@ impl Editor {
                 body = body.child(el().key(format!("{key}/caret{i}")).absolute(x - super::CARET_W / 2.0, top + y_of(row)).size(super::CARET_W, m.line_h).fill(theme::rgb(theme::ACCENT)));
             }
         }
-        if (top_row..last_row).contains(&caret_row) {
+        // A caret a fold hides isn't drawn, as in gpui-kit.
+        if !caret_hidden && (top_row..last_row).contains(&caret_row) {
             let x = (self.caret_cell() as f32 * m.cell_w - self.scroll[0]).round();
             let y = top + y_of(caret_row);
             if let Some(marked) = self.marked.clone() {

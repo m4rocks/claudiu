@@ -263,8 +263,6 @@ impl Editor {
         self.goal = None;
         self.row_end = false;
         self.wake_caret();
-        // A caret sent into a folded block opens it, so it is never hidden.
-        self.unfold_at(self.sel.head.line);
         self.buffer.break_typing();
         self.reveal_caret();
         self.dirty = true;
@@ -320,12 +318,11 @@ impl Editor {
         }
     }
 
-    /// Undo and redo don't say which lines they changed, so the folds open and every line wraps again; the parser
-    /// sends the fold candidates anew.
+    /// Undo and redo treat folds as any edit does (`relayout_edit`), one replacement at a time.
     fn after_history(&mut self) {
-        self.folds.clear();
-        self.fold_spots.clear();
-        self.relayout();
+        for (a, b, end) in std::mem::take(&mut self.buffer.changed) {
+            self.relayout_edit(a.line, b.line, end.line);
+        }
     }
 
     // ---------------------------------------------------------------------------------------------- geometry
@@ -557,7 +554,7 @@ impl Editor {
     // ---------------------------------------------------------------------------------------------- the caret's blink
 
     /// The caret moved or the text changed: it shows, and starts blinking again after a pause.
-    fn wake_caret(&mut self) {
+    pub(super) fn wake_caret(&mut self) {
         self.blink_from = Instant::now();
         self.dirty |= !self.caret_on;
         self.caret_on = true;

@@ -41,6 +41,10 @@ tree-sitter-rust = "0.24.2"
 tree-sitter-toml-ng = "0.7.0"
 tree-sitter-typescript = "0.23.2"
 tree-sitter-yaml = "0.7.2"
+# Where the editor may wrap a long line (Unicode line breaking) and never split a character the user sees, as main's
+# GPUI editor wrapped; main's build had both.
+unicode-linebreak = "0.1.5"
+unicode-segmentation = "1.13.3"
 # How many cells a character takes in the editor (wide CJK and emoji take two).
 unicode-width = "0.2.2"
 uuid = { version = "1.27.0", features = ["v4"] }

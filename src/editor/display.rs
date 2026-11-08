@@ -3,9 +3,6 @@
 //! rows start as far in as the line's own leading spaces. A fold hides every line strictly between its first and last;
 //! its candidates are the blocks tree-sitter finds (`fold_spots`). `starts` holds the first row of each line, so a
 //! hidden line takes none and a row finds its line by a binary search.
-//!
-//! gpui-kit wraps at Unicode line-break opportunities; this wraps after spaces and between wide characters only,
-//! which differs for code only at a `-` or `/` in a very long run of text without spaces.
 
 use std::ops::Range;
 
@@ -65,27 +62,21 @@ impl Rows {
 /// row's start (and, on the first row, past the indent); with none, break where the row is full, keeping at least one
 /// character on every row.
 pub(super) fn wrap(text: &str, cells: usize) -> (Vec<usize>, usize) {
+    use unicode_segmentation::UnicodeSegmentation;
     if cells == 0 {
         return (vec![], 0);
     }
     let indent = text.chars().take_while(|&c| c == ' ').count().min(MAX_INDENT);
-    // Each character's end, as a byte offset and a cell from the line's start.
+    // Each grapheme's end, as a byte offset and a cell from the line's start.
     let mut ends: Vec<(usize, usize)> = vec![];
-    let mut opportunities: Vec<usize> = vec![];
     let mut x = 0;
-    let mut before: Option<char> = None;
-    for (i, c) in text.char_indices() {
-        let w = width(c, x);
-        let wide = |c: char| unicode_width::UnicodeWidthChar::width(c) == Some(2);
-        if let Some(b) = before
-            && ((b.is_whitespace() && !c.is_whitespace()) || wide(b) || wide(c))
-        {
-            opportunities.push(i);
+    for (i, g) in text.grapheme_indices(true) {
+        for c in g.chars() {
+            x += width(c, x);
         }
-        x += w;
-        ends.push((i + c.len_utf8(), x));
-        before = Some(c);
+        ends.push((i + g.len(), x));
     }
+    let opportunities: Vec<usize> = unicode_linebreak::linebreaks(text).map(|(i, _)| i).filter(|i| ends.binary_search_by_key(i, |e| e.0).is_ok()).collect();
     let mut breaks = vec![];
     let (mut first, mut start, mut start_cell) = (0, 0, 0);
     while first < ends.len() {
@@ -177,16 +168,14 @@ impl Editor {
         self.folds.iter().any(|f| f.0 == line)
     }
 
-    /// Fold the block starting on `line`, or open it. The caret, if the fold hides it, goes to the fold's first line.
+    /// Fold the block starting on `line`, or open it. As in gpui-kit, a caret the fold hides stays where it is,
+    /// undrawn, until it moves or the text there changes.
     pub fn toggle_fold(&mut self, line: usize) {
         if self.is_folded(line) {
             self.folds.retain(|f| f.0 != line);
         } else if let Some(spot) = self.fold_spot(line) {
             self.folds.push(spot);
             self.folds.sort();
-            if self.hidden(self.sel.head.line) {
-                self.sel = super::buffer::Selection::caret(Pos::new(line, self.buffer.line(line).len()));
-            }
         }
         self.rows.count(&self.folds);
         self.dirty = true;
@@ -212,12 +201,22 @@ impl Editor {
         changed
     }
 
-    /// Open every fold that hides `line`, as gpui-kit's `unfold_at`: the caret is about to go there.
-    pub(super) fn unfold_at(&mut self, line: usize) {
-        let before = self.folds.len();
-        self.folds.retain(|&(s, e)| !(s < line && line < e));
-        if self.folds.len() != before {
-            self.rows.count(&self.folds);
+    /// The position a character before `p`, as Left and Backspace reach it: from the line after a fold, the end of
+    /// the fold's first line, so the hidden lines are stepped over (gpui-kit's `clamp_offset_to_visible_backward`).
+    pub(super) fn prev_visible(&self, p: Pos) -> Pos {
+        let q = self.buffer.prev(p);
+        match self.folds.iter().find(|&&(s, e)| self.hidden(q.line) && s < q.line && q.line <= e) {
+            Some(&(s, _)) => Pos::new(s, self.buffer.line(s).len()),
+            None => q,
+        }
+    }
+
+    /// The position a character after `p`, as Right and Delete reach it: into a fold, the start of its last line.
+    pub(super) fn next_visible(&self, p: Pos) -> Pos {
+        let q = self.buffer.next(p);
+        match self.folds.iter().find(|&&(s, e)| self.hidden(q.line) && s < q.line && q.line <= e) {
+            Some(&(_, e)) => Pos::new(e, 0),
+            None => q,
         }
     }
 
@@ -267,14 +266,22 @@ impl Editor {
         if row_end && k > 0 && breaks[k - 1] == p.col { k - 1 } else { k }
     }
 
-    /// The row `p` shows on.
+    /// The row `p` shows on; for a line a fold hides, the last row before the fold, as gpui-kit's
+    /// `nearest_visible_display_row`.
     pub(super) fn row_of(&self, p: Pos) -> usize {
-        self.line_row(p.line) + self.row_in_line(p, false)
+        self.visible_row(p, false)
     }
 
-    /// The row the caret shows on.
+    /// The row the caret shows on (or would, when a fold hides it).
     pub(super) fn caret_row(&self) -> usize {
-        self.line_row(self.sel.head.line) + self.row_in_line(self.sel.head, self.row_end)
+        self.visible_row(self.sel.head, self.row_end)
+    }
+
+    fn visible_row(&self, p: Pos, row_end: bool) -> usize {
+        if self.hidden(p.line) {
+            return self.line_row(p.line).saturating_sub(1);
+        }
+        self.line_row(p.line) + self.row_in_line(p, row_end)
     }
 
     /// The cell `p` shows at on row `k` of its line, counting the row's indent.
@@ -288,7 +295,7 @@ impl Editor {
 
     /// Where the cursors besides the main one show: their row and cell.
     pub(super) fn other_carets(&self) -> Vec<(usize, usize)> {
-        self.other_heads().map(|(p, row_end)| {
+        self.other_heads().filter(|(p, _)| !self.hidden(p.line)).map(|(p, row_end)| {
             let k = self.row_in_line(p, row_end);
             (self.line_row(p.line) + k, self.cell_in_row(p, k))
         }).collect()
@@ -340,6 +347,10 @@ mod tests {
         assert_eq!(wrap("", 4), (vec![], 0));
         assert_eq!(wrap("日本語日本", 4), (vec![6, 12], 0), "wide characters take two cells and break anywhere");
         assert_eq!(wrap("\tab cd ef", 8), (vec![4], 0), "a tab counts to its stop");
+        assert_eq!(wrap("aaaa-bbbb", 6), (vec![5], 0), "Unicode line breaking allows a break after a hyphen");
+        // Each é is a letter and a combining accent, two cells here. A row of 3 cells would split the second é if
+        // wrapping went by character; by grapheme each row holds one whole é.
+        assert_eq!(wrap("e\u{301}e\u{301}e\u{301}", 3), (vec![3, 6], 0), "a letter and its accent stay together");
     }
 
     #[test]
@@ -360,11 +371,14 @@ mod tests {
         assert_eq!(e.row_count(), 5, "lines 2 and 3 hidden");
         assert_eq!(e.row_line(4), (4, 0));
         assert!(e.hidden(2) && e.hidden(3) && !e.hidden(1) && !e.hidden(4));
-        e.unfold_at(2);
+        e.toggle_fold(1);
         assert_eq!(e.row_count(), 7);
         e.toggle_fold(1);
         e.select(crate::editor::buffer::Selection::caret(Pos::new(3, 0)));
-        assert!(!e.is_folded(1) && !e.hidden(3), "a caret sent into a fold opens it");
+        assert!(e.is_folded(1), "a jump into a fold leaves it folded, as in gpui-kit");
+        assert_eq!(e.caret_row(), 3, "and the caret counts as on the fold's first line");
+        assert_eq!(e.next_visible(Pos::new(1, 1)), Pos::new(4, 0), "Right steps over the hidden lines");
+        assert_eq!(e.prev_visible(Pos::new(4, 0)), Pos::new(1, 1), "and Left back");
     }
 
     #[test]
@@ -377,6 +391,20 @@ mod tests {
         assert_eq!(e.folds, [(5, 8)], "the edit inside the first fold opened it and moved the second");
         assert_eq!(e.fold_spots, [(5, 8)]);
         assert!(e.hidden(6) && e.hidden(7) && !e.hidden(8));
+    }
+
+    #[test]
+    fn undo_and_redo_move_folds_as_edits_do() {
+        let mut e = Editor::new("e", "a\nb\nc\nd\ne\nf\ng\nh");
+        e.fold_spots = vec![(4, 7)];
+        e.toggle_fold(4);
+        e.replace(Pos::new(0, 0), Pos::new(0, 0), "x\n", false);
+        assert_eq!(e.folds, [(5, 8)]);
+        e.undo();
+        assert_eq!(e.folds, [(4, 7)], "undo moves the fold back and keeps it folded");
+        e.redo();
+        assert_eq!(e.folds, [(5, 8)]);
+        assert!(e.hidden(6) && e.hidden(7));
     }
 }
 
