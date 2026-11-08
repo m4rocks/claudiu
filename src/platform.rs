@@ -408,6 +408,19 @@ pub fn request_attention(window: &rune::WindowHandle) {
     }
 }
 
+/// macOS's emoji and symbols palette, which types what is picked into the focused text, as Ctrl+Cmd+Space opened it
+/// in main's editor. Nothing elsewhere.
+pub fn show_character_palette() {
+    #[cfg(target_os = "macos")]
+    {
+        use objc2::MainThreadMarker;
+        use objc2_app_kit::NSApplication;
+        if let Some(mtm) = MainThreadMarker::new() {
+            NSApplication::sharedApplication(mtm).orderFrontCharacterPalette(None);
+        }
+    }
+}
+
 /// Strip the Windows verbatim prefix (`\?\`) so paths compare and display normally.
 pub fn clean_path(path: &Path) -> PathBuf {
     dunce::simplified(path).to_path_buf()

@@ -46,6 +46,10 @@ impl Editor {
             self.requests.push(super::assist::Request::Complete(self.sel.head));
             return true;
         }
+        if MAC && m.control && m.platform && !m.alt && !shift && key == "space" {
+            crate::platform::show_character_palette();
+            return true;
+        }
         if key == "f12" && !m.control && !m.platform && !m.alt && !shift {
             self.requests.push(super::assist::Request::Definition(self.sel.head));
             return true;
