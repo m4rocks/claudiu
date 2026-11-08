@@ -8,6 +8,7 @@ pub mod buffer;
 mod element;
 pub mod highlight;
 mod keys;
+pub mod lines;
 
 use std::ops::Range;
 

@@ -4,6 +4,7 @@
 use rune::Tx;
 
 use super::buffer::{Pos, Selection};
+use super::lines::LineAction;
 use super::{Editor, TAB_WIDTH};
 use crate::app::Workspace;
 use crate::terminal::keys::{Keystroke, Modifiers};
@@ -47,6 +48,10 @@ impl Editor {
         }
         if key == "f12" && !m.control && !m.platform && !m.alt && !shift {
             self.requests.push(super::assist::Request::Definition(self.sel.head));
+            return true;
+        }
+        if let Some(action) = line_action(&m, key) {
+            self.edit_lines(action);
             return true;
         }
         if primary(&m) && !m.alt {
@@ -300,10 +305,33 @@ impl Editor {
             (a, b, self.buffer.slice(a, b))
         };
         tx.copy(text);
-        if cut {
-            self.replace(a, b, "", false);
+        match cut {
+            // The line goes with its line end, and the last line with the one before it.
+            true if self.sel.is_empty() => {
+                self.edit_lines(LineAction::Delete);
+            }
+            true => self.replace(a, b, "", false),
+            false => {}
         }
     }
+}
+
+/// The line action a key runs, with VS Code's keys. Primary+Shift+Up / Down select by line, since Primary+Shift+Left /
+/// Right already select by word or to the line's ends.
+fn line_action(m: &Modifiers, key: &str) -> Option<LineAction> {
+    use LineAction::*;
+    let alt_only = m.alt && !m.control && !m.platform;
+    Some(match (key, m.shift) {
+        ("up", false) if alt_only => MoveUp,
+        ("down", false) if alt_only => MoveDown,
+        ("up", true) if alt_only => DuplicateUp,
+        ("down", true) if alt_only => DuplicateDown,
+        ("k", true) if primary(m) && !m.alt => Delete,
+        ("l", false) if primary(m) && !m.alt => Select,
+        ("up", true) if primary(m) && !m.alt => ExtendUp,
+        ("down", true) if primary(m) && !m.alt => ExtendDown,
+        _ => return None,
+    })
 }
 
 /// The text a key types, if it types one: plain keys, Shift, and on macOS Option (⌥P types π); AltGr elsewhere.
@@ -377,6 +405,23 @@ mod tests {
         assert_eq!(e.caret(), Pos::new(2, 7));
         e.vertical(-5, false);
         assert_eq!(e.caret(), Pos::new(0, 0), "past the top is the start");
+    }
+
+    #[test]
+    fn line_actions_have_vs_codes_keys() {
+        let action = |spec: &str| {
+            let ks = Keystroke::parse(spec).unwrap();
+            line_action(&ks.modifiers, &ks.key)
+        };
+        let primary = if MAC { "cmd" } else { "ctrl" };
+        assert_eq!(action("alt-up"), Some(LineAction::MoveUp));
+        assert_eq!(action("alt-shift-down"), Some(LineAction::DuplicateDown));
+        assert_eq!(action(&format!("{primary}-shift-k")), Some(LineAction::Delete));
+        assert_eq!(action(&format!("{primary}-l")), Some(LineAction::Select));
+        assert_eq!(action(&format!("{primary}-shift-up")), Some(LineAction::ExtendUp));
+        assert_eq!(action("up"), None);
+        assert_eq!(action(&format!("{primary}-up")), None, "to the start of the file, as before");
+        assert_eq!(action(&format!("{primary}-k")), None);
     }
 
     #[test]
