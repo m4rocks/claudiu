@@ -233,6 +233,13 @@ impl Editor {
             body = body.child(el().absolute(0.0, top + y_of(caret_line_row)).w_full().h(h).fill(theme::rgb(theme::ROW_ACTIVE)));
         }
         body = body.child(text_rows);
+        // The other cursors' carets, wherever the main one is.
+        for (i, (row, cell)) in self.other_carets().into_iter().enumerate() {
+            if focused && self.caret_on && (top_row..last_row).contains(&row) {
+                let x = (cell as f32 * m.cell_w - self.scroll[0]).round();
+                body = body.child(el().key(format!("{key}/caret{i}")).absolute(x - super::CARET_W / 2.0, top + y_of(row)).size(super::CARET_W, m.line_h).fill(theme::rgb(theme::ACCENT)));
+            }
+        }
         if (top_row..last_row).contains(&caret_row) {
             let x = (self.caret_cell() as f32 * m.cell_w - self.scroll[0]).round();
             let y = top + y_of(caret_row);
@@ -248,12 +255,6 @@ impl Editor {
                 );
             }
             // The bar stays laid out while it blinks off, so the input method keeps its place.
-            for (row, cell) in self.other_carets() {
-                if focused && self.caret_on && (top_row..last_row).contains(&row) {
-                    let x = (cell as f32 * m.cell_w - self.scroll[0]).round();
-                    body = body.child(el().absolute(x - super::CARET_W / 2.0, top + y_of(row)).size(super::CARET_W, m.line_h).fill(theme::rgb(theme::ACCENT)));
-                }
-            }
             let bar = el().absolute(x - super::CARET_W / 2.0, y).size(super::CARET_W, m.line_h);
             body = body.child(match focused {
                 true if self.caret_on => bar.fill(theme::rgb(theme::ACCENT)).ime_cursor(),

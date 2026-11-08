@@ -1545,6 +1545,16 @@ fn alt_click_and_the_add_cursor_key_type_at_several_cursors() {
 
     h.press(rune::Key::Text("z".into()), |m| if cfg!(target_os = "macos") { m.logo = true } else { m.ctrl = true });
     assert_eq!(h.shown_tab(&id).unwrap().editor.buffer.text(), "one\ntwo\nthree\nfour\n", "one undo takes back every cursor's typing");
+    // Another cursor's caret shows even while the first cursor is scrolled out of view.
+    h.step(|ws| {
+        let e = &mut ws.panes.get_mut(&id).unwrap().shown_mut().unwrap().editor;
+        e.scroll[1] = e.metrics_line_h() * 1.0;
+        // Whatever the blink's phase, so the check doesn't depend on timing.
+        e.blink(std::time::Instant::now(), false);
+    });
+    h.pump();
+    assert!(h.drawn(&format!("{key}/caret0")), "the second cursor's caret is drawn with the first off screen");
+
     h.press(rune::Key::Escape, |_| {});
     assert_eq!(heads(&h), [Pos::new(0, 0)], "Escape leaves the first cursor");
 }

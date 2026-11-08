@@ -202,6 +202,11 @@ impl Editor {
         e
     }
 
+    #[cfg(test)]
+    pub fn metrics_line_h(&self) -> f32 {
+        self.metrics().line_h
+    }
+
     fn metrics(&self) -> Metrics {
         metrics_for(crate::panels::scale::px(self.font_size))
     }
