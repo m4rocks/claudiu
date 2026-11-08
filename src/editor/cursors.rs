@@ -174,6 +174,11 @@ impl Editor {
         self.dirty = true;
     }
 
+    /// The button was let go: dragging no longer makes a block.
+    pub fn end_block(&mut self) {
+        self.block_from = None;
+    }
+
     /// Escape with several cursors: only the main one stays. Whether there were others.
     pub fn single_cursor(&mut self) -> bool {
         let had = !self.others.is_empty();
@@ -505,6 +510,43 @@ mod tests {
             type_text(&mut e, "X");
             assert_eq!(shown(&e), "aX|d\naX|d\naX|d", "shift {shift}");
         }
+    }
+
+    #[test]
+    fn alt_mouse_release_outside_editor_ends_column_selection() {
+        let mut e = editor("|abcd\nabcd");
+        e.area = [800.0, 400.0];
+        let (m, gutter) = (e.metrics(), e.gutter_w());
+        e.add_cursor_at(e.pos_at(gutter + 2.0, m.line_h * 0.5));
+        e.start_block_here(gutter + 2.0, m.line_h * 0.5);
+        let before = e.cursors();
+        e.end_block();
+        e.drag_block(-100.0, -100.0);
+        assert!(e.block_from.is_none());
+        assert_eq!(e.cursors(), before, "after the release, moving makes no block");
+    }
+
+    #[test]
+    fn multi_cursor_horizontal_selection_dispatch() {
+        // gpui-kit runs this off macOS through its keys; here the same moves at each cursor: a cursor above, then
+        // Shift+Right, Shift+Left twice, and typing.
+        let mut e = editor("ab\na|b");
+        e.add_cursor_vertical(-1);
+        let extend = |e: &mut Editor, right: bool| {
+            e.each_cursor(|e| {
+                let to = if right { e.next_visible(e.sel.head) } else { e.prev_visible(e.sel.head) };
+                e.select(Selection { anchor: e.sel.anchor, head: to });
+            })
+        };
+        extend(&mut e, true);
+        let ranges: Vec<(Pos, Pos)> = e.cursors().iter().map(|s| s.range()).collect();
+        assert_eq!(ranges, [(Pos::new(1, 1), Pos::new(1, 2)), (Pos::new(0, 1), Pos::new(0, 2))]);
+        extend(&mut e, false);
+        extend(&mut e, false);
+        let ranges: Vec<(Pos, Pos)> = e.cursors().iter().map(|s| s.range()).collect();
+        assert_eq!(ranges, [(Pos::new(1, 0), Pos::new(1, 1)), (Pos::new(0, 0), Pos::new(0, 1))]);
+        type_text(&mut e, "x");
+        assert_eq!(shown(&e), "x|b\nx|b");
     }
 
     #[test]

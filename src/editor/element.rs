@@ -352,7 +352,9 @@ fn handlers(root: El, key: String) -> El {
                 }
             }
             match d.phase {
-                rune::Phase::Move | rune::Phase::Up if e.press_done => e.drag_block(d.x, d.y),
+                rune::Phase::Move if e.press_done => e.drag_block(d.x, d.y),
+                // Letting go ends the block where the last move left it, even outside the editor, as in gpui-kit.
+                rune::Phase::Up if e.press_done => e.end_block(),
                 _ if e.press_done => {}
                 rune::Phase::Down if definition => {
                     let p = e.pos_at(d.x, d.y);
