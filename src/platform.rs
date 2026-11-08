@@ -416,7 +416,10 @@ pub fn show_character_palette() {
         use objc2::MainThreadMarker;
         use objc2_app_kit::NSApplication;
         if let Some(mtm) = MainThreadMarker::new() {
-            NSApplication::sharedApplication(mtm).orderFrontCharacterPalette(None);
+            let app = NSApplication::sharedApplication(mtm);
+            // The key window as the sender, as gpui did, so the picked character goes to the text that has focus.
+            let window = app.keyWindow();
+            app.orderFrontCharacterPalette(window.as_deref().map(|w| &**w as &objc2::runtime::AnyObject));
         }
     }
 }
