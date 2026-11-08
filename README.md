@@ -20,7 +20,6 @@ Claudiu never deletes a transcript. It writes to Claude Code's own data only to 
 
 ## Known gaps
 
-- Editor mode (Ctrl+Shift+E) is not in this build yet; it returns in a later one.
 - macOS is lightly tested, and the build isn't notarized, so Gatekeeper complains on first launch.
 - Linux is new and lightly tested.
 - Quitting ends running PTYs. Sessions stay resumable, but live processes don't survive a restart.
