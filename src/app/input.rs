@@ -39,6 +39,7 @@ impl Workspace {
         self.drain_terminals();
         self.drain_editors();
         self.note_edits();
+        self.follow_terminal_focus();
         self.drain_github();
         if std::mem::take(&mut self.blur) {
             tx.blur();

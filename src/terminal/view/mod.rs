@@ -106,6 +106,13 @@ struct Handing {
     clipboard: Option<Option<rune::ClipboardContent>>,
 }
 
+/// The `@path#L..` line `insert_reference` put into Claude's input.
+struct Inserted {
+    chars: usize,
+    /// The user typed or pasted after it, so it can no longer be erased without erasing their text too.
+    typed: bool,
+}
+
 /// Images Claude Code takes.
 fn is_image_file(p: &std::path::Path) -> bool {
     p.extension().and_then(|e| e.to_str()).is_some_and(|e| ["png", "jpg", "jpeg", "gif", "webp", "bmp"].contains(&e.to_ascii_lowercase().as_str()))
@@ -168,6 +175,8 @@ pub struct TerminalView {
     redraw_at: Option<Instant>,
     /// While Ctrl is held over a link: its viewport row and the columns to underline (none when it is drawn as a link already).
     hovered_link: Option<(usize, Option<std::ops::Range<usize>>)>,
+    /// A line Claudiu put into Claude's input for the user (`insert_reference`), until it is kept or taken back.
+    reference: Option<Inserted>,
     cards: cards::Cards,
     /// For the workspace to act on (see the module docs).
     pub events: Vec<TerminalEvent>,
@@ -248,6 +257,7 @@ impl TerminalView {
             last_redraw: None,
             redraw_at: None,
             hovered_link: None,
+            reference: None,
             cards: cards::Cards::default(),
             events: vec![],
             fx: vec![],

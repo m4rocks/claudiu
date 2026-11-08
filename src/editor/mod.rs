@@ -391,6 +391,17 @@ impl Editor {
         if to < from { Selection { anchor: end, head: Pos::new(a, 0) } } else { Selection { anchor: Pos::new(a, 0), head: end } }
     }
 
+    /// A right click puts the caret where it lands, unless it lands in the selection, which the menu then acts on.
+    pub fn right_click(&mut self, x: f32, y: f32) {
+        let p = self.pos_at(x, y);
+        let (a, b) = self.sel.range();
+        if self.sel.is_empty() || p < a || p > b {
+            self.select(Selection::caret(p));
+        }
+        self.completion = None;
+        self.hover = None;
+    }
+
     /// The pointer moved with the button held: the selection follows it in the grain the press chose, and the text
     /// scrolls when it is dragged past an edge.
     pub fn mouse_drag(&mut self, x: f32, y: f32) {

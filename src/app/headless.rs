@@ -1167,6 +1167,99 @@ fn a_language_server_checks_describes_completes_and_finds() {
     h.wait("the server hearing the close", heard_of("textDocument/didClose", ""));
 }
 
+/// Right-clicking the editor opens its menu; asking Claude about the selected lines sends `@path#L..` and the request
+/// to the session's mod (never typed into its terminal) and hands the keyboard to Claude.
+#[test]
+fn the_editor_menu_asks_claude_about_the_selected_lines() {
+    use crate::editor::buffer::{Pos, Selection};
+    let mut h = Harness::new(|_| vec![]);
+    let cwd = h.work.join("project");
+    std::fs::create_dir_all(cwd.join("src")).unwrap();
+    std::fs::write(cwd.join("src/code.rs"), "fn a() {}\nfn b() {}\nfn c() {}\n").unwrap();
+    h.step(|ws| ws.new_claude(cwd.clone()));
+    let id = h.ws().active.clone().unwrap();
+    h.wait("the session starting", |ws| ws.is_running(&ws.active.clone().unwrap()));
+    h.step(|ws| ws.toggle_editor());
+    h.wait("listing", |ws| !ws.panes[&id].root.as_os_str().is_empty());
+    let root = h.editor_pane(&id).root.clone();
+    h.step(|ws| ws.open_file(&id, root.join("src/code.rs"), None));
+    h.wait("opening", |ws| ws.panes[&id].shown().is_some());
+    h.settle();
+    h.step(|ws| ws.panes.get_mut(&id).unwrap().shown_mut().unwrap().editor.select(Selection { anchor: Pos::new(1, 0), head: Pos::new(3, 0) }));
+
+    // A right click inside the selection keeps it.
+    let key = h.shown_tab(&id).unwrap().editor.key.clone();
+    let (x, y) = h.rt.find(&format!("{key}/l1")).expect("line 2 is drawn");
+    h.rt.secondary_down(x, y);
+    h.rt.secondary_up(x, y);
+    h.settle();
+    let rows: Vec<String> = h.menu_rows().into_iter().map(|(label, _)| label).collect();
+    assert_eq!(rows[0], "Go to Definition");
+    let ask = rows.iter().position(|r| r == "Ask Claude to explain this").expect("the menu asks Claude");
+    assert_eq!(h.shown_tab(&id).unwrap().editor.sel, Selection { anchor: Pos::new(1, 0), head: Pos::new(3, 0) }, "the selection stays");
+
+    let serial = h.ws().menu.as_ref().unwrap().serial;
+    h.click(&format!("menu-{serial}-{ask}"));
+    let sent = std::fs::read_to_string(crate::claude::usage::ctl_file(&id)).expect("a request went to the session's mod");
+    assert!(sent.contains("@src/code.rs#L2-3: Explain this code."), "{sent}");
+    assert_eq!(h.ws().keys_to.as_deref(), Some(id.as_str()), "Claude has the keyboard");
+
+    // Outside the selection, the click moves the caret there first.
+    h.step(|ws| ws.focus_pane());
+    let (x, y) = h.rt.find(&format!("{key}/l0")).expect("line 1 is drawn");
+    h.rt.secondary_down(x, y);
+    h.rt.secondary_up(x, y);
+    h.pump();
+    let e = &h.shown_tab(&id).unwrap().editor;
+    assert!(e.sel.is_empty() && e.caret().line == 0, "the caret went to the clicked line");
+}
+
+/// Moving the keyboard from the editor to Claude while lines are selected puts `@path#L..: ` into Claude's input box,
+/// and moving it away again without typing erases it. A stand-in for `claude` draws an input box, asks for bracketed
+/// paste, and records what reaches it.
+#[cfg(unix)]
+#[test]
+fn selected_lines_are_named_in_claudes_input_until_the_keyboard_leaves() {
+    use crate::editor::buffer::{Pos, Selection};
+    let mut h = Harness::new(|_| vec![]);
+    let cwd = h.work.join("project");
+    std::fs::create_dir_all(&cwd).unwrap();
+    std::fs::write(cwd.join("code.rs"), "fn a() {}\nfn b() {}\nfn c() {}\n").unwrap();
+    let heard = h.work.join("heard");
+    let prompt = h.work.join("prompt-claude");
+    let rule = "─".repeat(30);
+    // Bracketed paste on, a rule, the `❯` line, a rule, then the cursor back after `❯ `; raw, so bytes arrive as sent.
+    let script = format!("#!/bin/sh\nstty raw -echo\nprintf '\\033[?2004h\\033[2J\\033[H{rule}\\r\\n❯ \\r\\n{rule}\\r\\n\\033[2;3H'\nexec cat > '{}'\n", heard.display());
+    std::fs::write(&prompt, script).unwrap();
+    std::fs::set_permissions(&prompt, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    h.step(|ws| ws.claude_exe = Some(prompt.clone()));
+    h.step(|ws| ws.new_claude(cwd.clone()));
+    let id = h.ws().active.clone().unwrap();
+    h.wait("the input box", |ws| ws.live_view(&id).is_some_and(|v| !v.is_loading() && v.input_holds("")));
+    h.step(|ws| ws.toggle_editor());
+    h.wait("listing", |ws| !ws.panes[&id].root.as_os_str().is_empty());
+    let root = h.editor_pane(&id).root.clone();
+    h.step(|ws| ws.open_file(&id, root.join("code.rs"), None));
+    h.wait("opening", |ws| ws.panes[&id].shown().is_some());
+    h.step(|ws| ws.panes.get_mut(&id).unwrap().shown_mut().unwrap().editor.select(Selection { anchor: Pos::new(1, 0), head: Pos::new(3, 0) }));
+
+    let read = || std::fs::read(&heard).unwrap_or_default();
+    h.step(|ws| ws.focus_terminal(&id));
+    h.wait("the reference reaching Claude", |_| String::from_utf8_lossy(&read()).contains("@code.rs#L2-3: "));
+    assert_eq!(read(), b"\x1b[200~@code.rs#L2-3: \x1b[201~", "pasted, so nothing it holds is taken as a key");
+
+    h.step(|ws| ws.focus_pane());
+    let reference = "@code.rs#L2-3: ".chars().count();
+    h.wait("the reference erased", |_| read().iter().filter(|&&b| b == 0x7f).count() == reference);
+
+    // Typed after, it stays: the user's comment is behind it.
+    h.step(|ws| ws.focus_terminal(&id));
+    h.press(rune::Key::Text("x".into()), |_| {});
+    h.step(|ws| ws.focus_pane());
+    h.settle();
+    assert_eq!(read().iter().filter(|&&b| b == 0x7f).count(), reference, "nothing more is erased");
+}
+
 /// The real servers on PATH: gleam's reports a type error, and one that isn't installed says so. Starts programs from
 /// the machine, so it runs on request: `cargo test -- --ignored real_language_servers`.
 #[test]

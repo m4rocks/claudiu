@@ -33,6 +33,17 @@ pub fn tree_key(id: &str) -> String {
     format!("files:{id}")
 }
 
+/// An entry of the editor's right-click menu (`Workspace::open_editor_menu`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum EditorCommand {
+    GoToDefinition,
+    Cut,
+    Copy,
+    Paste,
+    SelectAll,
+    Ask(super::Ask),
+}
+
 /// A session's files and editor. Never persisted; it goes away with the session.
 pub struct EditorPane {
     /// Open files, in the order they were opened, and the one shown.
@@ -211,6 +222,56 @@ impl Workspace {
     /// The editor with this key, in any session's pane.
     pub fn editor_mut(&mut self, key: &str) -> Option<&mut Editor> {
         self.panes.values_mut().flat_map(|p| p.tabs.iter_mut()).map(|t| &mut t.editor).find(|e| e.key == key)
+    }
+
+    /// The editor's right-click menu at window point `x`, `y`: the usual editing entries, then requests to Claude about
+    /// the selection (or the caret's line) and about the language server's problem there.
+    pub fn open_editor_menu(&mut self, x: f32, y: f32) {
+        use EditorCommand::*;
+        use super::Ask;
+        let entry = |label: &str, command| MenuItem::new(label, Act::EditorMenu(command));
+        let mut items = vec![
+            entry("Go to Definition", GoToDefinition),
+            entry("Cut", Cut),
+            entry("Copy", Copy),
+            entry("Paste", Paste),
+            entry("Select All", SelectAll),
+            entry("Ask Claude to explain this", Ask(Ask::Explain)),
+            entry("Ask Claude to fix this", Ask(Ask::Fix)),
+            entry("Ask Claude to write tests for this", Ask(Ask::Tests)),
+            entry("Ask Claude to fix the problem on this line", Ask(Ask::Problem)),
+        ];
+        for ix in [1, 5] {
+            items[ix].separator_before = true;
+        }
+        self.open_menu(MenuAnchor::Point(x, y), 280.0, items);
+    }
+
+    /// Run a right-click menu entry on the shown file's editor, which the click gave the keyboard.
+    pub(super) fn run_editor_command(&mut self, command: EditorCommand) {
+        if let EditorCommand::Ask(ask) = command {
+            return self.ask_claude(ask);
+        }
+        let Some(e) = self.active_id().cloned().and_then(|id| self.panes.get_mut(&id)).and_then(|p| p.shown_mut()).map(|t| &mut t.editor) else { return };
+        match command {
+            EditorCommand::GoToDefinition => e.requests.push(crate::editor::assist::Request::Definition(e.sel.head)),
+            EditorCommand::Cut | EditorCommand::Copy => {
+                let text = e.take_for_clipboard(command == EditorCommand::Cut);
+                self.rt.with_tx(move |tx| tx.copy(&text));
+            }
+            EditorCommand::Paste => {
+                let key = e.key.clone();
+                self.rt.with_tx(move |tx| {
+                    tx.read_clipboard(move |ws: &mut Workspace, content, _| {
+                        if let Some(e) = ws.editor_mut(&key) {
+                            e.paste_text(content.text());
+                        }
+                    })
+                });
+            }
+            EditorCommand::SelectAll => e.select_all(),
+            EditorCommand::Ask(_) => {}
+        }
     }
 
     /// Give the keyboard to this editor: text fields let go of it.

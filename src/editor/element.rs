@@ -194,7 +194,7 @@ fn mark_bar(mark: Mark, y: f32, m: Metrics) -> El {
 
 /// The mouse and wheel, routed to the editor by its key.
 fn handlers(root: El, key: String) -> El {
-    let (k1, k2, k3, k4, k5) = (key.clone(), key.clone(), key.clone(), key.clone(), key);
+    let (k1, k2, k3, k4, k5, k6) = (key.clone(), key.clone(), key.clone(), key.clone(), key.clone(), key);
     root.on_layout(move |ws: &mut Workspace, r: [f32; 4]| {
         if let Some(e) = ws.editor_mut(&k1) {
             e.set_area(r[2], r[3]);
@@ -218,6 +218,15 @@ fn handlers(root: El, key: String) -> El {
                 rune::Phase::Up => e.mouse_drag(d.x, d.y),
             }
         }
+        ws.after_input(tx);
+    })
+    .on_secondary_press_local(move |ws: &mut Workspace, p: rune::PointerEvent, tx: &mut rune::Tx| {
+        ws.focus_editor(&k6);
+        if let Some(e) = ws.editor_mut(&k6) {
+            e.right_click(p.x, p.y);
+        }
+        let at = p.window();
+        ws.open_editor_menu(at.x, at.y);
         ws.after_input(tx);
     })
     .on_pointer_move_local(move |ws: &mut Workspace, p: rune::PointerEvent, tx: &mut rune::Tx| {

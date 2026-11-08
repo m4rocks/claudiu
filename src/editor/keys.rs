@@ -57,15 +57,15 @@ impl Editor {
         if primary(&m) && !m.alt {
             return match (key, shift) {
                 ("a", false) => {
-                    self.select(Selection { anchor: Pos::default(), head: self.buffer.last() });
+                    self.select_all();
                     true
                 }
                 ("c", false) => {
-                    self.copy(tx, false);
+                    tx.copy(&self.take_for_clipboard(false));
                     true
                 }
                 ("x", false) => {
-                    self.copy(tx, true);
+                    tx.copy(&self.take_for_clipboard(true));
                     true
                 }
                 ("v", false) => {
@@ -289,8 +289,12 @@ impl Editor {
         self.sel = Selection { anchor: self.buffer.clamp(moved(anchor)), head: self.buffer.clamp(moved(head)) };
     }
 
-    /// Copy (and with `cut`, remove) the selection, or with none the caret's whole line.
-    fn copy(&mut self, tx: &mut Tx, cut: bool) {
+    pub fn select_all(&mut self) {
+        self.select(Selection { anchor: Pos::default(), head: self.buffer.last() });
+    }
+
+    /// The text to copy: the selection, or with none the caret's whole line. With `cut`, that text goes too.
+    pub fn take_for_clipboard(&mut self, cut: bool) -> String {
         let (a, b, text) = if self.sel.is_empty() {
             let line = self.sel.head.line;
             let sel = self.line_selection(line, line);
@@ -304,7 +308,6 @@ impl Editor {
             let (a, b) = self.sel.range();
             (a, b, self.buffer.slice(a, b))
         };
-        tx.copy(text);
         match cut {
             // The line goes with its line end, and the last line with the one before it.
             true if self.sel.is_empty() => {
@@ -313,6 +316,7 @@ impl Editor {
             true => self.replace(a, b, "", false),
             false => {}
         }
+        text
     }
 }
 

@@ -27,6 +27,8 @@ impl Workspace {
         }
         usage::send_ctl(&usage::ctl_file(id), "prompt", text.into());
         self.focus_active();
+        // The request names its lines already.
+        self.focus_without_reference();
     }
 }
 

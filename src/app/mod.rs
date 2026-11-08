@@ -29,6 +29,7 @@ use crate::updater::UpdateState;
 pub use rt::{HasRt, Rt};
 
 mod alt_accounts;
+mod ask_claude;
 mod attached_sync;
 pub mod commands;
 mod config_sync;
@@ -50,6 +51,7 @@ mod modal;
 mod navigation;
 pub mod picker;
 mod repo;
+mod selection_reference;
 pub mod rt;
 mod send;
 mod sessions;
@@ -60,9 +62,10 @@ mod visuals;
 mod switch;
 mod worktrees;
 
+pub use ask_claude::Ask;
 pub use commands::Command;
 pub use editing::Conflict;
-pub use editor_mode::EditorPane;
+pub use editor_mode::{EditorCommand, EditorPane};
 pub use lifecycle::{saved_window_geom, set_main_window, show_main_window};
 pub use settings::SettingsPage;
 pub use setup::open_first_setup;
@@ -113,6 +116,8 @@ pub enum Act {
     ToggleEditor,
     /// Close the tab of this file after the user agreed to lose its unsaved edits.
     DiscardTab(Id, PathBuf),
+    /// An entry of the editor's right-click menu.
+    EditorMenu(EditorCommand),
     Rename(Id),
     /// Hide (true) or restore (false) a session in the sidebar. Archived sessions still turn up in search.
     Archive(Id, bool),
@@ -396,6 +401,8 @@ pub struct Workspace {
     pub shells: HashMap<Id, ShellPanel>,
     /// The terminal that gets the keyboard (a session id or `shell_key`) while no text field has it.
     pub keys_to: Option<String>,
+    /// Who had the keyboard when `follow_terminal_focus` last looked.
+    focus_seen: Option<String>,
     /// A text field should let go of the keyboard after this handler (see `after_input`).
     pub(crate) blur: bool,
     /// The window has the system's keyboard focus.
@@ -497,6 +504,7 @@ impl Workspace {
             active: None,
             shells: HashMap::new(),
             keys_to: None,
+            focus_seen: None,
             blur: false,
             window_active: true,
             window_size: (1280.0, 800.0),
@@ -613,6 +621,7 @@ impl Workspace {
                 self.close_live(&id);
             }
             Act::ToggleEditor => self.toggle_editor(),
+            Act::EditorMenu(command) => self.run_editor_command(command),
             Act::DiscardTab(id, path) => {
                 self.modal = None;
                 if let Some(ix) = self.panes.get(&id).and_then(|p| p.tabs.iter().position(|t| t.path == path)) {
