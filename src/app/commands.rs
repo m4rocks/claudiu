@@ -70,6 +70,11 @@ impl PaneCommand {
     }
 }
 
+/// Whether `ks` is the chord `spec` names, as `CHORDS` writes them (`secondary-shift-f`).
+pub fn is_chord(ks: &Keystroke, spec: &str) -> bool {
+    chord_of(ks) == resolve(spec)
+}
+
 fn secondary() -> &'static str {
     if cfg!(target_os = "macos") { "cmd" } else { "ctrl" }
 }

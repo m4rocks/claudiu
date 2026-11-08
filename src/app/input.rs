@@ -153,6 +153,7 @@ impl Workspace {
             changed |= pump(&mut p.view, p.open && showing.as_ref() == Some(owner));
         }
         self.update_picker();
+        self.update_find();
         let (edited, animating) = self.poll_editors();
         changed |= edited;
         if animating {
@@ -175,6 +176,16 @@ impl Workspace {
     }
 
     fn key(&mut self, ks: &Keystroke, tx: &mut Tx) -> bool {
+        // Over the editor its search keys come first, as in main where the editor's own bindings won (so on macOS
+        // Cmd+Shift+F replaces in the file rather than finding in files).
+        if self.menu.is_none()
+            && self.modal.is_none()
+            && self.keys_to.as_deref().is_some_and(|k| self.shown_pane().is_some_and(|(_, p)| p.shown().is_some_and(|t| t.editor.key == k)))
+            && let Some(replace) = find::find_chord(ks)
+        {
+            self.open_find(replace);
+            return true;
+        }
         if let Some(c) = Command::for_key(ks) {
             self.command(c);
             return true;

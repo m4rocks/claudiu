@@ -28,6 +28,8 @@ pub const OK: u32 = 0x7fb069;
 pub const WARN: u32 = 0xe5c07b;
 pub const DANGER: u32 = 0xe06c75;
 pub const SELECTION: u32 = 0x3d4a5c;
+/// Search matches in the editor, faint, and the current one stronger.
+pub const FOUND: u32 = 0xe5c07b;
 
 const FG: Rgb = Rgb { r: 0xe4, g: 0xe4, b: 0xe4 };
 const BG: Rgb = Rgb { r: (TERMINAL_BG >> 16) as u8, g: (TERMINAL_BG >> 8) as u8, b: TERMINAL_BG as u8 };

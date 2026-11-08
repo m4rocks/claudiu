@@ -23,12 +23,14 @@ struct LinePaint {
     selected: Option<(usize, usize)>,
     /// Underlined problems: from and to cell, and whether it is an error.
     problems: Vec<(usize, usize, bool)>,
+    /// Search matches: from and to cell, and whether it is the current one.
+    found: Vec<(usize, usize, bool)>,
 }
 
 impl LinePaint {
     fn version(&self, m: Metrics) -> u64 {
         let mut h = std::collections::hash_map::DefaultHasher::new();
-        (m.cell_w.to_bits(), m.line_h.to_bits(), &self.text, self.selected, &self.problems).hash(&mut h);
+        (m.cell_w.to_bits(), m.line_h.to_bits(), &self.text, self.selected, &self.problems, &self.found).hash(&mut h);
         for s in &self.spans {
             (&s.bytes, s.color).hash(&mut h);
         }
@@ -38,6 +40,14 @@ impl LinePaint {
     fn build(self, m: Metrics, size: f32) -> El {
         let mut row = el().w_full().h(m.line_h);
         let x = |cell: usize| (m.cell_w * cell as f32).round();
+        for &(a, b, current) in &self.found {
+            let fill = if current { theme::rgb(theme::FOUND).alpha(0.45) } else { theme::rgb(theme::FOUND).alpha(0.18) };
+            let mut mark = el().absolute(x(a), 0.0).size((x(b) - x(a)).max(m.cell_w), m.line_h).radius(2.0).fill(fill);
+            if current {
+                mark = mark.border(1.0, theme::rgb(theme::FOUND).alpha(0.8));
+            }
+            row = row.child(mark);
+        }
         if let Some((a, b)) = self.selected {
             row = row.child(el().absolute(x(a), 0.0).size(x(b) - x(a), m.line_h).fill(theme::rgb(theme::SELECTION)));
         }
@@ -139,7 +149,8 @@ impl Editor {
                     (a, b.max(a + 1), p.error)
                 })
                 .collect();
-            let paint = LinePaint { text: text_.to_string(), spans: self.spans.get(line).cloned().unwrap_or_default(), selected, problems };
+            let found = self.found_on(line, text_);
+            let paint = LinePaint { text: text_.to_string(), spans: self.spans.get(line).cloned().unwrap_or_default(), selected, problems, found };
             let version = paint.version(m);
             rows = rows.child(el().absolute(0.0, y).w_full().child(rune::memo(format!("{key}/l{line}"), version, move || paint.build(m, size))));
         }
@@ -180,6 +191,24 @@ impl Editor {
             .child(numbers)
             .child(body);
         handlers(root, key)
+    }
+}
+
+impl Editor {
+    /// The search matches on `line` (whose text is `text`), in cells. Matches are in order, so the search starts at the
+    /// first that could reach this line.
+    fn found_on(&self, line: usize, text: &str) -> Vec<(usize, usize, bool)> {
+        let from = self.found.partition_point(|(_, b)| b.line < line);
+        self.found[from..]
+            .iter()
+            .enumerate()
+            .take_while(|(_, (a, _))| a.line <= line)
+            .map(|(i, &(a, b))| {
+                let start = if a.line == line { columns(&text[..a.col]) } else { 0 };
+                let end = if b.line == line { columns(&text[..b.col]) } else { columns(text) + 1 };
+                (start, end, self.found_current == Some(from + i))
+            })
+            .collect()
     }
 }
 

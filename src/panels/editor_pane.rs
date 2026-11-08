@@ -4,15 +4,16 @@
 use std::borrow::Cow;
 
 use rune::tok::motion;
-use rune::{Color, Cursor, El, GrowthSpec, PointerButton, ScrollSpec, Transition, Tx, col, el, row, text, text_input};
+use rune::{Color, Cursor, El, GrowthSpec, PointerButton, ScrollSpec, TextEdit, Transition, Tx, col, el, row, text, text_input};
 
 use crate::app::editor_mode::{TreeRow, relative, tree_key};
+use crate::app::find::FindBar;
 use crate::app::picker::{Picker, PickerKind};
 use crate::app::{Conflict, EditorPane, Workspace};
 use crate::files::Change;
 use crate::panels::icons;
 use crate::panels::theme::{self, rgb};
-use crate::panels::widgets::{button, font, icon, icon_button, label};
+use crate::panels::widgets::{button, button_disabled, font, icon, icon_button, label};
 use crate::platform::path_key;
 use crate::store::Id;
 
@@ -32,6 +33,9 @@ impl Workspace {
                 let mut body = col().key(format!("editor-{}", tab.editor.key)).w_full().grow(1.0).shrink().min_h(0.0).transition(Transition::opacity());
                 if let Some(c) = tab.conflict {
                     body = body.child(conflict_bar(id, &tab.path, c));
+                }
+                if tab.find.open {
+                    body = body.child(find_bar(&tab.find));
                 }
                 body = body.child(el().w_full().grow(1.0).shrink().min_h(0.0).child(tab.editor.render(focused, crate::panels::scale::screen())));
                 match self.server_status(id) {
@@ -359,6 +363,140 @@ fn file_icon(path: &std::path::Path) -> &'static rune::Icon {
         None if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("txt")) => &icons::FILE_TEXT,
         None => &icons::FILE,
     }
+}
+
+/// The shown file's search bar (`app::find`): the query with its case toggle, the replace toggle, the way through
+/// the matches and their count; under it, while replacing, the replacement and its two buttons.
+fn find_bar(bar: &FindBar) -> El {
+    fn field(edit: &TextEdit, key: &'static str, placeholder: &'static str, pick: fn(&mut FindBar) -> &mut TextEdit) -> El {
+        text_input(edit, font(12.5, 400.0))
+            .key(key)
+            .single_line()
+            .placeholder(placeholder, rgb(theme::TEXT_FAINT))
+            .color(rgb(theme::TEXT))
+            .caret(rgb(theme::ACCENT), rgb(theme::SELECTION))
+            .grow(1.0)
+            .shrink()
+            .min_w(0.0)
+            .on_edit(move |ws: &mut Workspace| {
+                // The bar closed between frames: a scratch field takes the edit.
+                if ws.shown_find().is_none() {
+                    return &mut ws.search;
+                }
+                pick(ws.shown_find().expect("checked above"))
+            })
+            .on_input_key(|ws: &mut Workspace, k: &rune::KeyEvent, tx: &mut Tx| {
+                let used = ws.find_key(k);
+                ws.after_input(tx);
+                used
+            })
+    }
+    fn boxed(child: El, focused: bool) -> El {
+        row()
+            .h(26.0)
+            .px(8.0)
+            .gap(6.0)
+            .center_y()
+            .grow(1.0)
+            .shrink()
+            .min_w(0.0)
+            .radius(5.0)
+            .fill(rgb(0x121214))
+            .border(1.0, rgb(if focused { theme::ACCENT } else { 0x2c2c30 }))
+            .child(child)
+    }
+    let toggle = |key: &'static str, on: bool, child: El| {
+        el().key(key)
+            .h(20.0)
+            .px(5.0)
+            .center()
+            .radius(4.0)
+            .cursor(Cursor::Pointer)
+            .role("button")
+            .fill(if on { rgb(theme::ACCENT).alpha(0.22) } else { Color::TRANSPARENT })
+            .hover(Color::WHITE.alpha(0.07))
+            .child(child)
+    };
+    let has = !bar.matches.is_empty();
+    let step = |key: &'static str, forward: bool| {
+        let glyph = icon(if forward { &icons::CHEVRON_RIGHT } else { &icons::CHEVRON_LEFT }, 13.0, if has { theme::TEXT_DIM } else { theme::TEXT_FAINT });
+        let b = el().key(key).size(22.0, 22.0).center().radius(4.0).child(glyph);
+        if !has {
+            return b;
+        }
+        b.cursor(Cursor::Pointer).role("button").hover(Color::WHITE.alpha(0.07)).on_press_tx(move |ws: &mut Workspace, tx: &mut Tx| {
+            ws.find_step(forward);
+            ws.after_input(tx);
+        })
+    };
+    let case = toggle("find-case", !bar.ignore_case, label("Aa", 11.5, if bar.ignore_case { theme::TEXT_DIM } else { theme::TEXT }).help("Match case")).on_press_tx(|ws: &mut Workspace, tx: &mut Tx| {
+        if let Some(bar) = ws.shown_find() {
+            bar.ignore_case = !bar.ignore_case;
+        }
+        ws.after_input(tx);
+    });
+    let replace_toggle = toggle("find-replace-toggle", bar.replace_mode, icon(if bar.replace_mode { &icons::CHEVRON_DOWN } else { &icons::CHEVRON_RIGHT }, 12.0, theme::TEXT_DIM))
+        .help("Replace")
+        .on_press_tx(|ws: &mut Workspace, tx: &mut Tx| {
+            if let Some(bar) = ws.shown_find() {
+                bar.replace_mode = !bar.replace_mode;
+                (bar.query.focused, bar.replacement.focused) = (!bar.replace_mode, bar.replace_mode);
+            }
+            ws.after_input(tx);
+        });
+    let close = el().key("find-close").size(22.0, 22.0).center().radius(4.0).cursor(Cursor::Pointer).role("button").help("Close").hover(Color::WHITE.alpha(0.07)).child(icon(&icons::X, 13.0, theme::TEXT_DIM)).on_press_tx(|ws: &mut Workspace, tx: &mut Tx| {
+        ws.close_find();
+        ws.after_input(tx);
+    });
+    let query = boxed(field(&bar.query, "find-query", "Find", |b| &mut b.query), bar.query.focused).child(case);
+    let first = row()
+        .w_full()
+        .gap(4.0)
+        .center_y()
+        .child(replace_toggle)
+        .child(query)
+        .child(step("find-prev", false))
+        .child(step("find-next", true))
+        .child(label(bar.label(), 11.5, if has { theme::TEXT_DIM } else { theme::TEXT_FAINT }).key("find-count").min_w(44.0))
+        .child(close);
+    let mut panel = col()
+        .key("find-bar")
+        .w_full()
+        .px(10.0)
+        .py(6.0)
+        .gap(6.0)
+        .fill(rgb(0x18181a))
+        .border_sides([0.0, 0.0, 1.0, 0.0], rgb(theme::BORDER))
+        .transition(Transition::opacity().combined(Transition::offset(0.0, -6.0)))
+        .child(first);
+    if bar.replace_mode {
+        let action = |key: &'static str, text: &'static str, all: bool| {
+            let b = if has { button(text, false) } else { button_disabled(text) };
+            let b = b.key(key);
+            if !has {
+                return b;
+            }
+            b.on_press_tx(move |ws: &mut Workspace, tx: &mut Tx| {
+                if all {
+                    ws.replace_all();
+                } else {
+                    ws.replace_one();
+                }
+                ws.after_input(tx);
+            })
+        };
+        panel = panel.child(
+            row()
+                .w_full()
+                .gap(4.0)
+                .center_y()
+                .child(el().w(30.0))
+                .child(boxed(field(&bar.replacement, "find-replacement", "Replace", |b| &mut b.replacement), bar.replacement.focused))
+                .child(action("find-replace-one", "Replace", false))
+                .child(action("find-replace-all", "Replace All", true)),
+        );
+    }
+    panel
 }
 
 /// The language server's state, under the editor.

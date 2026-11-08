@@ -10,6 +10,7 @@ pub mod highlight;
 mod keys;
 pub mod lines;
 mod pairs;
+mod search;
 
 use std::ops::Range;
 
@@ -111,6 +112,9 @@ pub struct Editor {
     hover_serial: u64,
     pub hover: Option<assist::HoverCard>,
     pub completion: Option<assist::Completion>,
+    /// The search bar's matches (`search`), highlighted while it is up, and the current one.
+    pub found: Vec<(Pos, Pos)>,
+    pub found_current: Option<usize>,
     /// Brackets and quotes the editor closed for the user, as where the opener and the closer are (`pairs`).
     pairs: Vec<(Pos, Pos)>,
 }
@@ -144,6 +148,8 @@ impl Editor {
             hover: None,
             completion: None,
             pairs: vec![],
+            found: vec![],
+            found_current: None,
         }
     }
 
@@ -318,8 +324,15 @@ impl Editor {
             self.reveal = true;
             return;
         }
+        self.reveal_pos(self.sel.head);
+    }
+
+    /// Scroll so `p` is on screen with a few lines to spare, once the editor knows its size.
+    fn reveal_pos(&mut self, p: Pos) {
+        if self.area[1] <= 0.0 {
+            return;
+        }
         let m = self.metrics();
-        let p = self.sel.head;
         let y = p.line as f32 * m.line_h;
         let margin = (m.line_h * MARGIN_LINES).min(self.area[1] / 3.0);
         let top = self.glide.as_ref().map_or(self.scroll[1], |g| g.target);

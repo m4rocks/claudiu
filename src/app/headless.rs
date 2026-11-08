@@ -987,6 +987,8 @@ fn quick_open_and_find_in_files_open_what_they_find() {
     h.wait("opening the picked file", |ws| ws.panes[&id].shown().is_some_and(|t| t.path.ends_with("notes.md")));
     assert!(picker(&h).is_none(), "choosing closes the picker");
 
+    // From the tree: over the editor, the editor's own search keys come first, as in main.
+    h.step(|ws| ws.focus_terminal(&editor_mode::tree_key(&id)));
     h.press(rune::Key::Command('f'), |m| {
         secondary(m);
         m.shift = true;
@@ -1440,6 +1442,67 @@ fn the_wheel_stops_at_both_ends_and_a_double_click_selects_a_word() {
     h.pump();
     let e = &h.shown_tab(&id).unwrap().editor;
     assert_eq!(e.buffer.slice(e.sel.range().0, e.sel.range().1), "line", "the word under the pointer");
+}
+
+/// Primary+F opens the search bar over the file: matches are counted and highlighted without moving the caret, Enter
+/// and Shift+Enter step through them, case can matter, the replace row replaces one or all as one undo step, and
+/// Escape gives the keyboard back to the editor.
+#[test]
+fn the_search_bar_finds_steps_and_replaces_in_the_file() {
+    use crate::editor::buffer::Pos;
+    let mut h = Harness::new(|_| vec![]);
+    let cwd = h.work.clone();
+    let file = cwd.join("words.txt");
+    std::fs::write(&file, "alpha beta alpha\nALPHA gamma\n").unwrap();
+    h.step(|ws| ws.new_claude(cwd.clone()));
+    let id = h.ws().active.clone().unwrap();
+    h.step(|ws| ws.toggle_editor());
+    h.step(|ws| ws.open_file(&id, file.clone(), None));
+    h.wait("opening", |ws| ws.panes[&id].shown().is_some());
+    h.settle();
+    let key = h.shown_tab(&id).unwrap().editor.key.clone();
+    let bar = |h: &Harness| {
+        let t = h.shown_tab(&id).unwrap();
+        (t.find.open, t.find.label(), t.editor.found.len(), t.editor.found_current)
+    };
+
+    h.press(rune::Key::Command('f'), secondary);
+    h.settle();
+    assert!(h.drawn("find-bar") && h.drawn("find-query"), "the bar is drawn: {:?}", h.keys());
+    h.type_text("alpha");
+    h.pump();
+    assert_eq!(bar(&h), (true, "1/3".into(), 3, Some(0)), "case is ignored by default");
+    assert_eq!(h.shown_tab(&id).unwrap().editor.caret(), Pos::new(0, 0), "the caret stays");
+    assert_eq!(h.shown_text(&id), "alpha beta alpha\nALPHA gamma\n");
+    h.press(rune::Key::Enter, |_| {});
+    assert_eq!(bar(&h).1, "2/3");
+    h.press(rune::Key::Enter, |m| m.shift = true);
+    h.press(rune::Key::Enter, |m| m.shift = true);
+    assert_eq!(bar(&h).1, "3/3", "back past the first wraps to the last");
+    h.click("find-case");
+    h.pump();
+    assert_eq!(bar(&h).1.split('/').nth(1), Some("2"), "matching case leaves the lowercase two");
+
+    // The replace row: one, then all, and one undo takes all back.
+    h.click("find-case");
+    h.click("find-replace-toggle");
+    h.settle();
+    assert!(h.shown_tab(&id).unwrap().find.replacement.focused, "the replacement has the keyboard");
+    h.type_text("omega");
+    h.pump();
+    h.click("find-replace-one");
+    h.pump();
+    assert_eq!(h.shown_text(&id), "omega beta alpha\nALPHA gamma\n");
+    assert_eq!(bar(&h).1, "1/2", "the next match becomes current");
+    h.click("find-replace-all");
+    h.pump();
+    assert_eq!(h.shown_text(&id), "omega beta omega\nomega gamma\n");
+    assert_eq!(bar(&h).1, "0/0");
+    h.step(|ws| ws.close_find());
+    h.press(rune::Key::Command('z'), secondary);
+    assert_eq!(h.shown_text(&id), "omega beta alpha\nALPHA gamma\n", "replace all is one step");
+    assert_eq!(h.shown_tab(&id).unwrap().editor.found.len(), 0, "a closed bar highlights nothing");
+    assert_eq!(h.ws().keys_to.as_deref(), Some(key.as_str()), "the editor has the keyboard again");
 }
 
 /// The real servers on PATH: gleam's reports a type error, and one that isn't installed says so. Starts programs from

@@ -146,6 +146,8 @@ pub struct Tab {
     pub version: i32,
     /// The language server that has this file open, once it is running.
     pub server: Option<std::sync::Arc<crate::lsp::Server>>,
+    /// The search bar over it (`find.rs`).
+    pub find: super::find::FindBar,
 }
 
 impl Workspace {
@@ -449,7 +451,7 @@ impl Workspace {
         let opened = pane.tabs.iter().position(|t| t.path == path);
         let ix = opened.unwrap_or_else(|| {
             let language = files::language(&path).filter(|_| note.is_none());
-            pane.tabs.push(Tab { path: path.clone(), editor, note, format, stamp, dirty: false, saving: false, conflict: None, language, version: 0, server: None });
+            pane.tabs.push(Tab { path: path.clone(), editor, note, format, stamp, dirty: false, saving: false, conflict: None, language, version: 0, server: None, find: Default::default() });
             pane.tabs.len() - 1
         });
         pane.active = Some(ix);

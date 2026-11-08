@@ -37,6 +37,7 @@ mod background;
 mod cross;
 mod editing;
 mod file_ops;
+pub mod find;
 pub mod editor_mode;
 mod github_pane;
 mod handoff;
