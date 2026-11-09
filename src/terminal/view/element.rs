@@ -231,8 +231,9 @@ impl TerminalView {
         }
 
         // Scrolling, and a program redrawing its screen, change what each row shows in place; it lands at once, or the
-        // view would spring between lines and a row's words slide over from where the last text's words were.
-        let mut grid = el().absolute(0.0, shift - m.line_h * top as f32).w_full().instant_changes();
+        // view would spring between lines, a row's words would slide over from where the last text's words were, and
+        // their colours and backgrounds would fade from the last text's.
+        let mut grid = el().absolute(0.0, shift - m.line_h * top as f32).w_full().instant_changes().motion(rune::Spring::NONE);
         for (i, paint) in paints.into_iter().enumerate() {
             let version = paint.version(m);
             let row_key = format!("{key}/row{i}");
@@ -341,22 +342,37 @@ mod tests {
     }
 
     /// The terminal drawn alone, its first frame settled, then `change` made: what is still on its way somewhere a
-    /// frame later (fading, exiting, or moving toward another place).
+    /// frame later (fading, exiting, moving toward another place, or changing colour). Every other line is red with a
+    /// highlighted background, so a row that now shows its neighbour's line changes colour.
     fn moving_after(change: impl FnOnce(&mut TerminalView)) -> Vec<String> {
         let (terminal, rx, _listener, _) = Terminal::build(&SpawnSpec::default(), 80, 24);
         let v = TerminalView::new(terminal, rx, "t");
-        write(&v, &(0..60).map(|i| format!("line {i} with a few words\r\n")).collect::<String>());
+        let lines: String = (0..60).map(|i| if i % 2 == 0 { format!("line {i} with a few words\r\n") } else { format!("\x1b[31;44mline {i} in red\x1b[0m\r\n") }).collect();
+        write(&v, &lines);
         let mut rt = rune::Runtime::new(v, |v: &TerminalView, _: &mut rune::Cx<TerminalView>| v.drawing(true, 2.0), (800.0, 600.0), rune::Env::new(true, 2.0));
         for _ in 0..60 {
             rt.frame(1.0 / 60.0);
         }
         rt.update(|v, _| change(v));
         rt.frame(1.0 / 60.0);
-        rt.elements()
-            .into_iter()
-            .filter(|el| el.exiting || el.opacity < 1.0 || el.rect.iter().zip(el.target).any(|(a, b)| (a - b).abs() > 0.01))
-            .map(|el| format!("{} {:?} {:?} {:?}->{:?}", el.path, el.text, el.opacity, el.rect, el.target))
+        let next = rt.elements();
+        for _ in 0..60 {
+            rt.frame(1.0 / 60.0);
+        }
+        let settled: std::collections::HashMap<String, rune::ElementInfo> = rt.elements().into_iter().map(|el| (el.path.clone(), el)).collect();
+        next.into_iter()
+            .filter(|el| {
+                let recolouring = settled.get(&el.path).is_some_and(|end| end.fill != el.fill || end.text_color != el.text_color);
+                el.exiting || el.opacity < 1.0 || recolouring || el.rect.iter().zip(el.target).any(|(a, b)| (a - b).abs() > 0.01)
+            })
+            .map(|el| format!("{} {:?} {:?} {:?}->{:?} {:?} {:?}", el.path, el.text, el.opacity, el.rect, el.target, el.fill, el.text_color))
             .collect()
+    }
+
+    #[test]
+    fn scrolling_back_a_whole_line_recolours_no_row_gradually() {
+        let moving = moving_after(|v| v.set_position(1.0));
+        assert!(moving.is_empty(), "{moving:#?}");
     }
 
     #[test]
