@@ -28,6 +28,9 @@ struct CellStyle {
     strike: bool,
 }
 
+/// The record bullet Claude Code puts before its messages.
+const BULLET: char = '\u{23FA}';
+
 /// A run of cells in one style, from column `col`.
 struct Batch {
     col: usize,
@@ -43,6 +46,8 @@ struct RowPaint {
     bgs: Vec<(usize, usize, Color)>,
     /// Box drawing and block elements as rectangles: x, y, w, h in the row, colour.
     rects: Vec<([f32; 4], Color)>,
+    /// Filled circles (Claude Code's `⏺` bullet): x, y, diameter, colour. The font draws it as colour emoji on macOS.
+    dots: Vec<([f32; 3], Color)>,
     batches: Vec<Batch>,
 }
 
@@ -58,6 +63,10 @@ impl RowPaint {
             r.map(f32::to_bits).hash(&mut h);
             c.hash(&mut h);
         }
+        for (d, c) in &self.dots {
+            d.map(f32::to_bits).hash(&mut h);
+            c.hash(&mut h);
+        }
         for b in &self.batches {
             (b.col, &b.text, b.style.fg, b.style.bold, b.style.italic, b.style.underline, b.style.strike).hash(&mut h);
         }
@@ -71,6 +80,9 @@ impl RowPaint {
         }
         for ([x, y, w, h], color) in self.rects {
             row = row.child(el().absolute(x, y).size(w, h).fill(color));
+        }
+        for ([x, y, d], color) in self.dots {
+            row = row.child(el().absolute(x, y).size(d, d).radius(d / 2.0).fill(color));
         }
         for b in self.batches {
             let x = m.cell_w * b.col as f32;
@@ -183,6 +195,11 @@ impl TerminalView {
                     for rc in rects {
                         paint.rects.push(([x0 + rc.x, rc.y, rc.w, rc.h], color.alpha(rc.alpha)));
                     }
+                    continue;
+                }
+                if ch == BULLET {
+                    let d = (m.cell_w * 0.75).round();
+                    paint.dots.push(([x0 + ((x1 - x0 - d) / 2.0).round(), ((m.line_h - d) / 2.0).round(), d], theme::term_color(fg)));
                     continue;
                 }
                 let style = CellStyle {
@@ -315,7 +332,9 @@ fn handlers(root: El, key: String) -> El {
         })
         .on_pointer_move_local(move |ws: &mut Workspace, p: rune::PointerEvent, tx: &mut Tx| {
             let mods = mods_of(tx);
-            if let Some(t) = ws.terminal_mut(&k4) {
+            // Rune also sends this during a drag, which the drag handler reports; a second report with no button
+            // held would tell a program that owns the mouse the drag let go.
+            if let Some(t) = ws.terminal_mut(&k4).filter(|t| t.pressed.is_none()) {
                 t.mouse_move(p.x, p.y, None, mods);
                 if !t.dirty {
                     tx.live_only();

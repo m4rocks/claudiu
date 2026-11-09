@@ -138,6 +138,8 @@ pub struct TerminalView {
     /// The size of the area it was last laid out in, in points.
     area: Option<[f32; 2]>,
     selecting: bool,
+    /// The button held down since a press, which the pointer-move handler sees as plain hovering too.
+    pub(super) pressed: Option<mouse::Button>,
     scroll_px: f32,
     /// Smooth scrollback: the view stands `frac` of a line above the line alacritty shows (0 at rest), and a wheel
     /// notch eases there (`panels/glide.rs`). Sub-line positions are drawn by shifting the rows.
@@ -235,6 +237,7 @@ impl TerminalView {
             key: key.into(),
             area: None,
             selecting: false,
+            pressed: None,
             scroll_px: 0.0,
             frac: 0.0,
             glide: None,

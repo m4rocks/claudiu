@@ -81,6 +81,7 @@ impl TerminalView {
     /// A button went down at `x, y`; `clicks` counts a run of quick presses (2 selects words, 3 lines).
     pub fn mouse_down(&mut self, button: Button, x: f32, y: f32, clicks: u32, mods: Modifiers, tx: &mut Tx) {
         let Some((point, side, col, row)) = self.grid_point(x, y) else { return };
+        self.pressed = Some(button);
 
         // Ctrl+click on a path or link opens it even when the program (Claude Code's full-screen view) has asked for the
         // mouse; any other click goes to the program.
@@ -123,6 +124,7 @@ impl TerminalView {
     }
 
     pub fn mouse_up(&mut self, button: Button, x: f32, y: f32, mods: Modifiers) {
+        self.pressed = None;
         if self.mouse_reporting(&mods) {
             if let Some((_, _, col, row)) = self.grid_point(x, y) {
                 self.report_mouse(button.code(), col, row, false, &mods, false);
