@@ -257,8 +257,8 @@ impl Workspace {
     pub fn on_modifiers(&mut self, mods: rune::Mods, tx: &mut Tx) {
         self.shortcuts_wait += 1;
         self.shortcuts_shown = false;
-        let secondary = if cfg!(target_os = "macos") { mods.logo } else { mods.ctrl };
-        let alone = secondary && !mods.shift && !mods.alt && !(mods.ctrl && mods.logo);
+        // `cmd` is ⌘ on macOS and Ctrl elsewhere. Ctrl with ⌘ (or with the Windows key) is another chord.
+        let alone = mods.primary() && !mods.shift && !mods.alt && !(mods.ctrl && mods.logo);
         if alone {
             let wait = self.shortcuts_wait;
             self.rt.after(SHORTCUT_HOLD, move |ws: &mut Workspace| {
