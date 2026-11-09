@@ -889,10 +889,15 @@ fn editor_mode_lists_opens_edits_and_saves_files() {
     h.press(rune::Key::Command('z'), secondary);
     assert_eq!(h.shown_text(&id), "# Notes\n");
     assert!(h.shown_tab(&id).unwrap().dirty);
-    h.press(rune::Key::Command('z'), |m| {
-        secondary(m);
-        m.shift = true;
-    });
+    // Redo is Cmd+Shift+Z on macOS and Ctrl+Y elsewhere (editor/keys.rs).
+    if cfg!(target_os = "macos") {
+        h.press(rune::Key::Command('z'), |m| {
+            secondary(m);
+            m.shift = true;
+        });
+    } else {
+        h.press(rune::Key::Command('y'), secondary);
+    }
     assert!(!h.shown_tab(&id).unwrap().dirty, "redo back to the saved text is clean again");
 
     // A change on disk reloads a clean tab; with unsaved edits it becomes a conflict that overwrites neither side.

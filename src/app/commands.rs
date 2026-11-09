@@ -289,7 +289,7 @@ mod tests {
         for (spec, c) in PANE_CHORDS {
             assert_eq!(PaneCommand::for_key(&Keystroke::parse(&resolve(spec)).unwrap()), Some(*c), "{spec}");
         }
-        assert_eq!(PaneCommand::for_key(&Keystroke::parse("ctrl-p").unwrap()), None);
+        assert_eq!(PaneCommand::for_key(&Keystroke::parse("alt-p").unwrap()), None);
     }
 
     #[test]
