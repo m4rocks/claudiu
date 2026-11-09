@@ -2112,3 +2112,46 @@ fn an_idle_window_is_not_drawn_again_for_nothing() {
     // The ticker's minute may turn once while this runs.
     assert!(redraws <= 1, "{redraws} frames redrew an idle window");
 }
+
+/// Settings lists the projects to move, rename and remove; a removal is undone from its toast, sessions and all.
+#[test]
+fn the_projects_page_moves_renames_and_removes_projects() {
+    let mut h = Harness::new(|work| {
+        let (a, b) = (work.join("alpha"), work.join("beta"));
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        vec![a, b]
+    });
+    let names = |h: &Harness| h.ws().store.data.projects.iter().map(|p| p.name.clone()).collect::<Vec<_>>();
+    let beta_dir = h.work.join("beta");
+    let session = h.start_one("in beta", &beta_dir, exit_spec(0, &beta_dir));
+    let beta = h.ws().store.data.projects[1].id.clone();
+    h.step(|ws| ws.store.session_mut(&session).unwrap().project_id = Some(beta.clone()));
+    h.step(|ws| {
+        ws.act(Act::OpenSettings);
+        ws.set_settings_page(SettingsPage::Projects);
+    });
+    h.settle();
+    assert!(h.drawn("project-add"), "{:?}", h.keys());
+
+    h.click("project-down-0");
+    assert_eq!(names(&h), ["beta", "alpha"]);
+    h.settle();
+
+    h.click("project-rename-1");
+    h.type_text(" two");
+    h.press(rune::Key::Up, |_| {});
+    assert_eq!(h.ws().settings_page, SettingsPage::Projects, "Up in the name field stays on the page");
+    h.press(rune::Key::Enter, |_| {});
+    assert_eq!(names(&h), ["beta", "alpha two"]);
+    assert!(matches!(h.ws().modal, Some(Modal::Settings { renaming: None, .. })), "Enter saved the name and left the dialog open");
+    h.settle();
+
+    h.click("project-remove-0");
+    assert_eq!(names(&h), ["alpha two"]);
+    assert_eq!(h.ws().store.session(&session).unwrap().project_id, None);
+    h.settle();
+    h.click("toast-action");
+    assert_eq!(names(&h), ["beta", "alpha two"], "Undo puts it back in its place");
+    assert_eq!(h.ws().store.session(&session).unwrap().project_id.as_ref(), Some(&beta), "with its session");
+}

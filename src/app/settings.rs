@@ -9,6 +9,7 @@ pub enum SettingsPage {
     #[default]
     General,
     Sessions,
+    Projects,
     ClaudeTools,
     ClaudiuTools,
     Worktrees,
@@ -16,12 +17,13 @@ pub enum SettingsPage {
 }
 
 impl SettingsPage {
-    pub const ALL: [SettingsPage; 6] = [Self::General, Self::Sessions, Self::ClaudeTools, Self::ClaudiuTools, Self::Worktrees, Self::About];
+    pub const ALL: [SettingsPage; 7] = [Self::General, Self::Sessions, Self::Projects, Self::ClaudeTools, Self::ClaudiuTools, Self::Worktrees, Self::About];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::General => "General",
             Self::Sessions => "Sessions",
+            Self::Projects => "Projects",
             Self::ClaudeTools => "Claude Code tools",
             Self::ClaudiuTools => "Claudiu tools",
             Self::Worktrees => "Worktrees",
@@ -50,9 +52,10 @@ impl Workspace {
             SettingsPage::General => &[0, 1],
             SettingsPage::Sessions => &[2],
             SettingsPage::ClaudeTools => &[3],
+            SettingsPage::Projects if modal_field(&mut self.modal, 4).is_some() => &[4],
             _ => &[],
         };
-        let focused = (0..4).find(|n| modal_field(&mut self.modal, *n).is_some_and(|f| f.focused));
+        let focused = (0..5).find(|n| modal_field(&mut self.modal, *n).is_some_and(|f| f.focused));
         let on_list = focused.is_none();
         let plain = !ks.modifiers.control && !ks.modifiers.alt && !ks.modifiers.platform;
         match ks.key.as_str() {
@@ -63,7 +66,7 @@ impl Workspace {
                 let here = focused.and_then(|f| fields.iter().position(|x| *x == f)).map_or(0, |i| i + 1);
                 let stops = fields.len() + 1;
                 let there = if ks.modifiers.shift { (here + stops - 1) % stops } else { (here + 1) % stops };
-                for n in 0..4 {
+                for n in 0..5 {
                     if let Some(f) = modal_field(&mut self.modal, n) {
                         f.focused = there.checked_sub(1).map(|i| fields[i]) == Some(n);
                     }

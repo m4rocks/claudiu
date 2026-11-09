@@ -20,7 +20,7 @@ use crate::git::worktree::Base;
 use crate::platform::{self, Editor};
 use crate::{claude::usage, datadir};
 use crate::store::{
-    Account, Attached, ClaudeMeta, ExternalState, Id, MAIN_ACCOUNT, SessionKind, SessionRecord, Store, new_id, now,
+    Account, Attached, ClaudeMeta, ExternalState, Id, MAIN_ACCOUNT, Project, SessionKind, SessionRecord, Store, new_id, now,
 };
 use crate::terminal::SpawnSpec;
 use crate::terminal::view::{TerminalEvent, TerminalView};
@@ -170,6 +170,14 @@ pub enum Act {
     FixGitWithClaude(PathBuf),
     AddProject(PathBuf),
     RemoveProject(Id),
+    /// Undo a removal: the project, back where it was in the list.
+    RestoreProject(usize, Project),
+    /// Start renaming a project on the Projects page of Settings.
+    RenameProject(Id),
+    SaveProjectName,
+    CancelProjectRename,
+    /// Move a project one place up (true) or down the list.
+    MoveProject(Id, bool),
     ToggleOlder,
     ConfirmQuit,
     ConfirmInstallUpdate,
@@ -291,6 +299,8 @@ pub enum Modal {
         costly: Vec<crate::claude::costly::Finding>,
         /// Placeholders: what each field means when left empty.
         hints: [String; 4],
+        /// The project being renamed on the Projects page, and the name typed so far.
+        renaming: Option<(Id, TextEdit)>,
     },
 }
 
@@ -302,6 +312,7 @@ pub fn modal_field(modal: &mut Option<Modal>, n: usize) -> Option<&mut TextEdit>
         (Modal::Settings { claude, .. }, 1) => Some(claude),
         (Modal::Settings { model, .. }, 2) => Some(model),
         (Modal::Settings { skills_field, .. }, 3) => Some(skills_field),
+        (Modal::Settings { renaming: Some((_, name)), .. }, 4) => Some(name),
         _ => None,
     }
 }
@@ -745,7 +756,7 @@ impl Workspace {
                 let hints = [platform::default_shell(None).0, claude_hint, "Claude Code default".into(), "none, e.g. dataviz, claude-api".into()];
                 self.blur = true;
                 self.set_settings_page(self.settings_page);
-                self.modal = Some(Modal::Settings { shell, claude, model, effort: defaults.effort, permission: defaults.permission_mode, updates, chrome, scale: crate::panels::scale::percent(), trimmed: self.store.data.settings.trimmed_tools.clone(), claudiu_off: self.store.data.settings.claudiu_tools_off.clone(), skills_field, costly: claude::costly::scan(), hints });
+                self.modal = Some(Modal::Settings { shell, claude, model, effort: defaults.effort, permission: defaults.permission_mode, updates, chrome, scale: crate::panels::scale::percent(), trimmed: self.store.data.settings.trimmed_tools.clone(), claudiu_off: self.store.data.settings.claudiu_tools_off.clone(), skills_field, costly: claude::costly::scan(), hints, renaming: None });
                 self.modal_serial += 1;
             }
             Act::PickEffort(choice) => {
@@ -771,12 +782,37 @@ impl Workspace {
                 self.toast("Project added", false);
             }
             Act::RemoveProject(id) => {
-                self.store.remove_project(&id);
+                let Some((at, project)) = self.store.remove_project(&id) else { return };
                 if self.store.data.layout.project_filter.as_ref() == Some(&id) {
                     self.store.data.layout.project_filter = None;
                 }
-                self.toast("Project removed. Its sessions are kept.", false);
+                if let Some(Modal::Settings { renaming, .. }) = self.modal.as_mut()
+                    && renaming.as_ref().is_some_and(|(r, _)| *r == id)
+                {
+                    *renaming = None;
+                }
+                self.show_toast("Project removed. Its sessions are kept.".into(), false, Some(("Undo".into(), Act::RestoreProject(at, project))));
             }
+            Act::RestoreProject(at, project) => self.store.restore_project(at, project),
+            Act::RenameProject(id) => {
+                let Some(name) = self.store.project(&id).map(|p| p.name.clone()) else { return };
+                if let Some(Modal::Settings { renaming, .. }) = self.modal.as_mut() {
+                    *renaming = Some((id, modal::field(&name, true)));
+                }
+            }
+            Act::SaveProjectName => {
+                if let Some(Modal::Settings { renaming, .. }) = self.modal.as_mut()
+                    && let Some((id, name)) = renaming.take()
+                {
+                    self.store.rename_project(&id, name.text.as_str());
+                }
+            }
+            Act::CancelProjectRename => {
+                if let Some(Modal::Settings { renaming, .. }) = self.modal.as_mut() {
+                    *renaming = None;
+                }
+            }
+            Act::MoveProject(id, up) => self.store.move_project(&id, up),
             Act::SetAutoCompact(id, on) => {
                 // Show the choice at once; the mod's next snapshot confirms or corrects it.
                 if let Some(meta) = self.store.session_mut(&id).and_then(|s| s.claude.as_mut()) {

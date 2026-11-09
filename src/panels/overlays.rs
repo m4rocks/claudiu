@@ -15,8 +15,13 @@ fn act(ws: &mut Workspace, a: Act, tx: &mut Tx) {
     ws.after_input(tx);
 }
 
-/// A text field of a dialog: field `n` of the open modal (see `modal_field`).
+/// A text field of a dialog: field `n` of the open modal (see `modal_field`). Enter submits the dialog.
 pub fn modal_input(n: usize, edit: &rune::TextEdit, placeholder: &str) -> El {
+    modal_input_submitting(n, edit, placeholder, Workspace::submit_modal)
+}
+
+/// `modal_input` whose Enter runs `submit` instead of submitting the dialog.
+pub fn modal_input_submitting(n: usize, edit: &rune::TextEdit, placeholder: &str, submit: fn(&mut Workspace)) -> El {
     let field = text_input(edit, font(13.0, 400.0))
         .key(format!("modal-field-{n}"))
         .single_line()
@@ -29,8 +34,8 @@ pub fn modal_input(n: usize, edit: &rune::TextEdit, placeholder: &str) -> El {
             // The modal closed between frames; a scratch field takes the edit.
             None => &mut ws.search,
         })
-        .on_submit(|ws: &mut Workspace, tx: &mut Tx| {
-            ws.submit_modal();
+        .on_submit(move |ws: &mut Workspace, tx: &mut Tx| {
+            submit(ws);
             ws.after_input(tx);
         });
     row()

@@ -522,7 +522,7 @@ impl Store {
         if let Some(existing) = self.data.projects.iter().find(|p| path_key(&p.path) == path_key(&root)) {
             return existing.id.clone();
         }
-        let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| root.to_string_lossy().into_owned());
+        let name = folder_name(&root);
         let project = Project { id: new_id(), name, path: root, git, collapsed: true, added_at: now() };
         let id = project.id.clone();
         self.data.projects.push(project);
@@ -531,12 +531,44 @@ impl Store {
         id
     }
 
-    pub fn remove_project(&mut self, id: &str) {
-        self.data.projects.retain(|p| p.id != id);
+    /// Drop a project; its sessions stay, without one. Returns where it was and what it was, for `restore_project`.
+    pub fn remove_project(&mut self, id: &str) -> Option<(usize, Project)> {
+        let at = self.data.projects.iter().position(|p| p.id == id)?;
+        let project = self.data.projects.remove(at);
         for s in self.data.sessions.iter_mut().filter(|s| s.project_id.as_deref() == Some(id)) {
             s.project_id = None;
         }
         self.dirty = true;
+        Some((at, project))
+    }
+
+    /// Put a removed project back at `at`, taking back the sessions in its folder. Nothing happens when its folder has
+    /// been added again since.
+    pub fn restore_project(&mut self, at: usize, project: Project) {
+        if self.data.projects.iter().any(|p| path_key(&p.path) == path_key(&project.path)) {
+            return;
+        }
+        self.data.projects.insert(at.min(self.data.projects.len()), project);
+        self.remap_sessions();
+        self.dirty = true;
+    }
+
+    /// The name the sidebar shows for a project; an empty one goes back to its folder's name.
+    pub fn rename_project(&mut self, id: &str, name: &str) {
+        let Some(p) = self.data.projects.iter_mut().find(|p| p.id == id) else { return };
+        let name = name.trim();
+        p.name = if name.is_empty() { folder_name(&p.path) } else { name.to_string() };
+        self.dirty = true;
+    }
+
+    /// Move a project one place up or down the list; the first and last stay where they are.
+    pub fn move_project(&mut self, id: &str, up: bool) {
+        let Some(at) = self.data.projects.iter().position(|p| p.id == id) else { return };
+        let to = if up { at.checked_sub(1) } else { Some(at + 1).filter(|&to| to < self.data.projects.len()) };
+        if let Some(to) = to {
+            self.data.projects.swap(at, to);
+            self.dirty = true;
+        }
     }
 
     pub fn refresh_git(&mut self) {
@@ -572,6 +604,11 @@ impl Store {
 }
 
 /// Deepest project containing `cwd` (project root or any of its worktrees).
+/// A project's name before anyone renames it.
+fn folder_name(path: &Path) -> String {
+    path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| path.to_string_lossy().into_owned())
+}
+
 pub fn project_for(projects: &[Project], cwd: &Path) -> Option<Id> {
     projects
         .iter()
@@ -741,6 +778,78 @@ mod tests {
         b.mark_dirty();
         b.save();
         assert!(b.dirty);
+    }
+
+    fn store_with(projects: Vec<Project>, sessions: Vec<(&str, &str, Option<&str>)>) -> (Store, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = Store::load(dir.path().join("state.json"));
+        s.data.projects = projects;
+        s.data.sessions = sessions
+            .into_iter()
+            .map(|(id, cwd, project)| SessionRecord {
+                id: id.into(),
+                kind: SessionKind::Claude,
+                title: id.into(),
+                custom_title: None,
+                auto_title: None,
+                cwd: PathBuf::from(cwd),
+                project_id: project.map(Into::into),
+                created_at: 1,
+                last_active: 1,
+                exit_code: None,
+                hidden: false,
+                claude: None,
+            })
+            .collect();
+        (s, dir)
+    }
+
+    fn order(s: &Store) -> Vec<&str> {
+        s.data.projects.iter().map(|p| p.id.as_str()).collect()
+    }
+
+    #[test]
+    fn a_removed_project_comes_back_in_its_place_with_its_sessions() {
+        let (mut s, _dir) = store_with(vec![project("a", "/a"), project("b", "/b"), project("c", "/c")], vec![("s1", "/b/x", Some("b")), ("s2", "/a", Some("a"))]);
+        let (at, removed) = s.remove_project("b").expect("b is there");
+        assert_eq!(order(&s), ["a", "c"]);
+        assert_eq!(s.session("s1").unwrap().project_id, None, "its session stays, without a project");
+        s.restore_project(at, removed);
+        assert_eq!(order(&s), ["a", "b", "c"]);
+        assert_eq!(s.session("s1").unwrap().project_id.as_deref(), Some("b"));
+        assert_eq!(s.session("s2").unwrap().project_id.as_deref(), Some("a"));
+        assert!(s.remove_project("gone").is_none());
+    }
+
+    #[test]
+    fn undoing_a_removal_after_the_folder_was_added_again_adds_nothing() {
+        let (mut s, _dir) = store_with(vec![project("a", "/a"), project("b", "/b")], vec![]);
+        let (at, removed) = s.remove_project("b").unwrap();
+        s.data.projects.push(project("b2", "/b"));
+        s.restore_project(at, removed);
+        assert_eq!(order(&s), ["a", "b2"]);
+    }
+
+    #[test]
+    fn a_project_is_renamed_and_an_empty_name_goes_back_to_its_folders() {
+        let (mut s, _dir) = store_with(vec![project("a", "/w/app")], vec![]);
+        s.rename_project("a", "  Main app ");
+        assert_eq!(s.project("a").unwrap().name, "Main app");
+        s.rename_project("a", "   ");
+        assert_eq!(s.project("a").unwrap().name, "app");
+    }
+
+    #[test]
+    fn projects_move_one_place_and_stop_at_the_ends() {
+        let (mut s, _dir) = store_with(vec![project("a", "/a"), project("b", "/b"), project("c", "/c")], vec![]);
+        s.move_project("c", true);
+        assert_eq!(order(&s), ["a", "c", "b"]);
+        s.move_project("a", true);
+        assert_eq!(order(&s), ["a", "c", "b"], "the first stays first");
+        s.move_project("a", false);
+        assert_eq!(order(&s), ["c", "a", "b"]);
+        s.move_project("b", false);
+        assert_eq!(order(&s), ["c", "a", "b"], "the last stays last");
     }
 
     #[test]

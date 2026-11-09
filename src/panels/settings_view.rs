@@ -7,9 +7,9 @@ use crate::app::{Act, MenuAnchor, MenuItem, Modal, SettingsPage, Workspace};
 use crate::claude::defaults::{Effort, PermissionMode};
 use crate::claude::mcp::Feature;
 use crate::claude::trim::Trim;
-use crate::panels::overlays::modal_input;
+use crate::panels::overlays::{modal_input, modal_input_submitting};
 use crate::panels::theme::{self, rgb};
-use crate::panels::widgets::{button, danger_button, label, section_label, tick};
+use crate::panels::widgets::{button, button_disabled, danger_button, label, section_label, tick};
 
 fn faint(t: impl Into<String>) -> El {
     label(t, 11.0, theme::TEXT_FAINT).wrap()
@@ -115,7 +115,7 @@ fn scale_step(key: &'static str, sign: &'static str, by: i32) -> El {
 
 impl Workspace {
     pub(crate) fn settings_body(&self) -> El {
-        let Some(Modal::Settings { shell, claude, model, effort, permission, updates, chrome, scale, trimmed, claudiu_off, skills_field, costly, hints }) = &self.modal else {
+        let Some(Modal::Settings { shell, claude, model, effort, permission, updates, chrome, scale, trimmed, claudiu_off, skills_field, costly, hints, renaming }) = &self.modal else {
             return el();
         };
         let page = self.settings_page;
@@ -197,6 +197,7 @@ impl Workspace {
                 }
                 list
             }
+            SettingsPage::Projects => self.projects_page(renaming.as_ref()),
             SettingsPage::Worktrees => self.worktrees_page(),
             SettingsPage::About => col().child(faint(format!(
                 "Claudiu {} · An independent project, not affiliated with, endorsed by or sponsored by Anthropic. Claude is a trademark of Anthropic.",
@@ -242,6 +243,69 @@ impl Workspace {
             .gap(16.0)
             .child(categories)
             .child(col().key(format!("settings-page-{}", page.label())).grow(1.0).shrink().min_w(0.0).h_full().scroll(ScrollSpec { stick_bottom: false }).transition(rune::Transition::opacity()).child(content.w_full().pr(6.0)))
+    }
+
+    /// The Projects page: every project in the sidebar's order, to rename, move, remove, or add to. Changes apply at
+    /// once, as on the Worktrees page; a removal can be undone from its toast.
+    fn projects_page(&self, renaming: Option<&(crate::store::Id, rune::TextEdit)>) -> El {
+        let projects = &self.store.data.projects;
+        let add = button("Add project…", false).key("project-add").on_press_tx(|ws: &mut Workspace, tx: &mut Tx| {
+            ws.act(Act::ImportProject);
+            ws.after_input(tx);
+        });
+        let mut list = col().gap(8.0).child(
+            row()
+                .w_full()
+                .center_y()
+                .justify_between()
+                .gap(10.0)
+                .child(faint("Removing a project keeps its sessions; they show under no project.").grow(1.0).shrink())
+                .child(add),
+        );
+        if projects.is_empty() {
+            return list.child(faint("No projects yet."));
+        }
+        let pressed = |key: String, b: El, a: Act| {
+            b.key(key).on_press_tx(move |ws: &mut Workspace, tx: &mut Tx| {
+                ws.act(a.clone());
+                ws.after_input(tx);
+            })
+        };
+        let last = projects.len() - 1;
+        for (i, p) in projects.iter().enumerate() {
+            let id = p.id.clone();
+            let name = match renaming.filter(|(r, _)| *r == p.id) {
+                Some((_, edit)) => modal_input_submitting(4, edit, "Name", |ws| ws.act(Act::SaveProjectName)),
+                None => label(p.name.clone(), 13.0, theme::TEXT),
+            };
+            let mut buttons = row().gap(6.0);
+            buttons = if renaming.is_some_and(|(r, _)| *r == p.id) {
+                buttons.child(pressed(format!("project-cancel-{i}"), button("Cancel", false), Act::CancelProjectRename)).child(pressed(format!("project-save-{i}"), button("Save", true), Act::SaveProjectName))
+            } else {
+                buttons.child(pressed(format!("project-rename-{i}"), button("Rename", false), Act::RenameProject(id.clone())))
+            };
+            buttons = buttons
+                .child(if i == 0 { button_disabled("Move up").key(format!("project-up-{i}")) } else { pressed(format!("project-up-{i}"), button("Move up", false), Act::MoveProject(id.clone(), true)) })
+                .child(if i == last { button_disabled("Move down").key(format!("project-down-{i}")) } else { pressed(format!("project-down-{i}"), button("Move down", false), Act::MoveProject(id.clone(), false)) })
+                .child(pressed(format!("project-remove-{i}"), button("Remove", false), Act::RemoveProject(id)));
+            list = list.child(
+                row()
+                    // By id, so a moved row keeps its element and slides to its new place.
+                    .key(format!("project-{}", p.id))
+                    .w_full()
+                    .center_y()
+                    .justify_between()
+                    .gap(10.0)
+                    .px(10.0)
+                    .py(6.0)
+                    .radius(6.0)
+                    .fill(rgb(0x111113))
+                    .border(1.0, rgb(0x242428))
+                    .child(col().grow(1.0).shrink().min_w(0.0).gap(2.0).child(name).child(label(p.path.to_string_lossy(), 11.0, theme::TEXT_FAINT).truncate_middle()))
+                    .child(buttons),
+            );
+        }
+        list
     }
 
     /// The Worktrees page: the worktree folders Claudiu made, by repository, each to show in the file manager or remove.

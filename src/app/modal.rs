@@ -94,7 +94,7 @@ impl Workspace {
                     }
                 }
             }
-            Some(Modal::Settings { shell, claude, model, effort, permission, updates, chrome, scale, trimmed, claudiu_off, skills_field, costly, hints }) => {
+            Some(Modal::Settings { shell, claude, model, effort, permission, updates, chrome, scale, trimmed, claudiu_off, skills_field, costly, hints, renaming }) => {
                 let clean = |s: &str| s.trim().trim_matches('"').to_string();
                 let (shell_t, claude_t) = (clean(&shell.text), clean(&claude.text));
                 let model_name = claude::defaults::parse_model(&model.text);
@@ -109,12 +109,16 @@ impl Workspace {
                 let bad_limits = limits.as_ref().err().map(|why| (SettingsPage::ClaudeTools, 3, why.clone()));
                 if let Some((page, field, msg)) = paths.or(bad_model).or(bad_limits) {
                     self.settings_page = page;
-                    self.modal = Some(Modal::Settings { shell, claude, model, effort, permission, updates, chrome, scale, trimmed, claudiu_off, skills_field, costly, hints });
+                    self.modal = Some(Modal::Settings { shell, claude, model, effort, permission, updates, chrome, scale, trimmed, claudiu_off, skills_field, costly, hints, renaming });
                     if let Some(f) = modal_field(&mut self.modal, field) {
                         f.focused = true;
                     }
                     self.toast(msg, true);
                     return;
+                }
+                // Save keeps a name typed on the Projects page, as it keeps the other fields.
+                if let Some((id, name)) = renaming {
+                    self.store.rename_project(&id, name.text.as_str());
                 }
                 let s = &mut self.store.data.settings;
                 s.shell = (!shell_t.is_empty()).then_some(shell_t);
