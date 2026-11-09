@@ -140,6 +140,11 @@ fn expand_tabs(part: &str, start: usize) -> String {
 impl Editor {
     /// The editor filling its parent. `focused`: it has the keyboard (a caret, and the current line lit).
     pub fn render(&self, focused: bool, scale: f32) -> El {
+        handlers(self.drawing(focused, scale), self.key.clone())
+    }
+
+    /// What `render` draws, before the pointer and keys are wired to the workspace.
+    fn drawing(&self, focused: bool, scale: f32) -> El {
         let key = self.key.clone();
         let m = self.metrics();
         let size = crate::panels::scale::px(self.font_size);
@@ -159,7 +164,9 @@ impl Editor {
         let caret = self.sel.head;
         let caret_row = self.caret_row();
 
-        let mut numbers = el().absolute(0.0, top).w(gutter).h_full();
+        // Scrolling moves these by whole lines and the offset under one; both land at once, never springing, and
+        // each line keeps its own element so a number or a row never slides over from the line before.
+        let mut numbers = el().absolute(0.0, top).w(gutter).h_full().instant_changes();
         let mut text_rows = el().absolute(-self.scroll[0].round(), top).w_full();
         let mut guides: Vec<usize> = vec![];
         let mut line = first;
@@ -172,7 +179,8 @@ impl Editor {
             let y = y_of(row);
             let number_color = if line == caret.line { theme::TEXT_DIM } else { theme::TEXT_FAINT };
             numbers = numbers.child(
-                el().absolute(0.0, y)
+                el().key(format!("{key}/n{line}"))
+                    .absolute(0.0, y)
                     .w(gutter - super::GUTTER_PAD - super::FOLD_W)
                     .h(m.line_h)
                     .justify_end()
@@ -222,23 +230,26 @@ impl Editor {
                 .collect();
             let paint = LinePaint { text: text_.to_string(), rows: row_list, spans: self.spans.get(line).cloned().unwrap_or_default(), selected, problems, found, guides: guides.clone() };
             let version = paint.version(m);
-            text_rows = text_rows.child(el().absolute(0.0, y).w_full().child(rune::memo(format!("{key}/l{line}"), version, move || paint.build(m, size))));
+            text_rows = text_rows.child(el().key(format!("{key}/r{line}")).absolute(0.0, y).w_full().child(rune::memo(format!("{key}/l{line}"), version, move || paint.build(m, size))));
             line += 1;
         }
 
         let mut body = el().absolute(gutter, 0.0).size((self.area[0] - gutter).max(0.0), self.area[1]).clip_rounded(0.0);
+        // The text and what sits on it follow the scroll at once; the completion list and hover card, drawn after it,
+        // keep their fades.
+        let mut page = el().w_full().h_full().instant_changes();
         let caret_line_row = self.line_row(caret.line);
         let caret_hidden = self.hidden(caret.line);
         if focused && self.sel.is_empty() && !caret_hidden && caret_line_row < last_row && caret_line_row >= top_row {
             let h = m.line_h * (self.line_breaks(caret.line).0.len() + 1) as f32;
-            body = body.child(el().absolute(0.0, top + y_of(caret_line_row)).w_full().h(h).fill(theme::rgb(theme::ROW_ACTIVE)));
+            page = page.child(el().absolute(0.0, top + y_of(caret_line_row)).w_full().h(h).fill(theme::rgb(theme::ROW_ACTIVE)));
         }
-        body = body.child(text_rows);
+        page = page.child(text_rows);
         // The other cursors' carets, wherever the main one is.
         for (i, (row, cell)) in self.other_carets().into_iter().enumerate() {
             if focused && self.caret_on && (top_row..last_row).contains(&row) {
                 let x = (cell as f32 * m.cell_w - self.scroll[0]).round();
-                body = body.child(el().key(format!("{key}/caret{i}")).absolute(x - super::CARET_W / 2.0, top + y_of(row)).size(super::CARET_W, m.line_h).fill(theme::rgb(theme::ACCENT)));
+                page = page.child(el().key(format!("{key}/caret{i}")).absolute(x - super::CARET_W / 2.0, top + y_of(row)).size(super::CARET_W, m.line_h).fill(theme::rgb(theme::ACCENT)));
             }
         }
         // A caret a fold hides isn't drawn, as in gpui-kit.
@@ -248,7 +259,7 @@ impl Editor {
             if let Some(marked) = self.marked.clone() {
                 let width = m.cell_w * columns(&marked) as f32;
                 let fg = theme::rgb(theme::TEXT);
-                body = body.child(
+                page = page.child(
                     el().absolute(x, y)
                         .h(m.line_h)
                         .fill(theme::rgb(theme::TERMINAL_BG))
@@ -258,25 +269,23 @@ impl Editor {
             }
             // The bar stays laid out while it blinks off, so the input method keeps its place.
             let bar = el().absolute(x - super::CARET_W / 2.0, y).size(super::CARET_W, m.line_h);
-            body = body.child(match focused {
+            page = page.child(match focused {
                 true if self.caret_on => bar.fill(theme::rgb(theme::ACCENT)).ime_cursor(),
                 true => bar.ime_cursor(),
                 false => bar,
             });
         }
         let body_area = [(self.area[0] - gutter).max(0.0), self.area[1]];
-        body = body.children(self.render_assist(m.cell_w, m.line_h, top_row, top, body_area));
+        body = body.child(page).children(self.render_assist(m.cell_w, m.line_h, top_row, top, body_area));
 
-        let root = el()
-            .key(key.clone())
+        el().key(key)
             .w_full()
             .h_full()
             .fill(theme::rgb(theme::TERMINAL_BG))
             .clip_rounded(0.0)
             .cursor(Cursor::Text)
             .child(numbers)
-            .child(body);
-        handlers(root, key)
+            .child(body)
     }
 }
 
@@ -413,6 +422,41 @@ fn handlers(root: El, key: String) -> El {
 #[cfg(test)]
 mod tests {
     use super::indent_guides;
+    use crate::editor::Editor;
+
+    /// The editor drawn alone, its first frame settled, then `change` made: what is still on its way somewhere a
+    /// frame later (fading, exiting, or moving toward another place).
+    fn moving_after(change: impl FnOnce(&mut Editor)) -> Vec<String> {
+        let text: String = (1..=200).map(|i| format!("fn line_{i}() {{\n    body();\n}}\n")).collect();
+        let mut e = Editor::new("e", &text);
+        e.set_area(800.0, 600.0);
+        e.fold_spots = (0..200).map(|i| (i * 3, i * 3 + 2)).collect();
+        let mut rt = rune::Runtime::new(e, |e: &Editor, _: &mut rune::Cx<Editor>| e.drawing(true, 2.0), (800.0, 600.0), rune::Env::new(true, 2.0));
+        for _ in 0..60 {
+            rt.frame(1.0 / 60.0);
+        }
+        rt.update(|e, _| change(e));
+        rt.frame(1.0 / 60.0);
+        rt.elements()
+            .into_iter()
+            .filter(|el| el.exiting || el.opacity < 1.0 || el.rect.iter().zip(el.target).any(|(a, b)| (a - b).abs() > 0.01))
+            .map(|el| format!("{} {:?} {:?} {:?}->{:?}", el.path, el.text, el.opacity, el.rect, el.target))
+            .collect()
+    }
+
+    #[test]
+    fn scrolling_moves_the_lines_without_fading_them() {
+        let moving = moving_after(|e| e.scroll[1] += 61.5);
+        assert!(moving.is_empty(), "{moving:#?}");
+    }
+
+    #[test]
+    fn the_gutter_under_the_pointer_shows_its_chevrons_without_moving_the_numbers() {
+        let moving = moving_after(|e| {
+            e.set_gutter_hover(true);
+        });
+        assert!(moving.is_empty(), "{moving:#?}");
+    }
 
     #[test]
     fn guides_mark_each_level_and_carry_over_empty_lines() {

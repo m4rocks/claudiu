@@ -91,6 +91,11 @@ impl RowPaint {
 impl TerminalView {
     /// The terminal as Rune elements, filling its parent. `focused`: it has the keyboard (a solid block cursor).
     pub fn render(&self, focused: bool, scale: f32) -> El {
+        handlers(self.drawing(focused, scale), self.key.clone())
+    }
+
+    /// What `render` draws, before the pointer and keys are wired to the workspace.
+    fn drawing(&self, focused: bool, scale: f32) -> El {
         let key = self.key.clone();
         let m = self.metrics();
         let font_size = crate::panels::scale::px(self.font_size);
@@ -225,7 +230,9 @@ impl TerminalView {
             }
         }
 
-        let mut grid = el().absolute(0.0, shift - m.line_h * top as f32).w_full();
+        // Scrolling, and a program redrawing its screen, change what each row shows in place; it lands at once, or the
+        // view would spring between lines and a row's words slide over from where the last text's words were.
+        let mut grid = el().absolute(0.0, shift - m.line_h * top as f32).w_full().instant_changes();
         for (i, paint) in paints.into_iter().enumerate() {
             let version = paint.version(m);
             let row_key = format!("{key}/row{i}");
@@ -241,13 +248,15 @@ impl TerminalView {
             .clip_rounded(0.0)
             .child(grid);
         if let Some(c) = cursor_el {
-            root = root.child(c);
+            // Scrolling takes the cursor off screen and back; it shows again where it is, without fading in.
+            root = root.child(c.key(format!("{key}/cursor")).transition(rune::Transition::none()).instant_changes());
         }
         if let (Some(text_), Some((x, y))) = (self.marked.clone(), preedit_at) {
             let fg = theme::rgb(theme::TEXT);
             let width = m.cell_w * text_.chars().count() as f32;
             root = root.child(
                 el().absolute(x, y)
+                    .instant_changes()
                     .h(m.line_h)
                     .fill(theme::rgb(theme::TERMINAL_BG))
                     .child(text(text_).font(font(font_size, false, false).lh(m.line_h)).color(fg))
@@ -263,7 +272,7 @@ impl TerminalView {
         if self.over_link() {
             root = root.cursor(Cursor::Pointer);
         }
-        handlers(root, key)
+        root
     }
 }
 
@@ -319,4 +328,46 @@ fn handlers(root: El, key: String) -> El {
             ws.after_input(tx);
             true
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::terminal::{SpawnSpec, Terminal};
+    use alacritty_terminal::vte::ansi::Processor;
+
+    fn write(v: &TerminalView, bytes: &str) {
+        Processor::<alacritty_terminal::vte::ansi::StdSyncHandler>::new().advance(&mut *v.terminal.term.lock(), bytes.as_bytes());
+    }
+
+    /// The terminal drawn alone, its first frame settled, then `change` made: what is still on its way somewhere a
+    /// frame later (fading, exiting, or moving toward another place).
+    fn moving_after(change: impl FnOnce(&mut TerminalView)) -> Vec<String> {
+        let (terminal, rx, _listener, _) = Terminal::build(&SpawnSpec::default(), 80, 24);
+        let v = TerminalView::new(terminal, rx, "t");
+        write(&v, &(0..60).map(|i| format!("line {i} with a few words\r\n")).collect::<String>());
+        let mut rt = rune::Runtime::new(v, |v: &TerminalView, _: &mut rune::Cx<TerminalView>| v.drawing(true, 2.0), (800.0, 600.0), rune::Env::new(true, 2.0));
+        for _ in 0..60 {
+            rt.frame(1.0 / 60.0);
+        }
+        rt.update(|v, _| change(v));
+        rt.frame(1.0 / 60.0);
+        rt.elements()
+            .into_iter()
+            .filter(|el| el.exiting || el.opacity < 1.0 || el.rect.iter().zip(el.target).any(|(a, b)| (a - b).abs() > 0.01))
+            .map(|el| format!("{} {:?} {:?} {:?}->{:?}", el.path, el.text, el.opacity, el.rect, el.target))
+            .collect()
+    }
+
+    #[test]
+    fn scrolling_back_moves_the_rows_without_springing() {
+        let moving = moving_after(|v| v.set_position(3.4));
+        assert!(moving.is_empty(), "{moving:#?}");
+    }
+
+    #[test]
+    fn a_program_redrawing_its_screen_does_not_slide_words_across_a_row() {
+        let moving = moving_after(|v| write(v, "\x1b[H\x1b[2J  indented then words\r\nx  y   z\r\n"));
+        assert!(moving.is_empty(), "{moving:#?}");
+    }
 }

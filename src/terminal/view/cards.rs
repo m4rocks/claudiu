@@ -139,6 +139,8 @@ impl TerminalView {
                 .child(crate::visual::ui::markdown(&format!("{}/card-{}", self.key, card.call), &card.content, &scope, &self.cards.ui));
             out.push(
                 el().key(format!("{}/slot-{}-{}", self.key, slot.call, slot.first))
+                    // Follows the scroll at once, as the rows around it do.
+                    .instant_changes()
                     .absolute(0.0, line_h * slot.row as f32 + shift)
                     .w(width + margin)
                     .h(line_h * slot.count as f32)
