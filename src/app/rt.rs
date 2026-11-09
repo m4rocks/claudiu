@@ -39,8 +39,15 @@ fn wake_window(waker: &WindowWaker) {
     }
 }
 
+/// A job on its way to the UI thread. A quiet one doesn't make the view run again by itself: it sets `Rt::dirty` when
+/// it changes what is shown.
+struct Queued<S> {
+    job: Job<S>,
+    quiet: bool,
+}
+
 /// Sends jobs to the UI thread from any thread.
-pub struct Mailbox<S>(Sender<Job<S>>, WindowWaker);
+pub struct Mailbox<S>(Sender<Queued<S>>, WindowWaker);
 
 impl<S> Clone for Mailbox<S> {
     fn clone(&self) -> Self {
@@ -51,7 +58,11 @@ impl<S> Clone for Mailbox<S> {
 impl<S: 'static> Mailbox<S> {
     /// Run `f` with the state on the UI thread. Returns false once the state is gone (the window closed).
     pub fn send(&self, f: impl FnOnce(&mut S) + Send + 'static) -> bool {
-        let sent = self.0.send(Box::new(f)).is_ok();
+        self.queue(f, false)
+    }
+
+    fn queue(&self, f: impl FnOnce(&mut S) + Send + 'static, quiet: bool) -> bool {
+        let sent = self.0.send(Queued { job: Box::new(f), quiet }).is_ok();
         wake_window(&self.1);
         sent
     }
@@ -60,15 +71,17 @@ impl<S: 'static> Mailbox<S> {
 struct Timer<S> {
     due: Instant,
     job: Box<dyn FnOnce(&mut S)>,
+    quiet: bool,
 }
 
 pub struct Rt<S> {
-    tx: Sender<Job<S>>,
-    rx: Receiver<Job<S>>,
+    tx: Sender<Queued<S>>,
+    rx: Receiver<Queued<S>>,
     timers: Vec<Timer<S>>,
     fx: Vec<Fx>,
     waker: WindowWaker,
-    /// Something changed outside a handler (a job ran, a terminal printed), so the view must run again.
+    /// Something changed outside a handler (a quiet job changed what is shown, a toast came up), so the view must
+    /// run again.
     pub dirty: bool,
 }
 
@@ -94,10 +107,20 @@ impl<S: 'static> Rt<S> {
 
     /// Run `work` on a thread of its own, then `done` with its result on the UI thread.
     pub fn spawn<T: Send + 'static>(&self, work: impl FnOnce() -> T + Send + 'static, done: impl FnOnce(&mut S, T) + Send + 'static) {
+        self.spawn_as(work, done, false);
+    }
+
+    /// `spawn` for work that repeats and mostly finds nothing new: `done` sets `dirty` when it changes what is shown,
+    /// so an idle window isn't drawn again for nothing.
+    pub fn spawn_quietly<T: Send + 'static>(&self, work: impl FnOnce() -> T + Send + 'static, done: impl FnOnce(&mut S, T) + Send + 'static) {
+        self.spawn_as(work, done, true);
+    }
+
+    fn spawn_as<T: Send + 'static>(&self, work: impl FnOnce() -> T + Send + 'static, done: impl FnOnce(&mut S, T) + Send + 'static, quiet: bool) {
         let mailbox = self.mailbox();
         std::thread::spawn(move || {
             let out = work();
-            mailbox.send(move |s| done(s, out));
+            mailbox.queue(move |s| done(s, out), quiet);
         });
     }
 
@@ -108,7 +131,12 @@ impl<S: 'static> Rt<S> {
 
     /// Run `f` with the state once `after` has passed (on the first frame after it).
     pub fn after(&mut self, after: Duration, f: impl FnOnce(&mut S) + 'static) {
-        self.timers.push(Timer { due: Instant::now() + after, job: Box::new(f) });
+        self.timers.push(Timer { due: Instant::now() + after, job: Box::new(f), quiet: false });
+    }
+
+    /// `after` for a timer that repeats and mostly changes nothing: `f` sets `dirty` when it changes what is shown.
+    pub fn after_quietly(&mut self, after: Duration, f: impl FnOnce(&mut S) + 'static) {
+        self.timers.push(Timer { due: Instant::now() + after, job: Box::new(f), quiet: true });
     }
 
     /// Run `f` with the frame's `Tx` once the current handler ends.
@@ -116,17 +144,17 @@ impl<S: 'static> Rt<S> {
         self.fx.push(Box::new(f));
     }
 
-    /// The jobs that arrived and the timers that are due, to run now in order.
+    /// The jobs that arrived and the timers that are due, to run now in order, each with whether it is quiet.
     #[allow(clippy::type_complexity)] // Jobs and timers both run as plain boxed closures.
-    fn take_due(&mut self) -> Vec<Box<dyn FnOnce(&mut S)>> {
-        let mut out: Vec<Box<dyn FnOnce(&mut S)>> = vec![];
-        while let Ok(job) = self.rx.try_recv() {
-            out.push(job);
+    fn take_due(&mut self) -> Vec<(Box<dyn FnOnce(&mut S)>, bool)> {
+        let mut out: Vec<(Box<dyn FnOnce(&mut S)>, bool)> = vec![];
+        while let Ok(q) = self.rx.try_recv() {
+            out.push((q.job, q.quiet));
         }
         let now = Instant::now();
         let (due, waiting): (Vec<_>, Vec<_>) = std::mem::take(&mut self.timers).into_iter().partition(|t| t.due <= now);
         self.timers = waiting;
-        out.extend(due.into_iter().map(|t| t.job));
+        out.extend(due.into_iter().map(|t| (t.job, t.quiet)));
         out
     }
 
@@ -139,7 +167,7 @@ impl<S: 'static> Rt<S> {
 pub trait HasRt: Sized + 'static {
     fn rt(&mut self) -> &mut Rt<Self>;
 
-    /// Run every arrived job and due timer. Returns whether any ran (the view must run again).
+    /// Run every arrived job and due timer. Returns whether any that isn't quiet ran (the view must run again).
     fn run_jobs(&mut self) -> bool {
         let mut ran = false;
         // A job may queue another one (or a timer of zero), which runs on this same frame.
@@ -148,8 +176,8 @@ pub trait HasRt: Sized + 'static {
             if jobs.is_empty() {
                 break;
             }
-            ran = true;
-            for job in jobs {
+            for (job, quiet) in jobs {
+                ran |= !quiet;
                 job(self);
             }
         }
@@ -196,6 +224,23 @@ mod tests {
         s.seen.sort();
         assert_eq!(s.seen, [2, 3], "the timer a minute away has not run");
         assert!(!s.run_jobs(), "nothing more is due");
+    }
+
+    #[test]
+    fn quiet_jobs_run_without_asking_for_a_redraw() {
+        let mut s = S::default();
+        s.rt.after_quietly(Duration::ZERO, |s: &mut S| s.seen.push(1));
+        s.rt.spawn_quietly(|| 2, |s: &mut S, v| s.seen.push(v));
+        let start = Instant::now();
+        let mut ran = false;
+        while s.seen.len() < 2 && start.elapsed() < Duration::from_secs(5) {
+            ran |= s.run_jobs();
+        }
+        s.seen.sort();
+        assert_eq!(s.seen, [1, 2]);
+        assert!(!ran, "quiet jobs say for themselves when the view must run again");
+        s.rt.after_quietly(Duration::ZERO, |s: &mut S| s.rt.after(Duration::ZERO, |s: &mut S| s.seen.push(3)));
+        assert!(s.run_jobs(), "a plain timer a quiet one queued still asks for a redraw");
     }
 
     #[test]

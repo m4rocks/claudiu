@@ -43,7 +43,7 @@ impl Workspace {
 
     /// Every five seconds: `tick`.
     pub(super) fn start_ticker(&mut self) {
-        self.rt.after(Duration::from_secs(5), |ws: &mut Workspace| {
+        self.rt.after_quietly(Duration::from_secs(5), |ws: &mut Workspace| {
             ws.tick();
             ws.start_ticker();
         });
@@ -60,15 +60,20 @@ impl Workspace {
     /// while the user isn't looking at it, mark it for attention, and if the whole window is in the
     /// background as well, flash the taskbar icon / bounce the dock icon.
     pub(super) fn start_activity_poll(&mut self) {
-        self.rt.after(Duration::from_secs(1), |ws: &mut Workspace| {
+        self.rt.after_quietly(Duration::from_secs(1), |ws: &mut Workspace| {
             let mut seen = std::mem::take(&mut ws.status_files);
-            ws.rt.spawn(
+            ws.rt.spawn_quietly(
                 move || {
                     let statuses = claude::claude_home().map(|h| claude::session_statuses(&h, &mut seen)).unwrap_or_default();
                     (statuses, crate::claude::bridge::take_requests(), seen)
                 },
                 |ws: &mut Workspace, (statuses, requests, seen)| {
                     ws.status_files = seen;
+                    // Other sessions' requests, hand-offs and worktree switches change what is shown when there are
+                    // any; `update_activity` says for itself.
+                    if !requests.is_empty() || !ws.handoffs.is_empty() || !ws.pending_switches.is_empty() || !ws.pending_starts.is_empty() {
+                        ws.rt.dirty = true;
+                    }
                     ws.serve_requests(requests);
                     ws.finish_handoffs();
                     ws.run_pending_switches(&statuses);
@@ -106,6 +111,7 @@ impl Workspace {
         }
         if next != self.activity {
             self.activity = next;
+            self.rt.dirty = true;
         }
         if flash && let Some(window) = lifecycle::main_window() {
             platform::request_attention(&window);
@@ -149,6 +155,7 @@ impl Workspace {
         let cache_running = self.selected_cache().is_some_and(|(_, left, _)| left > 0);
         if purged || cache_running || minute != self.tick_minute {
             self.tick_minute = minute;
+            self.rt.dirty = true;
         }
     }
 
@@ -211,7 +218,7 @@ impl Workspace {
         if jobs.is_empty() {
             return;
         }
-        self.rt.spawn(
+        self.rt.spawn_quietly(
             move || {
                     let mut out = Vec::new();
                     for (id, claude_id, known, last_mtime) in jobs {
@@ -232,6 +239,8 @@ impl Workspace {
                     out
             },
             |ws: &mut Workspace, out| {
+                // Only transcripts that changed since the last look come back.
+                ws.rt.dirty |= !out.is_empty();
                 for (id, mtime, scan) in out {
                     if let Some(m) = mtime {
                         ws.transcript_mtimes.insert(id.clone(), m);

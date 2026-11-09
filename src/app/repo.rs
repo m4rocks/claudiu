@@ -47,13 +47,14 @@ impl Workspace {
     pub(super) fn refresh_pending(&mut self) {
         let cwd = self.active_cwd();
         let dir = cwd.clone();
-        self.rt.spawn(
+        self.rt.spawn_quietly(
             move || crate::git::commit::pending(&dir),
             move |ws: &mut Workspace, pending| {
                 // The shown session may have changed meanwhile; its own read replaces this one.
                 let now = pending.ok().map(|p| (cwd, p));
                 if ws.pending != now {
                     ws.pending = now;
+                    ws.rt.dirty = true;
                 }
             },
         );
@@ -65,15 +66,15 @@ impl Workspace {
         if let Some(cwd) = self.git_busy.is_none().then(|| self.active_cwd()) {
             self.rt.background(move || crate::git::commit::background_fetch(&cwd));
         }
-        self.rt.after(Duration::from_secs(60), |ws: &mut Workspace| ws.start_fetch_loop());
+        self.rt.after_quietly(Duration::from_secs(60), |ws: &mut Workspace| ws.start_fetch_loop());
     }
 
     /// Re-read each project's git info every few seconds, off the UI thread, so the branch badge follows a
     /// checkout made in a terminal or by Claude, not only Claudiu's own branch actions.
     pub(super) fn start_git_watch(&mut self) {
-        self.rt.after(Duration::from_secs(3), |ws: &mut Workspace| {
+        self.rt.after_quietly(Duration::from_secs(3), |ws: &mut Workspace| {
             let paths: Vec<PathBuf> = ws.store.data.projects.iter().map(|p| p.path.clone()).collect();
-            ws.rt.spawn(
+            ws.rt.spawn_quietly(
                 move || paths.into_iter().map(|p| {
                     let g = crate::git::detect(&p);
                     (p, g)
@@ -88,6 +89,7 @@ impl Workspace {
                     }
                     if changed {
                         ws.store.mark_dirty();
+                        ws.rt.dirty = true;
                     }
                     ws.start_git_watch();
                 },

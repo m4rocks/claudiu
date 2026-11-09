@@ -158,7 +158,7 @@ impl Workspace {
     /// (headless, tests) must not keep waking the app.
     pub(super) fn take_quit_key(&mut self, tries_left: u32) {
         if !platform::take_quit_key(QUIT) && tries_left > 0 {
-            self.rt.after(Duration::from_millis(250), move |ws: &mut Workspace| ws.take_quit_key(tries_left - 1));
+            self.rt.after_quietly(Duration::from_millis(250), move |ws: &mut Workspace| ws.take_quit_key(tries_left - 1));
         }
     }
 }

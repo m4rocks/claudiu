@@ -2093,3 +2093,22 @@ mod github {
         r.act("escape", GhAct::Escape, false);
     }
 }
+
+#[test]
+fn an_idle_window_is_not_drawn_again_for_nothing() {
+    let mut h = Harness::new(|_| vec![]);
+    let cwd = h.work.clone();
+    h.step(|ws| ws.new_claude(cwd.clone()));
+    h.wait("the session's output", |ws| ws.live.iter().all(|l| !l.view.loading));
+    h.settle();
+    // Long enough for the activity poll, the git watch and the ticker to come round more than once.
+    let start = Instant::now();
+    let mut redraws = 0;
+    while start.elapsed() < Duration::from_millis(5500) {
+        std::thread::sleep(Duration::from_millis(16));
+        h.rt.update(|ws, tx| redraws += ws.poll(tx) as u32);
+        h.rt.frame(1.0 / 60.0);
+    }
+    // The ticker's minute may turn once while this runs.
+    assert!(redraws <= 1, "{redraws} frames redrew an idle window");
+}

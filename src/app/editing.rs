@@ -66,7 +66,7 @@ impl Workspace {
         if watched.is_empty() {
             return;
         }
-        self.rt.spawn(
+        self.rt.spawn_quietly(
             move || {
                 watched
                     .into_iter()
@@ -77,6 +77,7 @@ impl Workspace {
                     .collect::<Vec<_>>()
             },
             move |ws: &mut Workspace, changed| {
+                ws.rt.dirty |= !changed.is_empty();
                 for (path, seen, now) in changed {
                     let Some(tab) = ws.panes.get_mut(&id).and_then(|p| p.tabs.iter_mut().find(|t| t.path == path)) else { continue };
                     // Saved or reloaded since the look began (or being saved now): the new stamp is the tab's own.

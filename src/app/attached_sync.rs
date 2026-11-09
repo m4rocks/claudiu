@@ -59,7 +59,7 @@ impl Workspace {
         }
         self.attached_sync.running = true;
         self.attached_sync.last_try = Some(Instant::now());
-        self.rt.spawn(
+        self.rt.spawn_quietly(
             move || { ask_github(asks) },
             move |ws: &mut Workspace, answers| {
                 ws.attached_sync.running = false;
@@ -69,6 +69,7 @@ impl Workspace {
                 ws.attached_sync.failures = if ws.unanswered_items() { ws.attached_sync.failures + 1 } else { 0 };
                 if changed {
                     ws.store.mark_dirty();
+                    ws.rt.dirty = true;
                 }
             },
         );

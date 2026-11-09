@@ -41,7 +41,8 @@ impl Workspace {
         }
         self.config_sync.running = true;
         self.config_sync.last_try = Some(Instant::now());
-        self.rt.spawn(
+        // Nothing is shown unless it fails, and then the toast redraws.
+        self.rt.spawn_quietly(
             move || { sync::sync(&accounts, &sync::state_path()) },
             move |ws: &mut Workspace, result| {
                 ws.config_sync.running = false;

@@ -18,6 +18,8 @@ impl Workspace {
             serial,
             action,
         });
+        // Also from quiet jobs, which redraw only when told.
+        self.rt.dirty = true;
         self.rt.after(Duration::from_secs(secs), move |ws: &mut Workspace| {
             if ws.toast.as_ref().is_some_and(|t| t.serial == serial) {
                 ws.toast = None;

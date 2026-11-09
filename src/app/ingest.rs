@@ -9,7 +9,7 @@ use crate::claude::usage::Snapshot;
 impl Workspace {
     /// Costs no tokens; the files are tiny.
     pub(super) fn ingest_usage(&mut self) {
-        self.rt.spawn(
+        self.rt.spawn_quietly(
             move || { (usage::read_snapshots(&usage::snapshot_dir()), mcp::read_titles(), mcp::read_attached()) },
             move |ws: &mut Workspace, (snaps, titles, items)| {
                 let mut changed = false;
@@ -19,6 +19,7 @@ impl Workspace {
                 changed |= items.into_iter().fold(false, |c, (stem, item)| ws.apply_attachment(&stem, item) | c);
                 if changed {
                     ws.store.mark_dirty();
+                    ws.rt.dirty = true;
                 }
             },
         );
