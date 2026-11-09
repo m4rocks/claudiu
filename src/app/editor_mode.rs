@@ -82,6 +82,8 @@ pub struct EditorPane {
     pub watcher: Option<notify::RecommendedWatcher>,
     /// The repository's own folder, whose index and HEAD say when git's view of the files moved (a commit, a checkout).
     pub git_dir: Option<PathBuf>,
+    /// The same for the repositories nested in the folder, as the last listing found them.
+    pub nested_git_dirs: Vec<PathBuf>,
     /// The folders the tree lists; a change anywhere else (an ignored build folder) changes nothing it shows.
     pub folders: HashSet<PathBuf>,
     /// The watcher saw a change that the listing doesn't have yet.
@@ -205,6 +207,7 @@ impl Workspace {
             relist: false,
             watcher: None,
             git_dir: None,
+            nested_git_dirs: vec![],
             folders: HashSet::new(),
             stale: false,
             listed_at: None,
@@ -321,6 +324,7 @@ impl Workspace {
         let relist = std::mem::take(&mut pane.relist);
         pane.changed = listing.changed;
         pane.truncated = listing.truncated;
+        pane.nested_git_dirs = listing.nested_git_dirs;
         let moved = !pane.root.as_os_str().is_empty() && pane.root != listing.root;
         pane.root = listing.root;
         if pane.nodes != listing.nodes {
@@ -380,7 +384,8 @@ impl Workspace {
         let shown = self.active_id() == Some(id);
         let Some(pane) = self.panes.get_mut(id) else { return };
         // No paths: the watcher lost track (its buffer overflowed) and anything may have changed.
-        if !paths.is_empty() && !paths.iter().any(|p| change_matters(&pane.root, pane.git_dir.as_deref(), &pane.folders, pane.truncated, p)) {
+        let git_dirs: Vec<&Path> = pane.git_dir.iter().chain(&pane.nested_git_dirs).map(PathBuf::as_path).collect();
+        if !paths.is_empty() && !paths.iter().any(|p| change_matters(&pane.root, &git_dirs, &pane.folders, pane.truncated, p)) {
             return;
         }
         pane.stale = true;
@@ -636,15 +641,15 @@ fn folders_of(nodes: &[Node]) -> HashSet<PathBuf> {
 }
 
 /// Whether a change at `path` can change what a pane listing `root` shows: something in a folder the tree lists, or
-/// in git's index or HEAD (the tree's change marks). A build writing into an ignored folder (`target`,
+/// in the index or HEAD of one of `git_dirs` (the tree's change marks). A build writing into an ignored folder (`target`,
 /// `node_modules`) is neither, and must not set off a walk of the whole folder every moment it runs. With the
 /// listing incomplete or not there yet, every change counts.
-fn change_matters(root: &Path, git_dir: Option<&Path>, folders: &HashSet<PathBuf>, truncated: bool, path: &Path) -> bool {
+fn change_matters(root: &Path, git_dirs: &[&Path], folders: &HashSet<PathBuf>, truncated: bool, path: &Path) -> bool {
     if truncated || root.as_os_str().is_empty() {
         return true;
     }
     let parent = path.parent();
-    if let Some(git) = git_dir.filter(|g| path.starts_with(g)) {
+    if let Some(git) = git_dirs.iter().find(|g| path.starts_with(g)) {
         // The index and the branch the work tree is on; objects and logs churn without changing either.
         let named = |names: &[&str]| path.file_name().is_some_and(|n| names.iter().any(|m| n == *m));
         return (parent == Some(git) && named(&["index", "HEAD", "packed-refs"])) || path.starts_with(git.join("refs"));
@@ -674,7 +679,8 @@ mod tests {
         let root = Path::new("/w");
         let git = Path::new("/w/.git");
         let folders: HashSet<PathBuf> = [PathBuf::from("/w/src")].into();
-        let matters = |p: &str| change_matters(root, Some(git), &folders, false, Path::new(p));
+        let nested = Path::new("/w/lib/.git");
+        let matters = |p: &str| change_matters(root, &[git, nested], &folders, false, Path::new(p));
         assert!(matters("/w/README.md"));
         assert!(matters("/w/src/new.rs"));
         assert!(matters("/w/src/sub"), "a folder made in a listed one");
@@ -685,8 +691,10 @@ mod tests {
         assert!(matters("/w/.git/packed-refs"));
         assert!(!matters("/w/.git/objects/ab/cdef"));
         assert!(!matters("/w/.git/logs/HEAD"));
-        assert!(change_matters(root, Some(git), &folders, true, Path::new("/w/target/x")), "a cut-short listing may miss any folder");
-        assert!(change_matters(Path::new(""), None, &folders, false, Path::new("/w/target/x")), "nothing listed yet");
+        assert!(matters("/w/lib/.git/index"), "a commit in a repository nested in the folder");
+        assert!(!matters("/w/lib/.git/objects/ab/cdef"));
+        assert!(change_matters(root, &[git], &folders, true, Path::new("/w/target/x")), "a cut-short listing may miss any folder");
+        assert!(change_matters(Path::new(""), &[], &folders, false, Path::new("/w/target/x")), "nothing listed yet");
     }
 
     #[test]

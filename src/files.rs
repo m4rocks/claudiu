@@ -25,32 +25,59 @@ pub struct Listing {
     pub changed: HashMap<String, Change>,
     /// The walk stopped at its limit, so some files are missing.
     pub truncated: bool,
+    /// The git folders of the repositories nested below `root`, whose index and HEAD move the change marks.
+    pub nested_git_dirs: Vec<PathBuf>,
 }
 
-/// List `root`, at most `limit` entries. Skips `.git` and whatever the repository ignores.
+/// List `root`, at most `limit` entries. Skips `.git` and whatever the repository holding each file ignores: the one
+/// `root` is in, or one nested below it, such as a folder of several projects that is not a repository itself.
 pub fn list(root: &Path, limit: usize) -> Listing {
     let root = dunce::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
-    let repo = Repository::discover(&root).ok();
-    let workdir = repo.as_ref().and_then(|r| r.workdir()).map(Path::to_path_buf);
-    let ignored = |path: &Path| match (&repo, &workdir) {
-        (Some(repo), Some(wd)) => path.strip_prefix(wd).is_ok_and(|rel| repo.is_path_ignored(rel).unwrap_or(false)),
-        _ => false,
-    };
+    let outer = Repository::discover(&root).ok().and_then(Repo::new);
+    let mut nested = Vec::new();
     let mut budget = limit;
-    let nodes = walk(&root, &ignored, &mut budget);
-    let changed = match (&repo, &workdir) {
-        (Some(repo), Some(wd)) => changed(repo, wd, &root),
-        _ => HashMap::new(),
-    };
-    Listing { root, nodes, changed, truncated: budget == 0 }
+    let nodes = walk(&root, outer.as_ref(), &mut nested, &mut budget);
+    let mut changed = HashMap::new();
+    for repo in outer.iter().chain(&nested) {
+        mark_changes(repo, &root, &mut changed);
+    }
+    let nested_git_dirs = nested.iter().filter_map(|r| dunce::canonicalize(r.repo.path()).ok()).collect();
+    Listing { root, nodes, changed, truncated: budget == 0, nested_git_dirs }
 }
 
-fn walk(dir: &Path, ignored: &dyn Fn(&Path) -> bool, budget: &mut usize) -> Vec<Node> {
+/// A repository with a work tree, whose ignore rules and changes apply to the files under it.
+struct Repo {
+    repo: Repository,
+    workdir: PathBuf,
+}
+
+impl Repo {
+    fn new(repo: Repository) -> Option<Self> {
+        let workdir = repo.workdir()?.to_path_buf();
+        Some(Repo { repo, workdir })
+    }
+
+    /// `dir` when it is the top of a repository (`.git` is a folder there, or a file in a worktree or submodule).
+    fn at(dir: &Path) -> Option<Self> {
+        if !dir.join(".git").exists() {
+            return None;
+        }
+        Repository::open(dir).ok().and_then(Repo::new)
+    }
+
+    fn ignores(&self, path: &Path) -> bool {
+        path.strip_prefix(&self.workdir).is_ok_and(|rel| self.repo.is_path_ignored(rel).unwrap_or(false))
+    }
+}
+
+/// Lists `dir` with `repo`'s ignore rules, switching to a nested repository's own rules below its top folder, and
+/// collects those nested repositories into `nested` for their change marks.
+fn walk(dir: &Path, repo: Option<&Repo>, nested: &mut Vec<Repo>, budget: &mut usize) -> Vec<Node> {
     let Ok(read) = std::fs::read_dir(dir) else { return vec![] };
     let mut entries: Vec<(PathBuf, String, bool)> = read
         .flatten()
         .map(|e| (e.path(), e.file_name().to_string_lossy().into_owned(), e.file_type().is_ok_and(|t| t.is_dir())))
-        .filter(|(path, name, _)| name != ".git" && !ignored(path))
+        .filter(|(path, name, _)| name != ".git" && !repo.is_some_and(|r| r.ignores(path)))
         .collect();
     entries.sort_by_cached_key(|(_, name, is_dir)| (!is_dir, name.to_lowercase()));
     let mut nodes = Vec::new();
@@ -63,7 +90,14 @@ fn walk(dir: &Path, ignored: &dyn Fn(&Path) -> bool, budget: &mut usize) -> Vec<
             nodes.push(Node { path, name, children: None });
             continue;
         }
-        let children = walk(&path, ignored, budget);
+        let children = match Repo::at(&path) {
+            Some(inner) => {
+                let children = walk(&path, Some(&inner), nested, budget);
+                nested.push(inner);
+                children
+            }
+            None => walk(&path, repo, nested, budget),
+        };
         nodes.push(Node { path, name, children: Some(children) });
     }
     nodes
@@ -78,13 +112,12 @@ pub enum Change {
     Modified,
 }
 
-/// Changed and new files under `root`, and every folder between them and `root`.
-fn changed(repo: &Repository, workdir: &Path, root: &Path) -> HashMap<String, Change> {
+/// Marks `repo`'s changed and new files under `root`, and every folder between them and `root`.
+fn mark_changes(Repo { repo, workdir }: &Repo, root: &Path, marks: &mut HashMap<String, Change>) {
     let mut opts = StatusOptions::new();
     opts.include_untracked(true).recurse_untracked_dirs(true).include_ignored(false);
-    let Ok(statuses) = repo.statuses(Some(&mut opts)) else { return HashMap::new() };
+    let Ok(statuses) = repo.statuses(Some(&mut opts)) else { return };
     let under_root = format!("{}/", path_key(root));
-    let mut marks = HashMap::new();
     for entry in statuses.iter().filter(|s| !s.status().is_ignored()) {
         let Ok(path) = entry.path().map(|p| workdir.join(p)) else { continue };
         let change = if entry.status().intersects(Status::WT_NEW | Status::INDEX_NEW) { Change::Added } else { Change::Modified };
@@ -100,7 +133,6 @@ fn changed(repo: &Repository, workdir: &Path, root: &Path) -> HashMap<String, Ch
             marks.insert(key, change);
         }
     }
-    marks
 }
 
 /// What opening a file gives the editor.
@@ -574,6 +606,33 @@ mod tests {
         }
         assert_eq!(mark("docs/b.md"), None);
         assert_eq!(mark(""), None, "the listed folder itself");
+    }
+
+    #[test]
+    fn a_repository_nested_in_a_plain_folder_hides_what_it_ignores_and_marks_its_changes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(tmp.path()).unwrap();
+        let app = root.join("app");
+        fs::create_dir_all(app.join("node_modules/dep")).unwrap();
+        fs::write(app.join("node_modules/dep/index.js"), "x").unwrap();
+        fs::write(app.join(".gitignore"), "node_modules/\n").unwrap();
+        fs::write(app.join("main.js"), "x").unwrap();
+        let repo = Repository::init(&app).unwrap();
+        commit_all(&repo);
+        fs::write(app.join("main.js"), "changed").unwrap();
+        fs::create_dir_all(root.join("notes")).unwrap();
+        fs::write(root.join("notes/todo.md"), "x").unwrap();
+
+        let listing = list(&root, 1000);
+        assert_eq!(names(&listing.nodes), ["app", "notes"]);
+        assert_eq!(names(find(&listing.nodes, "app").children.as_ref().unwrap()), [".gitignore", "main.js"]);
+        let mark = |p: &str| listing.changed.get(&path_key(&root.join(p))).copied();
+        assert_eq!(mark("app/main.js"), Some(Change::Modified));
+        assert_eq!(mark("app"), Some(Change::Modified));
+        assert_eq!(mark("notes/todo.md"), None, "outside any repository");
+        assert_eq!(listing.nested_git_dirs, [app.join(".git")]);
+        // The ignored build output no longer uses up the limit before the folders after it.
+        assert!(!list(&root, 6).truncated);
     }
 
     #[test]
