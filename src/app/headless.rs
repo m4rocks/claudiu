@@ -629,9 +629,9 @@ fn removing_a_worktree() {
     h.step(|ws| ws.close_live(&id));
     h.wait("the offer", |ws| matches!(&ws.modal, Some(Modal::Confirm { act: Act::ConfirmRemoveWorktree { .. }, .. })));
     h.step(|ws| ws.submit_modal());
-    h.wait("the folder to go", |_| !folder.exists());
-    let toast = h.ws().toast.as_ref().map(|t| t.text.clone());
-    assert!(toast.as_deref().is_some_and(|t| t.contains("Removed worktree fix")), "{toast:?}");
+    // The toast comes after the branch is deleted too, which on Windows is later than the folder going.
+    h.wait("the removal's toast", |ws| ws.toast.as_ref().is_some_and(|t| t.text.contains("Removed worktree fix")));
+    assert!(!folder.exists(), "the folder went");
     assert!(!git(&repo_dir, &["rev-parse", "--verify", "-q", "worktree-fix"]).status.success(), "the merged branch went with it");
 
     // The branch menu has a title and an x on every local branch but the current one.
@@ -689,10 +689,17 @@ fn typing_and_pasting_reach_the_session() {
         hidden: false,
         claude: None,
     };
-    let program = if cfg!(windows) { "more" } else { "/bin/cat" };
+    let program = if cfg!(windows) { "more.com" } else { "/bin/cat" };
     h.step(|ws| ws.start_session(record, SpawnSpec { program: program.into(), cwd: Some(cwd), ..Default::default() }, true));
     h.settle();
-    assert!(h.ws().terminal_focused(&id), "a new session has the keyboard");
+    let ws = h.ws();
+    assert!(
+        ws.terminal_focused(&id),
+        "a new session has the keyboard (keys_to {:?}, search focused {}, modal open {})",
+        ws.keys_to,
+        ws.search.focused,
+        ws.modal.is_some()
+    );
     let shows = |h: &mut Harness, text: &str, what: &str| {
         h.wait(what, |ws| ws.live_view(&id).is_some_and(|v| v.tail_text(500).contains(text)));
     };
