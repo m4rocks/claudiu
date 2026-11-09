@@ -80,7 +80,7 @@ impl Workspace {
             return;
         };
         // The skeleton is up while a switch readies its target, so this also refuses a second switch.
-        if loading || self.handoffs.contains_key(&id) {
+        if loading {
             self.toast(BUSY, false);
             return;
         }

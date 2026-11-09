@@ -1,25 +1,11 @@
 //! Hand-off: a running Claude session moves to the active account. Claude Code can't change the account of a running
-//! process, so the session compacts itself (the mod runs `/compact`), then its process is replaced by a new one that
-//! resumes the same conversation under the active account. The Claudiu session is the same record and keeps its shell
+//! process, so its process is replaced by a new one that resumes the same conversation under the active account. The Claudiu session is the same record and keeps its shell
 //! and cards; the old process ends. The record remembers its new account, so it starts there from then on. The right sidebar offers the hand-off for a session that
 //! runs under another account than the active one.
 
 use super::*;
-use crate::claude::usage::Snapshot;
 use crate::terminal::view::Handover;
 use std::time::Instant;
-
-/// How long a compaction may take before the hand-off is given up.
-const TIMEOUT_SECS: i64 = 180;
-
-/// A session waiting to be compacted before it is resumed under the active account.
-pub struct Handoff {
-    pub asked: i64,
-    /// Set once the mod reports a compaction after `asked`.
-    pub compacted: bool,
-    /// The skeleton counts from here, across the restart.
-    pub since: Instant,
-}
 
 impl Workspace {
     /// The right sidebar offer: a running session that runs under another account than the active one.
@@ -37,7 +23,7 @@ impl Workspace {
         Some((from, active.name()))
     }
 
-    /// The right sidebar button. Asks first; the shown session is compacted and restarted under the active account.
+    /// The right sidebar button. Asks first; the shown session is restarted under the active account.
     pub fn ask_handoff(&mut self) {
         let shown = self.active_id().cloned().filter(|id| self.is_running(id) && self.store.session(id).is_some_and(|r| r.claude.is_some()));
         let Some(id) = shown else { return };
@@ -45,55 +31,18 @@ impl Workspace {
         self.modal = Some(Modal::Confirm {
             title: format!("Hand off to {to_name}?"),
             body: format!(
-                "Claude Code can't change accounts in a running session. Claudiu has this session compact itself, then restarts \
-                 it under {to_name} with the same conversation. Its history is kept."
+                "Claude Code can't change accounts in a running session. Claudiu restarts this session \
+                 under {to_name} with the same conversation. Its history is kept."
             ),
-            confirm: "Compact and hand off".into(),
+            confirm: "Hand off".into(),
             danger: false,
             act: Act::ConfirmHandoff(id),
         });
     }
 
-    /// Confirmed: the session asks to compact, and its skeleton says it is handing over.
+    /// Confirmed: the process is replaced at once, without compacting; the new one resumes the same conversation.
     pub fn start_handoff(&mut self, id: &str) {
-        let to_name = self.store.active_account().map_or_else(|| "the active account".into(), |a| a.name());
-        let since = Instant::now();
-        self.handoffs.insert(id.into(), Handoff { asked: crate::store::now(), compacted: false, since });
-        self.set_handover(id, Some(Handover { message: format!("Handing over to {to_name}…"), since }));
-        usage::send_ctl(&usage::ctl_file(id), "compact", serde_json::json!(true));
-    }
-
-    /// Mod reports from this ingest pass: a session that compacted after its hand-off was asked is ready.
-    pub fn note_compactions(&mut self, snaps: &[Snapshot]) {
-        for (id, h) in self.handoffs.iter_mut() {
-            let Some(cid) = self.store.session(id).and_then(|r| r.claude_id()) else { continue };
-            if snaps.iter().any(|s| s.session_id == cid && s.compacted_at.is_some_and(|c| c >= h.asked)) {
-                h.compacted = true;
-            }
-        }
-    }
-
-    /// Runs each second with the window: a compacted session is restarted under the active account; one that never
-    /// compacts is given up on.
-    pub fn finish_handoffs(&mut self) {
-        let t = crate::store::now();
-        let due: Vec<(Id, bool, Instant)> = self
-            .handoffs
-            .iter()
-            .filter(|(_, h)| h.compacted || t - h.asked > TIMEOUT_SECS)
-            .map(|(id, h)| (id.clone(), h.compacted, h.since))
-            .collect();
-        for (id, compacted, since) in due {
-            self.handoffs.remove(&id);
-            if !compacted {
-                self.set_handover(&id, None);
-                self.toast("The hand-off was cancelled: the session did not compact.", true);
-            } else if self.is_running(&id) {
-                self.restart_handed_off(&id, since);
-            } else {
-                self.set_handover(&id, None);
-            }
-        }
+        self.restart_handed_off(id, Instant::now());
     }
 
     /// The old process ends and a new one resumes the same conversation. The shell and cards belong to the session,

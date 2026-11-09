@@ -67,7 +67,6 @@ let activeSession = null // the Claude session id activeAdvisor belongs to (/cle
 let compactAt = null
 let compactRead = 0
 let compactModel = null // the model compactAt belongs to
-let compactedAt = null // when this session last compacted (seconds), so Claudiu can finish a hand-off
 
 
 // A session id as a file name.
@@ -158,7 +157,6 @@ async function report($, fresh = false, override = {}) {
       compact_at: await threshold($, fresh),
       advisor,
       advisor_active: activeAdvisor,
-      compacted_at: compactedAt,
     }
     // `seen_at` (when a limit was read) is left out, so reading the same value again is not a change.
     const key = JSON.stringify(snap, (k, v) => (k === 'seen_at' ? undefined : v))
@@ -211,8 +209,6 @@ async function applyCtlCommand($, c, override) {
     // A turn of its own once the session is idle, which can be a whole turn away: not awaited, so the commands
     // behind it in the file are not held up.
     void $.prompt.submit({ text: c.value, asUser: true }).catch(() => {})
-  } else if (c.key === 'compact' && c.value === true) {
-    await compactForHandoff($)
   } else if (c.key === 'advisor' && typeof c.value === 'string' && /^[A-Za-z0-9._-]{1,60}$/.test(c.value)) {
     await setAdvisor($, c.value, override)
   }
@@ -230,19 +226,6 @@ async function setAdvisor($, value, override) {
     return
   }
   override.advisor = advisorAlias(value)
-}
-
-// Claudiu's hand-off waits for this compaction. Between turns it compacts at once: `/compact` from a plugin would be
-// refused there after the person stopped the last turn, until they type again. During a turn the direct call is
-// refused, and `/compact` waits for the turn to end; the session.compact hook reports that one.
-async function compactForHandoff($) {
-  const result = await $.session.compact().catch(() => null)
-  if (result === null) {
-    await $.command.run({ command: 'compact' }).catch(() => {})
-  } else if (!('skip' in result)) {
-    // This plugin's own hooks don't see its own call.
-    await noteCompaction($)
-  }
 }
 
 // ---- Visual panel -------------------------------------------------------------------------------------------------
@@ -393,7 +376,6 @@ async function onSessionCompact($, e, next) {
 async function noteCompaction($) {
   activeAdvisor = advisorAlias(await setting($, 'advisorModel'))
   activeSession = await $.session.id().catch(() => null)
-  compactedAt = Math.floor(Date.now() / 1000)
   await report($, true)
 }
 

@@ -454,8 +454,6 @@ pub struct Workspace {
     ephemeral: HashSet<Id>,
     /// `claude auth login` tabs; account details are re-read when one ends.
     logins: HashSet<Id>,
-    /// Sessions being handed to another account: compacting, then resumed under it (see `handoff.rs`).
-    handoffs: HashMap<Id, handoff::Handoff>,
     pub editors: Vec<(Editor, bool)>,
     pub transcript_mtimes: HashMap<Id, SystemTime>,
     pub window_title: String,
@@ -547,7 +545,6 @@ impl Workspace {
             toast_serial: 0,
             ephemeral: HashSet::new(),
             logins: HashSet::new(),
-            handoffs: HashMap::new(),
             editors: Editor::ALL.iter().map(|e| (*e, e.locate().is_some())).collect(),
             transcript_mtimes: HashMap::new(),
             window_title: String::new(),

@@ -69,13 +69,12 @@ impl Workspace {
                 },
                 |ws: &mut Workspace, (statuses, requests, seen)| {
                     ws.status_files = seen;
-                    // Other sessions' requests, hand-offs and worktree switches change what is shown when there are
+                    // Other sessions' requests and worktree switches change what is shown when there are
                     // any; `update_activity` says for itself.
-                    if !requests.is_empty() || !ws.handoffs.is_empty() || !ws.pending_switches.is_empty() || !ws.pending_starts.is_empty() {
+                    if !requests.is_empty() || !ws.pending_switches.is_empty() || !ws.pending_starts.is_empty() {
                         ws.rt.dirty = true;
                     }
                     ws.serve_requests(requests);
-                    ws.finish_handoffs();
                     ws.run_pending_switches(&statuses);
                     ws.check_open_files();
                     ws.update_activity(&statuses);
