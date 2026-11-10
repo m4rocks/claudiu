@@ -285,7 +285,9 @@ impl TerminalView {
         if self.held() {
             let grid = skeleton::Grid { cell_w: m.cell_w, line_h: m.line_h, cols, rows };
             let since = self.handover.as_ref().map_or(self.terminal.born, |h| h.since);
-            root = root.child(skeleton::overlay(&self.draft, since.elapsed(), &self.phase(), grid).transition(rune::Transition::opacity()));
+            // Keyed so a keystroke updates the same element instead of fading a new one in; only its first appearance fades.
+            let overlay = skeleton::overlay(&self.draft, since.elapsed(), &self.phase(), grid);
+            root = root.child(overlay.key(format!("{key}/skeleton")).transition(rune::Transition::opacity()).instant_changes());
         }
         if self.over_link() {
             root = root.cursor(Cursor::Pointer);
