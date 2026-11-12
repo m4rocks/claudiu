@@ -49,7 +49,7 @@ impl Editor {
     /// The closer `c` is already next to the caret: move past it instead of typing another.
     fn step_over(&mut self, c: char, at: Pos) -> bool {
         let line = self.buffer.line(at.line);
-        if line[at.col..].chars().next() != Some(c) || escaped(&line[..at.col]) {
+        if !line[at.col..].starts_with(c) || escaped(&line[..at.col]) {
             return false;
         }
         let Some(&(open, close)) = PAIRS.iter().find(|(_, cl)| *cl == c) else { return false };

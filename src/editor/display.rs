@@ -334,6 +334,16 @@ impl Editor {
 }
 
 #[cfg(test)]
+impl Editor {
+    /// Lay out at the width tests set by hand.
+    fn relayout_with_width(&mut self) {
+        let lines = self.buffer.line_count();
+        let old = self.rows.breaks.len();
+        self.rows.rewrap(&self.buffer, 0, old, lines, &self.folds);
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -437,15 +447,5 @@ mod tests {
         e.redo();
         assert_eq!(e.folds, [(5, 8)]);
         assert!(e.hidden(6) && e.hidden(7));
-    }
-}
-
-#[cfg(test)]
-impl Editor {
-    /// Lay out at the width tests set by hand.
-    fn relayout_with_width(&mut self) {
-        let lines = self.buffer.line_count();
-        let old = self.rows.breaks.len();
-        self.rows.rewrap(&self.buffer, 0, old, lines, &self.folds);
     }
 }

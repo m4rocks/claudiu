@@ -682,7 +682,7 @@ mod tests {
 	let total = 1;
 }
 ").unwrap();
-        let hits = search(&[file.clone()], "total", 100, &|| false);
+        let hits = search(std::slice::from_ref(&file), "total", 100, &|| false);
         assert_eq!(hits, [Hit { path: file.clone(), line: 1, text: "let total = 1;".into() }]);
         let Ok(Contents::Text { text, .. }) = read(&file) else { panic!("readable") };
         assert_eq!(text.lines().nth(hits[0].line).unwrap().trim(), hits[0].text, "the editor has the same line there");
@@ -780,15 +780,13 @@ nothing
     fn tabs_after_the_indent_are_shown_too() {
         let tmp = tempfile::tempdir().unwrap();
         let p = tmp.path().join("a.go");
-        for (file, shown, why) in [
-            ("type A struct {\n\tName\tstring\n\tId\tint\n}\n", "type A struct {\n    Name    string\n    Id  int\n}\n", "tabs that align"),
-        ] {
-            fs::write(&p, file).unwrap();
-            let Contents::Text { text, format, stamp: s } = read(&p).unwrap() else { panic!("not text") };
-            assert_eq!(text, shown, "{why}");
-            save(&p, &text, format, Some(s)).unwrap();
-            assert_eq!(fs::read_to_string(&p).unwrap(), file, "{why}: saved unchanged");
-        }
+        // Tabs that align.
+        let file = "type A struct {\n\tName\tstring\n\tId\tint\n}\n";
+        fs::write(&p, file).unwrap();
+        let Contents::Text { text, format, stamp: s } = read(&p).unwrap() else { panic!("not text") };
+        assert_eq!(text, "type A struct {\n    Name    string\n    Id  int\n}\n");
+        save(&p, &text, format, Some(s)).unwrap();
+        assert_eq!(fs::read_to_string(&p).unwrap(), file, "saved unchanged");
         // A line edited by hand keeps the tabs of its indent, not the ones inside it.
         fs::write(&p, "type A struct {\n\tName\tstring\n}\n").unwrap();
         let Contents::Text { format, stamp: s, .. } = read(&p).unwrap() else { panic!("not text") };
