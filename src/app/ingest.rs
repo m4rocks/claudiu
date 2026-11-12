@@ -118,12 +118,24 @@ fn apply_to_meta(meta: &mut ClaudeMeta, snap: &Snapshot) -> bool {
         meta.compact_at = snap.compact_at;
         changed = true;
     }
+    // Before its first request the mod knows no effort, and the launch effort Claudiu recorded stays. The auto state
+    // and reason are always reported, so a session whose auto turned off never keeps showing an old pick.
+    if snap.effort.is_some() && meta.effort != snap.effort {
+        meta.effort = snap.effort.clone();
+        changed = true;
+    }
+    if meta.auto_state != snap.auto_effort || meta.effort_reason != snap.effort_reason {
+        meta.auto_state = snap.auto_effort;
+        meta.effort_reason = snap.effort_reason.clone();
+        changed = true;
+    }
     changed
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::claude::usage::AutoState;
 
     fn snap(json: &str) -> Snapshot {
         serde_json::from_str(json).unwrap()
@@ -143,6 +155,21 @@ mod tests {
         let later = snap(r#"{"session_id":"s","five_hour":null,"seven_day":null,"context_fraction":null,"context_tokens":null,"context_window":null,"model":null,"captured_at":3}"#);
         assert!(apply_to_meta(&mut meta, &later), "advisor off is a real change");
         assert_eq!((meta.context_tokens, meta.auto_compact, meta.advisor.clone()), (Some(500), Some(true), None));
+    }
+
+    #[test]
+    fn the_launch_effort_shows_until_the_first_request_and_an_old_pick_never_lingers() {
+        let mut meta = ClaudeMeta { effort: Some("medium".into()), ..Default::default() };
+        let before = snap(r#"{"session_id":"s","five_hour":null,"seven_day":null,"context_fraction":null,"context_tokens":null,"context_window":null,"model":null,"captured_at":1,"auto_effort":"on"}"#);
+        assert!(apply_to_meta(&mut meta, &before));
+        assert_eq!((meta.effort.as_deref(), meta.auto_state), (Some("medium"), AutoState::On), "no request yet: the launch effort stays");
+        let picked = snap(r#"{"session_id":"s","five_hour":null,"seven_day":null,"context_fraction":null,"context_tokens":null,"context_window":null,"model":null,"captured_at":2,"effort":"high","auto_effort":"on","effort_reason":"A refactor across files."}"#);
+        assert!(apply_to_meta(&mut meta, &picked));
+        assert_eq!((meta.effort.as_deref(), meta.effort_reason.as_deref()), (Some("high"), Some("A refactor across files.")));
+        let by_hand = snap(r#"{"session_id":"s","five_hour":null,"seven_day":null,"context_fraction":null,"context_tokens":null,"context_window":null,"model":null,"captured_at":3,"effort":"low","auto_effort":"manual"}"#);
+        assert!(apply_to_meta(&mut meta, &by_hand));
+        assert_eq!((meta.effort.as_deref(), meta.auto_state, meta.effort_reason.clone()), (Some("low"), AutoState::Manual, None), "the old reason goes with the pick");
+        assert!(!apply_to_meta(&mut meta, &by_hand), "the same report again changes nothing");
     }
 
     #[test]

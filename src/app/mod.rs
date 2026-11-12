@@ -14,7 +14,7 @@ use crate::claude::accounts;
 use crate::claude;
 use crate::panels::sidebar::{SIDEBAR_MAX, SIDEBAR_MIN, SIDEBAR_W};
 use crate::github::view::{GhEvent, GithubView};
-use crate::claude::defaults::{Effort, PermissionMode, Starter};
+use crate::claude::defaults::{AutoEffort, Effort, PermissionMode, Starter};
 use crate::claude::mcp;
 use crate::git::worktree::Base;
 use crate::platform::{self, Editor};
@@ -140,6 +140,11 @@ pub enum Act {
     /// dialog until Save.
     PickEffort(Option<Effort>),
     PickPermission(Option<PermissionMode>),
+    /// An end of the auto effort range in the Settings dialog; the other end follows when they would cross.
+    PickAutoLowest(Effort),
+    PickAutoHighest(Effort),
+    /// A running session's effort from the inspector: a level, or `auto` to hand it back to auto effort.
+    SetEffort(Id, String),
     /// The project's GitHub issues and pull requests.
     OpenGithub {
         cwd: PathBuf,
@@ -285,6 +290,8 @@ pub enum Modal {
         /// Model for new sessions (Sessions page); empty = Claude Code's default.
         model: TextEdit,
         effort: Option<Effort>,
+        /// Auto effort and its range (Sessions page).
+        auto: AutoEffort,
         permission: Option<PermissionMode>,
         updates: bool,
         chrome: bool,
@@ -753,12 +760,22 @@ impl Workspace {
                 let hints = [platform::default_shell(None).0, claude_hint, "Claude Code default".into(), "none, e.g. dataviz, claude-api".into()];
                 self.blur = true;
                 self.set_settings_page(self.settings_page);
-                self.modal = Some(Modal::Settings { shell, claude, model, effort: defaults.effort, permission: defaults.permission_mode, updates, chrome, scale: crate::panels::scale::percent(), trimmed: self.store.data.settings.trimmed_tools.clone(), claudiu_off: self.store.data.settings.claudiu_tools_off.clone(), skills_field, costly: claude::costly::scan(), hints, renaming: None });
+                self.modal = Some(Modal::Settings { shell, claude, model, effort: defaults.effort, auto: defaults.auto_effort, permission: defaults.permission_mode, updates, chrome, scale: crate::panels::scale::percent(), trimmed: self.store.data.settings.trimmed_tools.clone(), claudiu_off: self.store.data.settings.claudiu_tools_off.clone(), skills_field, costly: claude::costly::scan(), hints, renaming: None });
                 self.modal_serial += 1;
             }
             Act::PickEffort(choice) => {
                 if let Some(Modal::Settings { effort, .. }) = self.modal.as_mut() {
                     *effort = choice;
+                }
+            }
+            Act::PickAutoLowest(level) => {
+                if let Some(Modal::Settings { auto, .. }) = self.modal.as_mut() {
+                    *auto = auto.with_lowest(level);
+                }
+            }
+            Act::PickAutoHighest(level) => {
+                if let Some(Modal::Settings { auto, .. }) = self.modal.as_mut() {
+                    *auto = auto.with_highest(level);
                 }
             }
             Act::PickPermission(choice) => {
@@ -826,6 +843,25 @@ impl Workspace {
                 self.store.mark_dirty();
                 usage::send_ctl(&usage::ctl_file(&id), "precompute_compact", on.into());
                 self.toast(format!("Turning background compaction {}…", if on { "on" } else { "off" }), false);
+            }
+            Act::SetEffort(id, level) => {
+                // Shown at once; the mod's next snapshot confirms it. A level picked by hand ends auto effort for the
+                // session, and `auto` brings it back.
+                if let Some(meta) = self.store.session_mut(&id).and_then(|s| s.claude.as_mut()) {
+                    if level == "auto" {
+                        meta.auto_state = usage::AutoState::On;
+                    } else {
+                        if meta.auto_state != usage::AutoState::Off {
+                            meta.auto_state = usage::AutoState::Manual;
+                        }
+                        meta.effort = Some(level.clone());
+                        meta.effort_reason = None;
+                    }
+                }
+                self.store.mark_dirty();
+                usage::send_ctl(&usage::ctl_file(&id), "effort", level.clone().into());
+                let note = if level == "auto" { "Auto effort on.".to_string() } else { format!("Effort set to {level} for this session.") };
+                self.toast(note, false);
             }
             Act::SetChrome(id, on) => {
                 if let Some(meta) = self.store.session_mut(&id).and_then(|s| s.claude.as_mut()) {

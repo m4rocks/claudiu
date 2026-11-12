@@ -82,6 +82,29 @@ pub struct Snapshot {
     /// Tokens at which auto-compaction runs; `None` while it is off or not yet known.
     #[serde(default)]
     pub compact_at: Option<u64>,
+    /// The effort the session's last main request went out with; `None` before its first.
+    #[serde(default)]
+    pub effort: Option<String>,
+    #[serde(default)]
+    pub auto_effort: AutoState,
+    /// Haiku's reason for the effort it picked last.
+    #[serde(default)]
+    pub effort_reason: Option<String>,
+}
+
+/// Where auto effort stands in a session.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AutoState {
+    /// The session was launched without auto effort.
+    #[default]
+    Off,
+    /// Haiku picks the effort for each prompt.
+    On,
+    /// Haiku failed or was too slow on the last prompt, so the effort stayed where it was.
+    Fallback,
+    /// The user picked an effort by hand; auto stays off until /clear or the Auto item.
+    Manual,
 }
 
 pub fn snapshot_dir() -> PathBuf {
@@ -108,7 +131,8 @@ mod tests {
       "context_fraction": 0.028, "context_tokens": 28062, "context_window": 1000000,
       "five_hour": {"utilization": 0.67, "resets_at": 1792659600, "seen_at": 1000},
       "seven_day": {"utilization": 0.22, "resets_at": 1793167200, "seen_at": 1000},
-      "auto_compact": true, "precompute_compact": false, "advisor": "opus", "advisor_active": "opus", "compact_at": 167000
+      "auto_compact": true, "precompute_compact": false, "advisor": "opus", "advisor_active": "opus", "compact_at": 167000,
+      "effort": "high", "auto_effort": "fallback", "effort_reason": "Haiku did not answer in time."
     }"#;
 
     #[test]
@@ -141,11 +165,13 @@ mod tests {
         assert_eq!((s.context_tokens, s.context_window), (Some(28062), Some(1_000_000)));
         assert_eq!((s.auto_compact, s.advisor.as_deref(), s.advisor_active.as_deref(), s.compact_at), (Some(true), Some("opus"), Some("opus"), Some(167_000)));
         assert_eq!(s.precompute_compact, Some(false));
+        assert_eq!((s.effort.as_deref(), s.auto_effort, s.effort_reason.as_deref()), (Some("high"), AutoState::Fallback, Some("Haiku did not answer in time.")));
     }
 
     #[test]
     fn early_session_with_only_an_id_is_fine() {
         let s: Snapshot = serde_json::from_str(r#"{"session_id":"x","five_hour":null,"seven_day":null,"context_fraction":null,"context_tokens":null,"context_window":null,"model":null,"captured_at":5}"#).unwrap();
         assert!(s.auto_compact.is_none() && s.advisor.is_none());
+        assert_eq!((s.effort.clone(), s.auto_effort), (None, AutoState::Off), "an older mod reports no auto effort");
     }
 }

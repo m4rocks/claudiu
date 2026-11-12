@@ -94,7 +94,7 @@ impl Workspace {
                     }
                 }
             }
-            Some(Modal::Settings { shell, claude, model, effort, permission, updates, chrome, scale, trimmed, claudiu_off, skills_field, costly, hints, renaming }) => {
+            Some(Modal::Settings { shell, claude, model, effort, auto, permission, updates, chrome, scale, trimmed, claudiu_off, skills_field, costly, hints, renaming }) => {
                 let clean = |s: &str| s.trim().trim_matches('"').to_string();
                 let (shell_t, claude_t) = (clean(&shell.text), clean(&claude.text));
                 let model_name = claude::defaults::parse_model(&model.text);
@@ -109,7 +109,7 @@ impl Workspace {
                 let bad_limits = limits.as_ref().err().map(|why| (SettingsPage::ClaudeTools, 3, why.clone()));
                 if let Some((page, field, msg)) = paths.or(bad_model).or(bad_limits) {
                     self.settings_page = page;
-                    self.modal = Some(Modal::Settings { shell, claude, model, effort, permission, updates, chrome, scale, trimmed, claudiu_off, skills_field, costly, hints, renaming });
+                    self.modal = Some(Modal::Settings { shell, claude, model, effort, auto, permission, updates, chrome, scale, trimmed, claudiu_off, skills_field, costly, hints, renaming });
                     if let Some(f) = modal_field(&mut self.modal, field) {
                         f.focused = true;
                     }
@@ -129,7 +129,7 @@ impl Workspace {
                 }
                 s.scale = (scale != 100).then_some(scale);
                 s.chrome_default = chrome;
-                s.new_session = claude::defaults::NewSessionDefaults { model: model_name.unwrap_or_default(), effort, permission_mode: permission };
+                s.new_session = claude::defaults::NewSessionDefaults { model: model_name.unwrap_or_default(), effort, permission_mode: permission, auto_effort: auto };
                 let trimmed = claude::trim::normalized(&trimmed);
                 let claudiu_off = mcp::normalized_features(&claudiu_off);
                 // The trims go into Claude Code's own settings.json (every account gets the file through config_sync).

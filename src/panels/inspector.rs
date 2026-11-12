@@ -7,6 +7,8 @@ use rune::tok::motion;
 use rune::{Color, Cursor, El, Phase, ScrollSpec, Transition, Tx, col, el, row as hbox};
 
 use crate::app::{Act, GitOp, MenuAnchor, MenuItem, SideDrag, Workspace};
+use crate::claude::defaults::Effort;
+use crate::claude::usage::AutoState;
 use crate::github::model::State;
 use crate::panels::icons;
 use crate::panels::theme::{self, rgb};
@@ -296,6 +298,10 @@ impl Workspace {
             Some(m) => (m.auto_compact, m.precompute_compact, m.advisor.clone(), m.advisor_active.clone(), m.chrome, true),
             None => (None, None, None, None, false, false),
         };
+        let (effort, auto_state, reason) = match meta {
+            Some(m) => (m.effort.clone(), m.auto_state, m.effort_reason.clone()),
+            None => (None, AutoState::Off, None),
+        };
         let advisor = advisor.map(|a| a.to_lowercase());
         let active = active.map(|a| a.to_lowercase());
         let compact_text = compact.map_or("—", |v| if v { "On" } else { "Off" }).to_string();
@@ -319,6 +325,16 @@ impl Workspace {
             Some(sid) => pick_row("set-advisor", "Advisor", advisor_text, move || advisor_menu(&sid, advisor.as_deref())),
             None => kv("Advisor", advisor_text),
         };
+        let effort_text = if known { effort_display(effort.as_deref(), auto_state) } else { "—".into() };
+        let note = effort_note(effort.as_deref(), auto_state, reason.as_deref());
+        let effort_row = match settable.clone() {
+            Some(sid) => pick_row("set-effort", "Effort", effort_text, move || effort_menu(&sid, effort.as_deref(), auto_state)),
+            None => kv("Effort", effort_text),
+        };
+        let effort_rows = match note {
+            Some(note) => col().w_full().gap(2.0).child(effort_row).child(label(note, 11.0, theme::TEXT_FAINT).wrap().px(8.0)),
+            None => effort_row,
+        };
         let chrome_row = match settable {
             Some(sid) => pick_row("set-chrome", "Claude in Chrome", if chrome { "On" } else { "Off" }.into(), move || chrome_menu(&sid, chrome)),
             None => kv("Claude in Chrome", if chrome { "On" } else { "Off" }.into()),
@@ -329,7 +345,7 @@ impl Workspace {
             .px(8.0)
             .child(meter("meter-context", "CONTEXT", ctx_fraction, ctx_caption, None))
             .child(cache)
-            .child(settings.child(advisor_row).child(chrome_row))
+            .child(settings.child(effort_rows).child(advisor_row).child(chrome_row))
     }
 }
 
@@ -354,6 +370,37 @@ fn advisor_menu(sid: &Id, current: Option<&str>) -> Vec<MenuItem> {
     items.extend(ALIASES.iter().map(|(alias, name)| MenuItem::new(format!("{}{name}", tick(current == Some(*alias))), Act::SetAdvisor(sid.clone(), (*alias).into()))));
     items.push(MenuItem::new(format!("{}Other…", tick(other)), Act::AskAdvisor(sid.clone())));
     items
+}
+
+/// The five levels; "Auto" first in a session launched with auto effort.
+fn effort_menu(sid: &Id, effort: Option<&str>, state: AutoState) -> Vec<MenuItem> {
+    let auto = matches!(state, AutoState::On | AutoState::Fallback);
+    let mut items = Vec::new();
+    if state != AutoState::Off {
+        items.push(MenuItem::new(format!("{}Auto", tick(auto)), Act::SetEffort(sid.clone(), "auto".into())));
+    }
+    items.extend(Effort::ALL.iter().map(|e| MenuItem::new(format!("{}{}", tick(!auto && effort == Some(e.name())), e.name()), Act::SetEffort(sid.clone(), e.name().into()))));
+    items
+}
+
+/// `high · auto`, `medium · manual`, or the bare level in a session without auto effort.
+fn effort_display(effort: Option<&str>, state: AutoState) -> String {
+    let level = effort.unwrap_or("—");
+    match state {
+        AutoState::Off => level.to_string(),
+        AutoState::On | AutoState::Fallback => format!("{level} · auto"),
+        AutoState::Manual => format!("{level} · manual"),
+    }
+}
+
+/// The line under the Effort row: why auto picked the level, or why it didn't.
+fn effort_note(effort: Option<&str>, state: AutoState, reason: Option<&str>) -> Option<String> {
+    match state {
+        AutoState::Off => None,
+        AutoState::On => reason.map(String::from),
+        AutoState::Fallback => Some("Haiku didn't answer in time, so the effort stayed.".into()),
+        AutoState::Manual => Some(format!("Auto off: you picked {}.", effort.unwrap_or("an effort"))),
+    }
 }
 
 /// Claude Code may store either an alias (`opus`) or the resolved model id (`claude-opus-5-5`); the menu and the
@@ -523,5 +570,27 @@ mod tests {
         assert_eq!(advisor_display(Some("sonnet"), Some("sonnet")), "Sonnet");
         assert_eq!(advisor_display(Some("sonnet"), Some("claude-opus-5-5")), "Opus → Sonnet");
         assert_eq!(advisor_display(Some("opus"), None), "Opus");
+    }
+
+    #[test]
+    fn the_effort_row_says_who_picked_the_level_and_offers_auto_only_where_it_runs() {
+        let sid = "s".to_string();
+        let acts = |items: Vec<MenuItem>| items.into_iter().map(|i| match i.act { Act::SetEffort(_, v) => v, _ => panic!("not an effort pick") }).collect::<Vec<_>>();
+        assert_eq!(labels(&effort_menu(&sid, Some("high"), AutoState::On)), ["✓  Auto", "    low", "    medium", "    high", "    xhigh", "    max"]);
+        assert_eq!(labels(&effort_menu(&sid, Some("low"), AutoState::Manual)), ["    Auto", "✓  low", "    medium", "    high", "    xhigh", "    max"]);
+        assert_eq!(labels(&effort_menu(&sid, Some("medium"), AutoState::Off)), ["    low", "✓  medium", "    high", "    xhigh", "    max"]);
+        assert_eq!(acts(effort_menu(&sid, None, AutoState::Fallback)), ["auto", "low", "medium", "high", "xhigh", "max"]);
+
+        assert_eq!(effort_display(Some("high"), AutoState::On), "high · auto");
+        assert_eq!(effort_display(Some("medium"), AutoState::Fallback), "medium · auto");
+        assert_eq!(effort_display(Some("medium"), AutoState::Manual), "medium · manual");
+        assert_eq!(effort_display(Some("high"), AutoState::Off), "high");
+        assert_eq!(effort_display(None, AutoState::On), "— · auto");
+
+        assert_eq!(effort_note(Some("high"), AutoState::On, Some("A refactor across files.")).as_deref(), Some("A refactor across files."));
+        assert_eq!(effort_note(Some("low"), AutoState::Manual, Some("old")).as_deref(), Some("Auto off: you picked low."));
+        assert!(effort_note(Some("high"), AutoState::Fallback, None).is_some_and(|n| n.contains("didn't answer")));
+        assert_eq!(effort_note(Some("high"), AutoState::Off, Some("stale")), None);
+        assert_eq!(effort_note(None, AutoState::On, None), None, "nothing judged yet");
     }
 }

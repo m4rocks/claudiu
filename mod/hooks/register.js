@@ -16,6 +16,8 @@
 // - Cards: answers `show_visual` in-process and, while the model is still writing the call, streams its Markdown to
 //   `CLAUDIU_VISUAL_PREFIX<call>.json`. Under each call it reserves rows, each with a link naming the call, and Claudiu
 //   paints the live card over them. Claudiu's measured height comes back in `CLAUDIU_VISUAL_PREFIX<call>.rows`.
+// - Auto effort: when Claudiu launched the session with `CLAUDIU_AUTO_EFFORT`, asks Haiku before each prompt which
+//   effort it needs, within that range, and applies it per request (never with /effort, which saves the user's default).
 // - One-shot completions: runs requests from `CLAUDIU_ASK_FILE` (commit messages, session titles) with
 //   `$.model.complete`, on this session's own client, so Claudiu needs no `claude -p`.
 
@@ -157,6 +159,9 @@ async function report($, fresh = false, override = {}) {
       compact_at: await threshold($, fresh),
       advisor,
       advisor_active: activeAdvisor,
+      effort: effortShown() ?? null,
+      auto_effort: autoState,
+      effort_reason: autoState === 'on' ? autoReason : null,
     }
     // `seen_at` (when a limit was read) is left out, so reading the same value again is not a change.
     const key = JSON.stringify(snap, (k, v) => (k === 'seen_at' ? undefined : v))
@@ -211,6 +216,10 @@ async function applyCtlCommand($, c, override) {
     void $.prompt.submit({ text: c.value, asUser: true }).catch(() => {})
   } else if (c.key === 'advisor' && typeof c.value === 'string' && /^[A-Za-z0-9._-]{1,60}$/.test(c.value)) {
     await setAdvisor($, c.value, override)
+  } else if (c.key === 'effort' && (c.value === 'auto' || EFFORTS.includes(c.value))) {
+    if (c.value === 'auto') resumeAutoEffort()
+    else pickEffortByHand(c.value)
+    await report($)
   }
 }
 
@@ -314,6 +323,218 @@ async function answerAsk($) {
   }
 }
 
+// ---- Auto effort --------------------------------------------------------------------------------------------------
+
+// What Haiku judges by: Anthropic's effort guidance, condensed from
+// https://platform.claude.com/docs/en/build-with-claude/effort (copied 2026-11-12; refresh it when the docs change).
+const JUDGE_SYSTEM = `You pick the reasoning effort for a coding agent's next turn. Anthropic's guidance for the effort levels:
+- low: most efficient; simpler tasks that need the best speed and lowest cost: questions, lookups, small scoped edits.
+- medium: agentic tasks that need a balance of speed, cost and performance; well-specified coding work.
+- high: complex reasoning, difficult coding problems, harder or longer agentic tasks.
+- xhigh: long-running agentic and coding tasks (over 30 minutes).
+- max: the deepest possible reasoning, regardless of cost; rarely worth it.
+Opus 5.5 and Haiku 5.5 default to medium; Sonnet 5.5 uses medium for well-specified agentic coding and high for harder or longer work.
+Pick the lowest level that will do the task well, from the allowed levels only.
+Answer with JSON alone: {"effort": "<level>", "reason": "<one short sentence for the user>"}`
+
+const JUDGE_TIMEOUT_MS = 5000 // the prompt waits at most this long for Haiku, the git call included
+const REPLY_TAIL = 2000 // characters of the previous answer Haiku reads
+const PROMPT_HEAD = 8000 // characters of the prompt Haiku reads
+const MAX_CHANGED = 50 // changed files listed on the first prompt
+const MAX_MENTIONS = 20 // @-mentioned paths looked at on the first prompt
+// Prompts that aren't the user's words keep the current effort. A plugin's prompt counts when sent as the user's
+// (the editor's Ask Claude).
+const UNJUDGED_ORIGINS = ['task-notification', 'scheduled-trigger', 'peer', 'peer-send-message', 'projects-relay', 'channel']
+
+let autoRange = null // { lowest, highest } from CLAUDIU_AUTO_EFFORT; null when the session runs without auto effort
+let autoState = 'off' // 'on', 'fallback' (Haiku failed last time), 'manual' (the user picked one), 'off'
+let autoEffort // the level Haiku picked last, applied to main-thread steps while auto is on
+let autoReason = null // Haiku's reason for it
+let effortInUse = null // the effort the last main-thread request went out with
+let lastReply = '' // the end of the last main-thread answer
+let resumedRead = false // the resumed transcript's last reply was looked for
+let heldPick = null // { pick } for a prompt waiting behind the running turn, applied when its own turn starts
+
+// `low-high` as the range it names, or null.
+function parseRange(text) {
+  const m = /^([a-z]+)-([a-z]+)$/.exec(String(text ?? '').trim())
+  if (!m) return null
+  const [lo, hi] = [EFFORTS.indexOf(m[1]), EFFORTS.indexOf(m[2])]
+  return lo >= 0 && hi >= lo ? { lowest: m[1], highest: m[2] } : null
+}
+
+// The level and reason in Haiku's answer, the level held inside the range; null when the answer names no level.
+function parseJudgement(text, range) {
+  try {
+    const json = /\{[\s\S]*\}/.exec(String(text ?? ''))
+    const v = json ? JSON.parse(json[0]) : null
+    const at = EFFORTS.indexOf(String(v?.effort ?? '').trim().toLowerCase())
+    if (at < 0) return null
+    const level = EFFORTS[Math.min(Math.max(at, EFFORTS.indexOf(range.lowest)), EFFORTS.indexOf(range.highest))]
+    const reason = typeof v.reason === 'string' && v.reason.trim() ? v.reason.trim().slice(0, 200) : null
+    return { effort: level, reason }
+  } catch {
+    return null
+  }
+}
+
+const wordCount = text => String(text ?? '').trim().split(/\s+/).filter(Boolean).length
+
+// Whether a prompt after the first gets a fresh effort. A prompt that arrives while a turn runs joins that turn,
+// unless the user asked it to wait for its own.
+function isJudged(e) {
+  if (e.isMeta) return false
+  if (e.turnId && !e.wait) return false
+  const origin = e.origin?.kind
+  if (origin === 'plugin' ? !e.origin.asUser : UNJUDGED_ORIGINS.includes(origin)) return false
+  return wordCount(e.text) > 3
+}
+
+// The @-mentioned paths (a `#L12-30` range dropped) with their line counts; one that can't be read as a file
+// (a folder, a missing path) is listed by name.
+async function mentionedFiles($, text) {
+  const paths = [...String(text).matchAll(/(?:^|\s)@("[^"]+"|\S+)/g)]
+    .map(m => m[1].replace(/^"|"$/g, '').replace(/#L[\d-]*.*$/, '').replace(/[:,;.)]+$/, ''))
+    .filter(Boolean)
+  const cwd = await $.session.cwd().catch(() => '')
+  const lines = []
+  for (const p of [...new Set(paths)].slice(0, MAX_MENTIONS)) {
+    const full = /^([A-Za-z]:)?[\\/]/.test(p) || !cwd ? p : cwd + '/' + p
+    const body = await $.fs.read(full).catch(() => null)
+    lines.push(typeof body === 'string' ? `${p} (${body.split('\n').length} lines)` : p)
+  }
+  return lines
+}
+
+// The names in `git status --porcelain`; none outside a repository.
+async function changedFiles($) {
+  const r = await $.process.run(['git', 'status', '--porcelain'], { timeoutMs: JUDGE_TIMEOUT_MS }).catch(() => null)
+  if (!r || r.exitCode !== 0) return []
+  return r.stdout.split('\n').map(l => l.slice(3).trim()).filter(Boolean)
+}
+
+// The text of the last assistant message in the transcript a resumed session continues (Claudiu names it).
+async function resumedReply($) {
+  if (resumedRead) return ''
+  resumedRead = true
+  const file = await $.env.get('CLAUDIU_RESUMED_TRANSCRIPT')
+  const text = file ? await $.fs.read(file).catch(() => '') : ''
+  const lines = text.split('\n')
+  for (let i = lines.length - 1; i >= 0; i--) {
+    let entry
+    try {
+      entry = JSON.parse(lines[i])
+    } catch {
+      continue
+    }
+    const content = entry?.type === 'assistant' ? entry.message?.content : null
+    const said = Array.isArray(content) ? content.filter(b => b?.type === 'text').map(b => b.text).join('\n').trim() : ''
+    if (said) return said
+  }
+  return ''
+}
+
+async function judgeRequest($, text, first) {
+  const parts = [`<prompt>\n${String(text).slice(0, PROMPT_HEAD)}\n</prompt>`]
+  if (first) {
+    const [mentioned, changed] = await Promise.all([mentionedFiles($, text), changedFiles($)])
+    if (mentioned.length) parts.push(`<mentioned_files>\n${mentioned.join('\n')}\n</mentioned_files>`)
+    const more = changed.length > MAX_CHANGED ? `\n(${changed.length - MAX_CHANGED} more)` : ''
+    if (changed.length) parts.push(`<changed_files>\n${changed.slice(0, MAX_CHANGED).join('\n')}${more}\n</changed_files>`)
+  } else {
+    const reply = lastReply || (await resumedReply($))
+    parts.push(`<current_effort>${effortInUse ?? 'unknown'}</current_effort>`)
+    if (reply) parts.push(`<previous_reply_end>\n${reply.slice(-REPLY_TAIL)}\n</previous_reply_end>`)
+  }
+  const allowed = EFFORTS.slice(EFFORTS.indexOf(autoRange.lowest), EFFORTS.indexOf(autoRange.highest) + 1)
+  parts.push(`Allowed levels: ${allowed.join(', ')}.`)
+  return parts.join('\n\n')
+}
+
+// Asks Haiku for this prompt's effort: the pick, or null when Haiku failed or ran past the time limit, whose late
+// answer is dropped.
+async function judge($, text, first) {
+  const stop = new AbortController()
+  let timer
+  const timedOut = new Promise(resolve => { timer = $.clock.after(JUDGE_TIMEOUT_MS, () => resolve(null)) })
+  const answered = (async () => {
+    const prompt = await judgeRequest($, text, first)
+    const r = await $.model.complete(
+      { model: 'haiku', effort: 'medium', system: JUDGE_SYSTEM, prompt, maxTokens: 300, timeoutMs: JUDGE_TIMEOUT_MS },
+      { signal: stop.signal },
+    )
+    return r.isAnswered ? parseJudgement(r.text, autoRange) : null
+  })().catch(() => null)
+  const pick = await Promise.race([answered, timedOut])
+  timer?.cancel?.()
+  stop.abort()
+  return pick
+}
+
+// Without a pick the prompt goes on at the effort it had. A hand pick made meanwhile wins.
+function applyPick(pick) {
+  if (autoState === 'manual') return
+  if (pick) {
+    autoEffort = pick.effort
+    autoReason = pick.reason
+    autoState = 'on'
+  } else {
+    autoState = 'fallback'
+  }
+}
+
+// A level the user picked (the inspector, set_model): it holds for the session and ends auto effort until /clear or
+// `auto`. Without auto effort it is a plain session-only override.
+function pickEffortByHand(level) {
+  want = { ...want, effort: level }
+  if (autoRange) {
+    autoState = 'manual'
+    autoEffort = undefined
+    autoReason = null
+  }
+}
+
+// Auto effort on again: after /clear, or `auto` from the inspector or set_model.
+function resumeAutoEffort() {
+  if (!autoRange) return
+  heldPick = null
+  want = { ...want, effort: undefined }
+  autoState = 'on'
+  autoEffort = undefined
+  autoReason = null
+}
+
+// The effort the session's next request goes out with, as far as the mod knows it.
+const effortShown = () => want.effort ?? (autoState !== 'manual' ? autoEffort : undefined) ?? effortInUse
+
+async function onPromptSubmit($, e, next) {
+  if (!autoRange || autoState === 'manual' || e.command) return next(e)
+  const first = (await $.session.turns().catch(() => 1)) === 0
+  if (!first && !isJudged(e)) return next(e)
+  const pick = await judge($, e.text, first)
+  // A prompt typed during a turn waits for its own; the running turn keeps its effort until then.
+  if (e.turnId) heldPick = { pick }
+  else applyPick(pick)
+  await report($)
+  return next(e)
+}
+
+async function onTurnStart($, e, next) {
+  const r = await next(e)
+  if (!e.agentId && heldPick) {
+    applyPick(heldPick.pick)
+    heldPick = null
+    await report($)
+  }
+  return r
+}
+
+async function onTurnComplete($, e, next) {
+  const r = await next(e)
+  if (!e.agentId && autoRange) lastReply = String(e.answer ?? '').slice(-REPLY_TAIL)
+  return r
+}
+
 // ---- Session name -------------------------------------------------------------------------------------------------
 
 // Applies the name Claudiu writes to CLAUDIU_NAME_FILE with /rename: once per name and Claude session.
@@ -354,6 +575,18 @@ async function onMeasure($, e, next) {
 
 async function onCommandRun($, e, next) {
   const r = await next(e) // the command has run: a setting it changed is read after it
+  // Only the user's own /effort is a hand pick; set_model's queued one comes from this plugin.
+  if (autoRange && e.origin?.kind === 'composer' && e.command === 'effort') {
+    want = { ...want, effort: undefined }
+    autoState = 'manual'
+    autoEffort = undefined
+    autoReason = null
+    if (EFFORTS.includes(e.args.trim())) effortInUse = e.args.trim()
+  } else if (e.command === 'clear') {
+    lastReply = ''
+    resumedRead = true // the resumed conversation is gone
+    resumeAutoEffort()
+  }
   await report($, true)
   return r
 }
@@ -392,7 +625,13 @@ async function onSetModel($, e) {
   if (!model && e.effort == null) return { result: 'Give a model, an effort, or both.', isError: true }
 
   if (model) want = { ...want, model }
-  if (e.effort != null) want = { ...want, effort: effort === 'auto' ? undefined : effort }
+  // With auto effort, an effort from set_model holds for this session only and saves no default.
+  const effortByHand = e.effort != null && autoRange != null
+  if (effortByHand) {
+    if (effort === 'auto') resumeAutoEffort()
+    else pickEffortByHand(effort)
+    await report($)
+  } else if (e.effort != null) want = { ...want, effort: effort === 'auto' ? undefined : effort }
 
   // turn.step covers the rest of this turn. The session's own model and effort (what /model shows) follow once
   // Claude Code is idle. A command can't run from inside a hook the turn waits on, hence the timer.
@@ -403,7 +642,7 @@ async function onSetModel($, e) {
         () => {},
       )
     }
-    if (e.effort != null) {
+    if (e.effort != null && !effortByHand) {
       $.command.run({ command: 'effort', args: effort }).then(
         () => { if (want.effort === (effort === 'auto' ? undefined : effort)) want = { ...want, effort: undefined } },
         () => {},
@@ -433,12 +672,17 @@ async function onShowVisual($, e) {
   return { result: "Shown inline in the terminal. Say the key facts in a short reply; don't repeat the content." }
 }
 
-// Applies the saved model and effort to this turn's steps, and streams a show_visual call to its card while the model
-// writes it. Sub-agent steps are left alone.
+// Applies the saved model and effort (or auto effort's pick) to this turn's steps, and streams a show_visual call to its
+// card while the model writes it. Sub-agent steps are left alone.
 async function* onTurnStep($, e, next) {
-  const step = !e.agentId && (want.model || want.effort)
-    ? { ...e, model: want.model ?? e.model, effort: want.effort ?? e.effort }
+  const effort = e.agentId ? undefined : want.effort ?? (autoState !== 'manual' ? autoEffort : undefined)
+  const step = !e.agentId && (want.model || effort)
+    ? { ...e, model: want.model ?? e.model, effort: effort ?? e.effort }
     : e
+  if (!e.agentId && (step.effort ?? null) !== effortInUse) {
+    effortInUse = step.effort ?? null
+    void report($)
+  }
   const prefix = e.agentId ? null : await $.env.get('CLAUDIU_VISUAL_PREFIX')
   if (!prefix) return yield* next(step)
 
@@ -500,6 +744,11 @@ async function readCardRows($) {
 
 async function onSessionStart($, e, next) {
   const r = await next(e)
+  autoRange = parseRange(await $.env.get('CLAUDIU_AUTO_EFFORT'))
+  autoState = autoRange ? 'on' : 'off'
+  // A level picked by hand before Claudiu restarted the session still holds.
+  const hand = await $.env.get('CLAUDIU_HAND_EFFORT')
+  if (autoRange && EFFORTS.includes(hand)) pickEffortByHand(hand)
   await report($)
   await applyCtl($)
 
@@ -523,5 +772,8 @@ export function register(on) {
   on('ui.render', { component: 'ToolUse' }, onVisualRow)
   on('ui.render', { component: 'ToolGroup' }, onVisualGroup)
   on('turn.step', onTurnStep)
+  on('turn.start', onTurnStart)
+  on('turn.complete', onTurnComplete)
+  on('prompt.submit', onPromptSubmit)
   on('session.start', onSessionStart)
 }

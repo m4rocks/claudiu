@@ -89,6 +89,18 @@ pub struct ClaudeMeta {
     /// Tokens at which auto-compaction runs (the context bar's full mark); `None` while it is off or unknown.
     #[serde(default)]
     pub compact_at: Option<u64>,
+    /// Whether the session was launched with auto effort; restarts and resumes keep it. `None` for a session from
+    /// before the setting, which follows the current setting.
+    #[serde(default)]
+    pub auto_effort: Option<bool>,
+    /// The effort the session's requests go out with: the launch effort, then what the mod reports.
+    #[serde(default)]
+    pub effort: Option<String>,
+    /// Where auto effort stands in the session, and Haiku's reason for its last pick, as the mod reports them.
+    #[serde(default)]
+    pub auto_state: crate::claude::usage::AutoState,
+    #[serde(default)]
+    pub effort_reason: Option<String>,
     /// Issues and pull requests Claude attached to this session (the `attach_github` tool), oldest first.
     #[serde(default)]
     pub attached: Vec<Attached>,

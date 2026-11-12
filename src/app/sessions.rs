@@ -2,6 +2,22 @@
 
 use super::*;
 
+/// The transcript a resumed session with auto effort continues; the mod reads its last reply.
+const RESUMED_TRANSCRIPT_ENV: &str = "CLAUDIU_RESUMED_TRANSCRIPT";
+
+/// A level the user picked by hand in a session with auto effort; the restarted mod keeps it instead of judging again.
+const HAND_EFFORT_ENV: &str = "CLAUDIU_HAND_EFFORT";
+
+fn hand_effort_env(meta: &ClaudeMeta) -> Option<(String, String)> {
+    let effort = meta.effort.clone().filter(|_| meta.auto_state == usage::AutoState::Manual)?;
+    Some((HAND_EFFORT_ENV.into(), effort))
+}
+
+/// The value of `flag` in a launch's arguments, as `--flag value`.
+fn flag_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
+    args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).map(String::as_str)
+}
+
 /// Item `n` (from 1) of `items`.
 fn numbered<T>(items: &[T], n: usize) -> Option<&T> {
     items.get(n.checked_sub(1)?)
@@ -11,13 +27,16 @@ impl Workspace {
     /// Per-process additions to a Claude launch; nothing in the user's Claude Code config changes:
     /// the mod (`--plugin-dir`, which reports usage and status), the tab-title MCP server (`--mcp-config`, its
     /// tools pre-allowed), and IDE integration switched off through environment variables. `chrome` adds Claude in
-    /// Chrome (`--chrome`).
+    /// Chrome (`--chrome`). `auto` hands the mod the auto effort range; `resumed_from` is the transcript a resumed
+    /// session continues, whose last reply the mod reads for its first judged prompt.
     fn with_helpers(
         &mut self,
         mut spec: SpawnSpec,
         claude_session_id: &str,
         record_id: &str,
         chrome: bool,
+        auto: bool,
+        resumed_from: Option<&std::path::Path>,
     ) -> SpawnSpec {
         let started = std::time::Instant::now();
         // Diagnostics for the start-up trace (`terminal/trace.rs`): start without Claudiu's MCP server or mod to see what they cost.
@@ -29,7 +48,9 @@ impl Workspace {
             spec.args.extend(mcp::allowed_tools(&off));
             spec.args.extend(["--mcp-config".into(), config.to_string_lossy().into_owned()]);
         }
+        let mut has_mod = false;
         if let Ok(dir) = claude::plugin::install().and_then(|d| if without("CLAUDIU_NO_MOD") { Err(std::io::Error::other("off")) } else { Ok(d) }) {
+            has_mod = true;
             spec.args.extend(["--plugin-dir".into(), dir.to_string_lossy().into_owned()]);
             spec.env.push(("CLAUDIU_NAME_FILE".into(), mcp::name_file(claude_session_id).to_string_lossy().into_owned()));
             spec.env.push((usage::USAGE_DIR_ENV.into(), usage::snapshot_dir().to_string_lossy().into_owned()));
@@ -48,6 +69,15 @@ impl Workspace {
         if let Some(acct) = self.store.session_account(record_id) {
             spec.env.push((usage::ACCOUNT_ENV.into(), acct.id.clone()));
             spec.env.extend(Self::account_env(acct));
+        }
+        // Auto effort lives in the mod, so a session started without it gets none of this.
+        if auto && has_mod {
+            let capabilities = claude::defaults::CAPABILITIES_ENV;
+            let set_already = std::env::var_os(capabilities).is_some() || spec.env.iter().any(|(k, _)| k == capabilities);
+            spec.env.extend(claude::defaults::auto_env(self.store.data.settings.new_session.auto_effort, set_already));
+            if let Some(path) = resumed_from {
+                spec.env.push((RESUMED_TRANSCRIPT_ENV.into(), path.to_string_lossy().into_owned()));
+            }
         }
         // Extra `claude` flags for the start-up trace, e.g. CLAUDIU_TRACE_ARGS="--safe-mode".
         if crate::terminal::trace::on() && let Some(extra) = std::env::var_os("CLAUDIU_TRACE_ARGS") {
@@ -109,7 +139,9 @@ impl Workspace {
         let session_id = new_id();
         let record_id = new_id();
         let chrome = self.store.data.settings.chrome_default;
-        let Some(spec) = self.fresh_spec(&cwd, &session_id, &record_id, chrome, leading, by) else { return };
+        let auto = claude::defaults::auto_effort_for(&self.store.data.settings.new_session, by);
+        let Some(spec) = self.fresh_spec(&cwd, &session_id, &record_id, chrome, auto, leading, by) else { return };
+        let effort = flag_value(&spec.args, "--effort").map(String::from);
         let record = SessionRecord {
             id: record_id,
             kind: SessionKind::Claude,
@@ -125,25 +157,35 @@ impl Workspace {
             claude: Some(ClaudeMeta {
                 session_id,
                 chrome,
+                auto_effort: Some(auto),
+                effort,
+                auto_state: if auto { usage::AutoState::On } else { usage::AutoState::Off },
                 ..Default::default()
             }),
         };
         self.start_session(record, spec, true);
     }
 
+    /// Whether a session runs with auto effort: what it was launched with, or for one from before the setting, the
+    /// setting as it is now.
+    fn runs_auto_effort(&self, meta: &ClaudeMeta) -> bool {
+        meta.auto_effort.unwrap_or(self.store.data.settings.new_session.auto_effort.on)
+    }
+
     /// `claude --session-id` in `cwd` with the new-session defaults. None, with a toast, when `claude` isn't installed.
     #[allow(clippy::too_many_arguments)]
-    fn fresh_spec(&mut self, cwd: &std::path::Path, session_id: &str, record_id: &str, chrome: bool, mut leading: Vec<String>, by: Starter) -> Option<SpawnSpec> {
+    fn fresh_spec(&mut self, cwd: &std::path::Path, session_id: &str, record_id: &str, chrome: bool, auto: bool, mut leading: Vec<String>, by: Starter) -> Option<SpawnSpec> {
         let Some(exe) = self.claude_exe.clone() else {
             self.show_toast("Could not find the `claude` CLI. Install Claude Code, or set its path in Settings.".into(), true, Some(("Check setup".into(), Act::OpenSetup)));
             return None;
         };
         let mut spec = claude::new_session_spec(&exe, cwd, session_id);
         let settings = &self.store.data.settings;
-        let defaults = claude::defaults::flags(&settings.new_session, settings.trimmed_tools.contains(&claude::trim::Trim::PlanMode), &leading, by);
+        let defaults = claude::defaults::NewSessionDefaults { effort: claude::defaults::launch_effort(&settings.new_session, auto), ..settings.new_session.clone() };
+        let defaults = claude::defaults::flags(&defaults, settings.trimmed_tools.contains(&claude::trim::Trim::PlanMode), &leading, by);
         leading.extend(defaults);
         spec.args.splice(0..0, leading);
-        Some(self.with_helpers(spec, session_id, record_id, chrome))
+        Some(self.with_helpers(spec, session_id, record_id, chrome, auto, None))
     }
 
     /// Start the session over under its own id in its folder. For a session with no conversation yet: `--resume` has
@@ -152,7 +194,9 @@ impl Workspace {
         let Some(rec) = self.store.session(id).cloned() else { return };
         let Some(meta) = rec.claude.clone() else { return };
         let cwd = self.resume_cwd(&rec);
-        let Some(mut spec) = self.fresh_spec(&cwd, &meta.session_id, &rec.id, meta.chrome, vec![], Starter::User) else { return };
+        let auto = self.runs_auto_effort(&meta);
+        let Some(mut spec) = self.fresh_spec(&cwd, &meta.session_id, &rec.id, meta.chrome, auto, vec![], Starter::User) else { return };
+        spec.env.extend(hand_effort_env(&meta));
         if let Some(name) = rec.chosen_title() {
             spec.args.extend(["--name".into(), name.into()]);
         }
@@ -195,7 +239,9 @@ impl Workspace {
         if let Some(name) = rec.chosen_title() {
             spec.args.extend(["--name".into(), name.into()]);
         }
-        let spec = self.with_helpers(spec, &meta.session_id, &rec.id, meta.chrome);
+        let auto = self.runs_auto_effort(&meta);
+        let mut spec = self.with_helpers(spec, &meta.session_id, &rec.id, meta.chrome, auto, meta.transcript.as_deref());
+        spec.env.extend(hand_effort_env(&meta));
         self.start_session(rec, spec, false);
     }
 
@@ -482,7 +528,7 @@ impl Workspace {
 
 #[cfg(test)]
 mod tests {
-    use super::numbered;
+    use super::*;
 
     #[test]
     fn numbers_count_from_one() {
@@ -491,5 +537,17 @@ mod tests {
         assert_eq!(numbered(&running, 3), Some(&"c"));
         assert_eq!(numbered(&running, 4), None, "no fourth session");
         assert_eq!(numbered(&running, 0), None);
+    }
+
+    #[test]
+    fn a_restart_keeps_a_hand_picked_effort_only_while_auto_is_off_by_hand() {
+        let mut meta = ClaudeMeta { effort: Some("low".into()), auto_state: usage::AutoState::Manual, ..Default::default() };
+        assert_eq!(hand_effort_env(&meta), Some(("CLAUDIU_HAND_EFFORT".into(), "low".into())));
+        meta.auto_state = usage::AutoState::On;
+        assert_eq!(hand_effort_env(&meta), None, "auto picks again");
+        meta.auto_state = usage::AutoState::Off;
+        assert_eq!(hand_effort_env(&meta), None);
+        meta = ClaudeMeta { auto_state: usage::AutoState::Manual, ..Default::default() };
+        assert_eq!(hand_effort_env(&meta), None, "no level known");
     }
 }

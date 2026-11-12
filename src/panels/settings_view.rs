@@ -83,6 +83,21 @@ fn picker_row<T: Copy + PartialEq + 'static>(key: &'static str, title: &str, cur
         })
 }
 
+/// A row that opens a menu of effort levels under itself; one is always chosen.
+fn level_row(key: &'static str, title: &str, current: Effort, pick: fn(Effort) -> Act) -> El {
+    setting_row(key.to_string())
+        .cursor(Cursor::Pointer)
+        .role("button")
+        .hover(Color::WHITE.alpha(0.02))
+        .child(label(title.to_string(), 13.0, theme::TEXT))
+        .child(label(current.name(), 13.0, theme::ACCENT))
+        .on_press_tx(move |ws: &mut Workspace, tx: &mut Tx| {
+            let items = Effort::ALL.iter().map(|&e| MenuItem::new(format!("{}{}", tick(current == e), e.name()), pick(e))).collect();
+            ws.open_menu(MenuAnchor::Key(key.into()), 200.0, items);
+            ws.after_input(tx);
+        })
+}
+
 /// Adds `item` to `items`, or removes it when it is there.
 fn flip<T: PartialEq>(items: &mut Vec<T>, item: T) {
     match items.iter().position(|i| *i == item) {
@@ -115,7 +130,7 @@ fn scale_step(key: &'static str, sign: &'static str, by: i32) -> El {
 
 impl Workspace {
     pub(crate) fn settings_body(&self) -> El {
-        let Some(Modal::Settings { shell, claude, model, effort, permission, updates, chrome, scale, trimmed, claudiu_off, skills_field, costly, hints, renaming }) = &self.modal else {
+        let Some(Modal::Settings { shell, claude, model, effort, auto, permission, updates, chrome, scale, trimmed, claudiu_off, skills_field, costly, hints, renaming }) = &self.modal else {
             return el();
         };
         let page = self.settings_page;
@@ -146,8 +161,20 @@ impl Workspace {
                 let mut c = col()
                     .gap(10.0)
                     .child(field(2, "MODEL FOR NEW SESSIONS", model, &hints[2]))
-                    .child(picker_row("settings-effort", "Effort", *effort, &Effort::ALL, Effort::name, Act::PickEffort))
-                    .child(picker_row("settings-permission", "Permission mode", *permission, &PermissionMode::ALL, PermissionMode::name, Act::PickPermission));
+                    .child(picker_row("settings-effort", if auto.on { "Effort (fallback while auto is on)" } else { "Effort" }, *effort, &Effort::ALL, Effort::name, Act::PickEffort))
+                    .child(settings_toggle("settings-auto-effort", "Auto effort", auto.on, |m| match m {
+                        Modal::Settings { auto, .. } => Some(&mut auto.on),
+                        _ => None,
+                    }));
+                if auto.on {
+                    c = c
+                        .child(level_row("settings-auto-lowest", "Lowest", auto.lowest, Act::PickAutoLowest))
+                        .child(level_row("settings-auto-highest", "Highest", auto.highest, Act::PickAutoHighest))
+                        .child(faint(
+                            "Before each prompt, Haiku picks an effort in this range from what you asked. Short replies like \"ok\" and slash commands keep the current effort. Picking an effort yourself turns auto off for that session until /clear. Applies to new sessions.",
+                        ));
+                }
+                c = c.child(picker_row("settings-permission", "Permission mode", *permission, &PermissionMode::ALL, PermissionMode::name, Act::PickPermission));
                 if *permission == Some(PermissionMode::BypassPermissions) {
                     c = c.child(faint("Every new session will run commands and edit files without asking."));
                 }
