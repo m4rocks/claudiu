@@ -22,8 +22,9 @@ use serde_json::{Map, Value};
 const FILES: &[&str] = &["settings.json", "CLAUDE.md", "keybindings.json"];
 /// Top-level keys of an account's `.claude.json` that every account shares: the user's MCP servers, and the
 /// preferences `/config` saves there. The preferences are Claude Code's own list of global config keys (2.1.325),
-/// without the sign-in, install details, counters, notices and caches it also holds; Claude Code writes only the ones
-/// changed from their defaults, so most are usually absent.
+/// without the sign-in, install details, counters, notices and caches it also holds, and without the ones tied to a
+/// login: uploading sessions, remote control at startup, phone push and Claude in Chrome. Claude Code writes only the
+/// ones changed from their defaults, so most are usually absent.
 const SHARED_KEYS: &[&str] = &[
     "mcpServers",
     "theme",
@@ -46,17 +47,13 @@ const SHARED_KEYS: &[&str] = &[
     "showStatusInTerminalTab",
     "taskCompleteNotifEnabled",
     "inputNeededNotifEnabled",
-    "agentPushNotifEnabled",
     "respectGitignore",
-    "claudeInChromeDefaultEnabled",
     "copyFullResponse",
     "copyOnSelect",
     "leftArrowOpensAgents",
     "defaultToAgentsView",
     "prStatusFooterEnabled",
     "teammateMode",
-    "remoteControlAtStartup",
-    "autoUploadSessions",
 ];
 /// One project's trust in `.claude.json`: once any account trusts a folder, every account does.
 const TRUST_KEY: &str = "hasTrustDialogAccepted";
@@ -210,8 +207,9 @@ fn sync_claude_json(accounts: &[Account], state: &mut State) -> io::Result<()> {
         })
         .collect();
     let mut dirty = vec![false; accounts.len()];
-    let mut incomplete = false;
+    // Each key is agreed on alone, once every account holds it: a busy account behind on one key holds back only that.
     let mut agreed_now: Vec<(String, u64, Vec<usize>)> = vec![];
+    let mut needs_write: Vec<Vec<usize>> = vec![];
 
     for key in SHARED_KEYS {
         let state_key = format!("json:{key}");
@@ -233,13 +231,15 @@ fn sync_claude_json(accounts: &[Account], state: &mut State) -> io::Result<()> {
         let Some(winner) = pick(&held, state.agreed.get(&state_key).copied()) else { continue };
         let source = held[winner].as_ref().expect("the winner holds a value");
         let (print, value) = (source.print, source.value.clone());
+        let mut behind = false;
+        let mut written_to = vec![];
         for (i, file) in files.iter_mut().enumerate() {
             let Some((map, _)) = file else { continue };
             if map.get(*key) == value.as_ref() {
                 continue;
             }
             if accounts[i].busy {
-                incomplete = true;
+                behind = true;
                 continue;
             }
             match &value {
@@ -247,9 +247,14 @@ fn sync_claude_json(accounts: &[Account], state: &mut State) -> io::Result<()> {
                 None => map.remove(*key),
             };
             dirty[i] = true;
+            written_to.push(i);
+        }
+        if behind {
+            continue;
         }
         let holders = if value.is_some() { (0..files.len()).filter(|i| files[*i].is_some()).collect() } else { vec![] };
         agreed_now.push((state_key, print, holders));
+        needs_write.push(written_to);
     }
 
     // Trust only grows: a folder any account trusts is trusted everywhere.
@@ -269,7 +274,6 @@ fn sync_claude_json(accounts: &[Account], state: &mut State) -> io::Result<()> {
             continue;
         }
         if accounts[i].busy {
-            incomplete = true;
             continue;
         }
         let Some(projects) = map.entry("projects").or_insert_with(|| Value::Object(Map::new())).as_object_mut() else { continue };
@@ -282,19 +286,21 @@ fn sync_claude_json(accounts: &[Account], state: &mut State) -> io::Result<()> {
     }
 
     let mut result = Ok(());
+    let mut failed = vec![false; accounts.len()];
     for (i, file) in files.iter().enumerate() {
         let (true, Some((map, _))) = (dirty[i], file) else { continue };
         let text = serde_json::to_string_pretty(map).map_err(io::Error::other);
         let written = text.and_then(|text| crate::datadir::write_atomic(&accounts[i].claude_json, &text));
-        incomplete |= written.is_err();
+        failed[i] = written.is_err();
         keep(&mut result, written);
     }
-    if !incomplete {
-        for (state_key, print, holders) in agreed_now {
-            state.agreed.insert(state_key.clone(), print);
-            state.had.retain(|h| !h.starts_with(&format!("{state_key}|")));
-            state.had.extend(holders.into_iter().map(|i| had_key(&state_key, &accounts[i])));
+    for ((state_key, print, holders), written_to) in agreed_now.into_iter().zip(needs_write) {
+        if written_to.iter().any(|i| failed[*i]) {
+            continue;
         }
+        state.agreed.insert(state_key.clone(), print);
+        state.had.retain(|h| !h.starts_with(&format!("{state_key}|")));
+        state.had.extend(holders.into_iter().map(|i| had_key(&state_key, &accounts[i])));
     }
     result
 }
@@ -443,6 +449,27 @@ mod tests {
         write_at(&s.accounts[0].claude_json, r#"{"oauthAccount":{"email":"main"},"numStartups":1,"autoCompactEnabled":false}"#, 3000);
         sync(&s.accounts, &s.state).unwrap();
         assert!(s.accounts.iter().all(|a| json(a).get("theme").is_none()));
+        assert!(s.accounts.iter().all(|a| json(a)["autoCompactEnabled"] == false), "the other option stays");
+    }
+
+    #[test]
+    fn an_account_busy_with_another_difference_does_not_hold_back_an_option() {
+        let mut s = setup(3);
+        write_at(&s.accounts[0].claude_json, r#"{"projects":{"/p":{"hasTrustDialogAccepted":true}}}"#, 1000);
+        write_at(&s.accounts[1].claude_json, r#"{"theme":"light"}"#, 1000);
+        write_at(&s.accounts[2].claude_json, r#"{"theme":"light"}"#, 2000);
+        s.accounts[1].busy = true; // it lacks the trust and takes nothing while busy, but agrees on the theme
+        sync(&s.accounts, &s.state).unwrap();
+        let json = |a: &Account| serde_json::from_str::<Value>(&fs::read_to_string(&a.claude_json).unwrap()).unwrap();
+        assert_eq!(json(&s.accounts[0])["theme"], "light");
+
+        // Back to the default in main while the alt is still busy: the reset spreads, it is not filled back in.
+        let mut main = json(&s.accounts[0]);
+        main.as_object_mut().unwrap().remove("theme");
+        write_at(&s.accounts[0].claude_json, &main.to_string(), 3000);
+        sync(&s.accounts, &s.state).unwrap();
+        assert!(json(&s.accounts[0]).get("theme").is_none());
+        assert!(json(&s.accounts[2]).get("theme").is_none());
     }
 
     #[test]

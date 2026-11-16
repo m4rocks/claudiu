@@ -649,17 +649,18 @@ pub fn project_for(projects: &[Project], cwd: &Path) -> Option<Id> {
 
 /// A name the user gave the session inside Claude Code since the last read, to show in Claudiu too. Records what
 /// Claude Code holds either way. Only a change counts: Claude Code keeps the old name until a rename made in Claudiu
-/// reaches it, and that rename must not be undone meanwhile. The first name seen is taken only when Claudiu has no
-/// name of its own; otherwise it is only recorded, since Claudiu can't tell whether it came before or after Claudiu's.
+/// reaches it, and that rename must not be undone meanwhile. So a name is taken only when Claudiu has none of its own,
+/// or when Claude Code already held Claudiu's name; any other change is Claude Code catching up with an older rename.
 fn adopt_claude_title(rec: &mut SessionRecord, held: Option<&str>) -> Option<String> {
     let held = held.map(str::trim).filter(|t| !t.is_empty())?;
-    let named_in_claudiu = rec.custom_title.is_some();
+    let ours = rec.custom_title.clone();
     let meta = rec.claude.as_mut()?;
-    let changed = match meta.claude_title.replace(held.to_string()) {
-        Some(before) => before != held,
-        None => !named_in_claudiu,
+    let before = meta.claude_title.replace(held.to_string());
+    let confirmed = match ours {
+        None => true,
+        Some(ours) => before.as_deref() == Some(ours.as_str()),
     };
-    changed.then(|| held.to_string())
+    (before.as_deref() != Some(held) && confirmed).then(|| held.to_string())
 }
 
 /// What we learned about one Claude Code session from its on-disk record.
@@ -916,6 +917,7 @@ mod tests {
         d.sessions[0].claude.as_mut().unwrap().claude_title = None;
         reconcile(&mut d, &[named(Some("Old name"))], true);
         assert_eq!(d.sessions[0].display_title(), "Named in Claudiu", "the first name seen is only recorded");
+        reconcile(&mut d, &[named(Some("Named in Claudiu"))], true);
 
         reconcile(&mut d, &[named(Some("From /rename"))], true);
         assert_eq!(d.sessions[0].display_title(), "From /rename");
@@ -929,6 +931,11 @@ mod tests {
         reconcile(&mut d, &[named(Some("From Claudiu"))], true);
         reconcile(&mut d, &[named(Some("Again"))], true);
         assert_eq!(d.sessions[0].display_title(), "Again");
+
+        // Renamed twice in Claudiu, quickly: Claude Code reaches the first name while the second is on its way.
+        d.sessions[0].custom_title = Some("Second".into());
+        reconcile(&mut d, &[named(Some("First"))], true);
+        assert_eq!(d.sessions[0].display_title(), "Second", "Claude Code catching up is not a rename");
     }
 
     #[test]
