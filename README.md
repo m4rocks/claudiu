@@ -1,52 +1,17 @@
 # Claudiu
 
-Claudiu is a native desktop app, written in Rust with [Rune](https://github.com/anomalyco/rune), that runs several [Claude Code](https://code.claude.com) sessions in one window on Windows, macOS and Linux. It is a personal project with rough edges. Issues and pull requests are welcome.
+Claudiu is a native desktop app, written in Rust with [Rune](https://github.com/anomalyco/rune), that runs several [Claude Code](https://code.claude.com) sessions in one window on Windows, macOS and Linux. It is a personal project with rough edges: macOS and Linux are lightly tested, and the macOS build isn't notarized. Issues and pull requests are welcome.
 
 > **Claudiu is an independent project. It is not affiliated with, endorsed by or sponsored by Anthropic.** Claude and Claude Code are trademarks of Anthropic.
 
 ## What it does
 
-Each session is your own `claude` process in a real pseudo-terminal, so Claude Code's keys, mouse and paste work unchanged. Claudiu has no API keys and never calls the Anthropic API. Sign-in stays with Claude Code. The first launch opens a setup window that checks for `claude` (required) and `gh` (optional), links to their install pages and installs nothing. It also has an optional switch that turns off six Claude Code features that add tokens to every request and that coding rarely uses, such as Artifacts and bundled skills. Settings → Claude Code tools shows each switch as high, medium or low savings. Settings has a Check setup button to open it again. A sidebar lists your running sessions, with the rest in a Recent list at its bottom that opens and scrolls. Settings → Projects adds, renames, reorders and removes projects. Removing one keeps its sessions, and the notice that follows has an Undo button. Ended sessions resume through `claude --resume`, and sessions that were running come back at the next start.
-
-Around the terminal, Claudiu adds an editor mode (Ctrl+Shift+E) with files, tabs, search, Git change marks and language-server diagnostics, definitions and completion. It also adds usage and context meters, a GitHub pane for issues and pull requests through your `gh` login (Claude attaches the ones it works on to the right sidebar, from this project or another repository), defaults for the model, effort and permission mode of new sessions, and extra Claude accounts that share one configuration: settings, `CLAUDE.md`, keybindings, MCP servers, folder trust and the options `/config` saves, with your main `~/.claude` too. An account with a running session takes a changed `/config` option once its sessions have ended. You name a session yourself, from its right-click menu, by regenerating its title, or with `/rename` in Claude Code, which Claudiu's sidebar follows. When a reply needs a table, chart or diagram, Claude draws it as a card inside the terminal, under the tool call, and the card scrolls with the transcript. Cards can hold buttons that send a message for you, collapsible sections, tabs and charts, and they come back when you reopen a session. A session can move between git worktrees the way it switches branches, so several agents work on separate branches at once: the worktree button in the top bar switches the shown session into another worktree, or into a new one that Claudiu makes on a branch you name, and its conversation continues there (a session that has no conversation yet starts over in the new folder). Claude can switch the session itself with the `switch_worktree` tool, after you approve it and once its turn ends. In the menu, the hover x removes a worktree, the branch button's x deletes a local branch after telling you which commits would be lost, and ending the last session in a worktree offers to remove it. Claudiu keeps the worktrees it makes in its own data folder, outside your repositories, so they never show up in `git status`; Settings has a Worktrees page that lists them to show in the file manager or remove. Settings lists the rest.
-
-Settings → Custom subagents can add Codex subagents, which hand a task to OpenAI Codex instead of Claude. Claude uses one only when you ask for Codex or GPT. The page lists the models codex-acp offers your account, and each one you switch on becomes an agent type such as `codex-gpt-6-1-sol`. The subagent's view shows what Codex writes and runs, and Claude gets Codex's last message as the report. They need Node.js (`npx`) and a `codex login`, and the first run downloads [codex-acp](https://github.com/agentclientprotocol/codex-acp) from npm. Codex runs read-only unless you turn on Allow edits. With edits allowed, Claudiu accepts everything Codex asks for, including writes outside the folder and network access, and none of it goes through Claude Code's permission rules or hooks. A follow-up message to a finished Codex subagent starts a new Codex session without the earlier context.
-
-Ctrl+Shift (Cmd+Shift on macOS) plus a letter drives the app. Everything else reaches Claude Code. Editor mode finds `rust-analyzer`, `tsc --lsp` and `gleam` on your PATH and installs nothing.
-
-To reduce background rendering, an inactive window updates streaming terminal output at most four times a second, with a final update when output stops. Returning to the window restores the normal frame rate. Busy sidebar icons stop animating while the window is inactive, the sidebar is hidden, or editor mode hides it. When a session finishes or asks a question while the window is in the background, Claudiu sends a system notification.
+Each session is your own `claude` process in a real terminal, and sign-in stays with Claude Code. Around it, Claudiu adds a sidebar of running and recent sessions, notifications when a background session finishes or asks something, an editor mode (Ctrl+Shift+E), usage meters, a GitHub pane, cards Claude draws inline, sessions that move between git worktrees, extra accounts that share one configuration, and Codex subagents (Settings → Custom subagents, which needs Node and a `codex login`; with Allow edits on, Codex acts without Claude Code's permission rules). Settings lists the rest.
 
 ## What it touches
 
-Claudiu never deletes a transcript. It writes to Claude Code's own data only to change the settings you switch in Claudiu, as `/config` does, to sync shared files between accounts, and to append one line to a transcript when a session that `claude --worktree` put in a worktree moves to another folder, so Claude Code knows it has left that worktree. Claudiu uploads nothing itself, and terminal contents are never logged. Its only network use is GitHub: the update check (off with `"settings": { "update_url": "" }` in `state.json`) and the GitHub pane. Codex subagents, once you turn them on, download codex-acp from npm and send their tasks to OpenAI through Codex. State lives in `%LOCALAPPDATA%\m4rocks\Claudiu\data` on Windows, `~/Library/Application Support/Claudiu` on macOS and `~/.local/share/claudiu` on Linux, and crashes go to `crash.log` there.
-
-## Known gaps
-
-- macOS is lightly tested, and the build isn't notarized, so Gatekeeper complains on first launch.
-- Linux is new and lightly tested.
-- Quitting ends running PTYs. Sessions stay resumable, but live processes don't survive a restart.
+Claudiu never calls the Anthropic API or deletes a transcript, and it changes Claude Code's settings only when you flip a switch. Its network use is GitHub (the update check and the GitHub pane), plus npm and OpenAI once you turn on Codex subagents. Terminal contents are never logged.
 
 ## Development
 
-You need stable Rust. On Windows you also need Visual Studio Build Tools (C++) and the Windows SDK. On Linux you need the headers Rune builds against; on Debian or Ubuntu:
-
-```sh
-sudo apt install libwayland-dev libxkbcommon-dev libvulkan1 zlib1g-dev
-```
-
-Tasks go through [just](https://just.systems); run `just` to list them.
-
-```sh
-just run     # dev build: shows stderr, never checks for updates
-just test    # app tests and mod tests (the mod tests need the claude CLI)
-just lint    # clippy
-just ci      # what CI checks, plus the mod and the web build
-```
-
-The repository has three parts:
-
-- `src/` is the app, including the MCP server that each session connects to.
-- `mod/` is the Claude Code plugin each session loads, which writes the usage snapshots and answers for Codex subagents.
-- `web/` is the Astro site.
-
-`CLAUDE.md` has the conventions for contributing. Releases use [Velopack](https://velopack.io) and GitHub Releases: bump `version` in `Cargo.toml`, then `git tag vX.Y.Z && git push --tags`. `scripts\package.ps1` builds a local installer. The Linux release is an AppImage.
+You need stable Rust, plus Visual Studio Build Tools on Windows or the headers Rune builds against on Linux, and [just](https://just.systems): `just run`, `just test`, `just ci`. `src/` is the app, `mod/` is the Claude Code plugin each session loads, and `web/` is the site. `CLAUDE.md` has the conventions. To release, bump `version` in `Cargo.toml` and push a `vX.Y.Z` tag.
