@@ -253,9 +253,9 @@ pub struct Layout {
     pub sidebar_visible: bool,
     /// No longer used (the "Other sessions" group is gone); still written because older Claudiu versions require it.
     pub other_collapsed: bool,
-    /// The sidebar's RECENT list is closed (stored negated so it starts open).
+    /// The sidebar's RECENT list is open. It starts closed.
     #[serde(default)]
-    pub recent_closed: bool,
+    pub recent_open: bool,
     /// The project the sidebar list is filtered to.
     #[serde(default)]
     pub project_filter: Option<Id>,

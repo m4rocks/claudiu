@@ -850,7 +850,13 @@ fn the_recent_list_stays_short_and_draws_rows_where_scrolling_brings_them() {
         }
     });
     h.settle();
-    let (list, _) = h.rt.presented("recent-scroll").expect("the RECENT list starts open");
+    assert!(h.rt.find("recent-scroll").is_none(), "the RECENT list starts closed");
+    assert_eq!(h.rt.presented_pose("recent-caret").unwrap().rotation(), 0.0);
+    h.click("recent-header");
+    h.settle();
+    let turn = h.rt.presented_pose("recent-caret").unwrap().rotation();
+    assert!((turn - std::f32::consts::FRAC_PI_2).abs() < 1e-3, "the caret turns a quarter, not {turn} radians");
+    let (list, _) = h.rt.presented("recent-scroll").expect("the header opens the list");
     assert!(list[3] <= 900.0 * 0.4 + 1.0, "the open list is {}pt tall, more than its share of the window", list[3]);
     let (footer, _) = h.rt.presented("account-switcher").unwrap();
     assert!((0.0..20.0).contains(&(footer[1] - (list[1] + list[3]))), "the list sits at the bottom, above the account: {list:?}, account at {footer:?}");
@@ -866,7 +872,7 @@ fn the_recent_list_stays_short_and_draws_rows_where_scrolling_brings_them() {
     assert!(shown > 10, "only {shown} rows are drawn where the list scrolled to");
     h.click("recent-header");
     h.settle();
-    assert!(h.rt.find("recent-scroll").is_none() && h.ws().store.data.layout.recent_closed, "the header closes the list");
+    assert!(h.rt.find("recent-scroll").is_none() && !h.ws().store.data.layout.recent_open, "the header closes the list");
 }
 
 /// Cmd on macOS, Ctrl elsewhere: the modifier of the app's shortcuts.

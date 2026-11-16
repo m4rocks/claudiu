@@ -268,7 +268,7 @@ impl Workspace {
         if rows.is_empty() && !searching && self.project_filter().is_none() {
             return None;
         }
-        let open = searching || !self.store.data.layout.recent_closed;
+        let open = searching || self.store.data.layout.recent_open;
         let header = row()
             .key("recent-header")
             .h(HEADER_H + 8.0)
@@ -279,7 +279,7 @@ impl Workspace {
             .role("button")
             .hover(Color::WHITE.alpha(0.035))
             .on_press_tx(|ws: &mut Workspace, tx: &mut Tx| act(ws, Act::ToggleRecent, tx))
-            .child(icon(&icons::CHEVRON_RIGHT, 12.0, theme::TEXT_FAINT).rotate(if open { 90.0 } else { 0.0 }).motion(motion::SNAP))
+            .child(icon(&icons::CHEVRON_RIGHT, 12.0, theme::TEXT_FAINT).key("recent-caret").rotate(if open { std::f32::consts::FRAC_PI_2 } else { 0.0 }).motion(motion::SNAP))
             .child(section_label("RECENT"))
             .child(label(rows.len().to_string(), 10.5, theme::TEXT_FAINT));
         let mut section = col().key("recent-section").w_full().border_sides([1.0, 0.0, 0.0, 0.0], rgb(theme::BORDER)).child(header);

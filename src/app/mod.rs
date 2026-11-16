@@ -875,7 +875,7 @@ impl Workspace {
             }
             Act::ToggleRecent => {
                 let l = &mut self.store.data.layout;
-                l.recent_closed = !l.recent_closed;
+                l.recent_open = !l.recent_open;
                 self.store.mark_dirty();
             }
             Act::ConfirmQuit => {
