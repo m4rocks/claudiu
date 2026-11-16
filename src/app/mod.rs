@@ -301,10 +301,21 @@ pub enum Modal {
         hints: [String; 4],
         /// The project being renamed on the Projects page, and the name typed so far.
         renaming: Option<(Id, TextEdit)>,
+        /// The Custom subagents page.
+        subagents: SubagentsForm,
     },
 }
 
-/// A field of the open modal, by its place: the dialog's only field is 0; Settings' are shell, claude, model, skills.
+/// The Custom subagents page of the Settings dialog, as edited so far.
+pub struct SubagentsForm {
+    pub codex: bool,
+    /// Codex models, separated by commas.
+    pub models: TextEdit,
+    pub edits: bool,
+}
+
+/// A field of the open modal, by its place: the dialog's only field is 0; Settings' are shell, claude, model, skills,
+/// the project being renamed and the Codex models.
 pub fn modal_field(modal: &mut Option<Modal>, n: usize) -> Option<&mut TextEdit> {
     match (modal.as_mut()?, n) {
         (Modal::Rename { input, .. } | Modal::NewBranch { input, .. } | Modal::NewWorktree { input, .. } | Modal::Advisor { input, .. } | Modal::GoToLine { input, .. } | Modal::FileName { input, .. }, 0) => Some(input),
@@ -313,6 +324,7 @@ pub fn modal_field(modal: &mut Option<Modal>, n: usize) -> Option<&mut TextEdit>
         (Modal::Settings { model, .. }, 2) => Some(model),
         (Modal::Settings { skills_field, .. }, 3) => Some(skills_field),
         (Modal::Settings { renaming: Some((_, name)), .. }, 4) => Some(name),
+        (Modal::Settings { subagents, .. }, 5) => Some(&mut subagents.models),
         _ => None,
     }
 }
@@ -750,7 +762,9 @@ impl Workspace {
                 let hints = [platform::default_shell(None).0, claude_hint, "Claude Code default".into(), "none, e.g. dataviz, claude-api".into()];
                 self.blur = true;
                 self.set_settings_page(self.settings_page);
-                self.modal = Some(Modal::Settings { shell, claude, model, effort: defaults.effort, permission: defaults.permission_mode, updates, chrome, scale: crate::panels::scale::percent(), trimmed: self.store.data.settings.trimmed_tools.clone(), claudiu_off: self.store.data.settings.claudiu_tools_off.clone(), skills_field, costly: claude::costly::scan(), hints, renaming: None });
+                let custom = &self.store.data.settings.custom_subagents;
+                let subagents = SubagentsForm { codex: custom.codex, models: modal::field(&custom.codex_models.join(", "), false), edits: custom.codex_edits };
+                self.modal = Some(Modal::Settings { shell, claude, model, effort: defaults.effort, permission: defaults.permission_mode, updates, chrome, scale: crate::panels::scale::percent(), trimmed: self.store.data.settings.trimmed_tools.clone(), claudiu_off: self.store.data.settings.claudiu_tools_off.clone(), skills_field, costly: claude::costly::scan(), hints, renaming: None, subagents });
                 self.modal_serial += 1;
             }
             Act::PickEffort(choice) => {

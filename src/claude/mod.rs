@@ -9,6 +9,7 @@
 //! per-session config) and `plugin` (the mod Claudiu ships).
 
 pub mod accounts;
+pub mod acp;
 pub mod ask;
 pub mod bridge;
 pub mod config_sync;
@@ -16,6 +17,7 @@ pub mod costly;
 pub mod defaults;
 pub mod mcp;
 pub mod plugin;
+pub mod subagents;
 pub mod trim;
 pub mod usage;
 

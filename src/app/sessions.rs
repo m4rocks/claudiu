@@ -36,6 +36,12 @@ impl Workspace {
             spec.env.push((usage::CTL_ENV.into(), usage::ctl_file(record_id).to_string_lossy().into_owned()));
             spec.env.push((crate::visual::VISUAL_ENV.into(), crate::visual::prefix(record_id).to_string_lossy().into_owned()));
             spec.env.push((crate::claude::ask::ASK_ENV.into(), crate::claude::ask::request_file(record_id).to_string_lossy().into_owned()));
+            if let Some(subagents) = settings.custom_subagents.env()
+                && let Ok(exe) = std::env::current_exe()
+            {
+                spec.env.push((crate::claude::subagents::ENV.into(), subagents));
+                spec.env.push((crate::claude::subagents::EXE_ENV.into(), exe.to_string_lossy().into_owned()));
+            }
         }
         if chrome {
             spec.args.push("--chrome".into());

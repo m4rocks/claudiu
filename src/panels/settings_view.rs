@@ -3,7 +3,7 @@
 use rune::tok::motion;
 use rune::{Color, Cursor, El, ScrollSpec, Tx, col, el, row};
 
-use crate::app::{Act, MenuAnchor, MenuItem, Modal, SettingsPage, Workspace};
+use crate::app::{Act, MenuAnchor, MenuItem, Modal, SettingsPage, SubagentsForm, Workspace};
 use crate::claude::defaults::{Effort, PermissionMode};
 use crate::claude::mcp::Feature;
 use crate::claude::trim::Trim;
@@ -65,6 +65,36 @@ fn settings_toggle(key: &str, title: &str, on: bool, field: fn(&mut Modal) -> Op
     })
 }
 
+/// The Custom subagents page: Codex's switch, its models and whether it may edit.
+fn subagents_page(form: &SubagentsForm) -> El {
+    let mut page = col()
+        .gap(8.0)
+        .child(faint("Agent types that run a task in another coding agent instead of Claude. Claude uses one only when you ask for it. Applies to new and resumed sessions. Running sessions keep theirs."))
+        .child(section_label("CODEX".to_string()).mt(4.0))
+        .child(faint("Runs the task in OpenAI Codex through codex-acp. Needs Node (npx) and a `codex login`; the first run downloads codex-acp from npm."))
+        .child(settings_toggle("settings-codex", "Codex subagents", form.codex, |m| match m {
+            Modal::Settings { subagents, .. } => Some(&mut subagents.codex),
+            _ => None,
+        }));
+    if !form.codex {
+        return page;
+    }
+    page = page.child(field(5, "MODELS, SEPARATED BY COMMAS", &form.models, "none: Codex's default model, e.g. gpt-5.5, gpt-6.1-sol"));
+    let (_, skipped) = crate::claude::subagents::codex_types(&crate::claude::subagents::parse_models(&form.models.text));
+    if !skipped.is_empty() {
+        page = page.child(faint(format!("Skipped: {} (only letters, digits, . _ -; each name once).", skipped.join(", "))));
+    }
+    page.child(settings_toggle("settings-codex-edits", "Allow edits", form.edits, |m| match m {
+        Modal::Settings { subagents, .. } => Some(&mut subagents.edits),
+        _ => None,
+    }))
+    .child(faint(if form.edits {
+        "Codex may edit files and run commands in the subagent's folder. Its edits skip Claude Code's permission rules and hooks."
+    } else {
+        "Codex runs read-only: it can read and search, but not change files."
+    }))
+}
+
 /// A row that opens a menu of `options` under itself; the first entry, "Claude Code default", clears the choice.
 fn picker_row<T: Copy + PartialEq + 'static>(key: &'static str, title: &str, current: Option<T>, options: &'static [T], name: fn(T) -> &'static str, pick: fn(Option<T>) -> Act) -> El {
     const DEFAULT: &str = "Claude Code default";
@@ -115,7 +145,7 @@ fn scale_step(key: &'static str, sign: &'static str, by: i32) -> El {
 
 impl Workspace {
     pub(crate) fn settings_body(&self) -> El {
-        let Some(Modal::Settings { shell, claude, model, effort, permission, updates, chrome, scale, trimmed, claudiu_off, skills_field, costly, hints, renaming }) = &self.modal else {
+        let Some(Modal::Settings { shell, claude, model, effort, permission, updates, chrome, scale, trimmed, claudiu_off, skills_field, costly, hints, renaming, subagents }) = &self.modal else {
             return el();
         };
         let page = self.settings_page;
@@ -197,6 +227,7 @@ impl Workspace {
                 }
                 list
             }
+            SettingsPage::CustomSubagents => subagents_page(subagents),
             SettingsPage::Projects => self.projects_page(renaming.as_ref()),
             SettingsPage::Worktrees => self.worktrees_page(),
             SettingsPage::About => col().child(faint(format!(

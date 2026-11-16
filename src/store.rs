@@ -308,6 +308,9 @@ pub struct Settings {
     /// Output caps and turned-off skills for Claude Code (`claude/trim.rs`); empty leaves Claude Code's own behavior.
     #[serde(default)]
     pub limits: crate::claude::trim::Limits,
+    /// Agent types that run a task in another coding agent (Settings → Custom subagents); all off by default.
+    #[serde(default)]
+    pub custom_subagents: crate::claude::subagents::CustomSubagents,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

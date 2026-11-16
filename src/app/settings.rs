@@ -12,12 +12,13 @@ pub enum SettingsPage {
     Projects,
     ClaudeTools,
     ClaudiuTools,
+    CustomSubagents,
     Worktrees,
     About,
 }
 
 impl SettingsPage {
-    pub const ALL: [SettingsPage; 7] = [Self::General, Self::Sessions, Self::Projects, Self::ClaudeTools, Self::ClaudiuTools, Self::Worktrees, Self::About];
+    pub const ALL: [SettingsPage; 8] = [Self::General, Self::Sessions, Self::Projects, Self::ClaudeTools, Self::ClaudiuTools, Self::CustomSubagents, Self::Worktrees, Self::About];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -26,6 +27,7 @@ impl SettingsPage {
             Self::Projects => "Projects",
             Self::ClaudeTools => "Claude Code tools",
             Self::ClaudiuTools => "Claudiu tools",
+            Self::CustomSubagents => "Custom subagents",
             Self::Worktrees => "Worktrees",
             Self::About => "About",
         }
@@ -52,10 +54,12 @@ impl Workspace {
             SettingsPage::General => &[0, 1],
             SettingsPage::Sessions => &[2],
             SettingsPage::ClaudeTools => &[3],
+            // The models field shows only while Codex is on.
+            SettingsPage::CustomSubagents if matches!(&self.modal, Some(Modal::Settings { subagents, .. }) if subagents.codex) => &[5],
             SettingsPage::Projects if modal_field(&mut self.modal, 4).is_some() => &[4],
             _ => &[],
         };
-        let focused = (0..5).find(|n| modal_field(&mut self.modal, *n).is_some_and(|f| f.focused));
+        let focused = (0..6).find(|n| modal_field(&mut self.modal, *n).is_some_and(|f| f.focused));
         let on_list = focused.is_none();
         let plain = !ks.modifiers.control && !ks.modifiers.alt && !ks.modifiers.platform;
         match ks.key.as_str() {
@@ -66,7 +70,7 @@ impl Workspace {
                 let here = focused.and_then(|f| fields.iter().position(|x| *x == f)).map_or(0, |i| i + 1);
                 let stops = fields.len() + 1;
                 let there = if ks.modifiers.shift { (here + stops - 1) % stops } else { (here + 1) % stops };
-                for n in 0..5 {
+                for n in 0..6 {
                     if let Some(f) = modal_field(&mut self.modal, n) {
                         f.focused = there.checked_sub(1).map(|i| fields[i]) == Some(n);
                     }
@@ -88,7 +92,8 @@ mod tests {
     #[test]
     fn next_and_prev_walk_the_list_and_stop_at_the_ends() {
         assert_eq!(General.next(), Sessions);
-        assert_eq!(ClaudiuTools.next(), Worktrees);
+        assert_eq!(ClaudiuTools.next(), CustomSubagents);
+        assert_eq!(CustomSubagents.next(), Worktrees);
         assert_eq!(Worktrees.next(), About);
         assert_eq!(About.next(), About);
         assert_eq!(About.prev(), Worktrees);

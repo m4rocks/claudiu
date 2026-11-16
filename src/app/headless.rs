@@ -2283,3 +2283,47 @@ fn the_projects_page_moves_renames_and_removes_projects() {
     assert_eq!(names(&h), ["beta", "alpha two"], "Undo puts it back in its place");
     assert_eq!(h.ws().store.session(&session).unwrap().project_id.as_ref(), Some(&beta), "with its session");
 }
+
+/// Settings → Custom subagents: the models field shows once Codex is on, Save keeps what was typed, and a new session
+/// gets only the checked agent types.
+#[test]
+fn custom_subagents_reach_new_sessions() {
+    let mut h = Harness::new(|_| vec![]);
+    h.step(|ws| {
+        ws.act(Act::OpenSettings);
+        ws.set_settings_page(SettingsPage::CustomSubagents);
+    });
+    h.settle();
+    assert!(!h.drawn("modal-field-5"), "the models field waits for the Codex switch");
+    h.click("settings-codex");
+    h.settle();
+    assert!(h.drawn("modal-field-5"), "the models field shows once Codex is on: {:?}", h.keys());
+    h.click("modal-field-5");
+    for c in "gpt-5.5, gpt 5".chars() {
+        h.press(rune::Key::Text(c.to_string()), |_| {});
+    }
+    h.click("settings-codex-edits");
+    h.step(|ws| ws.submit_modal());
+    assert_eq!(h.ws().toast.as_ref().map(|t| t.text.as_str()), Some("Settings saved. Custom subagents apply to new and resumed sessions."));
+    let saved = h.ws().store.data.settings.custom_subagents.clone();
+    assert_eq!(
+        saved,
+        crate::claude::subagents::CustomSubagents { codex: true, codex_models: vec!["gpt-5.5".into(), "gpt 5".into()], codex_edits: true }
+    );
+
+    // A stand-in `claude` that prints what the mod would read.
+    let printer = h.work.join(if cfg!(windows) { "printer.cmd" } else { "printer" });
+    let script = if cfg!(windows) { "@echo off\r\necho %CLAUDIU_SUBAGENTS%\r\nping -n 60 127.0.0.1 >nul\r\n" } else { "#!/bin/sh\necho \"$CLAUDIU_SUBAGENTS\"\nsleep 60\n" };
+    std::fs::write(&printer, script).unwrap();
+    #[cfg(unix)]
+    std::fs::set_permissions(&printer, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let cwd = h.work.clone();
+    h.step(|ws| {
+        ws.claude_exe = Some(printer);
+        ws.new_claude(cwd);
+    });
+    let id = h.ws().active.clone().expect("a session is shown");
+    h.wait("the agent types to reach the session", |ws| {
+        ws.live_view(&id).is_some_and(|v| v.tail_text(2000).contains(r#"{"codex":{"edits":true,"types":[{"name":"codex-gpt-5-5","model":"gpt-5.5"}]}}"#))
+    });
+}
