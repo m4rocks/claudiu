@@ -276,7 +276,6 @@ impl Workspace {
             id: id.clone(),
             view,
             claude_name,
-            title_stamp: None,
             account,
         });
         self.activate(&id);

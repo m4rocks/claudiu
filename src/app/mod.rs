@@ -348,9 +348,6 @@ pub struct Live {
     pub view: TerminalView,
     /// The session name Claude Code was last given (`--name` or `/rename`), so a changed title is sent once.
     pub claude_name: Option<String>,
-    /// When Claude last called the title tool. A later call (e.g. after `/clear`, which starts a nameless
-    /// Claude session) clears `claude_name` so the title is sent again.
-    pub title_stamp: Option<std::time::SystemTime>,
     /// The account this process was started under; a session on another account than the active one can be handed off.
     pub account: Id,
 }

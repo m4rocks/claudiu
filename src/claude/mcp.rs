@@ -25,7 +25,7 @@ pub const RECORD_ENV: &str = "CLAUDIU_RECORD";
 /// Comma-separated names of what the server leaves out of this session (see `tools_off`). Missing means nothing is off.
 pub const TOOLS_OFF_ENV: &str = "CLAUDIU_TOOLS_OFF";
 
-/// A group of Claudiu's tools the user can switch off (Settings → Claudiu tools). `set_tab_title` has no switch.
+/// A group of Claudiu's tools the user can switch off (Settings → Claudiu tools).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Feature {
@@ -73,7 +73,7 @@ pub fn tools_off(features: &[Feature], trimmed: &[Trim]) -> Vec<&'static str> {
     off
 }
 
-/// The feature a tool belongs to; `set_tab_title` belongs to none.
+/// The feature a tool belongs to.
 fn feature_of(tool: &str) -> Option<&'static str> {
     match tool {
         "show_visual" => Some("visual"),
@@ -90,13 +90,13 @@ fn is_off(off: &[&str], tool: &str) -> bool {
 }
 
 /// Tools the model uses to tell Claudiu something about itself; none of them reads or starts another session.
-const OWN_TOOLS: [&str; 6] = ["set_tab_title", "attach_github", "detach_github", "link_session", "unlink_session", "show_visual"];
+const OWN_TOOLS: [&str; 5] = ["attach_github", "detach_github", "link_session", "unlink_session", "show_visual"];
 
 /// Tools that reach other sessions (`claude/bridge.rs`).
 const BRIDGE_TOOLS: [&str; 6] = ["list_code_sessions", "read_code_session", "search_sessions", "search_projects", "start_code_session", "switch_worktree"];
 
-/// `mcp__<server>__<tool>` names allowed per process so Claude Code adds no prompt of its own: renaming the tab is
-/// harmless, and the cross-session tools are limited to what the user asks of the model.
+/// `mcp__<server>__<tool>` names allowed per process so Claude Code adds no prompt of its own: Claudiu's own tools only
+/// change what Claudiu shows, and the cross-session tools are limited to what the user asks of the model.
 pub fn allowed_tools(off: &[&str]) -> Vec<String> {
     OWN_TOOLS.iter().copied().chain(BRIDGE_TOOLS).filter(|t| !is_off(off, t)).map(|t| format!("mcp__claudiu__{t}")).collect()
 }
@@ -124,10 +124,9 @@ const VISUAL_LOADING: &str = " Load it first with ToolSearch (select:mcp__claudi
 const GITHUB_INSTRUCTIONS: &str = " GitHub: call attach_github (silent, free) for each issue or pull request you work on, \
 as its description says; detach_github takes one off again.";
 
-const TITLE_INSTRUCTIONS: &str = "You are running inside Claudiu, which shows a tab title for this session. Call \
-set_tab_title (2-5 words, no quotes) once you understand the user's first request, again only when the task changes \
-and the title no longer fits, and whenever the user asks for a rename (use their name). Never repeat a near-identical \
-title; if the user ran /rename, leave it. Don't mention the tool unless asked.";
+/// The opening of the instructions; each feature's text follows it. The user names the session, so there is nothing
+/// about the title here.
+const INTRO: &str = "You are running inside Claudiu, a desktop app that runs this Claude Code session.";
 
 /// What makes the model ask before it calls `set_model`; `ask` is how it asks.
 fn model_instructions(ask: &str) -> String {
@@ -137,10 +136,10 @@ just named them. After set_model, end your turn and ask the user to confirm befo
     )
 }
 
-/// The `initialize` reply's instructions: the tab-title text, then the text of each feature that is not off.
+/// The `initialize` reply's instructions: the opening, then the text of each feature that is not off.
 fn instructions(off: &[&str]) -> String {
     let on = |name: &str| !off.contains(&name);
-    let mut text = TITLE_INSTRUCTIONS.to_string();
+    let mut text = INTRO.to_string();
     if on("model") {
         text += &model_instructions(if on("ask_user_question") { "with AskUserQuestion" } else { "the user" });
     }
@@ -163,6 +162,7 @@ fn instructions(off: &[&str]) -> String {
     text
 }
 
+/// Where the model's tab titles went before the user alone named sessions; kept so `app/lifecycle.rs` prunes old files.
 fn titles_dir() -> PathBuf {
     crate::datadir::data_dir().join("titles")
 }
@@ -190,14 +190,6 @@ fn config_dir() -> PathBuf {
     crate::datadir::data_dir().join("mcp")
 }
 
-/// Collapse whitespace, drop control characters, cap the length. `None` when nothing is left.
-fn clean_title(raw: &str) -> Option<String> {
-    let t: String = raw.chars().filter(|c| !c.is_control() || c.is_whitespace()).collect();
-    let t = t.split_whitespace().collect::<Vec<_>>().join(" ");
-    let t: String = t.chars().take(60).collect();
-    (!t.is_empty()).then_some(t)
-}
-
 /// Entry point of `claudiu --mcp-title`: newline-delimited JSON-RPC over stdio.
 pub fn run() -> i32 {
     let session = std::env::var(SESSION_ENV).unwrap_or_default();
@@ -210,13 +202,13 @@ pub fn run() -> i32 {
     }
     let off_env = std::env::var(TOOLS_OFF_ENV).unwrap_or_default();
     let off: Vec<&str> = off_env.split(',').map(str::trim).filter(|n| !n.is_empty()).collect();
-    serve(std::io::stdin().lock(), std::io::stdout().lock(), &session, &record, &crate::datadir::data_dir(), &off, |tool, args| crate::claude::bridge::ask(&from, tool, args));
+    serve(std::io::stdin().lock(), std::io::stdout().lock(), &record, &crate::datadir::data_dir(), &off, |tool, args| crate::claude::bridge::ask(&from, tool, args));
     0
 }
 
 /// `off` names what this session leaves out (see `tools_off`): those tools are neither listed nor callable and their
 /// instruction text is dropped. `ask` carries a cross-session request to Claudiu and waits for the user's answer.
-fn serve(input: impl BufRead, mut out: impl Write, session: &str, record: &str, data: &Path, off: &[&str], ask: impl Fn(&str, &Value) -> Result<String, String>) {
+fn serve(input: impl BufRead, mut out: impl Write, record: &str, data: &Path, off: &[&str], ask: impl Fn(&str, &Value) -> Result<String, String>) {
     for line in input.lines().map_while(Result::ok) {
         let Ok(msg) = serde_json::from_str::<Value>(&line) else { continue };
         // Notifications (no id) and responses (no method) need no answer.
@@ -231,7 +223,6 @@ fn serve(input: impl BufRead, mut out: impl Write, session: &str, record: &str, 
             "ping" => Ok(json!({})),
             "tools/list" => Ok(json!({ "tools": own_tools(off).into_iter().chain(bridge_tools()).filter(|t| !is_off(off, t["name"].as_str().unwrap_or_default())).collect::<Vec<_>>() })),
             "tools/call" => Ok(match msg["params"]["name"].as_str().filter(|tool| !is_off(off, tool)) {
-                Some("set_tab_title") => set_title(&msg["params"], session, &data.join("titles")),
                 Some("attach_github") => attach_github(&msg["params"], record, &attach_dir(data)),
                 Some("detach_github") => detach_github(&msg["params"], record, &attach_dir(data)),
                 Some("link_session") => link_session(&msg["params"], record, &attach_dir(data), "link"),
@@ -321,15 +312,7 @@ fn own_tools(off: &[&str]) -> Vec<Value> {
             "required": ["content"],
         },
     });
-    vec![upfront(json!({
-                "name": "set_tab_title",
-                "description": "Set this session's tab title in Claudiu (2-5 words). Call after the first request, when the current task or scope changes, and whenever the user asks to rename the session or tab. Don't repeat an unchanged title.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": { "title": { "type": "string", "description": "Short tab title, 2-5 words" } },
-                    "required": ["title"],
-                },
-            })), attach, detach, json!({
+    vec![attach, detach, json!({
                 "name": "set_model",
                 "description": format!(
                     "Switch this session's model and/or effort from your next request on, even mid-turn. Always ask the user first{} (which model, which effort) unless they just named them explicitly; never switch on your own. Claude Code also keeps the choice as the user's default model/effort.",
@@ -385,19 +368,6 @@ fn bridge_tools() -> Vec<Value> {
 
 fn reply(text: &str, is_error: bool) -> Value {
     json!({ "content": [{ "type": "text", "text": text }], "isError": is_error })
-}
-
-fn set_title(params: &Value, session: &str, dir: &Path) -> Value {
-    let Some(title) = params["arguments"]["title"].as_str().and_then(clean_title) else {
-        return reply("title must be a non-empty string", true);
-    };
-    if session.is_empty() {
-        return reply("not running inside Claudiu", true);
-    }
-    match crate::datadir::write_atomic(&dir.join(format!("{}.txt", crate::datadir::safe_file_stem(session))), &title) {
-        Ok(()) => reply("Tab renamed.", false),
-        Err(e) => reply(&format!("could not save title: {e}"), true),
-    }
 }
 
 /// Remember an issue or pull request for the session: one JSON line per call, picked up by `read_attached`.
@@ -522,21 +492,6 @@ fn keep_config_fresh(path: PathBuf) {
     });
 }
 
-/// `(claude session id stem, title, written at)` for every title Claude has set. The timestamp changes on every
-/// call of the tool, even with an unchanged title, which is how a `/clear` (new Claude session) is noticed.
-pub fn read_titles() -> Vec<(String, String, Option<std::time::SystemTime>)> {
-    let Ok(entries) = std::fs::read_dir(titles_dir()) else { return vec![] };
-    entries
-        .flatten()
-        .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("txt"))
-        .filter_map(|e| {
-            let stem = e.path().file_stem()?.to_string_lossy().into_owned();
-            let title = clean_title(&std::fs::read_to_string(e.path()).ok()?)?;
-            Some((stem, title, e.metadata().and_then(|m| m.modified()).ok()))
-        })
-        .collect()
-}
-
 /// What a session asked Claudiu to remember about itself.
 #[derive(Debug, PartialEq)]
 pub enum Attachment {
@@ -600,7 +555,7 @@ mod tests {
     fn talk_off(requests: &[Value], session: &str, dir: &Path, off: &[&str], ask: impl Fn(&str, &Value) -> Result<String, String>) -> Vec<Value> {
         let input: String = requests.iter().map(|r| format!("{r}\n")).collect();
         let mut out = Vec::new();
-        serve(input.as_bytes(), &mut out, session, session, dir, off, ask);
+        serve(input.as_bytes(), &mut out, session, dir, off, ask);
         String::from_utf8(out).unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect()
     }
 
@@ -646,10 +601,10 @@ mod tests {
         let names: Vec<_> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert_eq!(
             names,
-            ["set_tab_title", "attach_github", "detach_github", "set_model", "link_session", "unlink_session", "show_visual", "list_code_sessions", "read_code_session", "search_sessions", "search_projects", "start_code_session", "switch_worktree"]
+            ["attach_github", "detach_github", "set_model", "link_session", "unlink_session", "show_visual", "list_code_sessions", "read_code_session", "search_sessions", "search_projects", "start_code_session", "switch_worktree"]
         );
         let upfront: Vec<_> = tools.iter().filter(|t| t["_meta"]["anthropic/alwaysLoad"] == true).map(|t| t["name"].as_str().unwrap()).collect();
-        assert_eq!(upfront, ["set_tab_title", "attach_github", "detach_github", "link_session", "unlink_session"], "show_visual and the session-reaching tools stay deferred");
+        assert_eq!(upfront, ["attach_github", "detach_github", "link_session", "unlink_session"], "show_visual and the session-reaching tools stay deferred");
         assert_eq!(r[1]["result"]["content"][0]["text"], "read_code_session \"x\"");
         assert_eq!(r[1]["result"]["isError"], false);
         assert_eq!(r[2]["result"]["content"][0]["text"], "The user declined.");
@@ -676,14 +631,14 @@ mod tests {
     }
 
     #[test]
-    fn handshake_lists_the_tool_and_set_title_writes_a_file() {
+    fn handshake_lists_the_tools_and_the_model_cannot_name_the_session() {
         let tmp = tempfile::tempdir().unwrap();
         let replies = talk(
             &[
                 json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26"}}),
                 json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
                 json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}),
-                json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"set_tab_title","arguments":{"title":"  Fix\n the   build  "}}}),
+                json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"set_tab_title","arguments":{"title":"Fix the build"}}}),
                 json!({"jsonrpc":"2.0","id":4,"method":"nope"}),
             ],
             "abc-123",
@@ -691,10 +646,10 @@ mod tests {
         );
         assert_eq!(replies.len(), 4, "the notification gets no reply");
         assert_eq!(replies[0]["result"]["protocolVersion"], "2025-03-26");
-        assert!(replies[0]["result"]["instructions"].as_str().unwrap().contains("set_tab_title"));
-        assert_eq!(replies[1]["result"]["tools"][0]["name"], "set_tab_title");
-        assert_eq!(replies[2]["result"]["isError"], false);
-        assert_eq!(std::fs::read_to_string(tmp.path().join("titles/abc-123.txt")).unwrap(), "Fix the build");
+        assert!(!replies[0]["result"]["instructions"].as_str().unwrap().contains("title"), "nothing asks the model to name the session");
+        assert_eq!(replies[1]["result"]["tools"][0]["name"], "attach_github");
+        assert_eq!((replies[2]["result"]["isError"].clone(), replies[2]["result"]["content"][0]["text"].clone()), (json!(true), json!("unknown tool")));
+        assert!(!tmp.path().join("titles").exists());
         assert_eq!(replies[3]["error"]["code"], -32601);
     }
 
@@ -703,7 +658,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let call = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"set_model","arguments":{"model":"opus"}}});
         let r = talk(&[json!({"jsonrpc":"2.0","id":9,"method":"tools/list"}), call], "abc-123", tmp.path());
-        assert_eq!(r[0]["result"]["tools"][3]["name"], "set_model");
+        assert_eq!(r[0]["result"]["tools"][2]["name"], "set_model");
         assert_eq!(r[1]["result"]["isError"], true);
     }
 
@@ -786,17 +741,6 @@ mod tests {
         assert_eq!(parse_attachment("nonsense"), None);
     }
 
-    #[test]
-    fn bad_titles_are_rejected_and_long_ones_capped() {
-        let tmp = tempfile::tempdir().unwrap();
-        let call = |args: Value| json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"set_tab_title","arguments":args}});
-        let r = talk(&[call(json!({"title":"   "})), call(json!({})), call(json!({"title":"x".repeat(200)}))], "s", tmp.path());
-        assert_eq!(r[0]["result"]["isError"], true);
-        assert_eq!(r[1]["result"]["isError"], true);
-        assert_eq!(std::fs::read_to_string(tmp.path().join("titles/s.txt")).unwrap().len(), 60);
-        assert_eq!(talk(&[call(json!({"title":"hi"}))], "", tmp.path())[0]["result"]["isError"], true);
-    }
-
     /// The tool names and the instruction text a server with `off` hands out.
     fn offer(off: &[&str]) -> (Vec<String>, String) {
         let tmp = tempfile::tempdir().unwrap();
@@ -814,8 +758,8 @@ mod tests {
     #[test]
     fn with_nothing_off_the_server_offers_every_tool_and_all_the_text() {
         let (names, text) = offer(&[]);
-        assert_eq!(names.len(), 13);
-        for part in [TITLE_INSTRUCTIONS, GITHUB_INSTRUCTIONS, LINK_INSTRUCTIONS, VISUAL_INSTRUCTIONS, BRIDGE_INSTRUCTIONS] {
+        assert_eq!(names.len(), 12);
+        for part in [INTRO, GITHUB_INSTRUCTIONS, LINK_INSTRUCTIONS, VISUAL_INSTRUCTIONS, BRIDGE_INSTRUCTIONS] {
             assert!(text.contains(part));
         }
         assert!(text.contains("ask with AskUserQuestion which model") && text.contains("Artifacts are for pages to share."));
@@ -824,30 +768,30 @@ mod tests {
     #[test]
     fn each_feature_takes_its_tools_and_its_text_away() {
         let (names, text) = offer(&["visual"]);
-        assert!(!names.contains(&"show_visual".to_string()) && names.len() == 12);
+        assert!(!names.contains(&"show_visual".to_string()) && names.len() == 11);
         assert!(!text.contains("Visual:") && !text.contains("show_visual"));
 
         let (names, text) = offer(&["github"]);
-        assert!(!names.iter().any(|n| n.ends_with("_github")) && names.len() == 11);
+        assert!(!names.iter().any(|n| n.ends_with("_github")) && names.len() == 10);
         assert!(!text.contains("attach_github"));
 
         let (names, text) = offer(&["sessions"]);
         for gone in ["link_session", "unlink_session", "list_code_sessions", "read_code_session", "search_sessions", "search_projects", "start_code_session", "switch_worktree"] {
             assert!(!names.contains(&gone.to_string()), "{gone}");
         }
-        assert_eq!(names.len(), 5);
+        assert_eq!(names.len(), 4);
         assert!(!text.contains("link_session") && !text.contains("start_code_session"));
 
         let (names, text) = offer(&["model"]);
-        assert!(!names.contains(&"set_model".to_string()) && names.len() == 12);
+        assert!(!names.contains(&"set_model".to_string()) && names.len() == 11);
         assert!(!text.contains("set_model") && !text.contains("Never switch models"));
     }
 
     #[test]
-    fn the_tab_title_tool_and_text_stay_with_every_feature_off() {
+    fn with_every_feature_off_only_the_opening_is_left() {
         let (names, text) = offer(&["visual", "github", "sessions", "model"]);
-        assert_eq!(names, ["set_tab_title"]);
-        assert_eq!(text, TITLE_INSTRUCTIONS);
+        assert!(names.is_empty());
+        assert_eq!(text, INTRO);
     }
 
     #[test]
@@ -863,7 +807,7 @@ mod tests {
 
     #[test]
     fn allowed_tools_leaves_out_the_tools_of_features_that_are_off() {
-        assert_eq!(allowed_tools(&["github", "sessions"]), ["mcp__claudiu__set_tab_title", "mcp__claudiu__show_visual"]);
+        assert_eq!(allowed_tools(&["github", "sessions"]), ["mcp__claudiu__show_visual"]);
     }
 
     #[test]
