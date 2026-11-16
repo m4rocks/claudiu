@@ -1,5 +1,5 @@
-//! Left sidebar: one list of Claude Code sessions (running first, then recent, then older), a project filter, and
-//! the account usage meters.
+//! Left sidebar: the running Claude Code sessions, a project filter, the recent ones in a list that opens at the
+//! bottom, and the account usage meters.
 
 use rune::tok::motion;
 use rune::{Color, Cursor, El, Phase, PointerButton, ScrollSpec, Transition, Tx, col, el, row, text, text_input};
@@ -14,15 +14,14 @@ use crate::store::{ExternalState, Id, Project, SessionKind, SessionRecord, now};
 pub const SIDEBAR_W: f32 = 284.0;
 pub const SIDEBAR_MIN: f32 = 220.0;
 pub const SIDEBAR_MAX: f32 = 520.0;
-/// Entries shown under RECENT before the rest go behind OLDER.
-const RECENT_LIMIT: usize = 12;
+/// The open RECENT list takes at most this share of the window's height, and scrolls.
+const RECENT_SHARE: f32 = 0.4;
 
 /// Heights of the list's rows. A running session's row has three lines: project, title and branch.
 const ROW_H: f32 = 25.0;
 const RUNNING_ROW_H: f32 = 60.0;
 const HEADER_H: f32 = 20.0;
 const NOTE_H: f32 = 24.0;
-const SPACER_H: f32 = 10.0;
 const LIST_GAP: f32 = 2.0;
 /// Height of a running session's row plus the gap between rows: how far a dragged row moves to pass one.
 const ROW_PITCH: f32 = RUNNING_ROW_H + LIST_GAP;
@@ -74,19 +73,16 @@ enum Item {
     Header(&'static str, Option<String>),
     /// A line of text standing in for rows that aren't there.
     Note(&'static str),
-    Spacer,
     /// A session; `reorder` lets it be dragged among the others (the running ones).
     Session { row: Row, reorder: bool },
-    Older { count: usize, open: bool },
 }
 
 impl Item {
     #[cfg(test)]
     fn height(&self) -> f32 {
         match self {
-            Item::Header(..) | Item::Older { .. } => HEADER_H,
+            Item::Header(..) => HEADER_H,
             Item::Note(_) => NOTE_H,
-            Item::Spacer => SPACER_H,
             Item::Session { row, .. } if row.running => RUNNING_ROW_H,
             Item::Session { .. } => ROW_H,
         }
@@ -211,15 +207,10 @@ impl Workspace {
         self.store.data.layout.project_filter.as_ref().and_then(|id| self.store.project(id))
     }
 
-    /// One list of Claude Code sessions: what is running first (in the order you arranged them), then the most
-    /// recent, with the rest behind "Older". The project filter narrows all of it. Rows behind a closed "Older" are
-    /// counted, not built.
+    /// The running Claude Code sessions, in the order you arranged them, narrowed by the search and project filter.
     fn list_items(&self) -> Vec<Item> {
         let q = self.search.text.trim().to_lowercase();
-        let searching = !q.is_empty();
         let filter = self.project_filter().map(|p| p.id.clone());
-
-        // ---- RUNNING
         let numbered = self.running_ids();
         let running: Vec<Row> = numbered
             .iter()
@@ -236,42 +227,74 @@ impl Workspace {
                 row
             })
             .collect();
+        let mut items = vec![Item::Header("RUNNING", Some(running.len().to_string()))];
+        if running.is_empty() {
+            items.push(Item::Note(if !q.is_empty() || filter.is_some() { "Nothing running matches" } else { "Nothing running. Start a session." }));
+        }
+        items.extend(running.into_iter().map(|row| Item::Session { row, reorder: true }));
+        items
+    }
 
-        // ---- RECENT: everything else, newest first
+    /// The Claude Code sessions that aren't running, newest first, narrowed like the running ones. Archived ones only
+    /// show up in a search.
+    fn recent_rows(&self) -> Vec<Row> {
+        let q = self.search.text.trim().to_lowercase();
+        let filter = self.project_filter().map(|p| p.id.clone());
+        let running = self.running_ids();
         let mut recent: Vec<&SessionRecord> = self
             .store
             .data
             .sessions
             .iter()
-            .filter(|s| s.kind == SessionKind::Claude && (searching || !s.hidden) && !numbered.contains(&s.id) && self.listed(&q, filter.as_ref(), s))
+            .filter(|s| s.kind == SessionKind::Claude && (!q.is_empty() || !s.hidden) && !running.contains(&s.id) && self.listed(&q, filter.as_ref(), s))
             .collect();
         recent.sort_by_key(|r| std::cmp::Reverse(r.last_active));
-        let older = recent.split_off(recent.len().min(if searching { usize::MAX } else { RECENT_LIMIT }));
-        let history = |rec: &SessionRecord| {
-            let mut row = self.row_for(rec, false);
-            row.scope = "rec";
-            Item::Session { row, reorder: false }
-        };
+        recent
+            .into_iter()
+            .map(|rec| {
+                let mut row = self.row_for(rec, false);
+                row.scope = "rec";
+                row
+            })
+            .collect()
+    }
 
-        let mut items = vec![Item::Header("RUNNING", Some(running.len().to_string()))];
-        if running.is_empty() {
-            items.push(Item::Note(if searching || filter.is_some() { "Nothing running matches" } else { "Nothing running. Start a session." }));
+    /// RECENT at the bottom of the sidebar: a header that opens a list of the sessions that aren't running. The list
+    /// takes at most `RECENT_SHARE` of the window and scrolls. A search opens it, so what matches shows. Hidden when
+    /// there are no such sessions and nothing is searched.
+    fn recent_section(&self, spin: bool) -> Option<El> {
+        let rows = self.recent_rows();
+        let searching = !self.search.text.trim().is_empty();
+        if rows.is_empty() && !searching && self.project_filter().is_none() {
+            return None;
         }
-        items.extend(running.into_iter().map(|row| Item::Session { row, reorder: true }));
-        if !recent.is_empty() || !older.is_empty() {
-            items.extend([Item::Spacer, Item::Header("RECENT", None)]);
-            items.extend(recent.into_iter().map(history));
-        } else if searching || filter.is_some() {
-            items.push(Item::Note("No sessions match"));
-        }
-        if !older.is_empty() {
-            let open = self.store.data.layout.older_open;
-            items.push(Item::Older { count: older.len(), open });
-            if open {
-                items.extend(older.into_iter().map(history));
+        let open = searching || !self.store.data.layout.recent_closed;
+        let header = row()
+            .key("recent-header")
+            .h(HEADER_H + 8.0)
+            .center_y()
+            .gap(5.0)
+            .px(14.0)
+            .cursor(Cursor::Pointer)
+            .role("button")
+            .hover(Color::WHITE.alpha(0.035))
+            .on_press_tx(|ws: &mut Workspace, tx: &mut Tx| act(ws, Act::ToggleRecent, tx))
+            .child(icon(&icons::CHEVRON_RIGHT, 12.0, theme::TEXT_FAINT).rotate(if open { 90.0 } else { 0.0 }).motion(motion::SNAP))
+            .child(section_label("RECENT"))
+            .child(label(rows.len().to_string(), 10.5, theme::TEXT_FAINT));
+        let mut section = col().key("recent-section").w_full().border_sides([1.0, 0.0, 0.0, 0.0], rgb(theme::BORDER)).child(header);
+        if open {
+            let mut list = col().key("recent-list").w_full().gap(LIST_GAP).pb(6.0);
+            if rows.is_empty() {
+                list = list.child(self.list_item(Item::Note("No sessions match"), spin));
             }
+            for r in rows {
+                list = list.child(self.session_row(r, false, spin));
+            }
+            let max = (self.window_size.1 * RECENT_SHARE).max(ROW_H * 4.0);
+            section = section.child(col().key("recent-scroll").w_full().max_h(max).scroll(ScrollSpec { stick_bottom: false }).child(list));
         }
-        items
+        Some(section)
     }
 
     /// The running rows shown, in order: what a dragged row moves among.
@@ -312,7 +335,7 @@ impl Workspace {
             list = list.child(self.list_item(item, spin));
         }
         let scroll = col().key("sidebar-scroll").w_full().grow(1.0).shrink().min_h(0.0).scroll(ScrollSpec { stick_bottom: false }).child(list);
-        let panel = col()
+        let mut panel = col()
             .key("sidebar-panel")
             .w(width)
             .h_full()
@@ -321,8 +344,11 @@ impl Workspace {
             .border(1.0, rgb(theme::PANEL_BORDER))
             .fill(rgb(theme::SIDEBAR_BG))
             .child(self.sidebar_header())
-            .child(scroll)
-            .child(self.sidebar_footer());
+            .child(scroll);
+        if let Some(recent) = self.recent_section(spin) {
+            panel = panel.child(recent);
+        }
+        let panel = panel.child(self.sidebar_footer());
         // The right edge is the drag handle: it fills the gutter with a small visible grip.
         let handle = row()
             .key("left-resize")
@@ -357,20 +383,7 @@ impl Workspace {
         match item {
             Item::Header(label, count) => section_header(label, count),
             Item::Note(t) => row().key(format!("note-{t}")).h(NOTE_H).center_y().px(14.0).child(label(t, 12.0, theme::TEXT_FAINT)),
-            Item::Spacer => el().key("spacer").h(SPACER_H),
             Item::Session { row, reorder } => self.session_row(row, reorder, spin),
-            Item::Older { count, open } => row()
-                .key("older-header")
-                .h(HEADER_H)
-                .center_y()
-                .gap(5.0)
-                .px(14.0)
-                .cursor(Cursor::Pointer)
-                .role("button")
-                .on_press_tx(|ws: &mut Workspace, tx: &mut Tx| act(ws, Act::ToggleOlder, tx))
-                .child(icon(&icons::CHEVRON_RIGHT, 12.0, theme::TEXT_FAINT).rotate(if open { 90.0 } else { 0.0 }).motion(motion::SNAP))
-                .child(section_label("OLDER"))
-                .child(label(count.to_string(), 10.5, theme::TEXT_FAINT)),
         }
     }
 

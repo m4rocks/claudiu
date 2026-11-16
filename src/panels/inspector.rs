@@ -228,21 +228,24 @@ impl Workspace {
         for a in attached {
             let (pull, number) = (a.pull, a.number);
             let owner = id.cloned();
-            let key = format!("attached-{pull}-{number}");
+            let key = format!("attached-{}-{pull}-{number}", a.repo.as_deref().unwrap_or_default());
+            // An item of another repository says which one.
+            let name = format!("{}#{number}", a.repo.as_deref().unwrap_or_default());
             let title = match (a.title, a.state) {
-                (None, _) => pending_title(number),
-                (Some(t), Some(State::Closed)) => label(format!("#{number}  {t} (closed)"), 12.5, theme::TEXT_DIM).truncate().shrink(),
-                (Some(t), Some(State::Merged)) => label(format!("#{number}  {t} (merged)"), 12.5, theme::TEXT_DIM).truncate().shrink(),
-                (Some(t), _) => label(format!("#{number}  {t}"), 12.5, theme::TEXT).truncate().shrink(),
+                (None, _) => pending_title(&name),
+                (Some(t), Some(State::Closed)) => label(format!("{name}  {t} (closed)"), 12.5, theme::TEXT_DIM).truncate().shrink(),
+                (Some(t), Some(State::Merged)) => label(format!("{name}  {t} (merged)"), 12.5, theme::TEXT_DIM).truncate().shrink(),
+                (Some(t), _) => label(format!("{name}  {t}"), 12.5, theme::TEXT).truncate().shrink(),
             };
+            let (open_repo, detach_repo) = (a.repo.clone(), a.repo);
             rows = rows.child(removable_row(
                 key,
                 if pull { &icons::GIT_PULL_REQUEST } else { &icons::CIRCLE_DOT },
                 title,
-                move |ws| ws.open_attached(pull, number),
+                move |ws| ws.open_attached(open_repo.as_deref(), pull, number),
                 move |ws| {
                     if let Some(id) = &owner {
-                        ws.detach(id, pull, number);
+                        ws.detach(id, detach_repo.as_deref(), pull, number);
                     }
                 },
             ));
@@ -393,8 +396,8 @@ fn group(title: &str, body: El) -> El {
 }
 
 /// `#12` with a grey bar where the title will be, until GitHub answers.
-fn pending_title(number: u32) -> El {
-    hbox().center_y().gap(8.0).child(label(format!("#{number}"), 12.5, theme::TEXT)).child(el().h(8.0).w(96.0).radius(4.0).fill(rgb(0x1f1f21)))
+fn pending_title(name: &str) -> El {
+    hbox().center_y().gap(8.0).child(label(name.to_string(), 12.5, theme::TEXT)).child(el().h(8.0).w(96.0).radius(4.0).fill(rgb(0x1f1f21)))
 }
 
 fn base_row(key: &str, glyph: &'static rune::Icon, title: impl Into<RowLabel>, color: u32) -> El {

@@ -466,6 +466,51 @@ fn a_process_that_ends_closes_the_session_and_leaves_its_worktree() {
     assert!(toast.as_deref().is_some_and(|t| t.starts_with("Could not start Missing:")), "{toast:?}");
 }
 
+/// A new session that was open, with no conversation yet, comes back when Claudiu starts again and stays up:
+/// `claude --resume` would find nothing and end at once.
+#[test]
+fn a_new_session_without_a_conversation_comes_back_after_a_restart() {
+    let mut h = Harness::new(|_| vec![]);
+    // Like `claude`, the stand-in ends when asked to resume a conversation it doesn't have.
+    let fake = h.work.join(if cfg!(windows) { "claude-resume.cmd" } else { "claude-resume" });
+    let script = if cfg!(windows) {
+        "@echo off\r\necho %* | find \"--resume\" >nul && exit /b 1\r\necho ready\r\nping -n 60 127.0.0.1 >nul\r\n"
+    } else {
+        "#!/bin/sh\ncase \"$*\" in *--resume*) echo 'No conversation found'; exit 1 ;; esac\necho ready\nsleep 60\n"
+    };
+    std::fs::write(&fake, script).unwrap();
+    #[cfg(unix)]
+    std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let id = new_id();
+    let record = SessionRecord {
+        id: id.clone(),
+        kind: SessionKind::Claude,
+        title: "New session".into(),
+        custom_title: None,
+        auto_title: None,
+        project_id: None,
+        cwd: h.work.clone(),
+        created_at: now(),
+        last_active: now(),
+        exit_code: None,
+        hidden: false,
+        claude: Some(ClaudeMeta { session_id: new_id(), ..Default::default() }),
+    };
+    std::fs::write(datadir::data_dir().join("running.json"), serde_json::json!([id]).to_string()).unwrap();
+    h.step(|ws| {
+        ws.claude_exe = Some(fake);
+        ws.store.data.sessions.push(record);
+        ws.restore_open();
+    });
+    h.wait("the session to start", |ws| ws.live_view(&id).is_some_and(|v| v.tail_text(200).contains("ready") || !v.is_running()));
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(1) {
+        h.pump();
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(h.ws().is_running(&id), "the session closed itself after the restart");
+}
+
 /// The worktree dialog and the switch of a session between worktrees. What Claude Code does in the new folder is not
 /// checked: the stand-in only prints a line.
 #[test]
@@ -780,9 +825,10 @@ fn quitting_asks_first_only_while_a_session_is_working() {
     assert!(h.ws().modal.is_none());
 }
 
-/// Hundreds of sessions: the list scrolls under the wheel and keeps drawing rows where it brings them.
+/// Hundreds of recent sessions: the RECENT list at the bottom opens to part of the window, scrolls under the wheel and
+/// keeps drawing rows where it brings them; its header closes it.
 #[test]
-fn the_session_list_draws_rows_where_scrolling_brings_them() {
+fn the_recent_list_stays_short_and_draws_rows_where_scrolling_brings_them() {
     let mut h = Harness::new(|_| vec![]);
     h.step(|ws| {
         for i in 0..300 {
@@ -802,12 +848,15 @@ fn the_session_list_draws_rows_where_scrolling_brings_them() {
                 claude: None,
             });
         }
-        ws.store.data.layout.older_open = true;
     });
     h.settle();
+    let (list, _) = h.rt.presented("recent-scroll").expect("the RECENT list starts open");
+    assert!(list[3] <= 900.0 * 0.4 + 1.0, "the open list is {}pt tall, more than its share of the window", list[3]);
+    let (footer, _) = h.rt.presented("account-switcher").unwrap();
+    assert!((0.0..20.0).contains(&(footer[1] - (list[1] + list[3]))), "the list sits at the bottom, above the account: {list:?}, account at {footer:?}");
     let row_y = |h: &Harness, n: usize| h.keys().into_iter().find(|k| k.starts_with("row-") && k.ends_with(&format!("s{n:03}"))).and_then(|k| h.rt.find(&k)).map(|p| p.1);
     let top = row_y(&h, 0).expect("the first row draws");
-    let (x, y) = h.rt.find("sidebar-scroll").expect("the list draws");
+    let (x, y) = h.rt.find("recent-scroll").expect("the list draws");
     h.rt.pointer_move(x, y);
     h.rt.wheel(x, y, -1200.0);
     h.settle();
@@ -815,6 +864,9 @@ fn the_session_list_draws_rows_where_scrolling_brings_them() {
     assert!(moved.is_none_or(|m| m < top - 600.0), "the list did not scroll: the first row went from {top} to {moved:?}");
     let shown = (1..300).filter(|n| row_y(&h, *n).is_some_and(|y| (0.0..900.0).contains(&y))).count();
     assert!(shown > 10, "only {shown} rows are drawn where the list scrolled to");
+    h.click("recent-header");
+    h.settle();
+    assert!(h.rt.find("recent-scroll").is_none() && h.ws().store.data.layout.recent_closed, "the header closes the list");
 }
 
 /// Cmd on macOS, Ctrl elsewhere: the modifier of the app's shortcuts.
@@ -1734,6 +1786,43 @@ mod github {
         }
     }
 
+    /// A stand-in for `gh` with no login: `o/r` is the folder's repository, and it has no issues or pull requests. The
+    /// repository is on an Enterprise host, so a github.com login another test left in `gh`'s token cache never sends
+    /// its requests past the stand-in.
+    fn fake_gh(dir: &Path) -> PathBuf {
+        let repo = r#"{"nameWithOwner":"o/r","url":"https://ghe.invalid/o/r"}"#;
+        let data = r#"{"data":{"repository":{"id":"R","issueOrPullRequest":null}}}"#;
+        let fake = dir.join(if cfg!(windows) { "gh.cmd" } else { "gh" });
+        let script = if cfg!(windows) {
+            format!("@echo off\r\nif \"%1\"==\"auth\" exit /b 1\r\nif \"%1\"==\"repo\" goto repo\r\necho {data}\r\nexit /b 0\r\n:repo\r\necho {repo}\r\n")
+        } else {
+            format!("#!/bin/sh\ncase \"$1\" in\n  auth) exit 1 ;;\n  repo) echo '{repo}' ;;\n  *) echo '{data}' ;;\nesac\n")
+        };
+        std::fs::write(&fake, script).unwrap();
+        #[cfg(unix)]
+        std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        fake
+    }
+
+    /// A click on an attached pull request opens it in a pane that is still looking its repository up; the item loads
+    /// once the repository is known.
+    #[test]
+    fn an_item_opened_before_the_repository_is_known_still_loads() {
+        let mut h = Harness::new(|_| vec![]);
+        let work = h.work.clone();
+        let gh = Gh::new(fake_gh(&work), work.clone());
+        let pane = new_id();
+        let id = pane.clone();
+        h.step(move |ws| {
+            let view = GithubView::new(id.clone(), ws.rt.mailbox(), work.clone(), "p".into(), None, Some(gh));
+            ws.gh.push(crate::app::GhPane { id: id.clone(), cwd: work, project: "p".into(), view });
+            ws.right_gh = Some(id.clone());
+            ws.gh_view_mut(&id).unwrap().open_item(Kind::Pull, 7);
+        });
+        h.wait("the pull request's answer", |ws| ws.gh_pane(&pane).and_then(|p| p.view.detail.as_ref()).is_some_and(|d| !d.loading));
+        assert_eq!(h.pane(&pane).detail.as_ref().unwrap().error.as_deref(), Some("This item could not be found."));
+    }
+
     #[test]
     fn opening_a_pull_request_selects_the_pull_requests_tab() {
         let mut h = Harness::new(|_| vec![]);
@@ -1743,6 +1832,27 @@ mod github {
             h.with_pane(&pane, |v| v.open_item(kind, number));
             assert_eq!(h.pane(&pane).kind, kind);
         }
+    }
+
+    /// An attached item of another repository opens in that repository's own pane, not the project's.
+    #[test]
+    fn an_item_of_another_repository_opens_in_its_own_pane() {
+        let mut h = Harness::new(|_| vec![]);
+        let shown = h.ws().active_cwd();
+        let project = h.open_github_pane(&shown);
+        h.step(|ws| ws.open_attached(Some("octocat/hello-world"), true, 9));
+        let other = h.ws().right_gh.clone().unwrap();
+        assert_ne!(other, project);
+        let v = h.pane(&other);
+        assert_eq!(v.named.as_deref(), Some("octocat/hello-world"));
+        assert_eq!(v.detail.as_ref().map(|d| (d.kind, d.number)), Some((Kind::Pull, 9)));
+        h.step(|ws| ws.open_attached(Some("Octocat/Hello-World"), false, 2));
+        assert_eq!(h.ws().right_gh.as_ref(), Some(&other), "the same repository reuses its pane");
+        h.step(|ws| ws.open_attached(None, false, 3));
+        assert_eq!(h.ws().right_gh.as_ref(), Some(&project), "an item of the project opens in the project's pane");
+        h.with_pane(&project, |v| v.repo = RepoRef::on_github("o/r"));
+        h.step(|ws| ws.open_attached(Some("O/R"), false, 4));
+        assert_eq!(h.ws().right_gh.as_ref(), Some(&project), "the project's own repository, named, opens in the project's pane");
     }
 
     /// Draws the pane in every state, at two widths, with real GitHub data, to catch panics in `github/ui`. Only

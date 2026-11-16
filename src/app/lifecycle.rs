@@ -157,7 +157,7 @@ impl Workspace {
         let mut back = vec![];
         for id in saved {
             if self.store.session(&id).is_some_and(|s| s.kind == SessionKind::Claude && !s.hidden) {
-                self.resume(&id);
+                self.bring_back(&id);
                 back.push(id);
             }
         }

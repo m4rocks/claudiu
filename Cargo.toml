@@ -12,6 +12,8 @@ anyhow = "1.0.104"
 directories = "6.0.0"
 dunce = "1.0.5"
 futures = "0.3.34"
+# A system notification when a session finishes while the window is in the background (`platform::notify`).
+notify-rust = "4.19.0"
 # Editor mode's file tree follows its folder on disk.
 notify = "8.2.0"
 git2 = { version = "0.21.0", default-features = false }
@@ -64,8 +66,6 @@ codegen-units = 4
 strip = true
 
 [target."cfg(windows)".dependencies]
-# The main window's handle, to flash its taskbar button (`platform::request_attention`).
-raw-window-handle = "0.6"
 junction = "2.1.0"
 windows-sys = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging", "Win32_Foundation", "Win32_Security", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_System_Registry", "Win32_System_Threading"] }
 

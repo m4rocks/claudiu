@@ -92,6 +92,12 @@ pub struct RepoRef {
 }
 
 impl RepoRef {
+    /// A repository on github.com named `owner/name`.
+    pub fn on_github(full: &str) -> Option<Self> {
+        let (owner, name) = full.split_once('/')?;
+        Some(Self { owner: owner.into(), name: name.into(), url: format!("https://github.com/{full}"), host: None })
+    }
+
     pub fn full(&self) -> String {
         format!("{}/{}", self.owner, self.name)
     }

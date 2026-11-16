@@ -319,18 +319,20 @@ impl Workspace {
         let Some(meta) = rec.claude.as_ref() else {
             return;
         };
-        if meta.external != ExternalState::Unknown || meta.transcript.is_some() {
-            return;
-        }
-        let has_transcript = claude::claude_home()
-            .and_then(|h| claude::find_transcript(&h, &meta.session_id))
-            .is_some();
-        if !has_transcript {
+        if !has_conversation(meta) {
             self.store.data.sessions.retain(|s| s.id != id);
             if self.selected.as_deref() == Some(id) {
                 self.selected = None;
             }
             self.store.mark_dirty();
+        }
+    }
+
+    /// Bring a Claude session back after a restart: resume its conversation, or start it over when it has none yet.
+    pub(super) fn bring_back(&mut self, id: &str) {
+        match self.store.session(id).and_then(|s| s.claude.as_ref()) {
+            Some(meta) if !has_conversation(meta) => self.relaunch_empty(id),
+            _ => self.resume(id),
         }
     }
 
@@ -478,6 +480,14 @@ impl Workspace {
         let tokens = meta.context_tokens?;
         Some((claude::context_fraction(tokens), tokens, false, None))
     }
+}
+
+/// Whether Claude Code has a conversation for the session: one it listed on a scan, or a transcript on disk. A
+/// session nobody has written to has none, and `claude --resume` ends at once on it.
+fn has_conversation(meta: &ClaudeMeta) -> bool {
+    meta.external != ExternalState::Unknown
+        || meta.transcript.is_some()
+        || claude::claude_home().and_then(|h| claude::find_transcript(&h, &meta.session_id)).is_some()
 }
 
 #[cfg(test)]

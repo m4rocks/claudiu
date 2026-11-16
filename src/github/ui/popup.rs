@@ -170,7 +170,9 @@ impl GithubView {
                     out.push(item("Copy link", GhAct::Copy(it.url.clone())));
                     out.push(item(format!("Copy #{}", it.number), GhAct::Copy(format!("#{}", it.number))));
                     if it.kind == Kind::Pull {
-                        out.push(item("Check out locally", GhAct::Checkout));
+                        if self.named.is_none() {
+                            out.push(item("Check out locally", GhAct::Checkout));
+                        }
                         if it.state == State::Open && (d.mine || self.info.as_ref().is_some_and(|i| i.can_write())) {
                             out.push(if it.draft { item("Ready for review", GhAct::Ready) } else { item("Convert to draft", GhAct::ToDraft) });
                         }

@@ -268,12 +268,13 @@ fn own_tools(off: &[&str]) -> Vec<Value> {
     });
     let attach = json!({
         "name": "attach_github",
-        "description": "Show a GitHub issue or pull request of this session's project in Claudiu's sidebar. Call it once per item, before your next command, whenever you read, open, comment on, create or push to one, or the user names or asks to see one. Not for every result of a list or search. It changes nothing on GitHub.",
+        "description": "Show a GitHub issue or pull request in Claudiu's sidebar: of this session's project, or of another repository named in `repo`. Call it once per item, before your next command, whenever you read, open, comment on, create or push to one, or the user names or asks to see one. Not for every result of a list or search. It changes nothing on GitHub.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "kind": { "type": "string", "enum": ["issue", "pull"], "description": "issue or pull (a pull request)" },
                 "number": { "type": "integer", "description": "The issue or pull request number" },
+                "repo": { "type": "string", "description": "owner/name, only when the item is in another repository than this session's project" },
             },
             "required": ["kind", "number"],
         },
@@ -286,6 +287,7 @@ fn own_tools(off: &[&str]) -> Vec<Value> {
             "properties": {
                 "kind": { "type": "string", "enum": ["issue", "pull"], "description": "issue or pull (a pull request)" },
                 "number": { "type": "integer", "description": "The issue or pull request number" },
+                "repo": { "type": "string", "description": "owner/name, only when the item is in another repository than this session's project" },
             },
             "required": ["kind", "number"],
         },
@@ -402,18 +404,18 @@ fn set_title(params: &Value, session: &str, dir: &Path) -> Value {
 /// Keyed by Claudiu's own record id, which (unlike Claude's session id) survives `/clear`.
 fn attach_github(params: &Value, record: &str, dir: &Path) -> Value {
     let args = &params["arguments"];
-    let (pull, number) = match github_item(args, record) {
+    let (repo, pull, number) = match github_item(args, record) {
         Ok(item) => item,
         Err(e) => return e,
     };
-    match write_line(dir, record, &json!({ "pull": pull, "number": number })) {
-        Ok(()) => reply(&format!("{} #{number} attached.", if pull { "Pull request" } else { "Issue" }), false),
+    match write_line(dir, record, &json!({ "repo": repo, "pull": pull, "number": number })) {
+        Ok(()) => reply(&format!("{} {}#{number} attached.", if pull { "Pull request" } else { "Issue" }, repo.unwrap_or_default()), false),
         Err(e) => reply(&format!("could not attach: {e}"), true),
     }
 }
 
-/// The kind and number of an issue or pull request named in a tool call.
-fn github_item(args: &Value, record: &str) -> Result<(bool, u32), Value> {
+/// The repository (`None`: the session's project), kind and number of an issue or pull request named in a tool call.
+fn github_item(args: &Value, record: &str) -> Result<(Option<String>, bool, u32), Value> {
     let pull = match args["kind"].as_str() {
         Some("issue") => false,
         Some("pull") => true,
@@ -422,20 +424,37 @@ fn github_item(args: &Value, record: &str) -> Result<(bool, u32), Value> {
     let Some(number) = args["number"].as_u64().and_then(|n| u32::try_from(n).ok()).filter(|&n| n > 0) else {
         return Err(reply("number must be a positive integer", true));
     };
+    // Left out, null or empty all mean the session's project.
+    let repo = match &args["repo"] {
+        Value::Null => None,
+        Value::String(r) if r.trim().is_empty() => None,
+        v => match v.as_str().map(str::trim).filter(|r| is_repo_name(r)) {
+            Some(r) => Some(r.to_string()),
+            None => return Err(reply("repo must be owner/name, like octocat/hello-world", true)),
+        },
+    };
     if record.is_empty() {
         return Err(reply("not running inside Claudiu", true));
     }
-    Ok((pull, number))
+    Ok((repo, pull, number))
+}
+
+/// `owner/name` as GitHub allows them. It ends up in API paths and cache file names, so nothing else gets through.
+fn is_repo_name(s: &str) -> bool {
+    let Some((owner, name)) = s.split_once('/') else { return false };
+    let owner_ok = (1..=39).contains(&owner.len()) && owner.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
+    let name_ok = (1..=100).contains(&name.len()) && name != "." && name != ".." && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+    owner_ok && name_ok
 }
 
 /// Take an issue or pull request off the session again.
 fn detach_github(params: &Value, record: &str, dir: &Path) -> Value {
-    let (pull, number) = match github_item(&params["arguments"], record) {
+    let (repo, pull, number) = match github_item(&params["arguments"], record) {
         Ok(item) => item,
         Err(e) => return e,
     };
-    match write_line(dir, record, &json!({ "detach": { "pull": pull, "number": number } })) {
-        Ok(()) => reply(&format!("{} #{number} detached.", if pull { "Pull request" } else { "Issue" }), false),
+    match write_line(dir, record, &json!({ "detach": { "repo": repo, "pull": pull, "number": number } })) {
+        Ok(()) => reply(&format!("{} {}#{number} detached.", if pull { "Pull request" } else { "Issue" }, repo.unwrap_or_default()), false),
         Err(e) => reply(&format!("could not detach: {e}"), true),
     }
 }
@@ -526,7 +545,7 @@ pub enum Attachment {
     Link(String),
     Unlink(String),
     /// Take an issue or pull request off again.
-    Detach { pull: bool, number: u32 },
+    Detach { repo: Option<String>, pull: bool, number: u32 },
 }
 
 /// `(record id stem, item)` for everything attached since the last call.
@@ -562,7 +581,8 @@ fn parse_attachment(line: &str) -> Option<Attachment> {
         return Some(Attachment::Unlink(id.to_string()));
     }
     if let Some(d) = v.get("detach") {
-        return Some(Attachment::Detach { pull: d.get("pull")?.as_bool()?, number: u32::try_from(d.get("number")?.as_u64()?).ok()? });
+        let repo = d.get("repo").and_then(Value::as_str).map(str::to_string);
+        return Some(Attachment::Detach { repo, pull: d.get("pull")?.as_bool()?, number: u32::try_from(d.get("number")?.as_u64()?).ok()? });
     }
     serde_json::from_value(v).ok().map(Attachment::Github)
 }
@@ -698,16 +718,24 @@ mod tests {
                 call(json!({"kind":"commit","number":1})),
                 call(json!({"kind":"issue","number":0})),
                 call(json!({"kind":"issue","number":-3})),
+                call(json!({"kind":"pull","number":9,"repo":" octo-cat/hello.world "})),
+                call(json!({"kind":"pull","number":9,"repo":"../../etc"})),
+                call(json!({"kind":"pull","number":9,"repo":"octocat"})),
+                call(json!({"kind":"pull","number":9,"repo":"a/b/c"})),
+                call(json!({"kind":"pull","number":9,"repo":"octocat/.."})),
+                call(json!({"kind":"issue","number":11,"repo":" "})),
             ],
             "s1",
             tmp.path(),
         );
         let errors: Vec<_> = r.iter().map(|x| x["result"]["isError"].as_bool().unwrap()).collect();
-        assert_eq!(errors, [false, false, true, true, true]);
+        assert_eq!(errors, [false, false, true, true, true, false, true, true, true, true, false]);
         let items: Vec<Attachment> = read_attached_in(&tmp.path().join("attach")).into_iter().map(|(_, a)| a).collect();
-        assert_eq!(items.len(), 2);
-        assert!(items.contains(&Attachment::Github(Attached { pull: false, number: 52, title: None, state: None })));
-        assert!(items.contains(&Attachment::Github(Attached { pull: true, number: 7, title: None, state: None })));
+        assert_eq!(items.len(), 4);
+        assert!(items.contains(&Attachment::Github(Attached { repo: None, pull: false, number: 11, title: None, state: None })), "an empty repo is the project's");
+        assert!(items.contains(&Attachment::Github(Attached { repo: Some("octo-cat/hello.world".into()), pull: true, number: 9, title: None, state: None })));
+        assert!(items.contains(&Attachment::Github(Attached { repo: None, pull: false, number: 52, title: None, state: None })));
+        assert!(items.contains(&Attachment::Github(Attached { repo: None, pull: true, number: 7, title: None, state: None })));
         assert_eq!(talk(&[call(json!({"kind":"issue","number":1}))], "", tmp.path())[0]["result"]["isError"], true);
         assert!(allowed_tools(&[]).contains(&"mcp__claudiu__attach_github".to_string()));
     }
@@ -750,9 +778,10 @@ mod tests {
         let errors: Vec<_> = r.iter().map(|x| x["result"]["isError"].as_bool().unwrap()).collect();
         assert_eq!(errors, [false, true, true, true, true], "bad ids and a link to itself are refused");
         assert_eq!(read_attached_in(&tmp.path().join("attach")), [("s1".to_string(), Attachment::Link("abc-123".into()))]);
-        assert_eq!(parse_attachment(r#"{"pull":true,"number":7,"title":null}"#), Some(Attachment::Github(Attached { pull: true, number: 7, title: None, state: None })));
+        assert_eq!(parse_attachment(r#"{"pull":true,"number":7,"title":null}"#), Some(Attachment::Github(Attached { repo: None, pull: true, number: 7, title: None, state: None })));
         assert_eq!(parse_attachment(r#"{"unlink":"x"}"#), Some(Attachment::Unlink("x".into())));
-        assert_eq!(parse_attachment(r#"{"detach":{"pull":false,"number":3}}"#), Some(Attachment::Detach { pull: false, number: 3 }));
+        assert_eq!(parse_attachment(r#"{"detach":{"pull":false,"number":3}}"#), Some(Attachment::Detach { repo: None, pull: false, number: 3 }));
+        assert_eq!(parse_attachment(r#"{"detach":{"repo":"o/r","pull":true,"number":3}}"#), Some(Attachment::Detach { repo: Some("o/r".into()), pull: true, number: 3 }));
         assert_eq!(parse_attachment(r#"{"detach":{"number":3}}"#), None);
         assert_eq!(parse_attachment("nonsense"), None);
     }

@@ -377,35 +377,15 @@ pub fn take_quit_key(ours: &str) -> bool {
     }
 }
 
-/// Ask the OS to draw attention to the app while it is in the background: taskbar flash (Windows, until the
-/// window is focused) or a dock bounce (macOS). Call only when the window is not active.
-pub fn request_attention(window: &rune::WindowHandle) {
-    let _ = window;
-    #[cfg(target_os = "windows")]
-    {
-        use raw_window_handle::RawWindowHandle;
-        use windows_sys::Win32::UI::WindowsAndMessaging::{FLASHW_TIMERNOFG, FLASHW_TRAY, FLASHWINFO, FlashWindowEx};
-        let _ = window.with_raw_handle(|handle| {
-            let RawWindowHandle::Win32(h) = handle.as_raw() else { return };
-            let info = FLASHWINFO {
-                cbSize: size_of::<FLASHWINFO>() as u32,
-                hwnd: h.hwnd.get() as _,
-                dwFlags: FLASHW_TRAY | FLASHW_TIMERNOFG,
-                uCount: 0,
-                dwTimeout: 0,
-            };
-            // SAFETY: `info` is fully initialised and outlives the call; the HWND is our own window.
-            unsafe { FlashWindowEx(&info) };
-        });
-    }
-    #[cfg(target_os = "macos")]
-    {
-        use objc2::MainThreadMarker;
-        use objc2_app_kit::{NSApplication, NSRequestUserAttentionType};
-        if let Some(mtm) = MainThreadMarker::new() {
-            NSApplication::sharedApplication(mtm).requestUserAttention(NSRequestUserAttentionType::InformationalRequest);
-        }
-    }
+/// A system notification, for when the window is in the background. Shown from another thread: on Linux it waits for
+/// the notification server. A failure (no notification server, notifications turned off) is left silent.
+pub fn notify(title: String, body: &'static str) {
+    std::thread::spawn(move || {
+        // Notification Center files notifications under an app; the installed one is ours, a dev build has none.
+        #[cfg(target_os = "macos")]
+        let _ = notify_rust::set_application("com.m4rocks.claudiu");
+        let _ = notify_rust::Notification::new().appname("Claudiu").summary(&title).body(body).show();
+    });
 }
 
 /// macOS's emoji and symbols palette, which types what is picked into the focused text, as Ctrl+Cmd+Space opened it
