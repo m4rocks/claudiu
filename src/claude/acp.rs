@@ -26,6 +26,8 @@ const CODEX_ACP: &str = "@agentclientprotocol/codex-acp@2.6.0";
 const AUTH_REQUIRED: i64 = -32000;
 /// Lines of codex-acp's stderr kept for a failure's reason.
 const STDERR_LINES: usize = 5;
+/// How long the settings page waits for codex-acp's models; the first run downloads codex-acp through npx.
+const MODELS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// What the mod asks for.
 #[derive(Debug, Deserialize)]
@@ -88,11 +90,18 @@ fn run_codex(request: &Request, emit: &mut impl FnMut(Event)) -> Result<String, 
     agent.process.finish(result)
 }
 
-/// The models codex-acp offers this account, as the model picker of a new session lists them.
+/// The models codex-acp offers this account, as the model picker of a new session lists them. Gives up after
+/// `MODELS_TIMEOUT`, so a stalled download or a codex-acp that never answers can't leave the page loading for good.
 pub fn codex_models(cwd: &Path) -> Result<Vec<CodexModel>, String> {
     let agent = Agent::start(cwd, &[])?;
-    let result = list_models(agent.from_agent, agent.to_agent, cwd);
-    agent.process.finish(result)
+    let (Agent { from_agent, to_agent, process }, folder) = (agent, cwd.to_path_buf());
+    let (tx, rx) = std::sync::mpsc::channel();
+    // Killing codex-acp on a timeout closes its pipes, which ends this thread too.
+    std::thread::spawn(move || {
+        let _ = tx.send(list_models(from_agent, to_agent, &folder));
+    });
+    let result = rx.recv_timeout(MODELS_TIMEOUT).unwrap_or_else(|_| Err(format!("codex-acp didn't answer within {} seconds", MODELS_TIMEOUT.as_secs())));
+    process.finish(result)
 }
 
 /// A running codex-acp: its pipes, and the process with its stderr.

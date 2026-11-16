@@ -2307,6 +2307,14 @@ fn custom_subagents_reach_new_sessions() {
     let saved = &h.ws().store.data.settings.custom_subagents;
     assert_eq!((saved.codex, saved.codex_models.clone(), saved.codex_edits), (true, vec!["gpt-6.1-sol".to_string()], true));
 
+    // Settings opens on the page it showed last, and asks codex-acp again from there.
+    h.step(|ws| {
+        ws.codex_models_page.list = |_| Ok(vec![CodexModel { id: "gpt-7".into(), name: "7".into() }]);
+        ws.act(Act::OpenSettings);
+    });
+    h.wait("a fresh look at the models", |ws| ws.store.data.settings.custom_subagents.codex_catalog.iter().any(|m| m.id == "gpt-7"));
+    h.press(rune::Key::Escape, |_| {});
+
     // A stand-in `claude` that prints its arguments and what the mod would read.
     let printer = h.work.join(if cfg!(windows) { "printer.cmd" } else { "printer" });
     let script = if cfg!(windows) { "@echo off\r\necho %*\r\necho %CLAUDIU_SUBAGENTS%\r\nping -n 60 127.0.0.1 >nul\r\n" } else { "#!/bin/sh\necho \"$@\"\necho \"$CLAUDIU_SUBAGENTS\"\nsleep 60\n" };

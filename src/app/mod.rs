@@ -763,10 +763,11 @@ impl Workspace {
                 let skills_field = modal::field(&self.store.data.settings.limits.text(), false);
                 let hints = [platform::default_shell(None).0, claude_hint, "Claude Code default".into(), "none, e.g. dataviz, claude-api".into()];
                 self.blur = true;
-                self.set_settings_page(self.settings_page);
                 let custom = &self.store.data.settings.custom_subagents;
                 let subagents = SubagentsForm { codex: custom.codex, models: custom.codex_models.clone(), edits: custom.codex_edits };
                 self.modal = Some(Modal::Settings { shell, claude, model, effort: defaults.effort, permission: defaults.permission_mode, updates, chrome, scale: crate::panels::scale::percent(), trimmed: self.store.data.settings.trimmed_tools.clone(), claudiu_off: self.store.data.settings.claudiu_tools_off.clone(), skills_field, costly: claude::costly::scan(), hints, renaming: None, subagents });
+                // After the modal exists: a page that loads something reads the dialog's fields.
+                self.set_settings_page(self.settings_page);
                 self.modal_serial += 1;
             }
             Act::PickEffort(choice) => {
