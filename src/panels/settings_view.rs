@@ -89,7 +89,7 @@ fn subagents_page(form: &SubagentsForm) -> El {
         _ => None,
     }))
     .child(faint(if form.edits {
-        "Codex may edit files and run commands in the subagent's folder. Its edits skip Claude Code's permission rules and hooks."
+        "Claudiu accepts everything Codex asks for: editing files, running commands, writing outside the folder and using the network. None of it goes through Claude Code's permission rules or hooks."
     } else {
         "Codex runs read-only: it can read and search, but not change files."
     }))

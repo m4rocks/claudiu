@@ -111,8 +111,15 @@ fn run_codex(request: &Request, emit: &mut impl FnMut(Event)) -> Result<String, 
     // Closing its stdin (dropped with `to_agent`) ends codex-acp; kill it in case it lingers.
     let _ = child.kill();
     let _ = child.wait();
-    let stderr = errors.join().unwrap_or_default();
-    result.map_err(|reason| if reason == EXITED && !stderr.is_empty() { format!("{EXITED}: {stderr}") } else { reason })
+    // Only an early exit needs stderr's last lines. Waiting for stderr to close otherwise could hold up the report
+    // while something codex-acp started still has it open.
+    match result {
+        Err(reason) if reason == EXITED => {
+            let stderr = errors.join().unwrap_or_default();
+            Err(if stderr.is_empty() { reason } else { format!("{EXITED}: {stderr}") })
+        }
+        other => other,
+    }
 }
 
 const EXITED: &str = "codex-acp exited before Codex answered";
@@ -126,7 +133,7 @@ fn converse(from_agent: impl BufRead, mut to_agent: impl Write, request: &Reques
     };
     // Waits for the answer to request `id`, handling what Codex sends meanwhile.
     let mut messages = Messages::default();
-    // What read-only refused first: codex-acp offers only "cancel" for some commands, which ends Codex's turn.
+    // What read-only refused last: codex-acp offers only "cancel" for some commands, which ends Codex's turn.
     let mut refused: Option<String> = None;
     let mut answer = |to_agent: &mut dyn Write, id: i64, messages: &mut Messages, emit: &mut dyn FnMut(Event)| -> Result<Value, String> {
         for line in lines.by_ref() {
@@ -142,7 +149,7 @@ fn converse(from_agent: impl BufRead, mut to_agent: impl Write, request: &Reques
                 Some("session/update") => messages.update(&msg["params"]["update"], emit),
                 Some("session/request_permission") => {
                     let outcome = permission(&msg["params"]["options"], request.edits);
-                    if !request.edits && refused.is_none() {
+                    if !request.edits {
                         refused = Some(msg["params"]["toolCall"]["title"].as_str().unwrap_or("an action").to_string());
                     }
                     send(to_agent, json!({ "jsonrpc": "2.0", "id": msg["id"], "result": { "outcome": outcome } }))?;

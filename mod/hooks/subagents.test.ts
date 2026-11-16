@@ -72,6 +72,12 @@ test('a Codex subagent runs the task in Codex and hands back its last message', 
   const again = await step($, 't1', 1, 'a1')
   expect(requests.length).toBe(1)
   expect(JSON.parse(again.filter(c => c.kind === 'input').map(c => c.json).join(''))).toEqual({ message: 'The bug is on line 12.' })
+
+  // A hand-back refused again ends the turn with the report as text instead of asking forever.
+  const last = await step($, 't1', 2, 'a1')
+  expect(last.some(c => c.kind === 'tool')).toBe(false)
+  expect(last.filter(c => c.kind === 'text').map(c => c.text).join('')).toBe('The bug is on line 12.')
+  expect(requests.length).toBe(1)
 })
 
 test('a failure is handed back as the report', async ($, on) => {

@@ -38,6 +38,7 @@ const VISUAL_TOOL = 'mcp__claudiu__show_visual'
 // Claude Code names a plugin's agent types `<plugin>:<name>`; this plugin is `Claudiu`.
 const AGENT_PREFIX = 'Claudiu:'
 const HANDBACK_TOOL = 'SubagentHandback'
+const STUB_PROMPT = "Reply with exactly this and nothing else: Codex couldn't run this task because Claudiu's mod lost track of this agent. Start a new Codex subagent."
 // The /config row for background compaction ("Precompute compaction"). Claude Code lists it only while a server-side
 // flag enables the feature; without the row the setting does nothing, so Claudiu offers the switch only with it.
 const PRECOMPUTE_ROW = 'precomputeCompactionEnabled'
@@ -362,8 +363,9 @@ async function registerSubagents($) {
     const description = model
       ? `Runs the task in OpenAI Codex on ${model}. Use only when the user asks for Codex, GPT or ${model}.`
       : 'Runs the task in OpenAI Codex on its default model. Use only when the user asks for Codex or GPT.'
-    // Claude never runs for this agent (codexStep answers its turns), so its prompt, model and tools are never used.
-    await $.agent.register({ name, description, prompt: 'Codex answers for this agent.', model: 'haiku', tools: [] })
+    // codexStep answers this agent's turns, so Claude runs for it only if the mod lost track of the agent (a reload,
+    // and the agent gone from the agent list); the prompt then makes it say so rather than attempt the task.
+    await $.agent.register({ name, description, prompt: STUB_PROMPT, model: 'haiku', tools: [] })
       .then(() => codexTypes.set(AGENT_PREFIX + name, { model: model ?? null, edits: codex.edits === true }))
       .catch(() => {})
   }
@@ -373,7 +375,7 @@ async function registerSubagents($) {
 async function onAgentSpawn($, e, next) {
   const r = await next(e)
   if (r.agentId && codexTypes.has(e.subagentType)) {
-    codexRuns.set(r.agentId, { type: e.subagentType, prompt: e.prompt, turnId: null, report: null })
+    codexRuns.set(r.agentId, { type: e.subagentType, prompt: e.prompt, turnId: null, report: null, handedBack: 0 })
   }
   return r
 }
@@ -384,7 +386,7 @@ async function codexRun($, agentId) {
   if (codexRuns.has(agentId) || codexTypes.size === 0) return codexRuns.get(agentId)
   const agent = (await $.agent.list().catch(() => [])).find(a => a.id === agentId)
   if (!agent || !codexTypes.has(agent.type)) return undefined
-  const run = { type: agent.type, prompt: null, turnId: null, report: null }
+  const run = { type: agent.type, prompt: null, turnId: null, report: null, handedBack: 0 }
   codexRuns.set(agentId, run)
   return run
 }
@@ -400,11 +402,13 @@ async function codexTask($, run, agentId) {
 
 // Answers one step of a Codex subagent: runs the task in Codex, streams what Codex writes as thinking (shown, not
 // saved), and hands back Codex's report. Codex runs once per turn; a later step of the same turn (a refused hand-back)
-// hands back the same report again.
+// hands back the same report once more, then ends the turn with the report as plain text so a hand-back that keeps
+// being refused can't loop.
 async function* codexStep($, e, next, run) {
   if (run.turnId !== e.turnId || run.report === null) {
     const prompt = await codexTask($, run, e.agentId)
     run.turnId = e.turnId
+    run.handedBack = 0
     const { model, edits } = codexTypes.get(run.type)
     yield { kind: 'thinking', index: 0, text: `Codex on ${model ?? "Codex's default model"}, ${edits ? 'edits allowed' : 'read-only'}\n\n` }
     run.report = null
@@ -417,6 +421,12 @@ async function* codexStep($, e, next, run) {
     if (next.signal?.aborted) return
     run.report ??= 'Codex failed: the helper stopped without an answer.'
   }
+  if (run.handedBack >= 2) {
+    yield { kind: 'text', index: 1, text: run.report }
+    yield { kind: 'stop', stopReason: 'end_turn', usage: null }
+    return { turnId: e.turnId, index: e.index, answer: run.report, toolUses: [], stopReason: 'end_turn', usage: null }
+  }
+  run.handedBack += 1
   const input = { message: run.report }
   yield { kind: 'tool', index: 1, id: `toolu_codex_${e.turnId}_${e.index}`, name: HANDBACK_TOOL }
   yield { kind: 'input', index: 1, json: JSON.stringify(input) }
