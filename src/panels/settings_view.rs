@@ -3,7 +3,8 @@
 use rune::tok::motion;
 use rune::{Color, Cursor, El, ScrollSpec, Tx, col, el, row};
 
-use crate::app::{Act, MenuAnchor, MenuItem, Modal, SettingsPage, SubagentsForm, Workspace};
+use crate::app::{Act, CodexModelsPage, MenuAnchor, MenuItem, Modal, SettingsPage, SubagentsForm, Workspace};
+use crate::claude::subagents::CodexModel;
 use crate::claude::defaults::{Effort, PermissionMode};
 use crate::claude::mcp::Feature;
 use crate::claude::trim::Trim;
@@ -65,34 +66,54 @@ fn settings_toggle(key: &str, title: &str, on: bool, field: fn(&mut Modal) -> Op
     })
 }
 
-/// The Custom subagents page: Codex's switch, its models and whether it may edit.
-fn subagents_page(form: &SubagentsForm) -> El {
+/// The Custom subagents page: Codex's switch, a switch for each model codex-acp offers, and whether Codex may edit.
+fn subagents_page(form: &SubagentsForm, catalog: &[CodexModel], looking: &CodexModelsPage) -> El {
     let mut page = col()
         .gap(8.0)
         .child(faint("Agent types that run a task in another coding agent instead of Claude. Claude uses one only when you ask for it. Applies to new and resumed sessions. Running sessions keep theirs."))
         .child(section_label("CODEX".to_string()).mt(4.0))
         .child(faint("Runs the task in OpenAI Codex through codex-acp. Needs Node (npx) and a `codex login`; the first run downloads codex-acp from npm."))
-        .child(settings_toggle("settings-codex", "Codex subagents", form.codex, |m| match m {
-            Modal::Settings { subagents, .. } => Some(&mut subagents.codex),
-            _ => None,
+        .child(switch_row("settings-codex".into(), "Codex subagents", None, form.codex, |ws| {
+            if let Some(Modal::Settings { subagents, .. }) = ws.modal.as_mut() {
+                subagents.codex = !subagents.codex;
+            }
+            ws.load_codex_models();
         }));
     if !form.codex {
         return page;
     }
-    page = page.child(field(5, "MODELS, SEPARATED BY COMMAS", &form.models, "none: Codex's default model, e.g. gpt-5.5, gpt-6.1-sol"));
-    let (_, skipped) = crate::claude::subagents::codex_types(&crate::claude::subagents::parse_models(&form.models.text));
-    if !skipped.is_empty() {
-        page = page.child(faint(format!("Skipped: {} (only letters, digits, . _ -; each name once).", skipped.join(", "))));
+    page = page.child(section_label("MODELS".to_string()).mt(4.0));
+    // The models codex-acp offers, then any switched on that it no longer offers, so they can be switched off.
+    let gone = form.models.iter().filter(|id| !catalog.iter().any(|m| &m.id == *id)).map(|id| CodexModel { id: id.clone(), name: id.clone() });
+    let rows: Vec<(CodexModel, bool)> = catalog.iter().cloned().map(|m| (m, true)).chain(gone.map(|m| (m, false))).collect();
+    for (model, offered) in rows {
+        let Some(name) = crate::claude::subagents::type_name(&model.id) else { continue };
+        let tag = if offered { name } else { format!("{name} · no longer offered") };
+        let on = form.models.contains(&model.id);
+        let id = model.id.clone();
+        page = page.child(switch_row(format!("settings-codex-model-{}", model.id), &model.name, Some(&tag), on, move |ws| {
+            if let Some(Modal::Settings { subagents, .. }) = ws.modal.as_mut() {
+                flip(&mut subagents.models, id.clone());
+            }
+        }));
     }
-    page.child(settings_toggle("settings-codex-edits", "Allow edits", form.edits, |m| match m {
-        Modal::Settings { subagents, .. } => Some(&mut subagents.edits),
-        _ => None,
-    }))
-    .child(faint(if form.edits {
-        "Claudiu accepts everything Codex asks for: editing files, running commands, writing outside the folder and using the network. None of it goes through Claude Code's permission rules or hooks."
-    } else {
-        "Codex runs read-only: it can read and search, but not change files."
-    }))
+    if looking.loading && catalog.is_empty() {
+        page = page.child(faint("Loading Codex's models…"));
+    } else if let Some(why) = &looking.error {
+        page = page.child(label(format!("Couldn't load Codex's models: {why}"), 11.0, theme::WARN).wrap());
+    } else if form.models.is_empty() {
+        page = page.child(faint("Switch on a model to give Claude a Codex subagent for it."));
+    }
+    page.child(section_label("PERMISSIONS".to_string()).mt(4.0))
+        .child(settings_toggle("settings-codex-edits", "Allow edits", form.edits, |m| match m {
+            Modal::Settings { subagents, .. } => Some(&mut subagents.edits),
+            _ => None,
+        }))
+        .child(faint(if form.edits {
+            "Claudiu accepts everything Codex asks for: editing files, running commands, writing outside the folder and using the network. None of it goes through Claude Code's permission rules or hooks."
+        } else {
+            "Codex runs read-only: it can read and search, but not change files."
+        }))
 }
 
 /// A row that opens a menu of `options` under itself; the first entry, "Claude Code default", clears the choice.
@@ -227,7 +248,7 @@ impl Workspace {
                 }
                 list
             }
-            SettingsPage::CustomSubagents => subagents_page(subagents),
+            SettingsPage::CustomSubagents => subagents_page(subagents, &self.store.data.settings.custom_subagents.codex_catalog, &self.codex_models_page),
             SettingsPage::Projects => self.projects_page(renaming.as_ref()),
             SettingsPage::Worktrees => self.worktrees_page(),
             SettingsPage::About => col().child(faint(format!(

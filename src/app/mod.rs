@@ -70,7 +70,7 @@ pub use editing::Conflict;
 pub use file_ops::NameFor;
 pub use editor_mode::{EditorCommand, EditorPane};
 pub use lifecycle::{saved_window_geom, set_main_window, show_main_window};
-pub use settings::SettingsPage;
+pub use settings::{CodexModelsPage, SettingsPage};
 pub use setup::open_first_setup;
 
 /// Every user-triggerable operation, so buttons, menus and shortcuts share one code path.
@@ -309,13 +309,13 @@ pub enum Modal {
 /// The Custom subagents page of the Settings dialog, as edited so far.
 pub struct SubagentsForm {
     pub codex: bool,
-    /// Codex models, separated by commas.
-    pub models: TextEdit,
+    /// The ids of the Codex models switched on.
+    pub models: Vec<String>,
     pub edits: bool,
 }
 
-/// A field of the open modal, by its place: the dialog's only field is 0; Settings' are shell, claude, model, skills,
-/// the project being renamed and the Codex models.
+/// A field of the open modal, by its place: the dialog's only field is 0; Settings' are shell, claude, model, skills
+/// and the project being renamed.
 pub fn modal_field(modal: &mut Option<Modal>, n: usize) -> Option<&mut TextEdit> {
     match (modal.as_mut()?, n) {
         (Modal::Rename { input, .. } | Modal::NewBranch { input, .. } | Modal::NewWorktree { input, .. } | Modal::Advisor { input, .. } | Modal::GoToLine { input, .. } | Modal::FileName { input, .. }, 0) => Some(input),
@@ -324,7 +324,6 @@ pub fn modal_field(modal: &mut Option<Modal>, n: usize) -> Option<&mut TextEdit>
         (Modal::Settings { model, .. }, 2) => Some(model),
         (Modal::Settings { skills_field, .. }, 3) => Some(skills_field),
         (Modal::Settings { renaming: Some((_, name)), .. }, 4) => Some(name),
-        (Modal::Settings { subagents, .. }, 5) => Some(&mut subagents.models),
         _ => None,
     }
 }
@@ -455,6 +454,8 @@ pub struct Workspace {
     pub settings_page: SettingsPage,
     /// What the Worktrees page of Settings shows. Not saved to disk.
     pub worktrees_page: worktrees::WorktreesPage,
+    /// Whether the Custom subagents page is asking codex-acp for its models. Not saved to disk.
+    pub codex_models_page: settings::CodexModelsPage,
     pub menu: Option<Menu>,
     pub menu_serial: u64,
     pub toast: Option<Toast>,
@@ -548,6 +549,7 @@ impl Workspace {
             modal_serial: 0,
             settings_page: SettingsPage::default(),
             worktrees_page: Default::default(),
+            codex_models_page: Default::default(),
             menu: None,
             menu_serial: 0,
             toast: None,
@@ -763,7 +765,7 @@ impl Workspace {
                 self.blur = true;
                 self.set_settings_page(self.settings_page);
                 let custom = &self.store.data.settings.custom_subagents;
-                let subagents = SubagentsForm { codex: custom.codex, models: modal::field(&custom.codex_models.join(", "), false), edits: custom.codex_edits };
+                let subagents = SubagentsForm { codex: custom.codex, models: custom.codex_models.clone(), edits: custom.codex_edits };
                 self.modal = Some(Modal::Settings { shell, claude, model, effort: defaults.effort, permission: defaults.permission_mode, updates, chrome, scale: crate::panels::scale::percent(), trimmed: self.store.data.settings.trimmed_tools.clone(), claudiu_off: self.store.data.settings.claudiu_tools_off.clone(), skills_field, costly: claude::costly::scan(), hints, renaming: None, subagents });
                 self.modal_serial += 1;
             }

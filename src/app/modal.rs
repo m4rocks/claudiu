@@ -152,8 +152,9 @@ impl Workspace {
                 }
                 let custom_subagents = claude::subagents::CustomSubagents {
                     codex: subagents.codex,
-                    codex_models: claude::subagents::parse_models(&subagents.models.text),
+                    codex_models: subagents.models,
                     codex_edits: subagents.edits,
+                    codex_catalog: s.custom_subagents.codex_catalog.clone(),
                 };
                 let tools_changed = s.trimmed_tools != trimmed || s.limits != limits || s.claudiu_tools_off != claudiu_off;
                 let subagents_changed = s.custom_subagents != custom_subagents;

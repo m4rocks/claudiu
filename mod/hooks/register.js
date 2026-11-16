@@ -18,8 +18,9 @@
 //   paints the live card over them. Claudiu's measured height comes back in `CLAUDIU_VISUAL_PREFIX<call>.rows`.
 // - One-shot completions: runs requests from `CLAUDIU_ASK_FILE` (commit messages, session titles) with
 //   `$.model.complete`, on this session's own client, so Claudiu needs no `claude -p`.
-// - Custom subagents: registers the Codex agent types `CLAUDIU_SUBAGENTS` lists. Claude never runs for those agents:
-//   each turn is answered here with what Codex reports through `CLAUDIU_EXE --acp`, handed back with SubagentHandback.
+// - Custom subagents: Claudiu defines Codex agent types with `claude --agents` and lists them in `CLAUDIU_SUBAGENTS`.
+//   Claude never runs for those agents: each turn is answered here with what Codex writes through `CLAUDIU_EXE --acp`,
+//   and Codex's last message is handed back with SubagentHandback.
 
 // ---- Constants ----------------------------------------------------------------------------------------------------
 
@@ -35,10 +36,7 @@ const PROMPT_MAX = 20000 // characters of a message Claudiu asks the session to 
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']
 const ASK_MODELS = ['haiku', 'sonnet', 'opus']
 const VISUAL_TOOL = 'mcp__claudiu__show_visual'
-// Claude Code names a plugin's agent types `<plugin>:<name>`; this plugin is `Claudiu`.
-const AGENT_PREFIX = 'Claudiu:'
 const HANDBACK_TOOL = 'SubagentHandback'
-const STUB_PROMPT = "Reply with exactly this and nothing else: Codex couldn't run this task because Claudiu's mod lost track of this agent. Start a new Codex subagent."
 // The /config row for background compaction ("Precompute compaction"). Claude Code lists it only while a server-side
 // flag enables the feature; without the row the setting does nothing, so Claudiu offers the switch only with it.
 const PRECOMPUTE_ROW = 'precomputeCompactionEnabled'
@@ -55,7 +53,7 @@ let askPoll // watches CLAUDIU_ASK_FILE
 let askSeen = null // id of the last request looked at
 let asking = false // a completion is running; a poll that finds another request waits for it
 const cardRows = new Map() // show_visual call id -> rows reserved for its card
-const codexTypes = new Map() // `Claudiu:<name>` -> { model, edits } of each Codex agent type registered
+const codexTypes = new Map() // agent type name -> { model, edits } of each Codex agent type Claudiu defined
 const codexRuns = new Map() // agent id -> { type, prompt, turnId, report } of each Codex subagent started
 const published = new Set() // call ids whose card file this process wrote from the transcript
 let rowsPoll // watches the heights Claudiu measures
@@ -347,9 +345,9 @@ async function watchSessionName($) {
 
 // ---- Custom subagents ---------------------------------------------------------------------------------------------
 
-// Registers the Codex agent types Claudiu listed, already checked (`claude/subagents.rs`). A missing or broken list
-// registers none.
-async function registerSubagents($) {
+// Reads the Codex agent types Claudiu defined for this session (`claude --agents`, `claude/subagents.rs`). A missing or
+// broken list means none.
+async function readSubagents($) {
   codexTypes.clear()
   const listed = await $.env.get('CLAUDIU_SUBAGENTS')
   if (!listed || !(await $.env.get('CLAUDIU_EXE'))) return
@@ -360,14 +358,7 @@ async function registerSubagents($) {
     return
   }
   for (const { name, model } of codex?.types ?? []) {
-    const description = model
-      ? `Runs the task in OpenAI Codex on ${model}. Use only when the user asks for Codex, GPT or ${model}.`
-      : 'Runs the task in OpenAI Codex on its default model. Use only when the user asks for Codex or GPT.'
-    // codexStep answers this agent's turns, so Claude runs for it only if the mod lost track of the agent (a reload,
-    // and the agent gone from the agent list); the prompt then makes it say so rather than attempt the task.
-    await $.agent.register({ name, description, prompt: STUB_PROMPT, model: 'haiku', tools: [] })
-      .then(() => codexTypes.set(AGENT_PREFIX + name, { model: model ?? null, edits: codex.edits === true }))
-      .catch(() => {})
+    if (typeof name === 'string' && typeof model === 'string') codexTypes.set(name, { model, edits: codex.edits === true })
   }
 }
 
@@ -400,8 +391,8 @@ async function codexTask($, run, agentId) {
   return last?.text ?? run.prompt ?? ''
 }
 
-// Answers one step of a Codex subagent: runs the task in Codex, streams what Codex writes as thinking (shown, not
-// saved), and hands back Codex's report. Codex runs once per turn; a later step of the same turn (a refused hand-back)
+// Answers one step of a Codex subagent: runs the task in Codex, streams what Codex writes and does as the agent's own
+// text (saved in its transcript, which only the person reads), and hands back Codex's last message as the report. Codex runs once per turn; a later step of the same turn (a refused hand-back)
 // hands back the same report once more, then ends the turn with the report as plain text so a hand-back that keeps
 // being refused can't loop.
 async function* codexStep($, e, next, run) {
@@ -410,11 +401,11 @@ async function* codexStep($, e, next, run) {
     run.turnId = e.turnId
     run.handedBack = 0
     const { model, edits } = codexTypes.get(run.type)
-    yield { kind: 'thinking', index: 0, text: `Codex on ${model ?? "Codex's default model"}, ${edits ? 'edits allowed' : 'read-only'}\n\n` }
+    yield { kind: 'text', index: 0, text: `Codex on ${model}, ${edits ? 'edits allowed' : 'read-only'}\n\n` }
     run.report = null
     for await (const event of codexEvents($, { model, edits, cwd: await $.session.cwd(), prompt }, next.signal)) {
-      if (event.kind === 'text') yield { kind: 'thinking', index: 0, text: event.text }
-      else if (event.kind === 'step') yield { kind: 'thinking', index: 0, text: `\n▸ ${event.text}\n` }
+      if (event.kind === 'text') yield { kind: 'text', index: 0, text: event.text }
+      else if (event.kind === 'step') yield { kind: 'text', index: 0, text: `\n▸ ${event.text}\n` }
       else if (event.kind === 'report') run.report = event.text
       else if (event.kind === 'failed') run.report = 'Codex failed: ' + event.reason
     }
@@ -644,7 +635,7 @@ async function onSessionStart($, e, next) {
   rowsPoll?.cancel()
   rowsPoll = $.clock.every(200, () => readCardRows($))
   await watchSessionName($)
-  await registerSubagents($)
+  await readSubagents($)
   return r
 }
 

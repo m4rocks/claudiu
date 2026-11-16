@@ -46,7 +46,50 @@ impl SettingsPage {
     }
 }
 
+/// The Custom subagents page's look at codex-acp's models.
+pub struct CodexModelsPage {
+    pub loading: bool,
+    /// Why the last look failed.
+    pub error: Option<String>,
+    /// How the page asks; tests answer without codex-acp.
+    pub list: fn(&std::path::Path) -> Result<Vec<claude::subagents::CodexModel>, String>,
+}
+
+impl Default for CodexModelsPage {
+    fn default() -> Self {
+        Self { loading: false, error: None, list: claude::acp::codex_models }
+    }
+}
+
 impl Workspace {
+    /// Asks codex-acp for its models in the background while the Custom subagents page shows Codex switched on. The
+    /// list the page showed last stays until the answer comes; a failure keeps it and says why.
+    pub(crate) fn load_codex_models(&mut self) {
+        let codex_on = matches!(&self.modal, Some(Modal::Settings { subagents, .. }) if subagents.codex);
+        if self.settings_page != SettingsPage::CustomSubagents || !codex_on || self.codex_models_page.loading {
+            return;
+        }
+        self.codex_models_page.loading = true;
+        let list = self.codex_models_page.list;
+        let folder = crate::datadir::data_dir();
+        self.rt.spawn(
+            move || list(&folder),
+            move |ws: &mut Workspace, found| {
+                ws.codex_models_page.loading = false;
+                match found {
+                    Ok(models) => {
+                        ws.codex_models_page.error = None;
+                        if ws.store.data.settings.custom_subagents.codex_catalog != models {
+                            ws.store.data.settings.custom_subagents.codex_catalog = models;
+                            ws.store.mark_dirty();
+                        }
+                    }
+                    Err(why) => ws.codex_models_page.error = Some(why),
+                }
+            },
+        );
+    }
+
     /// Keys for the open Settings dialog that no text field took. Up and Down change the page and Enter saves while no
     /// field has the keyboard (the category list has it); Tab and Shift+Tab cycle the list and the page's text fields.
     pub(crate) fn settings_key(&mut self, ks: &Keystroke) -> bool {
@@ -54,12 +97,10 @@ impl Workspace {
             SettingsPage::General => &[0, 1],
             SettingsPage::Sessions => &[2],
             SettingsPage::ClaudeTools => &[3],
-            // The models field shows only while Codex is on.
-            SettingsPage::CustomSubagents if matches!(&self.modal, Some(Modal::Settings { subagents, .. }) if subagents.codex) => &[5],
             SettingsPage::Projects if modal_field(&mut self.modal, 4).is_some() => &[4],
             _ => &[],
         };
-        let focused = (0..6).find(|n| modal_field(&mut self.modal, *n).is_some_and(|f| f.focused));
+        let focused = (0..5).find(|n| modal_field(&mut self.modal, *n).is_some_and(|f| f.focused));
         let on_list = focused.is_none();
         let plain = !ks.modifiers.control && !ks.modifiers.alt && !ks.modifiers.platform;
         match ks.key.as_str() {
@@ -70,7 +111,7 @@ impl Workspace {
                 let here = focused.and_then(|f| fields.iter().position(|x| *x == f)).map_or(0, |i| i + 1);
                 let stops = fields.len() + 1;
                 let there = if ks.modifiers.shift { (here + stops - 1) % stops } else { (here + 1) % stops };
-                for n in 0..6 {
+                for n in 0..5 {
                     if let Some(f) = modal_field(&mut self.modal, n) {
                         f.focused = there.checked_sub(1).map(|i| fields[i]) == Some(n);
                     }

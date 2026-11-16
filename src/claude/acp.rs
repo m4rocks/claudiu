@@ -1,5 +1,5 @@
 //! Runs one task in Codex for a custom subagent (`claude/subagents.rs`), through the Agent Client Protocol:
-//! `claudiu --acp`.
+//! `claudiu --acp`. The Custom subagents settings page also asks codex-acp for its models here (`codex_models`).
 //!
 //! The mod starts this once per subagent turn and writes the task to stdin as JSON (`Request`). A mod can write a
 //! child's stdin only once, and ACP is a conversation in both directions, so the conversation happens here. Progress
@@ -10,11 +10,14 @@
 //! exits with it.
 
 use std::io::{BufRead, BufReader, Read, Write};
-use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::thread::JoinHandle;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+
+use crate::claude::subagents::CodexModel;
 
 pub const FLAG: &str = "--acp";
 /// Pinned so an upstream change reaches users only with a Claudiu release.
@@ -76,50 +79,124 @@ pub fn run() -> i32 {
 }
 
 fn run_codex(request: &Request, emit: &mut impl FnMut(Event)) -> Result<String, String> {
-    let npx = which::which("npx").map_err(|_| "npx was not found on PATH. Codex subagents need Node.js.".to_string())?;
-    let mut command = Command::new(npx);
-    command
-        .args(["-y", CODEX_ACP])
-        .current_dir(&request.cwd)
-        .env("INITIAL_AGENT_MODE", if request.edits { "workspace-write" } else { "read-only" })
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    let mut env = vec![("INITIAL_AGENT_MODE", (if request.edits { "workspace-write" } else { "read-only" }).to_string())];
     if let Some(model) = &request.model {
-        command.env("CODEX_CONFIG", json!({ "model": model }).to_string());
+        env.push(("CODEX_CONFIG", json!({ "model": model }).to_string()));
     }
-    let mut child = command.spawn().map_err(|e| format!("codex-acp could not start ({e})"))?;
-    let (Some(to_agent), Some(from_agent), Some(stderr)) = (child.stdin.take(), child.stdout.take(), child.stderr.take()) else {
-        let _ = child.kill();
-        return Err("codex-acp could not start (no pipes)".into());
-    };
-    // The last lines of stderr explain an exit; read on a thread so a full stderr pipe can't stall codex-acp.
-    let errors = std::thread::spawn(move || {
-        let mut last: Vec<String> = vec![];
-        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-            if !line.trim().is_empty() {
-                last.push(line);
-                if last.len() > STDERR_LINES {
-                    last.remove(0);
+    let agent = Agent::start(&request.cwd, &env)?;
+    let result = converse(agent.from_agent, agent.to_agent, request, emit);
+    agent.process.finish(result)
+}
+
+/// The models codex-acp offers this account, as the model picker of a new session lists them.
+pub fn codex_models(cwd: &Path) -> Result<Vec<CodexModel>, String> {
+    let agent = Agent::start(cwd, &[])?;
+    let result = list_models(agent.from_agent, agent.to_agent, cwd);
+    agent.process.finish(result)
+}
+
+/// A running codex-acp: its pipes, and the process with its stderr.
+struct Agent {
+    to_agent: ChildStdin,
+    from_agent: BufReader<ChildStdout>,
+    process: Process,
+}
+
+struct Process {
+    child: Child,
+    /// The last lines of stderr, collected on a thread so a full stderr pipe can't stall codex-acp.
+    errors: JoinHandle<String>,
+}
+
+impl Agent {
+    fn start(cwd: &Path, env: &[(&str, String)]) -> Result<Agent, String> {
+        let npx = which::which("npx").map_err(|_| "npx was not found on PATH. Codex subagents need Node.js.".to_string())?;
+        let mut command = Command::new(npx);
+        command.args(["-y", CODEX_ACP]).current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        for (key, value) in env {
+            command.env(key, value);
+        }
+        let mut child = command.spawn().map_err(|e| format!("codex-acp could not start ({e})"))?;
+        let (Some(to_agent), Some(from_agent), Some(stderr)) = (child.stdin.take(), child.stdout.take(), child.stderr.take()) else {
+            let _ = child.kill();
+            return Err("codex-acp could not start (no pipes)".into());
+        };
+        let errors = std::thread::spawn(move || {
+            let mut last: Vec<String> = vec![];
+            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                if !line.trim().is_empty() {
+                    last.push(line);
+                    if last.len() > STDERR_LINES {
+                        last.remove(0);
+                    }
                 }
             }
-        }
-        last.join("\n")
-    });
-
-    let result = converse(BufReader::new(from_agent), to_agent, request, emit);
-    // Closing its stdin (dropped with `to_agent`) ends codex-acp; kill it in case it lingers.
-    let _ = child.kill();
-    let _ = child.wait();
-    // Only an early exit needs stderr's last lines. Waiting for stderr to close otherwise could hold up the report
-    // while something codex-acp started still has it open.
-    match result {
-        Err(reason) if reason == EXITED => {
-            let stderr = errors.join().unwrap_or_default();
-            Err(if stderr.is_empty() { reason } else { format!("{EXITED}: {stderr}") })
-        }
-        other => other,
+            last.join("\n")
+        });
+        Ok(Agent { to_agent, from_agent: BufReader::new(from_agent), process: Process { child, errors } })
     }
+}
+
+impl Process {
+    /// Ends codex-acp once the conversation is over (its stdin is already closed) and returns `result`, with
+    /// stderr's last lines added when codex-acp exited early.
+    fn finish<T>(mut self, result: Result<T, String>) -> Result<T, String> {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        // Only an early exit needs stderr's last lines. Waiting for stderr to close otherwise could hold up the answer
+        // while something codex-acp started still has it open.
+        match result {
+            Err(reason) if reason == EXITED => {
+                let stderr = self.errors.join().unwrap_or_default();
+                Err(if stderr.is_empty() { reason } else { format!("{EXITED}: {stderr}") })
+            }
+            other => other,
+        }
+    }
+}
+
+fn initialize() -> Value {
+    json!({ "jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {
+        "protocolVersion": 1,
+        "clientCapabilities": { "fs": { "readTextFile": false, "writeTextFile": false }, "terminal": false },
+        "clientInfo": { "name": "claudiu", "version": env!("CARGO_PKG_VERSION") },
+    }})
+}
+
+fn new_session(cwd: &Path) -> Value {
+    json!({ "jsonrpc": "2.0", "id": 1, "method": "session/new", "params": { "cwd": cwd, "mcpServers": [] } })
+}
+
+/// Opens a session only to read its model picker: the config option whose category is `model`.
+fn list_models(from_agent: impl BufRead, mut to_agent: impl Write, cwd: &Path) -> Result<Vec<CodexModel>, String> {
+    let mut lines = from_agent.lines();
+    let mut reply = |id: i64| -> Result<Value, String> {
+        for line in lines.by_ref() {
+            let msg: Value = serde_json::from_str(&line.map_err(|_| EXITED.to_string())?).unwrap_or_default();
+            if msg.get("method").is_none() && msg["id"].as_i64() == Some(id) {
+                return match msg.get("error") {
+                    Some(error) => Err(error_reason(error)),
+                    None => Ok(msg["result"].clone()),
+                };
+            }
+        }
+        Err(EXITED.to_string())
+    };
+    for (id, message) in [(0, initialize()), (1, new_session(cwd))] {
+        writeln!(to_agent, "{message}").and_then(|_| to_agent.flush()).map_err(|_| EXITED.to_string())?;
+        let result = reply(id)?;
+        if id == 1 {
+            let options = result["configOptions"].as_array().into_iter().flatten();
+            let picker = options.filter(|o| o["category"] == "model").find_map(|o| o["options"].as_array());
+            let models: Vec<CodexModel> = picker
+                .into_iter()
+                .flatten()
+                .filter_map(|o| Some(CodexModel { id: o["value"].as_str()?.to_string(), name: o["name"].as_str().unwrap_or_default().to_string() }))
+                .collect();
+            return if models.is_empty() { Err("codex-acp listed no models".into()) } else { Ok(models) };
+        }
+    }
+    unreachable!("the loop returns after the session opens")
 }
 
 const EXITED: &str = "codex-acp exited before Codex answered";
@@ -164,14 +241,10 @@ fn converse(from_agent: impl BufRead, mut to_agent: impl Write, request: &Reques
         Err(EXITED.to_string())
     };
 
-    send(&mut to_agent, json!({ "jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {
-        "protocolVersion": 1,
-        "clientCapabilities": { "fs": { "readTextFile": false, "writeTextFile": false }, "terminal": false },
-        "clientInfo": { "name": "claudiu", "version": env!("CARGO_PKG_VERSION") },
-    }}))?;
+    send(&mut to_agent, initialize())?;
     answer(&mut to_agent, 0, &mut messages, emit)?;
 
-    send(&mut to_agent, json!({ "jsonrpc": "2.0", "id": 1, "method": "session/new", "params": { "cwd": request.cwd, "mcpServers": [] } }))?;
+    send(&mut to_agent, new_session(&request.cwd))?;
     let session = answer(&mut to_agent, 1, &mut messages, emit)?;
     let session_id = session["sessionId"].as_str().ok_or("codex-acp opened no session")?.to_string();
 
@@ -444,6 +517,39 @@ mod tests {
         let mut says = opening();
         says.extend([chunk("m1", "Partial findings."), reply(2, json!({ "stopReason": "max_tokens" }))]);
         assert_eq!(talk(&says, false).0, Ok("Partial findings.".into()));
+    }
+
+    #[test]
+    fn the_models_come_from_the_session_model_picker() {
+        let says = [
+            reply(0, json!({ "protocolVersion": 1 })),
+            update(json!({ "sessionUpdate": "available_commands_update", "availableCommands": [] })),
+            reply(1, json!({ "sessionId": "s1", "configOptions": [
+                { "id": "mode", "category": "mode", "options": [{ "value": "read-only", "name": "Read-only" }] },
+                { "id": "model", "category": "model", "options": [
+                    { "value": "gpt-6.1-sol", "name": "6.1 Sol" },
+                    { "value": "gpt-5.6-luna", "name": "5.6 Luna" },
+                ]},
+            ]})),
+        ];
+        let script: String = says.iter().map(|m| format!("{m}\n")).collect();
+        let mut sent = Vec::new();
+        let models = list_models(script.as_bytes(), &mut sent, Path::new("/work")).unwrap();
+        assert_eq!(
+            models,
+            vec![
+                CodexModel { id: "gpt-6.1-sol".into(), name: "6.1 Sol".into() },
+                CodexModel { id: "gpt-5.6-luna".into(), name: "5.6 Luna".into() },
+            ]
+        );
+        assert_eq!(String::from_utf8(sent).unwrap().lines().count(), 2, "initialize and session/new, no prompt");
+    }
+
+    #[test]
+    fn no_model_picker_is_an_error() {
+        let says = [reply(0, json!({})), reply(1, json!({ "sessionId": "s1" }))];
+        let script: String = says.iter().map(|m| format!("{m}\n")).collect();
+        assert_eq!(list_models(script.as_bytes(), Vec::new(), Path::new("/w")), Err("codex-acp listed no models".into()));
     }
 
     #[test]

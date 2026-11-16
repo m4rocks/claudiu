@@ -2284,36 +2284,32 @@ fn the_projects_page_moves_renames_and_removes_projects() {
     assert_eq!(h.ws().store.session(&session).unwrap().project_id.as_ref(), Some(&beta), "with its session");
 }
 
-/// Settings → Custom subagents: the models field shows once Codex is on, Save keeps what was typed, and a new session
-/// gets only the checked agent types.
+/// Settings → Custom subagents: turning Codex on lists the models codex-acp offers, each with a switch, Save keeps the
+/// ones switched on, and a new session gets one unprefixed agent type for each.
 #[test]
 fn custom_subagents_reach_new_sessions() {
+    use crate::claude::subagents::CodexModel;
     let mut h = Harness::new(|_| vec![]);
     h.step(|ws| {
+        ws.codex_models_page.list = |_| Ok(vec![CodexModel { id: "gpt-6.1-sol".into(), name: "6.1 Sol".into() }, CodexModel { id: "gpt-5.6-luna".into(), name: "5.6 Luna".into() }]);
         ws.act(Act::OpenSettings);
         ws.set_settings_page(SettingsPage::CustomSubagents);
     });
     h.settle();
-    assert!(!h.drawn("modal-field-5"), "the models field waits for the Codex switch");
+    assert!(!h.drawn("settings-codex-model-gpt-6.1-sol"), "the models wait for the Codex switch");
     h.click("settings-codex");
+    h.wait("the models codex-acp offers", |ws| ws.store.data.settings.custom_subagents.codex_catalog.len() == 2);
     h.settle();
-    assert!(h.drawn("modal-field-5"), "the models field shows once Codex is on: {:?}", h.keys());
-    h.click("modal-field-5");
-    for c in "gpt-5.5, gpt 5".chars() {
-        h.press(rune::Key::Text(c.to_string()), |_| {});
-    }
+    h.click("settings-codex-model-gpt-6.1-sol");
     h.click("settings-codex-edits");
     h.step(|ws| ws.submit_modal());
     assert_eq!(h.ws().toast.as_ref().map(|t| t.text.as_str()), Some("Settings saved. Custom subagents apply to new and resumed sessions."));
-    let saved = h.ws().store.data.settings.custom_subagents.clone();
-    assert_eq!(
-        saved,
-        crate::claude::subagents::CustomSubagents { codex: true, codex_models: vec!["gpt-5.5".into(), "gpt 5".into()], codex_edits: true }
-    );
+    let saved = &h.ws().store.data.settings.custom_subagents;
+    assert_eq!((saved.codex, saved.codex_models.clone(), saved.codex_edits), (true, vec!["gpt-6.1-sol".to_string()], true));
 
-    // A stand-in `claude` that prints what the mod would read.
+    // A stand-in `claude` that prints its arguments and what the mod would read.
     let printer = h.work.join(if cfg!(windows) { "printer.cmd" } else { "printer" });
-    let script = if cfg!(windows) { "@echo off\r\necho %CLAUDIU_SUBAGENTS%\r\nping -n 60 127.0.0.1 >nul\r\n" } else { "#!/bin/sh\necho \"$CLAUDIU_SUBAGENTS\"\nsleep 60\n" };
+    let script = if cfg!(windows) { "@echo off\r\necho %*\r\necho %CLAUDIU_SUBAGENTS%\r\nping -n 60 127.0.0.1 >nul\r\n" } else { "#!/bin/sh\necho \"$@\"\necho \"$CLAUDIU_SUBAGENTS\"\nsleep 60\n" };
     std::fs::write(&printer, script).unwrap();
     #[cfg(unix)]
     std::fs::set_permissions(&printer, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
@@ -2323,7 +2319,7 @@ fn custom_subagents_reach_new_sessions() {
         ws.new_claude(cwd);
     });
     let id = h.ws().active.clone().expect("a session is shown");
-    h.wait("the agent types to reach the session", |ws| {
-        ws.live_view(&id).is_some_and(|v| v.tail_text(2000).contains(r#"{"codex":{"edits":true,"types":[{"name":"codex-gpt-5-5","model":"gpt-5.5"}]}}"#))
-    });
+    let shows = |ws: &Workspace, text: &str| ws.live_view(&id).is_some_and(|v| v.tail_text(4000).contains(text));
+    h.wait("the agent type to reach Claude", |ws| shows(ws, r#"--agents {"codex-gpt-6-1-sol":{"#));
+    h.wait("the agent type to reach the mod", |ws| shows(ws, r#"{"codex":{"edits":true,"types":[{"name":"codex-gpt-6-1-sol","model":"gpt-6.1-sol"}]}}"#));
 }

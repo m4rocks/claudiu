@@ -36,9 +36,11 @@ impl Workspace {
             spec.env.push((usage::CTL_ENV.into(), usage::ctl_file(record_id).to_string_lossy().into_owned()));
             spec.env.push((crate::visual::VISUAL_ENV.into(), crate::visual::prefix(record_id).to_string_lossy().into_owned()));
             spec.env.push((crate::claude::ask::ASK_ENV.into(), crate::claude::ask::request_file(record_id).to_string_lossy().into_owned()));
-            if let Some(subagents) = settings.custom_subagents.env()
+            // The agent types go with the mod, which answers their turns: without it Claude would run for them.
+            if let (Some(subagents), Some(agents)) = (settings.custom_subagents.env(), settings.custom_subagents.agents())
                 && let Ok(exe) = std::env::current_exe()
             {
+                spec.args.extend(["--agents".into(), agents]);
                 spec.env.push((crate::claude::subagents::ENV.into(), subagents));
                 spec.env.push((crate::claude::subagents::EXE_ENV.into(), exe.to_string_lossy().into_owned()));
             }

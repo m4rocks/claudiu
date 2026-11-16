@@ -15,11 +15,6 @@ function engine(on: any, helper: string[], requests: unknown[], subagents = SUBA
   on('config.list', () => ({ value: [] }))
   on('settings.read', () => ({ value: {} }))
   on('session.start', (_$: any, e: any) => ({ cwd: e.cwd }))
-  const registered: any[] = []
-  on('agent.register', (_$: any, e: any) => {
-    registered.push(e)
-    return { value: undefined }
-  })
   on('agent.spawn', () => ({ model: 'haiku', agentId: 'a1' }))
   on('process.spawn', async function* (_$: any, e: any) {
     requests.push({ argv: e.argv, input: JSON.parse(e.input) })
@@ -34,7 +29,6 @@ function engine(on: any, helper: string[], requests: unknown[], subagents = SUBA
     yield { kind: 'text', index: 0, text: 'Claude answered' }
     return { turnId: e.turnId, index: e.index, answer: 'Claude answered', toolUses: [], stopReason: 'end_turn', usage: null }
   })
-  return registered
 }
 
 async function step($: any, turnId: string, index: number, agentId?: string) {
@@ -46,23 +40,20 @@ async function step($: any, turnId: string, index: number, agentId?: string) {
 
 test('a Codex subagent runs the task in Codex and hands back its last message', async ($, on) => {
   const requests: any[] = []
-  const registered = engine(on, [
+  engine(on, [
     JSON.stringify({ kind: 'text', text: 'Looking.' }),
     JSON.stringify({ kind: 'step', text: 'Read src/a.rs' }),
     JSON.stringify({ kind: 'report', text: 'The bug is on line 12.' }),
   ], requests)
 
   await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
-  expect(registered.map(r => r.name)).toEqual(['codex-gpt-5-5'])
-  expect(registered[0].description).toBe('Runs the task in OpenAI Codex on gpt-5.5. Use only when the user asks for Codex, GPT or gpt-5.5.')
-
-  await $.agent.spawn({ subagentType: 'Claudiu:codex-gpt-5-5', prompt: 'Find the bug' })
+  await $.agent.spawn({ subagentType: 'codex-gpt-5-5', prompt: 'Find the bug' })
   const chunks = await step($, 't1', 0, 'a1')
 
   expect(requests).toEqual([{ argv: ['/apps/claudiu', '--acp'], input: { model: 'gpt-5.5', edits: false, cwd: '/work/sub', prompt: 'Find the bug' } }])
-  const thinking = chunks.filter(c => c.kind === 'thinking').map(c => c.text).join('')
-  expect(thinking).toBe('Codex on gpt-5.5, read-only\n\nLooking.\n▸ Read src/a.rs\n')
-  expect(chunks.some(c => c.kind === 'text')).toBe(false) // nothing of Codex's is saved but the report
+  // What Codex writes and does is the agent's own text, which its transcript keeps; Claude gets only the report.
+  const text = chunks.filter(c => c.kind === 'text').map(c => c.text).join('')
+  expect(text).toBe('Codex on gpt-5.5, read-only\n\nLooking.\n▸ Read src/a.rs\n')
   const tool = chunks.find(c => c.kind === 'tool')
   expect(tool.name).toBe('SubagentHandback')
   const input = chunks.filter(c => c.kind === 'input').map(c => c.json).join('')
@@ -83,7 +74,7 @@ test('a Codex subagent runs the task in Codex and hands back its last message', 
 test('a failure is handed back as the report', async ($, on) => {
   engine(on, [JSON.stringify({ kind: 'failed', reason: "Codex isn't signed in. Run `codex login`, then try again." })], [])
   await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
-  await $.agent.spawn({ subagentType: 'Claudiu:codex-gpt-5-5', prompt: 'Find the bug' })
+  await $.agent.spawn({ subagentType: 'codex-gpt-5-5', prompt: 'Find the bug' })
   const chunks = await step($, 't1', 0, 'a1')
   const input = JSON.parse(chunks.filter(c => c.kind === 'input').map(c => c.json).join(''))
   expect(input.message).toBe("Codex failed: Codex isn't signed in. Run `codex login`, then try again.")
@@ -92,7 +83,7 @@ test('a failure is handed back as the report', async ($, on) => {
 test('a helper that ends without an answer is a failure too', async ($, on) => {
   engine(on, ['not json'], [])
   await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
-  await $.agent.spawn({ subagentType: 'Claudiu:codex-gpt-5-5', prompt: 'Find the bug' })
+  await $.agent.spawn({ subagentType: 'codex-gpt-5-5', prompt: 'Find the bug' })
   const chunks = await step($, 't1', 0, 'a1')
   const input = JSON.parse(chunks.filter(c => c.kind === 'input').map(c => c.json).join(''))
   expect(input.message).toBe('Codex failed: the helper stopped without an answer.')
@@ -108,8 +99,12 @@ test('other subagents still run on Claude', async ($, on) => {
   expect(requests).toEqual([])
 })
 
-test('no Codex types are registered while Codex is off', async ($, on) => {
-  const registered = engine(on, [], [], '') // an empty list reads as none, like a missing one
+test('without a list from Claudiu, an agent named like a Codex type still runs on Claude', async ($, on) => {
+  const requests: unknown[] = []
+  engine(on, [], requests, '') // an empty list reads as none, like a missing one
   await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
-  expect(registered).toEqual([])
+  await $.agent.spawn({ subagentType: 'codex-gpt-5-5', prompt: 'Find the bug' })
+  const chunks = await step($, 't1', 0, 'a1')
+  expect(chunks.map(c => c.kind)).toEqual(['text'])
+  expect(requests).toEqual([])
 })
