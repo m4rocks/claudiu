@@ -18,7 +18,7 @@ pub fn tidy_leftovers() {
     datadir::prune(attached, 7 * 86_400);
     datadir::prune(mcp_configs, 7 * 86_400);
     datadir::prune(crate::claude::trim::settings_dir(), 7 * 86_400);
-    // Titles are copied into the store on the next tick, so an old file is only a duplicate.
+    // Nothing writes titles any more; the old files go.
     datadir::prune(titles, 7 * 86_400);
     datadir::prune(usage::snapshot_dir(), 30 * 86_400);
     datadir::prune(usage::ctl_dir(), 7 * 86_400);

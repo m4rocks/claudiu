@@ -20,8 +20,44 @@ use serde_json::{Map, Value};
 
 /// Files inside each account's config folder that every account shares.
 const FILES: &[&str] = &["settings.json", "CLAUDE.md", "keybindings.json"];
-/// Top-level keys of an account's `.claude.json` that every account shares: the user's MCP servers.
-const SHARED_KEYS: &[&str] = &["mcpServers"];
+/// Top-level keys of an account's `.claude.json` that every account shares: the user's MCP servers, and the
+/// preferences `/config` saves there. The preferences are Claude Code's own list of global config keys (2.1.325),
+/// without the sign-in, install details, counters, notices and caches it also holds; Claude Code writes only the ones
+/// changed from their defaults, so most are usually absent.
+const SHARED_KEYS: &[&str] = &[
+    "mcpServers",
+    "theme",
+    "verbose",
+    "editorMode",
+    "preferredNotifChannel",
+    "autoCompactEnabled",
+    "autoScrollEnabled",
+    "showTurnDuration",
+    "showMessageTimestamps",
+    "diffTool",
+    "todoFeatureEnabled",
+    "showExpandedTodos",
+    "briefTranscript",
+    "messageIdleNotifThresholdMs",
+    "autoConnectIde",
+    "autoInstallIdeExtension",
+    "fileCheckpointingEnabled",
+    "terminalProgressBarEnabled",
+    "showStatusInTerminalTab",
+    "taskCompleteNotifEnabled",
+    "inputNeededNotifEnabled",
+    "agentPushNotifEnabled",
+    "respectGitignore",
+    "claudeInChromeDefaultEnabled",
+    "copyFullResponse",
+    "copyOnSelect",
+    "leftArrowOpensAgents",
+    "defaultToAgentsView",
+    "prStatusFooterEnabled",
+    "teammateMode",
+    "remoteControlAtStartup",
+    "autoUploadSessions",
+];
 /// One project's trust in `.claude.json`: once any account trusts a folder, every account does.
 const TRUST_KEY: &str = "hasTrustDialogAccepted";
 
@@ -382,6 +418,31 @@ mod tests {
         sync(&s.accounts, &s.state).unwrap();
         let main: Value = serde_json::from_str(&fs::read_to_string(&s.accounts[0].claude_json).unwrap()).unwrap();
         assert!(main.get("mcpServers").is_none(), "the removal reached main");
+    }
+
+    #[test]
+    fn a_config_option_changed_in_one_account_reaches_every_account_and_its_reset_does_too() {
+        let s = setup(3);
+        for (a, who) in s.accounts.iter().zip(["main", "alt1", "alt2"]) {
+            write_at(&a.claude_json, &format!(r#"{{"oauthAccount":{{"email":"{who}"}},"numStartups":1}}"#), 1000);
+        }
+        sync(&s.accounts, &s.state).unwrap();
+        let json = |a: &Account| serde_json::from_str::<Value>(&fs::read_to_string(&a.claude_json).unwrap()).unwrap();
+
+        // `/config` in the second alt: the theme and auto-compact.
+        write_at(&s.accounts[2].claude_json, r#"{"oauthAccount":{"email":"alt2"},"numStartups":9,"theme":"light","autoCompactEnabled":false}"#, 2000);
+        sync(&s.accounts, &s.state).unwrap();
+        for (a, who) in s.accounts.iter().zip(["main", "alt1", "alt2"]) {
+            let j = json(a);
+            assert_eq!((j["theme"].as_str(), j["autoCompactEnabled"].as_bool()), (Some("light"), Some(false)), "{who}");
+            assert_eq!(j["oauthAccount"]["email"], who, "the login stays the account's own");
+        }
+        assert_eq!(json(&s.accounts[0])["numStartups"], 1, "counters are not shared");
+
+        // Back to the default in main: Claude Code drops the key, and the others drop it too.
+        write_at(&s.accounts[0].claude_json, r#"{"oauthAccount":{"email":"main"},"numStartups":1,"autoCompactEnabled":false}"#, 3000);
+        sync(&s.accounts, &s.state).unwrap();
+        assert!(s.accounts.iter().all(|a| json(a).get("theme").is_none()));
     }
 
     #[test]

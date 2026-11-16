@@ -377,12 +377,13 @@ pub fn read_session(path: &Path) -> Option<SessionScan> {
         }
     }
 
-    let title = custom_title.or(ai_title).or(first_prompt);
+    let title = custom_title.clone().or(ai_title).or(first_prompt);
     Some(SessionScan {
         session: ExternalSession {
             session_id,
             cwd,
             title,
+            custom_title,
             created_at: created.unwrap_or(created_fs),
             last_active: modified_fs,
             model,

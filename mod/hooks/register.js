@@ -11,8 +11,8 @@
 // - Messages: sends a message Claudiu asks for through the same file (the editor's Ask Claude) as the user's own words,
 //   when the session is idle, without typing into the terminal. (Claudiu itself pastes the editor's `@file#L`
 //   reference into Claude's input box; that is not done here.)
-// - Usage and status: reports context, the 5-hour and 7-day limits, auto-compact, background compaction, advisor and
-//   the last command to `CLAUDIU_USAGE_DIR/<claude session id>.json`. No tokens are spent.
+// - Usage and status: reports context, the 5-hour and 7-day limits, auto-compact, background compaction and advisor to
+//   `CLAUDIU_USAGE_DIR/<claude session id>.json`, after each request, command and setting change. No tokens are spent.
 // - Cards: answers `show_visual` in-process and, while the model is still writing the call, streams its Markdown to
 //   `CLAUDIU_VISUAL_PREFIX<call>.json`. Under each call it reserves rows, each with a link naming the call, and Claudiu
 //   paints the live card over them. Claudiu's measured height comes back in `CLAUDIU_VISUAL_PREFIX<call>.rows`.
@@ -354,6 +354,10 @@ async function onMeasure($, e, next) {
 
 async function onCommandRun($, e, next) {
   const r = await next(e) // the command has run: a setting it changed is read after it
+  // A name the user gave with /rename is the session's now. Claudiu reads it from the transcript and writes it back to
+  // CLAUDIU_NAME_FILE; it is already applied, so that must not run /rename again.
+  const name = e.command === 'rename' ? e.args.trim() : ''
+  if (name) named = (await $.session.id()) + '\n' + name
   await report($, true)
   return r
 }

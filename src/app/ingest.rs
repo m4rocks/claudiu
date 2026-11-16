@@ -1,5 +1,5 @@
 //! Taking in what other processes left in the data folder: the per-process mod's usage snapshots (limits, context,
-//! settings), the tab titles Claude chose, and the links and GitHub items sessions asked for. Reading the files is
+//! settings), and the links and GitHub items sessions asked for. Reading the files is
 //! off the UI thread; applying them is a handful of small, separately testable steps.
 
 use super::*;
@@ -10,10 +10,9 @@ impl Workspace {
     /// Costs no tokens; the files are tiny.
     pub(super) fn ingest_usage(&mut self) {
         self.rt.spawn_quietly(
-            move || { (usage::read_snapshots(&usage::snapshot_dir()), mcp::read_titles(), mcp::read_attached()) },
-            move |ws: &mut Workspace, (snaps, titles, items)| {
+            move || { (usage::read_snapshots(&usage::snapshot_dir()), mcp::read_attached()) },
+            move |ws: &mut Workspace, (snaps, items)| {
                 let mut changed = false;
-                changed |= titles.into_iter().fold(false, |c, (stem, title, stamp)| ws.apply_title(&stem, title, stamp) | c);
                 changed |= snaps.iter().fold(false, |c, snap| ws.apply_snapshot(snap) | c);
                 changed |= items.into_iter().fold(false, |c, (stem, item)| ws.apply_attachment(&stem, item) | c);
                 if changed {
@@ -22,25 +21,6 @@ impl Workspace {
                 }
             },
         );
-    }
-
-    /// A title Claude chose for its session through the MCP tool.
-    fn apply_title(&mut self, stem: &str, title: String, stamp: Option<SystemTime>) -> bool {
-        let Some(rec) = self.store.data.sessions.iter_mut().find(|s| s.claude_id().is_some_and(|id| datadir::safe_file_stem(id) == stem)) else { return false };
-        if let Some(l) = self.live.iter_mut().find(|l| l.id == rec.id)
-            && l.title_stamp != stamp
-        {
-            // The first read only records the stamp: a resumed session already got `--name`.
-            if l.title_stamp.is_some() {
-                l.claude_name = None;
-            }
-            l.title_stamp = stamp;
-        }
-        if rec.auto_title.as_deref() == Some(title.as_str()) {
-            return false;
-        }
-        rec.auto_title = Some(title);
-        true
     }
 
     /// One mod report: the account's limits, and the session's own figures and settings.

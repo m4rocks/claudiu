@@ -90,6 +90,10 @@ pub struct ClaudeMeta {
     /// Background compaction ("Precompute compaction" in `/config`); `None` while Claude Code does not offer it.
     #[serde(default)]
     pub precompute_compact: Option<bool>,
+    /// The name Claude Code held for the session (its last `/rename`) when Claudiu last read the transcript. A different
+    /// one later means the user renamed it inside Claude Code.
+    #[serde(default)]
+    pub claude_title: Option<String>,
     /// Claude in Chrome: the session is (re)started with `--chrome`. Claudiu's own choice, so it survives restarts.
     #[serde(default)]
     pub chrome: bool,
@@ -124,7 +128,8 @@ pub struct SessionRecord {
     /// Claudiu-only display label; wins over `title` when set.
     #[serde(default)]
     pub custom_title: Option<String>,
-    /// Tab title Claude chose itself through Claudiu's MCP tool (see `claude/mcp.rs`). Beats `title`, loses to `custom_title`.
+    /// Tab title Claude chose through Claudiu's former `set_tab_title` tool. Nothing sets it any more; a session that
+    /// had one keeps showing it until it is renamed. Beats `title`, loses to `custom_title`.
     #[serde(default)]
     pub auto_title: Option<String>,
     pub cwd: PathBuf,
@@ -642,12 +647,29 @@ pub fn project_for(projects: &[Project], cwd: &Path) -> Option<Id> {
         .map(|(_, id)| id)
 }
 
+/// A name the user gave the session inside Claude Code since the last read, to show in Claudiu too. Records what
+/// Claude Code holds either way. Only a change counts: Claude Code keeps the old name until a rename made in Claudiu
+/// reaches it, and that rename must not be undone meanwhile. The first name seen is taken only when Claudiu has no
+/// name of its own; otherwise it is only recorded, since Claudiu can't tell whether it came before or after Claudiu's.
+fn adopt_claude_title(rec: &mut SessionRecord, held: Option<&str>) -> Option<String> {
+    let held = held.map(str::trim).filter(|t| !t.is_empty())?;
+    let named_in_claudiu = rec.custom_title.is_some();
+    let meta = rec.claude.as_mut()?;
+    let changed = match meta.claude_title.replace(held.to_string()) {
+        Some(before) => before != held,
+        None => !named_in_claudiu,
+    };
+    changed.then(|| held.to_string())
+}
+
 /// What we learned about one Claude Code session from its on-disk record.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ExternalSession {
     pub session_id: String,
     pub cwd: Option<PathBuf>,
     pub title: Option<String>,
+    /// The name the user gave it in Claude Code (`/rename`), apart from the generated title in `title`.
+    pub custom_title: Option<String>,
     pub created_at: i64,
     pub last_active: i64,
     pub model: Option<String>,
@@ -679,6 +701,9 @@ pub fn reconcile(data: &mut Data, external: &[ExternalSession], scan_ok: bool) -
                 let before = rec.clone();
                 if let Some(title) = ext.title.as_ref().filter(|t| !t.trim().is_empty()) {
                     rec.title = title.clone();
+                }
+                if let Some(name) = adopt_claude_title(rec, ext.custom_title.as_deref()) {
+                    rec.custom_title = Some(name);
                 }
                 rec.last_active = rec.last_active.max(ext.last_active);
                 if rec.project_id.is_none()
@@ -759,6 +784,7 @@ mod tests {
             session_id: id.into(),
             cwd: Some(PathBuf::from(cwd)),
             title: Some(title.into()),
+            custom_title: None,
             created_at: 1,
             last_active: last,
             model: Some("claude-sonnet-5-5".into()),
@@ -874,6 +900,35 @@ mod tests {
         assert_eq!(stats.added, 2);
         assert_eq!(d.sessions[0].project_id.as_deref(), Some("inner"));
         assert_eq!(d.sessions[1].project_id, None);
+    }
+
+    #[test]
+    fn a_rename_inside_claude_code_renames_the_session_in_claudiu() {
+        let mut d = Data::default();
+        let named = |name: Option<&str>| ExternalSession { custom_title: name.map(Into::into), ..ext("a", "/w", "Generated", 10) };
+        reconcile(&mut d, &[named(None)], true);
+        d.sessions[0].auto_title = Some("Old model title".into());
+        reconcile(&mut d, &[named(Some("First /rename"))], true);
+        assert_eq!(d.sessions[0].display_title(), "First /rename", "the first name of a session Claudiu never named");
+
+        // Named in Claudiu before Claudiu saw a name in Claude Code: the one Claude Code holds may be older.
+        d.sessions[0].custom_title = Some("Named in Claudiu".into());
+        d.sessions[0].claude.as_mut().unwrap().claude_title = None;
+        reconcile(&mut d, &[named(Some("Old name"))], true);
+        assert_eq!(d.sessions[0].display_title(), "Named in Claudiu", "the first name seen is only recorded");
+
+        reconcile(&mut d, &[named(Some("From /rename"))], true);
+        assert_eq!(d.sessions[0].display_title(), "From /rename");
+
+        // Renamed in Claudiu: Claude Code still holds the old name until the mod's /rename reaches it.
+        d.sessions[0].custom_title = Some("From Claudiu".into());
+        reconcile(&mut d, &[named(Some("From /rename"))], true);
+        assert_eq!(d.sessions[0].display_title(), "From Claudiu", "a rename made in Claudiu is not undone");
+        reconcile(&mut d, &[named(None)], true);
+        assert_eq!(d.sessions[0].display_title(), "From Claudiu", "a generated title never renames it");
+        reconcile(&mut d, &[named(Some("From Claudiu"))], true);
+        reconcile(&mut d, &[named(Some("Again"))], true);
+        assert_eq!(d.sessions[0].display_title(), "Again");
     }
 
     #[test]
