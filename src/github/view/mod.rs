@@ -217,6 +217,9 @@ pub struct GithubView {
     mailbox: Mailbox<Workspace>,
     pub cwd: PathBuf,
     pub project: String,
+    /// `owner/name` when the pane shows a repository other than the folder's (an item attached from there); it has
+    /// no local clone then, so nothing in it runs in the folder.
+    pub named: Option<String>,
     gh: Option<Gh>,
     pub phase: Phase,
     pub repo: Option<RepoRef>,
@@ -274,12 +277,13 @@ fn is_web(url: &str) -> bool {
 }
 
 impl GithubView {
-    pub fn new(id: String, mailbox: Mailbox<Workspace>, cwd: PathBuf, project: String, gh: Option<Gh>) -> Self {
+    pub fn new(id: String, mailbox: Mailbox<Workspace>, cwd: PathBuf, project: String, named: Option<String>, gh: Option<Gh>) -> Self {
         let mut view = Self {
             id,
             mailbox,
             cwd,
             project,
+            named,
             phase: if gh.is_some() { Phase::Loading } else { Phase::NoCli },
             gh,
             repo: None,

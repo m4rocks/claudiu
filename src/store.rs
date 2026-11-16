@@ -42,6 +42,9 @@ pub enum ExternalState {
 /// A GitHub issue or pull request Claude attached to a session.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Attached {
+    /// `owner/name` of a repository other than the session's project; `None` is the project's own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
     pub pull: bool,
     pub number: u32,
     /// Both come from GitHub (`app/attached_sync.rs`), never from the model.
@@ -49,6 +52,18 @@ pub struct Attached {
     pub title: Option<String>,
     #[serde(default)]
     pub state: Option<crate::github::model::State>,
+}
+
+impl Attached {
+    /// Whether this is that item. GitHub's repository names ignore case.
+    pub fn is(&self, repo: Option<&str>, pull: bool, number: u32) -> bool {
+        let same_repo = match (self.repo.as_deref(), repo) {
+            (None, None) => true,
+            (Some(a), Some(b)) => a.eq_ignore_ascii_case(b),
+            _ => false,
+        };
+        same_repo && self.pull == pull && self.number == number
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -233,9 +248,9 @@ pub struct Layout {
     pub sidebar_visible: bool,
     /// No longer used (the "Other sessions" group is gone); still written because older Claudiu versions require it.
     pub other_collapsed: bool,
-    /// The sidebar's OLDER group is expanded.
+    /// The sidebar's RECENT list is closed (stored negated so it starts open).
     #[serde(default)]
-    pub older_open: bool,
+    pub recent_closed: bool,
     /// The project the sidebar list is filtered to.
     #[serde(default)]
     pub project_filter: Option<Id>,

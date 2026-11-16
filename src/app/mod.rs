@@ -178,7 +178,7 @@ pub enum Act {
     CancelProjectRename,
     /// Move a project one place up (true) or down the list.
     MoveProject(Id, bool),
-    ToggleOlder,
+    ToggleRecent,
     ConfirmQuit,
     ConfirmInstallUpdate,
     Dismiss,
@@ -876,9 +876,9 @@ impl Workspace {
                 self.store.data.layout.project_filter = id;
                 self.store.mark_dirty();
             }
-            Act::ToggleOlder => {
+            Act::ToggleRecent => {
                 let l = &mut self.store.data.layout;
-                l.older_open = !l.older_open;
+                l.recent_closed = !l.recent_closed;
                 self.store.mark_dirty();
             }
             Act::ConfirmQuit => {

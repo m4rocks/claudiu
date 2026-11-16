@@ -459,7 +459,8 @@ impl TerminalView {
                     h.waiting = Some((marker, before, Instant::now() + patience));
                 }
             }
-            Step::Erase(n) => self.send(vec![0x7f; n]),
+            // Straight to the program: `send` drops input while the skeleton is up.
+            Step::Erase(n) => self.write_input(vec![0x7f; n]),
             Step::Image(path, _) => {
                 if h.clipboard.is_none() {
                     // Keep the user's clipboard to put back; the image goes on it first, so it waits for the read.
@@ -582,5 +583,37 @@ mod redraw_tests {
             assert_eq!(redraws, expected);
         }
         assert!(redraw_due(true, true, Some(start), start), "activation and typing do not wait for the background limit");
+    }
+
+    /// Everything written to the program so far; a terminal that never started keeps it queued.
+    fn written(v: &TerminalView) -> Vec<u8> {
+        match &*v.terminal.link.lock().unwrap() {
+            crate::terminal::Link::Starting(queue) => queue
+                .iter()
+                .filter_map(|m| match m {
+                    alacritty_terminal::event_loop::Msg::Input(b) => Some(b.to_vec()),
+                    _ => None,
+                })
+                .flatten()
+                .collect(),
+            _ => vec![],
+        }
+    }
+
+    #[test]
+    fn text_deleted_while_handing_the_draft_over_is_erased_in_claude_code_too() {
+        let (mut v, _listener) = view();
+        v.loading = true;
+        v.draft.insert("hello world");
+        v.handing = Some(Handing { steps: Default::default(), waiting: None, patience: Duration::from_secs(10), clipboard: None });
+        v.hand_over_step();
+        assert_eq!(written(&v), b"hello world");
+        // It arrived; meanwhile the user deletes a word of it on the skeleton.
+        v.handing.as_mut().unwrap().waiting = None;
+        for _ in 0.."world".len() {
+            v.draft.backspace();
+        }
+        v.hand_over_step();
+        assert_eq!(written(&v), b"hello world\x7f\x7f\x7f\x7f\x7f", "the backspaces reach Claude Code's prompt");
     }
 }

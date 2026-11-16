@@ -14,6 +14,16 @@ fn next_activity(working: bool, waiting: bool, before: Option<Activity>, viewing
     }
 }
 
+/// What the system notification says when a session stops working while the window is in the background: it
+/// finished its turn, or it asks something. Nothing for any other change.
+fn notice(before: Option<Activity>, now: Option<Activity>, window_active: bool) -> Option<&'static str> {
+    match (window_active, before, now) {
+        (false, Some(Activity::Working), Some(Activity::Attention)) => Some("Claude finished."),
+        (false, Some(Activity::Working), Some(Activity::Waiting)) => Some("Claude is waiting for your answer."),
+        _ => None,
+    }
+}
+
 impl Workspace {
     /// Startup reconciliation: scan Claude Code's records off the UI thread, then merge.
     pub fn start_scan(&mut self) {
@@ -58,7 +68,7 @@ impl Workspace {
 
     /// Once a second: derive each Claude session's `Activity` from its terminal output. When one stops working
     /// while the user isn't looking at it, mark it for attention, and if the whole window is in the
-    /// background as well, flash the taskbar icon / bounce the dock icon.
+    /// background as well, send a system notification.
     pub(super) fn start_activity_poll(&mut self) {
         self.rt.after_quietly(Duration::from_secs(1), |ws: &mut Workspace| {
             let mut seen = std::mem::take(&mut ws.status_files);
@@ -90,7 +100,7 @@ impl Workspace {
         let window_active = self.window_active;
         let shown = self.active_id().cloned();
         let mut next: HashMap<Id, Activity> = HashMap::new();
-        let mut flash = false;
+        let mut notices = vec![];
         for l in &self.live {
             let is_claude = self.store.session(&l.id).is_some_and(|r| r.kind == SessionKind::Claude);
             let view = &l.view;
@@ -103,7 +113,9 @@ impl Workspace {
             let waiting = status.is_some_and(|s| s == "waiting");
             let before = self.activity.get(&l.id).copied();
             let now = next_activity(working, waiting, before, viewing);
-            flash |= !window_active && before == Some(Activity::Working) && matches!(now, Some(Activity::Attention | Activity::Waiting));
+            if let Some(body) = notice(before, now, window_active) {
+                notices.push((self.store.session(&l.id).map(|r| r.display_title().to_string()).unwrap_or_default(), body));
+            }
             if let Some(now) = now {
                 next.insert(l.id.clone(), now);
             }
@@ -112,8 +124,8 @@ impl Workspace {
             self.activity = next;
             self.rt.dirty = true;
         }
-        if flash && let Some(window) = lifecycle::main_window() {
-            platform::request_attention(&window);
+        for (title, body) in notices {
+            platform::notify(title, body);
         }
         self.sync_claude_names();
     }
@@ -262,7 +274,18 @@ fn spin_visible(working: bool, active: bool, sidebar: bool) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{Activity, next_activity, spin_visible};
+    use super::{Activity, next_activity, notice, spin_visible};
+
+    #[test]
+    fn a_notification_says_a_background_session_finished_or_asks() {
+        use Activity::*;
+        assert_eq!(notice(Some(Working), Some(Attention), false), Some("Claude finished."));
+        assert_eq!(notice(Some(Working), Some(Waiting), false), Some("Claude is waiting for your answer."));
+        assert_eq!(notice(Some(Working), Some(Attention), true), None, "the window is in front");
+        assert_eq!(notice(Some(Attention), Some(Attention), false), None, "already told");
+        assert_eq!(notice(Some(Waiting), Some(Working), false), None, "it started working");
+        assert_eq!(notice(None, Some(Waiting), false), None, "it never worked meanwhile");
+    }
 
     #[test]
     fn spin_only_runs_for_a_visible_busy_sidebar() {

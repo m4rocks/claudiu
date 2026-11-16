@@ -26,9 +26,9 @@ impl Workspace {
     }
 
     /// Take an attached item away from a session.
-    pub fn detach(&mut self, id: &str, pull: bool, number: u32) {
+    pub fn detach(&mut self, id: &str, repo: Option<&str>, pull: bool, number: u32) {
         self.edit_attached(id, |l| {
-            l.retain(|x| !(x.pull == pull && x.number == number));
+            l.retain(|x| !x.is(repo, pull, number));
             true
         });
         self.store.mark_dirty();
@@ -46,8 +46,8 @@ impl Workspace {
                 self.unlink(&me, &other);
                 true
             }
-            Detach { pull, number } => {
-                self.detach(&me, pull, number);
+            Detach { repo, pull, number } => {
+                self.detach(&me, repo.as_deref(), pull, number);
                 true
             }
         }
@@ -87,8 +87,8 @@ fn remove_id(list: &mut Vec<Id>, id: &str) -> bool {
 }
 
 /// What GitHub says about an attached item. True when the title or state differs from what is kept.
-pub(super) fn set_status(list: &mut [Attached], pull: bool, number: u32, title: &str, state: crate::github::model::State) -> bool {
-    let Some(have) = list.iter_mut().find(|a| a.pull == pull && a.number == number) else { return false };
+pub(super) fn set_status(list: &mut [Attached], repo: Option<&str>, pull: bool, number: u32, title: &str, state: crate::github::model::State) -> bool {
+    let Some(have) = list.iter_mut().find(|a| a.is(repo, pull, number)) else { return false };
     if have.title.as_deref() == Some(title) && have.state == Some(state) {
         return false;
     }
@@ -102,7 +102,7 @@ const MAX_ATTACHED: usize = 20;
 
 /// Add an attached item unless it is there already. True when anything changed.
 pub(super) fn attach(list: &mut Vec<Attached>, item: Attached) -> bool {
-    if list.iter().any(|a| a.pull == item.pull && a.number == item.number) {
+    if list.iter().any(|a| a.is(item.repo.as_deref(), item.pull, item.number)) {
         return false;
     }
     list.push(item);
@@ -125,7 +125,7 @@ mod attach_tests {
     }
 
     fn item(pull: bool, number: u32) -> Attached {
-        Attached { pull, number, title: None, state: None }
+        Attached { repo: None, pull, number, title: None, state: None }
     }
 
     #[test]
@@ -134,18 +134,22 @@ mod attach_tests {
         assert!(attach(&mut list, item(false, 5)));
         assert!(!attach(&mut list, item(false, 5)), "same item again");
         assert!(attach(&mut list, item(true, 5)), "a pull request is not the issue with that number");
-        assert_eq!(list, [item(false, 5), item(true, 5)]);
+        let elsewhere = Attached { repo: Some("o/r".into()), ..item(false, 5) };
+        assert!(attach(&mut list, elsewhere.clone()), "nor is the issue with that number in another repository");
+        assert!(!attach(&mut list, Attached { repo: Some("O/R".into()), ..item(false, 5) }), "repository names ignore case");
+        assert_eq!(list, [item(false, 5), item(true, 5), elsewhere]);
     }
 
     #[test]
     fn github_status_updates_only_what_changed() {
         use crate::github::model::State;
         let mut list = vec![item(false, 5)];
-        assert!(set_status(&mut list, false, 5, "Fix it", State::Open));
-        assert!(!set_status(&mut list, false, 5, "Fix it", State::Open), "same answer again");
-        assert!(set_status(&mut list, false, 5, "Fix it properly", State::Open), "renamed on GitHub");
-        assert!(set_status(&mut list, false, 5, "Fix it properly", State::Closed), "closed on GitHub");
-        assert!(!set_status(&mut list, true, 5, "Other", State::Open), "no such pull request attached");
+        assert!(set_status(&mut list, None, false, 5, "Fix it", State::Open));
+        assert!(!set_status(&mut list, None, false, 5, "Fix it", State::Open), "same answer again");
+        assert!(set_status(&mut list, None, false, 5, "Fix it properly", State::Open), "renamed on GitHub");
+        assert!(set_status(&mut list, None, false, 5, "Fix it properly", State::Closed), "closed on GitHub");
+        assert!(!set_status(&mut list, None, true, 5, "Other", State::Open), "no such pull request attached");
+        assert!(!set_status(&mut list, Some("o/r"), false, 5, "Other", State::Open), "no such issue in that repository");
         assert_eq!(list[0].title.as_deref(), Some("Fix it properly"));
         assert_eq!(list[0].state, Some(State::Closed));
     }

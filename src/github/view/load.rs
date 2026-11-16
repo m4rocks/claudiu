@@ -4,7 +4,15 @@ use super::*;
 
 impl GithubView {
     pub(super) fn cache_file(&self) -> PathBuf {
-        crate::datadir::data_dir().join("github-cache").join(format!("{}.json", crate::datadir::safe_file_stem(&self.cwd.to_string_lossy())))
+        crate::datadir::data_dir().join("github-cache").join(format!("{}.json", self.cache_stem()))
+    }
+
+    /// What the cache files are named after: the folder, or the named repository (kept apart from the folder's own).
+    fn cache_stem(&self) -> String {
+        match &self.named {
+            Some(full) => crate::datadir::safe_file_stem(&format!("repo-{full}")),
+            None => crate::datadir::safe_file_stem(&self.cwd.to_string_lossy()),
+        }
     }
 
     /// Fill the lists from the last run so the pane is populated before `gh` answers; only the default query is cached.
@@ -27,7 +35,7 @@ impl GithubView {
     /// file (`safe_file_stem` never produces a dot).
     pub(super) fn detail_file(&self, number: u32) -> PathBuf {
         let dir = crate::datadir::data_dir().join("github-cache");
-        dir.join(format!("{}.{number}.json", crate::datadir::safe_file_stem(&self.cwd.to_string_lossy())))
+        dir.join(format!("{}.{number}.json", self.cache_stem()))
     }
 
     /// Write the first page of each list after a fresh load (skipped while a search is active). Written off the UI thread.
@@ -75,14 +83,17 @@ impl GithubView {
         let cached = self.repo.clone();
         if cached.is_some() {
             self.phase = Phase::Ready;
-            self.load_list(Kind::Issue, false);
-            self.load_list(Kind::Pull, false);
+            self.load_shown();
         } else {
             self.phase = Phase::Loading;
         }
+        let named = self.named.clone();
         self.spawn(
-            |gh, _| -> Result<(RepoRef, RepoInfo, Gh), cli::Error> {
-                let repo = gh.repo()?;
+            move |gh, _| -> Result<(RepoRef, RepoInfo, Gh), cli::Error> {
+                let repo = match named.as_deref().and_then(RepoRef::on_github) {
+                    Some(repo) => repo,
+                    None => gh.repo()?,
+                };
                 let mut gh = gh;
                 gh.host = repo.host.clone();
                 let data = gh.graphql(cli::REPO_QUERY, json!({"owner": repo.owner, "name": repo.name}))?;
@@ -97,8 +108,7 @@ impl GithubView {
                         v.info = Some(info);
                         v.phase = Phase::Ready;
                         if cached.as_ref() != v.repo.as_ref() {
-                            v.load_list(Kind::Issue, false);
-                            v.load_list(Kind::Pull, false);
+                            v.load_shown();
                         }
                     }
                     Err(e) => {
@@ -112,6 +122,16 @@ impl GithubView {
                 }
             },
         );
+    }
+
+    /// Load both lists, and the item opened before the repository was known (a click on an attached item opens it
+    /// in a pane that is still looking its repository up).
+    fn load_shown(&mut self) {
+        self.load_list(Kind::Issue, false);
+        self.load_list(Kind::Pull, false);
+        if self.detail.is_some() {
+            self.fetch_detail(None);
+        }
     }
 
     /// Reload what is on screen every 90 seconds so the pane follows what teammates do. Skipped while busy or editing.

@@ -26,8 +26,8 @@ fn retry_wait(failures: u32) -> Duration {
     RETRY_EVERY.saturating_mul(2u32.saturating_pow(failures)).min(REFRESH_EVERY)
 }
 
-/// One answer: the session, which item, and what GitHub said.
-type Answer = (Id, bool, u32, String, State);
+/// One answer: the session, which item (its repository, whether it is a pull request, its number), and what GitHub said.
+type Answer = (Id, Option<String>, bool, u32, String, State);
 
 impl Sync {
     fn due(&self, some_unanswered: bool) -> bool {
@@ -36,8 +36,8 @@ impl Sync {
     }
 }
 
-/// A session, its folder, and the items attached to it (`true` for a pull request) to ask GitHub about.
-type Ask = (Id, PathBuf, Vec<(bool, u32)>);
+/// A session, its folder, and the items attached to it (repository, `true` for a pull request, number) to ask GitHub about.
+type Ask = (Id, PathBuf, Vec<(Option<String>, bool, u32)>);
 
 impl Workspace {
     pub(super) fn sync_attached(&mut self) {
@@ -47,7 +47,7 @@ impl Workspace {
             .sessions
             .iter()
             .filter_map(|s| {
-                let items: Vec<_> = s.claude.as_ref()?.attached.iter().map(|a| (a.pull, a.number)).collect();
+                let items: Vec<_> = s.claude.as_ref()?.attached.iter().map(|a| (a.repo.clone(), a.pull, a.number)).collect();
                 // A session whose folder is gone cannot be asked about (and would never be answered). Checked last:
                 // it asks the disk, from the UI thread, and most sessions have nothing attached.
                 (!items.is_empty() && s.cwd.is_dir()).then(|| (s.id.clone(), s.cwd.clone(), items))
@@ -63,8 +63,8 @@ impl Workspace {
             move || { ask_github(asks) },
             move |ws: &mut Workspace, answers| {
                 ws.attached_sync.running = false;
-                let changed = answers.into_iter().fold(false, |c, (id, pull, number, title, state)| {
-                    ws.edit_attached(&id, |list| links::set_status(list, pull, number, &title, state)) | c
+                let changed = answers.into_iter().fold(false, |c, (id, repo, pull, number, title, state)| {
+                    ws.edit_attached(&id, |list| links::set_status(list, repo.as_deref(), pull, number, &title, state)) | c
                 });
                 ws.attached_sync.failures = if ws.unanswered_items() { ws.attached_sync.failures + 1 } else { 0 };
                 if changed {
@@ -88,14 +88,21 @@ fn ask_github(asks: Vec<Ask>) -> Vec<Answer> {
     let mut repos: HashMap<PathBuf, Option<(Gh, RepoRef)>> = HashMap::new();
     let mut answers = vec![];
     for (id, cwd, items) in asks {
-        let found = repos.entry(cwd.clone()).or_insert_with(|| {
-            let gh = Gh::new(exe.clone(), cwd);
-            gh.repo().ok().map(|repo| (gh, repo))
-        });
-        let Some((gh, repo)) = found else { continue };
-        for (pull, number) in items {
-            if let Ok((title, state)) = gh.item_status(repo, number) {
-                answers.push((id.clone(), pull, number, title, state));
+        for (named, pull, number) in items {
+            // An item of another repository needs no GitHub folder; the folder's own repository is looked up once.
+            let status = match named.as_deref().and_then(RepoRef::on_github) {
+                Some(repo) => Gh::new(exe.clone(), cwd.clone()).item_status(&repo, number),
+                None => {
+                    let found = repos.entry(cwd.clone()).or_insert_with(|| {
+                        let gh = Gh::new(exe.clone(), cwd.clone());
+                        gh.repo().ok().map(|repo| (gh, repo))
+                    });
+                    let Some((gh, repo)) = found else { continue };
+                    gh.item_status(repo, number)
+                }
+            };
+            if let Ok((title, state)) = status {
+                answers.push((id.clone(), named, pull, number, title, state));
             }
         }
     }

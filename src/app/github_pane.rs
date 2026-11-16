@@ -37,6 +37,10 @@ impl Workspace {
     /// Show the project's GitHub view in the right sidebar and move the keyboard into it.
     pub fn open_github(&mut self, cwd: PathBuf) {
         let id = self.github_pane(cwd);
+        self.show_github(id);
+    }
+
+    fn show_github(&mut self, id: Id) {
         self.right_gh = Some(id.clone());
         self.store.data.layout.right_hidden = false;
         self.store.mark_dirty();
@@ -45,10 +49,23 @@ impl Workspace {
         self.blur = true;
     }
 
-    /// An attached issue or pull request was clicked: show it in the GitHub view of the shown session's project.
-    pub fn open_attached(&mut self, pull: bool, number: u32) {
+    /// An attached issue or pull request was clicked: show it in the GitHub view of the shown session's project, or of
+    /// the repository it names.
+    pub fn open_attached(&mut self, repo: Option<&str>, pull: bool, number: u32) {
         let cwd = self.active_cwd();
-        self.open_github(cwd);
+        // Claude may name the project's own repository; its own pane shows that, with every action.
+        let project_repo = {
+            let id = self.github_pane(cwd.clone());
+            self.gh_pane(&id).and_then(|p| p.view.repo.as_ref()).map(|r| r.full())
+        };
+        let repo = repo.filter(|full| !project_repo.is_some_and(|own| own.eq_ignore_ascii_case(full)));
+        match repo {
+            Some(full) => {
+                let id = self.named_github_pane(cwd, full);
+                self.show_github(id);
+            }
+            None => self.open_github(cwd),
+        }
         let kind = if pull { crate::github::model::Kind::Pull } else { crate::github::model::Kind::Issue };
         if let Some(id) = self.right_gh.clone()
             && let Some(p) = self.gh.iter_mut().find(|p| p.id == id)
@@ -74,7 +91,7 @@ impl Workspace {
         let project = self.store.project_for_cwd(&cwd).and_then(|id| self.store.project(&id)).cloned();
         let root = project.as_ref().map(|p| p.path.clone()).unwrap_or(cwd);
         let key = platform::path_key(&root);
-        match self.gh.iter().find(|p| platform::path_key(&p.cwd) == key) {
+        match self.gh.iter().find(|p| p.view.named.is_none() && platform::path_key(&p.cwd) == key) {
             Some(p) => p.id.clone(),
             None => {
                 let name = project
@@ -83,11 +100,24 @@ impl Workspace {
                     .unwrap_or_else(|| "GitHub".into());
                 let id = new_id();
                 let gh = crate::github::cli::locate().map(|exe| crate::github::cli::Gh::new(exe, root.clone()));
-                let view = GithubView::new(id.clone(), self.rt.mailbox(), root.clone(), name.clone(), gh);
+                let view = GithubView::new(id.clone(), self.rt.mailbox(), root.clone(), name.clone(), None, gh);
                 self.gh.push(GhPane { id: id.clone(), cwd: root, project: name, view });
                 id
             }
         }
+    }
+
+    /// The GitHub view of the repository `full` (`owner/name`), which has no project here, created on first use.
+    /// `cwd` is only where its `gh` runs.
+    fn named_github_pane(&mut self, cwd: PathBuf, full: &str) -> Id {
+        if let Some(p) = self.gh.iter().find(|p| p.view.named.as_deref().is_some_and(|n| n.eq_ignore_ascii_case(full))) {
+            return p.id.clone();
+        }
+        let id = new_id();
+        let gh = crate::github::cli::locate().map(|exe| crate::github::cli::Gh::new(exe, cwd.clone()));
+        let view = GithubView::new(id.clone(), self.rt.mailbox(), cwd.clone(), full.to_string(), Some(full.to_string()), gh);
+        self.gh.push(GhPane { id: id.clone(), cwd, project: full.to_string(), view });
+        id
     }
 
     /// Run what a GitHub pane asked for.

@@ -65,12 +65,12 @@ impl GithubView {
 
         let url = it.url.clone();
         let ask = button_leading(&icons::SPARKLES, "Ask Claude", true).child(icon(&icons::CHEVRON_DOWN, 12.0, 0x17100d));
-        let mut actions = row()
-            .w_full()
-            .flex_wrap()
-            .center_y()
-            .gap(6.0)
-            .child(popup_trigger(ask, &self.id, "gh-claude".into(), PopKind::Claude))
+        let mut actions = row().w_full().flex_wrap().center_y().gap(6.0);
+        // Claude would work in the folder, which is not a clone of a repository named from elsewhere.
+        if self.named.is_none() {
+            actions = actions.child(popup_trigger(ask, &self.id, "gh-claude".into(), PopKind::Claude));
+        }
+        actions = actions
             .child(button_leading(&icons::EXTERNAL_LINK, "Open on GitHub", false).key("gh-open-web").on_press_tx(go(&self.id, GhAct::OpenWeb(url))))
             .child(popup_trigger(icon_button(&icons::ELLIPSIS), &self.id, "gh-more-menu".into(), PopKind::More));
         if ds.loading {
