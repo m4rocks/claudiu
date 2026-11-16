@@ -658,7 +658,8 @@ fn adopt_claude_title(rec: &mut SessionRecord, held: Option<&str>) -> Option<Str
     let before = meta.claude_title.replace(held.to_string());
     let confirmed = match ours {
         None => true,
-        Some(ours) => before.as_deref() == Some(ours.as_str()),
+        // Claude Code holds names trimmed; an exact match would never confirm a name with spaces around it again.
+        Some(ours) => before.as_deref() == Some(ours.trim()),
     };
     (before.as_deref() != Some(held) && confirmed).then(|| held.to_string())
 }
@@ -936,6 +937,12 @@ mod tests {
         d.sessions[0].custom_title = Some("Second".into());
         reconcile(&mut d, &[named(Some("First"))], true);
         assert_eq!(d.sessions[0].display_title(), "Second", "Claude Code catching up is not a rename");
+
+        // Claudiu's name with spaces around it, which Claude Code holds trimmed: later renames still count.
+        d.sessions[0].custom_title = Some(" Spaced ".into());
+        reconcile(&mut d, &[named(Some("Spaced"))], true);
+        reconcile(&mut d, &[named(Some("Next"))], true);
+        assert_eq!(d.sessions[0].display_title(), "Next");
     }
 
     #[test]
