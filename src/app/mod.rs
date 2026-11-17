@@ -29,6 +29,7 @@ use crate::updater::UpdateState;
 
 pub use rt::{HasRt, Rt};
 
+pub mod already_running;
 mod alt_accounts;
 mod ask_claude;
 mod attached_sync;
