@@ -1,6 +1,7 @@
 //! The pages of the Settings dialog and its keyboard handling.
 
 use super::*;
+use crate::claude::subagents::Agent;
 use crate::terminal::keys::Keystroke;
 
 /// A category in the Settings dialog's list, in display order.
@@ -46,53 +47,104 @@ impl SettingsPage {
     }
 }
 
-/// The Custom subagents page's look at codex-acp's models.
-pub struct CodexModelsPage {
+/// One agent's model lookup for the Custom subagents page.
+#[derive(Default)]
+pub struct Lookup {
     pub loading: bool,
-    /// Why the last look failed.
+    /// Why the last lookup failed.
     pub error: Option<String>,
-    /// How the page asks; tests answer without codex-acp.
-    pub list: fn(&std::path::Path) -> Result<Vec<claude::subagents::CodexModel>, String>,
 }
 
-impl Default for CodexModelsPage {
+/// The Custom subagents page's lookups of each agent's models.
+pub struct ModelLookups {
+    codex: Lookup,
+    opencode: Lookup,
+    /// How the page asks; tests answer without a real agent.
+    pub list: fn(Agent, &std::path::Path) -> Result<Vec<claude::subagents::AgentModel>, String>,
+}
+
+impl Default for ModelLookups {
     fn default() -> Self {
-        Self { loading: false, error: None, list: claude::acp::codex_models }
+        Self { codex: Lookup::default(), opencode: Lookup::default(), list: claude::acp::models }
+    }
+}
+
+impl ModelLookups {
+    pub fn get(&self, agent: Agent) -> &Lookup {
+        match agent {
+            Agent::Codex => &self.codex,
+            Agent::OpenCode => &self.opencode,
+        }
+    }
+
+    fn get_mut(&mut self, agent: Agent) -> &mut Lookup {
+        match agent {
+            Agent::Codex => &mut self.codex,
+            Agent::OpenCode => &mut self.opencode,
+        }
     }
 }
 
 impl Workspace {
-    /// Asks codex-acp for its models in the background while the Custom subagents page shows Codex switched on. The
-    /// list the page showed last stays until the answer comes; a failure keeps it and says why.
-    pub(crate) fn load_codex_models(&mut self) {
-        let codex_on = matches!(&self.modal, Some(Modal::Settings { subagents, .. }) if subagents.codex);
-        if self.settings_page != SettingsPage::CustomSubagents || !codex_on || self.codex_models_page.loading {
+    /// Asks each agent switched on for its models in the background while the Custom subagents page shows. The list
+    /// the page showed last stays until the answer comes; a failure keeps it and says why.
+    pub(crate) fn load_models(&mut self) {
+        if self.settings_page != SettingsPage::CustomSubagents {
             return;
         }
-        self.codex_models_page.loading = true;
-        let list = self.codex_models_page.list;
-        let folder = crate::datadir::data_dir();
-        self.rt.spawn(
-            move || list(&folder),
-            move |ws: &mut Workspace, found| {
-                ws.codex_models_page.loading = false;
-                match found {
-                    Ok(models) => {
-                        ws.codex_models_page.error = None;
-                        if ws.store.data.settings.custom_subagents.codex_catalog != models {
-                            ws.store.data.settings.custom_subagents.codex_catalog = models;
-                            ws.store.mark_dirty();
+        let Some(Modal::Settings { subagents, .. }) = &self.modal else { return };
+        let wanted: Vec<Agent> = Agent::ALL.into_iter().filter(|a| subagents.get(*a).on && !self.model_lookups.get(*a).loading).collect();
+        for agent in wanted {
+            self.model_lookups.get_mut(agent).loading = true;
+            let list = self.model_lookups.list;
+            let folder = crate::datadir::data_dir();
+            self.rt.spawn(
+                move || list(agent, &folder),
+                move |ws: &mut Workspace, found| {
+                    let lookup = ws.model_lookups.get_mut(agent);
+                    lookup.loading = false;
+                    match found {
+                        Ok(models) => {
+                            lookup.error = None;
+                            let catalog = &mut ws.store.data.settings.custom_subagents.get_mut(agent).catalog;
+                            if *catalog != models {
+                                *catalog = models;
+                                ws.store.mark_dirty();
+                            }
                         }
+                        Err(why) => lookup.error = Some(why),
                     }
-                    Err(why) => ws.codex_models_page.error = Some(why),
-                }
-            },
-        );
+                },
+            );
+        }
+    }
+
+    /// Opens the model picker over the Custom subagents page, with the keyboard in its search field.
+    pub(crate) fn open_model_picker(&mut self, agent: Agent) {
+        if let Some(Modal::Settings { subagents, .. }) = self.modal.as_mut() {
+            subagents.picking = Some((agent, super::modal::field("", true)));
+        }
+    }
+
+    /// Closes the model picker, keeping what it switched; Settings' Save keeps it for good.
+    pub(crate) fn close_model_picker(&mut self) {
+        if let Some(Modal::Settings { subagents, .. }) = self.modal.as_mut() {
+            subagents.picking = None;
+        }
+        self.blur = true;
+    }
+
+    pub(crate) fn model_picker_open(&self) -> bool {
+        matches!(&self.modal, Some(Modal::Settings { subagents: SubagentsForm { picking: Some(_), .. }, .. }))
     }
 
     /// Keys for the open Settings dialog that no text field took. Up and Down change the page and Enter saves while no
     /// field has the keyboard (the category list has it); Tab and Shift+Tab cycle the list and the page's text fields.
     pub(crate) fn settings_key(&mut self, ks: &Keystroke) -> bool {
+        // The picker over the page has only its search field, and no list of pages for Up and Down to move.
+        if self.model_picker_open() {
+            return false;
+        }
         let fields: &[usize] = match self.settings_page {
             SettingsPage::General => &[0, 1],
             SettingsPage::Sessions => &[2],

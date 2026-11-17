@@ -3,14 +3,14 @@
 use rune::tok::motion;
 use rune::{Color, Cursor, El, ScrollSpec, Tx, col, el, row};
 
-use crate::app::{Act, CodexModelsPage, MenuAnchor, MenuItem, Modal, SettingsPage, SubagentsForm, Workspace};
-use crate::claude::subagents::CodexModel;
+use crate::app::{Act, AgentForm, Lookup, MenuAnchor, MenuItem, Modal, SettingsPage, Workspace};
+use crate::claude::subagents::{Agent, AgentModel, type_name};
 use crate::claude::defaults::{Effort, PermissionMode};
 use crate::claude::mcp::Feature;
 use crate::claude::trim::Trim;
 use crate::panels::overlays::{modal_input, modal_input_submitting};
 use crate::panels::theme::{self, rgb};
-use crate::panels::widgets::{button, button_disabled, danger_button, label, section_label, tick};
+use crate::panels::widgets::{button, button_disabled, danger_button, font, label, section_label, tick};
 
 fn faint(t: impl Into<String>) -> El {
     label(t, 11.0, theme::TEXT_FAINT).wrap()
@@ -41,16 +41,18 @@ fn switch(on: bool) -> El {
 
 /// An On/Off row that runs `flip` on the workspace when clicked, with an optional faint `tag` after the label.
 fn switch_row(key: String, title: &str, tag: Option<&str>, on: bool, flip: impl Fn(&mut Workspace) + 'static) -> El {
-    let mut left = row().center_y().gap(8.0).child(label(title.to_string(), 13.0, theme::TEXT));
+    // A long name (a model's, say) gives way and is cut short, so the switch keeps its place at the right.
+    let mut left = row().grow(1.0).shrink().pr(10.0).center_y().gap(8.0).child(label(title.to_string(), 13.0, theme::TEXT).shrink().truncate());
     if let Some(t) = tag {
-        left = left.child(label(t.to_string(), 11.0, theme::TEXT_FAINT));
+        left = left.child(label(t.to_string(), 11.0, theme::TEXT_FAINT).shrink().truncate());
     }
+    let knob = format!("{key}-switch");
     setting_row(key)
         .cursor(Cursor::Pointer)
         .role("switch")
         .hover(Color::WHITE.alpha(0.02))
         .child(left)
-        .child(switch(on))
+        .child(switch(on).key(knob))
         .on_press_tx(move |ws: &mut Workspace, tx: &mut Tx| {
             flip(ws);
             ws.after_input(tx);
@@ -66,54 +68,120 @@ fn settings_toggle(key: &str, title: &str, on: bool, field: fn(&mut Modal) -> Op
     })
 }
 
-/// The Custom subagents page: Codex's switch, a switch for each model codex-acp offers, and whether Codex may edit.
-fn subagents_page(form: &SubagentsForm, catalog: &[CodexModel], looking: &CodexModelsPage) -> El {
-    let mut page = col()
+/// One agent's part of the Custom subagents page, edited as `form`.
+struct AgentSection<'a> {
+    agent: Agent,
+    form: &'a AgentForm,
+    /// The models the agent offered when the page last asked.
+    catalog: &'a [AgentModel],
+    lookup: &'a Lookup,
+}
+
+/// What the page says about an agent: what it runs on and needs, and what Allow edits on and off let it do.
+fn agent_texts(agent: Agent) -> (&'static str, &'static str, &'static str) {
+    match agent {
+        Agent::Codex => (
+            "Runs the task in OpenAI Codex through codex-acp. Needs Node (npx) and a `codex login`; the first run downloads codex-acp from npm.",
+            "Claudiu accepts everything Codex asks for: editing files, running commands, writing outside the folder and using the network. None of it goes through Claude Code's permission rules or hooks.",
+            "Codex runs read-only: it can read and search, but not change files.",
+        ),
+        Agent::OpenCode => (
+            "Runs the task in OpenCode (`opencode acp`), on the providers you set up in OpenCode. Needs `opencode` on PATH.",
+            "Claudiu accepts everything OpenCode asks for, and OpenCode's own permission settings decide the rest: it can edit files, run commands and use the network. None of it goes through Claude Code's permission rules or hooks.",
+            "OpenCode runs read-only: it can read, search and list files, but not change them or run any command, not even a read-only one.",
+        ),
+    }
+}
+
+/// The models to list: those the agent offers, then any switched on that it no longer offers, so they can be
+/// switched off. The flag says whether the agent still offers the model.
+fn model_rows(catalog: &[AgentModel], on: &[String]) -> Vec<(AgentModel, bool)> {
+    let gone = on.iter().filter(|id| !catalog.iter().any(|m| &m.id == *id)).map(|id| AgentModel { id: id.clone(), name: id.clone() });
+    catalog.iter().cloned().map(|m| (m, true)).chain(gone.map(|m| (m, false))).collect()
+}
+
+/// How many of the models the agent offers are switched on, as "2 of 107 on". A model switched on that the agent no
+/// longer offers isn't one of them.
+fn on_count(catalog: &[AgentModel], on: &[String]) -> String {
+    format!("{} of {} on", catalog.iter().filter(|m| on.contains(&m.id)).count(), catalog.len())
+}
+
+/// Whether `model` fits what was typed in the picker's search: every word, in its name or its id, ignoring case.
+fn model_matches(query: &str, model: &AgentModel) -> bool {
+    let haystack = format!("{} {}", model.name, model.id).to_lowercase();
+    query.to_lowercase().split_whitespace().all(|word| haystack.contains(word))
+}
+
+/// A model's switch, keyed `key`, on the page or in the picker; it flips the model in the agent's form.
+fn model_switch(key: String, agent: Agent, model: &AgentModel, offered: bool, on: bool) -> Option<El> {
+    let name = type_name(agent, &model.id)?;
+    let tag = if offered { name } else { format!("{name} · no longer offered") };
+    let id = model.id.clone();
+    Some(switch_row(key, &model.name, Some(&tag), on, move |ws| {
+        if let Some(Modal::Settings { subagents, .. }) = ws.modal.as_mut() {
+            flip(&mut subagents.get_mut(agent).models, id.clone());
+        }
+    }))
+}
+
+/// Where the agent's model lookup stands, when there is something to say.
+fn lookup_status(agent: Agent, catalog: &[AgentModel], lookup: &Lookup) -> Option<El> {
+    let name = agent.name();
+    if lookup.loading && catalog.is_empty() {
+        Some(faint(format!("Loading {name}'s models…")))
+    } else {
+        lookup.error.as_ref().map(|why| label(format!("Couldn't load {name}'s models: {why}"), 11.0, theme::WARN).wrap())
+    }
+}
+
+/// An agent's switch and, once it is on, the models switched on, the button to the model picker, and whether it may
+/// edit.
+fn agent_section(s: AgentSection) -> El {
+    let AgentSection { agent, form, catalog, lookup } = s;
+    let (about, edits_on, edits_off) = agent_texts(agent);
+    let key = agent.key();
+    let mut section = col()
         .gap(8.0)
-        .child(faint("Agent types that run a task in another coding agent instead of Claude. Claude uses one only when you ask for it. Applies to new and resumed sessions. Running sessions keep theirs."))
-        .child(section_label("CODEX".to_string()).mt(4.0))
-        .child(faint("Runs the task in OpenAI Codex through codex-acp. Needs Node (npx) and a `codex login`; the first run downloads codex-acp from npm."))
-        .child(switch_row("settings-codex".into(), "Codex subagents", None, form.codex, |ws| {
+        .child(section_label(agent.name().to_uppercase()).mt(4.0))
+        .child(faint(about))
+        .child(switch_row(format!("settings-{key}"), &format!("{} subagents", agent.name()), None, form.on, move |ws| {
             if let Some(Modal::Settings { subagents, .. }) = ws.modal.as_mut() {
-                subagents.codex = !subagents.codex;
+                let form = subagents.get_mut(agent);
+                form.on = !form.on;
             }
-            ws.load_codex_models();
+            ws.load_models();
         }));
-    if !form.codex {
-        return page;
+    if !form.on {
+        return section;
     }
-    page = page.child(section_label("MODELS".to_string()).mt(4.0));
-    // The models codex-acp offers, then any switched on that it no longer offers, so they can be switched off.
-    let gone = form.models.iter().filter(|id| !catalog.iter().any(|m| &m.id == *id)).map(|id| CodexModel { id: id.clone(), name: id.clone() });
-    let rows: Vec<(CodexModel, bool)> = catalog.iter().cloned().map(|m| (m, true)).chain(gone.map(|m| (m, false))).collect();
-    for (model, offered) in rows {
-        let Some(name) = crate::claude::subagents::type_name(&model.id) else { continue };
-        let tag = if offered { name } else { format!("{name} · no longer offered") };
-        let on = form.models.contains(&model.id);
-        let id = model.id.clone();
-        page = page.child(switch_row(format!("settings-codex-model-{}", model.id), &model.name, Some(&tag), on, move |ws| {
-            if let Some(Modal::Settings { subagents, .. }) = ws.modal.as_mut() {
-                flip(&mut subagents.models, id.clone());
-            }
-        }));
+    for (model, offered) in model_rows(catalog, &form.models).into_iter().filter(|(m, _)| form.models.contains(&m.id)) {
+        section = section.children(model_switch(format!("settings-{key}-model-{}", model.id), agent, &model, offered, true));
     }
-    if looking.loading && catalog.is_empty() {
-        page = page.child(faint("Loading Codex's models…"));
-    } else if let Some(why) = &looking.error {
-        page = page.child(label(format!("Couldn't load Codex's models: {why}"), 11.0, theme::WARN).wrap());
+    if let Some(status) = lookup_status(agent, catalog, lookup) {
+        section = section.child(status);
     } else if form.models.is_empty() {
-        page = page.child(faint("Switch on a model to give Claude a Codex subagent for it."));
+        section = section.child(faint(format!("Choose a model to give Claude a {} subagent for it.", agent.name())));
     }
-    page.child(section_label("PERMISSIONS".to_string()).mt(4.0))
-        .child(settings_toggle("settings-codex-edits", "Allow edits", form.edits, |m| match m {
-            Modal::Settings { subagents, .. } => Some(&mut subagents.edits),
-            _ => None,
+    let count = if catalog.is_empty() { String::new() } else { on_count(catalog, &form.models) };
+    section
+        .child(
+            row()
+                .w_full()
+                .center_y()
+                .justify_between()
+                .child(button("Choose models…", false).key(format!("settings-{key}-choose")).on_press_tx(move |ws: &mut Workspace, tx: &mut Tx| {
+                    ws.open_model_picker(agent);
+                    ws.after_input(tx);
+                }))
+                .child(faint(count)),
+        )
+        .child(switch_row(format!("settings-{key}-edits"), "Allow edits", None, form.edits, move |ws| {
+            if let Some(Modal::Settings { subagents, .. }) = ws.modal.as_mut() {
+                let form = subagents.get_mut(agent);
+                form.edits = !form.edits;
+            }
         }))
-        .child(faint(if form.edits {
-            "Claudiu accepts everything Codex asks for: editing files, running commands, writing outside the folder and using the network. None of it goes through Claude Code's permission rules or hooks."
-        } else {
-            "Codex runs read-only: it can read and search, but not change files."
-        }))
+        .child(faint(if form.edits { edits_on } else { edits_off }))
 }
 
 /// A row that opens a menu of `options` under itself; the first entry, "Claude Code default", clears the choice.
@@ -165,6 +233,62 @@ fn scale_step(key: &'static str, sign: &'static str, by: i32) -> El {
 }
 
 impl Workspace {
+    /// The model picker over the Custom subagents page: a search field and a switch for every model the agent offers
+    /// that fits it. Its switches edit the page's form, so Settings' Save and Cancel decide what is kept.
+    pub(crate) fn model_picker(&self) -> Option<El> {
+        let Some(Modal::Settings { subagents, .. }) = &self.modal else { return None };
+        let (agent, search) = subagents.picking.as_ref()?;
+        let agent = *agent;
+        let form = subagents.get(agent);
+        let catalog = &self.store.data.settings.custom_subagents.get(agent).catalog;
+        let query = search.text.as_str();
+        let mut list = col().gap(6.0);
+        let mut shown = 0;
+        for (model, offered) in model_rows(catalog, &form.models).into_iter().filter(|(m, _)| model_matches(query, m)) {
+            if let Some(row) = model_switch(format!("model-picker-{}", model.id), agent, &model, offered, form.models.contains(&model.id)) {
+                list = list.child(row);
+                shown += 1;
+            }
+        }
+        if let Some(status) = lookup_status(agent, catalog, self.model_lookups.get(agent)) {
+            list = list.child(status);
+        } else if shown == 0 {
+            list = list.child(faint(format!("No model matches “{}”.", query.trim())));
+        }
+        let count = on_count(catalog, &form.models);
+        let card = col()
+            .key("model-picker")
+            .w(crate::panels::scale::px(520.0))
+            .h(crate::panels::scale::px(440.0))
+            .padding(20.0)
+            .gap(12.0)
+            .radius(12.0)
+            .fill(rgb(0x151517))
+            .border(1.0, rgb(0x2c2c30))
+            .shadow(16.0, 48.0, Color::BLACK.alpha(0.55))
+            .role("dialog")
+            .transition(rune::Transition::scale(0.96).combined(rune::Transition::opacity()))
+            .child(rune::text(format!("{} models", agent.name())).font(font(15.0, 600.0)).color(rgb(theme::TEXT)))
+            .child(modal_input_submitting(5, search, "Search models", Workspace::close_model_picker))
+            .child(col().key("model-picker-list").grow(1.0).shrink().min_h(0.0).w_full().scroll(ScrollSpec { stick_bottom: false }).child(list.w_full().pr(6.0)))
+            .child(
+                row().w_full().center_y().justify_between().child(faint(count)).child(button("Done", true).key("model-picker-done").on_press_tx(|ws: &mut Workspace, tx: &mut Tx| {
+                    ws.close_model_picker();
+                    ws.after_input(tx);
+                })),
+            );
+        Some(
+            row()
+                .key("model-picker-backdrop")
+                .pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
+                .center()
+                .fill(Color::BLACK.alpha(0.4))
+                .transition(rune::Transition::opacity())
+                .modal(true, |ws: &mut Workspace| ws.close_model_picker())
+                .child(card),
+        )
+    }
+
     pub(crate) fn settings_body(&self) -> El {
         let Some(Modal::Settings { shell, claude, model, effort, permission, updates, chrome, scale, trimmed, claudiu_off, skills_field, costly, hints, renaming, subagents }) = &self.modal else {
             return el();
@@ -248,7 +372,16 @@ impl Workspace {
                 }
                 list
             }
-            SettingsPage::CustomSubagents => subagents_page(subagents, &self.store.data.settings.custom_subagents.codex_catalog, &self.codex_models_page),
+            SettingsPage::CustomSubagents => {
+                let saved = &self.store.data.settings.custom_subagents;
+                let mut page = col().gap(8.0).child(faint(
+                    "Agent types that run a task in another coding agent instead of Claude. Claude uses one only when you ask for it. Applies to new and resumed sessions. Running sessions keep theirs.",
+                ));
+                for agent in Agent::ALL {
+                    page = page.child(agent_section(AgentSection { agent, form: subagents.get(agent), catalog: &saved.get(agent).catalog, lookup: self.model_lookups.get(agent) }));
+                }
+                page
+            }
             SettingsPage::Projects => self.projects_page(renaming.as_ref()),
             SettingsPage::Worktrees => self.worktrees_page(),
             SettingsPage::About => col().child(faint(format!(
@@ -435,5 +568,37 @@ impl Workspace {
             list = list.child(r);
         }
         list
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn model(id: &str, name: &str) -> AgentModel {
+        AgentModel { id: id.into(), name: name.into() }
+    }
+
+    #[test]
+    fn every_word_of_the_search_must_match_the_name_or_the_id() {
+        let sol = model("openai/gpt-6.1-sol", "openai/GPT-6.1 Sol");
+        assert!(model_matches("", &sol));
+        assert!(model_matches("  GPT sol ", &sol));
+        assert!(model_matches("openai 6.1", &sol));
+        assert!(!model_matches("gpt luna", &sol));
+        assert!(!model_matches("anthropic", &sol));
+    }
+
+    #[test]
+    fn the_count_leaves_out_models_no_longer_offered() {
+        let catalog = [model("a", "A"), model("b", "B")];
+        let on = ["a".to_string(), "gone-1".into(), "gone-2".into()];
+        assert_eq!(on_count(&catalog, &on), "1 of 2 on");
+    }
+
+    #[test]
+    fn models_no_longer_offered_come_last_and_marked() {
+        let rows = model_rows(&[model("a", "A")], &["gone".to_string(), "a".into()]);
+        assert_eq!(rows, vec![(model("a", "A"), true), (model("gone", "gone"), false)]);
     }
 }

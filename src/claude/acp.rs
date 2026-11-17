@@ -1,13 +1,13 @@
-//! Runs one task in Codex for a custom subagent (`claude/subagents.rs`), through the Agent Client Protocol:
-//! `claudiu --acp`. The Custom subagents settings page also asks codex-acp for its models here (`codex_models`).
+//! Runs one task in Codex or OpenCode for a custom subagent (`claude/subagents.rs`), through the Agent Client
+//! Protocol: `claudiu --acp`. The Custom subagents settings page also asks the agent for its models here (`models`).
 //!
 //! The mod starts this once per subagent turn and writes the task to stdin as JSON (`Request`). A mod can write a
 //! child's stdin only once, and ACP is a conversation in both directions, so the conversation happens here. Progress
 //! goes to stdout as JSON lines (`Event`), ending with the report or the reason it failed.
 //!
-//! Codex runs through `npx codex-acp`, which uses the user's own `codex login`. Its stdin is a pipe from this
-//! process, so when the mod stops this helper (the user interrupted the subagent), the pipe closes and codex-acp
-//! exits with it.
+//! Codex runs through `npx codex-acp`, which uses the user's own `codex login`; OpenCode runs as the user's own
+//! `opencode acp`, with their providers. The agent's stdin is a pipe from this process, so when the mod stops this
+//! helper (the user interrupted the subagent), the pipe closes and the agent exits with it.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -17,26 +17,29 @@ use std::thread::JoinHandle;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::claude::subagents::CodexModel;
+use crate::claude::subagents::{Agent, AgentModel};
 
 pub const FLAG: &str = "--acp";
 /// Pinned so an upstream change reaches users only with a Claudiu release.
 const CODEX_ACP: &str = "@agentclientprotocol/codex-acp@2.6.0";
 /// ACP's error code for "authentication required".
 const AUTH_REQUIRED: i64 = -32000;
-/// Lines of codex-acp's stderr kept for a failure's reason.
+/// Lines of the agent's stderr kept for a failure's reason.
 const STDERR_LINES: usize = 5;
-/// How long the settings page waits for codex-acp's models; the first run downloads codex-acp through npx.
+/// How long the settings page waits for the agent's models; Codex's first run downloads codex-acp through npx.
 const MODELS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// What the mod asks for.
 #[derive(Debug, Deserialize)]
 pub struct Request {
-    /// Codex's model; none for Codex's own default.
+    /// The agent that runs the task. A mod from before OpenCode sends none, and means Codex.
+    #[serde(default)]
+    pub agent: Agent,
+    /// The agent's model; none for the agent's own default.
     pub model: Option<String>,
-    /// Whether Codex may edit files and run commands (`workspace-write`) or only read (`read-only`).
+    /// Whether the agent may edit files and run commands, or only read.
     pub edits: bool,
-    /// The folder Codex works in.
+    /// The folder the agent works in.
     pub cwd: PathBuf,
     /// The task, as Claude wrote it.
     pub prompt: String,
@@ -46,11 +49,11 @@ pub struct Request {
 #[derive(Debug, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Event {
-    /// A piece of a message Codex is writing.
+    /// A piece of a message the agent is writing.
     Text { text: String },
-    /// A tool call Codex started: a command, a read, an edit.
+    /// A tool call the agent started: a command, a read, an edit.
     Step { text: String },
-    /// The last message Codex wrote: the subagent's report.
+    /// The last message the agent wrote: the subagent's report.
     Report { text: String },
     Failed { reason: String },
 }
@@ -72,7 +75,7 @@ pub fn run() -> i32 {
             return 1;
         }
     };
-    let finished = run_codex(&request, &mut emit);
+    let finished = run_task(&request, &mut emit);
     emit(match finished {
         Ok(text) => Event::Report { text },
         Err(reason) => Event::Failed { reason },
@@ -80,55 +83,100 @@ pub fn run() -> i32 {
     0
 }
 
-fn run_codex(request: &Request, emit: &mut impl FnMut(Event)) -> Result<String, String> {
-    let mut env = vec![("INITIAL_AGENT_MODE", (if request.edits { "workspace-write" } else { "read-only" }).to_string())];
-    if let Some(model) = &request.model {
-        env.push(("CODEX_CONFIG", json!({ "model": model }).to_string()));
-    }
-    let agent = Agent::start(&request.cwd, &env)?;
-    let result = converse(agent.from_agent, agent.to_agent, request, emit);
-    agent.process.finish(result)
+fn run_task(request: &Request, emit: &mut impl FnMut(Event)) -> Result<String, String> {
+    let env = match request.agent {
+        Agent::Codex => {
+            let mut env = vec![("INITIAL_AGENT_MODE", (if request.edits { "workspace-write" } else { "read-only" }).to_string())];
+            if let Some(model) = &request.model {
+                env.push(("CODEX_CONFIG", json!({ "model": model }).to_string()));
+            }
+            env
+        }
+        Agent::OpenCode => vec![("OPENCODE_CONFIG_CONTENT", opencode_config(request.model.as_deref(), request.edits).to_string())],
+    };
+    let connection = Connection::start(request.agent, &request.cwd, &env)?;
+    let result = converse(connection.from_agent, connection.to_agent, request, emit);
+    connection.process.finish(result)
 }
 
-/// The models codex-acp offers this account, as the model picker of a new session lists them. Gives up after
-/// `MODELS_TIMEOUT`, so a stalled download or a codex-acp that never answers can't leave the page loading for good.
-pub fn codex_models(cwd: &Path) -> Result<Vec<CodexModel>, String> {
-    let agent = Agent::start(cwd, &[])?;
-    let (Agent { from_agent, to_agent, process }, folder) = (agent, cwd.to_path_buf());
+/// The tools OpenCode may use read-only: reading and searching files. Everything else, the shell included, is denied,
+/// since OpenCode has no sandbox that would let a command run without changing anything.
+fn opencode_read_only() -> Value {
+    json!({ "*": "deny", "read": "allow", "glob": "allow", "grep": "allow", "list": "allow" })
+}
+
+/// The config OpenCode gets on top of the user's own. Read-only pins the `build` agent and denies under it too,
+/// because an agent's own permissions in a project's or the user's opencode.json beat the top-level ones.
+fn opencode_config(model: Option<&str>, edits: bool) -> Value {
+    let mut config = json!({});
+    if let Some(model) = model {
+        config["model"] = json!(model);
+    }
+    if !edits {
+        config["default_agent"] = json!("build");
+        config["permission"] = opencode_read_only();
+        config["agent"] = json!({ "build": { "permission": opencode_read_only() } });
+    }
+    config
+}
+
+/// The models `agent` offers this account, as the model picker of a new session lists them. Gives up after
+/// `MODELS_TIMEOUT`, so a stalled download or an agent that never answers can't leave the page loading for good.
+pub fn models(agent: Agent, cwd: &Path) -> Result<Vec<AgentModel>, String> {
+    let connection = Connection::start(agent, cwd, &[])?;
+    let (Connection { from_agent, to_agent, process }, folder) = (connection, cwd.to_path_buf());
     let (tx, rx) = std::sync::mpsc::channel();
-    // Killing codex-acp on a timeout closes its pipes, which ends this thread too.
+    // Killing the agent on a timeout closes its pipes, which ends this thread too.
     std::thread::spawn(move || {
-        let _ = tx.send(list_models(from_agent, to_agent, &folder));
+        let _ = tx.send(list_models(agent, from_agent, to_agent, &folder));
     });
-    let result = rx.recv_timeout(MODELS_TIMEOUT).unwrap_or_else(|_| Err(format!("codex-acp didn't answer within {} seconds", MODELS_TIMEOUT.as_secs())));
+    let result = rx.recv_timeout(MODELS_TIMEOUT).unwrap_or_else(|_| Err(format!("{} didn't answer within {} seconds", server(agent), MODELS_TIMEOUT.as_secs())));
     process.finish(result)
 }
 
-/// A running codex-acp: its pipes, and the process with its stderr.
-struct Agent {
+/// The program Claudiu starts for `agent`, as failures name it.
+fn server(agent: Agent) -> &'static str {
+    match agent {
+        Agent::Codex => "codex-acp",
+        Agent::OpenCode => "opencode",
+    }
+}
+
+fn exited(agent: Agent) -> String {
+    format!("{} exited before {} answered", server(agent), agent.name())
+}
+
+/// A running agent: its pipes, and the process with its stderr.
+struct Connection {
     to_agent: ChildStdin,
     from_agent: BufReader<ChildStdout>,
     process: Process,
 }
 
 struct Process {
+    agent: Agent,
     child: Child,
-    /// The last lines of stderr, collected on a thread so a full stderr pipe can't stall codex-acp.
+    /// The last lines of stderr, collected on a thread so a full stderr pipe can't stall the agent.
     errors: JoinHandle<String>,
 }
 
-impl Agent {
-    fn start(cwd: &Path, env: &[(&str, String)]) -> Result<Agent, String> {
-        let npx = which::which("npx").map_err(|_| "npx was not found on PATH. Codex subagents need Node.js.".to_string())?;
-        let mut command = Command::new(npx);
-        command.args(["-y", CODEX_ACP]).current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+impl Connection {
+    fn start(agent: Agent, cwd: &Path, env: &[(&str, String)]) -> Result<Connection, String> {
+        let (program, args, missing): (&str, &[&str], &str) = match agent {
+            Agent::Codex => ("npx", &["-y", CODEX_ACP], "npx was not found on PATH. Codex subagents need Node.js."),
+            Agent::OpenCode => ("opencode", &["acp"], "opencode was not found on PATH. OpenCode subagents need OpenCode installed."),
+        };
+        let program = which::which(program).map_err(|_| missing.to_string())?;
+        let mut command = Command::new(program);
+        command.args(args).current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
         for (key, value) in env {
             command.env(key, value);
         }
-        let mut child = command.spawn().map_err(|e| format!("codex-acp could not start ({e})"))?;
+        let name = server(agent);
+        let mut child = command.spawn().map_err(|e| format!("{name} could not start ({e})"))?;
         let (Some(to_agent), Some(from_agent), Some(stderr)) = (child.stdin.take(), child.stdout.take(), child.stderr.take()) else {
             let _ = child.kill();
-            return Err("codex-acp could not start (no pipes)".into());
+            return Err(format!("{name} could not start (no pipes)"));
         };
         let errors = std::thread::spawn(move || {
             let mut last: Vec<String> = vec![];
@@ -142,22 +190,23 @@ impl Agent {
             }
             last.join("\n")
         });
-        Ok(Agent { to_agent, from_agent: BufReader::new(from_agent), process: Process { child, errors } })
+        Ok(Connection { to_agent, from_agent: BufReader::new(from_agent), process: Process { agent, child, errors } })
     }
 }
 
 impl Process {
-    /// Ends codex-acp once the conversation is over (its stdin is already closed) and returns `result`, with
-    /// stderr's last lines added when codex-acp exited early.
+    /// Ends the agent once the conversation is over (its stdin is already closed) and returns `result`, with
+    /// stderr's last lines added when the agent exited early.
     fn finish<T>(mut self, result: Result<T, String>) -> Result<T, String> {
         let _ = self.child.kill();
         let _ = self.child.wait();
         // Only an early exit needs stderr's last lines. Waiting for stderr to close otherwise could hold up the answer
-        // while something codex-acp started still has it open.
+        // while something the agent started still has it open.
+        let exited = exited(self.agent);
         match result {
-            Err(reason) if reason == EXITED => {
+            Err(reason) if reason == exited => {
                 let stderr = self.errors.join().unwrap_or_default();
-                Err(if stderr.is_empty() { reason } else { format!("{EXITED}: {stderr}") })
+                Err(if stderr.is_empty() { reason } else { format!("{exited}: {stderr}") })
             }
             other => other,
         }
@@ -176,63 +225,72 @@ fn new_session(cwd: &Path) -> Value {
     json!({ "jsonrpc": "2.0", "id": 1, "method": "session/new", "params": { "cwd": cwd, "mcpServers": [] } })
 }
 
-/// Opens a session only to read its model picker: the config option whose category is `model`.
-fn list_models(from_agent: impl BufRead, mut to_agent: impl Write, cwd: &Path) -> Result<Vec<CodexModel>, String> {
+/// Opens a session only to read its model picker: the config option whose category is `model`. OpenCode keeps every
+/// session in its history, so it deletes this empty one again.
+fn list_models(agent: Agent, from_agent: impl BufRead, mut to_agent: impl Write, cwd: &Path) -> Result<Vec<AgentModel>, String> {
     let mut lines = from_agent.lines();
+    let mut send = |message: Value| writeln!(to_agent, "{message}").and_then(|_| to_agent.flush()).map_err(|_| exited(agent));
     let mut reply = |id: i64| -> Result<Value, String> {
         for line in lines.by_ref() {
-            let msg: Value = serde_json::from_str(&line.map_err(|_| EXITED.to_string())?).unwrap_or_default();
+            let msg: Value = serde_json::from_str(&line.map_err(|_| exited(agent))?).unwrap_or_default();
             if msg.get("method").is_none() && msg["id"].as_i64() == Some(id) {
                 return match msg.get("error") {
-                    Some(error) => Err(error_reason(error)),
+                    Some(error) => Err(error_reason(agent, error)),
                     None => Ok(msg["result"].clone()),
                 };
             }
         }
-        Err(EXITED.to_string())
+        Err(exited(agent))
     };
-    for (id, message) in [(0, initialize()), (1, new_session(cwd))] {
-        writeln!(to_agent, "{message}").and_then(|_| to_agent.flush()).map_err(|_| EXITED.to_string())?;
-        let result = reply(id)?;
-        if id == 1 {
-            let options = result["configOptions"].as_array().into_iter().flatten();
-            let picker = options.filter(|o| o["category"] == "model").find_map(|o| o["options"].as_array());
-            let models: Vec<CodexModel> = picker
-                .into_iter()
-                .flatten()
-                .filter_map(|o| Some(CodexModel { id: o["value"].as_str()?.to_string(), name: o["name"].as_str().unwrap_or_default().to_string() }))
-                .collect();
-            return if models.is_empty() { Err("codex-acp listed no models".into()) } else { Ok(models) };
-        }
+    send(initialize())?;
+    reply(0)?;
+    send(new_session(cwd))?;
+    let session = reply(1)?;
+    let options = session["configOptions"].as_array().into_iter().flatten();
+    let picker = options.filter(|o| o["category"] == "model").find_map(|o| o["options"].as_array());
+    let models: Vec<AgentModel> = picker
+        .into_iter()
+        .flatten()
+        .filter_map(|o| Some(AgentModel { id: o["value"].as_str()?.to_string(), name: o["name"].as_str().unwrap_or_default().to_string() }))
+        .collect();
+    if agent == Agent::OpenCode
+        && let Some(id) = session["sessionId"].as_str()
+        // The models are known already, so a failed delete only leaves an empty session behind.
+        && send(json!({ "jsonrpc": "2.0", "id": 2, "method": "session/delete", "params": { "sessionId": id } })).is_ok()
+    {
+        let _ = reply(2);
     }
-    unreachable!("the loop returns after the session opens")
+    if models.is_empty() { Err(format!("{} listed no models", server(agent))) } else { Ok(models) }
 }
 
-const EXITED: &str = "codex-acp exited before Codex answered";
-
 /// The ACP conversation for one task: start, open a session in the task's folder, send the task, and follow the
-/// session's updates until Codex answers. Returns the last message Codex wrote.
+/// session's updates until the agent answers. Returns the last message the agent wrote.
 fn converse(from_agent: impl BufRead, mut to_agent: impl Write, request: &Request, emit: &mut impl FnMut(Event)) -> Result<String, String> {
+    let agent = request.agent;
+    let name = agent.name();
     let mut lines = from_agent.lines();
-    let send = |to_agent: &mut dyn Write, message: Value| -> Result<(), String> {
-        writeln!(to_agent, "{message}").and_then(|_| to_agent.flush()).map_err(|_| EXITED.to_string())
-    };
-    // Waits for the answer to request `id`, handling what Codex sends meanwhile.
+    let send = |to_agent: &mut dyn Write, message: Value| -> Result<(), String> { writeln!(to_agent, "{message}").and_then(|_| to_agent.flush()).map_err(|_| exited(agent)) };
     let mut messages = Messages::default();
     // What read-only refused last: codex-acp offers only "cancel" for some commands, which ends Codex's turn.
     let mut refused: Option<String> = None;
-    let mut answer = |to_agent: &mut dyn Write, id: i64, messages: &mut Messages, emit: &mut dyn FnMut(Event)| -> Result<Value, String> {
+    // Waits for the answer to request `id`, handling what the agent sends meanwhile. Only updates of `session` count:
+    // OpenCode also reports the sessions of its own subagents, whose messages are not this task's report.
+    let mut answer = |to_agent: &mut dyn Write, id: i64, session: Option<&str>, messages: &mut Messages, emit: &mut dyn FnMut(Event)| -> Result<Value, String> {
         for line in lines.by_ref() {
-            let line = line.map_err(|_| EXITED.to_string())?;
+            let line = line.map_err(|_| exited(agent))?;
             let Ok(msg) = serde_json::from_str::<Value>(&line) else { continue };
             if msg.get("method").is_none() && msg["id"].as_i64() == Some(id) {
                 return match msg.get("error") {
-                    Some(error) => Err(error_reason(error)),
+                    Some(error) => Err(error_reason(agent, error)),
                     None => Ok(msg["result"].clone()),
                 };
             }
             match msg["method"].as_str() {
-                Some("session/update") => messages.update(&msg["params"]["update"], emit),
+                Some("session/update") => {
+                    if session.is_some_and(|s| msg["params"]["sessionId"] == s) {
+                        messages.update(&msg["params"]["update"], emit);
+                    }
+                }
                 Some("session/request_permission") => {
                     let outcome = permission(&msg["params"]["options"], request.edits);
                     if !request.edits {
@@ -247,38 +305,38 @@ fn converse(from_agent: impl BufRead, mut to_agent: impl Write, request: &Reques
                 _ => {}
             }
         }
-        Err(EXITED.to_string())
+        Err(exited(agent))
     };
 
     send(&mut to_agent, initialize())?;
-    answer(&mut to_agent, 0, &mut messages, emit)?;
+    answer(&mut to_agent, 0, None, &mut messages, emit)?;
 
     send(&mut to_agent, new_session(&request.cwd))?;
-    let session = answer(&mut to_agent, 1, &mut messages, emit)?;
-    let session_id = session["sessionId"].as_str().ok_or("codex-acp opened no session")?.to_string();
+    let session = answer(&mut to_agent, 1, None, &mut messages, emit)?;
+    let session_id = session["sessionId"].as_str().ok_or(format!("{} opened no session", server(agent)))?.to_string();
 
     send(&mut to_agent, json!({ "jsonrpc": "2.0", "id": 2, "method": "session/prompt", "params": {
         "sessionId": session_id,
         "prompt": [{ "type": "text", "text": request.prompt }],
     }}))?;
-    let done = answer(&mut to_agent, 2, &mut messages, emit)?;
+    let done = answer(&mut to_agent, 2, Some(&session_id), &mut messages, emit)?;
     let stop = done["stopReason"].as_str().unwrap_or("end_turn");
     match (stop, messages.last()) {
         ("end_turn", Some(text)) => Ok(text),
-        ("end_turn", None) => Err("Codex finished without writing a report".into()),
+        ("end_turn", None) => Err(format!("{name} finished without writing a report")),
         ("cancelled", _) => Err(match refused {
-            Some(action) => format!("Codex stopped when read-only mode refused `{action}`. Turn on Allow edits in Settings → Custom subagents to let it."),
-            None => "Codex's turn was cancelled".into(),
+            Some(action) => format!("{name} stopped when read-only mode refused `{action}`. Turn on Allow edits in Settings → Custom subagents to let it."),
+            None => format!("{name}'s turn was cancelled"),
         }),
-        ("refusal", _) => Err("Codex refused the task".into()),
-        // Out of tokens or turns: what Codex wrote last is still the best report there is.
+        ("refusal", _) => Err(format!("{name} refused the task")),
+        // Out of tokens or turns: what the agent wrote last is still the best report there is.
         (_, Some(text)) => Ok(text),
-        (other, None) => Err(format!("Codex stopped ({other}) without writing a report")),
+        (other, None) => Err(format!("{name} stopped ({other}) without writing a report")),
     }
 }
 
-/// The messages Codex wrote in this run, as their pieces arrive. A message ends where a tool call starts or another
-/// message begins.
+/// The messages the agent wrote in this run, as their pieces arrive. A message ends where a tool call starts or
+/// another message begins.
 #[derive(Default)]
 struct Messages {
     current: String,
@@ -340,13 +398,17 @@ fn permission(options: &Value, edits: bool) -> Value {
     }
 }
 
-fn error_reason(error: &Value) -> String {
+fn error_reason(agent: Agent, error: &Value) -> String {
     if error["code"].as_i64() == Some(AUTH_REQUIRED) {
-        return "Codex isn't signed in. Run `codex login`, then try again.".into();
+        return match agent {
+            Agent::Codex => "Codex isn't signed in. Run `codex login`, then try again.".into(),
+            Agent::OpenCode => "OpenCode isn't signed in. Run `opencode auth login`, then try again.".into(),
+        };
     }
+    let server = server(agent);
     match error["message"].as_str() {
-        Some(message) => format!("codex-acp: {message}"),
-        None => format!("codex-acp: {error}"),
+        Some(message) => format!("{server}: {message}"),
+        None => format!("{server}: {error}"),
     }
 }
 
@@ -354,8 +416,8 @@ fn error_reason(error: &Value) -> String {
 mod tests {
     use super::*;
 
-    fn request(edits: bool) -> Request {
-        Request { model: Some("gpt-5.5".into()), edits, cwd: PathBuf::from("/work"), prompt: "Find the bug".into() }
+    fn request(agent: Agent, edits: bool) -> Request {
+        Request { agent, model: Some("gpt-5.5".into()), edits, cwd: PathBuf::from("/work"), prompt: "Find the bug".into() }
     }
 
     fn update(update: Value) -> Value {
@@ -372,13 +434,17 @@ mod tests {
 
     /// Runs the conversation against what a fake agent says, in order. Returns the result, what was sent to the agent,
     /// and the events.
-    fn talk(agent_says: &[Value], edits: bool) -> (Result<String, String>, Vec<Value>, Vec<Event>) {
+    fn talk_to(agent: Agent, agent_says: &[Value], edits: bool) -> (Result<String, String>, Vec<Value>, Vec<Event>) {
         let script: String = agent_says.iter().map(|m| format!("{m}\n")).collect();
         let mut sent = Vec::new();
         let mut events = vec![];
-        let result = converse(script.as_bytes(), &mut sent, &request(edits), &mut |e| events.push(e));
+        let result = converse(script.as_bytes(), &mut sent, &request(agent, edits), &mut |e| events.push(e));
         let sent = String::from_utf8(sent).unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect();
         (result, sent, events)
+    }
+
+    fn talk(agent_says: &[Value], edits: bool) -> (Result<String, String>, Vec<Value>, Vec<Event>) {
+        talk_to(Agent::Codex, agent_says, edits)
     }
 
     fn opening() -> Vec<Value> {
@@ -423,6 +489,20 @@ mod tests {
             reply(2, json!({ "stopReason": "end_turn" })),
         ]);
         assert_eq!(talk(&says, false).0, Ok("Second.".into()));
+    }
+
+    #[test]
+    fn a_child_session_message_is_not_the_report() {
+        let mut says = opening();
+        says.extend([
+            chunk("m1", "Asked a helper."),
+            json!({ "jsonrpc": "2.0", "method": "session/update", "params": { "sessionId": "child", "update": {
+                "sessionUpdate": "agent_message_chunk", "messageId": "c1", "content": { "type": "text", "text": "Helper notes." } } } }),
+            reply(2, json!({ "stopReason": "end_turn" })),
+        ]);
+        let (result, _, events) = talk_to(Agent::OpenCode, &says, true);
+        assert_eq!(result, Ok("Asked a helper.".into()));
+        assert_eq!(events, vec![Event::Text { text: "Asked a helper.".into() }]);
     }
 
     fn asks_permission() -> Vec<Value> {
@@ -480,6 +560,18 @@ mod tests {
     }
 
     #[test]
+    fn opencode_permission_options_are_answered_by_kind() {
+        // What opencode 2.3 offers.
+        let options = json!([
+            { "optionId": "once", "kind": "allow_once", "name": "Allow once" },
+            { "optionId": "always", "kind": "allow_always", "name": "Always allow" },
+            { "optionId": "reject", "kind": "reject_once", "name": "Reject" },
+        ]);
+        assert_eq!(permission(&options, false), json!({ "outcome": "selected", "optionId": "reject" }));
+        assert_eq!(permission(&options, true), json!({ "outcome": "selected", "optionId": "once" }));
+    }
+
+    #[test]
     fn a_permission_request_with_no_refusing_option_is_cancelled() {
         let options = json!([{ "optionId": "yes", "kind": "allow_once" }]);
         assert_eq!(permission(&options, false), json!({ "outcome": "cancelled" }));
@@ -499,19 +591,21 @@ mod tests {
     }
 
     #[test]
-    fn signed_out_says_to_run_codex_login() {
+    fn signed_out_says_how_to_sign_in() {
         let says = vec![
             reply(0, json!({ "protocolVersion": 1 })),
             json!({ "jsonrpc": "2.0", "id": 1, "error": { "code": -32000, "message": "Authentication required" } }),
         ];
         assert_eq!(talk(&says, false).0, Err("Codex isn't signed in. Run `codex login`, then try again.".into()));
+        assert_eq!(talk_to(Agent::OpenCode, &says, false).0, Err("OpenCode isn't signed in. Run `opencode auth login`, then try again.".into()));
     }
 
     #[test]
     fn an_agent_that_exits_midway_fails() {
         let mut says = opening();
         says.push(chunk("m1", "Starting"));
-        assert_eq!(talk(&says, false).0, Err(EXITED.into()));
+        assert_eq!(talk(&says, false).0, Err("codex-acp exited before Codex answered".into()));
+        assert_eq!(talk_to(Agent::OpenCode, &says, false).0, Err("opencode exited before OpenCode answered".into()));
     }
 
     #[test]
@@ -519,6 +613,7 @@ mod tests {
         let mut says = opening();
         says.push(reply(2, json!({ "stopReason": "end_turn" })));
         assert_eq!(talk(&says, false).0, Err("Codex finished without writing a report".into()));
+        assert_eq!(talk_to(Agent::OpenCode, &says, false).0, Err("OpenCode finished without writing a report".into()));
     }
 
     #[test]
@@ -529,36 +624,69 @@ mod tests {
     }
 
     #[test]
-    fn the_models_come_from_the_session_model_picker() {
-        let says = [
-            reply(0, json!({ "protocolVersion": 1 })),
-            update(json!({ "sessionUpdate": "available_commands_update", "availableCommands": [] })),
-            reply(1, json!({ "sessionId": "s1", "configOptions": [
-                { "id": "mode", "category": "mode", "options": [{ "value": "read-only", "name": "Read-only" }] },
-                { "id": "model", "category": "model", "options": [
-                    { "value": "gpt-6.1-sol", "name": "6.1 Sol" },
-                    { "value": "gpt-5.6-luna", "name": "5.6 Luna" },
-                ]},
-            ]})),
-        ];
+    fn read_only_opencode_denies_all_but_reading_even_in_its_build_agent() {
+        let read_only = json!({ "*": "deny", "read": "allow", "glob": "allow", "grep": "allow", "list": "allow" });
+        assert_eq!(
+            opencode_config(Some("openai/gpt-6.1-sol"), false),
+            json!({ "model": "openai/gpt-6.1-sol", "default_agent": "build", "permission": read_only, "agent": { "build": { "permission": read_only } } })
+        );
+        assert_eq!(opencode_config(Some("openai/gpt-6.1-sol"), true), json!({ "model": "openai/gpt-6.1-sol" }));
+        assert_eq!(opencode_config(None, true), json!({}));
+    }
+
+    #[test]
+    fn a_request_without_an_agent_is_for_codex() {
+        let r: Request = serde_json::from_value(json!({ "model": "gpt-5.5", "edits": false, "cwd": "/w", "prompt": "x" })).unwrap();
+        assert_eq!(r.agent, Agent::Codex);
+        let r: Request = serde_json::from_value(json!({ "agent": "opencode", "model": "openai/gpt-5.5", "edits": false, "cwd": "/w", "prompt": "x" })).unwrap();
+        assert_eq!(r.agent, Agent::OpenCode);
+    }
+
+    fn picker_session() -> Value {
+        reply(1, json!({ "sessionId": "s1", "configOptions": [
+            { "id": "mode", "category": "mode", "options": [{ "value": "read-only", "name": "Read-only" }] },
+            { "id": "model", "category": "model", "options": [
+                { "value": "gpt-6.1-sol", "name": "6.1 Sol" },
+                { "value": "gpt-5.6-luna", "name": "5.6 Luna" },
+            ]},
+        ]}))
+    }
+
+    fn list(agent: Agent, says: &[Value]) -> (Result<Vec<AgentModel>, String>, Vec<Value>) {
         let script: String = says.iter().map(|m| format!("{m}\n")).collect();
         let mut sent = Vec::new();
-        let models = list_models(script.as_bytes(), &mut sent, Path::new("/work")).unwrap();
+        let models = list_models(agent, script.as_bytes(), &mut sent, Path::new("/work"));
+        (models, String::from_utf8(sent).unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect())
+    }
+
+    #[test]
+    fn the_models_come_from_the_session_model_picker() {
+        let says = [reply(0, json!({ "protocolVersion": 1 })), update(json!({ "sessionUpdate": "available_commands_update", "availableCommands": [] })), picker_session()];
+        let (models, sent) = list(Agent::Codex, &says);
         assert_eq!(
-            models,
-            vec![
-                CodexModel { id: "gpt-6.1-sol".into(), name: "6.1 Sol".into() },
-                CodexModel { id: "gpt-5.6-luna".into(), name: "5.6 Luna".into() },
-            ]
+            models.unwrap(),
+            vec![AgentModel { id: "gpt-6.1-sol".into(), name: "6.1 Sol".into() }, AgentModel { id: "gpt-5.6-luna".into(), name: "5.6 Luna".into() }]
         );
-        assert_eq!(String::from_utf8(sent).unwrap().lines().count(), 2, "initialize and session/new, no prompt");
+        assert_eq!(sent.iter().map(|m| m["method"].as_str().unwrap()).collect::<Vec<_>>(), ["initialize", "session/new"], "no prompt, and Codex's session is left alone");
+    }
+
+    #[test]
+    fn opencode_deletes_the_session_it_read_the_models_from() {
+        let says = [reply(0, json!({ "protocolVersion": 1 })), picker_session(), reply(2, json!({}))];
+        let (models, sent) = list(Agent::OpenCode, &says);
+        assert_eq!(models.unwrap().len(), 2);
+        assert_eq!(sent.iter().map(|m| m["method"].as_str().unwrap()).collect::<Vec<_>>(), ["initialize", "session/new", "session/delete"]);
+        assert_eq!(sent[2]["params"]["sessionId"], "s1");
+        // A delete opencode refuses, or never answers before exiting, still gives the models.
+        let says = [reply(0, json!({ "protocolVersion": 1 })), picker_session()];
+        assert_eq!(list(Agent::OpenCode, &says).0.unwrap().len(), 2);
     }
 
     #[test]
     fn no_model_picker_is_an_error() {
         let says = [reply(0, json!({})), reply(1, json!({ "sessionId": "s1" }))];
-        let script: String = says.iter().map(|m| format!("{m}\n")).collect();
-        assert_eq!(list_models(script.as_bytes(), Vec::new(), Path::new("/w")), Err("codex-acp listed no models".into()));
+        assert_eq!(list(Agent::Codex, &says).0, Err("codex-acp listed no models".into()));
+        assert_eq!(list(Agent::OpenCode, &says).0, Err("opencode listed no models".into()));
     }
 
     #[test]

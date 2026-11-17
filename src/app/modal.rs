@@ -150,11 +150,11 @@ impl Workspace {
                         }
                     }
                 }
+                // The catalogs are what the agents last offered, kept as they are; the page edits the rest.
+                let choice = |form: AgentForm, saved: &claude::subagents::AgentChoice| claude::subagents::AgentChoice { on: form.on, models: form.models, edits: form.edits, catalog: saved.catalog.clone() };
                 let custom_subagents = claude::subagents::CustomSubagents {
-                    codex: subagents.codex,
-                    codex_models: subagents.models,
-                    codex_edits: subagents.edits,
-                    codex_catalog: s.custom_subagents.codex_catalog.clone(),
+                    codex: choice(subagents.codex, &s.custom_subagents.codex),
+                    opencode: choice(subagents.opencode, &s.custom_subagents.opencode),
                 };
                 let tools_changed = s.trimmed_tools != trimmed || s.limits != limits || s.claudiu_tools_off != claudiu_off;
                 let subagents_changed = s.custom_subagents != custom_subagents;

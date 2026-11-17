@@ -2284,35 +2284,115 @@ fn the_projects_page_moves_renames_and_removes_projects() {
     assert_eq!(h.ws().store.session(&session).unwrap().project_id.as_ref(), Some(&beta), "with its session");
 }
 
-/// Settings → Custom subagents: turning Codex on lists the models codex-acp offers, each with a switch, Save keeps the
-/// ones switched on, and a new session gets one unprefixed agent type for each.
+/// A model with a long name keeps its switch inside its row, on the page and in the picker.
 #[test]
-fn custom_subagents_reach_new_sessions() {
-    use crate::claude::subagents::CodexModel;
+fn a_long_model_name_keeps_the_switch_in_its_row() {
+    use crate::claude::subagents::{Agent, AgentModel};
     let mut h = Harness::new(|_| vec![]);
     h.step(|ws| {
-        ws.codex_models_page.list = |_| Ok(vec![CodexModel { id: "gpt-6.1-sol".into(), name: "6.1 Sol".into() }, CodexModel { id: "gpt-5.6-luna".into(), name: "5.6 Luna".into() }]);
+        ws.model_lookups.list = |_, _| Ok(vec![AgentModel { id: "openrouter/a-very-long-model".into(), name: "openrouter/A Very Long Model Name That Goes On And On Past Any Reasonable Width For A Row".into() }]);
         ws.act(Act::OpenSettings);
         ws.set_settings_page(SettingsPage::CustomSubagents);
     });
     h.settle();
-    assert!(!h.drawn("settings-codex-model-gpt-6.1-sol"), "the models wait for the Codex switch");
-    h.click("settings-codex");
-    h.wait("the models codex-acp offers", |ws| ws.store.data.settings.custom_subagents.codex_catalog.len() == 2);
+    h.click("settings-opencode");
+    h.wait("the models", |ws| !ws.store.data.settings.custom_subagents.get(Agent::OpenCode).catalog.is_empty());
+    let (x, y) = h.rt.find("settings-page-Custom subagents").unwrap();
+    h.rt.wheel(x, y, -1200.0);
     h.settle();
-    h.click("settings-codex-model-gpt-6.1-sol");
+    h.click("settings-opencode-choose");
+    h.settle();
+    let inside = |h: &Harness, row: &str| {
+        let (r, _) = h.rt.presented(row).unwrap_or_else(|| panic!("{row} is not drawn"));
+        let (s, _) = h.rt.presented(&format!("{row}-switch")).unwrap();
+        // [x, y, w, h]
+        s[0] >= r[0] && s[0] + s[2] <= r[0] + r[2]
+    };
+    assert!(inside(&h, "model-picker-openrouter/a-very-long-model"), "the picker's switch stays in its row");
+    let (card, _) = h.rt.presented("model-picker").unwrap();
+    let (row, _) = h.rt.presented("model-picker-openrouter/a-very-long-model").unwrap();
+    assert!(row[0] + row[2] <= card[0] + card[2], "the row stays in the picker");
+    h.click("model-picker-openrouter/a-very-long-model");
+    h.click("model-picker-done");
+    h.settle();
+    assert!(inside(&h, "settings-opencode-model-openrouter/a-very-long-model"), "the page's switch stays in its row");
+}
+
+/// Settings → Custom subagents: turning an agent on shows a Choose models button whose picker lists the models the
+/// agent offers, with a search; Save keeps the ones switched on, and a new session hands the mod one agent type for
+/// each.
+#[test]
+fn custom_subagents_reach_new_sessions() {
+    use crate::claude::subagents::{Agent, AgentModel};
+    fn model(id: &str, name: &str) -> AgentModel {
+        AgentModel { id: id.into(), name: name.into() }
+    }
+    let mut h = Harness::new(|_| vec![]);
+    h.step(|ws| {
+        ws.model_lookups.list = |agent, _| {
+            Ok(match agent {
+                Agent::Codex => vec![model("gpt-6.1-sol", "6.1 Sol"), model("gpt-5.6-luna", "5.6 Luna")],
+                Agent::OpenCode => vec![model("openai/gpt-6.1-sol", "openai/GPT-6.1 Sol"), model("opencode/beam-free", "opencode/Beam Free"), model("github-copilot/grok-4.7", "github-copilot/Grok 4.7")],
+            })
+        };
+        ws.act(Act::OpenSettings);
+        ws.set_settings_page(SettingsPage::CustomSubagents);
+    });
+    h.settle();
+    assert!(!h.drawn("settings-codex-choose"), "the models wait for the Codex switch");
+    h.click("settings-codex");
+    h.wait("the models codex-acp offers", |ws| ws.store.data.settings.custom_subagents.codex.catalog.len() == 2);
+    h.settle();
+    assert!(!h.drawn("settings-codex-model-gpt-6.1-sol"), "the page lists only the models switched on");
+    h.click("settings-codex-choose");
+    h.settle();
+    h.click("model-picker-gpt-6.1-sol");
+    h.press(rune::Key::Escape, |_| {});
+    h.settle();
+    assert!(!h.drawn("model-picker"), "Escape closes the picker");
+    assert!(matches!(h.ws().modal, Some(Modal::Settings { .. })), "and only the picker");
+    assert!(h.drawn("settings-codex-model-gpt-6.1-sol"), "the model switched on shows on the page");
     h.click("settings-codex-edits");
+
+    // OpenCode's picker narrows to what the search matches, by every word typed, in the name or the id.
+    h.click("settings-opencode");
+    h.wait("the models opencode offers", |ws| ws.store.data.settings.custom_subagents.opencode.catalog.len() == 3);
+    let (x, y) = h.rt.find("settings-page-Custom subagents").unwrap();
+    h.rt.wheel(x, y, -1200.0);
+    h.settle();
+    h.click("settings-opencode-choose");
+    h.settle();
+    h.type_text("GPT sol");
+    h.settle();
+    assert!(h.drawn("model-picker-openai/gpt-6.1-sol"));
+    assert!(!h.drawn("model-picker-opencode/beam-free"), "a model the search doesn't match is hidden");
+    h.click("model-picker-openai/gpt-6.1-sol");
+    h.press(rune::Key::Enter, |_| {});
+    h.settle();
+    assert!(!h.drawn("model-picker"), "Enter in the search closes the picker");
+    assert!(matches!(h.ws().modal, Some(Modal::Settings { .. })), "and leaves Settings open");
+
     h.step(|ws| ws.submit_modal());
     assert_eq!(h.ws().toast.as_ref().map(|t| t.text.as_str()), Some("Settings saved. Custom subagents apply to new and resumed sessions."));
     let saved = &h.ws().store.data.settings.custom_subagents;
-    assert_eq!((saved.codex, saved.codex_models.clone(), saved.codex_edits), (true, vec!["gpt-6.1-sol".to_string()], true));
+    assert_eq!((saved.codex.on, saved.codex.models.clone(), saved.codex.edits), (true, vec!["gpt-6.1-sol".to_string()], true));
+    assert_eq!((saved.opencode.on, saved.opencode.models.clone(), saved.opencode.edits), (true, vec!["openai/gpt-6.1-sol".to_string()], false));
 
-    // Settings opens on the page it showed last, and asks codex-acp again from there.
+    // Settings opens on the page it showed last, and asks again from there.
     h.step(|ws| {
-        ws.codex_models_page.list = |_| Ok(vec![CodexModel { id: "gpt-7".into(), name: "7".into() }]);
+        ws.model_lookups.list = |agent, _| Ok(vec![model(if agent == Agent::Codex { "gpt-7" } else { "openai/gpt-7" }, "7")]);
         ws.act(Act::OpenSettings);
     });
-    h.wait("a fresh look at the models", |ws| ws.store.data.settings.custom_subagents.codex_catalog.iter().any(|m| m.id == "gpt-7"));
+    h.wait("a fresh look at the models", |ws| ws.store.data.settings.custom_subagents.codex.catalog.iter().any(|m| m.id == "gpt-7"));
+    h.settle();
+    h.click("settings-codex-choose");
+    h.settle();
+    assert!(h.drawn("model-picker-gpt-7"));
+    assert!(h.drawn("model-picker-gpt-6.1-sol"), "a model switched on that is no longer offered stays listed");
+    h.click("model-picker-gpt-6.1-sol");
+    h.click("model-picker-done");
+    h.settle();
+    assert!(!h.drawn("settings-codex-model-gpt-6.1-sol"), "switched off, it leaves the page");
     h.press(rune::Key::Escape, |_| {});
 
     // A stand-in `claude` that prints its arguments and what the mod would read.
@@ -2328,6 +2408,9 @@ fn custom_subagents_reach_new_sessions() {
     });
     let id = h.ws().active.clone().expect("a session is shown");
     let shows = |ws: &Workspace, text: &str| ws.live_view(&id).is_some_and(|v| v.tail_text(4000).contains(text));
-    h.wait("the agent type to reach Claude", |ws| shows(ws, r#"--agents {"codex-gpt-6-1-sol":{"#));
-    h.wait("the agent type to reach the mod", |ws| shows(ws, r#"{"codex":{"edits":true,"types":[{"name":"codex-gpt-6-1-sol","model":"gpt-6.1-sol"}]}}"#));
+    // The mod registers what it reads here; interactive Claude Code ignores `claude --agents`.
+    h.wait("the agent types to reach the mod", |ws| {
+        shows(ws, r#"{"codex":{"edits":true,"types":[{"name":"codex-gpt-6-1-sol","model":"gpt-6.1-sol","description":"Runs the task in OpenAI Codex on gpt-6.1-sol."#)
+            && shows(ws, r#""opencode":{"edits":false,"types":[{"name":"opencode-openai-gpt-6-1-sol","model":"openai/gpt-6.1-sol","description":"Runs the task in OpenCode on openai/gpt-6.1-sol."#)
+    });
 }

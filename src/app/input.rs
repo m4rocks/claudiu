@@ -198,6 +198,8 @@ impl Workspace {
         }
         if self.modal.is_some() {
             match ks.key.as_str() {
+                // Escape and Enter close only the model picker over Settings, so Settings keeps what was edited.
+                "escape" | "enter" if plain && self.model_picker_open() => self.close_model_picker(),
                 "escape" if plain => self.act(Act::Dismiss),
                 "enter" if plain && tx.focused().is_none() => self.submit_modal(),
                 _ if matches!(self.modal, Some(Modal::Settings { .. })) => return self.settings_key(ks),
