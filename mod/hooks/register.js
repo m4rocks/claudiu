@@ -18,6 +18,9 @@
 //   paints the live card over them. Claudiu's measured height comes back in `CLAUDIU_VISUAL_PREFIX<call>.rows`.
 // - One-shot completions: runs requests from `CLAUDIU_ASK_FILE` (commit messages, session titles) with
 //   `$.model.complete`, on this session's own client, so Claudiu needs no `claude -p`.
+// - Custom subagents: registers the Codex and OpenCode agent types `CLAUDIU_SUBAGENTS` lists. Claude never runs for
+//   those agents: each turn is answered here with what the agent writes through `CLAUDIU_EXE --acp`, and its last
+//   message is handed back with SubagentHandback.
 
 // ---- Constants ----------------------------------------------------------------------------------------------------
 
@@ -33,6 +36,7 @@ const PROMPT_MAX = 20000 // characters of a message Claudiu asks the session to 
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']
 const ASK_MODELS = ['haiku', 'sonnet', 'opus']
 const VISUAL_TOOL = 'mcp__claudiu__show_visual'
+const HANDBACK_TOOL = 'SubagentHandback'
 // The /config row for background compaction ("Precompute compaction"). Claude Code lists it only while a server-side
 // flag enables the feature; without the row the setting does nothing, so Claudiu offers the switch only with it.
 const PRECOMPUTE_ROW = 'precomputeCompactionEnabled'
@@ -49,6 +53,10 @@ let askPoll // watches CLAUDIU_ASK_FILE
 let askSeen = null // id of the last request looked at
 let asking = false // a completion is running; a poll that finds another request waits for it
 const cardRows = new Map() // show_visual call id -> rows reserved for its card
+const AGENT_NAMES = { codex: 'Codex', opencode: 'OpenCode' } // the agents of `claude/subagents.rs`, by their key
+const AGENT_PREFIX = 'Claudiu:' // what Claude Code puts before an agent type this plugin registers
+const customTypes = new Map() // agent type name -> { agent, model, edits } of each custom agent type Claudiu defined
+const customRuns = new Map() // agent id -> { type, prompt, turnId, report } of each custom subagent started
 const published = new Set() // call ids whose card file this process wrote from the transcript
 let rowsPoll // watches the heights Claudiu measures
 let visualChain = Promise.resolve() // visual writes in order, without holding up the stream
@@ -337,6 +345,130 @@ async function watchSessionName($) {
   })
 }
 
+// ---- Custom subagents ---------------------------------------------------------------------------------------------
+
+// Registers the custom agent types Claudiu listed for this session (`claude/subagents.rs`); Claude Code names each
+// `Claudiu:<name>`. Interactive Claude Code ignores `claude --agents`, so this is where they are defined. A missing or
+// broken list registers none.
+async function registerSubagents($) {
+  customTypes.clear()
+  const listed = await $.env.get('CLAUDIU_SUBAGENTS')
+  if (!listed || !(await $.env.get('CLAUDIU_EXE'))) return
+  let agents
+  try {
+    agents = JSON.parse(listed)
+  } catch {
+    return
+  }
+  for (const agent of Object.keys(AGENT_NAMES)) {
+    const listing = agents?.[agent]
+    for (const { name, model, description, prompt } of listing?.types ?? []) {
+      if (![name, model, description, prompt].every(v => typeof v === 'string')) continue
+      // Claude never runs for this agent (customStep answers its turns) unless this module lost track of it; the
+      // prompt then says so.
+      await $.agent.register({ name, description, prompt, model: 'haiku', tools: [] })
+        .then(() => customTypes.set(AGENT_PREFIX + name, { agent, model, edits: listing.edits === true }))
+        .catch(() => {})
+    }
+  }
+}
+
+// Notes the task of each custom subagent as it starts; its turns are answered by customStep.
+async function onAgentSpawn($, e, next) {
+  const r = await next(e)
+  if (r.agentId && customTypes.has(e.subagentType)) {
+    customRuns.set(r.agentId, { type: e.subagentType, prompt: e.prompt, turnId: null, report: null, handedBack: 0 })
+  }
+  return r
+}
+
+// The custom run of a subagent, or undefined for any other agent. A reload of this module forgets the runs it noted,
+// so an agent of a custom type not noted is taken up from the agent list, with its newest message as the task.
+async function customRun($, agentId) {
+  if (customRuns.has(agentId) || customTypes.size === 0) return customRuns.get(agentId)
+  const agent = (await $.agent.list().catch(() => [])).find(a => a.id === agentId)
+  if (!agent || !customTypes.has(agent.type)) return undefined
+  const run = { type: agent.type, prompt: null, turnId: null, report: null, handedBack: 0 }
+  customRuns.set(agentId, run)
+  return run
+}
+
+// The task for this turn: the Agent call's prompt on the first turn, the newest message to the agent after that
+// (a message sent to a finished subagent starts a turn of its own).
+async function customTask($, run, agentId) {
+  if (run.turnId === null && run.prompt !== null) return run.prompt
+  const messages = await $.session.messages({ agentId }).catch(() => [])
+  const last = Array.isArray(messages) ? messages.filter(m => m.role === 'user' && m.text?.trim()).at(-1) : undefined
+  return last?.text ?? run.prompt ?? ''
+}
+
+// Answers one step of a custom subagent: runs the task in its agent, streams what the agent writes and does as the
+// subagent's own text (saved in its transcript, which only the person reads), and hands back the agent's last message
+// as the report. The agent runs once per turn; a later step of the same turn (a refused hand-back)
+// hands back the same report once more, then ends the turn with the report as plain text so a hand-back that keeps
+// being refused can't loop.
+async function* customStep($, e, next, run) {
+  if (run.turnId !== e.turnId || run.report === null) {
+    const prompt = await customTask($, run, e.agentId)
+    run.turnId = e.turnId
+    run.handedBack = 0
+    const { agent, model, edits } = customTypes.get(run.type)
+    const name = AGENT_NAMES[agent]
+    yield { kind: 'text', index: 0, text: `${name} on ${model}, ${edits ? 'edits allowed' : 'read-only'}\n\n` }
+    run.report = null
+    for await (const event of helperEvents($, { agent, model, edits, cwd: await $.session.cwd(), prompt }, next.signal)) {
+      if (event.kind === 'text') yield { kind: 'text', index: 0, text: event.text }
+      else if (event.kind === 'step') yield { kind: 'text', index: 0, text: `\n▸ ${event.text}\n` }
+      else if (event.kind === 'report') run.report = event.text
+      else if (event.kind === 'failed') run.report = `${name} failed: ${event.reason}`
+    }
+    if (next.signal?.aborted) return
+    run.report ??= `${name} failed: the helper stopped without an answer.`
+  }
+  if (run.handedBack >= 2) {
+    yield { kind: 'text', index: 1, text: run.report }
+    yield { kind: 'stop', stopReason: 'end_turn', usage: null }
+    return { turnId: e.turnId, index: e.index, answer: run.report, toolUses: [], stopReason: 'end_turn', usage: null }
+  }
+  run.handedBack += 1
+  const input = { message: run.report }
+  yield { kind: 'tool', index: 1, id: `toolu_custom_${e.turnId}_${e.index}`, name: HANDBACK_TOOL }
+  yield { kind: 'input', index: 1, json: JSON.stringify(input) }
+  yield { kind: 'stop', stopReason: 'tool_use', usage: null }
+  return { turnId: e.turnId, index: e.index, answer: '', toolUses: [{ name: HANDBACK_TOOL, input }], stopReason: 'tool_use', usage: null }
+}
+
+// The helper's events, one per line of its output. Stops early, ending the helper and the agent, when the turn is
+// interrupted.
+async function* helperEvents($, request, signal) {
+  const exe = await $.env.get('CLAUDIU_EXE')
+  let pending = ''
+  try {
+    for await (const chunk of $.process.spawn({ argv: [exe, '--acp'], input: JSON.stringify(request) })) {
+      if (signal?.aborted) return
+      if (chunk.stream !== 'stdout') continue
+      pending += chunk.text
+      const lines = pending.split('\n')
+      pending = lines.pop()
+      for (const line of lines) {
+        const event = parseEvent(line)
+        if (event) yield event
+      }
+    }
+  } catch (err) {
+    yield { kind: 'failed', reason: 'the helper could not run (' + String(err?.message ?? err).slice(0, 200) + ')' }
+  }
+}
+
+function parseEvent(line) {
+  try {
+    const event = JSON.parse(line)
+    return typeof event?.kind === 'string' ? event : null
+  } catch {
+    return null
+  }
+}
+
 // ---- Hook handlers ------------------------------------------------------------------------------------------------
 
 async function onMeasure($, e, next) {
@@ -438,8 +570,10 @@ async function onShowVisual($, e) {
 }
 
 // Applies the saved model and effort to this turn's steps, and streams a show_visual call to its card while the model
-// writes it. Sub-agent steps are left alone.
+// writes it. A custom subagent's steps are answered by customStep; other subagents' steps are left alone.
 async function* onTurnStep($, e, next) {
+  const run = e.agentId ? await customRun($, e.agentId) : undefined
+  if (run) return yield* customStep($, e, next, run)
   const step = !e.agentId && (want.model || want.effort)
     ? { ...e, model: want.model ?? e.model, effort: want.effort ?? e.effort }
     : e
@@ -514,6 +648,7 @@ async function onSessionStart($, e, next) {
   rowsPoll?.cancel()
   rowsPoll = $.clock.every(200, () => readCardRows($))
   await watchSessionName($)
+  await registerSubagents($)
   return r
 }
 
@@ -527,5 +662,6 @@ export function register(on) {
   on('ui.render', { component: 'ToolUse' }, onVisualRow)
   on('ui.render', { component: 'ToolGroup' }, onVisualGroup)
   on('turn.step', onTurnStep)
+  on('agent.spawn', onAgentSpawn)
   on('session.start', onSessionStart)
 }

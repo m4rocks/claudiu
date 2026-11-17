@@ -71,6 +71,10 @@ fn main() {
     if std::env::args().nth(1).as_deref() == Some(claude::mcp::FLAG) {
         std::process::exit(claude::mcp::run());
     }
+    // Hidden helper mode: runs one task in Codex for a custom subagent (see claude/acp.rs).
+    if std::env::args().nth(1).as_deref() == Some(claude::acp::FLAG) {
+        std::process::exit(claude::acp::run());
+    }
     install_crash_log();
     #[cfg(windows)]
     priority::restore_own_priority();

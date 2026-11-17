@@ -57,6 +57,10 @@ impl Workspace {
         if let Some(m) = self.render_modal() {
             out.push(m);
         }
+        // Above Settings: the last modal mounted takes Escape and clicks outside it.
+        if let Some(m) = self.model_picker() {
+            out.push(m);
+        }
         if let Some(m) = self.render_menu() {
             out.push(m);
         }

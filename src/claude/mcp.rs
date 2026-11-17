@@ -112,9 +112,11 @@ Claude Code session (the user says so, or you recognise it), find it with search
 call unlink_session when a link no longer fits. Both are silent.";
 
 /// What makes the model call `show_visual` (the tool's own description teaches the dialect, and stays deferred).
-const VISUAL_INSTRUCTIONS: &str = " Visual: show_visual draws a card inside this terminal, under the call. Most replies need \
-none. When a reply does need a visual (a table, comparison, flow, architecture, before/after, status board or chart), prefer \
-show_visual over drawing it in text, unasked (private, no approval), and reply in a few lines.";
+const VISUAL_INSTRUCTIONS: &str = " Visual: show_visual draws a card inside this terminal, under the call. Call it unasked \
+whenever a reply would contain a table, a comparison, three or more items that each have details, steps or a flow, an \
+architecture, a before/after, a status board or numbers worth a chart. A card is easier to read than the same thing typed \
+as text, and it is private and needs no approval. Put that part in the card and keep the typed reply to a few lines. A \
+short answer, a one-line fact or a code change needs no card.";
 
 const ARTIFACT_INSTRUCTIONS: &str = " Artifacts are for pages to share.";
 

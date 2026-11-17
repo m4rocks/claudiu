@@ -35,6 +35,7 @@ impl Workspace {
         if page == SettingsPage::Worktrees {
             self.load_stored_worktrees();
         }
+        self.load_models();
     }
 
     pub(super) fn load_stored_worktrees(&mut self) {

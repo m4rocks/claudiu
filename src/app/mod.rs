@@ -16,6 +16,7 @@ use crate::panels::sidebar::{SIDEBAR_MAX, SIDEBAR_MIN, SIDEBAR_W};
 use crate::github::view::{GhEvent, GithubView};
 use crate::claude::defaults::{Effort, PermissionMode, Starter};
 use crate::claude::mcp;
+use crate::claude::subagents::Agent;
 use crate::git::worktree::Base;
 use crate::platform::{self, Editor};
 use crate::{claude::usage, datadir};
@@ -70,7 +71,7 @@ pub use editing::Conflict;
 pub use file_ops::NameFor;
 pub use editor_mode::{EditorCommand, EditorPane};
 pub use lifecycle::{saved_window_geom, set_main_window, show_main_window};
-pub use settings::SettingsPage;
+pub use settings::{Lookup, SettingsPage};
 pub use setup::open_first_setup;
 
 /// Every user-triggerable operation, so buttons, menus and shortcuts share one code path.
@@ -301,10 +302,45 @@ pub enum Modal {
         hints: [String; 4],
         /// The project being renamed on the Projects page, and the name typed so far.
         renaming: Option<(Id, TextEdit)>,
+        /// The Custom subagents page.
+        subagents: SubagentsForm,
     },
 }
 
-/// A field of the open modal, by its place: the dialog's only field is 0; Settings' are shell, claude, model, skills.
+/// The Custom subagents page of the Settings dialog, as edited so far.
+pub struct SubagentsForm {
+    pub codex: AgentForm,
+    pub opencode: AgentForm,
+    /// The agent whose models the picker over the page lists, and the search typed in it so far.
+    pub picking: Option<(Agent, TextEdit)>,
+}
+
+/// One agent's part of the Custom subagents page.
+pub struct AgentForm {
+    pub on: bool,
+    /// The ids of the models switched on.
+    pub models: Vec<String>,
+    pub edits: bool,
+}
+
+impl SubagentsForm {
+    pub fn get(&self, agent: Agent) -> &AgentForm {
+        match agent {
+            Agent::Codex => &self.codex,
+            Agent::OpenCode => &self.opencode,
+        }
+    }
+
+    pub fn get_mut(&mut self, agent: Agent) -> &mut AgentForm {
+        match agent {
+            Agent::Codex => &mut self.codex,
+            Agent::OpenCode => &mut self.opencode,
+        }
+    }
+}
+
+/// A field of the open modal, by its place: the dialog's only field is 0; Settings' are shell, claude, model, skills,
+/// the project being renamed and the model picker's search.
 pub fn modal_field(modal: &mut Option<Modal>, n: usize) -> Option<&mut TextEdit> {
     match (modal.as_mut()?, n) {
         (Modal::Rename { input, .. } | Modal::NewBranch { input, .. } | Modal::NewWorktree { input, .. } | Modal::Advisor { input, .. } | Modal::GoToLine { input, .. } | Modal::FileName { input, .. }, 0) => Some(input),
@@ -313,6 +349,7 @@ pub fn modal_field(modal: &mut Option<Modal>, n: usize) -> Option<&mut TextEdit>
         (Modal::Settings { model, .. }, 2) => Some(model),
         (Modal::Settings { skills_field, .. }, 3) => Some(skills_field),
         (Modal::Settings { renaming: Some((_, name)), .. }, 4) => Some(name),
+        (Modal::Settings { subagents: SubagentsForm { picking: Some((_, search)), .. }, .. }, 5) => Some(search),
         _ => None,
     }
 }
@@ -443,6 +480,8 @@ pub struct Workspace {
     pub settings_page: SettingsPage,
     /// What the Worktrees page of Settings shows. Not saved to disk.
     pub worktrees_page: worktrees::WorktreesPage,
+    /// Whether the Custom subagents page is asking each agent for its models. Not saved to disk.
+    pub model_lookups: settings::ModelLookups,
     pub menu: Option<Menu>,
     pub menu_serial: u64,
     pub toast: Option<Toast>,
@@ -536,6 +575,7 @@ impl Workspace {
             modal_serial: 0,
             settings_page: SettingsPage::default(),
             worktrees_page: Default::default(),
+            model_lookups: Default::default(),
             menu: None,
             menu_serial: 0,
             toast: None,
@@ -749,8 +789,12 @@ impl Workspace {
                 let skills_field = modal::field(&self.store.data.settings.limits.text(), false);
                 let hints = [platform::default_shell(None).0, claude_hint, "Claude Code default".into(), "none, e.g. dataviz, claude-api".into()];
                 self.blur = true;
+                let custom = &self.store.data.settings.custom_subagents;
+                let form = |c: &claude::subagents::AgentChoice| AgentForm { on: c.on, models: c.models.clone(), edits: c.edits };
+                let subagents = SubagentsForm { codex: form(&custom.codex), opencode: form(&custom.opencode), picking: None };
+                self.modal = Some(Modal::Settings { shell, claude, model, effort: defaults.effort, permission: defaults.permission_mode, updates, chrome, scale: crate::panels::scale::percent(), trimmed: self.store.data.settings.trimmed_tools.clone(), claudiu_off: self.store.data.settings.claudiu_tools_off.clone(), skills_field, costly: claude::costly::scan(), hints, renaming: None, subagents });
+                // After the modal exists: a page that loads something reads the dialog's fields.
                 self.set_settings_page(self.settings_page);
-                self.modal = Some(Modal::Settings { shell, claude, model, effort: defaults.effort, permission: defaults.permission_mode, updates, chrome, scale: crate::panels::scale::percent(), trimmed: self.store.data.settings.trimmed_tools.clone(), claudiu_off: self.store.data.settings.claudiu_tools_off.clone(), skills_field, costly: claude::costly::scan(), hints, renaming: None });
                 self.modal_serial += 1;
             }
             Act::PickEffort(choice) => {

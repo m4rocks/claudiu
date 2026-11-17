@@ -94,7 +94,7 @@ impl Workspace {
                     }
                 }
             }
-            Some(Modal::Settings { shell, claude, model, effort, permission, updates, chrome, scale, trimmed, claudiu_off, skills_field, costly, hints, renaming }) => {
+            Some(Modal::Settings { shell, claude, model, effort, permission, updates, chrome, scale, trimmed, claudiu_off, skills_field, costly, hints, renaming, subagents }) => {
                 let clean = |s: &str| s.trim().trim_matches('"').to_string();
                 let (shell_t, claude_t) = (clean(&shell.text), clean(&claude.text));
                 let model_name = claude::defaults::parse_model(&model.text);
@@ -109,7 +109,7 @@ impl Workspace {
                 let bad_limits = limits.as_ref().err().map(|why| (SettingsPage::ClaudeTools, 3, why.clone()));
                 if let Some((page, field, msg)) = paths.or(bad_model).or(bad_limits) {
                     self.settings_page = page;
-                    self.modal = Some(Modal::Settings { shell, claude, model, effort, permission, updates, chrome, scale, trimmed, claudiu_off, skills_field, costly, hints, renaming });
+                    self.modal = Some(Modal::Settings { shell, claude, model, effort, permission, updates, chrome, scale, trimmed, claudiu_off, skills_field, costly, hints, renaming, subagents });
                     if let Some(f) = modal_field(&mut self.modal, field) {
                         f.focused = true;
                     }
@@ -150,16 +150,26 @@ impl Workspace {
                         }
                     }
                 }
+                // The catalogs are what the agents last offered, kept as they are; the page edits the rest.
+                let choice = |form: AgentForm, saved: &claude::subagents::AgentChoice| claude::subagents::AgentChoice { on: form.on, models: form.models, edits: form.edits, catalog: saved.catalog.clone() };
+                let custom_subagents = claude::subagents::CustomSubagents {
+                    codex: choice(subagents.codex, &s.custom_subagents.codex),
+                    opencode: choice(subagents.opencode, &s.custom_subagents.opencode),
+                };
                 let tools_changed = s.trimmed_tools != trimmed || s.limits != limits || s.claudiu_tools_off != claudiu_off;
+                let subagents_changed = s.custom_subagents != custom_subagents;
                 s.trimmed_tools = trimmed;
                 s.limits = limits;
                 s.claudiu_tools_off = claudiu_off;
+                s.custom_subagents = custom_subagents;
                 crate::panels::scale::set(scale);
                 self.shell = platform::default_shell(s.shell.as_deref());
                 self.claude_exe = claude::discover(s.claude_path.as_deref());
                 self.store.mark_dirty();
                 if let Some(e) = trim_error {
                     self.toast(format!("Settings saved, but Claude Code's settings.json could not be changed ({e}), so the tool trims stay as they were."), true);
+                } else if subagents_changed && !tools_changed {
+                    self.toast("Settings saved. Custom subagents apply to new and resumed sessions.", false);
                 } else if tools_changed {
                     self.toast("Settings saved. Tool changes apply to new sessions; resumed sessions keep the old instructions until their next compaction.", false);
                 } else {

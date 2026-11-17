@@ -83,6 +83,13 @@ impl TerminalView {
         self.cards.shown.contains_key(call)
     }
 
+    /// Takes `bytes` in as if the program had written them.
+    #[cfg(test)]
+    pub fn feed(&self, bytes: &str) {
+        use alacritty_terminal::vte::ansi::{Processor, StdSyncHandler};
+        Processor::<StdSyncHandler>::new().advance(&mut *self.terminal.term.lock(), bytes.as_bytes());
+    }
+
     /// What the user has done in this terminal's cards.
     pub fn card_ui(&mut self) -> &mut CardUi {
         self.dirty = true;
@@ -122,8 +129,15 @@ impl TerminalView {
         let margin = m.cell_w * MARGIN_COLS;
         let line_h = m.line_h;
         let mut out = vec![];
+        let mut pieces: HashMap<String, usize> = HashMap::new();
         for slot in self.visible_slots() {
             let Some(Shown { card, .. }) = self.cards.shown.get(&slot.call) else { continue };
+            // Keyed by the card and which of its pieces on screen this is, not by the card row it starts at: that
+            // changes with each line the card scrolls under the top edge, and a new key fades a new copy in over the
+            // old one fading out.
+            let piece = pieces.entry(slot.call.clone()).or_default();
+            let slot_key = format!("{}/slot-{}-{piece}", self.key, slot.call);
+            *piece += 1;
             let scope = Scope { call: card.call.clone(), terminal: self.key.clone() };
             let (call, term) = (card.call.clone(), self.key.clone());
             let clear = self.key.clone();
@@ -138,7 +152,7 @@ impl TerminalView {
                 })
                 .child(crate::visual::ui::markdown(&format!("{}/card-{}", self.key, card.call), &card.content, &scope, &self.cards.ui));
             out.push(
-                el().key(format!("{}/slot-{}-{}", self.key, slot.call, slot.first))
+                el().key(slot_key)
                     // Follows the scroll at once, as the rows around it do.
                     .instant_changes()
                     .absolute(0.0, line_h * slot.row as f32 + shift)

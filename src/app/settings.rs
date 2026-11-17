@@ -1,6 +1,7 @@
 //! The pages of the Settings dialog and its keyboard handling.
 
 use super::*;
+use crate::claude::subagents::Agent;
 use crate::terminal::keys::Keystroke;
 
 /// A category in the Settings dialog's list, in display order.
@@ -12,12 +13,13 @@ pub enum SettingsPage {
     Projects,
     ClaudeTools,
     ClaudiuTools,
+    CustomSubagents,
     Worktrees,
     About,
 }
 
 impl SettingsPage {
-    pub const ALL: [SettingsPage; 7] = [Self::General, Self::Sessions, Self::Projects, Self::ClaudeTools, Self::ClaudiuTools, Self::Worktrees, Self::About];
+    pub const ALL: [SettingsPage; 8] = [Self::General, Self::Sessions, Self::Projects, Self::ClaudeTools, Self::ClaudiuTools, Self::CustomSubagents, Self::Worktrees, Self::About];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -26,6 +28,7 @@ impl SettingsPage {
             Self::Projects => "Projects",
             Self::ClaudeTools => "Claude Code tools",
             Self::ClaudiuTools => "Claudiu tools",
+            Self::CustomSubagents => "Custom subagents",
             Self::Worktrees => "Worktrees",
             Self::About => "About",
         }
@@ -44,10 +47,104 @@ impl SettingsPage {
     }
 }
 
+/// One agent's model lookup for the Custom subagents page.
+#[derive(Default)]
+pub struct Lookup {
+    pub loading: bool,
+    /// Why the last lookup failed.
+    pub error: Option<String>,
+}
+
+/// The Custom subagents page's lookups of each agent's models.
+pub struct ModelLookups {
+    codex: Lookup,
+    opencode: Lookup,
+    /// How the page asks; tests answer without a real agent.
+    pub list: fn(Agent, &std::path::Path) -> Result<Vec<claude::subagents::AgentModel>, String>,
+}
+
+impl Default for ModelLookups {
+    fn default() -> Self {
+        Self { codex: Lookup::default(), opencode: Lookup::default(), list: claude::acp::models }
+    }
+}
+
+impl ModelLookups {
+    pub fn get(&self, agent: Agent) -> &Lookup {
+        match agent {
+            Agent::Codex => &self.codex,
+            Agent::OpenCode => &self.opencode,
+        }
+    }
+
+    fn get_mut(&mut self, agent: Agent) -> &mut Lookup {
+        match agent {
+            Agent::Codex => &mut self.codex,
+            Agent::OpenCode => &mut self.opencode,
+        }
+    }
+}
+
 impl Workspace {
+    /// Asks each agent switched on for its models in the background while the Custom subagents page shows. The list
+    /// the page showed last stays until the answer comes; a failure keeps it and says why.
+    pub(crate) fn load_models(&mut self) {
+        if self.settings_page != SettingsPage::CustomSubagents {
+            return;
+        }
+        let Some(Modal::Settings { subagents, .. }) = &self.modal else { return };
+        let wanted: Vec<Agent> = Agent::ALL.into_iter().filter(|a| subagents.get(*a).on && !self.model_lookups.get(*a).loading).collect();
+        for agent in wanted {
+            self.model_lookups.get_mut(agent).loading = true;
+            let list = self.model_lookups.list;
+            let folder = crate::datadir::data_dir();
+            self.rt.spawn(
+                move || list(agent, &folder),
+                move |ws: &mut Workspace, found| {
+                    let lookup = ws.model_lookups.get_mut(agent);
+                    lookup.loading = false;
+                    match found {
+                        Ok(models) => {
+                            lookup.error = None;
+                            let catalog = &mut ws.store.data.settings.custom_subagents.get_mut(agent).catalog;
+                            if *catalog != models {
+                                *catalog = models;
+                                ws.store.mark_dirty();
+                            }
+                        }
+                        Err(why) => lookup.error = Some(why),
+                    }
+                },
+            );
+        }
+    }
+
+    /// Opens the model picker over the Custom subagents page, with the keyboard in its search field.
+    pub(crate) fn open_model_picker(&mut self, agent: Agent) {
+        if let Some(Modal::Settings { subagents, .. }) = self.modal.as_mut() {
+            subagents.picking = Some((agent, super::modal::field("", true)));
+        }
+    }
+
+    /// Closes the model picker, keeping what it switched; Settings' Save keeps it for good.
+    pub(crate) fn close_model_picker(&mut self) {
+        if let Some(Modal::Settings { subagents, .. }) = self.modal.as_mut() {
+            subagents.picking = None;
+        }
+        self.blur = true;
+    }
+
+    pub(crate) fn model_picker_open(&self) -> bool {
+        matches!(&self.modal, Some(Modal::Settings { subagents: SubagentsForm { picking: Some(_), .. }, .. }))
+    }
+
     /// Keys for the open Settings dialog that no text field took. Up and Down change the page and Enter saves while no
     /// field has the keyboard (the category list has it); Tab and Shift+Tab cycle the list and the page's text fields.
     pub(crate) fn settings_key(&mut self, ks: &Keystroke) -> bool {
+        // The picker over the page has only its search field, and no list of pages for Up and Down to move.
+        if self.model_picker_open() {
+            return false;
+        }
         let fields: &[usize] = match self.settings_page {
             SettingsPage::General => &[0, 1],
             SettingsPage::Sessions => &[2],
@@ -88,7 +185,8 @@ mod tests {
     #[test]
     fn next_and_prev_walk_the_list_and_stop_at_the_ends() {
         assert_eq!(General.next(), Sessions);
-        assert_eq!(ClaudiuTools.next(), Worktrees);
+        assert_eq!(ClaudiuTools.next(), CustomSubagents);
+        assert_eq!(CustomSubagents.next(), Worktrees);
         assert_eq!(Worktrees.next(), About);
         assert_eq!(About.next(), About);
         assert_eq!(About.prev(), Worktrees);
