@@ -81,6 +81,18 @@ fn main() {
     // Velopack install/update hooks must run before anything else. A no-op for dev builds.
     velopack::VelopackApp::build().run();
 
+    // One app per data folder: a second one would race the first on state.json and the request files (#84). Debug
+    // builds have their own folder, so a dev build still runs beside the installed app.
+    let _data_folder = match datadir::lock(&datadir::data_dir(), std::time::Duration::from_secs(5)) {
+        Ok(Some(lock)) => Some(lock),
+        Ok(None) => {
+            app::already_running::show();
+            return;
+        }
+        // A folder that can't be locked (a read-only disk, say) is reported where it is first written, not here.
+        Err(_) => None,
+    };
+
     // TERM=xterm-256color / COLORTERM=truecolor for child processes.
     alacritty_terminal::tty::setup_env();
     terminal::prepare_child_env();

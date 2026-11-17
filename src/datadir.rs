@@ -36,6 +36,23 @@ pub fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
     std::fs::rename(&tmp, path)
 }
 
+/// Takes the data folder for this process: the lock lasts as long as the returned file is open. `Ok(None)` when another
+/// Claudiu holds it, so two apps never race on `state.json` and the request files. It waits up to `patience` first,
+/// because an update or restart starts the new app while the old one is still closing.
+pub fn lock(dir: &Path, patience: std::time::Duration) -> std::io::Result<Option<std::fs::File>> {
+    std::fs::create_dir_all(dir)?;
+    let file = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(dir.join("claudiu.lock"))?;
+    let start = std::time::Instant::now();
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(Some(file)),
+            Err(std::fs::TryLockError::WouldBlock) if start.elapsed() < patience => std::thread::sleep(std::time::Duration::from_millis(100)),
+            Err(std::fs::TryLockError::WouldBlock) => return Ok(None),
+            Err(std::fs::TryLockError::Error(e)) => return Err(e),
+        }
+    }
+}
+
 /// Remove the files in `dir` that have not been modified for `max_age_secs`. The caller decides the age.
 pub fn prune(dir: PathBuf, max_age_secs: u64) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
@@ -55,6 +72,18 @@ pub fn prune(dir: PathBuf, max_age_secs: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_second_app_cannot_take_a_data_folder_until_the_first_lets_go() {
+        let dir = tempfile::tempdir().unwrap();
+        let none = std::time::Duration::ZERO;
+        let first = lock(dir.path(), none).unwrap().expect("the first app takes the folder");
+        assert!(lock(dir.path(), none).unwrap().is_none(), "a second app finds it taken");
+        let other = tempfile::tempdir().unwrap();
+        assert!(lock(other.path(), none).unwrap().is_some(), "another data folder is free");
+        drop(first);
+        assert!(lock(dir.path(), none).unwrap().is_some(), "free again once the first app is gone");
+    }
 
     #[test]
     fn session_ids_cannot_escape_the_directory() {

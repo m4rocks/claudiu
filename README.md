@@ -14,4 +14,4 @@ Claudiu never calls the Anthropic API or deletes a transcript, and it changes Cl
 
 ## Development
 
-You need stable Rust, plus Visual Studio Build Tools on Windows or the headers Rune builds against on Linux, and [just](https://just.systems): `just run`, `just test`, `just ci`. `src/` is the app, `mod/` is the Claude Code plugin each session loads, and `web/` is the site. `CLAUDE.md` has the conventions. To release, bump `version` in `Cargo.toml` and push a `vX.Y.Z` tag.
+You need stable Rust, plus Visual Studio Build Tools on Windows or the headers Rune builds against on Linux, and [just](https://just.systems): `just run`, `just test`, `just ci`. `src/` is the app, `mod/` is the Claude Code plugin each session loads, and `web/` is the site. `CLAUDE.md` has the conventions. A debug build keeps its data in its own folder, so it runs beside the installed app; a second app on the same folder says Claudiu is already running and quits. To release, bump `version` in `Cargo.toml` and push a `vX.Y.Z` tag.
