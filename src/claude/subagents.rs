@@ -141,13 +141,18 @@ pub struct AgentType {
     pub model: String,
 }
 
-/// The agent type name of a model: the agent's key and the id, dots and slashes turned into dashes because type names
-/// can hold neither (`gpt-6.1-sol` → `codex-gpt-6-1-sol`, `openai/gpt-6.1-sol` → `opencode-openai-gpt-6-1-sol`).
-/// None for an id no type name can carry.
+/// The agent type name of a model: the agent's key and the id, with every character a type name can't hold (dots,
+/// slashes, colons) turned into a dash, cut to the length Claude Code takes (`gpt-6.1-sol` → `codex-gpt-6-1-sol`,
+/// `ollama/qwen3:8b` → `opencode-ollama-qwen3-8b`). None for an empty id.
 pub fn type_name(agent: Agent, model: &str) -> Option<String> {
-    let allowed = !model.is_empty() && model.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/'));
-    let name = format!("{}-{}", agent.key(), model.replace(['.', '/'], "-"));
-    (allowed && name.len() <= TYPE_NAME_MAX).then_some(name)
+    if model.is_empty() {
+        return None;
+    }
+    let id: String = model.chars().map(|c| if c.is_ascii_alphanumeric() || matches!(c, '_' | '-') { c } else { '-' }).collect();
+    // Every character is ASCII now, so cutting at a byte count can't split one.
+    let mut name = format!("{}-{id}", agent.key());
+    name.truncate(TYPE_NAME_MAX);
+    Some(name)
 }
 
 /// The agent types of the models switched on. A model whose type name an earlier one took gives none.
@@ -242,13 +247,16 @@ mod tests {
     }
 
     #[test]
-    fn ids_no_type_name_can_carry_and_repeats_give_no_type() {
-        let long = "g".repeat(59); // "codex-" plus 59 is 65 characters
-        let types = agent_types(Agent::Codex, &ids(&["gpt 5", "gpt-5.5", "gpt-5-5", "", &long, "o3"]));
-        assert_eq!(types.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(), ["codex-gpt-5-5", "codex-o3"]);
-        let fits = "g".repeat(55); // "opencode-" plus 55 is 64 characters
-        let types = agent_types(Agent::OpenCode, &ids(&[&format!("{fits}x"), &fits, "a/b.c", "a.b/c"]));
-        assert_eq!(types.iter().map(|t| t.name.clone()).collect::<Vec<_>>(), [format!("opencode-{fits}"), "opencode-a-b-c".into()]);
+    fn every_model_gets_a_type_and_repeats_give_none() {
+        let types = agent_types(Agent::OpenCode, &ids(&["ollama/qwen3:8b", "openrouter/deepseek/deepseek-r1:free", "a b+c", "", "a/b.c", "a.b/c"]));
+        let names: Vec<&str> = types.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, ["opencode-ollama-qwen3-8b", "opencode-openrouter-deepseek-deepseek-r1-free", "opencode-a-b-c"]);
+        // "a b+c" takes opencode-a-b-c first, so "a/b.c" and "a.b/c" give none.
+        assert_eq!(types[2].model, "a b+c");
+        let long = "g".repeat(70);
+        let types = agent_types(Agent::Codex, &ids(&[&long]));
+        assert_eq!(types[0].name, format!("codex-{}", "g".repeat(58)), "cut to 64 characters");
+        assert_eq!(types[0].model, long, "the agent still gets the real id");
     }
 
     #[test]
