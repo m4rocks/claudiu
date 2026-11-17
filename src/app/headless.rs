@@ -328,7 +328,6 @@ fn sessions_and_the_shell_panel() {
     h.settle();
 }
 
-/// Cross-session tools are answered on the spot, and one that can't work says why.
 /// The grips in the gutters answer the mouse: each panel follows its grip.
 #[test]
 fn the_sidebars_and_the_shell_resize_by_their_grips() {
@@ -347,6 +346,7 @@ fn the_sidebars_and_the_shell_resize_by_their_grips() {
     assert_eq!(h.ws().shells[&id].height, SHELL_HEIGHT + 60.0, "the shell follows its grip");
 }
 
+/// Cross-session tools are answered on the spot, and one that can't work says why.
 #[test]
 fn other_sessions_are_listed_started_and_read() {
     use serde_json::{Value, json};
