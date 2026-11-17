@@ -2457,4 +2457,11 @@ fn custom_subagents_reach_new_sessions() {
         shows(ws, r#"{"codex":{"edits":true,"types":[{"name":"codex-gpt-6-1-sol","model":"gpt-6.1-sol","description":"Runs the task in OpenAI Codex on gpt-6.1-sol."#)
             && shows(ws, r#""opencode":{"edits":false,"types":[{"name":"opencode-openai-gpt-6-1-sol","model":"openai/gpt-6.1-sol","description":"Runs the task in OpenCode on openai/gpt-6.1-sol."#)
     });
+
+    // A settings change reaches a running session only once it is resumed: its process keeps the types it started with.
+    h.step(|ws| ws.store.data.settings.custom_subagents.codex.models = vec!["gpt-7".into()]);
+    h.settle();
+    assert!(!shows(h.ws(), "codex-gpt-7"), "the running session keeps its types");
+    h.step(|ws| ws.restart_session(&id));
+    h.wait("the resumed session to get the new types", |ws| shows(ws, r#""types":[{"name":"codex-gpt-7","model":"gpt-7""#));
 }
