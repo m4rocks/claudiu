@@ -2431,6 +2431,8 @@ fn custom_subagents_reach_new_sessions() {
     h.settle();
     assert!(h.drawn("model-picker-gpt-7"));
     assert!(h.drawn("model-picker-gpt-6.1-sol"), "a model switched on that is no longer offered stays listed");
+    let drawn: Vec<String> = h.rt.elements().into_iter().filter_map(|e| e.text).collect();
+    assert!(drawn.iter().any(|t| t == "Claudiu:codex-gpt-7"), "each model shows the type Claude Code names it: {drawn:?}");
     h.click("model-picker-gpt-6.1-sol");
     h.click("model-picker-done");
     h.settle();

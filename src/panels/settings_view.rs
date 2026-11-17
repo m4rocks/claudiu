@@ -114,7 +114,8 @@ fn model_matches(query: &str, model: &AgentModel) -> bool {
 
 /// A model's switch, keyed `key`, on the page or in the picker; it flips the model in the agent's form.
 fn model_switch(key: String, agent: Agent, model: &AgentModel, offered: bool, on: bool) -> Option<El> {
-    let name = type_name(agent, &model.id)?;
+    // The mod registers the type, so Claude Code puts its plugin's name before it.
+    let name = format!("Claudiu:{}", type_name(agent, &model.id)?);
     let tag = if offered { name } else { format!("{name} · no longer offered") };
     let id = model.id.clone();
     Some(switch_row(key, &model.name, Some(&tag), on, move |ws| {

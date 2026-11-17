@@ -169,6 +169,7 @@ impl Connection {
         let program = which::which(program).map_err(|_| missing.to_string())?;
         let mut command = Command::new(program);
         command.args(args).current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        crate::platform::no_window(&mut command);
         for (key, value) in env {
             command.env(key, value);
         }
