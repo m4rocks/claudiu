@@ -214,10 +214,11 @@ impl Workspace {
         let height = if p.open { p.height } else { 0.0 };
         let key = crate::app::shell_key(&id);
         let focused = self.terminal_focused(&key);
-        // The top edge is the drag handle, with a small grip in the gutter.
+        // The top edge is the drag handle, with a small grip in the gutter. The gutter is the inner column's top
+        // padding: pinned any higher, the clipped slot hides the grip and its clicks.
         let handle = row()
             .key("shell-resize")
-            .pin(Some(0.0), Some(-(theme::PANEL_GAP / 2.0 + 3.0)), Some(0.0), None)
+            .pin(Some(0.0), Some(theme::PANEL_GAP / 2.0 - 3.0), Some(0.0), None)
             .h(6.0)
             .center()
             .cursor(Cursor::ResizeRow)

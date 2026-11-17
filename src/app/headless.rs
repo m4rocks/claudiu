@@ -122,6 +122,16 @@ impl Harness {
         self.pump();
     }
 
+    /// Press on the element drawn for `key`, move the pointer by `(dx, dy)` and let go, as a mouse would.
+    fn drag(&mut self, key: &str, dx: f32, dy: f32) {
+        let (x, y) = self.rt.find(key).unwrap_or_else(|| panic!("{key} is not drawn"));
+        self.rt.pointer_move(x, y);
+        self.rt.pointer_down(x, y);
+        self.rt.pointer_move(x + dx, y + dy);
+        self.rt.pointer_up(x + dx, y + dy);
+        self.pump();
+    }
+
     fn press(&mut self, key: rune::Key, mods: impl FnOnce(&mut rune::Mods)) {
         let mut m = rune::Mods::default();
         mods(&mut m);
@@ -316,6 +326,24 @@ fn sessions_and_the_shell_panel() {
     let follows = h.ws().right_gh.as_ref().and_then(|id| h.ws().gh_pane(id)).is_some_and(|p| platform::path_key(&p.cwd) == platform::path_key(&other));
     assert!(h.ws().gh.len() == 2 && follows, "GitHub follows a new session");
     h.settle();
+}
+
+/// The grips in the gutters answer the mouse: each panel follows its grip.
+#[test]
+fn the_sidebars_and_the_shell_resize_by_their_grips() {
+    let mut h = Harness::new(|_| vec![]);
+    let cwd = h.work.clone();
+    h.step(|ws| ws.new_claude(cwd.clone()));
+    let id = h.ws().active.clone().unwrap();
+    h.step(|ws| ws.toggle_shell(&id));
+    h.settle();
+
+    h.drag("left-resize", 40.0, 0.0);
+    assert_eq!(h.ws().left_width(1600.0), SIDEBAR_W + 40.0, "the left sidebar follows its grip");
+    h.drag("right-resize", -40.0, 0.0);
+    assert_eq!(h.ws().right_width(1600.0), RIGHT_MENU_W + 40.0, "the right sidebar follows its grip");
+    h.drag("shell-resize", 0.0, -60.0);
+    assert_eq!(h.ws().shells[&id].height, SHELL_HEIGHT + 60.0, "the shell follows its grip");
 }
 
 /// Cross-session tools are answered on the spot, and one that can't work says why.

@@ -65,10 +65,11 @@ impl Workspace {
                 .child(col().grow(1.0).shrink().min_h(0.0).w_full().child(p.view.render(width))),
             None => self.render_right_menu().key("right-menu").w(width).h_full().transition(Transition::opacity()),
         };
-        // Both views can be resized by their left edge; a small grip sits in the gutter.
+        // Both views can be resized by their left edge; a small grip sits in the gutter. The gutter is the inner
+        // column's left padding: pinned any further left, the clipped sidebar hides the grip and its clicks.
         let handle = hbox()
             .key("right-resize")
-            .pin(Some(-(theme::PANEL_GAP / 2.0 + 3.0)), Some(0.0), None, Some(0.0))
+            .pin(Some(theme::PANEL_GAP / 2.0 - 3.0), Some(0.0), None, Some(0.0))
             .w(6.0)
             .center()
             .cursor(Cursor::ResizeColumn)

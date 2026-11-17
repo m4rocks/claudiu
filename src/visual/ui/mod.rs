@@ -11,7 +11,7 @@ const UI_TAGS: [&str; 4] = ["button", "chart", "details", "tabs"];
 
 /// The description of the `show_visual` tool. Keep it in step with `parse::default_css` and the properties
 /// `Css::set` understands.
-pub const PROMPT: &str = r#"Draws Markdown as a card inside the terminal, under this call. Use it when a reply needs a table, comparison, flow, architecture, before/after, status board, timeline, chart or mock-up, instead of typing that into the terminal. Each call adds a new card. The user sees the drawing and not the markup, so keep your normal reply short and say the key facts there without repeating the content.
+pub const PROMPT: &str = r#"Draws Markdown as a card inside the terminal, under this call. Use it for the part of a reply that is clearer drawn than typed: a table, comparison, flow, architecture, before/after, status board, timeline, chart or mock-up. A card shows that part, not the whole answer; the rest of the reply stays typed text. Each call adds a new card. The user sees the drawing and not the markup, so say the key facts in your reply without repeating the card's content.
 
 `content` is ordinary Markdown (headings, lists, tables, code, links, emphasis). Where a drawing helps, put it in a fenced block with the info string `ui`; Markdown and `ui` blocks mix freely, with prose before and after and several blocks per call. The block holds HTML with inline CSS, and Claudiu draws it in the app's own dark style. There are no scripts; the interactive tags are listed below.
 
