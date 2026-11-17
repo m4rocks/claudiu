@@ -103,6 +103,8 @@ fn injected(name: &str) -> Option<&'static HighlightConfiguration> {
 pub fn highlight(language: &str, text: &str) -> Option<Vec<Vec<Span>>> {
     let config = configs().get(language)?;
     let mut highlighter = Highlighter::new();
+    // The closure isn't redundant: passed bare, `injected` ties its result to the highlighter's lifetime and won't compile.
+    #[allow(clippy::redundant_closure)]
     let events = highlighter.highlight(config, text.as_bytes(), None, |name| injected(name)).ok()?;
     let starts: Vec<usize> = std::iter::once(0).chain(text.match_indices('\n').map(|(i, _)| i + 1)).collect();
     let mut lines: Vec<Vec<Span>> = vec![vec![]; starts.len()];
