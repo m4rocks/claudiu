@@ -37,6 +37,8 @@ const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']
 const ASK_MODELS = ['haiku', 'sonnet', 'opus']
 const VISUAL_TOOL = 'mcp__claudiu__show_visual'
 const HANDBACK_TOOL = 'SubagentHandback'
+const STEPS_LISTED = 30 // steps a custom subagent's report lists; the rest are only counted
+const STEP_CHARS = 120 // characters of each listed step, enough for a command or a path
 // The /config row for background compaction ("Precompute compaction"). Claude Code lists it only while a server-side
 // flag enables the feature; without the row the setting does nothing, so Claudiu offers the switch only with it.
 const PRECOMPUTE_ROW = 'precomputeCompactionEnabled'
@@ -56,7 +58,7 @@ const cardRows = new Map() // show_visual call id -> rows reserved for its card
 const AGENT_NAMES = { codex: 'Codex', opencode: 'OpenCode' } // the agents of `claude/subagents.rs`, by their key
 const AGENT_PREFIX = 'Claudiu:' // what Claude Code puts before an agent type this plugin registers
 const customTypes = new Map() // agent type name -> { agent, model, edits } of each custom agent type Claudiu defined
-const customRuns = new Map() // agent id -> { type, prompt, turnId, report } of each custom subagent started
+const customRuns = new Map() // agent id -> { type, prompt, turnId, report, steps } of each custom subagent started
 const published = new Set() // call ids whose card file this process wrote from the transcript
 let rowsPoll // watches the heights Claudiu measures
 let visualChain = Promise.resolve() // visual writes in order, without holding up the stream
@@ -377,7 +379,7 @@ async function registerSubagents($) {
 async function onAgentSpawn($, e, next) {
   const r = await next(e)
   if (r.agentId && customTypes.has(e.subagentType)) {
-    customRuns.set(r.agentId, { type: e.subagentType, prompt: e.prompt, turnId: null, report: null, handedBack: 0 })
+    customRuns.set(r.agentId, { type: e.subagentType, prompt: e.prompt, turnId: null, report: null, handedBack: 0, steps: [] })
   }
   return r
 }
@@ -388,23 +390,45 @@ async function customRun($, agentId) {
   if (customRuns.has(agentId) || customTypes.size === 0) return customRuns.get(agentId)
   const agent = (await $.agent.list().catch(() => [])).find(a => a.id === agentId)
   if (!agent || !customTypes.has(agent.type)) return undefined
-  const run = { type: agent.type, prompt: null, turnId: null, report: null, handedBack: 0 }
+  const run = { type: agent.type, prompt: null, turnId: null, report: null, handedBack: 0, steps: [] }
   customRuns.set(agentId, run)
   return run
 }
 
-// The task for this turn: the Agent call's prompt on the first turn, the newest message to the agent after that
-// (a message sent to a finished subagent starts a turn of its own).
+// The task for this turn: the newest message to the agent, read from its transcript. A message sent to a finished
+// subagent starts a turn of its own, and Claude Code spawns the agent again for it, so the run noted at spawn knows only
+// that message. Each turn also starts Codex or OpenCode afresh, so a follow-up carries the first task and the last
+// report handed back before it.
 async function customTask($, run, agentId) {
-  if (run.turnId === null && run.prompt !== null) return run.prompt
   const messages = await $.session.messages({ agentId }).catch(() => [])
-  const last = Array.isArray(messages) ? messages.filter(m => m.role === 'user' && m.text?.trim()).at(-1) : undefined
-  return last?.text ?? run.prompt ?? ''
+  const said = Array.isArray(messages) ? messages : []
+  const asked = said.filter(m => m.role === 'user' && m.text?.trim())
+  const message = asked.at(-1)?.text ?? run.prompt ?? ''
+  if (asked.length < 2) return message
+  const handedBack = said.flatMap(m => m.toolUses ?? []).filter(t => t.tool === HANDBACK_TOOL).at(-1)?.input?.message
+  return [
+    'This follows up on an earlier task of yours. That session is gone, so what came before is below.',
+    'The task:\n' + asked[0].text,
+    ...(typeof handedBack === 'string' ? ['Your report:\n' + handedBack] : []),
+    'The new message:\n' + message,
+  ].join('\n\n')
+}
+
+// The report with the steps the agent took added under it. Claude Code counts none of them as the subagent's tool
+// calls, so without this list the caller can't tell a report written from the files from one written from the task
+// alone.
+function withSteps(report, name, steps) {
+  if (steps.length === 0) return `${report}\n\n---\n${name} ran no steps.`
+  // A step can be a multi-line command; on one line it can't be mistaken for report text or a step of its own.
+  const oneLine = steps.map(s => s.replace(/\s+/g, ' ').trim())
+  const listed = oneLine.slice(0, STEPS_LISTED).map(s => '- ' + (s.length > STEP_CHARS ? s.slice(0, STEP_CHARS - 1) + '…' : s))
+  if (steps.length > STEPS_LISTED) listed.push(`- and ${steps.length - STEPS_LISTED} more`)
+  return `${report}\n\n---\nSteps ${name} ran (${steps.length}):\n${listed.join('\n')}`
 }
 
 // Answers one step of a custom subagent: runs the task in its agent, streams what the agent writes and does as the
 // subagent's own text (saved in its transcript, which only the person reads), and hands back the agent's last message
-// as the report. The agent runs once per turn; a later step of the same turn (a refused hand-back)
+// and the steps it took as the report. The agent runs once per turn; a later step of the same turn (a refused hand-back)
 // hands back the same report once more, then ends the turn with the report as plain text so a hand-back that keeps
 // being refused can't loop.
 async function* customStep($, e, next, run) {
@@ -412,26 +436,30 @@ async function* customStep($, e, next, run) {
     const prompt = await customTask($, run, e.agentId)
     run.turnId = e.turnId
     run.handedBack = 0
+    run.steps = []
     const { agent, model, edits } = customTypes.get(run.type)
     const name = AGENT_NAMES[agent]
     yield { kind: 'text', index: 0, text: `${name} on ${model}, ${edits ? 'edits allowed' : 'read-only'}\n\n` }
     run.report = null
     for await (const event of helperEvents($, { agent, model, edits, cwd: await $.session.cwd(), prompt }, next.signal)) {
       if (event.kind === 'text') yield { kind: 'text', index: 0, text: event.text }
-      else if (event.kind === 'step') yield { kind: 'text', index: 0, text: `\n▸ ${event.text}\n` }
-      else if (event.kind === 'report') run.report = event.text
+      else if (event.kind === 'step') {
+        run.steps.push(event.text)
+        yield { kind: 'text', index: 0, text: `\n▸ ${event.text}\n` }
+      } else if (event.kind === 'report') run.report = event.text
       else if (event.kind === 'failed') run.report = `${name} failed: ${event.reason}`
     }
     if (next.signal?.aborted) return
     run.report ??= `${name} failed: the helper stopped without an answer.`
   }
+  const message = withSteps(run.report, AGENT_NAMES[customTypes.get(run.type).agent], run.steps)
   if (run.handedBack >= 2) {
-    yield { kind: 'text', index: 1, text: run.report }
+    yield { kind: 'text', index: 1, text: message }
     yield { kind: 'stop', stopReason: 'end_turn', usage: null }
-    return { turnId: e.turnId, index: e.index, answer: run.report, toolUses: [], stopReason: 'end_turn', usage: null }
+    return { turnId: e.turnId, index: e.index, answer: message, toolUses: [], stopReason: 'end_turn', usage: null }
   }
   run.handedBack += 1
-  const input = { message: run.report }
+  const input = { message }
   yield { kind: 'tool', index: 1, id: `toolu_custom_${e.turnId}_${e.index}`, name: HANDBACK_TOOL }
   yield { kind: 'input', index: 1, json: JSON.stringify(input) }
   yield { kind: 'stop', stopReason: 'tool_use', usage: null }
