@@ -384,8 +384,49 @@ pub fn notify(title: String, body: &'static str) {
         // Notification Center files notifications under an app; the installed one is ours, a dev build has none.
         #[cfg(target_os = "macos")]
         let _ = notify_rust::set_application("com.m4rocks.claudiu");
-        let _ = notify_rust::Notification::new().appname("Claudiu").summary(&title).body(body).show();
+        let mut notification = notify_rust::Notification::new();
+        notification.appname("Claudiu").summary(&title).body(body);
+        #[cfg(target_os = "windows")]
+        if let Some(id) = windows_app_id() {
+            notification.app_id(id);
+        }
+        let _ = notification.show();
     });
+}
+
+/// The app ID of the installed Claudiu, as its Start menu shortcut carries it (`velopack.Claudiu`), so Windows shows
+/// notifications as Claudiu's. Without one, notify-rust sends them as PowerShell's, which is all a dev build can do:
+/// Windows only shows a notification under an ID that has a shortcut.
+#[cfg(target_os = "windows")]
+fn windows_app_id() -> Option<&'static str> {
+    static ID: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    ID.get_or_init(|| {
+        let installed = velopack::locator::auto_locate_app_manifest(velopack::locator::LocationContext::FromCurrentExe).ok()?;
+        let id = installed.get_app_user_model_id();
+        register_notification_icon(&id);
+        Some(id)
+    })
+    .as_deref()
+}
+
+/// Gives the app ID a name and icon for the notification's header, which the shortcut alone doesn't. The icon is
+/// copied into the data folder, which an update leaves in place. A failure only leaves the header without an icon.
+#[cfg(target_os = "windows")]
+fn register_notification_icon(id: &str) {
+    use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, REG_SZ, RegSetKeyValueW};
+    let icon = crate::datadir::data_dir().join("notification-icon.png");
+    if std::fs::write(&icon, include_bytes!("../assets/claudiu.png")).is_err() {
+        return;
+    }
+    let wide = |s: &str| -> Vec<u16> { s.encode_utf16().chain(Some(0)).collect() };
+    let key = wide(&format!(r"Software\Classes\AppUserModelId\{id}"));
+    for (name, value) in [("DisplayName", "Claudiu".to_string()), ("IconUri", icon.to_string_lossy().into_owned())] {
+        let (name, value) = (wide(name), wide(&value));
+        // SAFETY: NUL-terminated names, and a value buffer whose size in bytes is passed with it.
+        unsafe {
+            RegSetKeyValueW(HKEY_CURRENT_USER, key.as_ptr(), name.as_ptr(), REG_SZ, value.as_ptr().cast(), (value.len() * 2) as u32);
+        }
+    }
 }
 
 /// macOS's emoji and symbols palette, which types what is picked into the focused text, as Ctrl+Cmd+Space opened it
