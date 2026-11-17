@@ -92,11 +92,11 @@ impl Editor {
                     true
                 }
                 ("c", false) => {
-                    tx.copy(&self.take_for_clipboard(false));
+                    tx.copy(self.take_for_clipboard(false));
                     true
                 }
                 ("x", false) => {
-                    tx.copy(&self.take_for_clipboard(true));
+                    tx.copy(self.take_for_clipboard(true));
                     true
                 }
                 ("v", false) => {

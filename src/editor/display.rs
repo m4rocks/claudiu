@@ -337,6 +337,15 @@ impl Editor {
 mod tests {
     use super::*;
 
+    impl Editor {
+        /// Lay out at the width tests set by hand.
+        fn relayout_with_width(&mut self) {
+            let lines = self.buffer.line_count();
+            let old = self.rows.breaks.len();
+            self.rows.rewrap(&self.buffer, 0, old, lines, &self.folds);
+        }
+    }
+
     #[test]
     fn a_long_line_wraps_after_the_last_space_that_fits_and_keeps_its_indent() {
         assert_eq!(wrap("short", 10), (vec![], 0));
@@ -437,15 +446,5 @@ mod tests {
         e.redo();
         assert_eq!(e.folds, [(5, 8)]);
         assert!(e.hidden(6) && e.hidden(7));
-    }
-}
-
-#[cfg(test)]
-impl Editor {
-    /// Lay out at the width tests set by hand.
-    fn relayout_with_width(&mut self) {
-        let lines = self.buffer.line_count();
-        let old = self.rows.breaks.len();
-        self.rows.rewrap(&self.buffer, 0, old, lines, &self.folds);
     }
 }
