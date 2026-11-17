@@ -163,7 +163,7 @@ struct Process {
 
 /// The program on the PATH. A desktop launch has a minimal PATH, so OpenCode or Node installed since Claudiu started,
 /// or put on the PATH only by the shell's startup files, turns up once the login shell's PATH is read again.
-fn locate(program: &str) -> Option<PathBuf> {
+fn locate_reloading(program: &str) -> Option<PathBuf> {
     find_executable(program).or_else(|| {
         reload_path();
         find_executable(program)
@@ -176,7 +176,7 @@ impl Connection {
             Agent::Codex => ("npx", &["-y", CODEX_ACP], "npx was not found on PATH. Codex subagents need Node.js."),
             Agent::OpenCode => ("opencode", &["acp"], "opencode was not found on PATH. OpenCode subagents need OpenCode installed."),
         };
-        let program = locate(program).ok_or_else(|| missing.to_string())?;
+        let program = locate_reloading(program).ok_or_else(|| missing.to_string())?;
         let mut command = Command::new(program);
         command.args(args).current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
         crate::platform::no_window(&mut command);
@@ -610,7 +610,7 @@ mod tests {
         let _only_test_using_login_path = crate::platform::LOGIN_PATH_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let previous = crate::platform::LOGIN_PATH.lock().unwrap().clone();
         *crate::platform::LOGIN_PATH.lock().unwrap() = Some(dir.as_os_str().to_os_string());
-        let found = locate("claudiu-acp-path-probe");
+        let found = locate_reloading("claudiu-acp-path-probe");
         *crate::platform::LOGIN_PATH.lock().unwrap() = previous;
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(found, Some(tool));
