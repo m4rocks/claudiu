@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::claude::subagents::{Agent, AgentModel};
+use crate::platform::{find_executable, reload_path};
 
 pub const FLAG: &str = "--acp";
 /// Pinned so an upstream change reaches users only with a Claudiu release.
@@ -160,16 +161,26 @@ struct Process {
     errors: JoinHandle<String>,
 }
 
+/// The program on the PATH. A desktop launch has a minimal PATH, so OpenCode or Node installed since Claudiu started,
+/// or put on the PATH only by the shell's startup files, turns up once the login shell's PATH is read again.
+fn locate_reloading(program: &str) -> Option<PathBuf> {
+    find_executable(program).or_else(|| {
+        reload_path();
+        find_executable(program)
+    })
+}
+
 impl Connection {
     fn start(agent: Agent, cwd: &Path, env: &[(&str, String)]) -> Result<Connection, String> {
         let (program, args, missing): (&str, &[&str], &str) = match agent {
             Agent::Codex => ("npx", &["-y", CODEX_ACP], "npx was not found on PATH. Codex subagents need Node.js."),
             Agent::OpenCode => ("opencode", &["acp"], "opencode was not found on PATH. OpenCode subagents need OpenCode installed."),
         };
-        let program = which::which(program).map_err(|_| missing.to_string())?;
+        let program = locate_reloading(program).ok_or_else(|| missing.to_string())?;
         let mut command = Command::new(program);
         command.args(args).current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
         crate::platform::no_window(&mut command);
+        crate::platform::with_login_path(&mut command);
         for (key, value) in env {
             command.env(key, value);
         }
@@ -583,6 +594,26 @@ mod tests {
             Err("Codex stopped when read-only mode refused `printf hi > made.txt`. Turn on Allow edits in Settings → Custom subagents to let it.".into())
         );
         assert_eq!(sent.last().unwrap()["result"]["outcome"]["optionId"], "cancel");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_program_only_the_login_shell_put_on_the_path_is_found() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("claudiu-acp-path-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let tool = dir.join("claudiu-acp-path-probe");
+        std::fs::write(&tool, b"#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let _only_test_using_login_path = crate::platform::LOGIN_PATH_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let previous = crate::platform::LOGIN_PATH.lock().unwrap().clone();
+        *crate::platform::LOGIN_PATH.lock().unwrap() = Some(dir.as_os_str().to_os_string());
+        let found = locate_reloading("claudiu-acp-path-probe");
+        *crate::platform::LOGIN_PATH.lock().unwrap() = previous;
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(found, Some(tool));
     }
 
     #[test]

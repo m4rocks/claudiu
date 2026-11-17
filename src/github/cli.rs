@@ -143,6 +143,7 @@ impl Gh {
         }
         cmd.env("GH_PROMPT_DISABLED", "1").env("NO_COLOR", "1").env("GH_NO_UPDATE_NOTIFIER", "1");
         crate::platform::no_window(&mut cmd);
+        crate::platform::with_login_path(&mut cmd);
         let mut child = cmd.spawn().map_err(|e| Error {
             kind: if e.kind() == std::io::ErrorKind::NotFound { ErrKind::NoCli } else { ErrKind::Other },
             msg: format!("could not run gh: {e}"),

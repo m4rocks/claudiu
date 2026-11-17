@@ -101,6 +101,7 @@ fn main() {
     let initial: Vec<std::path::PathBuf> = std::env::args().skip(1).map(std::path::PathBuf::from).filter(|p| p.is_dir()).collect();
     // A first launch (no state file) starts with the setup window alone. Asked before anything loads the store.
     let first_launch = store::Store::is_first_launch(&store::Store::default_path());
+    platform::read_login_path_in_background();
     let workspace = Workspace::new(initial);
     let mailbox = workspace.rt.mailbox();
     let ((w, h), maximized) = first_size();

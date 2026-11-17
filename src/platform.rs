@@ -124,14 +124,21 @@ pub fn home_dir() -> Option<PathBuf> {
     directories::BaseDirs::new().map(|d| d.home_dir().to_path_buf())
 }
 
-/// PATH lookup (honors PATHEXT on Windows).
+/// PATH lookup (honors PATHEXT on Windows). On macOS and Linux a miss also looks in the login shell's PATH, which
+/// the first miss waits for if the startup read hasn't finished, so call it off the UI thread.
 pub fn find_executable(name: &str) -> Option<PathBuf> {
     let found = which::which(name).ok();
     #[cfg(unix)]
-    let found = found.or_else(|| {
-        let path = LOGIN_PATH.lock().ok()?.clone()?;
-        which::which_in(name, Some(path), std::env::current_dir().ok()?).ok()
-    });
+    let found = {
+        let in_login_path = || {
+            let path = LOGIN_PATH.lock().ok()?.clone()?;
+            which::which_in(name, Some(path), std::env::current_dir().ok()?).ok()
+        };
+        found.or_else(in_login_path).or_else(|| {
+            read_login_path_once();
+            in_login_path()
+        })
+    };
     found
 }
 
@@ -139,7 +146,44 @@ pub fn find_executable(name: &str) -> Option<PathBuf> {
 /// the environment of a running process is not changed here (`set_var` is unsafe beside other threads on Unix), so
 /// `find_executable` looks here as well. Sessions already start through the login shell (`through_login_shell`).
 #[cfg(unix)]
-static LOGIN_PATH: std::sync::Mutex<Option<std::ffi::OsString>> = std::sync::Mutex::new(None);
+pub(crate) static LOGIN_PATH: std::sync::Mutex<Option<std::ffi::OsString>> = std::sync::Mutex::new(None);
+
+/// Tests that put a directory in `LOGIN_PATH` hold this, so two of them don't overwrite each other's.
+#[cfg(all(unix, test))]
+pub(crate) static LOGIN_PATH_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Read the login shell's PATH once at startup, off the UI thread, so tools only the shell's startup files put on the
+/// PATH are found. Windows has the registry and `reload_path` reads it when the setup window asks.
+pub fn read_login_path_in_background() {
+    #[cfg(unix)]
+    std::thread::spawn(read_login_path_once);
+}
+
+/// The first caller reads the login shell's PATH and every other waits for that read, so a lookup that runs before the
+/// startup read is done gets its answer instead of a miss. Tests skip it: they set `LOGIN_PATH` themselves, and a
+/// real login shell would overwrite it.
+#[cfg(unix)]
+fn read_login_path_once() {
+    static READ: std::sync::Once = std::sync::Once::new();
+    if !cfg!(test) {
+        READ.call_once(reload_path);
+    }
+}
+
+/// Start `command` with the login shell's PATH. A program may need others from the same folders, like `tsc` and `npx`
+/// needing `node` from nvm, which a desktop launch's minimal PATH lacks, even when the program itself is on the minimal
+/// PATH. Waits for the first read of that PATH, so call it off the UI thread. Windows programs inherit the PATH
+/// `reload_path` sets for this process.
+pub fn with_login_path(command: &mut Command) {
+    #[cfg(unix)]
+    read_login_path_once();
+    #[cfg(unix)]
+    if let Some(path) = LOGIN_PATH.lock().ok().and_then(|path| path.clone()) {
+        command.env("PATH", path);
+    }
+    #[cfg(not(unix))]
+    let _ = command;
+}
 
 /// Look for the PATH again, for a tool installed since Claudiu started or one that only the shell's startup files
 /// put on the PATH. Windows reads the system and user PATH from the registry and uses it for this process and the
@@ -644,12 +688,32 @@ bye
         perms.set_mode(0o755);
         std::fs::set_permissions(&tool, perms).unwrap();
 
+        let _only_test_using_login_path = LOGIN_PATH_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let previous = LOGIN_PATH.lock().unwrap().clone();
         *LOGIN_PATH.lock().unwrap() = Some(dir.as_os_str().to_os_string());
         let found = find_executable("claudiu-login-path-probe");
         *LOGIN_PATH.lock().unwrap() = previous;
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(found, Some(tool));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_program_starts_with_the_login_shells_path_once_it_is_known() {
+        let _only_test_using_login_path = LOGIN_PATH_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let previous = LOGIN_PATH.lock().unwrap().clone();
+        let path_of = |command: &Command| command.get_envs().find(|(key, _)| *key == "PATH").and_then(|(_, value)| value.map(|v| v.to_os_string()));
+
+        *LOGIN_PATH.lock().unwrap() = None;
+        let mut without = Command::new("true");
+        with_login_path(&mut without);
+        *LOGIN_PATH.lock().unwrap() = Some("/nvm/bin:/usr/bin".into());
+        let mut with = Command::new("true");
+        with_login_path(&mut with);
+        *LOGIN_PATH.lock().unwrap() = previous;
+
+        assert_eq!(path_of(&without), None);
+        assert_eq!(path_of(&with), Some("/nvm/bin:/usr/bin".into()));
     }
 
     #[test]

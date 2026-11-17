@@ -80,6 +80,7 @@ impl Server {
         let mut cmd = Command::new(program);
         cmd.args(kind.args).current_dir(root).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
         crate::platform::no_window(&mut cmd);
+        crate::platform::with_login_path(&mut cmd);
         let mut child = cmd.spawn().map_err(|e| format!("could not start {}: {e}", kind.program))?;
         let (stdin, stdout, stderr) = (child.stdin.take().unwrap(), child.stdout.take().unwrap(), child.stderr.take().unwrap());
         match Self::connect(stdout, stdin, Some(stderr), root, kind.pull_diagnostics, events) {
