@@ -343,6 +343,13 @@ struct Messages {
     current: String,
     current_id: Option<String>,
     last: Option<String>,
+    /// Tool calls named only by their tool, by id, waiting for the update that says what they act on.
+    unnamed: std::collections::HashMap<String, String>,
+}
+
+/// What a tool call acts on, from its input: the command, the pattern searched for, the address, or else the file.
+fn tool_target(input: &Value) -> Option<&str> {
+    ["command", "pattern", "query", "url", "path", "filePath"].iter().find_map(|key| input[key].as_str()).filter(|t| !t.is_empty())
 }
 
 impl Messages {
@@ -361,7 +368,24 @@ impl Messages {
             Some("tool_call") => {
                 self.close();
                 let title = update["title"].as_str().unwrap_or("a tool");
-                emit(Event::Step { text: title.to_string() });
+                // Codex's titles say what the call acts on ("Read src/parse.rs"). OpenCode's are the bare tool name, and
+                // the call's first update has the input.
+                let bare = !title.contains(' ');
+                match (bare, tool_target(&update["rawInput"]), update["toolCallId"].as_str()) {
+                    (true, Some(target), _) => emit(Event::Step { text: format!("{title} {target}") }),
+                    (true, None, Some(id)) => {
+                        self.unnamed.insert(id.to_string(), title.to_string());
+                    }
+                    _ => emit(Event::Step { text: title.to_string() }),
+                }
+            }
+            Some("tool_call_update") => {
+                let Some(title) = update["toolCallId"].as_str().and_then(|id| self.unnamed.remove(id)) else { return };
+                let text = match tool_target(&update["rawInput"]) {
+                    Some(target) => format!("{title} {target}"),
+                    None => title,
+                };
+                emit(Event::Step { text });
             }
             _ => {}
         }
@@ -478,6 +502,31 @@ mod tests {
         assert_eq!(sent[2]["params"]["sessionId"], "s1");
         assert_eq!(sent[2]["params"]["prompt"][0]["text"], "Find the bug");
         assert_eq!(sent[0]["params"]["clientCapabilities"]["terminal"], false);
+    }
+
+    /// OpenCode names only the tool when the call starts and sends what it acts on in the call's first update.
+    #[test]
+    fn a_step_named_only_by_its_tool_waits_for_what_it_acts_on() {
+        let call = |id: &str, title: &str| update(json!({ "sessionUpdate": "tool_call", "toolCallId": id, "title": title, "status": "pending", "rawInput": {} }));
+        let running = |id: &str, title: &str, input: Value| update(json!({ "sessionUpdate": "tool_call_update", "toolCallId": id, "title": title, "status": "in_progress", "rawInput": input }));
+        let done = |id: &str| update(json!({ "sessionUpdate": "tool_call_update", "toolCallId": id, "title": null, "status": "completed", "rawInput": null }));
+        let mut says = opening();
+        says.extend([
+            call("c1", "read"),
+            call("c2", "shell"),
+            call("c3", "todowrite"),
+            call("c4", "grep"),
+            running("c4", "grep", json!({ "pattern": "fn main", "path": "/work/src" })),
+            running("c1", "read", json!({ "path": "note.json" })),
+            running("c2", "echo hi", json!({ "command": "echo hi", "cwd": "/work" })),
+            done("c1"),
+            done("c3"),
+            done("c2"),
+            chunk("m1", "Done."),
+            reply(2, json!({ "stopReason": "end_turn" })),
+        ]);
+        let steps: Vec<String> = talk(&says, false).2.into_iter().filter_map(|e| if let Event::Step { text } = e { Some(text) } else { None }).collect();
+        assert_eq!(steps, ["grep fn main", "read note.json", "shell echo hi", "todowrite"]);
     }
 
     #[test]
