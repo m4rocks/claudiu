@@ -2284,6 +2284,48 @@ fn the_projects_page_moves_renames_and_removes_projects() {
     assert_eq!(h.ws().store.session(&session).unwrap().project_id.as_ref(), Some(&beta), "with its session");
 }
 
+/// A card scrolled partly past the top edge, as Claude Code redraws its transcript a line at a time, stays drawn as it
+/// was: nothing of it fades, and only one copy of it is on screen.
+#[test]
+fn a_card_scrolling_past_the_top_does_not_fade_or_double() {
+    let mut h = Harness::new(|_| vec![]);
+    let cwd = h.work.clone();
+    h.step(|ws| ws.new_claude(cwd));
+    let id = h.ws().active.clone().unwrap();
+    // The stand-in's own output (the console's first paint) comes first; after it the terminal is quiet.
+    let t = Instant::now();
+    while t.elapsed() < Duration::from_secs(3) {
+        std::thread::sleep(Duration::from_millis(50));
+        h.pump();
+    }
+    // The screen as Claude Code draws it: the card's 12 reserved rows from screen row `top`, which may be above the edge.
+    let screen = |top: i32| -> String {
+        let mut out = String::from("\x1b[H\x1b[2J");
+        for y in 0..20 {
+            let row = y - top;
+            out += &format!("\x1b[{};1H", y + 1);
+            out += &if (0..12).contains(&row) { format!("\x1b]8;;claudiu://visual/c1/{row}\x1b\\{}\x1b]8;;\x1b\\", " ".repeat(16)) } else { format!("line {y}") };
+        }
+        out
+    };
+    let feed = |h: &mut Harness, bytes: String| h.step(|ws| ws.terminal_mut(&id).unwrap().feed(&bytes));
+    feed(&mut h, screen(4));
+    let stem = datadir::safe_file_stem(&id);
+    let card = crate::visual::Card { call: "c1".into(), content: "# Title\n\nSome words in the card.\n\n- one\n- two\n- three".into() };
+    h.step(|ws| ws.apply_visuals(vec![(stem, card)]));
+    h.settle();
+    let card_parts = |h: &Harness| -> Vec<rune::ElementInfo> { h.rt.elements().into_iter().filter(|e| e.path.contains("/slot-") || e.key.as_deref().is_some_and(|k| k.contains("/slot-"))).collect() };
+    assert!(!card_parts(&h).is_empty(), "the card is drawn");
+    for top in [3, 2, 1, 0, -1, -2, -3] {
+        feed(&mut h, screen(top));
+        let moving = |e: &rune::ElementInfo| e.exiting || e.opacity < 1.0 || e.rect.iter().zip(e.target).any(|(a, b)| (a - b).abs() > 0.01);
+        let fading: Vec<String> = card_parts(&h).iter().filter(|e| moving(e)).map(|e| format!("{} {:?} exiting {} {:?}->{:?}", e.path, e.opacity, e.exiting, e.rect, e.target)).collect();
+        assert!(fading.is_empty(), "with the card from row {top}, parts of it fade or move: {fading:#?}");
+        let slots = h.keys().into_iter().filter(|k| k.contains("/slot-")).count();
+        assert_eq!(slots, 1, "with the card from row {top}, one copy is drawn");
+    }
+}
+
 /// A model with a long name keeps its switch inside its row, on the page and in the picker.
 #[test]
 fn a_long_model_name_keeps_the_switch_in_its_row() {
