@@ -8,7 +8,7 @@ use crate::app::{Act, Activity, MenuAnchor, MenuItem, SideDrag, Workspace};
 use crate::panels::icons;
 use crate::panels::status_icon::{SessionDot, status_icon};
 use crate::panels::theme::{self, rgb};
-use crate::panels::widgets::{ago, avatar, clawd, countdown, font, icon, icon_button, key_hint, label, meter, section_label, shortcut, tick};
+use crate::panels::widgets::{ago, avatar, clawd, countdown, font, icon, icon_button, key_hint, label, meter, METER_WARN_AT, section_label, shortcut, tick};
 use crate::store::{ExternalState, Id, Project, SessionKind, SessionRecord, now};
 
 pub const SIDEBAR_W: f32 = 284.0;
@@ -671,8 +671,9 @@ impl Workspace {
     fn sidebar_footer(&self) -> El {
         let t = now();
         let usage = self.store.active_account().map(|a| a.usage.clone()).unwrap_or_default();
-        // Captions are short: two meters share a row.
-        let limit = |key: &str, label: &str, l: &Option<crate::store::RateLimit>| -> El {
+        // Captions are short: two meters share a row. `calm` colors a bar that is not yet near its limit; near it, the
+        // meter's own warning colors win.
+        let limit = |key: &str, label: &str, l: &Option<crate::store::RateLimit>, calm: Option<u32>| -> El {
             match l {
                 Some(l) => match (l.resets_at, l.utilization) {
                     (Some(reset), util) if reset > t => {
@@ -680,7 +681,8 @@ impl Workspace {
                         if t - l.seen_at > 900 {
                             caption.push_str(&format!(" · {} ago", ago(l.seen_at, t)));
                         }
-                        meter(key, label, util, caption, None)
+                        let tone = calm.filter(|_| util.is_none_or(|f| f < METER_WARN_AT)).map(rgb);
+                        meter(key, label, util, caption, tone)
                     }
                     (Some(_), _) => meter(key, label, None, "reset · unknown".into(), None),
                     (None, util) => meter(key, label, util, format!("seen {} ago", ago(l.seen_at, t)), None),
@@ -688,7 +690,7 @@ impl Workspace {
                 None => meter(key, label, None, "after first message".into(), None),
             }
         };
-        col()
+        let mut footer = col()
             .gap(8.0)
             .px(14.0)
             .pt(6.0)
@@ -698,9 +700,19 @@ impl Workspace {
             .child(
                 row()
                     .gap(12.0)
-                    .child(limit("meter-5h", "5 HOUR", &usage.five_hour).grow(1.0).shrink())
-                    .child(limit("meter-7d", "7 DAY", &usage.seven_day).grow(1.0).shrink()),
-            )
+                    .child(limit("meter-5h", "5 HOUR", &usage.five_hour, None).grow(1.0).shrink())
+                    .child(limit("meter-7d", "7 DAY", &usage.seven_day, None).grow(1.0).shrink()),
+            );
+        // Only with Codex subagents on and once Codex has logged a reading, so people who don't use Codex see no row.
+        if let Some(codex) = self.codex_usage.as_ref().filter(|_| self.store.data.settings.custom_subagents.codex.on) {
+            footer = footer.child(
+                row()
+                    .gap(12.0)
+                    .child(limit("meter-codex-5h", "CODEX 5 HOUR", &codex.five_hour, Some(theme::CODEX)).grow(1.0).shrink())
+                    .child(limit("meter-codex-7d", "CODEX 7 DAY", &codex.seven_day, Some(theme::CODEX)).grow(1.0).shrink()),
+            );
+        }
+        footer
     }
 }
 

@@ -483,6 +483,9 @@ pub struct Workspace {
     pub worktrees_page: worktrees::WorktreesPage,
     /// Whether the Custom subagents page is asking each agent for its models. Not saved to disk.
     pub model_lookups: settings::ModelLookups,
+    /// Codex's own limits from its session logs (`claude/codex_limits.rs`); the sidebar shows them under Claude's.
+    /// Not saved to disk: the logs are read again on start.
+    pub codex_usage: Option<crate::store::AccountUsage>,
     pub menu: Option<Menu>,
     pub menu_serial: u64,
     pub toast: Option<Toast>,
@@ -577,6 +580,7 @@ impl Workspace {
             settings_page: SettingsPage::default(),
             worktrees_page: Default::default(),
             model_lookups: Default::default(),
+            codex_usage: None,
             menu: None,
             menu_serial: 0,
             toast: None,

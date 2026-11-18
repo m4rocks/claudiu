@@ -216,6 +216,16 @@ fn the_workspace_draws_and_its_controls_answer() {
 
 /// Sessions and the shell under them, the sidebars' widths, cards and the GitHub view, with a stand-in `claude`.
 #[test]
+fn codex_limits_show_only_with_codex_subagents_on() {
+    let mut h = Harness::new(|_| vec![]);
+    let limit = crate::store::RateLimit { utilization: Some(0.24), resets_at: Some(now() + 3600), seen_at: now() };
+    h.step(|ws| ws.codex_usage = Some(crate::store::AccountUsage { five_hour: Some(limit.clone()), seven_day: Some(limit) }));
+    assert!(h.drawn("meter-5h") && !h.drawn("meter-codex-5h"), "Codex subagents are off: {:?}", h.keys());
+    h.step(|ws| ws.store.data.settings.custom_subagents.codex.on = true);
+    assert!(h.drawn("meter-codex-5h") && h.drawn("meter-codex-7d"), "Codex's row draws under Claude's: {:?}", h.keys());
+}
+
+#[test]
 fn sessions_and_the_shell_panel() {
     let mut h = Harness::new(|_| vec![]);
     let cwd = h.work.clone();

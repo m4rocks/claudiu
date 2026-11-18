@@ -63,12 +63,15 @@ pub fn section_label(s: impl Into<String>) -> El {
     text(s).font(font(10.5, 600.0).tracking(0.3)).color(rgb(theme::TEXT_FAINT))
 }
 
+/// From here up, a meter's bar turns to the warning color.
+pub const METER_WARN_AT: f32 = 0.7;
+
 /// Progress bar. `fraction == None` renders the neutral "unavailable" state. The bar springs to a new value.
 pub fn meter(key: &str, label: &str, fraction: Option<f32>, caption: String, tone: Option<Color>) -> El {
     let color = tone.unwrap_or_else(|| {
         rgb(match fraction {
             Some(f) if f >= 0.9 => theme::DANGER,
-            Some(f) if f >= 0.7 => theme::WARN,
+            Some(f) if f >= METER_WARN_AT => theme::WARN,
             _ => theme::ACCENT,
         })
     });

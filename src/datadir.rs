@@ -17,6 +17,8 @@ pub fn use_throwaway_folders() -> (PathBuf, PathBuf) {
         unsafe {
             std::env::set_var("CLAUDIU_DATA_DIR", dirs.0.path());
             std::env::set_var("CLAUDE_CONFIG_DIR", dirs.1.path());
+            // Keeps the sidebar's Codex limits from reading the real `~/.codex`.
+            std::env::set_var("CODEX_HOME", dirs.0.path().join("codex"));
         }
         dirs
     });
