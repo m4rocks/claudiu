@@ -9,11 +9,10 @@ const SUBAGENTS = JSON.stringify({ codex: { edits: false, types: [type('codex-gp
 
 // What the engine answers beneath the mod for a session with Codex on. `helper` is what `claudiu --acp` writes;
 // `requests` collects what the mod sent it.
-function engine(on: any, helper: string[], requests: unknown[], subagents = SUBAGENTS) {
+function engine(on: any, helper: string[] | (() => AsyncGenerator<{ stream: string, text: string }, unknown>), requests: unknown[], subagents = SUBAGENTS) {
   mock.env(on, { CLAUDIU_SUBAGENTS: subagents, CLAUDIU_EXE: '/apps/claudiu' })
   mock.clock(on)
   on('fs.read', () => ({ value: '' }))
-  on('fs.write', () => ({ value: undefined }))
   on('session.id', () => ({ value: 's1' }))
   on('session.model', () => ({ value: 'claude-haiku-5-5' }))
   on('session.cwd', () => ({ value: '/work/sub' }))
@@ -28,6 +27,7 @@ function engine(on: any, helper: string[], requests: unknown[], subagents = SUBA
   on('agent.spawn', () => ({ model: 'haiku', agentId: 'a1' }))
   on('process.spawn', async function* (_$: any, e: any) {
     requests.push({ argv: e.argv, input: JSON.parse(e.input) })
+    if (typeof helper === 'function') return yield* helper()
     // Pieces cut mid-line, as a pipe delivers them.
     const out = helper.join('\n') + '\n'
     yield { stream: 'stdout', text: out.slice(0, 7) }
@@ -42,12 +42,136 @@ function engine(on: any, helper: string[], requests: unknown[], subagents = SUBA
   return registered
 }
 
+test('startup and activity reach the transcript while the helper is still running', async ($, on) => {
+  const log: string[] = []
+  let logAtSpawn: string[] = []
+  let logBeforeReport: string[] = []
+  on('ui.log', (_$: any, e: any) => { log.push(e.text); return { value: undefined } })
+  engine(on, async function* () {
+    logAtSpawn = [...log]
+    yield { stream: 'stdout', text: '{"kind":"progress","tex' }
+    yield { stream: 'stdout', text: 't":"Session ready."}\n{"kind":"thought","text":"Checking "}\n' }
+    yield { stream: 'stdout', text: '{"kind":"thought","text":"the parser."}\n{"kind":"step","text":"Run tests"}\n' }
+    yield { stream: 'stdout', text: '{"kind":"progress","text":"Run tests · failed"}\n{"kind":"output","text":"test failed"}\n' }
+    logBeforeReport = [...log]
+    yield { stream: 'stdout', text: '{"kind":"report","text":"Parser test failed."}\n' }
+    return { value: { code: 0, signal: null } }
+  }, [])
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+  await $.agent.spawn({ subagentType: 'Claudiu:codex-gpt-5-5', prompt: 'Find the bug' })
+  const chunks = await step($, 't1', 0, 'a1')
+
+  expect(logAtSpawn).toEqual(['Codex (a1) · Starting Codex adapter. On first run, npm may need to download it.'])
+  expect(logBeforeReport).toEqual([...logAtSpawn, 'Codex (a1) · Session ready.', 'Codex (a1) · Thinking', 'Codex (a1) · Run tests', 'Codex (a1) · Run tests · failed'])
+  const text = chunks.filter(c => c.kind === 'text').map(c => c.text).join('')
+  expect(text).toContain('Thinking\nChecking the parser.')
+  expect(text).toContain('Tool output\ntest failed')
+  expect(JSON.parse(chunks.find(c => c.kind === 'input').json).message).toBe('Parser test failed.\n\n---\nSteps Codex ran (1):\n- Run tests')
+})
+
 async function step($: any, turnId: string, index: number, agentId?: string) {
   const chunks: any[] = []
   const stream = $.turn.step({ turnId, index, model: 'haiku', messageCount: 1, agentId })
   for await (const c of stream) chunks.push(c)
   return chunks
 }
+
+function gate<T>() {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>(r => { resolve = r })
+  return { promise, resolve }
+}
+
+const INBOX_ID = 'be4bebed-a8ee-4afb-b7a1-c06d33ff3083'
+const INBOX_PATH = `/data/acp/${INBOX_ID}.json`
+const helperChunk = (event: object) => ({ stream: 'stdout', text: JSON.stringify(event) + '\n' })
+const messageTo = (agentId: string, text: string) => ({ agentId, origin: { kind: 'coordinator' as const }, text })
+
+test('SendMessage reaches only the running Codex helper and its reaction streams before handback', async ($, on) => {
+  const ready = gate<void>()
+  const first = gate<void>()
+  const second = gate<void>()
+  const finish = gate<void>()
+  const reaction = gate<void>()
+  const writes: any[] = []
+  let finished = false
+  engine(on, async function* () {
+    yield helperChunk({ kind: 'inbox', id: INBOX_ID, path: INBOX_PATH })
+    yield helperChunk({ kind: 'progress', text: 'Waiting for input.' })
+    await first.promise
+    yield helperChunk({ kind: 'accepted', seq: 1 })
+    await second.promise
+    yield helperChunk({ kind: 'accepted', seq: 2 })
+    yield helperChunk({ kind: 'progress', text: 'Codex received the message in its current turn.' })
+    yield helperChunk({ kind: 'text', text: 'I will check both files.' })
+    await finish.promise
+    yield helperChunk({ kind: 'report', text: 'Checked both files.' })
+    return { value: { code: 0, signal: null } }
+  }, [])
+  on('fs.write', (_$: any, e: any) => {
+    writes.push({ path: e.path.replace(/\\/g, '/').replace(/^[A-Za-z]:/, ''), body: JSON.parse(e.text) })
+    const written = writes.length === 1 ? first : second
+    written.resolve()
+    return { value: undefined }
+  })
+  on('ui.log', (_$: any, e: any) => {
+    if (e.text.endsWith('Waiting for input.')) ready.resolve()
+    if (e.text.endsWith('Writing a response')) reaction.resolve()
+    return { value: undefined }
+  })
+  on('session.receive', (_$: any, e: any) => ({ text: e.text }))
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+  await $.agent.spawn({ subagentType: 'Claudiu:codex-gpt-5-5', prompt: 'Find the bug' })
+  const running = step($, 't1', 0, 'a1').then(chunks => { finished = true; return chunks })
+  await ready.promise
+  expect(await $.session.receive(messageTo('someone-else', 'Other task'))).toEqual({ text: 'Other task' })
+  expect(await $.session.receive(messageTo('a1', 'x'.repeat(20_001)))).toEqual({ text: 'x'.repeat(20_001) })
+  const deliveries = await Promise.all([
+    $.session.receive(messageTo('a1', 'Check the parser.')),
+    $.session.receive(messageTo('a1', 'Check the tests too.')),
+  ])
+  expect(deliveries).toEqual([{ consumed: 'Delivered to the subagent helper' }, { consumed: 'Delivered to the subagent helper' }])
+  expect(writes).toEqual([
+    { path: INBOX_PATH, body: { seq: 1, text: 'Check the parser.' } },
+    { path: INBOX_PATH, body: { seq: 2, text: 'Check the tests too.' } },
+  ])
+  await reaction.promise
+  expect(finished).toBe(false)
+  finish.resolve()
+  const chunks = await running
+  expect(chunks.filter(c => c.kind === 'text').map(c => c.text).join('')).toContain('I will check both files.')
+  expect(await $.session.receive(messageTo('a1', 'Now summarize.'))).toEqual({ text: 'Now summarize.' })
+})
+
+test('a delivery racing helper exit is queued by Claude and its inbox is cleaned up', async ($, on) => {
+  const ready = gate<void>()
+  const wrote = gate<void>()
+  const cleanup: string[][] = []
+  engine(on, async function* () {
+    yield helperChunk({ kind: 'inbox', id: INBOX_ID, path: INBOX_PATH })
+    yield helperChunk({ kind: 'progress', text: 'Waiting for input.' })
+    await wrote.promise
+    yield helperChunk({ kind: 'report', text: 'Finished first.' })
+    return { value: { code: 0, signal: null } }
+  }, [])
+  on('ui.log', (_$: any, e: any) => {
+    if (e.text.endsWith('Waiting for input.')) ready.resolve()
+    return { value: undefined }
+  })
+  on('fs.write', () => { wrote.resolve(); return { value: undefined } })
+  on('process.run', (_$: any, e: any) => {
+    cleanup.push(e.argv)
+    return { value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  on('session.receive', (_$: any, e: any) => ({ text: e.text }))
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+  await $.agent.spawn({ subagentType: 'Claudiu:codex-gpt-5-5', prompt: 'Find the bug' })
+  const running = step($, 't1', 0, 'a1')
+  await ready.promise
+  expect(await $.session.receive(messageTo('a1', 'Check one more file.'))).toEqual({ text: 'Check one more file.' })
+  await running
+  expect(cleanup).toEqual([['/apps/claudiu', '--acp', '--cleanup', INBOX_ID]])
+})
 
 test('a Codex subagent runs the task in Codex and hands back its last message', async ($, on) => {
   const requests: any[] = []
@@ -63,7 +187,7 @@ test('a Codex subagent runs the task in Codex and hands back its last message', 
   await $.agent.spawn({ subagentType: 'Claudiu:codex-gpt-5-5', prompt: 'Find the bug' })
   const chunks = await step($, 't1', 0, 'a1')
 
-  expect(requests).toEqual([{ argv: ['/apps/claudiu', '--acp'], input: { agent: 'codex', model: 'gpt-5.5', edits: false, cwd: '/work/sub', prompt: 'Find the bug' } }])
+  expect(requests).toEqual([{ argv: ['/apps/claudiu', '--acp'], input: { agent: 'codex', model: 'gpt-5.5', effort: null, edits: false, cwd: '/work/sub', prompt: 'Find the bug', live_messages: true } }])
   // What Codex writes and does is the agent's own text, which its transcript keeps; Claude gets only the report.
   const text = chunks.filter(c => c.kind === 'text').map(c => c.text).join('')
   expect(text).toBe('Codex on gpt-5.5, read-only\n\nLooking.\n▸ Read src/a.rs\n')
@@ -84,6 +208,27 @@ test('a Codex subagent runs the task in Codex and hands back its last message', 
   expect(last.some(c => c.kind === 'tool')).toBe(false)
   expect(last.filter(c => c.kind === 'text').map(c => c.text).join('')).toBe(report)
   expect(requests.length).toBe(1)
+})
+
+test('the effort Claude asks for in its Agent call reaches Codex', async ($, on) => {
+  const requests: any[] = []
+  engine(on, [JSON.stringify({ kind: 'report', text: 'Done.' })], requests)
+  // Claude Code's Agent tool spawns the agent while the call runs.
+  const spawned = gate<void>()
+  let callId = ''
+  on('tool.call', { tool: 'Agent' }, async (_$: any, e: any) => {
+    callId = e.tool_use_id
+    await spawned.promise
+    return { result: 'started' }
+  })
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+  const call = $.tool.call({ tool: 'Agent', subagent_type: 'Claudiu:codex-gpt-5-5', prompt: 'Find the bug', description: 'Find it', effort: 'high' })
+  while (!callId) await new Promise(r => setTimeout(r, 1))
+  await $.agent.spawn({ subagentType: 'Claudiu:codex-gpt-5-5', prompt: 'Find the bug', tool_use_id: callId } as any)
+  spawned.resolve()
+  await call
+  await step($, 't1', 0, 'a1')
+  expect(requests.map(r => r.input.effort)).toEqual(['high'])
 })
 
 test('a report with many steps lists the first ones, each cut short', async ($, on) => {
@@ -146,7 +291,7 @@ test('an OpenCode subagent runs the task in OpenCode and names it', async ($, on
   await $.agent.spawn({ subagentType: 'Claudiu:opencode-openai-gpt-6-1-sol', prompt: 'Find the bug' })
   const chunks = await step($, 't1', 0, 'a1')
 
-  expect(requests.map(r => r.input)).toEqual([{ agent: 'opencode', model: 'openai/gpt-6.1-sol', edits: true, cwd: '/work/sub', prompt: 'Find the bug' }])
+  expect(requests.map(r => r.input)).toEqual([{ agent: 'opencode', model: 'openai/gpt-6.1-sol', effort: null, edits: true, cwd: '/work/sub', prompt: 'Find the bug', live_messages: true }])
   expect(chunks.filter(c => c.kind === 'text').map(c => c.text).join('')).toBe('OpenCode on openai/gpt-6.1-sol, edits allowed\n\n')
   const input = JSON.parse(chunks.filter(c => c.kind === 'input').map(c => c.json).join(''))
   expect(input.message).toBe('OpenCode failed: opencode was not found on PATH. OpenCode subagents need OpenCode installed.\n\n---\nOpenCode ran no steps.')
@@ -162,7 +307,7 @@ test('a failure is handed back as the report', async ($, on) => {
 })
 
 test('a helper that ends without an answer is a failure too', async ($, on) => {
-  engine(on, ['not json'], [])
+  engine(on, ['not json', '{"kind":"thought"}', '{"kind":"report","text":null}'], [])
   await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
   await $.agent.spawn({ subagentType: 'Claudiu:codex-gpt-5-5', prompt: 'Find the bug' })
   const chunks = await step($, 't1', 0, 'a1')
