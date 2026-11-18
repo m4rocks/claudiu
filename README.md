@@ -6,7 +6,7 @@ Claudiu is a native desktop app, written in Rust with [Rune](https://github.com/
 
 ## What it does
 
-Each session is your own `claude` process in a real terminal, and sign-in stays with Claude Code. Around it, Claudiu adds a sidebar of running and recent sessions, notifications when a background session finishes or asks something, an editor mode (Ctrl+Shift+E), usage meters, a GitHub pane, cards Claude draws inline, sessions that move between git worktrees, extra accounts that share one configuration, and Codex and OpenCode subagents (Settings → Custom subagents). Codex subagents need Node and a `codex login`, OpenCode subagents need `opencode` on PATH, and with Allow edits on, either acts without Claude Code's permission rules. Settings lists the rest.
+Each session is your own `claude` process in a real terminal, and sign-in stays with Claude Code. Around it, Claudiu adds a sidebar of running and recent sessions, notifications when a background session finishes or asks something, an editor mode (Ctrl+Shift+E), usage meters, a GitHub pane, cards Claude draws inline, sessions that move between git worktrees, extra accounts that share one configuration, and Codex and OpenCode subagents (Settings → Custom subagents). Codex subagents need Node and a `codex login`, OpenCode subagents need `opencode` on PATH, and with Allow edits on, either acts without Claude Code's permission rules. With Codex subagents on, the sidebar also shows Codex's 5-hour and 7-day limits, which Claudiu reads from the session logs in `~/.codex`. Settings lists the rest.
 
 ## What it touches
 

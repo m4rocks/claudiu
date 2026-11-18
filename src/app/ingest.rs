@@ -3,17 +3,26 @@
 //! off the UI thread; applying them is a handful of small, separately testable steps.
 
 use super::*;
-use crate::store::RateLimit;
+use crate::claude::codex_limits;
 use crate::claude::usage::Snapshot;
+use crate::store::RateLimit;
 
 impl Workspace {
-    /// Costs no tokens; the files are tiny.
+    /// Costs no tokens. The mod's files are tiny, and Codex's logs are read again only after Codex writes to them.
     pub(super) fn ingest_usage(&mut self) {
+        let codex_on = self.store.data.settings.custom_subagents.codex.on;
         self.rt.spawn_quietly(
-            move || { (usage::read_snapshots(&usage::snapshot_dir()), mcp::read_attached()) },
-            move |ws: &mut Workspace, (snaps, items)| {
-                let mut changed = false;
-                changed |= snaps.iter().fold(false, |c, snap| ws.apply_snapshot(snap) | c);
+            move || {
+                let codex = if codex_on { codex_limits::codex_home().and_then(|home| codex_limits::read(&home)) } else { None };
+                (usage::read_snapshots(&usage::snapshot_dir()), mcp::read_attached(), codex)
+            },
+            move |ws: &mut Workspace, (snaps, items, codex)| {
+                // A new Codex session has no reading until its first turn; the last one stays until then.
+                if codex.is_some() && ws.codex_usage != codex {
+                    ws.codex_usage = codex;
+                    ws.rt.dirty = true;
+                }
+                let mut changed = snaps.iter().fold(false, |c, snap| ws.apply_snapshot(snap) | c);
                 changed |= items.into_iter().fold(false, |c, (stem, item)| ws.apply_attachment(&stem, item) | c);
                 if changed {
                     ws.store.mark_dirty();

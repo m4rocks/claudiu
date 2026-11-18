@@ -28,6 +28,8 @@ pub const OK: u32 = 0x7fb069;
 pub const WARN: u32 = 0xe5c07b;
 pub const DANGER: u32 = 0xe06c75;
 pub const SELECTION: u32 = 0x3d4a5c;
+/// Codex's usage bars, so they read apart from Claude's at a glance. The terminal palette's blue.
+pub const CODEX: u32 = 0x61afef;
 /// Search matches in the editor, faint, and the current one stronger.
 pub const FOUND: u32 = 0xe5c07b;
 

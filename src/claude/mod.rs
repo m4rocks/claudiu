@@ -6,12 +6,14 @@
 //!
 //! Channels between Claudiu and the sessions it runs: `accounts` (alt config folders), `usage` (the mod's snapshots),
 //! `ask` (one-shot completions through the mod), `bridge` (requests from a session), `mcp` (the tab-title server and the
-//! per-session config) and `plugin` (the mod Claudiu ships).
+//! per-session config) and `plugin` (the mod Claudiu ships). `codex_limits` reads Codex's own usage limits from its
+//! session logs.
 
 pub mod accounts;
 pub mod acp;
 pub mod ask;
 pub mod bridge;
+pub mod codex_limits;
 pub mod config_sync;
 pub mod costly;
 pub mod defaults;
