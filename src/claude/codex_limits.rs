@@ -28,8 +28,13 @@ struct Seen {
     usage: Option<AccountUsage>,
 }
 
-/// A rollout log and when it was last written.
-type Log = (SystemTime, PathBuf);
+/// A rollout log, with its write time and size: either changes when Codex writes to it.
+#[derive(PartialEq)]
+struct Log {
+    modified: SystemTime,
+    len: u64,
+    path: PathBuf,
+}
 
 pub fn codex_home() -> Option<PathBuf> {
     match std::env::var_os("CODEX_HOME") {
@@ -47,8 +52,17 @@ pub fn read(codex_home: &Path) -> Option<AccountUsage> {
     {
         return seen.usage.clone();
     }
-    let usage = logs.iter().find_map(|(_, log)| read_log(log));
-    last.insert(codex_home.to_path_buf(), Seen { logs, usage: usage.clone() });
+    // A log that couldn't be opened (Windows lets a writer lock it) is tried again next time rather than remembered.
+    let mut failed = false;
+    let usage = logs.iter().find_map(|log| {
+        read_log(&log.path).unwrap_or_else(|_| {
+            failed = true;
+            None
+        })
+    });
+    if !failed {
+        last.insert(codex_home.to_path_buf(), Seen { logs, usage: usage.clone() });
+    }
     usage
 }
 
@@ -64,10 +78,16 @@ fn newest_logs(sessions: &Path) -> Vec<Log> {
         .iter()
         .filter_map(|day| std::fs::read_dir(day).ok())
         .flat_map(|entries| entries.flatten())
-        .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("jsonl"))
-        .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
+        .map(|e| e.path())
+        .filter(|path| path.extension().and_then(|x| x.to_str()) == Some("jsonl"))
+        // Asked of the file, not of the folder listing: on Windows the listing can show an old write time and size
+        // while Codex still has the log open.
+        .filter_map(|path| {
+            let meta = std::fs::metadata(&path).ok()?;
+            Some(Log { modified: meta.modified().ok()?, len: meta.len(), path })
+        })
         .collect();
-    logs.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
+    logs.sort_by_key(|log| std::cmp::Reverse(log.modified));
     logs.truncate(LOGS_TO_TRY);
     logs
 }
@@ -81,10 +101,10 @@ fn subdirs_newest_first(dir: &Path) -> Vec<PathBuf> {
     dirs
 }
 
-fn read_log(path: &Path) -> Option<AccountUsage> {
-    let (head, tail, whole, _, _) = super::read_chunks(path).ok()?;
+fn read_log(path: &Path) -> std::io::Result<Option<AccountUsage>> {
+    let (head, tail, whole, _, _) = super::read_chunks(path)?;
     let text = if whole { head } else { tail };
-    text.lines().rev().filter(|line| line.contains("\"rate_limits\"")).find_map(parse_line)
+    Ok(text.lines().rev().filter(|line| line.contains("\"rate_limits\"")).find_map(parse_line))
 }
 
 fn parse_line(line: &str) -> Option<AccountUsage> {
@@ -181,6 +201,31 @@ mod tests {
 
         std::fs::File::options().write(true).open(&log).unwrap().set_modified(written + std::time::Duration::from_secs(1)).unwrap();
         assert_eq!(read(home.path()).unwrap().five_hour.unwrap().utilization, Some(0.5));
+    }
+
+    #[test]
+    fn a_log_still_open_for_writing_is_read_again() {
+        use std::io::Write;
+        let home = tempfile::tempdir().unwrap();
+        let log = write_log(home.path(), "2026/11/18", "rollout-a.jsonl", &[READING]);
+        assert_eq!(read(home.path()).unwrap().five_hour.unwrap().utilization, Some(0.24));
+        let mut codex = std::fs::OpenOptions::new().append(true).open(&log).unwrap();
+        write!(codex, "
+{}", READING.replace("24.0", "50.0")).unwrap();
+        codex.flush().unwrap();
+        assert_eq!(read(home.path()).unwrap().five_hour.unwrap().utilization, Some(0.5));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_log_locked_by_its_writer_is_tried_again() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let home = tempfile::tempdir().unwrap();
+        let log = write_log(home.path(), "2026/11/18", "rollout-a.jsonl", &[READING]);
+        let locked = std::fs::OpenOptions::new().read(true).share_mode(0).open(&log).unwrap();
+        assert_eq!(read(home.path()), None);
+        drop(locked);
+        assert!(read(home.path()).is_some(), "the failed read was not remembered");
     }
 
     #[test]
