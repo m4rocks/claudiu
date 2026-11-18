@@ -239,6 +239,25 @@ test('the effort Claude asks for in its Agent call reaches Codex', async ($, on)
   expect(requests.map(r => r.input.effort)).toEqual(['high', 'low'])
 })
 
+test('a first turn that starts before its spawn is noted still gets the effort its Agent call asked for', async ($, on) => {
+  const requests: any[] = []
+  engine(on, [JSON.stringify({ kind: 'report', text: 'Done.' })], requests)
+  on('agent.list', () => ({ value: [{ id: 'a1', type: 'Claudiu:codex-gpt-5-5', description: 'Find it' }] }))
+  const finished = gate<void>()
+  on('tool.call', { tool: 'Agent' }, async () => {
+    await finished.promise
+    return { result: 'done' }
+  })
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+  const call = $.tool.call({ tool: 'Agent', subagent_type: 'Claudiu:codex-gpt-5-5', prompt: 'Find the bug', description: 'Find it', effort: 'high' })
+  // The agent's turn runs while the call does, before this module has seen its spawn.
+  await new Promise(r => setTimeout(r, 1))
+  await step($, 't1', 0, 'a1')
+  finished.resolve()
+  await call
+  expect(requests.map(r => r.input.effort)).toEqual(['high'])
+})
+
 test('a report with many steps lists the first ones, each cut short', async ($, on) => {
   const steps = Array.from({ length: 32 }, (_, i) => JSON.stringify({ kind: 'step', text: `Read src/f${i + 1}.rs` }))
   steps[0] = JSON.stringify({ kind: 'step', text: 'x'.repeat(130) })

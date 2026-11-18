@@ -60,7 +60,7 @@ const AGENT_NAMES = { codex: 'Codex', opencode: 'OpenCode' } // the agents of `c
 const AGENT_PREFIX = 'Claudiu:' // what Claude Code puts before an agent type this plugin registers
 const customTypes = new Map() // agent type name -> { agent, model, edits } of each custom agent type Claudiu defined
 const customRuns = new Map() // agent id -> { type, prompt, effort, turnId, report, steps } of each custom subagent started
-const agentEfforts = new Map() // Agent call id -> the effort it asked for, while the call is running
+const agentCalls = new Map() // Agent call id -> { type, description, effort } of each running call that asked for an effort
 const published = new Set() // call ids whose card file this process wrote from the transcript
 let rowsPoll // watches the heights Claudiu measures
 let visualChain = Promise.resolve() // visual writes in order, without holding up the stream
@@ -377,20 +377,19 @@ async function registerSubagents($) {
   }
 }
 
-// Notes the effort an Agent call asks for, which the spawn it leads to doesn't carry, until that spawn has happened.
+// Notes the effort an Agent call asks for, which the spawn it leads to doesn't carry, while the call runs.
 async function onAgentCall($, e, next) {
-  const effort = e.effort
-  if (typeof effort === 'string') agentEfforts.set(e.tool_use_id, effort)
+  if (typeof e.effort === 'string') agentCalls.set(e.tool_use_id, { type: e.subagent_type, description: e.description, effort: e.effort })
   try {
     return await next(e)
   } finally {
-    agentEfforts.delete(e.tool_use_id)
+    agentCalls.delete(e.tool_use_id)
   }
 }
 
 // Notes the task and effort of each custom subagent as it starts; its turns are answered by customStep.
 async function onAgentSpawn($, e, next) {
-  const effort = agentEfforts.get(e.tool_use_id) ?? null
+  const effort = agentCalls.get(e.tool_use_id)?.effort ?? null
   const r = await next(e)
   if (r.agentId && customTypes.has(e.subagentType)) {
     // The agent's first turn can start before this returns, taking the run up from the agent list; it keeps that run.
@@ -409,7 +408,9 @@ async function customRun($, agentId) {
   // The spawn may have noted the run while the list was read.
   if (customRuns.has(agentId)) return customRuns.get(agentId)
   if (!agent || !customTypes.has(agent.type)) return undefined
-  const run = { type: agent.type, prompt: null, effort: null, turnId: null, report: null, handedBack: 0, steps: [] }
+  // A first turn that starts before its spawn hook returns finds its Agent call's effort by what the list shows of it.
+  const call = [...agentCalls.values()].find(c => c.type === agent.type && c.description === agent.description)
+  const run = { type: agent.type, prompt: null, effort: call?.effort ?? null, turnId: null, report: null, handedBack: 0, steps: [] }
   customRuns.set(agentId, run)
   return run
 }
