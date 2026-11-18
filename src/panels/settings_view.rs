@@ -317,6 +317,14 @@ impl Workspace {
                 .child(settings_toggle("settings-updates", "Check for updates", *updates, |m| match m {
                     Modal::Settings { updates, .. } => Some(updates),
                     _ => None,
+                }))
+                .child(row().child(if self.update.status == crate::updater::Status::Checking {
+                    button_disabled("Checking…").key("settings-check-updates")
+                } else {
+                    button("Check now", false).key("settings-check-updates").on_press_tx(|ws: &mut Workspace, tx: &mut Tx| {
+                        ws.act(Act::CheckForUpdates);
+                        ws.after_input(tx);
+                    })
                 })),
             SettingsPage::Sessions => {
                 let mut c = col()

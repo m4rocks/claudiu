@@ -185,6 +185,8 @@ pub enum Act {
     ConfirmInstallUpdate,
     Dismiss,
     InstallUpdate,
+    /// The Check now button in Settings.
+    CheckForUpdates,
     /// New sessions start with this account; running ones keep theirs.
     SwitchAccount(Id),
     /// The shown session runs under another account: restart it under the active one (asks first, see `handoff.rs`).
@@ -960,6 +962,7 @@ impl Workspace {
                     crate::updater::install(self);
                 }
             }
+            Act::CheckForUpdates => crate::updater::check_now(self),
             Act::ConfirmInstallUpdate => {
                 self.modal = None;
                 crate::updater::install(self);

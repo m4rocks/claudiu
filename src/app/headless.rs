@@ -2279,6 +2279,28 @@ fn an_idle_window_is_not_drawn_again_for_nothing() {
     assert!(redraws <= 1, "{redraws} frames redrew an idle window");
 }
 
+/// Check now in Settings looks for an update even with background checks off, and says what it found. A test build
+/// isn't installed by the Claudiu installer, so it says that.
+#[test]
+fn check_now_says_what_it_found() {
+    let mut h = Harness::new(|_| vec![]);
+    h.step(|ws| ws.store.data.settings.update_url = Some(String::new()));
+    h.wait("the check at launch to finish", |ws| ws.update.status != crate::updater::Status::Checking);
+    h.step(|ws| ws.act(Act::OpenSettings));
+    h.settle();
+    h.click("settings-check-updates");
+    h.wait("an answer", |ws| ws.toast.is_some());
+    let toast = h.ws().toast.as_ref().unwrap();
+    assert_eq!(toast.text, "Could not check for updates: updates work only in a copy installed with the Claudiu installer");
+    assert!(toast.error);
+
+    // A downloaded update isn't thrown away by another check; the button says it's waiting instead.
+    h.step(|ws| ws.update.status = crate::updater::Status::Ready { version: "9.9.9".into() });
+    h.click("settings-check-updates");
+    assert_eq!(h.ws().toast.as_ref().map(|t| t.text.as_str()), Some("Claudiu 9.9.9 is ready. Restart to update."));
+    assert_eq!(h.ws().update.status, crate::updater::Status::Ready { version: "9.9.9".into() });
+}
+
 /// Settings lists the projects to move, rename and remove; a removal is undone from its toast, sessions and all.
 #[test]
 fn the_projects_page_moves_renames_and_removes_projects() {
