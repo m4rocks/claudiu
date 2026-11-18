@@ -393,7 +393,10 @@ async function onAgentSpawn($, e, next) {
   const effort = agentEfforts.get(e.tool_use_id) ?? null
   const r = await next(e)
   if (r.agentId && customTypes.has(e.subagentType)) {
-    customRuns.set(r.agentId, { type: e.subagentType, prompt: e.prompt, effort, turnId: null, report: null, handedBack: 0, steps: [] })
+    // The agent's first turn can start before this returns, taking the run up from the agent list; it keeps that run.
+    const run = customRuns.get(r.agentId)
+    if (run) Object.assign(run, { prompt: run.prompt ?? e.prompt, effort: run.effort ?? effort })
+    else customRuns.set(r.agentId, { type: e.subagentType, prompt: e.prompt, effort, turnId: null, report: null, handedBack: 0, steps: [] })
   }
   return r
 }
@@ -446,7 +449,8 @@ function showActivity($, label, text) {
 }
 
 function displayText(text) {
-  return text.replace(/\r\n?/g, '\n').replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, '')
+  // Color and cursor codes first: removing only their escape character would leave `[31m` behind.
+  return text.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '').replace(/\r\n?/g, '\n').replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, '')
 }
 
 // Only one write can be awaiting acknowledgement. Otherwise a second delivery could overwrite the first

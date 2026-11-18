@@ -139,7 +139,10 @@ struct Inbox {
 }
 
 impl Inbox {
-    fn take(&mut self, emit: &mut impl FnMut(Event)) -> Option<String> {
+    /// The next message the mod wrote, with its number. It is acknowledged (`Event::Accepted`) only once it has
+    /// reached the agent: until then the mod still holds it, and gives it back to Claude Code's own queue if this
+    /// helper ends first.
+    fn take(&mut self) -> Option<(u64, String)> {
         // The mod writes the whole JSON value. A poll during that write can read a partial value and retries it.
         if !std::fs::symlink_metadata(&self.path).ok()?.file_type().is_file() {
             return None;
@@ -156,8 +159,7 @@ impl Inbox {
         self.seen = delivery.seq;
         // The mod won't write the next message until it sees the acknowledgement.
         let _ = std::fs::remove_file(&self.path);
-        emit(Event::Accepted { seq: delivery.seq });
-        Some(delivery.text)
+        Some((delivery.seq, delivery.text))
     }
 }
 
@@ -473,8 +475,8 @@ fn converse(from_agent: impl BufRead + Send + 'static, mut to_agent: impl Write,
             && (Instant::now() >= next_poll || done.is_some())
         {
             next_poll = Instant::now() + INBOX_POLL;
-            if let Some(text) = inbox.take(emit) {
-                pending.push_back(text);
+            if let Some((seq, text)) = inbox.take() {
+                pending.push_back((Some(seq), text));
             }
         }
 
@@ -486,11 +488,15 @@ fn converse(from_agent: impl BufRead + Send + 'static, mut to_agent: impl Write,
                 // The client owns the next prompt so it can stream the reply and wait for its stop reason.
                 prompt_id = next_id;
                 next_id += 1;
-                send(&mut to_agent, prompt(prompt_id, pending.drain(..).collect()))?;
+                let (seqs, texts): (Vec<Option<u64>>, Vec<String>) = pending.drain(..).unzip();
+                send(&mut to_agent, prompt(prompt_id, texts))?;
+                for seq in seqs.into_iter().flatten() {
+                    emit(Event::Accepted { seq });
+                }
                 messages = Messages::default();
                 steer = supports_steering;
                 emit(Event::Progress { text: format!("{name} is continuing with the follow-up message.") });
-            } else if steer && let Some(text) = pending.pop_front() {
+            } else if steer && let Some((seq, text)) = pending.pop_front() {
                 let mut params = json!({
                     "sessionId": session_id,
                     "prompt": [{ "type": "text", "text": text }],
@@ -499,7 +505,7 @@ fn converse(from_agent: impl BufRead + Send + 'static, mut to_agent: impl Write,
                     params["_meta"] = json!({ "steering": { "idleBehavior": "promptRequired" } });
                 }
                 send(&mut to_agent, json!({ "jsonrpc": "2.0", "id": next_id, "method": "_session/steering", "params": params }))?;
-                steering = Some((next_id, text));
+                steering = Some((next_id, seq, text));
                 next_id += 1;
             }
         }
@@ -508,14 +514,24 @@ fn converse(from_agent: impl BufRead + Send + 'static, mut to_agent: impl Write,
         let Some(msg) = read(&mut to_agent, Some(&session_id), &mut messages, emit, timeout)? else { continue };
         if msg["id"] == prompt_id {
             done = Some(result(msg)?);
-        } else if steering.as_ref().is_some_and(|(id, _)| msg["id"] == *id) {
-            let (_, text) = steering.take().unwrap();
+        } else if steering.as_ref().is_some_and(|(id, _, _)| msg["id"] == *id) {
+            let (_, seq, text) = steering.take().unwrap();
             match msg["result"]["outcome"].as_str() {
-                Some("injected") => emit(Event::Progress { text: format!("{name} received the message in its current turn.") }),
+                Some("injected") => {
+                    if let Some(seq) = seq {
+                        emit(Event::Accepted { seq });
+                    }
+                    emit(Event::Progress { text: format!("{name} received the message in its current turn.") });
+                }
                 // If a different adapter started a turn despite the opt-in, don't send the message twice.
                 Some("startedNewTurn") => return Err(format!("{name} started an untracked turn while steering")),
+                // The agent answered, so it is up and the follow-up prompt will carry the message. Claude's message
+                // can't wait on that for the rest of the turn.
                 _ => {
-                    pending.push_front(text);
+                    if let Some(seq) = seq {
+                        emit(Event::Accepted { seq });
+                    }
+                    pending.push_front((None, text));
                     steer = false;
                     emit(Event::Progress { text: format!("{name} will take the message after its current turn.") });
                 }
@@ -767,8 +783,6 @@ mod tests {
     fn the_inbox_rejects_partial_oversized_out_of_order_and_replayed_deliveries() {
         let dir = tempfile::tempdir().unwrap();
         let mut inbox = test_inbox(dir.path());
-        let mut events = Vec::new();
-        let mut emit = |event| events.push(event);
         for body in [
             r#"{"seq":1,"text":"unfinished"#.to_string(),
             json!({ "seq": 1, "text": "   " }).to_string(),
@@ -778,15 +792,14 @@ mod tests {
             " ".repeat(INBOX_BYTES as usize + 1),
         ] {
             std::fs::write(&inbox.path, body).unwrap();
-            assert_eq!(inbox.take(&mut emit), None);
+            assert_eq!(inbox.take(), None);
         }
         let message = json!({ "seq": 1, "text": "Check the tests too" }).to_string();
         std::fs::write(&inbox.path, &message).unwrap();
-        assert_eq!(inbox.take(&mut emit).as_deref(), Some("Check the tests too"));
+        assert_eq!(inbox.take(), Some((1, "Check the tests too".to_string())));
         assert!(!inbox.path.exists());
         std::fs::write(&inbox.path, message).unwrap();
-        assert_eq!(inbox.take(&mut emit), None);
-        assert_eq!(events, [Event::Accepted { seq: 1 }]);
+        assert_eq!(inbox.take(), None);
         let path = inbox.path.clone();
         drop(inbox);
         assert!(!path.exists());
@@ -853,6 +866,42 @@ mod tests {
         assert!(events.contains(&Event::Accepted { seq: 1 }));
         assert!(events.contains(&Event::Text { text: "Checked the tests too.".into() }));
         assert!(!path.exists());
+    }
+
+    /// The mod gives a message back to Claude Code's queue unless it is acknowledged, so one that never reached the
+    /// agent must not be.
+    #[test]
+    fn a_message_is_not_acknowledged_when_the_agent_exits_before_taking_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let inbox = test_inbox(dir.path());
+        let path = inbox.path.clone();
+        let (from_agent, mut replies) = std::io::pipe().unwrap();
+        let (commands, to_agent) = std::io::pipe().unwrap();
+        let (sent, received) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for line in BufReader::new(commands).lines().map_while(Result::ok) {
+                if sent.send(serde_json::from_str::<Value>(&line).unwrap()).is_err() {
+                    break;
+                }
+            }
+        });
+        let task = std::thread::spawn(move || {
+            let mut events = Vec::new();
+            let report = converse(BufReader::new(from_agent), to_agent, &request(Agent::Codex, false), Some(inbox), &mut |event| events.push(event));
+            (report, events)
+        });
+        let next = || received.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(next()["method"], "initialize");
+        writeln!(replies, "{}", reply(0, json!({ "protocolVersion": 1, "_meta": { "steering": { "supported": true } } }))).unwrap();
+        assert_eq!(next()["method"], "session/new");
+        writeln!(replies, "{}", opening()[1]).unwrap();
+        assert_eq!(next()["method"], "session/prompt");
+        std::fs::write(&path, json!({ "seq": 1, "text": "Check the tests too" }).to_string()).unwrap();
+        assert_eq!(next()["method"], "_session/steering");
+        drop(replies);
+        let (report, events) = task.join().unwrap();
+        assert!(report.is_err());
+        assert!(!events.iter().any(|e| matches!(e, Event::Accepted { .. })), "{events:?}");
     }
 
     #[test]

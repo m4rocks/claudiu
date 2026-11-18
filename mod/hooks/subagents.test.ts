@@ -52,7 +52,7 @@ test('startup and activity reach the transcript while the helper is still runnin
     yield { stream: 'stdout', text: '{"kind":"progress","tex' }
     yield { stream: 'stdout', text: 't":"Session ready."}\n{"kind":"thought","text":"Checking "}\n' }
     yield { stream: 'stdout', text: '{"kind":"thought","text":"the parser."}\n{"kind":"step","text":"Run tests"}\n' }
-    yield { stream: 'stdout', text: '{"kind":"progress","text":"Run tests · failed"}\n{"kind":"output","text":"test failed"}\n' }
+    yield { stream: 'stdout', text: '{"kind":"progress","text":"Run tests · failed"}\n{"kind":"output","text":"\\u001b[31mtest failed\\u001b[0m"}\n' }
     logBeforeReport = [...log]
     yield { stream: 'stdout', text: '{"kind":"report","text":"Parser test failed."}\n' }
     return { value: { code: 0, signal: null } }
