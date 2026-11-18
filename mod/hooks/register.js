@@ -446,11 +446,6 @@ function withSteps(report, name, steps) {
   return `${report}\n\n---\nSteps ${name} ran (${steps.length}):\n${listed.join('\n')}`
 }
 
-function showActivity($, label, text) {
-  const line = displayText(text).replace(/\s+/g, ' ').trim()
-  $.ui.log(`${label} · ${line.length > 200 ? line.slice(0, 199) + '…' : line}`)
-}
-
 function displayText(text) {
   // Color and cursor codes first: removing only their escape character would leave `[31m` behind.
   return text.replace(/\x1b\[[0-9;:?]*[ -/]*[@-~]/g, '').replace(/\r\n?/g, '\n').replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, '')
@@ -498,9 +493,6 @@ async function* customStep($, e, next, run) {
     run.steps = []
     const { agent, model, edits } = customTypes.get(run.type)
     const name = AGENT_NAMES[agent]
-    const label = `${name} (${e.agentId})`
-    const starting = agent === 'codex' ? 'Starting Codex adapter. On first run, npm may need to download it.' : 'Starting OpenCode.'
-    showActivity($, label, starting)
     yield { kind: 'text', index: 0, text: `${name} on ${model}, ${edits ? 'edits allowed' : 'read-only'}\n\n` }
     run.report = null
     let previousKind
@@ -528,13 +520,10 @@ async function* customStep($, e, next, run) {
           continue
         }
         if (event.kind === 'text' || event.kind === 'thought' || event.kind === 'output') {
-          if (event.kind === 'thought' && previousKind !== 'thought') showActivity($, label, 'Thinking')
-          if (event.kind === 'text' && previousKind !== 'text') showActivity($, label, 'Writing a response')
           const prefix = previousKind === event.kind ? '' : { text: previousKind ? '\n\n' : '', thought: '\n\nThinking\n', output: '\n\nTool output\n' }[event.kind]
           yield { kind: 'text', index: 0, text: prefix + displayText(event.text) }
         } else if (event.kind === 'step' || event.kind === 'progress') {
           if (event.kind === 'step') run.steps.push(event.text)
-          showActivity($, label, event.text)
           yield { kind: 'text', index: 0, text: `\n▸ ${displayText(event.text)}\n` }
         } else if (event.kind === 'report' || event.kind === 'failed') {
           helperEnded = !event.spawnError
@@ -555,7 +544,6 @@ async function* customStep($, e, next, run) {
     }
     if (next.signal?.aborted) return
     run.report ??= `${name} failed: the helper stopped without an answer.`
-    if (run.report.startsWith(`${name} failed:`)) showActivity($, label, run.report)
   }
   const message = withSteps(run.report, AGENT_NAMES[customTypes.get(run.type).agent], run.steps)
   if (run.handedBack >= 2) {
