@@ -214,7 +214,6 @@ fn the_workspace_draws_and_its_controls_answer() {
     assert!(h.ws().is_running(&id));
 }
 
-/// Sessions and the shell under them, the sidebars' widths, cards and the GitHub view, with a stand-in `claude`.
 #[test]
 fn codex_limits_show_only_with_codex_subagents_on() {
     let mut h = Harness::new(|_| vec![]);
@@ -225,6 +224,7 @@ fn codex_limits_show_only_with_codex_subagents_on() {
     assert!(h.drawn("meter-codex-5h") && h.drawn("meter-codex-7d"), "Codex's row draws under Claude's: {:?}", h.keys());
 }
 
+/// Sessions and the shell under them, the sidebars' widths, cards and the GitHub view, with a stand-in `claude`.
 #[test]
 fn sessions_and_the_shell_panel() {
     let mut h = Harness::new(|_| vec![]);

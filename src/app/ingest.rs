@@ -3,12 +3,12 @@
 //! off the UI thread; applying them is a handful of small, separately testable steps.
 
 use super::*;
-use crate::store::RateLimit;
 use crate::claude::codex_limits;
 use crate::claude::usage::Snapshot;
+use crate::store::RateLimit;
 
 impl Workspace {
-    /// Costs no tokens. The mod's files are tiny; a Codex log costs under 1 MiB of reading.
+    /// Costs no tokens. The mod's files are tiny, and Codex's logs are read again only after Codex writes to them.
     pub(super) fn ingest_usage(&mut self) {
         let codex_on = self.store.data.settings.custom_subagents.codex.on;
         self.rt.spawn_quietly(

@@ -4,6 +4,9 @@
 //! parse is skipped and the sidebar shows no Codex row.
 
 use std::path::{Path, PathBuf};
+use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex};
+use std::time::SystemTime;
 
 use serde_json::Value;
 
@@ -13,8 +16,20 @@ use crate::store::{AccountUsage, RateLimit};
 /// yesterday's folder. Looking at the last few days finds it.
 const DAYS_TO_LOOK_AT: usize = 3;
 /// Logs tried, newest first, before giving up: a session that hasn't finished a turn yet has no reading. Kept small
-/// because every try reads up to 896 KiB, every few seconds, and a sign-in by API key never logs a reading.
+/// because a try reads up to 896 KiB, and a sign-in by API key never logs a reading.
 const LOGS_TO_TRY: usize = 3;
+
+/// Per Codex folder, the logs last looked at, with when each was written, and what they gave. The sidebar asks every
+/// few seconds and the logs are large, so they are read again only when one of them was written since.
+static LAST: LazyLock<Mutex<HashMap<PathBuf, Seen>>> = LazyLock::new(Default::default);
+
+struct Seen {
+    logs: Vec<Log>,
+    usage: Option<AccountUsage>,
+}
+
+/// A rollout log and when it was last written.
+type Log = (SystemTime, PathBuf);
 
 pub fn codex_home() -> Option<PathBuf> {
     match std::env::var_os("CODEX_HOME") {
@@ -25,18 +40,27 @@ pub fn codex_home() -> Option<PathBuf> {
 
 /// The newest limits Codex logged, or `None` when there are none to read.
 pub fn read(codex_home: &Path) -> Option<AccountUsage> {
-    newest_logs(&codex_home.join("sessions")).iter().find_map(|log| read_log(log))
+    let logs = newest_logs(&codex_home.join("sessions"));
+    let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(seen) = last.get(codex_home)
+        && seen.logs == logs
+    {
+        return seen.usage.clone();
+    }
+    let usage = logs.iter().find_map(|(_, log)| read_log(log));
+    last.insert(codex_home.to_path_buf(), Seen { logs, usage: usage.clone() });
+    usage
 }
 
-/// Rollout logs in the last few `YYYY/MM/DD` folders, most recently written first.
-fn newest_logs(sessions: &Path) -> Vec<PathBuf> {
+/// Rollout logs in the last few `YYYY/MM/DD` folders, with when each was written, most recently written first.
+fn newest_logs(sessions: &Path) -> Vec<Log> {
     let days: Vec<PathBuf> = subdirs_newest_first(sessions)
         .into_iter()
         .flat_map(|year| subdirs_newest_first(&year))
         .flat_map(|month| subdirs_newest_first(&month))
         .take(DAYS_TO_LOOK_AT)
         .collect();
-    let mut logs: Vec<(std::time::SystemTime, PathBuf)> = days
+    let mut logs: Vec<Log> = days
         .iter()
         .filter_map(|day| std::fs::read_dir(day).ok())
         .flat_map(|entries| entries.flatten())
@@ -44,7 +68,8 @@ fn newest_logs(sessions: &Path) -> Vec<PathBuf> {
         .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
         .collect();
     logs.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
-    logs.into_iter().take(LOGS_TO_TRY).map(|(_, path)| path).collect()
+    logs.truncate(LOGS_TO_TRY);
+    logs
 }
 
 /// Folder names are zero-padded numbers, so sorting by name sorts by date. Walking stays lazy: only the newest years
@@ -141,6 +166,21 @@ mod tests {
         let usage = read(home.path()).unwrap();
         assert_eq!(usage.five_hour, None);
         assert!(usage.seven_day.is_some());
+    }
+
+    #[test]
+    fn a_log_is_read_again_only_once_it_was_written() {
+        let home = tempfile::tempdir().unwrap();
+        let log = write_log(home.path(), "2026/11/18", "rollout-a.jsonl", &[READING]);
+        let written = std::fs::metadata(&log).unwrap().modified().unwrap();
+        assert_eq!(read(home.path()).unwrap().five_hour.unwrap().utilization, Some(0.24));
+
+        std::fs::write(&log, READING.replace("24.0", "50.0")).unwrap();
+        std::fs::File::options().write(true).open(&log).unwrap().set_modified(written).unwrap();
+        assert_eq!(read(home.path()).unwrap().five_hour.unwrap().utilization, Some(0.24), "same write time, not read again");
+
+        std::fs::File::options().write(true).open(&log).unwrap().set_modified(written + std::time::Duration::from_secs(1)).unwrap();
+        assert_eq!(read(home.path()).unwrap().five_hour.unwrap().utilization, Some(0.5));
     }
 
     #[test]
