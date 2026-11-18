@@ -241,13 +241,10 @@ fn print_path_script() -> String {
 #[cfg(any(unix, test))]
 fn path_from_shell(shell: &OsStr, script: &str, wait: std::time::Duration) -> Option<std::ffi::OsString> {
     use std::io::Read;
-    let mut child = Command::new(shell)
-        .args(["-l", "-i", "-c", script])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
+    let mut command = Command::new(shell);
+    command.args(["-l", "-i", "-c", script]).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
+    without_terminal(&mut command);
+    let mut child = command.spawn().ok()?;
     let mut stdout = child.stdout.take()?;
     let (sender, receiver) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -261,6 +258,21 @@ fn path_from_shell(shell: &OsStr, script: &str, wait: std::time::Duration) -> Op
     let _ = child.wait();
     path_between_markers(&output.ok()?).map(std::ffi::OsString::from)
 }
+
+/// Start `command` in a session of its own, without a controlling terminal. An interactive shell (`-i`) that has one
+/// takes over the terminal's foreground for as long as it runs. The Codex helper and the MCP server run inside Claude
+/// Code's terminal, so a PATH read from there took the terminal from Claude Code, which then died.
+#[cfg(unix)]
+fn without_terminal(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    // SAFETY: `setsid` is async-signal-safe, so it may run between fork and exec.
+    unsafe {
+        command.pre_exec(|| if libc::setsid() == -1 { Err(std::io::Error::last_os_error()) } else { Ok(()) });
+    }
+}
+
+#[cfg(all(not(unix), test))]
+fn without_terminal(_command: &mut Command) {}
 
 /// The text between the markers, ignoring whatever the shell's startup files printed around them.
 #[cfg(any(unix, test))]
@@ -714,6 +726,16 @@ bye
 
         assert_eq!(path_of(&without), None);
         assert_eq!(path_of(&with), Some("/nvm/bin:/usr/bin".into()));
+    }
+
+    /// A shell left in this process's session would share its terminal, and an interactive one takes it over.
+    #[test]
+    #[cfg(unix)]
+    fn the_login_shell_runs_without_this_processs_terminal() {
+        let script = format!("printf '%s%s%s' '{PATH_BEGIN}' \"$(ps -o pgid= -p $$ | tr -d ' ')\" '{PATH_END}'");
+        let group = path_from_shell(OsStr::new("/bin/sh"), &script, std::time::Duration::from_secs(20)).expect("the shell printed its group");
+        let ours = unsafe { libc::getpgrp() };
+        assert_ne!(group.to_string_lossy(), ours.to_string(), "the shell must run in a session of its own");
     }
 
     #[test]
