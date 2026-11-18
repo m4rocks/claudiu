@@ -33,6 +33,7 @@ const MODELS = {
 }
 const CARD_ROWS = 6 // reserved for a card until Claudiu has measured it
 const PROMPT_MAX = 20000 // characters of a message Claudiu asks the session to send (the editor's Ask Claude)
+const INBOX_TEXT_MAX = 20000 // UTF-16 units, matching the ACP helper
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']
 const ASK_MODELS = ['haiku', 'sonnet', 'opus']
 const VISUAL_TOOL = 'mcp__claudiu__show_visual'
@@ -58,7 +59,8 @@ const cardRows = new Map() // show_visual call id -> rows reserved for its card
 const AGENT_NAMES = { codex: 'Codex', opencode: 'OpenCode' } // the agents of `claude/subagents.rs`, by their key
 const AGENT_PREFIX = 'Claudiu:' // what Claude Code puts before an agent type this plugin registers
 const customTypes = new Map() // agent type name -> { agent, model, edits } of each custom agent type Claudiu defined
-const customRuns = new Map() // agent id -> { type, prompt, turnId, report, steps } of each custom subagent started
+const customRuns = new Map() // agent id -> { type, prompt, effort, turnId, report, steps } of each custom subagent started
+const agentCalls = new Map() // Agent call id -> { type, description, effort } of each running call that asked for an effort
 const published = new Set() // call ids whose card file this process wrote from the transcript
 let rowsPoll // watches the heights Claudiu measures
 let visualChain = Promise.resolve() // visual writes in order, without holding up the stream
@@ -375,11 +377,25 @@ async function registerSubagents($) {
   }
 }
 
-// Notes the task of each custom subagent as it starts; its turns are answered by customStep.
+// Notes the effort an Agent call asks for, which the spawn it leads to doesn't carry, while the call runs.
+async function onAgentCall($, e, next) {
+  if (typeof e.effort === 'string') agentCalls.set(e.tool_use_id, { type: e.subagent_type, description: e.description, effort: e.effort })
+  try {
+    return await next(e)
+  } finally {
+    agentCalls.delete(e.tool_use_id)
+  }
+}
+
+// Notes the task and effort of each custom subagent as it starts; its turns are answered by customStep.
 async function onAgentSpawn($, e, next) {
+  const effort = agentCalls.get(e.tool_use_id)?.effort ?? null
   const r = await next(e)
   if (r.agentId && customTypes.has(e.subagentType)) {
-    customRuns.set(r.agentId, { type: e.subagentType, prompt: e.prompt, turnId: null, report: null, handedBack: 0, steps: [] })
+    // The agent's first turn can start before this returns, taking the run up from the agent list; it keeps that run.
+    const run = customRuns.get(r.agentId)
+    if (run) Object.assign(run, { prompt: e.prompt, effort: effort ?? run.effort })
+    else customRuns.set(r.agentId, { type: e.subagentType, prompt: e.prompt, effort, turnId: null, report: null, handedBack: 0, steps: [] })
   }
   return r
 }
@@ -389,8 +405,12 @@ async function onAgentSpawn($, e, next) {
 async function customRun($, agentId) {
   if (customRuns.has(agentId) || customTypes.size === 0) return customRuns.get(agentId)
   const agent = (await $.agent.list().catch(() => [])).find(a => a.id === agentId)
+  // The spawn may have noted the run while the list was read.
+  if (customRuns.has(agentId)) return customRuns.get(agentId)
   if (!agent || !customTypes.has(agent.type)) return undefined
-  const run = { type: agent.type, prompt: null, turnId: null, report: null, handedBack: 0, steps: [] }
+  // A first turn that starts before its spawn hook returns finds its Agent call's effort by what the list shows of it.
+  const call = [...agentCalls.values()].find(c => c.type === agent.type && c.description === agent.description)
+  const run = { type: agent.type, prompt: null, effort: call?.effort ?? null, turnId: null, report: null, handedBack: 0, steps: [] }
   customRuns.set(agentId, run)
   return run
 }
@@ -426,6 +446,45 @@ function withSteps(report, name, steps) {
   return `${report}\n\n---\nSteps ${name} ran (${steps.length}):\n${listed.join('\n')}`
 }
 
+function showActivity($, label, text) {
+  const line = displayText(text).replace(/\s+/g, ' ').trim()
+  $.ui.log(`${label} · ${line.length > 200 ? line.slice(0, 199) + '…' : line}`)
+}
+
+function displayText(text) {
+  // Color and cursor codes first: removing only their escape character would leave `[31m` behind.
+  return text.replace(/\x1b\[[0-9;:?]*[ -/]*[@-~]/g, '').replace(/\r\n?/g, '\n').replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, '')
+}
+
+// Only one write can be awaiting acknowledgement. Otherwise a second delivery could overwrite the first
+// between polls. Until the helper takes the delivery, Claude Code can still queue it the usual way.
+function onSessionReceive($, e, next) {
+  const run = customRuns.get(e.agentId)
+  const inbox = run?.inbox
+  if (!inbox || inbox.closed || !['coordinator', 'peer', 'peer-send-message'].includes(e.origin?.kind)
+      || typeof e.text !== 'string' || !e.text.trim() || !/\P{White_Space}/u.test(e.text) || e.text.length > INBOX_TEXT_MAX) return next(e)
+
+  const delivered = inbox.tail.then(async () => {
+    if (inbox.closed) return false
+    const seq = inbox.seq + 1
+    const accepted = new Promise(resolve => { inbox.ack = resolve })
+    inbox.write = $.fs.write(inbox.path, JSON.stringify({ seq, text: e.text })).then(() => true, () => false)
+    if (!(await inbox.write)) {
+      closeInbox(inbox)
+      return inbox.seq === seq
+    }
+    return accepted
+  })
+  inbox.tail = delivered
+  return delivered.then(ok => ok ? { consumed: 'Delivered to the subagent helper' } : next(e))
+}
+
+function closeInbox(inbox) {
+  if (!inbox) return
+  inbox.closed = true
+  inbox.ack?.(false)
+}
+
 // Answers one step of a custom subagent: runs the task in its agent, streams what the agent writes and does as the
 // subagent's own text (saved in its transcript, which only the person reads), and hands back the agent's last message
 // and the steps it took as the report. The agent runs once per turn; a later step of the same turn (a refused hand-back)
@@ -439,18 +498,64 @@ async function* customStep($, e, next, run) {
     run.steps = []
     const { agent, model, edits } = customTypes.get(run.type)
     const name = AGENT_NAMES[agent]
+    const label = `${name} (${e.agentId})`
+    const starting = agent === 'codex' ? 'Starting Codex adapter. On first run, npm may need to download it.' : 'Starting OpenCode.'
+    showActivity($, label, starting)
     yield { kind: 'text', index: 0, text: `${name} on ${model}, ${edits ? 'edits allowed' : 'read-only'}\n\n` }
     run.report = null
-    for await (const event of helperEvents($, { agent, model, edits, cwd: await $.session.cwd(), prompt }, next.signal)) {
-      if (event.kind === 'text') yield { kind: 'text', index: 0, text: event.text }
-      else if (event.kind === 'step') {
-        run.steps.push(event.text)
-        yield { kind: 'text', index: 0, text: `\n▸ ${event.text}\n` }
-      } else if (event.kind === 'report') run.report = event.text
-      else if (event.kind === 'failed') run.report = `${name} failed: ${event.reason}`
+    let previousKind
+    let inbox
+    let helperEnded = false
+    const exe = await $.env.get('CLAUDIU_EXE')
+    const cwd = await $.session.cwd()
+    // Read after the awaits above, by which time a spawn still finishing has noted the effort.
+    const request = { agent, model, effort: run.effort, edits, cwd, prompt, live_messages: true }
+    try {
+      for await (const event of helperEvents($, exe, request, next.signal)) {
+        if (event.kind === 'inbox') {
+          if (!inbox && !helperEnded) {
+            inbox = { id: event.id, path: event.path, seq: 0, tail: Promise.resolve() }
+            run.inbox = inbox
+          }
+          continue
+        }
+        if (event.kind === 'accepted') {
+          if (inbox?.ack && !inbox.closed && event.seq === inbox.seq + 1) {
+            inbox.seq = event.seq
+            inbox.ack(true)
+            inbox.ack = null
+          }
+          continue
+        }
+        if (event.kind === 'text' || event.kind === 'thought' || event.kind === 'output') {
+          if (event.kind === 'thought' && previousKind !== 'thought') showActivity($, label, 'Thinking')
+          if (event.kind === 'text' && previousKind !== 'text') showActivity($, label, 'Writing a response')
+          const prefix = previousKind === event.kind ? '' : { text: previousKind ? '\n\n' : '', thought: '\n\nThinking\n', output: '\n\nTool output\n' }[event.kind]
+          yield { kind: 'text', index: 0, text: prefix + displayText(event.text) }
+        } else if (event.kind === 'step' || event.kind === 'progress') {
+          if (event.kind === 'step') run.steps.push(event.text)
+          showActivity($, label, event.text)
+          yield { kind: 'text', index: 0, text: `\n▸ ${displayText(event.text)}\n` }
+        } else if (event.kind === 'report' || event.kind === 'failed') {
+          helperEnded = !event.spawnError
+          closeInbox(inbox)
+          run.report = event.kind === 'report' ? event.text : `${name} failed: ${event.reason}`
+        }
+        previousKind = event.kind
+      }
+    } finally {
+      if (run.inbox === inbox) run.inbox = null
+      const needsCleanup = inbox?.ack || !helperEnded
+      closeInbox(inbox)
+      // The normal exit removes the file in Rust. An interrupted child or a write racing exit can leave it behind.
+      if (needsCleanup && inbox?.write) {
+        await inbox.write
+        await $.process.run([exe, '--acp', '--cleanup', inbox.id]).catch(() => {})
+      }
     }
     if (next.signal?.aborted) return
     run.report ??= `${name} failed: the helper stopped without an answer.`
+    if (run.report.startsWith(`${name} failed:`)) showActivity($, label, run.report)
   }
   const message = withSteps(run.report, AGENT_NAMES[customTypes.get(run.type).agent], run.steps)
   if (run.handedBack >= 2) {
@@ -468,8 +573,7 @@ async function* customStep($, e, next, run) {
 
 // The helper's events, one per line of its output. Stops early, ending the helper and the agent, when the turn is
 // interrupted.
-async function* helperEvents($, request, signal) {
-  const exe = await $.env.get('CLAUDIU_EXE')
+async function* helperEvents($, exe, request, signal) {
   let pending = ''
   try {
     for await (const chunk of $.process.spawn({ argv: [exe, '--acp'], input: JSON.stringify(request) })) {
@@ -484,14 +588,18 @@ async function* helperEvents($, request, signal) {
       }
     }
   } catch (err) {
-    yield { kind: 'failed', reason: 'the helper could not run (' + String(err?.message ?? err).slice(0, 200) + ')' }
+    yield { kind: 'failed', spawnError: true, reason: 'the helper could not run (' + String(err?.message ?? err).slice(0, 200) + ')' }
   }
 }
 
 function parseEvent(line) {
   try {
     const event = JSON.parse(line)
-    return typeof event?.kind === 'string' ? event : null
+    if (event?.kind === 'failed') return typeof event.reason === 'string' ? event : null
+    if (event?.kind === 'inbox' && typeof event.id === 'string' && /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(event.id) && typeof event.path === 'string' && event.path) return event
+    if (event?.kind === 'accepted' && Number.isSafeInteger(event.seq) && event.seq > 0) return event
+    if (['text', 'thought', 'output', 'step', 'progress', 'report'].includes(event?.kind) && typeof event.text === 'string') return event
+    return null
   } catch {
     return null
   }
@@ -690,6 +798,8 @@ export function register(on) {
   on('ui.render', { component: 'ToolUse' }, onVisualRow)
   on('ui.render', { component: 'ToolGroup' }, onVisualGroup)
   on('turn.step', onTurnStep)
+  on('tool.call', { tool: 'Agent' }, onAgentCall)
   on('agent.spawn', onAgentSpawn)
+  on('session.receive', onSessionReceive)
   on('session.start', onSessionStart)
 }

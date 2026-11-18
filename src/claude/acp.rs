@@ -4,6 +4,7 @@
 //! The mod starts this once per subagent turn and writes the task to stdin as JSON (`Request`). A mod can write a
 //! child's stdin only once, and ACP is a conversation in both directions, so the conversation happens here. Progress
 //! goes to stdout as JSON lines (`Event`), ending with the report or the reason it failed.
+//! During a run, the mod can also deliver messages through a per-run JSON file polled here.
 //!
 //! Codex runs through `npx codex-acp`, which uses the user's own `codex login`; OpenCode runs as the user's own
 //! `opencode acp`, with their providers. The agent's stdin is a pipe from this process, so when the mod stops this
@@ -12,10 +13,13 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::mpsc::{RecvTimeoutError, sync_channel};
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use uuid::Uuid;
 
 use crate::claude::subagents::{Agent, AgentModel};
 use crate::platform::{find_executable, reload_path};
@@ -29,6 +33,10 @@ const AUTH_REQUIRED: i64 = -32000;
 const STDERR_LINES: usize = 5;
 /// How long the settings page waits for the agent's models; Codex's first run downloads codex-acp through npx.
 const MODELS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+const INBOX_POLL: Duration = Duration::from_millis(100);
+const INBOX_TEXT_MAX: usize = 20_000; // UTF-16 units, matching the mod
+/// JSON can use six bytes per unit, plus the envelope.
+const INBOX_BYTES: u64 = INBOX_TEXT_MAX as u64 * 6 + 1_000;
 
 /// What the mod asks for.
 #[derive(Debug, Deserialize)]
@@ -38,12 +46,19 @@ pub struct Request {
     pub agent: Agent,
     /// The agent's model; none for the agent's own default.
     pub model: Option<String>,
+    /// The effort Claude's Agent call asked for; none for the agent's own default. OpenCode doesn't get it, since
+    /// its effort is an option of each provider's models rather than one setting.
+    #[serde(default)]
+    pub effort: Option<String>,
     /// Whether the agent may edit files and run commands, or only read.
     pub edits: bool,
     /// The folder the agent works in.
     pub cwd: PathBuf,
     /// The task, as Claude wrote it.
     pub prompt: String,
+    /// Whether this mod understands the helper's live inbox events.
+    #[serde(default)]
+    pub live_messages: bool,
 }
 
 /// One line of stdout.
@@ -52,6 +67,16 @@ pub struct Request {
 pub enum Event {
     /// A piece of a message the agent is writing.
     Text { text: String },
+    /// A piece of the reasoning summary the agent chose to share.
+    Thought { text: String },
+    /// A plan, tool status or other activity notice shown while the task runs.
+    Progress { text: String },
+    /// New output from a tool call, separate from the agent's report.
+    Output { text: String },
+    /// Where the mod can write messages for this run.
+    Inbox { id: String, path: PathBuf },
+    /// The helper took ownership of this message, so Claude need not queue it.
+    Accepted { seq: u64 },
     /// A tool call the agent started: a command, a read, an edit.
     Step { text: String },
     /// The last message the agent wrote: the subagent's report.
@@ -60,6 +85,9 @@ pub enum Event {
 }
 
 pub fn run() -> i32 {
+    if std::env::args().nth(2).as_deref() == Some("--cleanup") {
+        return cleanup_inbox();
+    }
     let mut out = std::io::stdout().lock();
     let mut emit = |event: Event| {
         if let Ok(line) = serde_json::to_string(&event) {
@@ -84,20 +112,97 @@ pub fn run() -> i32 {
     0
 }
 
+fn inbox_path(id: Uuid) -> PathBuf {
+    crate::datadir::data_dir().join("acp").join(format!("{id}.json"))
+}
+
+fn cleanup_inbox() -> i32 {
+    let Some(id) = std::env::args().nth(3).and_then(|id| Uuid::parse_str(&id).ok()) else { return 1 };
+    match std::fs::remove_file(inbox_path(id)) {
+        Ok(()) => 0,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => 0,
+        Err(_) => 1,
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Delivery {
+    seq: u64,
+    text: String,
+}
+
+struct Inbox {
+    id: Uuid,
+    path: PathBuf,
+    seen: u64,
+}
+
+impl Inbox {
+    /// The next message the mod wrote, with its number. It is acknowledged (`Event::Accepted`) only once it has
+    /// reached the agent: until then the mod still holds it, and gives it back to Claude Code's own queue if this
+    /// helper ends first.
+    fn take(&mut self) -> Option<(u64, String)> {
+        // The mod writes the whole JSON value. A poll during that write can read a partial value and retries it.
+        if !std::fs::symlink_metadata(&self.path).ok()?.file_type().is_file() {
+            return None;
+        }
+        let mut body = Vec::new();
+        std::fs::File::open(&self.path).ok()?.take(INBOX_BYTES + 1).read_to_end(&mut body).ok()?;
+        if body.len() as u64 > INBOX_BYTES {
+            return None;
+        }
+        let delivery: Delivery = serde_json::from_slice(&body).ok()?;
+        if delivery.seq != self.seen + 1 || delivery.text.trim().is_empty() || delivery.text.encode_utf16().count() > INBOX_TEXT_MAX {
+            return None;
+        }
+        self.seen = delivery.seq;
+        // The mod won't write the next message until it sees the acknowledgement.
+        let _ = std::fs::remove_file(&self.path);
+        Some((delivery.seq, delivery.text))
+    }
+}
+
+impl Drop for Inbox {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
 fn run_task(request: &Request, emit: &mut impl FnMut(Event)) -> Result<String, String> {
     let env = match request.agent {
         Agent::Codex => {
             let mut env = vec![("INITIAL_AGENT_MODE", (if request.edits { "workspace-write" } else { "read-only" }).to_string())];
-            if let Some(model) = &request.model {
-                env.push(("CODEX_CONFIG", json!({ "model": model }).to_string()));
+            if let Some(config) = codex_config(request.model.as_deref(), request.effort.as_deref()) {
+                env.push(("CODEX_CONFIG", config.to_string()));
             }
             env
         }
         Agent::OpenCode => vec![("OPENCODE_CONFIG_CONTENT", opencode_config(request.model.as_deref(), request.edits).to_string())],
     };
     let connection = Connection::start(request.agent, &request.cwd, &env)?;
-    let result = converse(connection.from_agent, connection.to_agent, request, emit);
+    let id = Uuid::new_v4();
+    let inbox = request.live_messages.then(|| Inbox { id, path: inbox_path(id), seen: 0 });
+    let result = converse(connection.from_agent, connection.to_agent, request, inbox, emit);
     connection.process.finish(result)
+}
+
+/// The config Codex gets on top of the user's own: the model and the reasoning effort, where given. Codex has no `max`,
+/// so `max` becomes its highest level, `xhigh`; a level Codex doesn't know is left to the user's config.
+fn codex_config(model: Option<&str>, effort: Option<&str>) -> Option<Value> {
+    let mut config = serde_json::Map::new();
+    if let Some(model) = model {
+        config.insert("model".into(), json!(model));
+    }
+    let effort = match effort {
+        Some("max") => Some("xhigh"),
+        Some(level @ ("low" | "medium" | "high" | "xhigh")) => Some(level),
+        _ => None,
+    };
+    if let Some(effort) = effort {
+        config.insert("model_reasoning_effort".into(), json!(effort));
+    }
+    (!config.is_empty()).then_some(Value::Object(config))
 }
 
 /// The tools OpenCode may use read-only: reading and searching files. Everything else, the shell included, is denied,
@@ -275,68 +380,170 @@ fn list_models(agent: Agent, from_agent: impl BufRead, mut to_agent: impl Write,
     if models.is_empty() { Err(format!("{} listed no models", server(agent))) } else { Ok(models) }
 }
 
-/// The ACP conversation for one task: start, open a session in the task's folder, send the task, and follow the
-/// session's updates until the agent answers. Returns the last message the agent wrote.
-fn converse(from_agent: impl BufRead, mut to_agent: impl Write, request: &Request, emit: &mut impl FnMut(Event)) -> Result<String, String> {
+/// Sends a task and its live messages in one ACP session, streaming updates as they arrive.
+fn converse(from_agent: impl BufRead + Send + 'static, mut to_agent: impl Write, request: &Request, mut inbox: Option<Inbox>, emit: &mut impl FnMut(Event)) -> Result<String, String> {
     let agent = request.agent;
     let name = agent.name();
-    let mut lines = from_agent.lines();
-    let send = |to_agent: &mut dyn Write, message: Value| -> Result<(), String> { writeln!(to_agent, "{message}").and_then(|_| to_agent.flush()).map_err(|_| exited(agent)) };
-    let mut messages = Messages::default();
-    // What read-only refused last: codex-acp offers only "cancel" for some commands, which ends Codex's turn.
-    let mut refused: Option<String> = None;
-    // Waits for the answer to request `id`, handling what the agent sends meanwhile. Only updates of `session` count:
-    // OpenCode also reports the sessions of its own subagents, whose messages are not this task's report.
-    let mut answer = |to_agent: &mut dyn Write, id: i64, session: Option<&str>, messages: &mut Messages, emit: &mut dyn FnMut(Event)| -> Result<Value, String> {
-        for line in lines.by_ref() {
-            let line = line.map_err(|_| exited(agent))?;
-            let Ok(msg) = serde_json::from_str::<Value>(&line) else { continue };
-            if msg.get("method").is_none() && msg["id"].as_i64() == Some(id) {
-                return match msg.get("error") {
-                    Some(error) => Err(error_reason(agent, error)),
-                    None => Ok(msg["result"].clone()),
-                };
-            }
-            match msg["method"].as_str() {
-                Some("session/update") => {
-                    if session.is_some_and(|s| msg["params"]["sessionId"] == s) {
-                        messages.update(&msg["params"]["update"], emit);
-                    }
-                }
-                Some("session/request_permission") => {
-                    let outcome = permission(&msg["params"]["options"], request.edits);
-                    if !request.edits {
-                        refused = Some(msg["params"]["toolCall"]["title"].as_str().unwrap_or("an action").to_string());
-                    }
-                    send(to_agent, json!({ "jsonrpc": "2.0", "id": msg["id"], "result": { "outcome": outcome } }))?;
-                }
-                // A request this client doesn't serve: it offered no file or terminal access.
-                Some(_) if msg.get("id").is_some() => {
-                    send(to_agent, json!({ "jsonrpc": "2.0", "id": msg["id"], "error": { "code": -32601, "message": "method not found" } }))?;
-                }
-                _ => {}
+    // ACP can go quiet during a long tool call. Reading stdout on its own thread lets the inbox still wake us.
+    let (tx, rx) = sync_channel(32);
+    std::thread::spawn(move || {
+        for line in from_agent.lines().map_while(Result::ok) {
+            if tx.send(line).is_err() {
+                break;
             }
         }
-        Err(exited(agent))
+    });
+    let send = |to_agent: &mut dyn Write, message: Value| -> Result<(), String> { writeln!(to_agent, "{message}").and_then(|_| to_agent.flush()).map_err(|_| exited(agent)) };
+    let mut messages = Messages::default();
+    // OpenCode also reports its own subagents' sessions. Their updates aren't this task's report.
+    let read = |to_agent: &mut dyn Write, session: Option<&str>, messages: &mut Messages, emit: &mut dyn FnMut(Event), timeout: Option<Duration>| -> Result<Option<Value>, String> {
+        let line = match timeout {
+            Some(wait) => match rx.recv_timeout(wait) {
+                Ok(line) => line,
+                Err(RecvTimeoutError::Timeout) => return Ok(None),
+                Err(RecvTimeoutError::Disconnected) => return Err(exited(agent)),
+            },
+            None => rx.recv().map_err(|_| exited(agent))?,
+        };
+        let Ok(msg) = serde_json::from_str::<Value>(&line) else { return Ok(None) };
+        match msg["method"].as_str() {
+            Some("session/update") => {
+                if session.is_some_and(|s| msg["params"]["sessionId"] == s) {
+                    messages.update(agent, &msg["params"]["update"], emit);
+                }
+            }
+            Some("session/request_permission") => {
+                let outcome = permission(&msg["params"]["options"], request.edits);
+                if !request.edits {
+                    messages.refused = Some(msg["params"]["toolCall"]["title"].as_str().unwrap_or("an action").to_string());
+                }
+                send(to_agent, json!({ "jsonrpc": "2.0", "id": msg["id"], "result": { "outcome": outcome } }))?;
+            }
+            // A request this client doesn't serve: it offered no file or terminal access.
+            Some(_) if msg.get("id").is_some() => {
+                send(to_agent, json!({ "jsonrpc": "2.0", "id": msg["id"], "error": { "code": -32601, "message": "method not found" } }))?;
+            }
+            None if msg["id"].is_i64() => return Ok(Some(msg)),
+            _ => {}
+        }
+        Ok(None)
     };
 
+    let result = |msg: Value| match msg.get("error") {
+        Some(error) => Err(error_reason(agent, error)),
+        None => Ok(msg["result"].clone()),
+    };
+    let answer = |to_agent: &mut dyn Write, id: i64, messages: &mut Messages, emit: &mut dyn FnMut(Event)| -> Result<Value, String> {
+        loop {
+            if let Some(msg) = read(to_agent, None, messages, emit, None)?
+                && msg["id"] == id
+            {
+                return result(msg);
+            }
+        }
+    };
     send(&mut to_agent, initialize())?;
-    answer(&mut to_agent, 0, None, &mut messages, emit)?;
+    let initialized = answer(&mut to_agent, 0, &mut messages, emit)?;
+    let supports_steering = initialized["_meta"]["steering"]["supported"] == true;
+    let mut steer = supports_steering;
+    if agent == Agent::OpenCode && !supports_steering {
+        inbox = None; // Claude Code keeps its usual queued delivery on older OpenCode versions.
+    }
 
     send(&mut to_agent, new_session(&request.cwd))?;
-    let session = answer(&mut to_agent, 1, None, &mut messages, emit)?;
+    let session = answer(&mut to_agent, 1, &mut messages, emit)?;
     let session_id = session["sessionId"].as_str().ok_or(format!("{} opened no session", server(agent)))?.to_string();
+    emit(Event::Progress { text: "Session ready. Sending the task.".into() });
 
-    send(&mut to_agent, json!({ "jsonrpc": "2.0", "id": 2, "method": "session/prompt", "params": {
-        "sessionId": session_id,
-        "prompt": [{ "type": "text", "text": request.prompt }],
-    }}))?;
-    let done = answer(&mut to_agent, 2, Some(&session_id), &mut messages, emit)?;
+    let prompt = |id, texts: Vec<String>| {
+        let blocks: Vec<_> = texts.into_iter().map(|text| json!({ "type": "text", "text": text })).collect();
+        json!({ "jsonrpc": "2.0", "id": id, "method": "session/prompt", "params": { "sessionId": session_id, "prompt": blocks } })
+    };
+    let mut prompt_id = 2;
+    let mut next_id = 3;
+    send(&mut to_agent, prompt(prompt_id, vec![request.prompt.clone()]))?;
+    if let Some(inbox) = &inbox {
+        emit(Event::Inbox { id: inbox.id.to_string(), path: inbox.path.clone() });
+    }
+
+    let mut pending = std::collections::VecDeque::new();
+    let mut steering = None;
+    let mut done = None;
+    let mut next_poll = Instant::now();
+    let done = loop {
+        if let Some(inbox) = &mut inbox
+            && (Instant::now() >= next_poll || done.is_some())
+        {
+            next_poll = Instant::now() + INBOX_POLL;
+            if let Some((seq, text)) = inbox.take() {
+                pending.push_back((Some(seq), text));
+            }
+        }
+
+        if steering.is_none() {
+            if let Some(reply) = done.take() {
+                if pending.is_empty() {
+                    break reply;
+                }
+                // The client owns the next prompt so it can stream the reply and wait for its stop reason.
+                prompt_id = next_id;
+                next_id += 1;
+                let (seqs, texts): (Vec<Option<u64>>, Vec<String>) = pending.drain(..).unzip();
+                send(&mut to_agent, prompt(prompt_id, texts))?;
+                for seq in seqs.into_iter().flatten() {
+                    emit(Event::Accepted { seq });
+                }
+                messages = Messages::default();
+                steer = supports_steering;
+                emit(Event::Progress { text: format!("{name} is continuing with the follow-up message.") });
+            } else if steer && let Some((seq, text)) = pending.pop_front() {
+                let mut params = json!({
+                    "sessionId": session_id,
+                    "prompt": [{ "type": "text", "text": text }],
+                });
+                if agent == Agent::Codex {
+                    params["_meta"] = json!({ "steering": { "idleBehavior": "promptRequired" } });
+                }
+                send(&mut to_agent, json!({ "jsonrpc": "2.0", "id": next_id, "method": "_session/steering", "params": params }))?;
+                steering = Some((next_id, seq, text));
+                next_id += 1;
+            }
+        }
+
+        let timeout = inbox.as_ref().map(|_| next_poll.saturating_duration_since(Instant::now()));
+        let Some(msg) = read(&mut to_agent, Some(&session_id), &mut messages, emit, timeout)? else { continue };
+        if msg["id"] == prompt_id {
+            done = Some(result(msg)?);
+        } else if steering.as_ref().is_some_and(|(id, _, _)| msg["id"] == *id) {
+            let (_, seq, text) = steering.take().unwrap();
+            match msg["result"]["outcome"].as_str() {
+                Some("injected") => {
+                    if let Some(seq) = seq {
+                        emit(Event::Accepted { seq });
+                    }
+                    emit(Event::Progress { text: format!("{name} received the message in its current turn.") });
+                }
+                // If a different adapter started a turn despite the opt-in, don't send the message twice.
+                Some("startedNewTurn") => return Err(format!("{name} started an untracked turn while steering")),
+                // The agent answered that its turn is idle, so the follow-up prompt will carry the message; Claude's
+                // message can't wait on that for the rest of the turn. After an error it waits for the follow-up.
+                _ => {
+                    let answered = msg.get("error").is_none();
+                    if answered && let Some(seq) = seq {
+                        emit(Event::Accepted { seq });
+                    }
+                    pending.push_front((if answered { None } else { seq }, text));
+                    steer = false;
+                    emit(Event::Progress { text: format!("{name} will take the message after its current turn.") });
+                }
+            }
+        }
+    };
     let stop = done["stopReason"].as_str().unwrap_or("end_turn");
     match (stop, messages.last()) {
         ("end_turn", Some(text)) => Ok(text),
         ("end_turn", None) => Err(format!("{name} finished without writing a report")),
-        ("cancelled", _) => Err(match refused {
+        ("cancelled", _) => Err(match messages.refused {
             Some(action) => format!("{name} stopped when read-only mode refused `{action}`. Turn on Allow edits in Settings → Custom subagents to let it."),
             None => format!("{name}'s turn was cancelled"),
         }),
@@ -354,8 +561,17 @@ struct Messages {
     current: String,
     current_id: Option<String>,
     last: Option<String>,
-    /// Tool calls named only by their tool, by id, waiting for the update that says what they act on.
-    unnamed: std::collections::HashMap<String, String>,
+    tools: std::collections::HashMap<String, ToolProgress>,
+    // Codex sometimes offers only "cancel" for a refusal, which stops the turn.
+    refused: Option<String>,
+}
+
+#[derive(Default)]
+struct ToolProgress {
+    title: String,
+    waiting_for_target: bool,
+    status: String,
+    output: String,
 }
 
 /// What a tool call acts on, from its input: the command, the pattern searched for, the address, or else the file.
@@ -364,7 +580,7 @@ fn tool_target(input: &Value) -> Option<&str> {
 }
 
 impl Messages {
-    fn update(&mut self, update: &Value, emit: &mut dyn FnMut(Event)) {
+    fn update(&mut self, agent: Agent, update: &Value, emit: &mut dyn FnMut(Event)) {
         match update["sessionUpdate"].as_str() {
             Some("agent_message_chunk") => {
                 let Some(text) = update["content"]["text"].as_str() else { return };
@@ -376,29 +592,94 @@ impl Messages {
                 self.current.push_str(text);
                 emit(Event::Text { text: text.to_string() });
             }
-            Some("tool_call") => {
-                self.close();
-                let title = update["title"].as_str().unwrap_or("a tool");
-                // Codex's titles say what the call acts on ("Read src/parse.rs"). OpenCode's are the bare tool name, and
-                // the call's first update has the input.
-                let bare = !title.contains(' ');
-                match (bare, tool_target(&update["rawInput"]), update["toolCallId"].as_str()) {
-                    (true, Some(target), _) => emit(Event::Step { text: format!("{title} {target}") }),
-                    (true, None, Some(id)) => {
-                        self.unnamed.insert(id.to_string(), title.to_string());
-                    }
-                    _ => emit(Event::Step { text: title.to_string() }),
+            Some("agent_thought_chunk") => {
+                if let Some(text) = update["content"]["text"].as_str() {
+                    emit(Event::Thought { text: text.into() });
                 }
             }
-            Some("tool_call_update") => {
-                let Some(title) = update["toolCallId"].as_str().and_then(|id| self.unnamed.remove(id)) else { return };
-                let text = match tool_target(&update["rawInput"]) {
-                    Some(target) => format!("{title} {target}"),
-                    None => title,
-                };
-                emit(Event::Step { text });
+            Some("plan") => {
+                let entries: Vec<_> = update["entries"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|entry| Some(format!("- {} ({})", entry["content"].as_str()?, entry["status"].as_str().unwrap_or("pending").replace('_', " "))))
+                    .collect();
+                if !entries.is_empty() {
+                    emit(Event::Progress { text: format!("Plan\n{}", entries.join("\n")) });
+                }
             }
+            Some("tool_call") => {
+                self.close();
+                self.tool_progress(agent, update, true, emit);
+            }
+            Some("tool_call_update") => self.tool_progress(agent, update, false, emit),
             _ => {}
+        }
+    }
+
+    fn tool_progress(&mut self, agent: Agent, update: &Value, started: bool, emit: &mut dyn FnMut(Event)) {
+        let id = update["toolCallId"].as_str();
+        let mut untracked = ToolProgress::default();
+        let tool = match id {
+            Some(id) => self.tools.entry(id.into()).or_default(),
+            None => &mut untracked,
+        };
+        let target = tool_target(&update["rawInput"]);
+        if started {
+            let title = update["title"].as_str().filter(|title| !title.is_empty()).unwrap_or("a tool");
+            tool.title = title.into();
+            // OpenCode may start with only the tool name and supply its target in the first update.
+            tool.waiting_for_target = agent == Agent::OpenCode && !title.contains(' ') && target.is_none() && id.is_some();
+            if !tool.waiting_for_target {
+                if let Some(target) = target.filter(|_| !title.contains(' ')) {
+                    tool.title = format!("{title} {target}");
+                }
+                emit(Event::Step { text: tool.title.clone() });
+            }
+        } else if tool.waiting_for_target {
+            tool.waiting_for_target = false;
+            if let Some(target) = target {
+                tool.title = format!("{} {target}", tool.title);
+            }
+            emit(Event::Step { text: tool.title.clone() });
+        } else if let Some(title) = update["title"].as_str().filter(|title| !title.is_empty()) {
+            tool.title = title.into();
+        }
+        if let Some(status) = update["status"].as_str().filter(|status| *status != tool.status) {
+            tool.status = status.into();
+            if !started || status == "failed" {
+                let title = if tool.title.is_empty() { id.unwrap_or("Tool") } else { &tool.title };
+                emit(Event::Progress { text: format!("{title} · {}", status.replace('_', " ")) });
+            }
+        }
+        let metadata = &update["_meta"];
+        for key in ["terminal_output_delta", "mcp_output_delta"] {
+            if let Some(text) = metadata[key]["data"].as_str().filter(|text| !text.is_empty()) {
+                emit(Event::Output { text: text.into() });
+            }
+        }
+        let content: Vec<_> = update["content"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|item| item["type"] == "content" && item["content"]["type"] == "text")
+            .filter_map(|item| item["content"]["text"].as_str())
+            .collect();
+        // On Codex starts, ACP content may describe the input. Result snapshots arrive in updates.
+        let output = if started || metadata["terminal_output_delta"].is_object() || metadata["mcp_output_delta"].is_object() {
+            None
+        } else if content.is_empty() {
+            let raw = &update["rawOutput"];
+            raw.as_str().or_else(|| raw["formatted_output"].as_str()).or_else(|| raw["output"].as_str()).map(str::to_owned)
+        } else {
+            Some(content.join("\n"))
+        };
+        if let Some(output) = output {
+            let added = output.strip_prefix(&tool.output).unwrap_or(&output);
+            if !added.is_empty() {
+                emit(Event::Output { text: added.into() });
+            }
+            tool.output = output;
         }
     }
 
@@ -453,7 +734,15 @@ mod tests {
     use super::*;
 
     fn request(agent: Agent, edits: bool) -> Request {
-        Request { agent, model: Some("gpt-5.5".into()), edits, cwd: PathBuf::from("/work"), prompt: "Find the bug".into() }
+        Request { agent, model: Some("gpt-5.5".into()), edits, cwd: PathBuf::from("/work"), prompt: "Find the bug".into(), effort: None, live_messages: false }
+    }
+
+    #[test]
+    fn codex_gets_the_effort_claude_asked_for_and_max_becomes_xhigh() {
+        assert_eq!(codex_config(Some("gpt-5.5"), Some("high")), Some(json!({ "model": "gpt-5.5", "model_reasoning_effort": "high" })));
+        assert_eq!(codex_config(None, Some("max")), Some(json!({ "model_reasoning_effort": "xhigh" })));
+        assert_eq!(codex_config(Some("gpt-5.5"), Some("turbo")), Some(json!({ "model": "gpt-5.5" })), "an unknown level is left to the user's config");
+        assert_eq!(codex_config(None, None), None);
     }
 
     fn update(update: Value) -> Value {
@@ -474,7 +763,7 @@ mod tests {
         let script: String = agent_says.iter().map(|m| format!("{m}\n")).collect();
         let mut sent = Vec::new();
         let mut events = vec![];
-        let result = converse(script.as_bytes(), &mut sent, &request(agent, edits), &mut |e| events.push(e));
+        let result = converse(std::io::Cursor::new(script), &mut sent, &request(agent, edits), None, &mut |e| events.push(e));
         let sent = String::from_utf8(sent).unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect();
         (result, sent, events)
     }
@@ -485,6 +774,175 @@ mod tests {
 
     fn opening() -> Vec<Value> {
         vec![reply(0, json!({ "protocolVersion": 1 })), reply(1, json!({ "sessionId": "s1" }))]
+    }
+
+    fn test_inbox(dir: &Path) -> Inbox {
+        Inbox { id: Uuid::new_v4(), path: dir.join("inbox.json"), seen: 0 }
+    }
+
+    #[test]
+    fn the_inbox_rejects_partial_oversized_out_of_order_and_replayed_deliveries() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut inbox = test_inbox(dir.path());
+        for body in [
+            r#"{"seq":1,"text":"unfinished"#.to_string(),
+            json!({ "seq": 1, "text": "   " }).to_string(),
+            json!({ "seq": 1, "text": 15 }).to_string(),
+            json!({ "seq": 2, "text": "skipped one" }).to_string(),
+            json!({ "seq": 1, "text": "a".repeat(INBOX_TEXT_MAX + 1) }).to_string(),
+            " ".repeat(INBOX_BYTES as usize + 1),
+        ] {
+            std::fs::write(&inbox.path, body).unwrap();
+            assert_eq!(inbox.take(), None);
+        }
+        let message = json!({ "seq": 1, "text": "Check the tests too" }).to_string();
+        std::fs::write(&inbox.path, &message).unwrap();
+        assert_eq!(inbox.take(), Some((1, "Check the tests too".to_string())));
+        assert!(!inbox.path.exists());
+        std::fs::write(&inbox.path, message).unwrap();
+        assert_eq!(inbox.take(), None);
+        let path = inbox.path.clone();
+        drop(inbox);
+        assert!(!path.exists());
+    }
+
+    /// Wait for a steer without sending any ACP output after the original prompt.
+    fn steer_a_quiet_turn(agent: Agent, parks_message: bool) {
+        let dir = tempfile::tempdir().unwrap();
+        let inbox = test_inbox(dir.path());
+        let path = inbox.path.clone();
+        let (from_agent, mut replies) = std::io::pipe().unwrap();
+        let (commands, to_agent) = std::io::pipe().unwrap();
+        let (sent, received) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for line in BufReader::new(commands).lines().map_while(Result::ok) {
+                if sent.send(serde_json::from_str::<Value>(&line).unwrap()).is_err() {
+                    break;
+                }
+            }
+        });
+        let task = std::thread::spawn(move || {
+            let mut events = Vec::new();
+            let report = converse(BufReader::new(from_agent), to_agent, &request(agent, false), Some(inbox), &mut |event| events.push(event));
+            (report, events)
+        });
+        let next = || received.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(next()["method"], "initialize");
+        writeln!(replies, "{}", reply(0, json!({ "protocolVersion": 1, "_meta": { "steering": { "supported": true } } }))).unwrap();
+        assert_eq!(next()["method"], "session/new");
+        writeln!(replies, "{}", opening()[1]).unwrap();
+        assert_eq!(next()["method"], "session/prompt");
+        std::fs::write(&path, json!({ "seq": 1, "text": "Check the tests too" }).to_string()).unwrap();
+        let steer = next();
+        assert_eq!(steer["method"], "_session/steering");
+        assert_eq!(steer["params"]["sessionId"], "s1");
+        assert_eq!(steer["params"]["prompt"], json!([{ "type": "text", "text": "Check the tests too" }]));
+        let idle_behavior = &steer["params"]["_meta"]["steering"]["idleBehavior"];
+        if agent == Agent::Codex {
+            assert_eq!(idle_behavior, "promptRequired");
+        } else {
+            assert!(idle_behavior.is_null());
+        }
+        let steer_id = steer["id"].as_i64().unwrap();
+        let finished = json!({ "stopReason": "end_turn" });
+        let final_id = if parks_message {
+            // The original prompt may finish before the adapter replies to the steer.
+            writeln!(replies, "{}", chunk("m1", "Original answer.")).unwrap();
+            writeln!(replies, "{}", reply(2, finished.clone())).unwrap();
+            writeln!(replies, "{}", reply(steer_id, json!({ "outcome": "promptRequired", "reason": "noRunningTurn" }))).unwrap();
+            let follow_up = next();
+            assert_eq!(follow_up["method"], "session/prompt");
+            assert_eq!(follow_up["params"]["sessionId"], "s1");
+            assert_eq!(follow_up["params"]["prompt"], steer["params"]["prompt"]);
+            follow_up["id"].as_i64().unwrap()
+        } else {
+            writeln!(replies, "{}", reply(steer_id, json!({ "outcome": "injected" }))).unwrap();
+            2
+        };
+        writeln!(replies, "{}", chunk("m2", "Checked the tests too.")).unwrap();
+        writeln!(replies, "{}", reply(final_id, finished)).unwrap();
+        drop(replies);
+        let (report, events) = task.join().unwrap();
+        assert_eq!(report.as_deref(), Ok("Checked the tests too."));
+        assert!(events.contains(&Event::Accepted { seq: 1 }));
+        assert!(events.contains(&Event::Text { text: "Checked the tests too.".into() }));
+        assert!(!path.exists());
+    }
+
+    /// The mod gives a message back to Claude Code's queue unless it is acknowledged, so one that never reached the
+    /// agent must not be: the agent exits before answering the steer, or refuses it with an error and then exits.
+    fn exit_before_taking_a_message(refuses_first: bool) {
+        let dir = tempfile::tempdir().unwrap();
+        let inbox = test_inbox(dir.path());
+        let path = inbox.path.clone();
+        let (from_agent, mut replies) = std::io::pipe().unwrap();
+        let (commands, to_agent) = std::io::pipe().unwrap();
+        let (sent, received) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for line in BufReader::new(commands).lines().map_while(Result::ok) {
+                if sent.send(serde_json::from_str::<Value>(&line).unwrap()).is_err() {
+                    break;
+                }
+            }
+        });
+        let task = std::thread::spawn(move || {
+            let mut events = Vec::new();
+            let report = converse(BufReader::new(from_agent), to_agent, &request(Agent::Codex, false), Some(inbox), &mut |event| events.push(event));
+            (report, events)
+        });
+        let next = || received.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(next()["method"], "initialize");
+        writeln!(replies, "{}", reply(0, json!({ "protocolVersion": 1, "_meta": { "steering": { "supported": true } } }))).unwrap();
+        assert_eq!(next()["method"], "session/new");
+        writeln!(replies, "{}", opening()[1]).unwrap();
+        assert_eq!(next()["method"], "session/prompt");
+        std::fs::write(&path, json!({ "seq": 1, "text": "Check the tests too" }).to_string()).unwrap();
+        let steer = next();
+        assert_eq!(steer["method"], "_session/steering");
+        if refuses_first {
+            writeln!(replies, "{}", json!({ "jsonrpc": "2.0", "id": steer["id"], "error": { "code": -32603, "message": "busy" } })).unwrap();
+        }
+        drop(replies);
+        let (report, events) = task.join().unwrap();
+        assert!(report.is_err());
+        assert!(!events.iter().any(|e| matches!(e, Event::Accepted { .. })), "{events:?}");
+    }
+
+    #[test]
+    fn a_message_is_not_acknowledged_when_the_agent_exits_before_taking_it() {
+        exit_before_taking_a_message(false);
+    }
+
+    #[test]
+    fn a_message_is_not_acknowledged_when_the_agent_refuses_the_steer_and_exits() {
+        exit_before_taking_a_message(true);
+    }
+
+    #[test]
+    fn codex_can_be_steered_while_acp_is_quiet() {
+        steer_a_quiet_turn(Agent::Codex, false);
+    }
+
+    #[test]
+    fn codex_follows_up_in_the_same_session_when_steering_finds_an_idle_turn() {
+        steer_a_quiet_turn(Agent::Codex, true);
+    }
+
+    #[test]
+    fn opencode_can_be_steered_when_it_advertises_support() {
+        steer_a_quiet_turn(Agent::OpenCode, false);
+    }
+
+    #[test]
+    fn opencode_without_steering_leaves_delivery_to_claude() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut says = opening();
+        says.extend([chunk("m1", "Original answer."), reply(2, json!({ "stopReason": "end_turn" }))]);
+        let script: String = says.iter().map(|m| format!("{m}\n")).collect();
+        let mut events = Vec::new();
+        let report = converse(std::io::Cursor::new(script), std::io::sink(), &request(Agent::OpenCode, false), Some(test_inbox(dir.path())), &mut |event| events.push(event));
+        assert_eq!(report.as_deref(), Ok("Original answer."));
+        assert!(!events.iter().any(|event| matches!(event, Event::Inbox { .. })));
     }
 
     #[test]
@@ -502,6 +960,7 @@ mod tests {
         assert_eq!(
             events,
             vec![
+                Event::Progress { text: "Session ready. Sending the task.".into() },
                 Event::Text { text: "Looking at ".into() },
                 Event::Text { text: "the parser.".into() },
                 Event::Step { text: "Read src/parse.rs".into() },
@@ -513,6 +972,39 @@ mod tests {
         assert_eq!(sent[2]["params"]["sessionId"], "s1");
         assert_eq!(sent[2]["params"]["prompt"][0]["text"], "Find the bug");
         assert_eq!(sent[0]["params"]["clientCapabilities"]["terminal"], false);
+    }
+
+    #[test]
+    fn thoughts_plans_and_tool_updates_stream_without_replacing_the_report() {
+        let mut says = opening();
+        says.extend([
+            update(json!({ "sessionUpdate": "agent_thought_chunk", "content": { "type": "text", "text": "Check the parser." } })),
+            update(json!({ "sessionUpdate": "plan", "entries": [{ "content": "Run tests", "status": "in_progress" }] })),
+            update(json!({ "sessionUpdate": "tool_call", "toolCallId": "c1", "title": "Run tests", "status": "in_progress" })),
+            update(json!({ "sessionUpdate": "tool_call_update", "toolCallId": "c1", "_meta": { "terminal_output_delta": { "data": "running\n" } } })),
+            update(json!({ "sessionUpdate": "tool_call_update", "toolCallId": "c1", "rawOutput": { "formatted_output": "started\n" } })),
+            update(json!({ "sessionUpdate": "tool_call_update", "toolCallId": "c1", "status": "failed", "content": [
+                { "type": "content", "content": { "type": "text", "text": "started\nfailed\n" } },
+            ] })),
+            update(json!({ "sessionUpdate": "tool_call_update", "toolCallId": "c1", "status": "failed", "rawOutput": "started\nfailed\n" })),
+            chunk("m1", "The parser test failed."),
+            update(json!({ "sessionUpdate": "agent_thought_chunk", "content": { "type": "text", "text": "Thought after the report." } })),
+            reply(2, json!({ "stopReason": "end_turn" })),
+        ]);
+        let (report, _, events) = talk(&says, false);
+        assert_eq!(report, Ok("The parser test failed.".into()));
+        assert_eq!(events, [
+            Event::Progress { text: "Session ready. Sending the task.".into() },
+            Event::Thought { text: "Check the parser.".into() },
+            Event::Progress { text: "Plan\n- Run tests (in progress)".into() },
+            Event::Step { text: "Run tests".into() },
+            Event::Output { text: "running\n".into() },
+            Event::Output { text: "started\n".into() },
+            Event::Progress { text: "Run tests · failed".into() },
+            Event::Output { text: "failed\n".into() },
+            Event::Text { text: "The parser test failed.".into() },
+            Event::Thought { text: "Thought after the report.".into() },
+        ]);
     }
 
     /// OpenCode names only the tool when the call starts and sends what it acts on in the call's first update.
@@ -536,7 +1028,7 @@ mod tests {
             chunk("m1", "Done."),
             reply(2, json!({ "stopReason": "end_turn" })),
         ]);
-        let steps: Vec<String> = talk(&says, false).2.into_iter().filter_map(|e| if let Event::Step { text } = e { Some(text) } else { None }).collect();
+        let steps: Vec<String> = talk_to(Agent::OpenCode, &says, false).2.into_iter().filter_map(|e| if let Event::Step { text } = e { Some(text) } else { None }).collect();
         assert_eq!(steps, ["grep fn main", "read note.json", "shell echo hi", "todowrite"]);
     }
 
@@ -563,7 +1055,7 @@ mod tests {
         ]);
         let (result, _, events) = talk_to(Agent::OpenCode, &says, true);
         assert_eq!(result, Ok("Asked a helper.".into()));
-        assert_eq!(events, vec![Event::Text { text: "Asked a helper.".into() }]);
+        assert_eq!(events, vec![Event::Progress { text: "Session ready. Sending the task.".into() }, Event::Text { text: "Asked a helper.".into() }]);
     }
 
     fn asks_permission() -> Vec<Value> {
