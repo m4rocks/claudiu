@@ -525,13 +525,14 @@ fn converse(from_agent: impl BufRead + Send + 'static, mut to_agent: impl Write,
                 }
                 // If a different adapter started a turn despite the opt-in, don't send the message twice.
                 Some("startedNewTurn") => return Err(format!("{name} started an untracked turn while steering")),
-                // The agent answered, so it is up and the follow-up prompt will carry the message. Claude's message
-                // can't wait on that for the rest of the turn.
+                // The agent answered that its turn is idle, so the follow-up prompt will carry the message; Claude's
+                // message can't wait on that for the rest of the turn. After an error it waits for the follow-up.
                 _ => {
-                    if let Some(seq) = seq {
+                    let answered = msg.get("error").is_none();
+                    if answered && let Some(seq) = seq {
                         emit(Event::Accepted { seq });
                     }
-                    pending.push_front((None, text));
+                    pending.push_front((if answered { None } else { seq }, text));
                     steer = false;
                     emit(Event::Progress { text: format!("{name} will take the message after its current turn.") });
                 }
@@ -869,9 +870,8 @@ mod tests {
     }
 
     /// The mod gives a message back to Claude Code's queue unless it is acknowledged, so one that never reached the
-    /// agent must not be.
-    #[test]
-    fn a_message_is_not_acknowledged_when_the_agent_exits_before_taking_it() {
+    /// agent must not be: the agent exits before answering the steer, or refuses it with an error and then exits.
+    fn exit_before_taking_a_message(refuses_first: bool) {
         let dir = tempfile::tempdir().unwrap();
         let inbox = test_inbox(dir.path());
         let path = inbox.path.clone();
@@ -897,11 +897,25 @@ mod tests {
         writeln!(replies, "{}", opening()[1]).unwrap();
         assert_eq!(next()["method"], "session/prompt");
         std::fs::write(&path, json!({ "seq": 1, "text": "Check the tests too" }).to_string()).unwrap();
-        assert_eq!(next()["method"], "_session/steering");
+        let steer = next();
+        assert_eq!(steer["method"], "_session/steering");
+        if refuses_first {
+            writeln!(replies, "{}", json!({ "jsonrpc": "2.0", "id": steer["id"], "error": { "code": -32603, "message": "busy" } })).unwrap();
+        }
         drop(replies);
         let (report, events) = task.join().unwrap();
         assert!(report.is_err());
         assert!(!events.iter().any(|e| matches!(e, Event::Accepted { .. })), "{events:?}");
+    }
+
+    #[test]
+    fn a_message_is_not_acknowledged_when_the_agent_exits_before_taking_it() {
+        exit_before_taking_a_message(false);
+    }
+
+    #[test]
+    fn a_message_is_not_acknowledged_when_the_agent_refuses_the_steer_and_exits() {
+        exit_before_taking_a_message(true);
     }
 
     #[test]

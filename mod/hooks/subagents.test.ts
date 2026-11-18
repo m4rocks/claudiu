@@ -214,21 +214,29 @@ test('the effort Claude asks for in its Agent call reaches Codex', async ($, on)
   const requests: any[] = []
   engine(on, [JSON.stringify({ kind: 'report', text: 'Done.' })], requests)
   // Claude Code's Agent tool spawns the agent while the call runs.
-  const spawned = gate<void>()
+  let spawned = gate<void>()
   let callId = ''
   on('tool.call', { tool: 'Agent' }, async (_$: any, e: any) => {
     callId = e.tool_use_id
     await spawned.promise
     return { result: 'started' }
   })
+  async function agentCall(effort: string) {
+    callId = ''
+    spawned = gate<void>()
+    const call = $.tool.call({ tool: 'Agent', subagent_type: 'Claudiu:codex-gpt-5-5', prompt: 'Find the bug', description: 'Find it', effort })
+    while (!callId) await new Promise(r => setTimeout(r, 1))
+    await $.agent.spawn({ subagentType: 'Claudiu:codex-gpt-5-5', prompt: 'Find the bug', tool_use_id: callId } as any)
+    spawned.resolve()
+    await call
+  }
   await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
-  const call = $.tool.call({ tool: 'Agent', subagent_type: 'Claudiu:codex-gpt-5-5', prompt: 'Find the bug', description: 'Find it', effort: 'high' })
-  while (!callId) await new Promise(r => setTimeout(r, 1))
-  await $.agent.spawn({ subagentType: 'Claudiu:codex-gpt-5-5', prompt: 'Find the bug', tool_use_id: callId } as any)
-  spawned.resolve()
-  await call
+  await agentCall('high')
   await step($, 't1', 0, 'a1')
-  expect(requests.map(r => r.input.effort)).toEqual(['high'])
+  // The same agent spawned again asks for its own effort.
+  await agentCall('low')
+  await step($, 't2', 0, 'a1')
+  expect(requests.map(r => r.input.effort)).toEqual(['high', 'low'])
 })
 
 test('a report with many steps lists the first ones, each cut short', async ($, on) => {

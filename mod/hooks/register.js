@@ -395,7 +395,7 @@ async function onAgentSpawn($, e, next) {
   if (r.agentId && customTypes.has(e.subagentType)) {
     // The agent's first turn can start before this returns, taking the run up from the agent list; it keeps that run.
     const run = customRuns.get(r.agentId)
-    if (run) Object.assign(run, { prompt: run.prompt ?? e.prompt, effort: run.effort ?? effort })
+    if (run) Object.assign(run, { prompt: e.prompt, effort: effort ?? run.effort })
     else customRuns.set(r.agentId, { type: e.subagentType, prompt: e.prompt, effort, turnId: null, report: null, handedBack: 0, steps: [] })
   }
   return r
@@ -406,6 +406,8 @@ async function onAgentSpawn($, e, next) {
 async function customRun($, agentId) {
   if (customRuns.has(agentId) || customTypes.size === 0) return customRuns.get(agentId)
   const agent = (await $.agent.list().catch(() => [])).find(a => a.id === agentId)
+  // The spawn may have noted the run while the list was read.
+  if (customRuns.has(agentId)) return customRuns.get(agentId)
   if (!agent || !customTypes.has(agent.type)) return undefined
   const run = { type: agent.type, prompt: null, effort: null, turnId: null, report: null, handedBack: 0, steps: [] }
   customRuns.set(agentId, run)
@@ -450,7 +452,7 @@ function showActivity($, label, text) {
 
 function displayText(text) {
   // Color and cursor codes first: removing only their escape character would leave `[31m` behind.
-  return text.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '').replace(/\r\n?/g, '\n').replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, '')
+  return text.replace(/\x1b\[[0-9;:?]*[ -/]*[@-~]/g, '').replace(/\r\n?/g, '\n').replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, '')
 }
 
 // Only one write can be awaiting acknowledgement. Otherwise a second delivery could overwrite the first
@@ -504,7 +506,9 @@ async function* customStep($, e, next, run) {
     let inbox
     let helperEnded = false
     const exe = await $.env.get('CLAUDIU_EXE')
-    const request = { agent, model, effort: run.effort, edits, cwd: await $.session.cwd(), prompt, live_messages: true }
+    const cwd = await $.session.cwd()
+    // Read after the awaits above, by which time a spawn still finishing has noted the effort.
+    const request = { agent, model, effort: run.effort, edits, cwd, prompt, live_messages: true }
     try {
       for await (const event of helperEvents($, exe, request, next.signal)) {
         if (event.kind === 'inbox') {
