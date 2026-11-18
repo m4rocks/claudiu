@@ -271,7 +271,7 @@ fn without_terminal(command: &mut Command) {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(all(not(unix), test))]
 fn without_terminal(_command: &mut Command) {}
 
 /// The text between the markers, ignoring whatever the shell's startup files printed around them.
