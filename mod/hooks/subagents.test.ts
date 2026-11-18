@@ -42,18 +42,16 @@ function engine(on: any, helper: string[] | (() => AsyncGenerator<{ stream: stri
   return registered
 }
 
-test('startup and activity reach the transcript while the helper is still running', async ($, on) => {
+// The subagent's own view streams its activity; the main conversation gets none of it, since one line per step
+// buried the person's own conversation.
+test('activity streams in the subagent and leaves the main conversation alone', async ($, on) => {
   const log: string[] = []
-  let logAtSpawn: string[] = []
-  let logBeforeReport: string[] = []
   on('ui.log', (_$: any, e: any) => { log.push(e.text); return { value: undefined } })
   engine(on, async function* () {
-    logAtSpawn = [...log]
     yield { stream: 'stdout', text: '{"kind":"progress","tex' }
     yield { stream: 'stdout', text: 't":"Session ready."}\n{"kind":"thought","text":"Checking "}\n' }
     yield { stream: 'stdout', text: '{"kind":"thought","text":"the parser."}\n{"kind":"step","text":"Run tests"}\n' }
     yield { stream: 'stdout', text: '{"kind":"progress","text":"Run tests · failed"}\n{"kind":"output","text":"\\u001b[31mtest failed\\u001b[0m"}\n' }
-    logBeforeReport = [...log]
     yield { stream: 'stdout', text: '{"kind":"report","text":"Parser test failed."}\n' }
     return { value: { code: 0, signal: null } }
   }, [])
@@ -61,10 +59,11 @@ test('startup and activity reach the transcript while the helper is still runnin
   await $.agent.spawn({ subagentType: 'Claudiu:codex-gpt-5-5', prompt: 'Find the bug' })
   const chunks = await step($, 't1', 0, 'a1')
 
-  expect(logAtSpawn).toEqual(['Codex (a1) · Starting Codex adapter. On first run, npm may need to download it.'])
-  expect(logBeforeReport).toEqual([...logAtSpawn, 'Codex (a1) · Session ready.', 'Codex (a1) · Thinking', 'Codex (a1) · Run tests', 'Codex (a1) · Run tests · failed'])
+  expect(log).toEqual([])
   const text = chunks.filter(c => c.kind === 'text').map(c => c.text).join('')
+  expect(text).toContain('▸ Session ready.')
   expect(text).toContain('Thinking\nChecking the parser.')
+  expect(text).toContain('▸ Run tests · failed')
   expect(text).toContain('Tool output\ntest failed')
   expect(JSON.parse(chunks.find(c => c.kind === 'input').json).message).toBe('Parser test failed.\n\n---\nSteps Codex ran (1):\n- Run tests')
 })
@@ -98,12 +97,14 @@ test('SendMessage reaches only the running Codex helper and its reaction streams
   engine(on, async function* () {
     yield helperChunk({ kind: 'inbox', id: INBOX_ID, path: INBOX_PATH })
     yield helperChunk({ kind: 'progress', text: 'Waiting for input.' })
+    ready.resolve()
     await first.promise
     yield helperChunk({ kind: 'accepted', seq: 1 })
     await second.promise
     yield helperChunk({ kind: 'accepted', seq: 2 })
     yield helperChunk({ kind: 'progress', text: 'Codex received the message in its current turn.' })
     yield helperChunk({ kind: 'text', text: 'I will check both files.' })
+    reaction.resolve()
     await finish.promise
     yield helperChunk({ kind: 'report', text: 'Checked both files.' })
     return { value: { code: 0, signal: null } }
@@ -112,11 +113,6 @@ test('SendMessage reaches only the running Codex helper and its reaction streams
     writes.push({ path: e.path.replace(/\\/g, '/').replace(/^[A-Za-z]:/, ''), body: JSON.parse(e.text) })
     const written = writes.length === 1 ? first : second
     written.resolve()
-    return { value: undefined }
-  })
-  on('ui.log', (_$: any, e: any) => {
-    if (e.text.endsWith('Waiting for input.')) ready.resolve()
-    if (e.text.endsWith('Writing a response')) reaction.resolve()
     return { value: undefined }
   })
   on('session.receive', (_$: any, e: any) => ({ text: e.text }))
@@ -150,14 +146,11 @@ test('a delivery racing helper exit is queued by Claude and its inbox is cleaned
   engine(on, async function* () {
     yield helperChunk({ kind: 'inbox', id: INBOX_ID, path: INBOX_PATH })
     yield helperChunk({ kind: 'progress', text: 'Waiting for input.' })
+    ready.resolve()
     await wrote.promise
     yield helperChunk({ kind: 'report', text: 'Finished first.' })
     return { value: { code: 0, signal: null } }
   }, [])
-  on('ui.log', (_$: any, e: any) => {
-    if (e.text.endsWith('Waiting for input.')) ready.resolve()
-    return { value: undefined }
-  })
   on('fs.write', () => { wrote.resolve(); return { value: undefined } })
   on('process.run', (_$: any, e: any) => {
     cleanup.push(e.argv)
