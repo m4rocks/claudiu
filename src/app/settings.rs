@@ -57,31 +57,24 @@ pub struct Lookup {
 
 /// The Custom subagents page's lookups of each agent's models.
 pub struct ModelLookups {
-    codex: Lookup,
-    opencode: Lookup,
+    agents: claude::subagents::AgentMap<Lookup>,
     /// How the page asks; tests answer without a real agent.
     pub list: fn(Agent, &std::path::Path) -> Result<Vec<claude::subagents::AgentModel>, String>,
 }
 
 impl Default for ModelLookups {
     fn default() -> Self {
-        Self { codex: Lookup::default(), opencode: Lookup::default(), list: claude::acp::models }
+        Self { agents: Default::default(), list: claude::acp::models }
     }
 }
 
 impl ModelLookups {
     pub fn get(&self, agent: Agent) -> &Lookup {
-        match agent {
-            Agent::Codex => &self.codex,
-            Agent::OpenCode => &self.opencode,
-        }
+        self.agents.get(agent)
     }
 
     fn get_mut(&mut self, agent: Agent) -> &mut Lookup {
-        match agent {
-            Agent::Codex => &mut self.codex,
-            Agent::OpenCode => &mut self.opencode,
-        }
+        self.agents.get_mut(agent)
     }
 }
 
@@ -119,30 +112,30 @@ impl Workspace {
         }
     }
 
-    /// Opens the model picker over the Custom subagents page, with the keyboard in its search field.
-    pub(crate) fn open_model_picker(&mut self, agent: Agent) {
+    /// Opens an agent's dialog over the Custom subagents page, with the keyboard in its model search.
+    pub(crate) fn open_agent_dialog(&mut self, agent: Agent) {
         if let Some(Modal::Settings { subagents, .. }) = self.modal.as_mut() {
             subagents.picking = Some((agent, super::modal::field("", true)));
         }
     }
 
-    /// Closes the model picker, keeping what it switched; Settings' Save keeps it for good.
-    pub(crate) fn close_model_picker(&mut self) {
+    /// Closes the agent's dialog, keeping what it switched; Settings' Save keeps it for good.
+    pub(crate) fn close_agent_dialog(&mut self) {
         if let Some(Modal::Settings { subagents, .. }) = self.modal.as_mut() {
             subagents.picking = None;
         }
         self.blur = true;
     }
 
-    pub(crate) fn model_picker_open(&self) -> bool {
+    pub(crate) fn agent_dialog_open(&self) -> bool {
         matches!(&self.modal, Some(Modal::Settings { subagents: SubagentsForm { picking: Some(_), .. }, .. }))
     }
 
     /// Keys for the open Settings dialog that no text field took. Up and Down change the page and Enter saves while no
     /// field has the keyboard (the category list has it); Tab and Shift+Tab cycle the list and the page's text fields.
     pub(crate) fn settings_key(&mut self, ks: &Keystroke) -> bool {
-        // The picker over the page has only its search field, and no list of pages for Up and Down to move.
-        if self.model_picker_open() {
+        // The dialog over the page has only its search field, and no list of pages for Up and Down to move.
+        if self.agent_dialog_open() {
             return false;
         }
         let fields: &[usize] = match self.settings_page {

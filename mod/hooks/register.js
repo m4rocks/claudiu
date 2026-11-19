@@ -18,7 +18,7 @@
 //   paints the live card over them. Claudiu's measured height comes back in `CLAUDIU_VISUAL_PREFIX<call>.rows`.
 // - One-shot completions: runs requests from `CLAUDIU_ASK_FILE` (commit messages, session titles) with
 //   `$.model.complete`, on this session's own client, so Claudiu needs no `claude -p`.
-// - Custom subagents: registers the Codex and OpenCode agent types `CLAUDIU_SUBAGENTS` lists. Claude never runs for
+// - Custom subagents: registers the provider agent types `CLAUDIU_SUBAGENTS` lists. Claude never runs for
 //   those agents: each turn is answered here with what the agent writes through `CLAUDIU_EXE --acp`, and its last
 //   message is handed back with SubagentHandback.
 
@@ -56,9 +56,8 @@ let askPoll // watches CLAUDIU_ASK_FILE
 let askSeen = null // id of the last request looked at
 let asking = false // a completion is running; a poll that finds another request waits for it
 const cardRows = new Map() // show_visual call id -> rows reserved for its card
-const AGENT_NAMES = { codex: 'Codex', opencode: 'OpenCode' } // the agents of `claude/subagents.rs`, by their key
 const AGENT_PREFIX = 'Claudiu:' // what Claude Code puts before an agent type this plugin registers
-const customTypes = new Map() // agent type name -> { agent, model, edits } of each custom agent type Claudiu defined
+const customTypes = new Map() // agent type name -> { agent, model, edits, name } of each custom agent type Claudiu defined
 const customRuns = new Map() // agent id -> { type, prompt, effort, turnId, report, steps } of each custom subagent started
 const agentCalls = new Map() // Agent call id -> { type, description, effort } of each running call that asked for an effort
 const published = new Set() // call ids whose card file this process wrote from the transcript
@@ -364,14 +363,14 @@ async function registerSubagents($) {
   } catch {
     return
   }
-  for (const agent of Object.keys(AGENT_NAMES)) {
+  for (const agent of Object.keys(agents ?? {})) {
     const listing = agents?.[agent]
     for (const { name, model, description, prompt } of listing?.types ?? []) {
       if (![name, model, description, prompt].every(v => typeof v === 'string')) continue
       // Claude never runs for this agent (customStep answers its turns) unless this module lost track of it; the
       // prompt then says so.
       await $.agent.register({ name, description, prompt, model: 'haiku', tools: [] })
-        .then(() => customTypes.set(AGENT_PREFIX + name, { agent, model, edits: listing.edits === true }))
+        .then(() => customTypes.set(AGENT_PREFIX + name, { agent, model, edits: listing.edits === true, name: typeof listing.name === 'string' ? listing.name : agent }))
         .catch(() => {})
     }
   }
@@ -417,7 +416,7 @@ async function customRun($, agentId) {
 
 // The task for this turn: the newest message to the agent, read from its transcript. A message sent to a finished
 // subagent starts a turn of its own, and Claude Code spawns the agent again for it, so the run noted at spawn knows only
-// that message. Each turn also starts Codex or OpenCode afresh, so a follow-up carries the first task and the last
+// that message. Each turn also starts the provider afresh, so a follow-up carries the first task and the last
 // report handed back before it.
 async function customTask($, run, agentId) {
   const messages = await $.session.messages({ agentId }).catch(() => [])
@@ -491,8 +490,7 @@ async function* customStep($, e, next, run) {
     run.turnId = e.turnId
     run.handedBack = 0
     run.steps = []
-    const { agent, model, edits } = customTypes.get(run.type)
-    const name = AGENT_NAMES[agent]
+    const { agent, model, edits, name } = customTypes.get(run.type)
     yield { kind: 'text', index: 0, text: `${name} on ${model}, ${edits ? 'edits allowed' : 'read-only'}\n\n` }
     run.report = null
     let previousKind
@@ -545,7 +543,7 @@ async function* customStep($, e, next, run) {
     if (next.signal?.aborted) return
     run.report ??= `${name} failed: the helper stopped without an answer.`
   }
-  const message = withSteps(run.report, AGENT_NAMES[customTypes.get(run.type).agent], run.steps)
+  const message = withSteps(run.report, customTypes.get(run.type).name, run.steps)
   if (run.handedBack >= 2) {
     yield { kind: 'text', index: 1, text: message }
     yield { kind: 'stop', stopReason: 'end_turn', usage: null }

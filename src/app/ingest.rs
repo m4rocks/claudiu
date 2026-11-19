@@ -3,14 +3,16 @@
 //! off the UI thread; applying them is a handful of small, separately testable steps.
 
 use super::*;
-use crate::claude::codex_limits;
+use crate::claude::subagents::Agent;
+use crate::claude::{acp, antigravity_limits, codex_limits};
 use crate::claude::usage::Snapshot;
 use crate::store::RateLimit;
 
 impl Workspace {
     /// Costs no tokens. The mod's files are tiny, and Codex's logs are read again only after Codex writes to them.
     pub(super) fn ingest_usage(&mut self) {
-        let codex_on = self.store.data.settings.custom_subagents.codex.on;
+        self.ingest_antigravity_usage();
+        let codex_on = self.store.data.settings.custom_subagents.get(Agent::Codex).on;
         self.rt.spawn_quietly(
             move || {
                 let codex = if codex_on { codex_limits::codex_home().and_then(|home| codex_limits::read(&home)) } else { None };
@@ -26,6 +28,30 @@ impl Workspace {
                 changed |= items.into_iter().fold(false, |c, (stem, item)| ws.apply_attachment(&stem, item) | c);
                 if changed {
                     ws.store.mark_dirty();
+                    ws.rt.dirty = true;
+                }
+            },
+        );
+    }
+
+    /// Antigravity's limits, asked of `agy` while Antigravity subagents are on, at most every few minutes. A failed
+    /// ask keeps the last reading; the sidebar's "ago" shows how old it is.
+    fn ingest_antigravity_usage(&mut self) {
+        if !self.store.data.settings.custom_subagents.get(Agent::Antigravity).on || self.antigravity_asked.is_some_and(|at| at.elapsed() < antigravity_limits::REFRESH_EVERY) {
+            return;
+        }
+        // Set before asking, so a slow answer isn't asked for twice.
+        self.antigravity_asked = Some(std::time::Instant::now());
+        self.rt.spawn_quietly(
+            || {
+                let agy = acp::locate(Agent::Antigravity).ok_or("agy was not found")?;
+                antigravity_limits::read(&agy, &crate::datadir::data_dir())
+            },
+            |ws: &mut Workspace, read: Result<Vec<antigravity_limits::Pool>, String>| {
+                if let Ok(pools) = read
+                    && ws.antigravity_usage != pools
+                {
+                    ws.antigravity_usage = pools;
                     ws.rt.dirty = true;
                 }
             },

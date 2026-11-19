@@ -5,7 +5,7 @@ function type(name: string, model: string) {
   return { name, model, description: `Runs the task on ${model}.`, prompt: 'Say the mod lost track.' }
 }
 
-const SUBAGENTS = JSON.stringify({ codex: { edits: false, types: [type('codex-gpt-5-5', 'gpt-5.5')] } })
+const SUBAGENTS = JSON.stringify({ codex: { name: 'Codex', edits: false, types: [type('codex-gpt-5-5', 'gpt-5.5')] } })
 
 // What the engine answers beneath the mod for a session with Codex on. `helper` is what `claudiu --acp` writes;
 // `requests` collects what the mod sent it.
@@ -304,7 +304,7 @@ test('an OpenCode subagent runs the task in OpenCode and names it', async ($, on
   const requests: any[] = []
   const subagents = JSON.stringify({
     codex: { edits: false, types: [type('codex-gpt-5-5', 'gpt-5.5')] },
-    opencode: { edits: true, types: [type('opencode-openai-gpt-6-1-sol', 'openai/gpt-6.1-sol')] },
+    opencode: { name: 'OpenCode', edits: true, types: [type('opencode-openai-gpt-6-1-sol', 'openai/gpt-6.1-sol')] },
   })
   engine(on, [JSON.stringify({ kind: 'failed', reason: 'opencode was not found on PATH. OpenCode subagents need OpenCode installed.' })], requests, subagents)
   await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
@@ -315,6 +315,31 @@ test('an OpenCode subagent runs the task in OpenCode and names it', async ($, on
   expect(chunks.filter(c => c.kind === 'text').map(c => c.text).join('')).toBe('OpenCode on openai/gpt-6.1-sol, edits allowed\n\n')
   const input = JSON.parse(chunks.filter(c => c.kind === 'input').map(c => c.json).join(''))
   expect(input.message).toBe('OpenCode failed: opencode was not found on PATH. OpenCode subagents need OpenCode installed.\n\n---\nOpenCode ran no steps.')
+})
+
+test('Antigravity uses the display name supplied by Claudiu', async ($, on) => {
+  const requests: any[] = []
+  const registered = engine(on, [JSON.stringify({ kind: 'report', text: 'Done.' })], requests, JSON.stringify({
+    antigravity: { name: 'Antigravity', edits: false, types: [type('antigravity-gemini-4-neon', 'gemini-4-neon')] },
+  }))
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+  expect(registered.map(r => r.name)).toEqual(['antigravity-gemini-4-neon'])
+  await $.agent.spawn({ subagentType: 'Claudiu:antigravity-gemini-4-neon', prompt: 'Find the bug' })
+  const chunks = await step($, 't1', 0, 'a1')
+  expect(requests[0].input.agent).toBe('antigravity')
+  expect(chunks.filter(c => c.kind === 'text').map(c => c.text).join('')).toBe('Antigravity on gemini-4-neon, read-only\n\n')
+  expect(JSON.parse(chunks.find(c => c.kind === 'input').json).message).toContain('Antigravity ran no steps.')
+})
+
+test('a provider without a display name falls back to its key', async ($, on) => {
+  engine(on, [JSON.stringify({ kind: 'report', text: 'Done.' })], [], JSON.stringify({
+    fourth: { edits: false, types: [type('fourth-model', 'model')] },
+  }))
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+  await $.agent.spawn({ subagentType: 'Claudiu:fourth-model', prompt: 'Find the bug' })
+  const chunks = await step($, 't1', 0, 'a1')
+  expect(chunks.filter(c => c.kind === 'text').map(c => c.text).join('')).toBe('fourth on model, read-only\n\n')
+  expect(JSON.parse(chunks.find(c => c.kind === 'input').json).message).toContain('fourth ran no steps.')
 })
 
 test('a failure is handed back as the report', async ($, on) => {

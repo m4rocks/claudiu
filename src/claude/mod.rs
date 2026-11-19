@@ -7,10 +7,12 @@
 //! Channels between Claudiu and the sessions it runs: `accounts` (alt config folders), `usage` (the mod's snapshots),
 //! `ask` (one-shot completions through the mod), `bridge` (requests from a session), `mcp` (the tab-title server and the
 //! per-session config) and `plugin` (the mod Claudiu ships). `codex_limits` reads Codex's own usage limits from its
-//! session logs.
+//! session logs, and `antigravity_limits` asks the Antigravity CLI for its own.
 
 pub mod accounts;
 pub mod acp;
+pub mod antigravity_limits;
+pub mod antigravity_read_only;
 pub mod ask;
 pub mod bridge;
 pub mod codex_limits;

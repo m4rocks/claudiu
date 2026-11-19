@@ -312,9 +312,8 @@ pub enum Modal {
 
 /// The Custom subagents page of the Settings dialog, as edited so far.
 pub struct SubagentsForm {
-    pub codex: AgentForm,
-    pub opencode: AgentForm,
-    /// The agent whose models the picker over the page lists, and the search typed in it so far.
+    pub agents: claude::subagents::AgentMap<AgentForm>,
+    /// The agent whose dialog is open over the page, and the model search typed in it so far.
     pub picking: Option<(Agent, TextEdit)>,
 }
 
@@ -328,22 +327,16 @@ pub struct AgentForm {
 
 impl SubagentsForm {
     pub fn get(&self, agent: Agent) -> &AgentForm {
-        match agent {
-            Agent::Codex => &self.codex,
-            Agent::OpenCode => &self.opencode,
-        }
+        self.agents.get(agent)
     }
 
     pub fn get_mut(&mut self, agent: Agent) -> &mut AgentForm {
-        match agent {
-            Agent::Codex => &mut self.codex,
-            Agent::OpenCode => &mut self.opencode,
-        }
+        self.agents.get_mut(agent)
     }
 }
 
 /// A field of the open modal, by its place: the dialog's only field is 0; Settings' are shell, claude, model, skills,
-/// the project being renamed and the model picker's search.
+/// the project being renamed and the agent dialog's model search.
 pub fn modal_field(modal: &mut Option<Modal>, n: usize) -> Option<&mut TextEdit> {
     match (modal.as_mut()?, n) {
         (Modal::Rename { input, .. } | Modal::NewBranch { input, .. } | Modal::NewWorktree { input, .. } | Modal::Advisor { input, .. } | Modal::GoToLine { input, .. } | Modal::FileName { input, .. }, 0) => Some(input),
@@ -488,6 +481,11 @@ pub struct Workspace {
     /// Codex's own limits from its session logs (`claude/codex_limits.rs`); the sidebar shows them under Claude's.
     /// Not saved to disk: the logs are read again on start.
     pub codex_usage: Option<crate::store::AccountUsage>,
+    /// Antigravity's limits, one pool per group of models, from `agy /usage` (`claude/antigravity_limits.rs`); the
+    /// sidebar shows them under Claude's. Not saved to disk.
+    pub antigravity_usage: Vec<crate::claude::antigravity_limits::Pool>,
+    /// When Antigravity's limits were last asked for: asking runs `agy`, which asks Google, so only every few minutes.
+    pub antigravity_asked: Option<std::time::Instant>,
     pub menu: Option<Menu>,
     pub menu_serial: u64,
     pub toast: Option<Toast>,
@@ -583,6 +581,8 @@ impl Workspace {
             worktrees_page: Default::default(),
             model_lookups: Default::default(),
             codex_usage: None,
+            antigravity_usage: vec![],
+            antigravity_asked: None,
             menu: None,
             menu_serial: 0,
             toast: None,
@@ -798,7 +798,7 @@ impl Workspace {
                 self.blur = true;
                 let custom = &self.store.data.settings.custom_subagents;
                 let form = |c: &claude::subagents::AgentChoice| AgentForm { on: c.on, models: c.models.clone(), edits: c.edits };
-                let subagents = SubagentsForm { codex: form(&custom.codex), opencode: form(&custom.opencode), picking: None };
+                let subagents = SubagentsForm { agents: claude::subagents::AgentMap::from_fn(|agent| form(custom.get(agent))), picking: None };
                 self.modal = Some(Modal::Settings { shell, claude, model, effort: defaults.effort, permission: defaults.permission_mode, updates, chrome, scale: crate::panels::scale::percent(), trimmed: self.store.data.settings.trimmed_tools.clone(), claudiu_off: self.store.data.settings.claudiu_tools_off.clone(), skills_field, costly: claude::costly::scan(), hints, renaming: None, subagents });
                 // After the modal exists: a page that loads something reads the dialog's fields.
                 self.set_settings_page(self.settings_page);

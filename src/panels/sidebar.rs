@@ -704,13 +704,28 @@ impl Workspace {
                     .child(limit("meter-7d", "7 DAY", &usage.seven_day, None).grow(1.0).shrink()),
             );
         // Only with Codex subagents on and once Codex has logged a reading, so people who don't use Codex see no row.
-        if let Some(codex) = self.codex_usage.as_ref().filter(|_| self.store.data.settings.custom_subagents.codex.on) {
+        let subagents = &self.store.data.settings.custom_subagents;
+        if let Some(codex) = self.codex_usage.as_ref().filter(|_| subagents.get(crate::claude::subagents::Agent::Codex).on) {
             footer = footer.child(
                 row()
                     .gap(12.0)
                     .child(limit("meter-codex-5h", "CODEX 5 HOUR", &codex.five_hour, Some(theme::CODEX)).grow(1.0).shrink())
                     .child(limit("meter-codex-7d", "CODEX 7 DAY", &codex.seven_day, Some(theme::CODEX)).grow(1.0).shrink()),
             );
+        }
+        // One row per group of models that share limits, each with the windows Antigravity reported for it.
+        if subagents.get(crate::claude::subagents::Agent::Antigravity).on {
+            for (i, pool) in self.antigravity_usage.iter().enumerate() {
+                let name = crate::claude::antigravity_limits::short_name(&pool.name);
+                let mut meters = row().gap(12.0);
+                if pool.usage.five_hour.is_some() {
+                    meters = meters.child(limit(&format!("meter-antigravity-{i}-5h"), &format!("{name} 5 HOUR"), &pool.usage.five_hour, Some(theme::ANTIGRAVITY)).grow(1.0).shrink());
+                }
+                if pool.usage.seven_day.is_some() {
+                    meters = meters.child(limit(&format!("meter-antigravity-{i}-7d"), &format!("{name} 7 DAY"), &pool.usage.seven_day, Some(theme::ANTIGRAVITY)).grow(1.0).shrink());
+                }
+                footer = footer.child(meters);
+            }
         }
         footer
     }
