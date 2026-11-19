@@ -254,8 +254,8 @@ pub struct Layout {
     pub sidebar_visible: bool,
     /// No longer used (the "Other sessions" group is gone); still written because older Claudiu versions require it.
     pub other_collapsed: bool,
-    /// The sidebar's RECENT list is open. It starts closed.
-    #[serde(default)]
+    /// The sidebar's RECENT list is open. It starts closed on every launch, so it isn't saved.
+    #[serde(skip)]
     pub recent_open: bool,
     /// The project the sidebar list is filtered to.
     #[serde(default)]
@@ -787,6 +787,13 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn the_recent_list_is_closed_after_a_restart() {
+        let layout = Layout { recent_open: true, ..Default::default() };
+        let saved = serde_json::to_string(&layout).unwrap();
+        assert!(!serde_json::from_str::<Layout>(&saved).unwrap().recent_open);
+    }
 
     fn ext(id: &str, cwd: &str, title: &str, last: i64) -> ExternalSession {
         ExternalSession {

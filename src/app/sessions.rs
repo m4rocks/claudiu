@@ -181,6 +181,8 @@ impl Workspace {
             self.show_session(id);
             return;
         }
+        // The session leaves the RECENT list, so the list folds away rather than staying open under it.
+        self.store.data.layout.recent_open = false;
         self.relaunch(id);
     }
 
