@@ -454,7 +454,12 @@ fn list_models(agent: Agent, from_agent: impl BufRead, mut to_agent: impl Write,
 }
 
 /// Sends a task and its live messages in one ACP session, streaming updates as they arrive.
-fn converse(from_agent: impl BufRead + Send + 'static, mut to_agent: impl Write, request: &Request, mut inbox: Option<Inbox>, emit: &mut impl FnMut(Event)) -> Result<String, String> {
+fn converse(from_agent: impl BufRead + Send + 'static, to_agent: impl Write, request: &Request, inbox: Option<Inbox>, emit: &mut impl FnMut(Event)) -> Result<String, String> {
+    converse_waiting(from_agent, to_agent, request, inbox, emit, BACKGROUND_WAIT)
+}
+
+/// `converse` with a choice of how long to wait for a command the agent moved to the background, so a test needn't wait 30 minutes.
+fn converse_waiting(from_agent: impl BufRead + Send + 'static, mut to_agent: impl Write, request: &Request, mut inbox: Option<Inbox>, emit: &mut impl FnMut(Event), background_wait: Duration) -> Result<String, String> {
     let agent = request.agent;
     let name = agent.name();
     // ACP can go quiet during a long tool call. Reading stdout on its own thread lets the inbox still wake us.
@@ -630,7 +635,7 @@ fn converse(from_agent: impl BufRead + Send + 'static, mut to_agent: impl Write,
         // What it wrote while starting the command ("waiting for it to finish") isn't the report.
         messages.close();
         messages.last = None;
-        let deadline = Instant::now() + BACKGROUND_WAIT;
+        let deadline = Instant::now() + background_wait;
         let mut quiet_since = Instant::now();
         while (messages.running() || !messages.idle || quiet_since.elapsed() < RESUMED_QUIET) && Instant::now() < deadline {
             let updates = messages.updates;
@@ -643,6 +648,9 @@ fn converse(from_agent: impl BufRead + Send + 'static, mut to_agent: impl Write,
             if messages.updates != updates {
                 quiet_since = Instant::now();
             }
+        }
+        if messages.running() {
+            return Err(format!("{name}'s command running in the background didn't finish within the wait"));
         }
     }
     match (stop, messages.last()) {
@@ -990,6 +998,21 @@ mod tests {
         // Codex's turn ends at its stop reason, even with a tool call left unfinished.
         let (result, _, _) = talk_to(Agent::Codex, &says(2), true);
         assert_eq!(result, Ok("Waiting for the command to finish.".into()));
+    }
+
+    /// A command that is still running when the wait ends leaves only the interim text, which isn't the report.
+    #[test]
+    fn antigravity_fails_when_a_command_it_moved_to_the_background_outlasts_the_wait() {
+        let command = update(json!({ "sessionUpdate": "tool_call", "toolCallId": "c1", "title": "cargo test", "status": "in_progress" }));
+        let mut says = opening();
+        says.extend((2..4).map(|id| reply(id, json!({}))));
+        says.extend([command, chunk("m1", "Waiting for the command to finish."), reply(4, json!({ "stopReason": "end_turn" })), chunk("m2", "Still running the tests.")]);
+        let script: String = says.iter().map(|m| format!("{m}\n")).collect();
+        // The agent stays connected and quiet, as it does while the command runs.
+        let (from_agent, mut agent) = std::io::pipe().unwrap();
+        agent.write_all(script.as_bytes()).unwrap();
+        let result = converse_waiting(BufReader::new(from_agent), std::io::sink(), &request(Agent::Antigravity, true), None, &mut |_| {}, Duration::from_millis(300));
+        assert_eq!(result, Err("Antigravity's command running in the background didn't finish within the wait".into()));
     }
 
     fn opening() -> Vec<Value> {
