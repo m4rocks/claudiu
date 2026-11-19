@@ -671,22 +671,15 @@ impl Workspace {
     fn sidebar_footer(&self) -> El {
         let t = now();
         let usage = self.store.active_account().map(|a| a.usage.clone()).unwrap_or_default();
-        // Stale readings show their age instead of crowding the narrow reset column.
+        // A reset time stays true however old the reading is, so it shows whenever it is still ahead, including for a
+        // reading saved before launch. Without one, the reading's age says how far to trust it.
         let limit = |key: &str, l: &Option<crate::store::RateLimit>, calm: u32| -> El {
             let (fraction, right) = match l {
-                Some(l) => {
-                    let expired = l.resets_at.is_some_and(|reset| reset <= t);
-                    let right = if t - l.seen_at > 900 {
-                        format!("{} ago", ago(l.seen_at, t))
-                    } else {
-                        match l.resets_at {
-                            Some(reset) if reset > t => countdown(reset - t),
-                            Some(_) => "—".into(),
-                            None => format!("{} ago", ago(l.seen_at, t)),
-                        }
-                    };
-                    (if expired { None } else { l.utilization }, right)
-                }
+                Some(l) => match l.resets_at {
+                    Some(reset) if reset > t => (l.utilization, countdown(reset - t)),
+                    Some(_) => (None, "—".into()),
+                    None => (l.utilization, format!("{} ago", ago(l.seen_at, t))),
+                },
                 None => (None, "—".into()),
             };
             let left = fraction.map(|f| format!("{:.0}%", (f * 100.0).round())).unwrap_or_else(|| "—".into());

@@ -277,6 +277,21 @@ fn codex_limits_show_only_with_codex_subagents_on() {
 }
 
 #[test]
+fn a_reading_saved_hours_ago_still_counts_down_to_its_reset() {
+    use crate::claude::limits::Pool;
+    use crate::claude::subagents::Agent;
+    let mut h = Harness::new(|_| vec![]);
+    let saved = crate::store::RateLimit { utilization: Some(0.24), resets_at: Some(now() + 3630), seen_at: now() - 3 * 3600 };
+    h.step(|ws| {
+        ws.store.data.settings.custom_subagents.get_mut(Agent::Codex).on = true;
+        ws.limits_asked = crate::claude::subagents::AgentMap::from_fn(|_| Some(Instant::now()));
+        ws.store.data.subagent_limits.insert("codex".into(), vec![Pool { name: "Codex".into(), usage: crate::store::AccountUsage { five_hour: Some(saved), seven_day: None } }]);
+    });
+    let texts: Vec<String> = h.rt.elements().into_iter().filter_map(|e| e.text).collect();
+    assert!(texts.iter().any(|t| t == "1h 0m") && !texts.iter().any(|t| t.ends_with(" ago")), "{texts:?}");
+}
+
+#[test]
 fn limit_meters_line_up_in_one_compact_grid_for_every_provider() {
     use crate::claude::limits::Pool;
     use crate::claude::subagents::Agent;
