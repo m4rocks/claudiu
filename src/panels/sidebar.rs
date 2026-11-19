@@ -694,13 +694,16 @@ impl Workspace {
         };
         let label_w = scale::px(64.0);
         let gap = scale::px(6.0);
-        // Each row starts with its provider's logo. Antigravity's pools share one, so they keep their names beside it.
-        let source_row = |source: &str, logo: &'static rune::Icon, name: Option<String>, color: u32, five: El, seven: El| -> El {
-            let mut who = row().w(label_w).gap(scale::px(5.0)).center_y().child(icon(logo, scale::px(12.0), color).key(format!("meter-logo-{source}")));
+        // Each row starts with the logos of whose limits it shows, and a short name where logos alone can't tell rows apart.
+        let source_row = |source: &str, marks: &[&'static rune::Icon], name: Option<String>, color: u32, five: El, seven: El| -> El {
+            let mut who = row().key(format!("meter-logo-{source}")).gap(scale::px(4.0)).center_y();
+            for logo in marks {
+                who = who.child(icon(logo, scale::px(12.0), color));
+            }
             if let Some(name) = name {
                 who = who.child(label(name, 10.5, color).truncate().shrink());
             }
-            row().key(format!("meter-row-{source}")).gap(gap).center_y().child(who).child(five).child(seven)
+            row().key(format!("meter-row-{source}")).gap(gap).center_y().child(row().w(label_w).child(who)).child(five).child(seven)
         };
         let divider = || el().h(scale::px(1.0)).w_full().my(scale::px(2.0)).fill(rgb(theme::BORDER));
         let headers = row()
@@ -708,12 +711,12 @@ impl Workspace {
             .child(el().w(label_w))
             .child(section_label("5 HOUR").w(0.0).grow(1.0).shrink())
             .child(section_label("7 DAY").w(0.0).grow(1.0).shrink());
-        let claude = source_row("claude", &logos::CLAUDE, None, theme::ACCENT, limit("meter-5h", &usage.five_hour, theme::ACCENT), limit("meter-7d", &usage.seven_day, theme::ACCENT));
+        let claude = source_row("claude", &[&logos::CLAUDE], None, theme::ACCENT, limit("meter-5h", &usage.five_hour, theme::ACCENT), limit("meter-7d", &usage.seven_day, theme::ACCENT));
         let mut limits = col().key("meter-limits").gap(scale::px(3.0)).child(headers).child(claude);
         // Only with Codex subagents on and once Codex has logged a reading.
         let subagents = &self.store.data.settings.custom_subagents;
         if let Some(codex) = self.codex_usage.as_ref().filter(|_| subagents.get(crate::claude::subagents::Agent::Codex).on) {
-            let codex = source_row("codex", &logos::CODEX, None, theme::CODEX, limit("meter-codex-5h", &codex.five_hour, theme::CODEX), limit("meter-codex-7d", &codex.seven_day, theme::CODEX));
+            let codex = source_row("codex", &[&logos::CODEX], None, theme::CODEX, limit("meter-codex-5h", &codex.five_hour, theme::CODEX), limit("meter-codex-7d", &codex.seven_day, theme::CODEX));
             limits = limits.child(divider()).child(codex);
         }
         // Empty windows keep their column, without drawing a keyed meter.
@@ -724,8 +727,14 @@ impl Workspace {
                     Some(_) => limit(&format!("meter-antigravity-{i}-{window}"), l, theme::ANTIGRAVITY),
                     None => el().w(0.0).h(scale::px(16.0)).grow(1.0).shrink(),
                 };
-                let name = crate::claude::antigravity_limits::short_name(&pool.name);
-                limits = limits.child(source_row(&format!("antigravity-{i}"), &logos::ANTIGRAVITY, Some(name), theme::ANTIGRAVITY, cell("5h", &pool.usage.five_hour), cell("7d", &pool.usage.seven_day)));
+                use crate::claude::antigravity_limits::{PoolMark, mark};
+                let (marks, name): (&[&'static rune::Icon], _) = match mark(&pool.name) {
+                    PoolMark::Gemini => (&[&logos::GEMINI], None),
+                    PoolMark::ClaudeAndGpt => (&[&logos::CLAUDE, &logos::OPENAI], None),
+                    PoolMark::GeminiNamed(name) => (&[&logos::GEMINI], Some(name)),
+                    PoolMark::Other(name) => (&[&logos::ANTIGRAVITY], Some(name)),
+                };
+                limits = limits.child(source_row(&format!("antigravity-{i}"), marks, name, theme::ANTIGRAVITY, cell("5h", &pool.usage.five_hour), cell("7d", &pool.usage.seven_day)));
             }
         }
         col()

@@ -262,13 +262,13 @@ fn limit_meters_line_up_in_one_compact_grid_for_every_provider() {
     assert!(grid[3] < 170.0, "the grid is too tall: {grid:?}");
     let headers = elements.iter().filter(|e| e.text.as_deref().is_some_and(|t| t.contains("5 HOUR"))).count();
     assert_eq!(headers, 1, "5 HOUR should appear once");
-    // Claude's and Codex's rows are told apart by their logos alone; Antigravity's pools also keep their names.
+    // Rows are told apart by their logos; only a named Gemini model adds a short name.
     for source in ["claude", "codex", "antigravity-0", "antigravity-1", "antigravity-2"] {
         let (logo, row) = (rect(&format!("meter-logo-{source}")), rect(&format!("meter-row-{source}")));
         assert!(logo[0] >= row[0] - 1.0 && logo[1] >= row[1] - 1.0 && logo[1] + logo[3] <= row[1] + row[3] + 1.0, "{source}'s logo starts its row: {logo:?} in {row:?}");
     }
     let texts: Vec<&str> = elements.iter().filter_map(|e| e.text.as_deref()).collect();
-    assert!(!texts.contains(&"CLAUDE") && !texts.contains(&"CODEX") && texts.contains(&"GEMINI") && texts.contains(&"ARGON"), "{texts:?}");
+    assert!(!texts.contains(&"CLAUDE") && !texts.contains(&"CODEX") && !texts.contains(&"GEMINI") && !texts.contains(&"CLAUDE/GPT") && texts.contains(&"Ar"), "{texts:?}");
 }
 
 #[test]
@@ -288,8 +288,7 @@ fn antigravity_limits_show_one_row_per_pool_only_with_antigravity_subagents_on()
     h.step(|ws| ws.store.data.settings.custom_subagents.get_mut(Agent::Antigravity).on = true);
     assert!(h.drawn("meter-antigravity-0-5h") && h.drawn("meter-antigravity-0-7d"), "Gemini's row draws under Claude's: {:?}", h.keys());
     assert!(h.drawn("meter-antigravity-1-7d") && !h.drawn("meter-antigravity-1-5h"), "a pool shows only the windows it has");
-    let text: Vec<String> = h.rt.elements().into_iter().filter_map(|e| e.text).collect();
-    assert!(text.iter().any(|t| t == "GEMINI"), "{text:?}");
+    assert!(h.drawn("meter-logo-antigravity-0") && h.drawn("meter-logo-antigravity-1"), "each pool's row starts with its logos");
 }
 
 /// Sessions and the shell under them, the sidebars' widths, cards and the GitHub view, with a stand-in `claude`.

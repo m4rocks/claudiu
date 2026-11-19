@@ -120,14 +120,34 @@ pub fn parse(json: &str, seen_at: i64) -> Option<Vec<Pool>> {
     (!pools.is_empty()).then_some(pools)
 }
 
-/// A pool's name as the sidebar's row label: `Gemini Models` → `GEMINI`, `Claude and GPT models` → `CLAUDE/GPT`,
-/// `Gemini 4 Argon` → `ARGON`.
-pub fn short_name(pool: &str) -> String {
+/// What the sidebar marks a pool's row with, by the models in it.
+#[derive(Debug, PartialEq)]
+pub enum PoolMark {
+    /// `Gemini Models`.
+    Gemini,
+    /// `Claude and GPT models`.
+    ClaudeAndGpt,
+    /// A named Gemini model with limits of its own, by the first two letters of its name: `Gemini 4 Argon` → `Ar`.
+    GeminiNamed(String),
+    /// A pool Claudiu doesn't know, by its name shortened: `Some New models` → `SOME NEW`.
+    Other(String),
+}
+
+pub fn mark(pool: &str) -> PoolMark {
     let words: Vec<&str> = pool.split_whitespace().filter(|w| !w.eq_ignore_ascii_case("models")).collect();
-    if let [family, version, name] = words.as_slice() && family.eq_ignore_ascii_case("gemini") && version.parse::<u32>().is_ok() {
-        return name.to_uppercase();
+    let lower: Vec<String> = words.iter().map(|w| w.to_lowercase()).collect();
+    match lower.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
+        ["gemini"] => PoolMark::Gemini,
+        ["claude", "and", "gpt"] => PoolMark::ClaudeAndGpt,
+        ["gemini", version, name] if version.parse::<u32>().is_ok() => PoolMark::GeminiNamed(symbol(name)),
+        _ => PoolMark::Other(words.join(" ").replace(" and ", "/").to_uppercase()),
     }
-    words.join(" ").replace(" and ", "/").to_uppercase()
+}
+
+/// A name's first two letters, written like an element's symbol: `argon` → `Ar`.
+fn symbol(name: &str) -> String {
+    let mut letters = name.chars();
+    letters.next().map(|first| first.to_uppercase().chain(letters.take(1)).collect()).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -178,11 +198,13 @@ mod tests {
     }
 
     #[test]
-    fn pool_names_shorten_for_the_meters() {
-        assert_eq!(short_name("Gemini Models"), "GEMINI");
-        assert_eq!(short_name("Claude and GPT models"), "CLAUDE/GPT");
-        assert_eq!(short_name("Gemini 4 Argon"), "ARGON");
-        assert_eq!(short_name("Gemini custom pool"), "GEMINI CUSTOM POOL");
-        assert_eq!(short_name("Other 4 Argon"), "OTHER 4 ARGON");
+    fn each_pool_gets_the_mark_of_its_models() {
+        assert_eq!(mark("Gemini Models"), PoolMark::Gemini);
+        assert_eq!(mark("Claude and GPT models"), PoolMark::ClaudeAndGpt);
+        assert_eq!(mark("Gemini 4 Argon"), PoolMark::GeminiNamed("Ar".into()));
+        assert_eq!(mark("Gemini 5 XENON"), PoolMark::GeminiNamed("Xe".into()));
+        assert_eq!(mark("Gemini custom pool"), PoolMark::Other("GEMINI CUSTOM POOL".into()));
+        assert_eq!(mark("Other 4 Argon"), PoolMark::Other("OTHER 4 ARGON".into()));
+        assert_eq!(mark("Mistral and Llama models"), PoolMark::Other("MISTRAL/LLAMA".into()));
     }
 }
