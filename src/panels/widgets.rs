@@ -101,6 +101,37 @@ pub fn meter(key: &str, label: &str, fraction: Option<f32>, caption: String, ton
         .child(text(caption).font(font(10.5, 400.0)).color(rgb(theme::TEXT_FAINT)))
 }
 
+/// Compact usage track, with the used fraction behind the percentage and reset countdown.
+pub fn limit_bar(key: &str, fraction: Option<f32>, left: String, right: String, tone: Option<Color>) -> El {
+    let color = match fraction {
+        Some(f) if f >= 0.9 => rgb(theme::DANGER),
+        Some(f) if f >= METER_WARN_AT => rgb(theme::WARN),
+        _ => tone.unwrap_or_else(|| rgb(theme::ACCENT)),
+    };
+    let height = scale::px(16.0);
+    // Faint enough that the text drawn over it stays readable.
+    let fill = el()
+        .key(format!("{key}-bar"))
+        .absolute(0.0, 0.0)
+        .h(height)
+        .w_frac(fraction.unwrap_or(0.0).clamp(0.0, 1.0))
+        .radius(scale::px(3.0))
+        .fill(color.alpha(0.32))
+        .motion(motion::REFLOW);
+    let percent_color = if fraction.is_some() { theme::TEXT } else { theme::TEXT_FAINT };
+    let texts = row()
+        .absolute(0.0, 0.0)
+        .w_full()
+        .h(height)
+        .px(scale::px(4.0))
+        .gap(scale::px(3.0))
+        .center_y()
+        .justify_between()
+        .child(text(left).font(font(10.5, 500.0).features("'tnum' 1")).color(rgb(percent_color)))
+        .child(text(right).font(font(10.5, 400.0).features("'tnum' 1")).color(rgb(theme::TEXT_DIM)).truncate().shrink());
+    el().key(key.to_string()).h(height).radius(scale::px(3.0)).clip_rounded(scale::px(3.0)).fill(rgb(0x1c1c1c)).child(fill).child(texts)
+}
+
 struct Look {
     bg: u32,
     fg: u32,

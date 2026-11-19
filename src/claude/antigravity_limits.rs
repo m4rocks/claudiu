@@ -120,10 +120,13 @@ pub fn parse(json: &str, seen_at: i64) -> Option<Vec<Pool>> {
     (!pools.is_empty()).then_some(pools)
 }
 
-/// A pool's name as the sidebar's meters put it before "5 HOUR": `Gemini Models` → `GEMINI`, `Claude and GPT models`
-/// → `CLAUDE/GPT`.
+/// A pool's name as the sidebar's row label: `Gemini Models` → `GEMINI`, `Claude and GPT models` → `CLAUDE/GPT`,
+/// `Gemini 4 Argon` → `ARGON`.
 pub fn short_name(pool: &str) -> String {
     let words: Vec<&str> = pool.split_whitespace().filter(|w| !w.eq_ignore_ascii_case("models")).collect();
+    if let [family, version, name] = words.as_slice() && family.eq_ignore_ascii_case("gemini") && version.parse::<u32>().is_ok() {
+        return name.to_uppercase();
+    }
     words.join(" ").replace(" and ", "/").to_uppercase()
 }
 
@@ -178,6 +181,8 @@ mod tests {
     fn pool_names_shorten_for_the_meters() {
         assert_eq!(short_name("Gemini Models"), "GEMINI");
         assert_eq!(short_name("Claude and GPT models"), "CLAUDE/GPT");
-        assert_eq!(short_name("Gemini 4 Argon"), "GEMINI 4 ARGON");
+        assert_eq!(short_name("Gemini 4 Argon"), "ARGON");
+        assert_eq!(short_name("Gemini custom pool"), "GEMINI CUSTOM POOL");
+        assert_eq!(short_name("Other 4 Argon"), "OTHER 4 ARGON");
     }
 }

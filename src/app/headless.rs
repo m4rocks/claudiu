@@ -225,6 +225,46 @@ fn codex_limits_show_only_with_codex_subagents_on() {
 }
 
 #[test]
+fn limit_meters_line_up_in_one_compact_grid_for_every_provider() {
+    use crate::claude::antigravity_limits::Pool;
+    use crate::claude::subagents::Agent;
+    let mut h = Harness::new(|_| vec![]);
+    let limit = crate::store::RateLimit { utilization: Some(0.24), resets_at: Some(now() + 3600), seen_at: now() };
+    let both = crate::store::AccountUsage { five_hour: Some(limit.clone()), seven_day: Some(limit.clone()) };
+    h.step(|ws| {
+        ws.store.data.accounts = vec![crate::store::Account { id: crate::store::MAIN_ACCOUNT.into(), usage: both.clone(), ..Default::default() }];
+        ws.codex_usage = Some(both.clone());
+        ws.store.data.settings.custom_subagents.get_mut(Agent::Codex).on = true;
+        ws.store.data.settings.custom_subagents.get_mut(Agent::Antigravity).on = true;
+        ws.antigravity_asked = Some(std::time::Instant::now());
+        ws.antigravity_usage = vec![Pool { name: "Gemini Models".into(), usage: both.clone() }, Pool { name: "Claude and GPT models".into(), usage: both.clone() }, Pool { name: "Gemini 4 Argon".into(), usage: crate::store::AccountUsage { five_hour: None, seven_day: Some(limit.clone()) } }];
+    });
+    h.settle();
+    let elements = h.rt.elements();
+    let rect = |key: &str| -> [f32; 4] { elements.iter().find(|e| e.key.as_deref() == Some(key) && !e.exiting).unwrap_or_else(|| panic!("{key} is not drawn: {:?}", h.keys())).rect };
+    let five = ["meter-5h", "meter-codex-5h", "meter-antigravity-0-5h", "meter-antigravity-1-5h"];
+    let seven = ["meter-7d", "meter-codex-7d", "meter-antigravity-0-7d", "meter-antigravity-1-7d", "meter-antigravity-2-7d"];
+    assert!(!h.drawn("meter-antigravity-2-5h"), "Argon has no five-hour window");
+    for column in [&five[..], &seven[..]] {
+        let first = rect(column[0]);
+        for key in column {
+            let r = rect(key);
+            assert!((r[0] - first[0]).abs() <= 1.0 && (r[2] - first[2]).abs() <= 1.0, "{key} is not aligned with {}: {r:?} vs {first:?}", column[0]);
+            assert!(r[3] <= 22.0, "{key} is too tall: {r:?}");
+            assert!(elements.iter().any(|e| e.text.as_deref().is_some_and(|t| t.contains("24%")) && e.rect[0] >= r[0] - 1.0 && e.rect[1] >= r[1] - 1.0 && e.rect[0] + e.rect[2] <= r[0] + r[2] + 1.0 && e.rect[1] + e.rect[3] <= r[1] + r[3] + 1.0), "{key} has no percent text inside its bar: {r:?}");
+        }
+    }
+    for key in ["meter-row-claude", "meter-row-codex", "meter-row-antigravity-0", "meter-row-antigravity-1", "meter-row-antigravity-2"] {
+        let r = rect(key);
+        assert!(r[3] <= 24.0, "{key} is too tall: {r:?}");
+    }
+    let grid = rect("meter-limits");
+    assert!(grid[3] < 170.0, "the grid is too tall: {grid:?}");
+    let headers = elements.iter().filter(|e| e.text.as_deref().is_some_and(|t| t.contains("5 HOUR"))).count();
+    assert_eq!(headers, 1, "5 HOUR should appear once");
+}
+
+#[test]
 fn antigravity_limits_show_one_row_per_pool_only_with_antigravity_subagents_on() {
     use crate::claude::antigravity_limits::Pool;
     use crate::claude::subagents::Agent;
@@ -242,7 +282,7 @@ fn antigravity_limits_show_one_row_per_pool_only_with_antigravity_subagents_on()
     assert!(h.drawn("meter-antigravity-0-5h") && h.drawn("meter-antigravity-0-7d"), "Gemini's row draws under Claude's: {:?}", h.keys());
     assert!(h.drawn("meter-antigravity-1-7d") && !h.drawn("meter-antigravity-1-5h"), "a pool shows only the windows it has");
     let text: Vec<String> = h.rt.elements().into_iter().filter_map(|e| e.text).collect();
-    assert!(text.iter().any(|t| t == "GEMINI 5 HOUR"), "{text:?}");
+    assert!(text.iter().any(|t| t == "GEMINI"), "{text:?}");
 }
 
 /// Sessions and the shell under them, the sidebars' widths, cards and the GitHub view, with a stand-in `claude`.

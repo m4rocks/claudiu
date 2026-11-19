@@ -5,10 +5,10 @@ use rune::tok::motion;
 use rune::{Color, Cursor, El, Phase, PointerButton, ScrollSpec, Transition, Tx, col, el, row, text, text_input};
 
 use crate::app::{Act, Activity, MenuAnchor, MenuItem, SideDrag, Workspace};
-use crate::panels::icons;
+use crate::panels::{icons, scale};
 use crate::panels::status_icon::{SessionDot, status_icon};
 use crate::panels::theme::{self, rgb};
-use crate::panels::widgets::{ago, avatar, clawd, countdown, font, icon, icon_button, key_hint, label, meter, METER_WARN_AT, section_label, shortcut, tick};
+use crate::panels::widgets::{ago, avatar, clawd, countdown, font, icon, icon_button, key_hint, label, limit_bar, section_label, shortcut, tick};
 use crate::store::{ExternalState, Id, Project, SessionKind, SessionRecord, now};
 
 pub const SIDEBAR_W: f32 = 284.0;
@@ -671,63 +671,66 @@ impl Workspace {
     fn sidebar_footer(&self) -> El {
         let t = now();
         let usage = self.store.active_account().map(|a| a.usage.clone()).unwrap_or_default();
-        // Captions are short: two meters share a row. `calm` colors a bar that is not yet near its limit; near it, the
-        // meter's own warning colors win.
-        let limit = |key: &str, label: &str, l: &Option<crate::store::RateLimit>, calm: Option<u32>| -> El {
-            match l {
-                Some(l) => match (l.resets_at, l.utilization) {
-                    (Some(reset), util) if reset > t => {
-                        let mut caption = format!("resets {}", countdown(reset - t));
-                        if t - l.seen_at > 900 {
-                            caption.push_str(&format!(" · {} ago", ago(l.seen_at, t)));
+        // Stale readings show their age instead of crowding the narrow reset column.
+        let limit = |key: &str, l: &Option<crate::store::RateLimit>, calm: u32| -> El {
+            let (fraction, right) = match l {
+                Some(l) => {
+                    let expired = l.resets_at.is_some_and(|reset| reset <= t);
+                    let right = if t - l.seen_at > 900 {
+                        format!("{} ago", ago(l.seen_at, t))
+                    } else {
+                        match l.resets_at {
+                            Some(reset) if reset > t => countdown(reset - t),
+                            Some(_) => "—".into(),
+                            None => format!("{} ago", ago(l.seen_at, t)),
                         }
-                        let tone = calm.filter(|_| util.is_none_or(|f| f < METER_WARN_AT)).map(rgb);
-                        meter(key, label, util, caption, tone)
-                    }
-                    (Some(_), _) => meter(key, label, None, "reset · unknown".into(), None),
-                    (None, util) => meter(key, label, util, format!("seen {} ago", ago(l.seen_at, t)), None),
-                },
-                None => meter(key, label, None, "after first message".into(), None),
-            }
+                    };
+                    (if expired { None } else { l.utilization }, right)
+                }
+                None => (None, "—".into()),
+            };
+            let left = fraction.map(|f| format!("{:.0}%", (f * 100.0).round())).unwrap_or_else(|| "—".into());
+            limit_bar(key, fraction, left, right, Some(rgb(calm))).w(0.0).grow(1.0).shrink()
         };
-        let mut footer = col()
+        let label_w = scale::px(64.0);
+        let gap = scale::px(6.0);
+        let source_row = |source: &str, name: String, color: u32, five: El, seven: El| -> El {
+            row().key(format!("meter-row-{source}")).gap(gap).center_y().child(label(name, 10.5, color).w(label_w).truncate()).child(five).child(seven)
+        };
+        let divider = || el().h(scale::px(1.0)).w_full().my(scale::px(2.0)).fill(rgb(theme::BORDER));
+        let headers = row()
+            .gap(gap)
+            .child(el().w(label_w))
+            .child(section_label("5 HOUR").w(0.0).grow(1.0).shrink())
+            .child(section_label("7 DAY").w(0.0).grow(1.0).shrink());
+        let claude = source_row("claude", "CLAUDE".into(), theme::TEXT_DIM, limit("meter-5h", &usage.five_hour, theme::ACCENT), limit("meter-7d", &usage.seven_day, theme::ACCENT));
+        let mut limits = col().key("meter-limits").gap(scale::px(3.0)).child(headers).child(claude);
+        // Only with Codex subagents on and once Codex has logged a reading.
+        let subagents = &self.store.data.settings.custom_subagents;
+        if let Some(codex) = self.codex_usage.as_ref().filter(|_| subagents.get(crate::claude::subagents::Agent::Codex).on) {
+            let codex = source_row("codex", "CODEX".into(), theme::CODEX, limit("meter-codex-5h", &codex.five_hour, theme::CODEX), limit("meter-codex-7d", &codex.seven_day, theme::CODEX));
+            limits = limits.child(divider()).child(codex);
+        }
+        // Empty windows keep their column, without drawing a keyed meter.
+        if subagents.get(crate::claude::subagents::Agent::Antigravity).on && !self.antigravity_usage.is_empty() {
+            limits = limits.child(divider());
+            for (i, pool) in self.antigravity_usage.iter().enumerate() {
+                let cell = |window: &str, l: &Option<crate::store::RateLimit>| match l {
+                    Some(_) => limit(&format!("meter-antigravity-{i}-{window}"), l, theme::ANTIGRAVITY),
+                    None => el().w(0.0).h(scale::px(16.0)).grow(1.0).shrink(),
+                };
+                let name = crate::claude::antigravity_limits::short_name(&pool.name);
+                limits = limits.child(source_row(&format!("antigravity-{i}"), name, theme::ANTIGRAVITY, cell("5h", &pool.usage.five_hour), cell("7d", &pool.usage.seven_day)));
+            }
+        }
+        col()
             .gap(8.0)
             .px(14.0)
             .pt(6.0)
             .pb(8.0)
             .border_sides([1.0, 0.0, 0.0, 0.0], rgb(theme::BORDER))
             .child(self.account_switcher())
-            .child(
-                row()
-                    .gap(12.0)
-                    .child(limit("meter-5h", "5 HOUR", &usage.five_hour, None).grow(1.0).shrink())
-                    .child(limit("meter-7d", "7 DAY", &usage.seven_day, None).grow(1.0).shrink()),
-            );
-        // Only with Codex subagents on and once Codex has logged a reading, so people who don't use Codex see no row.
-        let subagents = &self.store.data.settings.custom_subagents;
-        if let Some(codex) = self.codex_usage.as_ref().filter(|_| subagents.get(crate::claude::subagents::Agent::Codex).on) {
-            footer = footer.child(
-                row()
-                    .gap(12.0)
-                    .child(limit("meter-codex-5h", "CODEX 5 HOUR", &codex.five_hour, Some(theme::CODEX)).grow(1.0).shrink())
-                    .child(limit("meter-codex-7d", "CODEX 7 DAY", &codex.seven_day, Some(theme::CODEX)).grow(1.0).shrink()),
-            );
-        }
-        // One row per group of models that share limits, each with the windows Antigravity reported for it.
-        if subagents.get(crate::claude::subagents::Agent::Antigravity).on {
-            for (i, pool) in self.antigravity_usage.iter().enumerate() {
-                let name = crate::claude::antigravity_limits::short_name(&pool.name);
-                let mut meters = row().gap(12.0);
-                if pool.usage.five_hour.is_some() {
-                    meters = meters.child(limit(&format!("meter-antigravity-{i}-5h"), &format!("{name} 5 HOUR"), &pool.usage.five_hour, Some(theme::ANTIGRAVITY)).grow(1.0).shrink());
-                }
-                if pool.usage.seven_day.is_some() {
-                    meters = meters.child(limit(&format!("meter-antigravity-{i}-7d"), &format!("{name} 7 DAY"), &pool.usage.seven_day, Some(theme::ANTIGRAVITY)).grow(1.0).shrink());
-                }
-                footer = footer.child(meters);
-            }
-        }
-        footer
+            .child(limits)
     }
 }
 
