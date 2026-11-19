@@ -5,7 +5,7 @@ use rune::tok::motion;
 use rune::{Color, Cursor, El, Phase, PointerButton, ScrollSpec, Transition, Tx, col, el, row, text, text_input};
 
 use crate::app::{Act, Activity, MenuAnchor, MenuItem, SideDrag, Workspace};
-use crate::panels::{icons, scale};
+use crate::panels::{icons, logos, scale};
 use crate::panels::status_icon::{SessionDot, status_icon};
 use crate::panels::theme::{self, rgb};
 use crate::panels::widgets::{ago, avatar, clawd, countdown, font, icon, icon_button, key_hint, label, limit_bar, section_label, shortcut, tick};
@@ -694,8 +694,13 @@ impl Workspace {
         };
         let label_w = scale::px(64.0);
         let gap = scale::px(6.0);
-        let source_row = |source: &str, name: String, color: u32, five: El, seven: El| -> El {
-            row().key(format!("meter-row-{source}")).gap(gap).center_y().child(label(name, 10.5, color).w(label_w).truncate()).child(five).child(seven)
+        // Each row starts with its provider's logo. Antigravity's pools share one, so they keep their names beside it.
+        let source_row = |source: &str, logo: &'static rune::Icon, name: Option<String>, color: u32, five: El, seven: El| -> El {
+            let mut who = row().w(label_w).gap(scale::px(5.0)).center_y().child(icon(logo, scale::px(12.0), color).key(format!("meter-logo-{source}")));
+            if let Some(name) = name {
+                who = who.child(label(name, 10.5, color).truncate().shrink());
+            }
+            row().key(format!("meter-row-{source}")).gap(gap).center_y().child(who).child(five).child(seven)
         };
         let divider = || el().h(scale::px(1.0)).w_full().my(scale::px(2.0)).fill(rgb(theme::BORDER));
         let headers = row()
@@ -703,12 +708,12 @@ impl Workspace {
             .child(el().w(label_w))
             .child(section_label("5 HOUR").w(0.0).grow(1.0).shrink())
             .child(section_label("7 DAY").w(0.0).grow(1.0).shrink());
-        let claude = source_row("claude", "CLAUDE".into(), theme::TEXT_DIM, limit("meter-5h", &usage.five_hour, theme::ACCENT), limit("meter-7d", &usage.seven_day, theme::ACCENT));
+        let claude = source_row("claude", &logos::CLAUDE, None, theme::ACCENT, limit("meter-5h", &usage.five_hour, theme::ACCENT), limit("meter-7d", &usage.seven_day, theme::ACCENT));
         let mut limits = col().key("meter-limits").gap(scale::px(3.0)).child(headers).child(claude);
         // Only with Codex subagents on and once Codex has logged a reading.
         let subagents = &self.store.data.settings.custom_subagents;
         if let Some(codex) = self.codex_usage.as_ref().filter(|_| subagents.get(crate::claude::subagents::Agent::Codex).on) {
-            let codex = source_row("codex", "CODEX".into(), theme::CODEX, limit("meter-codex-5h", &codex.five_hour, theme::CODEX), limit("meter-codex-7d", &codex.seven_day, theme::CODEX));
+            let codex = source_row("codex", &logos::CODEX, None, theme::CODEX, limit("meter-codex-5h", &codex.five_hour, theme::CODEX), limit("meter-codex-7d", &codex.seven_day, theme::CODEX));
             limits = limits.child(divider()).child(codex);
         }
         // Empty windows keep their column, without drawing a keyed meter.
@@ -720,7 +725,7 @@ impl Workspace {
                     None => el().w(0.0).h(scale::px(16.0)).grow(1.0).shrink(),
                 };
                 let name = crate::claude::antigravity_limits::short_name(&pool.name);
-                limits = limits.child(source_row(&format!("antigravity-{i}"), name, theme::ANTIGRAVITY, cell("5h", &pool.usage.five_hour), cell("7d", &pool.usage.seven_day)));
+                limits = limits.child(source_row(&format!("antigravity-{i}"), &logos::ANTIGRAVITY, Some(name), theme::ANTIGRAVITY, cell("5h", &pool.usage.five_hour), cell("7d", &pool.usage.seven_day)));
             }
         }
         col()

@@ -262,6 +262,13 @@ fn limit_meters_line_up_in_one_compact_grid_for_every_provider() {
     assert!(grid[3] < 170.0, "the grid is too tall: {grid:?}");
     let headers = elements.iter().filter(|e| e.text.as_deref().is_some_and(|t| t.contains("5 HOUR"))).count();
     assert_eq!(headers, 1, "5 HOUR should appear once");
+    // Claude's and Codex's rows are told apart by their logos alone; Antigravity's pools also keep their names.
+    for source in ["claude", "codex", "antigravity-0", "antigravity-1", "antigravity-2"] {
+        let (logo, row) = (rect(&format!("meter-logo-{source}")), rect(&format!("meter-row-{source}")));
+        assert!(logo[0] >= row[0] - 1.0 && logo[1] >= row[1] - 1.0 && logo[1] + logo[3] <= row[1] + row[3] + 1.0, "{source}'s logo starts its row: {logo:?} in {row:?}");
+    }
+    let texts: Vec<&str> = elements.iter().filter_map(|e| e.text.as_deref()).collect();
+    assert!(!texts.contains(&"CLAUDE") && !texts.contains(&"CODEX") && texts.contains(&"GEMINI") && texts.contains(&"ARGON"), "{texts:?}");
 }
 
 #[test]
