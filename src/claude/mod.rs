@@ -19,6 +19,7 @@ pub mod codex_limits;
 pub mod config_sync;
 pub mod costly;
 pub mod defaults;
+pub mod limits;
 pub mod mcp;
 pub mod plugin;
 pub mod subagents;

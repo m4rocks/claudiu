@@ -6,6 +6,11 @@
 //! to define them per session. The mod answers each turn of those agents through the `claudiu --acp` helper
 //! (`claude/acp.rs`).
 
+use std::time::Duration;
+
+use super::limits::Pool;
+use crate::panels::{logos, theme};
+
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
@@ -28,9 +33,20 @@ pub enum Agent {
     Antigravity,
 }
 
-/// Everything Claudiu knows about one agent: what it is called, how its ACP server starts, and the few ways its ACP
-/// conversation differs from the others'.
+/// How a provider reads its limits and how often it asks again.
+pub struct Limits {
+    pub read: fn() -> Result<Vec<Pool>, String>,
+    pub every: Duration,
+}
+
+/// Everything Claudiu knows about one agent, including its ACP server and usage limits.
 pub struct Provider {
+    /// The limits reader and refresh cadence, absent when the provider has no limits to show.
+    pub limits: Option<Limits>,
+    /// The color of its sidebar limits.
+    pub color: u32,
+    /// The logos and optional short label that identify a pool in the sidebar.
+    pub marks: fn(&str) -> (&'static [&'static rune::Icon], Option<String>),
     /// The name the settings page and the subagent's text use.
     pub name: &'static str,
     /// The key in `CLAUDIU_SUBAGENTS` and in the state file, and the start of every agent type name.
@@ -72,6 +88,12 @@ pub struct Provider {
 }
 
 const CODEX: Provider = Provider {
+    limits: Some(Limits { read: || {
+        let usage = super::codex_limits::codex_home().and_then(|home| super::codex_limits::read(&home)).ok_or("Codex has no limits reading yet")?;
+        Ok(vec![Pool { name: "Codex".into(), usage }])
+    }, every: Duration::from_secs(3) }),
+    color: theme::CODEX,
+    marks: logos::codex_marks,
     name: "Codex",
     key: "codex",
     task_name: "OpenAI Codex",
@@ -96,6 +118,9 @@ const CODEX: Provider = Provider {
 };
 
 const OPENCODE: Provider = Provider {
+    limits: None,
+    color: theme::TEXT,
+    marks: |name| (&[], Some(name.to_uppercase())),
     name: "OpenCode",
     key: "opencode",
     task_name: "OpenCode",
@@ -119,6 +144,12 @@ const OPENCODE: Provider = Provider {
 };
 
 const ANTIGRAVITY: Provider = Provider {
+    limits: Some(Limits { read: || {
+        let agy = super::acp::locate(Agent::Antigravity).ok_or("agy was not found")?;
+        super::antigravity_limits::read(&agy, &crate::datadir::data_dir())
+    }, every: super::antigravity_limits::REFRESH_EVERY }),
+    color: theme::ANTIGRAVITY,
+    marks: logos::antigravity_marks,
     name: "Antigravity",
     key: "antigravity",
     task_name: "Google Antigravity",
@@ -336,6 +367,21 @@ impl CustomSubagents {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_limits_provider_has_visible_marks_and_a_color() {
+        for agent in Agent::ALL {
+            let provider = agent.provider();
+            if provider.limits.is_some() {
+                assert_ne!(provider.color, theme::PANEL_BG, "{}", provider.name);
+                for pool in ["Codex", "Gemini Models", "Claude and GPT models", "Gemini 4 Argon", "Some New models"] {
+                    let (marks, name) = (provider.marks)(pool);
+                    assert!(!marks.is_empty() || name.is_some_and(|name| !name.is_empty()), "{}: {pool}", provider.name);
+                    assert!(marks.iter().all(|mark| !mark.body.is_empty()), "{}: {pool}", provider.name);
+                }
+            }
+        }
+    }
 
     fn choices(codex: AgentChoice, opencode: AgentChoice) -> CustomSubagents {
         let mut choices = CustomSubagents::default();

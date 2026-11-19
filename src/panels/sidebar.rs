@@ -692,7 +692,8 @@ impl Workspace {
             let left = fraction.map(|f| format!("{:.0}%", (f * 100.0).round())).unwrap_or_else(|| "—".into());
             limit_bar(key, fraction, left, right, Some(rgb(calm))).w(0.0).grow(1.0).shrink()
         };
-        let label_w = scale::px(64.0);
+        // Fits the widest marks: two logos, or a logo and a two-letter name.
+        let label_w = scale::px(30.0);
         let gap = scale::px(6.0);
         // Each row starts with the logos of whose limits it shows, and a short name where logos alone can't tell rows apart.
         let source_row = |source: &str, marks: &[&'static rune::Icon], name: Option<String>, color: u32, five: El, seven: El| -> El {
@@ -713,28 +714,23 @@ impl Workspace {
             .child(section_label("7 DAY").w(0.0).grow(1.0).shrink());
         let claude = source_row("claude", &[&logos::CLAUDE], None, theme::ACCENT, limit("meter-5h", &usage.five_hour, theme::ACCENT), limit("meter-7d", &usage.seven_day, theme::ACCENT));
         let mut limits = col().key("meter-limits").gap(scale::px(3.0)).child(headers).child(claude);
-        // Only with Codex subagents on and once Codex has logged a reading.
         let subagents = &self.store.data.settings.custom_subagents;
-        if let Some(codex) = self.codex_usage.as_ref().filter(|_| subagents.get(crate::claude::subagents::Agent::Codex).on) {
-            let codex = source_row("codex", &[&logos::CODEX], None, theme::CODEX, limit("meter-codex-5h", &codex.five_hour, theme::CODEX), limit("meter-codex-7d", &codex.seven_day, theme::CODEX));
-            limits = limits.child(divider()).child(codex);
-        }
-        // Empty windows keep their column, without drawing a keyed meter.
-        if subagents.get(crate::claude::subagents::Agent::Antigravity).on && !self.antigravity_usage.is_empty() {
+        for agent in crate::claude::subagents::Agent::ALL {
+            let provider = agent.provider();
+            if !subagents.get(agent).on {
+                continue;
+            }
+            let Some(pools) = self.store.data.subagent_limits.get(provider.key).filter(|pools| !pools.is_empty()) else { continue };
             limits = limits.child(divider());
-            for (i, pool) in self.antigravity_usage.iter().enumerate() {
+            for (i, pool) in pools.iter().enumerate() {
+                let source = format!("{}-{i}", provider.key);
+                // Empty windows keep their column, without drawing a keyed meter.
                 let cell = |window: &str, l: &Option<crate::store::RateLimit>| match l {
-                    Some(_) => limit(&format!("meter-antigravity-{i}-{window}"), l, theme::ANTIGRAVITY),
+                    Some(_) => limit(&format!("meter-{source}-{window}"), l, provider.color),
                     None => el().w(0.0).h(scale::px(16.0)).grow(1.0).shrink(),
                 };
-                use crate::claude::antigravity_limits::{PoolMark, mark};
-                let (marks, name): (&[&'static rune::Icon], _) = match mark(&pool.name) {
-                    PoolMark::Gemini => (&[&logos::GEMINI], None),
-                    PoolMark::ClaudeAndGpt => (&[&logos::CLAUDE, &logos::OPENAI], None),
-                    PoolMark::GeminiNamed(name) => (&[&logos::GEMINI], Some(name)),
-                    PoolMark::Other(name) => (&[&logos::ANTIGRAVITY], Some(name)),
-                };
-                limits = limits.child(source_row(&format!("antigravity-{i}"), marks, name, theme::ANTIGRAVITY, cell("5h", &pool.usage.five_hour), cell("7d", &pool.usage.seven_day)));
+                let (marks, name) = (provider.marks)(&pool.name);
+                limits = limits.child(source_row(&source, marks, name, provider.color, cell("5h", &pool.usage.five_hour), cell("7d", &pool.usage.seven_day)));
             }
         }
         col()

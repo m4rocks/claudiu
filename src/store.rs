@@ -1,6 +1,7 @@
 //! Claudiu's own persisted state (projects, session history, cached usage, layout).
 //! Independent of the UI. Claude Code's data is only ever *read* (see `claude/`) and merged in here.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -322,6 +323,9 @@ pub struct Data {
     /// move) because older Claudiu versions require the field and would set state.json aside without it.
     #[serde(default)]
     pub account: AccountUsage,
+    /// The last limits reading per provider key, shown at launch while the next reading runs.
+    #[serde(default)]
+    pub subagent_limits: BTreeMap<String, Vec<crate::claude::limits::Pool>>,
     /// The main account first, then alts. Kept in `accounts.json`, not state.json: an older Claudiu still
     /// running would rewrite state.json without them.
     #[serde(skip)]
@@ -802,6 +806,22 @@ mod tests {
 
     fn project(id: &str, path: &str) -> Project {
         Project { id: id.into(), name: id.into(), path: PathBuf::from(path), git: None, collapsed: false, added_at: 0 }
+    }
+
+    #[test]
+    fn the_last_antigravity_reading_is_there_after_a_restart() {
+        use crate::claude::limits::Pool;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let mut s = Store::load(path.clone());
+        let limit = RateLimit { utilization: Some(0.5), resets_at: Some(200), seen_at: 100 };
+        s.data.subagent_limits.insert("antigravity".into(), vec![Pool { name: "Gemini 4 Argon".into(), usage: AccountUsage { five_hour: None, seven_day: Some(limit) } }]);
+        s.save();
+        assert_eq!(Store::load(path).data.subagent_limits, s.data.subagent_limits);
+        // A state.json from before the field loads with no reading.
+        let old = dir.path().join("old.json");
+        fs::write(&old, r#"{"version":1,"projects":[],"sessions":[]}"#).unwrap();
+        assert!(Store::load(old).data.subagent_limits.is_empty());
     }
 
     #[test]

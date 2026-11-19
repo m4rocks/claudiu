@@ -47,14 +47,22 @@ fn git(dir: &Path, args: &[&str]) -> std::process::Output {
 impl Harness {
     /// The workspace in a 1600×900 window, with the projects `initial` makes in the work folder registered.
     fn new(initial: impl FnOnce(&Path) -> Vec<PathBuf>) -> Self {
+        Self::with_store(initial, |store, _| store)
+    }
+
+    fn with_store(initial: impl FnOnce(&Path) -> Vec<PathBuf>, prepare: impl FnOnce(Store, &Path) -> Store) -> Self {
         let turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
         let (_, home) = datadir::use_throwaway_folders();
         let dirs = [tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap()];
         let work = dunce::canonicalize(dirs[1].path()).unwrap();
-        let store = Store::load(dirs[0].path().join("state.json"));
+        let path = dirs[0].path().join("state.json");
+        let store = prepare(Store::load(path.clone()), &path);
         let mut ws = Workspace::with_store(initial(&work), store);
         ws.claude_exe = Some(fake_claude(&work));
+        ws.limits_asked = crate::claude::subagents::AgentMap::from_fn(|_| Some(Instant::now()));
+        let asked = ws.limits_asked.clone();
         ws.start();
+        assert_eq!(ws.limits_asked, asked, "saved readings draw before any provider read starts");
         let mut rt = rune::Runtime::new(ws, crate::panels::workspace_view::view, (1600.0, 900.0), rune::Env::new(true, 2.0));
         // What `main` hands the app: keys no element took.
         rt.on_key = Some(|ws: &mut Workspace, ev: &rune::KeyEvent, tx: &mut Tx| ws.on_key(ev, tx));
@@ -83,6 +91,7 @@ impl Harness {
     /// One frame: background answers and terminal output are taken in, then the view is drawn.
     fn pump(&mut self) {
         self.rt.update(|ws, tx| {
+            ws.limits_asked = crate::claude::subagents::AgentMap::from_fn(|_| Some(Instant::now()));
             ws.poll(tx);
         });
         self.rt.frame(1.0 / 60.0);
@@ -215,35 +224,78 @@ fn the_workspace_draws_and_its_controls_answer() {
 }
 
 #[test]
+fn saved_subagent_limits_draw_at_launch_before_any_read() {
+    use crate::claude::{limits::Pool, subagents::Agent};
+    let h = Harness::with_store(|_| vec![], |mut store, path| {
+        let limit = crate::store::RateLimit { utilization: Some(0.24), resets_at: Some(now() + 3600), seen_at: now() };
+        for agent in Agent::ALL {
+            if agent.provider().limits.is_some() {
+                store.data.settings.custom_subagents.get_mut(agent).on = true;
+                store.data.subagent_limits.insert(agent.key().into(), vec![Pool { name: agent.name().into(), usage: crate::store::AccountUsage { five_hour: Some(limit.clone()), seven_day: Some(limit.clone()) } }]);
+            }
+        }
+        store.save();
+        Store::load(path.to_path_buf())
+    });
+    for agent in Agent::ALL {
+        if agent.provider().limits.is_some() {
+            assert!(h.drawn(&format!("meter-{}-0-5h", agent.key())), "{}: {:?}", agent.name(), h.keys());
+        }
+    }
+}
+
+#[test]
+fn failed_and_unchanged_subagent_limits_keep_the_saved_reading_without_a_redraw() {
+    use crate::claude::limits::Pool;
+    let mut h = Harness::new(|_| vec![]);
+    let limit = crate::store::RateLimit { utilization: Some(0.24), resets_at: Some(now() + 3600), seen_at: now() };
+    let pools = vec![Pool { name: "Codex".into(), usage: crate::store::AccountUsage { five_hour: Some(limit), seven_day: None } }];
+    h.step(|ws| {
+        ws.rt.dirty = false;
+        ws.apply_subagent_limits("codex", Ok(pools.clone()));
+        assert!(ws.rt.dirty, "a changed reading redraws");
+        ws.rt.dirty = false;
+        ws.apply_subagent_limits("codex", Ok(pools.clone()));
+        assert!(!ws.rt.dirty, "the same reading needs no redraw");
+        ws.apply_subagent_limits("codex", Err("no reading yet".into()));
+        assert!(!ws.rt.dirty, "a failed read needs no redraw");
+        assert_eq!(ws.store.data.subagent_limits.get("codex"), Some(&pools));
+    });
+}
+
+#[test]
 fn codex_limits_show_only_with_codex_subagents_on() {
     let mut h = Harness::new(|_| vec![]);
     let limit = crate::store::RateLimit { utilization: Some(0.24), resets_at: Some(now() + 3600), seen_at: now() };
-    h.step(|ws| ws.codex_usage = Some(crate::store::AccountUsage { five_hour: Some(limit.clone()), seven_day: Some(limit) }));
-    assert!(h.drawn("meter-5h") && !h.drawn("meter-codex-5h"), "Codex subagents are off: {:?}", h.keys());
+    h.step(|ws| {
+        ws.limits_asked = crate::claude::subagents::AgentMap::from_fn(|_| Some(Instant::now()));
+        ws.store.data.subagent_limits.insert("codex".into(), vec![crate::claude::limits::Pool { name: "Codex".into(), usage: crate::store::AccountUsage { five_hour: Some(limit.clone()), seven_day: Some(limit) } }]);
+    });
+    assert!(h.drawn("meter-5h") && !h.drawn("meter-codex-0-5h"), "Codex subagents are off: {:?}", h.keys());
     h.step(|ws| ws.store.data.settings.custom_subagents.get_mut(crate::claude::subagents::Agent::Codex).on = true);
-    assert!(h.drawn("meter-codex-5h") && h.drawn("meter-codex-7d"), "Codex's row draws under Claude's: {:?}", h.keys());
+    assert!(h.drawn("meter-codex-0-5h") && h.drawn("meter-codex-0-7d"), "Codex's row draws under Claude's: {:?}", h.keys());
 }
 
 #[test]
 fn limit_meters_line_up_in_one_compact_grid_for_every_provider() {
-    use crate::claude::antigravity_limits::Pool;
+    use crate::claude::limits::Pool;
     use crate::claude::subagents::Agent;
     let mut h = Harness::new(|_| vec![]);
     let limit = crate::store::RateLimit { utilization: Some(0.24), resets_at: Some(now() + 3600), seen_at: now() };
     let both = crate::store::AccountUsage { five_hour: Some(limit.clone()), seven_day: Some(limit.clone()) };
     h.step(|ws| {
         ws.store.data.accounts = vec![crate::store::Account { id: crate::store::MAIN_ACCOUNT.into(), usage: both.clone(), ..Default::default() }];
-        ws.codex_usage = Some(both.clone());
+        ws.store.data.subagent_limits.insert("codex".into(), vec![Pool { name: "Codex".into(), usage: both.clone() }]);
         ws.store.data.settings.custom_subagents.get_mut(Agent::Codex).on = true;
         ws.store.data.settings.custom_subagents.get_mut(Agent::Antigravity).on = true;
-        ws.antigravity_asked = Some(std::time::Instant::now());
-        ws.antigravity_usage = vec![Pool { name: "Gemini Models".into(), usage: both.clone() }, Pool { name: "Claude and GPT models".into(), usage: both.clone() }, Pool { name: "Gemini 4 Argon".into(), usage: crate::store::AccountUsage { five_hour: None, seven_day: Some(limit.clone()) } }];
+        ws.limits_asked = crate::claude::subagents::AgentMap::from_fn(|_| Some(Instant::now()));
+        ws.store.data.subagent_limits.insert("antigravity".into(), vec![Pool { name: "Gemini Models".into(), usage: both.clone() }, Pool { name: "Claude and GPT models".into(), usage: both.clone() }, Pool { name: "Gemini 4 Argon".into(), usage: crate::store::AccountUsage { five_hour: None, seven_day: Some(limit.clone()) } }]);
     });
     h.settle();
     let elements = h.rt.elements();
     let rect = |key: &str| -> [f32; 4] { elements.iter().find(|e| e.key.as_deref() == Some(key) && !e.exiting).unwrap_or_else(|| panic!("{key} is not drawn: {:?}", h.keys())).rect };
-    let five = ["meter-5h", "meter-codex-5h", "meter-antigravity-0-5h", "meter-antigravity-1-5h"];
-    let seven = ["meter-7d", "meter-codex-7d", "meter-antigravity-0-7d", "meter-antigravity-1-7d", "meter-antigravity-2-7d"];
+    let five = ["meter-5h", "meter-codex-0-5h", "meter-antigravity-0-5h", "meter-antigravity-1-5h"];
+    let seven = ["meter-7d", "meter-codex-0-7d", "meter-antigravity-0-7d", "meter-antigravity-1-7d", "meter-antigravity-2-7d"];
     assert!(!h.drawn("meter-antigravity-2-5h"), "Argon has no five-hour window");
     for column in [&five[..], &seven[..]] {
         let first = rect(column[0]);
@@ -254,7 +306,7 @@ fn limit_meters_line_up_in_one_compact_grid_for_every_provider() {
             assert!(elements.iter().any(|e| e.text.as_deref().is_some_and(|t| t.contains("24%")) && e.rect[0] >= r[0] - 1.0 && e.rect[1] >= r[1] - 1.0 && e.rect[0] + e.rect[2] <= r[0] + r[2] + 1.0 && e.rect[1] + e.rect[3] <= r[1] + r[3] + 1.0), "{key} has no percent text inside its bar: {r:?}");
         }
     }
-    for key in ["meter-row-claude", "meter-row-codex", "meter-row-antigravity-0", "meter-row-antigravity-1", "meter-row-antigravity-2"] {
+    for key in ["meter-row-claude", "meter-row-codex-0", "meter-row-antigravity-0", "meter-row-antigravity-1", "meter-row-antigravity-2"] {
         let r = rect(key);
         assert!(r[3] <= 24.0, "{key} is too tall: {r:?}");
     }
@@ -263,7 +315,7 @@ fn limit_meters_line_up_in_one_compact_grid_for_every_provider() {
     let headers = elements.iter().filter(|e| e.text.as_deref().is_some_and(|t| t.contains("5 HOUR"))).count();
     assert_eq!(headers, 1, "5 HOUR should appear once");
     // Rows are told apart by their logos; only a named Gemini model adds a short name.
-    for source in ["claude", "codex", "antigravity-0", "antigravity-1", "antigravity-2"] {
+    for source in ["claude", "codex-0", "antigravity-0", "antigravity-1", "antigravity-2"] {
         let (logo, row) = (rect(&format!("meter-logo-{source}")), rect(&format!("meter-row-{source}")));
         assert!(logo[0] >= row[0] - 1.0 && logo[1] >= row[1] - 1.0 && logo[1] + logo[3] <= row[1] + row[3] + 1.0, "{source}'s logo starts its row: {logo:?} in {row:?}");
     }
@@ -273,7 +325,7 @@ fn limit_meters_line_up_in_one_compact_grid_for_every_provider() {
 
 #[test]
 fn antigravity_limits_show_one_row_per_pool_only_with_antigravity_subagents_on() {
-    use crate::claude::antigravity_limits::Pool;
+    use crate::claude::limits::Pool;
     use crate::claude::subagents::Agent;
     let mut h = Harness::new(|_| vec![]);
     let limit = crate::store::RateLimit { utilization: Some(0.24), resets_at: Some(now() + 3600), seen_at: now() };
@@ -281,8 +333,8 @@ fn antigravity_limits_show_one_row_per_pool_only_with_antigravity_subagents_on()
     let argon = Pool { name: "Gemini 4 Argon".into(), usage: crate::store::AccountUsage { five_hour: None, seven_day: Some(limit) } };
     // Asked just now, so the test's own `agy`, if any, isn't run.
     h.step(|ws| {
-        ws.antigravity_asked = Some(std::time::Instant::now());
-        ws.antigravity_usage = vec![gemini, argon];
+        ws.limits_asked = crate::claude::subagents::AgentMap::from_fn(|_| Some(Instant::now()));
+        ws.store.data.subagent_limits.insert("antigravity".into(), vec![gemini, argon]);
     });
     assert!(!h.drawn("meter-antigravity-0-5h"), "Antigravity subagents are off: {:?}", h.keys());
     h.step(|ws| ws.store.data.settings.custom_subagents.get_mut(Agent::Antigravity).on = true);

@@ -1,7 +1,7 @@
 //! Antigravity's 5-hour and weekly limits, from the CLI's own `agy -p /usage --output-format json`. Since agy 1.1.11
 //! the CLI answers `/usage` itself, without a model turn, so a reading costs no tokens; it does ask Google's servers,
 //! so the sidebar asks only every few minutes (`REFRESH_EVERY`). The JSON is agy's own and undocumented, so anything
-//! that doesn't parse gives no reading and the sidebar shows no Antigravity row.
+//! that doesn't parse leaves the last reading in the sidebar.
 //!
 //! Antigravity splits its models into groups ("Gemini Models", "Claude and GPT models"), each with its own limits, so a
 //! reading is one `Pool` per group.
@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 
 use crate::store::{AccountUsage, RateLimit};
+use super::limits::Pool;
 
 /// How often the sidebar asks again while Antigravity subagents are on.
 pub const REFRESH_EVERY: Duration = Duration::from_secs(300);
@@ -21,13 +22,6 @@ pub const REFRESH_EVERY: Duration = Duration::from_secs(300);
 const TIMEOUT: Duration = Duration::from_secs(30);
 /// More than any reading needs, so a runaway child can't fill memory.
 const OUTPUT_MAX: u64 = 1 << 20;
-
-/// One group of models that share limits, by the name Antigravity gives it.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Pool {
-    pub name: String,
-    pub usage: AccountUsage,
-}
 
 /// The first agy that answers `/usage` itself. An older one sends it to the model, which spends a turn every ask.
 const FIRST_WITH_USAGE: (u32, u32, u32) = (1, 1, 11);
