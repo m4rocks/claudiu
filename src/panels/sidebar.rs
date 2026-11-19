@@ -690,14 +690,14 @@ impl Workspace {
         let gap = scale::px(6.0);
         // Each row starts with the logos of whose limits it shows, and a short name where logos alone can't tell rows apart.
         let source_row = |source: &str, marks: &[&'static rune::Icon], name: Option<String>, color: u32, five: El, seven: El| -> El {
-            let mut who = row().key(format!("meter-logo-{source}")).gap(scale::px(4.0)).center_y();
+            let mut who = row().key(format!("meter-logo-{source}")).w(label_w).gap(scale::px(4.0)).center_y().clip_rounded(0.0);
             for logo in marks {
                 who = who.child(icon(logo, scale::px(12.0), color));
             }
             if let Some(name) = name {
                 who = who.child(label(name, 10.5, color).truncate().shrink());
             }
-            row().key(format!("meter-row-{source}")).gap(gap).center_y().child(row().w(label_w).child(who)).child(five).child(seven)
+            row().key(format!("meter-row-{source}")).gap(gap).center_y().child(who).child(five).child(seven)
         };
         let divider = || el().h(scale::px(1.0)).w_full().my(scale::px(2.0)).fill(rgb(theme::BORDER));
         let headers = row()

@@ -123,18 +123,18 @@ pub enum PoolMark {
     ClaudeAndGpt,
     /// A named Gemini model with limits of its own, by the first two letters of its name: `Gemini 4 Argon` → `Ar`.
     GeminiNamed(String),
-    /// A pool Claudiu doesn't know, by its name shortened: `Some New models` → `SOME NEW`.
+    /// A pool Claudiu doesn't know, by the first two letters of its name: `Some New models` → `So`.
     Other(String),
 }
 
 pub fn mark(pool: &str) -> PoolMark {
-    let words: Vec<&str> = pool.split_whitespace().filter(|w| !w.eq_ignore_ascii_case("models")).collect();
-    let lower: Vec<String> = words.iter().map(|w| w.to_lowercase()).collect();
+    let lower: Vec<String> = pool.split_whitespace().filter(|w| !w.eq_ignore_ascii_case("models")).map(str::to_lowercase).collect();
     match lower.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
         ["gemini"] => PoolMark::Gemini,
         ["claude", "and", "gpt"] => PoolMark::ClaudeAndGpt,
         ["gemini", version, name] if version.parse::<u32>().is_ok() => PoolMark::GeminiNamed(symbol(name)),
-        _ => PoolMark::Other(words.join(" ").replace(" and ", "/").to_uppercase()),
+        [first, ..] => PoolMark::Other(symbol(first)),
+        [] => PoolMark::Other(symbol(&pool.to_lowercase())),
     }
 }
 
@@ -197,8 +197,8 @@ mod tests {
         assert_eq!(mark("Claude and GPT models"), PoolMark::ClaudeAndGpt);
         assert_eq!(mark("Gemini 4 Argon"), PoolMark::GeminiNamed("Ar".into()));
         assert_eq!(mark("Gemini 5 XENON"), PoolMark::GeminiNamed("Xe".into()));
-        assert_eq!(mark("Gemini custom pool"), PoolMark::Other("GEMINI CUSTOM POOL".into()));
-        assert_eq!(mark("Other 4 Argon"), PoolMark::Other("OTHER 4 ARGON".into()));
-        assert_eq!(mark("Mistral and Llama models"), PoolMark::Other("MISTRAL/LLAMA".into()));
+        assert_eq!(mark("Gemini custom pool"), PoolMark::Other("Ge".into()));
+        assert_eq!(mark("Other 4 Argon"), PoolMark::Other("Ot".into()));
+        assert_eq!(mark("Mistral and Llama models"), PoolMark::Other("Mi".into()));
     }
 }

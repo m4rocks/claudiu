@@ -339,6 +339,31 @@ fn limit_meters_line_up_in_one_compact_grid_for_every_provider() {
 }
 
 #[test]
+fn unknown_antigravity_pools_stay_in_the_label_column_and_tell_rows_apart() {
+    use crate::claude::limits::Pool;
+    use crate::claude::subagents::Agent;
+    let mut h = Harness::new(|_| vec![]);
+    let limit = crate::store::RateLimit { utilization: Some(0.24), resets_at: Some(now() + 3600), seen_at: now() };
+    let both = crate::store::AccountUsage { five_hour: Some(limit.clone()), seven_day: Some(limit) };
+    h.step(|ws| {
+        ws.store.data.settings.custom_subagents.get_mut(Agent::Antigravity).on = true;
+        ws.limits_asked = crate::claude::subagents::AgentMap::from_fn(|_| Some(Instant::now()));
+        ws.store.data.subagent_limits.insert("antigravity".into(), vec![Pool { name: "Mistral and Llama models".into(), usage: both.clone() }, Pool { name: "Some New models".into(), usage: both }]);
+    });
+    h.settle();
+    let elements = h.rt.elements();
+    let rect = |key: &str| -> [f32; 4] { elements.iter().find(|e| e.key.as_deref() == Some(key) && !e.exiting).unwrap_or_else(|| panic!("{key} is not drawn: {:?}", h.keys())).rect };
+    let claude_five = rect("meter-5h");
+    for (source, mark) in [("antigravity-0", "Mi"), ("antigravity-1", "So")] {
+        let (logo, five) = (rect(&format!("meter-logo-{source}")), rect(&format!("meter-{source}-5h")));
+        assert!((five[0] - claude_five[0]).abs() <= 1.0 && (five[2] - claude_five[2]).abs() <= 1.0, "{source}'s 5h bar is not aligned with Claude's: {five:?} vs {claude_five:?}");
+        assert!(logo[0] + logo[2] <= five[0], "{source}'s label column extends over its 5h bar: {logo:?} vs {five:?}");
+        let label = elements.iter().find(|e| e.text.as_deref() == Some(mark)).unwrap_or_else(|| panic!("{mark} is not drawn for {source}: {:?}", elements.iter().filter_map(|e| e.text.as_deref()).collect::<Vec<_>>()));
+        assert!(label.rect[0] >= logo[0] && label.rect[0] + label.rect[2] <= five[0], "{source}'s label {mark} extends past the label column: {:?} vs {five:?}", label.rect);
+    }
+}
+
+#[test]
 fn antigravity_limits_show_one_row_per_pool_only_with_antigravity_subagents_on() {
     use crate::claude::limits::Pool;
     use crate::claude::subagents::Agent;
