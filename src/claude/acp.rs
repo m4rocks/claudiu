@@ -32,6 +32,12 @@ const STDERR_LINES: usize = 5;
 /// How long the settings page waits for the agent's models; Codex's first run downloads codex-acp through npx.
 const MODELS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 const INBOX_POLL: Duration = Duration::from_millis(100);
+/// How long an agent that resumes after a background command must stay quiet, with nothing running, before its turn
+/// counts as over: agy marks the end of its own continuation only with a usage update, which also comes just before a
+/// new tool call.
+const RESUMED_QUIET: Duration = Duration::from_secs(3);
+/// The longest wait for background commands, so one that never exits, such as a dev server, can't hold the task forever.
+const BACKGROUND_WAIT: Duration = Duration::from_secs(30 * 60);
 const INBOX_TEXT_MAX: usize = 20_000; // UTF-16 units, matching the mod
 /// JSON can use six bytes per unit, plus the envelope.
 const INBOX_BYTES: u64 = INBOX_TEXT_MAX as u64 * 6 + 1_000;
@@ -619,6 +625,26 @@ fn converse(from_agent: impl BufRead + Send + 'static, mut to_agent: impl Write,
         }
     };
     let stop = done["stopReason"].as_str().unwrap_or("end_turn");
+    if stop == "end_turn" && agent.provider().resumes_after_background && messages.running() {
+        emit(Event::Progress { text: format!("{name} is waiting for a command running in the background.") });
+        // What it wrote while starting the command ("waiting for it to finish") isn't the report.
+        messages.close();
+        messages.last = None;
+        let deadline = Instant::now() + BACKGROUND_WAIT;
+        let mut quiet_since = Instant::now();
+        while (messages.running() || !messages.idle || quiet_since.elapsed() < RESUMED_QUIET) && Instant::now() < deadline {
+            let updates = messages.updates;
+            match read(&mut to_agent, Some(&session_id), &mut messages, emit, Some(INBOX_POLL)) {
+                Ok(_) => {}
+                // An agent that exits once its commands are done has still finished its turn.
+                Err(_) if !messages.running() => break,
+                Err(reason) => return Err(reason),
+            }
+            if messages.updates != updates {
+                quiet_since = Instant::now();
+            }
+        }
+    }
     match (stop, messages.last()) {
         ("end_turn", Some(text)) => Ok(text),
         ("end_turn", None) => Err(format!("{name} finished without writing a report")),
@@ -641,6 +667,10 @@ struct Messages {
     current_id: Option<String>,
     last: Option<String>,
     tools: std::collections::HashMap<String, ToolProgress>,
+    /// How many updates arrived, so a wait can tell when the agent went quiet.
+    updates: u64,
+    /// Whether the last update was a usage report with no tool running, which agy sends as a step's last update.
+    idle: bool,
     // Codex sometimes offers only "cancel" for a refusal, which stops the turn.
     refused: Option<String>,
 }
@@ -660,6 +690,8 @@ fn tool_target(input: &Value) -> Option<&str> {
 
 impl Messages {
     fn update(&mut self, agent: Agent, update: &Value, emit: &mut dyn FnMut(Event)) {
+        self.updates += 1;
+        self.idle = update["sessionUpdate"] == "usage_update" && !self.running();
         match update["sessionUpdate"].as_str() {
             Some("agent_message_chunk") => {
                 let Some(text) = update["content"]["text"].as_str() else { return };
@@ -769,6 +801,11 @@ impl Messages {
             self.last = Some(text);
         }
         self.current_id = None;
+    }
+
+    /// Whether a tool call has started and not yet finished.
+    fn running(&self) -> bool {
+        self.tools.values().any(|tool| matches!(tool.status.as_str(), "pending" | "in_progress"))
     }
 
     fn last(&mut self) -> Option<String> {
@@ -932,6 +969,27 @@ mod tests {
 
     fn talk(agent_says: &[Value], edits: bool) -> (Result<String, String>, Vec<Value>, Vec<Event>) {
         talk_to(Agent::Codex, agent_says, edits)
+    }
+
+    /// What agy 1.5 does with a command that outlasts its wait: it ends the turn while the command runs, then carries
+    /// on by itself once it finishes, ending with a usage update and no stop reason.
+    #[test]
+    fn antigravity_finishes_its_turn_after_a_command_it_moved_to_the_background() {
+        let command = |status: &str| update(json!({ "sessionUpdate": if status == "in_progress" { "tool_call" } else { "tool_call_update" }, "toolCallId": "c1", "title": "cargo test", "status": status }));
+        let usage = update(json!({ "sessionUpdate": "usage_update", "used": 9837, "size": 1048576 }));
+        // Antigravity sets its model and accept-edits mode first, so its prompt is request 4; Codex's is request 2.
+        let says = |prompt: i64| {
+            let mut says = opening();
+            says.extend((2..prompt).map(|id| reply(id, json!({}))));
+            says.extend([command("in_progress"), chunk("m1", "Waiting for the command to finish."), usage.clone(), reply(prompt, json!({ "stopReason": "end_turn" })), command("completed"), chunk("m2", "All 540 tests pass."), usage.clone()]);
+            says
+        };
+        let (result, _, events) = talk_to(Agent::Antigravity, &says(4), true);
+        assert_eq!(result, Ok("All 540 tests pass.".into()));
+        assert!(events.iter().any(|e| matches!(e, Event::Progress { text } if text.contains("background"))));
+        // Codex's turn ends at its stop reason, even with a tool call left unfinished.
+        let (result, _, _) = talk_to(Agent::Codex, &says(2), true);
+        assert_eq!(result, Ok("Waiting for the command to finish.".into()));
     }
 
     fn opening() -> Vec<Value> {

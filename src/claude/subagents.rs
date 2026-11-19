@@ -85,6 +85,9 @@ pub struct Provider {
     pub delete_model_session: bool,
     /// Whether a tool call can start with only the tool's name, its target arriving in the first update.
     pub deferred_tool_target: bool,
+    /// Whether the agent can end its turn while a command runs on in the background, then carry on by itself once it
+    /// finishes, with no new prompt and no second stop reason.
+    pub resumes_after_background: bool,
 }
 
 const CODEX: Provider = Provider {
@@ -115,6 +118,7 @@ const CODEX: Provider = Provider {
     steering_prompt_required: true,
     delete_model_session: false,
     deferred_tool_target: false,
+    resumes_after_background: false,
 };
 
 const OPENCODE: Provider = Provider {
@@ -141,6 +145,7 @@ const OPENCODE: Provider = Provider {
     steering_prompt_required: false,
     delete_model_session: true,
     deferred_tool_target: true,
+    resumes_after_background: false,
 };
 
 const ANTIGRAVITY: Provider = Provider {
@@ -170,6 +175,8 @@ const ANTIGRAVITY: Provider = Provider {
     steering_prompt_required: false,
     delete_model_session: false,
     deferred_tool_target: false,
+    // agy gives a command about ten seconds, then moves it to the background and ends the turn.
+    resumes_after_background: true,
 };
 
 /// One value per agent, such as each agent's part of the settings.
