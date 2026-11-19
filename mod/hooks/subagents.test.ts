@@ -65,7 +65,7 @@ test('activity streams in the subagent and leaves the main conversation alone', 
   expect(text).toContain('Thinking\nChecking the parser.')
   expect(text).toContain('▸ Run tests · failed')
   expect(text).toContain('Tool output\ntest failed')
-  expect(JSON.parse(chunks.find(c => c.kind === 'input').json).message).toBe('Parser test failed.\n\n---\nSteps Codex ran (1):\n- Run tests')
+  expect(JSON.parse(chunks.find(c => c.kind === 'input').json).message).toBe('Parser test failed.\n\n---\nSteps Codex ran (1), outside Claude Code, which counts them as 0 tool uses:\n- Run tests')
 })
 
 async function step($: any, turnId: string, index: number, agentId?: string) {
@@ -187,7 +187,7 @@ test('a Codex subagent runs the task in Codex and hands back its last message', 
   const tool = chunks.find(c => c.kind === 'tool')
   expect(tool.name).toBe('SubagentHandback')
   // The report names the steps, since Claude Code counts none of Codex's tool calls as the subagent's.
-  const report = 'The bug is on line 12.\n\n---\nSteps Codex ran (1):\n- Read src/a.rs'
+  const report = 'The bug is on line 12.\n\n---\nSteps Codex ran (1), outside Claude Code, which counts them as 0 tool uses:\n- Read src/a.rs'
   const input = chunks.filter(c => c.kind === 'input').map(c => c.json).join('')
   expect(JSON.parse(input)).toEqual({ message: report })
 
@@ -260,7 +260,7 @@ test('a report with many steps lists the first ones, each cut short', async ($, 
   await $.agent.spawn({ subagentType: 'Claudiu:codex-gpt-5-5', prompt: 'Find the bug' })
   const chunks = await step($, 't1', 0, 'a1')
   const lines = JSON.parse(chunks.filter(c => c.kind === 'input').map(c => c.json).join('')).message.split('\n')
-  expect(lines.slice(0, 6)).toEqual(['Done.', '', '---', 'Steps Codex ran (32):', '- ' + 'x'.repeat(119) + '…', '- bash cat <<EOF a EOF'])
+  expect(lines.slice(0, 6)).toEqual(['Done.', '', '---', 'Steps Codex ran (32), outside Claude Code, which counts them as 0 tool uses:', '- ' + 'x'.repeat(119) + '…', '- bash cat <<EOF a EOF'])
   expect(lines.slice(-2)).toEqual(['- Read src/f30.rs', '- and 2 more'])
 })
 

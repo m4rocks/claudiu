@@ -435,14 +435,14 @@ async function customTask($, run, agentId) {
 
 // The report with the steps the agent took added under it. Claude Code counts none of them as the subagent's tool
 // calls, so without this list the caller can't tell a report written from the files from one written from the task
-// alone.
+// alone. The heading says so too: a caller that saw a tool count of 0 has asked for the whole task again.
 function withSteps(report, name, steps) {
   if (steps.length === 0) return `${report}\n\n---\n${name} ran no steps.`
   // A step can be a multi-line command; on one line it can't be mistaken for report text or a step of its own.
   const oneLine = steps.map(s => s.replace(/\s+/g, ' ').trim())
   const listed = oneLine.slice(0, STEPS_LISTED).map(s => '- ' + (s.length > STEP_CHARS ? s.slice(0, STEP_CHARS - 1) + '…' : s))
   if (steps.length > STEPS_LISTED) listed.push(`- and ${steps.length - STEPS_LISTED} more`)
-  return `${report}\n\n---\nSteps ${name} ran (${steps.length}):\n${listed.join('\n')}`
+  return `${report}\n\n---\nSteps ${name} ran (${steps.length}), outside Claude Code, which counts them as 0 tool uses:\n${listed.join('\n')}`
 }
 
 function displayText(text) {
