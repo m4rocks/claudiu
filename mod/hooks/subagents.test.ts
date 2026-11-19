@@ -5,7 +5,7 @@ function type(name: string, model: string) {
   return { name, model, description: `Runs the task on ${model}.`, prompt: 'Say the mod lost track.' }
 }
 
-const SUBAGENTS = JSON.stringify({ codex: { edits: false, types: [type('codex-gpt-5-5', 'gpt-5.5')] } })
+const SUBAGENTS = JSON.stringify({ codex: { name: 'Codex', edits: false, types: [type('codex-gpt-5-5', 'gpt-5.5')] } })
 
 // What the engine answers beneath the mod for a session with Codex on. `helper` is what `claudiu --acp` writes;
 // `requests` collects what the mod sent it.
@@ -65,7 +65,7 @@ test('activity streams in the subagent and leaves the main conversation alone', 
   expect(text).toContain('Thinking\nChecking the parser.')
   expect(text).toContain('▸ Run tests · failed')
   expect(text).toContain('Tool output\ntest failed')
-  expect(JSON.parse(chunks.find(c => c.kind === 'input').json).message).toBe('Parser test failed.\n\n---\nSteps Codex ran (1):\n- Run tests')
+  expect(JSON.parse(chunks.find(c => c.kind === 'input').json).message).toBe('Parser test failed.\n\n---\nSteps Codex ran (1), outside Claude Code, which counts them as 0 tool uses:\n- Run tests')
 })
 
 async function step($: any, turnId: string, index: number, agentId?: string) {
@@ -187,7 +187,7 @@ test('a Codex subagent runs the task in Codex and hands back its last message', 
   const tool = chunks.find(c => c.kind === 'tool')
   expect(tool.name).toBe('SubagentHandback')
   // The report names the steps, since Claude Code counts none of Codex's tool calls as the subagent's.
-  const report = 'The bug is on line 12.\n\n---\nSteps Codex ran (1):\n- Read src/a.rs'
+  const report = 'The bug is on line 12.\n\n---\nSteps Codex ran (1), outside Claude Code, which counts them as 0 tool uses:\n- Read src/a.rs'
   const input = chunks.filter(c => c.kind === 'input').map(c => c.json).join('')
   expect(JSON.parse(input)).toEqual({ message: report })
 
@@ -260,7 +260,7 @@ test('a report with many steps lists the first ones, each cut short', async ($, 
   await $.agent.spawn({ subagentType: 'Claudiu:codex-gpt-5-5', prompt: 'Find the bug' })
   const chunks = await step($, 't1', 0, 'a1')
   const lines = JSON.parse(chunks.filter(c => c.kind === 'input').map(c => c.json).join('')).message.split('\n')
-  expect(lines.slice(0, 6)).toEqual(['Done.', '', '---', 'Steps Codex ran (32):', '- ' + 'x'.repeat(119) + '…', '- bash cat <<EOF a EOF'])
+  expect(lines.slice(0, 6)).toEqual(['Done.', '', '---', 'Steps Codex ran (32), outside Claude Code, which counts them as 0 tool uses:', '- ' + 'x'.repeat(119) + '…', '- bash cat <<EOF a EOF'])
   expect(lines.slice(-2)).toEqual(['- Read src/f30.rs', '- and 2 more'])
 })
 
@@ -304,7 +304,7 @@ test('an OpenCode subagent runs the task in OpenCode and names it', async ($, on
   const requests: any[] = []
   const subagents = JSON.stringify({
     codex: { edits: false, types: [type('codex-gpt-5-5', 'gpt-5.5')] },
-    opencode: { edits: true, types: [type('opencode-openai-gpt-6-1-sol', 'openai/gpt-6.1-sol')] },
+    opencode: { name: 'OpenCode', edits: true, types: [type('opencode-openai-gpt-6-1-sol', 'openai/gpt-6.1-sol')] },
   })
   engine(on, [JSON.stringify({ kind: 'failed', reason: 'opencode was not found on PATH. OpenCode subagents need OpenCode installed.' })], requests, subagents)
   await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
@@ -315,6 +315,31 @@ test('an OpenCode subagent runs the task in OpenCode and names it', async ($, on
   expect(chunks.filter(c => c.kind === 'text').map(c => c.text).join('')).toBe('OpenCode on openai/gpt-6.1-sol, edits allowed\n\n')
   const input = JSON.parse(chunks.filter(c => c.kind === 'input').map(c => c.json).join(''))
   expect(input.message).toBe('OpenCode failed: opencode was not found on PATH. OpenCode subagents need OpenCode installed.\n\n---\nOpenCode ran no steps.')
+})
+
+test('Antigravity uses the display name supplied by Claudiu', async ($, on) => {
+  const requests: any[] = []
+  const registered = engine(on, [JSON.stringify({ kind: 'report', text: 'Done.' })], requests, JSON.stringify({
+    antigravity: { name: 'Antigravity', edits: false, types: [type('antigravity-gemini-4-neon', 'gemini-4-neon')] },
+  }))
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+  expect(registered.map(r => r.name)).toEqual(['antigravity-gemini-4-neon'])
+  await $.agent.spawn({ subagentType: 'Claudiu:antigravity-gemini-4-neon', prompt: 'Find the bug' })
+  const chunks = await step($, 't1', 0, 'a1')
+  expect(requests[0].input.agent).toBe('antigravity')
+  expect(chunks.filter(c => c.kind === 'text').map(c => c.text).join('')).toBe('Antigravity on gemini-4-neon, read-only\n\n')
+  expect(JSON.parse(chunks.find(c => c.kind === 'input').json).message).toContain('Antigravity ran no steps.')
+})
+
+test('a provider without a display name falls back to its key', async ($, on) => {
+  engine(on, [JSON.stringify({ kind: 'report', text: 'Done.' })], [], JSON.stringify({
+    fourth: { edits: false, types: [type('fourth-model', 'model')] },
+  }))
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+  await $.agent.spawn({ subagentType: 'Claudiu:fourth-model', prompt: 'Find the bug' })
+  const chunks = await step($, 't1', 0, 'a1')
+  expect(chunks.filter(c => c.kind === 'text').map(c => c.text).join('')).toBe('fourth on model, read-only\n\n')
+  expect(JSON.parse(chunks.find(c => c.kind === 'input').json).message).toContain('fourth ran no steps.')
 })
 
 test('a failure is handed back as the report', async ($, on) => {

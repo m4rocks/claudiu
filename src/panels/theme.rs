@@ -30,6 +30,8 @@ pub const DANGER: u32 = 0xe06c75;
 pub const SELECTION: u32 = 0x3d4a5c;
 /// Codex's usage bars, so they read apart from Claude's at a glance. The terminal palette's blue.
 pub const CODEX: u32 = 0x61afef;
+/// Antigravity's usage bars, apart from Claude's and Codex's. The terminal palette's magenta.
+pub const ANTIGRAVITY: u32 = 0xc678dd;
 /// Search matches in the editor, faint, and the current one stronger.
 pub const FOUND: u32 = 0xe5c07b;
 

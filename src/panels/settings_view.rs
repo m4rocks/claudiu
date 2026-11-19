@@ -68,29 +68,84 @@ fn settings_toggle(key: &str, title: &str, on: bool, field: fn(&mut Modal) -> Op
     })
 }
 
-/// One agent's part of the Custom subagents page, edited as `form`.
-struct AgentSection<'a> {
-    agent: Agent,
-    form: &'a AgentForm,
-    /// The models the agent offered when the page last asked.
-    catalog: &'a [AgentModel],
-    lookup: &'a Lookup,
+/// Flips an agent's switch. Switched on with no model chosen yet, its dialog opens on the models, since an agent with
+/// none gives Claude no subagent.
+fn flip_agent(ws: &mut Workspace, agent: Agent) {
+    let Some(Modal::Settings { subagents, .. }) = ws.modal.as_mut() else { return };
+    let form = subagents.get_mut(agent);
+    form.on = !form.on;
+    let choose = form.on && form.models.is_empty();
+    ws.load_models();
+    if choose && !ws.agent_dialog_open() {
+        ws.open_agent_dialog(agent);
+    }
 }
 
-/// What the page says about an agent: what it runs on and needs, and what Allow edits on and off let it do.
-fn agent_texts(agent: Agent) -> (&'static str, &'static str, &'static str) {
-    match agent {
-        Agent::Codex => (
-            "Runs the task in OpenAI Codex through codex-acp. Needs Node (npx) and a `codex login`; the first run downloads codex-acp from npm.",
-            "Claudiu accepts everything Codex asks for: editing files, running commands, writing outside the folder and using the network. None of it goes through Claude Code's permission rules or hooks.",
-            "Codex runs read-only: it can read and search, but not change files.",
-        ),
-        Agent::OpenCode => (
-            "Runs the task in OpenCode (`opencode acp`), on the providers you set up in OpenCode. Needs `opencode` on PATH.",
-            "Claudiu accepts everything OpenCode asks for, and OpenCode's own permission settings decide the rest: it can edit files, run commands and use the network. None of it goes through Claude Code's permission rules or hooks.",
-            "OpenCode runs read-only: it can read, search and list files, but not change them or run any command, not even a read-only one.",
-        ),
+/// What an agent's card says under its name, and in which colour: off, missing a model, or what Claude gets.
+fn agent_status(agent: Agent, form: &AgentForm, lookup: &Lookup) -> (String, u32) {
+    if !form.on {
+        return ("Off".into(), theme::TEXT_FAINT);
     }
+    if lookup.error.is_some() {
+        return (format!("Couldn't load {}'s models", agent.name()), theme::WARN);
+    }
+    let access = if form.edits { "edits allowed" } else { "read-only" };
+    match form.models.len() {
+        0 => ("On, but no model is chosen, so Claude gets no subagent".into(), theme::WARN),
+        1 => (format!("1 subagent · {access}"), theme::TEXT_DIM),
+        n => (format!("{n} subagents · {access}"), theme::TEXT_DIM),
+    }
+}
+
+/// An agent's card on the Custom subagents page: its name, its status and the models switched on, which open its
+/// dialog, and its switch beside them.
+fn agent_card(agent: Agent, form: &AgentForm, catalog: &[AgentModel], lookup: &Lookup) -> El {
+    let key = agent.key();
+    let (status, tone) = agent_status(agent, form, lookup);
+    let mut about = col().grow(1.0).shrink().min_w(0.0).gap(3.0).child(label(agent.name(), 13.0, theme::TEXT).font(font(13.0, 600.0))).child(label(status, 11.0, tone).wrap());
+    if form.on && !form.models.is_empty() {
+        let names: Vec<&str> = form.models.iter().map(|id| catalog.iter().find(|m| &m.id == id).map_or(id.as_str(), |m| m.name.as_str())).collect();
+        about = about.child(label(names.join(" · "), 11.0, theme::TEXT_FAINT).truncate());
+    }
+    let open = row()
+        .key(format!("settings-{key}-open"))
+        .grow(1.0)
+        .shrink()
+        .min_w(0.0)
+        .center_y()
+        .gap(10.0)
+        .cursor(Cursor::Pointer)
+        .role("button")
+        .child(about)
+        .child(label("Set up ›", 12.0, theme::TEXT_DIM))
+        .on_press_tx(move |ws: &mut Workspace, tx: &mut Tx| {
+            ws.open_agent_dialog(agent);
+            ws.after_input(tx);
+        });
+    let toggle = row()
+        .key(format!("settings-{key}"))
+        .pl(14.0)
+        .h_full()
+        .center_y()
+        .cursor(Cursor::Pointer)
+        .role("switch")
+        .child(switch(form.on).key(format!("settings-{key}-switch")))
+        .on_press_tx(move |ws: &mut Workspace, tx: &mut Tx| {
+            flip_agent(ws, agent);
+            ws.after_input(tx);
+        });
+    row()
+        .key(format!("settings-{key}-card"))
+        .w_full()
+        .px(12.0)
+        .py(10.0)
+        .center_y()
+        .radius(8.0)
+        .fill(rgb(0x111113))
+        .border(1.0, rgb(if form.on { 0x3a302b } else { 0x242428 }))
+        .hover(Color::WHITE.alpha(0.02))
+        .child(open)
+        .child(toggle)
 }
 
 /// The models to list: those the agent offers, then any switched on that it no longer offers, so they can be
@@ -133,56 +188,6 @@ fn lookup_status(agent: Agent, catalog: &[AgentModel], lookup: &Lookup) -> Optio
     } else {
         lookup.error.as_ref().map(|why| label(format!("Couldn't load {name}'s models: {why}"), 11.0, theme::WARN).wrap())
     }
-}
-
-/// An agent's switch and, once it is on, the models switched on, the button to the model picker, and whether it may
-/// edit.
-fn agent_section(s: AgentSection) -> El {
-    let AgentSection { agent, form, catalog, lookup } = s;
-    let (about, edits_on, edits_off) = agent_texts(agent);
-    let key = agent.key();
-    let mut section = col()
-        .gap(8.0)
-        .child(section_label(agent.name().to_uppercase()).mt(4.0))
-        .child(faint(about))
-        .child(switch_row(format!("settings-{key}"), &format!("{} subagents", agent.name()), None, form.on, move |ws| {
-            if let Some(Modal::Settings { subagents, .. }) = ws.modal.as_mut() {
-                let form = subagents.get_mut(agent);
-                form.on = !form.on;
-            }
-            ws.load_models();
-        }));
-    if !form.on {
-        return section;
-    }
-    for (model, offered) in model_rows(catalog, &form.models).into_iter().filter(|(m, _)| form.models.contains(&m.id)) {
-        section = section.children(model_switch(format!("settings-{key}-model-{}", model.id), agent, &model, offered, true));
-    }
-    if let Some(status) = lookup_status(agent, catalog, lookup) {
-        section = section.child(status);
-    } else if form.models.is_empty() {
-        section = section.child(faint(format!("Choose a model to give Claude a {} subagent for it.", agent.name())));
-    }
-    let count = if catalog.is_empty() { String::new() } else { on_count(catalog, &form.models) };
-    section
-        .child(
-            row()
-                .w_full()
-                .center_y()
-                .justify_between()
-                .child(button("Choose models…", false).key(format!("settings-{key}-choose")).on_press_tx(move |ws: &mut Workspace, tx: &mut Tx| {
-                    ws.open_model_picker(agent);
-                    ws.after_input(tx);
-                }))
-                .child(faint(count)),
-        )
-        .child(switch_row(format!("settings-{key}-edits"), "Allow edits", None, form.edits, move |ws| {
-            if let Some(Modal::Settings { subagents, .. }) = ws.modal.as_mut() {
-                let form = subagents.get_mut(agent);
-                form.edits = !form.edits;
-            }
-        }))
-        .child(faint(if form.edits { edits_on } else { edits_off }))
 }
 
 /// A row that opens a menu of `options` under itself; the first entry, "Claude Code default", clears the choice.
@@ -234,33 +239,62 @@ fn scale_step(key: &'static str, sign: &'static str, by: i32) -> El {
 }
 
 impl Workspace {
-    /// The model picker over the Custom subagents page: a search field and a switch for every model the agent offers
-    /// that fits it. Its switches edit the page's form, so Settings' Save and Cancel decide what is kept.
-    pub(crate) fn model_picker(&self) -> Option<El> {
+    /// An agent's dialog over the Custom subagents page: what it runs on, its switch, Allow edits, and a search over
+    /// the models it offers with a switch for each. It edits the page's form, so Settings' Save and Cancel decide what
+    /// is kept.
+    pub(crate) fn agent_dialog(&self) -> Option<El> {
         let Some(Modal::Settings { subagents, .. }) = &self.modal else { return None };
         let (agent, search) = subagents.picking.as_ref()?;
         let agent = *agent;
+        let provider = agent.provider();
+        let key = agent.key();
         let form = subagents.get(agent);
         let catalog = &self.store.data.settings.custom_subagents.get(agent).catalog;
-        let query = search.text.as_str();
-        let mut list = col().gap(6.0);
-        let mut shown = 0;
-        for (model, offered) in model_rows(catalog, &form.models).into_iter().filter(|(m, _)| model_matches(query, m)) {
-            if let Some(row) = model_switch(format!("model-picker-{}", model.id), agent, &model, offered, form.models.contains(&model.id)) {
-                list = list.child(row);
-                shown += 1;
+        let lookup = self.model_lookups.get(agent);
+        let mut top = col()
+            .gap(8.0)
+            .w_full()
+            .child(rune::text(format!("{} subagents", provider.name)).font(font(15.0, 600.0)).color(rgb(theme::TEXT)))
+            .child(faint(provider.about))
+            .child(switch_row(format!("agent-dialog-{key}-on"), &format!("Give Claude {} subagents", provider.name), None, form.on, move |ws| flip_agent(ws, agent)));
+        let mut models = col().key("agent-dialog-models").w_full().gap(8.0);
+        if form.on {
+            top = top
+                .child(switch_row(format!("agent-dialog-{key}-edits"), "Allow edits", None, form.edits, move |ws| {
+                    if let Some(Modal::Settings { subagents, .. }) = ws.modal.as_mut() {
+                        let form = subagents.get_mut(agent);
+                        form.edits = !form.edits;
+                    }
+                }))
+                .child(faint(if form.edits { provider.edits_on } else { provider.edits_off }));
+            let query = search.text.as_str();
+            let mut list = col().gap(6.0);
+            let mut shown = 0;
+            for (model, offered) in model_rows(catalog, &form.models).into_iter().filter(|(m, _)| model_matches(query, m)) {
+                if let Some(row) = model_switch(format!("agent-dialog-model-{}", model.id), agent, &model, offered, form.models.contains(&model.id)) {
+                    list = list.child(row);
+                    shown += 1;
+                }
             }
+            if let Some(status) = lookup_status(agent, catalog, lookup) {
+                list = list.child(status);
+            } else if shown == 0 {
+                list = list.child(faint(format!("No model matches “{}”.", query.trim())));
+            }
+            let count = if catalog.is_empty() { String::new() } else { on_count(catalog, &form.models) };
+            models = models
+                .child(row().w_full().mt(4.0).center_y().justify_between().child(section_label("MODELS")).child(faint(count)))
+                .child(faint(format!("Each model switched on is one subagent Claude can start, named as shown under it. Claude uses {} only when you ask for it.", provider.name)))
+                .child(modal_input_submitting(5, search, "Search models", Workspace::close_agent_dialog))
+                .child(list.key("agent-dialog-list").w_full());
+        } else {
+            models = models.child(faint(format!("Switch {} on to choose its models.", provider.name)));
         }
-        if let Some(status) = lookup_status(agent, catalog, self.model_lookups.get(agent)) {
-            list = list.child(status);
-        } else if shown == 0 {
-            list = list.child(faint(format!("No model matches “{}”.", query.trim())));
-        }
-        let count = on_count(catalog, &form.models);
         let card = col()
-            .key("model-picker")
-            .w(crate::panels::scale::px(520.0))
-            .h(crate::panels::scale::px(440.0))
+            .key("agent-dialog")
+            // A small window or a large scale shrinks the dialog to fit, and its body scrolls as one above Done.
+            .w(crate::panels::scale::px(560.0).min(self.window_size.0 - 32.0))
+            .h(crate::panels::scale::px(560.0).min(self.window_size.1 - 32.0))
             .padding(20.0)
             .gap(12.0)
             .radius(12.0)
@@ -269,23 +303,19 @@ impl Workspace {
             .shadow(16.0, 48.0, Color::BLACK.alpha(0.55))
             .role("dialog")
             .transition(rune::Transition::scale(0.96).combined(rune::Transition::opacity()))
-            .child(rune::text(format!("{} models", agent.name())).font(font(15.0, 600.0)).color(rgb(theme::TEXT)))
-            .child(modal_input_submitting(5, search, "Search models", Workspace::close_model_picker))
-            .child(col().key("model-picker-list").grow(1.0).shrink().min_h(0.0).w_full().scroll(ScrollSpec { stick_bottom: false }).child(list.w_full().pr(6.0)))
-            .child(
-                row().w_full().center_y().justify_between().child(faint(count)).child(button("Done", true).key("model-picker-done").on_press_tx(|ws: &mut Workspace, tx: &mut Tx| {
-                    ws.close_model_picker();
-                    ws.after_input(tx);
-                })),
-            );
+            .child(col().key("agent-dialog-body").grow(1.0).shrink().min_h(0.0).w_full().gap(12.0).scroll(ScrollSpec { stick_bottom: false }).child(top.pr(6.0)).child(models.pr(6.0)))
+            .child(row().w_full().justify_end().child(button("Done", true).key("agent-dialog-done").on_press_tx(|ws: &mut Workspace, tx: &mut Tx| {
+                ws.close_agent_dialog();
+                ws.after_input(tx);
+            })));
         Some(
             row()
-                .key("model-picker-backdrop")
+                .key("agent-dialog-backdrop")
                 .pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
                 .center()
                 .fill(Color::BLACK.alpha(0.4))
                 .transition(rune::Transition::opacity())
-                .modal(true, |ws: &mut Workspace| ws.close_model_picker())
+                .modal(true, |ws: &mut Workspace| ws.close_agent_dialog())
                 .child(card),
         )
     }
@@ -384,10 +414,10 @@ impl Workspace {
             SettingsPage::CustomSubagents => {
                 let saved = &self.store.data.settings.custom_subagents;
                 let mut page = col().gap(8.0).child(faint(
-                    "Agent types that run a task in another coding agent instead of Claude. Claude uses one only when you ask for it. Applies to new and resumed sessions. Running sessions keep theirs.",
+                    "Let Claude hand a task to another coding agent. Each model you switch on under a provider becomes one subagent, and Claude uses it only when you ask for it. Applies to new and resumed sessions; running sessions keep theirs.",
                 ));
                 for agent in Agent::ALL {
-                    page = page.child(agent_section(AgentSection { agent, form: subagents.get(agent), catalog: &saved.get(agent).catalog, lookup: self.model_lookups.get(agent) }));
+                    page = page.child(agent_card(agent, subagents.get(agent), &saved.get(agent).catalog, self.model_lookups.get(agent)));
                 }
                 page
             }

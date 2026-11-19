@@ -1,7 +1,7 @@
 //! Codex's 5-hour and 7-day limits, read from the session logs Codex writes under `$CODEX_HOME/sessions` (default
 //! `~/.codex`). Each turn Codex logs a `token_count` event carrying its current `rate_limits`; the newest one is the
 //! reading. Read-only, no network, no tokens. The log format is Codex's own and undocumented, so anything that doesn't
-//! parse is skipped and the sidebar shows no Codex row.
+//! parse is skipped and the sidebar keeps its last reading.
 
 use std::path::{Path, PathBuf};
 use std::collections::HashMap;

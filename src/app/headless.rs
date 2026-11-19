@@ -47,14 +47,22 @@ fn git(dir: &Path, args: &[&str]) -> std::process::Output {
 impl Harness {
     /// The workspace in a 1600×900 window, with the projects `initial` makes in the work folder registered.
     fn new(initial: impl FnOnce(&Path) -> Vec<PathBuf>) -> Self {
+        Self::with_store(initial, |store, _| store)
+    }
+
+    fn with_store(initial: impl FnOnce(&Path) -> Vec<PathBuf>, prepare: impl FnOnce(Store, &Path) -> Store) -> Self {
         let turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
         let (_, home) = datadir::use_throwaway_folders();
         let dirs = [tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap()];
         let work = dunce::canonicalize(dirs[1].path()).unwrap();
-        let store = Store::load(dirs[0].path().join("state.json"));
+        let path = dirs[0].path().join("state.json");
+        let store = prepare(Store::load(path.clone()), &path);
         let mut ws = Workspace::with_store(initial(&work), store);
         ws.claude_exe = Some(fake_claude(&work));
+        ws.limits_asked = crate::claude::subagents::AgentMap::from_fn(|_| Some(Instant::now()));
+        let asked = ws.limits_asked.clone();
         ws.start();
+        assert_eq!(ws.limits_asked, asked, "saved readings draw before any provider read starts");
         let mut rt = rune::Runtime::new(ws, crate::panels::workspace_view::view, (1600.0, 900.0), rune::Env::new(true, 2.0));
         // What `main` hands the app: keys no element took.
         rt.on_key = Some(|ws: &mut Workspace, ev: &rune::KeyEvent, tx: &mut Tx| ws.on_key(ev, tx));
@@ -83,6 +91,7 @@ impl Harness {
     /// One frame: background answers and terminal output are taken in, then the view is drawn.
     fn pump(&mut self) {
         self.rt.update(|ws, tx| {
+            ws.limits_asked = crate::claude::subagents::AgentMap::from_fn(|_| Some(Instant::now()));
             ws.poll(tx);
         });
         self.rt.frame(1.0 / 60.0);
@@ -215,13 +224,138 @@ fn the_workspace_draws_and_its_controls_answer() {
 }
 
 #[test]
+fn saved_subagent_limits_draw_at_launch_before_any_read() {
+    use crate::claude::{limits::Pool, subagents::Agent};
+    let h = Harness::with_store(|_| vec![], |mut store, path| {
+        let limit = crate::store::RateLimit { utilization: Some(0.24), resets_at: Some(now() + 3600), seen_at: now() };
+        for agent in Agent::ALL {
+            if agent.provider().limits.is_some() {
+                store.data.settings.custom_subagents.get_mut(agent).on = true;
+                store.data.subagent_limits.insert(agent.key().into(), vec![Pool { name: agent.name().into(), usage: crate::store::AccountUsage { five_hour: Some(limit.clone()), seven_day: Some(limit.clone()) } }]);
+            }
+        }
+        store.save();
+        Store::load(path.to_path_buf())
+    });
+    for agent in Agent::ALL {
+        if agent.provider().limits.is_some() {
+            assert!(h.drawn(&format!("meter-{}-0-5h", agent.key())), "{}: {:?}", agent.name(), h.keys());
+        }
+    }
+}
+
+#[test]
+fn failed_and_unchanged_subagent_limits_keep_the_saved_reading_without_a_redraw() {
+    use crate::claude::limits::Pool;
+    let mut h = Harness::new(|_| vec![]);
+    let limit = crate::store::RateLimit { utilization: Some(0.24), resets_at: Some(now() + 3600), seen_at: now() };
+    let pools = vec![Pool { name: "Codex".into(), usage: crate::store::AccountUsage { five_hour: Some(limit), seven_day: None } }];
+    h.step(|ws| {
+        ws.rt.dirty = false;
+        ws.apply_subagent_limits("codex", Ok(pools.clone()));
+        assert!(ws.rt.dirty, "a changed reading redraws");
+        ws.rt.dirty = false;
+        ws.apply_subagent_limits("codex", Ok(pools.clone()));
+        assert!(!ws.rt.dirty, "the same reading needs no redraw");
+        ws.apply_subagent_limits("codex", Err("no reading yet".into()));
+        assert!(!ws.rt.dirty, "a failed read needs no redraw");
+        assert_eq!(ws.store.data.subagent_limits.get("codex"), Some(&pools));
+    });
+}
+
+#[test]
 fn codex_limits_show_only_with_codex_subagents_on() {
     let mut h = Harness::new(|_| vec![]);
     let limit = crate::store::RateLimit { utilization: Some(0.24), resets_at: Some(now() + 3600), seen_at: now() };
-    h.step(|ws| ws.codex_usage = Some(crate::store::AccountUsage { five_hour: Some(limit.clone()), seven_day: Some(limit) }));
-    assert!(h.drawn("meter-5h") && !h.drawn("meter-codex-5h"), "Codex subagents are off: {:?}", h.keys());
-    h.step(|ws| ws.store.data.settings.custom_subagents.codex.on = true);
-    assert!(h.drawn("meter-codex-5h") && h.drawn("meter-codex-7d"), "Codex's row draws under Claude's: {:?}", h.keys());
+    h.step(|ws| {
+        ws.limits_asked = crate::claude::subagents::AgentMap::from_fn(|_| Some(Instant::now()));
+        ws.store.data.subagent_limits.insert("codex".into(), vec![crate::claude::limits::Pool { name: "Codex".into(), usage: crate::store::AccountUsage { five_hour: Some(limit.clone()), seven_day: Some(limit) } }]);
+    });
+    assert!(h.drawn("meter-5h") && !h.drawn("meter-codex-0-5h"), "Codex subagents are off: {:?}", h.keys());
+    h.step(|ws| ws.store.data.settings.custom_subagents.get_mut(crate::claude::subagents::Agent::Codex).on = true);
+    assert!(h.drawn("meter-codex-0-5h") && h.drawn("meter-codex-0-7d"), "Codex's row draws under Claude's: {:?}", h.keys());
+}
+
+#[test]
+fn a_reading_saved_hours_ago_still_counts_down_to_its_reset() {
+    use crate::claude::limits::Pool;
+    use crate::claude::subagents::Agent;
+    let mut h = Harness::new(|_| vec![]);
+    let saved = crate::store::RateLimit { utilization: Some(0.24), resets_at: Some(now() + 3630), seen_at: now() - 3 * 3600 };
+    h.step(|ws| {
+        ws.store.data.settings.custom_subagents.get_mut(Agent::Codex).on = true;
+        ws.limits_asked = crate::claude::subagents::AgentMap::from_fn(|_| Some(Instant::now()));
+        ws.store.data.subagent_limits.insert("codex".into(), vec![Pool { name: "Codex".into(), usage: crate::store::AccountUsage { five_hour: Some(saved), seven_day: None } }]);
+    });
+    let texts: Vec<String> = h.rt.elements().into_iter().filter_map(|e| e.text).collect();
+    assert!(texts.iter().any(|t| t == "1h 0m") && !texts.iter().any(|t| t.ends_with(" ago")), "{texts:?}");
+}
+
+#[test]
+fn limit_meters_line_up_in_one_compact_grid_for_every_provider() {
+    use crate::claude::limits::Pool;
+    use crate::claude::subagents::Agent;
+    let mut h = Harness::new(|_| vec![]);
+    let limit = crate::store::RateLimit { utilization: Some(0.24), resets_at: Some(now() + 3600), seen_at: now() };
+    let both = crate::store::AccountUsage { five_hour: Some(limit.clone()), seven_day: Some(limit.clone()) };
+    h.step(|ws| {
+        ws.store.data.accounts = vec![crate::store::Account { id: crate::store::MAIN_ACCOUNT.into(), usage: both.clone(), ..Default::default() }];
+        ws.store.data.subagent_limits.insert("codex".into(), vec![Pool { name: "Codex".into(), usage: both.clone() }]);
+        ws.store.data.settings.custom_subagents.get_mut(Agent::Codex).on = true;
+        ws.store.data.settings.custom_subagents.get_mut(Agent::Antigravity).on = true;
+        ws.limits_asked = crate::claude::subagents::AgentMap::from_fn(|_| Some(Instant::now()));
+        ws.store.data.subagent_limits.insert("antigravity".into(), vec![Pool { name: "Gemini Models".into(), usage: both.clone() }, Pool { name: "Claude and GPT models".into(), usage: both.clone() }, Pool { name: "Gemini 4 Argon".into(), usage: crate::store::AccountUsage { five_hour: None, seven_day: Some(limit.clone()) } }]);
+    });
+    h.settle();
+    let elements = h.rt.elements();
+    let rect = |key: &str| -> [f32; 4] { elements.iter().find(|e| e.key.as_deref() == Some(key) && !e.exiting).unwrap_or_else(|| panic!("{key} is not drawn: {:?}", h.keys())).rect };
+    let five = ["meter-5h", "meter-codex-0-5h", "meter-antigravity-0-5h", "meter-antigravity-1-5h"];
+    let seven = ["meter-7d", "meter-codex-0-7d", "meter-antigravity-0-7d", "meter-antigravity-1-7d", "meter-antigravity-2-7d"];
+    assert!(!h.drawn("meter-antigravity-2-5h"), "Argon has no five-hour window");
+    for column in [&five[..], &seven[..]] {
+        let first = rect(column[0]);
+        for key in column {
+            let r = rect(key);
+            assert!((r[0] - first[0]).abs() <= 1.0 && (r[2] - first[2]).abs() <= 1.0, "{key} is not aligned with {}: {r:?} vs {first:?}", column[0]);
+            assert!(r[3] <= 22.0, "{key} is too tall: {r:?}");
+            assert!(elements.iter().any(|e| e.text.as_deref().is_some_and(|t| t.contains("24%")) && e.rect[0] >= r[0] - 1.0 && e.rect[1] >= r[1] - 1.0 && e.rect[0] + e.rect[2] <= r[0] + r[2] + 1.0 && e.rect[1] + e.rect[3] <= r[1] + r[3] + 1.0), "{key} has no percent text inside its bar: {r:?}");
+        }
+    }
+    for key in ["meter-row-claude", "meter-row-codex-0", "meter-row-antigravity-0", "meter-row-antigravity-1", "meter-row-antigravity-2"] {
+        let r = rect(key);
+        assert!(r[3] <= 24.0, "{key} is too tall: {r:?}");
+    }
+    let grid = rect("meter-limits");
+    assert!(grid[3] < 170.0, "the grid is too tall: {grid:?}");
+    let headers = elements.iter().filter(|e| e.text.as_deref().is_some_and(|t| t.contains("5 HOUR"))).count();
+    assert_eq!(headers, 1, "5 HOUR should appear once");
+    // Rows are told apart by their logos; only a named Gemini model adds a short name.
+    for source in ["claude", "codex-0", "antigravity-0", "antigravity-1", "antigravity-2"] {
+        let (logo, row) = (rect(&format!("meter-logo-{source}")), rect(&format!("meter-row-{source}")));
+        assert!(logo[0] >= row[0] - 1.0 && logo[1] >= row[1] - 1.0 && logo[1] + logo[3] <= row[1] + row[3] + 1.0, "{source}'s logo starts its row: {logo:?} in {row:?}");
+    }
+    let texts: Vec<&str> = elements.iter().filter_map(|e| e.text.as_deref()).collect();
+    assert!(!texts.contains(&"CLAUDE") && !texts.contains(&"CODEX") && !texts.contains(&"GEMINI") && !texts.contains(&"CLAUDE/GPT") && texts.contains(&"Ar"), "{texts:?}");
+}
+
+#[test]
+fn antigravity_limits_show_one_row_per_pool_only_with_antigravity_subagents_on() {
+    use crate::claude::limits::Pool;
+    use crate::claude::subagents::Agent;
+    let mut h = Harness::new(|_| vec![]);
+    let limit = crate::store::RateLimit { utilization: Some(0.24), resets_at: Some(now() + 3600), seen_at: now() };
+    let gemini = Pool { name: "Gemini Models".into(), usage: crate::store::AccountUsage { five_hour: Some(limit.clone()), seven_day: Some(limit.clone()) } };
+    let argon = Pool { name: "Gemini 4 Argon".into(), usage: crate::store::AccountUsage { five_hour: None, seven_day: Some(limit) } };
+    // Asked just now, so the test's own `agy`, if any, isn't run.
+    h.step(|ws| {
+        ws.limits_asked = crate::claude::subagents::AgentMap::from_fn(|_| Some(Instant::now()));
+        ws.store.data.subagent_limits.insert("antigravity".into(), vec![gemini, argon]);
+    });
+    assert!(!h.drawn("meter-antigravity-0-5h"), "Antigravity subagents are off: {:?}", h.keys());
+    h.step(|ws| ws.store.data.settings.custom_subagents.get_mut(Agent::Antigravity).on = true);
+    assert!(h.drawn("meter-antigravity-0-5h") && h.drawn("meter-antigravity-0-7d"), "Gemini's row draws under Claude's: {:?}", h.keys());
+    assert!(h.drawn("meter-antigravity-1-7d") && !h.drawn("meter-antigravity-1-5h"), "a pool shows only the windows it has");
+    assert!(h.drawn("meter-logo-antigravity-0") && h.drawn("meter-logo-antigravity-1"), "each pool's row starts with its logos");
 }
 
 /// Sessions and the shell under them, the sidebars' widths, cards and the GitHub view, with a stand-in `claude`.
@@ -2386,7 +2520,7 @@ fn a_card_scrolling_past_the_top_does_not_fade_or_double() {
     }
 }
 
-/// A model with a long name keeps its switch inside its row, on the page and in the picker.
+/// A model with a long name keeps its switch inside its row in the agent's dialog, and its card keeps its switch.
 #[test]
 fn a_long_model_name_keeps_the_switch_in_its_row() {
     use crate::claude::subagents::{Agent, AgentModel};
@@ -2399,106 +2533,110 @@ fn a_long_model_name_keeps_the_switch_in_its_row() {
     h.settle();
     h.click("settings-opencode");
     h.wait("the models", |ws| !ws.store.data.settings.custom_subagents.get(Agent::OpenCode).catalog.is_empty());
-    let (x, y) = h.rt.find("settings-page-Custom subagents").unwrap();
-    h.rt.wheel(x, y, -1200.0);
     h.settle();
-    h.click("settings-opencode-choose");
-    h.settle();
-    let inside = |h: &Harness, row: &str| {
-        let (r, _) = h.rt.presented(row).unwrap_or_else(|| panic!("{row} is not drawn"));
-        let (s, _) = h.rt.presented(&format!("{row}-switch")).unwrap();
-        // [x, y, w, h]
-        s[0] >= r[0] && s[0] + s[2] <= r[0] + r[2]
+    // [x, y, w, h]
+    let inside = |h: &Harness, outer: &str, inner: &str| {
+        let (o, _) = h.rt.presented(outer).unwrap_or_else(|| panic!("{outer} is not drawn"));
+        let (i, _) = h.rt.presented(inner).unwrap_or_else(|| panic!("{inner} is not drawn"));
+        i[0] >= o[0] && i[0] + i[2] <= o[0] + o[2]
     };
-    assert!(inside(&h, "model-picker-openrouter/a-very-long-model"), "the picker's switch stays in its row");
-    let (card, _) = h.rt.presented("model-picker").unwrap();
-    let (row, _) = h.rt.presented("model-picker-openrouter/a-very-long-model").unwrap();
-    assert!(row[0] + row[2] <= card[0] + card[2], "the row stays in the picker");
-    h.click("model-picker-openrouter/a-very-long-model");
-    h.click("model-picker-done");
+    let row = "agent-dialog-model-openrouter/a-very-long-model";
+    assert!(inside(&h, row, &format!("{row}-switch")), "the dialog's switch stays in its row");
+    assert!(inside(&h, "agent-dialog", row), "the row stays in the dialog");
+    h.click(row);
+    h.click("agent-dialog-done");
     h.settle();
-    assert!(inside(&h, "settings-opencode-model-openrouter/a-very-long-model"), "the page's switch stays in its row");
+    assert!(inside(&h, "settings-opencode-card", "settings-opencode-switch"), "the card's switch stays in the card");
+
+    // In the smallest window the dialog fits, and its body scrolls above Done.
+    h.rt.set_viewport((720.0, 420.0), 1.0);
+    h.click("settings-opencode-open");
+    h.settle();
+    let (dialog, _) = h.rt.presented("agent-dialog").unwrap();
+    let (done, _) = h.rt.presented("agent-dialog-done").unwrap();
+    assert!(dialog[1] >= 0.0 && dialog[1] + dialog[3] <= 420.0, "the dialog fits the window: {dialog:?}");
+    assert!(done[1] + done[3] <= dialog[1] + dialog[3], "Done stays in the dialog: {done:?}");
 }
 
-/// Settings → Custom subagents: turning an agent on shows a Choose models button whose picker lists the models the
-/// agent offers, with a search; Save keeps the ones switched on, and a new session hands the mod one agent type for
-/// each.
+/// Settings → Custom subagents: each agent is a card with a switch. Switching one on with no model opens its dialog,
+/// which lists the models the agent offers, with a search, and holds Allow edits; the card sums up what Claude gets.
+/// Save keeps the models switched on, and a new session hands the mod one agent type for each.
 #[test]
 fn custom_subagents_reach_new_sessions() {
     use crate::claude::subagents::{Agent, AgentModel};
     fn model(id: &str, name: &str) -> AgentModel {
         AgentModel { id: id.into(), name: name.into() }
     }
+    let drawn_text = |h: &Harness| -> Vec<String> { h.rt.elements().into_iter().filter_map(|e| e.text).collect() };
     let mut h = Harness::new(|_| vec![]);
     h.step(|ws| {
         ws.model_lookups.list = |agent, _| {
-            Ok(match agent {
-                Agent::Codex => vec![model("gpt-6.1-sol", "6.1 Sol"), model("gpt-5.6-luna", "5.6 Luna")],
-                Agent::OpenCode => vec![model("openai/gpt-6.1-sol", "openai/GPT-6.1 Sol"), model("opencode/beam-free", "opencode/Beam Free"), model("github-copilot/grok-4.7", "github-copilot/Grok 4.7")],
-            })
+            let catalogs = [
+                (Agent::Codex, vec![model("gpt-6.1-sol", "6.1 Sol"), model("gpt-5.6-luna", "5.6 Luna")]),
+                (Agent::OpenCode, vec![model("openai/gpt-6.1-sol", "openai/GPT-6.1 Sol"), model("opencode/beam-free", "opencode/Beam Free"), model("github-copilot/grok-4.7", "github-copilot/Grok 4.7")]),
+            ];
+            Ok(catalogs.into_iter().find(|(a, _)| *a == agent).map(|(_, models)| models).unwrap_or_default())
         };
         ws.act(Act::OpenSettings);
         ws.set_settings_page(SettingsPage::CustomSubagents);
     });
     h.settle();
-    assert!(!h.drawn("settings-codex-choose"), "the models wait for the Codex switch");
+    for agent in Agent::ALL {
+        assert!(h.drawn(&format!("settings-{}-card", agent.key())), "every agent has a card");
+    }
+    assert!(!h.drawn("agent-dialog"), "no dialog until asked");
     h.click("settings-codex");
-    h.wait("the models codex-acp offers", |ws| ws.store.data.settings.custom_subagents.codex.catalog.len() == 2);
+    h.wait("the models codex-acp offers", |ws| ws.store.data.settings.custom_subagents.get(Agent::Codex).catalog.len() == 2);
     h.settle();
-    assert!(!h.drawn("settings-codex-model-gpt-6.1-sol"), "the page lists only the models switched on");
-    h.click("settings-codex-choose");
-    h.settle();
-    h.click("model-picker-gpt-6.1-sol");
+    assert!(h.drawn("agent-dialog"), "switched on with no model, the dialog opens on the models");
+    h.click("agent-dialog-model-gpt-6.1-sol");
+    h.click("agent-dialog-codex-edits");
     h.press(rune::Key::Escape, |_| {});
     h.settle();
-    assert!(!h.drawn("model-picker"), "Escape closes the picker");
-    assert!(matches!(h.ws().modal, Some(Modal::Settings { .. })), "and only the picker");
-    assert!(h.drawn("settings-codex-model-gpt-6.1-sol"), "the model switched on shows on the page");
-    h.click("settings-codex-edits");
+    assert!(!h.drawn("agent-dialog"), "Escape closes the dialog");
+    assert!(matches!(h.ws().modal, Some(Modal::Settings { .. })), "and only the dialog");
+    let text = drawn_text(&h);
+    assert!(text.iter().any(|t| t == "1 subagent · edits allowed") && text.iter().any(|t| t == "6.1 Sol"), "the card sums up what Claude gets: {text:?}");
 
-    // OpenCode's picker narrows to what the search matches, by every word typed, in the name or the id.
+    // OpenCode's dialog narrows to what the search matches, by every word typed, in the name or the id.
     h.click("settings-opencode");
-    h.wait("the models opencode offers", |ws| ws.store.data.settings.custom_subagents.opencode.catalog.len() == 3);
-    let (x, y) = h.rt.find("settings-page-Custom subagents").unwrap();
-    h.rt.wheel(x, y, -1200.0);
-    h.settle();
-    h.click("settings-opencode-choose");
+    h.wait("the models opencode offers", |ws| ws.store.data.settings.custom_subagents.get(Agent::OpenCode).catalog.len() == 3);
     h.settle();
     h.type_text("GPT sol");
     h.settle();
-    assert!(h.drawn("model-picker-openai/gpt-6.1-sol"));
-    assert!(!h.drawn("model-picker-opencode/beam-free"), "a model the search doesn't match is hidden");
-    h.click("model-picker-openai/gpt-6.1-sol");
+    assert!(h.drawn("agent-dialog-model-openai/gpt-6.1-sol"));
+    assert!(!h.drawn("agent-dialog-model-opencode/beam-free"), "a model the search doesn't match is hidden");
+    h.click("agent-dialog-model-openai/gpt-6.1-sol");
     h.press(rune::Key::Enter, |_| {});
     h.settle();
-    assert!(!h.drawn("model-picker"), "Enter in the search closes the picker");
+    assert!(!h.drawn("agent-dialog"), "Enter in the search closes the dialog");
     assert!(matches!(h.ws().modal, Some(Modal::Settings { .. })), "and leaves Settings open");
 
     h.step(|ws| ws.submit_modal());
     assert_eq!(h.ws().toast.as_ref().map(|t| t.text.as_str()), Some("Settings saved. Custom subagents apply to new and resumed sessions."));
     let saved = &h.ws().store.data.settings.custom_subagents;
-    assert_eq!((saved.codex.on, saved.codex.models.clone(), saved.codex.edits), (true, vec!["gpt-6.1-sol".to_string()], true));
-    assert_eq!((saved.opencode.on, saved.opencode.models.clone(), saved.opencode.edits), (true, vec!["openai/gpt-6.1-sol".to_string()], false));
+    assert_eq!((saved.get(Agent::Codex).on, saved.get(Agent::Codex).models.clone(), saved.get(Agent::Codex).edits), (true, vec!["gpt-6.1-sol".to_string()], true));
+    assert_eq!((saved.get(Agent::OpenCode).on, saved.get(Agent::OpenCode).models.clone(), saved.get(Agent::OpenCode).edits), (true, vec!["openai/gpt-6.1-sol".to_string()], false));
 
     // Settings opens on the page it showed last, and asks again from there.
     h.step(|ws| {
         ws.model_lookups.list = |agent, _| Ok(vec![model(if agent == Agent::Codex { "gpt-7" } else { "openai/gpt-7" }, "7")]);
         ws.act(Act::OpenSettings);
     });
-    h.wait("a fresh look at the models", |ws| ws.store.data.settings.custom_subagents.codex.catalog.iter().any(|m| m.id == "gpt-7"));
+    h.wait("a fresh look at the models", |ws| ws.store.data.settings.custom_subagents.get(Agent::Codex).catalog.iter().any(|m| m.id == "gpt-7"));
     h.settle();
-    h.click("settings-codex-choose");
+    h.click("settings-codex-open");
     h.settle();
-    assert!(h.drawn("model-picker-gpt-7"));
-    assert!(h.drawn("model-picker-gpt-6.1-sol"), "a model switched on that is no longer offered stays listed");
-    let drawn: Vec<String> = h.rt.elements().into_iter().filter_map(|e| e.text).collect();
-    assert!(drawn.iter().any(|t| t == "Claudiu:codex-gpt-7"), "each model shows the type Claude Code names it: {drawn:?}");
-    h.click("model-picker-gpt-6.1-sol");
-    h.click("model-picker-done");
+    assert!(h.drawn("agent-dialog-model-gpt-7"));
+    assert!(h.drawn("agent-dialog-model-gpt-6.1-sol"), "a model switched on that is no longer offered stays listed");
+    let text = drawn_text(&h);
+    assert!(text.iter().any(|t| t == "Claudiu:codex-gpt-7"), "each model shows the type Claude Code names it: {text:?}");
+    h.click("agent-dialog-model-gpt-6.1-sol");
+    h.click("agent-dialog-done");
     h.settle();
-    assert!(!h.drawn("settings-codex-model-gpt-6.1-sol"), "switched off, it leaves the page");
+    let text = drawn_text(&h);
+    assert!(text.iter().any(|t| t == "On, but no model is chosen, so Claude gets no subagent"), "the card warns that Codex gives Claude nothing: {text:?}");
     h.press(rune::Key::Escape, |_| {});
-
     // A stand-in `claude` that prints its arguments and what the mod would read.
     let printer = h.work.join(if cfg!(windows) { "printer.cmd" } else { "printer" });
     let script = if cfg!(windows) { "@echo off\r\necho %*\r\necho %CLAUDIU_SUBAGENTS%\r\nping -n 60 127.0.0.1 >nul\r\n" } else { "#!/bin/sh\necho \"$@\"\necho \"$CLAUDIU_SUBAGENTS\"\nsleep 60\n" };
@@ -2514,12 +2652,12 @@ fn custom_subagents_reach_new_sessions() {
     let shows = |ws: &Workspace, text: &str| ws.live_view(&id).is_some_and(|v| v.tail_text(4000).contains(text));
     // The mod registers what it reads here; interactive Claude Code ignores `claude --agents`.
     h.wait("the agent types to reach the mod", |ws| {
-        shows(ws, r#"{"codex":{"edits":true,"types":[{"name":"codex-gpt-6-1-sol","model":"gpt-6.1-sol","description":"Runs the task in OpenAI Codex on gpt-6.1-sol."#)
-            && shows(ws, r#""opencode":{"edits":false,"types":[{"name":"opencode-openai-gpt-6-1-sol","model":"openai/gpt-6.1-sol","description":"Runs the task in OpenCode on openai/gpt-6.1-sol."#)
+        shows(ws, r#"{"codex":{"edits":true,"name":"Codex","types":[{"name":"codex-gpt-6-1-sol","model":"gpt-6.1-sol","description":"Runs the task in OpenAI Codex on gpt-6.1-sol."#)
+            && shows(ws, r#""opencode":{"edits":false,"name":"OpenCode","types":[{"name":"opencode-openai-gpt-6-1-sol","model":"openai/gpt-6.1-sol","description":"Runs the task in OpenCode on openai/gpt-6.1-sol."#)
     });
 
     // A settings change reaches a running session only once it is resumed: its process keeps the types it started with.
-    h.step(|ws| ws.store.data.settings.custom_subagents.codex.models = vec!["gpt-7".into()]);
+    h.step(|ws| ws.store.data.settings.custom_subagents.get_mut(crate::claude::subagents::Agent::Codex).models = vec!["gpt-7".into()]);
     h.settle();
     assert!(!shows(h.ws(), "codex-gpt-7"), "the running session keeps its types");
     h.step(|ws| ws.restart_session(&id));

@@ -3,25 +3,18 @@
 //! off the UI thread; applying them is a handful of small, separately testable steps.
 
 use super::*;
-use crate::claude::codex_limits;
+use crate::claude::subagents::Agent;
+use crate::claude::limits::Pool;
 use crate::claude::usage::Snapshot;
 use crate::store::RateLimit;
 
 impl Workspace {
     /// Costs no tokens. The mod's files are tiny, and Codex's logs are read again only after Codex writes to them.
     pub(super) fn ingest_usage(&mut self) {
-        let codex_on = self.store.data.settings.custom_subagents.codex.on;
+        self.ingest_subagent_limits();
         self.rt.spawn_quietly(
-            move || {
-                let codex = if codex_on { codex_limits::codex_home().and_then(|home| codex_limits::read(&home)) } else { None };
-                (usage::read_snapshots(&usage::snapshot_dir()), mcp::read_attached(), codex)
-            },
-            move |ws: &mut Workspace, (snaps, items, codex)| {
-                // A new Codex session has no reading until its first turn; the last one stays until then.
-                if codex.is_some() && ws.codex_usage != codex {
-                    ws.codex_usage = codex;
-                    ws.rt.dirty = true;
-                }
+            || (usage::read_snapshots(&usage::snapshot_dir()), mcp::read_attached()),
+            |ws: &mut Workspace, (snaps, items)| {
                 let mut changed = snaps.iter().fold(false, |c, snap| ws.apply_snapshot(snap) | c);
                 changed |= items.into_iter().fold(false, |c, (stem, item)| ws.apply_attachment(&stem, item) | c);
                 if changed {
@@ -30,6 +23,33 @@ impl Workspace {
                 }
             },
         );
+    }
+
+    /// Each enabled provider refreshes on its own cadence. Failed reads keep the saved reading.
+    fn ingest_subagent_limits(&mut self) {
+        for agent in Agent::ALL {
+            let provider = agent.provider();
+            let Some(limits) = &provider.limits else { continue };
+            if !self.store.data.settings.custom_subagents.get(agent).on || self.limits_asked.get(agent).is_some_and(|at| at.elapsed() < limits.every) {
+                continue;
+            }
+            // Set before asking, so a slow answer isn't asked for twice.
+            *self.limits_asked.get_mut(agent) = Some(std::time::Instant::now());
+            self.rt.spawn_quietly(
+                limits.read,
+                move |ws: &mut Workspace, read| ws.apply_subagent_limits(provider.key, read),
+            );
+        }
+    }
+
+    pub(super) fn apply_subagent_limits(&mut self, key: &str, read: Result<Vec<Pool>, String>) {
+        if let Ok(pools) = read
+            && self.store.data.subagent_limits.get(key) != Some(&pools)
+        {
+            self.store.data.subagent_limits.insert(key.into(), pools);
+            self.store.mark_dirty();
+            self.rt.dirty = true;
+        }
     }
 
     /// One mod report: the account's limits, and the session's own figures and settings.

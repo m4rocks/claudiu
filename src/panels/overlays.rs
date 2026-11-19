@@ -58,7 +58,7 @@ impl Workspace {
             out.push(m);
         }
         // Above Settings: the last modal mounted takes Escape and clicks outside it.
-        if let Some(m) = self.model_picker() {
+        if let Some(m) = self.agent_dialog() {
             out.push(m);
         }
         if let Some(m) = self.render_menu() {

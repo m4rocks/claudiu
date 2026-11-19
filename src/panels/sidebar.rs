@@ -5,10 +5,10 @@ use rune::tok::motion;
 use rune::{Color, Cursor, El, Phase, PointerButton, ScrollSpec, Transition, Tx, col, el, row, text, text_input};
 
 use crate::app::{Act, Activity, MenuAnchor, MenuItem, SideDrag, Workspace};
-use crate::panels::icons;
+use crate::panels::{icons, logos, scale};
 use crate::panels::status_icon::{SessionDot, status_icon};
 use crate::panels::theme::{self, rgb};
-use crate::panels::widgets::{ago, avatar, clawd, countdown, font, icon, icon_button, key_hint, label, meter, METER_WARN_AT, section_label, shortcut, tick};
+use crate::panels::widgets::{ago, avatar, clawd, countdown, font, icon, icon_button, key_hint, label, limit_bar, section_label, shortcut, tick};
 use crate::store::{ExternalState, Id, Project, SessionKind, SessionRecord, now};
 
 pub const SIDEBAR_W: f32 = 284.0;
@@ -671,48 +671,69 @@ impl Workspace {
     fn sidebar_footer(&self) -> El {
         let t = now();
         let usage = self.store.active_account().map(|a| a.usage.clone()).unwrap_or_default();
-        // Captions are short: two meters share a row. `calm` colors a bar that is not yet near its limit; near it, the
-        // meter's own warning colors win.
-        let limit = |key: &str, label: &str, l: &Option<crate::store::RateLimit>, calm: Option<u32>| -> El {
-            match l {
-                Some(l) => match (l.resets_at, l.utilization) {
-                    (Some(reset), util) if reset > t => {
-                        let mut caption = format!("resets {}", countdown(reset - t));
-                        if t - l.seen_at > 900 {
-                            caption.push_str(&format!(" · {} ago", ago(l.seen_at, t)));
-                        }
-                        let tone = calm.filter(|_| util.is_none_or(|f| f < METER_WARN_AT)).map(rgb);
-                        meter(key, label, util, caption, tone)
-                    }
-                    (Some(_), _) => meter(key, label, None, "reset · unknown".into(), None),
-                    (None, util) => meter(key, label, util, format!("seen {} ago", ago(l.seen_at, t)), None),
+        // A reset time stays true however old the reading is, so it shows whenever it is still ahead, including for a
+        // reading saved before launch. Without one, the reading's age says how far to trust it.
+        let limit = |key: &str, l: &Option<crate::store::RateLimit>, calm: u32| -> El {
+            let (fraction, right) = match l {
+                Some(l) => match l.resets_at {
+                    Some(reset) if reset > t => (l.utilization, countdown(reset - t)),
+                    Some(_) => (None, "—".into()),
+                    None => (l.utilization, format!("{} ago", ago(l.seen_at, t))),
                 },
-                None => meter(key, label, None, "after first message".into(), None),
-            }
+                None => (None, "—".into()),
+            };
+            let left = fraction.map(|f| format!("{:.0}%", (f * 100.0).round())).unwrap_or_else(|| "—".into());
+            limit_bar(key, fraction, left, right, Some(rgb(calm))).w(0.0).grow(1.0).shrink()
         };
-        let mut footer = col()
+        // Fits the widest marks: two logos, or a logo and a two-letter name.
+        let label_w = scale::px(30.0);
+        let gap = scale::px(6.0);
+        // Each row starts with the logos of whose limits it shows, and a short name where logos alone can't tell rows apart.
+        let source_row = |source: &str, marks: &[&'static rune::Icon], name: Option<String>, color: u32, five: El, seven: El| -> El {
+            let mut who = row().key(format!("meter-logo-{source}")).gap(scale::px(4.0)).center_y();
+            for logo in marks {
+                who = who.child(icon(logo, scale::px(12.0), color));
+            }
+            if let Some(name) = name {
+                who = who.child(label(name, 10.5, color).truncate().shrink());
+            }
+            row().key(format!("meter-row-{source}")).gap(gap).center_y().child(row().w(label_w).child(who)).child(five).child(seven)
+        };
+        let divider = || el().h(scale::px(1.0)).w_full().my(scale::px(2.0)).fill(rgb(theme::BORDER));
+        let headers = row()
+            .gap(gap)
+            .child(el().w(label_w))
+            .child(section_label("5 HOUR").w(0.0).grow(1.0).shrink())
+            .child(section_label("7 DAY").w(0.0).grow(1.0).shrink());
+        let claude = source_row("claude", &[&logos::CLAUDE], None, theme::ACCENT, limit("meter-5h", &usage.five_hour, theme::ACCENT), limit("meter-7d", &usage.seven_day, theme::ACCENT));
+        let mut limits = col().key("meter-limits").gap(scale::px(3.0)).child(headers).child(claude);
+        let subagents = &self.store.data.settings.custom_subagents;
+        for agent in crate::claude::subagents::Agent::ALL {
+            let provider = agent.provider();
+            if !subagents.get(agent).on {
+                continue;
+            }
+            let Some(pools) = self.store.data.subagent_limits.get(provider.key).filter(|pools| !pools.is_empty()) else { continue };
+            limits = limits.child(divider());
+            for (i, pool) in pools.iter().enumerate() {
+                let source = format!("{}-{i}", provider.key);
+                // Empty windows keep their column, without drawing a keyed meter.
+                let cell = |window: &str, l: &Option<crate::store::RateLimit>| match l {
+                    Some(_) => limit(&format!("meter-{source}-{window}"), l, provider.color),
+                    None => el().w(0.0).h(scale::px(16.0)).grow(1.0).shrink(),
+                };
+                let (marks, name) = (provider.marks)(&pool.name);
+                limits = limits.child(source_row(&source, marks, name, provider.color, cell("5h", &pool.usage.five_hour), cell("7d", &pool.usage.seven_day)));
+            }
+        }
+        col()
             .gap(8.0)
             .px(14.0)
             .pt(6.0)
             .pb(8.0)
             .border_sides([1.0, 0.0, 0.0, 0.0], rgb(theme::BORDER))
             .child(self.account_switcher())
-            .child(
-                row()
-                    .gap(12.0)
-                    .child(limit("meter-5h", "5 HOUR", &usage.five_hour, None).grow(1.0).shrink())
-                    .child(limit("meter-7d", "7 DAY", &usage.seven_day, None).grow(1.0).shrink()),
-            );
-        // Only with Codex subagents on and once Codex has logged a reading, so people who don't use Codex see no row.
-        if let Some(codex) = self.codex_usage.as_ref().filter(|_| self.store.data.settings.custom_subagents.codex.on) {
-            footer = footer.child(
-                row()
-                    .gap(12.0)
-                    .child(limit("meter-codex-5h", "CODEX 5 HOUR", &codex.five_hour, Some(theme::CODEX)).grow(1.0).shrink())
-                    .child(limit("meter-codex-7d", "CODEX 7 DAY", &codex.seven_day, Some(theme::CODEX)).grow(1.0).shrink()),
-            );
-        }
-        footer
+            .child(limits)
     }
 }
 

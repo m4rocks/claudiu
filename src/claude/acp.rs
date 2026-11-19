@@ -1,4 +1,4 @@
-//! Runs one task in Codex or OpenCode for a custom subagent (`claude/subagents.rs`), through the Agent Client
+//! Runs one task in a custom subagent's provider (`claude/subagents.rs`), through the Agent Client
 //! Protocol: `claudiu --acp`. The Custom subagents settings page also asks the agent for its models here (`models`).
 //!
 //! The mod starts this once per subagent turn and writes the task to stdin as JSON (`Request`). A mod can write a
@@ -25,8 +25,6 @@ use crate::claude::subagents::{Agent, AgentModel};
 use crate::platform::{find_executable, reload_path};
 
 pub const FLAG: &str = "--acp";
-/// Pinned so an upstream change reaches users only with a Claudiu release.
-const CODEX_ACP: &str = "@agentclientprotocol/codex-acp@2.6.0";
 /// ACP's error code for "authentication required".
 const AUTH_REQUIRED: i64 = -32000;
 /// Lines of the agent's stderr kept for a failure's reason.
@@ -46,8 +44,7 @@ pub struct Request {
     pub agent: Agent,
     /// The agent's model; none for the agent's own default.
     pub model: Option<String>,
-    /// The effort Claude's Agent call asked for; none for the agent's own default. OpenCode doesn't get it, since
-    /// its effort is an option of each provider's models rather than one setting.
+    /// The effort Claude's Agent call asked for; none for the agent's own default. The provider decides how to apply it.
     #[serde(default)]
     pub effort: Option<String>,
     /// Whether the agent may edit files and run commands, or only read.
@@ -85,8 +82,10 @@ pub enum Event {
 }
 
 pub fn run() -> i32 {
-    if std::env::args().nth(2).as_deref() == Some("--cleanup") {
-        return cleanup_inbox();
+    match std::env::args().nth(2).as_deref() {
+        Some("--cleanup") => return cleanup_inbox(),
+        Some(super::antigravity_read_only::HOOK_FLAG) => return super::antigravity_read_only::run_hook(),
+        _ => {}
     }
     let mut out = std::io::stdout().lock();
     let mut emit = |event: Event| {
@@ -170,21 +169,89 @@ impl Drop for Inbox {
 }
 
 fn run_task(request: &Request, emit: &mut impl FnMut(Event)) -> Result<String, String> {
-    let env = match request.agent {
-        Agent::Codex => {
-            let mut env = vec![("INITIAL_AGENT_MODE", (if request.edits { "workspace-write" } else { "read-only" }).to_string())];
-            if let Some(config) = codex_config(request.model.as_deref(), request.effort.as_deref()) {
-                env.push(("CODEX_CONFIG", config.to_string()));
-            }
-            env
-        }
-        Agent::OpenCode => vec![("OPENCODE_CONFIG_CONTENT", opencode_config(request.model.as_deref(), request.edits).to_string())],
-    };
-    let connection = Connection::start(request.agent, &request.cwd, &env)?;
+    let provider = request.agent.provider();
+    let args = (provider.task_args)(request)?;
+    let env = (provider.environment)(request);
+    let connection = Connection::start(request.agent, &request.cwd, &args, &env)?;
     let id = Uuid::new_v4();
     let inbox = request.live_messages.then(|| Inbox { id, path: inbox_path(id), seen: 0 });
     let result = converse(connection.from_agent, connection.to_agent, request, inbox, emit);
     connection.process.finish(result)
+}
+
+pub(super) fn codex_env(request: &Request) -> Vec<(&'static str, String)> {
+    let mut env = vec![("INITIAL_AGENT_MODE", (if request.edits { "workspace-write" } else { "read-only" }).to_string())];
+    if let Some(config) = codex_config(request.model.as_deref(), request.effort.as_deref()) {
+        env.push(("CODEX_CONFIG", config.to_string()));
+    }
+    env
+}
+
+pub(super) fn opencode_env(request: &Request) -> Vec<(&'static str, String)> {
+    vec![("OPENCODE_CONFIG_CONTENT", opencode_config(request.model.as_deref(), request.edits).to_string())]
+}
+
+pub(super) fn no_args(_: &Request) -> Result<Vec<String>, String> {
+    Ok(vec![])
+}
+
+/// Read-only Antigravity runs from a Gemini folder whose hook refuses every tool but reading
+/// (`claude/antigravity_read_only.rs`).
+pub(super) fn antigravity_args(request: &Request) -> Result<Vec<String>, String> {
+    if request.edits {
+        return Ok(vec![]);
+    }
+    let claudiu = std::env::current_exe().map_err(|e| format!("Claudiu couldn't find itself to keep Antigravity read-only ({e})"))?;
+    let gemini = super::antigravity_read_only::prepare(&crate::datadir::data_dir(), &claudiu).map_err(|e| format!("Claudiu couldn't set up Antigravity's read-only folder ({e})"))?;
+    Ok(vec!["--gemini-dir".into(), gemini.to_string_lossy().into_owned()])
+}
+
+pub(super) fn no_env(_: &Request) -> Vec<(&'static str, String)> {
+    vec![]
+}
+
+pub(super) fn no_options(_: &Request) -> Vec<(&'static str, String)> {
+    vec![]
+}
+
+pub(super) fn antigravity_options(request: &Request) -> Vec<(&'static str, String)> {
+    let mut options = vec![];
+    if let Some(model) = &request.model {
+        options.push(("model", model.clone()));
+    }
+    if let Some(effort) = effort_level(request.effort.as_deref()) {
+        options.push(("thought_level", effort.into()));
+    }
+    // Read-only keeps the default mode, where agy asks before each edit or command and Claudiu refuses.
+    if request.edits {
+        options.push(("mode", "accept-edits".into()));
+    }
+    options
+}
+
+/// Thinking levels from least to most, as ACP agents name them.
+const THOUGHT_LEVELS: [&str; 4] = ["low", "medium", "high", "xhigh"];
+
+/// The value to set `config` to, given the options the agent `offered`. A thinking level the model doesn't offer
+/// becomes the highest one it does below it, or none, which leaves the model's own default: Claude's effort is a hint,
+/// not worth failing the task for. Anything else is sent as asked, so an unknown model fails with the agent's reason.
+fn offered_value(offered: &Value, config: &str, wanted: &str) -> Option<String> {
+    let choices: Option<Vec<&str>> = offered
+        .as_array()
+        .and_then(|options| options.iter().find(|o| o["id"] == config))
+        .and_then(|option| option["options"].as_array())
+        .map(|choices| choices.iter().filter_map(|c| c["value"].as_str()).collect());
+    let Some(choices) = choices.filter(|_| config == "thought_level") else { return Some(wanted.into()) };
+    let rank = THOUGHT_LEVELS.iter().position(|l| *l == wanted)?;
+    THOUGHT_LEVELS[..=rank].iter().rev().find(|l| choices.contains(l)).map(|l| l.to_string())
+}
+
+fn effort_level(effort: Option<&str>) -> Option<&str> {
+    match effort {
+        Some("max") => Some("xhigh"),
+        Some(level @ ("low" | "medium" | "high" | "xhigh")) => Some(level),
+        _ => None,
+    }
 }
 
 /// The config Codex gets on top of the user's own: the model and the reasoning effort, where given. Codex has no `max`,
@@ -194,11 +261,7 @@ fn codex_config(model: Option<&str>, effort: Option<&str>) -> Option<Value> {
     if let Some(model) = model {
         config.insert("model".into(), json!(model));
     }
-    let effort = match effort {
-        Some("max") => Some("xhigh"),
-        Some(level @ ("low" | "medium" | "high" | "xhigh")) => Some(level),
-        _ => None,
-    };
+    let effort = effort_level(effort);
     if let Some(effort) = effort {
         config.insert("model_reasoning_effort".into(), json!(effort));
     }
@@ -229,7 +292,7 @@ fn opencode_config(model: Option<&str>, edits: bool) -> Value {
 /// The models `agent` offers this account, as the model picker of a new session lists them. Gives up after
 /// `MODELS_TIMEOUT`, so a stalled download or an agent that never answers can't leave the page loading for good.
 pub fn models(agent: Agent, cwd: &Path) -> Result<Vec<AgentModel>, String> {
-    let connection = Connection::start(agent, cwd, &[])?;
+    let connection = Connection::start(agent, cwd, &[], &[])?;
     let (Connection { from_agent, to_agent, process }, folder) = (connection, cwd.to_path_buf());
     let (tx, rx) = std::sync::mpsc::channel();
     // Killing the agent on a timeout closes its pipes, which ends this thread too.
@@ -242,10 +305,7 @@ pub fn models(agent: Agent, cwd: &Path) -> Result<Vec<AgentModel>, String> {
 
 /// The program Claudiu starts for `agent`, as failures name it.
 fn server(agent: Agent) -> &'static str {
-    match agent {
-        Agent::Codex => "codex-acp",
-        Agent::OpenCode => "opencode",
-    }
+    agent.provider().server
 }
 
 fn exited(agent: Agent) -> String {
@@ -275,15 +335,22 @@ fn locate_reloading(program: &str) -> Option<PathBuf> {
     })
 }
 
+/// Where `agent`'s ACP server is: on the PATH, or where its Windows installer puts it, which a desktop launch's PATH
+/// may not include yet.
+pub fn locate(agent: Agent) -> Option<PathBuf> {
+    let provider = agent.provider();
+    locate_reloading(provider.program).or_else(|| {
+        let installed = provider.windows_fallback.filter(|_| cfg!(windows))?;
+        Some(PathBuf::from(std::env::var_os("LOCALAPPDATA")?).join(installed)).filter(|path| path.is_file())
+    })
+}
+
 impl Connection {
-    fn start(agent: Agent, cwd: &Path, env: &[(&str, String)]) -> Result<Connection, String> {
-        let (program, args, missing): (&str, &[&str], &str) = match agent {
-            Agent::Codex => ("npx", &["-y", CODEX_ACP], "npx was not found on PATH. Codex subagents need Node.js."),
-            Agent::OpenCode => ("opencode", &["acp"], "opencode was not found on PATH. OpenCode subagents need OpenCode installed."),
-        };
-        let program = locate_reloading(program).ok_or_else(|| missing.to_string())?;
+    fn start(agent: Agent, cwd: &Path, task_args: &[String], env: &[(&str, String)]) -> Result<Connection, String> {
+        let provider = agent.provider();
+        let program = locate(agent).ok_or_else(|| provider.missing.to_string())?;
         let mut command = Command::new(program);
-        command.args(args).current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        command.args(provider.args).args(task_args).current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
         crate::platform::no_window(&mut command);
         crate::platform::with_login_path(&mut command);
         for (key, value) in env {
@@ -370,7 +437,7 @@ fn list_models(agent: Agent, from_agent: impl BufRead, mut to_agent: impl Write,
         .flatten()
         .filter_map(|o| Some(AgentModel { id: o["value"].as_str()?.to_string(), name: o["name"].as_str().unwrap_or_default().to_string() }))
         .collect();
-    if agent == Agent::OpenCode
+    if agent.provider().delete_model_session
         && let Some(id) = session["sessionId"].as_str()
         // The models are known already, so a failed delete only leaves an empty session behind.
         && send(json!({ "jsonrpc": "2.0", "id": 2, "method": "session/delete", "params": { "sessionId": id } })).is_ok()
@@ -446,7 +513,7 @@ fn converse(from_agent: impl BufRead + Send + 'static, mut to_agent: impl Write,
     let initialized = answer(&mut to_agent, 0, &mut messages, emit)?;
     let supports_steering = initialized["_meta"]["steering"]["supported"] == true;
     let mut steer = supports_steering;
-    if agent == Agent::OpenCode && !supports_steering {
+    if !agent.provider().inbox_without_steering && !supports_steering {
         inbox = None; // Claude Code keeps its usual queued delivery on older OpenCode versions.
     }
 
@@ -459,8 +526,20 @@ fn converse(from_agent: impl BufRead + Send + 'static, mut to_agent: impl Write,
         let blocks: Vec<_> = texts.into_iter().map(|text| json!({ "type": "text", "text": text })).collect();
         json!({ "jsonrpc": "2.0", "id": id, "method": "session/prompt", "params": { "sessionId": session_id, "prompt": blocks } })
     };
-    let mut prompt_id = 2;
-    let mut next_id = 3;
+    let mut next_id = 2;
+    // Each answer lists the options as they stand after the change: a new model can offer other thinking levels.
+    let mut offered = session["configOptions"].clone();
+    for (config, wanted) in (agent.provider().config_options)(request) {
+        let Some(value) = offered_value(&offered, config, &wanted) else { continue };
+        send(&mut to_agent, json!({ "jsonrpc": "2.0", "id": next_id, "method": "session/set_config_option", "params": { "sessionId": session_id, "configId": config, "value": value } }))?;
+        let changed = answer(&mut to_agent, next_id, &mut messages, emit).map_err(|reason| format!("{name} could not set {config}: {reason}"))?;
+        if changed["configOptions"].is_array() {
+            offered = changed["configOptions"].clone();
+        }
+        next_id += 1;
+    }
+    let mut prompt_id = next_id;
+    next_id += 1;
     send(&mut to_agent, prompt(prompt_id, vec![request.prompt.clone()]))?;
     if let Some(inbox) = &inbox {
         emit(Event::Inbox { id: inbox.id.to_string(), path: inbox.path.clone() });
@@ -501,7 +580,7 @@ fn converse(from_agent: impl BufRead + Send + 'static, mut to_agent: impl Write,
                     "sessionId": session_id,
                     "prompt": [{ "type": "text", "text": text }],
                 });
-                if agent == Agent::Codex {
+                if agent.provider().steering_prompt_required {
                     params["_meta"] = json!({ "steering": { "idleBehavior": "promptRequired" } });
                 }
                 send(&mut to_agent, json!({ "jsonrpc": "2.0", "id": next_id, "method": "_session/steering", "params": params }))?;
@@ -576,7 +655,7 @@ struct ToolProgress {
 
 /// What a tool call acts on, from its input: the command, the pattern searched for, the address, or else the file.
 fn tool_target(input: &Value) -> Option<&str> {
-    ["command", "pattern", "query", "url", "path", "filePath"].iter().find_map(|key| input[key].as_str()).filter(|t| !t.is_empty())
+    ["command", "pattern", "query", "url", "path", "Path", "filePath"].iter().find_map(|key| input[key].as_str()).filter(|t| !t.is_empty())
 }
 
 impl Messages {
@@ -629,7 +708,7 @@ impl Messages {
             let title = update["title"].as_str().filter(|title| !title.is_empty()).unwrap_or("a tool");
             tool.title = title.into();
             // OpenCode may start with only the tool name and supply its target in the first update.
-            tool.waiting_for_target = agent == Agent::OpenCode && !title.contains(' ') && target.is_none() && id.is_some();
+            tool.waiting_for_target = agent.provider().deferred_tool_target && !title.contains(' ') && target.is_none() && id.is_some();
             if !tool.waiting_for_target {
                 if let Some(target) = target.filter(|_| !title.contains(' ')) {
                     tool.title = format!("{title} {target}");
@@ -717,10 +796,7 @@ fn permission(options: &Value, edits: bool) -> Value {
 
 fn error_reason(agent: Agent, error: &Value) -> String {
     if error["code"].as_i64() == Some(AUTH_REQUIRED) {
-        return match agent {
-            Agent::Codex => "Codex isn't signed in. Run `codex login`, then try again.".into(),
-            Agent::OpenCode => "OpenCode isn't signed in. Run `opencode auth login`, then try again.".into(),
-        };
+        return agent.provider().sign_in.into();
     }
     let server = server(agent);
     match error["message"].as_str() {
@@ -760,12 +836,98 @@ mod tests {
     /// Runs the conversation against what a fake agent says, in order. Returns the result, what was sent to the agent,
     /// and the events.
     fn talk_to(agent: Agent, agent_says: &[Value], edits: bool) -> (Result<String, String>, Vec<Value>, Vec<Event>) {
+        talk_request(&request(agent, edits), agent_says)
+    }
+
+    fn talk_request(request: &Request, agent_says: &[Value]) -> (Result<String, String>, Vec<Value>, Vec<Event>) {
         let script: String = agent_says.iter().map(|m| format!("{m}\n")).collect();
         let mut sent = Vec::new();
         let mut events = vec![];
-        let result = converse(std::io::Cursor::new(script), &mut sent, &request(agent, edits), None, &mut |e| events.push(e));
+        let result = converse(std::io::Cursor::new(script), &mut sent, request, None, &mut |e| events.push(e));
         let sent = String::from_utf8(sent).unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect();
         (result, sent, events)
+    }
+
+    #[test]
+    fn antigravity_configures_each_option_before_prompting() {
+        for effort in ["low", "medium", "high", "xhigh", "max", "unknown"] {
+            for edits in [false, true] {
+                let mut request = request(Agent::Antigravity, edits);
+                request.model = Some("gemini-4-neon".into());
+                request.effort = Some(effort.into());
+                let mut expected = vec![("model", "gemini-4-neon")];
+                if effort != "unknown" { expected.push(("thought_level", if effort == "max" { "xhigh" } else { effort })); }
+                if edits { expected.push(("mode", "accept-edits")); }
+                let mut says = opening();
+                for i in 0..expected.len() { says.push(reply(2 + i as i64, json!({}))); }
+                says.push(chunk("m", "Done"));
+                says.push(reply(2 + expected.len() as i64, json!({ "stopReason": "end_turn" })));
+                let (result, sent, _) = talk_request(&request, &says);
+                assert_eq!(result, Ok("Done".into()));
+                for (i, (config, value)) in expected.iter().enumerate() {
+                    assert_eq!(sent[i + 2], json!({ "jsonrpc": "2.0", "id": i + 2, "method": "session/set_config_option", "params": { "sessionId": "s1", "configId": config, "value": value } }));
+                }
+                assert_eq!(sent.last().unwrap()["method"], "session/prompt");
+                assert_eq!(sent.len(), expected.len() + 3);
+            }
+        }
+    }
+
+    /// What agy 1.5.12 does: Gemini 3.8 Flash has no `xhigh`, and the answer to the model change says so.
+    #[test]
+    fn a_thinking_level_the_model_lacks_becomes_the_highest_it_offers() {
+        let levels = |values: &[&str]| json!([{ "id": "thought_level", "category": "thought_level", "options": values.iter().map(|v| json!({ "value": v })).collect::<Vec<_>>() }]);
+        let mut request = request(Agent::Antigravity, false);
+        request.model = Some("gemini-3.8-flash".into());
+        request.effort = Some("max".into());
+        let says = [
+            reply(0, json!({ "protocolVersion": 1 })),
+            reply(1, json!({ "sessionId": "s1", "configOptions": levels(&["low", "medium", "high", "xhigh"]) })),
+            reply(2, json!({ "configOptions": levels(&["low", "medium", "high"]) })),
+            reply(3, json!({})),
+            chunk("m", "Done"),
+            reply(4, json!({ "stopReason": "end_turn" })),
+        ];
+        let (result, sent, _) = talk_request(&request, &says);
+        assert_eq!(result, Ok("Done".into()));
+        assert_eq!((&sent[3]["params"]["configId"], &sent[3]["params"]["value"]), (&json!("thought_level"), &json!("high")));
+        assert_eq!(offered_value(&levels(&["medium", "high"]), "thought_level", "low"), None, "no level at or below: the model's default");
+        assert_eq!(offered_value(&levels(&["low"]), "model", "x"), Some("x".into()), "other options go as asked");
+    }
+
+    #[test]
+    fn antigravity_config_failure_never_prompts() {
+        let mut says = opening();
+        says.push(json!({ "id": 2, "error": { "code": -32602, "message": "unknown model" } }));
+        let (result, sent, _) = talk_to(Agent::Antigravity, &says, false);
+        assert_eq!(result, Err("Antigravity could not set model: agy: unknown model".into()));
+        assert!(sent.iter().all(|m| m["method"] != "session/prompt"));
+    }
+
+    #[test]
+    fn antigravity_denies_string_permission_ids_and_keeps_queued_delivery() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut request = request(Agent::Antigravity, false);
+        request.model = None;
+        let mut says = opening();
+        says.push(json!({ "jsonrpc": "2.0", "id": "1", "method": "session/request_permission", "params": { "options": [{ "optionId": "allow", "kind": "allow_once" }, { "optionId": "deny", "kind": "reject_once" }] } }));
+        says.push(chunk("m", "Read only"));
+        says.push(reply(2, json!({ "stopReason": "end_turn" })));
+        let script: String = says.iter().map(|m| format!("{m}\n")).collect();
+        let mut sent = vec![];
+        let mut events = vec![];
+        let result = converse(std::io::Cursor::new(script), &mut sent, &request, Some(test_inbox(dir.path())), &mut |e| events.push(e));
+        assert_eq!(result, Ok("Read only".into()));
+        let sent: Vec<Value> = String::from_utf8(sent).unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+        assert_eq!(sent[3]["id"], "1");
+        assert_eq!(sent[3]["result"]["outcome"]["optionId"], "deny");
+        assert!(!events.iter().any(|e| matches!(e, Event::Inbox { .. })));
+    }
+
+    #[test]
+    fn antigravity_file_targets_and_sign_in_hint() {
+        assert_eq!(tool_target(&json!({ "Path": "Cargo.toml" })), Some("Cargo.toml"));
+        assert_eq!(error_reason(Agent::Antigravity, &json!({ "code": AUTH_REQUIRED })), "Antigravity isn't signed in. Run `agy` and sign in, then try again.");
     }
 
     fn talk(agent_says: &[Value], edits: bool) -> (Result<String, String>, Vec<Value>, Vec<Event>) {
@@ -1241,6 +1403,22 @@ mod tests {
             vec![AgentModel { id: "gpt-6.1-sol".into(), name: "6.1 Sol".into() }, AgentModel { id: "gpt-5.6-luna".into(), name: "5.6 Luna".into() }]
         );
         assert_eq!(sent.iter().map(|m| m["method"].as_str().unwrap()).collect::<Vec<_>>(), ["initialize", "session/new"], "no prompt, and Codex's session is left alone");
+    }
+
+    #[test]
+    fn antigravity_lists_its_model_config_option_without_prompting() {
+        let says = [reply(0, json!({ "protocolVersion": 1, "agentInfo": { "name": "Antigravity ACP Server" } })), reply(1, json!({
+            "sessionId": "s1",
+            "configOptions": [
+                { "id": "thought_level", "category": "thought_level", "options": [{ "value": "high", "name": "High" }] },
+                { "id": "model", "category": "model", "options": [{ "value": "gemini-4-neon", "name": "Gemini 4 Neon" }] },
+                { "id": "mode", "category": "mode", "options": [{ "value": "default", "name": "Default" }] }
+            ],
+            "_meta": { "antigravity": { "tier": { "name": "Google AI Pro" } } }
+        }))];
+        let (models, sent) = list(Agent::Antigravity, &says);
+        assert_eq!(models.unwrap(), vec![AgentModel { id: "gemini-4-neon".into(), name: "Gemini 4 Neon".into() }]);
+        assert_eq!(sent.iter().map(|m| m["method"].as_str().unwrap()).collect::<Vec<_>>(), ["initialize", "session/new"]);
     }
 
     #[test]

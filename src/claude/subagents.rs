@@ -1,10 +1,15 @@
 //! Custom subagents: agent types that run a task in another coding agent instead of Claude (Settings → Custom
-//! subagents): OpenAI Codex and OpenCode.
+//! subagents). What differs from one agent to the next lives in its `Provider`.
 //!
 //! Claudiu lists the agent types in `CLAUDIU_SUBAGENTS`, and the mod registers them, so Claude Code names them
 //! `Claudiu:<type>`. Interactive Claude Code ignores `claude --agents` (only `-p` reads it), so the mod is the one way
 //! to define them per session. The mod answers each turn of those agents through the `claudiu --acp` helper
 //! (`claude/acp.rs`).
+
+use std::time::Duration;
+
+use super::limits::Pool;
+use crate::panels::{logos, theme};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -18,40 +23,208 @@ pub const EXE_ENV: &str = "CLAUDIU_EXE";
 const TYPE_NAME_MAX: usize = 64;
 
 /// A coding agent a custom subagent runs the task in. Its serde name is the key the mod reads in `CLAUDIU_SUBAGENTS`
-/// and the prefix of its agent types.
+/// and the prefix of its agent types. Adding one takes a variant here, its place in `ALL`, and a `Provider`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Agent {
     #[default]
     Codex,
     OpenCode,
+    Antigravity,
+}
+
+/// How a provider reads its limits and how often it asks again.
+pub struct Limits {
+    pub read: fn() -> Result<Vec<Pool>, String>,
+    pub every: Duration,
+}
+
+/// Everything Claudiu knows about one agent, including its ACP server and usage limits.
+pub struct Provider {
+    /// The limits reader and refresh cadence, absent when the provider has no limits to show.
+    pub limits: Option<Limits>,
+    /// The color of its sidebar limits.
+    pub color: u32,
+    /// The logos and optional short label that identify a pool in the sidebar.
+    pub marks: fn(&str) -> (&'static [&'static rune::Icon], Option<String>),
+    /// The name the settings page and the subagent's text use.
+    pub name: &'static str,
+    /// The key in `CLAUDIU_SUBAGENTS` and in the state file, and the start of every agent type name.
+    pub key: &'static str,
+    /// The name Claude reads in the agent type's description.
+    task_name: &'static str,
+    /// What the user asks for, besides the model, when Claude should pick this agent.
+    triggers: &'static str,
+    /// The ACP server: a program on the PATH and its arguments.
+    pub program: &'static str,
+    pub args: &'static [&'static str],
+    /// Where the installer puts `program` on Windows, under `%LOCALAPPDATA%`, for when it isn't on the PATH.
+    pub windows_fallback: Option<&'static str>,
+    /// The program as failures name it.
+    pub server: &'static str,
+    /// The failure when `program` can't be found.
+    pub missing: &'static str,
+    /// The failure when the agent answers that it isn't signed in.
+    pub sign_in: &'static str,
+    /// The settings page's text: what the agent runs on and needs, and what Allow edits on and off let it do.
+    pub about: &'static str,
+    pub edits_on: &'static str,
+    pub edits_off: &'static str,
+    /// Arguments after `args` for one task's server, made ready here.
+    pub task_args: fn(&super::acp::Request) -> Result<Vec<String>, String>,
+    /// The environment the server starts with, for agents that take the model, effort and edits that way.
+    pub environment: fn(&super::acp::Request) -> Vec<(&'static str, String)>,
+    /// ACP config options (`session/set_config_option`) set before the task, for agents that take them that way.
+    pub config_options: fn(&super::acp::Request) -> Vec<(&'static str, String)>,
+    /// Whether messages Claude sends mid-task go through this helper even when the agent can't steer: they then follow
+    /// up in the same session. Otherwise Claude Code queues them itself.
+    pub inbox_without_steering: bool,
+    /// Whether a steer asks the agent to answer `promptRequired`, rather than start a turn of its own, when idle.
+    pub steering_prompt_required: bool,
+    /// Whether the session opened only to list models is deleted again, since the agent keeps every session.
+    pub delete_model_session: bool,
+    /// Whether a tool call can start with only the tool's name, its target arriving in the first update.
+    pub deferred_tool_target: bool,
+}
+
+const CODEX: Provider = Provider {
+    limits: Some(Limits { read: || {
+        let usage = super::codex_limits::codex_home().and_then(|home| super::codex_limits::read(&home)).ok_or("Codex has no limits reading yet")?;
+        Ok(vec![Pool { name: "Codex".into(), usage }])
+    }, every: Duration::from_secs(3) }),
+    color: theme::CODEX,
+    marks: logos::codex_marks,
+    name: "Codex",
+    key: "codex",
+    task_name: "OpenAI Codex",
+    triggers: "Codex, GPT",
+    program: "npx",
+    // Pinned so an upstream adapter change reaches users only with a Claudiu release.
+    args: &["-y", "@agentclientprotocol/codex-acp@2.6.0"],
+    windows_fallback: None,
+    server: "codex-acp",
+    missing: "npx was not found on PATH. Codex subagents need Node.js.",
+    sign_in: "Codex isn't signed in. Run `codex login`, then try again.",
+    about: "Runs the task in OpenAI Codex through codex-acp. Needs Node (npx) and a `codex login`; the first run downloads codex-acp from npm.",
+    edits_on: "Claudiu accepts everything Codex asks for: editing files, running commands, writing outside the folder and using the network. None of it goes through Claude Code's permission rules or hooks.",
+    edits_off: "Codex runs read-only: it can read and search, but not change files.",
+    task_args: super::acp::no_args,
+    environment: super::acp::codex_env,
+    config_options: super::acp::no_options,
+    inbox_without_steering: true,
+    steering_prompt_required: true,
+    delete_model_session: false,
+    deferred_tool_target: false,
+};
+
+const OPENCODE: Provider = Provider {
+    limits: None,
+    color: theme::TEXT,
+    marks: |name| (&[], Some(name.to_uppercase())),
+    name: "OpenCode",
+    key: "opencode",
+    task_name: "OpenCode",
+    triggers: "OpenCode",
+    program: "opencode",
+    args: &["acp"],
+    windows_fallback: None,
+    server: "opencode",
+    missing: "opencode was not found on PATH. OpenCode subagents need OpenCode installed.",
+    sign_in: "OpenCode isn't signed in. Run `opencode auth login`, then try again.",
+    about: "Runs the task in OpenCode (`opencode acp`), on the providers you set up in OpenCode. Needs `opencode` on PATH.",
+    edits_on: "Claudiu accepts everything OpenCode asks for, and OpenCode's own permission settings decide the rest: it can edit files, run commands and use the network. None of it goes through Claude Code's permission rules or hooks.",
+    edits_off: "OpenCode runs read-only: it can read, search and list files, but not change them or run any command, not even a read-only one.",
+    task_args: super::acp::no_args,
+    environment: super::acp::opencode_env,
+    config_options: super::acp::no_options,
+    inbox_without_steering: false,
+    steering_prompt_required: false,
+    delete_model_session: true,
+    deferred_tool_target: true,
+};
+
+const ANTIGRAVITY: Provider = Provider {
+    limits: Some(Limits { read: || {
+        let agy = super::acp::locate(Agent::Antigravity).ok_or("agy was not found")?;
+        super::antigravity_limits::read(&agy, &crate::datadir::data_dir())
+    }, every: super::antigravity_limits::REFRESH_EVERY }),
+    color: theme::ANTIGRAVITY,
+    marks: logos::antigravity_marks,
+    name: "Antigravity",
+    key: "antigravity",
+    task_name: "Google Antigravity",
+    triggers: "Antigravity, Gemini",
+    program: "agy",
+    args: &["acp"],
+    windows_fallback: Some("agy/bin/agy.exe"),
+    server: "agy",
+    missing: "agy was not found. Antigravity subagents need the Antigravity CLI installed.",
+    sign_in: "Antigravity isn't signed in. Run `agy` and sign in, then try again.",
+    about: "Runs the task in Google Antigravity (`agy acp`), on the Gemini, Claude and GPT models your Google plan includes. Needs the Antigravity CLI, signed in through `agy`.",
+    edits_on: "Claudiu puts Antigravity in accept-edits mode and allows everything it asks for: editing files and running commands. None of it goes through Claude Code's permission rules or hooks.",
+    edits_off: "Antigravity runs read-only: it can read and search, but not change files or run commands. It runs from its own folder in Claudiu's data, so your Antigravity rules, skills and MCP servers don't load.",
+    task_args: super::acp::antigravity_args,
+    environment: super::acp::no_env,
+    config_options: super::acp::antigravity_options,
+    inbox_without_steering: false,
+    steering_prompt_required: false,
+    delete_model_session: false,
+    deferred_tool_target: false,
+};
+
+/// One value per agent, such as each agent's part of the settings.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentMap<T>([T; Agent::ALL.len()]);
+
+impl<T> AgentMap<T> {
+    pub fn from_fn(mut f: impl FnMut(Agent) -> T) -> Self {
+        Self(std::array::from_fn(|i| f(Agent::ALL[i])))
+    }
+
+    pub fn get(&self, agent: Agent) -> &T {
+        &self.0[agent.index()]
+    }
+
+    pub fn get_mut(&mut self, agent: Agent) -> &mut T {
+        &mut self.0[agent.index()]
+    }
+}
+
+impl<T: Default> Default for AgentMap<T> {
+    fn default() -> Self {
+        Self::from_fn(|_| T::default())
+    }
 }
 
 impl Agent {
-    pub const ALL: [Agent; 2] = [Agent::Codex, Agent::OpenCode];
+    /// In the order the settings page lists them.
+    pub const ALL: [Agent; 3] = [Agent::Codex, Agent::OpenCode, Agent::Antigravity];
 
-    /// The name the settings page and the subagent's text use.
-    pub fn name(self) -> &'static str {
+    pub fn provider(self) -> &'static Provider {
         match self {
-            Agent::Codex => "Codex",
-            Agent::OpenCode => "OpenCode",
+            Agent::Codex => &CODEX,
+            Agent::OpenCode => &OPENCODE,
+            Agent::Antigravity => &ANTIGRAVITY,
         }
     }
 
-    /// The key in `CLAUDIU_SUBAGENTS` and the start of every agent type name.
+    /// Its place in `ALL`.
+    fn index(self) -> usize {
+        Agent::ALL.iter().position(|a| *a == self).expect("every agent is in ALL")
+    }
+
+    pub fn name(self) -> &'static str {
+        self.provider().name
+    }
+
     pub fn key(self) -> &'static str {
-        match self {
-            Agent::Codex => "codex",
-            Agent::OpenCode => "opencode",
-        }
+        self.provider().key
     }
 
     /// What Claude reads to decide when to use an agent type of this agent.
     fn description(self, model: &str) -> String {
-        match self {
-            Agent::Codex => format!("Runs the task in OpenAI Codex on {model}. Use only when the user asks for Codex, GPT or {model}."),
-            Agent::OpenCode => format!("Runs the task in OpenCode on {model}. Use only when the user asks for OpenCode or {model}."),
-        }
+        let p = self.provider();
+        format!("Runs the task in {} on {model}. Use only when the user asks for {} or {model}.", p.task_name, p.triggers)
     }
 
     /// The mod answers these agents' turns, so Claude runs for one only if the mod lost track of it (a reload, and
@@ -81,56 +254,42 @@ pub struct AgentChoice {
     pub catalog: Vec<AgentModel>,
 }
 
-/// Saved as `Stored`, the flat shape state files already hold for Codex: a field that changed type would make the
-/// whole state file fail to load, and the store moves such a file aside.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(from = "Stored", into = "Stored")]
-pub struct CustomSubagents {
-    pub codex: AgentChoice,
-    pub opencode: AgentChoice,
-}
+/// Keeps the flat provider keys used by existing state files.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CustomSubagents(pub AgentMap<AgentChoice>);
 
-#[derive(Default, Serialize, Deserialize)]
-struct Stored {
-    #[serde(default)]
-    codex: bool,
-    #[serde(default)]
-    codex_models: Vec<String>,
-    #[serde(default)]
-    codex_edits: bool,
-    #[serde(default)]
-    codex_catalog: Vec<AgentModel>,
-    #[serde(default)]
-    opencode: bool,
-    #[serde(default)]
-    opencode_models: Vec<String>,
-    #[serde(default)]
-    opencode_edits: bool,
-    #[serde(default)]
-    opencode_catalog: Vec<AgentModel>,
-}
-
-impl From<Stored> for CustomSubagents {
-    fn from(s: Stored) -> Self {
-        CustomSubagents {
-            codex: AgentChoice { on: s.codex, models: s.codex_models, edits: s.codex_edits, catalog: s.codex_catalog },
-            opencode: AgentChoice { on: s.opencode, models: s.opencode_models, edits: s.opencode_edits, catalog: s.opencode_catalog },
+impl Serialize for CustomSubagents {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut stored = Map::new();
+        for agent in Agent::ALL {
+            let choice = self.get(agent);
+            let key = agent.key();
+            stored.insert(key.into(), json!(choice.on));
+            stored.insert(format!("{key}_models"), json!(choice.models));
+            stored.insert(format!("{key}_edits"), json!(choice.edits));
+            stored.insert(format!("{key}_catalog"), json!(choice.catalog));
         }
+        stored.serialize(serializer)
     }
 }
 
-impl From<CustomSubagents> for Stored {
-    fn from(c: CustomSubagents) -> Self {
-        Stored {
-            codex: c.codex.on,
-            codex_models: c.codex.models,
-            codex_edits: c.codex.edits,
-            codex_catalog: c.codex.catalog,
-            opencode: c.opencode.on,
-            opencode_models: c.opencode.models,
-            opencode_edits: c.opencode.edits,
-            opencode_catalog: c.opencode.catalog,
+impl<'de> Deserialize<'de> for CustomSubagents {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let mut stored = Map::<String, Value>::deserialize(deserializer)?;
+        fn field<T: serde::de::DeserializeOwned + Default, E: serde::de::Error>(stored: &mut Map<String, Value>, key: &str) -> Result<T, E> {
+            stored.remove(key).map(serde_json::from_value).transpose().map(|v| v.unwrap_or_default()).map_err(E::custom)
         }
+        let mut result = Self::default();
+        for agent in Agent::ALL {
+            let key = agent.key();
+            *result.get_mut(agent) = AgentChoice {
+                on: field::<_, D::Error>(&mut stored, key)?,
+                models: field::<_, D::Error>(&mut stored, &format!("{key}_models"))?,
+                edits: field::<_, D::Error>(&mut stored, &format!("{key}_edits"))?,
+                catalog: field::<_, D::Error>(&mut stored, &format!("{key}_catalog"))?,
+            };
+        }
+        Ok(result)
     }
 }
 
@@ -170,17 +329,11 @@ pub fn agent_types(agent: Agent, models: &[String]) -> Vec<AgentType> {
 
 impl CustomSubagents {
     pub fn get(&self, agent: Agent) -> &AgentChoice {
-        match agent {
-            Agent::Codex => &self.codex,
-            Agent::OpenCode => &self.opencode,
-        }
+        self.0.get(agent)
     }
 
     pub fn get_mut(&mut self, agent: Agent) -> &mut AgentChoice {
-        match agent {
-            Agent::Codex => &mut self.codex,
-            Agent::OpenCode => &mut self.opencode,
-        }
+        self.0.get_mut(agent)
     }
 
     /// Each agent switched on that has a type, with its types.
@@ -205,7 +358,7 @@ impl CustomSubagents {
                 .iter()
                 .map(|t| json!({ "name": t.name, "model": t.model, "description": agent.description(&t.model), "prompt": agent.stub_prompt() }))
                 .collect();
-            env.insert(agent.key().into(), json!({ "edits": self.get(agent).edits, "types": types }));
+            env.insert(agent.key().into(), json!({ "edits": self.get(agent).edits, "name": agent.name(), "types": types }));
         }
         Some(Value::Object(env).to_string())
     }
@@ -215,12 +368,53 @@ impl CustomSubagents {
 mod tests {
     use super::*;
 
+    #[test]
+    fn every_limits_provider_has_visible_marks_and_a_color() {
+        for agent in Agent::ALL {
+            let provider = agent.provider();
+            if provider.limits.is_some() {
+                assert_ne!(provider.color, theme::PANEL_BG, "{}", provider.name);
+                for pool in ["Codex", "Gemini Models", "Claude and GPT models", "Gemini 4 Argon", "Some New models"] {
+                    let (marks, name) = (provider.marks)(pool);
+                    assert!(!marks.is_empty() || name.is_some_and(|name| !name.is_empty()), "{}: {pool}", provider.name);
+                    assert!(marks.iter().all(|mark| !mark.body.is_empty()), "{}: {pool}", provider.name);
+                }
+            }
+        }
+    }
+
+    fn choices(codex: AgentChoice, opencode: AgentChoice) -> CustomSubagents {
+        let mut choices = CustomSubagents::default();
+        *choices.get_mut(Agent::Codex) = codex;
+        *choices.get_mut(Agent::OpenCode) = opencode;
+        choices
+    }
+
     fn ids(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| s.to_string()).collect()
     }
 
     fn on(models: &[&str], edits: bool) -> AgentChoice {
         AgentChoice { on: true, models: ids(models), edits, catalog: vec![] }
+    }
+
+    #[test]
+    fn antigravity_round_trips_flat_state_and_supplies_mod_texts() {
+        let mut choices = CustomSubagents::default();
+        *choices.get_mut(Agent::Antigravity) = AgentChoice { catalog: vec![AgentModel { id: "gemini-4-neon".into(), name: "Gemini 4 Neon".into() }], ..on(&["gemini-4-neon"], true) };
+        let stored = serde_json::to_value(&choices).unwrap();
+        assert_eq!(stored["antigravity"], true);
+        assert_eq!(stored["antigravity_models"], json!(["gemini-4-neon"]));
+        assert_eq!(stored["antigravity_edits"], true);
+        assert_eq!(stored["antigravity_catalog"][0]["name"], "Gemini 4 Neon");
+        assert_eq!(serde_json::from_value::<CustomSubagents>(stored).unwrap(), choices);
+        let env: Value = serde_json::from_str(&choices.env().unwrap()).unwrap();
+        assert_eq!(env["antigravity"]["name"], "Antigravity");
+        assert_eq!(env["antigravity"]["types"][0]["description"], "Runs the task in Google Antigravity on gemini-4-neon. Use only when the user asks for Antigravity, Gemini or gemini-4-neon.");
+        for agent in Agent::ALL {
+            assert_eq!(Agent::ALL[agent.index()], agent);
+            assert_eq!(agent.key(), serde_json::to_value(agent).unwrap().as_str().unwrap(), "the state file and the mod use the same key");
+        }
     }
 
     #[test]
@@ -261,17 +455,17 @@ mod tests {
 
     #[test]
     fn nothing_reaches_the_session_while_every_agent_is_off_or_has_no_model_on() {
-        let mut off = CustomSubagents { codex: on(&["gpt-6.1-sol"], true), opencode: on(&["openai/gpt-6.1-sol"], true) };
-        off.codex.on = false;
-        off.opencode.on = false;
+        let mut off = choices(on(&["gpt-6.1-sol"], true), on(&["openai/gpt-6.1-sol"], true));
+        off.get_mut(Agent::Codex).on = false;
+        off.get_mut(Agent::OpenCode).on = false;
         assert_eq!(off.env(), None);
-        let none = CustomSubagents { codex: on(&[], false), opencode: on(&[], false) };
+        let none = choices(on(&[], false), on(&[], false));
         assert_eq!(none.env(), None);
     }
 
     #[test]
     fn the_mod_gets_each_agent_on_with_its_edit_switch_and_types() {
-        let both = CustomSubagents { codex: on(&["gpt-6.1-sol", "gpt-5.6-luna"], false), opencode: on(&["openai/gpt-6.1-sol"], true) };
+        let both = choices(on(&["gpt-6.1-sol", "gpt-5.6-luna"], false), on(&["openai/gpt-6.1-sol"], true));
         let env: Value = serde_json::from_str(&both.env().unwrap()).unwrap();
         assert_eq!(env.as_object().unwrap().keys().collect::<Vec<_>>(), ["codex", "opencode"]);
         assert_eq!((&env["codex"]["edits"], &env["opencode"]["edits"]), (&json!(false), &json!(true)));
@@ -294,7 +488,7 @@ mod tests {
 
     #[test]
     fn an_agent_on_with_no_model_on_is_left_out() {
-        let codex_only = CustomSubagents { codex: on(&["gpt-6.1-sol"], false), opencode: on(&[], true) };
+        let codex_only = choices(on(&["gpt-6.1-sol"], false), on(&[], true));
         let env: Value = serde_json::from_str(&codex_only.env().unwrap()).unwrap();
         assert_eq!(env.as_object().unwrap().keys().collect::<Vec<_>>(), ["codex"]);
     }
@@ -305,10 +499,7 @@ mod tests {
         let loaded: CustomSubagents = serde_json::from_str(saved).unwrap();
         assert_eq!(
             loaded,
-            CustomSubagents {
-                codex: AgentChoice { on: true, models: ids(&["gpt-6.1-sol"]), edits: true, catalog: vec![AgentModel { id: "gpt-6.1-sol".into(), name: "6.1 Sol".into() }] },
-                opencode: AgentChoice::default(),
-            }
+            choices(AgentChoice { on: true, models: ids(&["gpt-6.1-sol"]), edits: true, catalog: vec![AgentModel { id: "gpt-6.1-sol".into(), name: "6.1 Sol".into() }] }, AgentChoice::default())
         );
         let again: CustomSubagents = serde_json::from_str(&serde_json::to_string(&loaded).unwrap()).unwrap();
         assert_eq!(again, loaded);
