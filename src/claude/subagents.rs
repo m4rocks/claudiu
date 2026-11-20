@@ -174,7 +174,7 @@ const ANTIGRAVITY: Provider = Provider {
     edits_off: "Antigravity runs read-only: it can read and search, but not change files or run commands. It runs from its own folder in Claudiu's data, so your Antigravity rules, skills and MCP servers don't load.",
     // Google's FAQ names Claude Code among the third-party software barred from Antigravity logins, under Section 6 of
     // the Antigravity Additional Terms (https://antigravity.google/docs/faq, https://antigravity.google/terms).
-    warning: Some("Google's Antigravity terms forbid using another company's agent, such as Claude Code, with a personal Google sign-in. That covers the Free, AI Plus, Pro and Ultra plans. Google can suspend or terminate an account that does. Switch this on at your own risk."),
+    warning: Some("Google's Antigravity terms forbid using another company's agent, such as Claude Code, with a personal Google sign-in. That covers the Free, AI Plus, Pro and Ultra plans. Google can suspend or terminate the Antigravity and Gemini CLI accounts of anyone who does. Switch this on at your own risk."),
     task_args: super::acp::antigravity_args,
     environment: super::acp::no_env,
     config_options: super::acp::antigravity_options,

@@ -2623,10 +2623,12 @@ fn a_long_model_name_keeps_the_switch_in_its_row() {
     assert!(done[1] + done[3] <= dialog[1] + dialog[3], "Done stays in the dialog: {done:?}");
 }
 
-/// Google's terms for Antigravity forbid another company's agent driving it on a personal sign-in, so its dialog warns
-/// of suspension before it is switched on. The other agents have no such warning.
+/// Google's terms for Antigravity forbid another company's agent driving it on a personal sign-in, so its card and its
+/// dialog warn of suspension before it is switched on: the card's switch can turn it on without the dialog. The other
+/// agents have no such warning.
 #[test]
-fn antigravity_dialog_warns_of_suspension() {
+fn antigravity_warns_of_suspension() {
+    let warns = |h: &Harness| h.rt.elements().into_iter().filter_map(|e| e.text).filter(|t| t.contains("Google can suspend or terminate the Antigravity and Gemini CLI accounts")).count();
     let mut h = Harness::new(|_| vec![]);
     h.step(|ws| {
         ws.model_lookups.list = |_, _| Ok(vec![]);
@@ -2634,9 +2636,11 @@ fn antigravity_dialog_warns_of_suspension() {
         ws.set_settings_page(SettingsPage::CustomSubagents);
     });
     h.settle();
+    assert!(h.drawn("settings-antigravity-warning") && warns(&h) == 1, "Antigravity's card warns while still off");
+    assert!(!h.drawn("settings-codex-warning") && !h.drawn("settings-opencode-warning"), "the other cards don't");
     h.click("settings-antigravity-open");
     h.settle();
-    assert!(h.drawn("agent-dialog-antigravity-warning"), "Antigravity's dialog warns while still off");
+    assert!(h.drawn("agent-dialog-antigravity-warning") && warns(&h) == 2, "Antigravity's dialog warns too");
     h.click("agent-dialog-done");
     h.click("settings-codex-open");
     h.settle();
