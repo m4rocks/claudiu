@@ -383,6 +383,40 @@ fn antigravity_limits_show_one_row_per_pool_only_with_antigravity_subagents_on()
     assert!(h.drawn("meter-logo-antigravity-0") && h.drawn("meter-logo-antigravity-1"), "each pool's row starts with its logos");
 }
 
+/// The welcome screen has a shell of its own: it opens with no session, takes the keyboard, is resized like any
+/// shell, hides while a session is shown, and is back when the last session closes.
+#[test]
+fn the_shell_opens_on_the_welcome_screen() {
+    let mut h = Harness::new(|_| vec![]);
+    assert!(h.ws().main == Main::Home && h.ws().active.is_none(), "starts on the welcome screen");
+    h.step(|ws| ws.command(Command::ToggleShell));
+    h.settle();
+    assert!(h.ws().shells.get(HOME_SHELL).is_some_and(|p| p.open), "the shell opens with no session");
+    assert!(h.ws().terminal_focused(&shell_key(HOME_SHELL)), "it takes the keyboard");
+    assert!(h.drawn("shell-panel"), "the shell panel draws: {:?}", h.keys());
+    h.step(|ws| {
+        ws.shell_drag = Some(SideDrag { size: SHELL_HEIGHT });
+        ws.drag_shell(-100.0);
+        assert_eq!(ws.shells[HOME_SHELL].height, SHELL_HEIGHT + 100.0, "the divider resizes it");
+        ws.shell_drag = None;
+    });
+
+    // A session shown hides it, and it keeps running; the session's own shell is separate.
+    let cwd = h.work.clone();
+    h.step(|ws| ws.new_claude(cwd.clone()));
+    let id = h.ws().active.clone().expect("a session is shown");
+    h.settle();
+    assert!(!h.drawn("shell-panel"), "the welcome shell stays out of a session's view");
+    assert!(h.ws().shells.contains_key(HOME_SHELL), "but is kept");
+    h.step(|ws| ws.close_live(&id));
+    h.settle();
+    assert!(h.ws().main == Main::Home && h.drawn("shell-panel"), "closing the last session brings the welcome shell back");
+    assert!(h.ws().terminal_focused(&shell_key(HOME_SHELL)), "and the keyboard with it");
+
+    h.step(|ws| ws.command(Command::ToggleShell));
+    assert!(!h.ws().shells[HOME_SHELL].open, "toggled shut");
+}
+
 /// Sessions and the shell under them, the sidebars' widths, cards and the GitHub view, with a stand-in `claude`.
 #[test]
 fn sessions_and_the_shell_panel() {

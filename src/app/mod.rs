@@ -408,6 +408,9 @@ pub fn shell_key(id: &str) -> String {
     format!("shell:{id}")
 }
 
+/// The owner of the shell on the welcome screen, which has no session. Session ids are UUIDs, so it never collides.
+pub const HOME_SHELL: &str = "home";
+
 pub const SHELL_HEIGHT: f32 = 260.0;
 pub const SHELL_MIN: f32 = 120.0;
 

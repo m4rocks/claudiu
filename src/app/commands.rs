@@ -215,11 +215,7 @@ impl Workspace {
                 let cwd = self.new_session_cwd();
                 self.act(Act::NewClaude { cwd })
             }
-            Command::ToggleShell => {
-                if let Some(id) = self.active.clone() {
-                    self.act(Act::ToggleShell(id))
-                }
-            }
+            Command::ToggleShell => self.toggle_shell_here(),
             Command::CloseSession => {
                 if let Some(id) = self.active.clone() {
                     self.act(Act::CloseLive(id))

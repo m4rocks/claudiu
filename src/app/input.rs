@@ -135,7 +135,10 @@ impl Workspace {
     pub fn poll(&mut self, tx: &mut Tx) -> bool {
         let mut changed = self.run_jobs();
         changed |= std::mem::take(&mut self.rt.dirty);
-        let showing = if self.main == Main::Terminals { self.active.clone() } else { None };
+        let showing = match self.main {
+            Main::Terminals => self.active.clone(),
+            Main::Home => Some(HOME_SHELL.to_string()),
+        };
         let foreground = self.window_active;
         let mut next: Option<Instant> = None;
         let mut pump = |view: &mut TerminalView, visible: bool| -> bool {

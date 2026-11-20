@@ -128,16 +128,10 @@ impl Workspace {
         if hints {
             right = right.child(key_hint("J").key("hint-shell"));
         }
-        right = right.child(if session_active {
-            icon_button(&icons::PANEL_BOTTOM).key("toggle-shell").help("Shell").on_press_tx(|ws: &mut Workspace, tx: &mut Tx| {
-                if let Some(id) = ws.active.clone() {
-                    ws.act(Act::ToggleShell(id));
-                }
-                ws.after_input(tx);
-            })
-        } else {
-            icon_button_disabled(&icons::PANEL_BOTTOM).key("toggle-shell")
-        });
+        right = right.child(icon_button(&icons::PANEL_BOTTOM).key("toggle-shell").help("Shell").on_press_tx(|ws: &mut Workspace, tx: &mut Tx| {
+            ws.toggle_shell_here();
+            ws.after_input(tx);
+        }));
         if hints {
             right = right.child(key_hint("Shift+R").key("hint-right"));
         }
@@ -208,9 +202,8 @@ impl Workspace {
     /// The session's shell as its own panel under the main one: same gutter, rounding and grip as the sidebars. It
     /// slides up from the bottom edge.
     fn render_shell(&self) -> El {
-        let shown = self.active.clone().filter(|_| self.main == Main::Terminals);
-        let panel = shown.as_ref().and_then(|id| self.shells.get(id).map(|p| (id.clone(), p)));
-        let Some((id, p)) = panel else { return el().key("shell-slot").h(0.0) };
+        let id = self.shell_owner();
+        let Some(p) = self.shells.get(&id) else { return el().key("shell-slot").h(0.0) };
         let height = if p.open { p.height } else { 0.0 };
         let key = crate::app::shell_key(&id);
         let focused = self.terminal_focused(&key);
@@ -226,7 +219,7 @@ impl Workspace {
             .on_drag(|ws: &mut Workspace, d: &mut rune::Drag, tx: &mut Tx| {
                 match d.phase {
                     Phase::Down => {
-                        let height = ws.active.as_ref().and_then(|id| ws.shells.get(id)).map_or(SHELL_HEIGHT, |p| p.height);
+                        let height = ws.shells.get(&ws.shell_owner()).map_or(SHELL_HEIGHT, |p| p.height);
                         ws.shell_drag = Some(SideDrag { size: height });
                     }
                     Phase::Move => ws.drag_shell(d.dy),
