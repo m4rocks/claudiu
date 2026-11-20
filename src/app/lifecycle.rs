@@ -13,9 +13,10 @@ fn running_file() -> PathBuf {
 /// Claude Code's own data.
 pub fn tidy_leftovers() {
     let data = datadir::data_dir();
-    let [mcp_configs, titles, names, attached] = mcp::cleanup_dirs();
+    let [mcp_configs, titles, names, attached, screenshots] = mcp::cleanup_dirs();
     datadir::prune(names, 7 * 86_400);
     datadir::prune(attached, 7 * 86_400);
+    datadir::prune(screenshots, 7 * 86_400);
     datadir::prune(mcp_configs, 7 * 86_400);
     datadir::prune(crate::claude::trim::settings_dir(), 7 * 86_400);
     // Nothing writes titles any more; the old files go.

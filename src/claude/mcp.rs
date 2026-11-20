@@ -15,6 +15,7 @@ use serde_json::{Value, json};
 
 use serde::{Deserialize, Serialize};
 
+use crate::claude::computer_use;
 use crate::claude::trim::Trim;
 use crate::store::Attached;
 
@@ -24,6 +25,8 @@ pub const SESSION_ENV: &str = "CLAUDIU_SESSION";
 pub const RECORD_ENV: &str = "CLAUDIU_RECORD";
 /// Comma-separated names of what the server leaves out of this session (see `tools_off`). Missing means nothing is off.
 pub const TOOLS_OFF_ENV: &str = "CLAUDIU_TOOLS_OFF";
+/// The process id of the Claudiu that started the session, whose windows computer use must not type into.
+pub const HOST_PID_ENV: &str = "CLAUDIU_PID";
 
 /// A group of Claudiu's tools the user can switch off (Settings → Claudiu tools).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -33,11 +36,12 @@ pub enum Feature {
     Github,
     Sessions,
     Model,
+    ComputerUse,
 }
 
 impl Feature {
     /// In the order the page lists them.
-    pub const ALL: [Feature; 4] = [Self::Visual, Self::Github, Self::Sessions, Self::Model];
+    pub const ALL: [Feature; 5] = [Self::Visual, Self::Github, Self::Sessions, Self::Model, Self::ComputerUse];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -45,6 +49,7 @@ impl Feature {
             Self::Github => "GitHub sidebar",
             Self::Sessions => "Other sessions",
             Self::Model => "Model switch",
+            Self::ComputerUse => "Computer use",
         }
     }
 
@@ -55,6 +60,7 @@ impl Feature {
             Self::Github => "github",
             Self::Sessions => "sessions",
             Self::Model => "model",
+            Self::ComputerUse => "computer_use",
         }
     }
 }
@@ -81,6 +87,7 @@ fn feature_of(tool: &str) -> Option<&'static str> {
         "link_session" | "unlink_session" => Some("sessions"),
         "set_model" => Some("model"),
         _ if BRIDGE_TOOLS.contains(&tool) => Some("sessions"),
+        _ if computer_use::TOOLS.contains(&tool) => Some("computer_use"),
         _ => None,
     }
 }
@@ -96,9 +103,11 @@ const OWN_TOOLS: [&str; 5] = ["attach_github", "detach_github", "link_session", 
 const BRIDGE_TOOLS: [&str; 6] = ["list_code_sessions", "read_code_session", "search_sessions", "search_projects", "start_code_session", "switch_worktree"];
 
 /// `mcp__<server>__<tool>` names allowed per process so Claude Code adds no prompt of its own: Claudiu's own tools only
-/// change what Claudiu shows, and the cross-session tools are limited to what the user asks of the model.
+/// change what Claudiu shows, and the cross-session tools are limited to what the user asks of the model. Computer
+/// use is allowed too, by the maintainer's choice; Settings → Claudiu tools switches it off.
 pub fn allowed_tools(off: &[&str]) -> Vec<String> {
-    OWN_TOOLS.iter().copied().chain(BRIDGE_TOOLS).filter(|t| !is_off(off, t)).map(|t| format!("mcp__claudiu__{t}")).collect()
+    let computer = if computer_use::SUPPORTED { &computer_use::TOOLS[..] } else { &[] };
+    OWN_TOOLS.iter().copied().chain(BRIDGE_TOOLS).chain(computer.iter().copied()).filter(|t| !is_off(off, t)).map(|t| format!("mcp__claudiu__{t}")).collect()
 }
 
 const BRIDGE_INSTRUCTIONS: &str = " Claudiu also has tools that reach your other sessions: list_code_sessions, read_code_session, \
@@ -161,6 +170,9 @@ fn instructions(off: &[&str]) -> String {
     if on("sessions") {
         text += BRIDGE_INSTRUCTIONS;
     }
+    if on("computer_use") && computer_use::SUPPORTED {
+        text += computer_use::INSTRUCTIONS;
+    }
     text
 }
 
@@ -186,6 +198,11 @@ pub fn write_name(claude_session_id: &str, name: Option<&str>) {
 
 fn attach_dir(data: &Path) -> PathBuf {
     data.join("attach")
+}
+
+/// Where the computer-use `screenshot` tool saves its PNGs for the model to Read.
+fn screenshot_dir(data: &Path) -> PathBuf {
+    data.join("screenshots")
 }
 
 fn config_dir() -> PathBuf {
@@ -223,7 +240,7 @@ fn serve(input: impl BufRead, mut out: impl Write, record: &str, data: &Path, of
                 "instructions": instructions(off),
             })),
             "ping" => Ok(json!({})),
-            "tools/list" => Ok(json!({ "tools": own_tools(off).into_iter().chain(bridge_tools()).filter(|t| !is_off(off, t["name"].as_str().unwrap_or_default())).collect::<Vec<_>>() })),
+            "tools/list" => Ok(json!({ "tools": own_tools(off).into_iter().chain(bridge_tools()).chain(computer_use::tools()).filter(|t| !is_off(off, t["name"].as_str().unwrap_or_default())).collect::<Vec<_>>() })),
             "tools/call" => Ok(match msg["params"]["name"].as_str().filter(|tool| !is_off(off, tool)) {
                 Some("attach_github") => attach_github(&msg["params"], record, &attach_dir(data)),
                 Some("detach_github") => detach_github(&msg["params"], record, &attach_dir(data)),
@@ -232,6 +249,10 @@ fn serve(input: impl BufRead, mut out: impl Write, record: &str, data: &Path, of
                 Some("set_model") => reply("Model switching isn't available in this session (Claudiu's mod isn't loaded).", true),
                 Some("show_visual") => reply("Visuals aren't available in this session (Claudiu's mod isn't loaded).", true),
                 Some(tool) if BRIDGE_TOOLS.contains(&tool) => match ask(tool, &msg["params"]["arguments"]) {
+                    Ok(text) => reply(&text, false),
+                    Err(text) => reply(&text, true),
+                },
+                Some(tool) if computer_use::TOOLS.contains(&tool) => match computer_use::call(tool, &msg["params"]["arguments"], &screenshot_dir(data)) {
                     Ok(text) => reply(&text, false),
                     Err(text) => reply(&text, true),
                 },
@@ -457,7 +478,7 @@ fn link_session(params: &Value, record: &str, dir: &Path, verb: &str) -> Value {
 
 /// Write the per-session MCP config and return its path (for `--mcp-config`).
 pub fn prepare(claude_session_id: &str, record_id: &str, off: &[&str]) -> std::io::Result<PathBuf> {
-    let mut env = json!({ SESSION_ENV: claude_session_id, RECORD_ENV: record_id });
+    let mut env = json!({ SESSION_ENV: claude_session_id, RECORD_ENV: record_id, HOST_PID_ENV: std::process::id().to_string() });
     if !off.is_empty() {
         env[TOOLS_OFF_ENV] = off.join(",").into();
     }
@@ -544,10 +565,10 @@ fn parse_attachment(line: &str) -> Option<Attachment> {
     serde_json::from_value(v).ok().map(Attachment::Github)
 }
 
-/// Directories `app/lifecycle.rs` prunes: `[per-session MCP configs, titles, names, attached items]` (titles also live in the store).
-pub fn cleanup_dirs() -> [PathBuf; 4] {
+/// Directories `app/lifecycle.rs` prunes: `[per-session MCP configs, titles, names, attached items, screenshots]` (titles also live in the store).
+pub fn cleanup_dirs() -> [PathBuf; 5] {
     let data = crate::datadir::data_dir();
-    [config_dir(), titles_dir(), data.join("names"), attach_dir(&data)]
+    [config_dir(), titles_dir(), data.join("names"), attach_dir(&data), screenshot_dir(&data)]
 }
 
 #[cfg(test)]
@@ -600,18 +621,19 @@ mod tests {
             |tool, args| if tool == "start_code_session" { Err("The user declined.".into()) } else { Ok(format!("{tool} {}", args["id"])) },
         );
         let tools = r[0]["result"]["tools"].as_array().unwrap();
-        let names: Vec<_> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        let names: Vec<_> = tools.iter().map(|t| t["name"].as_str().unwrap()).filter(|n| !computer_use::TOOLS.contains(n)).collect();
         assert_eq!(
             names,
             ["attach_github", "detach_github", "set_model", "link_session", "unlink_session", "show_visual", "list_code_sessions", "read_code_session", "search_sessions", "search_projects", "start_code_session", "switch_worktree"]
         );
         let upfront: Vec<_> = tools.iter().filter(|t| t["_meta"]["anthropic/alwaysLoad"] == true).map(|t| t["name"].as_str().unwrap()).collect();
-        assert_eq!(upfront, ["attach_github", "detach_github", "link_session", "unlink_session"], "show_visual and the session-reaching tools stay deferred");
+        assert_eq!(upfront, ["attach_github", "detach_github", "link_session", "unlink_session"], "show_visual, the session-reaching and the computer-use tools stay deferred");
         assert_eq!(r[1]["result"]["content"][0]["text"], "read_code_session \"x\"");
         assert_eq!(r[1]["result"]["isError"], false);
         assert_eq!(r[2]["result"]["content"][0]["text"], "The user declined.");
         assert_eq!(r[2]["result"]["isError"], true);
-        assert_eq!(allowed_tools(&[]).len(), BRIDGE_TOOLS.len() + OWN_TOOLS.len());
+        let computer = if computer_use::SUPPORTED { computer_use::TOOLS.len() } else { 0 };
+        assert_eq!(allowed_tools(&[]).len(), BRIDGE_TOOLS.len() + OWN_TOOLS.len() + computer);
         assert!(allowed_tools(&[]).contains(&"mcp__claudiu__show_visual".to_string()));
     }
 
@@ -757,10 +779,15 @@ mod tests {
         (names, r[0]["result"]["instructions"].as_str().unwrap().to_string())
     }
 
+    /// How many computer-use tools this platform lists.
+    fn computer_tools() -> usize {
+        if computer_use::SUPPORTED { computer_use::TOOLS.len() } else { 0 }
+    }
+
     #[test]
     fn with_nothing_off_the_server_offers_every_tool_and_all_the_text() {
         let (names, text) = offer(&[]);
-        assert_eq!(names.len(), 12);
+        assert_eq!(names.len(), 12 + computer_tools());
         for part in [INTRO, GITHUB_INSTRUCTIONS, LINK_INSTRUCTIONS, VISUAL_INSTRUCTIONS, BRIDGE_INSTRUCTIONS] {
             assert!(text.contains(part));
         }
@@ -770,28 +797,28 @@ mod tests {
     #[test]
     fn each_feature_takes_its_tools_and_its_text_away() {
         let (names, text) = offer(&["visual"]);
-        assert!(!names.contains(&"show_visual".to_string()) && names.len() == 11);
+        assert!(!names.contains(&"show_visual".to_string()) && names.len() == 11 + computer_tools());
         assert!(!text.contains("Visual:") && !text.contains("show_visual"));
 
         let (names, text) = offer(&["github"]);
-        assert!(!names.iter().any(|n| n.ends_with("_github")) && names.len() == 10);
+        assert!(!names.iter().any(|n| n.ends_with("_github")) && names.len() == 10 + computer_tools());
         assert!(!text.contains("attach_github"));
 
         let (names, text) = offer(&["sessions"]);
         for gone in ["link_session", "unlink_session", "list_code_sessions", "read_code_session", "search_sessions", "search_projects", "start_code_session", "switch_worktree"] {
             assert!(!names.contains(&gone.to_string()), "{gone}");
         }
-        assert_eq!(names.len(), 4);
+        assert_eq!(names.len(), 4 + computer_tools());
         assert!(!text.contains("link_session") && !text.contains("start_code_session"));
 
         let (names, text) = offer(&["model"]);
-        assert!(!names.contains(&"set_model".to_string()) && names.len() == 11);
+        assert!(!names.contains(&"set_model".to_string()) && names.len() == 11 + computer_tools());
         assert!(!text.contains("set_model") && !text.contains("Never switch models"));
     }
 
     #[test]
     fn with_every_feature_off_only_the_opening_is_left() {
-        let (names, text) = offer(&["visual", "github", "sessions", "model"]);
+        let (names, text) = offer(&["visual", "github", "sessions", "model", "computer_use"]);
         assert!(names.is_empty());
         assert_eq!(text, INTRO);
     }
@@ -809,7 +836,7 @@ mod tests {
 
     #[test]
     fn allowed_tools_leaves_out_the_tools_of_features_that_are_off() {
-        assert_eq!(allowed_tools(&["github", "sessions"]), ["mcp__claudiu__show_visual"]);
+        assert_eq!(allowed_tools(&["github", "sessions", "computer_use"]), ["mcp__claudiu__show_visual"]);
     }
 
     #[test]
@@ -830,5 +857,59 @@ mod tests {
     fn the_off_list_comes_from_both_settings_in_the_pages_order() {
         assert_eq!(tools_off(&[], &[]), Vec::<&str>::new());
         assert_eq!(tools_off(&[Feature::Model, Feature::Visual, Feature::Visual], &[Trim::Artifacts, Trim::PlanMode, Trim::AskUserQuestion]), ["visual", "model", "ask_user_question", "artifacts"]);
+    }
+
+    const COMPUTER_TOOLS: [&str; 6] = ["list_windows", "focus_window", "screenshot", "click", "type_text", "press_keys"];
+
+    #[test]
+    fn computer_use_is_listed_on_windows_only_and_its_switch_drops_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let seen = |off: &[&str]| {
+            let r = talk_off(&[json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}), json!({"jsonrpc":"2.0","id":2,"method":"initialize","params":{}})], "s", tmp.path(), off, |_, _| Err("no".into()));
+            let names: Vec<String> = r[0]["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect();
+            let listed = COMPUTER_TOOLS.iter().filter(|t| names.iter().any(|n| n == *t)).count();
+            let taught = r[1]["result"]["instructions"].as_str().unwrap().contains("take screenshots");
+            let allowed = COMPUTER_TOOLS.iter().filter(|t| allowed_tools(off).contains(&format!("mcp__claudiu__{t}"))).count();
+            (listed, taught, allowed)
+        };
+        let expected_on = if cfg!(windows) { (6, true, 6) } else { (0, false, 0) };
+        assert_eq!(seen(&[]), expected_on);
+        assert_eq!(seen(&tools_off(&[Feature::ComputerUse], &[])), (0, false, 0), "switched off, nothing is listed, taught or allowed");
+    }
+
+    #[test]
+    fn computer_use_checks_its_arguments_before_touching_the_desktop() {
+        let tmp = tempfile::tempdir().unwrap();
+        let call = |name: &str, args: Value| json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":args}});
+        let r = talk(
+            &[
+                call("click", json!({"y": 3})),
+                call("click", json!({"x": 1, "y": 2, "button": "middle-ish"})),
+                call("press_keys", json!({"keys": ["ctrl+banana"]})),
+                call("press_keys", json!({"keys": []})),
+                call("type_text", json!({"text": ""})),
+                call("focus_window", json!({})),
+            ],
+            "s",
+            tmp.path(),
+        );
+        let texts: Vec<&str> = r.iter().map(|r| r["result"]["content"][0]["text"].as_str().unwrap()).collect();
+        assert!(r.iter().all(|r| r["result"]["isError"] == true), "{texts:?}");
+        if cfg!(windows) {
+            assert_eq!(
+                texts,
+                [
+                    "x and y must be whole numbers of pixels",
+                    "button must be left, right or middle",
+                    "unknown key \"banana\" in \"ctrl+banana\"",
+                    "keys must list at least one key",
+                    "text must not be empty",
+                    "name the window with window_id, title or process",
+                ]
+            );
+        } else {
+            assert!(texts.iter().all(|t| t.contains("only on Windows")), "{texts:?}");
+        }
+        assert!(!tmp.path().join("screenshots").exists());
     }
 }

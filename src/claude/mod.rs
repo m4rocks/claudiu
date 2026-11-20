@@ -15,6 +15,7 @@ pub mod antigravity_limits;
 pub mod antigravity_read_only;
 pub mod ask;
 pub mod bridge;
+pub mod computer_use;
 pub mod codex_limits;
 pub mod config_sync;
 pub mod costly;

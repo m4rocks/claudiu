@@ -402,7 +402,8 @@ impl Workspace {
                 let mut list = col().gap(8.0).child(faint(
                     "Applies to new sessions. Running sessions keep their tools. Resumed sessions get the new tools, and the old instructions stay until their next compaction.",
                 ));
-                for feature in Feature::ALL {
+                // Off Windows there is no computer use to switch off.
+                for feature in Feature::ALL.into_iter().filter(|&f| f != Feature::ComputerUse || crate::claude::computer_use::SUPPORTED) {
                     list = list.child(switch_row(format!("settings-claudiu-{}", feature as usize), feature.label(), None, !claudiu_off.contains(&feature), move |ws| {
                         if let Some(Modal::Settings { claudiu_off, .. }) = ws.modal.as_mut() {
                             flip(claudiu_off, feature);
