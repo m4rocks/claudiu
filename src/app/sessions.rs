@@ -302,12 +302,12 @@ impl Workspace {
         self.prune_live();
     }
 
-    /// Exited terminals are only kept while shown; a shell panel goes with its session.
+    /// Exited terminals are only kept while shown; a shell panel goes with its session, except the welcome screen's.
     fn prune_live(&mut self) {
         let active = &self.active;
         self.live.retain(|l| active.as_ref() == Some(&l.id) || l.view.is_running());
         let live = &self.live;
-        self.shells.retain(|id, _| live.iter().any(|l| &l.id == id));
+        self.shells.retain(|id, _| id == HOME_SHELL || live.iter().any(|l| &l.id == id));
     }
 
     /// A Claude session that never produced a transcript (opened and closed without a prompt) has nothing
@@ -383,10 +383,11 @@ impl Workspace {
         }
     }
 
-    /// Give the keyboard to the shown session's terminal, or to nothing on the home page.
+    /// Give the keyboard to the shown session's terminal, or on the home page to its shell when one is open.
     pub fn focus_active(&mut self) {
         match (self.main, self.active.clone()) {
             (Main::Terminals, Some(id)) if self.live_view(&id).is_some() => self.focus_terminal(&id),
+            (Main::Home, _) if self.shells.get(HOME_SHELL).is_some_and(|p| p.open) => self.focus_terminal(&shell_key(HOME_SHELL)),
             _ => {
                 self.keys_to = None;
                 self.blur = true;

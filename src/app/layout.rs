@@ -31,6 +31,34 @@ impl Workspace {
         self.focus_shell();
     }
 
+    /// Show or hide the shell of what is on screen: the shown session's, or on the welcome screen the one that needs
+    /// no session. It starts in the home folder and is kept while sessions are open.
+    pub fn toggle_shell_here(&mut self) {
+        if let Some(id) = self.active_id().cloned() {
+            self.toggle_shell(&id);
+            return;
+        }
+        if let Some(p) = self.shells.get_mut(HOME_SHELL) {
+            p.open = !p.open;
+        } else if let Some(cwd) = platform::home_dir() {
+            let panel = self.new_shell_panel(HOME_SHELL, cwd);
+            self.shells.insert(HOME_SHELL.to_string(), panel);
+        } else {
+            self.toast("Could not find the home folder for a shell.", true);
+            return;
+        }
+        if self.shells.get(HOME_SHELL).is_some_and(|p| p.open) {
+            self.focus_shell();
+        } else {
+            self.focus_active();
+        }
+    }
+
+    /// The owner of the shell panel on screen: the shown session, or `HOME_SHELL` on the welcome screen.
+    pub fn shell_owner(&self) -> Id {
+        self.active_id().cloned().unwrap_or_else(|| HOME_SHELL.to_string())
+    }
+
     /// A shell for the session, started in `cwd`. When the shell ends, its panel goes away (`on_terminal_event`), with a
     /// toast if it never started.
     pub(super) fn new_shell_panel(&mut self, id: &str, cwd: PathBuf) -> ShellPanel {
@@ -41,8 +69,9 @@ impl Workspace {
     }
 
     fn focus_shell(&mut self) {
-        if let Some(id) = self.active_id().filter(|id| self.shells.get(*id).is_some_and(|p| p.open)).cloned() {
-            self.focus_terminal(&shell_key(&id));
+        let owner = self.shell_owner();
+        if self.shells.get(&owner).is_some_and(|p| p.open) {
+            self.focus_terminal(&shell_key(&owner));
         }
     }
 
@@ -64,7 +93,8 @@ impl Workspace {
         let Some(d) = self.shell_drag else { return };
         let window_h = self.window_size.1;
         let height = (d.size - dy).clamp(SHELL_MIN, (window_h - 200.0).max(SHELL_MIN));
-        if let Some(p) = self.active.clone().and_then(|id| self.shells.get_mut(&id)) {
+        let owner = self.shell_owner();
+        if let Some(p) = self.shells.get_mut(&owner) {
             p.height = height;
         }
     }
