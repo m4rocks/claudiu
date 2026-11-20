@@ -107,6 +107,10 @@ fn agent_card(agent: Agent, form: &AgentForm, catalog: &[AgentModel], lookup: &L
         let names: Vec<&str> = form.models.iter().map(|id| catalog.iter().find(|m| &m.id == id).map_or(id.as_str(), |m| m.name.as_str())).collect();
         about = about.child(label(names.join(" · "), 11.0, theme::TEXT_FAINT).truncate());
     }
+    // The card's switch turns an agent on without opening its dialog once models are saved, so the card warns too.
+    if let Some(warning) = agent.provider().warning {
+        about = about.child(label(warning, 11.0, theme::WARN).wrap().key(format!("settings-{key}-warning")));
+    }
     let open = row()
         .key(format!("settings-{key}-open"))
         .grow(1.0)
@@ -255,7 +259,11 @@ impl Workspace {
             .gap(8.0)
             .w_full()
             .child(rune::text(format!("{} subagents", provider.name)).font(font(15.0, 600.0)).color(rgb(theme::TEXT)))
-            .child(faint(provider.about))
+            .child(faint(provider.about));
+        if let Some(warning) = provider.warning {
+            top = top.child(label(warning, 11.0, theme::WARN).wrap().key(format!("agent-dialog-{key}-warning")));
+        }
+        top = top
             .child(switch_row(format!("agent-dialog-{key}-on"), &format!("Give Claude {} subagents", provider.name), None, form.on, move |ws| flip_agent(ws, agent)));
         let mut models = col().key("agent-dialog-models").w_full().gap(8.0);
         if form.on {
