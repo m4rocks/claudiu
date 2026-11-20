@@ -451,6 +451,80 @@
 		grid-template-columns: minmax(0, 1fr);
 		grid-template-areas: "tb" "tk";
 	}
+	.win.sub {
+		grid-template-columns: repeat(3, minmax(0, 1fr));
+		grid-template-areas: "tb tb tb" "s0 s0 s0" "s1 s2 s3";
+	}
+	.win .s0 {
+		grid-area: s0;
+		display: grid;
+		grid-template-columns: minmax(0, 7fr) minmax(0, 5fr);
+		column-gap: 36px;
+		align-items: center;
+	}
+	.win .s0 figure {
+		margin-top: 0;
+		padding-top: 0;
+	}
+	.sub-copy {
+		display: flex;
+		flex-direction: column;
+		gap: 14px;
+		min-width: 0;
+	}
+	.win .s1 { grid-area: s1; }
+	.win .s2 { grid-area: s2; }
+	.win .s3 { grid-area: s3; }
+	.sub-fig svg {
+		display: block;
+		width: 100%;
+		height: auto;
+	}
+	.win .cell .sub-h {
+		display: flex;
+		align-items: center;
+		gap: 14px;
+	}
+	/* the provider's logo, in a tile like a key on the panel */
+	.ico {
+		display: grid;
+		place-items: center;
+		width: 44px;
+		height: 44px;
+		flex: none;
+		border: 1px solid var(--color-faint);
+		border-bottom-width: 2px;
+		border-radius: 8px;
+		transition: border-color 160ms cubic-bezier(0.16, 1, 0.3, 1);
+	}
+	.ico svg {
+		width: 24px;
+		height: 24px;
+		fill: currentColor;
+		fill-rule: evenodd;
+		clip-rule: evenodd;
+	}
+	.win.sub .cell:hover .ico {
+		border-color: currentColor;
+	}
+	@media (prefers-reduced-motion: no-preference) {
+		.sub-fig .branch {
+			stroke-dasharray: 260;
+			stroke-dashoffset: 260;
+		}
+		@supports (animation-timeline: view()) {
+			.sub-fig .branch {
+				animation: draw linear forwards;
+				animation-timeline: view();
+				animation-range: entry 10% cover 40%;
+			}
+		}
+		@supports not (animation-timeline: view()) {
+			.sub-fig .branch {
+				stroke-dashoffset: 0;
+			}
+		}
+	}
 	.win .tk {
 		grid-area: tk;
 		display: grid;
@@ -549,6 +623,14 @@
 		.win.ed {
 			grid-template-columns: minmax(0, 1fr);
 			grid-template-areas: "tb" "e1" "l1" "a1";
+		}
+		.win.sub {
+			grid-template-columns: minmax(0, 1fr);
+			grid-template-areas: "tb" "s0" "s1" "s2" "s3";
+		}
+		.win .s0 {
+			grid-template-columns: minmax(0, 1fr);
+			row-gap: 20px;
 		}
 		.win .tk {
 			grid-template-columns: minmax(0, 1fr);

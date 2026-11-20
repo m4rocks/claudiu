@@ -38,11 +38,27 @@ const calls = [
     [8, 2050, 441, 1965, 441],
     [4, 2050, 610, 1965, 610],
 ];
+
+// the logos and colours the app draws for each provider (src/panels/logos.rs, src/panels/theme.rs), from Lobe Icons
+// under the MIT licence in assets/LICENSE-LOBE-ICONS; the app shows OpenCode's name instead, so its logo comes
+// straight from @lobehub/icons-static-svg 1.104.0, in the app's colour for OpenCode
+const logos = {
+    codex: { color: "#61afef", d: "M8.086.457a6.105 6.105 0 013.046-.415c1.333.153 2.521.72 3.564 1.7a.117.117 0 00.107.029c1.408-.346 2.762-.224 4.061.366l.063.03.154.076c1.357.703 2.33 1.77 2.918 3.198.278.679.418 1.388.421 2.126a5.655 5.655 0 01-.18 1.631.167.167 0 00.04.155 5.982 5.982 0 011.578 2.891c.385 1.901-.01 3.615-1.183 5.14l-.182.22a6.063 6.063 0 01-2.934 1.851.162.162 0 00-.108.102c-.255.736-.511 1.364-.987 1.992-1.199 1.582-2.962 2.462-4.948 2.451-1.583-.008-2.986-.587-4.21-1.736a.145.145 0 00-.14-.032c-.518.167-1.04.191-1.604.185a5.924 5.924 0 01-2.595-.622 6.058 6.058 0 01-2.146-1.781c-.203-.269-.404-.522-.551-.821a7.74 7.74 0 01-.495-1.283 6.11 6.11 0 01-.017-3.064.166.166 0 00.008-.074.115.115 0 00-.037-.064 5.958 5.958 0 01-1.38-2.202 5.196 5.196 0 01-.333-1.589 6.915 6.915 0 01.188-2.132c.45-1.484 1.309-2.648 2.577-3.493.282-.188.55-.334.802-.438.286-.12.573-.22.861-.304a.129.129 0 00.087-.087A6.016 6.016 0 015.635 2.31C6.315 1.464 7.132.846 8.086.457zm-.804 7.85a.848.848 0 00-1.473.842l1.694 2.965-1.688 2.848a.849.849 0 001.46.864l1.94-3.272a.849.849 0 00.007-.854l-1.94-3.393zm5.446 6.24a.849.849 0 000 1.695h4.848a.849.849 0 000-1.696h-4.848z" },
+    opencode: { color: "#e4e4e4", d: "M16 6H8v12h8V6zm4 16H4V2h16v20z" },
+    antigravity: { color: "#c678dd", d: "M21.751 22.607c1.34 1.005 3.35.335 1.508-1.508C17.73 15.74 18.904 1 12.037 1 5.17 1 6.342 15.74.815 21.1c-2.01 2.009.167 2.511 1.507 1.506 5.192-3.517 4.857-9.714 9.715-9.714 4.857 0 4.522 6.197 9.714 9.715z" },
+};
+
+// the three subagents as the Fig. 5 drawing branches them out of Claude Code
+const providers = [
+    ["codex", "Codex", "Node, codex login", 10],
+    ["opencode", "OpenCode", "opencode on PATH", 84],
+    ["antigravity", "Antigravity", "agy, signed in", 158],
+];
 ---
 
 <Layout
     title="Claudiu — a desktop app for juggling Claude Code sessions"
-    description="Claudiu runs your own Claude Code CLI in a real terminal and keeps your sessions, projects, GitHub issues, accounts and usage in one native window, with an editor beside the terminal, on Windows, macOS and Linux."
+    description="Claudiu runs your own Claude Code CLI in a real terminal and keeps your sessions, projects, GitHub issues, accounts and usage in one native window, with an editor beside the terminal and Codex, OpenCode and Antigravity subagents, on Windows, macOS and Linux."
 >
     <header class="wrap head">
         <a href="#top" class="flex items-center gap-2.5 text-[15px] font-bold text-ink no-underline">
@@ -53,6 +69,7 @@ const calls = [
             <a href="#parts" class="max-sm:hidden">Parts</a>
             <a href="#editor" class="max-sm:hidden">Editor</a>
             <a href="#tokens" class="max-sm:hidden">Tokens</a>
+            <a href="#subagents" class="max-sm:hidden">Subagents</a>
             <a href="#spec" class="max-sm:hidden">Specifications</a>
             <a href={repo}>Source</a>
         </nav>
@@ -212,6 +229,91 @@ const calls = [
             </section>
         </div>
 
+        <div class="win sub" id="subagents">
+            <div class="tb"><span>Claudiu · custom subagents</span><span>Fig. 5 · other agents, inside Claude Code</span></div>
+
+            <section class="cell s0" aria-labelledby="ts0">
+                <div class="sub-copy">
+                    <h2 id="ts0">Other agents, started by Claude Code.</h2>
+                    <p>
+                        Turn them on in Settings → Custom subagents. Each one streams its work into its own task; the main conversation gets only the report.
+                    </p>
+                    <table class="spec wide">
+                        <tbody>
+                            <tr><th scope="row">Allow edits</th><td>off is read-only; on skips Claude Code's permission rules</td></tr>
+                            <tr><th scope="row">Messages</th><td>reach a running subagent, or wait for its turn to end</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+                <figure class="sub-fig">
+                    <svg viewBox="0 0 460 220" fill="none" role="img" aria-labelledby="fig5">
+                        <title id="fig5">Claude Code branching out to Codex, OpenCode and Antigravity subagents, each streaming back into its own task</title>
+                        <rect x="1" y="70" width="150" height="80" rx="8" stroke="var(--color-ink)" stroke-width="1.5" />
+                        <text x="18" y="104" fill="var(--color-ink)" font-size="15" font-weight="600">Claude Code</text>
+                        <text x="18" y="127" fill="var(--color-dim)" font-size="13">starts each one</text>
+                        <circle cx="220" cy="110" r="4.5" fill="var(--color-orange)" />
+                        {providers.map(([key, name, needs, y]) => (
+                            <g>
+                                <path class="branch" d={`M151 110H220V${y + 26}H290`} stroke="var(--color-orange)" stroke-width="1.5" stroke-linejoin="round" />
+                                <rect x="290" y={y} width="169" height="52" rx="8" stroke="var(--color-ink)" stroke-width="1.5" />
+                                {logos[key] && <svg x="302" y={y + 14} width="24" height="24" viewBox="0 0 24 24" fill={logos[key].color} fill-rule="evenodd" clip-rule="evenodd"><path d={logos[key].d} /></svg>}
+                                <text x={logos[key] ? 336 : 306} y={y + 24} fill="var(--color-ink)" font-size="14" font-weight="600">{name}</text>
+                                <text x={logos[key] ? 336 : 306} y={y + 41} fill="var(--color-dim)" font-size="12">{needs}</text>
+                            </g>
+                        ))}
+                    </svg>
+                </figure>
+            </section>
+
+            <section class="cell s1" aria-labelledby="ts1">
+                <h2 id="ts1" class="sub-h"><span class="ico" aria-hidden="true" style={`color:${logos.codex.color}`}><svg viewBox="0 0 24 24"><path d={logos.codex.d} /></svg></span>Codex.</h2>
+                <p>
+                    Claude picks the effort, or Codex uses its own config.
+                </p>
+                <figure>
+                    <table class="spec wide">
+                        <tbody>
+                            <tr><th scope="row">Needs</th><td>Node, <code>codex login</code></td></tr>
+                            <tr><th scope="row">Messages</th><td>reach the running task</td></tr>
+                            <tr><th scope="row">Limits</th><td>5-hour and 7-day, in the sidebar</td></tr>
+                        </tbody>
+                    </table>
+                </figure>
+            </section>
+
+            <section class="cell s2" aria-labelledby="ts2">
+                <h2 id="ts2" class="sub-h"><span class="ico" aria-hidden="true" style={`color:${logos.opencode.color}`}><svg viewBox="0 0 24 24"><path d={logos.opencode.d} /></svg></span>OpenCode.</h2>
+                <p>
+                    Runs on your own OpenCode providers.
+                </p>
+                <figure>
+                    <table class="spec wide">
+                        <tbody>
+                            <tr><th scope="row">Needs</th><td><code>opencode</code> on <code>PATH</code></td></tr>
+                            <tr><th scope="row">Messages</th><td>reach the running task on newer versions</td></tr>
+                        </tbody>
+                    </table>
+                </figure>
+            </section>
+
+            <section class="cell s3" aria-labelledby="ts3">
+                <h2 id="ts3" class="sub-h"><span class="ico" aria-hidden="true" style={`color:${logos.antigravity.color}`}><svg viewBox="0 0 24 24"><path d={logos.antigravity.d} /></svg></span>Google Antigravity.</h2>
+                <p>
+                    Read-only runs can only read and search, and skip your own rules, skills and MCP servers.
+                </p>
+                <figure>
+                    <table class="spec wide">
+                        <tbody>
+                            <tr><th scope="row">Needs</th><td><code>agy</code>, signed in</td></tr>
+                            <tr><th scope="row">Effort</th><td>Claude's pick, up to the model's highest</td></tr>
+                            <tr><th scope="row">Messages</th><td>wait for the current turn to end</td></tr>
+                            <tr><th scope="row">Limits</th><td>per model group, at no token cost</td></tr>
+                        </tbody>
+                    </table>
+                </figure>
+            </section>
+        </div>
+
         <div class="win one">
             <div class="tb"><span>Claudiu</span><span>Specifications</span></div>
             <section class="cell sp" id="spec" aria-labelledby="tspec"><h2 id="tspec">Specifications.</h2><p>Claudiu owns the workspace. Claude Code owns the agent.</p><div class="mt-auto"><table class="spec wide"><tbody><tr><th scope="row">Built with</th><td>Rust and Rune, not a web wrapper</td></tr><tr><th scope="row">Terminal</th><td>one real PTY per session; typed into only for the editor's <code>@path#L</code> reference</td></tr><tr><th scope="row">Anthropic API</th><td>never called by Claudiu</td></tr><tr><th scope="row">Claude Code data</th><td>transcripts never deleted; settings change only when you flip a switch</td></tr><tr><th scope="row">Network</th><td>GitHub only, plus npm and OpenAI for Codex subagents, your own OpenCode providers for OpenCode subagents, and Google for Antigravity subagents</td></tr><tr><th scope="row">Uploads</th><td>none</td></tr><tr><th scope="row">After a restart</th><td>running sessions come back</td></tr></tbody></table><a class="download" href={latest}><span>Download <small>Windows, macOS and Linux</small></span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 15V3"/><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/></svg></a><div class="mt-3 flex flex-wrap gap-x-6 gap-y-2 text-[15px] text-dim"><a href={`${repo}/releases/latest/download/Claudiu.AppImage`}>Linux AppImage</a><a href={`${repo}/releases`}>All releases</a><a href={repo}>Source on GitHub</a></div></div></section></div></div>
@@ -221,5 +323,5 @@ const calls = [
         <a href="https://m4.rocks">Made with &hearts; by @m4rocks</a>
         <a href="#top">Back to Fig. 1</a>
     </footer>
-    <p class="wrap text-[13px] text-dim pb-6">Claudiu is an independent project, not affiliated with, endorsed by or sponsored by Anthropic. Claude and Claude Code are trademarks of Anthropic.</p>
+    <p class="wrap text-[13px] text-dim pb-6">Claudiu is an independent project, not affiliated with, endorsed by or sponsored by Anthropic. Claude and Claude Code are trademarks of Anthropic. Codex, OpenCode and Antigravity belong to their owners; their logos come from <a href="https://github.com/lobehub/lobe-icons">Lobe Icons</a> (MIT).</p>
 </Layout>
