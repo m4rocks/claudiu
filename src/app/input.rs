@@ -219,6 +219,9 @@ impl Workspace {
             self.pane_command(c);
             return true;
         }
+        if commands::is_chord(ks, "secondary-z") && self.undo_key_reopens() && self.reopen_closed() {
+            return true;
+        }
         let Some(key) = self.keys_to.clone() else { return false };
         if let Some(e) = self.editor_mut(&key) {
             return e.on_key(ks, tx);
@@ -227,6 +230,13 @@ impl Workspace {
             Some(t) => t.on_key(ks, tx),
             None => false,
         }
+    }
+
+    /// Whether Ctrl+Z (Cmd+Z) is free to reopen a closed session: the editor keeps it for undo, and off macOS a shell
+    /// keeps Ctrl+Z to suspend the job it runs.
+    fn undo_key_reopens(&self) -> bool {
+        let in_shell = self.keys_to.as_deref().is_some_and(|k| k.starts_with("shell:"));
+        !self.keys_in_pane() && !(in_shell && !cfg!(target_os = "macos"))
     }
 
     /// A paste that reached no text field: the terminal with the keyboard takes it.

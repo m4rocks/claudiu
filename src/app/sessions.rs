@@ -400,9 +400,23 @@ impl Workspace {
     pub(super) fn close_live(&mut self, id: &str) {
         let was_in = self.store.session(id).map(|s| (s.cwd.clone(), s.project_id.clone()));
         self.end_live(id);
+        self.closed.retain(|c| c != id);
+        self.closed.push(id.to_string());
         if let Some((cwd, project)) = was_in {
             self.offer_worktree_removal(&cwd, project.as_deref());
         }
+    }
+
+    /// Resume the last closed session that can come back: one still in the history, with a Claude conversation, and
+    /// not running again. Whether there was one.
+    pub fn reopen_closed(&mut self) -> bool {
+        while let Some(id) = self.closed.pop() {
+            if !self.is_running(&id) && self.store.session(&id).is_some_and(|r| r.claude.is_some()) {
+                self.resume(&id);
+                return true;
+            }
+        }
+        false
     }
 
     pub(super) fn end_live(&mut self, id: &str) {

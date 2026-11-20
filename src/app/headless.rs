@@ -1056,6 +1056,58 @@ fn quitting_asks_first_only_while_a_session_is_working() {
     assert!(h.ws().modal.is_none());
 }
 
+/// Ctrl+Z (Cmd+Z on macOS) resumes the sessions closed since Claudiu started, the last closed first. The editor keeps
+/// the key for undo, and off macOS a shell keeps it to suspend its job.
+#[test]
+fn the_undo_key_reopens_closed_sessions_the_last_closed_first() {
+    let mut h = Harness::new(|_| vec![]);
+    let cwd = h.work.join("project");
+    std::fs::create_dir_all(&cwd).unwrap();
+    std::fs::write(cwd.join("code.rs"), "fn a() {}\n").unwrap();
+    let exe = h.ws().claude_exe.clone().unwrap();
+    let first = h.start_one("First", &cwd, claude::resume_spec(&exe, &cwd, "first"));
+    let second = h.start_one("Second", &cwd, claude::resume_spec(&exe, &cwd, "second"));
+    let third = h.start_one("Third", &cwd, claude::resume_spec(&exe, &cwd, "third"));
+    h.wait("the sessions starting", |ws| [&first, &second, &third].iter().all(|id| ws.is_running(id)));
+    h.step(|ws| ws.close_live(&first));
+    h.step(|ws| ws.close_live(&second));
+    let undo = |h: &mut Harness| h.press(rune::Key::Command('z'), secondary);
+
+    // The shell under the shown session has the keyboard.
+    h.step(|ws| ws.show_session(&third));
+    h.step(|ws| ws.toggle_shell_here());
+    assert_eq!(h.ws().keys_to, Some(shell_key(&third)));
+    undo(&mut h);
+    assert_eq!(h.ws().is_running(&second), cfg!(target_os = "macos"), "off macOS the shell keeps Ctrl+Z");
+    if h.ws().is_running(&second) {
+        h.step(|ws| ws.close_live(&second));
+    }
+
+    // The editor has the keyboard.
+    h.step(|ws| ws.show_session(&third));
+    h.step(|ws| ws.toggle_editor());
+    h.wait("listing", |ws| !ws.panes[&third].root.as_os_str().is_empty());
+    let root = h.editor_pane(&third).root.clone();
+    h.step(|ws| ws.open_file(&third, root.join("code.rs"), None));
+    h.wait("opening", |ws| ws.panes[&third].shown().is_some());
+    h.step(|ws| ws.focus_pane());
+    assert!(h.ws().keys_in_pane());
+    undo(&mut h);
+    assert!(!h.ws().is_running(&second), "the editor keeps the key for undo");
+    h.step(|ws| ws.toggle_editor());
+
+    // Claude has the keyboard.
+    h.step(|ws| ws.show_session(&third));
+    assert_eq!(h.ws().keys_to.as_deref(), Some(third.as_str()));
+    undo(&mut h);
+    h.wait("the second to come back", |ws| ws.is_running(&second));
+    assert!(!h.ws().is_running(&first), "one press brings back one session");
+    undo(&mut h);
+    h.wait("the first to come back", |ws| ws.is_running(&first));
+    undo(&mut h);
+    assert_eq!(h.ws().running_count(), 3, "with nothing left to reopen the key does nothing");
+}
+
 /// Hundreds of recent sessions: the RECENT list at the bottom opens to part of the window, scrolls under the wheel and
 /// keeps drawing rows where it brings them; its header closes it.
 #[test]

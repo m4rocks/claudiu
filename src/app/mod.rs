@@ -469,6 +469,8 @@ pub struct Workspace {
     pub window_size: (f32, f32),
     /// Open sessions in the order they were last shown (most recent last); closing one goes back to the previous.
     recent: Vec<Id>,
+    /// Sessions the user closed since Claudiu started, the last closed last; Ctrl+Z (Cmd+Z) resumes them in turn.
+    closed: Vec<Id>,
     pub main: Main,
     pub selected: Option<Id>,
     pub search: TextEdit,
@@ -569,6 +571,7 @@ impl Workspace {
             window_active: true,
             window_size: (1280.0, 800.0),
             recent: vec![],
+            closed: vec![],
             main: Main::Home,
             selected: store.data.layout.selected_session.clone(),
             search: TextEdit::new(""),
