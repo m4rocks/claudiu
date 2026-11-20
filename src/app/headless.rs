@@ -2623,6 +2623,26 @@ fn a_long_model_name_keeps_the_switch_in_its_row() {
     assert!(done[1] + done[3] <= dialog[1] + dialog[3], "Done stays in the dialog: {done:?}");
 }
 
+/// Google's terms for Antigravity forbid another company's agent driving it on a personal sign-in, so its dialog warns
+/// of suspension before it is switched on. The other agents have no such warning.
+#[test]
+fn antigravity_dialog_warns_of_suspension() {
+    let mut h = Harness::new(|_| vec![]);
+    h.step(|ws| {
+        ws.model_lookups.list = |_, _| Ok(vec![]);
+        ws.act(Act::OpenSettings);
+        ws.set_settings_page(SettingsPage::CustomSubagents);
+    });
+    h.settle();
+    h.click("settings-antigravity-open");
+    h.settle();
+    assert!(h.drawn("agent-dialog-antigravity-warning"), "Antigravity's dialog warns while still off");
+    h.click("agent-dialog-done");
+    h.click("settings-codex-open");
+    h.settle();
+    assert!(h.drawn("agent-dialog") && !h.drawn("agent-dialog-codex-warning"), "Codex's dialog has no warning");
+}
+
 /// Settings → Custom subagents: each agent is a card with a switch. Switching one on with no model opens its dialog,
 /// which lists the models the agent offers, with a search, and holds Allow edits; the card sums up what Claude gets.
 /// Save keeps the models switched on, and a new session hands the mod one agent type for each.

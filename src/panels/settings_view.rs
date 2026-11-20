@@ -255,7 +255,11 @@ impl Workspace {
             .gap(8.0)
             .w_full()
             .child(rune::text(format!("{} subagents", provider.name)).font(font(15.0, 600.0)).color(rgb(theme::TEXT)))
-            .child(faint(provider.about))
+            .child(faint(provider.about));
+        if let Some(warning) = provider.warning {
+            top = top.child(label(warning, 11.0, theme::WARN).wrap().key(format!("agent-dialog-{key}-warning")));
+        }
+        top = top
             .child(switch_row(format!("agent-dialog-{key}-on"), &format!("Give Claude {} subagents", provider.name), None, form.on, move |ws| flip_agent(ws, agent)));
         let mut models = col().key("agent-dialog-models").w_full().gap(8.0);
         if form.on {

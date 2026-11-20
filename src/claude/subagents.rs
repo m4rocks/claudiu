@@ -70,6 +70,8 @@ pub struct Provider {
     pub about: &'static str,
     pub edits_on: &'static str,
     pub edits_off: &'static str,
+    /// A risk the settings page shows before the agent is switched on, such as a sign-in its maker's terms forbid here.
+    pub warning: Option<&'static str>,
     /// Arguments after `args` for one task's server, made ready here.
     pub task_args: fn(&super::acp::Request) -> Result<Vec<String>, String>,
     /// The environment the server starts with, for agents that take the model, effort and edits that way.
@@ -111,6 +113,7 @@ const CODEX: Provider = Provider {
     about: "Runs the task in OpenAI Codex through codex-acp. Needs Node (npx) and a `codex login`; the first run downloads codex-acp from npm.",
     edits_on: "Claudiu accepts everything Codex asks for: editing files, running commands, writing outside the folder and using the network. None of it goes through Claude Code's permission rules or hooks.",
     edits_off: "Codex runs read-only: it can read and search, but not change files.",
+    warning: None,
     task_args: super::acp::no_args,
     environment: super::acp::codex_env,
     config_options: super::acp::no_options,
@@ -138,6 +141,7 @@ const OPENCODE: Provider = Provider {
     about: "Runs the task in OpenCode (`opencode acp`), on the providers you set up in OpenCode. Needs `opencode` on PATH.",
     edits_on: "Claudiu accepts everything OpenCode asks for, and OpenCode's own permission settings decide the rest: it can edit files, run commands and use the network. None of it goes through Claude Code's permission rules or hooks.",
     edits_off: "OpenCode runs read-only: it can read, search and list files, but not change them or run any command, not even a read-only one.",
+    warning: None,
     task_args: super::acp::no_args,
     environment: super::acp::opencode_env,
     config_options: super::acp::no_options,
@@ -168,6 +172,9 @@ const ANTIGRAVITY: Provider = Provider {
     about: "Runs the task in Google Antigravity (`agy acp`), on the Gemini, Claude and GPT models your Google plan includes. Needs the Antigravity CLI, signed in through `agy`.",
     edits_on: "Claudiu puts Antigravity in accept-edits mode and allows everything it asks for: editing files and running commands. None of it goes through Claude Code's permission rules or hooks.",
     edits_off: "Antigravity runs read-only: it can read and search, but not change files or run commands. It runs from its own folder in Claudiu's data, so your Antigravity rules, skills and MCP servers don't load.",
+    // Google's FAQ names Claude Code among the third-party software barred from Antigravity logins, under Section 6 of
+    // the Antigravity Additional Terms (https://antigravity.google/docs/faq, https://antigravity.google/terms).
+    warning: Some("Google's Antigravity terms forbid using another company's agent, such as Claude Code, with a personal Google sign-in. That covers the Free, AI Plus, Pro and Ultra plans. Google can suspend or terminate an account that does. Switch this on at your own risk."),
     task_args: super::acp::antigravity_args,
     environment: super::acp::no_env,
     config_options: super::acp::antigravity_options,
