@@ -17,11 +17,26 @@ for line in sys.stdin:
         continue
     method, i = m["method"], m["id"]
     if method == "session/new":
+        cwd = m["params"]["cwd"]
         send({"jsonrpc": "2.0", "id": i, "result": {"sessionId": "fake-session"}})
     elif method == "session/prompt":
         s = m["params"]["sessionId"]
+        text = m["params"]["prompt"][0]["text"]
+        # Every message is logged next to the script; one that says "edit" changes notes.txt, as an agent's turn would.
+        with open(__file__ + ".prompts", "a") as log:
+            log.write(text + "\n---\n")
+        if "edit" in text:
+            with open(cwd + "/notes.txt", "w") as f:
+                f.write("one\nTWO\nthree\n")
         send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": s, "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "ok"}}}})
         send({"jsonrpc": "2.0", "id": i, "result": {"stopReason": "end_turn"}})
+    elif method == "session/list":
+        send({"jsonrpc": "2.0", "id": i, "result": {"sessions": [{"sessionId": "from-terminal", "cwd": m["params"]["cwd"], "title": "Started in a terminal"}]}})
+    elif method == "session/load":
+        cwd = m["params"]["cwd"]
+        with open(__file__ + ".prompts", "a") as log:
+            log.write("loaded " + m["params"]["sessionId"] + "\n---\n")
+        send({"jsonrpc": "2.0", "id": i, "result": {}})
     else:
         send({"jsonrpc": "2.0", "id": i, "result": {}})
 "#).unwrap();
@@ -1797,6 +1812,181 @@ fn a_process_that_ends_closes_the_session_and_leaves_its_worktree() {
     until_closed(&mut cx, &missing);
     let toast = ws.read_with(&cx, |ws, _| ws.toast.as_ref().map(|t| t.text.clone()));
     assert!(toast.as_deref().is_some_and(|t| t.starts_with("Could not start Missing:")), "{toast:?}");
+}
+
+/// A turn that changes a file shows in the review: a hunk put back is as it was before the message, and a comment goes
+/// back to the agent naming its line.
+#[test]
+#[ignore = "drives the workspace with a stand-in agent"]
+fn reviewing_what_a_turn_changed() {
+    let data = tempfile::tempdir().unwrap();
+    // SAFETY: set before any other thread reads the environment; this test owns the process.
+    unsafe { std::env::set_var("CLAUDIU_DATA_DIR", data.path()) };
+    let work = tempfile::tempdir().unwrap();
+    let cwd = dunce::canonicalize(work.path()).unwrap().join("proj");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let git = |args: &[&str]| assert!(std::process::Command::new("git").args(["-c", "user.name=t", "-c", "user.email=t@t"]).args(args).current_dir(&cwd).status().unwrap().success());
+    git(&["init", "-q", "-b", "main"]);
+    std::fs::write(cwd.join("notes.txt"), "one\ntwo\nthree\n").unwrap();
+    git(&["add", "-A"]);
+    git(&["commit", "-q", "-m", "one"]);
+    let agent = fake_agent(work.path());
+    let prompts = PathBuf::from(format!("{}.prompts", agent.1[0]));
+
+    let mut cx = TestAppContext::single();
+    cx.update(|app| {
+        gpui_kit::init(app);
+        gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, app);
+    });
+    let (window, ws) = cx.update(|app| gpui_kit::open_window(Default::default(), app, |window, app| app.new(|cx| Workspace::new(window, vec![], cx)))).unwrap();
+    let draw = |cx: &mut TestAppContext| {
+        cx.update_window(window, |_, window, app| window.draw(app).clear(app)).unwrap();
+        cx.run_until_parked();
+    };
+    let wait = |cx: &mut TestAppContext, what: &str, done: &dyn Fn(&Workspace, &App) -> bool| {
+        let t = std::time::Instant::now();
+        while !ws.read_with(cx, |ws, app| done(ws, app)) {
+            assert!(t.elapsed() < Duration::from_secs(30), "timed out waiting for {what}");
+            std::thread::sleep(Duration::from_millis(50));
+            draw(cx);
+        }
+    };
+    ws.update(&mut cx, |ws, _| ws.acp_server = Some(agent.clone()));
+    cx.update_window(window, |_, window, app| ws.update(app, |ws, cx| ws.new_claude(cwd.clone(), window, cx))).unwrap();
+    draw(&mut cx);
+    let id = ws.read_with(&cx, |ws, _| ws.active.clone().expect("a session is shown"));
+    let thread = |ws: &Workspace| ws.live_view(&id).and_then(|v| v.thread()).cloned().expect("a thread view");
+    wait(&mut cx, "the session to open", &|ws, app| !thread(ws).read(app).is_loading());
+    let on_thread = |cx: &mut TestAppContext, f: &dyn Fn(&mut crate::thread::ThreadView, &mut Window, &mut Context<crate::thread::ThreadView>)| {
+        cx.update_window(window, |_, window, app| {
+            let view = thread(ws.read(app));
+            view.update(app, |v, cx| f(v, window, cx));
+        })
+        .unwrap();
+        draw(cx);
+    };
+
+    on_thread(&mut cx, &|v, w, cx| v.send("edit the notes".into(), w, cx));
+    wait(&mut cx, "the turn", &|ws, app| thread(ws).read(app).can_review());
+    assert_eq!(std::fs::read_to_string(cwd.join("notes.txt")).unwrap(), "one\nTWO\nthree\n");
+    on_thread(&mut cx, &|v, _, cx| v.open_review(cx));
+    wait(&mut cx, "the changes", &|ws, app| thread(ws).read(app).review_files().is_some());
+    let files = ws.read_with(&cx, |ws, app| thread(ws).read(app).review_files().unwrap().to_vec());
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0].path, PathBuf::from("notes.txt"));
+    let added = files[0].hunks[0].lines.iter().find(|l| l.origin == '+').unwrap();
+    assert_eq!((added.text.as_str(), added.new_line), ("TWO", Some(2)));
+
+    // A comment on the changed line goes back to the agent with the review closed.
+    on_thread(&mut cx, &|v, w, cx| v.comment_on("notes.txt".into(), 2, "keep it lowercase", w, cx));
+    on_thread(&mut cx, &|v, w, cx| v.send_comments(w, cx));
+    wait(&mut cx, "the comments to reach the agent", &|_, _| std::fs::read_to_string(&prompts).is_ok_and(|p| p.contains("@notes.txt#L2: keep it lowercase")));
+
+    // That message was a turn too: its review is empty until something changes, and putting back the earlier hunk is
+    // then the only change.
+    wait(&mut cx, "the second turn", &|ws, app| thread(ws).read(app).can_review());
+    on_thread(&mut cx, &|v, _, cx| v.open_review(cx));
+    wait(&mut cx, "the changes", &|ws, app| thread(ws).read(app).review_files().is_some());
+    assert!(ws.read_with(&cx, |ws, app| thread(ws).read(app).review_files().unwrap().is_empty()));
+    let hunk = files[0].hunks[0].clone();
+    on_thread(&mut cx, &|v, _, cx| v.revert_hunk(hunk.clone(), cx));
+    wait(&mut cx, "the hunk to go back", &|_, _| std::fs::read_to_string(cwd.join("notes.txt")).unwrap() == "one\ntwo\nthree\n");
+    wait(&mut cx, "the review to read again", &|ws, app| thread(ws).read(app).review_files().is_some_and(|f| f.len() == 1));
+}
+
+/// A session the agent lists for a folder opens here as a Claudiu session, loading the agent's own conversation, and
+/// picking it up again shows the same record.
+#[test]
+#[ignore = "drives the workspace with a stand-in agent"]
+fn picking_up_a_session_started_elsewhere() {
+    let data = tempfile::tempdir().unwrap();
+    // SAFETY: set before any other thread reads the environment; this test owns the process.
+    unsafe { std::env::set_var("CLAUDIU_DATA_DIR", data.path()) };
+    let work = tempfile::tempdir().unwrap();
+    let cwd = dunce::canonicalize(work.path()).unwrap();
+    let agent = fake_agent(work.path());
+    let prompts = PathBuf::from(format!("{}.prompts", agent.1[0]));
+    let mut cx = TestAppContext::single();
+    cx.update(|app| {
+        gpui_kit::init(app);
+        gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, app);
+    });
+    let (window, ws) = cx.update(|app| gpui_kit::open_window(Default::default(), app, |window, app| app.new(|cx| Workspace::new(window, vec![], cx)))).unwrap();
+    let wait = |cx: &mut TestAppContext, what: &str, done: &dyn Fn(&Workspace, &App) -> bool| {
+        let t = std::time::Instant::now();
+        while !ws.read_with(cx, |ws, app| done(ws, app)) {
+            assert!(t.elapsed() < Duration::from_secs(30), "timed out waiting for {what}");
+            std::thread::sleep(Duration::from_millis(50));
+            cx.update_window(window, |_, window, app| window.draw(app).clear(app)).unwrap();
+            cx.run_until_parked();
+        }
+    };
+    ws.update(&mut cx, |ws, _| ws.acp_server = Some(agent.clone()));
+    let act = |cx: &mut TestAppContext, act: Act| cx.update_window(window, |_, window, app| ws.update(app, |ws, cx| ws.act(act, window, cx))).unwrap();
+    act(&mut cx, Act::ListSessions { cwd: cwd.clone() });
+    wait(&mut cx, "the list", &|ws, _| ws.menu.is_some());
+    let pick = ws.read_with(&cx, |ws, _| {
+        let items = &ws.menu.as_ref().unwrap().items;
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].label, "Started in a terminal");
+        items[0].act.clone()
+    });
+    act(&mut cx, pick.clone());
+    let id = ws.read_with(&cx, |ws, _| ws.active.clone().expect("the picked session is shown"));
+    wait(&mut cx, "the session to open", &|ws, app| ws.live_view(&id).and_then(|v| v.thread()).is_some_and(|t| !t.read(app).is_loading()));
+    assert!(std::fs::read_to_string(&prompts).unwrap().contains("loaded from-terminal"), "the agent's own conversation was loaded");
+    ws.read_with(&cx, |ws, _| {
+        let rec = ws.store.session(&id).unwrap();
+        assert_eq!((rec.claude_id(), rec.title.as_str()), (Some("from-terminal"), "Started in a terminal"));
+    });
+    act(&mut cx, pick);
+    assert_eq!(ws.read_with(&cx, |ws, _| ws.store.data.sessions.iter().filter(|s| s.claude_id() == Some("from-terminal")).count()), 1, "no second record");
+}
+
+/// Handing a session to another agent starts a session of that agent in the same folder, whose first message carries
+/// the conversation; the first session keeps running.
+#[test]
+#[ignore = "drives the workspace with a stand-in agent"]
+fn handing_a_session_to_another_agent() {
+    let data = tempfile::tempdir().unwrap();
+    // SAFETY: set before any other thread reads the environment; this test owns the process.
+    unsafe { std::env::set_var("CLAUDIU_DATA_DIR", data.path()) };
+    let work = tempfile::tempdir().unwrap();
+    let cwd = dunce::canonicalize(work.path()).unwrap();
+    let agent = fake_agent(work.path());
+    let prompts = PathBuf::from(format!("{}.prompts", agent.1[0]));
+    let mut cx = TestAppContext::single();
+    cx.update(|app| {
+        gpui_kit::init(app);
+        gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, app);
+    });
+    let (window, ws) = cx.update(|app| gpui_kit::open_window(Default::default(), app, |window, app| app.new(|cx| Workspace::new(window, vec![], cx)))).unwrap();
+    let wait = |cx: &mut TestAppContext, what: &str, done: &dyn Fn(&Workspace, &App) -> bool| {
+        let t = std::time::Instant::now();
+        while !ws.read_with(cx, |ws, app| done(ws, app)) {
+            assert!(t.elapsed() < Duration::from_secs(30), "timed out waiting for {what}");
+            std::thread::sleep(Duration::from_millis(50));
+            cx.update_window(window, |_, window, app| window.draw(app).clear(app)).unwrap();
+            cx.run_until_parked();
+        }
+    };
+    ws.update(&mut cx, |ws, _| ws.acp_server = Some(agent.clone()));
+    cx.update_window(window, |_, window, app| ws.update(app, |ws, cx| ws.new_claude(cwd.clone(), window, cx))).unwrap();
+    let first = ws.read_with(&cx, |ws, _| ws.active.clone().unwrap());
+    let thread = |ws: &Workspace, id: &str| ws.live_view(id).and_then(|v| v.thread()).cloned();
+    wait(&mut cx, "the session to open", &|ws, app| thread(ws, &first).is_some_and(|t| !t.read(app).is_loading()));
+    cx.update_window(window, |_, window, app| thread(ws.read(app), &first).unwrap().update(app, |v, cx| v.send("plan the change".into(), window, cx))).unwrap();
+    wait(&mut cx, "the reply", &|ws, app| thread(ws, &first).is_some_and(|t| !t.read(app).is_working() && t.read(app).tail_text(10).contains("Agent: ok")));
+
+    cx.update_window(window, |_, window, app| ws.update(app, |ws, cx| ws.act(Act::HandToAgent(first.clone(), crate::harness::Harness::Codex), window, cx))).unwrap();
+    let second = ws.read_with(&cx, |ws, _| ws.active.clone().unwrap());
+    assert_ne!(second, first);
+    ws.read_with(&cx, |ws, app| {
+        let rec = ws.store.session(&second).unwrap();
+        assert_eq!((rec.claude.as_ref().unwrap().harness, &rec.cwd), (crate::harness::Harness::Codex, &cwd));
+        assert!(ws.is_running(&first, app), "the first session keeps running");
+    });
+    wait(&mut cx, "the hand-off message", &|_, _| std::fs::read_to_string(&prompts).is_ok_and(|p| p.contains("taking over work from a Claude Code session") && p.contains("User: plan the change\n\nAgent: ok")));
 }
 
 /// A Claude Code session through its ACP adapter: it starts, names itself, and answers a message in the thread.

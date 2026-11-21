@@ -55,10 +55,16 @@ impl Workspace {
     /// A new session in the default harness, sent `prompt` once it is ready. `options` (by category, such as
     /// `model`) win over the new-session defaults.
     pub(super) fn new_claude_with(&mut self, cwd: PathBuf, prompt: Option<String>, options: Vec<(&'static str, String)>, by: Starter, window: &mut Window, cx: &mut Context<Self>) {
+        let harness = self.store.data.settings.harness;
+        self.new_session_with(harness, cwd, prompt, options, by, window, cx);
+    }
+
+    /// A new session in `harness`, as `new_claude_with`.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn new_session_with(&mut self, harness: Harness, cwd: PathBuf, prompt: Option<String>, options: Vec<(&'static str, String)>, by: Starter, window: &mut Window, cx: &mut Context<Self>) {
         // A new session starts in the main checkout, not in a linked worktree. Fix-with-Claude works where the failure was.
         let cwd = if by == Starter::FixGit { cwd } else { self.outside_linked_worktree(cwd) };
         let record_id = new_id();
-        let harness = self.store.data.settings.harness;
         let meta = ClaudeMeta { chrome: self.store.data.settings.chrome_default, harness, ..Default::default() };
         let Some(mut start) = self.thread_start(&record_id, &cwd, &meta, None, prompt, by, cx) else { return };
         start.options.retain(|(category, _)| options.iter().all(|(c, _)| c != category));
@@ -84,7 +90,7 @@ impl Workspace {
     /// mod, account and flags. A new session (no id yet) also gets the new-session defaults. None, with a toast, when
     /// Claude Code isn't installed.
     #[allow(clippy::too_many_arguments)]
-    fn thread_start(&mut self, record_id: &str, cwd: &std::path::Path, meta: &ClaudeMeta, name: Option<String>, prompt: Option<String>, by: Starter, cx: &mut Context<Self>) -> Option<crate::thread::Start> {
+    pub(super) fn thread_start(&mut self, record_id: &str, cwd: &std::path::Path, meta: &ClaudeMeta, name: Option<String>, prompt: Option<String>, by: Starter, cx: &mut Context<Self>) -> Option<crate::thread::Start> {
         let session_id = Some(meta.session_id.clone()).filter(|id| !id.is_empty());
         let settings = &self.store.data.settings;
         let off = mcp::tools_off(&settings.claudiu_tools_off, &settings.trimmed_tools);

@@ -310,7 +310,10 @@ impl Workspace {
 
     fn project_menu(&self, p: &Project) -> Vec<MenuItem> {
         let item = |label: String, act: Act, danger: bool, sep: bool| MenuItem { label, hint: None, detail: None, act, danger, disabled: false, separator_before: sep, remove: None, icon: None };
-        let mut items = vec![item("New Claude session here".into(), Act::NewClaude { cwd: p.path.clone() }, false, false)];
+        let mut items = vec![
+            item(format!("New {} session here", self.store.data.settings.harness.name()), Act::NewClaude { cwd: p.path.clone() }, false, false),
+            item("Pick up a session here…".into(), Act::ListSessions { cwd: p.path.clone() }, false, false),
+        ];
         if p.git.is_some() {
             items.push(item("GitHub issues & PRs".into(), Act::OpenGithub { cwd: p.path.clone() }, false, true));
         }

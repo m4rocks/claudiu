@@ -23,6 +23,9 @@ impl Render for ThreadView {
         if self.phase == Phase::Starting {
             return root.child(waiting(&format!("Starting {}…", self.harness.name())));
         }
+        if let Some(review) = self.render_review(cx) {
+            return root.child(review);
+        }
         let conversation = list(self.list.clone(), cx.processor(|v: &mut Self, ix: usize, window, cx| v.render_entry(ix, window, cx)))
             .flex_1()
             .w_full()
@@ -254,6 +257,17 @@ impl ThreadView {
             );
         }
         line = line.child(div().flex_1());
+        if self.can_review() {
+            line = line.child(
+                div()
+                    .id("thread-review-open")
+                    .cursor_pointer()
+                    .text_color(hsla(theme::TEXT_DIM))
+                    .hover(|s| s.text_color(hsla(theme::TEXT)))
+                    .child("Review changes")
+                    .on_click(cx.listener(|v, _: &ClickEvent, _, cx| v.open_review(cx))),
+            );
+        }
         if !self.queue.is_empty() {
             line = line.child(faint(format!("{} queued", self.queue.len())));
         }

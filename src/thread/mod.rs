@@ -4,6 +4,7 @@
 
 mod keys;
 mod render;
+mod review;
 
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
@@ -106,6 +107,11 @@ pub struct ThreadView {
     pub handover: Option<Handover>,
     cards: HashMap<String, Card>,
     card_ui: Entity<CardUi>,
+    /// The working tree as it was before each message, oldest first (`git/snapshot.rs`). Empty outside a git
+    /// repository.
+    pub snapshots: Vec<String>,
+    /// The review of what changed since the last message, while it is open.
+    review: Option<review::Review>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -167,6 +173,8 @@ impl ThreadView {
             handover: None,
             cards: HashMap::new(),
             card_ui,
+            snapshots: Vec::new(),
+            review: None,
             _subscriptions: subscriptions,
         };
         view.start(start, cx);
@@ -321,8 +329,18 @@ impl ThreadView {
         self.remeasure(at);
         self.list.scroll_to_end();
         self.working = true;
-        let turn = connection.request("session/prompt", json!({"sessionId": session, "prompt": [{"type": "text", "text": text}]}));
+        let cwd = self.cwd.clone();
         cx.spawn(async move |this, cx| {
+            // The snapshot comes first, so the review sees what this turn changed. Outside a repository it fails, and the
+            // message goes anyway.
+            let snapshot = {
+                let session = session.clone();
+                cx.background_executor().spawn(async move { crate::git::snapshot::take(&cwd, &session) }).await
+            };
+            if let Ok(id) = snapshot {
+                let _ = this.update(cx, |v, _| v.snapshots.push(id));
+            }
+            let turn = connection.request("session/prompt", json!({"sessionId": session, "prompt": [{"type": "text", "text": text}]}));
             let result = turn.await;
             let _ = this.update(cx, |v, cx| v.turn_ended(result, cx));
         })

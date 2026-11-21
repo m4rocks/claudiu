@@ -33,6 +33,7 @@ use crate::thread::Handover;
 use crate::thread::{ThreadEvent, ThreadView};
 use crate::updater::UpdateState;
 
+mod agent_handoff;
 mod alt_accounts;
 pub mod already_running;
 mod attached_sync;
@@ -57,6 +58,7 @@ mod links;
 mod modal;
 mod navigation;
 pub mod picker;
+mod pickup;
 mod repo;
 mod selection_reference;
 mod sessions;
@@ -152,6 +154,12 @@ pub enum Act {
     ToggleShell(Id),
     /// End the thread and copy the harness's own command to carry on with the session in a terminal.
     ContinueInTerminal(Id),
+    /// Start a session of another agent in the same folder, with this session's conversation as its first message.
+    HandToAgent(Id, Harness),
+    /// List the default agent's sessions in a folder, to pick one up here.
+    ListSessions { cwd: PathBuf },
+    /// Open a session an agent listed.
+    PickUp { harness: Harness, cwd: PathBuf, session_id: String, title: Option<String> },
     /// Turn editor mode on or off for the shown session (see `editor_mode.rs`).
     ToggleEditor,
     /// Click on a session row: live -> show it, history -> resume it.
@@ -830,6 +838,9 @@ impl Workspace {
             }
             Act::ToggleShell(id) => self.toggle_shell(&id, window, cx),
             Act::ContinueInTerminal(id) => self.continue_in_terminal(&id, window, cx),
+            Act::HandToAgent(id, to) => self.hand_to_agent(&id, to, window, cx),
+            Act::ListSessions { cwd } => self.list_sessions(cwd, window.mouse_position(), cx),
+            Act::PickUp { harness, cwd, session_id, title } => self.pick_up(harness, cwd, session_id, title, window, cx),
             Act::ToggleEditor => self.toggle_editor(window, cx),
             Act::Editor(command) => self.run_editor_command(command, window, cx),
             Act::Select(id) => self.show_session(&id, window, cx),

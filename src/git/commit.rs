@@ -246,7 +246,13 @@ fn clean_message(raw: &str) -> Option<String> {
 }
 
 pub(super) fn git(cwd: &Path, args: &[&str], stdin: Option<&str>) -> Result<String, String> {
+    git_with(cwd, args, stdin, &[])
+}
+
+/// `git` with extra environment variables, such as `GIT_INDEX_FILE`.
+pub(super) fn git_with(cwd: &Path, args: &[&str], stdin: Option<&str>, env: &[(&str, &std::ffi::OsStr)]) -> Result<String, String> {
     let mut cmd = Command::new("git");
+    cmd.envs(env.iter().copied());
     cmd.args(args).current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     // No terminal can answer a credential prompt: fail instead of hanging (GUI credential helpers still work).
     cmd.env("GIT_TERMINAL_PROMPT", "0");
