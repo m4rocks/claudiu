@@ -1989,7 +1989,7 @@ fn handing_a_session_to_another_agent() {
     wait(&mut cx, "the hand-off message", &|_, _| std::fs::read_to_string(&prompts).is_ok_and(|p| p.contains("taking over work from a Claude Code session") && p.contains("User: plan the change\n\nAgent: ok")));
 }
 
-/// A Claude Code session through its ACP adapter: it starts, names itself, and answers a message in the thread.
+/// A session of each agent through ACP (Claude Code through the SDK bridge): it starts, names itself, and answers a message in the thread.
 /// Each spends one short turn on the signed-in account. `cargo test -- --ignored session_answers`.
 #[test]
 #[ignore = "runs the real Claude Code"]

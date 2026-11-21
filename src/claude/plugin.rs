@@ -15,11 +15,12 @@ const FILES: [(&str, &str); 3] = [
 /// release and a dev build) never overwrite each other's files: a rewrite reloads the mod in every running session
 /// that loaded the folder, including sessions the other build started.
 pub fn install() -> std::io::Result<PathBuf> {
-    install_into(&crate::datadir::data_dir(), &FILES)
+    install_into(&crate::datadir::data_dir(), "mod", &FILES)
 }
 
-fn install_into(data: &Path, files: &[(&str, &str)]) -> std::io::Result<PathBuf> {
-    let dir = data.join(folder_name(files));
+/// Write `files` into a folder of the data dir named `prefix-<hash of the files>`, leaving files that already match.
+pub fn install_into(data: &Path, prefix: &str, files: &[(&str, &str)]) -> std::io::Result<PathBuf> {
+    let dir = data.join(folder_name(prefix, files));
     for (rel, text) in files {
         let path = dir.join(rel);
         if std::fs::read_to_string(&path).ok().as_deref() != Some(*text) {
@@ -29,16 +30,16 @@ fn install_into(data: &Path, files: &[(&str, &str)]) -> std::io::Result<PathBuf>
     Ok(dir)
 }
 
-/// `mod-` and a hash of the files, so equal copies share a folder. FNV-1a, because the name must not change between
+/// The prefix and a hash of the files, so equal copies share a folder. FNV-1a, because the name must not change between
 /// Rust versions (a std hasher may).
-fn folder_name(files: &[(&str, &str)]) -> String {
+fn folder_name(prefix: &str, files: &[(&str, &str)]) -> String {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for (rel, text) in files {
         for byte in rel.bytes().chain([0]).chain(text.bytes()).chain([0]) {
             hash = (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3);
         }
     }
-    format!("mod-{hash:016x}")
+    format!("{prefix}-{hash:016x}")
 }
 
 #[cfg(test)]
@@ -50,8 +51,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let release = [("hooks/register.js", "release")];
         let dev = [("hooks/register.js", "dev")];
-        let release_dir = install_into(tmp.path(), &release).unwrap();
-        let dev_dir = install_into(tmp.path(), &dev).unwrap();
+        let release_dir = install_into(tmp.path(), "mod", &release).unwrap();
+        let dev_dir = install_into(tmp.path(), "mod", &dev).unwrap();
         assert_ne!(release_dir, dev_dir);
         assert_eq!(std::fs::read_to_string(release_dir.join("hooks/register.js")).unwrap(), "release");
         assert_eq!(std::fs::read_to_string(dev_dir.join("hooks/register.js")).unwrap(), "dev");
@@ -61,18 +62,18 @@ mod tests {
     fn the_same_mod_keeps_its_folder_and_is_not_rewritten() {
         let tmp = tempfile::tempdir().unwrap();
         let files = [("hooks/register.js", "same")];
-        let first = install_into(tmp.path(), &files).unwrap();
+        let first = install_into(tmp.path(), "mod", &files).unwrap();
         let written = std::fs::metadata(first.join("hooks/register.js")).unwrap().modified().unwrap();
-        let again = install_into(tmp.path(), &files).unwrap();
+        let again = install_into(tmp.path(), "mod", &files).unwrap();
         assert_eq!(first, again);
         assert_eq!(std::fs::metadata(again.join("hooks/register.js")).unwrap().modified().unwrap(), written);
     }
 
     #[test]
     fn a_changed_path_or_content_changes_the_name() {
-        let a = folder_name(&[("a", "bc")]);
-        assert_ne!(a, folder_name(&[("ab", "c")]), "the split between path and text counts");
-        assert_ne!(a, folder_name(&[("a", "bd")]));
+        let a = folder_name("mod", &[("a", "bc")]);
+        assert_ne!(a, folder_name("mod", &[("ab", "c")]), "the split between path and text counts");
+        assert_ne!(a, folder_name("mod", &[("a", "bd")]));
         assert!(a.starts_with("mod-") && a.len() == 4 + 16);
     }
 }

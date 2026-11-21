@@ -2,3 +2,6 @@
 /dist
 /mod/tsconfig.json
 /mod/.claude-plugin/types/
+
+# The Claude Agent SDK, when installed in the bridge folder by hand.
+bridge/node_modules/
