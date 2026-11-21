@@ -84,14 +84,14 @@ impl Workspace {
 
     fn focus_shell(&self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(p) = self.shells.get(&self.shell_owner()).filter(|p| p.open) {
-            window.focus(&p.view.read(cx).focus_handle(cx), cx);
+            window.focus(&p.view.focus_handle(cx), cx);
         }
     }
 
     /// Move the keyboard between the Claude terminal and its open shell.
     pub fn swap_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(shell) = self.shells.get(&self.shell_owner()).filter(|p| p.open) else { return };
-        if shell.view.read(cx).focus_handle(cx).is_focused(window) {
+        if shell.view.focus_handle(cx).is_focused(window) {
             self.focus_active(window, cx);
         } else {
             self.focus_shell(window, cx);

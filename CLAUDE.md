@@ -42,7 +42,7 @@ Leave nothing behind but the change: no summary files, commented-out code, debug
 
 ## Boundaries
 
-Claudiu types into a session's terminal in one place. In editor mode, moving the keyboard to the terminal while lines are selected pastes `@path#L12-30: ` into Claude Code's input box, and leaving without typing erases it again (`terminal/view/typing.rs`, `app/selection_reference.rs`). It does this only while the cursor is in that input box. It stays a deliberate exception: messages, settings changes and every other request reach Claude Code through the mod, not the terminal. Any further typing into a PTY needs the maintainer's decision first.
+Agents run as ACP servers and show in Claudiu's chat view (`harness/`, `thread/`); no agent runs in a PTY. The shell panel (Ctrl+J and the welcome screen's shell) is the only PTY, and Claudiu never types into it. In editor mode, moving the keyboard to the chat while lines are selected puts `@path#L12-30: ` into its message box, and leaving without typing takes it out again (`thread/mod.rs`, `app/selection_reference.rs`). Running an agent in a PTY, or typing into the shell, needs the maintainer's decision first.
 
 ## Enforced rules
 

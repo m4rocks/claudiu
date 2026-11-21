@@ -206,7 +206,7 @@ impl Workspace {
             // Without a registry entry (older Claude Code) the terminal's own activity decides, as in `switch::inspect`.
             let idle = match claude_id.and_then(|c| statuses.get(c)) {
                 Some(status) => status == "idle",
-                None => self.live_view(&p.id).is_some_and(|v| !v.read(cx).is_working()),
+                None => self.live_view(&p.id).is_some_and(|v| !v.is_working(cx)),
             };
             if now - p.approved > SWITCH_PATIENCE_SECS {
                 self.toast("The worktree switch was dropped: the session's turn did not end.", true, cx);
@@ -280,16 +280,14 @@ impl Workspace {
             }
             "read_code_session" => {
                 let rec = self.store.session(&id).filter(|s| s.kind == SessionKind::Claude).ok_or("No session with that id.")?;
-                let view = self.live_view(&id).filter(|v| v.read(cx).is_running()).ok_or_else(|| format!("The session “{}” has ended; only running sessions can be read.", rec.display_title()))?;
-                let text = view.read(cx).tail_text(count("lines", 120, 400));
-                Ok(format!("Session “{}” ({}), latest terminal output:\n\n{text}", rec.display_title(), stamps(rec.created_at, rec.last_active)))
+                let view = self.live_view(&id).filter(|v| v.is_running(cx)).ok_or_else(|| format!("The session “{}” has ended; only running sessions can be read.", rec.display_title()))?;
+                let text = view.tail_text(count("lines", 120, 400), cx);
+                Ok(format!("Session “{}” ({}), latest conversation:\n\n{text}", rec.display_title(), stamps(rec.created_at, rec.last_active)))
             }
             "start_code_session" => {
                 let cwd = folder.ok_or("No folder.")?;
                 let before = self.selected.clone();
-                // A prompt that looks like a flag must not become one.
-                let leading = prompt.map(|p| if p.starts_with('-') { format!(" {p}") } else { p }).into_iter().collect();
-                self.new_claude_with(cwd.clone(), leading, Starter::OtherSession, window, cx);
+                self.new_claude_with(cwd.clone(), prompt, vec![], Starter::OtherSession, window, cx);
                 match self.selected.clone().filter(|s| Some(s) != before.as_ref()) {
                     Some(id) => {
                         // A session started from another one is linked with it from the start.

@@ -31,11 +31,6 @@ pub fn prefix(record_id: &str) -> PathBuf {
     dir().join(format!("{}{SEPARATOR}", crate::datadir::safe_file_stem(record_id)))
 }
 
-/// The file telling the mod how many terminal rows a card needs.
-pub fn rows_file(record_stem: &str, call: &str) -> PathBuf {
-    dir().join(format!("{record_stem}{SEPARATOR}{}.rows", crate::datadir::safe_file_stem(call)))
-}
-
 /// One `show_visual` call as the mod writes it.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Card {

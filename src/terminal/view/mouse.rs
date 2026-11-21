@@ -172,9 +172,6 @@ impl TerminalView {
             (grid[point].hyperlink(), (0..grid.columns()).map(|c| row[Column(c)].c).collect::<String>())
         };
         if let Some(link) = hyperlink {
-            if link.uri().starts_with(INLINE_LINK) {
-                return None;
-            }
             let file = url::Url::parse(link.uri()).ok().filter(|u| u.scheme() == "file").and_then(|u| u.to_file_path().ok());
             // Cells of a link are underlined already.
             return Some((match file {

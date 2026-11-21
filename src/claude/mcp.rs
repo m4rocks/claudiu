@@ -19,7 +19,6 @@ use crate::claude::trim::Trim;
 use crate::store::Attached;
 
 pub const FLAG: &str = "--mcp-title";
-pub const SESSION_ENV: &str = "CLAUDIU_SESSION";
 /// Claudiu's own id of the session. Unlike Claude's session id it survives `/clear`.
 pub const RECORD_ENV: &str = "CLAUDIU_RECORD";
 /// Comma-separated names of what the server leaves out of this session (see `tools_off`). Missing means nothing is off.
@@ -194,14 +193,8 @@ fn config_dir() -> PathBuf {
 
 /// Entry point of `claudiu --mcp-title`: newline-delimited JSON-RPC over stdio.
 pub fn run() -> i32 {
-    let session = std::env::var(SESSION_ENV).unwrap_or_default();
-    let record = std::env::var(RECORD_ENV).unwrap_or_else(|_| session.clone());
+    let record = std::env::var(RECORD_ENV).unwrap_or_default();
     let from = format!("code:{record}");
-    if !session.is_empty() {
-        let config = config_file(&session);
-        let _ = mark_in_use(&config);
-        keep_config_fresh(config);
-    }
     let off_env = std::env::var(TOOLS_OFF_ENV).unwrap_or_default();
     let off: Vec<&str> = off_env.split(',').map(str::trim).filter(|n| !n.is_empty()).collect();
     serve(std::io::stdin().lock(), std::io::stdout().lock(), &record, &crate::datadir::data_dir(), &off, |tool, args| crate::claude::bridge::ask(&from, tool, args));
@@ -455,45 +448,6 @@ fn link_session(params: &Value, record: &str, dir: &Path, verb: &str) -> Value {
     }
 }
 
-/// Write the per-session MCP config and return its path (for `--mcp-config`).
-pub fn prepare(claude_session_id: &str, record_id: &str, off: &[&str]) -> std::io::Result<PathBuf> {
-    let mut env = json!({ SESSION_ENV: claude_session_id, RECORD_ENV: record_id });
-    if !off.is_empty() {
-        env[TOOLS_OFF_ENV] = off.join(",").into();
-    }
-    let config = json!({ "mcpServers": { "claudiu": {
-        "command": std::env::current_exe()?.to_string_lossy(),
-        "args": [FLAG],
-        "env": env,
-    }}});
-    let path = config_file(claude_session_id);
-    crate::datadir::write_atomic(&path, &config.to_string())?;
-    Ok(path)
-}
-
-fn config_file(claude_session_id: &str) -> PathBuf {
-    config_dir().join(format!("{}.json", crate::datadir::safe_file_stem(claude_session_id)))
-}
-
-/// How often a running server marks its config as in use. Well under the week after which `app/lifecycle.rs` prunes it.
-const CONFIG_REFRESH: std::time::Duration = std::time::Duration::from_secs(86_400);
-
-/// Bump the modification time of an existing file so an age-based prune keeps it. Never creates the file.
-fn mark_in_use(path: &Path) -> std::io::Result<()> {
-    std::fs::OpenOptions::new().write(true).open(path)?.set_modified(std::time::SystemTime::now())
-}
-
-/// Claude Code reads the config again whenever it reconnects to the server, which can be long after the session
-/// started, so a server that is still running keeps its own config from being pruned.
-fn keep_config_fresh(path: PathBuf) {
-    std::thread::spawn(move || {
-        loop {
-            std::thread::sleep(CONFIG_REFRESH);
-            let _ = mark_in_use(&path);
-        }
-    });
-}
-
 /// What a session asked Claudiu to remember about itself.
 #[derive(Debug, PartialEq)]
 pub enum Attachment {
@@ -567,26 +521,6 @@ mod tests {
 
     fn talk(requests: &[Value], session: &str, dir: &Path) -> Vec<Value> {
         talk_with(requests, session, dir, |_, _| Err("no".into()))
-    }
-
-    #[test]
-    fn a_config_in_use_survives_the_prune() {
-        let dir = std::env::temp_dir().join(format!("claudiu-mcp-prune-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let running = dir.join("running.json");
-        let stale = dir.join("stale.json");
-        let eight_days_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(8 * 86_400);
-        for file in [&running, &stale] {
-            std::fs::write(file, "{}").unwrap();
-            std::fs::File::options().write(true).open(file).unwrap().set_modified(eight_days_ago).unwrap();
-        }
-        mark_in_use(&running).unwrap();
-        crate::datadir::prune(dir.clone(), 7 * 86_400);
-        assert!(running.exists(), "a config its server keeps fresh is not pruned");
-        assert!(!stale.exists(), "an unused config still is");
-        assert!(mark_in_use(&dir.join("gone.json")).is_err());
-        assert!(!dir.join("gone.json").exists(), "marking never creates the file");
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

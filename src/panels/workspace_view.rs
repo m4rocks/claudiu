@@ -10,7 +10,7 @@ use crate::claude::defaults::{Effort, PermissionMode};
 use crate::claude::mcp::Feature;
 use crate::claude::trim::Trim;
 use crate::app::{
-    Act, CloseSession, SettingsPage, GitOp, FocusSearch, ImportProject, Main, MenuItem, Modal, NewClaude, NextSession, OpenGithub, OpenSettings, PrevSession, ShellDrag, SwapFocus,
+    Act, CloseSession, SessionView, SettingsPage, GitOp, FocusSearch, ImportProject, Main, MenuItem, Modal, NewClaude, NextSession, OpenGithub, OpenSettings, PrevSession, ShellDrag, SwapFocus,
     ToggleEditor, ToggleRight, ToggleShell, ToggleSidebar, Workspace, SHELL_HEIGHT,
 };
 use gpui_kit::component::{TitleBar, input::{Input, InputState}};
@@ -18,6 +18,7 @@ use crate::store::{SessionKind, now};
 use crate::panels::theme::{self, hsla};
 use crate::updater::Status;
 use gpui_kit::assets::IconName;
+use crate::harness::Harness;
 use crate::panels::settings_pages::{flip, switch_row};
 use crate::panels::widgets::{Trigger, ago, button, button_disabled, clawd, danger_button, fade_in, icon, icon_button, icon_button_disabled, key_hint, section_label, short_path, shortcut, spinner, tick};
 
@@ -192,7 +193,11 @@ impl Workspace {
     fn render_session(&mut self, _cx: &mut Context<Self>) -> AnyElement {
         let blank = || div().size_full().bg(hsla(theme::TERMINAL_BG)).into_any_element();
         let Some(id) = self.active.clone() else { return blank() };
-        let Some(term) = self.live_view(&id).cloned() else { return blank() };
+        let Some(view) = self.live_view(&id).cloned() else { return blank() };
+        let term = match view {
+            SessionView::Thread(v) => v.into_any_element(),
+            SessionView::Terminal(v) => v.into_any_element(),
+        };
 
         let pane = fade_in(
             div()
@@ -650,10 +655,12 @@ impl Render for Workspace {
         let showing = if matches!(self.main, Main::Terminals) { self.active.as_ref() } else { None };
         for l in &self.live {
             let visible = showing == Some(&l.id);
-            l.view.update(cx, |v, _| {
-                v.visible = visible;
-                v.foreground = window.is_window_active();
-            });
+            if let Some(view) = l.view.terminal() {
+                view.update(cx, |v, _| {
+                    v.visible = visible;
+                    v.foreground = window.is_window_active();
+                });
+            }
         }
         let shell_owner = self.shell_owner();
         for (owner, p) in &self.shells {
@@ -756,8 +763,11 @@ impl Render for Workspace {
             .on_drop(cx.listener(|ws, paths: &gpui::ExternalPaths, window, cx| {
                 let focused = ws.active.as_ref().and_then(|id| ws.live_view(id)).cloned();
                 if let (Some(view), Main::Terminals) = (focused, &ws.main) {
-                    // Over a terminal, files go to the session as paths (Claude Code attaches images).
-                    view.update(cx, |v, cx| v.paste_paths(paths.paths(), cx));
+                    // Over a session, files go to it as paths.
+                    match view {
+                        SessionView::Thread(v) => v.update(cx, |v, cx| v.paste_paths(paths.paths(), window, cx)),
+                        SessionView::Terminal(v) => v.update(cx, |v, cx| v.paste_paths(paths.paths(), cx)),
+                    }
                     return;
                 }
                 for p in paths.paths().iter().filter(|p| p.is_dir()) {
@@ -822,7 +832,7 @@ impl Render for Workspace {
 /// The Settings dialog's body: the category list on the left and the chosen page on the right.
 fn settings_body(ws: &Workspace, window: &mut Window, cx: &mut Context<Workspace>) -> AnyElement {
     let (page, worktrees, scroll) = (ws.settings_page, &ws.worktrees_page, &ws.settings_scroll);
-    let Some(Modal::Settings { shell, claude, model, effort, permission, updates, chrome, scale, trimmed, claudiu_off, skills_field, costly, list_focus, renaming, .. }) = &ws.modal else {
+    let Some(Modal::Settings { shell, claude, model, harness, effort, permission, updates, chrome, scale, trimmed, claudiu_off, skills_field, costly, list_focus, renaming, .. }) = &ws.modal else {
         return div().into_any_element();
     };
     let (updates, chrome, scale) = (*updates, *chrome, *scale);
@@ -875,6 +885,7 @@ fn settings_body(ws: &Workspace, window: &mut Window, cx: &mut Context<Workspace
             .flex()
             .flex_col()
             .gap(px(10.0))
+            .child(harness_row(*harness, cx))
             .child(field("MODEL FOR NEW SESSIONS", model))
             .child(picker_row("settings-effort", "Effort", *effort, &Effort::ALL, Effort::name, Act::PickEffort, cx))
             .child(picker_row("settings-permission", "Permission mode", *permission, &PermissionMode::ALL, PermissionMode::name, Act::PickPermission, cx))
@@ -1070,6 +1081,29 @@ fn settings_toggle(id: &'static str, label: &'static str, on: bool, field: fn(&m
 }
 
 /// A row that opens a menu of `options` under itself; the first entry, "Claude Code default", clears the choice.
+/// The harness new sessions run in, picked from every harness Claudiu knows.
+fn harness_row(current: Harness, cx: &mut Context<Workspace>) -> impl IntoElement {
+    div()
+        .id("settings-harness")
+        .h(px(32.0))
+        .px(px(10.0))
+        .flex()
+        .items_center()
+        .justify_between()
+        .rounded(px(6.0))
+        .bg(hsla(0x111111))
+        .border_1()
+        .border_color(hsla(0x242424))
+        .text_size(crate::panels::scale::px(13.0))
+        .cursor_pointer()
+        .child("Harness for new sessions")
+        .child(div().text_color(hsla(theme::ACCENT)).child(current.name()))
+        .dropdown(cx, move |ws, at, _window, cx| {
+            let items = Harness::ALL.iter().map(|&h| MenuItem::new(format!("{}{}", tick(current == h), h.name()), Act::PickHarness(h))).collect();
+            ws.open_dropdown(at, items, cx);
+        })
+}
+
 fn picker_row<T: Copy + PartialEq + 'static>(
     id: &'static str,
     label: &'static str,

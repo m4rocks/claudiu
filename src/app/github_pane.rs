@@ -111,7 +111,7 @@ impl Workspace {
             GhEvent::Toast { text, error } => self.toast(text.clone(), *error, cx),
             GhEvent::AskClaude(prompt) => match self.running_claude_in(&cwd, cx) {
                 Some(id) => self.send_to_claude(&id, prompt, window, cx),
-                None => self.new_claude_with(cwd, vec![prompt.clone()], Starter::User, window, cx),
+                None => self.new_claude_with(cwd, Some(prompt.clone()), vec![], Starter::User, window, cx),
             },
             GhEvent::Checkout(number) => {
                 let Some(exe) = crate::github::cli::locate() else { return };

@@ -32,9 +32,8 @@ impl Workspace {
     pub(super) fn apply_visuals(&mut self, changes: Vec<(String, Card)>, cx: &mut Context<Self>) {
         for (stem, card) in changes {
             let Some(session) = self.store.data.sessions.iter().find(|s| datadir::safe_file_stem(&s.id) == stem) else { continue };
-            let Some(view) = self.live_view(&session.id) else { continue };
-            let rows_file = visual::rows_file(&stem, &card.call);
-            view.update(cx, |view, cx| view.set_card(card, rows_file, cx));
+            let Some(view) = self.live_view(&session.id).and_then(|v| v.thread()) else { continue };
+            view.update(cx, |view, cx| view.set_card(card, cx));
         }
     }
 }

@@ -42,17 +42,16 @@ impl Workspace {
         self.running_claude(cx).filter(|id| self.store.session(id).is_some_and(|r| works_in(&r.cwd, folder)))
     }
 
-    /// Ask the Claude session `id` to take `text` as the user's next message, then move the keyboard to its terminal.
-    /// It goes through the session's mod, which sends it once the session is idle, so nothing is typed into the
-    /// terminal and a half-written prompt there is left alone.
+    /// Send `text` to the session `id` as the user's next message, then move the keyboard to it. A session mid-turn
+    /// queues it for after the turn; a half-written message in its composer is left alone.
     pub(super) fn send_to_claude(&mut self, id: &Id, text: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(view) = self.live_view(id).filter(|v| v.read(cx).is_running()) else {
+        let Some(view) = self.live_view(id).filter(|v| v.is_running(cx)).and_then(|v| v.thread()).cloned() else {
             self.toast("This session isn't running. Resume it, then try again.", false, cx);
             return;
         };
-        usage::send_ctl(&usage::ctl_file(id), "prompt", text.into());
+        view.update(cx, |v, cx| v.send(text.to_string(), window, cx));
         // Only a change of focus raises `on_terminal_focus`; otherwise the flag would outlive this request.
-        self.skip_selection_reference = !view.read(cx).focus_handle(cx).is_focused(window);
+        self.skip_selection_reference = !view.focus_handle(cx).is_focused(window);
         self.focus_active(window, cx);
     }
 

@@ -118,9 +118,35 @@ pub fn flags(defaults: &NewSessionDefaults, plan_trimmed: bool, leading: &[Strin
     out
 }
 
+/// The same defaults for a session that opens through ACP: the permission mode's id, and the config options to set
+/// by category. Manual is ACP's `default` mode.
+pub fn acp_settings(defaults: &NewSessionDefaults, plan_trimmed: bool, by: Starter) -> (Option<String>, Vec<(&'static str, String)>) {
+    let flags = flags(defaults, plan_trimmed, &[], by);
+    let (mut mode, mut options) = (None, vec![]);
+    for pair in flags.chunks(2) {
+        let [flag, value] = pair else { continue };
+        match flag.as_str() {
+            "--model" => options.push(("model", value.clone())),
+            "--effort" => options.push(("thought_level", value.clone())),
+            "--permission-mode" => mode = Some(if value == PermissionMode::Manual.name() { "default".to_string() } else { value.clone() }),
+            _ => {}
+        }
+    }
+    (mode, options)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn acp_sessions_get_the_same_defaults_by_category() {
+        let (mode, options) = acp_settings(&all_set(PermissionMode::Manual), false, Starter::User);
+        assert_eq!(mode.as_deref(), Some("default"));
+        assert_eq!(options, vec![("model", "opus".to_string()), ("thought_level", "high".to_string())]);
+        let (mode, _) = acp_settings(&all_set(PermissionMode::Plan), false, Starter::FixGit);
+        assert_eq!(mode, None, "the same rules as the flags");
+    }
 
     fn strings(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| s.to_string()).collect()

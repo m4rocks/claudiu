@@ -34,7 +34,6 @@ use serde_json::Value;
 
 use crate::platform::{find_executable, home_dir};
 use crate::store::ExternalSession;
-use crate::terminal::SpawnSpec;
 
 /// Locate the user's `claude` executable: explicit setting, PATH, then well-known install dirs.
 pub fn discover(configured: Option<&Path>) -> Option<PathBuf> {
@@ -59,10 +58,6 @@ pub fn discover(configured: Option<&Path>) -> Option<PathBuf> {
     candidates.into_iter().find(|p| p.is_file())
 }
 
-fn spec(exe: &Path, cwd: &Path, args: Vec<String>) -> SpawnSpec {
-    SpawnSpec { program: exe.to_string_lossy().into_owned(), args, cwd: Some(cwd.to_path_buf()), ..Default::default() }
-}
-
 /// A `claude` command for headless use (`-p`): handles `.cmd` shims and never flashes a console window.
 pub fn command(exe: &Path) -> std::process::Command {
     let is_script = exe.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("cmd") || e.eq_ignore_ascii_case("bat"));
@@ -75,16 +70,6 @@ pub fn command(exe: &Path) -> std::process::Command {
     };
     crate::platform::no_window(&mut cmd);
     cmd
-}
-
-/// New interactive session. We choose the session id up front so Claudiu knows which transcript is ours.
-pub fn new_session_spec(exe: &Path, cwd: &Path, session_id: &str) -> SpawnSpec {
-    spec(exe, cwd, vec!["--session-id".into(), session_id.into()])
-}
-
-/// Resume through Claude Code's supported mechanism.
-pub fn resume_spec(exe: &Path, cwd: &Path, session_id: &str) -> SpawnSpec {
-    spec(exe, cwd, vec!["--resume".into(), session_id.into()])
 }
 
 /// Claude Code's data directory (`CLAUDE_CONFIG_DIR` is the documented override).
@@ -601,13 +586,5 @@ Claude: Found it.
     fn context_fraction_switches_window() {
         assert!((context_fraction(100_000) - 0.5).abs() < 1e-6);
         assert!((context_fraction(500_000) - 0.5).abs() < 1e-6);
-    }
-
-    #[test]
-    fn launch_specs_use_documented_flags() {
-        let s = new_session_spec(Path::new("claude"), Path::new("/w"), "abc");
-        assert_eq!(s.args, vec!["--session-id", "abc"]);
-        let r = resume_spec(Path::new("claude"), Path::new("/w"), "abc");
-        assert_eq!(r.args, vec!["--resume", "abc"]);
     }
 }

@@ -1,14 +1,11 @@
 //! GPUI view over a `Terminal`: paints the grid, turns GPUI input into VT input.
-//! Children: `typing` (keys, paste, IME), `mouse` (selection, reporting, scrolling), `element` (the paint pass),
-//! `cards` (the model's cards over the transcript).
+//! Children: `typing` (keys, paste, IME), `mouse` (selection, reporting, scrolling), `element` (the paint pass).
 
-mod cards;
 mod element;
 mod mouse;
 mod paths;
 mod typing;
 
-use cards::INLINE_LINK;
 use element::TerminalElement;
 
 use std::ops::Range;
@@ -36,7 +33,6 @@ use gpui_kit::component::input;
 
 use crate::terminal::glyphs;
 use crate::terminal::keys;
-use crate::terminal::skeleton::{self, Draft, Step};
 use crate::terminal::{SpawnSpec, Terminal};
 use crate::panels::theme;
 
@@ -46,8 +42,6 @@ pub enum TerminalEvent {
     /// Ctrl+click on a file path in the text, or on a `file:` link: the path as written (maybe relative to the
     /// session's folder), and its line (1-based) when one was given.
     OpenPath(String, Option<usize>),
-    /// A card's button: text to send as the user's next message.
-    SendText(String),
 }
 
 #[derive(Clone, Copy)]
@@ -57,21 +51,6 @@ struct Metrics {
     origin: Point<Pixels>,
     /// How far the rows are drawn below their cells while scrolling between two lines.
     shift: Pixels,
-}
-
-/// Where a view was last drawn: its grid and cell size.
-#[derive(Clone, Copy)]
-pub struct Layout {
-    cols: u16,
-    rows: u16,
-    metrics: Metrics,
-}
-
-/// A session being moved while its process restarts: what the skeleton says, and when the move began (an account
-/// hand-off compacts the old process first, so it began earlier than the restart).
-pub struct Handover {
-    pub message: String,
-    pub since: Instant,
 }
 
 pub struct TerminalView {
@@ -90,32 +69,19 @@ pub struct TerminalView {
     /// Output timing, for `is_working`: when output last arrived and when the current burst began.
     last_output: Option<Instant>,
     burst_start: Option<Instant>,
-    /// The start-up trace has begun for this terminal (`trace.rs`).
-    traced: bool,
-    /// What the user types while Claude Code starts; moved into the real prompt when it appears (`skeleton.rs`).
-    draft: Draft,
-    /// The draft is being typed into Claude Code; the skeleton stays until the real prompt shows it.
-    handing: bool,
     pub exit_code: Option<Option<i32>>,
     /// IME composition / dead-key text not yet committed; drawn at the cursor, never sent to the program.
     marked: Option<String>,
     font_family: &'static str,
     font_size: Pixels,
-    /// Show a startup animation until the program first draws something (set for Claude sessions).
-    pub loading: bool,
-    /// The skeleton says what the session is being moved to until the new process is ready.
-    pub handover: Option<Handover>,
     /// Whether a pane currently shows this terminal (kept up to date by the workspace's render).
     pub visible: bool,
     /// Inactive windows still show output, but do not need the foreground frame rate.
     pub foreground: bool,
     last_redraw: Option<Instant>,
     redraw_task: Option<gpui::Task<()>>,
-    /// A line Claudiu put into Claude's input for the user (`insert_reference`), until it is kept or taken back.
-    reference: Option<Inserted>,
     /// While Ctrl is held over a link: its viewport row and the columns to underline (none when it is drawn as a link already).
     hovered_link: Option<(usize, Option<std::ops::Range<usize>>)>,
-    cards: cards::Cards,
 }
 
 /// What Ctrl+click opens.
@@ -125,51 +91,12 @@ enum Link {
     Url(String),
 }
 
-struct Inserted {
-    chars: usize,
-    /// The user typed or pasted after it, so it can no longer be erased without erasing their text too.
-    typed: bool,
-}
-
 impl EventEmitter<TerminalEvent> for TerminalView {}
 
 impl Focusable for TerminalView {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus.clone()
     }
-}
-
-/// A row's height at the terminal's 14 px font (`font_size * 1.35`, rounded); the skeleton prompt lines up with it.
-pub const LINE_H: f32 = 19.0;
-
-
-/// What to look for on Claude Code's screen to know a piece of the draft arrived.
-enum Marker {
-    Text(String),
-    Image,
-}
-
-/// Images Claude Code takes.
-fn is_image_file(p: &std::path::Path) -> bool {
-    p.extension().and_then(|e| e.to_str()).is_some_and(|e| ["png", "jpg", "jpeg", "gif", "webp", "bmp"].contains(&e.to_ascii_lowercase().as_str()))
-}
-
-/// Keep a pasted clipboard image as a file under the data folder (`pasted/`, pruned after a week).
-fn save_pasted(image: &gpui::Image) -> Option<std::path::PathBuf> {
-    use gpui::ImageFormat::*;
-    let ext = match image.format {
-        Png => "png",
-        Jpeg => "jpg",
-        Webp => "webp",
-        Gif => "gif",
-        Bmp => "bmp",
-        _ => return None,
-    };
-    let dir = crate::datadir::data_dir().join("pasted");
-    std::fs::create_dir_all(&dir).ok()?;
-    let path = dir.join(format!("{:x}.{ext}", image.id));
-    std::fs::write(&path, &image.bytes).ok()?;
-    Some(path)
 }
 
 impl TerminalView {
@@ -181,20 +108,6 @@ impl TerminalView {
 
     pub fn start_error(&self) -> Option<String> {
         self.terminal.start_error()
-    }
-
-    /// `None` until the view has been drawn.
-    pub fn layout(&self) -> Option<Layout> {
-        let (cols, rows) = self.terminal.size();
-        self.metrics.map(|metrics| Layout { cols, rows, metrics })
-    }
-
-    /// Start on the grid of a view in the same pane. A view's first frame is drawn before it is laid out, so a new one
-    /// would otherwise draw that frame, and the skeleton's prompt with it, on the default 120×32 grid.
-    pub fn take_layout(&mut self, layout: Layout) {
-        let Layout { cols, rows, metrics } = layout;
-        self.terminal.resize(cols, rows, f32::from(metrics.cell_w), f32::from(metrics.line_h));
-        self.metrics = Some(metrics);
     }
 
     pub fn new(
@@ -216,43 +129,16 @@ impl TerminalView {
             title: None,
             last_output: None,
             burst_start: None,
-            traced: false,
-            draft: Draft::default(),
-            handing: false,
             exit_code: None,
             marked: None,
             font_family: crate::platform::monospace_font(),
             font_size: px(14.0),
-            loading: false,
-            handover: None,
             visible: true,
             foreground: true,
             last_redraw: None,
             redraw_task: None,
-            reference: None,
             hovered_link: None,
-            cards: cards::Cards::new(cx),
         }
-    }
-
-    /// Trace when the start-up burst of output ends (a second without any): about when Claude Code is ready.
-    fn trace_quiet(&self, cx: &mut Context<Self>) {
-        cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor().timer(Duration::from_millis(250)).await;
-                let Ok(quiet) = this.update(cx, |v, _| {
-                    let last = v.last_output?;
-                    (last.elapsed() > Duration::from_secs(1)).then(|| (v.terminal.tag.clone(), last.duration_since(v.terminal.born)))
-                }) else {
-                    break;
-                };
-                if let Some((tag, at)) = quiet {
-                    crate::terminal::trace::note(&tag, at, "last output of the start-up burst");
-                    break;
-                }
-            }
-        })
-        .detach();
     }
 
     pub fn is_running(&self) -> bool {
@@ -278,11 +164,6 @@ impl TerminalView {
                     self.burst_start = Some(t);
                 }
                 self.last_output = Some(t);
-                if crate::terminal::trace::on() && !self.traced {
-                    self.traced = true;
-                    crate::terminal::trace::note(&self.terminal.tag, self.terminal.born.elapsed(), "first output");
-                    self.trace_quiet(cx);
-                }
                 // Off-screen terminals only record the timing; a notify would redraw the whole window.
                 if redraw_due(self.visible, self.foreground, self.last_redraw, t) {
                     self.redraw_task = None;
@@ -345,103 +226,6 @@ impl TerminalView {
         *self.terminal.term.lock().mode()
     }
 
-    /// How often the markers show on the screen: the text just typed (or "[Pasted text" when it is long), or "[Image #".
-    fn marks(&self, marker: &Marker) -> usize {
-        let screen = self.tail_text(60);
-        match marker {
-            Marker::Text(t) => screen.matches(t.as_str()).count() + screen.matches("[Pasted text").count(),
-            Marker::Image => screen.matches("[Image #").count(),
-        }
-    }
-
-    /// Wait until `marker` shows more often than `before`, at most `patience`. A count, not a lookup, because a resumed
-    /// session may already show such text, and Claude Code's image numbers may not start at 1.
-    async fn wait_for(this: &gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp, marker: &Marker, before: usize, patience: Duration) {
-        let start = Instant::now();
-        while start.elapsed() < patience {
-            match this.update(cx, |v, _| v.marks(marker) > before) {
-                Ok(false) => cx.background_executor().timer(Duration::from_millis(50)).await,
-                _ => return,
-            }
-        }
-    }
-
-    /// Claude Code drew something: type the draft into it piece by piece, waiting after each for it to show on the
-    /// real screen (its first screen can arrive well before it reads the keyboard, and each image is read from the
-    /// clipboard when its key is handled). The skeleton stays up meanwhile, and keeps taking what is typed; then
-    /// `finish_loading`.
-    fn hand_over(&mut self, cx: &mut Context<Self>) {
-        self.handing = true;
-        cx.spawn(async move |this, cx| {
-            // Images borrow the clipboard; the user's own comes back at the end.
-            let mut clipboard = None;
-            // The first piece also waits for Claude Code to start reading the keyboard.
-            let mut patience = Duration::from_secs(10);
-            loop {
-                let Ok(steps) = this.update(cx, |v, _| v.draft.next_steps()) else { return };
-                if steps.is_empty() {
-                    break;
-                }
-                for step in steps {
-                    let wait = this
-                        .update(cx, |v, cx| match &step {
-                            Step::Text(t) => {
-                                let last = t.lines().rev().map(str::trim).find(|l| !l.is_empty()).unwrap_or_default();
-                                let marker = Marker::Text(last.chars().take(20).collect());
-                                let before = v.marks(&marker);
-                                v.type_in(t, cx);
-                                (!last.is_empty()).then_some((marker, before))
-                            }
-                            Step::Erase(n) => {
-                                v.send(vec![0x7f; *n], cx);
-                                None
-                            }
-                            Step::Image(path, _) => {
-                                clipboard.get_or_insert_with(|| cx.read_from_clipboard());
-                                let before = v.marks(&Marker::Image);
-                                v.paste_image_file(path, cx).then_some((Marker::Image, before))
-                            }
-                        })
-                        .ok()
-                        .flatten();
-                    if let Some((marker, before)) = wait {
-                        Self::wait_for(&this, cx, &marker, before, patience).await;
-                    }
-                    patience = Duration::from_secs(3);
-                }
-            }
-            this.update(cx, |v, cx| {
-                if let Some(Some(item)) = clipboard {
-                    cx.write_to_clipboard(item);
-                }
-                v.finish_loading(cx)
-            })
-            .ok();
-        })
-        .detach();
-    }
-
-    /// The real prompt is up: drop the skeleton, type what was added meanwhile, and press Enter if the user did.
-    fn finish_loading(&mut self, cx: &mut Context<Self>) {
-        self.loading = false;
-        self.handover = None;
-        self.handing = false;
-        crate::terminal::trace::note(&self.terminal.tag, self.terminal.born.elapsed(), "prompt ready");
-        let erase = self.draft.take_erase();
-        if erase > 0 {
-            self.send(vec![0x7f; erase], cx);
-        }
-        let (rest, sent) = self.draft.take();
-        self.type_in(&rest, cx);
-        if sent {
-            // Enter right behind a paste can be read as part of it.
-            cx.spawn(async move |this, cx| {
-                cx.background_executor().timer(Duration::from_millis(150)).await;
-                this.update(cx, |v, cx| v.send(b"\r".to_vec(), cx)).ok();
-            })
-            .detach();
-        }
-    }
 }
 
 fn redraw_due(visible: bool, foreground: bool, last: Option<Instant>, now: Instant) -> bool {
@@ -452,23 +236,6 @@ impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.glide_step(window);
         self.wheel_step(window);
-        if self.loading && self.exit_code.is_some() {
-            self.loading = false;
-            self.handover = None;
-        } else if self.loading && !self.handing && self.has_content() {
-            crate::terminal::trace::note(&self.terminal.tag, self.terminal.born.elapsed(), "first content painted");
-            if self.draft.is_empty() {
-                self.finish_loading(cx);
-            } else {
-                self.hand_over(cx);
-            }
-        }
-        let phase = match (&self.handover, self.handing, self.last_output) {
-            (Some(h), _, _) => h.message.clone(),
-            (None, true, _) => "Handing your message to Claude Code…".into(),
-            (None, false, Some(_)) => "Loading skills, plugins and MCP servers…".into(),
-            (None, false, None) => "Starting Claude Code…".into(),
-        };
         div()
             .id("terminal")
             .relative()
@@ -494,31 +261,6 @@ impl Render for TerminalView {
             .when(self.hovered_link.is_some(), |d| d.cursor_pointer())
             .on_scroll_wheel(cx.listener(Self::on_scroll))
             .child(TerminalElement { view: cx.entity() })
-            .children(self.inline_cards(cx))
-            .when(self.loading || self.handover.is_some(), |d| {
-                let (cols, rows) = self.terminal.size();
-                let (cell_w, line_h) = self.metrics.map_or((8.0, LINE_H), |m| (f32::from(m.cell_w), f32::from(m.line_h)));
-                let grid = skeleton::Grid { cell_w, line_h, cols, rows };
-                let since = self.handover.as_ref().map_or(self.terminal.born, |h| h.since);
-                d.child(skeleton::overlay(&self.draft, since.elapsed(), &phase, grid))
-            })
-    }
-}
-
-impl TerminalView {
-    /// The skeleton is up: Claude Code is starting, or the session is being moved.
-    pub fn is_loading(&self) -> bool {
-        self.held()
-    }
-
-    /// Input goes to the skeleton's draft, not the PTY: Claude Code is starting, or the session is handing over.
-    fn held(&self) -> bool {
-        self.loading || self.handover.is_some()
-    }
-
-    /// Anything visible on screen yet. Startup mode/escape sequences wake us up but draw nothing.
-    fn has_content(&self) -> bool {
-        self.terminal.term.lock().renderable_content().display_iter.any(|c| !matches!(c.c, ' ' | '\0'))
     }
 }
 

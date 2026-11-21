@@ -296,6 +296,12 @@ impl Workspace {
                     .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::ToggleShell(id.clone()), window, cx))),
             );
         }
+        if let Some(id) = id.filter(|id| running && claude && self.continue_command(id).is_some()).cloned() {
+            actions = actions.child(
+                row("continue-in-terminal", IconName::ExternalLink, "Continue in a terminal")
+                    .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::ContinueInTerminal(id.clone()), window, cx))),
+            );
+        }
         let cwd = self.active_cwd();
         actions.child(if id.is_some() {
             row("github", IconName::GitPullRequest, "GitHub")

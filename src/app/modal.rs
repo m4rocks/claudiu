@@ -121,7 +121,7 @@ impl Workspace {
                     }
                 }
             }
-            Some(Modal::Settings { shell, claude, model, effort, permission, updates, chrome, scale, trimmed, claudiu_off, skills_field, costly, list_focus, renaming, subagents }) => {
+            Some(Modal::Settings { shell, claude, model, harness, effort, permission, updates, chrome, scale, trimmed, claudiu_off, skills_field, costly, list_focus, renaming, subagents }) => {
                 let clean = |s: &str| s.trim().trim_matches('"').to_string();
                 let (shell_t, claude_t) = (clean(shell.read(cx).value().as_ref()), clean(claude.read(cx).value().as_ref()));
                 let model_name = claude::defaults::parse_model(model.read(cx).value().as_ref());
@@ -136,7 +136,7 @@ impl Workspace {
                 if let Some((page, field, msg)) = paths.or(bad_model).or(bad_limits) {
                     self.settings_page = page;
                     field.update(cx, |s, cx| s.focus(window, cx));
-                    self.modal = Some(Modal::Settings { shell, claude, model, effort, permission, updates, chrome, scale, trimmed, claudiu_off, skills_field, costly, list_focus, renaming, subagents });
+                    self.modal = Some(Modal::Settings { shell, claude, model, harness, effort, permission, updates, chrome, scale, trimmed, claudiu_off, skills_field, costly, list_focus, renaming, subagents });
                     self.toast(msg, true, cx);
                     return;
                 }
@@ -154,6 +154,7 @@ impl Workspace {
                 }
                 s.scale = (scale != 100).then_some(scale);
                 s.chrome_default = chrome;
+                s.harness = harness;
                 s.new_session = claude::defaults::NewSessionDefaults { model: model_name.unwrap_or_default(), effort, permission_mode: permission };
                 let trimmed = claude::trim::normalized(&trimmed);
                 let claudiu_off = mcp::normalized_features(&claudiu_off);

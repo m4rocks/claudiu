@@ -8,16 +8,15 @@ use super::*;
 
 impl Workspace {
     /// Have the session's terminal watch its keyboard focus, for `on_terminal_focus` and `on_terminal_blur`.
-    pub(super) fn watch_terminal_focus(&self, id: &Id, view: &Entity<TerminalView>, window: &mut Window, cx: &mut Context<Self>) -> [Subscription; 2] {
-        let focus = view.read(cx).focus_handle(cx);
+    pub(super) fn watch_terminal_focus(&self, id: &Id, focus: &FocusHandle, window: &mut Window, cx: &mut Context<Self>) -> [Subscription; 2] {
         let (focused, blurred) = (id.clone(), id.clone());
         [
-            cx.on_focus(&focus, window, move |ws, _w, cx| ws.on_terminal_focus(&focused, cx)),
-            cx.on_blur(&focus, window, move |ws, _w, cx| ws.on_terminal_blur(&blurred, cx)),
+            cx.on_focus(focus, window, move |ws, window, cx| ws.on_terminal_focus(&focused, window, cx)),
+            cx.on_blur(focus, window, move |ws, window, cx| ws.on_terminal_blur(&blurred, window, cx)),
         ]
     }
 
-    fn on_terminal_focus(&mut self, id: &Id, cx: &mut Context<Self>) {
+    fn on_terminal_focus(&mut self, id: &Id, window: &mut Window, cx: &mut Context<Self>) {
         if std::mem::take(&mut self.skip_selection_reference) {
             return;
         }
@@ -25,19 +24,19 @@ impl Workspace {
             return;
         }
         let Some(reference) = self.selection_reference(id, cx) else { return };
-        let Some(view) = self.live_view(id) else { return };
-        // Still in Claude's input from an earlier visit, where the user kept it by typing after it. Once sent, it can
+        let Some(view) = self.live_view(id).and_then(|v| v.thread()).cloned() else { return };
+        // Still in the composer from an earlier visit, where the user kept it by typing after it. Once sent, it can
         // be put in again.
-        if view.read(cx).input_holds(&reference) {
+        if view.read(cx).input_holds(&reference, cx) {
             return;
         }
-        view.update(cx, |v, cx| v.insert_reference(&reference, cx));
+        view.update(cx, |v, cx| v.insert_reference(&reference, window, cx));
     }
 
-    fn on_terminal_blur(&mut self, id: &Id, cx: &mut Context<Self>) {
+    fn on_terminal_blur(&mut self, id: &Id, window: &mut Window, cx: &mut Context<Self>) {
         self.skip_selection_reference = false;
-        let Some(view) = self.live_view(id) else { return };
-        view.update(cx, |v, cx| v.withdraw_reference(cx));
+        let Some(view) = self.live_view(id).and_then(|v| v.thread()).cloned() else { return };
+        view.update(cx, |v, cx| v.withdraw_reference(window, cx));
     }
 
     /// `@path#L..` for the shown tab's selection; `None` when nothing is selected.

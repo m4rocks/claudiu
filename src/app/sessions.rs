@@ -11,80 +11,20 @@ fn numbered<T>(items: &[T], n: usize) -> Option<&T> {
 const SHORTCUT_HOLD: Duration = Duration::from_millis(400);
 
 impl Workspace {
-    /// Per-process additions to a Claude launch; nothing in the user's Claude Code config changes:
-    /// the mod (`--plugin-dir`, which reports usage and status), the tab-title MCP server (`--mcp-config`, its
-    /// tools pre-allowed), and IDE integration switched off through environment variables. `chrome` adds Claude in
-    /// Chrome (`--chrome`).
-    fn with_helpers(
-        &mut self,
-        mut spec: SpawnSpec,
-        claude_session_id: &str,
-        record_id: &str,
-        chrome: bool,
-        cx: &mut Context<Self>,
-    ) -> SpawnSpec {
-        let started = std::time::Instant::now();
-        // Diagnostics for the start-up trace (`terminal/trace.rs`): start without Claudiu's MCP server or mod to see what they cost.
-        let without = |name: &str| crate::terminal::trace::on() && std::env::var_os(name).is_some();
-        let settings = &self.store.data.settings;
-        let off = mcp::tools_off(&settings.claudiu_tools_off, &settings.trimmed_tools);
-        if let Ok(config) = mcp::prepare(claude_session_id, record_id, &off).and_then(|c| if without("CLAUDIU_NO_MCP") { Err(std::io::Error::other("off")) } else { Ok(c) }) {
-            spec.args.push("--allowedTools".into());
-            spec.args.extend(mcp::allowed_tools(&off));
-            spec.args.extend(["--mcp-config".into(), config.to_string_lossy().into_owned()]);
-        }
-        if let Ok(dir) = claude::plugin::install().and_then(|d| if without("CLAUDIU_NO_MOD") { Err(std::io::Error::other("off")) } else { Ok(d) }) {
-            spec.args.extend(["--plugin-dir".into(), dir.to_string_lossy().into_owned()]);
-            spec.env.push(("CLAUDIU_NAME_FILE".into(), mcp::name_file(claude_session_id).to_string_lossy().into_owned()));
-            spec.env.push((usage::USAGE_DIR_ENV.into(), usage::snapshot_dir().to_string_lossy().into_owned()));
-            spec.env.push((usage::CTL_ENV.into(), usage::ctl_file(record_id).to_string_lossy().into_owned()));
-            spec.env.push((crate::visual::VISUAL_ENV.into(), crate::visual::prefix(record_id).to_string_lossy().into_owned()));
-            spec.env.push((crate::claude::ask::ASK_ENV.into(), crate::claude::ask::request_file(record_id).to_string_lossy().into_owned()));
-            // The mod registers the agent types and answers their turns, so they go only where it loads.
-            if let Some(subagents) = settings.custom_subagents.env()
-                && let Ok(exe) = std::env::current_exe()
-            {
-                spec.env.push((crate::claude::subagents::ENV.into(), subagents));
-                spec.env.push((crate::claude::subagents::EXE_ENV.into(), exe.to_string_lossy().into_owned()));
-            }
-        }
-        if chrome {
-            spec.args.push("--chrome".into());
-        }
-        spec.env.push(("CLAUDE_CODE_NO_FLICKER".into(), "1".into())); // fullscreen renderer, per process
-        spec.env.push(("FORCE_HYPERLINK".into(), "1".into())); // Claude Code would print links as text otherwise; cards are found by theirs
-        spec.env.push(("CLAUDE_CODE_AUTO_CONNECT_IDE".into(), "false".into()));
-        spec.env.push(("CLAUDE_CODE_IDE_SKIP_AUTO_INSTALL".into(), "1".into()));
-        self.sync_configs_now(cx);
-        if let Some(acct) = self.store.session_account(record_id) {
-            spec.env.push((usage::ACCOUNT_ENV.into(), acct.id.clone()));
-            spec.env.extend(Self::account_env(acct));
-        }
-        // Extra `claude` flags for the start-up trace, e.g. CLAUDIU_TRACE_ARGS="--safe-mode".
-        if crate::terminal::trace::on() && let Some(extra) = std::env::var_os("CLAUDIU_TRACE_ARGS") {
-            spec.args.extend(extra.to_string_lossy().split_whitespace().map(String::from));
-        }
-        (spec.program, spec.args) = platform::through_login_shell(spec.program, spec.args);
-        if let Some(cwd) = spec.cwd.as_ref().and_then(|c| c.file_name()) {
-            crate::terminal::trace::note(&cwd.to_string_lossy(), started.elapsed(), "launch files and arguments prepared (before the terminal exists)");
-        }
-        spec
-    }
-
     pub fn is_running(&self, id: &str, cx: &App) -> bool {
         self.live
             .iter()
-            .any(|l| l.id == id && l.view.read(cx).is_running())
+            .any(|l| l.id == id && l.view.is_running(cx))
     }
 
     pub fn running_count(&self, cx: &App) -> usize {
         self.live
             .iter()
-            .filter(|l| l.view.read(cx).is_running())
+            .filter(|l| l.view.is_running(cx))
             .count()
     }
 
-    pub fn live_view(&self, id: &str) -> Option<&Entity<TerminalView>> {
+    pub fn live_view(&self, id: &str) -> Option<&SessionView> {
         self.live.iter().find(|l| l.id == id).map(|l| &l.view)
     }
 
@@ -109,22 +49,24 @@ impl Workspace {
     }
 
     pub fn new_claude(&mut self, cwd: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        self.new_claude_with(cwd, vec![], Starter::User, window, cx);
+        self.new_claude_with(cwd, None, vec![], Starter::User, window, cx);
     }
 
-    /// `leading` goes before every other argument: the initial prompt must come ahead of the variadic
-    /// `--allowedTools` / `--mcp-config` flags, or they would swallow it.
-    pub(super) fn new_claude_with(&mut self, cwd: PathBuf, leading: Vec<String>, by: Starter, window: &mut Window, cx: &mut Context<Self>) {
+    /// A new session in the default harness, sent `prompt` once it is ready. `options` (by category, such as
+    /// `model`) win over the new-session defaults.
+    pub(super) fn new_claude_with(&mut self, cwd: PathBuf, prompt: Option<String>, options: Vec<(&'static str, String)>, by: Starter, window: &mut Window, cx: &mut Context<Self>) {
         // A new session starts in the main checkout, not in a linked worktree. Fix-with-Claude works where the failure was.
         let cwd = if by == Starter::FixGit { cwd } else { self.outside_linked_worktree(cwd) };
-        let session_id = new_id();
         let record_id = new_id();
-        let chrome = self.store.data.settings.chrome_default;
-        let Some(spec) = self.fresh_spec(&cwd, &session_id, &record_id, chrome, leading, by, cx) else { return };
+        let harness = self.store.data.settings.harness;
+        let meta = ClaudeMeta { chrome: self.store.data.settings.chrome_default, harness, ..Default::default() };
+        let Some(mut start) = self.thread_start(&record_id, &cwd, &meta, None, prompt, by, cx) else { return };
+        start.options.retain(|(category, _)| options.iter().all(|(c, _)| c != category));
+        start.options.extend(options);
         let record = SessionRecord {
             id: record_id,
             kind: SessionKind::Claude,
-            title: "New Claude session".into(),
+            title: format!("New {} session", harness.name()),
             custom_title: None,
             auto_title: None,
             project_id: self.store.project_for_cwd(&cwd),
@@ -133,41 +75,87 @@ impl Workspace {
             last_active: now(),
             exit_code: None,
             hidden: false,
-            claude: Some(ClaudeMeta {
-                session_id,
-                chrome,
-                ..Default::default()
-            }),
+            claude: Some(meta),
         };
-        self.start(record, spec, true, window, cx);
+        self.start_thread(record, start, true, window, cx);
     }
 
-    /// `claude --session-id` in `cwd` with the new-session defaults. None, with a toast, when `claude` isn't installed.
+    /// What a harness session starts with: Claudiu's MCP server, which every harness gets, and for Claude Code its
+    /// mod, account and flags. A new session (no id yet) also gets the new-session defaults. None, with a toast, when
+    /// Claude Code isn't installed.
     #[allow(clippy::too_many_arguments)]
-    fn fresh_spec(&mut self, cwd: &std::path::Path, session_id: &str, record_id: &str, chrome: bool, mut leading: Vec<String>, by: Starter, cx: &mut Context<Self>) -> Option<SpawnSpec> {
-        let Some(exe) = self.claude_exe.clone() else {
-            self.show_toast("Could not find the `claude` CLI. Install Claude Code, or set its path in Settings.".into(), true, Some(("Check setup".into(), Act::OpenSetup)), cx);
-            return None;
-        };
-        let mut spec = claude::new_session_spec(&exe, cwd, session_id);
+    fn thread_start(&mut self, record_id: &str, cwd: &std::path::Path, meta: &ClaudeMeta, name: Option<String>, prompt: Option<String>, by: Starter, cx: &mut Context<Self>) -> Option<crate::thread::Start> {
+        let session_id = Some(meta.session_id.clone()).filter(|id| !id.is_empty());
         let settings = &self.store.data.settings;
-        let defaults = claude::defaults::flags(&settings.new_session, settings.trimmed_tools.contains(&claude::trim::Trim::PlanMode), &leading, by);
-        leading.extend(defaults);
-        spec.args.splice(0..0, leading);
-        Some(self.with_helpers(spec, session_id, record_id, chrome, cx))
+        let off = mcp::tools_off(&settings.claudiu_tools_off, &settings.trimmed_tools);
+        let mut mcp_servers = vec![];
+        if let Ok(exe) = std::env::current_exe() {
+            let mut env = vec![(mcp::RECORD_ENV, record_id.to_string())];
+            if !off.is_empty() {
+                env.push((mcp::TOOLS_OFF_ENV, off.join(",")));
+            }
+            mcp_servers.push(harness::stdio_server("claudiu", &exe, &[mcp::FLAG], &env));
+        }
+        let (mode, options) = match session_id {
+            None => claude::defaults::acp_settings(&settings.new_session, settings.trimmed_tools.contains(&claude::trim::Trim::PlanMode), by),
+            Some(_) => (None, vec![]),
+        };
+        let mut env = vec![];
+        let mut session_meta = serde_json::json!({});
+        if meta.harness == Harness::Claude {
+            let Some(exe) = self.claude_exe.clone() else {
+                self.show_toast("Could not find the `claude` CLI. Install Claude Code, or set its path in Settings.".into(), true, Some(("Check setup".into(), Act::OpenSetup)), cx);
+                return None;
+            };
+            env.extend(harness::claude::environment(&exe));
+            let plugin = claude::plugin::install().ok();
+            if plugin.is_some() {
+                if let Some(id) = &session_id {
+                    env.push(("CLAUDIU_NAME_FILE".into(), mcp::name_file(id).to_string_lossy().into_owned()));
+                }
+                env.push((usage::USAGE_DIR_ENV.into(), usage::snapshot_dir().to_string_lossy().into_owned()));
+                env.push((usage::CTL_ENV.into(), usage::ctl_file(record_id).to_string_lossy().into_owned()));
+                env.push((crate::visual::VISUAL_ENV.into(), crate::visual::prefix(record_id).to_string_lossy().into_owned()));
+                env.push((crate::claude::ask::ASK_ENV.into(), crate::claude::ask::request_file(record_id).to_string_lossy().into_owned()));
+                // The mod registers the agent types and answers their turns, so they go only where it loads.
+                if let Some(subagents) = settings.custom_subagents.env()
+                    && let Ok(exe) = std::env::current_exe()
+                {
+                    env.push((crate::claude::subagents::ENV.into(), subagents));
+                    env.push((crate::claude::subagents::EXE_ENV.into(), exe.to_string_lossy().into_owned()));
+                }
+            }
+            env.push(("CLAUDE_CODE_AUTO_CONNECT_IDE".into(), "false".into()));
+            env.push(("CLAUDE_CODE_IDE_SKIP_AUTO_INSTALL".into(), "1".into()));
+            let mut extra = vec![];
+            if let Some(name) = name {
+                extra.push(("name", Some(name)));
+            }
+            if meta.chrome {
+                extra.push(("chrome", None));
+            }
+            session_meta = harness::claude::claude_meta(plugin.as_deref(), &mcp::allowed_tools(&off), &extra);
+            self.sync_configs_now(cx);
+            if let Some(acct) = self.store.session_account(record_id) {
+                env.push((usage::ACCOUNT_ENV.into(), acct.id.clone()));
+                env.extend(Self::account_env(acct));
+            }
+        }
+        Some(crate::thread::Start { harness: meta.harness, server: self.acp_server.clone(), cwd: cwd.to_path_buf(), env, session_id, meta: session_meta, mcp_servers, mode, options, prompt })
     }
 
-    /// Start the session over under its own id in its folder. For a session with no conversation yet: `--resume` has
-    /// nothing to find, and nothing is lost. A running view of it is replaced, which ends its process.
+    /// Start the session over in its folder. For a session with no conversation yet, nothing is lost. A running view
+    /// of it is replaced, which ends its process.
     pub(super) fn relaunch_empty(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(rec) = self.store.session(id).cloned() else { return };
-        let Some(meta) = rec.claude.clone() else { return };
+        let Some(mut meta) = rec.claude.clone() else { return };
+        meta.session_id.clear();
         let cwd = self.resume_cwd(&rec, cx);
-        let Some(mut spec) = self.fresh_spec(&cwd, &meta.session_id, &rec.id, meta.chrome, vec![], Starter::User, cx) else { return };
-        if let Some(name) = rec.chosen_title() {
-            spec.args.extend(["--name".into(), name.into()]);
+        let Some(start) = self.thread_start(&rec.id, &cwd, &meta, rec.chosen_title().map(String::from), None, Starter::User, cx) else { return };
+        if let Some(m) = self.store.session_mut(id).and_then(|r| r.claude.as_mut()) {
+            m.session_id.clear();
         }
-        self.start(rec, spec, false, window, cx);
+        self.start_thread(rec, start, false, window, cx);
     }
 
     /// `cwd`, or the project's main checkout when `cwd` is inside one of its linked worktrees.
@@ -190,26 +178,15 @@ impl Workspace {
         self.relaunch(id, window, cx);
     }
 
-    /// `claude --resume` in the record's folder. A running view of the session is replaced, which ends its process.
+    /// Open the session again in its harness, in the record's folder. A running view of it is replaced, which ends
+    /// its process.
     pub(super) fn relaunch(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(rec) = self.store.session(id).cloned() else {
-            return;
-        };
-        let Some(meta) = rec.claude.clone() else {
-            return;
-        };
-        let Some(exe) = self.claude_exe.clone() else {
-            self.toast("Could not find the `claude` CLI.", true, cx);
-            return;
-        };
+        let Some(rec) = self.store.session(id).cloned() else { return };
+        let Some(meta) = rec.claude.clone() else { return };
         let cwd = self.resume_cwd(&rec, cx);
-        let mut spec = claude::resume_spec(&exe, &cwd, &meta.session_id);
-        // Hand Claudiu's tab title to Claude Code so its own name (prompt box, /resume, Remote Control) matches.
-        if let Some(name) = rec.chosen_title() {
-            spec.args.extend(["--name".into(), name.into()]);
-        }
-        let spec = self.with_helpers(spec, &meta.session_id, &rec.id, meta.chrome, cx);
-        self.start(rec, spec, false, window, cx);
+        // Hand Claudiu's tab title to Claude Code so its own name (/resume, Remote Control) matches.
+        let Some(start) = self.thread_start(&rec.id, &cwd, &meta, rec.chosen_title().map(String::from), None, Starter::User, cx) else { return };
+        self.start_thread(rec, start, false, window, cx);
     }
 
     /// Where a resumed session starts: its folder, or its project's main checkout when the folder is gone (Claude Code's
@@ -247,22 +224,54 @@ impl Workspace {
         }
     }
 
-    pub(super) fn start(
-        &mut self,
-        mut record: SessionRecord,
-        spec: SpawnSpec,
-        is_new: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    /// Run a shell tab's program (a sign-in) in a terminal.
+    pub(super) fn start(&mut self, record: SessionRecord, spec: SpawnSpec, is_new: bool, window: &mut Window, cx: &mut Context<Self>) {
         let (terminal, rx) = TerminalView::spawn(&spec);
         let id = record.id.clone();
-        let loading = record.kind == SessionKind::Claude;
+        self.prepare_live(record, is_new);
+        let view = cx.new(|cx| TerminalView::new(terminal, rx, cx));
+        let sub_id = id.clone();
+        let sub = cx.subscribe_in(&view, window, move |ws: &mut Workspace, _view, ev: &TerminalEvent, window, cx| match ev {
+            TerminalEvent::Exited(code) => ws.on_exit(&sub_id, *code, window, cx),
+            TerminalEvent::Bell => {}
+            TerminalEvent::OpenPath(path, line) => ws.open_from_terminal(&sub_id, path, *line, window, cx),
+        });
+        self.adopt_live(id, SessionView::Terminal(view), sub, None, window, cx);
+    }
+
+    /// Run a harness session in a thread view.
+    pub(super) fn start_thread(&mut self, record: SessionRecord, start: crate::thread::Start, is_new: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let id = record.id.clone();
+        let name = record.chosen_title().map(String::from);
+        self.prepare_live(record, is_new);
+        let view = cx.new(|cx| ThreadView::new(start, window, cx));
+        let sub_id = id.clone();
+        let sub = cx.subscribe_in(&view, window, move |ws: &mut Workspace, _view, ev: &ThreadEvent, window, cx| match ev {
+            ThreadEvent::Exited(code) => ws.on_exit(&sub_id, *code, window, cx),
+            ThreadEvent::SessionId(session) => {
+                if let Some(meta) = ws.store.session_mut(&sub_id).and_then(|r| r.claude.as_mut()) {
+                    meta.session_id = session.clone();
+                    ws.store.mark_dirty();
+                }
+            }
+            ThreadEvent::Title(title) => {
+                if let Some(rec) = ws.store.session_mut(&sub_id) {
+                    rec.title = title.clone();
+                    ws.store.mark_dirty();
+                    cx.notify();
+                }
+            }
+            ThreadEvent::OpenPath(path, line) => ws.open_from_terminal(&sub_id, path, *line, window, cx),
+        });
+        self.adopt_live(id, SessionView::Thread(view), sub, name, window, cx);
+    }
+
+    /// Before a session's new view exists: drop the view it replaces and mark the record as running.
+    fn prepare_live(&mut self, mut record: SessionRecord, is_new: bool) {
+        let id = record.id.clone();
         record.exit_code = None;
         record.last_active = now();
-        // The pane's grid: from the view this one replaces, or the one shown there now.
-        let layout = self.live_view(&id).or_else(|| self.active.as_ref().and_then(|a| self.live_view(a))).and_then(|v| v.read(cx).layout());
-        // Drop the previous terminal view for this record: an exited one, or a running one whose process this ends.
+        // Dropping a running view ends its process.
         self.live.retain(|l| l.id != id);
         self.purge_dead_shells();
         self.transcript_mtimes.remove(&id);
@@ -272,44 +281,21 @@ impl Workspace {
             r.exit_code = None;
             r.last_active = now();
         }
-        let view = cx.new(|cx| {
-            let mut v = TerminalView::new(terminal, rx, cx);
-            v.loading = loading;
-            if let Some(layout) = layout {
-                v.take_layout(layout);
-            }
-            v
-        });
-        let sub_id = id.clone();
-        let sub = cx.subscribe_in(
-            &view,
-            window,
-            move |ws: &mut Workspace, _view, ev: &TerminalEvent, window, cx| match ev {
-                TerminalEvent::Exited(code) => ws.on_exit(&sub_id, *code, window, cx),
-                TerminalEvent::Bell => {}
-                TerminalEvent::OpenPath(path, line) => ws.open_from_terminal(&sub_id, path, *line, window, cx),
-                TerminalEvent::SendText(text) => ws.send_to_claude(&sub_id, text, window, cx),
-            },
-        );
-        let claude_name = spec.args.iter().position(|a| a == "--name").and_then(|i| spec.args.get(i + 1)).cloned();
+    }
+
+    /// Keep the new view among the live sessions and show it.
+    fn adopt_live(&mut self, id: Id, view: SessionView, sub: Subscription, claude_name: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         // The mod reads the launch name first and leaves it alone; a stale file would otherwise rename the session.
         if let Some(cid) = self.store.session(&id).and_then(|r| r.claude_id()) {
             mcp::write_name(cid, claude_name.as_deref());
         }
-        // The account `with_helpers` chose: kept, so the session starts there again after closing or a restart.
+        // The account the launch chose: kept, so the session starts there again after closing or a restart.
         let account = self.store.session_account(&id).map_or_else(|| MAIN_ACCOUNT.into(), |a| a.id.clone());
         if let Some(meta) = self.store.session_mut(&id).and_then(|r| r.claude.as_mut()) {
             meta.account = Some(account.clone());
         }
-        let _focus = self.watch_terminal_focus(&id, &view, window, cx);
-        self.live.push(Live {
-            id: id.clone(),
-            view,
-            _sub: sub,
-            _focus,
-            claude_name,
-            account,
-        });
+        let _focus = self.watch_terminal_focus(&id, &view.focus_handle(cx), window, cx);
+        self.live.push(Live { id: id.clone(), view, _sub: sub, _focus, claude_name, account });
         self.activate(&id, cx);
         self.remember(&id);
         self.selected = Some(id.clone());
@@ -329,7 +315,7 @@ impl Workspace {
     /// Exited terminals are only kept while shown; a shell panel goes with its session, except the welcome screen's.
     fn prune_live(&mut self, cx: &App) {
         let active = &self.active;
-        self.live.retain(|l| active.as_ref() == Some(&l.id) || l.view.read(cx).is_running());
+        self.live.retain(|l| active.as_ref() == Some(&l.id) || l.view.is_running(cx));
         let live = &self.live;
         self.shells.retain(|id, _| id == HOME_SHELL || live.iter().any(|l| &l.id == id));
     }
@@ -370,7 +356,7 @@ impl Workspace {
     /// says nothing. This does not offer to remove a worktree: `/exit` already asked inside Claude Code, and the X
     /// (`close_live`) is the path that kills the process before that prompt.
     fn on_exit(&mut self, id: &str, code: Option<i32>, window: &mut Window, cx: &mut Context<Self>) {
-        let start_error = self.live_view(id).and_then(|v| v.read(cx).start_error());
+        let start_error = self.live_view(id).and_then(|v| v.start_error(cx));
         let title = self.store.session(id).map(|r| r.display_title().to_string()).unwrap_or_else(|| "Session".into());
         if let Some(rec) = self.store.session_mut(id) {
             rec.exit_code = Some(code.unwrap_or(0));
@@ -405,11 +391,11 @@ impl Workspace {
         if let (Main::Terminals, Some(id)) = (&self.main, self.active.as_ref())
             && let Some(view) = self.live_view(id)
         {
-            window.focus(&view.read(cx).focus_handle(cx), cx);
+            window.focus(&view.focus_handle(cx), cx);
             return;
         }
         if let (Main::Home, Some(shell)) = (&self.main, self.shells.get(HOME_SHELL).filter(|p| p.open)) {
-            window.focus(&shell.view.read(cx).focus_handle(cx), cx);
+            window.focus(&shell.view.focus_handle(cx), cx);
             return;
         }
         window.focus(&self.root_focus, cx);
@@ -478,9 +464,26 @@ impl Workspace {
         cx.notify();
     }
 
+    /// The command to carry on with the session in a terminal, when its harness can resume one by id and the session has
+    /// started (its id is known).
+    pub fn continue_command(&self, id: &str) -> Option<String> {
+        let rec = self.store.session(id)?;
+        let meta = rec.claude.as_ref()?;
+        harness::continue_command(meta.harness, &rec.cwd, rec.claude_id()?)
+    }
+
+    /// Hand the session to a terminal: the thread ends, so the harness isn't driven from two places, and the command
+    /// that resumes it goes to the clipboard.
+    pub(super) fn continue_in_terminal(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(command) = self.continue_command(id) else { return };
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(command));
+        self.end_live(id, window, cx);
+        self.toast("Session ended here. Paste the copied command into a terminal to carry on.", false, cx);
+    }
+
     /// The running sessions, in the sidebar's order.
     pub fn running_ids(&self, cx: &App) -> Vec<Id> {
-        self.live.iter().filter(|l| l.view.read(cx).is_running()).map(|l| l.id.clone()).collect()
+        self.live.iter().filter(|l| l.view.is_running(cx)).map(|l| l.id.clone()).collect()
     }
 
     /// Show running session number `n` (from 1), as the sidebar numbers them while Ctrl is held.

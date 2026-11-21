@@ -5,6 +5,7 @@ mod claude;
 mod datadir;
 mod files;
 mod git;
+mod harness;
 mod lsp;
 mod github;
 mod panels;
@@ -12,6 +13,7 @@ mod platform;
 mod priority;
 mod store;
 mod terminal;
+mod thread;
 mod updater;
 mod visual;
 

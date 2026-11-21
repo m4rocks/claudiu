@@ -9,16 +9,15 @@
 //! `claude::clear_recorded_worktree`).
 
 use std::path::Path;
-use std::time::Instant;
 
 use super::*;
 use crate::git::GitInfo;
 use crate::git::worktree::{self, Base};
-use crate::terminal::view::Handover;
+use crate::thread::Handover;
 
 const BUSY: &str = "Wait until Claude finishes, then switch.";
 
-/// What the skeleton says while the session moves to `folder`.
+/// What the waiting screen says while the session moves to `folder`.
 fn switching_message(git: &GitInfo, folder: &Path) -> String {
     match folder.file_name() {
         Some(name) if !git.is_main(folder) => format!("Switching to {}…", name.to_string_lossy()),
@@ -75,20 +74,20 @@ impl Workspace {
         let Some(rec) = self.store.session(&id).cloned() else { return };
         let Some(claude_id) = rec.claude_id().map(str::to_string) else { return };
         let Some(git) = rec.project_id.as_ref().and_then(|p| self.store.project(p)).and_then(|p| p.git.clone()) else { return };
-        let Some(view) = self.live_view(&id).filter(|v| v.read(cx).is_running()).cloned() else {
+        let Some(view) = self.live_view(&id).filter(|v| v.is_running(cx)).cloned() else {
             self.toast("Resume the session to switch.", false, cx);
             return;
         };
         // The skeleton is up while a switch readies its target, so this also refuses a second switch.
-        let loading = view.read(cx).is_loading();
+        let loading = view.is_loading(cx);
         if loading {
             self.toast(BUSY, false, cx);
             return;
         }
-        let quiet = !view.read(cx).is_working();
+        let quiet = !view.is_working(cx);
         let from = git.folder_of(&rec.cwd).unwrap_or(&rec.cwd).to_path_buf();
         // Looking at the session takes a moment (git, the registry, the transcript): the skeleton answers the click at once.
-        self.set_handover(&id, Some(Handover { message: switching_message(&git, &folder), since: Instant::now() }), cx);
+        self.set_handover(&id, Some(Handover { message: switching_message(&git, &folder) }), cx);
         cx.spawn_in(window, async move |this, cx| {
             let looked = from.clone();
             let checked = cx.background_executor().spawn(async move { inspect(&claude_id, &looked, quiet) }).await;
@@ -161,7 +160,7 @@ impl Workspace {
         } else {
             self.relaunch(id, window, cx);
         }
-        self.set_handover(id, Some(Handover { message, since: Instant::now() }), cx);
+        self.set_handover(id, Some(Handover { message }), cx);
         self.restore_shell(id, shell, window, cx);
         if was_shown {
             self.show_session(id, window, cx);

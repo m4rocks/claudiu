@@ -4,6 +4,31 @@
 use super::*;
 use gpui::{TestAppContext, VisualTestContext};
 
+/// A stand-in ACP agent for tests that need a session up but no real harness: it opens any session it is asked for,
+/// names a new one `fake-session`, and ends every prompt with the reply "ok". Needs python3 on the PATH.
+fn fake_agent(dir: &std::path::Path) -> (PathBuf, Vec<String>) {
+    let script = dir.join("fake_agent.py");
+    std::fs::write(&script, r#"import json, sys
+def send(m):
+    sys.stdout.write(json.dumps(m) + "\n"); sys.stdout.flush()
+for line in sys.stdin:
+    m = json.loads(line)
+    if "id" not in m or "method" not in m:
+        continue
+    method, i = m["method"], m["id"]
+    if method == "session/new":
+        send({"jsonrpc": "2.0", "id": i, "result": {"sessionId": "fake-session"}})
+    elif method == "session/prompt":
+        s = m["params"]["sessionId"]
+        send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": s, "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "ok"}}}})
+        send({"jsonrpc": "2.0", "id": i, "result": {"stopReason": "end_turn"}})
+    else:
+        send({"jsonrpc": "2.0", "id": i, "result": {}})
+"#).unwrap();
+    let python = crate::platform::find_executable("python3").expect("python3 for the stand-in agent");
+    (python, vec![script.to_string_lossy().into_owned()])
+}
+
 #[test]
 #[ignore = "isolated workspace scheduling measurement"]
 fn energy_sidebar_scheduling() {
@@ -126,14 +151,14 @@ fn run() {
     assert_eq!(ws.read_with(&cx, |ws, _| ws.live.len()), live_before + 1);
     let code_id = text.split("(id ").nth(1).and_then(|t| t.split(')').next()).unwrap().to_string();
     let t = std::time::Instant::now();
-    while ws.read_with(&cx, |ws, cx| ws.live_view(&code_id).is_none_or(|v| v.read(cx).tail_text(40).is_empty())) {
-        assert!(t.elapsed() < Duration::from_secs(60), "the session drew nothing to read");
+    while ws.read_with(&cx, |ws, cx| ws.live_view(&code_id).is_none_or(|v| v.is_loading(cx))) {
+        assert!(t.elapsed() < Duration::from_secs(120), "the session never opened");
         std::thread::sleep(Duration::from_millis(200));
         draw(&mut cx);
     }
     let h = ask(from_session.clone(), "read_code_session", json!({"id": code_id}));
     serve(&mut cx, take());
-    assert!(h.join().unwrap().unwrap().contains("latest terminal output"));
+    assert!(h.join().unwrap().unwrap().contains("latest conversation"));
     step(&mut cx, &|ws, w, cx| ws.close_live(&id, w, cx));
     // Closing goes to the home screen; the ended session is picked from the sidebar.
     step(&mut cx, &|ws, w, cx| ws.act(Act::Select(id.clone()), w, cx));
@@ -221,7 +246,7 @@ fn sessions_and_shell() {
     // The keyboard moves to the opened file, inside the pane, so the pane's shortcuts (Ctrl+P) reach it.
     cx.update_window(window, |_, window, app| {
         let pane = &ws.read(app).panes[&first];
-        assert!(pane.shown().unwrap().buffer.read(app).focus_handle(app).is_focused(window) && pane.focus.contains_focused(window, app));
+        assert!(pane.shown().unwrap().buffer.focus_handle(app).is_focused(window) && pane.focus.contains_focused(window, app));
     })
     .unwrap();
     assert_eq!(ws.read_with(&cx, |ws, app| ws.panes[&first].shown().unwrap().buffer.read(app).value().to_string()), "# Notes\n");
@@ -307,7 +332,7 @@ fn sessions_and_shell() {
         b.select_all(w, cx);
     }));
     step(&mut cx, &|ws, w, cx| ws.focus_active(w, cx));
-    assert!(ws.read_with(&cx, |ws, app| !ws.live_view(&first).unwrap().read(app).tail_text(40).contains("@code.rs")));
+    assert!(ws.read_with(&cx, |ws, app| !ws.live_view(&first).unwrap().tail_text(40, app).contains("@code.rs")));
     step(&mut cx, &|ws, w, cx| ws.toggle_editor(w, cx));
     assert!(ws.read_with(&cx, |ws, _| !ws.editor_mode && (ws.store.data.layout.sidebar_visible, ws.store.data.layout.right_hidden) == sidebars), "leaving editor mode brings the sidebars back as they were");
     // Asking for a sidebar in editor mode leaves it and shows that sidebar, even one that was hidden before.
@@ -350,7 +375,7 @@ fn sessions_and_shell() {
     let card = |call: &str| crate::visual::Card { call: call.into(), content: "# Hi".into() };
     step(&mut cx, &|ws, _w, cx| ws.apply_visuals(vec![(stem.clone(), card("c1")), ("no-such-session".into(), card("c2"))], cx));
     assert!(ws.read_with(&cx, |ws, cx| {
-        let view = ws.live_view(&shown).unwrap().read(cx);
+        let view = ws.live_view(&shown).unwrap().thread().unwrap().read(cx);
         view.has_card("c1") && !view.has_card("c2")
     }));
     step(&mut cx, &|ws, w, cx| ws.open_github(cwd.clone(), w, cx));
@@ -614,8 +639,8 @@ fn c() {}
     };
     act(&mut cx, &|ws, w, cx| ws.new_claude(root.clone(), w, cx));
     let id = ws.read_with(&cx, |ws, _| ws.active.clone().unwrap());
-    let screen = |ws: &Workspace, app: &App| ws.live_view(&id).unwrap().read(app).tail_text(40);
-    wait(&mut cx, "Claude's input box", &|ws, app| screen(ws, app).contains('❯') && !ws.live_view(&id).unwrap().read(app).loading);
+    let screen = |ws: &Workspace, app: &App| ws.live_view(&id).unwrap().thread().unwrap().read(app).draft(app);
+    wait(&mut cx, "the session to open", &|ws, app| !ws.live_view(&id).unwrap().is_loading(app));
     act(&mut cx, &|ws, w, cx| ws.toggle_editor(w, cx));
     wait(&mut cx, "the editor pane", &|ws, _| ws.panes.contains_key(&id));
     act(&mut cx, &|ws, w, cx| ws.open_file(&id, dunce::canonicalize(&code).unwrap(), None, w, cx));
@@ -634,7 +659,7 @@ fn c() {}
     // Typed after: it stays, and coming back with the same lines selected doesn't add it again.
     act(&mut cx, &|ws, w, cx| ws.focus_active(w, cx));
     wait(&mut cx, "the reference again", &|ws, app| screen(ws, app).contains(&mention));
-    act(&mut cx, &|ws, _w, cx| ws.live_view(&id).unwrap().update(cx, |v, cx| v.paste_text("explain", cx)));
+    act(&mut cx, &|ws, w, cx| ws.live_view(&id).unwrap().thread().unwrap().clone().update(cx, |v, cx| v.paste_text("explain", w, cx)));
     wait(&mut cx, "the typed request", &|ws, app| screen(ws, app).contains("explain"));
     act(&mut cx, &|_, w, cx| buffer.update(cx, |b, cx| b.focus(w, cx)));
     act(&mut cx, &|ws, w, cx| ws.focus_active(w, cx));
@@ -652,9 +677,7 @@ fn c() {}
     wait(&mut cx, "the second reference", &|ws, app| screen(ws, app).contains(&both));
     let lines = ws.read_with(&cx, |ws, app| screen(ws, app));
     // After the user's text, on the same line with a space: the user starts a new line themselves when they want one.
-    // Words only: Claude Code wraps a long input line onto the next row, padding the row it leaves.
-    let words = lines.split_whitespace().collect::<Vec<_>>().join(" ");
-    assert!(words.contains(&format!("explain {both}:")), "after the typed text: {lines}");
+    assert!(lines.contains(&format!("explain {both}:")), "after the typed text: {lines}");
     act(&mut cx, &|ws, w, cx| ws.close_live(&id, w, cx));
 }
 
@@ -866,7 +889,7 @@ fn line_actions_on_their_keys() {
     cx.update(|app| app.bind_keys([gpui::KeyBinding::new("secondary-w", super::CloseTab, Some("EditorPane"))]));
     press(&mut cx, "secondary-w");
     assert_eq!(ws.read_with(&cx, |ws, _| ws.panes[&id].tabs.iter().map(|t| t.path.clone()).collect::<Vec<_>>()), [root.join("lines.txt")]);
-    let focused = ws.read_with(&cx, |ws, app| ws.panes[&id].shown().unwrap().buffer.read(app).focus_handle(app));
+    let focused = ws.read_with(&cx, |ws, app| ws.panes[&id].shown().unwrap().buffer.focus_handle(app));
     assert!(cx.update_window(window, |_, w, _| focused.is_focused(w)).unwrap(), "the tab now shown has the keyboard");
     press(&mut cx, "secondary-w");
     // lines.txt has unsaved edits, so closing it asks first.
@@ -1319,7 +1342,10 @@ fn switching_between_worktrees_in_the_workspace() {
     std::fs::write(&fake, if cfg!(windows) { "@echo off\r\necho ready\r\nping -n 120 127.0.0.1 >nul\r\n" } else { "#!/bin/sh\necho ready\nsleep 120\n" }).unwrap();
     #[cfg(unix)]
     std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-    ws.update(&mut cx, |ws, _| ws.claude_exe = Some(fake.clone()));
+    ws.update(&mut cx, |ws, _| {
+        ws.claude_exe = Some(fake.clone());
+        ws.acp_server = Some(fake_agent(work.path()));
+    });
 
     // A new session starts in the main checkout. The menu is there but cannot switch until a session runs.
     step(&mut cx, &|ws, w, cx| ws.act(Act::NewClaude { cwd: repo_dir.clone() }, w, cx));
@@ -1327,12 +1353,13 @@ fn switching_between_worktrees_in_the_workspace() {
     let session = ws.read_with(&cx, |ws, _| active(ws));
     assert_eq!(session.cwd, repo_dir);
     // The conversation exists once Claude Code has had a prompt; the test stands one in, in Claude Code's own place.
-    let claude_id = session.claude_id().unwrap().to_string();
+    wait(&mut cx, "the session to open", &|ws, _| ws.store.session(&session.id).and_then(|r| r.claude_id()).is_some());
+    let claude_id = ws.read_with(&cx, |ws, _| ws.store.session(&session.id).unwrap().claude_id().unwrap().to_string());
     let transcript = home.path().join("projects/p").join(format!("{claude_id}.jsonl"));
     std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
     std::fs::write(&transcript, "{\"type\":\"user\"}
 ").unwrap();
-    wait(&mut cx, "the first screen", &|ws, app| ws.live.iter().all(|l| !l.view.read(app).is_loading() && !l.view.read(app).is_working()));
+    wait(&mut cx, "the first screen", &|ws, app| ws.live.iter().all(|l| !l.view.is_loading(app) && !l.view.is_working(app)));
 
     // Files open in the editor when the session moves: two are committed, so the new worktree has them, and one is
     // ignored, so it only exists in the main checkout.
@@ -1368,14 +1395,6 @@ fn switching_between_worktrees_in_the_workspace() {
     let (shell_before, ..) = ws.read_with(&cx, |ws, _| shell(ws)).unwrap();
     // The panels ease open over `Reveal::MS` of real time, so the pane's grid keeps changing for that long; how far
     // it has got depends on how fast the machine ran the steps above. The grid read below must be the settled one.
-    let pane_grid = |cx: &mut TestAppContext| ws.read_with(cx, |ws, app| ws.live_view(&session.id).map(|v| v.read(app).terminal.size()));
-    let mut last = None;
-    while last != Some(pane_grid(&mut cx)) {
-        last = Some(pane_grid(&mut cx));
-        std::thread::sleep(Duration::from_millis(crate::panels::widgets::Reveal::MS as u64 + 20));
-        cx.update_window(window, |_, window, app| window.draw(app).clear(app)).unwrap();
-        cx.run_until_parked();
-    }
 
     // A bad name keeps the dialog open; a typed one moves the session into the worktree Claude Code will make.
     step(&mut cx, &|ws, w, cx| ws.act(Act::NewWorktree(repo_dir.clone()), w, cx));
@@ -1392,16 +1411,11 @@ fn switching_between_worktrees_in_the_workspace() {
         ws.submit_modal(w, cx);
     });
     let worktree = crate::git::worktree::folder(&repo_dir, "fix-login");
-    let skeleton = |ws: &Workspace, app: &App| ws.live_view(&session.id).and_then(|v| v.read(app).handover.as_ref().map(|h| h.message.clone()));
+    let skeleton = |ws: &Workspace, app: &App| ws.live_view(&session.id).and_then(|v| v.thread()).and_then(|v| v.read(app).handover.as_ref().map(|h| h.message.clone()));
     assert_eq!(ws.read_with(&cx, |ws, app| skeleton(ws, app)).as_deref(), Some("Switching to fix-login…"), "the skeleton names the worktree");
-    // The grid the pane draws terminals on. A new terminal starts at a default size until it is first laid out.
-    let grid = ws.read_with(&cx, |ws, app| ws.live_view(&session.id).unwrap().read(app).terminal.size());
-    assert_ne!(grid, (120, 32), "the window must not happen to match the default size");
-    // Until the new process is up, the session stays shown and running behind its skeleton, never an empty pane, and
-    // the skeleton sits on the pane's grid from the first frame on.
+    // Until the new process is up, the session stays shown and running behind its skeleton, never an empty pane.
     let moved_to = |folder: &std::path::Path, ws: &Workspace, app: &App| {
-        let loading = ws.live_view(&session.id).is_some_and(|v| v.read(app).is_loading());
-        assert_eq!(ws.live_view(&session.id).map(|v| v.read(app).terminal.size()), Some(grid), "mid-switch the skeleton is on another grid");
+        let loading = ws.live_view(&session.id).is_some_and(|v| v.is_loading(app));
         assert!(ws.active.as_ref() == Some(&session.id) && ws.is_running(&session.id, app), "mid-switch the session is not shown running");
         let moved = ws.store.session(&session.id).is_some_and(|r| r.cwd == folder);
         assert!(loading || moved, "mid-switch the pane has no skeleton");
@@ -1438,7 +1452,7 @@ fn switching_between_worktrees_in_the_workspace() {
     std::fs::write(&transcript, "{\"type\":\"user\"}
 {\"type\":\"worktree-state\",\"worktreeSession\":{\"worktreeName\":\"fix-login\"},\"sessionId\":\"x\"}
 ").unwrap();
-    wait(&mut cx, "the first screen again", &|ws, app| ws.live.iter().all(|l| !l.view.read(app).is_loading() && !l.view.read(app).is_working()));
+    wait(&mut cx, "the first screen again", &|ws, app| ws.live.iter().all(|l| !l.view.is_loading(app) && !l.view.is_working(app)));
     step(&mut cx, &|ws, w, cx| ws.act(Act::SwitchWorktree { folder: repo_dir.clone(), base: Default::default() }, w, cx));
     // The work file stays in the worktree the session leaves, so it asks first.
     wait(&mut cx, "the question", &|ws, _| matches!(&ws.modal, Some(Modal::Confirm { body, .. }) if body.contains("1 uncommitted file stays")));
@@ -1456,18 +1470,13 @@ fn switching_between_worktrees_in_the_workspace() {
     assert!(!crate::claude::worktree_recorded(&transcript).unwrap(), "the transcript no longer names the worktree");
     assert!(std::fs::read_to_string(&transcript).unwrap().lines().count() == 3);
 
-    // A restart (a switch, a hand-off) puts the new terminal on the pane's grid before its first frame, which is drawn
-    // before the terminal is laid out: on a default grid the skeleton's prompt would jump to the middle for a frame.
-    step(&mut cx, &|ws, w, cx| {
-        ws.restart_session(&session.id, w, cx);
-        assert_eq!(ws.live_view(&session.id).map(|v| v.read(cx).terminal.size()), Some(grid), "the new terminal starts on another grid");
-    });
-    wait(&mut cx, "the restart", &|ws, app| ws.live_view(&session.id).is_some_and(|v| !v.read(app).is_loading()));
+    step(&mut cx, &|ws, w, cx| ws.restart_session(&session.id, w, cx));
+    wait(&mut cx, "the restart", &|ws, app| ws.live_view(&session.id).is_some_and(|v| !v.is_loading(app)));
 
     // Mid-turn nothing changes: a session that has not shown its first screen is not idle.
     step(&mut cx, &|ws, w, cx| ws.act(Act::SwitchWorktree { folder: worktree.clone(), base: Default::default() }, w, cx));
     // Either the check ran before the screen was ready (told to wait) or after (switched); it never half-switches.
-    wait(&mut cx, "a settled state", &|ws, app| ws.is_running(&session.id, app) && ws.live_view(&session.id).is_some_and(|v| !v.read(app).is_loading()));
+    wait(&mut cx, "a settled state", &|ws, app| ws.is_running(&session.id, app) && ws.live_view(&session.id).is_some_and(|v| !v.is_loading(app)));
 
     // A project without commits has a disabled "New worktree…".
     let bare = dunce::canonicalize(work.path()).unwrap().join("bare");
@@ -1493,7 +1502,7 @@ fn switching_between_worktrees() {
 }
 
 /// A running session refuses the removal of its worktree. Ending it offers the removal, and confirming removes the folder
-/// (with a real `claude` running in it until the session ends, which on Windows holds the folder until the process is gone).
+/// (with an agent running in it until the session ends, which on Windows holds the folder until the process is gone).
 fn removing_a_worktree_when_its_session_ends() {
     let data = tempfile::tempdir().unwrap();
     // SAFETY: set before any other thread reads the environment; this test owns the process.
@@ -1535,10 +1544,11 @@ fn removing_a_worktree_when_its_session_ends() {
             cx.run_until_parked();
         }
     };
+    ws.update(&mut cx, |ws, _| ws.acp_server = Some(fake_agent(work.path())));
     // The worktree is known to the project once git has been read again.
     step(&mut cx, &|ws, _w, _cx| ws.store.refresh_git());
     // A new session never starts inside a worktree; Fix-with-Claude is the one starter that keeps the folder it is given.
-    step(&mut cx, &|ws, w, cx| ws.new_claude_with(folder.clone(), vec![], crate::claude::defaults::Starter::FixGit, w, cx));
+    step(&mut cx, &|ws, w, cx| ws.new_claude_with(folder.clone(), None, vec![], crate::claude::defaults::Starter::FixGit, w, cx));
     let id = ws.read_with(&cx, |ws, _| ws.active.clone().unwrap());
 
     // Any other way of starting a session, asked to start inside the worktree, starts in the main checkout.
@@ -1787,4 +1797,69 @@ fn a_process_that_ends_closes_the_session_and_leaves_its_worktree() {
     until_closed(&mut cx, &missing);
     let toast = ws.read_with(&cx, |ws, _| ws.toast.as_ref().map(|t| t.text.clone()));
     assert!(toast.as_deref().is_some_and(|t| t.starts_with("Could not start Missing:")), "{toast:?}");
+}
+
+/// A Claude Code session through its ACP adapter: it starts, names itself, and answers a message in the thread.
+/// Each spends one short turn on the signed-in account. `cargo test -- --ignored session_answers`.
+#[test]
+#[ignore = "runs the real Claude Code"]
+fn a_claude_code_session_answers_in_its_thread() {
+    a_session_answers_in_its_thread(crate::harness::Harness::Claude);
+}
+
+#[test]
+#[ignore = "runs the real Codex"]
+fn a_codex_session_answers_in_its_thread() {
+    a_session_answers_in_its_thread(crate::harness::Harness::Codex);
+}
+
+#[test]
+#[ignore = "runs the real OpenCode"]
+fn an_opencode_session_answers_in_its_thread() {
+    a_session_answers_in_its_thread(crate::harness::Harness::OpenCode);
+}
+
+fn a_session_answers_in_its_thread(harness: crate::harness::Harness) {
+    use crate::harness::thread::Entry;
+    let data = tempfile::tempdir().unwrap();
+    // SAFETY: set before any other thread reads the environment; this test owns the process.
+    unsafe { std::env::set_var("CLAUDIU_DATA_DIR", data.path()) };
+    let work = tempfile::tempdir().unwrap();
+    let mut cx = TestAppContext::single();
+    cx.update(|app| {
+        gpui_kit::init(app);
+        gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, app);
+    });
+    let (window, ws) = cx.update(|app| gpui_kit::open_window(Default::default(), app, |window, app| app.new(|cx| Workspace::new(window, vec![], cx)))).unwrap();
+    let draw = |cx: &mut TestAppContext| {
+        cx.update_window(window, |_, window, app| window.draw(app).clear(app)).unwrap();
+        cx.run_until_parked();
+    };
+    let wait = |cx: &mut TestAppContext, what: &str, secs: u64, done: &dyn Fn(&Workspace, &App) -> bool| {
+        let t = std::time::Instant::now();
+        while !ws.read_with(cx, |ws, app| done(ws, app)) {
+            assert!(t.elapsed() < Duration::from_secs(secs), "timed out waiting for {what}");
+            std::thread::sleep(Duration::from_millis(100));
+            draw(cx);
+        }
+    };
+    let cwd = dunce::canonicalize(work.path()).unwrap();
+    ws.update(&mut cx, |ws, _| ws.store.data.settings.harness = harness);
+    cx.update_window(window, |_, window, app| ws.update(app, |ws, cx| ws.new_claude(cwd.clone(), window, cx))).unwrap();
+    draw(&mut cx);
+    let id = ws.read_with(&cx, |ws, _| ws.active.clone().expect("a session is shown"));
+    let thread = |ws: &Workspace| ws.live_view(&id).and_then(|v| v.thread()).cloned().expect("a thread view");
+    wait(&mut cx, "the session to open", 120, &|ws, app| !thread(ws).read(app).is_loading() || !ws.is_running(&id, app));
+    assert!(ws.read_with(&cx, |ws, app| ws.is_running(&id, app)), "the harness stopped: {:?}", ws.read_with(&cx, |ws, app| thread(ws).read(app).start_error()));
+    assert!(ws.read_with(&cx, |ws, _| ws.store.session(&id).and_then(|r| r.claude_id()).is_some()), "the session's id was kept");
+    cx.update_window(window, |_, window, app| {
+        let view = ws.read(app).live_view(&id).and_then(|v| v.thread()).cloned().unwrap();
+        view.update(app, |v, cx| v.send("Reply with exactly one word: pong".into(), window, cx));
+    })
+    .unwrap();
+    wait(&mut cx, "the reply", 180, &|ws, app| {
+        let v = thread(ws);
+        let v = v.read(app);
+        !v.is_working() && v.thread.entries.iter().any(|e| matches!(e, Entry::Agent(t) if t.to_lowercase().contains("pong")))
+    });
 }

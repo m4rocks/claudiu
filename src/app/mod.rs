@@ -20,6 +20,7 @@ use crate::panels::sidebar::{SIDEBAR_MAX, SIDEBAR_MIN, SIDEBAR_W};
 use crate::github::view::{GhEvent, GithubView};
 use crate::claude::defaults::{Effort, PermissionMode, Starter};
 use crate::claude::mcp;
+use crate::harness::{self, Harness};
 use crate::git::worktree::Base;
 use crate::platform::{self, Editor};
 use crate::{claude::usage, datadir};
@@ -28,6 +29,8 @@ use crate::store::{
 };
 use crate::terminal::SpawnSpec;
 use crate::terminal::view::{TerminalEvent, TerminalView};
+use crate::thread::Handover;
+use crate::thread::{ThreadEvent, ThreadView};
 use crate::updater::UpdateState;
 
 mod alt_accounts;
@@ -147,6 +150,8 @@ pub enum Act {
     ConfirmDeleteUnlisted(PathBuf),
     /// Show or hide the shell under a Claude session's terminal (started on first use, in the session's folder).
     ToggleShell(Id),
+    /// End the thread and copy the harness's own command to carry on with the session in a terminal.
+    ContinueInTerminal(Id),
     /// Turn editor mode on or off for the shown session (see `editor_mode.rs`).
     ToggleEditor,
     /// Click on a session row: live -> show it, history -> resume it.
@@ -170,6 +175,7 @@ pub enum Act {
     /// A choice in the Settings dialog's effort or permission-mode picker (None = Claude Code's default); kept in the
     /// dialog until Save.
     PickEffort(Option<Effort>),
+    PickHarness(Harness),
     PickPermission(Option<PermissionMode>),
     /// The project's GitHub issues and pull requests.
     OpenGithub {
@@ -309,6 +315,8 @@ pub enum Modal {
         claude: Entity<InputState>,
         /// Model for new sessions (Sessions page); empty = Claude Code's default.
         model: Entity<InputState>,
+        /// The harness new sessions run in (Sessions page).
+        harness: Harness,
         effort: Option<Effort>,
         permission: Option<PermissionMode>,
         updates: bool,
@@ -384,13 +392,97 @@ pub enum GitOp {
 
 pub struct Live {
     pub id: Id,
-    pub view: Entity<TerminalView>,
+    pub view: SessionView,
     pub _sub: Subscription,
     pub _focus: [Subscription; 2],
     /// The session name Claude Code was last given (`--name` or `/rename`), so a changed title is sent once.
     pub claude_name: Option<String>,
     /// The account this process was started under; a session on another account than the active one can be handed off.
     pub account: Id,
+}
+
+/// What a session is drawn as: a harness session's conversation, or the terminal of a shell tab (a sign-in).
+#[derive(Clone)]
+pub enum SessionView {
+    Thread(Entity<ThreadView>),
+    Terminal(Entity<TerminalView>),
+}
+
+impl SessionView {
+    pub fn is_running(&self, cx: &App) -> bool {
+        match self {
+            Self::Thread(v) => v.read(cx).is_running(),
+            Self::Terminal(v) => v.read(cx).is_running(),
+        }
+    }
+
+    pub fn is_working(&self, cx: &App) -> bool {
+        match self {
+            Self::Thread(v) => v.read(cx).is_working(),
+            Self::Terminal(v) => v.read(cx).is_working(),
+        }
+    }
+
+    pub fn is_loading(&self, cx: &App) -> bool {
+        match self {
+            Self::Thread(v) => v.read(cx).is_loading(),
+            Self::Terminal(_) => false,
+        }
+    }
+
+    pub fn focus_handle(&self, cx: &App) -> FocusHandle {
+        match self {
+            Self::Thread(v) => v.focus_handle(cx),
+            Self::Terminal(v) => v.focus_handle(cx),
+        }
+    }
+
+    pub fn start_error(&self, cx: &App) -> Option<String> {
+        match self {
+            Self::Thread(v) => v.read(cx).start_error(),
+            Self::Terminal(v) => v.read(cx).start_error(),
+        }
+    }
+
+    /// The last `n` lines (a terminal) or entries (a thread), as text.
+    pub fn tail_text(&self, n: usize, cx: &App) -> String {
+        match self {
+            Self::Thread(v) => v.read(cx).tail_text(n),
+            Self::Terminal(v) => v.read(cx).tail_text(n),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn entity_id(&self) -> gpui::EntityId {
+        match self {
+            Self::Thread(v) => v.entity_id(),
+            Self::Terminal(v) => v.entity_id(),
+        }
+    }
+
+    /// Only a harness session moves; a shell terminal has nothing to say while it restarts.
+    pub fn set_handover(&self, handover: Option<Handover>, cx: &mut App) {
+        if let Self::Thread(v) = self {
+            v.update(cx, |v, cx| {
+                v.handover = handover;
+                cx.notify();
+            })
+        }
+    }
+
+    pub fn thread(&self) -> Option<&Entity<ThreadView>> {
+        match self {
+            Self::Thread(v) => Some(v),
+            Self::Terminal(_) => None,
+        }
+    }
+
+    pub fn terminal(&self) -> Option<&Entity<TerminalView>> {
+        match self {
+            Self::Terminal(v) => Some(v),
+            Self::Thread(_) => None,
+        }
+    }
 }
 
 /// A project's GitHub view, shown in the right sidebar. Kept while Claudiu runs so each project keeps its place;
@@ -451,6 +543,8 @@ pub struct Toast {
 pub struct Workspace {
     pub store: Store,
     pub claude_exe: Option<PathBuf>,
+    /// The ACP server every harness session starts, in place of the harness's own. Tests stand in a fake agent.
+    pub acp_server: Option<(PathBuf, Vec<String>)>,
     pub shell: (String, Vec<String>),
     pub live: Vec<Live>,
     pub gh: Vec<GhPane>,
@@ -589,6 +683,7 @@ impl Workspace {
         .detach();
         let mut ws = Self {
             claude_exe,
+            acp_server: None,
             shell: platform::default_shell(store.data.settings.shell.as_deref()),
             live: vec![],
             gh: vec![],
@@ -734,6 +829,7 @@ impl Workspace {
                 );
             }
             Act::ToggleShell(id) => self.toggle_shell(&id, window, cx),
+            Act::ContinueInTerminal(id) => self.continue_in_terminal(&id, window, cx),
             Act::ToggleEditor => self.toggle_editor(window, cx),
             Act::Editor(command) => self.run_editor_command(command, window, cx),
             Act::Select(id) => self.show_session(&id, window, cx),
@@ -820,10 +916,9 @@ impl Workspace {
                     Some(id) => self.send_to_claude(&id, prompt, window, cx),
                     None => {
                         // No session to ask: a short-lived one on a mid-sized model.
-                        let args = ["--model", "claude-sonnet-5-5", "--effort", "medium"];
-                        let leading = std::iter::once(prompt).chain(args).map(String::from).collect();
+                        let options = vec![("model", "claude-sonnet-5-5".to_string()), ("thought_level", "medium".to_string())];
                         let before = self.selected.clone();
-                        self.new_claude_with(cwd, leading, Starter::FixGit, window, cx);
+                        self.new_claude_with(cwd, Some(prompt.to_string()), options, Starter::FixGit, window, cx);
                         if self.selected != before
                             && let Some(id) = self.selected.clone() {
                                 self.ephemeral.insert(id);
@@ -840,6 +935,7 @@ impl Workspace {
                 );
                 let updates = s.update_url.as_deref() != Some("");
                 let chrome = s.chrome_default;
+                let harness = s.harness;
                 let claude_hint = self.claude_exe.as_ref().map_or("not found".to_string(), |p| p.to_string_lossy().into_owned());
                 let defaults = s.new_session.clone();
                 let claude = self.modal_input(&claude_t, &claude_hint, window, cx);
@@ -851,9 +947,14 @@ impl Workspace {
                 let custom = &self.store.data.settings.custom_subagents;
                 let form = |c: &claude::subagents::AgentChoice| AgentForm { on: c.on, models: c.models.clone(), edits: c.edits };
                 let subagents = SubagentsForm { agents: claude::subagents::AgentMap::from_fn(|agent| form(custom.get(agent))), picking: None };
-                self.modal = Some(Modal::Settings { shell, claude, model, effort: defaults.effort, permission: defaults.permission_mode, updates, chrome, scale: crate::panels::scale::percent(), trimmed: self.store.data.settings.trimmed_tools.clone(), claudiu_off: self.store.data.settings.claudiu_tools_off.clone(), skills_field, costly: claude::costly::scan(), list_focus, renaming: None, subagents });
+                self.modal = Some(Modal::Settings { shell, claude, model, harness, effort: defaults.effort, permission: defaults.permission_mode, updates, chrome, scale: crate::panels::scale::percent(), trimmed: self.store.data.settings.trimmed_tools.clone(), claudiu_off: self.store.data.settings.claudiu_tools_off.clone(), skills_field, costly: claude::costly::scan(), list_focus, renaming: None, subagents });
                 // After the modal exists: a page that loads something reads the dialog's fields.
                 self.set_settings_page(self.settings_page, cx);
+            }
+            Act::PickHarness(choice) => {
+                if let Some(Modal::Settings { harness, .. }) = self.modal.as_mut() {
+                    *harness = choice;
+                }
             }
             Act::PickEffort(choice) => {
                 if let Some(Modal::Settings { effort, .. }) = self.modal.as_mut() {

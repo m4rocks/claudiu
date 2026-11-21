@@ -21,7 +21,7 @@ impl Workspace {
     /// because Claude Code rewrites that file from memory.
     fn account_files(&self, cx: &App) -> Vec<Files> {
         let busy = |account: &Account| {
-            self.live.iter().any(|l| l.view.read(cx).is_running() && self.store.session_account(&l.id).is_some_and(|a| a.id == account.id))
+            self.live.iter().any(|l| l.view.is_running(cx) && self.store.session_account(&l.id).is_some_and(|a| a.id == account.id))
         };
         self.store
             .data

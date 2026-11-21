@@ -69,7 +69,11 @@ impl Attached {
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ClaudeMeta {
+    /// The harness's id for the session; empty until a new session's harness names it.
     pub session_id: String,
+    /// The harness the session runs in. Sessions from before there was a choice ran in Claude Code.
+    #[serde(default)]
+    pub harness: crate::harness::Harness,
     pub model: Option<String>,
     pub context_tokens: Option<u64>,
     /// Exact context usage (0..=1) and window size as reported by Claude Code's status line, when seen.
@@ -156,8 +160,9 @@ impl SessionRecord {
         [&self.custom_title, &self.auto_title].into_iter().flatten().map(|t| t.trim()).find(|t| !t.is_empty())
     }
 
+    /// The harness's id for the session, once it has one.
     pub fn claude_id(&self) -> Option<&str> {
-        self.claude.as_ref().map(|c| c.session_id.as_str())
+        self.claude.as_ref().map(|c| c.session_id.as_str()).filter(|id| !id.is_empty())
     }
 }
 
@@ -292,6 +297,9 @@ pub struct Settings {
     /// Whether new Claude sessions start with Claude in Chrome (`--chrome`); each session can still switch it.
     #[serde(default)]
     pub chrome_default: bool,
+    /// The harness new sessions run in.
+    #[serde(default)]
+    pub harness: crate::harness::Harness,
     /// Model, effort and permission mode for new Claude sessions; empty fields leave Claude Code's own default.
     #[serde(default)]
     pub new_session: crate::claude::defaults::NewSessionDefaults,

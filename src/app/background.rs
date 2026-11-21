@@ -160,14 +160,18 @@ impl Workspace {
         let mut notices = vec![];
         for l in &self.live {
             let is_claude = self.store.session(&l.id).is_some_and(|r| r.kind == SessionKind::Claude);
-            let view = l.view.read(cx);
-            if !is_claude || !view.is_running() {
+            if !is_claude || !l.view.is_running(cx) {
                 continue;
             }
             let viewing = window_active && shown.as_deref() == Some(l.id.as_str());
-            let status = self.store.session(&l.id).and_then(|r| statuses.get(r.claude_id()?));
-            let working = status.map_or_else(|| view.is_working(), |s| s == "busy");
-            let waiting = status.is_some_and(|s| s == "waiting");
+            // A thread knows from ACP itself: a turn is out, or a permission question is open.
+            let (working, waiting) = match &l.view {
+                SessionView::Thread(v) => (v.read(cx).is_working(), v.read(cx).is_waiting()),
+                SessionView::Terminal(v) => {
+                    let status = self.store.session(&l.id).and_then(|r| statuses.get(r.claude_id()?));
+                    (status.map_or_else(|| v.read(cx).is_working(), |s| s == "busy"), status.is_some_and(|s| s == "waiting"))
+                }
+            };
             let before = self.activity.get(&l.id).copied();
             let now = next_activity(working, waiting, before, viewing);
             if let Some(body) = notice(before, now, window_active) {
@@ -276,7 +280,7 @@ impl Workspace {
         let jobs: Vec<(Id, String, Option<PathBuf>, Option<SystemTime>)> = self
             .live
             .iter()
-            .filter(|l| l.view.read(cx).is_running())
+            .filter(|l| l.view.is_running(cx))
             .filter_map(|l| {
                 let rec = self.store.session(&l.id)?;
                 let meta = rec.claude.as_ref()?;

@@ -77,8 +77,7 @@ impl Workspace {
         // Moving a window raises no render, so its last position is read here, before the layout is saved.
         self.remember_window(window);
         let working = self.live.iter().filter(|l| {
-            let v = l.view.read(cx);
-            v.is_running() && v.is_working() && self.store.session(&l.id).is_some_and(|r| r.kind == SessionKind::Claude)
+            l.view.is_running(cx) && l.view.is_working(cx) && self.store.session(&l.id).is_some_and(|r| r.kind == SessionKind::Claude)
         });
         let working = working.count();
         let unsaved = self.unsaved(None);

@@ -163,7 +163,7 @@ impl Workspace {
                 let here = if on_list {
                     Some(0)
                 } else {
-                    fields.iter().position(|f| f.read(cx).focus_handle(cx).is_focused(window)).map(|i| i + 1)
+                    fields.iter().position(|f| f.focus_handle(cx).is_focused(window)).map(|i| i + 1)
                 };
                 let Some(here) = here else { return };
                 let stops = fields.len() + 1;
