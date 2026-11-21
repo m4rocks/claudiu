@@ -18,7 +18,7 @@ use crate::platform::Editor;
 use crate::github::model::State;
 use crate::store::{Attached, Id, Project, SessionKind, SessionRecord};
 use crate::panels::theme::{self, hsla};
-use crate::panels::widgets::{countdown, icon, icon_button, key_hint, meter, section_label, tick};
+use crate::panels::widgets::{icon, icon_button, key_hint, meter, section_label, tick};
 use gpui_kit::assets::IconName;
 
 /// What the top bar and the right sidebar describe: the shown session and the folder and project it is in.
@@ -235,19 +235,9 @@ impl Workspace {
                                 .flex_1()
                                 .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::OpenEditor(editor, t.clone()), window, cx))),
                         )
-                        .child(icon_button("open-in-pick", IconName::ChevronDown).dropdown(
-                            cx,
-                            move |ws, at, _w, cx| {
-                                let current = ws.preferred_editor();
-                                let items = ws
-                                    .editors
-                                    .iter()
-                                    .filter(|(_, found)| *found)
-                                    .map(|(e, _)| MenuItem::new(format!("{}{}", tick(current == Some(*e)), e.label()), Act::OpenEditor(*e, pick_target.clone())))
-                                    .collect();
-                                ws.open_dropdown(at, items, cx);
-                            },
-                        )),
+                        .child(icon_button("open-in-pick", IconName::ChevronDown).dropdown_right(cx, move |ws, at, _, cx| {
+                            ws.open_editor_picker(pick_target.clone(), at, cx);
+                        })),
                 );
             }
         }
@@ -294,12 +284,6 @@ impl Workspace {
                 row("shell", IconName::Terminal, if open { "Hide shell" } else { "Show shell" })
                     .when(hints, |d| d.child(key_hint("J")))
                     .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::ToggleShell(id.clone()), window, cx))),
-            );
-        }
-        if let Some(id) = id.filter(|id| running && claude && self.continue_command(id).is_some()).cloned() {
-            actions = actions.child(
-                row("continue-in-terminal", IconName::Terminal, "Continue in a terminal")
-                    .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::ContinueInTerminal(id.clone()), window, cx))),
             );
         }
         let cwd = self.active_cwd();
@@ -368,36 +352,19 @@ impl Workspace {
         rows
     }
 
-    /// Context and cache meters, and the two settings Claude Code keeps (dropdowns while the session runs).
+    /// Context meter across all harnesses, plus Claude Code's session settings when applicable.
     fn status_rows(&self, shown: &Shown, id: Option<&Id>, running: bool, cx: &mut Context<Self>) -> Div {
-        let (ctx_fraction, ctx_caption) = match self.selected_context() {
+        let (ctx_fraction, ctx_caption) = match self.selected_context(cx) {
             Some((f, tokens, true, Some(full))) => (Some(f), format!("{}k of {}k tokens", tokens / 1000, full / 1000)),
             Some((f, tokens, true, None)) => (Some(f), format!("{}k tokens", tokens / 1000)),
             Some((f, tokens, false, _)) => (Some(f), format!("~{}k tokens (estimate)", tokens / 1000)),
             None => (None, "no session".to_string()),
         };
-        // Fills with time left; goes red in the last fifth. Expired means the next message re-reads the whole context at full price.
-        let cache = match self.selected_cache() {
-            Some((_, 0, _)) => meter("CACHE", Some(0.0), "expired".into(), None),
-            Some((f, left, ttl)) => {
-                let tone = hsla(if f < 0.2 { theme::DANGER } else { theme::ACCENT });
-                let window = if ttl >= 3600 { "1h" } else { "5m" };
-                let left = if left < 60 { "<1m".to_string() } else { countdown(left) };
-                meter("CACHE", Some(f), format!("{left} left of {window}"), Some(tone))
-            }
-            None => meter("CACHE", None, "no session".into(), None),
-        };
 
         // The figures come from the snapshot the session's mod reports.
         let meta = shown.rec.as_ref().filter(|r| r.kind == SessionKind::Claude).and_then(|r| r.claude.as_ref());
-        let (compact, precompute, advisor, active, chrome, known) = match meta {
-            Some(m) => (m.auto_compact, m.precompute_compact, m.advisor.clone(), m.advisor_active.clone(), m.chrome, true),
-            None => (None, None, None, None, false, false),
-        };
-        let advisor = advisor.map(|a| a.to_lowercase());
-        let active = active.map(|a| a.to_lowercase());
+        let (compact, precompute) = meta.map_or((None, None), |m| (m.auto_compact, m.precompute_compact));
         let compact_text = compact.map_or("—", |v| if v { "On" } else { "Off" }).to_string();
-        let advisor_text = if known { advisor_display(advisor.as_deref(), active.as_deref()) } else { "—".into() };
         let settable = id.filter(|_| meta.is_some() && running).cloned();
 
         let compact_row = match settable.clone() {
@@ -412,22 +379,13 @@ impl Workspace {
                 None => kv("Background compaction", text).into_any_element(),
             }
         });
-        let chrome_row = match settable.clone() {
-            Some(sid) => pick_row(cx, "set-chrome", "Claude in Chrome", if chrome { "On" } else { "Off" }.into(), move || chrome_menu(&sid, chrome)).into_any_element(),
-            None => kv("Claude in Chrome", if chrome { "On" } else { "Off" }.into()).into_any_element(),
-        };
-        let advisor_row = match settable {
-            Some(sid) => pick_row(cx, "set-advisor", "Advisor", advisor_text, move || advisor_menu(&sid, advisor.as_deref())).into_any_element(),
-            None => kv("Advisor", advisor_text).into_any_element(),
-        };
         div()
             .flex()
             .flex_col()
             .gap(px(10.0))
             .px(px(8.0))
             .child(meter("CONTEXT", ctx_fraction, ctx_caption, None))
-            .child(cache)
-            .child(div().flex().flex_col().gap(px(2.0)).child(compact_row).children(precompute_row).child(advisor_row).child(chrome_row))
+            .child(div().flex().flex_col().gap(px(2.0)).child(compact_row).children(precompute_row))
     }
 }
 
@@ -437,53 +395,6 @@ fn auto_compact_menu(sid: &Id, current: Option<bool>) -> Vec<MenuItem> {
 
 fn precompute_compact_menu(sid: &Id, current: bool) -> Vec<MenuItem> {
     [(true, "On"), (false, "Off")].into_iter().map(|(on, name)| MenuItem::new(format!("{}{name}", tick(current == on)), Act::SetPrecomputeCompact(sid.clone(), on))).collect()
-}
-
-/// Off, the two aliases, and "Other…" (ticked for any other model) which asks for a name.
-fn chrome_menu(sid: &Id, current: bool) -> Vec<MenuItem> {
-    [(true, "On"), (false, "Off")].into_iter().map(|(on, name)| MenuItem::new(format!("{}{name}", tick(current == on)), Act::SetChrome(sid.clone(), on))).collect()
-}
-
-fn advisor_menu(sid: &Id, current: Option<&str>) -> Vec<MenuItem> {
-    const ALIASES: [(&str, &str); 2] = [("opus", "Opus"), ("sonnet", "Sonnet")];
-    let current = current.and_then(advisor_alias);
-    let other = current.is_some_and(|a| !ALIASES.iter().any(|(k, _)| *k == a));
-    let mut items = vec![MenuItem::new(format!("{}Off", tick(current.is_none())), Act::SetAdvisor(sid.clone(), "off".into()))];
-    items.extend(ALIASES.iter().map(|(alias, name)| MenuItem::new(format!("{}{name}", tick(current == Some(*alias))), Act::SetAdvisor(sid.clone(), (*alias).into()))));
-    items.push(MenuItem::new(format!("{}Other…", tick(other)), Act::AskAdvisor(sid.clone())));
-    items
-}
-
-/// Claude Code may store either an alias (`opus`) or the resolved model id (`claude-opus-5-5`); the menu and the
-/// value both speak aliases, so map the id back to the family it belongs to.
-fn advisor_alias(value: &str) -> Option<&str> {
-    let value = value.trim();
-    if value.is_empty() || value.eq_ignore_ascii_case("off") {
-        return None;
-    }
-    let lower = value.to_ascii_lowercase();
-    if lower == "opus" || lower.contains("opus") {
-        Some("opus")
-    } else if lower == "sonnet" || lower.contains("sonnet") {
-        Some("sonnet")
-    } else {
-        Some(value)
-    }
-}
-
-/// `Opus`, or `Opus → Sonnet` while the saved setting waits for `/clear` or `/compact`.
-fn advisor_display(saved: Option<&str>, active: Option<&str>) -> String {
-    let Some(saved) = saved.and_then(advisor_alias) else { return "Off".into() };
-    let active = active.and_then(advisor_alias).unwrap_or(saved);
-    if active == saved { advisor_name(active) } else { format!("{} → {}", advisor_name(active), advisor_name(saved)) }
-}
-
-fn advisor_name(alias: &str) -> String {
-    match alias {
-        "opus" => "Opus".into(),
-        "sonnet" => "Sonnet".into(),
-        other => other.to_string(),
-    }
 }
 
 fn group(label: &str, body: impl IntoElement) -> Div {
@@ -659,15 +570,5 @@ mod tests {
         assert_eq!(labels(&auto_compact_menu(&sid, Some(false))), ["    On", "✓  Off"]);
         assert_eq!(labels(&auto_compact_menu(&sid, None)), ["    On", "    Off"]);
         assert_eq!(labels(&precompute_compact_menu(&sid, true)), ["✓  On", "    Off"]);
-        assert_eq!(labels(&advisor_menu(&sid, None)), ["✓  Off", "    Opus", "    Sonnet", "    Other…"]);
-        assert_eq!(labels(&advisor_menu(&sid, Some("sonnet"))), ["    Off", "    Opus", "✓  Sonnet", "    Other…"]);
-        assert_eq!(labels(&advisor_menu(&sid, Some("claude-opus-5-5"))), ["    Off", "✓  Opus", "    Sonnet", "    Other…"]);
-        assert_eq!(labels(&advisor_menu(&sid, Some("claude-sonnet-4-5-20250929"))), ["    Off", "    Opus", "✓  Sonnet", "    Other…"]);
-        assert_eq!(labels(&advisor_menu(&sid, Some("off"))), ["✓  Off", "    Opus", "    Sonnet", "    Other…"]);
-        assert_eq!(labels(&advisor_menu(&sid, Some("my-model"))), ["    Off", "    Opus", "    Sonnet", "✓  Other…"]);
-        assert_eq!(advisor_display(None, None), "Off");
-        assert_eq!(advisor_display(Some("sonnet"), Some("sonnet")), "Sonnet");
-        assert_eq!(advisor_display(Some("sonnet"), Some("claude-opus-5-5")), "Opus → Sonnet");
-        assert_eq!(advisor_display(Some("opus"), None), "Opus");
     }
 }

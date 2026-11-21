@@ -8,7 +8,7 @@ use std::sync::Mutex;
 
 use serde_json::{Value, json};
 
-use super::{Adapter, Reopen, Server, words};
+use super::{Adapter, Reopen, Server};
 
 /// The bridge's files, embedded in the binary. The lockfile pins the SDK, so an SDK change reaches users only with a
 /// Claudiu release.
@@ -26,9 +26,10 @@ pub const EXECUTABLE_ENV: &str = "CLAUDE_CODE_EXECUTABLE";
 
 pub const ADAPTER: Adapter = Adapter {
     name: "Claude Code",
+    server_name: "claude-bridge",
     server: || server(&crate::datadir::data_dir()),
     reopen: Reopen::Load,
-    resume_command: |id| Some(words(&["claude", "--resume", id])),
+    delete_model_session: false,
 };
 
 /// Sessions starting together must not install the SDK into the same folder at once.

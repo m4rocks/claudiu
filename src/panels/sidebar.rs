@@ -15,7 +15,7 @@ use crate::panels::theme::{self, hsla};
 use gpui_kit::assets::IconName;
 use crate::panels::status_icon::{SessionDot, StatusIcon};
 use crate::panels::logos;
-use crate::panels::widgets::{Trigger, ago, button, countdown, icon, icon_button, key_hint, limit_bar, section_label, shortcut, tick};
+use crate::panels::widgets::{Trigger, ago, countdown, icon, icon_button, key_hint, limit_bar, section_label, shortcut};
 
 pub const SIDEBAR_W: f32 = 284.0;
 pub const SIDEBAR_MIN: f32 = 220.0;
@@ -84,6 +84,7 @@ const ROW_H: f32 = 25.0;
 /// Its lines are 14 + 17 + 14 px with 2 px gaps (see `render_row`), which leaves 5.5 px above and below.
 const RUNNING_ROW_H: f32 = 60.0;
 const HEADER_H: f32 = 20.0;
+const NEW_ROW_H: f32 = 32.0;
 const NOTE_H: f32 = 24.0;
 const LIST_GAP: f32 = 2.0;
 /// Drawn beyond each edge of the view. The list is rebuilt for every frame its offset moves, so one row is enough.
@@ -146,7 +147,9 @@ fn visible_items(heights: &[f32], gap: f32, from: f32, to: f32) -> (Vec<(usize, 
 /// One part of the session list, top to bottom.
 #[derive(Clone, PartialEq)]
 enum Item {
-    Header(&'static str, Option<String>),
+    /// Opens the Welcome screen to start a session: in the chosen project (named), or asking for one. Lit while the
+    /// Welcome screen is shown.
+    NewSession { project: Option<String>, shown: bool },
     /// A line of text standing in for rows that aren't there.
     Note(&'static str),
     /// A session; `reorder` lets it be dragged among the others (the running ones).
@@ -156,7 +159,7 @@ enum Item {
 impl Item {
     fn height(&self) -> f32 {
         match self {
-            Item::Header(..) => HEADER_H,
+            Item::NewSession { .. } => NEW_ROW_H,
             Item::Note(_) => NOTE_H,
             Item::Session { row, .. } if row.running => RUNNING_ROW_H,
             Item::Session { .. } => ROW_H,
@@ -314,7 +317,7 @@ impl Workspace {
     fn project_menu(&self, p: &Project) -> Vec<MenuItem> {
         let item = |label: String, act: Act, danger: bool, sep: bool| MenuItem { label, hint: None, detail: None, act, danger, disabled: false, separator_before: sep, remove: None, icon: None };
         let mut items = vec![
-            item(format!("New {} session here", self.store.data.settings.harness.name()), Act::NewClaude { cwd: p.path.clone() }, false, false),
+            item("New session here".into(), Act::NewClaude { cwd: p.path.clone() }, false, false),
             item("Pick up a session here…".into(), Act::ListSessions { cwd: p.path.clone() }, false, false),
         ];
         if p.git.is_some() {
@@ -395,7 +398,7 @@ impl Workspace {
                         .text_size(crate::panels::scale::px(11.0))
                         .line_height(crate::panels::scale::px(14.0))
                         .text_color(hsla(theme::TEXT_FAINT))
-                        .children(row.harness.map(|h| logos::draw(logos::for_harness(h), 11.0, hsla(theme::harness_color(h)))))
+                        .children(row.harness.map(|h| logos::draw(logos::for_harness(h), 11.0, hsla(theme::TEXT_FAINT))))
                         .child(ellipsis(div().flex_1()).child(row.project.clone()))
                         .child(div().flex_none().text_color(right_color).child(right_text)),
                 )
@@ -490,6 +493,8 @@ impl Workspace {
                     }));
                 d.child(
                     div()
+                        .self_start()
+                        .mt(px(4.0))
                         .flex()
                         .flex_none()
                         .justify_end()
@@ -584,9 +589,10 @@ impl Workspace {
         }
         self.prev_current = ids;
 
-        let mut items = vec![Item::Header("RUNNING", Some(running.len().to_string()))];
-        if running.is_empty() {
-            items.push(Item::Note(if searching || filter.is_some() { "Nothing running matches" } else { "Nothing running. Start a session." }));
+        let project = self.project_filter().map(|p| p.name.clone());
+        let mut items = vec![Item::NewSession { project, shown: matches!(self.main, crate::app::Main::Home) }];
+        if running.is_empty() && (searching || filter.is_some()) {
+            items.push(Item::Note("Nothing running matches"));
         }
         items.extend(running.into_iter().map(|row| Item::Session { row, reorder: true }));
         ListModel { items, dragging: self.dragging.clone(), scale: crate::panels::scale::percent() }
@@ -678,7 +684,7 @@ impl Workspace {
 
     fn list_item(&self, item: Item, list: gpui::EntityId, cx: &mut Context<Self>) -> AnyElement {
         match item {
-            Item::Header(label, count) => self.section_header(label, count, None::<Stateful<Div>>).into_any_element(),
+            Item::NewSession { project, shown } => self.new_session_row(project, shown, cx).into_any_element(),
             Item::Note(text) => div()
                 .h(px(NOTE_H))
                 .flex()
@@ -696,19 +702,14 @@ impl Workspace {
         }
     }
 
-    /// "+ Code session" with no project chosen: pick where it starts.
-    fn new_session_menu(&self) -> Vec<MenuItem> {
-        let item = |label: String, detail: Option<String>, act: Act, disabled: bool, sep: bool| MenuItem { label, hint: None, detail, act, danger: false, disabled, separator_before: sep, remove: None, icon: None };
-        let mut items = vec![item("Start the session in…".into(), None, Act::Dismiss, true, false)];
-        items.extend(self.store.data.projects.iter().map(|p| item(p.name.clone(), Some(crate::panels::widgets::short_path(&p.path)), Act::NewClaude { cwd: p.path.clone() }, false, false)));
-        items.push(item("Add project…".into(), None, Act::ImportProject, false, true));
-        items
-    }
-
-    /// The project filter: a chip that lists the projects, and (with a project chosen) a ⋯ button for its actions.
+    /// The project filter: a chip that opens the universal Project picker, and (with a project chosen) a ⋯ button for its actions.
     fn render_project_filter(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let current = self.project_filter().cloned();
         let name = current.as_ref().map_or("All projects".to_string(), |p| p.name.clone());
+        let filter_open = matches!(
+            self.picker_kind(),
+            Some(crate::app::WorkspacePicker::Project { mode: crate::app::ProjectPickerMode::SidebarFilter, .. })
+        );
         let chip = div()
             .id("project-filter")
             .flex_1()
@@ -719,25 +720,19 @@ impl Workspace {
             .items_center()
             .gap(px(6.0))
             .rounded(px(6.0))
-            .bg(hsla(0x141414))
+            .bg(hsla(if filter_open { theme::ROW_ACTIVE } else { 0x141414 }))
+            .border_1()
+            .border_color(hsla(if filter_open { theme::ACCENT } else { 0x141414 }))
             .cursor_pointer()
             .hover(|s| s.bg(hsla(0x1b1b1b)))
             .text_size(crate::panels::scale::px(12.0))
-            .text_color(hsla(if current.is_some() { theme::TEXT } else { theme::TEXT_DIM }))
+            .text_color(hsla(if current.is_some() || filter_open { theme::TEXT } else { theme::TEXT_DIM }))
             .child(icon(IconName::FolderOpen, 13.0))
             .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(name))
             .child(div().flex_none().text_color(hsla(theme::TEXT_FAINT)).child(icon(IconName::ChevronDown, 12.0)))
-            .dropdown(
-                cx,
-                move |ws, at, _w, cx| {
-                    let chosen = ws.project_filter().map(|p| p.id.clone());
-                    let item = |label: String, act: Act, sep: bool| MenuItem { label, hint: None, detail: None, act, danger: false, disabled: false, separator_before: sep, remove: None, icon: None };
-                    let mut items = vec![item(format!("{}All projects", tick(chosen.is_none())), Act::FilterProject(None), false)];
-                    items.extend(ws.store.data.projects.iter().map(|p| item(format!("{}{}", tick(chosen.as_ref() == Some(&p.id)), p.name), Act::FilterProject(Some(p.id.clone())), false)));
-                    items.push(item("Add project…".into(), Act::ImportProject, true));
-                    ws.open_dropdown(at, items, cx);
-                },
-            );
+            .dropdown(cx, |ws, at, window, cx| {
+                ws.open_project_picker(crate::app::ProjectPickerMode::SidebarFilter, at, window, cx);
+            });
         div()
             .occlude()
             .flex()
@@ -812,13 +807,7 @@ impl Workspace {
     }
 
     fn render_sidebar_header(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        // With a project chosen a new session starts there (and the button says so); with "All projects" it asks.
-        let filter = self.project_filter().map(|p| p.name.clone());
         let hints = self.shortcuts_shown;
-        let label = match filter {
-            Some(name) => format!("+ New in {}", if name.chars().count() > 12 { format!("{}…", name.chars().take(11).collect::<String>()) } else { name }),
-            None => "+ New".to_string(),
-        };
         div()
             .flex()
             .flex_col()
@@ -853,33 +842,12 @@ impl Workspace {
                                     .flex()
                                     .items_center()
                                     .justify_center()
-                                    .child(icon(IconName::Terminal, 12.0).text_color(hsla(theme::harness_color(self.store.data.settings.harness)))),
+                                    .child(icon(IconName::Terminal, 12.0).text_color(hsla(theme::ACCENT))),
                             )
                             .child(div().text_size(crate::panels::scale::px(13.0)).font_weight(FontWeight::BOLD).text_color(hsla(theme::TEXT)).child("CLAUDIU")),
                     )
                     .when(hints, |d| d.child(key_hint(",")))
                     .child(icon_button("settings", IconName::Settings).occlude().on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::OpenSettings, window, cx)))),
-            )
-            .child(
-                div()
-                    .occlude()
-                    .flex()
-                    .gap(px(6.0))
-                    .child(button("new-claude", label, true).dropdown(
-                        cx,
-                        |ws, at, window, cx| match ws.project_filter().map(|p| p.path.clone()) {
-                            Some(cwd) => ws.act(Act::NewClaude { cwd }, window, cx),
-                            None if ws.store.data.projects.is_empty() => {
-                                let cwd = ws.active_cwd();
-                                ws.act(Act::NewClaude { cwd }, window, cx)
-                            }
-                            None => {
-                                let items = ws.new_session_menu();
-                                ws.open_dropdown(at, items, cx);
-                            }
-                        },
-                    ))
-                    .when(hints, |d| d.items_center().child(key_hint("Shift+N"))),
             )
             .child(self.render_project_filter(cx))
             .child(
@@ -893,23 +861,31 @@ impl Workspace {
             )
     }
 
-    fn section_header(&self, label: &str, count: Option<String>, trailing: Option<Stateful<Div>>) -> Div {
+    /// The first row of the session list: a neutral row like a session's, which opens the Welcome screen. With a
+    /// project chosen a new session starts there, and the row says so; with "All projects" the Welcome screen asks.
+    fn new_session_row(&self, project: Option<String>, shown: bool, cx: &mut Context<Self>) -> Stateful<Div> {
+        let label = match project {
+            Some(name) => format!("New session in {name}"),
+            None => "New session".to_string(),
+        };
         div()
+            .id("new-claude")
             .flex()
             .items_center()
-            .justify_between()
-            .px(px(14.0))
-            .pr(px(10.0))
-            .h(px(HEADER_H))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .child(section_label(label.to_string()))
-                    .when_some(count, |d, c| d.child(div().text_size(crate::panels::scale::px(10.5)).text_color(hsla(theme::TEXT_FAINT)).child(c))),
-            )
-            .when_some(trailing, |d, t| d.child(t))
+            .gap(px(ROW_GAP))
+            .h(px(NEW_ROW_H))
+            .pl(px(10.0))
+            .pr(px(8.0))
+            .mx(px(5.0))
+            .rounded(px(6.0))
+            .cursor_pointer()
+            .text_color(hsla(if shown { theme::TEXT } else { theme::TEXT_DIM }))
+            .when(shown, |d| d.bg(hsla(theme::ROW_ACTIVE)))
+            .hover(|s| s.bg(hsla(theme::ROW_HOVER)).text_color(hsla(theme::TEXT)))
+            .child(icon(IconName::Plus, 13.0).text_color(hsla(theme::TEXT_FAINT)))
+            .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(crate::panels::scale::px(13.0)).child(label))
+            .when(self.shortcuts_shown, |d| d.child(key_hint("Shift+N")))
+            .on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.open_home(window, cx)))
     }
 
     /// Connected harnesses' usage limits only (no account picker). Hidden when no connected harness has a limits adapter.

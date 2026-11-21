@@ -83,8 +83,6 @@ pub struct Provider {
     pub inbox_without_steering: bool,
     /// Whether a steer asks the agent to answer `promptRequired`, rather than start a turn of its own, when idle.
     pub steering_prompt_required: bool,
-    /// Whether the session opened only to list models is deleted again, since the agent keeps every session.
-    pub delete_model_session: bool,
     /// Whether a tool call can start with only the tool's name, its target arriving in the first update.
     pub deferred_tool_target: bool,
     /// Whether the agent can end its turn while a command runs on in the background, then carry on by itself once it
@@ -119,7 +117,6 @@ const CODEX: Provider = Provider {
     config_options: super::acp::no_options,
     inbox_without_steering: true,
     steering_prompt_required: true,
-    delete_model_session: false,
     deferred_tool_target: false,
     resumes_after_background: false,
 };
@@ -147,7 +144,6 @@ const OPENCODE: Provider = Provider {
     config_options: super::acp::no_options,
     inbox_without_steering: false,
     steering_prompt_required: false,
-    delete_model_session: true,
     deferred_tool_target: true,
     resumes_after_background: false,
 };
@@ -180,7 +176,6 @@ const ANTIGRAVITY: Provider = Provider {
     config_options: super::acp::antigravity_options,
     inbox_without_steering: false,
     steering_prompt_required: false,
-    delete_model_session: false,
     deferred_tool_target: false,
     // agy gives a command about ten seconds, then moves it to the background and ends the turn.
     resumes_after_background: true,

@@ -47,6 +47,15 @@ impl Feature {
         }
     }
 
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::Visual => "Render charts, diagrams, and interactive UI cards inline in chat",
+            Self::Github => "Attach GitHub issues and pull requests to the right sidebar",
+            Self::Sessions => "Link and coordinate with other running Claudiu sessions",
+            Self::Model => "Let the agent switch its own model or effort mid-conversation",
+        }
+    }
+
     /// The name in `CLAUDIU_TOOLS_OFF`.
     fn name(self) -> &'static str {
         match self {
@@ -78,7 +87,7 @@ fn feature_of(tool: &str) -> Option<&'static str> {
         "show_visual" => Some("visual"),
         "attach_github" | "detach_github" => Some("github"),
         "link_session" | "unlink_session" => Some("sessions"),
-        "set_model" => Some("model"),
+        "set_model" | "list_models" => Some("model"),
         _ if BRIDGE_TOOLS.contains(&tool) => Some("sessions"),
         _ => None,
     }
@@ -91,13 +100,17 @@ fn is_off(off: &[&str], tool: &str) -> bool {
 /// Tools the model uses to tell Claudiu something about itself; none of them reads or starts another session.
 const OWN_TOOLS: [&str; 5] = ["attach_github", "detach_github", "link_session", "unlink_session", "show_visual"];
 
+/// Tools that change this session's model; Claudiu answers them (`app/cross.rs`), whatever the harness.
+/// `list_models` only reads, so it is allowed like the own tools; `set_model` keeps the agent's own permission prompt.
+const MODEL_TOOLS: [&str; 2] = ["list_models", "set_model"];
+
 /// Tools that reach other sessions (`claude/bridge.rs`).
 const BRIDGE_TOOLS: [&str; 6] = ["list_code_sessions", "read_code_session", "search_sessions", "search_projects", "start_code_session", "switch_worktree"];
 
 /// `mcp__<server>__<tool>` names allowed per process so Claude Code adds no prompt of its own: Claudiu's own tools only
 /// change what Claudiu shows, and the cross-session tools are limited to what the user asks of the model.
 pub fn allowed_tools(off: &[&str]) -> Vec<String> {
-    OWN_TOOLS.iter().copied().chain(BRIDGE_TOOLS).filter(|t| !is_off(off, t)).map(|t| format!("mcp__claudiu__{t}")).collect()
+    OWN_TOOLS.iter().copied().chain(["list_models"]).chain(BRIDGE_TOOLS).filter(|t| !is_off(off, t)).map(|t| format!("mcp__claudiu__{t}")).collect()
 }
 
 const BRIDGE_INSTRUCTIONS: &str = " Claudiu also has tools that reach your other sessions: list_code_sessions, read_code_session, \
@@ -133,7 +146,8 @@ const INTRO: &str = "You are running inside Claudiu, a desktop app that runs thi
 fn model_instructions(ask: &str) -> String {
     format!(
         " Never switch models on your own: before set_model, ask {ask} which model and effort, unless the user \
-just named them. After set_model, end your turn and ask the user to confirm before continuing, so the switch applies."
+just named them. list_models gives the exact names set_model takes (harness:model-id), including other coding agents; \
+switching to another one hands this conversation over. After set_model, end your turn."
     )
 }
 
@@ -216,15 +230,14 @@ fn serve(input: impl BufRead, mut out: impl Write, record: &str, data: &Path, of
                 "instructions": instructions(off),
             })),
             "ping" => Ok(json!({})),
-            "tools/list" => Ok(json!({ "tools": own_tools(off).into_iter().chain(bridge_tools()).filter(|t| !is_off(off, t["name"].as_str().unwrap_or_default())).collect::<Vec<_>>() })),
+            "tools/list" => Ok(json!({ "tools": own_tools().into_iter().chain(model_tools(off)).chain(bridge_tools()).filter(|t| !is_off(off, t["name"].as_str().unwrap_or_default())).collect::<Vec<_>>() })),
             "tools/call" => Ok(match msg["params"]["name"].as_str().filter(|tool| !is_off(off, tool)) {
                 Some("attach_github") => attach_github(&msg["params"], record, &attach_dir(data)),
                 Some("detach_github") => detach_github(&msg["params"], record, &attach_dir(data)),
                 Some("link_session") => link_session(&msg["params"], record, &attach_dir(data), "link"),
                 Some("unlink_session") => link_session(&msg["params"], record, &attach_dir(data), "unlink"),
-                Some("set_model") => reply("Model switching isn't available in this session (Claudiu's mod isn't loaded).", true),
                 Some("show_visual") => reply("Visuals aren't available in this session (Claudiu's mod isn't loaded).", true),
-                Some(tool) if BRIDGE_TOOLS.contains(&tool) => match ask(tool, &msg["params"]["arguments"]) {
+                Some(tool) if BRIDGE_TOOLS.contains(&tool) || MODEL_TOOLS.contains(&tool) => match ask(tool, &msg["params"]["arguments"]) {
                     Ok(text) => reply(&text, false),
                     Err(text) => reply(&text, true),
                 },
@@ -242,7 +255,7 @@ fn serve(input: impl BufRead, mut out: impl Write, record: &str, data: &Path, of
 }
 
 /// The tools that tell Claudiu something about the session.
-fn own_tools(off: &[&str]) -> Vec<Value> {
+fn own_tools() -> Vec<Value> {
     let link = json!({
         "name": "link_session",
         "description": "Link this session to another one, so Claudiu shows them together in the sidebar. Use it when this work continues, builds on or was prompted by another Claude Code session. Find the id with search_sessions. Silent; once per pair.",
@@ -307,20 +320,33 @@ fn own_tools(off: &[&str]) -> Vec<Value> {
             "required": ["content"],
         },
     });
-    vec![attach, detach, json!({
-                "name": "set_model",
-                "description": format!(
-                    "Switch this session's model and/or effort from your next request on, even mid-turn. Always ask the user first{} (which model, which effort) unless they just named them explicitly; never switch on your own. Claude Code also keeps the choice as the user's default model/effort.",
-                    if off.contains(&"ask_user_question") { "" } else { " with the AskUserQuestion tool" }
-                ),
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "model": { "type": "string", "description": "Model alias (sonnet, opus, haiku) or full model id" },
-                        "effort": { "type": "string", "description": "Effort level: low, medium, high, xhigh, max or auto" },
-                    },
+    vec![attach, detach, link, unlink, visual]
+}
+
+/// `list_models` and `set_model`: the session's model, on its own harness or another one.
+fn model_tools(off: &[&str]) -> Vec<Value> {
+    let ask = if off.contains(&"ask_user_question") { "" } else { " with the AskUserQuestion tool" };
+    vec![
+        json!({
+            "name": "list_models",
+            "description": "List the models this session can switch to with set_model, across every coding agent the user enabled in Claudiu (Claude Code, Codex, OpenCode, Antigravity). One per line, as harness:model-id, then its name; the current one is marked.",
+            "inputSchema": { "type": "object", "properties": {} },
+        }),
+        json!({
+            "name": "set_model",
+            "description": format!(
+                "Switch this session to another model, or change its effort. Name the model exactly as list_models prints it (harness:model-id); call list_models first. On the same harness it applies from your next request. On another harness the user is asked to approve, and Claudiu then hands this conversation to that agent once your turn ends. Always ask the user first{ask} (which model, which effort) unless they just named them; never switch on your own."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "model": { "type": "string", "description": "harness:model-id, as list_models prints it (e.g. codex:gpt-6, claude:opus)" },
+                    "effort": { "type": "string", "description": "Effort level: low, medium, high, xhigh or max" },
+                    "message": { "type": "string", "description": "Only when switching to another harness: the first message that agent gets, saying what to do next" },
                 },
-            }), link, unlink, visual]
+            },
+        }),
+    ]
 }
 
 const CONFIRM: &str = " It acts at once, so only call it when the user asked for this.";
@@ -537,7 +563,7 @@ mod tests {
         let names: Vec<_> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert_eq!(
             names,
-            ["attach_github", "detach_github", "set_model", "link_session", "unlink_session", "show_visual", "list_code_sessions", "read_code_session", "search_sessions", "search_projects", "start_code_session", "switch_worktree"]
+            ["attach_github", "detach_github", "link_session", "unlink_session", "show_visual", "list_models", "set_model", "list_code_sessions", "read_code_session", "search_sessions", "search_projects", "start_code_session", "switch_worktree"]
         );
         let upfront: Vec<_> = tools.iter().filter(|t| t["_meta"]["anthropic/alwaysLoad"] == true).map(|t| t["name"].as_str().unwrap()).collect();
         assert_eq!(upfront, ["attach_github", "detach_github", "link_session", "unlink_session"], "show_visual and the session-reaching tools stay deferred");
@@ -545,7 +571,8 @@ mod tests {
         assert_eq!(r[1]["result"]["isError"], false);
         assert_eq!(r[2]["result"]["content"][0]["text"], "The user declined.");
         assert_eq!(r[2]["result"]["isError"], true);
-        assert_eq!(allowed_tools(&[]).len(), BRIDGE_TOOLS.len() + OWN_TOOLS.len());
+        assert_eq!(allowed_tools(&[]).len(), BRIDGE_TOOLS.len() + OWN_TOOLS.len() + 1, "list_models too; set_model keeps the agent's own prompt");
+        assert!(!allowed_tools(&[]).contains(&"mcp__claudiu__set_model".to_string()));
         assert!(allowed_tools(&[]).contains(&"mcp__claudiu__show_visual".to_string()));
     }
 
@@ -590,12 +617,12 @@ mod tests {
     }
 
     #[test]
-    fn set_model_is_listed_but_errors_when_the_mod_did_not_answer() {
+    fn the_model_tools_are_answered_by_claudiu_for_every_harness() {
         let tmp = tempfile::tempdir().unwrap();
-        let call = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"set_model","arguments":{"model":"opus"}}});
-        let r = talk(&[json!({"jsonrpc":"2.0","id":9,"method":"tools/list"}), call], "abc-123", tmp.path());
-        assert_eq!(r[0]["result"]["tools"][2]["name"], "set_model");
-        assert_eq!(r[1]["result"]["isError"], true);
+        let call = |name: &str, args: Value| json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":args}});
+        let r = talk_off(&[call("list_models", json!({})), call("set_model", json!({"model": "codex:gpt-6"}))], "abc-123", tmp.path(), &[], |tool, args| Ok(format!("{tool} {}", args["model"])));
+        assert_eq!(r[0]["result"]["content"][0]["text"], "list_models null");
+        assert_eq!(r[1]["result"]["content"][0]["text"], "set_model \"codex:gpt-6\"");
     }
 
     #[test]
@@ -694,7 +721,7 @@ mod tests {
     #[test]
     fn with_nothing_off_the_server_offers_every_tool_and_all_the_text() {
         let (names, text) = offer(&[]);
-        assert_eq!(names.len(), 12);
+        assert_eq!(names.len(), 13);
         for part in [INTRO, GITHUB_INSTRUCTIONS, LINK_INSTRUCTIONS, VISUAL_INSTRUCTIONS, BRIDGE_INSTRUCTIONS] {
             assert!(text.contains(part));
         }
@@ -704,23 +731,23 @@ mod tests {
     #[test]
     fn each_feature_takes_its_tools_and_its_text_away() {
         let (names, text) = offer(&["visual"]);
-        assert!(!names.contains(&"show_visual".to_string()) && names.len() == 11);
+        assert!(!names.contains(&"show_visual".to_string()) && names.len() == 12);
         assert!(!text.contains("Visual:") && !text.contains("show_visual"));
 
         let (names, text) = offer(&["github"]);
-        assert!(!names.iter().any(|n| n.ends_with("_github")) && names.len() == 10);
+        assert!(!names.iter().any(|n| n.ends_with("_github")) && names.len() == 11);
         assert!(!text.contains("attach_github"));
 
         let (names, text) = offer(&["sessions"]);
         for gone in ["link_session", "unlink_session", "list_code_sessions", "read_code_session", "search_sessions", "search_projects", "start_code_session", "switch_worktree"] {
             assert!(!names.contains(&gone.to_string()), "{gone}");
         }
-        assert_eq!(names.len(), 4);
+        assert_eq!(names.len(), 5);
         assert!(!text.contains("link_session") && !text.contains("start_code_session"));
 
         let (names, text) = offer(&["model"]);
-        assert!(!names.contains(&"set_model".to_string()) && names.len() == 11);
-        assert!(!text.contains("set_model") && !text.contains("Never switch models"));
+        assert!(!names.contains(&"set_model".to_string()) && !names.contains(&"list_models".to_string()) && names.len() == 11);
+        assert!(!text.contains("set_model") && !text.contains("list_models") && !text.contains("Never switch models"));
     }
 
     #[test]
@@ -743,7 +770,8 @@ mod tests {
 
     #[test]
     fn allowed_tools_leaves_out_the_tools_of_features_that_are_off() {
-        assert_eq!(allowed_tools(&["github", "sessions"]), ["mcp__claudiu__show_visual"]);
+        assert_eq!(allowed_tools(&["github", "sessions"]), ["mcp__claudiu__show_visual", "mcp__claudiu__list_models"]);
+        assert_eq!(allowed_tools(&["github", "sessions", "model"]), ["mcp__claudiu__show_visual"]);
     }
 
     #[test]

@@ -225,10 +225,9 @@ impl Workspace {
         self.raise_claude_priority(cx);
         self.refresh_pending(cx);
         // The steps above redraw when they change something. The sidebar's "5m ago" and the reset countdowns count
-        // in minutes, so they need a redraw only when the minute turns; the prompt cache's bar shrinks as it runs out.
+        // in minutes, so they need a redraw only when the minute turns.
         let minute = crate::store::now() / 60;
-        let cache_running = self.selected_cache().is_some_and(|(_, left, _)| left > 0);
-        if purged || cache_running || minute != self.tick_minute {
+        if purged || minute != self.tick_minute {
             self.tick_minute = minute;
             cx.notify();
         }

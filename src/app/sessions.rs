@@ -59,11 +59,16 @@ impl Workspace {
         self.new_session_with(harness, cwd, prompt, options, by, window, cx);
     }
 
-    /// A new session in `harness` directly inside `cwd` (preserving a chosen worktree) with an optional effort override.
-    pub(super) fn new_session_from_home(&mut self, harness: Harness, cwd: PathBuf, prompt: Option<String>, effort: Option<Effort>, window: &mut Window, cx: &mut Context<Self>) {
+    /// A new session in `harness` directly inside `cwd` (preserving a chosen worktree) with optional model and effort overrides.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn new_session_from_home(&mut self, harness: Harness, model: Option<String>, cwd: PathBuf, prompt: Option<String>, effort: Option<Effort>, window: &mut Window, cx: &mut Context<Self>) {
         let record_id = new_id();
         let meta = ClaudeMeta { chrome: self.store.data.settings.chrome_default, harness, ..Default::default() };
         let Some(mut start) = self.thread_start(&record_id, &cwd, &meta, None, prompt, Starter::User, cx) else { return };
+        if let Some(model_id) = model.filter(|m| !m.is_empty()) {
+            start.options.retain(|(category, _)| *category != "model");
+            start.options.push(("model", model_id));
+        }
         if let Some(effort) = effort {
             start.options.retain(|(category, _)| *category != "thought_level");
             start.options.push(("thought_level", effort.name().to_string()));
@@ -71,7 +76,7 @@ impl Workspace {
         let record = SessionRecord {
             id: record_id,
             kind: SessionKind::Claude,
-            title: format!("New {} session", harness.name()),
+            title: "New session".into(),
             custom_title: None,
             auto_title: None,
             project_id: self.store.project_for_cwd(&cwd),
@@ -98,7 +103,7 @@ impl Workspace {
         let record = SessionRecord {
             id: record_id,
             kind: SessionKind::Claude,
-            title: format!("New {} session", harness.name()),
+            title: "New session".into(),
             custom_title: None,
             auto_title: None,
             project_id: self.store.project_for_cwd(&cwd),
@@ -129,7 +134,28 @@ impl Workspace {
             mcp_servers.push(harness::stdio_server("claudiu", &exe, &[mcp::FLAG], &env));
         }
         let (mode, options) = match session_id {
-            None => claude::defaults::acp_settings(&settings.new_session, settings.trimmed_tools.contains(&claude::trim::Trim::PlanMode), by),
+            None => {
+                // Only inherit the default model id when starting on the harness that serves it.
+                let mut defaults = settings.new_session.clone();
+                if defaults.effort.is_none() {
+                    defaults.effort = Some(claude::defaults::Effort::default());
+                }
+                if meta.harness != settings.harness {
+                    defaults.model = None;
+                }
+                let (mut mode, options) = claude::defaults::acp_settings(&defaults, settings.trimmed_tools.contains(&claude::trim::Trim::PlanMode), by);
+                if let Some(id) = defaults.mode_id.as_deref().filter(|s| !s.is_empty()) {
+                    let allowed = match id {
+                        "plan" => !settings.trimmed_tools.contains(&claude::trim::Trim::PlanMode) && by != claude::defaults::Starter::FixGit,
+                        "bypassPermissions" | "fullAccess" | "full_access" | "yolo" => by != claude::defaults::Starter::OtherSession,
+                        _ => true,
+                    };
+                    if allowed && (meta.harness == settings.harness || settings.modes_for(meta.harness).iter().any(|(mid, _)| mid == id)) {
+                        mode = Some(id.to_string());
+                    }
+                }
+                (mode, options)
+            }
             Some(_) => (None, vec![]),
         };
         let mut env = vec![];
@@ -174,10 +200,12 @@ impl Workspace {
             }
         }
         self.sync_skills(Some(meta.harness), cx);
-        let enabled_harnesses = self.store.data.settings.enabled_harnesses_list();
+        let all_models = self.store.data.settings.aggregated_models();
+        let picked = self.store.data.settings.picked_models(meta.harness).to_vec();
         Some(crate::thread::Start {
             harness: meta.harness,
-            enabled_harnesses,
+            all_models,
+            picked,
             server: self.acp_server.clone(),
             cwd: cwd.to_path_buf(),
             env,
@@ -308,8 +336,45 @@ impl Workspace {
                     cx.notify();
                 }
             }
+            ThreadEvent::Models(harness, choices) => {
+                let catalog: Vec<crate::claude::subagents::AgentModel> = choices
+                    .iter()
+                    .map(|(id, name)| crate::claude::subagents::AgentModel { id: id.clone(), name: name.clone() })
+                    .collect();
+                if !catalog.is_empty() {
+                    let lookup = ws.model_lookups.get_mut(*harness);
+                    lookup.fetched = true;
+                    lookup.error = None;
+                    if ws.store.data.settings.set_harness_models(*harness, catalog) {
+                        ws.store.mark_dirty();
+                        ws.push_models_to_threads(cx);
+                    }
+                }
+            }
+            ThreadEvent::Modes(harness, modes) => {
+                if ws.store.data.settings.set_harness_modes(*harness, modes.clone()) {
+                    ws.store.mark_dirty();
+                    cx.notify();
+                }
+            }
+            ThreadEvent::Context(used, size) => {
+                if let Some(meta) = ws.store.session_mut(&sub_id).and_then(|r| r.claude.as_mut()) {
+                    meta.context_tokens = Some(*used);
+                    if *size > 0 {
+                        meta.context_window = Some(*size);
+                        meta.context_fraction = Some((*used as f64 / *size as f64).min(1.0) as f32);
+                    }
+                    cx.notify();
+                }
+            }
+            ThreadEvent::OpenGitPicker(at) => {
+                let (project, cwd) = (ws.store.session(&sub_id).and_then(|r| r.project_id.clone()), ws.store.session(&sub_id).map(|r| r.cwd.clone()));
+                if let (Some(project), Some(cwd)) = (project, cwd) {
+                    ws.open_git_picker(project, cwd, crate::app::GitPickerTarget::Session, *at, window, cx);
+                }
+            }
             ThreadEvent::OpenPath(path, line) => ws.open_from_terminal(&sub_id, path, *line, window, cx),
-            ThreadEvent::Handoff { to, message, effort } => ws.dynamic_handoff(&sub_id, *to, message.clone(), effort.clone(), window, cx),
+            ThreadEvent::Handoff { to, model, message, effort } => ws.dynamic_handoff(&sub_id, *to, model.clone(), message.clone(), effort.clone(), window, cx),
         });
         self.adopt_live(id, SessionView::Thread(view), sub, name, window, cx);
     }
@@ -512,23 +577,6 @@ impl Workspace {
         cx.notify();
     }
 
-    /// The command to carry on with the session in a terminal, when its harness can resume one by id and the session has
-    /// started (its id is known).
-    pub fn continue_command(&self, id: &str) -> Option<String> {
-        let rec = self.store.session(id)?;
-        let meta = rec.claude.as_ref()?;
-        harness::continue_command(meta.harness, &rec.cwd, rec.claude_id()?)
-    }
-
-    /// Hand the session to a terminal: the thread ends, so the harness isn't driven from two places, and the command
-    /// that resumes it goes to the clipboard.
-    pub(super) fn continue_in_terminal(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(command) = self.continue_command(id) else { return };
-        cx.write_to_clipboard(gpui::ClipboardItem::new_string(command));
-        self.end_live(id, window, cx);
-        self.toast("Session ended here. Paste the copied command into a terminal to carry on.", false, cx);
-    }
-
     /// The running sessions, in the sidebar's order.
     pub fn running_ids(&self, cx: &App) -> Vec<Id> {
         self.live.iter().filter(|l| l.view.is_running(cx)).map(|l| l.id.clone()).collect()
@@ -580,23 +628,19 @@ impl Workspace {
     }
 
     /// Prompt-cache timer for the selected session: `(remaining fraction, remaining secs, ttl secs)`.
-    /// Every request that reads or writes the cache restarts its TTL; that moment is the timestamp of the last
-    /// assistant response that used it (not the transcript's mtime, which user messages and renames also bump).
-    /// Unknown TTL assumes the 5-minute tier.
-    pub fn selected_cache(&self) -> Option<(f32, i64, i64)> {
+    /// Context-meter source for the selected session across all harnesses: `(fraction, tokens, exact, full at)`.
+    /// Reads live ACP `usage_update` context first (works for Claude Code, Codex, OpenCode, and Antigravity), then
+    /// falls back to saved session metadata / transcript estimates.
+    pub fn selected_context(&self, cx: &gpui::App) -> Option<(f32, u64, bool, Option<u64>)> {
         let id = self.selected.as_ref().or(self.active_id())?;
-        let meta = self.store.session(id)?.claude.as_ref()?;
-        let last = meta.cache_at?;
-        let ttl = meta.cache_ttl.unwrap_or(300) as i64;
-        let left = (last + ttl - now()).clamp(0, ttl);
-        Some((left as f32 / ttl as f32, left, ttl))
-    }
-
-    /// Context-meter source for the selected session: `(fraction, tokens, exact, full at)`. `exact` means Claude Code
-    /// itself reported the figures; otherwise they are estimated from the transcript. `full at` is the token count
-    /// the bar ends at (`claude::context_limit`), when known.
-    pub fn selected_context(&self) -> Option<(f32, u64, bool, Option<u64>)> {
-        let id = self.selected.as_ref().or(self.active_id())?;
+        if let Some(live) = self.live.iter().find(|l| &l.id == id)
+            && let SessionView::Thread(t) = &live.view
+            && let Some((used, size)) = t.read(cx).thread.context
+            && size > 0
+        {
+            let frac = (used as f64 / size as f64).min(1.0) as f32;
+            return Some((frac, used, true, Some(size)));
+        }
         let scaled = |tokens: u64, limit: Option<u64>| limit.map(|l| (tokens as f64 / l as f64).min(1.0) as f32);
         let meta = self.store.session(id)?.claude.as_ref()?;
         let limit = claude::context_limit(meta.context_window, meta.compact_at, meta.auto_compact);

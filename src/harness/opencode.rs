@@ -2,11 +2,12 @@
 
 use crate::claude::subagents::Agent;
 
-use super::{Adapter, Reopen, words};
+use super::{Adapter, Reopen};
 
 pub const ADAPTER: Adapter = Adapter {
     name: "OpenCode",
+    server_name: "opencode",
     server: || super::subagent_server(Agent::OpenCode),
     reopen: Reopen::Load,
-    resume_command: |id| Some(words(&["opencode", "--session", id])),
+    delete_model_session: true,
 };

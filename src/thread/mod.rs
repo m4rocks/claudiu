@@ -6,27 +6,29 @@ mod keys;
 mod render;
 mod review;
 
+pub use render::short_effort_label;
+
 use std::cell::Cell;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Instant;
 
 use futures::StreamExt;
 use gpui::{App, AppContext, Bounds, Context, Entity, EventEmitter, FocusHandle, Focusable, KeystrokeEvent, ListAlignment, ListState, Pixels, Subscription, Window, px};
-use gpui_kit::component::input::{InputEvent, TextareaState};
+use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
 use serde_json::{Value, json};
 
 use crate::harness::acp::{self, Connection, Event, Launch};
 use crate::harness::thread::{Entry, Thread};
-use crate::harness::{Harness, Reopen};
+use crate::harness::{CatalogModel, Harness, Reopen};
 use crate::visual::Card;
 use crate::visual::ui::{CardUi, SendText};
 
 /// Which compact composer popover is open.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ThreadPicker {
-    /// Provider switcher, model list, and draggable effort bar.
+    /// Unified aggregated model list (across all enabled harnesses) + draggable effort bar.
     Model,
     /// Permission mode selector dialog.
     Permission,
@@ -37,23 +39,46 @@ pub struct Handover {
     pub message: String,
 }
 
+/// What the message box's branch chip shows; the workspace keeps it current (`Workspace::sync_git_chips`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct GitChip {
+    /// The branch checked out, or the worktree's name without one.
+    pub primary: String,
+    /// The linked worktree's name, outside the main checkout.
+    pub linked: Option<String>,
+    /// A branch or worktree change is running.
+    pub busy: bool,
+    /// The Branch & Worktree dialog is open for this session.
+    pub open: bool,
+}
+
 pub enum ThreadEvent {
+    /// The branch chip was clicked: open the Branch & Worktree dialog there.
+    OpenGitPicker(crate::panels::widgets::Dropdown),
     /// The harness stopped; the session's view closes.
     Exited(Option<i32>),
     /// The agent named the session: a new one learns its id this way.
     SessionId(String),
     Title(String),
+    /// The harness reported its live model catalog `(id, name)`.
+    Models(Harness, Vec<(String, String)>),
+    /// The harness reported its available permission modes `(id, name)`.
+    Modes(Harness, Vec<(String, String)>),
+    /// The harness reported live context usage `(used_tokens, max_tokens)`.
+    Context(u64, u64),
     /// A file a tool acted on was clicked: its path and line (1-based).
     OpenPath(String, Option<usize>),
-    /// The user switched provider in the composer picker and sent a message: dynamically hand off this chat.
-    Handoff { to: Harness, message: String, effort: Option<String> },
+    /// The user picked a model served by another harness and sent a message: dynamically hand off this chat.
+    Handoff { to: Harness, model: Option<String>, message: String, effort: Option<String> },
 }
 
 /// How to bring a session up.
 pub struct Start {
     pub harness: Harness,
-    /// Enabled harnesses shown in the composer's provider switcher.
-    pub enabled_harnesses: Vec<Harness>,
+    /// Aggregated models across every enabled harness for the unified model picker.
+    pub all_models: Vec<CatalogModel>,
+    /// The models of `harness` ticked in Settings → Harnesses (`store::keep_picked`).
+    pub picked: Vec<String>,
     /// The ACP server to start in place of the harness's own.
     pub server: Option<(PathBuf, Vec<String>)>,
     pub cwd: PathBuf,
@@ -73,12 +98,19 @@ pub struct Start {
     pub prior_entries: Vec<Entry>,
 }
 
-/// A permission the agent is waiting for.
+/// One selectable option in a permission or AskUserQuestion prompt.
+struct QuestionOption {
+    id: String,
+    name: String,
+    description: Option<String>,
+    kind: String,
+}
+
+/// A permission or multiple-choice question the agent is waiting for.
 struct Question {
     id: Value,
     title: String,
-    /// `(option id, name, kind)`; the kind is allow_once, allow_always, reject_once or reject_always.
-    options: Vec<(String, String, String)>,
+    options: Vec<QuestionOption>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -90,12 +122,20 @@ enum Phase {
 
 pub struct ThreadView {
     pub harness: Harness,
-    /// Enabled harnesses offered in the compact composer switcher.
-    pub enabled_harnesses: Vec<Harness>,
-    /// If set to another harness, the next message submitted hands this chat over dynamically.
-    pub pending_harness: Option<Harness>,
+    /// Aggregated models from every enabled harness, shown together in one picker.
+    pub all_models: Vec<CatalogModel>,
+    /// The models of this session's harness ticked in Settings → Harnesses; they narrow the live model list too.
+    pub picked: Vec<String>,
+    /// The branch chip, when the session's folder is in a git repository.
+    pub git: Option<GitChip>,
+    /// Model from another harness staged for dynamic handoff on the next message.
+    pub pending_model: Option<CatalogModel>,
+    /// A hand-off the agent asked for with `set_model` and the user approved: the model, its effort and the first
+    /// message for the new agent. It runs as soon as the turn that asked ends.
+    handoff_after_turn: Option<(CatalogModel, Option<String>, String)>,
     /// Effort choice staged for the next handoff or while no live `thought_level` option exists yet.
     pub pending_effort: Option<String>,
+    model_search: Entity<InputState>,
     cwd: PathBuf,
     connection: Option<Rc<Connection>>,
     session_id: Option<String>,
@@ -120,8 +160,16 @@ pub struct ThreadView {
     pub detail: bool,
     /// Ctrl+T: the plan.
     pub plan_open: bool,
-    /// Active compact picker popover above the composer (Alt+P for Model/Provider/Effort, or click Permission).
+    /// Active compact picker dropdown above the composer (Alt+P for Model/Provider/Effort, or click Permission).
     pub picker: Option<ThreadPicker>,
+    picker_at: crate::panels::widgets::Dropdown,
+    model_anchor: crate::panels::widgets::Anchor,
+    /// Highlighted row index inside the Model picker for Up/Down + Enter keyboard navigation.
+    model_highlight: usize,
+    /// Follows `model_highlight` so keyboard moves keep the highlighted row in view.
+    pub(super) model_scroll: gpui::ScrollHandle,
+    /// Tool call ids manually expanded by clicking their compressed single-line header.
+    expanded_tools: HashSet<String>,
     effort_bounds: Rc<Cell<Bounds<Pixels>>>,
     effort_dragging: Rc<Cell<bool>>,
     last_escape: Option<Instant>,
@@ -149,8 +197,8 @@ impl Focusable for ThreadView {
 
 impl ThreadView {
     pub fn new(start: Start, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let name = start.harness.name();
-        let composer = cx.new(|cx| TextareaState::new(window, cx).auto_grow(1, 12).submit_on_enter(true).placeholder(format!("Message {name}")));
+        let composer = cx.new(|cx| TextareaState::new(window, cx).auto_grow(1, 12).submit_on_enter(true).placeholder("Ask anything…"));
+        let model_search = cx.new(|cx| InputState::new(window, cx).placeholder("Filter models…"));
         let card_ui = cx.new(|_| CardUi::default());
         let this = cx.entity().downgrade();
         let mut subscriptions = vec![
@@ -164,6 +212,11 @@ impl ThreadView {
                 }
                 _ => {}
             }),
+            cx.subscribe_in(&model_search, window, |_: &mut Self, _, ev: &InputEvent, _, cx| {
+                if matches!(ev, InputEvent::Change) {
+                    cx.notify();
+                }
+            }),
             cx.subscribe_in(&card_ui, window, |v: &mut Self, ui, ev: &SendText, window, cx| {
                 ui.update(cx, |ui, cx| ui.mark_sent(&ev.key, cx));
                 v.send(ev.text.clone(), window, cx);
@@ -176,16 +229,15 @@ impl ThreadView {
         let mut thread = Thread::default();
         let rows = start.prior_entries.len();
         thread.entries = start.prior_entries.clone();
-        let enabled_harnesses = if start.enabled_harnesses.is_empty() {
-            vec![start.harness]
-        } else {
-            start.enabled_harnesses.clone()
-        };
         let mut view = ThreadView {
             harness: start.harness,
-            enabled_harnesses,
-            pending_harness: None,
+            all_models: start.all_models.clone(),
+            picked: start.picked.clone(),
+            git: None,
+            pending_model: None,
+            handoff_after_turn: None,
             pending_effort: start.options.iter().find(|(k, _)| *k == "thought_level").map(|(_, v)| v.clone()),
+            model_search,
             cwd: start.cwd.clone(),
             connection: None,
             session_id: start.session_id.clone(),
@@ -203,6 +255,11 @@ impl ThreadView {
             detail: false,
             plan_open: false,
             picker: None,
+            picker_at: crate::panels::widgets::Dropdown::at(gpui::point(px(0.0), px(0.0))),
+            model_anchor: crate::panels::widgets::Anchor::default(),
+            model_highlight: 0,
+            model_scroll: gpui::ScrollHandle::new(),
+            expanded_tools: HashSet::new(),
             effort_bounds: Rc::new(Cell::new(Bounds::default())),
             effort_dragging: Rc::new(Cell::new(false)),
             last_escape: None,
@@ -268,6 +325,16 @@ impl ThreadView {
             }
         };
         self.thread.apply_session(&result);
+        if let Some(model_opt) = self.thread.option("model")
+            && !model_opt.choices.is_empty()
+        {
+            let real: Vec<(String, String)> = model_opt.choices.iter().filter(|(id, _)| id != "default").cloned().collect();
+            let choices = if real.is_empty() { model_opt.choices.clone() } else { real };
+            cx.emit(ThreadEvent::Models(self.harness, choices));
+        }
+        if !self.thread.modes.is_empty() {
+            cx.emit(ThreadEvent::Modes(self.harness, self.thread.modes.clone()));
+        }
         if self.session_id.as_deref() != Some(&session_id) {
             self.session_id = Some(session_id.clone());
             cx.emit(ThreadEvent::SessionId(session_id));
@@ -296,6 +363,7 @@ impl ThreadView {
         match event {
             Event::Update(update) => {
                 let title = self.thread.title.clone();
+                let prev_ctx = self.thread.context;
                 if let Some(at) = self.thread.apply(&update) {
                     self.remeasure(at);
                 }
@@ -304,13 +372,23 @@ impl ThreadView {
                 {
                     cx.emit(ThreadEvent::Title(t));
                 }
+                if self.thread.context != prev_ctx
+                    && let Some((used, size)) = self.thread.context
+                {
+                    cx.emit(ThreadEvent::Context(used, size));
+                }
             }
             Event::Permission { id, params } => {
                 let options = params["options"]
                     .as_array()
                     .into_iter()
                     .flatten()
-                    .map(|o| (str_of(o, "optionId"), str_of(o, "name"), str_of(o, "kind")))
+                    .map(|o| QuestionOption {
+                        id: str_of(o, "optionId"),
+                        name: str_of(o, "name"),
+                        description: o["description"].as_str().filter(|s| !s.trim().is_empty()).map(String::from),
+                        kind: str_of(o, "kind"),
+                    })
                     .collect();
                 let title = params.pointer("/toolCall/title").and_then(Value::as_str).unwrap_or("The agent asks for permission").to_string();
                 self.question = Some(Question { id, title, options });
@@ -337,9 +415,21 @@ impl ThreadView {
         cx.notify();
     }
 
-    /// Stage a switch to another harness; the next message sent dynamically hands off the chat.
-    pub fn stage_harness(&mut self, to: Harness, cx: &mut Context<Self>) {
-        self.pending_harness = (to != self.harness).then_some(to);
+    /// Pick a model from the aggregated catalog: switches live on the same harness, or stages a dynamic in-chat
+    /// handoff when the model belongs to another harness.
+    pub fn pick_model(&mut self, model: CatalogModel, cx: &mut Context<Self>) {
+        if model.harness == self.harness {
+            self.pending_model = None;
+            if let Some(opt) = self.thread.option("model")
+                && !model.id.is_empty()
+            {
+                let id = opt.id.clone();
+                self.set_option(id, model.id, cx);
+            }
+        } else {
+            self.pending_model = Some(model);
+        }
+        self.picker = None;
         cx.notify();
     }
 
@@ -353,9 +443,10 @@ impl ThreadView {
         self.history_at = None;
         self.reference = None;
         self.picker = None;
-        if let Some(to) = self.pending_harness.take().filter(|&h| h != self.harness) {
+        if let Some(target) = self.pending_model.take().filter(|m| m.harness != self.harness) {
             let effort = self.pending_effort.take();
-            cx.emit(ThreadEvent::Handoff { to, message: text, effort });
+            let model = (!target.id.is_empty()).then_some(target.id);
+            cx.emit(ThreadEvent::Handoff { to: target.harness, model, message: text, effort });
             cx.notify();
             return;
         }
@@ -364,10 +455,11 @@ impl ThreadView {
 
     /// Send `text` as the user's next message, now or after the turn that is running.
     pub fn send(&mut self, text: String, _window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(to) = self.pending_harness.take().filter(|&h| h != self.harness) {
+        if let Some(target) = self.pending_model.take().filter(|m| m.harness != self.harness) {
             let effort = self.pending_effort.take();
+            let model = (!target.id.is_empty()).then_some(target.id);
             self.picker = None;
-            cx.emit(ThreadEvent::Handoff { to, message: text, effort });
+            cx.emit(ThreadEvent::Handoff { to: target.harness, model, message: text, effort });
             cx.notify();
             return;
         }
@@ -422,7 +514,51 @@ impl ThreadView {
             let at = self.thread.notice(text, error);
             self.remeasure(at);
         }
+        if let Some((target, effort, message)) = self.handoff_after_turn.take() {
+            let model = (!target.id.is_empty()).then_some(target.id);
+            cx.emit(ThreadEvent::Handoff { to: target.harness, model, message, effort });
+            cx.notify();
+            return;
+        }
         self.send_next(cx);
+        cx.notify();
+    }
+
+    /// The model this session runs now, as the picker lists it.
+    pub fn current_model(&self) -> Option<CatalogModel> {
+        let id = self.thread.option("model")?.current.clone();
+        self.unified_models().into_iter().find(|m| m.harness == self.harness && m.id == id)
+    }
+
+    /// `set_model` on this session's own harness: switch the model and the effort from the next request on.
+    pub fn switch_model(&mut self, model: Option<&CatalogModel>, effort: Option<&str>, cx: &mut Context<Self>) -> Result<String, String> {
+        let mut done = vec![];
+        if let Some(model) = model {
+            let option = self.thread.option("model").map(|o| o.id.clone()).ok_or("This session's agent doesn't let Claudiu change its model.")?;
+            self.set_option(option, model.id.clone(), cx);
+            done.push(model.name.clone());
+        }
+        if let Some(effort) = effort {
+            let (values, _, _, option) = self.effort_choices();
+            let value = values.iter().find(|v| v.eq_ignore_ascii_case(effort)).cloned().ok_or_else(|| format!("No effort “{effort}”. Use one of: {}.", values.join(", ")))?;
+            let option = option.ok_or("This session's agent doesn't let Claudiu change its effort.")?;
+            self.pending_effort = Some(value.clone());
+            self.set_option(option, value.clone(), cx);
+            done.push(format!("effort {value}"));
+        }
+        cx.notify();
+        Ok(done.join(", "))
+    }
+
+    /// `set_model` onto another harness, once the user approved it: hand the conversation over when this turn ends.
+    pub fn hand_off_after_turn(&mut self, model: CatalogModel, effort: Option<String>, message: String, cx: &mut Context<Self>) {
+        if self.working {
+            self.handoff_after_turn = Some((model, effort, message));
+        } else {
+            let to = model.harness;
+            let model = (!model.id.is_empty()).then_some(model.id);
+            cx.emit(ThreadEvent::Handoff { to, model, message, effort });
+        }
         cx.notify();
     }
 
@@ -438,7 +574,7 @@ impl ThreadView {
     /// Answer the open permission question with option `index` (from 0), or turn it down.
     fn answer(&mut self, index: Option<usize>, cx: &mut Context<Self>) {
         let Some(q) = self.question.take() else { return };
-        let option = index.and_then(|i| q.options.get(i)).map(|(id, _, _)| id.as_str());
+        let option = index.and_then(|i| q.options.get(i)).map(|o| o.id.as_str());
         if let Some(c) = &self.connection {
             c.respond(q.id, acp::permission_outcome(option));
         }
@@ -447,7 +583,7 @@ impl ThreadView {
 
     /// Turn the question down with its own reject option when it has one.
     fn decline(&mut self, cx: &mut Context<Self>) {
-        let reject = self.question.as_ref().and_then(|q| q.options.iter().position(|(_, _, kind)| kind == "reject_once"));
+        let reject = self.question.as_ref().and_then(|q| q.options.iter().position(|o| o.kind == "reject_once"));
         self.answer(reject, cx);
     }
 
@@ -455,6 +591,10 @@ impl ThreadView {
         let (Some(c), Some(s)) = (self.connection.clone(), self.session_id.clone()) else { return };
         // The agent confirms with `current_mode_update`; showing it at once keeps Shift+Tab presses in step.
         self.thread.mode = Some(mode.clone());
+        if let Some(opt) = self.thread.option("mode") {
+            let id = opt.id.clone();
+            self.set_option(id, mode.clone(), cx);
+        }
         let reply = c.request("session/set_mode", json!({"sessionId": s, "modeId": mode}));
         cx.spawn(async move |_, _| drop(reply.await)).detach();
         cx.notify();
@@ -475,6 +615,48 @@ impl ThreadView {
     }
 
     fn intercept(&mut self, ev: &KeystrokeEvent, window: &mut Window, cx: &mut Context<Self>) {
+        // Keyboard navigation while the Model picker is open (works even when the search input has focus):
+        // Up/Down moves the highlighted model, Left/Right steps effort, Enter confirms, Escape closes.
+        if self.picker == Some(ThreadPicker::Model)
+            && !ev.keystroke.modifiers.control
+            && !ev.keystroke.modifiers.alt
+            && !ev.keystroke.modifiers.platform
+            && !ev.keystroke.modifiers.shift
+        {
+            match ev.keystroke.key.as_str() {
+                "up" | "down" => {
+                    let count = self.filtered_models(cx).len();
+                    if count > 0 {
+                        let cur = self.model_highlight.min(count - 1);
+                        self.model_highlight = if ev.keystroke.key == "up" {
+                            if cur == 0 { count - 1 } else { cur - 1 }
+                        } else {
+                            (cur + 1) % count
+                        };
+                        self.model_scroll.scroll_to_item(self.model_highlight);
+                    }
+                    cx.stop_propagation();
+                    cx.notify();
+                    return;
+                }
+                "left" | "right" => {
+                    self.step_effort(if ev.keystroke.key == "left" { -1 } else { 1 }, cx);
+                    cx.stop_propagation();
+                    cx.notify();
+                    return;
+                }
+                "enter" => {
+                    let models = self.filtered_models(cx);
+                    if let Some(choice) = models.get(self.model_highlight.min(models.len().saturating_sub(1))).cloned() {
+                        self.pick_model(choice, cx);
+                        self.composer.update(cx, |c, cx| c.focus(window, cx));
+                    }
+                    cx.stop_propagation();
+                    return;
+                }
+                _ => {}
+            }
+        }
         // Escape always closes an open composer picker even if focus briefly left the textarea.
         if self.picker.is_some()
             && ev.keystroke.key == "escape"
@@ -485,6 +667,20 @@ impl ThreadView {
         {
             self.picker = None;
             self.effort_dragging.set(false);
+            self.composer.update(cx, |c, cx| c.focus(window, cx));
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
+        // Alt+P / Option+P toggles the model picker even while focus is inside the model search box.
+        if ev.keystroke.key == "p"
+            && ev.keystroke.modifiers.alt
+            && !ev.keystroke.modifiers.control
+            && !ev.keystroke.modifiers.platform
+            && !ev.keystroke.modifiers.shift
+            && (self.composer.focus_handle(cx).is_focused(window) || self.model_search.focus_handle(cx).is_focused(window))
+        {
+            self.toggle_model_picker(window, cx);
             cx.stop_propagation();
             cx.notify();
             return;
@@ -543,11 +739,87 @@ impl ThreadView {
                 self.remeasure(0);
             }
             keys::Key::TogglePlan => self.plan_open = !self.plan_open,
-            keys::Key::PickModel => {
-                self.picker = if self.picker == Some(ThreadPicker::Model) { None } else { Some(ThreadPicker::Model) };
-            }
+            keys::Key::PickModel => self.toggle_model_picker(window, cx),
         }
         cx.notify();
+    }
+
+    pub(super) fn toggle_model_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.picker == Some(ThreadPicker::Model) {
+            self.picker = None;
+            self.effort_dragging.set(false);
+            self.composer.update(cx, |c, cx| c.focus(window, cx));
+        } else {
+            self.picker = Some(ThreadPicker::Model);
+            self.picker_at = self.model_anchor.above();
+            self.model_search.update(cx, |s, cx| {
+                s.set_value("", window, cx);
+                s.focus(window, cx);
+            });
+            let current_id = self.thread.option("model").map(|m| m.current.as_str());
+            let models = self.unified_models();
+            self.model_highlight = models
+                .iter()
+                .position(|m| match &self.pending_model {
+                    Some(p) => p.harness == m.harness && p.id == m.id,
+                    None => m.harness == self.harness && current_id == Some(m.id.as_str()),
+                })
+                .unwrap_or(0);
+            self.model_scroll.scroll_to_item(self.model_highlight);
+        }
+    }
+
+    pub(super) fn filtered_models(&self, cx: &App) -> Vec<CatalogModel> {
+        let query = self.model_search.read(cx).value().to_lowercase();
+        let words: Vec<&str> = query.split_whitespace().collect();
+        self.unified_models()
+            .into_iter()
+            .filter(|m| {
+                let hay = format!("{} {} {}", m.name, m.id, m.harness.name()).to_lowercase();
+                words.iter().all(|w| hay.contains(w))
+            })
+            .collect()
+    }
+
+    /// `(values, short_labels, current_index, live_option_id)` for the effort slider, with no `"default"` step and
+    /// Medium as the fallback default.
+    pub(super) fn effort_choices(&self) -> (Vec<String>, Vec<String>, usize, Option<String>) {
+        if self.pending_model.is_none()
+            && let Some(opt) = self.thread.option("thought_level")
+        {
+            let non_default: Vec<(String, String)> = opt.choices.iter().filter(|(v, _)| !v.eq_ignore_ascii_case("default")).cloned().collect();
+            if !non_default.is_empty() {
+                let values: Vec<String> = non_default.iter().map(|(v, _)| v.clone()).collect();
+                let labels: Vec<String> = non_default.iter().map(|(_, n)| short_effort_label(n)).collect();
+                let ix = values
+                    .iter()
+                    .position(|v| v == &opt.current)
+                    .or_else(|| values.iter().position(|v| v.eq_ignore_ascii_case("medium")))
+                    .unwrap_or(1.min(values.len() - 1));
+                return (values, labels, ix, Some(opt.id.clone()));
+            }
+        }
+        let values: Vec<String> = crate::claude::defaults::Effort::ALL.iter().map(|e| e.name().to_string()).collect();
+        let labels: Vec<String> = vec!["Low".into(), "Med".into(), "High".into(), "XHigh".into(), "Max".into()];
+        let ix = self
+            .pending_effort
+            .as_deref()
+            .and_then(|cur| values.iter().position(|v| v.eq_ignore_ascii_case(cur)))
+            .unwrap_or(1);
+        (values, labels, ix, None)
+    }
+
+    fn step_effort(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let (values, _, cur, option_id) = self.effort_choices();
+        if values.is_empty() {
+            return;
+        }
+        let next = (cur as isize + delta).clamp(0, values.len() as isize - 1) as usize;
+        let val = values[next].clone();
+        self.pending_effort = Some(val.clone());
+        if let Some(id) = option_id {
+            self.set_option(id, val, cx);
+        }
     }
 
     /// The slash command a typed `/` prefix completes to: the first one it starts.

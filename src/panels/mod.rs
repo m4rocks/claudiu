@@ -2,10 +2,12 @@
 //! and `inspector` are the two side panels, `editor_pane` is editor mode's files and editor, `widgets` holds the small
 //! shared pieces, `status_icon` the icon at the start of a session row. `theme` and `scale` set the look, and `glide` does the smooth scrolling.
 
+pub mod composer;
 pub mod editor_pane;
 pub mod glide;
 pub mod inspector;
 pub mod logos;
+pub mod picker;
 pub mod scale;
 pub mod settings_pages;
 mod skills_page;

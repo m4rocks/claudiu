@@ -2,12 +2,13 @@
 //! and show which active harnesses receive synced symlinks.
 
 use gpui::{ClickEvent, Context, Div, FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString, StatefulInteractiveElement, Styled, div, px};
+use gpui_kit::assets::IconName;
 use gpui_kit::component::input::{Input, InputState};
 
-use crate::app::{Act, MenuItem, SkillScope, SkillsTab, Workspace};
+use crate::app::{Act, SkillScope, SkillsTab, Workspace, WorkspacePicker};
 use crate::panels::settings_pages::switch_row;
 use crate::panels::theme::{self, hsla};
-use crate::panels::widgets::{Trigger, button, button_disabled, section_label, tick};
+use crate::panels::widgets::{Trigger, button, button_disabled, icon, section_label};
 use crate::skills::registry::{CatalogEntry, format_installs};
 
 fn faint(text: impl Into<SharedString>) -> Div {
@@ -38,13 +39,22 @@ impl Workspace {
                     .on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::SetSkillsTab(SkillsTab::Browse), window, cx))),
             );
 
-        let mut page = div()
+        let top_bar = div()
             .flex()
-            .flex_col()
+            .flex_wrap()
+            .items_center()
+            .justify_between()
             .gap(px(8.0))
-            .child(faint("Install SKILL.md packages from skills.sh and toggle them globally or per project. Enabled skills symlink into each active harness's skills folder."))
-            .child(faint(format!("Active harnesses: {}", harnesses.join(", "))))
-            .child(tabs);
+            .child(tabs)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .child(faint(format!("Syncing to: {}", harnesses.join(", ")))),
+            );
+
+        let mut page = div().flex().flex_col().gap(px(10.0)).child(top_bar);
 
         match state.tab {
             SkillsTab::Installed => {
@@ -243,7 +253,7 @@ impl Workspace {
     }
 
     /// Current scope, falling back to Global if a previously selected project was removed.
-    fn effective_skill_scope(&self) -> SkillScope {
+    pub(crate) fn effective_skill_scope(&self) -> SkillScope {
         match &self.skills_page.scope {
             SkillScope::Global => SkillScope::Global,
             SkillScope::Project(id) if self.store.project(id).is_some() => SkillScope::Project(id.clone()),
@@ -251,7 +261,7 @@ impl Workspace {
         }
     }
 
-    /// Picker row choosing whether toggles and installs target Global or a specific project.
+    /// Picker row choosing whether toggles and installs target Global or a specific project (opens universal dialog).
     fn skills_scope_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let current = self.effective_skill_scope();
         let label = match &current {
@@ -262,34 +272,30 @@ impl Workspace {
             SkillsTab::Installed => "Toggle scope",
             SkillsTab::Browse => "Enable on install",
         };
+        let open = matches!(self.picker_kind(), Some(WorkspacePicker::SkillsScope { .. }));
         div()
             .id("skills-scope")
-            .h(px(32.0))
-            .px(px(10.0))
+            .h(px(36.0))
+            .px(px(14.0))
             .flex()
             .items_center()
             .justify_between()
-            .rounded(px(6.0))
-            .bg(hsla(0x111111))
+            .rounded(px(8.0))
+            .bg(hsla(theme::SURFACE_ELEVATED))
             .border_1()
-            .border_color(hsla(0x242424))
+            .border_color(hsla(if open { theme::ACCENT } else { theme::PANEL_BORDER }))
+            .hover(|s| s.bg(hsla(theme::SURFACE_HOVER)))
             .text_size(crate::panels::scale::px(13.0))
             .cursor_pointer()
             .child(caption)
-            .child(div().text_color(hsla(theme::ACCENT)).child(label))
-            .dropdown(cx, move |ws, at, _window, cx| {
-                let active = ws.effective_skill_scope();
-                let mut items = vec![MenuItem::new(
-                    format!("{}Global (all workspaces)", tick(active == SkillScope::Global)),
-                    Act::SetSkillScope(SkillScope::Global),
-                )];
-                for project in &ws.store.data.projects {
-                    let scope = SkillScope::Project(project.id.clone());
-                    let mut item = MenuItem::new(format!("{}Project · {}", tick(active == scope), project.name), Act::SetSkillScope(scope));
-                    item.detail = Some(project.path.to_string_lossy().into_owned());
-                    items.push(item);
-                }
-                ws.open_dropdown(at, items, cx);
-            })
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .child(div().text_color(hsla(theme::ACCENT)).child(label))
+                    .child(icon(IconName::ChevronDown, 11.0).text_color(hsla(theme::TEXT_FAINT))),
+            )
+            .dropdown_right(cx, |ws, at, window, cx| ws.open_skills_scope_picker(at, window, cx))
     }
 }

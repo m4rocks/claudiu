@@ -52,21 +52,28 @@ class Inbox {
 const sessions = new Map();
 
 const MODES = [
-  { id: "default", name: "Default" },
-  { id: "acceptEdits", name: "Accept edits" },
-  { id: "plan", name: "Plan mode" },
+  { id: "default", name: "Ask Before Editing" },
+  { id: "acceptEdits", name: "Accept Edits" },
+  { id: "plan", name: "Plan Mode" },
+  { id: "dontAsk", name: "Don't Ask" },
+  { id: "bypassPermissions", name: "Full Access" },
 ];
-const BYPASS = { id: "bypassPermissions", name: "Bypass permissions" };
 const EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 
-/** The modes to cycle through. Bypass is listed only while it is on, so Shift+Tab never lands on it. */
+const AUTO = { id: "auto", name: "Auto" };
+
+/** Auto mode is listed only when Claude Code offers it: a model of this account supports it (the "default" entry
+ * included), or the session already started in it. Without that, choosing it would fail. */
 function modes(session) {
-  const available = session.mode === BYPASS.id ? [...MODES, BYPASS] : MODES;
+  const offersAuto = session.mode === AUTO.id || session.offersAuto;
+  const available = offersAuto ? [MODES[0], MODES[1], AUTO, ...MODES.slice(2)] : MODES;
   return { currentModeId: session.mode, availableModes: available };
 }
 
 function configOptions(session) {
-  const models = session.models.map((m) => ({ value: m.value, name: m.displayName || m.value }));
+  const realModels = session.models.filter((m) => m.value !== "default");
+  const sourceModels = realModels.length ? realModels : session.models;
+  const models = sourceModels.map((m) => ({ value: m.value, name: m.displayName || m.value }));
   return [
     { id: "model", name: "Model", category: "model", type: "select", currentValue: session.model, options: models },
     {
@@ -75,7 +82,7 @@ function configOptions(session) {
       category: "thought_level",
       type: "select",
       currentValue: session.effort,
-      options: [{ value: "default", name: "Default" }, ...EFFORTS.map((e) => ({ value: e, name: e }))],
+      options: EFFORTS.map((e) => ({ value: e, name: e })),
     },
   ];
 }
@@ -213,7 +220,10 @@ async function askQuestions(session, input, options) {
     const answer = await ask("session/request_permission", {
       sessionId: session.id,
       toolCall: { toolCallId: `${options.toolUseID}-${q.question}`, title: q.question, kind: "other", status: "pending" },
-      options: [...q.options.map((o, i) => ({ optionId: String(i), name: o.label, kind: "allow_once" })), { optionId: "skip", name: "Skip", kind: "reject_once" }],
+      options: [
+        ...q.options.map((o, i) => ({ optionId: String(i), name: o.label, ...(o.description ? { description: o.description } : {}), kind: "allow_once" })),
+        { optionId: "skip", name: "Skip", kind: "reject_once" },
+      ],
     });
     const chosen = answer?.outcome?.outcome === "selected" ? answer.outcome.optionId : null;
     if (chosen === null) return { behavior: "deny", message: "The user dismissed the question.", interrupt: true };
@@ -283,7 +293,7 @@ async function pump(session) {
 async function open(params, resume) {
   const id = resume ?? randomUUID();
   const extra = params._meta?.claudeCode?.options ?? {};
-  const session = { id, cwd: params.cwd, inbox: new Inbox(), tools: new Map(), streamed: new Set(), turn: null, cancelled: false, mode: "default", model: "default", effort: "default", models: [] };
+  const session = { id, cwd: params.cwd, inbox: new Inbox(), tools: new Map(), streamed: new Set(), turn: null, cancelled: false, mode: "default", model: "", effort: "medium", models: [] };
   session.query = query({
     prompt: session.inbox,
     options: {
@@ -308,7 +318,10 @@ async function open(params, resume) {
     session.query.close();
     throw error;
   }
-  session.models = init.models ?? [];
+  const rawModels = init.models ?? [];
+  session.offersAuto = rawModels.some((m) => m.supportsAutoMode);
+  const realModels = rawModels.filter((m) => m.value !== "default");
+  session.models = realModels.length ? realModels : rawModels;
   if (!session.models.some((m) => m.value === session.model) && session.models.length) session.model = session.models[0].value;
   update(id, { sessionUpdate: "available_commands_update", availableCommands: (init.commands ?? []).map((c) => ({ name: c.name, description: c.description, input: c.argumentHint ? { hint: c.argumentHint } : null })) });
   pump(session);

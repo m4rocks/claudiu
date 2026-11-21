@@ -2,8 +2,8 @@
 //! with each harness's configuration popup (Claude Code tools & accounts; subagent opt-in and models for the others).
 
 use gpui::{
-    AnyElement, ClickEvent, Context, Div, FontWeight, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, ParentElement, StatefulInteractiveElement,
-    Styled, Window, deferred, div, px, rgba,
+    AnyElement, ClickEvent, Context, Div, FontWeight, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, ParentElement, SharedString,
+    StatefulInteractiveElement, Styled, Window, deferred, div, prelude::FluentBuilder, px, rgba,
 };
 use gpui_kit::component::input::{Input, InputState};
 
@@ -15,31 +15,75 @@ use crate::panels::logos;
 use crate::panels::theme::{self, hsla};
 use crate::panels::widgets::{button, button_disabled, section_label};
 
-fn faint(text: impl Into<gpui::SharedString>) -> Div {
+fn faint(text: impl Into<SharedString>) -> Div {
     div().text_size(crate::panels::scale::px(11.0)).text_color(hsla(theme::TEXT_FAINT)).child(text.into())
 }
 
-fn warn(text: impl Into<gpui::SharedString>) -> Div {
+fn warn(text: impl Into<SharedString>) -> Div {
     div().text_size(crate::panels::scale::px(11.0)).text_color(hsla(theme::WARN)).child(text.into())
+}
+
+/// Compact pill toggle switch shared across all Settings pages and harness popups.
+pub fn toggle_switch(on: bool) -> Div {
+    div()
+        .flex_none()
+        .w(px(32.0))
+        .h(px(18.0))
+        .p(px(2.0))
+        .rounded(px(999.0))
+        .bg(hsla(if on { theme::ACCENT } else { 0x2a2a2e }))
+        .flex()
+        .items_center()
+        .when(on, |d| d.justify_end())
+        .child(div().w(px(14.0)).h(px(14.0)).rounded(px(999.0)).bg(hsla(if on { 0xffffff } else { 0x9c9ca4 })))
+}
+
+/// A labelled Settings section: uppercase header (with an optional trailing control) over a single rounded card whose
+/// child rows are separated by crisp hairlines.
+pub fn settings_group(title: impl Into<SharedString>, trailing: Option<AnyElement>, rows: Vec<AnyElement>) -> Div {
+    let header = div()
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap(px(8.0))
+        .child(section_label(title))
+        .children(trailing);
+    let mut card = div()
+        .flex()
+        .flex_col()
+        .w_full()
+        .rounded(px(8.0))
+        .bg(hsla(theme::SURFACE_ELEVATED))
+        .border_1()
+        .border_color(hsla(theme::PANEL_BORDER))
+        .overflow_hidden();
+    for (i, row) in rows.into_iter().enumerate() {
+        if i > 0 {
+            card = card.child(div().h(px(1.0)).w_full().bg(hsla(theme::BORDER)));
+        }
+        card = card.child(row);
+    }
+    div().flex().flex_col().gap(px(7.0)).w_full().child(header).child(card)
 }
 
 /// An On/Off row that runs `flip` on the workspace when clicked, with an optional faint `tag` after the label.
 pub fn switch_row(
     id: impl Into<gpui::ElementId>,
-    label: impl Into<gpui::SharedString>,
-    tag: Option<gpui::SharedString>,
+    label: impl Into<SharedString>,
+    tag: Option<SharedString>,
     on: bool,
     flip: impl Fn(&mut Workspace, &mut Window, &mut Context<Workspace>) + 'static,
     cx: &mut Context<Workspace>,
 ) -> gpui::Stateful<Div> {
     div()
         .id(id)
-        .min_h(px(34.0))
+        .min_h(px(36.0))
         .px(px(12.0))
+        .py(px(6.0))
         .flex()
         .items_center()
         .justify_between()
-        .gap(px(8.0))
+        .gap(px(10.0))
         .rounded(px(7.0))
         .bg(hsla(theme::SURFACE_ELEVATED))
         .border_1()
@@ -57,7 +101,7 @@ pub fn switch_row(
                 .child(label.into())
                 .children(tag.map(|tag| div().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().text_size(crate::panels::scale::px(11.0)).text_color(hsla(theme::TEXT_FAINT)).child(tag))),
         )
-        .child(div().flex_none().font_weight(FontWeight::MEDIUM).text_color(hsla(if on { theme::ACCENT } else { theme::TEXT_FAINT })).child(if on { "On" } else { "Off" }))
+        .child(toggle_switch(on))
         .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
             flip(ws, window, cx);
             cx.notify();
@@ -75,20 +119,28 @@ pub fn flip<T: PartialEq>(items: &mut Vec<T>, item: T) {
 }
 
 /// Flips whether `harness` is enabled as a provider in Claudiu. Ensures at least one harness stays enabled.
-fn flip_harness_enabled(ws: &mut Workspace, harness: Harness) {
-    let Some(Modal::Settings { subagents, harness: default_harness, .. }) = ws.modal.as_mut() else { return };
-    if subagents.enabled.contains(&harness) {
-        if subagents.enabled.len() <= 1 {
-            return;
+fn flip_harness_enabled(ws: &mut Workspace, harness: Harness, cx: &mut Context<Workspace>) {
+    let enabled = {
+        let Some(Modal::Settings { subagents, default_model, .. }) = ws.modal.as_mut() else { return };
+        if subagents.enabled.contains(&harness) {
+            if subagents.enabled.len() <= 1 {
+                return;
+            }
+            subagents.enabled.retain(|&h| h != harness);
+            if default_model.harness == harness
+                && let Some(&next) = subagents.enabled.first()
+            {
+                let all = ws.store.data.settings.aggregated_models_for(&subagents.enabled);
+                *default_model = crate::store::Settings::resolve_model(&all, next, None);
+            }
+            false
+        } else {
+            subagents.enabled.push(harness);
+            true
         }
-        subagents.enabled.retain(|&h| h != harness);
-        if *default_harness == harness
-            && let Some(&next) = subagents.enabled.first()
-        {
-            *default_harness = next;
-        }
-    } else {
-        subagents.enabled.push(harness);
+    };
+    if enabled {
+        ws.load_models(cx);
     }
 }
 
@@ -100,36 +152,40 @@ fn flip_subagent(ws: &mut Workspace, agent: Agent, cx: &mut Context<Workspace>) 
     ws.load_models(cx);
 }
 
-fn agent_for_harness(harness: Harness) -> Option<Agent> {
-    match harness {
-        Harness::Claude => None,
-        Harness::Codex => Some(Agent::Codex),
-        Harness::OpenCode => Some(Agent::OpenCode),
-        Harness::Antigravity => Some(Agent::Antigravity),
-    }
-}
-
-fn harness_status(harness: Harness, enabled: bool, subagents: &crate::app::HarnessesForm, trimmed: &[Trim], lookup: Option<&Lookup>) -> (String, u32) {
+fn harness_status(harness: Harness, enabled: bool, subagents: &crate::app::HarnessesForm, trimmed: &[Trim], lookup: &Lookup, model_count: usize) -> (String, u32) {
     if !enabled {
         return ("Disabled".into(), theme::TEXT_FAINT);
     }
-    match agent_for_harness(harness) {
+    if lookup.loading && model_count == 0 {
+        return (format!("Enabled · loading {} models…", harness.name()), theme::TEXT_DIM);
+    }
+    if let Some(why) = &lookup.error
+        && model_count == 0
+    {
+        return (format!("Enabled · couldn't load models ({why})"), theme::WARN);
+    }
+    match harness.agent() {
         None => {
+            let models_note = if model_count > 0 { format!(" · {model_count} models") } else { String::new() };
             if trimmed.is_empty() {
-                ("Enabled · Claude Agent SDK · all tools on".into(), theme::TEXT_DIM)
+                (format!("Enabled · Claude Agent SDK{models_note}"), theme::TEXT_DIM)
             } else {
                 let n = trimmed.len();
                 let noun = if n == 1 { "trim" } else { "trims" };
-                (format!("Enabled · {n} tool {noun} off"), theme::TEXT_DIM)
+                (format!("Enabled · {n} tool {noun} off{models_note}"), theme::TEXT_DIM)
             }
         }
         Some(agent) => {
             let form = subagents.get(agent);
             if !form.on {
-                return ("Enabled · primary sessions only".into(), theme::TEXT_DIM);
+                return if model_count > 0 {
+                    (format!("Enabled · {model_count} models"), theme::TEXT_DIM)
+                } else {
+                    ("Enabled · primary sessions only".into(), theme::TEXT_DIM)
+                };
             }
-            if lookup.is_some_and(|l| l.error.is_some()) {
-                return (format!("Enabled · couldn't load {}'s subagent models", agent.name()), theme::WARN);
+            if lookup.error.is_some() {
+                return (format!("Enabled · couldn't load {}'s models", agent.name()), theme::WARN);
             }
             let access = if form.edits { "edits allowed" } else { "read-only" };
             match form.models.len() {
@@ -160,31 +216,19 @@ fn model_matches(query: &str, model: &AgentModel) -> bool {
     query.to_lowercase().split_whitespace().all(|word| haystack.contains(word))
 }
 
-/// Where the agent's model lookup stands, when there is something to say.
-fn lookup_status(agent: Agent, catalog: &[AgentModel], lookup: &Lookup) -> Option<Div> {
-    let name = agent.name();
-    if lookup.loading && catalog.is_empty() {
-        Some(faint(format!("Loading {name}'s models…")))
-    } else {
-        lookup.error.as_ref().map(|why| warn(format!("Couldn't load {name}'s models: {why}")))
-    }
-}
-
 impl Workspace {
     /// The Harnesses page: enable Claude Code, Codex, OpenCode and Antigravity, and open each provider's configuration
     /// popup (Claude Code tools & accounts; subagent opt-in and models for the others).
     pub(crate) fn harnesses_page(&self, cx: &mut Context<Self>) -> Div {
         let Some(Modal::Settings { subagents, trimmed, .. }) = &self.modal else { return div() };
         let saved = &self.store.data.settings.custom_subagents;
-        let mut page = div().flex().flex_col().gap(px(10.0)).child(faint(
-            "Choose which coding agent harnesses are enabled across Claudiu. Enabled harnesses appear in the welcome screen, in-chat switcher, and sidebar usage meters. Open any harness to configure its tools or allow using it as a subagent.",
-        ));
+        let mut rows: Vec<AnyElement> = Vec::new();
         for harness in Harness::ALL {
             let enabled = subagents.enabled.contains(&harness);
-            let agent = agent_for_harness(harness);
-            let lookup = agent.map(|a| self.model_lookups.get(a));
-            let (status, tone) = harness_status(harness, enabled, subagents, trimmed, lookup);
-            let color = theme::harness_color(harness);
+            let agent = harness.agent();
+            let lookup = self.model_lookups.get(harness);
+            let model_count = self.store.data.settings.harness_models(harness).len();
+            let (status, tone) = harness_status(harness, enabled, subagents, trimmed, lookup, model_count);
 
             let mut about = div()
                 .flex()
@@ -197,8 +241,8 @@ impl Workspace {
                         .flex()
                         .items_center()
                         .gap(px(8.0))
-                        .child(logos::draw(logos::for_harness(harness), 15.0, hsla(if enabled { color } else { theme::TEXT_FAINT })))
-                        .child(div().text_size(crate::panels::scale::px(13.5)).font_weight(FontWeight::SEMIBOLD).child(harness.name())),
+                        .child(logos::draw(logos::for_harness(harness), 15.0, hsla(if enabled { theme::ACCENT } else { theme::TEXT_FAINT })))
+                        .child(div().text_size(crate::panels::scale::px(13.0)).font_weight(FontWeight::MEDIUM).text_color(hsla(if enabled { theme::TEXT } else { theme::TEXT_DIM })).child(harness.name())),
                 )
                 .child(div().text_size(crate::panels::scale::px(11.5)).text_color(hsla(tone)).child(status));
             if let Some(agent) = agent {
@@ -216,60 +260,136 @@ impl Workspace {
             }
             let key = harness.name().to_lowercase().replace(' ', "-");
             let open = div()
-                .id(gpui::SharedString::from(format!("settings-harness-{key}-open")))
+                .id(SharedString::from(format!("settings-harness-{key}-open")))
                 .flex()
                 .flex_1()
                 .min_w_0()
                 .items_center()
-                .gap(px(10.0))
+                .gap(px(12.0))
                 .cursor_pointer()
                 .child(about)
-                .child(div().text_size(crate::panels::scale::px(12.0)).text_color(hsla(theme::TEXT_DIM)).child("Configure ›"))
+                .child(
+                    div()
+                        .flex_none()
+                        .px(px(8.0))
+                        .h(px(24.0))
+                        .rounded(px(5.0))
+                        .border_1()
+                        .border_color(hsla(theme::PANEL_BORDER))
+                        .bg(hsla(theme::PANEL_BG))
+                        .hover(|s| s.bg(hsla(theme::SURFACE_HOVER)))
+                        .flex()
+                        .items_center()
+                        .text_size(crate::panels::scale::px(11.5))
+                        .text_color(hsla(theme::TEXT_DIM))
+                        .child("Configure"),
+                )
                 .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
                     ws.open_harness_dialog(harness, window, cx);
                     cx.notify();
                 }));
             let toggle = div()
-                .id(gpui::SharedString::from(format!("settings-harness-{key}")))
-                .pl(px(14.0))
+                .id(SharedString::from(format!("settings-harness-{key}")))
+                .pl(px(12.0))
                 .flex()
                 .items_center()
                 .cursor_pointer()
-                .text_size(crate::panels::scale::px(13.0))
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(hsla(if enabled { color } else { theme::TEXT_FAINT }))
-                .child(if enabled { "On" } else { "Off" })
+                .child(toggle_switch(enabled))
                 .on_click(cx.listener(move |ws, _: &ClickEvent, _w, cx| {
-                    flip_harness_enabled(ws, harness);
+                    flip_harness_enabled(ws, harness, cx);
                     cx.notify();
                 }));
-            page = page.child(
+            rows.push(
                 div()
                     .flex()
                     .items_center()
                     .w_full()
                     .px(px(14.0))
-                    .py(px(11.0))
-                    .rounded(px(8.0))
-                    .bg(hsla(theme::SURFACE_ELEVATED))
-                    .border_1()
-                    .border_color(hsla(if enabled { theme::PANEL_BORDER } else { theme::BORDER }))
+                    .py(px(12.0))
+                    .hover(|s| s.bg(hsla(theme::SURFACE_HOVER)))
                     .child(open)
-                    .child(toggle),
+                    .child(toggle)
+                    .into_any_element(),
             );
         }
-        page
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(12.0))
+            .child(settings_group("CONNECTED HARNESSES", None, rows))
+            .child(faint("Open any harness to configure its tools, accounts, or subagent delegation."))
+    }
+
+    /// The MODELS list of a harness popup: every model the harness offers, ticked ones in the chat's model picker. For
+    /// an agent (`agent`) with "Allow use as subagents" on, each ticked model is also a subagent and its row names the
+    /// agent type.
+    fn model_list(&self, harness: Harness, search: &gpui::Entity<InputState>, agent: Option<Agent>, cx: &mut Context<Self>) -> Div {
+        let Some(Modal::Settings { subagents, .. }) = &self.modal else { return div() };
+        let picked = subagents.picked(harness);
+        let subagents_on = agent.is_some_and(|a| subagents.get(a).on);
+        let catalog = self.store.data.settings.harness_models(harness);
+        let query = search.read(cx).value().to_string();
+        let mut list = div().flex().flex_col().gap(px(6.0));
+        let mut shown = 0;
+        for (model, offered) in model_rows(catalog, picked).into_iter().filter(|(m, _)| model_matches(&query, m)) {
+            let type_tag = agent.filter(|_| subagents_on).and_then(|a| type_name(a, &model.id)).map(|name| format!("Claudiu:{name}"));
+            let tag = match (type_tag, offered) {
+                (Some(name), true) => Some(name),
+                (Some(name), false) => Some(format!("{name} · no longer offered")),
+                (None, true) => None,
+                (None, false) => Some("no longer offered".into()),
+            };
+            let id = model.id.clone();
+            list = list.child(switch_row(
+                gpui::SharedString::from(format!("harness-dialog-model-{}", model.id)),
+                model.name.clone(),
+                tag.map(Into::into),
+                picked.contains(&model.id),
+                move |ws, _, _| {
+                    if let Some(Modal::Settings { subagents, .. }) = ws.modal.as_mut() {
+                        flip(subagents.picked_mut(harness), id.clone());
+                    }
+                },
+                cx,
+            ));
+            shown += 1;
+        }
+        let lookup = self.model_lookups.get(harness);
+        if lookup.loading && catalog.is_empty() {
+            list = list.child(faint(format!("Loading {}'s models…", harness.name())));
+        } else if let Some(why) = lookup.error.as_ref().filter(|_| catalog.is_empty()) {
+            list = list.child(warn(format!("Couldn't load {}'s models: {why}", harness.name())));
+        } else if catalog.is_empty() {
+            list = list.child(faint(format!("{} lists its models once it is enabled.", harness.name())));
+        } else if shown == 0 {
+            list = list.child(faint(format!("No model matches “{}”.", query.trim())));
+        }
+        let count = if catalog.is_empty() { String::new() } else { on_count(catalog, picked) };
+        let about = match agent {
+            Some(a) if subagents_on => format!("Ticked models show in the model picker and are subagents Claude Code can use. With none ticked, the picker shows them all and there are no subagents. {} runs only when asked.", a.provider().name),
+            Some(_) => "Ticked models show in the model picker; with none ticked, it shows them all. With “Allow use as subagents” on, the ticked models are also Claude Code's subagents.".to_string(),
+            None => "Ticked models show in the model picker; with none ticked, it shows them all.".to_string(),
+        };
+        div()
+            .flex()
+            .flex_col()
+            .w_full()
+            .gap(px(8.0))
+            .child(div().flex().w_full().mt(px(4.0)).items_center().justify_between().child(section_label("MODELS")).child(faint(count)))
+            .child(faint(about))
+            .child(Input::new(search))
+            .child(list)
     }
 
     /// Popup dialog over the Harnesses page: Claude Code tools & accounts, or an external provider's subagent controls.
     pub(crate) fn render_harness_dialog(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let Some(Modal::Settings { claude, trimmed, skills_field, costly, subagents, .. }) = &self.modal else { return None };
+        let Some(Modal::Settings { claude, trimmed, skills_field, costly, subagents, chrome, .. }) = &self.modal else { return None };
         let picking = subagents.picking.as_ref()?;
         let viewport = window.viewport_size();
         let scaled = crate::panels::scale::px;
 
         let body: Div = match picking {
-            HarnessDialog::Claude => {
+            HarnessDialog::Claude(search) => {
                 let enabled = subagents.enabled.contains(&Harness::Claude);
                 let plan_trimmed = trimmed.contains(&Trim::PlanMode);
                 let mut col = div()
@@ -291,10 +411,22 @@ impl Workspace {
                         "Enable Claude Code",
                         None,
                         enabled,
-                        |ws, _, _| flip_harness_enabled(ws, Harness::Claude),
+                        |ws, _, cx| flip_harness_enabled(ws, Harness::Claude, cx),
                         cx,
                     ))
-                    .child(div().flex().flex_col().gap(px(4.0)).child(section_label("CLAUDE CODE PATH")).child(Input::new(claude)));
+                    .child(div().flex().flex_col().gap(px(4.0)).child(section_label("CLAUDE CODE PATH")).child(Input::new(claude)))
+                    .child(switch_row(
+                        "harness-dialog-claude-chrome",
+                        "Claude in Chrome",
+                        Some("New sessions start with browser integration (--chrome)".into()),
+                        *chrome,
+                        |ws, _, _| {
+                            if let Some(Modal::Settings { chrome, .. }) = ws.modal.as_mut() {
+                                *chrome = !*chrome;
+                            }
+                        },
+                        cx,
+                    ));
 
                 // Claude Code accounts (moved out of the sidebar footer).
                 let active_id = self.store.active_account().map(|a| a.id.clone());
@@ -349,6 +481,7 @@ impl Workspace {
                     ws.act(Act::AddAccount, window, cx)
                 }))));
                 col = col.child(accounts_box);
+                col = col.child(self.model_list(Harness::Claude, search, None, cx));
 
                 // Claude Code tools (moved from the old Claude Code tools page).
                 col = col.child(div().mt(px(6.0)).child(section_label("CLAUDE CODE TOOLS")));
@@ -394,8 +527,6 @@ impl Workspace {
                 let key = agent.key();
                 let enabled = subagents.enabled.contains(&harness);
                 let form = subagents.get(agent);
-                let catalog = &self.store.data.settings.custom_subagents.get(agent).catalog;
-                let lookup = self.model_lookups.get(agent);
 
                 let mut top = div()
                     .flex()
@@ -407,7 +538,7 @@ impl Workspace {
                             .flex()
                             .items_center()
                             .gap(px(8.0))
-                            .child(logos::draw(logos::for_harness(harness), 16.0, hsla(theme::harness_color(harness))))
+                            .child(logos::draw(logos::for_harness(harness), 16.0, hsla(theme::ACCENT)))
                             .child(div().text_size(scaled(15.0)).font_weight(FontWeight::SEMIBOLD).child(provider.name)),
                     )
                     .child(faint(provider.about))
@@ -416,7 +547,7 @@ impl Workspace {
                         format!("Enable {}", provider.name),
                         None,
                         enabled,
-                        move |ws, _, _| flip_harness_enabled(ws, harness),
+                        move |ws, _, cx| flip_harness_enabled(ws, harness, cx),
                         cx,
                     ))
                     .child(switch_row(
@@ -431,7 +562,6 @@ impl Workspace {
                 if let Some(warning) = provider.warning {
                     top = top.child(warn(warning));
                 }
-                let mut models = div().flex().flex_col().w_full().gap(px(8.0));
                 if form.on {
                     top = top
                         .child(switch_row(
@@ -448,42 +578,8 @@ impl Workspace {
                             cx,
                         ))
                         .child(faint(if form.edits { provider.edits_on } else { provider.edits_off }));
-                    let query = search.read(cx).value().to_string();
-                    let mut list = div().flex().flex_col().gap(px(6.0));
-                    let mut shown = 0;
-                    for (model, offered) in model_rows(catalog, &form.models).into_iter().filter(|(m, _)| model_matches(&query, m)) {
-                        let Some(name) = type_name(agent, &model.id) else { continue };
-                        let name = format!("Claudiu:{name}");
-                        let tag = if offered { name } else { format!("{name} · no longer offered") };
-                        let id = model.id.clone();
-                        list = list.child(switch_row(
-                            gpui::SharedString::from(format!("agent-dialog-model-{}", model.id)),
-                            model.name.clone(),
-                            Some(tag.into()),
-                            form.models.contains(&model.id),
-                            move |ws, _, _| {
-                                if let Some(Modal::Settings { subagents, .. }) = ws.modal.as_mut() {
-                                    flip(&mut subagents.get_mut(agent).models, id.clone());
-                                }
-                            },
-                            cx,
-                        ));
-                        shown += 1;
-                    }
-                    if let Some(status) = lookup_status(agent, catalog, lookup) {
-                        list = list.child(status);
-                    } else if shown == 0 {
-                        list = list.child(faint(format!("No model matches “{}”.", query.trim())));
-                    }
-                    let count = if catalog.is_empty() { String::new() } else { on_count(catalog, &form.models) };
-                    models = models
-                        .child(div().flex().w_full().mt(px(4.0)).items_center().justify_between().child(section_label("SUBAGENT MODELS")).child(faint(count)))
-                        .child(faint(format!("Each model switched on becomes a subagent available to Claude Code. {} runs only when asked.", provider.name)))
-                        .child(Input::new(search))
-                        .child(list);
-                } else {
-                    models = models.child(faint(format!("Turn on “Allow use as subagents” to choose models for {}.", provider.name)));
                 }
+                let models = self.model_list(harness, search, Some(agent), cx);
                 div().flex().flex_col().gap(px(12.0)).w_full().child(top).child(models)
             }
         };
@@ -539,35 +635,34 @@ impl Workspace {
         )
     }
 
-    /// The Projects page: every project in the sidebar's order, to rename, move, remove, or add to. Changes apply at
-    /// once, as on the Worktrees page; a removal can be undone from its toast.
-    pub(crate) fn projects_page(&self, renaming: Option<&(crate::store::Id, gpui::Entity<InputState>)>, cx: &mut Context<Self>) -> Div {
+    /// The Projects section on the Projects page: every project in the sidebar's order, to rename, move, remove, or
+    /// add to. Changes apply at once; a removal can be undone from its toast.
+    pub(crate) fn projects_section(&self, renaming: Option<&(crate::store::Id, gpui::Entity<InputState>)>, cx: &mut Context<Self>) -> Div {
         let projects = &self.store.data.projects;
-        let add = button("project-add", "Add project…", false).on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::ImportProject, window, cx)));
-        let list = div().flex().flex_col().gap(px(8.0)).child(
-            div()
-                .flex()
-                .w_full()
-                .items_center()
-                .justify_between()
-                .gap(px(10.0))
-                .child(faint("Removing a project keeps its sessions; they show under no project.").flex_1().min_w_0())
-                .child(add),
-        );
+        let add = button("project-add", "Add project…", false)
+            .on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::ImportProject, window, cx)))
+            .into_any_element();
         if projects.is_empty() {
-            return list.child(faint("No projects yet."));
+            let empty = div()
+                .px(px(14.0))
+                .py(px(14.0))
+                .text_size(crate::panels::scale::px(12.0))
+                .text_color(hsla(theme::TEXT_FAINT))
+                .child("No projects yet. Add a folder to group sessions and switch branches.")
+                .into_any_element();
+            return settings_group("PROJECTS", Some(add), vec![empty]);
         }
         let pressed = |b: gpui::Stateful<Div>, act: Act, cx: &mut Context<Self>| b.on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(act.clone(), window, cx)));
         let last = projects.len() - 1;
-        let mut list = list;
+        let mut rows: Vec<AnyElement> = Vec::with_capacity(projects.len());
         for (i, p) in projects.iter().enumerate() {
             let id = p.id.clone();
             let editing = renaming.filter(|(r, _)| *r == p.id);
             let name = match editing {
                 Some((_, input)) => Input::new(input).into_any_element(),
-                None => div().text_size(crate::panels::scale::px(13.0)).child(p.name.clone()).into_any_element(),
+                None => div().text_size(crate::panels::scale::px(13.0)).font_weight(FontWeight::MEDIUM).child(p.name.clone()).into_any_element(),
             };
-            let mut buttons = div().flex().flex_none().gap(px(6.0));
+            let mut buttons = div().flex().flex_none().gap(px(5.0));
             buttons = if editing.is_some() {
                 buttons
                     .child(pressed(button(format!("project-cancel-{i}"), "Cancel", false), Act::CancelProjectRename, cx))
@@ -576,22 +671,18 @@ impl Workspace {
                 buttons.child(pressed(button(format!("project-rename-{i}"), "Rename", false), Act::RenameProject(id.clone()), cx))
             };
             buttons = buttons
-                .child(if i == 0 { button_disabled(format!("project-up-{i}"), "Move up") } else { pressed(button(format!("project-up-{i}"), "Move up", false), Act::MoveProject(id.clone(), true), cx) })
-                .child(if i == last { button_disabled(format!("project-down-{i}"), "Move down") } else { pressed(button(format!("project-down-{i}"), "Move down", false), Act::MoveProject(id.clone(), false), cx) })
+                .child(if i == 0 { button_disabled(format!("project-up-{i}"), "Up") } else { pressed(button(format!("project-up-{i}"), "Up", false), Act::MoveProject(id.clone(), true), cx) })
+                .child(if i == last { button_disabled(format!("project-down-{i}"), "Down") } else { pressed(button(format!("project-down-{i}"), "Down", false), Act::MoveProject(id.clone(), false), cx) })
                 .child(pressed(button(format!("project-remove-{i}"), "Remove", false), Act::RemoveProject(id), cx));
-            list = list.child(
+            rows.push(
                 div()
                     .flex()
                     .w_full()
                     .items_center()
                     .justify_between()
-                    .gap(px(10.0))
-                    .px(px(12.0))
-                    .py(px(8.0))
-                    .rounded(px(7.0))
-                    .bg(hsla(theme::SURFACE_ELEVATED))
-                    .border_1()
-                    .border_color(hsla(theme::PANEL_BORDER))
+                    .gap(px(12.0))
+                    .px(px(14.0))
+                    .py(px(10.0))
                     .child(
                         div()
                             .flex()
@@ -602,10 +693,16 @@ impl Workspace {
                             .child(name)
                             .child(faint(p.path.to_string_lossy().into_owned()).overflow_hidden().text_ellipsis().whitespace_nowrap()),
                     )
-                    .child(buttons),
+                    .child(buttons)
+                    .into_any_element(),
             );
         }
-        list
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .child(settings_group("PROJECTS", Some(add), rows))
+            .child(faint("Removing a project keeps its sessions; they show under no project."))
     }
 }
 

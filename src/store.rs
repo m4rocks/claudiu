@@ -321,15 +321,143 @@ pub struct Settings {
     /// Output caps and turned-off skills for Claude Code (`claude/trim.rs`); empty leaves Claude Code's own behavior.
     #[serde(default)]
     pub limits: crate::claude::trim::Limits,
-    /// Agent types that run a task in another coding agent (Settings → Custom subagents); all off by default.
+    /// Agent types that run a task in another coding agent (Settings → Harnesses); all off by default.
     #[serde(default)]
     pub custom_subagents: crate::claude::subagents::CustomSubagents,
+    /// Last model list reported by Claude Code, used to populate the unified model picker before a session opens.
+    #[serde(default)]
+    pub claude_models: Vec<crate::claude::subagents::AgentModel>,
+    /// The Claude Code models ticked in Settings → Harnesses; empty shows every model in the picker.
+    #[serde(default)]
+    pub claude_picked: Vec<String>,
+    /// Last permission modes `(id, name)` reported by each harness's ACP adapter, keyed by harness serde name.
+    #[serde(default)]
+    pub harness_modes: BTreeMap<String, Vec<(String, String)>>,
     /// Installed `SKILL.md` packages and their global / per-project toggles (Settings → Skills).
     #[serde(default)]
     pub skills: crate::skills::SkillsConfig,
 }
 
 impl Settings {
+    fn harness_key(harness: crate::harness::Harness) -> &'static str {
+        harness.key()
+    }
+
+    /// Permission modes `(id, name)` available for `harness`: the live list reported by its ACP adapter, or sensible
+    /// fallback defaults until its adapter answers.
+    pub fn modes_for(&self, harness: crate::harness::Harness) -> Vec<(String, String)> {
+        if let Some(modes) = self.harness_modes.get(Self::harness_key(harness))
+            && !modes.is_empty()
+        {
+            return modes.clone();
+        }
+        match harness {
+            crate::harness::Harness::Claude => crate::claude::defaults::PermissionMode::ALL
+                .into_iter()
+                .map(|m| (m.acp_id().to_string(), m.label().to_string()))
+                .collect(),
+            crate::harness::Harness::Codex | crate::harness::Harness::OpenCode | crate::harness::Harness::Antigravity => {
+                vec![("default".into(), "Ask Before Editing".into()), ("fullAccess".into(), "Full Access".into())]
+            }
+        }
+    }
+
+    /// Update the cached permission modes for `harness`; returns `true` when the list actually changed.
+    pub fn set_harness_modes(&mut self, harness: crate::harness::Harness, modes: Vec<(String, String)>) -> bool {
+        if modes.is_empty() {
+            return false;
+        }
+        let key = Self::harness_key(harness).to_string();
+        if self.harness_modes.get(&key) == Some(&modes) {
+            return false;
+        }
+        self.harness_modes.insert(key, modes);
+        true
+    }
+    /// Cached model catalog for `harness` (empty until its adapter or a live session reports models).
+    pub fn harness_models(&self, harness: crate::harness::Harness) -> &[crate::claude::subagents::AgentModel] {
+        match harness.agent() {
+            None => &self.claude_models,
+            Some(agent) => &self.custom_subagents.get(agent).catalog,
+        }
+    }
+
+    /// Update the cached model catalog for `harness`; returns `true` when the list actually changed.
+    pub fn set_harness_models(&mut self, harness: crate::harness::Harness, models: Vec<crate::claude::subagents::AgentModel>) -> bool {
+        let slot = match harness.agent() {
+            None => &mut self.claude_models,
+            Some(agent) => &mut self.custom_subagents.get_mut(agent).catalog,
+        };
+        if *slot == models {
+            return false;
+        }
+        *slot = models;
+        true
+    }
+
+    /// The models ticked for `harness` in Settings → Harnesses. For Codex, OpenCode and Antigravity the same ticks are
+    /// the subagents Claude Code gets while "Allow use as subagents" is on.
+    pub fn picked_models(&self, harness: crate::harness::Harness) -> &[String] {
+        match harness.agent() {
+            None => &self.claude_picked,
+            Some(agent) => &self.custom_subagents.get(agent).models,
+        }
+    }
+
+    /// All selectable models across every enabled harness, aggregated into one flat list.
+    pub fn aggregated_models(&self) -> Vec<crate::harness::CatalogModel> {
+        self.aggregated_models_for(&self.enabled_harnesses_list())
+    }
+
+    /// All selectable models across `enabled`, aggregated into one flat list.
+    pub fn aggregated_models_for(&self, enabled: &[crate::harness::Harness]) -> Vec<crate::harness::CatalogModel> {
+        use crate::harness::{CatalogModel, Harness};
+        let mut out = Vec::new();
+        for harness in Harness::ALL.into_iter().filter(|h| enabled.contains(h)) {
+            let catalog = self.harness_models(harness);
+            if catalog.is_empty() {
+                match harness {
+                    Harness::Claude => out.extend(CatalogModel::default_claude_models()),
+                    Harness::Codex | Harness::OpenCode | Harness::Antigravity => {
+                        out.push(CatalogModel { harness, id: String::new(), name: format!("{} (default)", harness.name()) });
+                    }
+                }
+            } else {
+                let all = catalog.iter().map(|m| CatalogModel { harness, id: m.id.clone(), name: m.name.clone() }).collect();
+                out.extend(keep_picked(all, self.picked_models(harness), |m| &m.id));
+            }
+        }
+        out
+    }
+
+    /// Resolve a `(harness, model_id)` pair against `models`, falling back to a model from `harness` or the first
+    /// available model. Keeps an unknown `model_id` when its harness is present in `models`.
+    pub fn resolve_model(models: &[crate::harness::CatalogModel], harness: crate::harness::Harness, model_id: Option<&str>) -> crate::harness::CatalogModel {
+        use crate::harness::CatalogModel;
+        if let Some(id) = model_id.filter(|id| !id.is_empty()) {
+            if let Some(found) = models.iter().find(|m| m.harness == harness && m.id == id) {
+                return found.clone();
+            }
+            if let Some(found) = models.iter().find(|m| m.id == id) {
+                return found.clone();
+            }
+            if models.iter().any(|m| m.harness == harness) {
+                return CatalogModel { harness, id: id.to_string(), name: id.to_string() };
+            }
+        }
+        models
+            .iter()
+            .find(|m| m.harness == harness)
+            .or_else(|| models.first())
+            .cloned()
+            .unwrap_or_else(|| CatalogModel { harness, id: String::new(), name: harness.name().into() })
+    }
+
+    /// Default model for new sessions (across all enabled harnesses).
+    pub fn default_model(&self) -> crate::harness::CatalogModel {
+        let all = self.aggregated_models();
+        Self::resolve_model(&all, self.harness, self.new_session.model.as_deref())
+    }
     /// Harnesses enabled by the user (Settings → Harnesses). Always includes at least the configured default harness
     /// when none have been explicitly stored yet.
     pub fn enabled_harnesses_list(&self) -> Vec<crate::harness::Harness> {
@@ -822,6 +950,15 @@ pub fn reconcile(data: &mut Data, external: &[ExternalSession], scan_ok: bool) -
     stats
 }
 
+/// The `models` whose id is in `picked`, in their own order. With nothing picked, or nothing picked that is still
+/// offered, all of them: a harness never drops out of the picker because of stale ticks.
+pub fn keep_picked<T>(models: Vec<T>, picked: &[String], id: impl Fn(&T) -> &str) -> Vec<T> {
+    if !models.iter().any(|m| picked.iter().any(|p| p == id(m))) {
+        return models;
+    }
+    models.into_iter().filter(|m| picked.iter().any(|p| p == id(m))).collect()
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -831,6 +968,25 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn the_picker_lists_only_the_ticked_models_once_any_are_ticked() {
+        use crate::claude::subagents::{Agent, AgentModel};
+        use crate::harness::Harness;
+        let model = |id: &str| AgentModel { id: id.into(), name: id.to_uppercase() };
+        let mut settings = Settings { enabled_harnesses: Some(vec![Harness::Claude, Harness::Codex]), ..Default::default() };
+        settings.claude_models = vec![model("opus"), model("sonnet")];
+        settings.custom_subagents.get_mut(Agent::Codex).catalog = vec![model("gpt-a"), model("gpt-b"), model("gpt-c")];
+        let ids = |s: &Settings| s.aggregated_models().into_iter().map(|m| m.id).collect::<Vec<_>>();
+        assert_eq!(ids(&settings), ["opus", "sonnet", "gpt-a", "gpt-b", "gpt-c"], "nothing ticked: every model shows");
+
+        settings.claude_picked = vec!["sonnet".into()];
+        settings.custom_subagents.get_mut(Agent::Codex).models = vec!["gpt-c".into(), "gpt-a".into()];
+        assert_eq!(ids(&settings), ["sonnet", "gpt-a", "gpt-c"], "the catalog's order stays");
+
+        settings.claude_picked = vec!["retired".into()];
+        assert_eq!(ids(&settings)[..2], ["opus", "sonnet"], "ticks the harness no longer offers don't empty it");
+    }
 
     #[test]
     fn the_recent_list_is_closed_after_a_restart() {
@@ -1238,6 +1394,35 @@ mod tests {
         assert_eq!(geom(2000.0).display_of(&[primary, right]), Some(1));
         assert_eq!(geom(2000.0).display_of(&[primary]), None, "the second monitor was unplugged");
         assert_eq!(geom(100.0).display_of(&[]), None, "no display reported");
+    }
+
+    #[test]
+    fn default_model_resolves_across_enabled_harnesses_and_falls_back_when_disabled() {
+        use crate::claude::subagents::{Agent, AgentModel};
+        use crate::harness::{CatalogModel, Harness};
+
+        let mut settings = Settings {
+            enabled_harnesses: Some(vec![Harness::Claude, Harness::Codex]),
+            harness: Harness::Codex,
+            ..Default::default()
+        };
+        settings.custom_subagents.get_mut(Agent::Codex).catalog = vec![
+            AgentModel { id: "gpt-5.3-codex".into(), name: "GPT-5.3 Codex".into() },
+        ];
+        settings.new_session.model = Some("gpt-5.3-codex".into());
+
+        let all = settings.aggregated_models();
+        assert!(all.iter().any(|m| m.harness == Harness::Claude && m.id == "opus"));
+        assert!(all.iter().any(|m| m.harness == Harness::Codex && m.id == "gpt-5.3-codex"));
+        assert_eq!(
+            settings.default_model(),
+            CatalogModel { harness: Harness::Codex, id: "gpt-5.3-codex".into(), name: "GPT-5.3 Codex".into() }
+        );
+
+        // Disabling Codex falls back to an enabled harness's model.
+        settings.enabled_harnesses = Some(vec![Harness::Claude]);
+        assert_eq!(settings.default_model().harness, Harness::Claude);
+        assert_eq!(settings.default_model().id, "opus");
     }
 
 }

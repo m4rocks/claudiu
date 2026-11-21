@@ -1,7 +1,6 @@
 //! Overlays: toasts, the context menu, input modals, the editor choice and the project import.
 
 use super::*;
-use crate::git::worktree;
 use crate::panels::widgets::Dropdown;
 
 impl Workspace {
@@ -87,60 +86,30 @@ impl Workspace {
                 }
                 Act::Dismiss
             }
-            Some(Modal::Advisor { id, input }) => {
-                let name = input.read(cx).value().trim().to_lowercase();
-                if name.is_empty() {
-                    Act::Dismiss
-                } else if !usage::valid_model_name(&name) {
-                    self.modal = Some(Modal::Advisor { id, input });
-                    self.toast("Use a model alias or id (letters, digits, . _ -), or “off”.", true, cx);
-                    return;
-                } else {
-                    self.act(Act::SetAdvisor(id, name), window, cx);
-                    Act::Dismiss
-                }
-            }
             Some(Modal::NewBranch { cwd, input }) => {
                 // Spaces aren't allowed in branch names; git reports anything else that is invalid.
                 let name = input.read(cx).value().split_whitespace().collect::<Vec<_>>().join("-");
                 if name.is_empty() { Act::Dismiss } else { Act::CreateBranch(cwd, name) }
             }
-            Some(Modal::NewWorktree { main_checkout, input, base }) => {
-                let typed = input.read(cx).value().trim().to_string();
-                let name = if typed.is_empty() {
-                    Ok(worktree::generate_name(uuid::Uuid::new_v4().as_u128(), worktree::name_taken(&main_checkout)))
-                } else {
-                    worktree::check_name(&typed).and_then(|()| worktree::check_unused(&main_checkout, &typed)).map(|()| typed)
-                };
-                match name {
-                    Ok(name) => Act::SwitchWorktree { folder: worktree::folder(&main_checkout, &name), base },
-                    Err(why) => {
-                        self.modal = Some(Modal::NewWorktree { main_checkout, input, base });
-                        self.toast(why, true, cx);
-                        return;
-                    }
-                }
-            }
-            Some(Modal::Settings { shell, claude, model, harness, effort, permission, updates, chrome, scale, trimmed, claudiu_off, skills_field, skill_search, costly, list_focus, renaming, subagents }) => {
+            Some(Modal::Settings { shell, claude, default_model, effort, permission, updates, chrome, scale, trimmed, claudiu_off, skills_field, skill_search, costly, list_focus, renaming, subagents }) => {
                 let clean = |s: &str| s.trim().trim_matches('"').to_string();
                 let (shell_t, claude_t) = (clean(shell.read(cx).value().as_ref()), clean(claude.read(cx).value().as_ref()));
-                let model_name = claude::defaults::parse_model(model.read(cx).value().as_ref());
                 // In category order, then top to bottom: the first bad field decides which page the dialog shows.
                 let paths = [("Shell", &shell, &shell_t, SettingsPage::General), ("Claude path", &claude, &claude_t, SettingsPage::Harnesses)]
                     .into_iter()
                     .find(|(_, _, t, _)| !t.is_empty() && platform::resolve_program(t).is_none())
                     .map(|(what, field, t, page)| (page, field.clone(), format!("{what}: “{t}” is not a file or a program on PATH")));
-                let bad_model = model_name.is_err().then(|| (SettingsPage::Sessions, model.clone(), "Use a model alias or id (letters, digits, . _ -).".to_string()));
                 let limits = claude::trim::Limits::parse(skills_field.read(cx).value().as_ref());
                 let bad_limits = limits.as_ref().err().map(|why| (SettingsPage::Harnesses, skills_field.clone(), why.clone()));
-                if let Some((page, field, msg)) = paths.or(bad_model).or(bad_limits) {
+                if let Some((page, field, msg)) = paths.or(bad_limits) {
                     self.settings_page = page;
                     let mut subagents = subagents;
                     if page == SettingsPage::Harnesses {
-                        subagents.picking = Some(HarnessDialog::Claude);
+                        let search = self.modal_input_then("", "Search models", Self::close_harness_dialog, window, cx);
+                        subagents.picking = Some(HarnessDialog::Claude(search));
                     }
                     field.update(cx, |s, cx| s.focus(window, cx));
-                    self.modal = Some(Modal::Settings { shell, claude, model, harness, effort, permission, updates, chrome, scale, trimmed, claudiu_off, skills_field, skill_search, costly, list_focus, renaming, subagents });
+                    self.modal = Some(Modal::Settings { shell, claude, default_model, effort, permission, updates, chrome, scale, trimmed, claudiu_off, skills_field, skill_search, costly, list_focus, renaming, subagents });
                     self.toast(msg, true, cx);
                     return;
                 }
@@ -158,11 +127,28 @@ impl Workspace {
                 }
                 s.scale = (scale != 100).then_some(scale);
                 s.chrome_default = chrome;
-                let harness_changed = s.harness != harness || s.enabled_harnesses.as_ref() != Some(&subagents.enabled);
-                let enabled = if subagents.enabled.is_empty() { vec![harness] } else { subagents.enabled.clone() };
-                s.enabled_harnesses = Some(enabled.clone());
-                s.harness = if enabled.contains(&harness) { harness } else { enabled[0] };
-                s.new_session = claude::defaults::NewSessionDefaults { model: model_name.unwrap_or_default(), effort, permission_mode: permission };
+                let enabled = if subagents.enabled.is_empty() { vec![default_model.harness] } else { subagents.enabled.clone() };
+                let chosen = if enabled.contains(&default_model.harness) {
+                    default_model
+                } else {
+                    let all = s.aggregated_models_for(&enabled);
+                    crate::store::Settings::resolve_model(&all, enabled[0], None)
+                };
+                let next_model = (!chosen.id.is_empty()).then_some(chosen.id);
+                let default_model_changed = s.harness != chosen.harness || s.new_session.model != next_model;
+                let harness_changed = s.harness != chosen.harness || s.enabled_harnesses.as_ref() != Some(&enabled);
+                let legacy_perm = claude::defaults::PermissionMode::ALL
+                    .into_iter()
+                    .find(|m| m.acp_id() == permission || m.name() == permission);
+                s.enabled_harnesses = Some(enabled);
+                s.harness = chosen.harness;
+                s.new_session = claude::defaults::NewSessionDefaults {
+                    model: next_model,
+                    effort: Some(effort),
+                    permission_mode: legacy_perm,
+                    mode_id: Some(permission),
+                };
+                self.home.effort = effort;
                 let trimmed = claude::trim::normalized(&trimmed);
                 let claudiu_off = mcp::normalized_features(&claudiu_off);
                 // The trims go into Claude Code's own settings.json (every account gets the file through config_sync).
@@ -189,25 +175,22 @@ impl Workspace {
                     claude::subagents::AgentChoice { on: form.on, models: form.models.clone(), edits: form.edits, catalog: s.custom_subagents.get(agent).catalog.clone() }
                 }));
                 let tools_changed = s.trimmed_tools != trimmed || s.limits != limits || s.claudiu_tools_off != claudiu_off;
-                let subagents_changed = s.custom_subagents != custom_subagents;
+                let subagents_changed = s.custom_subagents != custom_subagents || s.claude_picked != subagents.claude_models;
                 s.trimmed_tools = trimmed;
                 s.limits = limits;
                 s.claudiu_tools_off = claudiu_off;
                 s.custom_subagents = custom_subagents;
+                s.claude_picked = subagents.claude_models.clone();
                 crate::panels::scale::set(scale);
                 self.shell = platform::default_shell(s.shell.as_deref());
                 self.claude_exe = claude::discover(s.claude_path.as_deref());
                 self.store.mark_dirty();
+                if default_model_changed {
+                    self.home.model = None;
+                }
                 if harness_changed || subagents_changed {
-                    let enabled = self.store.data.settings.enabled_harnesses_list();
-                    for live in &self.live {
-                        if let Some(thread) = live.view.thread() {
-                            thread.update(cx, |t, cx| {
-                                t.enabled_harnesses = enabled.clone();
-                                cx.notify();
-                            });
-                        }
-                    }
+                    self.push_models_to_threads(cx);
+                    self.load_enabled_models(cx);
                     self.sync_skills(None, cx);
                 }
                 if let Some(e) = trim_error {

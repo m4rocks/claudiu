@@ -1,44 +1,36 @@
 //! Main area (the shown session / home), overlays (menu, modal, toast), and the root `Render`.
 
 use gpui::{
-    AnyElement, Entity, ClickEvent, Context, FontWeight, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
+    AnyElement, ClickEvent, Context, FontWeight, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
     ParentElement, Render, StatefulInteractiveElement, Styled, Window, anchored, deferred, div, prelude::FluentBuilder,
     px, rgba,
 };
 
-use crate::claude::defaults::{Effort, PermissionMode};
+use crate::claude::defaults::Effort;
 use crate::claude::mcp::Feature;
 use crate::app::{
-    Act, CloseSession, SessionView, SettingsPage, GitOp, FocusSearch, ImportProject, Main, MenuItem, Modal, NewClaude, NextSession, OpenGithub, OpenSettings, PrevSession, ShellDrag, SwapFocus,
-    ToggleEditor, ToggleRight, ToggleShell, ToggleSidebar, Workspace, SHELL_HEIGHT,
+    Act, CloseSession, FocusSearch, GitOp, GitPickerTarget, ImportProject, Main, Modal, NewClaude, NextSession, OpenGithub, OpenSettings, PrevSession, ProjectPickerMode, SessionView,
+    SettingsPage, ShellDrag, SkillScope, SwapFocus, ToggleEditor, ToggleRight, ToggleShell, ToggleSidebar, Workspace, WorkspacePicker, SHELL_HEIGHT,
 };
-use gpui_kit::component::{TitleBar, input::{Input, InputState, Textarea}};
-use crate::store::{SessionKind, now};
-use crate::panels::logos;
+use gpui_kit::component::{TitleBar, input::{Input, Textarea}};
+use crate::panels::{composer, logos, picker};
 use crate::panels::theme::{self, hsla};
 use crate::updater::Status;
 use gpui_kit::assets::IconName;
-use crate::harness::Harness;
-use crate::panels::settings_pages::{flip, switch_row};
-use crate::panels::widgets::{Trigger, ago, button, button_disabled, danger_button, effort_slider, fade_in, icon, icon_button, icon_button_disabled, key_hint, section_label, short_path, shortcut, spinner, tick};
+use crate::panels::settings_pages::{flip, settings_group, toggle_switch};
+use crate::panels::widgets::{
+    Anchor, Dropdown, Trigger, button, button_disabled, danger_button, effort_slider, fade_in, icon, icon_button, icon_button_disabled, key_badge, key_hint, section_label, short_path, spinner,
+};
 
 impl Workspace {
     // ------------------------------------------------------------------ top bar
 
     fn render_topbar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let crate::panels::inspector::Shown { rec, cwd, project } = self.shown();
-        // Git actions live in the right sidebar; the branch pill here needs the repository of the session's own folder.
-        let repo = project.as_ref().filter(|p| p.git.is_some()).and(cwd.clone());
-        let busy = self.git_busy;
+        let crate::panels::inspector::Shown { rec, cwd, .. } = self.shown();
         let hints = self.shortcuts_shown;
         let session_active = self.active_id().is_some();
 
-        let title = rec.as_ref().map(|r| r.display_title().to_string()).unwrap_or_else(|| "Welcome".into());
-        let active_harness = rec.as_ref().and_then(|r| r.claude.as_ref()).map(|m| m.harness);
-        // The branch and the worktree of the session's own folder, which is not the project's folder for a worktree session.
-        let git = project.as_ref().and_then(|p| p.git.as_ref());
-        let branch = git.and_then(|g| cwd.as_deref().map_or(g.branch.as_deref(), |c| g.branch_at(c))).map(str::to_string);
-        let worktree = project.as_ref().zip(git).zip(cwd.as_deref()).and_then(|((p, g), c)| Some((p.id.clone(), c.to_path_buf(), crate::git::worktree::label(g, c)?)));
+        let title = rec.as_ref().map(|r| r.display_title().to_string()).unwrap_or_else(|| "Claudiu".into());
         // `.occlude()` on both groups: the bar is a Windows drag (HTCAPTION) area, which would otherwise swallow clicks on the buttons inside it.
         // The top bar spans the window and is drawn as the window background, not as a panel. macOS keeps its
         // traffic lights at the left (they are hidden in fullscreen); Windows/Linux get min/max/close at the right.
@@ -68,24 +60,6 @@ impl Workspace {
                             .on_click(cx.listener(|ws, _: &ClickEvent, _w, cx| ws.toggle_left(cx))),
                     )
                     .when(hints, |d| d.child(key_hint("Shift+B")))
-                    .when_some(active_harness, |d, h| {
-                        let color = theme::harness_color(h);
-                        d.child(
-                            div()
-                                .flex_none()
-                                .flex()
-                                .items_center()
-                                .gap(px(5.0))
-                                .px(px(7.0))
-                                .h(px(20.0))
-                                .rounded(px(6.0))
-                                .bg(hsla(theme::SURFACE_ELEVATED))
-                                .border_1()
-                                .border_color(hsla(theme::PANEL_BORDER))
-                                .child(logos::draw(logos::for_harness(h), 11.0, hsla(color)))
-                                .child(div().text_size(crate::panels::scale::px(11.0)).font_weight(FontWeight::MEDIUM).text_color(hsla(color)).child(h.name())),
-                        )
-                    })
                     .child(
                         div()
                             .min_w_0()
@@ -108,55 +82,6 @@ impl Workspace {
                                 .child(short_path(&p)),
                         )
                     })
-                    .when_some(branch.zip(repo), |d, (b, repo)| {
-                        // Click: switch branch or create one (see Workspace::open_branch_menu).
-                        let tail: AnyElement = if busy == Some(GitOp::Branch) { spinner("branch-busy", 12.0).into_any_element() } else { icon(IconName::ChevronDown, 12.0).into_any_element() };
-                        d.child(
-                            div()
-                                .id("branch")
-                                .occlude()
-                                .flex_none()
-                                .flex()
-                                .items_center()
-                                .gap(px(4.0))
-                                .px(px(7.0))
-                                .py(px(1.0))
-                                .rounded(px(10.0))
-                                .bg(hsla(0x26262a))
-                                .text_size(crate::panels::scale::px(11.0))
-                                .text_color(hsla(theme::TEXT_DIM))
-                                .cursor_pointer()
-                                .hover(|s| s.bg(hsla(0x323236)).text_color(hsla(theme::TEXT)))
-                                .child(icon(IconName::GitBranch, 12.0))
-                                .child(b)
-                                .child(tail)
-                                .dropdown(cx, move |ws, at, _w, cx| ws.open_branch_menu(repo.clone(), at, cx)),
-                        )
-                    })
-                    .when_some(worktree, |d, (project, cwd, label)| {
-                        // Click: the repository's worktrees and a new one (see Workspace::open_worktree_menu).
-                        d.child(
-                            div()
-                                .id("worktree")
-                                .occlude()
-                                .flex_none()
-                                .flex()
-                                .items_center()
-                                .gap(px(4.0))
-                                .px(px(7.0))
-                                .py(px(1.0))
-                                .rounded(px(10.0))
-                                .bg(hsla(0x26262a))
-                                .text_size(crate::panels::scale::px(11.0))
-                                .text_color(hsla(theme::TEXT_DIM))
-                                .cursor_pointer()
-                                .hover(|s| s.bg(hsla(0x323236)).text_color(hsla(theme::TEXT)))
-                                .child(icon(IconName::FolderGit2, 12.0))
-                                .child(label)
-                                .child(icon(IconName::ChevronDown, 12.0))
-                                .dropdown(cx, move |ws, at, _w, cx| ws.open_worktree_menu(project.clone(), cwd.clone(), at, cx)),
-                        )
-                    }),
             )
             .child(
                 div()
@@ -209,7 +134,31 @@ impl Workspace {
 
     // ------------------------------------------------------------------ the shown session
 
-    fn render_session(&mut self, _cx: &mut Context<Self>) -> AnyElement {
+    /// Keep the shown session's branch chip in step with its folder, git work and the open dialog.
+    fn sync_git_chip(&mut self, cx: &mut Context<Self>) {
+        let crate::panels::inspector::Shown { rec, cwd, project } = self.shown();
+        let Some(thread) = rec.as_ref().and_then(|r| self.live_view(&r.id)).and_then(|v| v.thread()).cloned() else { return };
+        let chip = project.as_ref().zip(cwd.as_deref()).and_then(|(p, c)| {
+            let g = p.git.as_ref()?;
+            let linked = (!g.is_main(c)).then(|| crate::git::worktree::label(g, c)).flatten();
+            let primary = g.branch_at(c).map(str::to_string).or_else(|| crate::git::worktree::label(g, c))?;
+            Some(crate::thread::GitChip {
+                primary,
+                linked,
+                busy: matches!(self.git_busy, Some(GitOp::Branch | GitOp::Worktree)),
+                open: matches!(self.git_picker(), Some(gp) if gp.target == GitPickerTarget::Session),
+            })
+        });
+        if thread.read(cx).git != chip {
+            thread.update(cx, |t, cx| {
+                t.git = chip;
+                cx.notify();
+            });
+        }
+    }
+
+    fn render_session(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        self.sync_git_chip(cx);
         let blank = || div().size_full().bg(hsla(theme::TERMINAL_BG)).into_any_element();
         let Some(id) = self.active.clone() else { return blank() };
         let Some(view) = self.live_view(&id).cloned() else { return blank() };
@@ -305,12 +254,10 @@ impl Workspace {
 
     // ------------------------------------------------------------------ details & home
 
-    fn render_home(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn render_home(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        use gpui::Focusable;
         let scaled = crate::panels::scale::px;
-        let enabled = self.store.data.settings.enabled_harnesses_list();
-        let harness = self.home_selected_harness();
-        let h_color = theme::harness_color(harness);
-        let accent = hsla(h_color);
+        let chosen_model = self.home_selected_model();
 
         let project = self.home_selected_project().cloned();
         let target_cwd = self.home_target_cwd();
@@ -318,304 +265,97 @@ impl Workspace {
         let branch = git.as_ref().and_then(|g| g.branch_at(&target_cwd)).map(str::to_string);
         let worktree_label = git.as_ref().and_then(|g| crate::git::worktree::label(g, &target_cwd));
 
-        // 1. Harness pills row across all enabled harnesses.
-        let mut harness_bar = div().flex().flex_wrap().items_center().gap(px(6.0));
-        for &h in &enabled {
-            let selected = h == harness;
-            let color = theme::harness_color(h);
-            harness_bar = harness_bar.child(
-                div()
-                    .id(gpui::SharedString::from(format!("home-harness-{}", h.name())))
-                    .px(px(10.0))
-                    .h(px(28.0))
-                    .rounded(px(7.0))
-                    .cursor_pointer()
-                    .bg(hsla(if selected { theme::ROW_ACTIVE } else { theme::PANEL_BG }))
-                    .border_1()
-                    .border_color(if selected { hsla(color) } else { hsla(theme::PANEL_BORDER) })
-                    .hover(|s| s.bg(hsla(theme::SURFACE_HOVER)))
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .text_size(scaled(12.0))
-                    .font_weight(if selected { FontWeight::SEMIBOLD } else { FontWeight::NORMAL })
-                    .text_color(hsla(if selected { theme::TEXT } else { theme::TEXT_DIM }))
-                    .child(logos::draw(logos::for_harness(h), 13.0, hsla(color)))
-                    .child(h.name())
-                    .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::HomeSelectHarness(h), window, cx))),
-            );
-        }
+        let project_open = matches!(self.picker_kind(), Some(WorkspacePicker::Project { mode: ProjectPickerMode::Home, .. }));
+        let project_label = project.as_ref().map_or_else(|| "Project".to_string(), |p| p.name.clone());
+        let project_chip = composer::chip("home-project", project_open)
+            .text_color(hsla(if project.is_some() { theme::TEXT } else { theme::TEXT_DIM }))
+            .child(icon(IconName::FolderOpen, 12.0).text_color(hsla(theme::TEXT_DIM)))
+            .child(div().max_w(px(150.0)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(project_label))
+            .child(icon(IconName::ChevronDown, 10.5).text_color(hsla(theme::TEXT_FAINT)))
+            .dropdown(cx, |ws, at, window, cx| {
+                ws.open_project_picker(ProjectPickerMode::Home, at, window, cx);
+            });
 
-        // 2. Context selectors: Project, Worktree, Branch.
-        let pill = |id: &'static str, glyph: IconName, text: String, active: bool| {
-            div()
-                .id(id)
-                .h(px(28.0))
-                .px(px(10.0))
-                .rounded(px(7.0))
-                .bg(hsla(theme::PANEL_BG))
-                .border_1()
-                .border_color(hsla(theme::PANEL_BORDER))
-                .hover(|s| s.bg(hsla(theme::SURFACE_HOVER)).border_color(hsla(0x343846)))
-                .flex()
-                .items_center()
-                .gap(px(6.0))
-                .cursor_pointer()
-                .text_size(scaled(12.0))
-                .text_color(hsla(if active { theme::TEXT } else { theme::TEXT_DIM }))
-                .child(icon(glyph, 12.5).text_color(hsla(theme::TEXT_DIM)))
-                .child(div().max_w(px(180.0)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(text))
-                .child(icon(IconName::ChevronDown, 11.0).text_color(hsla(theme::TEXT_FAINT)))
-        };
-
-        let project_label = project.as_ref().map_or_else(|| "Select project".to_string(), |p| p.name.clone());
-        let project_pill = pill("home-project", IconName::FolderOpen, project_label, project.is_some()).dropdown(cx, |ws, at, _w, cx| {
-            let current = ws.home_selected_project().map(|p| p.id.clone());
-            let mut items: Vec<MenuItem> = ws
-                .store
-                .data
-                .projects
-                .iter()
-                .map(|p| {
-                    let mut item = MenuItem::new(format!("{}{}", tick(current.as_ref() == Some(&p.id)), p.name), Act::HomeSelectProject(p.id.clone()));
-                    item.detail = Some(short_path(&p.path));
-                    item
-                })
-                .collect();
-            let sep = !items.is_empty();
-            items.push(MenuItem { separator_before: sep, ..MenuItem::new("Add project…", Act::ImportProject) });
-            ws.open_dropdown(at, items, cx);
-        });
-
-        let worktree_pill = git.as_ref().map(|g| {
-            let main_checkout = g.main_checkout().to_path_buf();
-            let label = worktree_label.clone().unwrap_or_else(|| "main".into());
-            let git_info = g.clone();
-            let current_cwd = target_cwd.clone();
-            pill("home-worktree", IconName::FolderGit2, label, true).dropdown(cx, move |ws, at, _w, cx| {
-                let here = git_info.folder_of(&current_cwd).map(crate::platform::path_key);
-                let mut items: Vec<MenuItem> = crate::git::worktree::folders(&git_info)
-                    .into_iter()
-                    .map(|folder| {
-                        let name = crate::git::worktree::label(&git_info, folder).unwrap_or_default();
-                        let own = here.as_deref() == Some(crate::platform::path_key(folder).as_str());
-                        MenuItem {
-                            hint: git_info.branch_in(folder).map(str::to_string),
-                            ..MenuItem::new(format!("{}{name}", tick(own)), Act::HomeSelectWorktree(folder.to_path_buf()))
-                        }
-                    })
-                    .collect();
-                items.push(MenuItem { separator_before: true, ..MenuItem::new("New worktree…", Act::NewWorktree(main_checkout.clone())) });
-                ws.open_dropdown(at, items, cx);
-            })
-        });
-
-        let branch_pill = branch.zip(git.as_ref()).map(|(b, _)| {
-            let repo = target_cwd.clone();
-            pill("home-branch", IconName::GitBranch, b, true).dropdown(cx, move |ws, at, _w, cx| ws.open_branch_menu(repo.clone(), at, cx))
-        });
-
-        // 3. Draggable Effort bar.
-        let effort_labels: Vec<String> = vec!["Low".into(), "Med".into(), "High".into(), "XHigh".into(), "Max".into()];
-        let effort_ix = self.home.effort.and_then(|e| Effort::ALL.iter().position(|x| *x == e));
-        let on_effort: crate::panels::widgets::EffortPick<Self> = std::rc::Rc::new(|ws, ix, window, cx| {
-            if let Some(&e) = Effort::ALL.get(ix) {
-                ws.act(Act::HomeSetEffort(Some(e)), window, cx);
-            }
-        });
-        let effort_row = div()
-            .flex()
-            .flex_col()
-            .gap(px(4.0))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(section_label("EFFORT"))
-                    .child(match self.home.effort {
-                        Some(_) => div()
-                            .id("home-effort-reset")
-                            .cursor_pointer()
-                            .text_size(scaled(11.0))
-                            .text_color(hsla(theme::TEXT_FAINT))
-                            .hover(|s| s.text_color(hsla(theme::TEXT)))
-                            .child("Reset to default")
-                            .on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::HomeSetEffort(None), window, cx)))
-                            .into_any_element(),
-                        None => div().text_size(scaled(11.0)).text_color(hsla(theme::TEXT_FAINT)).child("Harness default · drag or click").into_any_element(),
+        let git_chip = project.as_ref().and_then(|p| {
+            let g = p.git.as_ref()?;
+            let primary = branch.clone().or_else(|| worktree_label.clone()).unwrap_or_else(|| "main".into());
+            let linked = (!g.is_main(&target_cwd)).then(|| worktree_label.clone()).flatten();
+            let pid = p.id.clone();
+            let cwd = target_cwd.clone();
+            let open = matches!(self.picker_kind(), Some(WorkspacePicker::Git(gp)) if gp.target == GitPickerTarget::Home);
+            Some(
+                composer::git_chip("home-git", open, primary, linked, None)
+                    .dropdown(cx, move |ws, at, window, cx| {
+                        ws.open_git_picker(pid.clone(), cwd.clone(), GitPickerTarget::Home, at, window, cx);
                     }),
             )
-            .child(effort_slider(
-                "home-effort",
-                &effort_labels,
-                effort_ix,
-                accent,
-                self.home.effort_bounds.clone(),
-                self.home.effort_dragging.clone(),
-                on_effort,
-                cx,
-            ));
+        });
 
-        let launch_btn = div()
-            .id("home-launch")
-            .px(px(14.0))
-            .h(px(30.0))
-            .rounded(px(7.0))
-            .bg(accent)
-            .text_color(hsla(0x0d0e11))
-            .text_size(scaled(12.5))
-            .font_weight(FontWeight::SEMIBOLD)
-            .flex()
-            .items_center()
-            .gap(px(6.0))
-            .cursor_pointer()
-            .hover(|s| s.opacity(0.9))
-            .child(format!("Start {} session", harness.name()))
+        let model_open = matches!(self.picker_kind(), Some(WorkspacePicker::HomeModel { .. }));
+        let effort_badge = crate::thread::short_effort_label(self.home.effort.name());
+        let model_anchor = self.home.model_anchor.clone();
+        let model_chip = composer::chip("home-model", model_open)
+            .relative()
+            .child(model_anchor.probe())
+            .child(logos::draw(logos::for_harness(chosen_model.harness), 11.0, hsla(theme::TEXT_DIM)))
+            .child(div().max_w(px(190.0)).overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(hsla(theme::TEXT)).child(chosen_model.name.clone()))
+            .child(div().px(px(5.0)).rounded(px(4.0)).bg(hsla(0x1f1f22)).text_size(scaled(10.0)).text_color(hsla(theme::TEXT_DIM)).child(effort_badge))
+            .child(icon(IconName::ChevronDown, 10.5).text_color(hsla(theme::TEXT_FAINT)))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |ws, _: &MouseDownEvent, window, cx| {
+                    cx.stop_propagation();
+                    ws.open_home_model_picker(model_anchor.below(), window, cx);
+                }),
+            );
+
+        let start_btn = button("home-launch", "Start", true)
+            .h(px(26.0))
+            .px(px(12.0))
             .on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::HomeLaunch, window, cx)));
 
-        let launch_card = div()
-            .w_full()
-            .max_w(px(680.0))
-            .p(px(16.0))
-            .rounded(px(14.0))
-            .bg(hsla(theme::SURFACE_ELEVATED))
-            .border_1()
-            .border_color(hsla(theme::PANEL_BORDER))
-            .shadow_md()
-            .flex()
-            .flex_col()
-            .gap(px(12.0))
-            .child(harness_bar)
-            .child(
-                div()
-                    .px(px(12.0))
-                    .py(px(8.0))
-                    .rounded(px(9.0))
-                    .bg(hsla(theme::PANEL_BG))
-                    .border_1()
-                    .border_color(hsla(theme::PANEL_BORDER))
-                    .on_mouse_down(MouseButton::Left, cx.listener(|ws, _, window, cx| ws.home.prompt.update(cx, |p, cx| p.focus(window, cx))))
-                    .child(Textarea::new(&self.home.prompt).appearance(false)),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .items_center()
-                    .gap(px(6.0))
-                    .child(project_pill)
-                    .children(worktree_pill)
-                    .children(branch_pill),
-            )
-            .child(div().h(px(1.0)).w_full().bg(hsla(theme::BORDER)))
-            .child(effort_row)
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .pt(px(2.0))
-                    .child(
-                        div()
-                            .text_size(scaled(11.0))
-                            .text_color(hsla(theme::TEXT_FAINT))
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .child(short_path(&target_cwd)),
-                    )
-                    .child(launch_btn),
-            );
+        let focused = self.home.prompt.focus_handle(cx).is_focused(window);
+        let input = composer::input_area()
+            .min_h(px(74.0))
+            .on_mouse_down(MouseButton::Left, cx.listener(|ws, _, window, cx| ws.home.prompt.update(cx, |p, cx| p.focus(window, cx))))
+            .child(Textarea::new(&self.home.prompt).appearance(false))
+            .into_any_element();
+        let chips: Vec<AnyElement> = [Some(model_chip.into_any_element()), Some(project_chip.into_any_element()), git_chip.map(IntoElement::into_any_element)].into_iter().flatten().collect();
+        let composer = composer::frame(focused, None, input, chips, vec![start_btn.into_any_element()]).max_w(px(680.0));
 
-        // 4. Recent sessions below the launcher.
-        let mut recent = div().flex().flex_col().gap(px(2.0)).w_full().max_w(px(680.0));
-        let mut newest: Vec<&crate::store::SessionRecord> = self.store.data.sessions.iter().filter(|s| s.kind == SessionKind::Claude && !s.hidden).collect();
-        newest.sort_by_key(|s| std::cmp::Reverse(s.last_active));
-        let sessions: Vec<(String, String, i64, Harness, Option<String>)> = newest
-            .into_iter()
-            .take(5)
-            .map(|s| {
-                let h = s.claude.as_ref().map_or(Harness::Claude, |m| m.harness);
-                let proj = s.project_id.as_ref().and_then(|pid| self.store.project(pid)).map(|p| p.name.clone());
-                (s.id.clone(), s.display_title().to_string(), s.last_active, h, proj)
-            })
-            .collect();
-        let t = now();
-        if !sessions.is_empty() {
-            recent = recent.child(div().mb(px(4.0)).child(section_label("RECENT SESSIONS")));
-        }
-        for (i, (id, title, last_active, h, proj)) in sessions.into_iter().enumerate() {
-            recent = recent.child(
-                div()
-                    .id(gpui::SharedString::from(format!("recent-{i}")))
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .px(px(10.0))
-                    .py(px(7.0))
-                    .rounded(px(7.0))
-                    .cursor_pointer()
-                    .hover(|st| st.bg(hsla(theme::ROW_HOVER)))
-                    .child(logos::draw(logos::for_harness(h), 12.5, hsla(theme::harness_color(h))))
-                    .child(div().flex_1().min_w_0().text_size(scaled(13.0)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(title))
-                    .when_some(proj, |d, name| {
-                        d.child(div().px(px(6.0)).py(px(1.0)).rounded(px(4.0)).bg(hsla(theme::SURFACE_ELEVATED)).text_size(scaled(10.5)).text_color(hsla(theme::TEXT_DIM)).child(name))
-                    })
-                    .child(div().flex_none().text_size(scaled(11.5)).text_color(hsla(theme::TEXT_FAINT)).child(ago(last_active, t)))
-                    .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::Select(id.clone()), window, cx))),
-            );
-        }
-
-        let shortcut_chip = |keys: String, what: &str| {
+        let shortcut_chip = |keys: &str, what: &str| {
             div()
                 .flex()
                 .items_center()
                 .gap(px(5.0))
                 .text_size(scaled(11.0))
                 .text_color(hsla(theme::TEXT_FAINT))
-                .child(key_hint(&keys))
+                .child(key_hint(keys))
                 .child(what.to_string())
         };
 
         div()
-            .id("home-scroll")
+            .id("home-root")
+            .relative()
             .size_full()
-            .overflow_y_scroll()
             .px(px(28.0))
-            .py(px(36.0))
             .flex()
             .flex_col()
             .items_center()
             .justify_center()
-            .gap(px(22.0))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .gap(px(5.0))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(10.0))
-                            .child(div().text_size(scaled(24.0)).font_weight(FontWeight::BOLD).text_color(hsla(theme::TEXT)).child("Claudiu")),
-                    )
-                    .child(div().text_size(scaled(13.0)).text_color(hsla(theme::TEXT_DIM)).child("Native multi-harness workspace")),
-            )
-            .child(launch_card)
-            .child(recent)
+            .gap(px(20.0))
+            .child(div().text_size(scaled(24.0)).font_weight(FontWeight::MEDIUM).text_color(hsla(theme::TEXT)).child("What are we working on?"))
+            .child(composer)
             .child(
                 div()
                     .flex()
                     .flex_wrap()
                     .justify_center()
                     .gap(px(16.0))
-                    .child(shortcut_chip(shortcut("Shift+N"), "New session"))
-                    .child(shortcut_chip(shortcut("Shift+E"), "Editor"))
-                    .child(shortcut_chip(shortcut("J"), "Shell"))
-                    .child(shortcut_chip(shortcut(","), "Settings")),
+                    .child(shortcut_chip("Shift+N", "New session"))
+                    .child(shortcut_chip("Shift+E", "Editor"))
+                    .child(shortcut_chip("J", "Shell"))
+                    .child(shortcut_chip(",", "Settings")),
             )
     }
 
@@ -703,122 +443,81 @@ impl Workspace {
         )
     }
 
-    /// One labelled text field of the settings modal; `hint` is the default shown while it is empty.
+    /// Active modal overlay (Settings uses its own split-pane layout; other modals share the compact 440px card).
     fn render_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let modal = self.modal.as_ref()?;
-        let (title, body, confirm_label, danger): (String, gpui::AnyElement, String, bool) = match modal {
-            Modal::Confirm { title, body, confirm, danger, .. } => (
-                title.clone(),
-                div().text_size(crate::panels::scale::px(13.0)).text_color(hsla(theme::TEXT_DIM)).child(body.clone()).into_any_element(),
-                confirm.clone(),
-                *danger,
-            ),
-            Modal::Settings { .. } => ("Settings".into(), settings_body(self, window, cx), "Save".into(), false),
-            Modal::Advisor { input, .. } => (
-                "Advisor model".into(),
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(8.0))
-                    .child(div().text_size(crate::panels::scale::px(12.0)).text_color(hsla(theme::TEXT_DIM)).child("A model alias or id, such as opus, sonnet or claude-opus-5-5, or “off”. Claude Code saves it as your default."))
-                    .child(Input::new(input))
-                    .into_any_element(),
-                "Set".into(),
-                false,
-            ),
-            Modal::FileName { purpose, input, .. } => (
-                match purpose {
-                    crate::app::NameFor::FileIn(_) => "New file",
-                    crate::app::NameFor::FolderIn(_) => "New folder",
-                    crate::app::NameFor::Rename(_) => "Rename",
-                }
-                .into(),
-                Input::new(input).into_any_element(),
-                match purpose {
-                    crate::app::NameFor::FileIn(_) | crate::app::NameFor::FolderIn(_) => "Create",
-                    crate::app::NameFor::Rename(_) => "Rename",
-                }
-                .into(),
-                false,
-            ),
-            Modal::NewWorktree { input, base, .. } => {
-                use crate::git::worktree::Base;
-                let choice = |id: &'static str, label: &'static str, this: Base| {
-                    button(id, label, *base == this).on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::PickBase(this), window, cx)))
-                };
-                (
-                    "New worktree".into(),
+        let viewport = window.viewport_size();
+        let card = if matches!(modal, Modal::Settings { .. }) {
+            render_settings_card(self, viewport, window, cx)
+        } else {
+            let (title, body, confirm_label, danger): (String, gpui::AnyElement, String, bool) = match modal {
+                Modal::Confirm { title, body, confirm, danger, .. } => (
+                    title.clone(),
+                    div().text_size(crate::panels::scale::px(13.0)).text_color(hsla(theme::TEXT_DIM)).child(body.clone()).into_any_element(),
+                    confirm.clone(),
+                    *danger,
+                ),
+                Modal::Settings { .. } => unreachable!(),
+                Modal::FileName { purpose, input, .. } => (
+                    match purpose {
+                        crate::app::NameFor::FileIn(_) => "New file",
+                        crate::app::NameFor::FolderIn(_) => "New folder",
+                        crate::app::NameFor::Rename(_) => "Rename",
+                    }
+                    .into(),
+                    Input::new(input).into_any_element(),
+                    match purpose {
+                        crate::app::NameFor::FileIn(_) | crate::app::NameFor::FolderIn(_) => "Create",
+                        crate::app::NameFor::Rename(_) => "Rename",
+                    }
+                    .into(),
+                    false,
+                ),
+                Modal::GoToLine { input, .. } => ("Go to line".into(), Input::new(input).into_any_element(), "Go".into(), false),
+                Modal::Rename { input, .. } | Modal::NewBranch { input, .. } => (
+                    if matches!(modal, Modal::NewBranch { .. }) { "New branch" } else { "Rename session" }.into(),
+                    Input::new(input).into_any_element(),
+                    if matches!(modal, Modal::NewBranch { .. }) { "Create" } else { "Rename" }.into(),
+                    false,
+                ),
+            };
+            div()
+                .id("modal-card")
+                .occlude()
+                .track_focus(&self.modal_focus)
+                .w(px(440.0))
+                .p(px(22.0))
+                .rounded(px(12.0))
+                .bg(hsla(theme::PANEL_BG))
+                .border_1()
+                .border_color(hsla(theme::PANEL_BORDER))
+                .shadow_lg()
+                .flex()
+                .flex_col()
+                .gap(px(12.0))
+                .on_key_down(cx.listener(|ws, ev: &KeyDownEvent, window, cx| {
+                    let key = ev.keystroke.key.as_str();
+                    match (key, ws.modal.as_ref()) {
+                        ("escape", _) => ws.act(Act::Dismiss, window, cx),
+                        ("enter", Some(Modal::Confirm { .. })) => ws.submit_modal(window, cx),
+                        _ => {}
+                    }
+                }))
+                .child(div().text_size(crate::panels::scale::px(15.0)).font_weight(FontWeight::SEMIBOLD).child(title))
+                .child(body)
+                .child(
                     div()
                         .flex()
-                        .flex_col()
-                        .gap(px(10.0))
-                        .child(div().text_size(crate::panels::scale::px(12.0)).text_color(hsla(theme::TEXT_DIM)).child("The session moves into it and keeps its history. Claudiu makes a folder for it in its own data folder, outside your repository, with a new branch of this name."))
-                        .child(Input::new(input))
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(6.0))
-                                .child(div().text_size(crate::panels::scale::px(12.0)).text_color(hsla(theme::TEXT_FAINT)).child("Start from"))
-                                .child(choice("base-main", "Main", Base::Main))
-                                .child(choice("base-current", "Current branch", Base::Current)),
-                        )
-                        .into_any_element(),
-                    "Create and switch".into(),
-                    false,
+                        .justify_end()
+                        .gap(px(8.0))
+                        .mt(px(4.0))
+                        .child(button("modal-cancel", "Cancel", false).on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::Dismiss, window, cx))))
+                        .child({
+                            let b = if danger { danger_button("modal-ok", confirm_label) } else { button("modal-ok", confirm_label, true) };
+                            b.on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.submit_modal(window, cx)))
+                        }),
                 )
-            }
-            Modal::GoToLine { input, .. } => ("Go to line".into(), Input::new(input).into_any_element(), "Go".into(), false),
-            Modal::Rename { input, .. } | Modal::NewBranch { input, .. } => (
-                if matches!(modal, Modal::NewBranch { .. }) { "New branch" } else { "Rename session" }.into(),
-                Input::new(input).into_any_element(),
-                if matches!(modal, Modal::NewBranch { .. }) { "Create" } else { "Rename" }.into(),
-                false,
-            ),
         };
-        let viewport = window.viewport_size();
-        let card = div()
-            .id("modal-card")
-            .occlude()
-            .track_focus(&self.modal_focus)
-            .when(matches!(modal, Modal::Settings { .. }), |c| {
-                // Spacious Settings dialog, clamped so small windows stay usable.
-                c.w(crate::panels::scale::px(980.0).min(viewport.width - px(48.0)))
-                    .h(crate::panels::scale::px(680.0).min(viewport.height - px(48.0)))
-            })
-            .when(!matches!(modal, Modal::Settings { .. }), |c| c.w(px(440.0)))
-            .p(px(22.0))
-            .rounded(px(12.0))
-            .bg(hsla(theme::PANEL_BG))
-            .border_1()
-            .border_color(hsla(theme::PANEL_BORDER))
-            .shadow_lg()
-            .flex()
-            .flex_col()
-            .gap(px(12.0))
-            .capture_key_down(cx.listener(|ws, ev: &KeyDownEvent, window, cx| ws.settings_key(ev, window, cx)))
-            .on_key_down(cx.listener(|ws, ev: &KeyDownEvent, window, cx| {
-                let key = ev.keystroke.key.as_str();
-                match (key, ws.modal.as_ref()) {
-                    ("escape", _) => ws.act(Act::Dismiss, window, cx),
-                    ("enter", Some(Modal::Confirm { .. })) => ws.submit_modal(window, cx),
-                    _ => {}
-                }
-            }))
-            .child(div().text_size(crate::panels::scale::px(15.0)).font_weight(FontWeight::SEMIBOLD).child(title))
-            .child(body)
-            .child(
-                div()
-                    .flex()
-                    .justify_end()
-                    .gap(px(8.0))
-                    .mt(px(4.0))
-                    .child(button("modal-cancel", "Cancel", false).on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::Dismiss, window, cx))))
-                    .child({
-                        let b = if danger { danger_button("modal-ok", confirm_label) } else { button("modal-ok", confirm_label, true) };
-                        b.on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.submit_modal(window, cx)))
-                    }),
-            );
         Some(
             deferred(
                 div()
@@ -838,6 +537,530 @@ impl Workspace {
             .with_priority(20)
             .into_any_element(),
         )
+    }
+
+    /// Universal anchored dropdown picker (based on the Model Picker) used for model, project, branch & worktree,
+    /// Settings selectors, Skills scope, and editor selection.
+    fn render_picker(&mut self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let active = self.picker.as_ref()?;
+        let at = active.at;
+        let scaled = crate::panels::scale::px;
+        let accent = hsla(theme::ACCENT);
+        let priority = if self.modal.is_some() { 25 } else { 22 };
+
+        let (id, title, body): (&'static str, &'static str, AnyElement) = match &active.kind {
+            WorkspacePicker::HomeModel { search } => {
+                let query = search.read(cx).value().to_lowercase();
+                let words: Vec<&str> = query.split_whitespace().collect();
+                let chosen_model = self.home_selected_model();
+                let filtered: Vec<crate::harness::CatalogModel> = self
+                    .store
+                    .data
+                    .settings
+                    .aggregated_models()
+                    .into_iter()
+                    .filter(|m| {
+                        let hay = format!("{} {} {}", m.name, m.id, m.harness.name()).to_lowercase();
+                        words.iter().all(|w| hay.contains(w))
+                    })
+                    .collect();
+                let hi = self.home.model_highlight.min(filtered.len().saturating_sub(1));
+                let mut list = div().id("home-model-list").max_h(px(176.0)).overflow_y_scroll().track_scroll(&self.home.model_scroll).flex().flex_col().gap(px(2.0));
+                for (n, m) in filtered.iter().enumerate() {
+                    let selected = chosen_model.harness == m.harness && chosen_model.id == m.id;
+                    let focused = n == hi;
+                    let choice = m.clone();
+                    let logo = logos::draw(logos::for_harness(m.harness), 11.5, if selected { accent } else { hsla(theme::TEXT_FAINT) }).into_any_element();
+                    list = list.child(
+                        picker::row(gpui::SharedString::from(format!("home-model-opt-{n}")), Some(logo), m.name.clone(), None, None, selected, false)
+                            .when(focused && !selected, |d| d.bg(hsla(theme::SURFACE_HOVER)))
+                            .when(focused, |d| d.border_1().border_color(accent.opacity(0.45)))
+                            .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::HomeSelectModel(choice.clone()), window, cx))),
+                    );
+                }
+                if filtered.is_empty() {
+                    list = list.child(picker::empty_note("No models match."));
+                }
+
+                let effort_labels: Vec<String> = vec!["Low".into(), "Med".into(), "High".into(), "XHigh".into(), "Max".into()];
+                let effort_ix = Effort::ALL.iter().position(|x| *x == self.home.effort).unwrap_or(1);
+                let on_effort: crate::panels::widgets::EffortPick<Self> = std::rc::Rc::new(|ws, ix, window, cx| {
+                    if let Some(&e) = Effort::ALL.get(ix) {
+                        ws.act(Act::HomeSetEffort(e), window, cx);
+                    }
+                });
+                let effort_trailing = div().text_size(scaled(10.5)).text_color(hsla(theme::TEXT_FAINT)).child("←/→ or drag").into_any_element();
+                let loading = self.model_lookups.any_loading(&self.store.data.settings.enabled_harnesses_list());
+                let body = div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.0))
+                    .child(picker::search_input(search))
+                    .child(list)
+                    .when(loading, |d| {
+                        d.child(
+                            div()
+                                .px(px(6.0))
+                                .flex()
+                                .items_center()
+                                .gap(px(6.0))
+                                .text_size(scaled(11.0))
+                                .text_color(hsla(theme::TEXT_FAINT))
+                                .child(spinner("home-models-loading", 11.0))
+                                .child("Loading models…"),
+                        )
+                    })
+                    .child(picker::divider())
+                    .child(
+                        div()
+                            .flex_none()
+                            .flex()
+                            .flex_col()
+                            .gap(px(5.0))
+                            .child(picker::section_header("EFFORT", Some(effort_trailing)))
+                            .child(effort_slider(
+                                "home-effort",
+                                &effort_labels,
+                                Some(effort_ix),
+                                accent,
+                                self.home.effort_bounds.clone(),
+                                self.home.effort_dragging.clone(),
+                                on_effort,
+                                cx,
+                            )),
+                    );
+                ("home-model-dialog", "MODEL", body.into_any_element())
+            }
+            WorkspacePicker::Project { mode, search } => {
+                let mode = *mode;
+                let query = search.read(cx).value().to_lowercase();
+                let words: Vec<&str> = query.split_whitespace().collect();
+                let matches = |hay: &str| {
+                    let low = hay.to_lowercase();
+                    words.iter().all(|w| low.contains(w))
+                };
+                let current_id = match mode {
+                    ProjectPickerMode::Home => self.home_selected_project().map(|p| p.id.clone()),
+                    ProjectPickerMode::SidebarFilter => self.project_filter().map(|p| p.id.clone()),
+                };
+                let mut list = div().id("project-picker-list").max_h(px(260.0)).overflow_y_scroll().flex().flex_col().gap(px(2.0));
+                let mut shown = 0usize;
+                if mode == ProjectPickerMode::SidebarFilter && matches("all projects") {
+                    let selected = current_id.is_none();
+                    let lead = icon(IconName::FolderOpen, 12.0).text_color(if selected { accent } else { hsla(theme::TEXT_FAINT) }).into_any_element();
+                    list = list.child(
+                        picker::row("project-picker-all", Some(lead), "All projects", Some("Show sessions from every project".into()), None, selected, false)
+                            .on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::FilterProject(None), window, cx))),
+                    );
+                    shown += 1;
+                }
+                for (i, p) in self.store.data.projects.iter().enumerate() {
+                    let path_str = short_path(&p.path);
+                    if !matches(&format!("{} {path_str}", p.name)) {
+                        continue;
+                    }
+                    let selected = current_id.as_ref() == Some(&p.id);
+                    let lead = icon(IconName::FolderOpen, 12.0).text_color(if selected { accent } else { hsla(theme::TEXT_FAINT) }).into_any_element();
+                    let act = match mode {
+                        ProjectPickerMode::Home => Act::HomeSelectProject(p.id.clone()),
+                        ProjectPickerMode::SidebarFilter => Act::FilterProject(Some(p.id.clone())),
+                    };
+                    list = list.child(
+                        picker::row(gpui::SharedString::from(format!("project-picker-{i}")), Some(lead), p.name.clone(), Some(path_str), None, selected, false)
+                            .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(act.clone(), window, cx))),
+                    );
+                    shown += 1;
+                }
+                if shown == 0 {
+                    list = list.child(picker::empty_note("No projects match."));
+                }
+                let add_btn = picker::action_pill("project-picker-add", "+ Add project", |ws, window, cx| ws.act(Act::ImportProject, window, cx), cx).into_any_element();
+                let title = "PROJECT";
+                let body = div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.0))
+                    .child(picker::search_input(search))
+                    .child(picker::section_header("PROJECTS", Some(add_btn)))
+                    .child(list);
+                ("project-picker-dialog", title, body.into_any_element())
+            }
+            WorkspacePicker::Git(gp) => {
+                let query = gp.search.read(cx).value().to_lowercase();
+                let words: Vec<&str> = query.split_whitespace().collect();
+                let matches = |hay: &str| {
+                    let low = hay.to_lowercase();
+                    words.iter().all(|w| low.contains(w))
+                };
+                let target = gp.target;
+                let can_switch = gp.can_switch_worktree;
+                let new_wt_disabled = gp.new_worktree_reason.is_some() || !can_switch;
+                let main_checkout = gp.main_checkout.clone();
+                let cwd = gp.cwd.clone();
+
+                // The quickest way to start work: a worktree named after what was typed (or a random name), made at once.
+                let typed = gp.search.read(cx).value().trim().to_string();
+                let quick = |base: crate::git::worktree::Base| Act::QuickWorktree { main_checkout: main_checkout.clone(), name: typed.clone(), base, for_home: target == GitPickerTarget::Home };
+                let new_wt_title = if typed.is_empty() { "New worktree".to_string() } else { format!("New worktree “{typed}”") };
+                let new_wt_row: AnyElement = if new_wt_disabled {
+                    let why = gp.new_worktree_reason.clone().unwrap_or_else(|| "Resume the session to create one".into());
+                    picker::row("git-picker-new-worktree", Some(icon(IconName::Plus, 12.0).into_any_element()), new_wt_title, Some(why), None, false, true).into_any_element()
+                } else {
+                    let detail = match (typed.is_empty(), target) {
+                        (true, GitPickerTarget::Session) => "Random name, from main. The session moves into it; type above to name it",
+                        (true, GitPickerTarget::Home) => "Random name, from main. Type above to name it",
+                        (false, GitPickerTarget::Session) => "New branch from main. The session moves into it",
+                        (false, GitPickerTarget::Home) => "New branch from main, for this session",
+                    };
+                    let from_main = quick(crate::git::worktree::Base::Main);
+                    let from_current = quick(crate::git::worktree::Base::Current);
+                    let current_pill = picker::action_pill("git-picker-new-worktree-current", "from current", move |ws, window, cx| ws.act(from_current.clone(), window, cx), cx)
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .into_any_element();
+                    picker::row("git-picker-new-worktree", Some(icon(IconName::Plus, 12.0).text_color(accent).into_any_element()), new_wt_title, Some(detail.into()), Some(current_pill), false, false)
+                        .border_1()
+                        .border_color(hsla(theme::PANEL_BORDER))
+                        .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(from_main.clone(), window, cx)))
+                        .into_any_element()
+                };
+
+                let mut wt_list = div().id("git-picker-worktrees").max_h(px(108.0)).overflow_y_scroll().flex().flex_col().gap(px(2.0));
+                let mut wt_shown = 0usize;
+                for (i, wt) in gp.worktrees.iter().enumerate() {
+                    if !matches(&format!("{} {}", wt.label, wt.branch.as_deref().unwrap_or(""))) {
+                        continue;
+                    }
+                    let current = wt.current;
+                    let folder = wt.folder.clone();
+                    let remove = wt.remove.clone();
+                    let row_group = gpui::SharedString::from(format!("gp-wt-row-{i}"));
+                    let lead = icon(IconName::FolderGit2, 12.0).text_color(if current { accent } else { hsla(theme::TEXT_FAINT) }).into_any_element();
+                    let trailing = div()
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .when(wt.running, |d| d.child(div().w(px(5.0)).h(px(5.0)).rounded_full().bg(hsla(theme::OK))))
+                        .when_some(wt.branch.clone(), |d, b| {
+                            d.child(div().max_w(px(110.0)).overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(scaled(11.0)).text_color(hsla(theme::TEXT_FAINT)).child(b))
+                        })
+                        .children(remove.map(|act| {
+                            icon_button(gpui::SharedString::from(format!("git-picker-wt-rm-{i}")), IconName::X)
+                                .invisible()
+                                .group_hover(row_group.clone(), |s| s.visible())
+                                .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
+                                    cx.stop_propagation();
+                                    ws.act(act.clone(), window, cx);
+                                }))
+                        }))
+                        .into_any_element();
+                    let mut row = picker::row(gpui::SharedString::from(format!("git-picker-wt-{i}")), Some(lead), wt.label.clone(), None, Some(trailing), current, !can_switch).group(row_group);
+                    if can_switch {
+                        row = row.on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
+                            if current {
+                                ws.dismiss_picker(window, cx);
+                            } else {
+                                let act = match target {
+                                    GitPickerTarget::Home => Act::HomeSelectWorktree(folder.clone()),
+                                    GitPickerTarget::Session => Act::SwitchWorktree { folder: folder.clone(), base: Default::default() },
+                                };
+                                ws.act(act, window, cx);
+                            }
+                        }));
+                    }
+                    wt_list = wt_list.child(row);
+                    wt_shown += 1;
+                }
+                if wt_shown == 0 {
+                    wt_list = wt_list.child(picker::empty_note("No matching worktrees."));
+                }
+
+                let new_branch_cwd = cwd.clone();
+                let new_branch_btn = picker::action_pill("git-picker-new-branch", "+ New branch", move |ws, window, cx| ws.act(Act::NewBranch(new_branch_cwd.clone()), window, cx), cx).into_any_element();
+                // Spaces aren't allowed in branch names, as in the New branch dialog.
+                let typed_branch = typed.split_whitespace().collect::<Vec<_>>().join("-");
+                let branch_exists = matches!(&gp.branches, Some(Ok(list)) if list.iter().any(|b| b.name == typed_branch));
+                let create_branch_row = (!typed_branch.is_empty() && !branch_exists).then(|| {
+                    let act = Act::CreateBranch(cwd.clone(), typed_branch.clone());
+                    picker::row("git-picker-create-branch", Some(icon(IconName::Plus, 12.0).into_any_element()), format!("Create branch “{typed_branch}”"), Some("Switches this checkout to it".into()), None, false, false)
+                        .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
+                            ws.dismiss_picker(window, cx);
+                            ws.act(act.clone(), window, cx);
+                        }))
+                        .into_any_element()
+                });
+
+                let mut br_list = div().id("git-picker-branches").max_h(px(140.0)).overflow_y_scroll().flex().flex_col().gap(px(2.0));
+                match &gp.branches {
+                    None => {
+                        br_list = br_list.child(
+                            div()
+                                .px(px(8.0))
+                                .py(px(8.0))
+                                .flex()
+                                .items_center()
+                                .gap(px(6.0))
+                                .text_size(scaled(11.5))
+                                .text_color(hsla(theme::TEXT_FAINT))
+                                .child(spinner("git-picker-br-loading", 12.0))
+                                .child("Loading branches…"),
+                        );
+                    }
+                    Some(Err(why)) => {
+                        br_list = br_list.child(div().px(px(8.0)).py(px(6.0)).text_size(scaled(11.5)).text_color(hsla(theme::DANGER)).child(why.clone()));
+                    }
+                    Some(Ok(branches)) => {
+                        let mut br_shown = 0usize;
+                        for (i, br) in branches.iter().enumerate() {
+                            let hay = match &br.held_tree {
+                                Some((tree, _)) => format!("{} {tree}", br.name),
+                                None => br.name.clone(),
+                            };
+                            if !matches(&hay) {
+                                continue;
+                            }
+                            let current = br.current;
+                            let held = br.held_tree.clone();
+                            let name = br.name.clone();
+                            let dir = cwd.clone();
+                            let remove = br.remove.clone();
+                            let row_group = gpui::SharedString::from(format!("gp-br-row-{i}"));
+                            let act = match &held {
+                                Some((_, folder)) => match target {
+                                    GitPickerTarget::Home => Act::HomeSelectWorktree(folder.clone()),
+                                    GitPickerTarget::Session => Act::SwitchWorktree { folder: folder.clone(), base: Default::default() },
+                                },
+                                None => Act::SwitchBranch(dir, name),
+                            };
+                            let lead = icon(IconName::GitBranch, 12.0).text_color(if current { accent } else { hsla(theme::TEXT_FAINT) }).into_any_element();
+                            let trailing = (held.is_some() || remove.is_some()).then(|| {
+                                div()
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(6.0))
+                                    .when_some(held.map(|(tree, _)| tree), |d, tree| {
+                                        d.child(
+                                            div()
+                                                .flex()
+                                                .items_center()
+                                                .gap(px(4.0))
+                                                .text_size(scaled(11.0))
+                                                .text_color(hsla(theme::TEXT_FAINT))
+                                                .child(icon(IconName::FolderGit2, 11.0))
+                                                .child(format!("opens {tree}")),
+                                        )
+                                    })
+                                    .children(remove.map(|rm_act| {
+                                        icon_button(gpui::SharedString::from(format!("git-picker-br-rm-{i}")), IconName::X)
+                                            .invisible()
+                                            .group_hover(row_group.clone(), |s| s.visible())
+                                            .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
+                                                cx.stop_propagation();
+                                                ws.act(rm_act.clone(), window, cx);
+                                            }))
+                                    }))
+                                    .into_any_element()
+                            });
+                            let row = picker::row(gpui::SharedString::from(format!("git-picker-br-{i}")), Some(lead), br.name.clone(), None, trailing, current, false)
+                                .group(row_group)
+                                .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
+                                    if current {
+                                        ws.dismiss_picker(window, cx);
+                                    } else {
+                                        ws.act(act.clone(), window, cx);
+                                    }
+                                }));
+                            br_list = br_list.child(row);
+                            br_shown += 1;
+                        }
+                        if br_shown == 0 {
+                            br_list = br_list.child(picker::empty_note("No matching branches."));
+                        }
+                    }
+                }
+
+                let body = div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.0))
+                    .child(picker::search_input(&gp.search))
+                    .child(new_wt_row)
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(4.0))
+                            .child(picker::section_header("WORKTREES", None))
+                            .when(!can_switch, |d| d.child(div().text_size(scaled(11.0)).text_color(hsla(theme::TEXT_FAINT)).child("Resume the session to switch worktrees.")))
+                            .child(wt_list),
+                    )
+                    .child(picker::divider())
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(4.0))
+                            .child(picker::section_header("BRANCHES", Some(new_branch_btn)))
+                            .children(create_branch_row)
+                            .child(br_list),
+                    );
+                ("git-picker-dialog", "BRANCH & WORKTREE", body.into_any_element())
+            }
+            WorkspacePicker::SettingsModel { search } => {
+                let Some(Modal::Settings { default_model, subagents, .. }) = &self.modal else { return None };
+                let current = default_model.clone();
+                let query = search.read(cx).value().to_lowercase();
+                let words: Vec<&str> = query.split_whitespace().collect();
+                let mut all = self.store.data.settings.aggregated_models_for(&subagents.enabled);
+                if !all.iter().any(|m| m.harness == current.harness && m.id == current.id) {
+                    all.insert(0, current.clone());
+                }
+                let mut list = div().id("settings-model-list").max_h(px(260.0)).overflow_y_scroll().flex().flex_col().gap(px(2.0));
+                let mut shown = 0usize;
+                for (n, m) in all.into_iter().enumerate() {
+                    let hay = format!("{} {} {}", m.name, m.id, m.harness.name()).to_lowercase();
+                    if !words.iter().all(|w| hay.contains(w)) {
+                        continue;
+                    }
+                    let selected = m.harness == current.harness && m.id == current.id;
+                    let choice = m.clone();
+                    let logo = logos::draw(logos::for_harness(m.harness), 11.5, if selected { accent } else { hsla(theme::TEXT_FAINT) }).into_any_element();
+                    list = list.child(
+                        picker::row(gpui::SharedString::from(format!("settings-model-opt-{n}")), Some(logo), m.name.clone(), None, None, selected, false)
+                            .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::PickDefaultModel(choice.clone()), window, cx))),
+                    );
+                    shown += 1;
+                }
+                if shown == 0 {
+                    list = list.child(picker::empty_note("No models match."));
+                }
+                let loading = self.model_lookups.any_loading(&subagents.enabled);
+                let body = div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.0))
+                    .child(picker::search_input(search))
+                    .child(list)
+                    .when(loading, |d| {
+                        d.child(
+                            div()
+                                .px(px(6.0))
+                                .flex()
+                                .items_center()
+                                .gap(px(6.0))
+                                .text_size(scaled(11.0))
+                                .text_color(hsla(theme::TEXT_FAINT))
+                                .child(spinner("settings-models-loading", 11.0))
+                                .child("Loading models…"),
+                        )
+                    });
+                ("settings-model-dialog", "DEFAULT MODEL", body.into_any_element())
+            }
+            WorkspacePicker::SettingsEffort => {
+                let Some(Modal::Settings { effort, .. }) = &self.modal else { return None };
+                let current = *effort;
+                let mut list = div().id("settings-effort-list").flex().flex_col().gap(px(2.0));
+                for (i, &opt) in Effort::ALL.iter().enumerate() {
+                    let selected = current == opt;
+                    list = list.child(
+                        picker::row(gpui::SharedString::from(format!("settings-effort-{i}")), None, opt.label(), None, None, selected, false)
+                            .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::PickEffort(opt), window, cx))),
+                    );
+                }
+                ("settings-effort-dialog", "EFFORT", list.into_any_element())
+            }
+            WorkspacePicker::SettingsPermission => {
+                let Some(Modal::Settings { default_model, permission, .. }) = &self.modal else { return None };
+                let current = permission.clone();
+                let modes = self.store.data.settings.modes_for(default_model.harness);
+                let mut list = div().id("settings-perm-list").max_h(px(340.0)).overflow_y_scroll().flex().flex_col().gap(px(2.0));
+                for (i, (id, name)) in modes.into_iter().enumerate() {
+                    let selected = current == id;
+                    let display = picker::format_mode_name(&id, &name);
+                    let desc = picker::permission_description(&id).to_string();
+                    let lead = icon(IconName::Lock, 12.0).text_color(if selected { accent } else { hsla(theme::TEXT_FAINT) }).into_any_element();
+                    let pick_id = id.clone();
+                    list = list.child(
+                        picker::row(
+                            gpui::SharedString::from(format!("settings-perm-{i}")),
+                            Some(lead),
+                            display,
+                            Some(desc),
+                            None,
+                            selected,
+                            false,
+                        )
+                        .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::PickPermission(pick_id.clone()), window, cx))),
+                    );
+                }
+                ("settings-perm-dialog", "PERMISSION MODE", list.into_any_element())
+            }
+            WorkspacePicker::SkillsScope { search } => {
+                let query = search.read(cx).value().to_lowercase();
+                let words: Vec<&str> = query.split_whitespace().collect();
+                let matches = |hay: &str| {
+                    let low = hay.to_lowercase();
+                    words.iter().all(|w| low.contains(w))
+                };
+                let current = self.effective_skill_scope();
+                let mut list = div().id("skills-scope-list").max_h(px(250.0)).overflow_y_scroll().flex().flex_col().gap(px(2.0));
+                let mut shown = 0usize;
+                if matches("global all workspaces") {
+                    let selected = current == SkillScope::Global;
+                    let lead = icon(IconName::FolderOpen, 12.0).text_color(if selected { accent } else { hsla(theme::TEXT_FAINT) }).into_any_element();
+                    list = list.child(
+                        picker::row("skills-scope-global", Some(lead), "Global (all workspaces)", Some("Symlink into global harness skills folders".into()), None, selected, false)
+                            .on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::SetSkillScope(SkillScope::Global), window, cx))),
+                    );
+                    shown += 1;
+                }
+                for (i, p) in self.store.data.projects.iter().enumerate() {
+                    let path_str = short_path(&p.path);
+                    if !matches(&format!("{} {path_str}", p.name)) {
+                        continue;
+                    }
+                    let scope = SkillScope::Project(p.id.clone());
+                    let selected = current == scope;
+                    let lead = icon(IconName::FolderOpen, 12.0).text_color(if selected { accent } else { hsla(theme::TEXT_FAINT) }).into_any_element();
+                    list = list.child(
+                        picker::row(gpui::SharedString::from(format!("skills-scope-{i}")), Some(lead), p.name.clone(), Some(path_str), None, selected, false)
+                            .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::SetSkillScope(scope.clone()), window, cx))),
+                    );
+                    shown += 1;
+                }
+                if shown == 0 {
+                    list = list.child(picker::empty_note("No matching scope."));
+                }
+                let body = div().flex().flex_col().gap(px(8.0)).child(picker::search_input(search)).child(list);
+                ("skills-scope-dialog", "SKILL SCOPE", body.into_any_element())
+            }
+            WorkspacePicker::Editor { target } => {
+                let current = self.preferred_editor();
+                let target = target.clone();
+                let mut list = div().id("editor-picker-list").flex().flex_col().gap(px(2.0));
+                let mut shown = 0usize;
+                for (i, &(ed, found)) in self.editors.iter().enumerate() {
+                    if !found {
+                        continue;
+                    }
+                    let selected = current == Some(ed);
+                    let path = target.clone();
+                    let lead = icon(IconName::ExternalLink, 12.0).text_color(if selected { accent } else { hsla(theme::TEXT_FAINT) }).into_any_element();
+                    list = list.child(
+                        picker::row(gpui::SharedString::from(format!("editor-picker-{i}")), Some(lead), ed.label(), None, None, selected, false)
+                            .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::OpenEditor(ed, path.clone()), window, cx))),
+                    );
+                    shown += 1;
+                }
+                if shown == 0 {
+                    list = list.child(picker::empty_note("No editors found."));
+                }
+                ("editor-picker-dialog", "OPEN IN EDITOR", list.into_any_element())
+            }
+        };
+
+        Some(picker::dropdown_overlay((id, title), at, priority, body, |ws: &mut Self, window, cx| ws.dismiss_picker(window, cx), window, cx))
     }
 
     fn render_toast(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -937,9 +1160,10 @@ impl Render for Workspace {
         let window_w = f32::from(window.viewport_size().width);
         let main: AnyElement = match &self.main {
             Main::Terminals => self.render_session(cx),
-            Main::Home => self.render_home(cx).into_any_element(),
+            Main::Home => self.render_home(window, cx).into_any_element(),
         };
         let menu = self.render_menu(cx);
+        let picker_dialog = self.render_picker(window, cx);
         let modal = self.render_modal(window, cx);
         let agent_dialog = self.render_harness_dialog(window, cx);
         let toast = self.render_toast(cx);
@@ -956,6 +1180,71 @@ impl Render for Workspace {
             .flex_col()
             .bg(hsla(theme::APP_BG))
             .text_color(hsla(theme::TEXT))
+            .capture_key_down(cx.listener(|ws, ev: &KeyDownEvent, window, cx| {
+                let m = &ev.keystroke.modifiers;
+                let plain = !m.control && !m.alt && !m.platform && !m.shift && !m.function;
+                if ev.keystroke.key == "escape" && plain && ws.picker.is_some() {
+                    ws.dismiss_picker(window, cx);
+                    cx.stop_propagation();
+                    return;
+                }
+                // Alt+P / Option+P toggles the Welcome model picker when on the New Session page.
+                if ev.keystroke.key == "p" && m.alt && !m.control && !m.platform && !m.shift && matches!(ws.main, Main::Home) && ws.modal.is_none() {
+                    if matches!(ws.picker_kind(), Some(WorkspacePicker::HomeModel { .. })) {
+                        ws.dismiss_picker(window, cx);
+                    } else {
+                        let at = ws.home.model_anchor.below();
+                        ws.open_home_model_picker(at, window, cx);
+                    }
+                    cx.stop_propagation();
+                    return;
+                }
+                // Keyboard navigation inside the Welcome model picker: Up/Down moves model, Left/Right steps effort, Enter confirms.
+                if plain && let Some(WorkspacePicker::HomeModel { search }) = ws.picker_kind() {
+                    let query = search.read(cx).value().to_lowercase();
+                    let words: Vec<&str> = query.split_whitespace().collect();
+                    let filtered: Vec<crate::harness::CatalogModel> = ws
+                        .store
+                        .data
+                        .settings
+                        .aggregated_models()
+                        .into_iter()
+                        .filter(|m| {
+                            let hay = format!("{} {} {}", m.name, m.id, m.harness.name()).to_lowercase();
+                            words.iter().all(|w| hay.contains(w))
+                        })
+                        .collect();
+                    match ev.keystroke.key.as_str() {
+                        "up" | "down" => {
+                            if !filtered.is_empty() {
+                                let cur = ws.home.model_highlight.min(filtered.len() - 1);
+                                ws.home.model_highlight = if ev.keystroke.key == "up" {
+                                    if cur == 0 { filtered.len() - 1 } else { cur - 1 }
+                                } else {
+                                    (cur + 1) % filtered.len()
+                                };
+                                ws.home.model_scroll.scroll_to_item(ws.home.model_highlight);
+                            }
+                            cx.stop_propagation();
+                            cx.notify();
+                        }
+                        "left" | "right" => {
+                            let cur = Effort::ALL.iter().position(|e| *e == ws.home.effort).unwrap_or(1) as isize;
+                            let delta = if ev.keystroke.key == "left" { -1 } else { 1 };
+                            let next = (cur + delta).clamp(0, Effort::ALL.len() as isize - 1) as usize;
+                            ws.act(Act::HomeSetEffort(Effort::ALL[next]), window, cx);
+                            cx.stop_propagation();
+                        }
+                        "enter" => {
+                            if let Some(choice) = filtered.get(ws.home.model_highlight.min(filtered.len().saturating_sub(1))).cloned() {
+                                ws.act(Act::HomeSelectModel(choice), window, cx);
+                            }
+                            cx.stop_propagation();
+                        }
+                        _ => {}
+                    }
+                }
+            }))
             .on_action(cx.listener(|ws, _: &NewClaude, window, cx| {
                 let cwd = ws.new_session_cwd();
                 ws.act(Act::NewClaude { cwd }, window, cx)
@@ -1085,119 +1374,209 @@ impl Render for Workspace {
             )
             .children(menu)
             .children(modal)
+            .children(picker_dialog)
             .children(agent_dialog)
             .children(toast)
     }
 }
 
-/// The Settings dialog's body: the category list on the left and the chosen page on the right.
-fn settings_body(ws: &Workspace, window: &mut Window, cx: &mut Context<Workspace>) -> AnyElement {
+/// Split-pane Settings window: left navigation rail with icons + version footer, right scrollable page with grouped
+/// section cards and a dedicated Save/Cancel action bar.
+fn render_settings_card(
+    ws: &Workspace,
+    viewport: gpui::Size<gpui::Pixels>,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) -> gpui::Stateful<gpui::Div> {
     let (page, worktrees, scroll) = (ws.settings_page, &ws.worktrees_page, &ws.settings_scroll);
-    let Some(Modal::Settings { shell, model, harness, effort, permission, updates, chrome, scale, trimmed, claudiu_off, skill_search, list_focus, renaming, subagents, .. }) = &ws.modal else {
-        return div().into_any_element();
+    let Some(Modal::Settings { shell, default_model, effort, permission, updates, scale, trimmed, claudiu_off, skill_search, list_focus, renaming, .. }) = &ws.modal else {
+        return div().id("modal-card");
     };
-    let (updates, chrome, scale) = (*updates, *chrome, *scale);
+    let (updates, scale) = (*updates, *scale);
     let scaled = crate::panels::scale::px;
-    let faint = |text: String| div().text_size(scaled(11.0)).text_color(hsla(theme::TEXT_FAINT)).child(text);
-    let field = |label: &str, input: &Entity<InputState>| {
-        div().flex().flex_col().gap(px(4.0)).child(section_label(label.to_string())).child(Input::new(input))
-    };
-    let content = match page {
-        SettingsPage::General => div()
-            .flex()
-            .flex_col()
-            .gap(px(10.0))
-            .child(field("SHELL", shell))
-            .child(div().flex().child(button("settings-check-setup", "Check setup", false).on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::OpenSetup, window, cx)))))
-            .child(
-                div()
-                    .h(px(34.0))
-                    .px(px(12.0))
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .rounded(px(7.0))
-                    .bg(hsla(theme::SURFACE_ELEVATED))
-                    .border_1()
-                    .border_color(hsla(theme::PANEL_BORDER))
-                    .text_size(px(13.0))
-                    .child("Scale (text and terminal)")
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(10.0))
-                            .child(scale_step("scale-down", "−", -(crate::panels::scale::STEP as i32), cx))
-                            .child(div().w(px(40.0)).flex().justify_center().child(format!("{scale}%")))
-                            .child(scale_step("scale-up", "+", crate::panels::scale::STEP as i32, cx)),
-                    ),
-            )
-            .child(settings_toggle("settings-updates", "Check for updates", updates, |m| match m {
-                Modal::Settings { updates, .. } => Some(updates),
-                _ => None,
-            }, cx))
-            .child(div().flex().child(if ws.update.status == Status::Checking {
-                button_disabled("settings-check-updates", "Checking…")
-            } else {
-                button("settings-check-updates", "Check now", false).on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::CheckForUpdates, window, cx)))
-            })),
-        SettingsPage::Sessions => div()
-            .flex()
-            .flex_col()
-            .gap(px(10.0))
-            .child(harness_row(*harness, &subagents.enabled, cx))
-            .child(field("MODEL FOR NEW SESSIONS", model))
-            .child(picker_row("settings-effort", "Effort", *effort, &Effort::ALL, Effort::name, Act::PickEffort, cx))
-            .child(picker_row("settings-permission", "Permission mode", *permission, &PermissionMode::ALL, PermissionMode::name, Act::PickPermission, cx))
-            .children((*permission == Some(PermissionMode::BypassPermissions)).then(|| faint("Every new session will run commands and edit files without asking.".to_string())))
-            .children((*permission == Some(PermissionMode::Plan) && trimmed.contains(&crate::claude::trim::Trim::PlanMode)).then(|| {
-                faint("Plan mode is off under Claude Code's tools, so new Claude Code sessions start in default mode.".to_string())
-            }))
-            .child(settings_toggle("settings-chrome", "Claude in Chrome for new Claude Code sessions", chrome, |m| match m {
-                Modal::Settings { chrome, .. } => Some(chrome),
-                _ => None,
-            }, cx)),
-        SettingsPage::Harnesses => ws.harnesses_page(cx),
-        SettingsPage::ClaudiuTools => {
-            let mut list = div().flex().flex_col().gap(px(8.0)).child(faint(
-                "Applies to new sessions. Running sessions keep their tools. Resumed sessions get the new tools, and the old instructions stay until their next compaction."
-                    .to_string(),
-            ));
-            for feature in Feature::ALL {
-                list = list.child(switch_row(("settings-claudiu", feature as usize), feature.label(), None, !claudiu_off.contains(&feature), move |ws, _, _| {
-                    if let Some(Modal::Settings { claudiu_off, .. }) = ws.modal.as_mut() {
-                        flip(claudiu_off, feature);
-                    }
-                }, cx));
+    let faint = |text: String| div().text_size(scaled(11.5)).text_color(hsla(theme::TEXT_FAINT)).child(text);
+
+    let content: AnyElement = match page {
+        SettingsPage::General => {
+            let model_open = matches!(ws.picker_kind(), Some(WorkspacePicker::SettingsModel { .. }));
+            let effort_open = matches!(ws.picker_kind(), Some(WorkspacePicker::SettingsEffort));
+            let perm_open = matches!(ws.picker_kind(), Some(WorkspacePicker::SettingsPermission));
+            let modes = ws.store.data.settings.modes_for(default_model.harness);
+            let perm_raw = modes.iter().find(|(id, _)| id == permission).map_or(permission.as_str(), |(_, n)| n.as_str());
+            let perm_display = picker::format_mode_name(permission, perm_raw);
+            let mut session_rows: Vec<AnyElement> = vec![
+                default_model_row(default_model, model_open, cx).into_any_element(),
+                settings_picker_row("settings-effort", ("Effort", "Reasoning depth for new sessions"), effort.label().to_string(), effort_open, |ws, at, _, cx| ws.open_settings_effort_picker(at, cx), cx).into_any_element(),
+                settings_picker_row("settings-permission", ("Permission mode", "Approval policy for tool calls and edits"), perm_display, perm_open, |ws, at, _, cx| ws.open_settings_permission_picker(at, cx), cx).into_any_element(),
+            ];
+            if matches!(permission.as_str(), "bypassPermissions" | "fullAccess" | "full_access" | "yolo") {
+                session_rows.push(
+                    div()
+                        .px(px(14.0))
+                        .py(px(8.0))
+                        .bg(hsla(0x191512))
+                        .text_size(scaled(11.5))
+                        .text_color(hsla(theme::WARN))
+                        .child("Every new session will run commands and edit files without asking.")
+                        .into_any_element(),
+                );
+            } else if permission == "plan" && trimmed.contains(&crate::claude::trim::Trim::PlanMode) {
+                session_rows.push(
+                    div()
+                        .px(px(14.0))
+                        .py(px(8.0))
+                        .text_size(scaled(11.5))
+                        .text_color(hsla(theme::TEXT_FAINT))
+                        .child("Plan mode is off under Claude Code's tools, so new Claude Code sessions start in default mode.")
+                        .into_any_element(),
+                );
             }
-            list
+            let env_rows: Vec<AnyElement> = vec![
+                row_shell(
+                    "Interface scale",
+                    Some("Adjusts UI text and terminal font size"),
+                    div()
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .gap(px(4.0))
+                        .p(px(2.0))
+                        .rounded(px(6.0))
+                        .bg(hsla(theme::PANEL_BG))
+                        .border_1()
+                        .border_color(hsla(theme::PANEL_BORDER))
+                        .child(scale_step("scale-down", "−", -(crate::panels::scale::STEP as i32), cx))
+                        .child(div().w(px(42.0)).flex().justify_center().text_size(scaled(12.0)).text_color(hsla(theme::TEXT)).child(format!("{scale}%")))
+                        .child(scale_step("scale-up", "+", crate::panels::scale::STEP as i32, cx))
+                        .into_any_element(),
+                )
+                .into_any_element(),
+                row_shell(
+                    "Shell",
+                    Some("Program used for the bottom shell panel"),
+                    div().w(px(230.0)).flex_none().child(Input::new(shell).h(px(28.0)).text_size(scaled(12.0))).into_any_element(),
+                )
+                .into_any_element(),
+                row_shell(
+                    "Environment setup",
+                    Some("Verify installed CLIs, Node, and agent bridges"),
+                    button("settings-check-setup", "Check setup", false)
+                        .on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::OpenSetup, window, cx)))
+                        .into_any_element(),
+                )
+                .into_any_element(),
+            ];
+
+            let check_btn = if ws.update.status == Status::Checking {
+                button_disabled("settings-check-updates", "Checking…").into_any_element()
+            } else {
+                button("settings-check-updates", "Check now", false)
+                    .on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::CheckForUpdates, window, cx)))
+                    .into_any_element()
+            };
+            let updates_row = div()
+                .id("settings-updates")
+                .px(px(14.0))
+                .py(px(11.0))
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap(px(12.0))
+                .cursor_pointer()
+                .hover(|s| s.bg(hsla(theme::SURFACE_HOVER)))
+                .child(row_labels("Automatic updates", Some("Check for new Claudiu releases in the background")))
+                .child(
+                    div()
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .gap(px(10.0))
+                        .child(div().on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).child(check_btn))
+                        .child(toggle_switch(updates)),
+                )
+                .on_click(cx.listener(|ws, _: &ClickEvent, _, cx| {
+                    if let Some(Modal::Settings { updates, .. }) = ws.modal.as_mut() {
+                        *updates = !*updates;
+                    }
+                    cx.notify();
+                }))
+                .into_any_element();
+
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(18.0))
+                .child(settings_group("NEW SESSIONS", None, session_rows))
+                .child(settings_group("INTERFACE & ENVIRONMENT", None, env_rows))
+                .child(settings_group("UPDATES", None, vec![updates_row]))
+                .into_any_element()
         }
-        SettingsPage::Projects => ws.projects_page(renaming.as_ref(), cx),
-        SettingsPage::Skills => ws.skills_page(skill_search, cx),
-        SettingsPage::Worktrees => worktrees_page(worktrees, cx),
-        SettingsPage::About => div().child(faint(format!(
-            "Claudiu {} · Native multi-harness agent workspace. Independent project, not affiliated with Anthropic, OpenAI, or Google.",
-            env!("CARGO_PKG_VERSION")
-        ))),
+        SettingsPage::Harnesses => ws.harnesses_page(cx).into_any_element(),
+        SettingsPage::Skills => ws.skills_page(skill_search, cx).into_any_element(),
+        SettingsPage::ClaudiuTools => {
+            let rows: Vec<AnyElement> = Feature::ALL
+                .into_iter()
+                .map(|feature| {
+                    let on = !claudiu_off.contains(&feature);
+                    div()
+                        .id(("settings-claudiu", feature as usize))
+                        .px(px(14.0))
+                        .py(px(11.0))
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(12.0))
+                        .cursor_pointer()
+                        .hover(|s| s.bg(hsla(theme::SURFACE_HOVER)))
+                        .child(row_labels(feature.label(), Some(feature.description())))
+                        .child(toggle_switch(on))
+                        .on_click(cx.listener(move |ws, _: &ClickEvent, _, cx| {
+                            if let Some(Modal::Settings { claudiu_off, .. }) = ws.modal.as_mut() {
+                                flip(claudiu_off, feature);
+                            }
+                            cx.notify();
+                        }))
+                        .into_any_element()
+                })
+                .collect();
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(10.0))
+                .child(settings_group("BUILT-IN MCP TOOLS", None, rows))
+                .child(faint("Running sessions keep their current tools. Resumed sessions pick up changes on their next compaction.".into()))
+                .into_any_element()
+        }
+        SettingsPage::Projects => div()
+            .flex()
+            .flex_col()
+            .gap(px(20.0))
+            .child(ws.projects_section(renaming.as_ref(), cx))
+            .child(worktrees_section(worktrees, cx))
+            .into_any_element(),
     };
-    let categories = SettingsPage::ALL.into_iter().enumerate().fold(
-        div().id("settings-categories").track_focus(list_focus).w(scaled(160.0)).flex_none().flex().flex_col().gap(px(2.0)),
+
+    let nav = SettingsPage::ALL.into_iter().enumerate().fold(
+        div().id("settings-categories").track_focus(list_focus).flex().flex_col().gap(px(2.0)),
         |list, (i, p)| {
             let selected = p == page;
             let focus = list_focus.clone();
             list.child(
                 div()
                     .id(("settings-category", i))
-                    .h(scaled(28.0))
+                    .h(scaled(30.0))
                     .px(px(10.0))
                     .flex()
                     .items_center()
+                    .gap(px(8.0))
                     .rounded(px(6.0))
                     .text_size(scaled(13.0))
-                    .text_color(hsla(if selected { theme::ACCENT } else { theme::TEXT_DIM }))
-                    .when(selected, |d| d.bg(hsla(0x1f1f1f)))
+                    .font_weight(if selected { FontWeight::MEDIUM } else { FontWeight::NORMAL })
+                    .text_color(hsla(if selected { theme::TEXT } else { theme::TEXT_DIM }))
+                    .when(selected, |d| d.bg(hsla(theme::ROW_ACTIVE)))
                     .cursor_pointer()
-                    .hover(|s| s.bg(hsla(0x1f1f1f)))
+                    .hover(|s| s.bg(hsla(theme::ROW_HOVER)))
+                    .child(icon(p.icon(), 13.5).text_color(hsla(if selected { theme::ACCENT } else { theme::TEXT_FAINT })))
                     .child(p.label())
                     .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
                         ws.set_settings_page(p, cx);
@@ -1206,28 +1585,173 @@ fn settings_body(ws: &Workspace, window: &mut Window, cx: &mut Context<Workspace
             )
         },
     );
-    div()
-        .flex_1()
-        .min_h_0()
+
+    let sidebar = div()
+        .w(scaled(204.0))
+        .flex_none()
+        .h_full()
+        .bg(hsla(0x09090a))
+        .border_r_1()
+        .border_color(hsla(theme::BORDER))
+        .p(px(14.0))
         .flex()
-        .gap(px(16.0))
-        .child(categories)
-        .child(scroll.wire(div().id("settings-page").flex_1().min_w_0(), window).child(content))
-        .into_any_element()
+        .flex_col()
+        .justify_between()
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(10.0))
+                .child(div().px(px(10.0)).pt(px(4.0)).text_size(scaled(14.5)).font_weight(FontWeight::SEMIBOLD).text_color(hsla(theme::TEXT)).child("Settings"))
+                .child(nav),
+        )
+        .child(
+            div()
+                .px(px(10.0))
+                .pt(px(12.0))
+                .border_t_1()
+                .border_color(hsla(theme::BORDER))
+                .flex()
+                .flex_col()
+                .gap(px(2.0))
+                .child(div().text_size(scaled(11.5)).font_weight(FontWeight::MEDIUM).text_color(hsla(theme::TEXT_DIM)).child(format!("Claudiu {}", env!("CARGO_PKG_VERSION"))))
+                .child(div().text_size(scaled(10.5)).text_color(hsla(theme::TEXT_FAINT)).child("Independent project")),
+        );
+
+    let page_header = div()
+        .flex()
+        .flex_col()
+        .gap(px(3.0))
+        .pb(px(14.0))
+        .border_b_1()
+        .border_color(hsla(theme::BORDER))
+        .child(div().text_size(scaled(17.0)).font_weight(FontWeight::SEMIBOLD).text_color(hsla(theme::TEXT)).child(page.label()))
+        .child(div().text_size(scaled(12.0)).text_color(hsla(theme::TEXT_DIM)).child(page.subtitle()));
+
+    let footer = div()
+        .flex_none()
+        .px(px(24.0))
+        .py(px(12.0))
+        .border_t_1()
+        .border_color(hsla(theme::BORDER))
+        .bg(hsla(0x09090a))
+        .flex()
+        .items_center()
+        .justify_between()
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .text_size(scaled(11.0))
+                .text_color(hsla(theme::TEXT_FAINT))
+                .child(key_badge("Esc"))
+                .child("close"),
+        )
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .child(button("modal-cancel", "Cancel", false).on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::Dismiss, window, cx))))
+                .child(button("modal-ok", "Save", true).on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.submit_modal(window, cx)))),
+        );
+
+    let main_pane = div()
+        .flex_1()
+        .min_w_0()
+        .h_full()
+        .flex()
+        .flex_col()
+        .bg(hsla(theme::PANEL_BG))
+        .child(
+            scroll.wire(div().id("settings-page").flex_1().min_h_0(), window).child(
+                div()
+                    .px(px(26.0))
+                    .py(px(20.0))
+                    .flex()
+                    .flex_col()
+                    .gap(px(18.0))
+                    .child(page_header)
+                    .child(content),
+            ),
+        )
+        .child(footer);
+
+    div()
+        .id("modal-card")
+        .occlude()
+        .track_focus(&ws.modal_focus)
+        .w(scaled(880.0).min(viewport.width - px(48.0)))
+        .h(scaled(620.0).min(viewport.height - px(48.0)))
+        .rounded(px(12.0))
+        .overflow_hidden()
+        .bg(hsla(theme::PANEL_BG))
+        .border_1()
+        .border_color(hsla(theme::PANEL_BORDER))
+        .shadow_lg()
+        .flex()
+        .capture_key_down(cx.listener(|ws, ev: &KeyDownEvent, window, cx| ws.settings_key(ev, window, cx)))
+        .on_key_down(cx.listener(|ws, ev: &KeyDownEvent, window, cx| {
+            if ev.keystroke.key.as_str() == "escape" {
+                ws.act(Act::Dismiss, window, cx);
+            }
+        }))
+        .child(sidebar)
+        .child(main_pane)
 }
 
-/// The Worktrees page: the worktree folders Claudiu made, by repository, each to show in the file manager or remove.
-fn worktrees_page(page: &crate::app::WorktreesPage, cx: &mut Context<Workspace>) -> gpui::Div {
+fn row_labels(title: &str, subtitle: Option<&str>) -> gpui::Div {
     let scaled = crate::panels::scale::px;
-    let faint = |text: String| div().text_size(scaled(11.0)).text_color(hsla(theme::TEXT_FAINT)).child(text);
+    div()
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_w_0()
+        .gap(px(2.0))
+        .child(div().text_size(scaled(13.0)).text_color(hsla(theme::TEXT)).child(title.to_string()))
+        .children(subtitle.map(|s| div().text_size(scaled(11.5)).text_color(hsla(theme::TEXT_FAINT)).child(s.to_string())))
+}
+
+fn row_shell(title: &str, subtitle: Option<&str>, trailing: AnyElement) -> gpui::Div {
+    div()
+        .px(px(14.0))
+        .py(px(10.0))
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap(px(12.0))
+        .child(row_labels(title, subtitle))
+        .child(trailing)
+}
+
+/// The Worktrees section on the Projects page: worktree folders Claudiu made, grouped by repository.
+fn worktrees_section(page: &crate::app::WorktreesPage, cx: &mut Context<Workspace>) -> gpui::Div {
+    let scaled = crate::panels::scale::px;
+    let faint = |text: String| div().text_size(scaled(11.5)).text_color(hsla(theme::TEXT_FAINT)).child(text);
     let reveal = if cfg!(target_os = "macos") { "Show in Finder" } else { "Show in File Explorer" };
-    let mut list = div().flex().flex_col().gap(px(8.0)).child(faint(
-        "Worktrees Claudiu made live in its own data folder, outside your repositories. Removing one here asks the same question as the x in the top-bar menu.".to_string(),
-    ));
-    let Some(stored) = &page.stored else { return list.child(faint("Looking…".to_string())) };
+    let empty_card = |msg: &str| {
+        settings_group(
+            "WORKTREES",
+            None,
+            vec![
+                div()
+                    .px(px(14.0))
+                    .py(px(14.0))
+                    .text_size(scaled(12.0))
+                    .text_color(hsla(theme::TEXT_FAINT))
+                    .child(msg.to_string())
+                    .into_any_element(),
+            ],
+        )
+    };
+    let Some(stored) = &page.stored else {
+        return empty_card("Looking for worktrees…");
+    };
     if stored.is_empty() {
-        return list.child(faint("No worktrees yet. Make one from the worktree button in the top bar.".to_string()));
+        return empty_card("No worktrees yet. Create one from the branch & worktree dialog in the top bar or welcome screen.");
     }
+    let mut rows: Vec<AnyElement> = Vec::new();
     let mut group: Option<&std::path::Path> = None;
     for (i, item) in stored.iter().enumerate() {
         let repo_folder = item.folder.parent();
@@ -1237,7 +1761,14 @@ fn worktrees_page(page: &crate::app::WorktreesPage, cx: &mut Context<Workspace>)
                 Some(main) => main.to_string_lossy().into_owned(),
                 None => format!("{} (repository not found)", repo_folder.and_then(|p| p.file_name()).unwrap_or_default().to_string_lossy()),
             };
-            list = list.child(div().mt(px(4.0)).child(section_label(heading)));
+            rows.push(
+                div()
+                    .px(px(14.0))
+                    .py(px(7.0))
+                    .bg(hsla(0x101012))
+                    .child(section_label(heading))
+                    .into_any_element(),
+            );
         }
         let name = item.folder.file_name().unwrap_or_default().to_string_lossy().into_owned();
         let (folder, remove) = (item.folder.clone(), item.main_checkout.clone());
@@ -1250,13 +1781,9 @@ fn worktrees_page(page: &crate::app::WorktreesPage, cx: &mut Context<Workspace>)
         let row = div()
             .flex()
             .flex_col()
-            .gap(px(6.0))
-            .px(px(10.0))
-            .py(px(6.0))
-            .rounded(px(6.0))
-            .bg(hsla(0x111111))
-            .border_1()
-            .border_color(hsla(0x242424))
+            .gap(px(8.0))
+            .px(px(14.0))
+            .py(px(10.0))
             .child(
                 div()
                     .flex()
@@ -1267,112 +1794,165 @@ fn worktrees_page(page: &crate::app::WorktreesPage, cx: &mut Context<Workspace>)
                         div()
                             .flex_1()
                             .min_w_0()
-                            .child(div().text_size(scaled(13.0)).child(name))
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.0))
+                            .child(div().text_size(scaled(13.0)).font_weight(FontWeight::MEDIUM).child(name))
                             .child(faint(item.folder.to_string_lossy().into_owned()).overflow_hidden().text_ellipsis().whitespace_nowrap()),
                     )
                     .child(
                         div()
                             .flex()
+                            .flex_none()
                             .gap(px(6.0))
                             .child(button(format!("worktree-reveal-{i}"), reveal, false).on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::Reveal(revealed.clone()), window, cx))))
                             .child(button(format!("worktree-remove-{i}"), "Remove", false).on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(ask.clone(), window, cx)))),
                     ),
             );
-        list = list.child(match asked {
-            None => row,
-            Some(asked) => {
-                let act = asked.act.clone();
-                let confirm = if asked.danger { danger_button(format!("worktree-confirm-{i}"), asked.confirm.clone()) } else { button(format!("worktree-confirm-{i}"), asked.confirm.clone(), true) };
-                row.child(faint(asked.body.clone())).child(
-                    div()
-                        .flex()
-                        .gap(px(6.0))
-                        .child(button(format!("worktree-cancel-{i}"), "Cancel", false).on_click(cx.listener(|ws, _: &ClickEvent, _window, cx| {
-                            ws.worktrees_page.asking = None;
-                            cx.notify();
-                        })))
-                        .child(confirm.on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(act.clone(), window, cx)))),
-                )
+        rows.push(
+            match asked {
+                None => row,
+                Some(asked) => {
+                    let act = asked.act.clone();
+                    let confirm = if asked.danger { danger_button(format!("worktree-confirm-{i}"), asked.confirm.clone()) } else { button(format!("worktree-confirm-{i}"), asked.confirm.clone(), true) };
+                    row.child(faint(asked.body.clone())).child(
+                        div()
+                            .flex()
+                            .gap(px(6.0))
+                            .child(button(format!("worktree-cancel-{i}"), "Cancel", false).on_click(cx.listener(|ws, _: &ClickEvent, _window, cx| {
+                                ws.worktrees_page.asking = None;
+                                cx.notify();
+                            })))
+                            .child(confirm.on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(act.clone(), window, cx)))),
+                    )
+                }
             }
-        });
+            .into_any_element(),
+        );
     }
-    list
-}
-
-/// An On/Off row in the Settings modal; `field` picks the flag it flips.
-fn settings_toggle(id: &'static str, label: &'static str, on: bool, field: fn(&mut Modal) -> Option<&mut bool>, cx: &mut Context<Workspace>) -> impl IntoElement {
-    switch_row(id, label, None, on, move |ws, _, _| {
-        if let Some(flag) = ws.modal.as_mut().and_then(field) {
-            *flag = !*flag;
-        }
-    }, cx)
-}
-
-/// The harness new sessions run in, picked from enabled harnesses.
-fn harness_row(current: Harness, enabled: &[Harness], cx: &mut Context<Workspace>) -> impl IntoElement {
-    let options: Vec<Harness> = if enabled.is_empty() { Harness::ALL.to_vec() } else { enabled.to_vec() };
     div()
-        .id("settings-harness")
-        .h(px(34.0))
-        .px(px(12.0))
+        .flex()
+        .flex_col()
+        .gap(px(6.0))
+        .child(settings_group("WORKTREES", None, rows))
+        .child(faint("Worktrees Claudiu makes live in its own data folder, outside your repositories.".into()))
+}
+
+/// Default model row inside the New sessions card; clicking opens the universal model dropdown anchored to its pill.
+fn default_model_row(current: &crate::harness::CatalogModel, open: bool, cx: &mut Context<Workspace>) -> impl IntoElement {
+    let scaled = crate::panels::scale::px;
+    let accent = hsla(theme::ACCENT);
+    let row_anchor = Anchor::default();
+    let pill_anchor = Anchor::default();
+    div()
+        .id("settings-default-model")
+        .relative()
+        .px(px(14.0))
+        .py(px(11.0))
         .flex()
         .items_center()
         .justify_between()
-        .rounded(px(7.0))
-        .bg(hsla(theme::SURFACE_ELEVATED))
-        .border_1()
-        .border_color(hsla(theme::PANEL_BORDER))
-        .text_size(crate::panels::scale::px(13.0))
+        .gap(px(12.0))
         .cursor_pointer()
-        .child("Default harness for new sessions")
-        .child(div().text_color(hsla(theme::harness_color(current))).child(current.name()))
-        .dropdown(cx, move |ws, at, _window, cx| {
-            let items = options.iter().map(|&h| MenuItem::new(format!("{}{}", tick(current == h), h.name()), Act::PickHarness(h))).collect();
-            ws.open_dropdown(at, items, cx);
-        })
+        .hover(|s| s.bg(hsla(theme::SURFACE_HOVER)))
+        .child(row_anchor.probe())
+        .child(row_labels("Default model", Some("Model used when starting a new session")))
+        .child(
+            div()
+                .relative()
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .px(px(9.0))
+                .h(px(26.0))
+                .rounded(px(6.0))
+                .bg(hsla(if open { theme::ROW_ACTIVE } else { theme::PANEL_BG }))
+                .border_1()
+                .border_color(hsla(if open { theme::ACCENT } else { theme::PANEL_BORDER }))
+                .child(pill_anchor.probe())
+                .child(logos::draw(logos::for_harness(current.harness), 11.5, hsla(theme::TEXT_DIM)))
+                .child(div().max_w(px(220.0)).overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(scaled(12.0)).text_color(accent).child(current.name.clone()))
+                .child(icon(IconName::ChevronDown, 10.5).text_color(hsla(theme::TEXT_FAINT))),
+        )
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |ws, _: &MouseDownEvent, window, cx| {
+                cx.stop_propagation();
+                ws.open_settings_model_picker(pill_anchor.below_right().with_hit(row_anchor.bounds()), window, cx);
+            }),
+        )
 }
 
-fn picker_row<T: Copy + PartialEq + 'static>(
+fn settings_picker_row(
     id: &'static str,
-    label: &'static str,
-    current: Option<T>,
-    options: &'static [T],
-    name: fn(T) -> &'static str,
-    pick: fn(Option<T>) -> Act,
+    (label, subtitle): (&'static str, &'static str),
+    current: String,
+    open: bool,
+    on_open: impl Fn(&mut Workspace, Dropdown, &mut Window, &mut Context<Workspace>) + 'static,
     cx: &mut Context<Workspace>,
 ) -> impl IntoElement {
-    const DEFAULT: &str = "Harness default";
+    let scaled = crate::panels::scale::px;
+    let row_anchor = Anchor::default();
+    let pill_anchor = Anchor::default();
     div()
         .id(id)
-        .h(px(32.0))
-        .px(px(10.0))
+        .relative()
+        .px(px(14.0))
+        .py(px(11.0))
         .flex()
         .items_center()
         .justify_between()
-        .rounded(px(6.0))
-        .bg(hsla(0x111111))
-        .border_1()
-        .border_color(hsla(0x242424))
-        .text_size(crate::panels::scale::px(13.0))
+        .gap(px(12.0))
         .cursor_pointer()
-        .child(label)
-        .child(div().text_color(hsla(if current.is_some() { theme::ACCENT } else { theme::TEXT_FAINT })).child(current.map_or(DEFAULT, name)))
-        .dropdown(cx, move |ws, at, _window, cx| {
-            let items = std::iter::once(MenuItem::new(format!("{}{DEFAULT}", tick(current.is_none())), pick(None)))
-                .chain(options.iter().map(|&o| MenuItem::new(format!("{}{}", tick(current == Some(o)), name(o)), pick(Some(o)))))
-                .collect();
-            ws.open_dropdown(at, items, cx);
-        })
+        .hover(|s| s.bg(hsla(theme::SURFACE_HOVER)))
+        .child(row_anchor.probe())
+        .child(row_labels(label, Some(subtitle)))
+        .child(
+            div()
+                .relative()
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .px(px(9.0))
+                .h(px(26.0))
+                .rounded(px(6.0))
+                .bg(hsla(if open { theme::ROW_ACTIVE } else { theme::PANEL_BG }))
+                .border_1()
+                .border_color(hsla(if open { theme::ACCENT } else { theme::PANEL_BORDER }))
+                .text_size(scaled(12.0))
+                .child(pill_anchor.probe())
+                .child(div().text_color(hsla(theme::ACCENT)).child(current))
+                .child(icon(IconName::ChevronDown, 10.5).text_color(hsla(theme::TEXT_FAINT))),
+        )
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |ws, _: &MouseDownEvent, window, cx| {
+                cx.stop_propagation();
+                on_open(ws, pill_anchor.below_right().with_hit(row_anchor.bounds()), window, cx);
+            }),
+        )
 }
 
 /// A − / + button in the Settings modal that moves the scale by `by` percent, within the allowed range.
 fn scale_step(id: &'static str, label: &'static str, by: i32, cx: &mut Context<Workspace>) -> impl IntoElement {
-    div().id(id).w(px(22.0)).h(px(22.0)).flex().items_center().justify_center().rounded(px(4.0)).cursor_pointer().hover(|s| s.bg(hsla(0x242424))).child(label).on_click(
-        cx.listener(move |ws, _: &ClickEvent, _w, cx| {
+    div()
+        .id(id)
+        .w(px(22.0))
+        .h(px(22.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(4.0))
+        .text_color(hsla(theme::TEXT_DIM))
+        .cursor_pointer()
+        .hover(|s| s.bg(hsla(theme::SURFACE_HOVER)).text_color(hsla(theme::TEXT)))
+        .child(label)
+        .on_click(cx.listener(move |ws, _: &ClickEvent, _w, cx| {
             if let Some(Modal::Settings { scale, .. }) = ws.modal.as_mut() {
                 *scale = (*scale as i32 + by).clamp(crate::panels::scale::MIN as i32, crate::panels::scale::MAX as i32) as u32;
             }
             cx.notify();
-        }),
-    )
+        }))
 }

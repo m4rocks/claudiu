@@ -2,6 +2,8 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use super::*;
 use crate::skills::registry::CatalogEntry;
@@ -33,6 +35,9 @@ pub struct SkillsPage {
     pub error: Option<String>,
     /// Keys (`source/skill_id`) currently being downloaded.
     pub installing: HashSet<String>,
+    /// Serializes disk syncs and drops superseded snapshots so rapid toggles never apply out of order.
+    sync_serial: Arc<AtomicU64>,
+    sync_lock: Arc<Mutex<()>>,
     /// Injectable loaders so headless tests run without touching the network.
     pub fetch_popular: fn() -> Result<Vec<CatalogEntry>, String>,
     pub fetch_search: fn(&str) -> Result<Vec<CatalogEntry>, String>,
@@ -53,6 +58,8 @@ impl Default for SkillsPage {
             loading: false,
             error: None,
             installing: HashSet::new(),
+            sync_serial: Arc::new(AtomicU64::new(0)),
+            sync_lock: Arc::new(Mutex::new(())),
             fetch_popular: crate::skills::registry::popular,
             fetch_search: crate::skills::registry::search,
             install_pkg: crate::skills::registry::install_from_github,
@@ -251,8 +258,11 @@ impl Workspace {
         let home = self.skills_home();
         let projects: Vec<PathBuf> = self.store.data.projects.iter().map(|p| p.path.clone()).collect();
         let removed = name.clone();
+        self.skills_page.sync_serial.fetch_add(1, Ordering::SeqCst);
+        let lock = self.skills_page.sync_lock.clone();
         self.in_background(
             move || {
+                let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
                 let Some(home) = home else {
                     return Err(std::io::Error::other("home directory not found"));
                 };
@@ -277,8 +287,17 @@ impl Workspace {
         let active = self.active_skill_harnesses(extra_harness);
         let root = skills_root();
         let projects: Vec<(String, PathBuf)> = self.store.data.projects.iter().map(|p| (p.id.clone(), p.path.clone())).collect();
+        let ticket = self.skills_page.sync_serial.fetch_add(1, Ordering::SeqCst) + 1;
+        let serial = self.skills_page.sync_serial.clone();
+        let lock = self.skills_page.sync_lock.clone();
         self.in_background(
-            move || sync_all(&root, &home, &active, &config, &projects),
+            move || {
+                let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+                if serial.load(Ordering::SeqCst) != ticket {
+                    return Vec::new();
+                }
+                sync_all(&root, &home, &active, &config, &projects)
+            },
             |ws, errors, cx| {
                 if let Some(first) = errors.first() {
                     ws.toast(format!("Couldn't sync skills: {first}"), true, cx);

@@ -7,8 +7,9 @@ use super::{Adapter, Reopen};
 
 pub const ADAPTER: Adapter = Adapter {
     name: "Antigravity",
+    server_name: "agy",
     server: || super::subagent_server(Agent::Antigravity),
     reopen: Reopen::Resume,
+    delete_model_session: false,
     // agy has no documented way to resume a session by id from its command line.
-    resume_command: |_| None,
 };

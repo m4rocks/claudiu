@@ -1,4 +1,4 @@
-//! Git worktrees in the app: the dialog for a new one, the top-bar menu that switches the shown session between them
+//! Git worktrees in the app: making one from the Branch & Worktree dialog, switching the shown session between them
 //! (see `switch.rs`), and removing them. Claudiu makes the worktrees with git (see `git/worktree.rs`).
 
 use std::path::Path;
@@ -6,7 +6,6 @@ use std::path::Path;
 use super::*;
 use crate::git::GitInfo;
 use crate::git::worktree;
-use crate::panels::widgets::tick;
 use crate::platform::path_key;
 
 /// What the Worktrees page of Settings shows.
@@ -27,12 +26,64 @@ pub struct Asked {
     pub act: Act,
 }
 
+/// Whether the unified Branch & Worktree dialog is acting on the shown session or the Welcome screen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GitPickerTarget {
+    Session,
+    Home,
+}
+
+/// One worktree row inside the unified Branch & Worktree dialog.
+pub struct GitPickerWorktree {
+    pub label: String,
+    pub folder: PathBuf,
+    pub branch: Option<String>,
+    pub current: bool,
+    pub running: bool,
+    pub remove: Option<Act>,
+}
+
+/// One branch row inside the unified Branch & Worktree dialog.
+pub struct GitPickerBranch {
+    pub name: String,
+    pub current: bool,
+    pub held_tree: Option<(String, PathBuf)>,
+    pub remove: Option<Act>,
+}
+
+/// Unified Branch & Worktree dialog state, shared by the Welcome screen and the window's top bar.
+pub struct GitPicker {
+    pub cwd: PathBuf,
+    pub main_checkout: PathBuf,
+    pub target: GitPickerTarget,
+    pub search: Entity<InputState>,
+    pub can_switch_worktree: bool,
+    pub new_worktree_reason: Option<String>,
+    pub worktrees: Vec<GitPickerWorktree>,
+    /// `None` while branches are loading off the UI thread.
+    pub branches: Option<Result<Vec<GitPickerBranch>, String>>,
+}
+
+/// What making a worktree called `typed` does (a random name when it is blank): on the Welcome screen it is made and
+/// chosen for the next session; for a running session, the session moves into it. Err says why the name can't be used.
+pub(super) fn new_worktree_act(main_checkout: &Path, typed: &str, base: worktree::Base, for_home: bool) -> Result<Act, String> {
+    let typed = typed.trim();
+    let name = if typed.is_empty() {
+        worktree::generate_name(uuid::Uuid::new_v4().as_u128(), worktree::name_taken(main_checkout))
+    } else {
+        worktree::check_name(typed).and_then(|()| worktree::check_unused(main_checkout, typed))?;
+        typed.to_string()
+    };
+    let folder = worktree::folder(main_checkout, &name);
+    Ok(if for_home { Act::CreateHomeWorktree { main_checkout: main_checkout.to_path_buf(), folder, base } } else { Act::SwitchWorktree { folder, base } })
+}
+
 impl Workspace {
     /// Show a page of the Settings dialog. The Worktrees page looks at the disk every time it opens.
     pub(crate) fn set_settings_page(&mut self, page: SettingsPage, cx: &mut Context<Self>) {
         self.settings_page = page;
         self.worktrees_page.asking = None;
-        if page == SettingsPage::Worktrees {
+        if page == SettingsPage::Projects {
             self.load_stored_worktrees(cx);
         }
         if page == SettingsPage::Skills {
@@ -53,44 +104,113 @@ impl Workspace {
         .detach();
     }
 
-    pub(super) fn ask_worktree(&mut self, main_checkout: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        let input = self.modal_input("", "Name, or leave blank for a random one", window, cx);
-        self.modal = Some(Modal::NewWorktree { main_checkout, input, base: Base::default() });
+    /// Create a new worktree from the Welcome screen and select it for the upcoming session.
+    pub(super) fn create_home_worktree(&mut self, main_checkout: PathBuf, folder: PathBuf, base: Base, cx: &mut Context<Self>) {
+        if self.git_busy.is_some() {
+            return;
+        }
+        self.git_busy = Some(GitOp::Worktree);
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let dir = folder.clone();
+            let result = cx.background_executor().spawn(async move { worktree::add(&main_checkout, &dir, base) }).await;
+            let _ = this.update(cx, |ws, cx| {
+                ws.git_busy = None;
+                ws.store.refresh_git();
+                ws.store.save_if_dirty();
+                match result {
+                    Ok(()) => {
+                        let name = folder.file_name().map_or_else(|| "worktree".into(), |n| n.to_string_lossy().into_owned());
+                        ws.home.worktree = Some(folder);
+                        ws.toast(format!("Created worktree {name}"), false, cx);
+                    }
+                    Err(why) => ws.toast(format!("Couldn't create worktree: {}", why.trim()), true, cx),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
-    /// The top-bar menu: the repository's working trees, each switching the shown session into it, and a new worktree.
-    pub fn open_worktree_menu(&mut self, project: Id, cwd: PathBuf, at: crate::panels::widgets::Dropdown, cx: &mut Context<Self>) {
+    /// Open the unified Branch & Worktree dropdown for `project` at `cwd`, anchored to `at`. Worktrees populate
+    /// immediately; branches load off the UI thread and stream in when ready.
+    pub fn open_git_picker(&mut self, project: Id, cwd: PathBuf, target: GitPickerTarget, at: crate::panels::widgets::Dropdown, window: &mut Window, cx: &mut Context<Self>) {
         let Some(git) = self.store.project(&project).and_then(|p| p.git.clone()) else { return };
+        self.menu = None;
         let here = git.folder_of(&cwd).map(path_key);
-        // A switch restarts the process, so it needs one that is running.
-        let can_switch = self.active_id().is_some_and(|id| self.is_running(id, cx));
-        let mut title = MenuItem::new("Worktrees", Act::Dismiss);
-        title.disabled = true;
-        title.hint = (!can_switch).then(|| "Resume the session to switch".to_string());
-        let mut items = vec![title];
-        items.extend(worktree::folders(&git).into_iter().map(|folder| {
-            let name = worktree::label(&git, folder).unwrap_or_default();
-            let running = self.live.iter().any(|l| self.store.session(&l.id).is_some_and(|s| same_folder(&git, &s.cwd, folder)));
-            let own = here.as_deref() == Some(path_key(folder).as_str());
-            let remove = worktree::removable(git.main_checkout(), folder).then(|| Act::RemoveWorktree { main_checkout: git.main_checkout().to_path_buf(), folder: folder.to_path_buf() });
-            MenuItem {
-                label: format!("{}{name}{}", tick(own), if running { "  ●" } else { "" }),
-                hint: git.branch_in(folder).map(str::to_string),
-                act: if own { Act::Dismiss } else { Act::SwitchWorktree { folder: folder.to_path_buf(), base: Base::default() } },
-                disabled: !can_switch,
-                remove,
-                ..MenuItem::new("", Act::Dismiss)
-            }
-        }));
-        let source = worktree::source(Some(&git));
-        items.push(MenuItem {
-            hint: source.err().map(str::to_string),
-            disabled: source.is_err() || !can_switch,
-            separator_before: true,
-            ..MenuItem::new("New worktree…", Act::NewWorktree(git.main_checkout().to_path_buf()))
+        let can_switch_worktree = match target {
+            GitPickerTarget::Home => true,
+            GitPickerTarget::Session => self.active_id().is_some_and(|id| self.is_running(id, cx)),
+        };
+        let worktrees = worktree::folders(&git)
+            .into_iter()
+            .map(|folder| {
+                let label = worktree::label(&git, folder).unwrap_or_default();
+                let running = self.live.iter().any(|l| self.store.session(&l.id).is_some_and(|s| same_folder(&git, &s.cwd, folder)));
+                let current = here.as_deref() == Some(path_key(folder).as_str());
+                let remove = worktree::removable(git.main_checkout(), folder).then(|| Act::RemoveWorktree {
+                    main_checkout: git.main_checkout().to_path_buf(),
+                    folder: folder.to_path_buf(),
+                });
+                GitPickerWorktree {
+                    label,
+                    folder: folder.to_path_buf(),
+                    branch: git.branch_in(folder).map(str::to_string),
+                    current,
+                    running,
+                    remove,
+                }
+            })
+            .collect();
+        let new_worktree_reason = worktree::source(Some(&git)).err().map(str::to_string);
+        let search = self.picker_search("Filter branches & worktrees…", window, cx);
+        let main_checkout = git.main_checkout().to_path_buf();
+        self.picker = Some(AnchoredPicker {
+            at,
+            kind: WorkspacePicker::Git(GitPicker {
+                cwd: cwd.clone(),
+                main_checkout,
+                target,
+                search,
+                can_switch_worktree,
+                new_worktree_reason,
+                worktrees,
+                branches: None,
+            }),
         });
-        // Each row holds a name, its branch and a hover button; the default 232 px leaves the name no room.
-        self.open_dropdown(crate::panels::widgets::Dropdown { min_w: at.min_w.max(gpui::px(340.0)), ..at }, items, cx);
+        cx.notify();
+
+        let dir = cwd.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let list = crate::git::commit::branches(&dir)?;
+                    let deletable = crate::git::commit::deletable_branches(&dir, list.current.as_deref());
+                    let items = list
+                        .names
+                        .into_iter()
+                        .map(|name| {
+                            let current = list.current.as_deref() == Some(name.as_str());
+                            let held = list.elsewhere.iter().find(|h| h.branch == name);
+                            let held_tree = held.map(|h| (h.tree.clone(), h.folder.clone()));
+                            let remove = (held.is_none() && deletable.contains(&name)).then(|| Act::DeleteBranch(dir.clone(), name.clone()));
+                            GitPickerBranch { name, current, held_tree, remove }
+                        })
+                        .collect::<Vec<_>>();
+                    Ok::<_, String>(items)
+                })
+                .await;
+            let _ = this.update(cx, |ws, cx| {
+                if let Some(AnchoredPicker { kind: WorkspacePicker::Git(picker), .. }) = ws.picker.as_mut()
+                    && picker.cwd == cwd
+                {
+                    picker.branches = Some(result);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     /// The most recently active Claudiu session that runs in `folder`.

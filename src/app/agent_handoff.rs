@@ -27,8 +27,10 @@ pub fn handoff_message_with_prompt(from: &str, transcript: &str, user_message: &
 }
 
 impl Workspace {
-    /// Switch session `id` in place to `to`, carrying over the conversation transcript and sending `user_message`.
-    pub(super) fn dynamic_handoff(&mut self, id: &str, to: Harness, user_message: String, effort: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+    /// Switch session `id` in place to `to` (with an optional specific model & effort), carrying over the conversation
+    /// transcript and sending `user_message`.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn dynamic_handoff(&mut self, id: &str, to: Harness, model: Option<String>, user_message: String, effort: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(thread) = self.live_view(id).and_then(|v| v.thread()).cloned() else { return };
         let Some(mut rec) = self.store.session(id).cloned() else { return };
         let cwd = rec.cwd.clone();
@@ -36,8 +38,9 @@ impl Workspace {
             let t = thread.read(cx);
             (t.harness.name(), t.thread.transcript(LAST_ENTRIES), t.thread.entries.clone())
         };
+        let target_label = model.as_deref().filter(|m| !m.is_empty()).unwrap_or_else(|| to.name());
         prior_entries.push(Entry::Notice {
-            text: format!("Switched from {from_name} to {}", to.name()),
+            text: format!("Switched to {target_label}"),
             error: false,
         });
         let prompt = if transcript.trim().is_empty() {
@@ -57,6 +60,10 @@ impl Workspace {
             return;
         };
         start.prior_entries = prior_entries;
+        if let Some(model_id) = model.filter(|m| !m.is_empty()) {
+            start.options.retain(|(cat, _)| *cat != "model");
+            start.options.push(("model", model_id));
+        }
         if let Some(level) = effort {
             start.options.retain(|(cat, _)| *cat != "thought_level");
             start.options.push(("thought_level", level));

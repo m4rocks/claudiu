@@ -1,9 +1,6 @@
 // Loaded per process through `--plugin-dir`. Claudiu writes nothing to the user's Claude Code config.
 //
 // What this mod does:
-// - Model and effort: answers Claudiu's `set_model` tool in-process, so the override applies from the next request,
-//   even mid-turn. It then runs /model and /effort once Claude Code is idle, so the session (and what /model shows)
-//   switches too. Claude Code saves those as the user's default.
 // - Session name: applies the name Claudiu writes to `CLAUDIU_NAME_FILE` with /rename, which Claude Code queues
 //   until the session is idle.
 // - Sidebar settings: applies auto-compact, background compaction and advisor changes sent through
@@ -24,17 +21,9 @@
 
 // ---- Constants ----------------------------------------------------------------------------------------------------
 
-// The aliases `set_model` accepts. A full `claude-…` id is accepted too.
-const MODELS = {
-  haiku: 'claude-haiku-5-5',
-  sonnet: 'claude-sonnet-5-5',
-  opus: 'claude-opus-5-5',
-  fable: 'claude-fable-5-1',
-}
 const CARD_ROWS = 6 // reserved for a card until Claudiu has measured it
 const PROMPT_MAX = 20000 // characters of a message Claudiu asks the session to send (the editor's Ask Claude)
 const INBOX_TEXT_MAX = 20000 // UTF-16 units, matching the ACP helper
-const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']
 const ASK_MODELS = ['haiku', 'sonnet', 'opus']
 const VISUAL_TOOL = 'mcp__claudiu__show_visual'
 const HANDBACK_TOOL = 'SubagentHandback'
@@ -46,7 +35,6 @@ const PRECOMPUTE_ROW = 'precomputeCompactionEnabled'
 
 // ---- Per-process state --------------------------------------------------------------------------------------------
 
-let want = {} // { model?, effort? } from Claudiu, applied to each turn step until Claude Code has run /model and /effort
 let named = null // `${claude session id}\n${name}` last applied with /rename
 let namePoll // watches CLAUDIU_NAME_FILE
 let ctlPoll // watches CLAUDIU_CTL_FILE
@@ -637,47 +625,6 @@ async function noteCompaction($) {
   await report($, true)
 }
 
-async function onSetModel($, e) {
-  const alias = String(e.model ?? '').trim().toLowerCase()
-  const model = MODELS[alias] ?? (/^claude-[a-z0-9.-]+$/.test(alias) ? alias : undefined)
-  const effort = String(e.effort ?? '').trim().toLowerCase()
-  if (e.model != null && !model) {
-    return { result: 'Unknown model: ' + e.model + '. Use haiku, sonnet, opus, fable or a full claude-… id.', isError: true }
-  }
-  if (e.effort != null && effort !== 'auto' && !EFFORTS.includes(effort)) {
-    return { result: 'Unknown effort: ' + e.effort + '. Use ' + EFFORTS.join(', ') + ' or auto.', isError: true }
-  }
-  if (!model && e.effort == null) return { result: 'Give a model, an effort, or both.', isError: true }
-
-  if (model) want = { ...want, model }
-  if (e.effort != null) want = { ...want, effort: effort === 'auto' ? undefined : effort }
-
-  // turn.step covers the rest of this turn. The session's own model and effort (what /model shows) follow once
-  // Claude Code is idle. A command can't run from inside a hook the turn waits on, hence the timer.
-  $.clock.after(0, () => {
-    if (model) {
-      $.command.run({ command: 'model', args: model }).then(
-        () => { if (want.model === model) want = { ...want, model: undefined } },
-        () => {},
-      )
-    }
-    if (e.effort != null) {
-      $.command.run({ command: 'effort', args: effort }).then(
-        () => { if (want.effort === (effort === 'auto' ? undefined : effort)) want = { ...want, effort: undefined } },
-        () => {},
-      )
-    }
-  })
-
-  const what = [model, e.effort != null && 'effort ' + effort].filter(Boolean).join(', ')
-  // Ending the turn lets the queued /model and /effort run, so the session (and /model) switch for good.
-  return {
-    result: 'Switched to ' + what + ' from your next request. Your system prompt still names the previous model; ignore that. ' +
-      'Now stop: end your turn with one short line telling the user the switch is done and asking them to confirm ' +
-      '(or say what to do next) so the session itself switches. Do not continue the task in this turn.',
-  }
-}
-
 // The model's show_visual call streams to its card while it is written. The call's arguments arrive as pieces of JSON;
 // the Markdown read out of them so far goes to the file a few times a second at most. The tool.call hook writes the
 // finished card.
@@ -691,19 +638,15 @@ async function onShowVisual($, e) {
   return { result: "Shown inline in the terminal. Say the key facts in a short reply; don't repeat the content." }
 }
 
-// Applies the saved model and effort to this turn's steps, and streams a show_visual call to its card while the model
-// writes it. A custom subagent's steps are answered by customStep; other subagents' steps are left alone.
+// Streams a show_visual call to its card while the model writes it. A custom subagent's steps are answered by customStep; other subagents' steps are left alone.
 async function* onTurnStep($, e, next) {
   const run = e.agentId ? await customRun($, e.agentId) : undefined
   if (run) return yield* customStep($, e, next, run)
-  const step = !e.agentId && (want.model || want.effort)
-    ? { ...e, model: want.model ?? e.model, effort: want.effort ?? e.effort }
-    : e
   const prefix = e.agentId ? null : await $.env.get('CLAUDIU_VISUAL_PREFIX')
-  if (!prefix) return yield* next(step)
+  if (!prefix) return yield* next(e)
 
   const open = new Map() // block index -> the show_visual call being written there
-  for await (const c of next(step)) {
+  for await (const c of next(e)) {
     if (c.kind === 'tool' && c.name === VISUAL_TOOL) {
       open.set(c.index, { id: c.id, json: '', at: 0 })
       lastVisual = c.id
@@ -779,7 +722,6 @@ export function register(on) {
   on('command.run', onCommandRun)
   on('config.set', onConfigSet)
   on('session.compact', onSessionCompact)
-  on('tool.call', { tool: 'mcp__claudiu__set_model' }, onSetModel)
   on('tool.call', { tool: VISUAL_TOOL }, onShowVisual)
   on('ui.render', { component: 'ToolUse' }, onVisualRow)
   on('ui.render', { component: 'ToolGroup' }, onVisualGroup)

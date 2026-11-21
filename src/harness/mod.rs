@@ -30,16 +30,79 @@ pub enum Harness {
 /// An ACP server's program and its arguments.
 pub type Server = (PathBuf, Vec<String>);
 
+/// One selectable model from an enabled harness, aggregated into a single model picker across the app.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CatalogModel {
+    pub harness: Harness,
+    /// Model id sent to the harness (`""` means let the harness pick its default).
+    pub id: String,
+    pub name: String,
+}
+
+impl CatalogModel {
+    /// Built-in Claude Code aliases used before a Claude Code session reports its live model list.
+    pub fn default_claude_models() -> Vec<Self> {
+        [("opus", "Claude Opus"), ("sonnet", "Claude Sonnet"), ("haiku", "Claude Haiku")]
+            .into_iter()
+            .map(|(id, name)| Self { harness: Harness::Claude, id: id.into(), name: name.into() })
+            .collect()
+    }
+}
+
 /// How Claudiu drives one harness: the parts that differ between them. Each lives in its own file.
 pub struct Adapter {
     pub name: &'static str,
+    /// Program / bridge name shown in error messages when listing models.
+    pub server_name: &'static str,
     /// The ACP server's program and arguments, or why it can't start.
     pub server: fn() -> Result<Server, String>,
     /// How a stored session opens again.
     pub reopen: Reopen,
-    /// The harness's own command line for a session, to carry on in a terminal. None when it has no way to resume
-    /// one by id.
-    pub resume_command: fn(&str) -> Option<Vec<String>>,
+    /// Whether the empty session opened only to read `configOptions[category == "model"]` should be deleted again.
+    pub delete_model_session: bool,
+}
+
+/// One value per harness, indexed exhaustively without hashing.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct HarnessMap<T> {
+    claude: T,
+    codex: T,
+    opencode: T,
+    antigravity: T,
+}
+
+impl<T> HarnessMap<T> {
+    pub fn get(&self, harness: Harness) -> &T {
+        match harness {
+            Harness::Claude => &self.claude,
+            Harness::Codex => &self.codex,
+            Harness::OpenCode => &self.opencode,
+            Harness::Antigravity => &self.antigravity,
+        }
+    }
+
+    pub fn get_mut(&mut self, harness: Harness) -> &mut T {
+        match harness {
+            Harness::Claude => &mut self.claude,
+            Harness::Codex => &mut self.codex,
+            Harness::OpenCode => &mut self.opencode,
+            Harness::Antigravity => &mut self.antigravity,
+        }
+    }
+}
+
+/// Models and permission modes reported by a harness's ACP adapter.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct HarnessCatalog {
+    pub models: Vec<crate::claude::subagents::AgentModel>,
+    pub modes: Vec<(String, String)>,
+}
+
+/// Ask `harness`'s ACP adapter for the models and permission modes it offers this account, using the same
+/// `initialize` -> `session/new` handshake for every harness (Claude Code, Codex, OpenCode, and Antigravity).
+pub fn probe(harness: Harness, cwd: &Path, env: &[(String, String)]) -> Result<HarnessCatalog, String> {
+    let (program, args) = (harness.adapter().server)()?;
+    crate::claude::acp::probe_server(harness, program, args, cwd, env)
 }
 
 /// ACP has two ways to open a stored session: `session/load` replays the conversation into the client, and
@@ -66,6 +129,33 @@ impl Harness {
     pub fn name(self) -> &'static str {
         self.adapter().name
     }
+
+    /// The harness's short lowercase key, as saved settings and the `set_model` tool spell it.
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+            Self::OpenCode => "opencode",
+            Self::Antigravity => "antigravity",
+        }
+    }
+
+    pub fn from_agent(agent: Agent) -> Self {
+        match agent {
+            Agent::Codex => Self::Codex,
+            Agent::OpenCode => Self::OpenCode,
+            Agent::Antigravity => Self::Antigravity,
+        }
+    }
+
+    pub fn agent(self) -> Option<Agent> {
+        match self {
+            Self::Claude => None,
+            Self::Codex => Some(Agent::Codex),
+            Self::OpenCode => Some(Agent::OpenCode),
+            Self::Antigravity => Some(Agent::Antigravity),
+        }
+    }
 }
 
 /// The server of a harness that shares its ACP server with a subagent provider.
@@ -73,10 +163,6 @@ fn subagent_server(agent: Agent) -> Result<Server, String> {
     let provider = agent.provider();
     let program = crate::claude::acp::locate(agent).ok_or(provider.missing)?;
     Ok((program, provider.args.iter().map(|s| s.to_string()).collect()))
-}
-
-fn words(items: &[&str]) -> Vec<String> {
-    items.iter().map(|s| s.to_string()).collect()
 }
 
 /// `name` on the PATH; a desktop launch's PATH may lack what only the login shell's startup files add.
@@ -97,46 +183,9 @@ pub fn stdio_server(name: &str, command: &Path, args: &[&str], env: &[(&str, Str
     })
 }
 
-/// The line to paste into a terminal to carry on with session `id` in `cwd`: change into the folder, then resume.
-pub fn continue_command(harness: Harness, cwd: &Path, id: &str) -> Option<String> {
-    let words = (harness.adapter().resume_command)(id)?;
-    let line = words.iter().map(|w| shell_word(w)).collect::<Vec<_>>().join(" ");
-    let cd = if cfg!(windows) { "cd /d" } else { "cd" };
-    Some(format!("{cd} {} && {line}", shell_word(&cwd.to_string_lossy())))
-}
-
-/// A word as a shell reads it back unchanged: as is when it is plain, quoted otherwise.
-fn shell_word(word: &str) -> String {
-    let plain = !word.is_empty() && word.chars().all(|c| c.is_ascii_alphanumeric() || "-_./:=@%+,".contains(c));
-    if plain {
-        word.to_string()
-    } else if cfg!(windows) {
-        format!("\"{word}\"")
-    } else {
-        format!("'{}'", word.replace('\'', "'\\''"))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn each_harness_resumes_in_its_own_command() {
-        let resume = |h: Harness| (h.adapter().resume_command)("abc");
-        assert_eq!(resume(Harness::Claude), Some(words(&["claude", "--resume", "abc"])));
-        assert_eq!(resume(Harness::Codex), Some(words(&["codex", "resume", "abc"])));
-        assert_eq!(resume(Harness::OpenCode), Some(words(&["opencode", "--session", "abc"])));
-        assert_eq!(resume(Harness::Antigravity), None);
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn carrying_on_in_a_terminal_changes_into_the_quoted_folder_first() {
-        assert_eq!(continue_command(Harness::Claude, Path::new("/w/app"), "abc").as_deref(), Some("cd /w/app && claude --resume abc"));
-        assert_eq!(continue_command(Harness::Codex, Path::new("/w/it's here"), "abc").as_deref(), Some("cd '/w/it'\\''s here' && codex resume abc"));
-        assert_eq!(continue_command(Harness::Antigravity, Path::new("/w"), "abc"), None);
-    }
 
     #[test]
     fn an_mcp_server_lists_its_environment_by_name() {

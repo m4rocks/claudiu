@@ -28,11 +28,6 @@ pub fn ctl_file(record_id: &str) -> PathBuf {
     ctl_dir().join(format!("{}.json", crate::datadir::safe_file_stem(record_id)))
 }
 
-/// A model alias or id as the mod accepts it for `/advisor` (it checks the same rule).
-pub fn valid_model_name(name: &str) -> bool {
-    !name.is_empty() && name.len() <= 60 && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
-}
-
 /// Ask the mod of a running session to change a setting: `auto_compact` or `precompute_compact` (bool), `advisor` (a
 /// model name or `off`), or `prompt` (a message for the session to send once it is idle).
 /// The file keeps the latest few commands, each with a number that only goes up, so none is lost if two come within
@@ -123,7 +118,6 @@ mod tests {
         assert_eq!(cmds.len(), 8);
         assert!(cmds.windows(2).all(|w| w[0]["seq"].as_i64() < w[1]["seq"].as_i64()), "numbers only go up");
         assert_eq!(cmds[7]["value"], "m9");
-        assert!(valid_model_name("claude-opus-5-5") && valid_model_name("off") && !valid_model_name("") && !valid_model_name("a b") && !valid_model_name("../x"));
     }
 
     #[test]

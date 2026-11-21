@@ -5,8 +5,8 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use gpui::{
-    Animation, AnimationElement, AnimationExt, Bounds, Canvas, ClickEvent, Context, Div, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Window, Pixels, Point, canvas, point, ElementId, FontWeight, Hsla, InteractiveElement, ParentElement, SharedString,
-    Stateful, StatefulInteractiveElement, Styled, div, px,
+    Anchor as Corner, Animation, AnimationElement, AnimationExt, Bounds, Canvas, ClickEvent, Context, Div, ElementId, FontWeight, Hsla, InteractiveElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, SharedString,
+    Stateful, StatefulInteractiveElement, Styled, Window, canvas, div, point, px,
 };
 use gpui_kit::assets::IconName;
 use gpui_kit::component::Icon;
@@ -420,8 +420,8 @@ fn shortcut_for(macos: bool, keys: &str) -> String {
     if macos { format!("⌘{}", keys.replace("Shift+", "⇧")) } else { format!("Ctrl+{keys}") }
 }
 
-/// The small key label drawn beside a control while Ctrl (Cmd) is held.
-pub fn key_hint(keys: &str) -> Div {
+/// A small keycap pill drawn as-is (e.g. "Esc", "1-9").
+pub fn key_badge(label: impl Into<SharedString>) -> Div {
     div()
         .flex_none()
         .px(px(4.0))
@@ -430,7 +430,12 @@ pub fn key_hint(keys: &str) -> Div {
         .text_size(crate::panels::scale::px(10.5))
         .text_color(hsla(theme::TEXT_DIM))
         .whitespace_nowrap()
-        .child(shortcut(keys))
+        .child(label.into())
+}
+
+/// The small key label drawn beside a control while Ctrl (Cmd) is held, automatically prepending ⌘ / Ctrl+.
+pub fn key_hint(keys: &str) -> Div {
+    key_badge(shortcut(keys))
 }
 
 /// Monogram avatar: the first letter of `seed` on a color picked from it, so each account keeps its color.
@@ -601,35 +606,97 @@ mod tests {
     }
 }
 
-/// Where a dropdown opens: just under its trigger, at least as wide as it.
+/// Where a dropdown opens relative to its trigger, at least as wide as it.
+#[derive(Clone, Copy, Debug)]
 pub struct Dropdown {
     pub pos: Point<Pixels>,
     pub min_w: Pixels,
+    pub anchor: Corner,
+    /// Trigger button's window bounds (empty when opened programmatically without a painted trigger).
+    pub trigger: Bounds<Pixels>,
+    /// Interactive bounds that toggle this dropdown closed when clicked again (defaults to `trigger`; rows with a
+    /// smaller anchored pill can expand this to the full clickable row).
+    pub hit: Bounds<Pixels>,
 }
 
-/// Remembers a trigger's bounds as it paints, so its menu can open under it instead of at the pointer.
+impl Dropdown {
+    /// Fallback placement for programmatic / keyboard opens when no trigger bounds are available.
+    pub fn at(pos: Point<Pixels>) -> Self {
+        Self { pos, min_w: px(0.0), anchor: Corner::TopLeft, trigger: Bounds::default(), hit: Bounds::default() }
+    }
+
+    pub fn with_hit(mut self, hit: Bounds<Pixels>) -> Self {
+        self.hit = hit;
+        self
+    }
+}
+
+/// Remembers a trigger's bounds as it paints, so its menu or picker can stem directly from it.
 #[derive(Clone, Default)]
-struct Anchor(Rc<Cell<Bounds<Pixels>>>);
+pub struct Anchor(Rc<Cell<Bounds<Pixels>>>);
 
 impl Anchor {
-    fn probe(&self) -> Canvas<()> {
+    pub fn probe(&self) -> Canvas<()> {
         let cell = self.0.clone();
         canvas(move |bounds, _, _| cell.set(bounds), |_, _, _, _| {}).absolute().top_0().left_0().size_full()
     }
 
-    fn below(&self) -> Dropdown {
+    pub fn bounds(&self) -> Bounds<Pixels> {
+        self.0.get()
+    }
+
+    pub fn below(&self) -> Dropdown {
         let b = self.0.get();
-        Dropdown { pos: b.bottom_left() + point(px(0.0), px(3.0)), min_w: b.size.width }
+        Dropdown { pos: b.bottom_left() + point(px(0.0), px(4.0)), min_w: b.size.width, anchor: Corner::TopLeft, trigger: b, hit: b }
+    }
+
+    pub fn below_right(&self) -> Dropdown {
+        let b = self.0.get();
+        Dropdown { pos: b.bottom_right() + point(px(0.0), px(4.0)), min_w: b.size.width, anchor: Corner::TopRight, trigger: b, hit: b }
+    }
+
+    pub fn above(&self) -> Dropdown {
+        let b = self.0.get();
+        Dropdown { pos: b.origin - point(px(0.0), px(4.0)), min_w: b.size.width, anchor: Corner::BottomLeft, trigger: b, hit: b }
     }
 }
 
-/// The one way to make a dropdown button: any element that opens a menu or picker under itself on mouse-down.
+/// Any element that opens a menu or picker anchored directly to itself on mouse-down.
 pub trait Trigger: InteractiveElement + ParentElement + Styled + Sized {
+    /// Open directly below the trigger, left-aligned.
     fn dropdown<V: 'static>(self, cx: &Context<V>, open: impl Fn(&mut V, Dropdown, &mut Window, &mut Context<V>) + 'static) -> Self {
         let anchor = Anchor::default();
-        self.relative()
-            .child(anchor.probe())
-            .on_mouse_down(MouseButton::Left, cx.listener(move |v, _: &MouseDownEvent, window, cx| open(v, anchor.below(), window, cx)))
+        self.relative().child(anchor.probe()).on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |v, _: &MouseDownEvent, window, cx| {
+                cx.stop_propagation();
+                open(v, anchor.below(), window, cx);
+            }),
+        )
+    }
+
+    /// Open directly below the trigger, right-aligned (for controls near the right edge).
+    fn dropdown_right<V: 'static>(self, cx: &Context<V>, open: impl Fn(&mut V, Dropdown, &mut Window, &mut Context<V>) + 'static) -> Self {
+        let anchor = Anchor::default();
+        self.relative().child(anchor.probe()).on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |v, _: &MouseDownEvent, window, cx| {
+                cx.stop_propagation();
+                open(v, anchor.below_right(), window, cx);
+            }),
+        )
+    }
+
+    /// Open directly above the trigger, left-aligned (for bottom-docked triggers like the composer bar).
+    fn dropdown_above<V: 'static>(self, cx: &Context<V>, open: impl Fn(&mut V, Dropdown, &mut Window, &mut Context<V>) + 'static) -> Self {
+        let anchor = Anchor::default();
+        self.relative().child(anchor.probe()).on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |v, _: &MouseDownEvent, window, cx| {
+                cx.stop_propagation();
+                open(v, anchor.above(), window, cx);
+            }),
+        )
     }
 }
 

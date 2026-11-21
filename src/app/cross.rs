@@ -5,6 +5,7 @@
 
 use super::*;
 use crate::claude::bridge::{self, Request};
+use crate::harness::CatalogModel;
 use serde_json::Value;
 
 /// Longest first message a session may hand over: it travels on a Windows command line, which is limited to about
@@ -104,7 +105,7 @@ impl Workspace {
     /// work is refused with the reason.
     pub(super) fn serve_requests(&mut self, requests: Vec<Request>, window: &mut Window, cx: &mut Context<Self>) {
         for mut req in requests.into_iter().filter(|r| r.deadline > crate::store::now()) {
-            let prepared = self.prepare(&mut req);
+            let prepared = self.prepare(&mut req, cx);
             if prepared.is_ok() && wants_confirmation(&req) {
                 self.pending_starts.push(PendingStart { req, shown: false });
                 continue;
@@ -146,6 +147,9 @@ impl Workspace {
         let folder = PathBuf::from(p.req.args["folder"].as_str().unwrap_or_default());
         let (title, body, confirm) = if p.req.tool == "switch_worktree" {
             ("Switch worktree?", switch_question(&asker, &folder, p.req.args["new"].as_bool().unwrap_or(false)), "Switch")
+        } else if p.req.tool == "set_model" {
+            let name = p.req.args["name"].as_str().unwrap_or_default();
+            ("Hand off to another agent?", format!("“{asker}” wants to switch to {name}. The conversation moves to that agent once this turn ends."), "Hand off")
         } else {
             let prompt = p.req.args["prompt"].as_str().unwrap_or_default().trim().to_string();
             ("Start a Claude Code session?", start_question(&asker, &folder, &prompt), "Start session")
@@ -166,9 +170,12 @@ impl Workspace {
     }
 
     /// Check what the request needs. A new session's folder, or the worktree to switch to, is resolved into `req.args["folder"]`.
-    fn prepare(&self, req: &mut Request) -> Result<(), String> {
+    fn prepare(&self, req: &mut Request, cx: &App) -> Result<(), String> {
         if req.tool == "switch_worktree" {
             return self.prepare_switch(req);
+        }
+        if req.tool == "set_model" {
+            return self.prepare_model(req, cx);
         }
         if req.tool != "start_code_session" {
             return Ok(());
@@ -180,6 +187,34 @@ impl Workspace {
         req.args["folder"] = folder.map_or(Value::Null, |f| f.to_string_lossy().into_owned().into());
         if req.args["prompt"].as_str().is_some_and(|p| p.trim().chars().count() > MAX_PROMPT) {
             return Err(format!("The first message is too long ({MAX_PROMPT} characters at most). Shorten it, or write the details to a file and point to it."));
+        }
+        Ok(())
+    }
+
+    /// The requester's chat view, for the model tools.
+    fn requester_thread(&self, req: &Request) -> Result<Entity<crate::thread::ThreadView>, String> {
+        let id = req.from.split_once(':').map_or(req.from.as_str(), |(_, id)| id);
+        self.live_view(id).and_then(|v| v.thread()).cloned().ok_or_else(|| "This session isn't open in Claudiu's chat view.".to_string())
+    }
+
+    /// Resolve `set_model`'s model into `harness`, `model_id` and `name`, and mark a switch onto another harness
+    /// (`cross`), which waits for the user's yes.
+    fn prepare_model(&self, req: &mut Request, cx: &App) -> Result<(), String> {
+        let thread = self.requester_thread(req)?.read(cx);
+        let wanted = req.args["model"].as_str().map(str::trim).filter(|m| !m.is_empty());
+        if wanted.is_none() && req.args["effort"].as_str().is_none() {
+            return Err("Give a model (as list_models prints it), an effort, or both.".into());
+        }
+        if let Some(wanted) = wanted {
+            let model = find_model(&thread.unified_models(), wanted)?;
+            let cross = model.harness != thread.harness;
+            if cross && req.args["message"].as_str().is_some_and(|m| m.trim().chars().count() > MAX_PROMPT) {
+                return Err(format!("The message is too long ({MAX_PROMPT} characters at most)."));
+            }
+            req.args["harness"] = model.harness.key().into();
+            req.args["model_id"] = model.id.clone().into();
+            req.args["name"] = format!("{} ({})", model.name, model.harness.name()).into();
+            req.args["cross"] = cross.into();
         }
         Ok(())
     }
@@ -304,14 +339,92 @@ impl Workspace {
                 self.pending_switches.push(PendingSwitch { id: requester_id.to_string(), folder, base, approved: crate::store::now() });
                 Ok(format!("Approved. Claudiu switches this session to {name} as soon as your turn ends, so end your turn now: reply in one line and make no more tool calls. The user's next message continues the same conversation there."))
             }
+            "list_models" => {
+                let thread = self.requester_thread(req)?.read(cx);
+                Ok(model_lines(&thread.unified_models(), thread.current_model().as_ref()))
+            }
+            "set_model" => {
+                let thread = self.requester_thread(req)?;
+                let effort = req.args["effort"].as_str().map(str::trim).filter(|e| !e.is_empty()).map(String::from);
+                let model = req.args["harness"].as_str().and_then(|key| crate::harness::Harness::ALL.into_iter().find(|h| h.key() == key)).map(|harness| CatalogModel {
+                    harness,
+                    id: req.args["model_id"].as_str().unwrap_or_default().to_string(),
+                    name: req.args["name"].as_str().unwrap_or_default().to_string(),
+                });
+                match model {
+                    Some(model) if req.args["cross"].as_bool() == Some(true) => {
+                        let message = req.args["message"].as_str().map(str::trim).filter(|m| !m.is_empty()).map_or_else(|| "Carry on with the task from where the conversation left off.".into(), String::from);
+                        let name = model.name.clone();
+                        thread.update(cx, |t, cx| t.hand_off_after_turn(model, effort, message, cx));
+                        Ok(format!("Approved. Claudiu hands this conversation to {name} as soon as your turn ends, so end your turn now: reply in one line and make no more tool calls."))
+                    }
+                    model => {
+                        let done = thread.update(cx, |t, cx| t.switch_model(model.as_ref(), effort.as_deref(), cx))?;
+                        Ok(format!("Switched to {done} from your next request. Your system prompt may still name the previous model; ignore that."))
+                    }
+                }
+            }
             other => Err(format!("unknown tool {other}")),
         }
+    }
+}
+
+/// What `list_models` answers: one line per model a session can switch to, `harness:model-id · name`, the current one
+/// marked.
+fn model_lines(models: &[CatalogModel], current: Option<&CatalogModel>) -> String {
+    let lines: Vec<String> = models
+        .iter()
+        .filter(|m| !m.id.is_empty())
+        .map(|m| {
+            let here = current.is_some_and(|c| c.harness == m.harness && c.id == m.id);
+            format!("- {}:{} · {} ({}){}", m.harness.key(), m.id, m.name, m.harness.name(), if here { " · current" } else { "" })
+        })
+        .collect();
+    if lines.is_empty() { "No models are listed yet.".into() } else { lines.join("\n") }
+}
+
+/// The model `wanted` names, as `list_models` prints it (`codex:gpt-6`). A bare id is accepted when only one harness
+/// offers it, so `opus` still works when it is unambiguous.
+fn find_model(models: &[CatalogModel], wanted: &str) -> Result<CatalogModel, String> {
+    let wanted = wanted.trim();
+    let named = |m: &&CatalogModel| match wanted.split_once(':') {
+        Some((key, id)) if crate::harness::Harness::ALL.iter().any(|h| h.key() == key) => m.harness.key() == key && m.id == id,
+        _ => m.id == wanted,
+    };
+    let found: Vec<&CatalogModel> = models.iter().filter(|m| !m.id.is_empty()).filter(named).collect();
+    match found.as_slice() {
+        [one] => Ok((*one).clone()),
+        [] => Err(format!("No model “{wanted}”. Use one of these exactly as written:\n{}", model_lines(models, None))),
+        many => Err(format!("“{wanted}” is offered by {}. Say which, as harness:model-id.", many.iter().map(|m| m.harness.name()).collect::<Vec<_>>().join(" and "))),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn models() -> Vec<CatalogModel> {
+        use crate::harness::Harness;
+        let m = |harness, id: &str, name: &str| CatalogModel { harness, id: id.into(), name: name.into() };
+        vec![m(Harness::Claude, "opus", "Opus"), m(Harness::Codex, "gpt-6", "GPT-6"), m(Harness::OpenCode, "gpt-6", "GPT-6 (OpenCode)"), m(Harness::Antigravity, "", "Antigravity (default)")]
+    }
+
+    #[test]
+    fn set_model_finds_a_model_by_harness_and_id_or_by_an_unambiguous_id() {
+        assert_eq!(find_model(&models(), "codex:gpt-6").unwrap().harness, crate::harness::Harness::Codex);
+        assert_eq!(find_model(&models(), " opus ").unwrap().id, "opus");
+        let both = find_model(&models(), "gpt-6").unwrap_err();
+        assert!(both.contains("Codex and OpenCode"), "{both}");
+        let none = find_model(&models(), "claude:sonnet").unwrap_err();
+        assert!(none.contains("- codex:gpt-6 · GPT-6 (Codex)"), "an unknown name lists the choices: {none}");
+        assert!(find_model(&models(), "antigravity:").is_err(), "a harness's placeholder default is not a model to switch to");
+    }
+
+    #[test]
+    fn list_models_marks_the_current_model() {
+        let listed = model_lines(&models(), models().get(1));
+        assert_eq!(listed, "- claude:opus · Opus (Claude Code)\n- codex:gpt-6 · GPT-6 (Codex) · current\n- opencode:gpt-6 · GPT-6 (OpenCode) (OpenCode)");
+    }
 
     #[test]
     fn unix_times_become_utc_dates() {
@@ -321,10 +434,12 @@ mod tests {
     }
 }
 
-/// A new session with a first message of its own is a prompt the user did not write, and a worktree switch restarts the
-/// session: both wait for the user's yes.
+/// A new session with a first message of its own is a prompt the user did not write, and a worktree switch or a
+/// hand-off to another harness restarts the session: all of them wait for the user's yes.
 fn wants_confirmation(req: &Request) -> bool {
-    req.tool == "switch_worktree" || (req.tool == "start_code_session" && req.args["prompt"].as_str().is_some_and(|p| !p.trim().is_empty()))
+    req.tool == "switch_worktree"
+        || (req.tool == "set_model" && req.args["cross"].as_bool() == Some(true))
+        || (req.tool == "start_code_session" && req.args["prompt"].as_str().is_some_and(|p| !p.trim().is_empty()))
 }
 
 #[cfg(test)]
@@ -343,6 +458,8 @@ mod start_tests {
         assert!(!wants_confirmation(&request("start_code_session", json!({"folder": "/p", "prompt": "  "}))));
         assert!(!wants_confirmation(&request("read_code_session", json!({"prompt": "x"}))));
         assert!(wants_confirmation(&request("switch_worktree", json!({"worktree": "fix"}))), "a switch always asks");
+        assert!(wants_confirmation(&request("set_model", json!({"model": "codex:gpt-6", "cross": true}))), "a hand-off asks");
+        assert!(!wants_confirmation(&request("set_model", json!({"model": "opus", "cross": false}))), "the same harness switches at once");
     }
 
     #[test]

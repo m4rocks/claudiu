@@ -295,18 +295,58 @@ fn opencode_config(model: Option<&str>, edits: bool) -> Value {
     config
 }
 
-/// The models `agent` offers this account, as the model picker of a new session lists them. Gives up after
-/// `MODELS_TIMEOUT`, so a stalled download or an agent that never answers can't leave the page loading for good.
-pub fn models(agent: Agent, cwd: &Path) -> Result<Vec<AgentModel>, String> {
-    let connection = Connection::start(agent, cwd, &[], &[])?;
-    let (Connection { from_agent, to_agent, process }, folder) = (connection, cwd.to_path_buf());
+/// The models and permission modes `harness`'s ACP server offers this account, as a new session lists them. Gives up
+/// after `MODELS_TIMEOUT`, so a stalled download or an agent that never answers can't leave the UI loading for good.
+pub(crate) fn probe_server(
+    harness: crate::harness::Harness,
+    program: PathBuf,
+    args: Vec<String>,
+    cwd: &Path,
+    env: &[(String, String)],
+) -> Result<crate::harness::HarnessCatalog, String> {
+    let adapter = harness.adapter();
+    let mut command = Command::new(program);
+    command.args(&args).current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    crate::platform::no_window(&mut command);
+    crate::platform::with_login_path(&mut command);
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    let name = adapter.server_name;
+    let mut child = command.spawn().map_err(|e| format!("{name} could not start ({e})"))?;
+    let (Some(to_agent), Some(from_agent), Some(stderr)) = (child.stdin.take(), child.stdout.take(), child.stderr.take()) else {
+        let _ = child.kill();
+        return Err(format!("{name} could not start (no pipes)"));
+    };
+    let errors = std::thread::spawn(move || {
+        let mut last: Vec<String> = vec![];
+        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            if !line.trim().is_empty() {
+                last.push(line);
+                if last.len() > STDERR_LINES {
+                    last.remove(0);
+                }
+            }
+        }
+        last.join("\n")
+    });
+    let folder = cwd.to_path_buf();
     let (tx, rx) = std::sync::mpsc::channel();
     // Killing the agent on a timeout closes its pipes, which ends this thread too.
     std::thread::spawn(move || {
-        let _ = tx.send(list_models(agent, from_agent, to_agent, &folder));
+        let _ = tx.send(list_catalog_for(harness, BufReader::new(from_agent), to_agent, &folder));
     });
-    let result = rx.recv_timeout(MODELS_TIMEOUT).unwrap_or_else(|_| Err(format!("{} didn't answer within {} seconds", server(agent), MODELS_TIMEOUT.as_secs())));
-    process.finish(result)
+    let result = rx.recv_timeout(MODELS_TIMEOUT).unwrap_or_else(|_| Err(format!("{name} didn't answer within {} seconds", MODELS_TIMEOUT.as_secs())));
+    let _ = child.kill();
+    let _ = child.wait();
+    let early_exit = exited_harness(harness);
+    match result {
+        Err(reason) if reason == early_exit => {
+            let stderr = errors.join().unwrap_or_default();
+            Err(if stderr.is_empty() { reason } else { format!("{early_exit}: {stderr}") })
+        }
+        other => other,
+    }
 }
 
 /// The program Claudiu starts for `agent`, as failures name it.
@@ -314,8 +354,12 @@ fn server(agent: Agent) -> &'static str {
     agent.provider().server
 }
 
+fn exited_harness(harness: crate::harness::Harness) -> String {
+    format!("{} exited before {} answered", harness.adapter().server_name, harness.name())
+}
+
 fn exited(agent: Agent) -> String {
-    format!("{} exited before {} answered", server(agent), agent.name())
+    exited_harness(crate::harness::Harness::from_agent(agent))
 }
 
 /// A running agent: its pipes, and the process with its stderr.
@@ -415,42 +459,95 @@ fn new_session(cwd: &Path) -> Value {
     json!({ "jsonrpc": "2.0", "id": 1, "method": "session/new", "params": { "cwd": cwd, "mcpServers": [] } })
 }
 
-/// Opens a session only to read its model picker: the config option whose category is `model`. OpenCode keeps every
-/// session in its history, so it deletes this empty one again.
-fn list_models(agent: Agent, from_agent: impl BufRead, mut to_agent: impl Write, cwd: &Path) -> Result<Vec<AgentModel>, String> {
+fn new_model_probe_session(harness: crate::harness::Harness, cwd: &Path) -> Value {
+    if harness == crate::harness::Harness::Claude {
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "session/new",
+            "params": {
+                "cwd": cwd,
+                "mcpServers": [],
+                "_meta": { "claudeCode": { "options": { "persistSession": false } } }
+            }
+        })
+    } else {
+        new_session(cwd)
+    }
+}
+
+/// Opens a session only to read its model picker (`configOptions[category == "model"]`) and permission modes
+/// (`modes.availableModes` or `configOptions[category == "mode"]`). Harnesses that keep every empty session in their
+/// history (OpenCode) delete this probe session again.
+fn list_catalog_for(harness: crate::harness::Harness, from_agent: impl BufRead, mut to_agent: impl Write, cwd: &Path) -> Result<crate::harness::HarnessCatalog, String> {
+    let adapter = harness.adapter();
     let mut lines = from_agent.lines();
-    let mut send = |message: Value| writeln!(to_agent, "{message}").and_then(|_| to_agent.flush()).map_err(|_| exited(agent));
+    let mut send = |message: Value| writeln!(to_agent, "{message}").and_then(|_| to_agent.flush()).map_err(|_| exited_harness(harness));
     let mut reply = |id: i64| -> Result<Value, String> {
         for line in lines.by_ref() {
-            let msg: Value = serde_json::from_str(&line.map_err(|_| exited(agent))?).unwrap_or_default();
+            let msg: Value = serde_json::from_str(&line.map_err(|_| exited_harness(harness))?).unwrap_or_default();
             if msg.get("method").is_none() && msg["id"].as_i64() == Some(id) {
                 return match msg.get("error") {
-                    Some(error) => Err(error_reason(agent, error)),
+                    Some(error) => Err(harness_error_reason(harness, error)),
                     None => Ok(msg["result"].clone()),
                 };
             }
         }
-        Err(exited(agent))
+        Err(exited_harness(harness))
     };
     send(initialize())?;
     reply(0)?;
-    send(new_session(cwd))?;
+    send(new_model_probe_session(harness, cwd))?;
     let session = reply(1)?;
     let options = session["configOptions"].as_array().into_iter().flatten();
-    let picker = options.filter(|o| o["category"] == "model").find_map(|o| o["options"].as_array());
-    let models: Vec<AgentModel> = picker
+    let picker = options.clone().filter(|o| o["category"] == "model").find_map(|o| o["options"].as_array());
+    let raw_models: Vec<AgentModel> = picker
         .into_iter()
         .flatten()
         .filter_map(|o| Some(AgentModel { id: o["value"].as_str()?.to_string(), name: o["name"].as_str().unwrap_or_default().to_string() }))
         .collect();
-    if agent.provider().delete_model_session
+    let real_models: Vec<AgentModel> = raw_models.iter().filter(|m| m.id != "default").cloned().collect();
+    let models = if real_models.is_empty() { raw_models } else { real_models };
+
+    let mut modes: Vec<(String, String)> = session
+        .pointer("/modes/availableModes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|m| Some((m["id"].as_str()?.to_string(), m["name"].as_str().unwrap_or_default().to_string())))
+        .collect();
+    if modes.is_empty() {
+        modes = options
+            .filter(|o| o["category"] == "mode")
+            .find_map(|o| o["options"].as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|o| Some((o["value"].as_str()?.to_string(), o["name"].as_str().unwrap_or_default().to_string())))
+            .collect();
+    }
+
+    if adapter.delete_model_session
         && let Some(id) = session["sessionId"].as_str()
         // The models are known already, so a failed delete only leaves an empty session behind.
         && send(json!({ "jsonrpc": "2.0", "id": 2, "method": "session/delete", "params": { "sessionId": id } })).is_ok()
     {
         let _ = reply(2);
     }
-    if models.is_empty() { Err(format!("{} listed no models", server(agent))) } else { Ok(models) }
+    if models.is_empty() {
+        Err(format!("{} listed no models", adapter.server_name))
+    } else {
+        Ok(crate::harness::HarnessCatalog { models, modes })
+    }
+}
+
+#[cfg(test)]
+fn list_models_for(harness: crate::harness::Harness, from_agent: impl BufRead, to_agent: impl Write, cwd: &Path) -> Result<Vec<AgentModel>, String> {
+    list_catalog_for(harness, from_agent, to_agent, cwd).map(|c| c.models)
+}
+
+#[cfg(test)]
+fn list_models(agent: Agent, from_agent: impl BufRead, to_agent: impl Write, cwd: &Path) -> Result<Vec<AgentModel>, String> {
+    list_models_for(crate::harness::Harness::from_agent(agent), from_agent, to_agent, cwd)
 }
 
 /// Sends a task and its live messages in one ACP session, streaming updates as they arrive.
@@ -839,15 +936,22 @@ fn permission(options: &Value, edits: bool) -> Value {
     }
 }
 
-fn error_reason(agent: Agent, error: &Value) -> String {
+fn harness_error_reason(harness: crate::harness::Harness, error: &Value) -> String {
     if error["code"].as_i64() == Some(AUTH_REQUIRED) {
-        return agent.provider().sign_in.into();
+        return match harness.agent() {
+            Some(agent) => agent.provider().sign_in.into(),
+            None => "Sign in to Claude Code (`claude auth login`) first.".into(),
+        };
     }
-    let server = server(agent);
+    let server = harness.adapter().server_name;
     match error["message"].as_str() {
         Some(message) => format!("{server}: {message}"),
         None => format!("{server}: {error}"),
     }
+}
+
+fn error_reason(agent: Agent, error: &Value) -> String {
+    harness_error_reason(crate::harness::Harness::from_agent(agent), error)
 }
 
 #[cfg(test)]
@@ -1515,10 +1619,39 @@ mod tests {
     }
 
     #[test]
+    fn claude_code_lists_its_models_without_persisting_a_session() {
+        let says = [
+            reply(0, json!({ "protocolVersion": 1 })),
+            reply(1, json!({
+                "sessionId": "s1",
+                "configOptions": [
+                    { "id": "model", "category": "model", "options": [
+                        { "value": "default", "name": "Default (Opus)" },
+                        { "value": "sonnet", "name": "Sonnet 4.6" },
+                    ]}
+                ]
+            })),
+        ];
+        let script: String = says.iter().map(|m| format!("{m}\n")).collect();
+        let mut sent = Vec::new();
+        let models = list_models_for(crate::harness::Harness::Claude, script.as_bytes(), &mut sent, Path::new("/work")).unwrap();
+        let sent: Vec<Value> = String::from_utf8(sent).unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+        assert_eq!(models, vec![AgentModel { id: "sonnet".into(), name: "Sonnet 4.6".into() }]);
+        assert_eq!(sent.iter().map(|m| m["method"].as_str().unwrap()).collect::<Vec<_>>(), ["initialize", "session/new"]);
+        assert_eq!(sent[1]["params"]["_meta"]["claudeCode"]["options"]["persistSession"], json!(false));
+    }
+
+    #[test]
     fn no_model_picker_is_an_error() {
         let says = [reply(0, json!({})), reply(1, json!({ "sessionId": "s1" }))];
         assert_eq!(list(Agent::Codex, &says).0, Err("codex-acp listed no models".into()));
         assert_eq!(list(Agent::OpenCode, &says).0, Err("opencode listed no models".into()));
+        let script: String = says.iter().map(|m| format!("{m}\n")).collect();
+        let mut sent = Vec::new();
+        assert_eq!(
+            list_models_for(crate::harness::Harness::Claude, script.as_bytes(), &mut sent, Path::new("/work")),
+            Err("claude-bridge listed no models".into())
+        );
     }
 
     #[test]

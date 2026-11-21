@@ -564,7 +564,7 @@ mod tests {
     #[test]
     fn svg_tokens_and_size() {
         assert_eq!(svg_tokens("fill=\"var(--accent)\" stroke=\"var(--nope)\""), "fill=\"#d97757\" stroke=\"var(--nope)\"");
-        assert!(svg_tokens("<g color=\"currentColor\">").contains("#e8eaef"));
+        assert!(svg_tokens("<g color=\"currentColor\">").contains("#e4e4e4"));
         let nodes = parse("<svg viewBox=\"0 0 200 100\" width=\"100\"><rect width=\"10\" height=\"10\"/></svg><p>after</p>");
         match &nodes[0] {
             Node::Svg(Some(s)) => assert_eq!((s.w, s.h), (100.0, 50.0)),

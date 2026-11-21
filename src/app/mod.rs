@@ -18,7 +18,7 @@ use crate::claude::subagents::Agent;
 use crate::claude;
 use crate::panels::sidebar::{SIDEBAR_MAX, SIDEBAR_MIN, SIDEBAR_W};
 use crate::github::view::{GhEvent, GithubView};
-use crate::claude::defaults::{Effort, PermissionMode, Starter};
+use crate::claude::defaults::{Effort, Starter};
 use crate::claude::mcp;
 use crate::harness::{self, Harness};
 use crate::git::worktree::Base;
@@ -77,7 +77,7 @@ pub use editor_mode::EditorCommand;
 pub use file_ops::NameFor;
 pub use settings::{Lookup, SettingsPage};
 pub use skills::{SkillScope, SkillsTab};
-pub use worktrees::WorktreesPage;
+pub use worktrees::{GitPicker, GitPickerTarget, WorktreesPage};
 pub use setup::{Mode as SetupMode, SetupEvent, SetupView, window_options as setup_window_options};
 
 actions!(
@@ -114,7 +114,7 @@ actions!(
     ]
 );
 
-/// Ctrl+1 to Ctrl+9 (Cmd on macOS): show the running session with that number, counted down the sidebar's RUNNING list.
+/// Ctrl+1 to Ctrl+9 (Cmd on macOS): show the running session with that number, counted down the sidebar's running sessions.
 #[derive(Clone, Debug, PartialEq, gpui::Action)]
 #[action(namespace = claudiu, no_json)]
 pub struct ShowSession(pub usize);
@@ -125,9 +125,14 @@ pub enum Act {
     NewClaude {
         cwd: PathBuf,
     },
-    /// The worktree dialog for a repository's main checkout (see `worktrees.rs`).
-    NewWorktree(PathBuf),
-    PickBase(Base),
+    /// Make a worktree named `name` (random when blank) straight from the Branch & Worktree dialog: chosen for the
+    /// Welcome screen's next session (`for_home`), or the shown session moves into it.
+    QuickWorktree { main_checkout: PathBuf, name: String, base: Base, for_home: bool },
+    CreateHomeWorktree {
+        main_checkout: PathBuf,
+        folder: PathBuf,
+        base: Base,
+    },
     /// Move the shown session into this working tree of its project (`base` is for a worktree that does not exist yet).
     SwitchWorktree {
         folder: PathBuf,
@@ -154,14 +159,12 @@ pub enum Act {
     ConfirmDeleteUnlisted(PathBuf),
     /// Show or hide the shell under a Claude session's terminal (started on first use, in the session's folder).
     ToggleShell(Id),
-    /// End the thread and copy the harness's own command to carry on with the session in a terminal.
-    ContinueInTerminal(Id),
     /// Return to the Welcome / New session launcher screen.
     ShowHome,
     HomeSelectProject(Id),
     HomeSelectWorktree(PathBuf),
-    HomeSelectHarness(Harness),
-    HomeSetEffort(Option<Effort>),
+    HomeSelectModel(crate::harness::CatalogModel),
+    HomeSetEffort(Effort),
     HomeLaunch,
     /// List the default agent's sessions in a folder, to pick one up here.
     ListSessions { cwd: PathBuf },
@@ -187,11 +190,10 @@ pub enum Act {
     OpenSettings,
     /// The setup window again, from Settings or the missing-`claude` toast (see `setup.rs`).
     OpenSetup,
-    /// A choice in the Settings dialog's effort or permission-mode picker (None = Claude Code's default); kept in the
-    /// dialog until Save.
-    PickEffort(Option<Effort>),
-    PickHarness(Harness),
-    PickPermission(Option<PermissionMode>),
+    /// A choice in the Settings dialog's default-model, effort, or permission-mode picker; kept in the dialog until Save.
+    PickDefaultModel(crate::harness::CatalogModel),
+    PickEffort(Effort),
+    PickPermission(String),
     /// The project's GitHub issues and pull requests.
     OpenGithub {
         cwd: PathBuf,
@@ -201,11 +203,6 @@ pub enum Act {
     /// Change a setting of a running session through its mod (see `usage::send_ctl`).
     SetAutoCompact(Id, bool),
     SetPrecomputeCompact(Id, bool),
-    SetAdvisor(Id, String),
-    /// Turn Claude in Chrome on or off; the session restarts to apply it.
-    SetChrome(Id, bool),
-    /// Ask for an advisor model by name.
-    AskAdvisor(Id),
     /// Filter the sidebar list to a project (`None`: all).
     FilterProject(Option<Id>),
     /// Stage everything in this folder's repository, commit it with a message the running session's mod (Haiku) writes, push.
@@ -322,26 +319,14 @@ pub enum Modal {
         cwd: PathBuf,
         input: Entity<InputState>,
     },
-    /// Empty name = a generated one.
-    NewWorktree {
-        main_checkout: PathBuf,
-        input: Entity<InputState>,
-        base: Base,
-    },
-    Advisor {
-        id: Id,
-        input: Entity<InputState>,
-    },
     /// Empty text = use the default.
     Settings {
         shell: Entity<InputState>,
         claude: Entity<InputState>,
-        /// Model for new sessions (Sessions page); empty = Claude Code's default.
-        model: Entity<InputState>,
-        /// The harness new sessions run in (Sessions page).
-        harness: Harness,
-        effort: Option<Effort>,
-        permission: Option<PermissionMode>,
+        /// Default model for new sessions (General page); its harness runs new sessions.
+        default_model: crate::harness::CatalogModel,
+        effort: Effort,
+        permission: String,
         updates: bool,
         chrome: bool,
         scale: u32,
@@ -360,13 +345,14 @@ pub enum Modal {
         /// The project being renamed on the Projects page, and the name typed so far.
         renaming: Option<(Id, Entity<InputState>)>,
         /// The Harnesses page.
-        subagents: HarnessesForm,
+        subagents: Box<HarnessesForm>,
     },
 }
 
 /// Which harness's configuration popup is open over Settings → Harnesses.
 pub enum HarnessDialog {
-    Claude,
+    /// With the search box over its model list.
+    Claude(Entity<InputState>),
     Agent(Agent, Entity<InputState>),
 }
 
@@ -374,6 +360,8 @@ pub enum HarnessDialog {
 pub struct HarnessesForm {
     pub enabled: Vec<Harness>,
     pub agents: claude::subagents::AgentMap<AgentForm>,
+    /// The ids of the Claude Code models ticked for the picker.
+    pub claude_models: Vec<String>,
     /// The harness whose configuration popup is open over the page.
     pub picking: Option<HarnessDialog>,
 }
@@ -394,15 +382,69 @@ impl HarnessesForm {
     pub fn get_mut(&mut self, agent: Agent) -> &mut AgentForm {
         self.agents.get_mut(agent)
     }
+
+    /// The model ids ticked for `harness` (for an agent, also its subagents while those are on).
+    pub fn picked(&self, harness: Harness) -> &[String] {
+        match harness.agent() {
+            None => &self.claude_models,
+            Some(agent) => &self.get(agent).models,
+        }
+    }
+
+    pub fn picked_mut(&mut self, harness: Harness) -> &mut Vec<String> {
+        match harness.agent() {
+            None => &mut self.claude_models,
+            Some(agent) => &mut self.get_mut(agent).models,
+        }
+    }
 }
 
-/// Interactive state for the Welcome / New session launcher page (`Main::Home`).
+/// What choosing a project in the universal Project picker dialog does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProjectPickerMode {
+    /// Choose the project on the Welcome screen.
+    Home,
+    /// Filter the sidebar list (includes an "All projects" row).
+    SidebarFilter,
+}
+
+/// Active universal picker dropdown owned by `Workspace`, anchored to the button that opened it.
+pub struct AnchoredPicker {
+    pub at: crate::panels::widgets::Dropdown,
+    pub kind: WorkspacePicker,
+}
+
+/// Which universal picker dropdown is currently open on `Workspace`.
+pub enum WorkspacePicker {
+    /// Model + draggable effort picker on the Welcome screen.
+    HomeModel { search: Entity<InputState> },
+    /// Project selector for Welcome, sidebar filter, or "+ New session".
+    Project { mode: ProjectPickerMode, search: Entity<InputState> },
+    /// Unified Branch & Worktree picker (top bar and Welcome screen).
+    Git(GitPicker),
+    /// Settings -> General: Default model selector.
+    SettingsModel { search: Entity<InputState> },
+    /// Settings -> General: Default effort selector.
+    SettingsEffort,
+    /// Settings -> General: Default permission mode selector.
+    SettingsPermission,
+    /// Settings -> Skills: Global vs project scope selector.
+    SkillsScope { search: Entity<InputState> },
+    /// Right sidebar: Choose which installed editor to open in.
+    Editor { target: PathBuf },
+}
+
+/// Interactive state for the Welcome / "Start a new session" page (`Main::Home`).
 pub struct HomeState {
     pub project: Option<Id>,
     pub worktree: Option<PathBuf>,
-    pub harness: Option<Harness>,
-    pub effort: Option<Effort>,
+    pub model: Option<crate::harness::CatalogModel>,
+    pub effort: Effort,
     pub prompt: Entity<TextareaState>,
+    pub model_anchor: crate::panels::widgets::Anchor,
+    pub model_highlight: usize,
+    /// Follows `model_highlight` so keyboard moves keep the highlighted row in view.
+    pub model_scroll: gpui::ScrollHandle,
     pub effort_bounds: std::rc::Rc<std::cell::Cell<gpui::Bounds<Pixels>>>,
     pub effort_dragging: std::rc::Rc<std::cell::Cell<bool>>,
 }
@@ -639,6 +681,8 @@ pub struct Workspace {
     pub settings_scroll: crate::panels::glide::Smooth,
     /// Whether this run already said it couldn't write a session's tool settings file (said at most once).
     pub menu: Option<Menu>,
+    /// Active universal anchored picker dropdown (model, project, branch & worktree, settings, scope, editor).
+    pub picker: Option<AnchoredPicker>,
     pub toast: Option<Toast>,
     pub toast_serial: u64,
     /// Requests from sessions to other sessions, waiting for the user's answer.
@@ -727,7 +771,7 @@ impl Workspace {
             cx.notify();
         })
         .detach();
-        let home_prompt = cx.new(|cx| TextareaState::new(window, cx).auto_grow(2, 8).submit_on_enter(true).placeholder("Start a task, review a diff, or ask a question…"));
+        let home_prompt = cx.new(|cx| TextareaState::new(window, cx).auto_grow(2, 8).submit_on_enter(true).placeholder("Ask anything, or describe a task…"));
         cx.subscribe_in(&home_prompt, window, |ws: &mut Self, _, ev: &InputEvent, window, cx| {
             if matches!(ev, InputEvent::PressEnter { .. }) {
                 ws.act(Act::HomeLaunch, window, cx);
@@ -762,9 +806,12 @@ impl Workspace {
             home: HomeState {
                 project: None,
                 worktree: None,
-                harness: None,
-                effort: home_effort,
+                model: None,
+                effort: home_effort.unwrap_or_default(),
                 prompt: home_prompt,
+                model_anchor: crate::panels::widgets::Anchor::default(),
+                model_highlight: 0,
+                model_scroll: gpui::ScrollHandle::new(),
                 effort_bounds: std::rc::Rc::new(std::cell::Cell::new(gpui::Bounds::default())),
                 effort_dragging: std::rc::Rc::new(std::cell::Cell::new(false)),
             },
@@ -780,6 +827,7 @@ impl Workspace {
             skills_page: Default::default(),
             settings_scroll: Default::default(),
             menu: None,
+            picker: None,
             toast: None,
             toast_serial: 0,
             ephemeral: HashSet::new(),
@@ -858,6 +906,9 @@ impl Workspace {
         ws.start_git_watch(cx);
         ws.start_activity_poll(window, cx);
         ws.sync_skills(None, cx);
+        if !cfg!(test) {
+            ws.load_enabled_models(cx);
+        }
         cx.observe_window_activation(window, |_, _, cx| cx.notify()).detach();
         ws.check_updates(cx);
         window.focus(&ws.root_focus, cx);
@@ -866,14 +917,20 @@ impl Workspace {
 
     pub fn act(&mut self, act: Act, window: &mut Window, cx: &mut Context<Self>) {
         self.menu = None;
+        // Dragging the effort slider inside the Home model picker keeps that dialog open.
+        if !matches!(act, Act::HomeSetEffort(_)) {
+            self.picker = None;
+        }
         match act {
             Act::NewClaude { cwd } => self.new_claude(cwd, window, cx),
-            Act::NewWorktree(main_checkout) => self.ask_worktree(main_checkout, window, cx),
-            Act::PickBase(choice) => {
-                if let Some(Modal::NewWorktree { base, .. }) = self.modal.as_mut() {
-                    *base = choice;
+            Act::QuickWorktree { main_checkout, name, base, for_home } => match worktrees::new_worktree_act(&main_checkout, &name, base, for_home) {
+                Ok(act) => {
+                    self.picker = None;
+                    self.act(act, window, cx);
                 }
-            }
+                Err(why) => self.toast(why, true, cx),
+            },
+            Act::CreateHomeWorktree { main_checkout, folder, base } => self.create_home_worktree(main_checkout, folder, base, cx),
             Act::SwitchWorktree { folder, base } => self.switch_shown(folder, base, false, window, cx),
             Act::ConfirmSwitch { id, folder, base } => {
                 self.modal = None;
@@ -894,7 +951,6 @@ impl Workspace {
                 );
             }
             Act::ToggleShell(id) => self.toggle_shell(&id, window, cx),
-            Act::ContinueInTerminal(id) => self.continue_in_terminal(&id, window, cx),
             Act::ShowHome => {
                 self.main = Main::Home;
                 self.editor_mode = false;
@@ -908,22 +964,23 @@ impl Workspace {
             Act::HomeSelectWorktree(path) => {
                 self.home.worktree = Some(path);
             }
-            Act::HomeSelectHarness(h) => {
-                self.home.harness = Some(h);
+            Act::HomeSelectModel(model) => {
+                self.home.model = Some(model);
             }
             Act::HomeSetEffort(effort) => {
                 self.home.effort = effort;
             }
             Act::HomeLaunch => {
                 let cwd = self.home_target_cwd();
-                let harness = self.home_selected_harness();
+                let chosen = self.home_selected_model();
                 let effort = self.home.effort;
                 let text = self.home.prompt.read(cx).value().trim().to_string();
                 let prompt = (!text.is_empty()).then_some(text);
                 if prompt.is_some() {
                     self.home.prompt.update(cx, |p, cx| p.set_value("", window, cx));
                 }
-                self.new_session_from_home(harness, cwd, prompt, effort, window, cx);
+                let model = (!chosen.id.is_empty()).then_some(chosen.id);
+                self.new_session_from_home(chosen.harness, model, cwd, prompt, Some(effort), window, cx);
             }
             Act::ListSessions { cwd } => self.list_sessions(cwd, window.mouse_position(), cx),
             Act::PickUp { harness, cwd, session_id, title } => self.pick_up(harness, cwd, session_id, title, window, cx),
@@ -1012,8 +1069,11 @@ impl Workspace {
                 match self.running_claude_in(&cwd, cx) {
                     Some(id) => self.send_to_claude(&id, prompt, window, cx),
                     None => {
-                        // No session to ask: a short-lived one on a mid-sized model.
-                        let options = vec![("model", "claude-sonnet-5-5".to_string()), ("thought_level", "medium".to_string())];
+                        // No session to ask: a short-lived one on medium effort (mid-sized Claude model when on Claude).
+                        let mut options = vec![("thought_level", "medium".to_string())];
+                        if self.store.data.settings.harness == Harness::Claude {
+                            options.push(("model", "claude-sonnet-5-5".to_string()));
+                        }
                         let before = self.selected.clone();
                         self.new_claude_with(cwd, Some(prompt.to_string()), options, Starter::FixGit, window, cx);
                         if self.selected != before
@@ -1032,11 +1092,10 @@ impl Workspace {
                 );
                 let updates = s.update_url.as_deref() != Some("");
                 let chrome = s.chrome_default;
-                let harness = s.harness;
+                let default_model = s.default_model();
                 let claude_hint = self.claude_exe.as_ref().map_or("not found".to_string(), |p| p.to_string_lossy().into_owned());
                 let defaults = s.new_session.clone();
                 let claude = self.modal_input(&claude_t, &claude_hint, window, cx);
-                let model = self.modal_input(defaults.model.as_deref().unwrap_or_default(), "Claude Code default", window, cx);
                 let shell = self.modal_input(&shell_t, &platform::default_shell(None).0, window, cx);
                 let skills_field = self.modal_input(&self.store.data.settings.limits.text(), "none, e.g. dataviz, claude-api", window, cx);
                 let skill_search = self.modal_input_then("", "Search skills.sh or enter owner/repo", |ws, _, cx| ws.search_skills(cx), window, cx);
@@ -1044,8 +1103,21 @@ impl Workspace {
                 window.focus(&list_focus, cx);
                 let custom = &self.store.data.settings.custom_subagents;
                 let form = |c: &claude::subagents::AgentChoice| AgentForm { on: c.on, models: c.models.clone(), edits: c.edits };
-                let subagents = HarnessesForm { enabled: self.store.data.settings.enabled_harnesses_list(), agents: claude::subagents::AgentMap::from_fn(|agent| form(custom.get(agent))), picking: None };
-                self.modal = Some(Modal::Settings { shell, claude, model, harness, effort: defaults.effort, permission: defaults.permission_mode, updates, chrome, scale: crate::panels::scale::percent(), trimmed: self.store.data.settings.trimmed_tools.clone(), claudiu_off: self.store.data.settings.claudiu_tools_off.clone(), skills_field, skill_search, costly: claude::costly::scan(), list_focus, renaming: None, subagents });
+                let subagents = Box::new(HarnessesForm {
+                    enabled: self.store.data.settings.enabled_harnesses_list(),
+                    agents: claude::subagents::AgentMap::from_fn(|agent| form(custom.get(agent))),
+                    claude_models: self.store.data.settings.claude_picked.clone(),
+                    picking: None,
+                });
+                let modes = self.store.data.settings.modes_for(default_model.harness);
+                let initial_perm = defaults
+                    .mode_id
+                    .clone()
+                    .or_else(|| defaults.permission_mode.map(|m| m.acp_id().to_string()))
+                    .filter(|id| modes.iter().any(|(mid, _)| mid == id))
+                    .or_else(|| modes.first().map(|(id, _)| id.clone()))
+                    .unwrap_or_else(|| "default".into());
+                self.modal = Some(Modal::Settings { shell, claude, default_model, effort: defaults.effort.unwrap_or_default(), permission: initial_perm, updates, chrome, scale: crate::panels::scale::percent(), trimmed: self.store.data.settings.trimmed_tools.clone(), claudiu_off: self.store.data.settings.claudiu_tools_off.clone(), skills_field, skill_search, costly: claude::costly::scan(), list_focus, renaming: None, subagents });
                 // After the modal exists: a page that loads something reads the dialog's fields.
                 self.set_settings_page(self.settings_page, cx);
             }
@@ -1063,9 +1135,16 @@ impl Workspace {
             Act::InstallSkillRepo(source) => self.install_skill_repo(source, cx),
             Act::ToggleSkill(name) => self.toggle_skill(name, cx),
             Act::UninstallSkill(name) => self.uninstall_skill(name, cx),
-            Act::PickHarness(choice) => {
-                if let Some(Modal::Settings { harness, .. }) = self.modal.as_mut() {
-                    *harness = choice;
+            Act::PickDefaultModel(choice) => {
+                let modes = self.store.data.settings.modes_for(choice.harness);
+                if let Some(Modal::Settings { default_model, permission, list_focus, .. }) = self.modal.as_mut() {
+                    if !modes.iter().any(|(id, _)| id == permission)
+                        && let Some((first, _)) = modes.first()
+                    {
+                        *permission = first.clone();
+                    }
+                    *default_model = choice;
+                    window.focus(list_focus, cx);
                 }
             }
             Act::PickEffort(choice) => {
@@ -1143,52 +1222,6 @@ impl Workspace {
                 usage::send_ctl(&usage::ctl_file(&id), "precompute_compact", on.into());
                 self.toast(format!("Turning background compaction {}…", if on { "on" } else { "off" }), false, cx);
             }
-            Act::SetChrome(id, on) => {
-                if let Some(meta) = self.store.session_mut(&id).and_then(|s| s.claude.as_mut()) {
-                    meta.chrome = on;
-                }
-                self.store.mark_dirty();
-                self.restart_session(&id, window, cx);
-                self.toast(format!("Claude in Chrome {}. Session restarted.", if on { "on" } else { "off" }), false, cx);
-            }
-            Act::SetAdvisor(id, model) => {
-                // The saved setting changes at once, but a different model only reaches the current conversation on
-                // /clear or /compact; switching the advisor off or on does apply right away.
-                let saved = (model != "off").then(|| model.clone());
-                let mut pending = false;
-                let mut was_off = false;
-                if let Some(meta) = self.store.session_mut(&id).and_then(|s| s.claude.as_mut()) {
-                    let active = meta.advisor_active.clone().or_else(|| meta.advisor.clone());
-                    was_off = active.is_none();
-                    pending = !was_off && saved.as_deref() != active.as_deref();
-                    meta.advisor = saved.clone();
-                    if saved.is_none() {
-                        meta.advisor_active = None;
-                    } else if was_off {
-                        meta.advisor_active = saved.clone();
-                    } else {
-                        meta.advisor_active = active;
-                    }
-                }
-                self.store.mark_dirty();
-                cx.notify();
-                usage::send_ctl(&usage::ctl_file(&id), "advisor", model.clone().into());
-                let note = if model == "off" {
-                    "Advisor off.".to_string()
-                } else if pending {
-                    format!("Advisor will switch to {model} after /clear or /compact.")
-                } else if was_off {
-                    format!("Advisor on ({model}).")
-                } else {
-                    format!("Advisor set to {model}.")
-                };
-                self.toast(note, false, cx);
-            }
-            Act::AskAdvisor(id) => {
-                let current = self.store.session(&id).and_then(|s| s.claude.as_ref()).and_then(|m| m.advisor.clone()).unwrap_or_default();
-                let input = self.modal_input(&current, "opus, sonnet, off, or a model id", window, cx);
-                self.modal = Some(Modal::Advisor { id, input });
-            }
             Act::FilterProject(id) => {
                 self.store.data.layout.project_filter = id;
                 self.store.mark_dirty();
@@ -1236,6 +1269,10 @@ impl Workspace {
                 self.store.data.active_account = Some(id);
                 self.store.mark_dirty();
                 self.refresh_accounts(cx);
+                self.model_lookups.get_mut(Harness::Claude).fetched = false;
+                if !cfg!(test) {
+                    self.load_enabled_models(cx);
+                }
                 self.toast("Switched. New and resumed sessions use this account; running sessions keep theirs.", false, cx);
             }
             Act::Handoff => self.ask_handoff(window, cx),
@@ -1335,18 +1372,113 @@ impl Workspace {
         self.active_cwd()
     }
 
-    /// Harness currently chosen on the Welcome screen (always an enabled harness when possible).
-    pub fn home_selected_harness(&self) -> Harness {
-        let enabled = self.store.data.settings.enabled_harnesses_list();
-        if let Some(h) = self.home.harness
-            && enabled.contains(&h)
+    /// Model currently chosen on the Welcome screen (from the aggregated catalog across enabled harnesses).
+    pub fn home_selected_model(&self) -> crate::harness::CatalogModel {
+        let all = self.store.data.settings.aggregated_models();
+        if let Some(m) = &self.home.model
+            && all.iter().any(|x| x.harness == m.harness && x.id == m.id)
         {
-            return h;
+            return m.clone();
         }
-        if enabled.contains(&self.store.data.settings.harness) {
-            self.store.data.settings.harness
+        self.store.data.settings.default_model()
+    }
+
+    pub fn picker_kind(&self) -> Option<&WorkspacePicker> {
+        self.picker.as_ref().map(|p| &p.kind)
+    }
+
+    pub fn git_picker(&self) -> Option<&GitPicker> {
+        match self.picker_kind() {
+            Some(WorkspacePicker::Git(g)) => Some(g),
+            _ => None,
+        }
+    }
+
+    /// Create a focused search input for a universal picker dropdown that triggers live re-filtering as you type.
+    pub(crate) fn picker_search(&self, placeholder: &'static str, window: &mut Window, cx: &mut Context<Self>) -> Entity<InputState> {
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
+        cx.subscribe_in(&input, window, |_: &mut Self, _, ev: &InputEvent, _, cx| {
+            if matches!(ev, InputEvent::Change) {
+                cx.notify();
+            }
+        })
+        .detach();
+        input.update(cx, |s, cx| s.focus(window, cx));
+        input
+    }
+
+    /// Switch to the New Session (`Main::Home`) composer page and focus its prompt.
+    pub fn open_home(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.menu = None;
+        self.picker = None;
+        self.main = Main::Home;
+        self.active = None;
+        self.selected = None;
+        self.editor_mode = false;
+        self.home.prompt.update(cx, |p, cx| p.focus(window, cx));
+        cx.notify();
+    }
+
+    pub fn open_home_model_picker(&mut self, at: crate::panels::widgets::Dropdown, window: &mut Window, cx: &mut Context<Self>) {
+        self.menu = None;
+        self.load_enabled_models(cx);
+        let chosen = self.home_selected_model();
+        let all = self.store.data.settings.aggregated_models();
+        self.home.model_highlight = all.iter().position(|m| m.harness == chosen.harness && m.id == chosen.id).unwrap_or(0);
+        self.home.model_scroll.scroll_to_item(self.home.model_highlight);
+        let search = self.picker_search("Filter models…", window, cx);
+        self.picker = Some(AnchoredPicker { at, kind: WorkspacePicker::HomeModel { search } });
+        cx.notify();
+    }
+
+    pub fn open_project_picker(&mut self, mode: ProjectPickerMode, at: crate::panels::widgets::Dropdown, window: &mut Window, cx: &mut Context<Self>) {
+        self.menu = None;
+        let search = self.picker_search("Filter projects…", window, cx);
+        self.picker = Some(AnchoredPicker { at, kind: WorkspacePicker::Project { mode, search } });
+        cx.notify();
+    }
+
+    pub fn open_settings_model_picker(&mut self, at: crate::panels::widgets::Dropdown, window: &mut Window, cx: &mut Context<Self>) {
+        self.menu = None;
+        self.load_models(cx);
+        let search = self.picker_search("Filter models…", window, cx);
+        self.picker = Some(AnchoredPicker { at, kind: WorkspacePicker::SettingsModel { search } });
+        cx.notify();
+    }
+
+    pub fn open_settings_effort_picker(&mut self, at: crate::panels::widgets::Dropdown, cx: &mut Context<Self>) {
+        self.menu = None;
+        self.picker = Some(AnchoredPicker { at, kind: WorkspacePicker::SettingsEffort });
+        cx.notify();
+    }
+
+    pub fn open_settings_permission_picker(&mut self, at: crate::panels::widgets::Dropdown, cx: &mut Context<Self>) {
+        self.menu = None;
+        self.picker = Some(AnchoredPicker { at, kind: WorkspacePicker::SettingsPermission });
+        cx.notify();
+    }
+
+    pub fn open_skills_scope_picker(&mut self, at: crate::panels::widgets::Dropdown, window: &mut Window, cx: &mut Context<Self>) {
+        self.menu = None;
+        let search = self.picker_search("Filter scope…", window, cx);
+        self.picker = Some(AnchoredPicker { at, kind: WorkspacePicker::SkillsScope { search } });
+        cx.notify();
+    }
+
+    pub fn open_editor_picker(&mut self, target: PathBuf, at: crate::panels::widgets::Dropdown, cx: &mut Context<Self>) {
+        self.menu = None;
+        self.picker = Some(AnchoredPicker { at, kind: WorkspacePicker::Editor { target } });
+        cx.notify();
+    }
+
+    pub fn dismiss_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.picker = None;
+        self.home.effort_dragging.set(false);
+        if let Some(Modal::Settings { list_focus, .. }) = &self.modal {
+            window.focus(list_focus, cx);
         } else {
-            enabled.first().copied().unwrap_or(self.store.data.settings.harness)
+            self.focus_active(window, cx);
         }
+        cx.notify();
     }
 }

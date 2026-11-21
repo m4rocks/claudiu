@@ -4,33 +4,48 @@ use super::*;
 use crate::claude::subagents::Agent;
 use gpui::KeyDownEvent;
 
-/// A category in the Settings dialog's list, in display order.
+/// A category in the Settings dialog's sidebar, in display order.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SettingsPage {
     #[default]
     General,
-    Sessions,
     Harnesses,
-    Projects,
     Skills,
     ClaudiuTools,
-    Worktrees,
-    About,
+    Projects,
 }
 
 impl SettingsPage {
-    pub const ALL: [SettingsPage; 8] = [Self::General, Self::Sessions, Self::Harnesses, Self::Projects, Self::Skills, Self::ClaudiuTools, Self::Worktrees, Self::About];
+    pub const ALL: [SettingsPage; 5] = [Self::General, Self::Harnesses, Self::Skills, Self::ClaudiuTools, Self::Projects];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::General => "General",
-            Self::Sessions => "Sessions",
             Self::Harnesses => "Harnesses",
-            Self::Projects => "Projects",
             Self::Skills => "Skills",
             Self::ClaudiuTools => "Claudiu tools",
-            Self::Worktrees => "Worktrees",
-            Self::About => "About",
+            Self::Projects => "Projects",
+        }
+    }
+
+    pub fn icon(self) -> gpui_kit::assets::IconName {
+        use gpui_kit::assets::IconName;
+        match self {
+            Self::General => IconName::Settings,
+            Self::Harnesses => IconName::Terminal,
+            Self::Skills => IconName::FileCode,
+            Self::ClaudiuTools => IconName::Brackets,
+            Self::Projects => IconName::FolderOpen,
+        }
+    }
+
+    pub fn subtitle(self) -> &'static str {
+        match self {
+            Self::General => "Defaults for new sessions, interface scale, shell, and updates.",
+            Self::Harnesses => "Link coding agents to aggregate their models into one picker and show usage limits.",
+            Self::Skills => "Install SKILL.md packages from skills.sh and sync them across active harnesses.",
+            Self::ClaudiuTools => "Built-in MCP tools exposed to sessions. Applies to new sessions and after compaction.",
+            Self::Projects => "Manage projects in the sidebar and git worktrees created by Claudiu.",
         }
     }
 
@@ -47,62 +62,123 @@ impl SettingsPage {
     }
 }
 
-/// One agent's model lookup for the Custom subagents page.
+/// One harness's background model lookup.
 #[derive(Default)]
 pub struct Lookup {
     pub loading: bool,
+    /// True once a lookup succeeded in this run so opening a dropdown doesn't re-spawn the adapter every click.
+    pub fetched: bool,
     /// Why the last lookup failed.
     pub error: Option<String>,
 }
 
-/// The Custom subagents page's lookups of each agent's models.
+pub type ModelLister = fn(Harness, &std::path::Path, &[(String, String)]) -> Result<crate::harness::HarnessCatalog, String>;
+
+/// Background model & mode lookups across every harness (Claude Code, Codex, OpenCode, and Antigravity).
 pub struct ModelLookups {
-    agents: claude::subagents::AgentMap<Lookup>,
-    /// How the page asks; tests answer without a real agent.
-    pub list: fn(Agent, &std::path::Path) -> Result<Vec<claude::subagents::AgentModel>, String>,
+    harnesses: crate::harness::HarnessMap<Lookup>,
+    /// How the workspace asks a harness for its models and modes; tests can replace this without a real adapter.
+    pub list: ModelLister,
 }
 
 impl Default for ModelLookups {
     fn default() -> Self {
-        Self { agents: Default::default(), list: claude::acp::models }
+        Self { harnesses: Default::default(), list: crate::harness::probe }
     }
 }
 
 impl ModelLookups {
-    pub fn get(&self, agent: Agent) -> &Lookup {
-        self.agents.get(agent)
+    pub fn get(&self, harness: Harness) -> &Lookup {
+        self.harnesses.get(harness)
     }
 
-    fn get_mut(&mut self, agent: Agent) -> &mut Lookup {
-        self.agents.get_mut(agent)
+    pub fn get_mut(&mut self, harness: Harness) -> &mut Lookup {
+        self.harnesses.get_mut(harness)
+    }
+
+    pub fn any_loading(&self, enabled: &[Harness]) -> bool {
+        enabled.iter().any(|&h| self.harnesses.get(h).loading)
     }
 }
 
 impl Workspace {
-    /// Asks each agent switched on as a subagent for its models in the background while the Harnesses page shows.
-    /// The list the page showed last stays until the answer comes; a failure keeps it and says why.
+    /// Environment passed to `harness`'s ACP server when probing its available models.
+    fn harness_model_env(&self, harness: Harness) -> Result<Vec<(String, String)>, String> {
+        if harness != Harness::Claude {
+            return Ok(vec![]);
+        }
+        let Some(exe) = self.claude_exe.clone() else {
+            return Err("Could not find the `claude` CLI on PATH.".into());
+        };
+        let mut env = harness::claude::environment(&exe);
+        env.push(("CLAUDE_CODE_AUTO_CONNECT_IDE".into(), "false".into()));
+        env.push(("CLAUDE_CODE_IDE_SKIP_AUTO_INSTALL".into(), "1".into()));
+        if let Some(acct) = self.store.active_account() {
+            env.extend(Self::account_env(acct));
+        }
+        Ok(env)
+    }
+
+    /// Refreshes model catalogs in the background for every enabled harness (Claude Code, Codex, OpenCode,
+    /// Antigravity) and any enabled subagent that hasn't loaded yet in this run.
+    pub(crate) fn load_enabled_models(&mut self, cx: &mut Context<Self>) {
+        let enabled = self.store.data.settings.enabled_harnesses_list();
+        let wanted: Vec<Harness> = Harness::ALL
+            .into_iter()
+            .filter(|&h| {
+                let subagent_on = h.agent().is_some_and(|a| self.store.data.settings.custom_subagents.get(a).on);
+                let lookup = self.model_lookups.get(h);
+                (enabled.contains(&h) || subagent_on) && !lookup.loading && !lookup.fetched
+            })
+            .collect();
+        self.fetch_harness_models(wanted, cx);
+    }
+
+    /// Asks each harness switched on in Settings (as a harness or subagent) for its models in the background while
+    /// General or Harnesses shows.
     pub(crate) fn load_models(&mut self, cx: &mut Context<Self>) {
-        if self.settings_page != SettingsPage::Harnesses {
+        if !matches!(self.settings_page, SettingsPage::General | SettingsPage::Harnesses) {
             return;
         }
         let Some(Modal::Settings { subagents, .. }) = &self.modal else { return };
-        let wanted: Vec<Agent> = Agent::ALL.into_iter().filter(|a| subagents.get(*a).on && !self.model_lookups.get(*a).loading).collect();
-        for agent in wanted {
-            self.model_lookups.get_mut(agent).loading = true;
+        let wanted: Vec<Harness> = Harness::ALL
+            .into_iter()
+            .filter(|&h| {
+                let subagent_on = h.agent().is_some_and(|a| subagents.get(a).on);
+                let lookup = self.model_lookups.get(h);
+                (subagents.enabled.contains(&h) || subagent_on) && !lookup.loading && (!lookup.fetched || lookup.error.is_some())
+            })
+            .collect();
+        self.fetch_harness_models(wanted, cx);
+    }
+
+    fn fetch_harness_models(&mut self, wanted: Vec<Harness>, cx: &mut Context<Self>) {
+        for harness in wanted {
+            let env = match self.harness_model_env(harness) {
+                Ok(env) => env,
+                Err(why) => {
+                    self.model_lookups.get_mut(harness).error = Some(why);
+                    cx.notify();
+                    continue;
+                }
+            };
+            self.model_lookups.get_mut(harness).loading = true;
             let list = self.model_lookups.list;
             let folder = crate::datadir::data_dir();
             self.in_background(
-                move || list(agent, &folder),
-                move |ws, found, _| {
-                    let lookup = ws.model_lookups.get_mut(agent);
+                move || list(harness, &folder, &env),
+                move |ws, found, cx| {
+                    let lookup = ws.model_lookups.get_mut(harness);
                     lookup.loading = false;
                     match found {
-                        Ok(models) => {
+                        Ok(catalog) => {
+                            lookup.fetched = true;
                             lookup.error = None;
-                            let catalog = &mut ws.store.data.settings.custom_subagents.get_mut(agent).catalog;
-                            if *catalog != models {
-                                *catalog = models;
+                            let models_changed = ws.store.data.settings.set_harness_models(harness, catalog.models);
+                            let modes_changed = ws.store.data.settings.set_harness_modes(harness, catalog.modes);
+                            if models_changed || modes_changed {
                                 ws.store.mark_dirty();
+                                ws.push_models_to_threads(cx);
                             }
                         }
                         Err(why) => lookup.error = Some(why),
@@ -113,13 +189,30 @@ impl Workspace {
         }
     }
 
+    /// Keep every open chat thread's aggregated model list up to date.
+    pub(crate) fn push_models_to_threads(&self, cx: &mut Context<Self>) {
+        let settings = &self.store.data.settings;
+        let models = settings.aggregated_models();
+        for live in &self.live {
+            if let Some(thread) = live.view.thread() {
+                thread.update(cx, |t, cx| {
+                    t.all_models = models.clone();
+                    t.picked = settings.picked_models(t.harness).to_vec();
+                    cx.notify();
+                });
+            }
+        }
+    }
+
     /// Opens a harness's configuration popup over the Harnesses page.
     pub(crate) fn open_harness_dialog(&mut self, harness: Harness, window: &mut Window, cx: &mut Context<Self>) {
         match harness {
             Harness::Claude => {
+                let search = self.modal_input_then("", "Search models", Self::close_harness_dialog, window, cx);
                 if let Some(Modal::Settings { subagents, .. }) = self.modal.as_mut() {
-                    subagents.picking = Some(HarnessDialog::Claude);
+                    subagents.picking = Some(HarnessDialog::Claude(search));
                 }
+                self.load_models(cx);
             }
             Harness::Codex | Harness::OpenCode | Harness::Antigravity => {
                 let agent = match harness {
@@ -146,7 +239,7 @@ impl Workspace {
     }
 
     pub(crate) fn harness_dialog_open(&self) -> bool {
-        matches!(&self.modal, Some(Modal::Settings { subagents: HarnessesForm { picking: Some(_), .. }, .. }))
+        matches!(&self.modal, Some(Modal::Settings { subagents, .. }) if subagents.picking.is_some())
     }
 
     /// Keys for the open Settings dialog, seen before the focused control. Up and Down change the page and Enter saves
@@ -161,11 +254,17 @@ impl Workspace {
             }
             return;
         }
-        let Some(Modal::Settings { shell, model, skill_search, list_focus, renaming, .. }) = &self.modal else { return };
+        // Escape closes any active universal picker over Settings without closing Settings itself.
+        if ev.keystroke.key == "escape" && self.picker.is_some() {
+            self.dismiss_picker(window, cx);
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
+        let Some(Modal::Settings { shell, skill_search, list_focus, renaming, .. }) = &self.modal else { return };
         let list_focus = list_focus.clone();
         let fields = match self.settings_page {
             SettingsPage::General => vec![shell.clone()],
-            SettingsPage::Sessions => vec![model.clone()],
             SettingsPage::Skills if self.skills_page.tab == SkillsTab::Browse => vec![skill_search.clone()],
             SettingsPage::Projects => renaming.iter().map(|(_, name)| name.clone()).collect(),
             _ => Vec::new(),
@@ -202,16 +301,13 @@ mod tests {
 
     #[test]
     fn next_and_prev_walk_the_list_and_stop_at_the_ends() {
-        assert_eq!(General.next(), Sessions);
-        assert_eq!(Sessions.next(), Harnesses);
-        assert_eq!(Harnesses.next(), Projects);
-        assert_eq!(Projects.next(), Skills);
+        assert_eq!(General.next(), Harnesses);
+        assert_eq!(Harnesses.next(), Skills);
         assert_eq!(Skills.next(), ClaudiuTools);
-        assert_eq!(ClaudiuTools.next(), Worktrees);
-        assert_eq!(Worktrees.next(), About);
-        assert_eq!(About.next(), About);
-        assert_eq!(About.prev(), Worktrees);
-        assert_eq!(Sessions.prev(), General);
+        assert_eq!(ClaudiuTools.next(), Projects);
+        assert_eq!(Projects.next(), Projects);
+        assert_eq!(Projects.prev(), ClaudiuTools);
+        assert_eq!(Harnesses.prev(), General);
         assert_eq!(General.prev(), General);
     }
 

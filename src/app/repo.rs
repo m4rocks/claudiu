@@ -24,7 +24,7 @@ impl Workspace {
                 ws.store.save_if_dirty();
                 ws.refresh_pending(cx);
                 // The Worktrees page of Settings lists what a removal just deleted.
-                if op == GitOp::Worktree && ws.settings_page == SettingsPage::Worktrees {
+                if op == GitOp::Worktree && ws.settings_page == SettingsPage::Projects {
                     ws.load_stored_worktrees(cx);
                 }
                 match result {
@@ -108,54 +108,6 @@ impl Workspace {
                     }
                 });
             }
-        })
-        .detach();
-    }
-
-    /// Branch menu: list branches off the UI thread, then open the menu under the trigger.
-    pub fn open_branch_menu(&mut self, cwd: PathBuf, at: crate::panels::widgets::Dropdown, cx: &mut Context<Self>) {
-        if self.git_busy.is_some() {
-            return;
-        }
-        self.git_busy = Some(GitOp::Branch);
-        cx.notify();
-        cx.spawn(async move |this, cx| {
-            let dir = cwd.clone();
-            let result = cx
-                .background_executor()
-                .spawn(async move {
-                    let list = crate::git::commit::branches(&dir)?;
-                    let deletable = crate::git::commit::deletable_branches(&dir, list.current.as_deref());
-                    Ok::<_, String>((list, deletable))
-                })
-                .await;
-            let _ = this.update(cx, |ws, cx| {
-                ws.git_busy = None;
-                match result {
-                    Ok((list, deletable)) => {
-                        let mut items = vec![MenuItem::new("Branches", Act::Dismiss)];
-                        items[0].disabled = true;
-                        // ponytail: the menu doesn't scroll, so only the most recently used branches are listed.
-                        items.extend(list.names.into_iter().take(15).map(|name| {
-                            let label = format!("{}{name}", crate::panels::widgets::tick(list.current.as_deref() == Some(name.as_str())));
-                            let held = list.elsewhere.iter().find(|h| h.branch == name);
-                            let hint = held.map(|h| format!("opens {}", h.tree));
-                            // Git won't check a branch out twice, so the row moves the session into the working tree that has it.
-                            let act = match held {
-                                Some(h) => Act::SwitchWorktree { folder: h.folder.clone(), base: Default::default() },
-                                None => Act::SwitchBranch(cwd.clone(), name.clone()),
-                            };
-                            // Remote-only branches have nothing local to delete.
-                            let remove = (held.is_none() && deletable.contains(&name)).then(|| Act::DeleteBranch(cwd.clone(), name.clone()));
-                            MenuItem { remove, hint, icon: held.map(|_| gpui_kit::assets::IconName::FolderGit2), ..MenuItem::new(label, act) }
-                        }));
-                        items.push(MenuItem { separator_before: true, ..MenuItem::new("New branch…", Act::NewBranch(cwd)) });
-                        ws.open_dropdown(crate::panels::widgets::Dropdown { min_w: at.min_w.max(gpui::px(300.0)), ..at }, items, cx);
-                    }
-                    Err(e) => ws.toast(e, true, cx),
-                }
-                cx.notify();
-            });
         })
         .detach();
     }

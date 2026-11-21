@@ -1411,20 +1411,11 @@ fn switching_between_worktrees_in_the_workspace() {
     // The panels ease open over `Reveal::MS` of real time, so the pane's grid keeps changing for that long; how far
     // it has got depends on how fast the machine ran the steps above. The grid read below must be the settled one.
 
-    // A bad name keeps the dialog open; a typed one moves the session into the worktree Claude Code will make.
-    step(&mut cx, &|ws, w, cx| ws.act(Act::NewWorktree(repo_dir.clone()), w, cx));
-    step(&mut cx, &|ws, w, cx| {
-        let Some(Modal::NewWorktree { input, .. }) = &ws.modal else { panic!("no dialog") };
-        input.clone().update(cx, |i, cx| i.set_value("bad name", w, cx));
-        ws.submit_modal(w, cx);
-    });
-    assert!(ws.read_with(&cx, |ws, _| matches!(ws.modal, Some(Modal::NewWorktree { .. }))), "a bad name is refused");
-    step(&mut cx, &|ws, w, cx| {
-        let Some(Modal::NewWorktree { input, .. }) = &ws.modal else { panic!("no dialog") };
-        input.clone().update(cx, |i, cx| i.set_value("fix-login", w, cx));
-        ws.act(Act::PickBase(crate::git::worktree::Base::Current), w, cx);
-        ws.submit_modal(w, cx);
-    });
+    // A bad name changes nothing; a typed one moves the session into the worktree Claude Code will make.
+    let quick = |name: &str| Act::QuickWorktree { main_checkout: repo_dir.clone(), name: name.into(), base: crate::git::worktree::Base::Current, for_home: false };
+    step(&mut cx, &|ws, w, cx| ws.act(quick("bad name"), w, cx));
+    assert!(ws.read_with(&cx, |ws, app| ws.live_view(&session.id).and_then(|v| v.thread()).is_some_and(|v| v.read(app).handover.is_none())), "a bad name is refused");
+    step(&mut cx, &|ws, w, cx| ws.act(quick("fix-login"), w, cx));
     let worktree = crate::git::worktree::folder(&repo_dir, "fix-login");
     let skeleton = |ws: &Workspace, app: &App| ws.live_view(&session.id).and_then(|v| v.thread()).and_then(|v| v.read(app).handover.as_ref().map(|h| h.message.clone()));
     assert_eq!(ws.read_with(&cx, |ws, app| skeleton(ws, app)).as_deref(), Some("Switching to fix-login…"), "the skeleton names the worktree");
@@ -1493,15 +1484,15 @@ fn switching_between_worktrees_in_the_workspace() {
     // Either the check ran before the screen was ready (told to wait) or after (switched); it never half-switches.
     wait(&mut cx, "a settled state", &|ws, app| ws.is_running(&session.id, app) && ws.live_view(&session.id).is_some_and(|v| !v.is_loading(app)));
 
-    // A project without commits has a disabled "New worktree…".
+    // A project without commits disables "+ New worktree" in the unified Branch & Worktree dialog.
     let bare = dunce::canonicalize(work.path()).unwrap().join("bare");
     git2::Repository::init(&bare).unwrap();
     let bare_project = ws.update(&mut cx, |ws, _| ws.store.add_project(&bare));
     let bare_cwd = bare.clone();
-    let at = crate::panels::widgets::Dropdown { pos: gpui::point(gpui::px(100.0), gpui::px(30.0)), min_w: gpui::px(0.0) };
-    step(&mut cx, &|ws, _w, cx| ws.open_worktree_menu(bare_project.clone(), bare_cwd.clone(), crate::panels::widgets::Dropdown { pos: at.pos, min_w: at.min_w }, cx));
-    let last = ws.read_with(&cx, |ws, _| ws.menu.as_ref().and_then(|m| m.items.last().map(|i| (i.label.clone(), i.disabled, i.hint.clone()))));
-    assert!(matches!(&last, Some((label, true, Some(hint))) if label == "New worktree…" && hint.contains("no commits")), "{last:?}");
+    let origin = crate::panels::widgets::Dropdown::at(gpui::point(gpui::px(0.0), gpui::px(0.0)));
+    step(&mut cx, &|ws, w, cx| ws.open_git_picker(bare_project.clone(), bare_cwd.clone(), crate::app::GitPickerTarget::Session, origin, w, cx));
+    let reason = ws.read_with(&cx, |ws, _| ws.git_picker().and_then(|p| p.new_worktree_reason.clone()));
+    assert!(reason.as_deref().is_some_and(|r| r.contains("no commits")), "{reason:?}");
 }
 
 #[test]
@@ -1573,24 +1564,22 @@ fn removing_a_worktree_when_its_session_ends() {
     step(&mut cx, &|ws, w, cx| ws.close_live(&other, w, cx));
     step(&mut cx, &|ws, w, cx| ws.act(Act::Select(id.clone()), w, cx));
 
-    // The top-bar menu offers the removal for the session's own worktree, and not in the main checkout.
+    // The unified Branch & Worktree dialog offers removal for the linked worktree and not the main checkout.
     let project = ws.read_with(&cx, |ws, _| ws.store.data.projects[0].id.clone());
-    let menu_of = |cx: &mut TestAppContext, cwd: PathBuf| {
-        let at = crate::panels::widgets::Dropdown { pos: gpui::point(gpui::px(100.0), gpui::px(30.0)), min_w: gpui::px(0.0) };
-        step(cx, &|ws, _w, cx| ws.open_worktree_menu(project.clone(), cwd.clone(), crate::panels::widgets::Dropdown { pos: at.pos, min_w: at.min_w }, cx));
-        // Each row's label and whether it has an x.
-        ws.read_with(cx, |ws, _| ws.menu.as_ref().map(|m| m.items.iter().map(|i| (i.label.trim().to_string(), i.remove.is_some())).collect::<Vec<_>>()).unwrap_or_default())
+    let origin = crate::panels::widgets::Dropdown::at(gpui::point(gpui::px(0.0), gpui::px(0.0)));
+    let worktrees_of = |cx: &mut TestAppContext, cwd: PathBuf| {
+        step(cx, &|ws, w, cx| ws.open_git_picker(project.clone(), cwd.clone(), crate::app::GitPickerTarget::Session, origin, w, cx));
+        ws.read_with(cx, |ws, _| ws.git_picker().map(|p| p.worktrees.iter().map(|w| (w.label.clone(), w.remove.is_some())).collect::<Vec<_>>()).unwrap_or_default())
     };
     for cwd in [folder.clone(), repo_dir.clone()] {
-        let rows = menu_of(&mut cx, cwd);
-        assert_eq!(rows[0].0, "Worktrees");
-        assert!(rows[1].0.contains("main checkout") && !rows[1].1, "the main checkout has no x: {rows:?}");
-        assert!(rows[2].0.contains("fix") && rows[2].1, "the worktree has an x: {rows:?}");
-        assert!(rows.last().is_some_and(|r| r.0 == "New worktree…" && !r.1), "{rows:?}");
+        let rows = worktrees_of(&mut cx, cwd);
+        assert!(rows[0].0.contains("main checkout") && !rows[0].1, "the main checkout has no x: {rows:?}");
+        assert!(rows[1].0.contains("fix") && rows[1].1, "the worktree has an x: {rows:?}");
+        assert!(ws.read_with(&cx, |ws, _| ws.git_picker().is_some_and(|p| p.new_worktree_reason.is_none())), "creating a new worktree is enabled");
     }
 
     // The x on the worktree a session is running in is refused, naming the session.
-    let own_x = ws.read_with(&cx, |ws, _| ws.menu.as_ref().and_then(|m| m.items[2].remove.clone()));
+    let own_x = ws.read_with(&cx, |ws, _| ws.git_picker().and_then(|p| p.worktrees[1].remove.clone()));
     let Some(x) = own_x else { panic!("no x on the worktree's row") };
     step(&mut cx, &|ws, w, cx| ws.act(x.clone(), w, cx));
     let toast = ws.read_with(&cx, |ws, _| ws.toast.as_ref().map(|t| t.text.clone()));
@@ -1606,16 +1595,20 @@ fn removing_a_worktree_when_its_session_ends() {
     assert!(toast.as_deref().is_some_and(|t| t.contains("Removed worktree fix")), "{toast:?}");
     assert!(!git(&["rev-parse", "--verify", "-q", "worktree-fix"]).status.success(), "the merged branch went with it");
 
-    // The branch menu has a title and an x on every local branch but the current one.
+    // The same dialog lists branches and puts an x on every local branch except the current one.
     assert!(git(&["branch", "spare"]).status.success());
-    let at = crate::panels::widgets::Dropdown { pos: gpui::point(gpui::px(100.0), gpui::px(30.0)), min_w: gpui::px(0.0) };
-    step(&mut cx, &|ws, _w, cx| ws.open_branch_menu(repo_dir.clone(), crate::panels::widgets::Dropdown { pos: at.pos, min_w: at.min_w }, cx));
-    wait(&mut cx, "the branch menu", &|ws| ws.menu.is_some());
-    let rows = ws.read_with(&cx, |ws, _| ws.menu.as_ref().map(|m| m.items.iter().map(|i| (i.label.trim().to_string(), i.remove.clone())).collect::<Vec<_>>()).unwrap_or_default());
-    assert_eq!(rows[0].0, "Branches");
-    let spare = rows.iter().find(|r| r.0 == "spare").and_then(|r| r.1.clone());
+    step(&mut cx, &|ws, w, cx| ws.open_git_picker(project.clone(), repo_dir.clone(), crate::app::GitPickerTarget::Session, origin, w, cx));
+    wait(&mut cx, "the branch list", &|ws| ws.git_picker().is_some_and(|p| p.branches.is_some()));
+    let rows = ws.read_with(&cx, |ws, _| {
+        ws.git_picker()
+            .and_then(|p| p.branches.as_ref())
+            .and_then(|r| r.as_ref().ok())
+            .map(|list| list.iter().map(|b| (b.name.clone(), b.current, b.remove.clone())).collect::<Vec<_>>())
+            .unwrap_or_default()
+    });
+    let spare = rows.iter().find(|r| r.0 == "spare").and_then(|r| r.2.clone());
     assert!(spare.is_some(), "a local branch has an x: {rows:?}");
-    assert!(rows.iter().find(|r| r.0.starts_with('✓')).is_some_and(|r| r.1.is_none()), "the current branch has none: {rows:?}");
+    assert!(rows.iter().find(|r| r.1).is_some_and(|r| r.2.is_none()), "the current branch has none: {rows:?}");
 
     let x = spare.unwrap();
     step(&mut cx, &|ws, w, cx| ws.act(x.clone(), w, cx));
@@ -1628,7 +1621,7 @@ fn removing_a_worktree_when_its_session_ends() {
     assert!(git(&["worktree", "add", "-q", "-b", "listed", &listed.to_string_lossy()]).status.success());
     step(&mut cx, &|ws, w, cx| {
         ws.act(Act::OpenSettings, w, cx);
-        ws.set_settings_page(SettingsPage::Worktrees, cx);
+        ws.set_settings_page(SettingsPage::Projects, cx);
     });
     let shown = |ws: &Workspace| ws.worktrees_page.stored.as_ref().is_some_and(|s| s.iter().any(|w| w.folder == listed));
     wait(&mut cx, "the page to list it", &shown);
@@ -1978,11 +1971,18 @@ fn handing_a_session_to_another_agent() {
     cx.update_window(window, |_, window, app| thread(ws.read(app), &first).unwrap().update(app, |v, cx| v.send("plan the change".into(), window, cx))).unwrap();
     wait(&mut cx, "the reply", &|ws, app| thread(ws, &first).is_some_and(|t| !t.read(app).is_working() && t.read(app).tail_text(10).contains("Agent: ok")));
 
-    // Stage switching to Codex inside the chat picker; sending the next message dynamically hands off in place.
+    // Pick a model served by Codex from the unified model picker; sending the next message dynamically hands off in place.
     cx.update_window(window, |_, window, app| {
         let view = thread(ws.read(app), &first).unwrap();
         view.update(app, |v, cx| {
-            v.stage_harness(crate::harness::Harness::Codex, cx);
+            v.pick_model(
+                crate::harness::CatalogModel {
+                    harness: crate::harness::Harness::Codex,
+                    id: "gpt-5.3-codex".into(),
+                    name: "GPT-5.3 Codex".into(),
+                },
+                cx,
+            );
             v.send("implement step 2".into(), window, cx);
         });
     })
@@ -2180,4 +2180,124 @@ fn skills_page_installs_toggles_syncs_and_removes() {
             && std::fs::symlink_metadata(project_skills_dir(Harness::Claude, &proj_path).join("demo-skill")).is_err()
             && !data.path().join("skills").join("demo-skill").exists()
     });
+}
+
+#[test]
+#[ignore = "drives the workspace"]
+fn dropdowns_switch_on_one_click_and_load_all_harness_models() {
+    use gpui::px;
+    use std::time::Instant;
+
+    let data = tempfile::tempdir().unwrap();
+    let proj_dir = tempfile::tempdir().unwrap();
+    git2::Repository::init(proj_dir.path()).unwrap();
+    // SAFETY: test-isolated data dir.
+    unsafe { std::env::set_var("CLAUDIU_DATA_DIR", data.path()) };
+
+    let mut cx = TestAppContext::single();
+    cx.update(|app| {
+        gpui_kit::init(app);
+        gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, app);
+        app.bind_keys(crate::app::line_action_bindings());
+    });
+    let (window, ws) = cx
+        .update(|app| {
+            gpui_kit::open_window(
+                gpui::WindowOptions {
+                    window_bounds: Some(gpui::WindowBounds::Windowed(gpui::Bounds::new(gpui::point(px(0.0), px(0.0)), gpui::size(px(1280.0), px(800.0))))),
+                    ..Default::default()
+                },
+                app,
+                |window, app| app.new(|cx| Workspace::new(window, vec![proj_dir.path().to_path_buf()], cx)),
+            )
+        })
+        .unwrap();
+
+    // Inject a uniform lister for all harnesses (including Claude Code) and trigger background model loading.
+    ws.update(&mut cx, |ws, cx| {
+        ws.claude_exe = Some(PathBuf::from("/fake/claude"));
+        ws.store.data.settings.enabled_harnesses = Some(vec![Harness::Claude, Harness::Codex]);
+        ws.model_lookups.list = |harness, _cwd, _env| match harness {
+            Harness::Claude => Ok(crate::harness::HarnessCatalog {
+                models: vec![crate::claude::subagents::AgentModel { id: "claude-opus-4-6".into(), name: "Opus 4.6".into() }],
+                modes: vec![("default".into(), "Ask Before Editing".into()), ("bypassPermissions".into(), "Full Access".into())],
+            }),
+            Harness::Codex => Ok(crate::harness::HarnessCatalog {
+                models: vec![crate::claude::subagents::AgentModel { id: "gpt-5.4".into(), name: "GPT-5.4".into() }],
+                modes: vec![("ask".into(), "Ask".into()), ("fullAccess".into(), "Full Access".into())],
+            }),
+            _ => Ok(Default::default()),
+        };
+        ws.load_enabled_models(cx);
+    });
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        cx.run_until_parked();
+        let ready = ws.read_with(&cx, |ws, _| {
+            let names: Vec<String> = ws.store.data.settings.aggregated_models().into_iter().map(|m| m.name).collect();
+            names.contains(&"Opus 4.6".to_string()) && names.contains(&"GPT-5.4".to_string())
+        });
+        if ready {
+            break;
+        }
+        assert!(Instant::now() < deadline, "all enabled harnesses should load models uniformly");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    // Draw once so Anchor probes capture real bounds on the Welcome chips.
+    cx.update_window(window, |_, window, app| window.draw(app).clear(app)).unwrap();
+
+    let click = |cx: &mut TestAppContext, x: f32, y: f32| {
+        cx.update_window(window, |_, window, app| {
+            let _ = window.dispatch_event(
+                gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
+                    position: gpui::point(px(x), px(y)),
+                    modifiers: gpui::Modifiers::none(),
+                    button: gpui::MouseButton::Left,
+                    click_count: 1,
+                    first_mouse: false,
+                }),
+                app,
+            );
+            window.draw(app).clear(app);
+        })
+        .unwrap();
+    };
+
+    // Click the Welcome Model chip to open HomeModel, then read its exact painted bounds to locate the neighboring
+    // Project chip right beside it.
+    let (model_pos, project_pos) = {
+        // Welcome composer is centered in the main pane (x=284..996, y≈460). Scan horizontally for HomeModel first.
+        let mut found_model = None;
+        for y in (400..520).step_by(12) {
+            for x in (340..480).step_by(20) {
+                click(&mut cx, x as f32, y as f32);
+                if ws.read_with(&cx, |ws, _| matches!(ws.picker_kind(), Some(crate::app::WorkspacePicker::HomeModel { .. }))) {
+                    let b = ws.read_with(&cx, |ws, _| ws.picker.as_ref().unwrap().at.trigger);
+                    found_model = Some((f32::from(b.center().x), f32::from(b.center().y), f32::from(b.right())));
+                    break;
+                }
+            }
+            if found_model.is_some() {
+                break;
+            }
+        }
+        let (mx, my, mright) = found_model.expect("should hit Welcome model chip");
+        ((mx, my), (mright + 36.0, my))
+    };
+
+    // While HomeModel is open, a SINGLE click on the neighboring Project chip must dismiss HomeModel and open Project.
+    click(&mut cx, project_pos.0, project_pos.1);
+    assert!(
+        ws.read_with(&cx, |ws, _| matches!(ws.picker_kind(), Some(crate::app::WorkspacePicker::Project { mode: crate::app::ProjectPickerMode::Home, .. }))),
+        "clicking another trigger while a dropdown is open must switch immediately in one click"
+    );
+
+    // Clicking the Project chip again while Project is open toggles it closed.
+    click(&mut cx, project_pos.0, project_pos.1);
+    assert!(ws.read_with(&cx, |ws, _| ws.picker.is_none()), "clicking the active trigger again toggles its dropdown closed");
+
+    // Clicking Model again opens HomeModel cleanly.
+    click(&mut cx, model_pos.0, model_pos.1);
+    assert!(ws.read_with(&cx, |ws, _| matches!(ws.picker_kind(), Some(crate::app::WorkspacePicker::HomeModel { .. }))));
 }

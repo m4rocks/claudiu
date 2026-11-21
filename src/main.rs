@@ -29,9 +29,9 @@ use gpui_kit::component::TitleBar;
 gpui_kit::assets::icon_assets!(
     AppIcons,
     [
-        WindowMinimize, WindowMaximize, WindowRestore, WindowClose, Archive, ArchiveRestore, ArrowDownToLine, ArrowLeft, Brackets, Check, ChevronDown, ChevronRight,
+        WindowMinimize, WindowMaximize, WindowRestore, WindowClose, Archive, ArchiveRestore, ArrowDownToLine, ArrowLeft, Brackets, Check, ChevronDown, ChevronRight, ChevronUp,
         CircleCheck, CircleDot, CircleDotDashed, CircleQuestionMark, CircleSlash, CircleSmall, CircleX, Clock, Ellipsis, Eye, ExternalLink, File, FileText, Folder, FolderGit2, FolderOpen, GitBranch, GitCommitHorizontal, GitMerge, GitPullRequest,
-        GitPullRequestClosed, GitPullRequestDraft, HeartPlus, LoaderCircle, Lock, MessageSquare, FileCode, PanelBottom, PanelLeft, PanelRight, Pencil, RefreshCw, Search,
+        GitPullRequestClosed, GitPullRequestDraft, HeartPlus, LoaderCircle, Lock, MessageSquare, FileCode, PanelBottom, PanelLeft, PanelRight, Pencil, Plus, RefreshCw, Search,
         Settings, Terminal, X
     ]
 );
@@ -78,7 +78,7 @@ fn menu_bar() -> Vec<gpui::Menu> {
             MenuItem::action("Quit Claudiu", Quit),
         ]),
         Menu::new("File").items([
-            MenuItem::action("New Claude Session", NewClaude),
+            MenuItem::action("New Session", NewClaude),
             MenuItem::action("Show or Hide Shell", ToggleShell),
             MenuItem::action("Editor Mode", ToggleEditor),
             MenuItem::action("GitHub Issues & Pull Requests", OpenGithub),

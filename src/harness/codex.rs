@@ -3,11 +3,12 @@
 
 use crate::claude::subagents::Agent;
 
-use super::{Adapter, Reopen, words};
+use super::{Adapter, Reopen};
 
 pub const ADAPTER: Adapter = Adapter {
     name: "Codex",
+    server_name: "codex-acp",
     server: || super::subagent_server(Agent::Codex),
     reopen: Reopen::Load,
-    resume_command: |id| Some(words(&["codex", "resume", id])),
+    delete_model_session: false,
 };
