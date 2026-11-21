@@ -53,22 +53,11 @@ pub fn link_shared(main: &Path, alt: &Path) -> io::Result<()> {
         if fs::symlink_metadata(&dst).is_ok() {
             continue;
         }
-        if let Err(e) = link_dir(&src, &dst) {
+        if let Err(e) = crate::platform::link_dir(&src, &dst) {
             result = Err(e);
         }
     }
     result
-}
-
-#[cfg(windows)]
-fn link_dir(src: &Path, dst: &Path) -> io::Result<()> {
-    // Junctions need no admin rights or Developer Mode, unlike directory symlinks.
-    junction::create(src, dst)
-}
-
-#[cfg(unix)]
-fn link_dir(src: &Path, dst: &Path) -> io::Result<()> {
-    std::os::unix::fs::symlink(src, dst)
 }
 
 /// Delete an alt folder: its login plus the links, never what they point at. Refuses anything outside `root()`.
@@ -83,9 +72,7 @@ fn delete(alt: &Path) -> io::Result<()> {
     for e in fs::read_dir(alt)?.flatten() {
         // `DirEntry::file_type` doesn't follow links; on Windows junctions count as symlinks too.
         if e.file_type()?.is_symlink() {
-            let p = e.path();
-            // Windows removes directory links with RemoveDirectory; Unix removes any symlink as a file.
-            if cfg!(windows) && p.is_dir() { fs::remove_dir(&p)? } else { fs::remove_file(&p)? }
+            crate::platform::remove_dir_link(&e.path())?;
         }
     }
     // Hard links left over are just extra names: removing them leaves the main file in place.

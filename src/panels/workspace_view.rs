@@ -8,19 +8,19 @@ use gpui::{
 
 use crate::claude::defaults::{Effort, PermissionMode};
 use crate::claude::mcp::Feature;
-use crate::claude::trim::Trim;
 use crate::app::{
     Act, CloseSession, SessionView, SettingsPage, GitOp, FocusSearch, ImportProject, Main, MenuItem, Modal, NewClaude, NextSession, OpenGithub, OpenSettings, PrevSession, ShellDrag, SwapFocus,
     ToggleEditor, ToggleRight, ToggleShell, ToggleSidebar, Workspace, SHELL_HEIGHT,
 };
-use gpui_kit::component::{TitleBar, input::{Input, InputState}};
+use gpui_kit::component::{TitleBar, input::{Input, InputState, Textarea}};
 use crate::store::{SessionKind, now};
+use crate::panels::logos;
 use crate::panels::theme::{self, hsla};
 use crate::updater::Status;
 use gpui_kit::assets::IconName;
 use crate::harness::Harness;
 use crate::panels::settings_pages::{flip, switch_row};
-use crate::panels::widgets::{Trigger, ago, button, button_disabled, clawd, danger_button, fade_in, icon, icon_button, icon_button_disabled, key_hint, section_label, short_path, shortcut, spinner, tick};
+use crate::panels::widgets::{Trigger, ago, button, button_disabled, danger_button, effort_slider, fade_in, icon, icon_button, icon_button_disabled, key_hint, section_label, short_path, shortcut, spinner, tick};
 
 impl Workspace {
     // ------------------------------------------------------------------ top bar
@@ -33,7 +33,8 @@ impl Workspace {
         let hints = self.shortcuts_shown;
         let session_active = self.active_id().is_some();
 
-        let title = rec.as_ref().map(|r| r.display_title().to_string()).unwrap_or_else(|| "Claudiu".into());
+        let title = rec.as_ref().map(|r| r.display_title().to_string()).unwrap_or_else(|| "Welcome".into());
+        let active_harness = rec.as_ref().and_then(|r| r.claude.as_ref()).map(|m| m.harness);
         // The branch and the worktree of the session's own folder, which is not the project's folder for a worktree session.
         let git = project.as_ref().and_then(|p| p.git.as_ref());
         let branch = git.and_then(|g| cwd.as_deref().map_or(g.branch.as_deref(), |c| g.branch_at(c))).map(str::to_string);
@@ -67,6 +68,24 @@ impl Workspace {
                             .on_click(cx.listener(|ws, _: &ClickEvent, _w, cx| ws.toggle_left(cx))),
                     )
                     .when(hints, |d| d.child(key_hint("Shift+B")))
+                    .when_some(active_harness, |d, h| {
+                        let color = theme::harness_color(h);
+                        d.child(
+                            div()
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .gap(px(5.0))
+                                .px(px(7.0))
+                                .h(px(20.0))
+                                .rounded(px(6.0))
+                                .bg(hsla(theme::SURFACE_ELEVATED))
+                                .border_1()
+                                .border_color(hsla(theme::PANEL_BORDER))
+                                .child(logos::draw(logos::for_harness(h), 11.0, hsla(color)))
+                                .child(div().text_size(crate::panels::scale::px(11.0)).font_weight(FontWeight::MEDIUM).text_color(hsla(color)).child(h.name())),
+                        )
+                    })
                     .child(
                         div()
                             .min_w_0()
@@ -287,76 +306,316 @@ impl Workspace {
     // ------------------------------------------------------------------ details & home
 
     fn render_home(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let shortcut_row = |keys: &str, what: &str| {
+        let scaled = crate::panels::scale::px;
+        let enabled = self.store.data.settings.enabled_harnesses_list();
+        let harness = self.home_selected_harness();
+        let h_color = theme::harness_color(harness);
+        let accent = hsla(h_color);
+
+        let project = self.home_selected_project().cloned();
+        let target_cwd = self.home_target_cwd();
+        let git = project.as_ref().and_then(|p| p.git.clone());
+        let branch = git.as_ref().and_then(|g| g.branch_at(&target_cwd)).map(str::to_string);
+        let worktree_label = git.as_ref().and_then(|g| crate::git::worktree::label(g, &target_cwd));
+
+        // 1. Harness pills row across all enabled harnesses.
+        let mut harness_bar = div().flex().flex_wrap().items_center().gap(px(6.0));
+        for &h in &enabled {
+            let selected = h == harness;
+            let color = theme::harness_color(h);
+            harness_bar = harness_bar.child(
+                div()
+                    .id(gpui::SharedString::from(format!("home-harness-{}", h.name())))
+                    .px(px(10.0))
+                    .h(px(28.0))
+                    .rounded(px(7.0))
+                    .cursor_pointer()
+                    .bg(hsla(if selected { theme::ROW_ACTIVE } else { theme::PANEL_BG }))
+                    .border_1()
+                    .border_color(if selected { hsla(color) } else { hsla(theme::PANEL_BORDER) })
+                    .hover(|s| s.bg(hsla(theme::SURFACE_HOVER)))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .text_size(scaled(12.0))
+                    .font_weight(if selected { FontWeight::SEMIBOLD } else { FontWeight::NORMAL })
+                    .text_color(hsla(if selected { theme::TEXT } else { theme::TEXT_DIM }))
+                    .child(logos::draw(logos::for_harness(h), 13.0, hsla(color)))
+                    .child(h.name())
+                    .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::HomeSelectHarness(h), window, cx))),
+            );
+        }
+
+        // 2. Context selectors: Project, Worktree, Branch.
+        let pill = |id: &'static str, glyph: IconName, text: String, active: bool| {
             div()
+                .id(id)
+                .h(px(28.0))
+                .px(px(10.0))
+                .rounded(px(7.0))
+                .bg(hsla(theme::PANEL_BG))
+                .border_1()
+                .border_color(hsla(theme::PANEL_BORDER))
+                .hover(|s| s.bg(hsla(theme::SURFACE_HOVER)).border_color(hsla(0x343846)))
                 .flex()
-                .justify_between()
-                .gap(px(28.0))
-                .child(div().text_size(crate::panels::scale::px(12.0)).text_color(hsla(theme::TEXT_DIM)).child(what.to_string()))
-                .child(div().text_size(crate::panels::scale::px(12.0)).text_color(hsla(theme::TEXT_FAINT)).child(keys.to_string()))
+                .items_center()
+                .gap(px(6.0))
+                .cursor_pointer()
+                .text_size(scaled(12.0))
+                .text_color(hsla(if active { theme::TEXT } else { theme::TEXT_DIM }))
+                .child(icon(glyph, 12.5).text_color(hsla(theme::TEXT_DIM)))
+                .child(div().max_w(px(180.0)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(text))
+                .child(icon(IconName::ChevronDown, 11.0).text_color(hsla(theme::TEXT_FAINT)))
         };
-        let mut recent = div().flex().flex_col().gap(px(2.0)).mt(px(26.0)).w(px(420.0));
-        // Newest first: (id, title, last active). Only the five shown are copied out of the store.
+
+        let project_label = project.as_ref().map_or_else(|| "Select project".to_string(), |p| p.name.clone());
+        let project_pill = pill("home-project", IconName::FolderOpen, project_label, project.is_some()).dropdown(cx, |ws, at, _w, cx| {
+            let current = ws.home_selected_project().map(|p| p.id.clone());
+            let mut items: Vec<MenuItem> = ws
+                .store
+                .data
+                .projects
+                .iter()
+                .map(|p| {
+                    let mut item = MenuItem::new(format!("{}{}", tick(current.as_ref() == Some(&p.id)), p.name), Act::HomeSelectProject(p.id.clone()));
+                    item.detail = Some(short_path(&p.path));
+                    item
+                })
+                .collect();
+            let sep = !items.is_empty();
+            items.push(MenuItem { separator_before: sep, ..MenuItem::new("Add project…", Act::ImportProject) });
+            ws.open_dropdown(at, items, cx);
+        });
+
+        let worktree_pill = git.as_ref().map(|g| {
+            let main_checkout = g.main_checkout().to_path_buf();
+            let label = worktree_label.clone().unwrap_or_else(|| "main".into());
+            let git_info = g.clone();
+            let current_cwd = target_cwd.clone();
+            pill("home-worktree", IconName::FolderGit2, label, true).dropdown(cx, move |ws, at, _w, cx| {
+                let here = git_info.folder_of(&current_cwd).map(crate::platform::path_key);
+                let mut items: Vec<MenuItem> = crate::git::worktree::folders(&git_info)
+                    .into_iter()
+                    .map(|folder| {
+                        let name = crate::git::worktree::label(&git_info, folder).unwrap_or_default();
+                        let own = here.as_deref() == Some(crate::platform::path_key(folder).as_str());
+                        MenuItem {
+                            hint: git_info.branch_in(folder).map(str::to_string),
+                            ..MenuItem::new(format!("{}{name}", tick(own)), Act::HomeSelectWorktree(folder.to_path_buf()))
+                        }
+                    })
+                    .collect();
+                items.push(MenuItem { separator_before: true, ..MenuItem::new("New worktree…", Act::NewWorktree(main_checkout.clone())) });
+                ws.open_dropdown(at, items, cx);
+            })
+        });
+
+        let branch_pill = branch.zip(git.as_ref()).map(|(b, _)| {
+            let repo = target_cwd.clone();
+            pill("home-branch", IconName::GitBranch, b, true).dropdown(cx, move |ws, at, _w, cx| ws.open_branch_menu(repo.clone(), at, cx))
+        });
+
+        // 3. Draggable Effort bar.
+        let effort_labels: Vec<String> = vec!["Low".into(), "Med".into(), "High".into(), "XHigh".into(), "Max".into()];
+        let effort_ix = self.home.effort.and_then(|e| Effort::ALL.iter().position(|x| *x == e));
+        let on_effort: crate::panels::widgets::EffortPick<Self> = std::rc::Rc::new(|ws, ix, window, cx| {
+            if let Some(&e) = Effort::ALL.get(ix) {
+                ws.act(Act::HomeSetEffort(Some(e)), window, cx);
+            }
+        });
+        let effort_row = div()
+            .flex()
+            .flex_col()
+            .gap(px(4.0))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(section_label("EFFORT"))
+                    .child(match self.home.effort {
+                        Some(_) => div()
+                            .id("home-effort-reset")
+                            .cursor_pointer()
+                            .text_size(scaled(11.0))
+                            .text_color(hsla(theme::TEXT_FAINT))
+                            .hover(|s| s.text_color(hsla(theme::TEXT)))
+                            .child("Reset to default")
+                            .on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::HomeSetEffort(None), window, cx)))
+                            .into_any_element(),
+                        None => div().text_size(scaled(11.0)).text_color(hsla(theme::TEXT_FAINT)).child("Harness default · drag or click").into_any_element(),
+                    }),
+            )
+            .child(effort_slider(
+                "home-effort",
+                &effort_labels,
+                effort_ix,
+                accent,
+                self.home.effort_bounds.clone(),
+                self.home.effort_dragging.clone(),
+                on_effort,
+                cx,
+            ));
+
+        let launch_btn = div()
+            .id("home-launch")
+            .px(px(14.0))
+            .h(px(30.0))
+            .rounded(px(7.0))
+            .bg(accent)
+            .text_color(hsla(0x0d0e11))
+            .text_size(scaled(12.5))
+            .font_weight(FontWeight::SEMIBOLD)
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .cursor_pointer()
+            .hover(|s| s.opacity(0.9))
+            .child(format!("Start {} session", harness.name()))
+            .on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::HomeLaunch, window, cx)));
+
+        let launch_card = div()
+            .w_full()
+            .max_w(px(680.0))
+            .p(px(16.0))
+            .rounded(px(14.0))
+            .bg(hsla(theme::SURFACE_ELEVATED))
+            .border_1()
+            .border_color(hsla(theme::PANEL_BORDER))
+            .shadow_md()
+            .flex()
+            .flex_col()
+            .gap(px(12.0))
+            .child(harness_bar)
+            .child(
+                div()
+                    .px(px(12.0))
+                    .py(px(8.0))
+                    .rounded(px(9.0))
+                    .bg(hsla(theme::PANEL_BG))
+                    .border_1()
+                    .border_color(hsla(theme::PANEL_BORDER))
+                    .on_mouse_down(MouseButton::Left, cx.listener(|ws, _, window, cx| ws.home.prompt.update(cx, |p, cx| p.focus(window, cx))))
+                    .child(Textarea::new(&self.home.prompt).appearance(false)),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(6.0))
+                    .child(project_pill)
+                    .children(worktree_pill)
+                    .children(branch_pill),
+            )
+            .child(div().h(px(1.0)).w_full().bg(hsla(theme::BORDER)))
+            .child(effort_row)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .pt(px(2.0))
+                    .child(
+                        div()
+                            .text_size(scaled(11.0))
+                            .text_color(hsla(theme::TEXT_FAINT))
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .child(short_path(&target_cwd)),
+                    )
+                    .child(launch_btn),
+            );
+
+        // 4. Recent sessions below the launcher.
+        let mut recent = div().flex().flex_col().gap(px(2.0)).w_full().max_w(px(680.0));
         let mut newest: Vec<&crate::store::SessionRecord> = self.store.data.sessions.iter().filter(|s| s.kind == SessionKind::Claude && !s.hidden).collect();
         newest.sort_by_key(|s| std::cmp::Reverse(s.last_active));
-        let sessions: Vec<(String, String, i64)> = newest.into_iter().take(5).map(|s| (s.id.clone(), s.display_title().to_string(), s.last_active)).collect();
+        let sessions: Vec<(String, String, i64, Harness, Option<String>)> = newest
+            .into_iter()
+            .take(5)
+            .map(|s| {
+                let h = s.claude.as_ref().map_or(Harness::Claude, |m| m.harness);
+                let proj = s.project_id.as_ref().and_then(|pid| self.store.project(pid)).map(|p| p.name.clone());
+                (s.id.clone(), s.display_title().to_string(), s.last_active, h, proj)
+            })
+            .collect();
         let t = now();
         if !sessions.is_empty() {
-            recent = recent.child(div().mb(px(4.0)).child(section_label("RECENT")));
+            recent = recent.child(div().mb(px(4.0)).child(section_label("RECENT SESSIONS")));
         }
-        for (i, (id, title, last_active)) in sessions.into_iter().enumerate() {
+        for (i, (id, title, last_active, h, proj)) in sessions.into_iter().enumerate() {
             recent = recent.child(
                 div()
                     .id(gpui::SharedString::from(format!("recent-{i}")))
                     .flex()
-                    .justify_between()
+                    .items_center()
+                    .gap(px(8.0))
                     .px(px(10.0))
-                    .py(px(6.0))
-                    .rounded(px(6.0))
+                    .py(px(7.0))
+                    .rounded(px(7.0))
                     .cursor_pointer()
                     .hover(|st| st.bg(hsla(theme::ROW_HOVER)))
-                    .child(div().text_size(crate::panels::scale::px(13.0)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(title))
-                    .child(div().text_size(crate::panels::scale::px(11.5)).text_color(hsla(theme::TEXT_FAINT)).child(ago(last_active, t)))
+                    .child(logos::draw(logos::for_harness(h), 12.5, hsla(theme::harness_color(h))))
+                    .child(div().flex_1().min_w_0().text_size(scaled(13.0)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(title))
+                    .when_some(proj, |d, name| {
+                        d.child(div().px(px(6.0)).py(px(1.0)).rounded(px(4.0)).bg(hsla(theme::SURFACE_ELEVATED)).text_size(scaled(10.5)).text_color(hsla(theme::TEXT_DIM)).child(name))
+                    })
+                    .child(div().flex_none().text_size(scaled(11.5)).text_color(hsla(theme::TEXT_FAINT)).child(ago(last_active, t)))
                     .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::Select(id.clone()), window, cx))),
             );
         }
+
+        let shortcut_chip = |keys: String, what: &str| {
+            div()
+                .flex()
+                .items_center()
+                .gap(px(5.0))
+                .text_size(scaled(11.0))
+                .text_color(hsla(theme::TEXT_FAINT))
+                .child(key_hint(&keys))
+                .child(what.to_string())
+        };
+
         div()
+            .id("home-scroll")
             .size_full()
+            .overflow_y_scroll()
+            .px(px(28.0))
+            .py(px(36.0))
             .flex()
             .flex_col()
             .items_center()
             .justify_center()
-            .child(clawd(72.0))
-            .child(div().mt(px(20.0)).text_size(crate::panels::scale::px(22.0)).font_weight(FontWeight::SEMIBOLD).child("Claudiu"))
-            .child(div().mt(px(4.0)).text_size(crate::panels::scale::px(13.0)).text_color(hsla(theme::TEXT_DIM)).child("A workspace for your Claude Code sessions"))
+            .gap(px(22.0))
             .child(
                 div()
-                    .mt(px(22.0))
                     .flex()
-                    .gap(px(8.0))
-                    .child(button("home-claude", "New", true).dropdown(
-                        cx,
-                        |ws, at, _w, cx| {
-                            let item = |label: String, act: Act, sep: bool| crate::app::MenuItem { label, hint: None, detail: None, act, danger: false, disabled: false, separator_before: sep, remove: None, icon: None };
-                            let mut items: Vec<_> = ws.store.data.projects.iter().map(|p| item(p.name.clone(), Act::NewClaude { cwd: p.path.clone() }, false)).collect();
-                            let sep = !items.is_empty();
-                            items.push(item("Add project…".into(), Act::ImportProject, sep));
-                            ws.open_dropdown(at, items, cx);
-                        },
-                    ))
-                    .child(button("home-import", "Add project", false).on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::ImportProject, window, cx)))),
+                    .flex_col()
+                    .items_center()
+                    .gap(px(5.0))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(10.0))
+                            .child(div().text_size(scaled(24.0)).font_weight(FontWeight::BOLD).text_color(hsla(theme::TEXT)).child("Claudiu")),
+                    )
+                    .child(div().text_size(scaled(13.0)).text_color(hsla(theme::TEXT_DIM)).child("Native multi-harness workspace")),
             )
+            .child(launch_card)
             .child(recent)
             .child(
                 div()
-                    .mt(px(30.0))
                     .flex()
-                    .flex_col()
-                    .gap(px(4.0))
-                    .child(shortcut_row(&shortcut("Shift+N"), "New code session"))
-                    .child(shortcut_row(&shortcut("J"), "Show or hide shell"))
-                    .child(shortcut_row("Ctrl+Tab", "Next session"))
-                    .child(shortcut_row(&shortcut("Shift+W"), "End session")),
+                    .flex_wrap()
+                    .justify_center()
+                    .gap(px(16.0))
+                    .child(shortcut_chip(shortcut("Shift+N"), "New session"))
+                    .child(shortcut_chip(shortcut("Shift+E"), "Editor"))
+                    .child(shortcut_chip(shortcut("J"), "Shell"))
+                    .child(shortcut_chip(shortcut(","), "Settings")),
             )
     }
 
@@ -517,20 +776,22 @@ impl Workspace {
                 false,
             ),
         };
+        let viewport = window.viewport_size();
         let card = div()
             .id("modal-card")
             .occlude()
             .track_focus(&self.modal_focus)
             .when(matches!(modal, Modal::Settings { .. }), |c| {
-                // One size for every page, growing with Scale.
-                c.w(crate::panels::scale::px(720.0)).h(crate::panels::scale::px(480.0))
+                // Spacious Settings dialog, clamped so small windows stay usable.
+                c.w(crate::panels::scale::px(980.0).min(viewport.width - px(48.0)))
+                    .h(crate::panels::scale::px(680.0).min(viewport.height - px(48.0)))
             })
-            .when(!matches!(modal, Modal::Settings { .. }), |c| c.w(px(420.0)))
-            .p(px(20.0))
+            .when(!matches!(modal, Modal::Settings { .. }), |c| c.w(px(440.0)))
+            .p(px(22.0))
             .rounded(px(12.0))
-            .bg(hsla(0x151515))
+            .bg(hsla(theme::PANEL_BG))
             .border_1()
-            .border_color(hsla(0x2c2c2c))
+            .border_color(hsla(theme::PANEL_BORDER))
             .shadow_lg()
             .flex()
             .flex_col()
@@ -680,7 +941,7 @@ impl Render for Workspace {
         };
         let menu = self.render_menu(cx);
         let modal = self.render_modal(window, cx);
-        let agent_dialog = self.render_agent_dialog(window, cx);
+        let agent_dialog = self.render_harness_dialog(window, cx);
         let toast = self.render_toast(cx);
         // The top bar's own background is the gutter above the panels; only an update banner needs real space.
         let content_top = if banner.is_some() { theme::PANEL_GAP } else { 0.0 };
@@ -832,7 +1093,7 @@ impl Render for Workspace {
 /// The Settings dialog's body: the category list on the left and the chosen page on the right.
 fn settings_body(ws: &Workspace, window: &mut Window, cx: &mut Context<Workspace>) -> AnyElement {
     let (page, worktrees, scroll) = (ws.settings_page, &ws.worktrees_page, &ws.settings_scroll);
-    let Some(Modal::Settings { shell, claude, model, harness, effort, permission, updates, chrome, scale, trimmed, claudiu_off, skills_field, costly, list_focus, renaming, .. }) = &ws.modal else {
+    let Some(Modal::Settings { shell, model, harness, effort, permission, updates, chrome, scale, trimmed, claudiu_off, skill_search, list_focus, renaming, subagents, .. }) = &ws.modal else {
         return div().into_any_element();
     };
     let (updates, chrome, scale) = (*updates, *chrome, *scale);
@@ -847,19 +1108,18 @@ fn settings_body(ws: &Workspace, window: &mut Window, cx: &mut Context<Workspace
             .flex_col()
             .gap(px(10.0))
             .child(field("SHELL", shell))
-            .child(field("CLAUDE CODE PATH", claude))
             .child(div().flex().child(button("settings-check-setup", "Check setup", false).on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::OpenSetup, window, cx)))))
             .child(
                 div()
-                    .h(px(32.0))
-                    .px(px(10.0))
+                    .h(px(34.0))
+                    .px(px(12.0))
                     .flex()
                     .items_center()
                     .justify_between()
-                    .rounded(px(6.0))
-                    .bg(hsla(0x111111))
+                    .rounded(px(7.0))
+                    .bg(hsla(theme::SURFACE_ELEVATED))
                     .border_1()
-                    .border_color(hsla(0x242424))
+                    .border_color(hsla(theme::PANEL_BORDER))
                     .text_size(px(13.0))
                     .child("Scale (text and terminal)")
                     .child(
@@ -885,51 +1145,19 @@ fn settings_body(ws: &Workspace, window: &mut Window, cx: &mut Context<Workspace
             .flex()
             .flex_col()
             .gap(px(10.0))
-            .child(harness_row(*harness, cx))
+            .child(harness_row(*harness, &subagents.enabled, cx))
             .child(field("MODEL FOR NEW SESSIONS", model))
             .child(picker_row("settings-effort", "Effort", *effort, &Effort::ALL, Effort::name, Act::PickEffort, cx))
             .child(picker_row("settings-permission", "Permission mode", *permission, &PermissionMode::ALL, PermissionMode::name, Act::PickPermission, cx))
             .children((*permission == Some(PermissionMode::BypassPermissions)).then(|| faint("Every new session will run commands and edit files without asking.".to_string())))
-            .children((*permission == Some(PermissionMode::Plan) && trimmed.contains(&Trim::PlanMode)).then(|| {
-                faint("Plan mode is off under Claude Code tools, so new sessions start in Claude Code's default mode.".to_string())
+            .children((*permission == Some(PermissionMode::Plan) && trimmed.contains(&crate::claude::trim::Trim::PlanMode)).then(|| {
+                faint("Plan mode is off under Claude Code's tools, so new Claude Code sessions start in default mode.".to_string())
             }))
-            .child(settings_toggle("settings-chrome", "Claude in Chrome for new sessions", chrome, |m| match m {
+            .child(settings_toggle("settings-chrome", "Claude in Chrome for new Claude Code sessions", chrome, |m| match m {
                 Modal::Settings { chrome, .. } => Some(chrome),
                 _ => None,
             }, cx)),
-        SettingsPage::ClaudeTools => {
-            let plan_trimmed = trimmed.contains(&Trim::PlanMode);
-            let mut list = div().flex().flex_col().gap(px(8.0));
-            for found in costly {
-                list = list.child(
-                    div()
-                        .text_size(scaled(11.0))
-                        .text_color(hsla(theme::WARN))
-                        .child(format!("{} is set in {}. {}", found.name, found.source, found.effect)),
-                );
-            }
-            list = list.child(faint(
-                "Applies to new sessions. Running sessions keep their tools. Resumed sessions get the new tools, and the old instructions stay until their next compaction. These switches edit Claude Code's own settings.json, for every account and for Claude Code outside Claudiu. Claudiu only turns things off; anything you turned off yourself stays off."
-                    .to_string(),
-            ));
-            for (heading, items) in Trim::GROUPS {
-                list = list.child(div().mt(px(4.0)).child(section_label(heading.to_string())));
-                for &item in items {
-                    let tag = Some(item.saving().label().into());
-                    list = list.child(switch_row(("settings-trim", item as usize), item.label(), tag, !trimmed.contains(&item), move |ws, _, _| {
-                        if let Some(Modal::Settings { trimmed, .. }) = ws.modal.as_mut() {
-                            flip(trimmed, item);
-                        }
-                    }, cx));
-                }
-            }
-            if plan_trimmed {
-                list = list.child(faint("With Plan mode off, Claude can't leave plan mode itself; press Shift+Tab.".to_string()));
-            }
-            list.child(div().mt(px(4.0)).child(section_label("SKILLS".to_string())))
-                .child(faint("Claude no longer sees these skills, but you can still type them. A setting you already have for a skill in Claude Code's settings.json wins.".to_string()))
-                .child(field("SKILLS TO TURN OFF, SEPARATED BY COMMAS", skills_field))
-        }
+        SettingsPage::Harnesses => ws.harnesses_page(cx),
         SettingsPage::ClaudiuTools => {
             let mut list = div().flex().flex_col().gap(px(8.0)).child(faint(
                 "Applies to new sessions. Running sessions keep their tools. Resumed sessions get the new tools, and the old instructions stay until their next compaction."
@@ -945,10 +1173,10 @@ fn settings_body(ws: &Workspace, window: &mut Window, cx: &mut Context<Workspace
             list
         }
         SettingsPage::Projects => ws.projects_page(renaming.as_ref(), cx),
-        SettingsPage::CustomSubagents => ws.subagents_page(cx),
+        SettingsPage::Skills => ws.skills_page(skill_search, cx),
         SettingsPage::Worktrees => worktrees_page(worktrees, cx),
         SettingsPage::About => div().child(faint(format!(
-            "Claudiu {} · An independent project, not affiliated with, endorsed by or sponsored by Anthropic. Claude is a trademark of Anthropic.",
+            "Claudiu {} · Native multi-harness agent workspace. Independent project, not affiliated with Anthropic, OpenAI, or Google.",
             env!("CARGO_PKG_VERSION")
         ))),
     };
@@ -1080,26 +1308,26 @@ fn settings_toggle(id: &'static str, label: &'static str, on: bool, field: fn(&m
     }, cx)
 }
 
-/// A row that opens a menu of `options` under itself; the first entry, "Claude Code default", clears the choice.
-/// The harness new sessions run in, picked from every harness Claudiu knows.
-fn harness_row(current: Harness, cx: &mut Context<Workspace>) -> impl IntoElement {
+/// The harness new sessions run in, picked from enabled harnesses.
+fn harness_row(current: Harness, enabled: &[Harness], cx: &mut Context<Workspace>) -> impl IntoElement {
+    let options: Vec<Harness> = if enabled.is_empty() { Harness::ALL.to_vec() } else { enabled.to_vec() };
     div()
         .id("settings-harness")
-        .h(px(32.0))
-        .px(px(10.0))
+        .h(px(34.0))
+        .px(px(12.0))
         .flex()
         .items_center()
         .justify_between()
-        .rounded(px(6.0))
-        .bg(hsla(0x111111))
+        .rounded(px(7.0))
+        .bg(hsla(theme::SURFACE_ELEVATED))
         .border_1()
-        .border_color(hsla(0x242424))
+        .border_color(hsla(theme::PANEL_BORDER))
         .text_size(crate::panels::scale::px(13.0))
         .cursor_pointer()
-        .child("Harness for new sessions")
-        .child(div().text_color(hsla(theme::ACCENT)).child(current.name()))
+        .child("Default harness for new sessions")
+        .child(div().text_color(hsla(theme::harness_color(current))).child(current.name()))
         .dropdown(cx, move |ws, at, _window, cx| {
-            let items = Harness::ALL.iter().map(|&h| MenuItem::new(format!("{}{}", tick(current == h), h.name()), Act::PickHarness(h))).collect();
+            let items = options.iter().map(|&h| MenuItem::new(format!("{}{}", tick(current == h), h.name()), Act::PickHarness(h))).collect();
             ws.open_dropdown(at, items, cx);
         })
 }
@@ -1113,7 +1341,7 @@ fn picker_row<T: Copy + PartialEq + 'static>(
     pick: fn(Option<T>) -> Act,
     cx: &mut Context<Workspace>,
 ) -> impl IntoElement {
-    const DEFAULT: &str = "Claude Code default";
+    const DEFAULT: &str = "Harness default";
     div()
         .id(id)
         .h(px(32.0))

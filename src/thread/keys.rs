@@ -10,6 +10,8 @@ pub const DOUBLE_PRESS: Duration = Duration::from_millis(500);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Key {
+    /// Escape while a picker popover (model/effort or permission) is open: close it.
+    ClosePicker,
     /// Escape or Ctrl+C mid-turn: stop the turn.
     Interrupt,
     /// Escape on a permission question: turn it down.
@@ -38,6 +40,7 @@ pub enum Key {
 /// What the thread knows when a key arrives.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct State {
+    pub picker_open: bool,
     pub working: bool,
     /// How many options the open permission question has; 0 when none is open.
     pub question: usize,
@@ -54,6 +57,7 @@ pub fn key(keystroke: &Keystroke, s: State) -> Option<Key> {
     let m = &keystroke.modifiers;
     let plain = !m.control && !m.alt && !m.platform && !m.shift && !m.function;
     match keystroke.key.as_str() {
+        "escape" if plain && s.picker_open => Some(Key::ClosePicker),
         "escape" if plain && s.question > 0 => Some(Key::Decline),
         "escape" if plain && s.working => Some(Key::Interrupt),
         "escape" if plain && s.escape_just_pressed => Some(if s.draft_empty { Key::EditLast } else { Key::Clear }),
@@ -84,6 +88,12 @@ mod tests {
 
     fn idle() -> State {
         State { draft_empty: true, ..Default::default() }
+    }
+
+    #[test]
+    fn escape_closes_an_open_picker_before_anything_else() {
+        let open = State { picker_open: true, question: 2, working: true, escape_just_pressed: true, ..idle() };
+        assert_eq!(press("escape", open), Some(Key::ClosePicker));
     }
 
     #[test]

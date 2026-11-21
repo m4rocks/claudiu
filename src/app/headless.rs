@@ -1978,15 +1978,28 @@ fn handing_a_session_to_another_agent() {
     cx.update_window(window, |_, window, app| thread(ws.read(app), &first).unwrap().update(app, |v, cx| v.send("plan the change".into(), window, cx))).unwrap();
     wait(&mut cx, "the reply", &|ws, app| thread(ws, &first).is_some_and(|t| !t.read(app).is_working() && t.read(app).tail_text(10).contains("Agent: ok")));
 
-    cx.update_window(window, |_, window, app| ws.update(app, |ws, cx| ws.act(Act::HandToAgent(first.clone(), crate::harness::Harness::Codex), window, cx))).unwrap();
-    let second = ws.read_with(&cx, |ws, _| ws.active.clone().unwrap());
-    assert_ne!(second, first);
-    ws.read_with(&cx, |ws, app| {
-        let rec = ws.store.session(&second).unwrap();
+    // Stage switching to Codex inside the chat picker; sending the next message dynamically hands off in place.
+    cx.update_window(window, |_, window, app| {
+        let view = thread(ws.read(app), &first).unwrap();
+        view.update(app, |v, cx| {
+            v.stage_harness(crate::harness::Harness::Codex, cx);
+            v.send("implement step 2".into(), window, cx);
+        });
+    })
+    .unwrap();
+    let after = ws.read_with(&cx, |ws, _| ws.active.clone().unwrap());
+    assert_eq!(after, first, "dynamic handoff continues in the same session");
+    ws.read_with(&cx, |ws, _| {
+        let rec = ws.store.session(&first).unwrap();
         assert_eq!((rec.claude.as_ref().unwrap().harness, &rec.cwd), (crate::harness::Harness::Codex, &cwd));
-        assert!(ws.is_running(&first, app), "the first session keeps running");
     });
-    wait(&mut cx, "the hand-off message", &|_, _| std::fs::read_to_string(&prompts).is_ok_and(|p| p.contains("taking over work from a Claude Code session") && p.contains("User: plan the change\n\nAgent: ok")));
+    wait(&mut cx, "the hand-off message", &|_, _| {
+        std::fs::read_to_string(&prompts).is_ok_and(|p| {
+            p.contains("taking over work from a Claude Code session")
+                && p.contains("User: plan the change\n\nAgent: ok")
+                && p.contains("User's next message:\nimplement step 2")
+        })
+    });
 }
 
 /// A session of each agent through ACP (Claude Code through the SDK bridge): it starts, names itself, and answers a message in the thread.
@@ -2051,5 +2064,120 @@ fn a_session_answers_in_its_thread(harness: crate::harness::Harness) {
         let v = thread(ws);
         let v = v.read(app);
         !v.is_working() && v.thread.entries.iter().any(|e| matches!(e, Entry::Agent(t) if t.to_lowercase().contains("pong")))
+    });
+}
+
+#[test]
+#[ignore = "drives the workspace"]
+fn skills_page_installs_toggles_syncs_and_removes() {
+    use crate::skills::registry::CatalogEntry;
+    use crate::skills::{InstalledSkill, global_skills_dir, project_skills_dir};
+
+    let data = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let proj_dir = tempfile::tempdir().unwrap();
+    // Create Antigravity's config dir so both Claude (default) and Antigravity count as active harnesses.
+    std::fs::create_dir_all(home.path().join(".gemini").join("config")).unwrap();
+    // SAFETY: test-isolated data dir.
+    unsafe { std::env::set_var("CLAUDIU_DATA_DIR", data.path()) };
+
+    let mut cx = TestAppContext::single();
+    cx.update(|app| {
+        gpui_kit::init(app);
+        gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, app);
+    });
+    let (window, ws) = cx
+        .update(|app| gpui_kit::open_window(Default::default(), app, |window, app| app.new(|cx| Workspace::new(window, vec![proj_dir.path().to_path_buf()], cx))))
+        .unwrap();
+
+    fn fake_popular() -> Result<Vec<CatalogEntry>, String> {
+        Ok(vec![CatalogEntry {
+            source: "acme/demo-skills".into(),
+            skill_id: "demo-skill".into(),
+            name: "demo-skill".into(),
+            installs: 12_345,
+            is_official: true,
+        }])
+    }
+    fn fake_install(root: &std::path::Path, entry: &CatalogEntry) -> Result<InstalledSkill, String> {
+        let dir = root.join(&entry.name);
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        std::fs::write(dir.join("SKILL.md"), "---\nname: demo-skill\ndescription: Demo skill\n---\n# Demo\n").map_err(|e| e.to_string())?;
+        Ok(InstalledSkill {
+            name: entry.name.clone(),
+            source: entry.source.clone(),
+            skill_id: entry.skill_id.clone(),
+            description: "Demo skill".into(),
+            installed_at: 1,
+        })
+    }
+
+    let home_path = home.path().to_path_buf();
+    ws.update(&mut cx, |ws, _| {
+        ws.skills_page.home_override = Some(home_path.clone());
+        ws.skills_page.fetch_popular = fake_popular;
+        ws.skills_page.install_pkg = fake_install;
+    });
+
+    let draw = |cx: &mut TestAppContext| {
+        cx.update_window(window, |_, window, app| window.draw(app).clear(app)).unwrap();
+        cx.run_until_parked();
+    };
+    let wait = |cx: &mut TestAppContext, what: &str, done: &dyn Fn(&Workspace) -> bool| {
+        let t = std::time::Instant::now();
+        while !ws.read_with(cx, |ws, _| done(ws)) {
+            assert!(t.elapsed() < Duration::from_secs(10), "timed out waiting for {what}");
+            std::thread::sleep(Duration::from_millis(20));
+            draw(cx);
+        }
+    };
+
+    // Open Settings → Skills → Browse and wait for the catalog.
+    cx.update_window(window, |_, window, app| {
+        ws.update(app, |ws, cx| {
+            ws.act(Act::OpenSettings, window, cx);
+            ws.set_settings_page(SettingsPage::Skills, cx);
+            ws.act(Act::SetSkillsTab(SkillsTab::Browse), window, cx);
+        });
+    })
+    .unwrap();
+    draw(&mut cx);
+    wait(&mut cx, "popular catalog", &|ws| ws.skills_page.popular.as_ref().is_some_and(|p| p.len() == 1));
+
+    // Install the skill while scope is Global; symlinks should appear in active harnesses' global dirs.
+    let entry = ws.read_with(&cx, |ws, _| ws.skills_page.popular.as_ref().unwrap()[0].clone());
+    cx.update_window(window, |_, window, app| ws.update(app, |ws, cx| ws.act(Act::InstallSkill(entry), window, cx))).unwrap();
+    wait(&mut cx, "global skill sync", &|ws| {
+        ws.store.data.settings.skills.is_global("demo-skill")
+            && global_skills_dir(Harness::Claude, &home_path).join("demo-skill").join("SKILL.md").is_file()
+            && global_skills_dir(Harness::Antigravity, &home_path).join("demo-skill").join("SKILL.md").is_file()
+    });
+    assert!(!global_skills_dir(Harness::Codex, &home_path).exists(), "inactive harness is untouched");
+
+    // Toggle off globally and enable per-project instead.
+    let project_id = ws.read_with(&cx, |ws, _| ws.store.data.projects[0].id.clone());
+    cx.update_window(window, |_, window, app| {
+        ws.update(app, |ws, cx| {
+            ws.act(Act::SetSkillsTab(SkillsTab::Installed), window, cx);
+            ws.act(Act::ToggleSkill("demo-skill".into()), window, cx);
+            ws.act(Act::SetSkillScope(SkillScope::Project(project_id.clone())), window, cx);
+            ws.act(Act::ToggleSkill("demo-skill".into()), window, cx);
+        });
+    })
+    .unwrap();
+    draw(&mut cx);
+    let proj_path = ws.read_with(&cx, |ws, _| ws.store.data.projects[0].path.clone());
+    wait(&mut cx, "project skill sync", &|_| {
+        std::fs::symlink_metadata(global_skills_dir(Harness::Claude, &home_path).join("demo-skill")).is_err()
+            && project_skills_dir(Harness::Claude, &proj_path).join("demo-skill").join("SKILL.md").is_file()
+            && project_skills_dir(Harness::Antigravity, &proj_path).join("demo-skill").join("SKILL.md").is_file()
+    });
+
+    // Uninstall cleans up both project symlinks and the canonical stored folder.
+    cx.update_window(window, |_, window, app| ws.update(app, |ws, cx| ws.act(Act::UninstallSkill("demo-skill".into()), window, cx))).unwrap();
+    wait(&mut cx, "skill uninstall", &|ws| {
+        !ws.store.data.settings.skills.is_installed("demo-skill")
+            && std::fs::symlink_metadata(project_skills_dir(Harness::Claude, &proj_path).join("demo-skill")).is_err()
+            && !data.path().join("skills").join("demo-skill").exists()
     });
 }

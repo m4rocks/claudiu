@@ -1,40 +1,57 @@
-//! Colors. Black-first, with Claude's orange as the single accent.
+//! Colors. Deep neutral-slate surfaces with per-harness accents.
 
 use alacritty_terminal::term::color::Colors;
 use alacritty_terminal::vte::ansi::{Color, NamedColor, Rgb};
 use gpui::{Hsla, rgb};
 
-/// The window background the panels float on, a shade lighter than the panels themselves.
-pub const APP_BG: u32 = 0x131316;
-/// One background for the panels and the terminal's default background.
-pub const PANEL_BG: u32 = 0x0c0c0d;
+use crate::harness::Harness;
+
+/// The window background the panels float on, slightly deeper than the panels themselves.
+pub const APP_BG: u32 = 0x0b0c0f;
+/// Primary surface for the main chat pane and editor.
+pub const PANEL_BG: u32 = 0x111216;
 pub const TERMINAL_BG: u32 = PANEL_BG;
-pub const SIDEBAR_BG: u32 = PANEL_BG;
-pub const BORDER: u32 = 0x1f1f1f;
-/// The faint outline that separates a panel from the window background.
-pub const PANEL_BORDER: u32 = 0x242428;
+pub const SIDEBAR_BG: u32 = 0x0e0f13;
+/// Elevated surfaces: composer dock, welcome launch card, popovers, pills.
+pub const SURFACE_ELEVATED: u32 = 0x171920;
+pub const SURFACE_HOVER: u32 = 0x1e212b;
+pub const BORDER: u32 = 0x1d1f27;
+/// The crisp hairline outline around panels and cards.
+pub const PANEL_BORDER: u32 = 0x242731;
 /// Corner radius of the window's panels.
-pub const PANEL_RADIUS: f32 = 8.0;
+pub const PANEL_RADIUS: f32 = 10.0;
 /// Gutter between the panels and the window edges.
 pub const PANEL_GAP: f32 = 6.0;
 /// Height of the window's top bar. macOS traffic lights are centered in it (see `main.rs`).
-pub const TOPBAR_HEIGHT: f32 = 34.0;
-pub const ROW_HOVER: u32 = 0x181818;
-pub const ROW_ACTIVE: u32 = 0x211f1e;
-pub const TEXT: u32 = 0xe4e4e4;
-pub const TEXT_DIM: u32 = 0x8a8a8a;
-pub const TEXT_FAINT: u32 = 0x5a5a5a;
+pub const TOPBAR_HEIGHT: f32 = 36.0;
+pub const ROW_HOVER: u32 = 0x191b22;
+pub const ROW_ACTIVE: u32 = 0x20232d;
+pub const TEXT: u32 = 0xe8eaef;
+pub const TEXT_DIM: u32 = 0x9499a8;
+pub const TEXT_FAINT: u32 = 0x5c6170;
 pub const ACCENT: u32 = 0xd97757;
 pub const OK: u32 = 0x7fb069;
 pub const WARN: u32 = 0xe5c07b;
 pub const DANGER: u32 = 0xe06c75;
 pub const SELECTION: u32 = 0x3d4a5c;
-/// Codex's usage bars, so they read apart from Claude's at a glance. The terminal palette's blue.
+/// Codex's accent and usage bars.
 pub const CODEX: u32 = 0x61afef;
-/// Antigravity's usage bars, apart from Claude's and Codex's. The terminal palette's magenta.
+/// OpenCode's accent.
+pub const OPENCODE: u32 = 0x5ec29b;
+/// Antigravity's accent and usage bars.
 pub const ANTIGRAVITY: u32 = 0xc678dd;
 
-const FG: Rgb = Rgb { r: 0xe4, g: 0xe4, b: 0xe4 };
+/// The signature color of a harness across badges, switches, and usage meters.
+pub fn harness_color(harness: Harness) -> u32 {
+    match harness {
+        Harness::Claude => ACCENT,
+        Harness::Codex => CODEX,
+        Harness::OpenCode => OPENCODE,
+        Harness::Antigravity => ANTIGRAVITY,
+    }
+}
+
+const FG: Rgb = Rgb { r: 0xe8, g: 0xea, b: 0xef };
 const BG: Rgb = Rgb { r: (TERMINAL_BG >> 16) as u8, g: (TERMINAL_BG >> 8) as u8, b: TERMINAL_BG as u8 };
 
 const ANSI: [u32; 16] = [

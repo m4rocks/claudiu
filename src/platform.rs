@@ -294,6 +294,29 @@ pub fn resolve_program(text: &str) -> Option<PathBuf> {
     if p.is_file() { Some(p.to_path_buf()) } else { find_executable(text) }
 }
 
+/// Create a directory link at `dst` pointing to `src`: a junction on Windows (no admin rights or Developer Mode
+/// required) and a symlink on Unix.
+pub fn link_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        junction::create(src, dst)
+    }
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(src, dst)
+    }
+}
+
+/// Remove a directory link at `path` without touching what it points to.
+/// Windows removes directory links with `RemoveDirectory`; Unix removes any symlink as a file.
+pub fn remove_dir_link(path: &Path) -> std::io::Result<()> {
+    if cfg!(windows) && path.is_dir() {
+        std::fs::remove_dir(path)
+    } else {
+        std::fs::remove_file(path)
+    }
+}
+
 /// Spawn a GUI/helper process fully detached and without flashing a console window.
 pub fn spawn_detached(program: &Path, args: &[&OsStr]) -> std::io::Result<()> {
     let mut cmd = Command::new(program);

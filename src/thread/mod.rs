@@ -6,21 +6,31 @@ mod keys;
 mod render;
 mod review;
 
+use std::cell::Cell;
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Instant;
 
 use futures::StreamExt;
-use gpui::{App, AppContext, Context, Entity, EventEmitter, FocusHandle, Focusable, KeystrokeEvent, ListAlignment, ListState, Subscription, Window, px};
+use gpui::{App, AppContext, Bounds, Context, Entity, EventEmitter, FocusHandle, Focusable, KeystrokeEvent, ListAlignment, ListState, Pixels, Subscription, Window, px};
 use gpui_kit::component::input::{InputEvent, TextareaState};
 use serde_json::{Value, json};
 
 use crate::harness::acp::{self, Connection, Event, Launch};
-use crate::harness::thread::Thread;
+use crate::harness::thread::{Entry, Thread};
 use crate::harness::{Harness, Reopen};
 use crate::visual::Card;
 use crate::visual::ui::{CardUi, SendText};
+
+/// Which compact composer popover is open.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ThreadPicker {
+    /// Provider switcher, model list, and draggable effort bar.
+    Model,
+    /// Permission mode selector dialog.
+    Permission,
+}
 
 /// A session being moved while its harness restarts: what the waiting screen says.
 pub struct Handover {
@@ -35,11 +45,15 @@ pub enum ThreadEvent {
     Title(String),
     /// A file a tool acted on was clicked: its path and line (1-based).
     OpenPath(String, Option<usize>),
+    /// The user switched provider in the composer picker and sent a message: dynamically hand off this chat.
+    Handoff { to: Harness, message: String, effort: Option<String> },
 }
 
 /// How to bring a session up.
 pub struct Start {
     pub harness: Harness,
+    /// Enabled harnesses shown in the composer's provider switcher.
+    pub enabled_harnesses: Vec<Harness>,
     /// The ACP server to start in place of the harness's own.
     pub server: Option<(PathBuf, Vec<String>)>,
     pub cwd: PathBuf,
@@ -55,6 +69,8 @@ pub struct Start {
     pub options: Vec<(&'static str, String)>,
     /// Sent as soon as the session is ready.
     pub prompt: Option<String>,
+    /// Entries carried over visually from a previous harness during an in-chat handoff.
+    pub prior_entries: Vec<Entry>,
 }
 
 /// A permission the agent is waiting for.
@@ -74,6 +90,12 @@ enum Phase {
 
 pub struct ThreadView {
     pub harness: Harness,
+    /// Enabled harnesses offered in the compact composer switcher.
+    pub enabled_harnesses: Vec<Harness>,
+    /// If set to another harness, the next message submitted hands this chat over dynamically.
+    pub pending_harness: Option<Harness>,
+    /// Effort choice staged for the next handoff or while no live `thought_level` option exists yet.
+    pub pending_effort: Option<String>,
     cwd: PathBuf,
     connection: Option<Rc<Connection>>,
     session_id: Option<String>,
@@ -98,8 +120,10 @@ pub struct ThreadView {
     pub detail: bool,
     /// Ctrl+T: the plan.
     pub plan_open: bool,
-    /// Alt+P: the model picker.
-    pub model_menu: bool,
+    /// Active compact picker popover above the composer (Alt+P for Model/Provider/Effort, or click Permission).
+    pub picker: Option<ThreadPicker>,
+    effort_bounds: Rc<Cell<Bounds<Pixels>>>,
+    effort_dragging: Rc<Cell<bool>>,
     last_escape: Option<Instant>,
     /// Why the harness stopped, when it said.
     error: Option<String>,
@@ -149,12 +173,23 @@ impl ThreadView {
         subscriptions.push(cx.intercept_keystrokes(move |ev: &KeystrokeEvent, window, cx| {
             let _ = this.update(cx, |v, cx| v.intercept(ev, window, cx));
         }));
+        let mut thread = Thread::default();
+        let rows = start.prior_entries.len();
+        thread.entries = start.prior_entries.clone();
+        let enabled_harnesses = if start.enabled_harnesses.is_empty() {
+            vec![start.harness]
+        } else {
+            start.enabled_harnesses.clone()
+        };
         let mut view = ThreadView {
             harness: start.harness,
+            enabled_harnesses,
+            pending_harness: None,
+            pending_effort: start.options.iter().find(|(k, _)| *k == "thought_level").map(|(_, v)| v.clone()),
             cwd: start.cwd.clone(),
             connection: None,
             session_id: start.session_id.clone(),
-            thread: Thread::default(),
+            thread,
             phase: Phase::Starting,
             working: false,
             queue: start.prompt.clone().into_iter().collect(),
@@ -163,11 +198,13 @@ impl ThreadView {
             history_at: None,
             draft: String::new(),
             reference: None,
-            list: ListState::new(0, ListAlignment::Bottom, px(600.0)),
-            rows: 0,
+            list: ListState::new(rows, ListAlignment::Bottom, px(600.0)),
+            rows,
             detail: false,
             plan_open: false,
-            model_menu: false,
+            picker: None,
+            effort_bounds: Rc::new(Cell::new(Bounds::default())),
+            effort_dragging: Rc::new(Cell::new(false)),
             last_escape: None,
             error: None,
             handover: None,
@@ -300,6 +337,12 @@ impl ThreadView {
         cx.notify();
     }
 
+    /// Stage a switch to another harness; the next message sent dynamically hands off the chat.
+    pub fn stage_harness(&mut self, to: Harness, cx: &mut Context<Self>) {
+        self.pending_harness = (to != self.harness).then_some(to);
+        cx.notify();
+    }
+
     /// Enter in the composer.
     fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let text = self.composer.read(cx).value().trim().to_string();
@@ -309,11 +352,25 @@ impl ThreadView {
         self.composer.update(cx, |c, cx| c.set_value("", window, cx));
         self.history_at = None;
         self.reference = None;
+        self.picker = None;
+        if let Some(to) = self.pending_harness.take().filter(|&h| h != self.harness) {
+            let effort = self.pending_effort.take();
+            cx.emit(ThreadEvent::Handoff { to, message: text, effort });
+            cx.notify();
+            return;
+        }
         self.send(text, window, cx);
     }
 
     /// Send `text` as the user's next message, now or after the turn that is running.
     pub fn send(&mut self, text: String, _window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(to) = self.pending_harness.take().filter(|&h| h != self.harness) {
+            let effort = self.pending_effort.take();
+            self.picker = None;
+            cx.emit(ThreadEvent::Handoff { to, message: text, effort });
+            cx.notify();
+            return;
+        }
         self.queue.push_back(text);
         self.send_next(cx);
         cx.notify();
@@ -418,11 +475,26 @@ impl ThreadView {
     }
 
     fn intercept(&mut self, ev: &KeystrokeEvent, window: &mut Window, cx: &mut Context<Self>) {
+        // Escape always closes an open composer picker even if focus briefly left the textarea.
+        if self.picker.is_some()
+            && ev.keystroke.key == "escape"
+            && !ev.keystroke.modifiers.control
+            && !ev.keystroke.modifiers.alt
+            && !ev.keystroke.modifiers.platform
+            && !ev.keystroke.modifiers.shift
+        {
+            self.picker = None;
+            self.effort_dragging.set(false);
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
         if !self.composer.focus_handle(cx).is_focused(window) {
             return;
         }
         let draft = self.composer.read(cx).value().to_string();
         let state = keys::State {
+            picker_open: self.picker.is_some(),
             working: self.working,
             question: self.question.as_ref().map_or(0, |q| q.options.len()),
             draft_empty: draft.trim().is_empty(),
@@ -439,6 +511,10 @@ impl ThreadView {
         self.last_escape = None;
         cx.stop_propagation();
         match key {
+            keys::Key::ClosePicker => {
+                self.picker = None;
+                self.effort_dragging.set(false);
+            }
             keys::Key::Interrupt => self.interrupt(cx),
             keys::Key::Decline => self.decline(cx),
             keys::Key::Choose(n) => self.answer(Some(n - 1), cx),
@@ -467,7 +543,9 @@ impl ThreadView {
                 self.remeasure(0);
             }
             keys::Key::TogglePlan => self.plan_open = !self.plan_open,
-            keys::Key::PickModel => self.model_menu = !self.model_menu && self.thread.option("model").is_some(),
+            keys::Key::PickModel => {
+                self.picker = if self.picker == Some(ThreadPicker::Model) { None } else { Some(ThreadPicker::Model) };
+            }
         }
         cx.notify();
     }

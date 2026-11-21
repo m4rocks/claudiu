@@ -300,7 +300,11 @@ pub struct Settings {
     /// The harness new sessions run in.
     #[serde(default)]
     pub harness: crate::harness::Harness,
-    /// Model, effort and permission mode for new Claude sessions; empty fields leave Claude Code's own default.
+    /// Harnesses enabled under Settings → Harnesses. `None` (older state files) enables Claude Code plus the default
+    /// harness and any harness previously enabled under Custom subagents.
+    #[serde(default)]
+    pub enabled_harnesses: Option<Vec<crate::harness::Harness>>,
+    /// Model, effort and permission mode for new sessions; empty fields leave the harness's own default.
     #[serde(default)]
     pub new_session: crate::claude::defaults::NewSessionDefaults,
     /// Parts of Claudiu's own MCP server switched off for new sessions (`claude/mcp.rs`). Empty means everything is on,
@@ -320,6 +324,38 @@ pub struct Settings {
     /// Agent types that run a task in another coding agent (Settings → Custom subagents); all off by default.
     #[serde(default)]
     pub custom_subagents: crate::claude::subagents::CustomSubagents,
+    /// Installed `SKILL.md` packages and their global / per-project toggles (Settings → Skills).
+    #[serde(default)]
+    pub skills: crate::skills::SkillsConfig,
+}
+
+impl Settings {
+    /// Harnesses enabled by the user (Settings → Harnesses). Always includes at least the configured default harness
+    /// when none have been explicitly stored yet.
+    pub fn enabled_harnesses_list(&self) -> Vec<crate::harness::Harness> {
+        use crate::claude::subagents::Agent;
+        use crate::harness::Harness;
+        if let Some(list) = &self.enabled_harnesses {
+            return Harness::ALL.into_iter().filter(|h| list.contains(h)).collect();
+        }
+        Harness::ALL
+            .into_iter()
+            .filter(|&h| {
+                h == Harness::Claude
+                    || h == self.harness
+                    || match h {
+                        Harness::Claude => false,
+                        Harness::Codex => self.custom_subagents.get(Agent::Codex).on,
+                        Harness::OpenCode => self.custom_subagents.get(Agent::OpenCode).on,
+                        Harness::Antigravity => self.custom_subagents.get(Agent::Antigravity).on,
+                    }
+            })
+            .collect()
+    }
+
+    pub fn harness_enabled(&self, harness: crate::harness::Harness) -> bool {
+        self.enabled_harnesses_list().contains(&harness)
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

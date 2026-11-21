@@ -35,6 +35,9 @@ impl Workspace {
         if page == SettingsPage::Worktrees {
             self.load_stored_worktrees(cx);
         }
+        if page == SettingsPage::Skills {
+            self.load_skills_catalog(cx);
+        }
         self.load_models(cx);
         cx.notify();
     }

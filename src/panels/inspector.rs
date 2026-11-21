@@ -302,13 +302,6 @@ impl Workspace {
                     .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::ContinueInTerminal(id.clone()), window, cx))),
             );
         }
-        if let Some(id) = id.filter(|id| running && claude && self.live_view(id).and_then(|v| v.thread()).is_some()).cloned() {
-            let from = self.store.session(&id).and_then(|r| r.claude.as_ref()).map(|m| m.harness);
-            actions = actions.child(row("hand-to-agent", IconName::MessageSquare, "Hand to another agent").dropdown(cx, move |ws, at, _w, cx| {
-                let items = crate::harness::Harness::ALL.iter().filter(|&&h| Some(h) != from).map(|&h| MenuItem::new(h.name(), Act::HandToAgent(id.clone(), h))).collect();
-                ws.open_dropdown(at, items, cx);
-            }));
-        }
         let cwd = self.active_cwd();
         actions.child(if id.is_some() {
             row("github", IconName::GitPullRequest, "GitHub")

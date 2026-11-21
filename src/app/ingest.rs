@@ -25,12 +25,18 @@ impl Workspace {
         );
     }
 
-    /// Each enabled provider refreshes on its own cadence. Failed reads keep the saved reading.
+    /// Each enabled harness with a limits adapter refreshes on its own cadence. Failed reads keep the saved reading.
     fn ingest_subagent_limits(&mut self, cx: &mut Context<Self>) {
         for agent in Agent::ALL {
             let provider = agent.provider();
             let Some(limits) = &provider.limits else { continue };
-            if !self.store.data.settings.custom_subagents.get(agent).on || self.limits_asked.get(agent).is_some_and(|at| at.elapsed() < limits.every) {
+            let harness = match agent {
+                Agent::Codex => Harness::Codex,
+                Agent::OpenCode => Harness::OpenCode,
+                Agent::Antigravity => Harness::Antigravity,
+            };
+            let active = self.store.data.settings.harness_enabled(harness) || self.store.data.settings.custom_subagents.get(agent).on;
+            if !active || self.limits_asked.get(agent).is_some_and(|at| at.elapsed() < limits.every) {
                 continue;
             }
             // Set before asking, so a slow answer isn't asked for twice.

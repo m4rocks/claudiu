@@ -11,6 +11,7 @@ mod github;
 mod panels;
 mod platform;
 mod priority;
+mod skills;
 mod store;
 mod terminal;
 mod thread;

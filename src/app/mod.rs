@@ -12,7 +12,7 @@ use gpui::{
     Pixels, Point, Subscription, Window, actions,
 };
 
-use gpui_kit::component::input::{InputEvent, InputState};
+use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
 use crate::claude::accounts;
 use crate::claude::subagents::Agent;
 use crate::claude;
@@ -64,6 +64,7 @@ mod selection_reference;
 mod sessions;
 mod settings;
 mod setup;
+mod skills;
 mod titles;
 mod visuals;
 mod switch;
@@ -75,6 +76,7 @@ pub use lifecycle::saved_window_bounds;
 pub use editor_mode::EditorCommand;
 pub use file_ops::NameFor;
 pub use settings::{Lookup, SettingsPage};
+pub use skills::{SkillScope, SkillsTab};
 pub use worktrees::WorktreesPage;
 pub use setup::{Mode as SetupMode, SetupEvent, SetupView, window_options as setup_window_options};
 
@@ -154,8 +156,13 @@ pub enum Act {
     ToggleShell(Id),
     /// End the thread and copy the harness's own command to carry on with the session in a terminal.
     ContinueInTerminal(Id),
-    /// Start a session of another agent in the same folder, with this session's conversation as its first message.
-    HandToAgent(Id, Harness),
+    /// Return to the Welcome / New session launcher screen.
+    ShowHome,
+    HomeSelectProject(Id),
+    HomeSelectWorktree(PathBuf),
+    HomeSelectHarness(Harness),
+    HomeSetEffort(Option<Effort>),
+    HomeLaunch,
     /// List the default agent's sessions in a folder, to pick one up here.
     ListSessions { cwd: PathBuf },
     /// Open a session an agent listed.
@@ -250,6 +257,14 @@ pub enum Act {
     ConfirmDelete(Id, PathBuf),
     /// An entry of the editor's right-click menu.
     Editor(EditorCommand),
+    /// Settings → Skills (`skills.sh` browser, installer and global/per-project toggles).
+    SetSkillsTab(SkillsTab),
+    SetSkillScope(SkillScope),
+    SearchSkills,
+    InstallSkill(crate::skills::registry::CatalogEntry),
+    InstallSkillRepo(String),
+    ToggleSkill(String),
+    UninstallSkill(String),
 }
 
 impl MenuItem {
@@ -336,25 +351,34 @@ pub enum Modal {
         claudiu_off: Vec<crate::claude::mcp::Feature>,
         /// Skills to turn off, separated by commas (Claude Code tools page).
         skills_field: Entity<InputState>,
+        /// Search box on the Skills page (Browse skills.sh).
+        skill_search: Entity<InputState>,
         /// Settings found at open time that make Claude Code cost more (Claude Code tools page).
         costly: Vec<crate::claude::costly::Finding>,
         /// Focus of the category list, which has the keyboard when the dialog opens.
         list_focus: FocusHandle,
         /// The project being renamed on the Projects page, and the name typed so far.
         renaming: Option<(Id, Entity<InputState>)>,
-        /// The Custom subagents page.
-        subagents: SubagentsForm,
+        /// The Harnesses page.
+        subagents: HarnessesForm,
     },
 }
 
-/// The Custom subagents page of the Settings dialog, as edited so far.
-pub struct SubagentsForm {
-    pub agents: claude::subagents::AgentMap<AgentForm>,
-    /// The agent whose dialog is open over the page, and the model search typed in it so far.
-    pub picking: Option<(Agent, Entity<InputState>)>,
+/// Which harness's configuration popup is open over Settings → Harnesses.
+pub enum HarnessDialog {
+    Claude,
+    Agent(Agent, Entity<InputState>),
 }
 
-/// One agent's part of the Custom subagents page.
+/// The Harnesses page of the Settings dialog, as edited so far.
+pub struct HarnessesForm {
+    pub enabled: Vec<Harness>,
+    pub agents: claude::subagents::AgentMap<AgentForm>,
+    /// The harness whose configuration popup is open over the page.
+    pub picking: Option<HarnessDialog>,
+}
+
+/// One agent's subagent settings inside Settings → Harnesses.
 pub struct AgentForm {
     pub on: bool,
     /// The ids of the models switched on.
@@ -362,7 +386,7 @@ pub struct AgentForm {
     pub edits: bool,
 }
 
-impl SubagentsForm {
+impl HarnessesForm {
     pub fn get(&self, agent: Agent) -> &AgentForm {
         self.agents.get(agent)
     }
@@ -370,6 +394,17 @@ impl SubagentsForm {
     pub fn get_mut(&mut self, agent: Agent) -> &mut AgentForm {
         self.agents.get_mut(agent)
     }
+}
+
+/// Interactive state for the Welcome / New session launcher page (`Main::Home`).
+pub struct HomeState {
+    pub project: Option<Id>,
+    pub worktree: Option<PathBuf>,
+    pub harness: Option<Harness>,
+    pub effort: Option<Effort>,
+    pub prompt: Entity<TextareaState>,
+    pub effort_bounds: std::rc::Rc<std::cell::Cell<gpui::Bounds<Pixels>>>,
+    pub effort_dragging: std::rc::Rc<std::cell::Cell<bool>>,
 }
 
 #[derive(Clone, Copy)]
@@ -584,6 +619,7 @@ pub struct Workspace {
     /// Open sessions in the order they were last shown (most recent last); closing one goes back to the previous.
     recent: Vec<Id>,
     pub main: Main,
+    pub home: HomeState,
     pub selected: Option<Id>,
     pub search: String,
     pub search_input: Entity<InputState>,
@@ -597,6 +633,8 @@ pub struct Workspace {
     pub settings_page: SettingsPage,
     /// What the Worktrees page of Settings shows. Not saved to disk.
     pub worktrees_page: worktrees::WorktreesPage,
+    /// What the Skills page of Settings shows. Not saved to disk.
+    pub skills_page: skills::SkillsPage,
     /// Smooth wheel scrolling of the settings page.
     pub settings_scroll: crate::panels::glide::Smooth,
     /// Whether this run already said it couldn't write a session's tool settings file (said at most once).
@@ -689,6 +727,14 @@ impl Workspace {
             cx.notify();
         })
         .detach();
+        let home_prompt = cx.new(|cx| TextareaState::new(window, cx).auto_grow(2, 8).submit_on_enter(true).placeholder("Start a task, review a diff, or ask a question…"));
+        cx.subscribe_in(&home_prompt, window, |ws: &mut Self, _, ev: &InputEvent, window, cx| {
+            if matches!(ev, InputEvent::PressEnter { .. }) {
+                ws.act(Act::HomeLaunch, window, cx);
+            }
+        })
+        .detach();
+        let home_effort = store.data.settings.new_session.effort;
         let mut ws = Self {
             claude_exe,
             acp_server: None,
@@ -713,6 +759,15 @@ impl Workspace {
             shell_h: crate::panels::widgets::Reveal::at_value(0.0),
             recent: vec![],
             main: Main::Home,
+            home: HomeState {
+                project: None,
+                worktree: None,
+                harness: None,
+                effort: home_effort,
+                prompt: home_prompt,
+                effort_bounds: std::rc::Rc::new(std::cell::Cell::new(gpui::Bounds::default())),
+                effort_dragging: std::rc::Rc::new(std::cell::Cell::new(false)),
+            },
             selected: store.data.layout.selected_session.clone(),
             search: String::new(),
             search_input,
@@ -722,6 +777,7 @@ impl Workspace {
             modal_focus: cx.focus_handle(),
             settings_page: SettingsPage::default(),
             worktrees_page: Default::default(),
+            skills_page: Default::default(),
             settings_scroll: Default::default(),
             menu: None,
             toast: None,
@@ -801,6 +857,7 @@ impl Workspace {
         ws.start_fetch_loop(cx);
         ws.start_git_watch(cx);
         ws.start_activity_poll(window, cx);
+        ws.sync_skills(None, cx);
         cx.observe_window_activation(window, |_, _, cx| cx.notify()).detach();
         ws.check_updates(cx);
         window.focus(&ws.root_focus, cx);
@@ -838,7 +895,36 @@ impl Workspace {
             }
             Act::ToggleShell(id) => self.toggle_shell(&id, window, cx),
             Act::ContinueInTerminal(id) => self.continue_in_terminal(&id, window, cx),
-            Act::HandToAgent(id, to) => self.hand_to_agent(&id, to, window, cx),
+            Act::ShowHome => {
+                self.main = Main::Home;
+                self.editor_mode = false;
+                self.right_gh = None;
+                self.home.prompt.update(cx, |p, cx| p.focus(window, cx));
+            }
+            Act::HomeSelectProject(id) => {
+                self.home.project = Some(id);
+                self.home.worktree = None;
+            }
+            Act::HomeSelectWorktree(path) => {
+                self.home.worktree = Some(path);
+            }
+            Act::HomeSelectHarness(h) => {
+                self.home.harness = Some(h);
+            }
+            Act::HomeSetEffort(effort) => {
+                self.home.effort = effort;
+            }
+            Act::HomeLaunch => {
+                let cwd = self.home_target_cwd();
+                let harness = self.home_selected_harness();
+                let effort = self.home.effort;
+                let text = self.home.prompt.read(cx).value().trim().to_string();
+                let prompt = (!text.is_empty()).then_some(text);
+                if prompt.is_some() {
+                    self.home.prompt.update(cx, |p, cx| p.set_value("", window, cx));
+                }
+                self.new_session_from_home(harness, cwd, prompt, effort, window, cx);
+            }
             Act::ListSessions { cwd } => self.list_sessions(cwd, window.mouse_position(), cx),
             Act::PickUp { harness, cwd, session_id, title } => self.pick_up(harness, cwd, session_id, title, window, cx),
             Act::ToggleEditor => self.toggle_editor(window, cx),
@@ -953,15 +1039,30 @@ impl Workspace {
                 let model = self.modal_input(defaults.model.as_deref().unwrap_or_default(), "Claude Code default", window, cx);
                 let shell = self.modal_input(&shell_t, &platform::default_shell(None).0, window, cx);
                 let skills_field = self.modal_input(&self.store.data.settings.limits.text(), "none, e.g. dataviz, claude-api", window, cx);
+                let skill_search = self.modal_input_then("", "Search skills.sh or enter owner/repo", |ws, _, cx| ws.search_skills(cx), window, cx);
                 let list_focus = cx.focus_handle();
                 window.focus(&list_focus, cx);
                 let custom = &self.store.data.settings.custom_subagents;
                 let form = |c: &claude::subagents::AgentChoice| AgentForm { on: c.on, models: c.models.clone(), edits: c.edits };
-                let subagents = SubagentsForm { agents: claude::subagents::AgentMap::from_fn(|agent| form(custom.get(agent))), picking: None };
-                self.modal = Some(Modal::Settings { shell, claude, model, harness, effort: defaults.effort, permission: defaults.permission_mode, updates, chrome, scale: crate::panels::scale::percent(), trimmed: self.store.data.settings.trimmed_tools.clone(), claudiu_off: self.store.data.settings.claudiu_tools_off.clone(), skills_field, costly: claude::costly::scan(), list_focus, renaming: None, subagents });
+                let subagents = HarnessesForm { enabled: self.store.data.settings.enabled_harnesses_list(), agents: claude::subagents::AgentMap::from_fn(|agent| form(custom.get(agent))), picking: None };
+                self.modal = Some(Modal::Settings { shell, claude, model, harness, effort: defaults.effort, permission: defaults.permission_mode, updates, chrome, scale: crate::panels::scale::percent(), trimmed: self.store.data.settings.trimmed_tools.clone(), claudiu_off: self.store.data.settings.claudiu_tools_off.clone(), skills_field, skill_search, costly: claude::costly::scan(), list_focus, renaming: None, subagents });
                 // After the modal exists: a page that loads something reads the dialog's fields.
                 self.set_settings_page(self.settings_page, cx);
             }
+            Act::SetSkillsTab(tab) => {
+                self.skills_page.tab = tab;
+                if tab == SkillsTab::Browse {
+                    self.load_skills_catalog(cx);
+                }
+            }
+            Act::SetSkillScope(scope) => {
+                self.skills_page.scope = scope;
+            }
+            Act::SearchSkills => self.search_skills(cx),
+            Act::InstallSkill(entry) => self.install_skill(entry, cx),
+            Act::InstallSkillRepo(source) => self.install_skill_repo(source, cx),
+            Act::ToggleSkill(name) => self.toggle_skill(name, cx),
+            Act::UninstallSkill(name) => self.uninstall_skill(name, cx),
             Act::PickHarness(choice) => {
                 if let Some(Modal::Settings { harness, .. }) = self.modal.as_mut() {
                     *harness = choice;
@@ -1207,5 +1308,45 @@ impl Workspace {
         }
         self.store.save_if_dirty();
         cx.notify();
+    }
+
+    /// Project currently chosen on the Welcome screen (defaults to the sidebar filter or the first project).
+    pub fn home_selected_project(&self) -> Option<&Project> {
+        self.home
+            .project
+            .as_ref()
+            .and_then(|id| self.store.project(id))
+            .or_else(|| self.project_filter())
+            .or_else(|| self.store.data.projects.first())
+    }
+
+    /// Working folder the Welcome screen will launch into: chosen worktree if still under the chosen project, else the
+    /// project's root, else the fallback cwd.
+    pub fn home_target_cwd(&self) -> PathBuf {
+        if let Some(project) = self.home_selected_project() {
+            if let Some(wt) = &self.home.worktree
+                && wt.is_dir()
+                && project.git.as_ref().is_some_and(|g| g.folder_of(wt).is_some())
+            {
+                return wt.clone();
+            }
+            return project.path.clone();
+        }
+        self.active_cwd()
+    }
+
+    /// Harness currently chosen on the Welcome screen (always an enabled harness when possible).
+    pub fn home_selected_harness(&self) -> Harness {
+        let enabled = self.store.data.settings.enabled_harnesses_list();
+        if let Some(h) = self.home.harness
+            && enabled.contains(&h)
+        {
+            return h;
+        }
+        if enabled.contains(&self.store.data.settings.harness) {
+            self.store.data.settings.harness
+        } else {
+            enabled.first().copied().unwrap_or(self.store.data.settings.harness)
+        }
     }
 }

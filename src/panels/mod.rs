@@ -8,6 +8,7 @@ pub mod inspector;
 pub mod logos;
 pub mod scale;
 pub mod settings_pages;
+mod skills_page;
 pub mod sidebar;
 pub mod status_icon;
 pub mod theme;

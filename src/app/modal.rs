@@ -121,22 +121,26 @@ impl Workspace {
                     }
                 }
             }
-            Some(Modal::Settings { shell, claude, model, harness, effort, permission, updates, chrome, scale, trimmed, claudiu_off, skills_field, costly, list_focus, renaming, subagents }) => {
+            Some(Modal::Settings { shell, claude, model, harness, effort, permission, updates, chrome, scale, trimmed, claudiu_off, skills_field, skill_search, costly, list_focus, renaming, subagents }) => {
                 let clean = |s: &str| s.trim().trim_matches('"').to_string();
                 let (shell_t, claude_t) = (clean(shell.read(cx).value().as_ref()), clean(claude.read(cx).value().as_ref()));
                 let model_name = claude::defaults::parse_model(model.read(cx).value().as_ref());
                 // In category order, then top to bottom: the first bad field decides which page the dialog shows.
-                let paths = [("Shell", &shell, &shell_t), ("Claude path", &claude, &claude_t)]
+                let paths = [("Shell", &shell, &shell_t, SettingsPage::General), ("Claude path", &claude, &claude_t, SettingsPage::Harnesses)]
                     .into_iter()
-                    .find(|(_, _, t)| !t.is_empty() && platform::resolve_program(t).is_none())
-                    .map(|(what, field, t)| (SettingsPage::General, field.clone(), format!("{what}: “{t}” is not a file or a program on PATH")));
+                    .find(|(_, _, t, _)| !t.is_empty() && platform::resolve_program(t).is_none())
+                    .map(|(what, field, t, page)| (page, field.clone(), format!("{what}: “{t}” is not a file or a program on PATH")));
                 let bad_model = model_name.is_err().then(|| (SettingsPage::Sessions, model.clone(), "Use a model alias or id (letters, digits, . _ -).".to_string()));
                 let limits = claude::trim::Limits::parse(skills_field.read(cx).value().as_ref());
-                let bad_limits = limits.as_ref().err().map(|why| (SettingsPage::ClaudeTools, skills_field.clone(), why.clone()));
+                let bad_limits = limits.as_ref().err().map(|why| (SettingsPage::Harnesses, skills_field.clone(), why.clone()));
                 if let Some((page, field, msg)) = paths.or(bad_model).or(bad_limits) {
                     self.settings_page = page;
+                    let mut subagents = subagents;
+                    if page == SettingsPage::Harnesses {
+                        subagents.picking = Some(HarnessDialog::Claude);
+                    }
                     field.update(cx, |s, cx| s.focus(window, cx));
-                    self.modal = Some(Modal::Settings { shell, claude, model, harness, effort, permission, updates, chrome, scale, trimmed, claudiu_off, skills_field, costly, list_focus, renaming, subagents });
+                    self.modal = Some(Modal::Settings { shell, claude, model, harness, effort, permission, updates, chrome, scale, trimmed, claudiu_off, skills_field, skill_search, costly, list_focus, renaming, subagents });
                     self.toast(msg, true, cx);
                     return;
                 }
@@ -154,7 +158,10 @@ impl Workspace {
                 }
                 s.scale = (scale != 100).then_some(scale);
                 s.chrome_default = chrome;
-                s.harness = harness;
+                let harness_changed = s.harness != harness || s.enabled_harnesses.as_ref() != Some(&subagents.enabled);
+                let enabled = if subagents.enabled.is_empty() { vec![harness] } else { subagents.enabled.clone() };
+                s.enabled_harnesses = Some(enabled.clone());
+                s.harness = if enabled.contains(&harness) { harness } else { enabled[0] };
                 s.new_session = claude::defaults::NewSessionDefaults { model: model_name.unwrap_or_default(), effort, permission_mode: permission };
                 let trimmed = claude::trim::normalized(&trimmed);
                 let claudiu_off = mcp::normalized_features(&claudiu_off);
@@ -191,6 +198,18 @@ impl Workspace {
                 self.shell = platform::default_shell(s.shell.as_deref());
                 self.claude_exe = claude::discover(s.claude_path.as_deref());
                 self.store.mark_dirty();
+                if harness_changed || subagents_changed {
+                    let enabled = self.store.data.settings.enabled_harnesses_list();
+                    for live in &self.live {
+                        if let Some(thread) = live.view.thread() {
+                            thread.update(cx, |t, cx| {
+                                t.enabled_harnesses = enabled.clone();
+                                cx.notify();
+                            });
+                        }
+                    }
+                    self.sync_skills(None, cx);
+                }
                 if let Some(e) = trim_error {
                     self.toast(format!("Settings saved, but Claude Code's settings.json could not be changed ({e}), so the tool trims stay as they were."), true, cx);
                 } else if subagents_changed && !tools_changed {

@@ -5,8 +5,8 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use gpui::{
-    Animation, AnimationElement, AnimationExt, Bounds, Canvas, Context, Div, MouseButton, MouseDownEvent, Window, Pixels, Point, canvas, point, ElementId, FontWeight, Hsla, InteractiveElement, ParentElement, SharedString,
-    Stateful, Styled, div, px,
+    Animation, AnimationElement, AnimationExt, Bounds, Canvas, ClickEvent, Context, Div, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Window, Pixels, Point, canvas, point, ElementId, FontWeight, Hsla, InteractiveElement, ParentElement, SharedString,
+    Stateful, StatefulInteractiveElement, Styled, div, px,
 };
 use gpui_kit::assets::IconName;
 use gpui_kit::component::Icon;
@@ -234,6 +234,151 @@ pub fn icon(name: IconName, size: f32) -> Icon {
     Icon::new(name).size(px(size))
 }
 
+/// Map a pointer's x position within `[left, left + width]` to the nearest discrete stop in `0..count`.
+pub fn step_at_x(x: f32, left: f32, width: f32, count: usize) -> usize {
+    if count <= 1 || width <= 0.0 {
+        return 0;
+    }
+    let t = ((x - left) / width).clamp(0.0, 1.0);
+    (t * (count - 1) as f32).round() as usize
+}
+
+/// Callback invoked when the user clicks or drags the effort slider to a stop index.
+pub type EffortPick<V> = Rc<dyn Fn(&mut V, usize, &mut Window, &mut Context<V>)>;
+
+/// Compact draggable effort bar: click or drag horizontally along the track to pick among `labels`, or click any label.
+#[allow(clippy::too_many_arguments)]
+pub fn effort_slider<V: 'static>(
+    id: impl Into<SharedString>,
+    labels: &[String],
+    selected: Option<usize>,
+    accent: Hsla,
+    bounds: Rc<Cell<Bounds<Pixels>>>,
+    dragging: Rc<Cell<bool>>,
+    on_pick: EffortPick<V>,
+    cx: &mut Context<V>,
+) -> Div {
+    let id = id.into();
+    let count = labels.len();
+    let frac = match selected {
+        Some(ix) if count > 1 => (ix as f32 / (count - 1) as f32).clamp(0.0, 1.0),
+        Some(_) => 1.0,
+        None => 0.0,
+    };
+
+    let measure_bounds = bounds.clone();
+    let down_bounds = bounds.clone();
+    let move_bounds = bounds;
+    let down_drag = dragging.clone();
+    let move_drag = dragging.clone();
+    let up_drag = dragging;
+    let down_pick = on_pick.clone();
+    let move_pick = on_pick.clone();
+
+    let mut stops = div().absolute().inset_0().flex().items_center().justify_between();
+    for i in 0..count {
+        let active = selected.is_some_and(|s| i <= s);
+        stops = stops.child(
+            div()
+                .size(px(6.0))
+                .rounded_full()
+                .bg(if active { accent } else { hsla(0x323644) }),
+        );
+    }
+
+    let track = div()
+        .id(SharedString::from(format!("{id}-track")))
+        .relative()
+        .w_full()
+        .h(px(22.0))
+        .flex()
+        .items_center()
+        .cursor_pointer()
+        .child(
+            canvas(
+                move |b, _, _| measure_bounds.set(b),
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .inset_0(),
+        )
+        .child(
+            div()
+                .relative()
+                .w_full()
+                .h(px(4.0))
+                .rounded_full()
+                .bg(hsla(0x252834))
+                .child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .h_full()
+                        .w(gpui::relative(frac))
+                        .rounded_full()
+                        .bg(accent),
+                ),
+        )
+        .child(stops)
+        .children(selected.map(|_| {
+            div()
+                .absolute()
+                .left(gpui::relative(frac))
+                .ml(px(-6.0))
+                .size(px(12.0))
+                .rounded_full()
+                .bg(hsla(theme::TEXT))
+                .border_2()
+                .border_color(accent)
+        }))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |v, ev: &MouseDownEvent, window, cx| {
+                cx.stop_propagation();
+                down_drag.set(true);
+                let b = down_bounds.get();
+                let ix = step_at_x(f32::from(ev.position.x), f32::from(b.origin.x), f32::from(b.size.width), count);
+                down_pick(v, ix, window, cx);
+            }),
+        )
+        .on_mouse_move(cx.listener(move |v, ev: &MouseMoveEvent, window, cx| {
+            if !move_drag.get() {
+                return;
+            }
+            if ev.pressed_button != Some(MouseButton::Left) {
+                move_drag.set(false);
+                return;
+            }
+            let b = move_bounds.get();
+            let ix = step_at_x(f32::from(ev.position.x), f32::from(b.origin.x), f32::from(b.size.width), count);
+            move_pick(v, ix, window, cx);
+        }))
+        .on_mouse_up(
+            MouseButton::Left,
+            cx.listener(move |_, _: &MouseUpEvent, _, _| up_drag.set(false)),
+        );
+
+    let mut label_row = div().flex().items_center().justify_between().w_full();
+    for (i, label) in labels.iter().enumerate() {
+        let is_sel = selected == Some(i);
+        let pick = on_pick.clone();
+        label_row = label_row.child(
+            div()
+                .id(SharedString::from(format!("{id}-lbl-{i}")))
+                .cursor_pointer()
+                .text_size(crate::panels::scale::px(10.5))
+                .font_weight(if is_sel { FontWeight::SEMIBOLD } else { FontWeight::NORMAL })
+                .text_color(if is_sel { accent } else { hsla(theme::TEXT_FAINT) })
+                .hover(|s| s.text_color(hsla(theme::TEXT)))
+                .child(label.clone())
+                .on_click(cx.listener(move |v, _: &ClickEvent, window, cx| pick(v, i, window, cx))),
+        );
+    }
+
+    div().flex().flex_col().gap(px(2.0)).w_full().child(track).child(label_row)
+}
+
 /// The "working" icon: Lucide's loader, turning.
 pub fn spinner(id: impl Into<ElementId>, size: f32) -> AnimationElement<Icon> {
     icon(IconName::LoaderCircle, size).with_animation(
@@ -443,6 +588,16 @@ mod tests {
             "/a/very/long/path/that/keeps/going/and/going/forever/and/ever/project",
         );
         assert!(short_path(p).chars().count() <= 46);
+    }
+
+    #[test]
+    fn effort_slider_maps_pointer_x_to_nearest_stop() {
+        assert_eq!(step_at_x(0.0, 100.0, 200.0, 5), 0);
+        assert_eq!(step_at_x(100.0, 100.0, 200.0, 5), 0);
+        assert_eq!(step_at_x(150.0, 100.0, 200.0, 5), 1);
+        assert_eq!(step_at_x(200.0, 100.0, 200.0, 5), 2);
+        assert_eq!(step_at_x(300.0, 100.0, 200.0, 5), 4);
+        assert_eq!(step_at_x(999.0, 100.0, 200.0, 5), 4);
     }
 }
 

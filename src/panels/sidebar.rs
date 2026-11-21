@@ -15,7 +15,7 @@ use crate::panels::theme::{self, hsla};
 use gpui_kit::assets::IconName;
 use crate::panels::status_icon::{SessionDot, StatusIcon};
 use crate::panels::logos;
-use crate::panels::widgets::{Trigger, ago, avatar, button, clawd, countdown, icon, icon_button, key_hint, limit_bar, section_label, shortcut, tick};
+use crate::panels::widgets::{Trigger, ago, button, countdown, icon, icon_button, key_hint, limit_bar, section_label, shortcut, tick};
 
 pub const SIDEBAR_W: f32 = 284.0;
 pub const SIDEBAR_MIN: f32 = 220.0;
@@ -29,6 +29,8 @@ struct Row {
     id: Id,
     /// What the leading status icon shows.
     dot: SessionDot,
+    /// Which harness this session runs in (for its subtle badge).
+    harness: Option<crate::harness::Harness>,
     title: String,
     right: String,
     /// The project's name, on the first line of a running session's row.
@@ -265,6 +267,7 @@ impl Workspace {
         Row {
             id: rec.id.clone(),
             dot,
+            harness: rec.claude.as_ref().map(|c| c.harness),
             title: rec.display_title().to_string(),
             right: if with_project && !running { project.clone() } else { ago(rec.last_active, now()) },
             project,
@@ -296,7 +299,7 @@ impl Workspace {
             items.push(item("Regenerate title", Act::RegenTitle(rec.id.clone()), false, false));
         }
         if let Some(c) = &rec.claude {
-            items.push(item("Copy Claude session ID", Act::CopyText(c.session_id.clone()), false, true));
+            items.push(item("Copy session ID", Act::CopyText(c.session_id.clone()), false, true));
         }
         items.push(item("Copy folder path", Act::CopyText(rec.cwd.to_string_lossy().into_owned()), false, rec.claude.is_none()));
         items.push(item(reveal_label(), Act::Reveal(rec.cwd.clone()), false, false));
@@ -377,7 +380,7 @@ impl Workspace {
         let title_color = hsla(if row.dim { theme::TEXT_DIM } else { theme::TEXT });
         let ellipsis = |el: Div| el.min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis();
         let content = if row.running {
-            // Project and age, then the title with the status icon, then the branch.
+            // Harness mark + project and age, then the title with the status icon, then the branch.
             div()
                 .flex_1()
                 .min_w_0()
@@ -387,10 +390,12 @@ impl Workspace {
                 .child(
                     div()
                         .flex()
-                        .gap(px(6.0))
+                        .items_center()
+                        .gap(px(5.0))
                         .text_size(crate::panels::scale::px(11.0))
                         .line_height(crate::panels::scale::px(14.0))
                         .text_color(hsla(theme::TEXT_FAINT))
+                        .children(row.harness.map(|h| logos::draw(logos::for_harness(h), 11.0, hsla(theme::harness_color(h)))))
                         .child(ellipsis(div().flex_1()).child(row.project.clone()))
                         .child(div().flex_none().text_color(right_color).child(right_text)),
                 )
@@ -801,7 +806,7 @@ impl Workspace {
                     .child(self.render_sidebar_header(cx))
                     .child(list)
                     .children(self.recent_section(window, cx))
-                    .child(self.render_footer(cx)),
+                    .children(self.render_footer(cx)),
             )
             .child(handle)
     }
@@ -819,16 +824,39 @@ impl Workspace {
             .flex_col()
             .gap(px(8.0))
             .px(px(8.0))
-            .pt(px(8.0))
+            .pt(px(10.0))
             .pb(px(8.0))
             .child(
                 div()
                     .flex()
                     .items_center()
                     .gap(px(8.0))
-                    .px(px(2.0))
-                    .child(clawd(24.0))
-                    .child(div().flex_1().text_size(crate::panels::scale::px(13.0)).font_weight(FontWeight::BOLD).text_color(hsla(theme::TEXT)).child("CLAUDIU"))
+                    .px(px(4.0))
+                    .child(
+                        div()
+                            .id("sidebar-brand-home")
+                            .occlude()
+                            .flex()
+                            .flex_1()
+                            .items_center()
+                            .gap(px(7.0))
+                            .cursor_pointer()
+                            .hover(|s| s.opacity(0.85))
+                            .on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::ShowHome, window, cx)))
+                            .child(
+                                div()
+                                    .size(px(20.0))
+                                    .rounded(px(5.0))
+                                    .bg(hsla(theme::SURFACE_ELEVATED))
+                                    .border_1()
+                                    .border_color(hsla(theme::PANEL_BORDER))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .child(icon(IconName::Terminal, 12.0).text_color(hsla(theme::harness_color(self.store.data.settings.harness)))),
+                            )
+                            .child(div().text_size(crate::panels::scale::px(13.0)).font_weight(FontWeight::BOLD).text_color(hsla(theme::TEXT)).child("CLAUDIU")),
+                    )
                     .when(hints, |d| d.child(key_hint(",")))
                     .child(icon_button("settings", IconName::Settings).occlude().on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::OpenSettings, window, cx)))),
             )
@@ -884,68 +912,11 @@ impl Workspace {
             .when_some(trailing, |d, t| d.child(t))
     }
 
-    /// Switch account, add one, or sign in again / remove the active alt (shown greyed out for the main account).
-    fn account_menu(&self) -> Vec<MenuItem> {
-        let active = self.store.active_account().map(|a| a.id.clone());
-        let item = |label: String, hint: Option<String>, act: Act, danger: bool, sep: bool| MenuItem {
-            label,
-            hint,
-            detail: None,
-            act,
-            danger,
-            disabled: false,
-            separator_before: sep,
-            remove: None,
-            icon: None,
-        };
-        let accounts = &self.store.data.accounts;
-        let mut items: Vec<MenuItem> = accounts
-            .iter()
-            .map(|a| {
-                let mark = tick(active.as_ref() == Some(&a.id));
-                item(format!("{mark}{}", a.name()), Some(account_hint(a)), Act::SwitchAccount(a.id.clone()), false, false)
-            })
-            .collect();
-        items.push(item("Add account…".into(), None, Act::AddAccount, false, true));
-        let id = active.unwrap_or_default();
-        let main = self.store.active_account().is_none_or(|a| a.is_main());
-        for (label, act, danger) in [
-            ("Sign in to this account again…", Act::SignIn(id.clone()), false),
-            ("Remove this account…", Act::RemoveAccount(id), true),
-        ] {
-            items.push(MenuItem { disabled: main, ..item(label.into(), None, act, danger, false) });
-        }
-        items
-    }
-
-    fn render_account_switcher(&self, cx: &mut Context<Self>) -> Stateful<Div> {
-        let acct = self.store.active_account();
-        let name = acct.map_or_else(|| "Main account".to_string(), |a| a.name());
-        // `Pro · Alt`, so the row says which kind of account is in use.
-        let plan = acct.map(account_hint).unwrap_or_default();
-        div()
-            .id("account-switcher")
-            .flex()
-            .items_center()
-            .gap(px(8.0))
-            .h(px(26.0))
-            .mx(px(-5.0))
-            .px(px(5.0))
-            .rounded(px(6.0))
-            .cursor_pointer()
-            .hover(|s| s.bg(hsla(theme::ROW_HOVER)))
-            .dropdown(cx, |ws, at, _window, cx| {
-                let items = ws.account_menu();
-                ws.open_dropdown(at, items, cx);
-            })
-            .child(avatar(&name, 18.0))
-            .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(crate::panels::scale::px(12.5)).text_color(hsla(theme::TEXT)).child(name))
-            .child(div().flex_none().text_size(crate::panels::scale::px(10.5)).text_color(hsla(theme::TEXT_FAINT)).child(plan))
-            .child(div().flex_none().text_color(hsla(theme::TEXT_FAINT)).child(icon(IconName::ChevronDown, 12.0)))
-    }
-
-    fn render_footer(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    /// Connected harnesses' usage limits only (no account picker). Hidden when no connected harness has a limits adapter.
+    fn render_footer(&self, _cx: &mut Context<Self>) -> Option<Div> {
+        use crate::harness::Harness;
         let t = now();
+        let settings = &self.store.data.settings;
         let usage = self.store.active_account().map(|a| a.usage.clone()).unwrap_or_default();
 
         // A reset time stays true however old the reading is, so it shows whenever it is still ahead, including for a
@@ -965,7 +936,6 @@ impl Workspace {
         // Fits the widest marks: two logos, or a logo and a two-letter name.
         let label_w = crate::panels::scale::px(30.0);
         let gap = crate::panels::scale::px(6.0);
-        // Each row starts with the logos of whose limits it shows, and a short name where logos alone can't tell rows apart.
         let source_row = |marks: &[&'static logos::Logo], name: Option<String>, color: u32, five: AnyElement, seven: AnyElement| -> Div {
             let mut who = div().flex().flex_none().items_center().gap(crate::panels::scale::px(4.0)).w(label_w).overflow_hidden();
             for logo in marks {
@@ -983,61 +953,62 @@ impl Workspace {
             .child(div().flex_none().w(label_w))
             .child(section_label("5 HOUR").flex_1().min_w_0())
             .child(section_label("7 DAY").flex_1().min_w_0());
-        let claude = source_row(
-            &[&logos::CLAUDE],
-            None,
-            theme::ACCENT,
-            limit("meter-5h".into(), &usage.five_hour, theme::ACCENT).into_any_element(),
-            limit("meter-7d".into(), &usage.seven_day, theme::ACCENT).into_any_element(),
-        );
-        let mut limits = div().flex().flex_col().gap(crate::panels::scale::px(3.0)).child(headers).child(claude);
-        let subagents = &self.store.data.settings.custom_subagents;
+
+        let mut rows: Vec<Div> = Vec::new();
+        if settings.harness_enabled(Harness::Claude) {
+            rows.push(source_row(
+                &[&logos::CLAUDE],
+                None,
+                theme::ACCENT,
+                limit("meter-5h".into(), &usage.five_hour, theme::ACCENT).into_any_element(),
+                limit("meter-7d".into(), &usage.seven_day, theme::ACCENT).into_any_element(),
+            ));
+        }
+        let subagents = &settings.custom_subagents;
         for agent in crate::claude::subagents::Agent::ALL {
+            let harness = match agent {
+                crate::claude::subagents::Agent::Codex => Harness::Codex,
+                crate::claude::subagents::Agent::OpenCode => Harness::OpenCode,
+                crate::claude::subagents::Agent::Antigravity => Harness::Antigravity,
+            };
             let provider = agent.provider();
-            if !subagents.get(agent).on {
+            if !(settings.harness_enabled(harness) || subagents.get(agent).on) {
                 continue;
             }
             let Some(pools) = self.store.data.subagent_limits.get(provider.key).filter(|pools| !pools.is_empty()) else { continue };
-            limits = limits.child(divider());
+            if !rows.is_empty() {
+                rows.push(divider());
+            }
             for (i, pool) in pools.iter().enumerate() {
                 let source = format!("{}-{i}", provider.key);
-                // Empty windows keep their column, without drawing a meter.
                 let cell = |window: &str, l: &Option<crate::store::RateLimit>| match l {
                     Some(_) => limit(format!("meter-{source}-{window}"), l, provider.color).into_any_element(),
                     None => div().flex_1().min_w_0().h(crate::panels::scale::px(16.0)).into_any_element(),
                 };
                 let (marks, name) = (provider.marks)(&pool.name);
-                limits = limits.child(source_row(marks, name, provider.color, cell("5h", &pool.usage.five_hour), cell("7d", &pool.usage.seven_day)));
+                rows.push(source_row(marks, name, provider.color, cell("5h", &pool.usage.five_hour), cell("7d", &pool.usage.seven_day)));
             }
         }
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(8.0))
-            .px(px(14.0))
-            .pt(px(6.0))
-            .pb(px(8.0))
-            .border_t_1()
-            .border_color(hsla(theme::BORDER))
-            .child(self.render_account_switcher(cx))
-            .child(limits)
+        if rows.is_empty() {
+            return None;
+        }
+        let mut limits = div().flex().flex_col().gap(crate::panels::scale::px(3.0)).child(headers);
+        for row in rows {
+            limits = limits.child(row);
+        }
+        Some(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(6.0))
+                .px(px(14.0))
+                .pt(px(8.0))
+                .pb(px(10.0))
+                .border_t_1()
+                .border_color(hsla(theme::BORDER))
+                .child(limits),
+        )
     }
-}
-
-/// `email · Pro (Main)` for the menu.
-/// `Pro · Main`, shown right of the email in the account menu.
-fn account_hint(a: &crate::store::Account) -> String {
-    a.plan.as_deref().map_or(kind_label(a).to_string(), |p| format!("{} · {}", plan_label(p), kind_label(a)))
-}
-
-fn kind_label(a: &crate::store::Account) -> &'static str {
-    if a.is_main() { "Main" } else { "Alt" }
-}
-
-/// `pro` → `Pro`.
-fn plan_label(plan: &str) -> String {
-    let mut c = plan.chars();
-    c.next().map_or_else(String::new, |f| f.to_uppercase().chain(c).collect())
 }
 
 #[cfg(test)]
@@ -1048,6 +1019,7 @@ mod tests {
         Row {
             id: "s".into(),
             dot: SessionDot::Active,
+            harness: None,
             title: String::new(),
             right: String::new(),
             project: String::new(),

@@ -10,25 +10,25 @@ pub enum SettingsPage {
     #[default]
     General,
     Sessions,
+    Harnesses,
     Projects,
-    ClaudeTools,
+    Skills,
     ClaudiuTools,
-    CustomSubagents,
     Worktrees,
     About,
 }
 
 impl SettingsPage {
-    pub const ALL: [SettingsPage; 8] = [Self::General, Self::Sessions, Self::Projects, Self::ClaudeTools, Self::ClaudiuTools, Self::CustomSubagents, Self::Worktrees, Self::About];
+    pub const ALL: [SettingsPage; 8] = [Self::General, Self::Sessions, Self::Harnesses, Self::Projects, Self::Skills, Self::ClaudiuTools, Self::Worktrees, Self::About];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::General => "General",
             Self::Sessions => "Sessions",
+            Self::Harnesses => "Harnesses",
             Self::Projects => "Projects",
-            Self::ClaudeTools => "Claude Code tools",
+            Self::Skills => "Skills",
             Self::ClaudiuTools => "Claudiu tools",
-            Self::CustomSubagents => "Custom subagents",
             Self::Worktrees => "Worktrees",
             Self::About => "About",
         }
@@ -79,10 +79,10 @@ impl ModelLookups {
 }
 
 impl Workspace {
-    /// Asks each agent switched on for its models in the background while the Custom subagents page shows. The list
-    /// the page showed last stays until the answer comes; a failure keeps it and says why.
+    /// Asks each agent switched on as a subagent for its models in the background while the Harnesses page shows.
+    /// The list the page showed last stays until the answer comes; a failure keeps it and says why.
     pub(crate) fn load_models(&mut self, cx: &mut Context<Self>) {
-        if self.settings_page != SettingsPage::CustomSubagents {
+        if self.settings_page != SettingsPage::Harnesses {
             return;
         }
         let Some(Modal::Settings { subagents, .. }) = &self.modal else { return };
@@ -113,44 +113,60 @@ impl Workspace {
         }
     }
 
-    /// Opens an agent's dialog over the Custom subagents page, with the keyboard in its model search.
-    pub(crate) fn open_agent_dialog(&mut self, agent: Agent, window: &mut Window, cx: &mut Context<Self>) {
-        let search = self.modal_input_then("", "Search models", Self::close_agent_dialog, window, cx);
-        if let Some(Modal::Settings { subagents, .. }) = self.modal.as_mut() {
-            subagents.picking = Some((agent, search));
+    /// Opens a harness's configuration popup over the Harnesses page.
+    pub(crate) fn open_harness_dialog(&mut self, harness: Harness, window: &mut Window, cx: &mut Context<Self>) {
+        match harness {
+            Harness::Claude => {
+                if let Some(Modal::Settings { subagents, .. }) = self.modal.as_mut() {
+                    subagents.picking = Some(HarnessDialog::Claude);
+                }
+            }
+            Harness::Codex | Harness::OpenCode | Harness::Antigravity => {
+                let agent = match harness {
+                    Harness::Codex => Agent::Codex,
+                    Harness::OpenCode => Agent::OpenCode,
+                    Harness::Antigravity => Agent::Antigravity,
+                    Harness::Claude => unreachable!(),
+                };
+                let search = self.modal_input_then("", "Search models", Self::close_harness_dialog, window, cx);
+                if let Some(Modal::Settings { subagents, .. }) = self.modal.as_mut() {
+                    subagents.picking = Some(HarnessDialog::Agent(agent, search));
+                }
+                self.load_models(cx);
+            }
         }
     }
 
-    /// Closes the agent's dialog, keeping what it switched; Settings' Save keeps it for good.
-    pub(crate) fn close_agent_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Closes the harness popup, keeping what was switched; Settings' Save persists it.
+    pub(crate) fn close_harness_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(Modal::Settings { subagents, list_focus, .. }) = self.modal.as_mut() {
             subagents.picking = None;
             window.focus(list_focus, cx);
         }
     }
 
-    pub(crate) fn agent_dialog_open(&self) -> bool {
-        matches!(&self.modal, Some(Modal::Settings { subagents: SubagentsForm { picking: Some(_), .. }, .. }))
+    pub(crate) fn harness_dialog_open(&self) -> bool {
+        matches!(&self.modal, Some(Modal::Settings { subagents: HarnessesForm { picking: Some(_), .. }, .. }))
     }
 
     /// Keys for the open Settings dialog, seen before the focused control. Up and Down change the page and Enter saves
     /// only while the category list has focus; Tab and Shift+Tab cycle the list and the current page's text fields.
     pub(crate) fn settings_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        // The dialog over the page has only its search field, and no list of pages for Up and Down to move.
-        if self.agent_dialog_open() {
+        // The popup over Harnesses closes on Escape without closing Settings itself.
+        if self.harness_dialog_open() {
             if ev.keystroke.key == "escape" {
-                self.close_agent_dialog(window, cx);
+                self.close_harness_dialog(window, cx);
                 cx.stop_propagation();
                 cx.notify();
             }
             return;
         }
-        let Some(Modal::Settings { shell, claude, model, skills_field, list_focus, renaming, .. }) = &self.modal else { return };
+        let Some(Modal::Settings { shell, model, skill_search, list_focus, renaming, .. }) = &self.modal else { return };
         let list_focus = list_focus.clone();
         let fields = match self.settings_page {
-            SettingsPage::General => vec![shell.clone(), claude.clone()],
+            SettingsPage::General => vec![shell.clone()],
             SettingsPage::Sessions => vec![model.clone()],
-            SettingsPage::ClaudeTools => vec![skills_field.clone()],
+            SettingsPage::Skills if self.skills_page.tab == SkillsTab::Browse => vec![skill_search.clone()],
             SettingsPage::Projects => renaming.iter().map(|(_, name)| name.clone()).collect(),
             _ => Vec::new(),
         };
@@ -187,8 +203,11 @@ mod tests {
     #[test]
     fn next_and_prev_walk_the_list_and_stop_at_the_ends() {
         assert_eq!(General.next(), Sessions);
-        assert_eq!(ClaudiuTools.next(), CustomSubagents);
-        assert_eq!(CustomSubagents.next(), Worktrees);
+        assert_eq!(Sessions.next(), Harnesses);
+        assert_eq!(Harnesses.next(), Projects);
+        assert_eq!(Projects.next(), Skills);
+        assert_eq!(Skills.next(), ClaudiuTools);
+        assert_eq!(ClaudiuTools.next(), Worktrees);
         assert_eq!(Worktrees.next(), About);
         assert_eq!(About.next(), About);
         assert_eq!(About.prev(), Worktrees);

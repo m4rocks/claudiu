@@ -59,6 +59,32 @@ impl Workspace {
         self.new_session_with(harness, cwd, prompt, options, by, window, cx);
     }
 
+    /// A new session in `harness` directly inside `cwd` (preserving a chosen worktree) with an optional effort override.
+    pub(super) fn new_session_from_home(&mut self, harness: Harness, cwd: PathBuf, prompt: Option<String>, effort: Option<Effort>, window: &mut Window, cx: &mut Context<Self>) {
+        let record_id = new_id();
+        let meta = ClaudeMeta { chrome: self.store.data.settings.chrome_default, harness, ..Default::default() };
+        let Some(mut start) = self.thread_start(&record_id, &cwd, &meta, None, prompt, Starter::User, cx) else { return };
+        if let Some(effort) = effort {
+            start.options.retain(|(category, _)| *category != "thought_level");
+            start.options.push(("thought_level", effort.name().to_string()));
+        }
+        let record = SessionRecord {
+            id: record_id,
+            kind: SessionKind::Claude,
+            title: format!("New {} session", harness.name()),
+            custom_title: None,
+            auto_title: None,
+            project_id: self.store.project_for_cwd(&cwd),
+            cwd,
+            created_at: now(),
+            last_active: now(),
+            exit_code: None,
+            hidden: false,
+            claude: Some(meta),
+        };
+        self.start_thread(record, start, true, window, cx);
+    }
+
     /// A new session in `harness`, as `new_claude_with`.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn new_session_with(&mut self, harness: Harness, cwd: PathBuf, prompt: Option<String>, options: Vec<(&'static str, String)>, by: Starter, window: &mut Window, cx: &mut Context<Self>) {
@@ -147,7 +173,22 @@ impl Workspace {
                 env.extend(Self::account_env(acct));
             }
         }
-        Some(crate::thread::Start { harness: meta.harness, server: self.acp_server.clone(), cwd: cwd.to_path_buf(), env, session_id, meta: session_meta, mcp_servers, mode, options, prompt })
+        self.sync_skills(Some(meta.harness), cx);
+        let enabled_harnesses = self.store.data.settings.enabled_harnesses_list();
+        Some(crate::thread::Start {
+            harness: meta.harness,
+            enabled_harnesses,
+            server: self.acp_server.clone(),
+            cwd: cwd.to_path_buf(),
+            env,
+            session_id,
+            meta: session_meta,
+            mcp_servers,
+            mode,
+            options,
+            prompt,
+            prior_entries: vec![],
+        })
     }
 
     /// Start the session over in its folder. For a session with no conversation yet, nothing is lost. A running view
@@ -268,6 +309,7 @@ impl Workspace {
                 }
             }
             ThreadEvent::OpenPath(path, line) => ws.open_from_terminal(&sub_id, path, *line, window, cx),
+            ThreadEvent::Handoff { to, message, effort } => ws.dynamic_handoff(&sub_id, *to, message.clone(), effort.clone(), window, cx),
         });
         self.adopt_live(id, SessionView::Thread(view), sub, name, window, cx);
     }
