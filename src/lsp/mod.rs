@@ -1,5 +1,6 @@
 //! A small Language Server Protocol client for editor mode: start a server found on PATH, talk to it over stdio, and
-//! pass its diagnostics on. Nothing is downloaded or installed. No UI here; `app::language_servers` wires it to tabs.
+//! pass its diagnostics on. Nothing is downloaded or installed. No GPUI here;
+//! `app::language_servers` wires it to tabs.
 
 pub mod rpc;
 
@@ -44,6 +45,24 @@ pub fn language_id(language: &str) -> &str {
         "tsx" => "typescriptreact",
         other => other,
     }
+}
+
+/// A column on `line` counted in UTF-16 units, as most servers count, in characters, as the editor does. A column
+/// inside a character (half of an emoji) moves past it.
+pub fn utf16_to_chars(line: &str, units: u32) -> u32 {
+    let mut seen = 0;
+    for (chars, c) in line.chars().enumerate() {
+        if seen >= units {
+            return chars as u32;
+        }
+        seen += c.len_utf16() as u32;
+    }
+    line.chars().count() as u32
+}
+
+/// A column on `line` counted in characters, as the editor does, in UTF-16 units.
+pub fn chars_to_utf16(line: &str, chars: u32) -> u32 {
+    line.chars().take(chars as usize).map(|c| c.len_utf16() as u32).sum()
 }
 
 pub fn uri(path: &Path) -> Option<Uri> {
@@ -194,7 +213,7 @@ impl Server {
         async move { serde_json::from_value(reply.await?).map_err(|e| e.to_string()) }
     }
 
-    /// Whether the server counts columns in UTF-16 units rather than characters (see `app::language_servers::to_lsp`).
+    /// Whether the server counts columns in UTF-16 units rather than characters (see `utf16_to_chars`).
     pub fn counts_utf16(&self) -> bool {
         self.utf16
     }
@@ -351,6 +370,22 @@ mod tests {
         assert_eq!(pulled.iter().map(|d| d.message.as_str()).collect::<Vec<_>>(), ["asked for"]);
         drop(server);
         assert!(matches!(futures::executor::block_on(rx.next()), Some(Event::Exited(_))), "the end of the server is reported");
+    }
+
+    #[test]
+    fn columns_convert_between_characters_and_utf16() {
+        let line = "let 😀 = é;";
+        // Characters: l e t ␠ 😀 ␠ = ␠ é ;  — the emoji is one character but two UTF-16 units.
+        assert_eq!(chars_to_utf16(line, 4), 4, "before the emoji");
+        assert_eq!(chars_to_utf16(line, 5), 6, "after the emoji");
+        assert_eq!(chars_to_utf16(line, 9), 10, "é is one unit");
+        assert_eq!(utf16_to_chars(line, 6), 5);
+        assert_eq!(utf16_to_chars(line, 10), 9);
+        assert_eq!(utf16_to_chars(line, 5), 5, "inside the emoji moves past it");
+        assert_eq!(utf16_to_chars(line, 99), 10, "past the end stays at the end");
+        for chars in 0..=10 {
+            assert_eq!(utf16_to_chars(line, chars_to_utf16(line, chars)), chars, "round trip at {chars}");
+        }
     }
 
     #[test]

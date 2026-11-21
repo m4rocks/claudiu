@@ -7,6 +7,9 @@ fn numbered<T>(items: &[T], n: usize) -> Option<&T> {
     items.get(n.checked_sub(1)?)
 }
 
+/// How long Ctrl (Cmd) is held alone before the sidebar shows the session shortcuts.
+const SHORTCUT_HOLD: Duration = Duration::from_millis(400);
+
 impl Workspace {
     /// Per-process additions to a Claude launch; nothing in the user's Claude Code config changes:
     /// the mod (`--plugin-dir`, which reports usage and status), the tab-title MCP server (`--mcp-config`, its
@@ -18,6 +21,7 @@ impl Workspace {
         claude_session_id: &str,
         record_id: &str,
         chrome: bool,
+        cx: &mut Context<Self>,
     ) -> SpawnSpec {
         let started = std::time::Instant::now();
         // Diagnostics for the start-up trace (`terminal/trace.rs`): start without Claudiu's MCP server or mod to see what they cost.
@@ -51,7 +55,7 @@ impl Workspace {
         spec.env.push(("FORCE_HYPERLINK".into(), "1".into())); // Claude Code would print links as text otherwise; cards are found by theirs
         spec.env.push(("CLAUDE_CODE_AUTO_CONNECT_IDE".into(), "false".into()));
         spec.env.push(("CLAUDE_CODE_IDE_SKIP_AUTO_INSTALL".into(), "1".into()));
-        self.sync_configs_now();
+        self.sync_configs_now(cx);
         if let Some(acct) = self.store.session_account(record_id) {
             spec.env.push((usage::ACCOUNT_ENV.into(), acct.id.clone()));
             spec.env.extend(Self::account_env(acct));
@@ -67,20 +71,20 @@ impl Workspace {
         spec
     }
 
-    pub fn is_running(&self, id: &str) -> bool {
+    pub fn is_running(&self, id: &str, cx: &App) -> bool {
         self.live
             .iter()
-            .any(|l| l.id == id && l.view.is_running())
+            .any(|l| l.id == id && l.view.read(cx).is_running())
     }
 
-    pub fn running_count(&self) -> usize {
+    pub fn running_count(&self, cx: &App) -> usize {
         self.live
             .iter()
-            .filter(|l| l.view.is_running())
+            .filter(|l| l.view.read(cx).is_running())
             .count()
     }
 
-    pub fn live_view(&self, id: &str) -> Option<&TerminalView> {
+    pub fn live_view(&self, id: &str) -> Option<&Entity<TerminalView>> {
         self.live.iter().find(|l| l.id == id).map(|l| &l.view)
     }
 
@@ -104,19 +108,19 @@ impl Workspace {
             .unwrap_or_else(|| PathBuf::from("."))
     }
 
-    pub fn new_claude(&mut self, cwd: PathBuf) {
-        self.new_claude_with(cwd, vec![], Starter::User);
+    pub fn new_claude(&mut self, cwd: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        self.new_claude_with(cwd, vec![], Starter::User, window, cx);
     }
 
     /// `leading` goes before every other argument: the initial prompt must come ahead of the variadic
     /// `--allowedTools` / `--mcp-config` flags, or they would swallow it.
-    pub(super) fn new_claude_with(&mut self, cwd: PathBuf, leading: Vec<String>, by: Starter) {
+    pub(super) fn new_claude_with(&mut self, cwd: PathBuf, leading: Vec<String>, by: Starter, window: &mut Window, cx: &mut Context<Self>) {
         // A new session starts in the main checkout, not in a linked worktree. Fix-with-Claude works where the failure was.
         let cwd = if by == Starter::FixGit { cwd } else { self.outside_linked_worktree(cwd) };
         let session_id = new_id();
         let record_id = new_id();
         let chrome = self.store.data.settings.chrome_default;
-        let Some(spec) = self.fresh_spec(&cwd, &session_id, &record_id, chrome, leading, by) else { return };
+        let Some(spec) = self.fresh_spec(&cwd, &session_id, &record_id, chrome, leading, by, cx) else { return };
         let record = SessionRecord {
             id: record_id,
             kind: SessionKind::Claude,
@@ -135,14 +139,14 @@ impl Workspace {
                 ..Default::default()
             }),
         };
-        self.start_session(record, spec, true);
+        self.start(record, spec, true, window, cx);
     }
 
     /// `claude --session-id` in `cwd` with the new-session defaults. None, with a toast, when `claude` isn't installed.
     #[allow(clippy::too_many_arguments)]
-    fn fresh_spec(&mut self, cwd: &std::path::Path, session_id: &str, record_id: &str, chrome: bool, mut leading: Vec<String>, by: Starter) -> Option<SpawnSpec> {
+    fn fresh_spec(&mut self, cwd: &std::path::Path, session_id: &str, record_id: &str, chrome: bool, mut leading: Vec<String>, by: Starter, cx: &mut Context<Self>) -> Option<SpawnSpec> {
         let Some(exe) = self.claude_exe.clone() else {
-            self.show_toast("Could not find the `claude` CLI. Install Claude Code, or set its path in Settings.".into(), true, Some(("Check setup".into(), Act::OpenSetup)));
+            self.show_toast("Could not find the `claude` CLI. Install Claude Code, or set its path in Settings.".into(), true, Some(("Check setup".into(), Act::OpenSetup)), cx);
             return None;
         };
         let mut spec = claude::new_session_spec(&exe, cwd, session_id);
@@ -150,20 +154,20 @@ impl Workspace {
         let defaults = claude::defaults::flags(&settings.new_session, settings.trimmed_tools.contains(&claude::trim::Trim::PlanMode), &leading, by);
         leading.extend(defaults);
         spec.args.splice(0..0, leading);
-        Some(self.with_helpers(spec, session_id, record_id, chrome))
+        Some(self.with_helpers(spec, session_id, record_id, chrome, cx))
     }
 
     /// Start the session over under its own id in its folder. For a session with no conversation yet: `--resume` has
     /// nothing to find, and nothing is lost. A running view of it is replaced, which ends its process.
-    pub(super) fn relaunch_empty(&mut self, id: &str) {
+    pub(super) fn relaunch_empty(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(rec) = self.store.session(id).cloned() else { return };
         let Some(meta) = rec.claude.clone() else { return };
-        let cwd = self.resume_cwd(&rec);
-        let Some(mut spec) = self.fresh_spec(&cwd, &meta.session_id, &rec.id, meta.chrome, vec![], Starter::User) else { return };
+        let cwd = self.resume_cwd(&rec, cx);
+        let Some(mut spec) = self.fresh_spec(&cwd, &meta.session_id, &rec.id, meta.chrome, vec![], Starter::User, cx) else { return };
         if let Some(name) = rec.chosen_title() {
             spec.args.extend(["--name".into(), name.into()]);
         }
-        self.start_session(rec, spec, false);
+        self.start(rec, spec, false, window, cx);
     }
 
     /// `cwd`, or the project's main checkout when `cwd` is inside one of its linked worktrees.
@@ -176,18 +180,18 @@ impl Workspace {
     }
 
     /// Resume a Claude session through `claude --resume`. Reuses the history record.
-    pub fn resume(&mut self, id: &str) {
-        if self.is_running(id) {
-            self.show_session(id);
+    pub fn resume(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.is_running(id, cx) {
+            self.show_session(id, window, cx);
             return;
         }
         // The session leaves the RECENT list, so the list folds away rather than staying open under it.
         self.store.data.layout.recent_open = false;
-        self.relaunch(id);
+        self.relaunch(id, window, cx);
     }
 
     /// `claude --resume` in the record's folder. A running view of the session is replaced, which ends its process.
-    pub(super) fn relaunch(&mut self, id: &str) {
+    pub(super) fn relaunch(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(rec) = self.store.session(id).cloned() else {
             return;
         };
@@ -195,22 +199,22 @@ impl Workspace {
             return;
         };
         let Some(exe) = self.claude_exe.clone() else {
-            self.toast("Could not find the `claude` CLI.", true);
+            self.toast("Could not find the `claude` CLI.", true, cx);
             return;
         };
-        let cwd = self.resume_cwd(&rec);
+        let cwd = self.resume_cwd(&rec, cx);
         let mut spec = claude::resume_spec(&exe, &cwd, &meta.session_id);
         // Hand Claudiu's tab title to Claude Code so its own name (prompt box, /resume, Remote Control) matches.
         if let Some(name) = rec.chosen_title() {
             spec.args.extend(["--name".into(), name.into()]);
         }
-        let spec = self.with_helpers(spec, &meta.session_id, &rec.id, meta.chrome);
-        self.start_session(rec, spec, false);
+        let spec = self.with_helpers(spec, &meta.session_id, &rec.id, meta.chrome, cx);
+        self.start(rec, spec, false, window, cx);
     }
 
     /// Where a resumed session starts: its folder, or its project's main checkout when the folder is gone (Claude Code's
     /// exit prompt removes a worktree). Claude Code then tells the user in the session that the worktree is gone.
-    fn resume_cwd(&mut self, rec: &SessionRecord) -> PathBuf {
+    fn resume_cwd(&mut self, rec: &SessionRecord, cx: &mut Context<Self>) -> PathBuf {
         if rec.cwd.is_dir() {
             return rec.cwd.clone();
         }
@@ -219,7 +223,7 @@ impl Workspace {
         match fallback {
             Some(main) => {
                 let short = crate::panels::widgets::short_path;
-                self.toast(format!("{} is gone, so the session starts in {}.", short(&rec.cwd), short(&main)), false);
+                self.toast(format!("{} is gone, so the session starts in {}.", short(&rec.cwd), short(&main)), false, cx);
                 // The record follows, so the shell, the files and the next resume start there too.
                 if let Some(r) = self.store.session_mut(&rec.id) {
                     r.cwd = main.clone();
@@ -231,23 +235,25 @@ impl Workspace {
     }
 
     /// End the session's process and resume the same conversation. The shell and cards belong to the session, so they stay.
-    pub(super) fn restart_session(&mut self, id: &str) {
+    pub(super) fn restart_session(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         let was_shown = self.active_id().is_some_and(|a| a == id);
         let shell = self.shells.remove(id);
-        self.relaunch(id);
+        self.relaunch(id, window, cx);
         if let Some(shell) = shell {
             self.shells.insert(id.into(), shell);
         }
         if was_shown {
-            self.show_session(id);
+            self.show_session(id, window, cx);
         }
     }
 
-    pub(super) fn start_session(
+    pub(super) fn start(
         &mut self,
         mut record: SessionRecord,
         spec: SpawnSpec,
         is_new: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
     ) {
         let (terminal, rx) = TerminalView::spawn(&spec);
         let id = record.id.clone();
@@ -255,7 +261,7 @@ impl Workspace {
         record.exit_code = None;
         record.last_active = now();
         // The pane's grid: from the view this one replaces, or the one shown there now.
-        let layout = self.live_view(&id).or_else(|| self.active.as_ref().and_then(|a| self.live_view(a))).and_then(|v| v.layout());
+        let layout = self.live_view(&id).or_else(|| self.active.as_ref().and_then(|a| self.live_view(a))).and_then(|v| v.read(cx).layout());
         // Drop the previous terminal view for this record: an exited one, or a running one whose process this ends.
         self.live.retain(|l| l.id != id);
         self.purge_dead_shells();
@@ -266,11 +272,25 @@ impl Workspace {
             r.exit_code = None;
             r.last_active = now();
         }
-        let mut view = TerminalView::new(terminal, rx, id.clone());
-        view.loading = loading;
-        if let Some(layout) = layout {
-            view.take_layout(layout);
-        }
+        let view = cx.new(|cx| {
+            let mut v = TerminalView::new(terminal, rx, cx);
+            v.loading = loading;
+            if let Some(layout) = layout {
+                v.take_layout(layout);
+            }
+            v
+        });
+        let sub_id = id.clone();
+        let sub = cx.subscribe_in(
+            &view,
+            window,
+            move |ws: &mut Workspace, _view, ev: &TerminalEvent, window, cx| match ev {
+                TerminalEvent::Exited(code) => ws.on_exit(&sub_id, *code, window, cx),
+                TerminalEvent::Bell => {}
+                TerminalEvent::OpenPath(path, line) => ws.open_from_terminal(&sub_id, path, *line, window, cx),
+                TerminalEvent::SendText(text) => ws.send_to_claude(&sub_id, text, window, cx),
+            },
+        );
         let claude_name = spec.args.iter().position(|a| a == "--name").and_then(|i| spec.args.get(i + 1)).cloned();
         // The mod reads the launch name first and leaves it alone; a stale file would otherwise rename the session.
         if let Some(cid) = self.store.session(&id).and_then(|r| r.claude_id()) {
@@ -281,31 +301,35 @@ impl Workspace {
         if let Some(meta) = self.store.session_mut(&id).and_then(|r| r.claude.as_mut()) {
             meta.account = Some(account.clone());
         }
+        let _focus = self.watch_terminal_focus(&id, &view, window, cx);
         self.live.push(Live {
             id: id.clone(),
             view,
+            _sub: sub,
+            _focus,
             claude_name,
             account,
         });
-        self.activate(&id);
+        self.activate(&id, cx);
         self.remember(&id);
         self.selected = Some(id.clone());
         self.main = Main::Terminals;
-        self.sync_github();
+        self.sync_github(window, cx);
         self.persist_layout();
-        self.focus_active();
+        self.focus_active(window, cx);
+        cx.notify();
     }
 
     /// Make `id` the session shown.
-    pub(super) fn activate(&mut self, id: &Id) {
+    pub(super) fn activate(&mut self, id: &Id, cx: &App) {
         self.active = Some(id.clone());
-        self.prune_live();
+        self.prune_live(cx);
     }
 
     /// Exited terminals are only kept while shown; a shell panel goes with its session, except the welcome screen's.
-    fn prune_live(&mut self) {
+    fn prune_live(&mut self, cx: &App) {
         let active = &self.active;
-        self.live.retain(|l| active.as_ref() == Some(&l.id) || l.view.is_running());
+        self.live.retain(|l| active.as_ref() == Some(&l.id) || l.view.read(cx).is_running());
         let live = &self.live;
         self.shells.retain(|id, _| id == HOME_SHELL || live.iter().any(|l| &l.id == id));
     }
@@ -336,14 +360,6 @@ impl Workspace {
         }
     }
 
-    /// Bring a Claude session back after a restart: resume its conversation, or start it over when it has none yet.
-    pub(super) fn bring_back(&mut self, id: &str) {
-        match self.store.session(id).and_then(|s| s.claude.as_ref()) {
-            Some(meta) if !has_conversation(meta) => self.relaunch_empty(id),
-            _ => self.resume(id),
-        }
-    }
-
     pub(super) fn remember(&mut self, id: &Id) {
         self.recent.retain(|r| r != id);
         self.recent.push(id.clone());
@@ -353,80 +369,91 @@ impl Workspace {
     /// "Session ended" bar. A non-zero exit is a toast, because that output goes away with the view; a clean exit
     /// says nothing. This does not offer to remove a worktree: `/exit` already asked inside Claude Code, and the X
     /// (`close_live`) is the path that kills the process before that prompt.
-    pub(super) fn on_exit(&mut self, id: &str, code: Option<i32>) {
-        let start_error = self.live_view(id).and_then(|v| v.start_error());
+    fn on_exit(&mut self, id: &str, code: Option<i32>, window: &mut Window, cx: &mut Context<Self>) {
+        let start_error = self.live_view(id).and_then(|v| v.read(cx).start_error());
         let title = self.store.session(id).map(|r| r.display_title().to_string()).unwrap_or_else(|| "Session".into());
         if let Some(rec) = self.store.session_mut(id) {
             rec.exit_code = Some(code.unwrap_or(0));
         }
-        self.end_live(id);
+        self.end_live(id, window, cx);
         if let Some(err) = start_error {
-            self.toast(format!("Could not start {title}: {err}"), true);
+            self.toast(format!("Could not start {title}: {err}"), true, cx);
         } else if let Some(code) = code.filter(|c| *c != 0) {
-            self.toast(format!("{title} ended (exit code {code})"), true);
+            self.toast(format!("{title} ended (exit code {code})"), true, cx);
         }
     }
 
     /// Clicking a session: running -> show its terminal; past -> open it right away (no intermediate page).
-    pub fn show_session(&mut self, id: &str) {
+    pub fn show_session(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         let id = id.to_string();
         self.selected = Some(id.clone());
         if self.live_view(&id).is_some() {
-            self.activate(&id);
+            self.activate(&id, cx);
             self.remember(&id);
             self.main = Main::Terminals;
-            self.sync_github();
-            self.focus_active();
+            self.sync_github(window, cx);
+            self.focus_active(window, cx);
             self.persist_layout();
+            cx.notify();
         } else {
-            self.resume(&id);
+            self.resume(&id, window, cx);
         }
     }
 
     /// Give the keyboard to the shown session's terminal, or on the home page to its shell when one is open.
-    pub fn focus_active(&mut self) {
-        match (self.main, self.active.clone()) {
-            (Main::Terminals, Some(id)) if self.live_view(&id).is_some() => self.focus_terminal(&id),
-            (Main::Home, _) if self.shells.get(HOME_SHELL).is_some_and(|p| p.open) => self.focus_terminal(&shell_key(HOME_SHELL)),
-            _ => {
-                self.keys_to = None;
-                self.blur = true;
-            }
+    pub fn focus_active(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if let (Main::Terminals, Some(id)) = (&self.main, self.active.as_ref())
+            && let Some(view) = self.live_view(id)
+        {
+            window.focus(&view.read(cx).focus_handle(cx), cx);
+            return;
         }
+        if let (Main::Home, Some(shell)) = (&self.main, self.shells.get(HOME_SHELL).filter(|p| p.open)) {
+            window.focus(&shell.view.read(cx).focus_handle(cx), cx);
+            return;
+        }
+        window.focus(&self.root_focus, cx);
     }
 
-    /// End a session. One that ran in a Claude Code worktree no other session uses then gets the offer to remove it,
-    /// since Claude Code's own prompt only appears when a session exits with `/exit`.
-    pub(super) fn close_live(&mut self, id: &str) {
-        let was_in = self.store.session(id).map(|s| (s.cwd.clone(), s.project_id.clone()));
-        self.end_live(id);
-        self.closed.retain(|c| c != id);
-        self.closed.push(id.to_string());
-        if let Some((cwd, project)) = was_in {
-            self.offer_worktree_removal(&cwd, project.as_deref());
+    /// Bring a Claude session back after a restart: resume its conversation, or start it over when it has none yet.
+    pub(super) fn bring_back(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        match self.store.session(id).and_then(|s| s.claude.as_ref()) {
+            Some(meta) if !has_conversation(meta) => self.relaunch_empty(id, window, cx),
+            _ => self.resume(id, window, cx),
         }
     }
 
     /// Resume the last closed session that can come back: one still in the history, with a Claude conversation, and
     /// not running again. Whether there was one.
-    pub fn reopen_closed(&mut self) -> bool {
+    pub fn reopen_closed(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         while let Some(id) = self.closed.pop() {
-            if !self.is_running(&id) && self.store.session(&id).is_some_and(|r| r.claude.is_some()) {
-                self.resume(&id);
+            if !self.is_running(&id, cx) && self.store.session(&id).is_some_and(|r| r.claude.is_some()) {
+                self.resume(&id, window, cx);
                 return true;
             }
         }
         false
     }
 
-    pub(super) fn end_live(&mut self, id: &str) {
+    /// End a session. One that ran in a Claude Code worktree no other session uses then gets the offer to remove it,
+    /// since Claude Code's own prompt only appears when a session exits with `/exit`.
+    pub(super) fn close_live(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let was_in = self.store.session(id).map(|s| (s.cwd.clone(), s.project_id.clone()));
+        self.closed.retain(|c| c != id);
+        self.closed.push(id.to_string());
+        self.end_live(id, window, cx);
+        if let Some((cwd, project)) = was_in {
+            self.offer_worktree_removal(&cwd, project.as_deref(), cx);
+        }
+    }
+
+    pub(super) fn end_live(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         if self.logins.remove(id) {
-            self.refresh_accounts();
+            self.refresh_accounts(cx);
         }
         let was_active = self.active_id().is_some_and(|a| a == id);
         self.live.retain(|l| l.id != id); // dropping the view drops the Terminal, which closes the PTY
         self.shells.remove(id);
-        // Its language servers and folder watcher stop with the pane.
         self.panes.remove(id);
         self.recent.retain(|r| r != id);
         // Closing the shown session goes back to the one shown before it; otherwise stay where we are.
@@ -447,23 +474,49 @@ impl Workspace {
             self.main = Main::Home;
         }
         self.store.save_if_dirty();
-        self.focus_active();
+        self.focus_active(window, cx);
+        cx.notify();
     }
 
     /// The running sessions, in the sidebar's order.
-    pub fn running_ids(&self) -> Vec<Id> {
-        self.live.iter().filter(|l| l.view.is_running()).map(|l| l.id.clone()).collect()
+    pub fn running_ids(&self, cx: &App) -> Vec<Id> {
+        self.live.iter().filter(|l| l.view.read(cx).is_running()).map(|l| l.id.clone()).collect()
     }
 
     /// Show running session number `n` (from 1), as the sidebar numbers them while Ctrl is held.
-    pub fn show_numbered(&mut self, n: usize) {
-        if let Some(id) = numbered(&self.running_ids(), n).cloned() {
-            self.show_session(&id);
+    pub fn show_numbered(&mut self, n: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(id) = numbered(&self.running_ids(cx), n).cloned() {
+            self.show_session(&id, window, cx);
         }
     }
 
-    pub fn cycle(&mut self, delta: isize) {
-        let running = self.running_ids();
+    /// Ctrl (Cmd) alone, held for a moment, shows the sessions' numbers; anything else hides them. Quick chords such as
+    /// Ctrl+C never show them, since the key is let go before the wait ends.
+    pub fn modifiers_changed(&mut self, modifiers: &gpui::Modifiers, cx: &mut Context<Self>) {
+        self.shortcuts_wait += 1;
+        if self.shortcuts_shown {
+            self.shortcuts_shown = false;
+            cx.notify();
+        }
+        let alone = modifiers.secondary() && !modifiers.shift && !modifiers.alt && !(modifiers.control && modifiers.platform);
+        if !alone {
+            return;
+        }
+        let wait = self.shortcuts_wait;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(SHORTCUT_HOLD).await;
+            let _ = this.update(cx, |ws, cx| {
+                if ws.shortcuts_wait == wait {
+                    ws.shortcuts_shown = true;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    pub fn cycle(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
+        let running = self.running_ids(cx);
         if running.is_empty() {
             return;
         }
@@ -472,7 +525,7 @@ impl Workspace {
             .and_then(|a| running.iter().position(|r| r == a))
             .unwrap_or(0) as isize;
         let next = (cur + delta).rem_euclid(running.len() as isize) as usize;
-        self.show_session(&running[next].clone());
+        self.show_session(&running[next].clone(), window, cx);
     }
 
     /// Prompt-cache timer for the selected session: `(remaining fraction, remaining secs, ttl secs)`.

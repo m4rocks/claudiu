@@ -1,8 +1,8 @@
 //! Colors. Black-first, with Claude's orange as the single accent.
 
 use alacritty_terminal::term::color::Colors;
-use alacritty_terminal::vte::ansi::{Color as AnsiColor, NamedColor, Rgb};
-use rune::Color;
+use alacritty_terminal::vte::ansi::{Color, NamedColor, Rgb};
+use gpui::{Hsla, rgb};
 
 /// The window background the panels float on, a shade lighter than the panels themselves.
 pub const APP_BG: u32 = 0x131316;
@@ -19,6 +19,7 @@ pub const PANEL_RADIUS: f32 = 8.0;
 pub const PANEL_GAP: f32 = 6.0;
 /// Height of the window's top bar. macOS traffic lights are centered in it (see `main.rs`).
 pub const TOPBAR_HEIGHT: f32 = 34.0;
+pub const ROW_HOVER: u32 = 0x181818;
 pub const ROW_ACTIVE: u32 = 0x211f1e;
 pub const TEXT: u32 = 0xe4e4e4;
 pub const TEXT_DIM: u32 = 0x8a8a8a;
@@ -32,8 +33,6 @@ pub const SELECTION: u32 = 0x3d4a5c;
 pub const CODEX: u32 = 0x61afef;
 /// Antigravity's usage bars, apart from Claude's and Codex's. The terminal palette's magenta.
 pub const ANTIGRAVITY: u32 = 0xc678dd;
-/// Search matches in the editor, faint, and the current one stronger.
-pub const FOUND: u32 = 0xe5c07b;
 
 const FG: Rgb = Rgb { r: 0xe4, g: 0xe4, b: 0xe4 };
 const BG: Rgb = Rgb { r: (TERMINAL_BG >> 16) as u8, g: (TERMINAL_BG >> 8) as u8, b: TERMINAL_BG as u8 };
@@ -43,15 +42,12 @@ const ANSI: [u32; 16] = [
     0x5c6370, 0xff7b86, 0xa9d98a, 0xf0d08c, 0x74bdff, 0xd68aee, 0x67c7d4, 0xffffff,
 ];
 
-/// An sRGB colour written as `0xrrggbb`, in Rune's linear colour.
-pub fn rgb(hex: u32) -> Color {
-    let channel = |shift: u32| rune::color::srgb_decode(((hex >> shift) & 0xff) as f32 / 255.0);
-    Color { r: channel(16), g: channel(8), b: channel(0), a: 1.0 }
+pub fn hsla(hex: u32) -> Hsla {
+    rgb(hex).into()
 }
 
-
-pub fn term_color(c: Rgb) -> Color {
-    rgb(((c.r as u32) << 16) | ((c.g as u32) << 8) | c.b as u32)
+pub fn rgb_to_hsla(c: Rgb) -> Hsla {
+    hsla(((c.r as u32) << 16) | ((c.g as u32) << 8) | c.b as u32)
 }
 
 fn ansi(i: usize) -> Rgb {
@@ -95,19 +91,22 @@ pub fn palette(index: usize, colors: &Colors) -> Rgb {
     }
 }
 
-pub fn resolve(color: AnsiColor, colors: &Colors) -> Rgb {
+pub fn resolve(color: Color, colors: &Colors) -> Rgb {
     match color {
-        AnsiColor::Spec(c) => c,
-        AnsiColor::Indexed(i) => palette(i as usize, colors),
-        AnsiColor::Named(n) => palette(n as usize, colors),
+        Color::Spec(c) => c,
+        Color::Indexed(i) => palette(i as usize, colors),
+        Color::Named(n) => palette(n as usize, colors),
     }
 }
 
-pub fn is_default_bg(color: &AnsiColor) -> bool {
-    matches!(color, AnsiColor::Named(NamedColor::Background))
+pub fn is_default_bg(color: &Color) -> bool {
+    matches!(color, Color::Named(NamedColor::Background))
 }
 
 pub fn dimmed(c: Rgb) -> Rgb {
     dim(c)
 }
 
+pub fn default_bg() -> Rgb {
+    BG
+}

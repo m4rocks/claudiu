@@ -29,6 +29,9 @@ fn retry_wait(failures: u32) -> Duration {
 /// One answer: the session, which item (its repository, whether it is a pull request, its number), and what GitHub said.
 type Answer = (Id, Option<String>, bool, u32, String, State);
 
+/// A session, its folder, and the items attached to it (repository, `true` for a pull request, number) to ask GitHub about.
+type Ask = (Id, PathBuf, Vec<(Option<String>, bool, u32)>);
+
 impl Sync {
     fn due(&self, some_unanswered: bool) -> bool {
         let wait = if some_unanswered { retry_wait(self.failures) } else { REFRESH_EVERY };
@@ -36,11 +39,8 @@ impl Sync {
     }
 }
 
-/// A session, its folder, and the items attached to it (repository, `true` for a pull request, number) to ask GitHub about.
-type Ask = (Id, PathBuf, Vec<(Option<String>, bool, u32)>);
-
 impl Workspace {
-    pub(super) fn sync_attached(&mut self) {
+    pub(super) fn sync_attached(&mut self, cx: &mut Context<Self>) {
         let asks: Vec<Ask> = self
             .store
             .data
@@ -59,9 +59,9 @@ impl Workspace {
         }
         self.attached_sync.running = true;
         self.attached_sync.last_try = Some(Instant::now());
-        self.rt.spawn_quietly(
-            move || { ask_github(asks) },
-            move |ws: &mut Workspace, answers| {
+        cx.spawn(async move |this, cx| {
+            let answers = cx.background_executor().spawn(async move { ask_github(asks) }).await;
+            let _ = this.update(cx, |ws, cx| {
                 ws.attached_sync.running = false;
                 let changed = answers.into_iter().fold(false, |c, (id, repo, pull, number, title, state)| {
                     ws.edit_attached(&id, |list| links::set_status(list, repo.as_deref(), pull, number, &title, state)) | c
@@ -69,10 +69,11 @@ impl Workspace {
                 ws.attached_sync.failures = if ws.unanswered_items() { ws.attached_sync.failures + 1 } else { 0 };
                 if changed {
                     ws.store.mark_dirty();
-                    ws.rt.dirty = true;
+                    cx.notify();
                 }
-            },
-        );
+            });
+        })
+        .detach();
     }
 
     /// Whether some attached item of a session with a folder has no answer from GitHub yet.

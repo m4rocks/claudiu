@@ -1,517 +1,575 @@
-//! Editor mode's panel beside the terminal: the shown session's files on the left, the open files' tabs over the
-//! editor on the right (state in `app::editor_mode`).
+//! Editor mode's right-hand panel: the shown session's files beside an editor (state in `app::editor_mode`).
 
-use std::borrow::Cow;
+use gpui::{
+    AnyElement, ClickEvent, Context, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, ParentElement, SharedString, StatefulInteractiveElement, Styled,
+    div, prelude::FluentBuilder, px,
+};
+use gpui_kit::assets::IconName;
+use gpui_kit::component::input::{Editor, EditorState, Input, RopeExt};
+use crate::git::lines::{Change as LineChange, Kind};
+use gpui_kit::component::list::ListItem;
+use gpui_kit::component::tree::tree;
 
-use rune::tok::motion;
-use rune::{Color, Cursor, El, GrowthSpec, PointerButton, ScrollSpec, TextEdit, Transition, Tx, col, el, row, text, text_input};
-
-use crate::app::editor_mode::{TreeRow, relative, tree_key};
-use crate::app::find::FindBar;
-use crate::app::picker::{Picker, PickerKind};
-use crate::app::{Conflict, EditorPane, Workspace};
+use crate::app::picker::{Picker, PickerKind, relative};
+use crate::app::editing::Conflict;
 use crate::files::Change;
-use crate::panels::icons;
-use crate::panels::theme::{self, rgb};
-use crate::panels::widgets::{button, button_disabled, font, icon, icon_button, label};
+use crate::app::{Act, Ask, AskExplain, AskFix, AskFixProblem, AskTests, EditorCommand, EditorPane, MenuItem, GoBack, GoForward, GoToLine, QuickOpen, SaveFile, Tab, Workspace, CloseTab};
+use crate::panels::glide::Follow;
+use crate::panels::theme::{self, hsla};
+use crate::panels::widgets::{button, icon};
 use crate::platform::path_key;
-use crate::store::Id;
 
 const TREE_W: f32 = 240.0;
-const TREE_ROW_H: f32 = 24.0;
-const TABS_H: f32 = 32.0;
 
 impl Workspace {
-    /// The panel, while editor mode shows a session.
-    pub fn render_editor_pane(&self) -> Option<El> {
-        let (id, pane) = self.shown_pane()?;
-        let tree = self.render_tree(id, pane);
-        let body = match pane.shown() {
-            Some(tab) if tab.note.is_some() => centered(tab.note.clone().unwrap_or_default()),
-            Some(tab) => {
-                let focused = self.keys_to.as_deref() == Some(tab.editor.key.as_str()) && self.modal.is_none() && !self.search.focused && pane.picker.is_none();
-                let mut body = col().key(format!("editor-{}", tab.editor.key)).w_full().grow(1.0).shrink().min_h(0.0).transition(Transition::opacity());
-                if let Some(c) = tab.conflict {
-                    body = body.child(conflict_bar(id, &tab.path, c));
-                }
-                if tab.find.open {
-                    body = body.child(find_bar(&tab.find));
-                }
-                body = body.child(el().w_full().grow(1.0).shrink().min_h(0.0).child(tab.editor.render(focused, crate::panels::scale::screen())));
-                match self.server_status(id) {
-                    Some(status) => body.child(status_line(status)),
-                    None => body,
-                }
+    pub fn render_editor_pane(&mut self, window: &mut gpui::Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let ws = cx.entity().downgrade();
+        let menu_ws = ws.clone();
+        let server = self.active_id().cloned().and_then(|id| self.server_status(&id));
+        let (id, pane) = self.shown_pane(cx)?;
+        let tabs = render_tabs(&id, pane, window, cx);
+        let changed = pane.changed.clone();
+        let empty_folders = pane.empty_folders.clone();
+        let tree_id = id.clone();
+        let files = tree(&pane.tree, move |_ix, entry, _selected, _w, _cx| {
+            let path = std::path::PathBuf::from(entry.item().id.as_ref());
+            let folder = entry.is_folder() || empty_folders.contains(entry.item().id.as_ref());
+            let change = changed.get(&path_key(&path)).copied();
+            let color = match change {
+                Some(Change::Modified) => theme::WARN,
+                Some(Change::Added) => theme::OK,
+                None => theme::TEXT,
+            };
+            let chevron = folder.then(|| icon(if entry.is_expanded() { IconName::ChevronDown } else { IconName::ChevronRight }, 12.0));
+            let glyph = match (folder, entry.is_expanded()) {
+                (true, true) => IconName::FolderOpen,
+                (true, false) => IconName::Folder,
+                (false, _) => file_icon(&path),
+            };
+            // Like VS Code: a letter on a changed file, a dot on a folder holding changes.
+            let badge = change.map(|c| match (folder, c) {
+                (true, _) => "●",
+                (false, Change::Modified) => "M",
+                (false, Change::Added) => "A",
+            });
+            let row = div()
+                .flex()
+                .items_center()
+                .gap(px(5.0))
+                .pl(px(8.0 + 12.0 * entry.depth() as f32 + if folder { 0.0 } else { 17.0 }))
+                .pr(px(10.0))
+                .text_size(crate::panels::scale::px(12.5))
+                .text_color(hsla(color))
+                .children(chevron)
+                .child(icon(glyph, 13.0).text_color(hsla(color)))
+                .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(entry.item().label.clone()))
+                .children(badge.map(|b| div().flex_none().text_size(crate::panels::scale::px(if folder { 8.0 } else { 11.0 })).child(b)));
+            let (menu_ws, menu_id, menu_path) = (ws.clone(), tree_id.clone(), path.clone());
+            let item = ListItem::new(entry.item().id.clone()).py(px(2.0)).child(row).on_mouse_down(MouseButton::Right, move |ev, _w, cx| {
+                cx.stop_propagation(); // the tree's own menu is for the session folder
+                let _ = menu_ws.update(cx, |ws, cx| {
+                    let items = ws.file_menu(&menu_id, Some(&menu_path), folder);
+                    ws.open_menu(ev.position, items, cx);
+                });
+            });
+            if folder {
+                return item;
             }
-            None => centered(format!("Pick a file on the left, or press {}.", crate::panels::widgets::shortcut("P"))),
+            let (ws, id) = (ws.clone(), tree_id.clone());
+            item.on_click(move |_, window, cx| {
+                let _ = ws.update(cx, |ws, cx| ws.open_file(&id, path.clone(), None, window, cx));
+            })
+        });
+        let truncated = pane.truncated.then(|| {
+            div()
+                .px(px(10.0))
+                .py(px(6.0))
+                .text_size(crate::panels::scale::px(11.0))
+                .text_color(hsla(theme::TEXT_FAINT))
+                .child("Too many files to list them all here.")
+        });
+        let body: AnyElement = match pane.shown() {
+            Some(Tab { note: Some(note), .. }) => centered(note.clone()),
+            Some(tab) => div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .children(tab.conflict.map(|c| render_conflict(&id, &tab.path, c, cx)))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .relative()
+                        .child(Editor::new(&tab.buffer).appearance(false).h_full().context_menu(move |menu, window, cx| {
+                            // The menu is Claudiu's own: the system's menu keeps the editor's text cursor over it.
+                            let at = window.mouse_position();
+                            let _ = menu_ws.update(cx, |ws, cx| ws.open_menu(at, editor_menu(), cx));
+                            menu
+                        }))
+                        .child(change_marks(tab.buffer.clone(), tab.marks.clone(), tab.follow.clone())),
+                )
+                .children(server.map(|s| {
+                    div()
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .px(px(12.0))
+                        .py(px(3.0))
+                        .border_t_1()
+                        .border_color(hsla(theme::BORDER))
+                        .text_size(crate::panels::scale::px(11.0))
+                        .text_color(hsla(theme::TEXT_FAINT))
+                        .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(s))
+                }))
+                .into_any_element(),
+            None => centered("Pick a file on the left, or press Ctrl+P.".into()),
         };
-        let mut right = col().key("editor-right").grow(1.0).shrink().min_w(0.0).h_full().child(self.render_tabs(id, pane)).child(body);
-        if let Some(p) = &pane.picker {
-            right = right.child(render_picker(p, &pane.root));
-        }
+        let picker = pane.picker.as_ref().map(|p| render_picker(p, &pane.root, cx));
         Some(
-            row()
-                .key("editor-pane")
-                .grow(1.0)
-                .shrink()
-                .min_w(0.0)
+            div()
+                .id("editor-pane")
+                .key_context("EditorPane")
+                .track_focus(&pane.focus)
+                .on_action(cx.listener(|ws, _: &QuickOpen, window, cx| ws.open_picker(PickerKind::Files, window, cx)))
+                .on_action(cx.listener(|ws, _: &SaveFile, _w, cx| ws.save_shown(cx)))
+                .on_action(cx.listener(|ws, _: &GoToLine, window, cx| ws.ask_go_to_line(window, cx)))
+                .on_action(cx.listener(|ws, _: &GoBack, window, cx| ws.go_back(window, cx)))
+                .on_action(cx.listener(|ws, _: &GoForward, window, cx| ws.go_forward(window, cx)))
+                .on_action(cx.listener(|ws, _: &CloseTab, window, cx| ws.close_shown_tab(window, cx)))
+                .on_action(cx.listener(|ws, a: &crate::app::EditLines, window, cx| ws.edit_lines(a.0, window, cx)))
+                .on_action(cx.listener(|ws, _: &AskExplain, window, cx| ws.ask_claude(Ask::Explain, window, cx)))
+                .on_action(cx.listener(|ws, _: &AskFix, window, cx| ws.ask_claude(Ask::Fix, window, cx)))
+                .on_action(cx.listener(|ws, _: &AskTests, window, cx| ws.ask_claude(Ask::Tests, window, cx)))
+                .on_action(cx.listener(|ws, _: &AskFixProblem, window, cx| ws.ask_claude(Ask::Problem, window, cx)))
+                .relative()
+                .flex()
+                .flex_1()
+                .min_w_0()
                 .h_full()
-                .radius(theme::PANEL_RADIUS)
-                .clip_rounded(theme::PANEL_RADIUS)
-                .border(1.0, rgb(theme::PANEL_BORDER))
-                .fill(rgb(theme::PANEL_BG))
-                .transition(Transition::opacity().combined(Transition::offset(16.0, 0.0)))
-                .child(tree)
-                .child(right),
+                .rounded(px(theme::PANEL_RADIUS))
+                .overflow_hidden()
+                .border_1()
+                .border_color(hsla(theme::PANEL_BORDER))
+                .bg(hsla(theme::PANEL_BG))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_none()
+                        .w(px(TREE_W))
+                        .h_full()
+                        .py(px(6.0))
+                        .border_r_1()
+                        .border_color(hsla(theme::BORDER))
+                        // Rows don't take the keyboard themselves; the pane does, so its shortcuts work from here.
+                        .on_mouse_down(MouseButton::Left, cx.listener(|ws, _: &MouseDownEvent, window, cx| {
+                            if let Some(pane) = ws.active_id().and_then(|id| ws.panes.get(id)) {
+                                window.focus(&pane.focus, cx);
+                            }
+                        }))
+                        // Right-click below the rows (or on a row, which opens its own menu instead).
+                        .on_mouse_down(MouseButton::Right, cx.listener(|ws, ev: &MouseDownEvent, _w, cx| {
+                            if let Some(id) = ws.active_id().cloned() {
+                                let items = ws.file_menu(&id, None, true);
+                                ws.open_menu(ev.position, items, cx);
+                            }
+                        }))
+                        .child(pane.tree_scroll.watch(div().id("file-tree").flex_1().min_h_0(), window).child(files))
+                        .children(truncated),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_w_0()
+                        .h_full()
+                        .child(tabs)
+                        .child(div().flex_1().min_h_0().child(body)),
+                )
+                .children(picker)
+                .into_any_element(),
         )
     }
+}
 
-    /// The session's folder as a tree: folders open in place, files open in a tab. Only the rows on screen are built.
-    fn render_tree(&self, id: &Id, pane: &EditorPane) -> El {
-        let shown = pane.shown().map(|t| path_key(&t.path));
-        let (key_id, build_id) = (id.clone(), id.clone());
-        let rows = col()
-            .key(format!("tree-rows-{id}"))
-            .w_full()
-            .growth(GrowthSpec::default())
-            .virtual_rows(
-                pane.rows.len(),
-                TREE_ROW_H,
-                move |ws: &Workspace, i| -> Cow<'_, str> {
-                    match ws.panes.get(&key_id).and_then(|p| p.rows.get(i)) {
-                        Some(r) => Cow::Owned(format!("tree-{}", path_key(&r.path))),
-                        None => Cow::Owned(format!("tree-gone-{i}")),
-                    }
-                },
-                move |ws: &Workspace, i| {
-                    let Some(pane) = ws.panes.get(&build_id) else { return el() };
-                    let Some(r) = pane.rows.get(i) else { return el() };
-                    let shown = pane.shown().is_some_and(|t| t.path == r.path);
-                    tree_row(r, shown)
-                },
-            )
-            .virtual_rows_version((pane.rows_version, shown));
-        let mut tree = col()
-            .key("file-tree")
-            .w(TREE_W)
-            .h_full()
-            .py(6.0)
-            .border_sides([0.0, 1.0, 0.0, 0.0], rgb(theme::BORDER))
-            // Right-click below the rows (a row opens its own menu instead).
-            .on_secondary_press({
-                let id = id.clone();
-                move |ws: &mut Workspace, p: rune::PointerPress, tx: &mut Tx| {
-                    ws.open_file_menu(&id, None, true, p.x, p.y);
-                    ws.after_input(tx);
-                }
-            })
-            .child(col().key(format!("tree-scroll-{id}")).w_full().grow(1.0).shrink().min_h(0.0).scroll(ScrollSpec { stick_bottom: false }).child(rows));
-        if pane.truncated {
-            tree = tree.child(label("Too many files to list them all here.", 11.0, theme::TEXT_FAINT).px(10.0).py(6.0).wrap());
-        }
-        tree
+/// One tab per open file: click to show it, × or a middle click to close it. The full path is in the tab's tooltip.
+/// The editor's right-click menu: the usual editing items, then requests to Claude about the selection (or the clicked
+/// line) and about the language server's problem there. The same for every click: the editor builds it while it is
+/// itself being updated, so it can't be read for a selection or a problem here; each request checks when it runs.
+fn editor_menu() -> Vec<MenuItem> {
+    let entry = |label: &str, command| MenuItem::new(label, Act::Editor(command));
+    let mut items = vec![
+        entry("Go to Definition", EditorCommand::GoToDefinition),
+        entry("Cut", EditorCommand::Cut),
+        entry("Copy", EditorCommand::Copy),
+        entry("Paste", EditorCommand::Paste),
+        entry("Select All", EditorCommand::SelectAll),
+        entry("Ask Claude to explain this", EditorCommand::Ask(Ask::Explain)),
+        entry("Ask Claude to fix this", EditorCommand::Ask(Ask::Fix)),
+        entry("Ask Claude to write tests for this", EditorCommand::Ask(Ask::Tests)),
+        entry("Ask Claude to fix the problem on this line", EditorCommand::Ask(Ask::Problem)),
+    ];
+    for ix in [1, 5] {
+        items[ix].separator_before = true;
     }
+    items
+}
 
-    /// One tab per open file: click to show it, × or a middle click to close it. The path is in the tab's tooltip.
-    fn render_tabs(&self, id: &Id, pane: &EditorPane) -> El {
-        let mut tabs = row().key("tabs-row").h(TABS_H);
-        for (i, tab) in pane.tabs.iter().enumerate() {
-            let shown = pane.active == Some(i);
-            let name = tab.path.file_name().map_or_else(|| tab.path.to_string_lossy(), |n| n.to_string_lossy()).to_string();
-            let key = format!("tab-{}", path_key(&tab.path));
-            let (pressed, close) = (id.clone(), id.clone());
-            // Handlers find their tab by its file: another tab closing moves it.
-            let path = tab.path.clone();
-            let find = move |ws: &Workspace, id: &Id| ws.panes.get(id).and_then(|p| p.tabs.iter().position(|t| t.path == path));
-            let find_close = find.clone();
-            let mut t = row()
-                .key(key.clone())
-                .h_full()
-                .pl(12.0)
-                .pr(6.0)
-                .gap(6.0)
-                .center_y()
-                .border_sides([0.0, 1.0, 0.0, 0.0], rgb(theme::BORDER))
-                .cursor(Cursor::Pointer)
-                .role("tab")
-                .hover_group()
-                .help(relative(&tab.path, &pane.root))
-                .motion(motion::REFLOW)
-                .transition(Transition::opacity().combined(Transition::offset(0.0, 4.0)))
-                .pointer_buttons([PointerButton::Primary, PointerButton::Middle])
-                .on_drag(move |ws: &mut Workspace, d: &mut rune::Drag, tx: &mut Tx| {
-                    if d.phase != rune::Phase::Up {
-                        return;
+/// The text scrolls through the editor's own offset, which the editor clamps itself. The wheel is taken before the editor
+/// sees it and eased here, one frame at a time; the canvas below hosts it because it is painted every frame, over the editor.
+fn glide_text(buffer: &gpui::Entity<EditorState>, follow: &std::cell::RefCell<Follow>, window: &mut gpui::Window, cx: &mut gpui::App) {
+    let here = f32::from(buffer.read(cx).scroll_offset().y);
+    if let Some((y, more)) = follow.borrow_mut().frame(here, window.scale_factor()) {
+        buffer.update(cx, |editor, cx| editor.set_scroll_offset(gpui::point(editor.scroll_offset().x, px(y)), cx));
+        if more {
+            window.request_animation_frame();
+        }
+    }
+}
+
+/// A bar at the editor's left edge, over the line numbers, for each line that differs from the last commit. The editor
+/// has no gutter of its own to draw in, so this paints over it and asks the editor where each line is, which
+/// follows scrolling, soft wrapping and folds. Changes are as of the last save (`Tab::marks`).
+fn change_marks(buffer: gpui::Entity<EditorState>, marks: std::sync::Arc<Vec<LineChange>>, follow: std::rc::Rc<std::cell::RefCell<Follow>>) -> impl IntoElement {
+    const BAR_WIDTH: f32 = 3.0;
+    gpui::canvas(
+        |_, _, _| (),
+        move |viewport, _, window, cx| {
+            glide_text(&buffer, &follow, window, cx);
+            let (wheel_buffer, wheel_follow, view) = (buffer.clone(), follow.clone(), window.current_view());
+            window.on_mouse_event(move |ev: &gpui::ScrollWheelEvent, phase, window, cx| {
+                if phase != gpui::DispatchPhase::Capture || !viewport.contains(&ev.position) || ev.modifiers.modified() {
+                    return;
+                }
+                if ev.delta.precise() {
+                    wheel_follow.borrow_mut().cancel();
+                    return;
+                }
+                let here = f32::from(wheel_buffer.read(cx).scroll_offset().y);
+                let by = f32::from(ev.delta.pixel_delta(window.line_height()).y) * crate::panels::glide::NOTCH;
+                wheel_follow.borrow_mut().wheel(here, by);
+                cx.stop_propagation();
+                // Only this view: a refresh would redraw every cached one too.
+                cx.notify(view);
+            });
+            let editor = buffer.read(cx);
+            let (Some(area), Some(visible)) = (editor.text_bounds(), editor.visible_row_range()) else { return };
+            let text = editor.text();
+            let lines = text.lines_len();
+            // Clip to what is on screen: the editor's text area is the whole scrolled content, which moves away from the view.
+            window.with_content_mask(Some(gpui::ContentMask { bounds: viewport }), |window| {
+                for mark in marks.iter() {
+                    let color = match mark.kind {
+                        Kind::Added => hsla(theme::OK),
+                        Kind::Modified => hsla(0x61afef),
+                        Kind::Deleted => hsla(theme::DANGER),
+                    };
+                    if mark.kind == Kind::Deleted {
+                        // A removal has no line of its own: a short bar on the border between the two lines it was between.
+                        let at = mark.lines.start.min(lines.saturating_sub(1));
+                        if at < visible.start || at > visible.end {
+                            continue;
+                        }
+                        if let Some(top) = editor.range_to_bounds(&(text.line_start_offset(at)..text.line_start_offset(at))) {
+                            window.paint_quad(gpui::fill(gpui::Bounds::new(gpui::point(area.origin.x, top.origin.y - px(1.0)), gpui::size(px(BAR_WIDTH * 2.0), px(2.0))), color));
+                        }
+                        continue;
                     }
-                    if let Some(ix) = find(ws, &pressed) {
-                        if tx.button() == PointerButton::Middle {
-                            ws.request_close_tab(&pressed, ix);
-                        } else {
-                            ws.show_tab(&pressed, ix);
+                    // Lines above the screen would be placed at its top edge, and none lies below the rows on screen.
+                    for line in (mark.lines.start.max(visible.start)..mark.lines.end).take_while(|&l| l <= visible.end && l < lines) {
+                        let (start, end) = (text.line_start_offset(line), text.line_end_offset(line));
+                        if let Some(bounds) = editor.range_to_bounds(&(start..end)) {
+                            window.paint_quad(gpui::fill(gpui::Bounds::new(gpui::point(area.origin.x, bounds.origin.y), gpui::size(px(BAR_WIDTH), bounds.size.height)), color));
                         }
                     }
-                    ws.after_input(tx);
-                })
-                .child(label(name, 12.0, if shown { theme::TEXT } else { theme::TEXT_DIM }));
-            if shown {
-                t = t.fill(rgb(theme::ROW_ACTIVE));
-            } else {
-                t = t.hover(Color::WHITE.alpha(0.03));
-            }
-            if tab.dirty {
-                t = t.child(el().key(format!("{key}-dirty")).size(6.0, 6.0).radius(3.0).fill(rgb(theme::ACCENT)).transition(Transition::scale(0.4).combined(Transition::opacity())));
-            }
-            let x = icon_button(&icons::X).key(format!("{key}-close")).help("Close").on_press_tx(move |ws: &mut Workspace, tx: &mut Tx| {
-                if let Some(ix) = find_close(ws, &close) {
-                    ws.request_close_tab(&close, ix);
                 }
-                ws.after_input(tx);
             });
-            // The shown tab always shows its ×; the others only under the pointer.
-            t = t.child(if shown { x } else { x.group_opacity(0.0, 1.0) });
-            tabs = tabs.child(t);
-        }
-        row()
-            .key("tabs")
-            .w_full()
-            .h(TABS_H)
-            .border_sides([0.0, 0.0, 1.0, 0.0], rgb(theme::BORDER))
-            .child(col().w_full().h(TABS_H).scroll_x().child(tabs))
-    }
+        },
+    )
+    .absolute()
+    .top_0()
+    .left_0()
+    .size_full()
 }
 
-/// A row of the file tree: indented by its depth, a chevron on a folder, a letter on a changed file and a dot on a
-/// folder holding changes (as VS Code shows them).
-fn tree_row(r: &TreeRow, shown: bool) -> El {
-    let color = match r.change {
-        Some(Change::Modified) => theme::WARN,
-        Some(Change::Added) => theme::OK,
-        None => theme::TEXT,
-    };
-    let glyph = match (r.folder, r.open) {
-        (true, true) => &icons::FOLDER_OPEN,
-        (true, false) => &icons::FOLDER,
-        (false, _) => file_icon(&r.path),
-    };
-    let indent = 8.0 + 12.0 * r.depth as f32 + if r.folder { 0.0 } else { 17.0 };
-    let mut out = row()
-        .key(format!("tree-{}", path_key(&r.path)))
-        .w_full()
-        .h(TREE_ROW_H)
-        .pl(indent)
-        .pr(10.0)
-        .gap(5.0)
-        .center_y()
-        .cursor(Cursor::Pointer)
-        .role(if r.folder { "treeitem" } else { "button" })
-        .hover(Color::WHITE.alpha(0.04));
-    if shown {
-        out = out.fill(rgb(theme::ROW_ACTIVE));
-    }
-    if r.folder {
-        out = out.child(icon(&icons::CHEVRON_RIGHT, 12.0, theme::TEXT_FAINT).rotate(if r.open { 90.0 } else { 0.0 }).motion(motion::SNAP));
-    }
-    out = out
-        .child(icon(glyph, 13.0, color))
-        .child(text(r.name.clone()).font(font(crate::panels::scale::px(12.5), 400.0)).color(rgb(color)).truncate().grow(1.0).shrink());
-    let badge = r.change.map(|c| match (r.folder, c) {
-        (true, _) => "●",
-        (false, Change::Modified) => "M",
-        (false, Change::Added) => "A",
+fn render_tabs(id: &crate::store::Id, pane: &EditorPane, window: &mut gpui::Window, cx: &mut Context<Workspace>) -> AnyElement {
+    let tabs = pane.tabs.iter().enumerate().map(|(i, tab)| {
+        let shown = pane.active == Some(i);
+        let name = tab.path.file_name().map_or_else(|| tab.path.to_string_lossy(), |n| n.to_string_lossy()).to_string();
+        let rel = relative(&tab.path, &pane.root);
+        let (show, close, middle) = (id.clone(), id.clone(), id.clone());
+        div()
+            .id(SharedString::from(format!("tab-{i}")))
+            .group(SharedString::from(format!("tab-{i}")))
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(px(6.0))
+            .h_full()
+            .pl(px(12.0))
+            .pr(px(6.0))
+            .border_r_1()
+            .border_color(hsla(theme::BORDER))
+            .text_size(crate::panels::scale::px(12.0))
+            .text_color(hsla(if shown { theme::TEXT } else { theme::TEXT_DIM }))
+            .when(shown, |d| d.bg(hsla(theme::ROW_ACTIVE)))
+            .cursor_pointer()
+            .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(rel.clone()).build(window, cx))
+            .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.show_tab(&show, i, window, cx)))
+            .on_mouse_up(MouseButton::Middle, cx.listener(move |ws, _: &gpui::MouseUpEvent, window, cx| ws.request_close_tab(&middle, i, window, cx)))
+            .child(name)
+            .when(tab.dirty, |d| d.child(div().text_color(hsla(theme::ACCENT)).child("●")))
+            .child(
+                div()
+                    .id(SharedString::from(format!("tab-close-{i}")))
+                    .rounded(px(3.0))
+                    .hover(|s| s.bg(hsla(0x2a2a2a)))
+                    .invisible()
+                    .when(shown, |d| d.visible())
+                    .group_hover(SharedString::from(format!("tab-{i}")), |s| s.visible())
+                    .child(icon(IconName::X, 12.0))
+                    .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
+                        cx.stop_propagation();
+                        ws.request_close_tab(&close, i, window, cx);
+                    })),
+            )
     });
-    if let Some(b) = badge {
-        out = out.child(text(b).font(font(crate::panels::scale::px(if r.folder { 8.0 } else { 11.0 }), 500.0)).color(rgb(color)));
-    }
-    let (path, folder) = (r.path.clone(), r.folder);
-    let menu_path = path.clone();
-    out.on_secondary_press(move |ws: &mut Workspace, p: rune::PointerPress, tx: &mut Tx| {
-        if let Some(id) = ws.active_id().cloned() {
-            ws.open_file_menu(&id, Some(&menu_path), folder, p.x, p.y);
-        }
-        ws.after_input(tx);
-    })
-    .on_press_tx(move |ws: &mut Workspace, tx: &mut Tx| {
-        if folder {
-            ws.toggle_folder(&path);
-        } else if let Some(id) = ws.active_id().cloned() {
-            ws.focus_terminal(&tree_key(&id));
-            ws.open_file(&id, path.clone(), None);
-        }
-        ws.after_input(tx);
-    })
+    pane.tabs_scroll
+        .wire(div().id("tabs"), window)
+        .flex_none()
+        .h(px(30.0))
+        .flex()
+        .border_b_1()
+        .border_color(hsla(theme::BORDER))
+        .children(tabs)
+        .into_any_element()
 }
 
-/// Over the editor when the file and the text disagree: reload from disk, or keep the text and save over it later.
-fn conflict_bar(id: &Id, path: &std::path::Path, conflict: Conflict) -> El {
-    let message = match conflict {
+/// Above the editor when the file and the buffer disagree: reload from disk, or keep the buffer and save over it later.
+fn render_conflict(id: &crate::store::Id, path: &std::path::Path, conflict: Conflict, cx: &mut Context<Workspace>) -> AnyElement {
+    let text = match conflict {
         Conflict::Changed => "This file changed on disk while you had unsaved edits.",
         Conflict::Deleted => "This file was deleted on disk.",
     };
-    let mut buttons = row().gap(6.0);
-    if conflict == Conflict::Changed {
-        let (id, path) = (id.clone(), path.to_path_buf());
-        buttons = buttons.child(button("Reload", false).key("conflict-reload").on_press_tx(move |ws: &mut Workspace, tx: &mut Tx| {
-            ws.reload_tab(&id, path.clone());
-            ws.after_input(tx);
-        }));
-    }
-    let (id, path) = (id.clone(), path.to_path_buf());
-    buttons = buttons.child(button("Keep mine", true).key("conflict-keep").on_press_tx(move |ws: &mut Workspace, tx: &mut Tx| {
-        ws.keep_mine(&id, &path);
-        ws.after_input(tx);
-    }));
-    row()
-        .key("conflict")
-        .w_full()
-        .px(12.0)
-        .py(6.0)
-        .gap(8.0)
-        .center_y()
+    let (reload_id, reload_path, keep_id, keep_path) = (id.clone(), path.to_path_buf(), id.clone(), path.to_path_buf());
+    div()
+        .flex_none()
+        .flex()
+        .items_center()
         .justify_between()
-        .fill(rgb(0x1d1512))
-        .border_sides([0.0, 0.0, 1.0, 0.0], rgb(0x3a2a24))
-        .transition(Transition::opacity().combined(Transition::offset(0.0, -6.0)))
-        .child(label(message, 12.0, theme::WARN).shrink())
-        .child(buttons)
+        .gap(px(8.0))
+        .px(px(12.0))
+        .py(px(6.0))
+        .bg(hsla(0x1d1512))
+        .border_b_1()
+        .border_color(hsla(0x3a2a24))
+        .text_size(crate::panels::scale::px(12.0))
+        .text_color(hsla(theme::WARN))
+        .child(text)
+        .child(
+            div()
+                .flex()
+                .gap(px(6.0))
+                .when(conflict == Conflict::Changed, |d| {
+                    d.child(button("conflict-reload", "Reload", false).on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
+                        ws.reload_tab(&reload_id, reload_path.clone(), window, cx)
+                    })))
+                })
+                .child(button("conflict-keep", "Keep mine", true).on_click(cx.listener(move |ws, _: &ClickEvent, _w, cx| ws.keep_mine(&keep_id, &keep_path, cx)))),
+        )
+        .into_any_element()
 }
 
-/// Rows the picker shows at once; Up and Down scroll the rest into them.
-const PICKER_ROWS: usize = 12;
-
-/// The quick open / find in files box, floating near the top of the editor: a field over a list. Up and Down move,
-/// Enter opens, Escape closes.
-fn render_picker(p: &Picker, root: &std::path::Path) -> El {
-    let placeholder = match p.kind {
-        PickerKind::Files => "Go to file",
-        PickerKind::Text => "Find in files",
-    };
-    let field = text_input(&p.input, font(13.0, 400.0))
-        .key("picker-field")
-        .single_line()
-        .placeholder(placeholder, rgb(theme::TEXT_FAINT))
-        .color(rgb(theme::TEXT))
-        .caret(rgb(theme::ACCENT), rgb(theme::SELECTION))
-        .w_full()
-        .on_edit(|ws: &mut Workspace| match ws.active_id().cloned().and_then(|id| ws.panes.get_mut(&id)).and_then(|p| p.picker.as_mut()) {
-            Some(p) => &mut p.input,
-            // The picker closed between frames; a scratch field takes the edit.
-            None => &mut ws.search,
-        })
-        .on_submit(|ws: &mut Workspace, tx: &mut Tx| {
-            ws.choose_picked();
-            ws.after_input(tx);
-        })
-        .on_input_key(|ws: &mut Workspace, k: &rune::KeyEvent, tx: &mut Tx| {
-            let used = ws.picker_key(&k.key);
-            ws.after_input(tx);
-            used
-        });
-    let mut list = col().key("picker-list").w_full().gap(1.0);
-    let start = p.selected.saturating_sub(PICKER_ROWS - 1);
-    for (i, hit) in p.hits.iter().enumerate().skip(start).take(PICKER_ROWS) {
-        let (title, detail) = match p.kind {
+/// The quick open / find in files box: a field over a list, Up/Down to move, Enter to open, Escape to close.
+fn render_picker(p: &Picker, root: &std::path::Path, cx: &mut Context<Workspace>) -> AnyElement {
+    let start = p.selected.saturating_sub(VISIBLE_ROWS - 1);
+    let rows = p.hits.iter().enumerate().skip(start).take(VISIBLE_ROWS).map(|(i, hit)| {
+        let (label, detail) = match p.kind {
             PickerKind::Files => (hit.text.clone(), None),
             PickerKind::Text => (format!("{}:{}", relative(&hit.path, root), hit.line + 1), Some(hit.text.clone())),
         };
-        let mut r = col()
-            .key(format!("picked-{i}"))
-            .w_full()
-            .px(10.0)
-            .py(4.0)
-            .radius(5.0)
-            .cursor(Cursor::Pointer)
-            .role("option")
-            .hover(Color::WHITE.alpha(0.04))
-            .child(label(title, 12.5, theme::TEXT).truncate());
-        if i == p.selected {
-            r = r.fill(rgb(theme::ROW_ACTIVE));
-        }
-        if let Some(d) = detail {
-            r = r.child(label(d, 11.5, theme::TEXT_DIM).truncate());
-        }
-        list = list.child(r.on_press_tx(move |ws: &mut Workspace, tx: &mut Tx| {
-            ws.pick(i);
-            ws.choose_picked();
-            ws.after_input(tx);
-        }));
-    }
-    let empty = p.hits.is_empty() && !p.input.text.is_empty();
-    if empty {
-        list = list.child(label("Nothing found", 12.0, theme::TEXT_FAINT).px(10.0).py(4.0));
-    }
-    let card = col()
-        .key("picker")
-        .w(560.0)
-        .shrink()
-        .padding(6.0)
-        .gap(4.0)
-        .radius(8.0)
-        .fill(rgb(0x181818))
-        .border(1.0, rgb(0x2c2c2c))
-        .shadow(10.0, 32.0, Color::BLACK.alpha(0.5))
-        .transition(Transition::scale(0.97).combined(Transition::opacity()))
-        .child(row().key("picker-box").h(30.0).w_full().px(8.0).center_y().radius(6.0).fill(rgb(0x111113)).border(1.0, rgb(0x3a3a40)).child(field))
-        .child(list);
-    row().key("picker-slot").pin(Some(0.0), Some(TABS_H + 4.0), Some(0.0), None).justify_center().px(12.0).child(card)
+        div()
+            .id(SharedString::from(format!("picked-{i}")))
+            .flex()
+            .flex_col()
+            .px(px(10.0))
+            .py(px(4.0))
+            .rounded(px(5.0))
+            .cursor_pointer()
+            .when(i == p.selected, |d| d.bg(hsla(theme::ROW_ACTIVE)))
+            .hover(|s| s.bg(hsla(theme::ROW_HOVER)))
+            .child(div().text_size(crate::panels::scale::px(12.5)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(label))
+            .children(detail.map(|d| {
+                div().text_size(crate::panels::scale::px(11.5)).text_color(hsla(theme::TEXT_DIM)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(d)
+            }))
+            .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
+                ws.pick(i, cx);
+                ws.choose_picked(window, cx);
+            }))
+    });
+    let list = div()
+        .flex()
+        .flex_col()
+        .gap(px(4.0))
+        .capture_key_down(cx.listener(|ws, ev: &KeyDownEvent, _w, cx| {
+            match ev.keystroke.key.as_str() {
+                "up" => ws.move_picked(-1, cx),
+                "down" => ws.move_picked(1, cx),
+                _ => return,
+            }
+            cx.stop_propagation();
+        }))
+        .child(Input::new(&p.input))
+        .child(div().flex().flex_col().children(rows));
+    floating("picker", list, |ws, window, cx| ws.close_picker(window, cx), cx)
 }
+
+/// A box floating near the top of the editor pane (quick open, find in files); Escape closes it.
+fn floating(
+    id: &'static str,
+    content: impl IntoElement,
+    close: impl Fn(&mut Workspace, &mut gpui::Window, &mut Context<Workspace>) + 'static,
+    cx: &mut Context<Workspace>,
+) -> AnyElement {
+    div()
+        .absolute()
+        .top(px(36.0))
+        .left_0()
+        .right_0()
+        .flex()
+        .justify_center()
+        .child(
+            div()
+                .id(id)
+                .occlude()
+                .w(px(560.0))
+                .max_w_full()
+                .p(px(6.0))
+                .rounded(px(8.0))
+                .bg(hsla(0x181818))
+                .border_1()
+                .border_color(hsla(0x2c2c2c))
+                .shadow_lg()
+                .capture_key_down(cx.listener(move |ws, ev: &KeyDownEvent, window, cx| {
+                    if ev.keystroke.key == "escape" {
+                        close(ws, window, cx);
+                        cx.stop_propagation();
+                    }
+                }))
+                .child(content),
+        )
+        .into_any_element()
+}
+
+const VISIBLE_ROWS: usize = 12;
 
 /// Source code, prose, or anything else.
-fn file_icon(path: &std::path::Path) -> &'static rune::Icon {
+fn file_icon(path: &std::path::Path) -> IconName {
     match crate::files::language(path) {
-        Some("markdown") => &icons::FILE_TEXT,
-        Some(_) => &icons::FILE_CODE,
-        None if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("txt")) => &icons::FILE_TEXT,
-        None => &icons::FILE,
+        Some("markdown") => IconName::FileText,
+        Some(_) => IconName::FileCode,
+        None if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("txt")) => IconName::FileText,
+        None => IconName::File,
     }
 }
 
-/// The shown file's search bar (`app::find`): the query with its case toggle, the replace toggle, the way through
-/// the matches and their count; under it, while replacing, the replacement and its two buttons.
-fn find_bar(bar: &FindBar) -> El {
-    fn field(edit: &TextEdit, key: &'static str, placeholder: &'static str, pick: fn(&mut FindBar) -> &mut TextEdit) -> El {
-        text_input(edit, font(12.5, 400.0))
-            .key(key)
-            .single_line()
-            .placeholder(placeholder, rgb(theme::TEXT_FAINT))
-            .color(rgb(theme::TEXT))
-            .caret(rgb(theme::ACCENT), rgb(theme::SELECTION))
-            .grow(1.0)
-            .shrink()
-            .min_w(0.0)
-            .on_edit(move |ws: &mut Workspace| {
-                // The bar closed between frames: a scratch field takes the edit.
-                if ws.shown_find().is_none() {
-                    return &mut ws.search;
-                }
-                pick(ws.shown_find().expect("checked above"))
-            })
-            .on_input_key(|ws: &mut Workspace, k: &rune::KeyEvent, tx: &mut Tx| {
-                let used = ws.find_key(k);
-                ws.after_input(tx);
-                used
-            })
+fn centered(text: String) -> AnyElement {
+    div()
+        .size_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .px(px(24.0))
+        .text_size(crate::panels::scale::px(12.5))
+        .text_color(hsla(theme::TEXT_FAINT))
+        .child(text)
+        .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{AppContext, Entity, TestAppContext, Window, point};
+
+    struct Pane {
+        buffer: Entity<EditorState>,
+        follow: std::rc::Rc<std::cell::RefCell<Follow>>,
     }
-    fn boxed(child: El, focused: bool) -> El {
-        row()
-            .h(26.0)
-            .px(8.0)
-            .gap(6.0)
-            .center_y()
-            .grow(1.0)
-            .shrink()
-            .min_w(0.0)
-            .radius(5.0)
-            .fill(rgb(0x121214))
-            .border(1.0, rgb(if focused { theme::ACCENT } else { 0x2c2c30 }))
-            .child(child)
-    }
-    let toggle = |key: &'static str, on: bool, child: El| {
-        el().key(key)
-            .h(20.0)
-            .px(5.0)
-            .center()
-            .radius(4.0)
-            .cursor(Cursor::Pointer)
-            .role("button")
-            .fill(if on { rgb(theme::ACCENT).alpha(0.22) } else { Color::TRANSPARENT })
-            .hover(Color::WHITE.alpha(0.07))
-            .child(child)
-    };
-    let has = !bar.matches.is_empty();
-    let step = |key: &'static str, forward: bool| {
-        let glyph = icon(if forward { &icons::CHEVRON_RIGHT } else { &icons::CHEVRON_LEFT }, 13.0, if has { theme::TEXT_DIM } else { theme::TEXT_FAINT });
-        let b = el().key(key).size(22.0, 22.0).center().radius(4.0).child(glyph);
-        if !has {
-            return b;
+
+    impl gpui::Render for Pane {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .size_full()
+                .relative()
+                .child(Editor::new(&self.buffer).h_full())
+                .child(change_marks(self.buffer.clone(), Default::default(), self.follow.clone()))
         }
-        b.cursor(Cursor::Pointer).role("button").hover(Color::WHITE.alpha(0.07)).on_press_tx(move |ws: &mut Workspace, tx: &mut Tx| {
-            ws.find_step(forward);
-            ws.after_input(tx);
+    }
+
+    /// Where the editor drew its text this frame, as an offset from the top of its view. The editor's own offset is
+    /// clamped after drawing, so it can't show a frame drawn past the end.
+    fn drawn(pane: &Entity<Pane>, cx: &mut TestAppContext) -> f32 {
+        pane.read_with(cx, |pane, app| {
+            let editor = pane.buffer.read(app);
+            f32::from(editor.text_bounds().unwrap().origin.y - editor.input_bounds().origin.y)
         })
-    };
-    let case = toggle("find-case", !bar.ignore_case, label("Aa", 11.5, if bar.ignore_case { theme::TEXT_DIM } else { theme::TEXT }).help("Match case")).on_press_tx(|ws: &mut Workspace, tx: &mut Tx| {
-        if let Some(bar) = ws.shown_find() {
-            bar.ignore_case = !bar.ignore_case;
-        }
-        ws.after_input(tx);
-    });
-    let replace_toggle = toggle("find-replace-toggle", bar.replace_mode, icon(if bar.replace_mode { &icons::CHEVRON_DOWN } else { &icons::CHEVRON_RIGHT }, 12.0, theme::TEXT_DIM))
-        .help("Replace")
-        .on_press_tx(|ws: &mut Workspace, tx: &mut Tx| {
-            if let Some(bar) = ws.shown_find() {
-                bar.replace_mode = !bar.replace_mode;
-                (bar.query.focused, bar.replacement.focused) = (!bar.replace_mode, bar.replace_mode);
-            }
-            ws.after_input(tx);
-        });
-    let close = el().key("find-close").size(22.0, 22.0).center().radius(4.0).cursor(Cursor::Pointer).role("button").help("Close").hover(Color::WHITE.alpha(0.07)).child(icon(&icons::X, 13.0, theme::TEXT_DIM)).on_press_tx(|ws: &mut Workspace, tx: &mut Tx| {
-        ws.close_find();
-        ws.after_input(tx);
-    });
-    let query = boxed(field(&bar.query, "find-query", "Find", |b| &mut b.query), bar.query.focused).child(case);
-    let first = row()
-        .w_full()
-        .gap(4.0)
-        .center_y()
-        .child(replace_toggle)
-        .child(query)
-        .child(step("find-prev", false))
-        .child(step("find-next", true))
-        .child(label(bar.label(), 11.5, if has { theme::TEXT_DIM } else { theme::TEXT_FAINT }).key("find-count").min_w(44.0))
-        .child(close);
-    let mut panel = col()
-        .key("find-bar")
-        .w_full()
-        .px(10.0)
-        .py(6.0)
-        .gap(6.0)
-        .fill(rgb(0x18181a))
-        .border_sides([0.0, 0.0, 1.0, 0.0], rgb(theme::BORDER))
-        .transition(Transition::opacity().combined(Transition::offset(0.0, -6.0)))
-        .child(first);
-    if bar.replace_mode {
-        let action = |key: &'static str, text: &'static str, all: bool| {
-            let b = if has { button(text, false) } else { button_disabled(text) };
-            let b = b.key(key);
-            if !has {
-                return b;
-            }
-            b.on_press_tx(move |ws: &mut Workspace, tx: &mut Tx| {
-                if all {
-                    ws.replace_all();
-                } else {
-                    ws.replace_one();
-                }
-                ws.after_input(tx);
-            })
-        };
-        panel = panel.child(
-            row()
-                .w_full()
-                .gap(4.0)
-                .center_y()
-                .child(el().w(30.0))
-                .child(boxed(field(&bar.replacement, "find-replacement", "Replace", |b| &mut b.replacement), bar.replacement.focused))
-                .child(action("find-replace-one", "Replace", false))
-                .child(action("find-replace-all", "Replace All", true)),
-        );
     }
-    panel
-}
 
-/// The language server's state, under the editor.
-fn status_line(status: String) -> El {
-    row()
-        .key("server-status")
-        .w_full()
-        .h(22.0)
-        .px(12.0)
-        .center_y()
-        .border_sides([1.0, 0.0, 0.0, 0.0], rgb(theme::BORDER))
-        .transition(Transition::opacity())
-        .child(label(status, 11.0, theme::TEXT_FAINT).truncate())
-}
+    #[test]
+    fn a_wheel_glide_into_either_end_never_draws_past_it() {
+        let mut cx = TestAppContext::single();
+        cx.update(gpui_kit::init);
+        let (window, pane) = cx
+            .update(|app| {
+                gpui_kit::open_window(Default::default(), app, |window, app| {
+                    let buffer = app.new(|cx| EditorState::new(window, cx));
+                    let text: String = (0..300).map(|i| format!("line {i}\n")).collect();
+                    buffer.update(app, |b, cx| b.set_value(text, window, cx));
+                    app.new(|_| Pane { buffer, follow: Default::default() })
+                })
+            })
+            .unwrap();
+        let draw = |cx: &mut TestAppContext| {
+            cx.update_window(window, |_, window, app| window.draw(app).clear(app)).unwrap();
+            cx.run_until_parked();
+        };
+        let scroll_to = |y: f32, cx: &mut TestAppContext| {
+            pane.update(cx, |pane, cx| pane.buffer.update(cx, |b, cx| b.set_scroll_offset(point(px(0.0), px(y)), cx)));
+            draw(cx);
+            draw(cx);
+        };
+        // Turns the wheel `notches` times (negative scrolls down) and returns every offset drawn while it glides.
+        let glide = |notches: f32, cx: &mut TestAppContext| {
+            cx.update_window(window, |_, window, app| {
+                let at = point(px(200.0), px(200.0));
+                window.dispatch_event(gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent { position: at, pressed_button: None, modifiers: Default::default() }), app);
+                let wheel = gpui::ScrollWheelEvent { position: at, delta: gpui::ScrollDelta::Lines(point(0.0, notches)), modifiers: Default::default(), touch_phase: gpui::TouchPhase::Moved };
+                window.dispatch_event(gpui::PlatformInput::ScrollWheel(wheel), app);
+            })
+            .unwrap();
+            let mut seen = Vec::new();
+            for _ in 0..60 {
+                std::thread::sleep(std::time::Duration::from_millis(8));
+                draw(cx);
+                seen.push(drawn(&pane, cx));
+            }
+            seen
+        };
+        draw(&mut cx);
+        scroll_to(-1.0e6, &mut cx);
+        let bottom = drawn(&pane, &mut cx);
+        assert!(bottom < -1000.0, "the editor never scrolled: {bottom}");
 
-fn centered(message: String) -> El {
-    col().key(format!("editor-note-{message}")).w_full().grow(1.0).center().px(24.0).transition(Transition::opacity()).child(label(message, 12.5, theme::TEXT_FAINT).wrap())
+        scroll_to(bottom + 60.0, &mut cx);
+        let seen = glide(-20.0, &mut cx);
+        assert!(seen.iter().all(|&y| y >= bottom), "drew past the bottom at {bottom}: {seen:?}");
+        assert_eq!(seen.last(), Some(&bottom), "{seen:?}");
+
+        scroll_to(-60.0, &mut cx);
+        let seen = glide(20.0, &mut cx);
+        assert!(seen.iter().all(|&y| y <= 0.0), "drew past the top: {seen:?}");
+        assert_eq!(seen.last(), Some(&0.0), "{seen:?}");
+    }
 }

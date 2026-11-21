@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::claude::subagents::Agent;
-use crate::terminal::keys::Keystroke;
+use gpui::KeyDownEvent;
 
 /// A category in the Settings dialog's list, in display order.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -81,7 +81,7 @@ impl ModelLookups {
 impl Workspace {
     /// Asks each agent switched on for its models in the background while the Custom subagents page shows. The list
     /// the page showed last stays until the answer comes; a failure keeps it and says why.
-    pub(crate) fn load_models(&mut self) {
+    pub(crate) fn load_models(&mut self, cx: &mut Context<Self>) {
         if self.settings_page != SettingsPage::CustomSubagents {
             return;
         }
@@ -91,9 +91,9 @@ impl Workspace {
             self.model_lookups.get_mut(agent).loading = true;
             let list = self.model_lookups.list;
             let folder = crate::datadir::data_dir();
-            self.rt.spawn(
+            self.in_background(
                 move || list(agent, &folder),
-                move |ws: &mut Workspace, found| {
+                move |ws, found, _| {
                     let lookup = ws.model_lookups.get_mut(agent);
                     lookup.loading = false;
                     match found {
@@ -108,66 +108,75 @@ impl Workspace {
                         Err(why) => lookup.error = Some(why),
                     }
                 },
+                cx,
             );
         }
     }
 
     /// Opens an agent's dialog over the Custom subagents page, with the keyboard in its model search.
-    pub(crate) fn open_agent_dialog(&mut self, agent: Agent) {
+    pub(crate) fn open_agent_dialog(&mut self, agent: Agent, window: &mut Window, cx: &mut Context<Self>) {
+        let search = self.modal_input_then("", "Search models", Self::close_agent_dialog, window, cx);
         if let Some(Modal::Settings { subagents, .. }) = self.modal.as_mut() {
-            subagents.picking = Some((agent, super::modal::field("", true)));
+            subagents.picking = Some((agent, search));
         }
     }
 
     /// Closes the agent's dialog, keeping what it switched; Settings' Save keeps it for good.
-    pub(crate) fn close_agent_dialog(&mut self) {
-        if let Some(Modal::Settings { subagents, .. }) = self.modal.as_mut() {
+    pub(crate) fn close_agent_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(Modal::Settings { subagents, list_focus, .. }) = self.modal.as_mut() {
             subagents.picking = None;
+            window.focus(list_focus, cx);
         }
-        self.blur = true;
     }
 
     pub(crate) fn agent_dialog_open(&self) -> bool {
         matches!(&self.modal, Some(Modal::Settings { subagents: SubagentsForm { picking: Some(_), .. }, .. }))
     }
 
-    /// Keys for the open Settings dialog that no text field took. Up and Down change the page and Enter saves while no
-    /// field has the keyboard (the category list has it); Tab and Shift+Tab cycle the list and the page's text fields.
-    pub(crate) fn settings_key(&mut self, ks: &Keystroke) -> bool {
+    /// Keys for the open Settings dialog, seen before the focused control. Up and Down change the page and Enter saves
+    /// only while the category list has focus; Tab and Shift+Tab cycle the list and the current page's text fields.
+    pub(crate) fn settings_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         // The dialog over the page has only its search field, and no list of pages for Up and Down to move.
         if self.agent_dialog_open() {
-            return false;
+            if ev.keystroke.key == "escape" {
+                self.close_agent_dialog(window, cx);
+                cx.stop_propagation();
+                cx.notify();
+            }
+            return;
         }
-        let fields: &[usize] = match self.settings_page {
-            SettingsPage::General => &[0, 1],
-            SettingsPage::Sessions => &[2],
-            SettingsPage::ClaudeTools => &[3],
-            SettingsPage::Projects if modal_field(&mut self.modal, 4).is_some() => &[4],
-            _ => &[],
+        let Some(Modal::Settings { shell, claude, model, skills_field, list_focus, renaming, .. }) = &self.modal else { return };
+        let list_focus = list_focus.clone();
+        let fields = match self.settings_page {
+            SettingsPage::General => vec![shell.clone(), claude.clone()],
+            SettingsPage::Sessions => vec![model.clone()],
+            SettingsPage::ClaudeTools => vec![skills_field.clone()],
+            SettingsPage::Projects => renaming.iter().map(|(_, name)| name.clone()).collect(),
+            _ => Vec::new(),
         };
-        let focused = (0..5).find(|n| modal_field(&mut self.modal, *n).is_some_and(|f| f.focused));
-        let on_list = focused.is_none();
-        let plain = !ks.modifiers.control && !ks.modifiers.alt && !ks.modifiers.platform;
-        match ks.key.as_str() {
-            "up" if on_list && plain => self.set_settings_page(self.settings_page.prev()),
-            "down" if on_list && plain => self.set_settings_page(self.settings_page.next()),
-            "tab" if plain => {
-                // Stop 0 is the list, then the page's fields in order.
-                let here = focused.and_then(|f| fields.iter().position(|x| *x == f)).map_or(0, |i| i + 1);
+        let on_list = list_focus.is_focused(window);
+        match ev.keystroke.key.as_str() {
+            "up" if on_list => self.set_settings_page(self.settings_page.prev(), cx),
+            "down" if on_list => self.set_settings_page(self.settings_page.next(), cx),
+            "enter" if on_list => self.submit_modal(window, cx),
+            "tab" => {
+                let here = if on_list {
+                    Some(0)
+                } else {
+                    fields.iter().position(|f| f.read(cx).focus_handle(cx).is_focused(window)).map(|i| i + 1)
+                };
+                let Some(here) = here else { return };
                 let stops = fields.len() + 1;
-                let there = if ks.modifiers.shift { (here + stops - 1) % stops } else { (here + 1) % stops };
-                for n in 0..5 {
-                    if let Some(f) = modal_field(&mut self.modal, n) {
-                        f.focused = there.checked_sub(1).map(|i| fields[i]) == Some(n);
-                    }
-                }
-                if there == 0 {
-                    self.blur = true;
+                let there = if ev.keystroke.modifiers.shift { (here + stops - 1) % stops } else { (here + 1) % stops };
+                match there.checked_sub(1) {
+                    None => window.focus(&list_focus, cx),
+                    Some(i) => fields[i].update(cx, |s, cx| s.focus(window, cx)),
                 }
             }
-            _ => return false,
+            _ => return,
         }
-        true
+        cx.stop_propagation();
+        cx.notify();
     }
 }
 

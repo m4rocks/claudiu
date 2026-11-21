@@ -42,8 +42,6 @@ impl EventListener for Listener {
             return;
         }
         let _ = self.tx.unbounded_send(event);
-        // The UI thread reads terminals on its next frame.
-        crate::app::rt::wake();
     }
 }
 

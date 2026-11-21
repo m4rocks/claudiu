@@ -46,7 +46,7 @@ pub struct Provider {
     /// The color of its sidebar limits.
     pub color: u32,
     /// The logos and optional short label that identify a pool in the sidebar.
-    pub marks: fn(&str) -> (&'static [&'static rune::Icon], Option<String>),
+    pub marks: fn(&str) -> (&'static [&'static logos::Logo], Option<String>),
     /// The name the settings page and the subagent's text use.
     pub name: &'static str,
     /// The key in `CLAUDIU_SUBAGENTS` and in the state file, and the start of every agent type name.
@@ -391,7 +391,7 @@ mod tests {
                 for pool in ["Codex", "Gemini Models", "Claude and GPT models", "Gemini 4 Argon", "Some New models"] {
                     let (marks, name) = (provider.marks)(pool);
                     assert!(!marks.is_empty() || name.is_some_and(|name| !name.is_empty()), "{}: {pool}", provider.name);
-                    assert!(marks.iter().all(|mark| !mark.body.is_empty()), "{}: {pool}", provider.name);
+                    assert!(marks.iter().all(|mark| !mark.svg.is_empty()), "{}: {pool}", provider.name);
                 }
             }
         }

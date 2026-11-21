@@ -10,9 +10,9 @@ use std::time::Instant;
 impl Workspace {
     /// The right sidebar offer: a running session that runs under another account than the active one.
     /// Returns the account it runs under, and the active account's name.
-    pub fn session_away(&self, id: &str) -> Option<(String, String)> {
+    pub fn session_away(&self, id: &str, cx: &App) -> Option<(String, String)> {
         let live = self.live.iter().find(|l| l.id == id)?;
-        if !self.is_running(id) {
+        if !self.is_running(id, cx) {
             return None;
         }
         let active = self.store.active_account()?;
@@ -24,8 +24,8 @@ impl Workspace {
     }
 
     /// The right sidebar button. Asks first; the shown session is restarted under the active account.
-    pub fn ask_handoff(&mut self) {
-        let shown = self.active_id().cloned().filter(|id| self.is_running(id) && self.store.session(id).is_some_and(|r| r.claude.is_some()));
+    pub fn ask_handoff(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let shown = self.active_id().cloned().filter(|id| self.is_running(id, cx) && self.store.session(id).is_some_and(|r| r.claude.is_some()));
         let Some(id) = shown else { return };
         let to_name = self.store.active_account().map_or_else(|| "the active account".into(), |a| a.name());
         self.modal = Some(Modal::Confirm {
@@ -38,29 +38,33 @@ impl Workspace {
             danger: false,
             act: Act::ConfirmHandoff(id),
         });
+        window.focus(&self.modal_focus, cx);
     }
 
     /// Confirmed: the process is replaced at once, without compacting; the new one resumes the same conversation.
-    pub fn start_handoff(&mut self, id: &str) {
-        self.restart_handed_off(id, Instant::now());
+    pub fn start_handoff(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.restart_handed_off(id, Instant::now(), window, cx);
     }
 
     /// The old process ends and a new one resumes the same conversation. The shell and cards belong to the session,
     /// so they stay.
-    fn restart_handed_off(&mut self, id: &str, since: Instant) {
+    fn restart_handed_off(&mut self, id: &str, since: Instant, window: &mut Window, cx: &mut Context<Self>) {
         let to = self.store.active_account().map(|a| a.id.clone());
         if let Some(meta) = self.store.session_mut(id).and_then(|r| r.claude.as_mut()) {
             meta.account = to;
         }
-        self.restart_session(id);
+        self.restart_session(id, window, cx);
         let to_name = self.store.active_account().map_or_else(|| "the active account".into(), |a| a.name());
-        self.set_handover(id, Some(Handover { message: format!("Handing over to {to_name}…"), since }));
+        self.set_handover(id, Some(Handover { message: format!("Handing over to {to_name}…"), since }), cx);
     }
 
     /// The skeleton says "Handing over to …" while this is set; the new process clears it once its prompt is ready.
-    pub(super) fn set_handover(&mut self, id: &str, handover: Option<Handover>) {
-        if let Some(view) = self.terminal_mut(id) {
-            view.handover = handover;
+    pub(super) fn set_handover(&self, id: &str, handover: Option<Handover>, cx: &mut App) {
+        if let Some(view) = self.live_view(id) {
+            view.update(cx, |v, cx| {
+                v.handover = handover;
+                cx.notify();
+            });
         }
     }
 }

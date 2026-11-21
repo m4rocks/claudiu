@@ -3,11 +3,11 @@
 use super::*;
 
 impl TerminalView {
-    pub(super) fn send(&mut self, bytes: Vec<u8>) {
+    pub(super) fn send(&mut self, bytes: Vec<u8>, cx: &mut Context<Self>) {
         // Claude Code is not listening yet: keys edit the draft instead (`draft_key`).
         if !self.held() {
             self.mark_typed();
-            self.write_input(bytes);
+            self.write_input(bytes, cx);
         }
     }
 
@@ -21,14 +21,14 @@ impl TerminalView {
     /// Claude Code is starting, or while an earlier one is still there. Only into Claude's own input box: on a menu (a
     /// permission question, the folder trust check) the line break could pick an answer, and without bracketed paste it
     /// would send the message. Returns whether it was inserted.
-    pub fn insert_reference(&mut self, text: &str) -> bool {
+    pub fn insert_reference(&mut self, text: &str, cx: &mut Context<Self>) -> bool {
         if self.held() || self.reference.is_some() || !self.mode().contains(TermMode::BRACKETED_PASTE) {
             return false;
         }
         let Some(column) = self.prompt_column() else { return false };
         let line = reference_line(text, column);
         let bytes = self.paste_bytes(&line);
-        self.write_input(bytes);
+        self.write_input(bytes, cx);
         self.reference = Some(Inserted { chars: line.chars().count(), typed: false });
         true
     }
@@ -64,13 +64,13 @@ impl TerminalView {
     }
 
     /// Erase the inserted line again unless the user typed after it.
-    pub fn withdraw_reference(&mut self) {
+    pub fn withdraw_reference(&mut self, cx: &mut Context<Self>) {
         if let Some(r) = self.reference.take().filter(|r| !r.typed) {
-            self.write_input(vec![0x7f; r.chars]);
+            self.write_input(vec![0x7f; r.chars], cx);
         }
     }
 
-    pub(super) fn write_input(&mut self, bytes: Vec<u8>) {
+    pub(super) fn write_input(&mut self, bytes: Vec<u8>, cx: &mut Context<Self>) {
         let mut term = self.terminal.term.lock();
         term.selection = None;
         if term.grid().display_offset() != 0 {
@@ -79,17 +79,17 @@ impl TerminalView {
         drop(term);
         (self.frac, self.glide) = (0.0, None);
         self.terminal.write(bytes);
-        self.dirty = true;
+        cx.notify();
     }
 
-    pub fn paste_text(&mut self, text: &str) {
+    pub fn paste_text(&mut self, text: &str, cx: &mut Context<Self>) {
         if self.held() {
             self.draft.insert(text);
-            self.dirty = true;
+            cx.notify();
             return;
         }
         let bytes = self.paste_bytes(text);
-        self.send(bytes);
+        self.send(bytes, cx);
     }
 
     pub(super) fn paste_bytes(&self, text: &str) -> Vec<u8> {
@@ -103,46 +103,45 @@ impl TerminalView {
         }
     }
 
-    /// Read the clipboard and paste it (`paste_content`) once it arrives.
-    pub fn paste(&mut self, tx: &mut Tx) {
-        let key = self.key.clone();
-        tx.read_clipboard(move |ws: &mut crate::app::Workspace, content, _| {
-            if let Some(t) = ws.terminal_mut(&key) {
-                t.paste_content(content);
-            }
-        });
-    }
-
-    /// What the clipboard held: text is pasted, files paste their paths, and an image is handed to Claude Code.
-    pub fn paste_content(&mut self, content: &rune::ClipboardContent) {
-        if !content.text().is_empty() {
-            let text = content.text().to_string();
-            self.paste_text(&text);
+    pub fn paste(&mut self, cx: &mut Context<Self>) {
+        let Some(item) = cx.read_from_clipboard() else {
+            return;
+        };
+        if let Some(text) = item.text().filter(|t| !t.is_empty()) {
+            self.paste_text(&text, cx);
             return;
         }
         // While Claude Code starts, images are kept as files and typed in as paths when it is ready (`skeleton.rs`).
         if self.loading {
-            if let Some(path) = content.image().and_then(|image| save_pasted(image.png())) {
-                self.draft.add_image(path);
+            for entry in item.entries() {
+                match entry {
+                    gpui::ClipboardEntry::Image(image) => {
+                        if let Some(path) = save_pasted(image) {
+                            self.draft.add_image(path);
+                        }
+                    }
+                    gpui::ClipboardEntry::ExternalPaths(p) => self.paste_paths(p.paths(), cx),
+                    _ => {}
+                }
             }
-            let files = content.files().to_vec();
-            self.paste_paths(&files);
-            self.dirty = true;
+            cx.notify();
             return;
         }
         // An image on the clipboard: Claude Code reads it itself on its image-paste key (Alt+V on Windows,
         // Ctrl+V elsewhere).
-        if content.image().is_some() {
+        if item.entries().iter().any(|e| matches!(e, gpui::ClipboardEntry::Image(_))) {
             let key: &[u8] = if cfg!(target_os = "windows") { b"\x1bv" } else { b"\x16" };
-            self.send(key.to_vec());
-        } else if !content.files().is_empty() {
-            let files = content.files().to_vec();
-            self.paste_paths(&files);
+            self.send(key.to_vec(), cx);
+        } else if let Some(paths) = item.entries().iter().find_map(|e| match e {
+            gpui::ClipboardEntry::ExternalPaths(p) => Some(p.paths().to_vec()),
+            _ => None,
+        }) {
+            self.paste_paths(&paths, cx);
         }
     }
 
     /// Dropped or copied files: paste their paths (quoted when needed); Claude Code attaches them.
-    pub fn paste_paths(&mut self, paths: &[std::path::PathBuf]) {
+    pub fn paste_paths(&mut self, paths: &[std::path::PathBuf], cx: &mut Context<Self>) {
         if self.loading {
             for p in paths {
                 if is_image_file(p) {
@@ -151,12 +150,12 @@ impl TerminalView {
                     self.draft.insert(&format!("{} ", skeleton::quote_path(p)));
                 }
             }
-            self.dirty = true;
+            cx.notify();
             return;
         }
         let text = paths.iter().map(|p| skeleton::quote_path(p)).collect::<Vec<_>>().join(" ");
         if !text.is_empty() {
-            self.paste_text(&format!("{text} "));
+            self.paste_text(&format!("{text} "), cx);
         }
     }
 
@@ -169,7 +168,7 @@ impl TerminalView {
     }
 
     /// Copies the selection; returns whether there was one.
-    pub fn copy(&mut self, tx: &mut Tx) -> bool {
+    pub fn copy(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let mut term = self.terminal.term.lock();
         let text = term.selection_to_string().filter(|t| !t.is_empty());
         if text.is_some() {
@@ -178,60 +177,60 @@ impl TerminalView {
         drop(term);
         match text {
             Some(text) => {
-                tx.copy(text);
-                self.dirty = true;
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+                cx.notify();
                 true
             }
             // Text selected in a card: Ctrl+C copies it rather than interrupting Claude Code.
-            None => match tx.text_selection().map(|s| s.text().to_string()).filter(|t| !t.is_empty()) {
-                Some(text) => {
-                    tx.copy(text);
-                    tx.clear_text_selection();
-                    true
-                }
-                None => false,
-            },
+            None if TextSelection::has_selection(window, cx) => {
+                let text = TextSelection::selected_text(window, cx);
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+                TextSelection::clear(window, cx);
+                true
+            }
+            None => false,
         }
     }
 
-    pub(super) fn select_all(&mut self) {
+    pub(super) fn select_all(&mut self, cx: &mut Context<Self>) {
         let mut term = self.terminal.term.lock();
         let (top, bottom, last) = (term.topmost_line(), term.bottommost_line(), term.last_column());
         let mut sel = Selection::new(SelectionType::Simple, GridPoint::new(top, Column(0)), Side::Left);
         sel.update(GridPoint::new(bottom, last), Side::Right);
         term.selection = Some(sel);
         drop(term);
-        self.dirty = true;
+        cx.notify();
     }
 
-    /// A key while this terminal has the keyboard. Returns whether it was used; every other key goes on to the app.
-    pub fn on_key(&mut self, ks: &keys::Keystroke, tx: &mut Tx) -> bool {
+    pub(super) fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let ks = &event.keystroke;
         let m = &ks.modifiers;
         let key = ks.key.as_str();
 
         // Claudiu terminal shortcuts. Everything else goes to the program untouched.
-        let copy_chord = (m.control && m.shift && key == "c") || (m.control && !m.shift && !m.alt && key == "insert");
-        let paste_chord = (m.control && m.shift && key == "v") || (m.shift && !m.control && !m.alt && key == "insert");
+        let copy_chord = (m.control && m.shift && key == "c")
+            || (m.control && !m.shift && !m.alt && key == "insert");
+        let paste_chord = (m.control && m.shift && key == "v")
+            || (m.shift && !m.control && !m.alt && key == "insert");
         // Ctrl+V pastes on Windows/Linux (as in Windows Terminal); on macOS Cmd+C / Cmd+V are the copy/paste keys.
         let ctrl_v = !cfg!(target_os = "macos") && m.control && !m.shift && !m.alt && key == "v";
         let mac_copy = m.platform && !m.shift && !m.control && !m.alt && key == "c";
         let mac_paste = m.platform && !m.shift && !m.control && !m.alt && key == "v";
-        let mac_select_all = m.platform && !m.shift && !m.control && !m.alt && key == "a";
+        // Every key handled here stops propagation, so the platform doesn't also deliver it as text.
         if mac_copy || copy_chord {
-            self.copy(tx);
-            return true;
+            self.copy(window, cx);
+            cx.stop_propagation();
+            return;
         }
         if mac_paste || paste_chord || ctrl_v {
-            self.paste(tx);
-            return true;
-        }
-        if mac_select_all {
-            self.select_all();
-            return true;
+            self.paste(cx);
+            cx.stop_propagation();
+            return;
         }
         // Ctrl+C with a selection copies (like Windows Terminal); otherwise it is SIGINT as usual.
-        if m.control && !m.shift && !m.alt && key == "c" && self.copy(tx) {
-            return true;
+        if m.control && !m.shift && !m.alt && key == "c" && self.copy(window, cx) {
+            cx.stop_propagation();
+            return;
         }
         if m.shift && !m.control && !m.alt {
             let scroll = match key {
@@ -244,104 +243,123 @@ impl TerminalView {
             if let Some(scroll) = scroll {
                 (self.frac, self.glide) = (0.0, None);
                 self.terminal.term.lock().scroll_display(scroll);
-                self.dirty = true;
-                return true;
+                cx.notify();
+                cx.stop_propagation();
+                return;
             }
         }
-        // Plain text types itself, as an input method's commit does.
-        if keys::is_text(ks) {
-            if let Some(text) = ks.key_char.as_deref() {
-                self.commit_text(text);
-            }
-            return true;
-        }
-        if self.exit_code.is_some() {
-            return false;
+        // Plain text arrives through `EntityInputHandler::replace_text_in_range` (IME, dead keys).
+        if self.exit_code.is_some() || keys::is_text(ks) {
+            return;
         }
         if self.held() {
             self.draft.key(ks);
-            self.dirty = true;
-            return true;
+            cx.notify();
+            cx.stop_propagation();
+            return;
         }
-        match keys::encode(ks, self.mode()) {
-            Some(bytes) => {
-                self.send(bytes);
-                true
-            }
-            None => false,
-        }
-    }
-
-    /// Text typed or composed: to the draft while Claude Code starts, else to the program.
-    fn commit_text(&mut self, text: &str) {
-        self.marked = None;
-        if self.held() {
-            self.draft.insert(text);
-            self.dirty = true;
-        } else if !text.is_empty() && self.is_running() {
-            self.send(text.as_bytes().to_vec());
-        } else {
-            self.dirty = true;
-        }
-    }
-
-    /// The input method: composition is drawn at the cursor (never sent), and what it commits is typed.
-    pub fn ime(&mut self, ime: &rune::Ime) -> bool {
-        match ime {
-            rune::Ime::Preedit(text, _) => {
-                self.marked = (!text.is_empty()).then(|| text.clone());
-                self.dirty = true;
-                true
-            }
-            rune::Ime::Commit(text) => {
-                self.commit_text(text);
-                true
-            }
-            _ => false,
+        if let Some(bytes) = keys::encode(ks, self.mode()) {
+            self.send(bytes, cx);
+            cx.stop_propagation();
         }
     }
 
     /// Type a message into Claude Code: a line as keystrokes, several as one paste so their breaks stay breaks.
-    pub(super) fn type_in(&mut self, text: &str) {
+    pub(super) fn type_in(&mut self, text: &str, cx: &mut Context<Self>) {
         if text.is_empty() {
             return;
         }
         // A long line is better pasted than typed.
         let bytes = if text.contains('\n') || text.chars().count() > 200 { self.paste_bytes(text) } else { text.as_bytes().to_vec() };
-        self.write_input(bytes);
+        self.write_input(bytes, cx);
     }
 
     /// Put an image file on the clipboard and press Claude Code's image-paste key, which reads it from there.
-    pub(super) fn paste_image_file(&mut self, path: &std::path::Path) -> bool {
-        if !is_image_file(path) {
-            return false;
-        }
+    pub(super) fn paste_image_file(&mut self, path: &std::path::Path, cx: &mut Context<Self>) -> bool {
+        use gpui::ImageFormat::*;
+        let format = match path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).as_deref() {
+            Some("png") => Png,
+            Some("jpg" | "jpeg") => Jpeg,
+            Some("gif") => Gif,
+            Some("webp") => Webp,
+            Some("bmp") => Bmp,
+            _ => return false,
+        };
         let Ok(bytes) = std::fs::read(path) else { return false };
         #[cfg(target_os = "windows")]
         if !crate::platform::set_clipboard_bitmap(&bytes) {
             return false;
         }
         #[cfg(not(target_os = "windows"))]
-        {
-            let Some(image) = as_png(&bytes).and_then(rune::ClipboardImage::from_png) else { return false };
-            self.fx.push(Box::new(move |tx: &mut Tx| tx.copy_rich(rune::ClipboardContent::default().with_image(image))));
-        }
+        cx.write_to_clipboard(ClipboardItem::new_image(&gpui::Image::from_bytes(format, bytes)));
+        #[cfg(target_os = "windows")]
+        let _ = format;
         let key: &[u8] = if cfg!(target_os = "windows") { b"\x1bv" } else { b"\x16" };
-        self.write_input(key.to_vec());
+        self.mark_typed();
+        self.write_input(key.to_vec(), cx);
         true
     }
 }
 
-/// An image file's bytes as PNG, which is what the clipboard takes.
-#[cfg(not(target_os = "windows"))]
-fn as_png(bytes: &[u8]) -> Option<Vec<u8>> {
-    if bytes.starts_with(b"\x89PNG") {
-        return Some(bytes.to_vec());
+/// Text input from the platform: typed characters, dead-key results and IME commits. A terminal has no editable
+/// document, so ranges are ignored; only in-progress composition (`marked`) is tracked, to draw it at the cursor.
+impl EntityInputHandler for TerminalView {
+    fn text_for_range(&mut self, _: Range<usize>, _: &mut Option<Range<usize>>, _: &mut Window, _: &mut Context<Self>) -> Option<String> {
+        None
     }
-    let image = image::load_from_memory(bytes).ok()?;
-    let mut out = std::io::Cursor::new(Vec::new());
-    image.write_to(&mut out, image::ImageFormat::Png).ok()?;
-    Some(out.into_inner())
+
+    fn selected_text_range(&mut self, _: bool, _: &mut Window, _: &mut Context<Self>) -> Option<UTF16Selection> {
+        Some(UTF16Selection { range: 0..0, reversed: false })
+    }
+
+    fn marked_text_range(&self, _: &mut Window, _: &mut Context<Self>) -> Option<Range<usize>> {
+        self.marked.as_ref().map(|t| 0..t.encode_utf16().count())
+    }
+
+    fn unmark_text(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        self.marked = None;
+        cx.notify();
+    }
+
+    fn replace_text_in_range(&mut self, _: Option<Range<usize>>, text: &str, _: &mut Window, cx: &mut Context<Self>) {
+        self.marked = None;
+        if self.held() {
+            self.draft.insert(text);
+            cx.notify();
+        } else if !text.is_empty() && self.is_running() {
+            self.send(text.as_bytes().to_vec(), cx);
+        } else {
+            cx.notify();
+        }
+    }
+
+    fn replace_and_mark_text_in_range(
+        &mut self,
+        _: Option<Range<usize>>,
+        text: &str,
+        _: Option<Range<usize>>,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.marked = (!text.is_empty()).then(|| text.to_string());
+        cx.notify();
+    }
+
+    /// The cursor cell, so the IME candidate window opens next to it.
+    fn bounds_for_range(&mut self, _: Range<usize>, _: Bounds<Pixels>, _: &mut Window, _: &mut Context<Self>) -> Option<Bounds<Pixels>> {
+        let m = self.metrics?;
+        let term = self.terminal.term.lock();
+        let cursor = term.grid().cursor.point;
+        let row = (cursor.line.0 + term.grid().display_offset() as i32).max(0);
+        Some(Bounds::new(
+            point(m.origin.x + m.cell_w * cursor.column.0 as f32, m.origin.y + m.shift + m.line_h * row as f32),
+            size(m.cell_w, m.line_h),
+        ))
+    }
+
+    fn character_index_for_point(&mut self, _: Point<Pixels>, _: &mut Window, _: &mut Context<Self>) -> Option<usize> {
+        None
+    }
 }
 
 /// Where Claude Code's input text starts on each of its lines: after `❯ `, and indented as far below it.

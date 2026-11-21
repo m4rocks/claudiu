@@ -10,23 +10,23 @@ use crate::store::RateLimit;
 
 impl Workspace {
     /// Costs no tokens. The mod's files are tiny, and Codex's logs are read again only after Codex writes to them.
-    pub(super) fn ingest_usage(&mut self) {
-        self.ingest_subagent_limits();
-        self.rt.spawn_quietly(
+    pub(super) fn ingest_usage(&mut self, cx: &mut Context<Self>) {
+        self.ingest_subagent_limits(cx);
+        self.in_background(
             || (usage::read_snapshots(&usage::snapshot_dir()), mcp::read_attached()),
-            |ws: &mut Workspace, (snaps, items)| {
+            |ws, (snaps, items), _| {
                 let mut changed = snaps.iter().fold(false, |c, snap| ws.apply_snapshot(snap) | c);
                 changed |= items.into_iter().fold(false, |c, (stem, item)| ws.apply_attachment(&stem, item) | c);
                 if changed {
                     ws.store.mark_dirty();
-                    ws.rt.dirty = true;
                 }
             },
+            cx,
         );
     }
 
     /// Each enabled provider refreshes on its own cadence. Failed reads keep the saved reading.
-    fn ingest_subagent_limits(&mut self) {
+    fn ingest_subagent_limits(&mut self, cx: &mut Context<Self>) {
         for agent in Agent::ALL {
             let provider = agent.provider();
             let Some(limits) = &provider.limits else { continue };
@@ -35,10 +35,7 @@ impl Workspace {
             }
             // Set before asking, so a slow answer isn't asked for twice.
             *self.limits_asked.get_mut(agent) = Some(std::time::Instant::now());
-            self.rt.spawn_quietly(
-                limits.read,
-                move |ws: &mut Workspace, read| ws.apply_subagent_limits(provider.key, read),
-            );
+            self.in_background(limits.read, move |ws, read, _| ws.apply_subagent_limits(provider.key, read), cx);
         }
     }
 
@@ -48,7 +45,6 @@ impl Workspace {
         {
             self.store.data.subagent_limits.insert(key.into(), pools);
             self.store.mark_dirty();
-            self.rt.dirty = true;
         }
     }
 

@@ -1,5 +1,5 @@
 //! Claudiu's own persisted state (projects, session history, cached usage, layout).
-//! Independent of the UI. Claude Code's data is only ever *read* (see `claude/`) and merged in here.
+//! Independent of GPUI. Claude Code's data is only ever *read* (see `claude/`) and merged in here.
 
 use std::collections::BTreeMap;
 use std::fs;

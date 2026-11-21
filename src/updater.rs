@@ -8,6 +8,7 @@
 
 use std::time::Duration;
 
+use gpui::Context;
 use velopack::{UpdateCheck, UpdateInfo, UpdateManager, sources::GithubSource};
 
 use crate::app::Workspace;
@@ -42,19 +43,23 @@ fn repo_url(ws: &Workspace) -> Option<String> {
 }
 
 /// Look for a newer release in the background, and again every six hours while the app stays open.
-pub fn check(ws: &mut Workspace) {
-    ws.rt.after(Duration::from_secs(6 * 3600), check);
+pub fn check(ws: &mut Workspace, cx: &mut Context<Workspace>) {
+    cx.spawn(async move |this, cx| {
+        cx.background_executor().timer(Duration::from_secs(6 * 3600)).await;
+        let _ = this.update(cx, check);
+    })
+    .detach();
     let Some(url) = repo_url(ws) else { return };
-    look(ws, url, false);
+    look(ws, url, false, cx);
 }
 
 /// The Check now button in Settings: one look, made even with background checks off, that says what it found.
-pub fn check_now(ws: &mut Workspace) {
+pub fn check_now(ws: &mut Workspace, cx: &mut Context<Workspace>) {
     let url = repo_url(ws).unwrap_or_else(|| DEFAULT_REPO.to_string());
-    look(ws, url, true);
+    look(ws, url, true, cx);
 }
 
-fn look(ws: &mut Workspace, url: String, asked: bool) {
+fn look(ws: &mut Workspace, url: String, asked: bool, cx: &mut Context<Workspace>) {
     // Once an update is downloading or downloaded, a re-check would only throw that away.
     let busy = match &ws.update.status {
         Status::Checking => Some(None),
@@ -64,12 +69,12 @@ fn look(ws: &mut Workspace, url: String, asked: bool) {
     };
     if let Some(said) = busy {
         if let Some(text) = said.filter(|_| asked) {
-            ws.toast(text, false);
+            ws.toast(text, false, cx);
         }
         return;
     }
     let previous = std::mem::replace(&mut ws.update.status, Status::Checking);
-    ws.rt.spawn(
+    ws.in_background(
         move || {
             let manager = UpdateManager::new(GithubSource::new(&url, None, false), None, None).map_err(|e| match e {
                 velopack::Error::NotInstalled(_) => "updates work only in a copy installed with the Claudiu installer".to_string(),
@@ -78,7 +83,7 @@ fn look(ws: &mut Workspace, url: String, asked: bool) {
             let check = manager.check_for_updates().map_err(|e| e.to_string())?;
             Ok::<_, String>((manager, check))
         },
-        move |ws: &mut Workspace, result| {
+        move |ws, result, cx| {
             let found = match result {
                 Ok((manager, UpdateCheck::UpdateAvailable(info))) => {
                     let version = info.TargetFullRelease.Version.clone();
@@ -93,9 +98,10 @@ fn look(ws: &mut Workspace, url: String, asked: bool) {
             let (status, said) = outcome(previous, found, asked);
             ws.update.status = status;
             if let Some((text, error)) = said {
-                ws.toast(text, error);
+                ws.toast(text, error, cx);
             }
         },
+        cx,
     );
 }
 
@@ -120,30 +126,31 @@ fn outcome(previous: Status, found: Result<Found, String>, asked: bool) -> (Stat
 }
 
 /// Download (first click) then apply and restart (second click).
-pub fn install(ws: &mut Workspace) {
+pub fn install(ws: &mut Workspace, cx: &mut Context<Workspace>) {
     let (Some(manager), Some(info)) = (ws.update.manager.clone(), ws.update.info.clone()) else { return };
     match ws.update.status.clone() {
         Status::Available { version } => {
             ws.update.status = Status::Downloading;
-            ws.rt.spawn(
+            ws.in_background(
                 move || manager.download_updates(&info, None).map_err(|e| e.to_string()),
-                move |ws: &mut Workspace, result| {
+                move |ws, result, cx| {
                     ws.update.status = match result {
                         Ok(()) => Status::Ready { version },
                         Err(e) => Status::Error(e),
                     };
                     if let Status::Error(e) = &ws.update.status {
                         let msg = format!("Update failed: {e}");
-                        ws.toast(msg, true);
+                        ws.toast(msg, true, cx);
                     }
                 },
+                cx,
             );
         }
         Status::Ready { .. } => {
             // Persist state, then hand over to the updater; it restarts Claudiu into the new version.
-            ws.finalize();
+            ws.finalize(cx);
             if let Err(e) = manager.apply_updates_and_restart(&info) {
-                ws.toast(format!("Could not apply update: {e}"), true);
+                ws.toast(format!("Could not apply update: {e}"), true, cx);
             }
         }
         _ => {}

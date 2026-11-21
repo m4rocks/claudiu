@@ -1,5 +1,5 @@
 //! The files the editor shows: a folder listed without what Git ignores and with Git's changes marked, and a file read
-//! as text when the editor can hold it. No UI here; callers run both off the UI thread.
+//! as text when the editor can hold it. No GPUI here; callers run both off the UI thread.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -146,7 +146,7 @@ pub enum Contents {
     NotText,
 }
 
-/// The editor draws only the lines on screen, but highlights and searches the whole file, so it stops here.
+/// The editor widget handles text "up to about 50K lines" (gpui-base's own note).
 pub const MAX_LINES: usize = 50_000;
 pub const MAX_BYTES: u64 = 8 * 1024 * 1024;
 
@@ -190,8 +190,7 @@ pub fn read(path: &Path) -> std::io::Result<Contents> {
 pub struct Format {
     /// Every line ended in `\r\n`; the editor has `\n`.
     pub crlf: bool,
-    /// The file is indented with tabs; the editor has spaces for each, so the Tab key and the
-    /// file's own indents line up.
+    /// The file is indented with tabs; the editor has spaces for each, because it draws a tab with no width.
     /// `None` for a file shown as it is.
     pub tabs: Option<std::sync::Arc<Indents>>,
 }
@@ -216,7 +215,7 @@ enum Kept {
 /// Spaces per tab while a file is in the editor.
 pub const TAB_WIDTH: usize = 4;
 
-/// A file with tab-indented lines, as the editor shows it, so its indents and the Tab key's spaces agree: each tab as
+/// A file with tab-indented lines, as the editor shows it, because the editor draws a tab with no width: each tab as
 /// spaces (those in a line's indent `TAB_WIDTH` each, the others up to the next multiple of `TAB_WIDTH`). Lines that
 /// `ruled` would not give back as they were (tabs after the indent, spaces after the tabs to align, a template string
 /// indented with spaces) are remembered, so they save unchanged until edited; an edited line keeps only the tabs in its
