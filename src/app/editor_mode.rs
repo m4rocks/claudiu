@@ -58,6 +58,8 @@ pub struct EditorPane {
     pub relist: bool,
     /// Quick open or find in files, while it is up.
     pub picker: Option<super::picker::Picker>,
+    /// The comment box on lines of the shown tab, while it is up (`line_comment`).
+    pub comment: Option<super::LineComment>,
     /// Language servers by program name; dropping the pane (the session ended) stops them.
     pub servers: HashMap<&'static str, super::language_servers::ServerState>,
     /// Tells the pane when its folder changes on disk (see `watch_folder`); while there is none, every tick lists
@@ -95,6 +97,8 @@ pub struct Tab {
     pub marks: std::sync::Arc<Vec<crate::git::lines::Change>>,
     /// The smooth wheel scrolling of the text (see `panels::editor_pane::change_marks`, which also hosts it).
     pub follow: std::rc::Rc<std::cell::RefCell<crate::panels::glide::Follow>>,
+    /// The line under the mouse, which gets the comment button when nothing is selected.
+    pub hovered_line: std::rc::Rc<std::cell::Cell<Option<usize>>>,
     /// A save is being written; the disk check leaves the tab alone until it lands, so the save isn't taken for a
     /// change from outside.
     pub saving: bool,
@@ -223,6 +227,7 @@ impl Workspace {
                 listing: false,
                 relist: false,
                 picker: None,
+                comment: None,
                 servers: HashMap::new(),
                 watcher: None,
                 git_dir: None,
@@ -486,7 +491,7 @@ impl Workspace {
                 let opened = pane.tabs.iter().position(|t| t.path == path);
                 let ix = opened.unwrap_or_else(|| {
                     let language = language.filter(|_| note.is_none());
-                    pane.tabs.push(Tab { path: path.clone(), buffer, note, format, stamp, dirty: false, marks: Default::default(), follow: Default::default(), saving: false, conflict: None, language, version: 0, server: None, _sub: sub });
+                    pane.tabs.push(Tab { path: path.clone(), buffer, note, format, stamp, dirty: false, marks: Default::default(), follow: Default::default(), hovered_line: Default::default(), saving: false, conflict: None, language, version: 0, server: None, _sub: sub });
                     pane.tabs.len() - 1
                 });
                 pane.active = Some(ix);

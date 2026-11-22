@@ -339,8 +339,7 @@ fn sessions_and_shell() {
     assert!(ws.read_with(&cx, |ws, _| matches!(ws.modal, Some(Modal::Confirm { act: Act::ConfirmCloseLive(_), .. })) && ws.live_view(&first).is_some()), "ending the session asks");
     step(&mut cx, &|ws, w, cx| ws.act(Act::Dismiss, w, cx));
     assert_eq!(std::fs::read_to_string(&code).unwrap(), "fn unsaved() {}\n", "nothing was saved by asking");
-    // Claude Code first asks whether to trust this new folder. That is a menu, where a pasted line break could pick an
-    // answer, so moving there with lines selected puts nothing in (`selection_reference` covers Claude's input box).
+    // Moving the keyboard to the chat with lines selected puts nothing in its message box; the comment button does that.
     cx.update_window(window, |_, window, _| window.activate_window()).unwrap();
     step(&mut cx, &|ws, w, cx| buffer(ws).update(cx, |b, cx| {
         b.focus(w, cx);
@@ -610,21 +609,18 @@ fn language_servers() {
     t.join().unwrap();
 }
 
-/// Lines selected in the editor go into Claude's input as `@file#L..` when the keyboard moves to Claude, and come back
-/// out when it leaves without typing. Runs the real `claude` in this repository, which Claude Code already trusts (a
-/// new folder stops at its trust and import questions), on a file under `target`. `cargo test -- --ignored selection_reference`.
-fn selection_reference_in_claudes_input() {
+/// The comment button beside the editor's selection opens a box whose Enter adds `@file#L..: comment` to the message
+/// box, on a line of its own after what is typed there. Moving the keyboard to the chat adds nothing by itself. Runs the
+/// real `claude` in this repository on a file under `target`. `cargo test -- --ignored line_comment`.
+fn line_comment_into_the_message_box() {
     let data = tempfile::tempdir().unwrap();
     // SAFETY: set before any other thread reads the environment; this test owns the process.
     unsafe { std::env::set_var("CLAUDIU_DATA_DIR", data.path()) };
     let root = dunce::canonicalize(env!("CARGO_MANIFEST_DIR")).unwrap();
     let work = tempfile::tempdir_in(root.join("target")).unwrap();
     let code = work.path().join("code.rs");
-    std::fs::write(&code, "fn a() {}
-fn b() {}
-fn c() {}
-").unwrap();
-    let mention = format!("@{}#L2", crate::app::picker::relative(&dunce::canonicalize(&code).unwrap(), &root));
+    std::fs::write(&code, "fn a() {}\nfn b() {}\nfn c() {}\n").unwrap();
+    let path = crate::app::picker::relative(&dunce::canonicalize(&code).unwrap(), &root);
 
     let mut cx = TestAppContext::single();
     cx.update(|app| {
@@ -634,7 +630,6 @@ fn c() {}
     let (window, ws) = cx
         .update(|app| gpui_kit::open_window(Default::default(), app, |window, app| app.new(|cx| Workspace::new(window, vec![], cx))))
         .unwrap();
-    // Focus changes are only reported in an active window.
     cx.update_window(window, |_, window, _| window.activate_window()).unwrap();
     let draw = |cx: &mut TestAppContext| {
         cx.update_window(window, |_, window, app| window.draw(app).clear(app)).unwrap();
@@ -654,7 +649,7 @@ fn c() {}
     };
     act(&mut cx, &|ws, w, cx| ws.new_claude(root.clone(), w, cx));
     let id = ws.read_with(&cx, |ws, _| ws.active.clone().unwrap());
-    let screen = |ws: &Workspace, app: &App| ws.live_view(&id).unwrap().thread().unwrap().read(app).draft(app);
+    let draft = |ws: &Workspace, app: &App| ws.live_view(&id).unwrap().thread().unwrap().read(app).draft(app);
     wait(&mut cx, "the session to open", &|ws, app| !ws.live_view(&id).unwrap().is_loading(app));
     act(&mut cx, &|ws, w, cx| ws.toggle_editor(w, cx));
     wait(&mut cx, "the editor pane", &|ws, _| ws.panes.contains_key(&id));
@@ -665,41 +660,24 @@ fn c() {}
         b.focus(w, cx);
         b.set_selected_range(10..20, cx);
     }));
+    act(&mut cx, &|ws, w, cx| ws.focus_active(w, cx));
+    assert_eq!(ws.read_with(&cx, |ws, app| draft(ws, app)), "", "moving to the chat adds nothing");
 
-    act(&mut cx, &|ws, w, cx| ws.focus_active(w, cx));
-    wait(&mut cx, "the reference in Claude's input", &|ws, app| screen(ws, app).contains(&mention));
-    act(&mut cx, &|_, w, cx| buffer.update(cx, |b, cx| b.focus(w, cx)));
-    wait(&mut cx, "the untouched reference taken back", &|ws, app| !screen(ws, app).contains(&mention));
-
-    // Typed after: it stays, and coming back with the same lines selected doesn't add it again.
-    act(&mut cx, &|ws, w, cx| ws.focus_active(w, cx));
-    wait(&mut cx, "the reference again", &|ws, app| screen(ws, app).contains(&mention));
-    act(&mut cx, &|ws, w, cx| ws.live_view(&id).unwrap().thread().unwrap().clone().update(cx, |v, cx| v.paste_text("explain", w, cx)));
-    wait(&mut cx, "the typed request", &|ws, app| screen(ws, app).contains("explain"));
-    act(&mut cx, &|_, w, cx| buffer.update(cx, |b, cx| b.focus(w, cx)));
-    act(&mut cx, &|ws, w, cx| ws.focus_active(w, cx));
-    std::thread::sleep(Duration::from_secs(1));
+    act(&mut cx, &|ws, w, cx| ws.live_view(&id).unwrap().thread().unwrap().clone().update(cx, |v, cx| v.paste_text("look at these", w, cx)));
+    act(&mut cx, &|ws, w, cx| ws.start_line_comment(0, gpui::point(gpui::px(100.0), gpui::px(100.0)), w, cx));
+    let input = ws.read_with(&cx, |ws, _| ws.panes[&id].comment.as_ref().expect("the comment box is up").input.clone());
+    act(&mut cx, &|_, w, cx| input.update(cx, |i, cx| i.set_value("why two?", w, cx)));
+    cx.simulate_keystrokes(window, "enter");
     draw(&mut cx);
-    assert_eq!(ws.read_with(&cx, |ws, app| screen(ws, app).matches(&mention).count()), 1, "kept once: {}", ws.read_with(&cx, |ws, app| screen(ws, app)));
-
-    // After text the user typed first, the reference follows it on the same line.
-    act(&mut cx, &|_, w, cx| buffer.update(cx, |b, cx| {
-        b.focus(w, cx);
-        b.set_selected_range(0..20, cx);
-    }));
-    act(&mut cx, &|ws, w, cx| ws.focus_active(w, cx));
-    let both = format!("@{}#L1-2", crate::app::picker::relative(&dunce::canonicalize(&code).unwrap(), &root));
-    wait(&mut cx, "the second reference", &|ws, app| screen(ws, app).contains(&both));
-    let lines = ws.read_with(&cx, |ws, app| screen(ws, app));
-    // After the user's text, on the same line with a space: the user starts a new line themselves when they want one.
-    assert!(lines.contains(&format!("explain {both}:")), "after the typed text: {lines}");
+    assert!(ws.read_with(&cx, |ws, _| ws.panes[&id].comment.is_none()), "Enter closes the box");
+    assert_eq!(ws.read_with(&cx, |ws, app| draft(ws, app)), format!("look at these\n@{path}#L2: why two?"), "the selection, not the line clicked");
     act(&mut cx, &|ws, w, cx| ws.close_live(&id, w, cx));
 }
 
 #[test]
 #[ignore]
-fn selection_reference() {
-    let t = std::thread::spawn(selection_reference_in_claudes_input);
+fn line_comment() {
+    let t = std::thread::spawn(line_comment_into_the_message_box);
     let start = std::time::Instant::now();
     while !t.is_finished() {
         assert!(start.elapsed() < Duration::from_secs(180), "the workspace froze");

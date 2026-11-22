@@ -50,8 +50,6 @@ impl Workspace {
             return;
         };
         view.update(cx, |v, cx| v.send(text.to_string(), window, cx));
-        // Only a change of focus raises `on_terminal_focus`; otherwise the flag would outlive this request.
-        self.skip_selection_reference = !view.focus_handle(cx).is_focused(window);
         self.focus_active(window, cx);
     }
 

@@ -416,8 +416,7 @@ impl Workspace {
         if let Some(meta) = self.store.session_mut(&id).and_then(|r| r.claude.as_mut()) {
             meta.account = Some(account.clone());
         }
-        let _focus = self.watch_terminal_focus(&id, &view.focus_handle(cx), window, cx);
-        self.live.push(Live { id: id.clone(), view, _sub: sub, _focus, claude_name, account });
+        self.live.push(Live { id: id.clone(), view, _sub: sub, claude_name, account });
         self.activate(&id, cx);
         self.remember(&id);
         self.selected = Some(id.clone());

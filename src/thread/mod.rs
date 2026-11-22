@@ -155,9 +155,6 @@ pub struct ThreadView {
     /// Where Up has got to among the messages sent before, and what was typed before it started.
     history_at: Option<usize>,
     draft: String,
-    /// A reference editor mode put in the composer, taken out again if the user leaves without typing: the
-    /// composer's text before it, and the whole text with it.
-    reference: Option<(String, String)>,
     list: ListState,
     /// How many rows the list has measured.
     rows: usize,
@@ -218,9 +215,6 @@ impl ThreadView {
                 InputEvent::PressEnter { .. } => v.submit(window, cx),
                 InputEvent::Change => {
                     v.command_highlight = 0;
-                    if v.reference.as_ref().is_some_and(|(_, with)| v.composer.read(cx).value().as_ref() != with) {
-                        v.reference = None;
-                    }
                     cx.notify();
                 }
                 _ => {}
@@ -263,7 +257,6 @@ impl ThreadView {
             composer,
             history_at: None,
             draft: String::new(),
-            reference: None,
             list: ListState::new(rows, ListAlignment::Bottom, px(600.0)),
             rows,
             detail: false,
@@ -462,7 +455,6 @@ impl ThreadView {
         }
         self.composer.update(cx, |c, cx| c.set_value("", window, cx));
         self.history_at = None;
-        self.reference = None;
         self.picker = None;
         if let Some(target) = self.pending_model.take().filter(|m| m.harness != self.harness) {
             let effort = self.pending_effort.take();
@@ -991,25 +983,10 @@ impl ThreadView {
         self.paste_text(&format!("{} ", mentions.join(" ")), window, cx);
     }
 
-    /// Editor mode's `@path#L12-30: ` for the selected lines, after whatever the composer holds. Whether it went in.
-    pub fn insert_reference(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        if self.reference.is_some() || self.is_loading() {
-            return false;
-        }
-        let before = self.draft(cx);
-        let with = with_reference(&before, text);
+    /// Editor mode's `@path#L12-30: comment`, after whatever the composer holds.
+    pub fn add_comment(&mut self, comment: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let with = with_comment(&self.draft(cx), comment);
         self.set_draft(&with, window, cx);
-        self.reference = Some((before, with));
-        true
-    }
-
-    /// Take the reference out again when nothing was typed after it.
-    pub fn withdraw_reference(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some((before, with)) = self.reference.take()
-            && self.draft(cx) == with
-        {
-            self.set_draft(&before, window, cx);
-        }
     }
 
     /// What the composer holds.
@@ -1020,10 +997,6 @@ impl ThreadView {
     #[cfg(test)]
     pub fn has_card(&self, call: &str) -> bool {
         self.cards.contains_key(call)
-    }
-
-    pub fn input_holds(&self, text: &str, cx: &App) -> bool {
-        self.composer.read(cx).value().contains(text)
     }
 
     /// A `show_visual` card, drawn under the tool call that made it.
@@ -1060,11 +1033,10 @@ async fn open(c: &Connection, harness: Harness, start: &Start) -> Result<(String
     }
 }
 
-/// `reference: ` after the text typed so far, on the same line with a space, so the user types their comment after
-/// it; they start a new line themselves when they want one.
-fn with_reference(typed: &str, reference: &str) -> String {
+/// `comment` after the text typed so far, on a line of its own, so several comments read as a list.
+fn with_comment(typed: &str, comment: &str) -> String {
     let typed = typed.trim_end();
-    if typed.is_empty() { format!("{reference}: ") } else { format!("{typed} {reference}: ") }
+    if typed.is_empty() { comment.to_string() } else { format!("{typed}\n{comment}") }
 }
 
 fn str_of(value: &Value, key: &str) -> String {
@@ -1073,11 +1045,11 @@ fn str_of(value: &Value, key: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::with_reference;
+    use super::with_comment;
 
     #[test]
-    fn a_reference_follows_what_was_typed() {
-        assert_eq!(with_reference("", "@a.rs#L1"), "@a.rs#L1: ");
-        assert_eq!(with_reference("explain \n", "@a.rs#L1"), "explain @a.rs#L1: ");
+    fn a_comment_goes_on_its_own_line_after_what_was_typed() {
+        assert_eq!(with_comment("", "@a.rs#L1: why"), "@a.rs#L1: why");
+        assert_eq!(with_comment("look at these \n", "@a.rs#L1: why"), "look at these\n@a.rs#L1: why");
     }
 }

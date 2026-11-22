@@ -60,7 +60,8 @@ mod navigation;
 pub mod picker;
 mod pickup;
 mod repo;
-mod selection_reference;
+mod line_comment;
+pub use line_comment::LineComment;
 mod sessions;
 mod settings;
 mod setup;
@@ -483,7 +484,6 @@ pub struct Live {
     pub id: Id,
     pub view: SessionView,
     pub _sub: Subscription,
-    pub _focus: [Subscription; 2],
     /// The session name Claude Code was last given (`--name` or `/rename`), so a changed title is sent once.
     pub claude_name: Option<String>,
     /// The account this process was started under; a session on another account than the active one can be handed off.
@@ -672,9 +672,6 @@ pub struct Workspace {
     pub root_focus: FocusHandle,
     /// Up/Down/Enter in the open workspace dropdown (`panels::picker::Choices`).
     pub picker_nav: crate::panels::picker::Nav,
-    /// Set when an Ask Claude request moves the keyboard to the terminal, so that arrival doesn't also put the editor's
-    /// selection into Claude's input (`selection_reference`).
-    pub(crate) skip_selection_reference: bool,
     pub modal: Option<Modal>,
     pub modal_focus: FocusHandle,
     /// The Settings category last shown. Kept here because opening Settings builds the modal anew; not saved to disk.
@@ -828,7 +825,6 @@ impl Workspace {
             search_input,
             root_focus: cx.focus_handle(),
             picker_nav: Default::default(),
-            skip_selection_reference: false,
             modal: None,
             modal_focus: cx.focus_handle(),
             settings_page: SettingsPage::default(),

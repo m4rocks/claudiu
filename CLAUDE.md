@@ -42,7 +42,7 @@ Leave nothing behind but the change: no summary files, commented-out code, debug
 
 ## Boundaries
 
-Agents run as ACP servers and show in Claudiu's chat view (`harness/`, `thread/`); no agent runs in a PTY. The shell panel (Ctrl+J and the welcome screen's shell) is the only PTY, and Claudiu never types into it. In editor mode, moving the keyboard to the chat while lines are selected puts `@path#L12-30: ` into its message box, and leaving without typing takes it out again (`thread/mod.rs`, `app/selection_reference.rs`). Running an agent in a PTY, or typing into the shell, needs the maintainer's decision first.
+Agents run as ACP servers and show in Claudiu's chat view (`harness/`, `thread/`); no agent runs in a PTY. The shell panel (Ctrl+J and the welcome screen's shell) is the only PTY, and Claudiu never types into it. In editor mode, the comment button beside the selected or hovered line adds `@path#L12-30: comment` to the chat's message box, or sends it with Cmd/Ctrl+Enter (`app/line_comment.rs`). Running an agent in a PTY, or typing into the shell, needs the maintainer's decision first.
 
 ## Enforced rules
 

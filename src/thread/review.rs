@@ -5,11 +5,12 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use gpui::{AppContext, Subscription, ClickEvent, Context, Div, Entity, FontWeight, InteractiveElement, IntoElement, KeyDownEvent, ParentElement, SharedString, StatefulInteractiveElement, Styled, Window, div, prelude::FluentBuilder, px};
-use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui::{Subscription, ClickEvent, Context, Div, Entity, FontWeight, InteractiveElement, IntoElement, KeyDownEvent, ParentElement, SharedString, StatefulInteractiveElement, Styled, Window, div, prelude::FluentBuilder, px};
+use gpui_kit::component::input::{InputEvent, InputState};
 
 use super::ThreadView;
 use crate::git::snapshot::{self, FileChange, Hunk};
+use crate::panels::comment_box::{comment_box, comment_input};
 use crate::panels::scale;
 use crate::panels::theme::{self, hsla};
 use crate::panels::widgets::{button, spinner};
@@ -140,12 +141,14 @@ impl ThreadView {
     }
 
     fn start_comment(&mut self, path: PathBuf, line: u32, window: &mut Window, cx: &mut Context<Self>) {
-        let input = cx.new(|cx| InputState::new(window, cx).placeholder(format!("Comment on line {line}")));
-        input.update(cx, |i, cx| i.focus(window, cx));
+        let input = comment_input(&format!("line {line}"), window, cx);
         let sub = cx.subscribe_in(&input, window, |v: &mut Self, input, ev: &InputEvent, window, cx| {
-            if let InputEvent::PressEnter { .. } = ev {
+            if let InputEvent::PressEnter { secondary, .. } = ev {
                 let text = input.read(cx).value().trim().to_string();
                 v.finish_comment(text, window, cx);
+                if *secondary {
+                    v.send_comments(window, cx);
+                }
             }
         });
         if let Some(review) = &mut self.review {
@@ -276,7 +279,7 @@ impl ThreadView {
                                     cx.stop_propagation();
                                 }
                             }))
-                            .child(Input::new(input)),
+                            .child(comment_box(input, "keeps it", "sends all")),
                     );
                 }
             }

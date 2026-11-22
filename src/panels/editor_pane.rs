@@ -2,7 +2,7 @@
 
 use gpui::{
     AnyElement, ClickEvent, Context, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, ParentElement, SharedString, StatefulInteractiveElement, Styled,
-    div, prelude::FluentBuilder, px,
+    anchored, deferred, div, prelude::FluentBuilder, px,
 };
 use gpui_kit::assets::IconName;
 use gpui_kit::component::input::{Editor, EditorState, Input, RopeExt};
@@ -13,9 +13,10 @@ use gpui_kit::component::tree::tree;
 use crate::app::picker::{Picker, PickerKind, relative};
 use crate::app::editing::Conflict;
 use crate::files::Change;
-use crate::app::{Act, Ask, AskExplain, AskFix, AskFixProblem, AskTests, EditorCommand, EditorPane, MenuItem, GoBack, GoForward, GoToLine, QuickOpen, SaveFile, Tab, Workspace, CloseTab};
+use crate::app::{Act, Ask, AskExplain, AskFix, AskFixProblem, AskTests, EditorCommand, EditorPane, MenuItem, GoBack, GoForward, GoToLine, QuickOpen, SaveFile, Tab, Workspace, CloseTab, LineComment};
 use crate::panels::glide::Follow;
 use crate::panels::theme::{self, hsla};
+use crate::panels::comment_box::comment_box;
 use crate::panels::widgets::{button, icon};
 use crate::platform::path_key;
 
@@ -25,6 +26,7 @@ impl Workspace {
     pub fn render_editor_pane(&mut self, window: &mut gpui::Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let ws = cx.entity().downgrade();
         let menu_ws = ws.clone();
+        let comment_ws = ws.clone();
         let server = self.active_id().cloned().and_then(|id| self.server_status(&id));
         let (id, pane) = self.shown_pane(cx)?;
         let tabs = render_tabs(&id, pane, window, cx);
@@ -106,7 +108,8 @@ impl Workspace {
                             let _ = menu_ws.update(cx, |ws, cx| ws.open_menu(at, editor_menu(), cx));
                             menu
                         }))
-                        .child(change_marks(tab.buffer.clone(), tab.marks.clone(), tab.follow.clone())),
+                        .child(change_marks(tab.buffer.clone(), tab.marks.clone(), tab.follow.clone()))
+                        .child(comment_button(tab.buffer.clone(), tab.hovered_line.clone(), comment_ws.clone())),
                 )
                 .children(server.map(|s| {
                     div()
@@ -126,6 +129,7 @@ impl Workspace {
             None => centered("Pick a file on the left, or press Ctrl+P.".into()),
         };
         let picker = pane.picker.as_ref().map(|p| render_picker(p, &pane.root, cx));
+        let comment = pane.comment.as_ref().map(|c| render_comment(c, cx));
         Some(
             div()
                 .id("editor-pane")
@@ -189,6 +193,7 @@ impl Workspace {
                         .child(div().flex_1().min_h_0().child(body)),
                 )
                 .children(picker)
+                .children(comment)
                 .into_any_element(),
         )
     }
@@ -206,15 +211,110 @@ fn editor_menu() -> Vec<MenuItem> {
         entry("Copy", EditorCommand::Copy),
         entry("Paste", EditorCommand::Paste),
         entry("Select All", EditorCommand::SelectAll),
-        entry("Ask Claude to explain this", EditorCommand::Ask(Ask::Explain)),
-        entry("Ask Claude to fix this", EditorCommand::Ask(Ask::Fix)),
-        entry("Ask Claude to write tests for this", EditorCommand::Ask(Ask::Tests)),
-        entry("Ask Claude to fix the problem on this line", EditorCommand::Ask(Ask::Problem)),
+        entry("Explain this", EditorCommand::Ask(Ask::Explain)),
+        entry("Fix this", EditorCommand::Ask(Ask::Fix)),
+        entry("Write tests for this", EditorCommand::Ask(Ask::Tests)),
+        entry("Fix the problem on this line", EditorCommand::Ask(Ask::Problem)),
     ];
     for ix in [1, 5] {
         items[ix].separator_before = true;
     }
     items
+}
+
+/// The comment box beside the lines it is about (`app::line_comment`). Esc, or a click elsewhere with nothing typed,
+/// closes it; a click elsewhere keeps typed text, so it isn't lost to a stray click.
+fn render_comment(comment: &LineComment, cx: &mut Context<Workspace>) -> AnyElement {
+    let input = comment.input.clone();
+    deferred(
+        anchored().position(comment.at).snap_to_window_with_margin(px(8.0)).child(
+            div()
+                .id("line-comment")
+                .w(px(380.0))
+                .occlude()
+                .on_key_down(cx.listener(|ws, ev: &KeyDownEvent, window, cx| {
+                    if ev.keystroke.key == "escape" {
+                        ws.finish_line_comment("", false, window, cx);
+                        cx.stop_propagation();
+                    }
+                }))
+                .on_mouse_down_out(cx.listener(move |ws, _: &MouseDownEvent, window, cx| {
+                    if input.read(cx).value().trim().is_empty() {
+                        ws.finish_line_comment("", false, window, cx);
+                    }
+                }))
+                .child(comment_box(&comment.input, "adds it to your message", "sends it")),
+        ),
+    )
+    .with_priority(20)
+    .into_any_element()
+}
+
+/// The button that opens the comment box: in the gutter beside the selection's first line, or beside the line under the
+/// mouse when nothing is selected. Painted over the editor like `change_marks`, since the editor has no gutter of its
+/// own to put an element in.
+fn comment_button(buffer: gpui::Entity<EditorState>, hovered: std::rc::Rc<std::cell::Cell<Option<usize>>>, ws: gpui::WeakEntity<Workspace>) -> impl IntoElement {
+    const SIZE: f32 = 16.0;
+    gpui::canvas(
+        |_, _, _| (),
+        move |viewport, _, window, cx| {
+            let (move_buffer, move_hovered, view) = (buffer.clone(), hovered.clone(), window.current_view());
+            window.on_mouse_event(move |ev: &gpui::MouseMoveEvent, phase, _, cx| {
+                if phase != gpui::DispatchPhase::Bubble {
+                    return;
+                }
+                let line = viewport.contains(&ev.position).then(|| line_at(move_buffer.read(cx), ev.position.y)).flatten();
+                if move_hovered.replace(line) != line {
+                    cx.notify(view);
+                }
+            });
+            let editor = buffer.read(cx);
+            let (Some(area), Some(visible)) = (editor.text_bounds(), editor.visible_row_range()) else { return };
+            let text = editor.text();
+            let range = editor.selected_range();
+            let line = if range.is_empty() { hovered.get() } else { Some(text.offset_to_point(range.start).row) };
+            let Some(line) = line.filter(|l| visible.contains(l) && *l < text.lines_len()) else { return };
+            let start = text.line_start_offset(line);
+            let Some(row) = editor.range_to_bounds(&(start..start)) else { return };
+            let top = row.origin.y + (row.size.height - px(SIZE)) / 2.0;
+            let button = gpui::Bounds::new(gpui::point(area.origin.x + px(6.0), top), gpui::size(px(SIZE), px(SIZE)));
+            if !viewport.intersects(&button) {
+                return;
+            }
+            let over = button.contains(&window.mouse_position());
+            window.with_content_mask(Some(gpui::ContentMask { bounds: viewport }), |window| {
+                let bg = if over { theme::TEXT_FAINT } else { theme::FOCUS_BORDER };
+                window.paint_quad(gpui::fill(button, hsla(bg)).corner_radii(px(4.0)));
+                let c = button.center();
+                window.paint_quad(gpui::fill(gpui::Bounds::new(gpui::point(c.x - px(4.0), c.y - px(0.75)), gpui::size(px(8.0), px(1.5))), hsla(theme::TEXT)));
+                window.paint_quad(gpui::fill(gpui::Bounds::new(gpui::point(c.x - px(0.75), c.y - px(4.0)), gpui::size(px(1.5), px(8.0))), hsla(theme::TEXT)));
+            });
+            let ws = ws.clone();
+            window.on_mouse_event(move |ev: &MouseDownEvent, phase, window, cx| {
+                if phase != gpui::DispatchPhase::Capture || ev.button != MouseButton::Left || !button.contains(&ev.position) {
+                    return;
+                }
+                // Taken before the editor sees it, which would otherwise drop the selection the comment is about.
+                cx.stop_propagation();
+                let at = gpui::point(button.right() + px(6.0), button.top());
+                let _ = ws.update(cx, |ws, cx| ws.start_line_comment(line, at, window, cx));
+            });
+        },
+    )
+    .absolute()
+    .top_0()
+    .left_0()
+    .size_full()
+}
+
+/// The line drawn at height `y` in the window, among those on screen.
+fn line_at(editor: &EditorState, y: gpui::Pixels) -> Option<usize> {
+    let visible = editor.visible_row_range()?;
+    let text = editor.text();
+    (visible.start..=visible.end).take_while(|&l| l < text.lines_len()).find(|&l| {
+        let start = text.line_start_offset(l);
+        editor.range_to_bounds(&(start..text.line_end_offset(l))).is_some_and(|b| b.origin.y <= y && y < b.origin.y + b.size.height)
+    })
 }
 
 /// The text scrolls through the editor's own offset, which the editor clamps itself. The wheel is taken before the editor
