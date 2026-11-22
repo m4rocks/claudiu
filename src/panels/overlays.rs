@@ -231,6 +231,7 @@ impl Workspace {
         let id = pop.id.clone();
         let thread = self.live_view(&id)?.thread()?;
         let question = thread.read(cx).pending_question()?;
+        let question_id = question.id;
         let session_title = self.store.session(&id).map(|r| r.display_title().to_string()).unwrap_or_else(|| "Session".into());
 
         let viewport = window.viewport_size();
@@ -245,7 +246,7 @@ impl Workspace {
             let primary = opt.kind == "allow_once" && i == 0;
             let answer_id = id.clone();
             let row = div()
-                .id(gpui::SharedString::from(format!("sidebar-q-opt-{i}")))
+                .id(gpui::SharedString::from(format!("sidebar-q-opt-{question_id}-{i}")))
                 .w_full()
                 .px(px(10.0))
                 .py(px(7.0))
@@ -262,7 +263,7 @@ impl Workspace {
                 .children(opt.description.clone().map(|desc| div().text_size(scaled(11.0)).text_color(hsla(theme::TEXT_DIM)).child(desc)))
                 .on_click(cx.listener(move |ws, _: &ClickEvent, _w, cx| {
                     cx.stop_propagation();
-                    ws.answer_session_question(&answer_id, Some(i), cx);
+                    ws.answer_session_question(&answer_id, question_id, Some(i), cx);
                 }));
             options = options.child(row);
         }
@@ -325,7 +326,7 @@ impl Workspace {
                     .child(
                         button("sidebar-q-decline", "Decline", false).h(px(24.0)).on_click(cx.listener(move |ws, _: &ClickEvent, _w, cx| {
                             cx.stop_propagation();
-                            ws.answer_session_question(&decline_id, None, cx);
+                            ws.answer_session_question(&decline_id, question_id, None, cx);
                         })),
                     )
                     .child(

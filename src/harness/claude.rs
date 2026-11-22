@@ -12,8 +12,9 @@ use super::{Adapter, Reopen, Server};
 
 /// The bridge's files, embedded in the binary. The lockfile pins the SDK, so an SDK change reaches users only with a
 /// m4code release.
-const FILES: [(&str, &str); 3] = [
+const FILES: [(&str, &str); 4] = [
     ("claude.mjs", include_str!("../../bridge/claude.mjs")),
+    ("background-shells.mjs", include_str!("../../bridge/background-shells.mjs")),
     ("package.json", include_str!("../../bridge/package.json")),
     ("package-lock.json", include_str!("../../bridge/package-lock.json")),
 ];

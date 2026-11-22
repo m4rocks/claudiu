@@ -547,7 +547,11 @@ impl Workspace {
     /// A Claude session that never produced a transcript (opened and closed without a prompt) has nothing
     /// to resume. Remove m4code's own record of it; Claude Code's data is never touched.
     fn drop_if_empty(&mut self, id: &str) {
-        if self.ephemeral.remove(id) {
+        let ephemeral = self.ephemeral.remove(id);
+        if crate::thread::has_saved_queue(id) {
+            return;
+        }
+        if ephemeral {
             self.store.data.sessions.retain(|s| s.id != id);
             if self.selected.as_deref() == Some(id) {
                 self.selected = None;
@@ -671,7 +675,7 @@ impl Workspace {
         }
         let was_active = self.active_id().is_some_and(|a| a == id);
         if let Some(thread) = self.live_view(id).and_then(|view| view.thread()) {
-            thread.read(cx).stop();
+            thread.update(cx, |view, _| view.stop());
         }
         self.live.retain(|l| l.id != id); // dropping the view drops the Terminal, which closes the PTY
         self.shells.remove(id);

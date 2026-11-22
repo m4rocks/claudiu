@@ -128,8 +128,13 @@ impl Workspace {
             target.update(cx, |view, _| view.relinquish_record());
         }
         self.live.retain(|live| live.id != id);
-        if let (Some(source), Some(draft)) = (pending.source.view.thread(), pending.draft) {
-            source.update(cx, |view, cx| view.paste_text(&draft, window, cx));
+        if let Some(source) = pending.source.view.thread() {
+            source.update(cx, |view, cx| {
+                view.restore_queue_after_handoff(cx);
+                if let Some(draft) = pending.draft {
+                    view.paste_text(&draft, window, cx);
+                }
+            });
         }
         self.live.push(pending.source);
         self.toast(format!("Handoff failed; the original session is still open. {error}"), true, cx);
@@ -145,7 +150,7 @@ impl Workspace {
                 target.update(cx, |view, _| view.relinquish_record());
             }
             if let Some(source) = pending.source.view.thread() {
-                source.read(cx).stop();
+                source.update(cx, |view, _| view.stop());
             }
         }
     }

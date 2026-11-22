@@ -900,16 +900,14 @@ impl Workspace {
 
     /// Answer (or decline when `choice` is `None`) a session's pending question directly from the sidebar popover
     /// without switching the active view to that session.
-    pub fn answer_session_question(&mut self, id: &str, choice: Option<usize>, cx: &mut Context<Self>) {
-        if let Some(thread) = self.live_view(id).and_then(|v| v.thread()).cloned() {
-            thread.update(cx, |v, cx| match choice {
-                Some(ix) => v.answer(Some(ix), cx),
-                None => v.decline(cx),
-            });
+    pub fn answer_session_question(&mut self, id: &str, question: uuid::Uuid, choice: Option<usize>, cx: &mut Context<Self>) {
+        let Some(thread) = self.live_view(id).and_then(|v| v.thread()).cloned() else { return };
+        if !thread.update(cx, |v, cx| v.answer_question(question, choice, cx)) {
+            return;
         }
         self.question_popover = None;
         self.question_popover_hovered = false;
-        if self.activity.get(id) == Some(&Activity::Waiting) {
+        if self.activity.get(id) == Some(&Activity::Waiting) && !thread.read(cx).is_waiting() {
             self.activity.insert(id.to_string(), Activity::Working);
         }
         cx.notify();

@@ -669,7 +669,7 @@ fn handing_a_session_to_another_agent() {
     );
     ws.read_with(&cx, |ws, _| {
         let rec = ws.store.session(&first).unwrap();
-        assert_eq!((rec.claude.as_ref().unwrap().harness, &rec.cwd), (crate::harness::Harness::Codex, &cwd));
+        assert_eq!((rec.claude.as_ref().unwrap().harness, &rec.cwd), (crate::harness::Harness::Claude, &cwd));
     });
     wait(&mut cx, "the hand-off message", &|_, _| {
         std::fs::read_to_string(&prompts).is_ok_and(|p| {
@@ -677,6 +677,10 @@ fn handing_a_session_to_another_agent() {
                 && p.contains("User: plan the change\n\nAgent: ok")
                 && p.contains("User's next message:\nimplement step 2")
         })
+    });
+    ws.read_with(&cx, |ws, _| {
+        let rec = ws.store.session(&first).unwrap();
+        assert_eq!((rec.claude.as_ref().unwrap().harness, &rec.cwd), (crate::harness::Harness::Codex, &cwd));
     });
 }
 

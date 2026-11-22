@@ -9,6 +9,7 @@
 
 import { randomUUID } from "node:crypto";
 import { createInterface } from "node:readline";
+import { BackgroundShells, liveOutput, readOutput } from "./background-shells.mjs";
 
 import { getSessionMessages, listSessions, query } from "@anthropic-ai/claude-agent-sdk";
 
@@ -279,7 +280,14 @@ async function finishTurn(session, result) {
   if (turn) {
     const failed = result.is_error && !session.cancelled;
     if (failed) turn.reject(new Error(result.result || (result.errors ?? []).join("\n") || "Claude Code stopped with an error."));
-    else turn.resolve({ stopReason: stopReason(session, result), ...steersBack(session, turn, receipt) });
+    else {
+      if (session.cancelled) {
+        for (const uuid of receipt?.still_queued ?? []) {
+          if (turn.steers.has(uuid) && !turn.shown.has(uuid)) session.dropping.add(uuid);
+        }
+      }
+      turn.resolve({ stopReason: stopReason(session, result) });
+    }
   }
   // The context size is only shown, so the turn ends without waiting for it.
   session.query
@@ -288,35 +296,45 @@ async function finishTurn(session, result) {
     .catch(() => {});
 }
 
-/**
- * The steers the turn ends without having answered, in the reply's `_meta.m4code`. `unread` are those Claude had not
- * read when the user stopped the turn: Claude Code keeps them and would run them as a turn of their own, which the
- * user just asked to stop, so the bridge stops that turn too (`dropping`) and m4code puts their text back in the
- * message box. `resend` are those Claude dropped unread on its own, which m4code sends as the next turn.
- */
-function steersBack(session, turn, receipt) {
-  const stillQueued = new Set(receipt?.still_queued ?? []);
-  const unread = [...turn.waiting].filter((uuid) => turn.steers.has(uuid) && !turn.shown.has(uuid) && stillQueued.has(uuid));
-  for (const uuid of unread) session.dropping.add(uuid);
-  const back = {};
-  if (unread.length) back.unread = unread.map((uuid) => turn.steers.get(uuid));
-  if (turn.dropped.length) back.resend = turn.dropped;
-  return Object.keys(back).length ? { _meta: { m4code: back } } : {};
-}
-
 /** Claude Code says it took a steer off its queue without reading it (the states t3code treats the same way). */
 function steerDropped(session, m) {
   const turn = session.turn;
   if (!turn || session.cancelled || !["cancelled", "discarded", "refused"].includes(m.state) || !turn.steers.has(m.command_uuid)) return;
   if (!turn.waiting.delete(m.command_uuid)) return;
-  turn.dropped.push(turn.steers.get(m.command_uuid));
+  turn.steers.delete(m.command_uuid);
   if (turn.waiting.size === 0 && turn.held) return finishTurn(session, turn.held);
+}
+
+function publishShells(session) {
+  const shells = [...session.shells.active.values()].map(({ id, label }) => ({ id, label }));
+  update(session.id, { sessionUpdate: "_m4code/background_shells", shells });
+}
+
+async function finishShell(session, message) {
+  const shell = session.shells.finish(message);
+  if (!shell?.backgrounded) return;
+  publishShells(session);
+  const output = await readOutput(message.output_file);
+  update(session.id, {
+    sessionUpdate: "tool_call",
+    toolCallId: `background-shell-${shell.id}`,
+    kind: "execute",
+    _meta: { m4code: { backgroundShell: true } },
+    title: shell.label,
+    status: message.status === "completed" ? "completed" : "failed",
+    content: [{ type: "content", content: { type: "text", text: [message.summary, output].filter(Boolean).join("\n\n") } }],
+  });
 }
 
 /** The session's messages from the SDK, as updates to m4code, until the session ends. */
 async function pump(session) {
+  let errorText;
   try {
     for await (const m of session.query) {
+      if (m.type === "system") {
+        if (session.shells.update(m)) publishShells(session);
+        if (m.subtype === "task_notification") await finishShell(session, m);
+      }
       if (session.dropping.size && !session.turn) {
         if (m.type === "result") {
           for (const uuid of answeredBy(m) ?? [...session.dropping]) session.dropping.delete(uuid);
@@ -371,6 +389,7 @@ async function pump(session) {
       }
     }
   } catch (error) {
+    errorText = error?.message ?? String(error);
     session.turn?.reject(error);
     session.turn = null;
   }
@@ -378,12 +397,13 @@ async function pump(session) {
   session.turn?.reject(new Error("Claude Code stopped before it finished the turn."));
   session.turn = null;
   sessions.delete(session.id);
+  update(session.id, { sessionUpdate: "_m4code/session_ended", error: errorText });
 }
 
 async function open(params, resume) {
   const id = resume ?? randomUUID();
   const extra = params._meta?.claudeCode?.options ?? {};
-  const session = { id, cwd: params.cwd, inbox: new Inbox(), tools: new Map(), streamed: new Set(), turn: null, cancelled: false, interrupted: null, dropping: new Set(), dropInterrupted: false, dropsDone: null, mode: "default", model: "", effort: "medium", models: [] };
+  const session = { id, cwd: params.cwd, inbox: new Inbox(), tools: new Map(), streamed: new Set(), shells: new BackgroundShells(), turn: null, cancelled: false, interrupted: null, dropping: new Set(), dropInterrupted: false, dropsDone: null, mode: "default", model: "", effort: "medium", models: [] };
   session.query = query({
     prompt: session.inbox,
     options: {
@@ -457,14 +477,17 @@ const handlers = {
   "session/prompt": async (p) => {
     const s = sessions.get(p.sessionId);
     if (!s) throw new Error("That session has ended.");
-    if (s.turn) throw new Error("A turn is already running.");
+    if (s.turn || s.preparing) throw new Error("A turn is already running.");
     s.cancelled = false;
+    s.preparing = true;
     // Steers the user stopped still run in Claude Code first; this message waits until they are gone, so their
     // output and result can't be taken for its own.
     await afterDropped(s);
+    s.preparing = false;
+    if (s.cancelled) return { stopReason: "cancelled" };
     const text = (p.prompt ?? []).filter((c) => c.type === "text").map((c) => c.text).join("\n");
     const uuid = randomUUID();
-    const done = new Promise((resolve, reject) => (s.turn = { resolve, reject, waiting: new Set([uuid]), steers: new Map(), shown: new Set(), dropped: [], held: null }));
+    const done = new Promise((resolve, reject) => (s.turn = { resolve, reject, waiting: new Set([uuid]), steers: new Map(), shown: new Set(), held: null }));
     s.inbox.push(userMessage(s, text, uuid));
     return done;
   },
@@ -472,12 +495,21 @@ const handlers = {
     const s = sessions.get(p.sessionId);
     if (!s) throw new Error("That session has ended.");
     if (!s.turn || s.cancelled) throw new Error("No turn is running.");
-    const uuid = randomUUID();
+    const uuid = p.id;
     s.turn.waiting.add(uuid);
     s.turn.steers.set(uuid, p.text);
     // "next" waits for the tool calls running to finish; "now" would cancel them, as t3code found.
     s.inbox.push(userMessage(s, p.text, uuid, "next"));
     return {};
+  },
+  "_m4code/background_shell": async (p) => {
+    const session = sessions.get(p.sessionId);
+    if (!session?.shells.active.has(p.taskId)) throw new Error("That background shell has ended.");
+    if (p.action === "stop") {
+      await session.query.stopTask(p.taskId);
+      return {};
+    }
+    return { output: await liveOutput(session.cwd, session.id, p.taskId) };
   },
   "session/set_mode": async (p) => {
     const s = sessions.get(p.sessionId);
@@ -530,7 +562,7 @@ function showSteer(session, uuid) {
   const text = turn?.steers.get(uuid);
   if (text === undefined || turn.shown.has(uuid)) return;
   turn.shown.add(uuid);
-  update(session.id, { sessionUpdate: "user_message_chunk", content: { type: "text", text }, _meta: { m4code: { steer: true } } });
+  update(session.id, { sessionUpdate: "user_message_chunk", content: { type: "text", text }, _meta: { m4code: { steer: uuid } } });
 }
 
 /** Every steer not shown yet, oldest first: Claude is about to answer them, or just did. */
@@ -540,8 +572,9 @@ function showWaitingSteers(session, only) {
 
 function cancel(p) {
   const s = sessions.get(p.sessionId);
-  if (!s?.turn) return;
+  if (!s || (!s.turn && !s.preparing)) return;
   s.cancelled = true;
+  if (!s.turn) return;
   s.interrupted = s.query.interrupt().catch(() => undefined);
 }
 
