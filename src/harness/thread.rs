@@ -103,10 +103,19 @@ impl Thread {
     pub fn apply(&mut self, update: &Value) -> Option<usize> {
         let text = || update.pointer("/content/text").and_then(Value::as_str).unwrap_or_default();
         match update["sessionUpdate"].as_str().unwrap_or_default() {
-            "user_message_chunk" => return self.append(text(), Entry::User, |e| match e {
-                Entry::User(t) => Some(t),
-                _ => None,
-            }),
+            "user_message_chunk" => {
+                let at = self.append(text(), Entry::User, |e| match e {
+                    Entry::User(t) => Some(t),
+                    _ => None,
+                });
+                // A replayed hand-off arrives in pieces, so the whole message so far is checked each time.
+                if let Some(Entry::User(t)) = self.entries.last_mut()
+                    && let Some(typed) = typed_part(t)
+                {
+                    *t = typed.to_string();
+                }
+                return at;
+            }
             "agent_message_chunk" => return self.append(text(), Entry::Agent, |e| match e {
                 Entry::Agent(t) => Some(t),
                 _ => None,
@@ -206,7 +215,8 @@ impl Thread {
 
     /// Add what the user sent, and return where it went. Agents don't echo a live prompt back.
     pub fn sent(&mut self, text: impl Into<String>) -> usize {
-        self.entries.push(Entry::User(text.into()));
+        let text = text.into();
+        self.entries.push(Entry::User(typed_part(&text).map_or(text.clone(), String::from)));
         self.entries.len() - 1
     }
 
@@ -267,6 +277,37 @@ impl Thread {
 }
 
 /// Only the fields an update carries change; the rest of the call stays as it was.
+/// How much of the conversation a hand-off carries, newest kept: enough for the plan and recent steps, without
+/// filling the new agent's context.
+const HANDOFF_MAX_CHARS: usize = 40_000;
+const HANDOFF_OPENING: &str = "You are taking over work from a ";
+const HANDOFF_NEXT: &str = "\n\nUser's next message:\n";
+
+/// The first message a hand-off sends the new agent: `transcript` of the conversation so far, then `user_message`.
+/// The chat shows only `user_message` (see `typed_part`).
+pub fn handoff_prompt(from: &str, transcript: &str, user_message: &str) -> String {
+    let mut start = transcript.len().saturating_sub(HANDOFF_MAX_CHARS);
+    while !transcript.is_char_boundary(start) {
+        start += 1;
+    }
+    let cut = if start > 0 { "[earlier messages left out]\n\n" } else { "" };
+    format!(
+        "{HANDOFF_OPENING}{from} session in this folder. Its conversation so far is below; tool steps show as \
+         [kind: title]. Read it, check the current state of the files, then answer the user's next message.\n\n\
+         <conversation>\n{cut}{}\n</conversation>{HANDOFF_NEXT}{user_message}",
+        &transcript[start..]
+    )
+}
+
+/// What the user typed, from a message that may be a hand-off prompt: the transcript in front of it was already on
+/// screen, and copying it into the chat would also nest it into the next hand-off.
+fn typed_part(text: &str) -> Option<&str> {
+    if !text.starts_with(HANDOFF_OPENING) {
+        return None;
+    }
+    text.find(HANDOFF_NEXT).map(|at| &text[at + HANDOFF_NEXT.len()..])
+}
+
 fn merge_tool(call: &mut ToolCall, update: &Value) {
     if let Some(title) = update["title"].as_str() {
         call.title = title.to_string();
@@ -341,6 +382,36 @@ mod tests {
 
     fn chunk(kind: &str, text: &str) -> Value {
         json!({"sessionUpdate": kind, "content": {"type": "text", "text": text}})
+    }
+
+    #[test]
+    fn a_handoff_carries_the_conversation_and_the_new_message_keeping_the_end_when_long() {
+        let short = handoff_prompt("Claude Code", "User: plan it\n\nAgent: step 1", "now implement step 2");
+        assert!(short.contains("from a Claude Code session") && short.contains("<conversation>\nUser: plan it\n\nAgent: step 1\n</conversation>"));
+        assert!(short.ends_with("User's next message:\nnow implement step 2"));
+        assert!(!short.contains("left out"));
+
+        let long = format!("User: {}é the end", "x".repeat(HANDOFF_MAX_CHARS));
+        let message = handoff_prompt("Codex", &long, "finish up");
+        assert!(message.contains("[earlier messages left out]") && message.contains("é the end\n</conversation>"), "the newest part goes along");
+        assert!(message.ends_with("User's next message:\nfinish up"));
+        assert!(!message.contains("User: x"), "the oldest part is cut");
+    }
+
+    #[test]
+    fn a_hand_off_shows_only_the_message_the_user_typed() {
+        let prompt = handoff_prompt("Claude Code", "User: plan it\n\nAgent: step 1", "now implement step 2");
+        let mut live = Thread::default();
+        live.sent(prompt.clone());
+        assert_eq!(live.entries, [Entry::User("now implement step 2".into())]);
+
+        // Replayed after a restart, in pieces that split the wording.
+        let (head, tail) = prompt.split_at(prompt.len() - 25);
+        let replayed = thread(&[chunk("user_message_chunk", head), chunk("user_message_chunk", tail)]);
+        assert_eq!(replayed.entries, [Entry::User("now implement step 2".into())]);
+
+        let quoted = "What does \"User's next message:\" mean?";
+        assert_eq!(thread(&[chunk("user_message_chunk", quoted)]).entries, [Entry::User(quoted.into())], "an ordinary message stays whole");
     }
 
     #[test]

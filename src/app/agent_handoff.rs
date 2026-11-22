@@ -5,26 +5,8 @@
 use super::*;
 use crate::harness::thread::Entry;
 
-/// How much of the conversation goes along, newest kept: enough for the plan and recent steps, without filling the
-/// new agent's context.
-const MAX_CHARS: usize = 40_000;
 /// Entries read from the end before the cut, so a long session is not turned into text whole.
 const LAST_ENTRIES: usize = 400;
-
-/// The first message sent to the new harness when taking over an existing conversation along with the user's message.
-pub fn handoff_message_with_prompt(from: &str, transcript: &str, user_message: &str) -> String {
-    let mut start = transcript.len().saturating_sub(MAX_CHARS);
-    while !transcript.is_char_boundary(start) {
-        start += 1;
-    }
-    let cut = if start > 0 { "[earlier messages left out]\n\n" } else { "" };
-    format!(
-        "You are taking over work from a {from} session in this folder. Its conversation so far is below; tool steps \
-         show as [kind: title]. Read it, check the current state of the files, then answer the user's next message.\n\n\
-         <conversation>\n{cut}{}\n</conversation>\n\nUser's next message:\n{user_message}",
-        &transcript[start..]
-    )
-}
 
 impl Workspace {
     /// Switch session `id` in place to `to` (with an optional specific model & effort), carrying over the conversation
@@ -46,7 +28,7 @@ impl Workspace {
         let prompt = if transcript.trim().is_empty() {
             user_message
         } else {
-            handoff_message_with_prompt(from_name, &transcript, &user_message)
+            crate::harness::thread::handoff_prompt(from_name, &transcript, &user_message)
         };
         let mut meta = rec.claude.clone().unwrap_or_default();
         meta.harness = to;
@@ -69,24 +51,5 @@ impl Workspace {
             start.options.push(("thought_level", level));
         }
         self.start_thread(rec, start, false, window, cx);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_handoff_carries_the_conversation_and_the_new_message_keeping_the_end_when_long() {
-        let short = handoff_message_with_prompt("Claude Code", "User: plan it\n\nAgent: step 1", "now implement step 2");
-        assert!(short.contains("from a Claude Code session") && short.contains("<conversation>\nUser: plan it\n\nAgent: step 1\n</conversation>"));
-        assert!(short.ends_with("User's next message:\nnow implement step 2"));
-        assert!(!short.contains("left out"));
-
-        let long = format!("User: {}é the end", "x".repeat(MAX_CHARS));
-        let message = handoff_message_with_prompt("Codex", &long, "finish up");
-        assert!(message.contains("[earlier messages left out]") && message.contains("é the end\n</conversation>"), "the newest part goes along");
-        assert!(message.ends_with("User's next message:\nfinish up"));
-        assert!(!message.contains("User: x"), "the oldest part is cut");
     }
 }
