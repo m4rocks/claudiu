@@ -383,7 +383,7 @@ impl Workspace {
                 }
             }
             ThreadEvent::OpenPath(path, line) => ws.open_from_terminal(&sub_id, path, *line, window, cx),
-            ThreadEvent::Handoff { to, model, message, effort } => ws.dynamic_handoff(&sub_id, *to, model.clone(), message.clone(), effort.clone(), window, cx),
+            ThreadEvent::Handoff { to, model, message, effort, by_agent } => ws.dynamic_handoff(&sub_id, *to, model.clone(), message.clone(), *by_agent, effort.clone(), window, cx),
         });
         self.adopt_live(id, SessionView::Thread(view), sub, name, window, cx);
     }

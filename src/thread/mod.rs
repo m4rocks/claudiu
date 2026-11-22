@@ -69,7 +69,8 @@ pub enum ThreadEvent {
     /// A file a tool acted on was clicked: its path and line (1-based).
     OpenPath(String, Option<usize>),
     /// The user picked a model served by another harness and sent a message: dynamically hand off this chat.
-    Handoff { to: Harness, model: Option<String>, message: String, effort: Option<String> },
+    /// `by_agent` when the agent asked for it (set_model): its `message` is then the agent's, not the user's.
+    Handoff { to: Harness, model: Option<String>, message: String, effort: Option<String>, by_agent: bool },
     /// The session's model or effort changed: `(model, effort)` option values, kept for when it resumes.
     Chosen(Option<String>, Option<String>),
 }
@@ -457,7 +458,7 @@ impl ThreadView {
         if let Some(target) = self.pending_model.take().filter(|m| m.harness != self.harness) {
             let effort = self.pending_effort.take();
             let model = (!target.id.is_empty()).then_some(target.id);
-            cx.emit(ThreadEvent::Handoff { to: target.harness, model, message: text, effort });
+            cx.emit(ThreadEvent::Handoff { to: target.harness, model, message: text, effort, by_agent: false });
             cx.notify();
             return;
         }
@@ -470,7 +471,7 @@ impl ThreadView {
             let effort = self.pending_effort.take();
             let model = (!target.id.is_empty()).then_some(target.id);
             self.picker = None;
-            cx.emit(ThreadEvent::Handoff { to: target.harness, model, message: text, effort });
+            cx.emit(ThreadEvent::Handoff { to: target.harness, model, message: text, effort, by_agent: false });
             cx.notify();
             return;
         }
@@ -485,8 +486,9 @@ impl ThreadView {
         }
         let (Some(connection), Some(session)) = (self.connection.clone(), self.session_id.clone()) else { return };
         let Some(text) = self.queue.pop_front() else { return };
-        let at = self.thread.sent(text.clone());
-        self.remeasure(at);
+        if let Some(at) = self.thread.sent(text.clone()) {
+            self.remeasure(at);
+        }
         self.list.scroll_to_end();
         self.working = true;
         self.changed = None;
@@ -529,7 +531,7 @@ impl ThreadView {
         }
         if let Some((target, effort, message)) = self.handoff_after_turn.take() {
             let model = (!target.id.is_empty()).then_some(target.id);
-            cx.emit(ThreadEvent::Handoff { to: target.harness, model, message, effort });
+            cx.emit(ThreadEvent::Handoff { to: target.harness, model, message, effort, by_agent: true });
             cx.notify();
             return;
         }
@@ -570,7 +572,7 @@ impl ThreadView {
         } else {
             let to = model.harness;
             let model = (!model.id.is_empty()).then_some(model.id);
-            cx.emit(ThreadEvent::Handoff { to, model, message, effort });
+            cx.emit(ThreadEvent::Handoff { to, model, message, effort, by_agent: true });
         }
         cx.notify();
     }

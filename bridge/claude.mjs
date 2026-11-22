@@ -328,10 +328,18 @@ async function open(params, resume) {
   return session;
 }
 
+/** The summary Claude Code writes when it compacts a conversation comes back as a user message, and the SDK's
+ * messages carry no mark for it, so its fixed opening is the only way to tell. */
+const COMPACT_SUMMARY = "This session is being continued from a previous conversation";
+
+function isCompactSummary(m) {
+  return m.type === "user" && typeof m.message?.content === "string" && m.message.content.startsWith(COMPACT_SUMMARY);
+}
+
 async function replay(session) {
   const messages = await getSessionMessages(session.id, { dir: session.cwd });
   for (const m of messages) {
-    if (m.type !== "user" && m.type !== "assistant") continue;
+    if ((m.type !== "user" && m.type !== "assistant") || isCompactSummary(m)) continue;
     // A tool's result arrives as a user message; it is not something the user said.
     for (const u of updatesOf(session, m.type, m.message?.content)) update(session.id, u);
   }

@@ -10,9 +10,9 @@ const LAST_ENTRIES: usize = 400;
 
 impl Workspace {
     /// Switch session `id` in place to `to` (with an optional specific model & effort), carrying over the conversation
-    /// transcript and sending `user_message`.
+    /// transcript and sending `message`: the user's, or with `by_agent` what the agent said to hand over.
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn dynamic_handoff(&mut self, id: &str, to: Harness, model: Option<String>, user_message: String, effort: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn dynamic_handoff(&mut self, id: &str, to: Harness, model: Option<String>, message: String, by_agent: bool, effort: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(thread) = self.live_view(id).and_then(|v| v.thread()).cloned() else { return };
         let Some(mut rec) = self.store.session(id).cloned() else { return };
         let cwd = rec.cwd.clone();
@@ -25,10 +25,14 @@ impl Workspace {
             text: format!("Switched to {target_label}"),
             error: false,
         });
-        let prompt = if transcript.trim().is_empty() {
-            user_message
+        // An agent's own message goes in as the last thing it said, so the chat shows no message the user didn't type.
+        let prompt = if by_agent {
+            let said = if transcript.trim().is_empty() { format!("Agent: {message}") } else { format!("{transcript}\n\nAgent: {message}") };
+            crate::harness::thread::handoff_prompt(from_name, &said, "")
+        } else if transcript.trim().is_empty() {
+            message
         } else {
-            crate::harness::thread::handoff_prompt(from_name, &transcript, &user_message)
+            crate::harness::thread::handoff_prompt(from_name, &transcript, &message)
         };
         let mut meta = rec.claude.clone().unwrap_or_default();
         meta.harness = to;

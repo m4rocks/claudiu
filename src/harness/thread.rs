@@ -112,6 +112,11 @@ impl Thread {
                 if let Some(Entry::User(t)) = self.entries.last_mut()
                     && let Some(typed) = typed_part(t)
                 {
+                    if typed.is_empty() {
+                        // An agent's own hand-off: nothing the user typed.
+                        self.entries.pop();
+                        return None;
+                    }
                     *t = typed.to_string();
                 }
                 return at;
@@ -214,10 +219,14 @@ impl Thread {
     }
 
     /// Add what the user sent, and return where it went. Agents don't echo a live prompt back.
-    pub fn sent(&mut self, text: impl Into<String>) -> usize {
+    pub fn sent(&mut self, text: impl Into<String>) -> Option<usize> {
         let text = text.into();
-        self.entries.push(Entry::User(typed_part(&text).map_or(text.clone(), String::from)));
-        self.entries.len() - 1
+        let shown = typed_part(&text).map_or(text.clone(), String::from);
+        if shown.is_empty() {
+            return None;
+        }
+        self.entries.push(Entry::User(shown));
+        Some(self.entries.len() - 1)
     }
 
     /// What the user sent, oldest first: the composer's history.
@@ -283,8 +292,8 @@ const HANDOFF_MAX_CHARS: usize = 40_000;
 const HANDOFF_OPENING: &str = "You are taking over work from a ";
 const HANDOFF_NEXT: &str = "\n\nUser's next message:\n";
 
-/// The first message a hand-off sends the new agent: `transcript` of the conversation so far, then `user_message`.
-/// The chat shows only `user_message` (see `typed_part`).
+/// The first message a hand-off sends the new agent: `transcript` of the conversation so far, then `user_message`,
+/// empty when the agent handed over on its own. The chat shows only `user_message` (see `typed_part`).
 pub fn handoff_prompt(from: &str, transcript: &str, user_message: &str) -> String {
     let mut start = transcript.len().saturating_sub(HANDOFF_MAX_CHARS);
     while !transcript.is_char_boundary(start) {
@@ -293,9 +302,10 @@ pub fn handoff_prompt(from: &str, transcript: &str, user_message: &str) -> Strin
     let cut = if start > 0 { "[earlier messages left out]\n\n" } else { "" };
     format!(
         "{HANDOFF_OPENING}{from} session in this folder. Its conversation so far is below; tool steps show as \
-         [kind: title]. Read it, check the current state of the files, then answer the user's next message.\n\n\
+         [kind: title]. Read it, check the current state of the files, then {next}.\n\n\
          <conversation>\n{cut}{}\n</conversation>{HANDOFF_NEXT}{user_message}",
-        &transcript[start..]
+        &transcript[start..],
+        next = if user_message.is_empty() { "carry on where the last agent message leaves off" } else { "answer the user's next message" },
     )
 }
 
@@ -410,6 +420,13 @@ mod tests {
         let replayed = thread(&[chunk("user_message_chunk", head), chunk("user_message_chunk", tail)]);
         assert_eq!(replayed.entries, [Entry::User("now implement step 2".into())]);
 
+        // An agent's own hand-off has no message from the user, so the chat gains none.
+        let by_agent = handoff_prompt("Claude Code", "User: plan it\n\nAgent: Carry on with step 2", "");
+        let mut live = Thread::default();
+        live.sent(by_agent.clone());
+        assert!(live.entries.is_empty());
+        assert!(thread(&[chunk("user_message_chunk", &by_agent)]).entries.is_empty());
+
         let quoted = "What does \"User's next message:\" mean?";
         assert_eq!(thread(&[chunk("user_message_chunk", quoted)]).entries, [Entry::User(quoted.into())], "an ordinary message stays whole");
     }
@@ -456,7 +473,7 @@ mod tests {
         assert_eq!(t.apply(&json!({"sessionUpdate": "tool_call_update", "toolCallId": "t1", "status": "completed"})), Some(1), "an earlier call");
         assert_eq!(t.apply(&chunk("agent_message_chunk", "")), None, "an empty chunk changes nothing");
         assert_eq!(t.apply(&json!({"sessionUpdate": "usage_update", "used": 1, "size": 2})), None, "not an entry");
-        assert_eq!(t.sent("next"), 3);
+        assert_eq!(t.sent("next"), Some(3));
         assert_eq!(t.sent_texts(), vec!["next".to_string()]);
     }
 
