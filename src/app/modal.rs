@@ -112,6 +112,7 @@ impl Workspace {
             updates,
             chrome,
             scale,
+            follow_up,
             m4code_off,
             skills_field,
             renaming,
@@ -150,6 +151,7 @@ impl Workspace {
         let scale_changed = s.scale != (scale != 100).then_some(scale);
         s.scale = (scale != 100).then_some(scale);
         s.chrome_default = chrome;
+        s.follow_up = follow_up;
 
         let enabled = if subagents.enabled.is_empty() { vec![default_model.harness] } else { subagents.enabled.clone() };
         let chosen = if enabled.contains(&default_model.harness) {
@@ -222,6 +224,7 @@ impl Workspace {
         for live in &self.live {
             if let Some(thread) = live.view.thread() {
                 thread.update(cx, |t, cx| {
+                    t.follow_up = follow_up;
                     if default_model_changed && t.harness == chosen.harness && !chosen.id.is_empty() {
                         t.pick_model(chosen.clone(), cx);
                     }

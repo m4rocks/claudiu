@@ -32,6 +32,7 @@ pub const ADAPTER: Adapter = Adapter {
     compact_command: Some("compact"),
     default_modes: super::standard_default_modes,
     default_models: || super::default_model_entry(super::Harness::OpenCode),
+    steers: false,
 };
 
 #[cfg(test)]

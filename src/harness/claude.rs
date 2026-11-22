@@ -38,6 +38,7 @@ pub const ADAPTER: Adapter = Adapter {
             .collect()
     },
     default_models: super::CatalogModel::default_claude_models,
+    steers: true,
 };
 
 /// Sessions starting together must not install the SDK into the same folder at once.

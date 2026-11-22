@@ -330,6 +330,7 @@ impl Workspace {
                 );
                 let updates = s.update_url.as_deref() != Some("");
                 let chrome = s.chrome_default;
+                let s_follow_up = s.follow_up;
                 let default_model = s.default_model();
                 let claude_hint = self.claude_exe.as_ref().map_or("not found".to_string(), |p| p.to_string_lossy().into_owned());
                 let defaults = s.new_session.clone();
@@ -356,7 +357,7 @@ impl Workspace {
                     .filter(|id| modes.iter().any(|(mid, _)| mid == id))
                     .or_else(|| modes.first().map(|(id, _)| id.clone()))
                     .unwrap_or_else(|| "default".into());
-                self.modal = Some(Modal::Settings { shell, claude, default_model, effort: defaults.effort.unwrap_or_default(), permission: initial_perm, updates, chrome, scale: crate::panels::scale::percent(), m4code_off: self.store.data.settings.m4code_tools_off.clone(), skills_field, skill_search, costly: claude::costly::scan(), list_focus, renaming: None, subagents });
+                self.modal = Some(Modal::Settings { shell, claude, default_model, effort: defaults.effort.unwrap_or_default(), permission: initial_perm, updates, chrome, scale: crate::panels::scale::percent(), follow_up: s_follow_up, m4code_off: self.store.data.settings.m4code_tools_off.clone(), skills_field, skill_search, costly: claude::costly::scan(), list_focus, renaming: None, subagents });
                 // After the modal exists: a page that loads something reads the dialog's fields.
                 self.set_settings_page(self.settings_page, cx);
             }

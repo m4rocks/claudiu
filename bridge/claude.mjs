@@ -4,6 +4,7 @@
 //
 // Only the part of ACP m4code uses is here: initialize, session/new, session/load, session/list, session/prompt,
 // session/cancel, session/set_mode and session/set_config_option, and session/request_permission back to m4code.
+// `_m4code/steer` is m4code's own: a message for the turn that is running, which ACP has no request for.
 // stdout carries the protocol only, so anything logged goes to stderr.
 
 import { randomUUID } from "node:crypto";
@@ -247,13 +248,36 @@ function stopReason(session, result) {
   return "end_turn";
 }
 
-function finishTurn(session, result) {
+/** The uuids of the messages a result answered: every one Claude took into that turn. */
+function answeredBy(result) {
+  if (Array.isArray(result.user_message_uuids)) return result.user_message_uuids;
+  return result.user_message_uuid ? [result.user_message_uuid] : null;
+}
+
+/**
+ * A result ends the turn m4code sees once it has answered every message sent in it. A steer Claude takes between tool
+ * calls is answered by the same result; one it takes after the turn gets a result of its own, so the turn stays open
+ * for it. A Claude Code too old to say which messages a result answered ends the turn at its first result, as before.
+ */
+async function finishTurn(session, result) {
   const turn = session.turn;
+  if (turn && !session.cancelled && !result.is_error) {
+    const answered = answeredBy(result);
+    if (answered) for (const uuid of answered) turn.waiting.delete(uuid);
+    else turn.waiting.clear();
+    if (turn.waiting.size) {
+      turn.held = result;
+      return;
+    }
+  }
   session.turn = null;
+  // The receipt lists the messages Claude Code still means to run, which is how `unreadSteers` tells a steer it
+  // dropped from one it already answered. An older Claude Code sends none, and its steers are left to run.
+  const receipt = session.cancelled ? await session.interrupted : undefined;
   if (turn) {
     const failed = result.is_error && !session.cancelled;
     if (failed) turn.reject(new Error(result.result || (result.errors ?? []).join("\n") || "Claude Code stopped with an error."));
-    else turn.resolve({ stopReason: stopReason(session, result) });
+    else turn.resolve({ stopReason: stopReason(session, result), ...steersBack(session, turn, receipt) });
   }
   // The context size is only shown, so the turn ends without waiting for it.
   session.query
@@ -262,10 +286,50 @@ function finishTurn(session, result) {
     .catch(() => {});
 }
 
+/**
+ * The steers the turn ends without having answered, in the reply's `_meta.m4code`. `unread` are those Claude had not
+ * read when the user stopped the turn: Claude Code keeps them and would run them as a turn of their own, which the
+ * user just asked to stop, so the bridge stops that turn too (`dropping`) and m4code puts their text back in the
+ * message box. `resend` are those Claude dropped unread on its own, which m4code sends as the next turn.
+ */
+function steersBack(session, turn, receipt) {
+  const stillQueued = new Set(receipt?.still_queued ?? []);
+  const unread = [...turn.waiting].filter((uuid) => turn.steers.has(uuid) && stillQueued.has(uuid));
+  for (const uuid of unread) session.dropping.add(uuid);
+  const back = {};
+  if (unread.length) back.unread = unread.map((uuid) => turn.steers.get(uuid));
+  if (turn.dropped.length) back.resend = turn.dropped;
+  return Object.keys(back).length ? { _meta: { m4code: back } } : {};
+}
+
+/** Claude Code says it took a steer off its queue without reading it (the states t3code treats the same way). */
+function steerDropped(session, m) {
+  const turn = session.turn;
+  if (!turn || session.cancelled || !["cancelled", "discarded", "refused"].includes(m.state) || !turn.steers.has(m.command_uuid)) return;
+  if (!turn.waiting.delete(m.command_uuid)) return;
+  turn.dropped.push(turn.steers.get(m.command_uuid));
+  if (turn.waiting.size === 0 && turn.held) return finishTurn(session, turn.held);
+}
+
 /** The session's messages from the SDK, as updates to m4code, until the session ends. */
 async function pump(session) {
   try {
     for await (const m of session.query) {
+      if (session.dropping.size && !session.turn) {
+        if (m.type === "result") {
+          for (const uuid of answeredBy(m) ?? [...session.dropping]) session.dropping.delete(uuid);
+          session.dropInterrupted = false;
+        } else if (!session.dropInterrupted) {
+          session.dropInterrupted = true;
+          session.query.interrupt().catch(() => {});
+        }
+        continue;
+      }
+      // Not in the SDK's types yet; t3code reads it the same way.
+      if (m.type === "command_lifecycle") {
+        await steerDropped(session, m);
+        continue;
+      }
       // A subagent's own steps stay inside its tool call.
       if (m.parent_tool_use_id) continue;
       if (m.type === "stream_event") {
@@ -287,7 +351,7 @@ async function pump(session) {
           update(session.id, { sessionUpdate: "current_mode_update", currentModeId: session.mode });
         }
       } else if (m.type === "result") {
-        finishTurn(session, m);
+        await finishTurn(session, m);
       }
     }
   } catch (error) {
@@ -300,7 +364,7 @@ async function pump(session) {
 async function open(params, resume) {
   const id = resume ?? randomUUID();
   const extra = params._meta?.claudeCode?.options ?? {};
-  const session = { id, cwd: params.cwd, inbox: new Inbox(), tools: new Map(), streamed: new Set(), turn: null, cancelled: false, mode: "default", model: "", effort: "medium", models: [] };
+  const session = { id, cwd: params.cwd, inbox: new Inbox(), tools: new Map(), streamed: new Set(), turn: null, cancelled: false, interrupted: null, dropping: new Set(), dropInterrupted: false, mode: "default", model: "", effort: "medium", models: [] };
   session.query = query({
     prompt: session.inbox,
     options: {
@@ -376,10 +440,24 @@ const handlers = {
     if (!s) throw new Error("That session has ended.");
     if (s.turn) throw new Error("A turn is already running.");
     s.cancelled = false;
+    // A new message is the user's own again: stopping the steers they took back must not stop this one.
+    s.dropping.clear();
+    s.dropInterrupted = false;
     const text = (p.prompt ?? []).filter((c) => c.type === "text").map((c) => c.text).join("\n");
-    const done = new Promise((resolve, reject) => (s.turn = { resolve, reject }));
-    s.inbox.push({ type: "user", message: { role: "user", content: [{ type: "text", text }] }, parent_tool_use_id: null, session_id: s.id, origin: { kind: "human" } });
+    const uuid = randomUUID();
+    const done = new Promise((resolve, reject) => (s.turn = { resolve, reject, waiting: new Set([uuid]), steers: new Map(), dropped: [], held: null }));
+    s.inbox.push(userMessage(s, text, uuid));
     return done;
+  },
+  "_m4code/steer": async (p) => {
+    const s = sessions.get(p.sessionId);
+    if (!s) throw new Error("That session has ended.");
+    if (!s.turn || s.cancelled) throw new Error("No turn is running.");
+    const uuid = randomUUID();
+    s.turn.waiting.add(uuid);
+    s.turn.steers.set(uuid, p.text);
+    s.inbox.push(userMessage(s, p.text, uuid));
+    return {};
   },
   "session/set_mode": async (p) => {
     const s = sessions.get(p.sessionId);
@@ -403,11 +481,15 @@ const handlers = {
   },
 };
 
+function userMessage(session, text, uuid) {
+  return { type: "user", uuid, message: { role: "user", content: [{ type: "text", text }] }, parent_tool_use_id: null, session_id: session.id, origin: { kind: "human" } };
+}
+
 function cancel(p) {
   const s = sessions.get(p.sessionId);
   if (!s?.turn) return;
   s.cancelled = true;
-  s.query.interrupt().catch(() => {});
+  s.interrupted = s.query.interrupt().catch(() => undefined);
 }
 
 async function handle(m) {

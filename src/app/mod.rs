@@ -191,6 +191,7 @@ pub enum Modal {
         updates: bool,
         chrome: bool,
         scale: u32,
+        follow_up: crate::store::FollowUp,
         /// m4code tools turned off (m4code tools page).
         m4code_off: Vec<crate::claude::mcp::Feature>,
         /// Skills to turn off, separated by commas (Claude Code tools page).

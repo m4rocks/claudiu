@@ -31,10 +31,10 @@ pub(super) fn render_settings_card(
     cx: &mut Context<Workspace>,
 ) -> gpui::Stateful<gpui::Div> {
     let (page, worktrees, scroll) = (ws.settings_page, &ws.worktrees_page, &ws.settings_scroll);
-    let Some(Modal::Settings { shell, default_model, effort, permission, updates, scale, m4code_off, skill_search, list_focus, renaming, .. }) = &ws.modal else {
+    let Some(Modal::Settings { shell, default_model, effort, permission, updates, scale, follow_up, m4code_off, skill_search, list_focus, renaming, .. }) = &ws.modal else {
         return div().id("modal-card");
     };
-    let (updates, scale) = (*updates, *scale);
+    let (updates, scale, follow_up) = (*updates, *scale, *follow_up);
     let scaled = crate::panels::scale::px;
     let faint = |text: String| div().text_size(scaled(11.5)).text_color(hsla(theme::TEXT_FAINT)).child(text);
 
@@ -51,6 +51,20 @@ pub(super) fn render_settings_card(
                 settings_picker_row("settings-effort", ("Effort", "Reasoning depth for new sessions"), effort.label().to_string(), effort_open, |ws, at, _, cx| ws.open_settings_effort_picker(at, cx), cx).into_any_element(),
                 settings_picker_row("settings-permission", ("Permission mode", "Approval policy for tool calls and edits"), perm_display, perm_open, |ws, at, _, cx| ws.open_settings_permission_picker(at, cx), cx).into_any_element(),
             ];
+            session_rows.push(
+                row_shell(
+                    "Messages sent while the agent works",
+                    Some("Steer reaches the agent in its turn; Queue waits for it to end. Cmd/Ctrl+Enter does the other."),
+                    div()
+                        .flex_none()
+                        .flex()
+                        .gap(px(4.0))
+                        .child(follow_up_button(crate::store::FollowUp::Queue, "Queue", follow_up, cx))
+                        .child(follow_up_button(crate::store::FollowUp::Steer, "Steer", follow_up, cx))
+                        .into_any_element(),
+                )
+                .into_any_element(),
+            );
             if matches!(permission.as_str(), "bypassPermissions" | "fullAccess" | "full_access" | "yolo") {
                 session_rows.push(
                     div()
@@ -335,6 +349,16 @@ fn row_labels(title: &str, subtitle: Option<&str>) -> gpui::Div {
         .gap(px(2.0))
         .child(div().text_size(scaled(13.0)).text_color(hsla(theme::TEXT)).child(title.to_string()))
         .children(subtitle.map(|s| div().text_size(scaled(11.5)).text_color(hsla(theme::TEXT_FAINT)).child(s.to_string())))
+}
+
+/// One side of the Queue / Steer switch; the chosen one is drawn as the primary button.
+fn follow_up_button(choice: crate::store::FollowUp, label: &'static str, current: crate::store::FollowUp, cx: &mut Context<Workspace>) -> impl IntoElement {
+    button(format!("settings-follow-up-{label}"), label, choice == current).on_click(cx.listener(move |ws, _: &ClickEvent, _, cx| {
+        if let Some(Modal::Settings { follow_up, .. }) = ws.modal.as_mut() {
+            *follow_up = choice;
+        }
+        cx.notify();
+    }))
 }
 
 fn row_shell(title: &str, subtitle: Option<&str>, trailing: AnyElement) -> gpui::Div {

@@ -107,6 +107,30 @@ pub struct Settings {
     /// Installed `SKILL.md` packages and their global / per-project toggles (Settings → Skills).
     #[serde(default)]
     pub skills: crate::skills::SkillsConfig,
+    /// What a message sent while the agent works does (Settings → General).
+    #[serde(default)]
+    pub follow_up: FollowUp,
+}
+
+/// What a message sent while the agent works does. Cmd/Ctrl+Enter does the other one for a single message.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FollowUp {
+    /// Wait for the turn to end.
+    Queue,
+    /// Reach the agent in the turn it is working on: Claude Code reads it between tool calls; an agent that can't
+    /// stops its turn and starts again with the message.
+    #[default]
+    Steer,
+}
+
+impl FollowUp {
+    pub fn other(self) -> Self {
+        match self {
+            Self::Queue => Self::Steer,
+            Self::Steer => Self::Queue,
+        }
+    }
 }
 
 impl Settings {
@@ -247,3 +271,18 @@ impl Settings {
     }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::FollowUp;
+
+    #[test]
+    fn messages_mid_turn_steer_unless_the_user_chose_to_queue() {
+        let older: super::Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(older.follow_up, FollowUp::Steer, "a state file from before the setting steers, as t3code does");
+        let queue: super::Settings = serde_json::from_str(r#"{"follow_up":"queue"}"#).unwrap();
+        assert_eq!(queue.follow_up, FollowUp::Queue);
+        assert_eq!(FollowUp::Queue.other(), FollowUp::Steer);
+        assert_eq!(FollowUp::Steer.other(), FollowUp::Queue);
+    }
+}

@@ -75,6 +75,8 @@ pub struct Adapter {
     /// Whether the empty session opened only to read `configOptions[category == "model"]` should be deleted again.
     pub delete_model_session: bool,
     pub compact_command: Option<&'static str>,
+    /// Whether the agent takes a message in the turn it is working on (`_m4code/steer`, the Claude Code bridge's own).
+    pub steers: bool,
     /// Fallback permission modes shown before the adapter's ACP server reports its live list.
     pub default_modes: fn() -> Vec<(String, String)>,
     /// Fallback model entries shown before the adapter's ACP server reports its live catalog.
