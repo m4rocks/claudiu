@@ -135,7 +135,7 @@ impl Workspace {
                         }
                     }
                     // What was typed stays in the message box, so nothing is lost when git refuses.
-                    Err(why) => ws.toast(format!("Couldn't create worktree: {}", why.trim()), true, cx),
+                    Err(why) => ws.toast(format!("Couldn't create worktree: {}", why.trim()), cx),
                 }
                 cx.notify();
             });
@@ -273,7 +273,7 @@ impl Workspace {
         let name = folder.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let Some(inside) = self.running_in(folder) else { return false };
         let title = inside.display_title().to_string();
-        self.toast(format!("“{title}” is in {name}. Switch it to main first."), true, cx);
+        self.toast(format!("“{title}” is in {name}. Switch it to main first."), cx);
         true
     }
 
@@ -294,7 +294,7 @@ impl Workspace {
                     ws.show_removal_question(folder, title, body, confirm, danger, act);
                     cx.notify();
                 }
-                Err(e) => ws.toast(e, true, cx),
+                Err(e) => ws.toast(e, cx),
             });
         })
         .detach();

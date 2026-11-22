@@ -62,7 +62,7 @@ impl Workspace {
 
     fn tell_sync_failure(&mut self, result: std::io::Result<()>, cx: &mut Context<Self>) {
         if result.is_err() && !std::mem::replace(&mut self.config_sync.told, true) {
-            self.toast("Couldn't keep the Claude Code settings the same in every account. Will keep trying.", true, cx);
+            self.toast("Couldn't keep the Claude Code settings the same in every account. Will keep trying.", cx);
         }
     }
 }

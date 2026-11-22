@@ -28,7 +28,7 @@ pub use sessions::{SessionKind, ExternalState, Attached, ClaudeMeta, ProviderSes
 mod accounts;
 pub use accounts::{RateLimit, AccountUsage, Account, MAIN_ACCOUNT};
 mod settings;
-pub use settings::{FollowUp, SideCard, WindowGeom, Layout, Settings};
+pub use settings::{FollowUp, SideCard, WindowGeom, Layout, Settings, TextGenerationModel};
 mod data;
 pub use data::{Data};
 

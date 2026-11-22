@@ -76,20 +76,21 @@ pub enum Act {
     OpenSetup,
     /// A choice in the Settings dialog's default-model, effort, or permission-mode picker; kept in the dialog until Save.
     PickDefaultModel(crate::harness::CatalogModel),
+    PickTextGenerationModel(Option<crate::store::TextGenerationModel>),
     PickEffort(Effort),
     PickPermission(String),
     /// The project's GitHub issues and pull requests.
     OpenGithub {
         cwd: PathBuf,
     },
-    /// Have the running session's own mod (Haiku) write a new title from what was said in it.
+    /// Generate a new title from the session’s first user message.
     RegenTitle(Id),
     /// Change a setting of a running session through its mod (see `usage::send_ctl`).
     SetAutoCompact(Id, bool),
     SetPrecomputeCompact(Id, bool),
     /// Filter the sidebar list to a project (`None`: all).
     FilterProject(Option<Id>),
-    /// Stage everything in this folder's repository, commit it with a message the running session's mod (Haiku) writes, push.
+    /// Stage changes, generate a commit message, commit and push.
     CommitPush(Id, PathBuf),
     Pull(PathBuf),
     SwitchBranch(PathBuf, String),
@@ -164,7 +165,7 @@ impl Workspace {
                     self.picker = None;
                     self.act(act, window, cx);
                 }
-                Err(why) => self.toast(why, true, cx),
+                Err(why) => self.toast(why, cx),
             },
             Act::CreateHomeWorktree { main_checkout, folder, base } => self.create_home_worktree(main_checkout, folder, base, window, cx),
             Act::SwitchWorktree { folder, base } => self.switch_shown(folder, base, false, window, cx),
@@ -255,12 +256,12 @@ impl Workspace {
                     self.selected = None;
                 }
                 if archive {
-                    self.toast("Archived. Search still finds it; the session transcript was not touched.", false, cx);
+                    self.toast("Archived. Search still finds it; the session transcript was not touched.", cx);
                 }
             }
             Act::CopyText(text) => {
                 cx.write_to_clipboard(ClipboardItem::new_string(text));
-                self.toast("Copied", false, cx);
+                self.toast("Copied", cx);
             }
             Act::Reveal(path) => cx.reveal_path(&path),
             Act::OpenEditor(editor, path) => {
@@ -270,7 +271,7 @@ impl Workspace {
                     self.store.mark_dirty();
                 }
                 if let Err(e) = editor.open(&path) {
-                    self.toast(e, true, cx);
+                    self.toast(e, cx);
                 }
             }
             Act::ImportProject => self.import_project(window, cx),
@@ -281,10 +282,16 @@ impl Workspace {
             }
             Act::RegenTitle(id) => self.regen_title(&id, cx),
             Act::CommitPush(_id, cwd) => {
+                let generator = self.text_generator(cx);
                 self.run_git(
                     GitOp::CommitPush,
                     move || {
-                        crate::git::commit::commit_and_push(&|_system, prompt| Ok(summarize_commit_diff(prompt)), &cwd)
+                        let complete = |system: &str, prompt: &str| match &generator {
+                            Ok(Some(generate)) => generate(system, prompt),
+                            Ok(None) => Ok(summarize_commit_diff(prompt)),
+                            Err(why) => Err(why.clone()),
+                        };
+                        crate::git::commit::commit_and_push(&complete, &cwd)
                             .map_err(|e| crate::git::commit::classify(&cwd, e))
                     },
                     cx,
@@ -332,6 +339,7 @@ impl Workspace {
                 let chrome = s.chrome_default;
                 let s_follow_up = s.follow_up;
                 let default_model = s.default_model();
+                let text_generation_model = s.text_generation_model.clone();
                 let claude_hint = self.claude_exe.as_ref().map_or("not found".to_string(), |p| p.to_string_lossy().into_owned());
                 let defaults = s.new_session.clone();
                 let claude = self.modal_input(&claude_t, &claude_hint, window, cx);
@@ -357,7 +365,7 @@ impl Workspace {
                     .filter(|id| modes.iter().any(|(mid, _)| mid == id))
                     .or_else(|| modes.first().map(|(id, _)| id.clone()))
                     .unwrap_or_else(|| "default".into());
-                self.modal = Some(Modal::Settings { shell, claude, default_model, effort: defaults.effort.unwrap_or_default(), permission: initial_perm, updates, chrome, scale: crate::panels::scale::percent(), follow_up: s_follow_up, m4code_off: self.store.data.settings.m4code_tools_off.clone(), skills_field, skill_search, costly: claude::costly::scan(), list_focus, renaming: None, subagents });
+                self.modal = Some(Modal::Settings { shell, claude, default_model, text_generation_model, effort: defaults.effort.unwrap_or_default(), permission: initial_perm, updates, chrome, scale: crate::panels::scale::percent(), follow_up: s_follow_up, m4code_off: self.store.data.settings.m4code_tools_off.clone(), skills_field, skill_search, costly: claude::costly::scan(), list_focus, renaming: None, subagents });
                 // After the modal exists: a page that loads something reads the dialog's fields.
                 self.set_settings_page(self.settings_page, cx);
             }
@@ -389,6 +397,12 @@ impl Workspace {
                     window.focus(list_focus, cx);
                 }
             }
+            Act::PickTextGenerationModel(choice) => {
+                if let Some(Modal::Settings { text_generation_model, list_focus, .. }) = self.modal.as_mut() {
+                    *text_generation_model = choice;
+                    window.focus(list_focus, cx);
+                }
+            }
             Act::PickEffort(choice) => {
                 if let Some(Modal::Settings { effort, .. }) = self.modal.as_mut() {
                     *effort = choice;
@@ -409,7 +423,7 @@ impl Workspace {
             Act::AddProject(path) => {
                 let id = self.store.add_project(&path);
                 let _ = id;
-                self.toast("Project added", false, cx);
+                self.toast("Project added", cx);
             }
             Act::RemoveProject(id) => {
                 let Some((at, project)) = self.store.remove_project(&id) else { return };
@@ -421,7 +435,7 @@ impl Workspace {
                 {
                     *renaming = None;
                 }
-                self.show_toast("Project removed. Its sessions are kept.".into(), false, Some(("Undo".into(), Act::RestoreProject(at, project))), cx);
+                self.show_toast("Project removed. Its sessions are kept.".into(), Some(("Undo".into(), Act::RestoreProject(at, project))), cx);
             }
             Act::RestoreProject(at, project) => self.store.restore_project(at, project),
             Act::RenameProject(id) => {
@@ -463,7 +477,7 @@ impl Workspace {
                 self.store.mark_dirty();
                 cx.notify();
                 usage::send_ctl(&usage::ctl_file(&id), "precompute_compact", on.into());
-                self.toast(format!("Turning background compaction {}…", if on { "on" } else { "off" }), false, cx);
+                self.toast(format!("Turning background compaction {}…", if on { "on" } else { "off" }), cx);
             }
             Act::FilterProject(id) => {
                 self.store.data.layout.project_filter = id;
@@ -520,7 +534,7 @@ impl Workspace {
                 if !cfg!(test) {
                     self.load_enabled_models(cx);
                 }
-                self.toast("Switched. New and resumed sessions use this account; running sessions keep theirs.", false, cx);
+                self.toast("Switched. New and resumed sessions use this account; running sessions keep theirs.", cx);
             }
             Act::Handoff => self.ask_handoff(window, cx),
             Act::ConfirmHandoff(id) => {
@@ -553,7 +567,7 @@ impl Workspace {
                         self.store.mark_dirty();
                         self.sign_in(&id, window, cx);
                     }
-                    Err(e) => self.toast(format!("Could not create the account folder: {e}"), true, cx),
+                    Err(e) => self.toast(format!("Could not create the account folder: {e}"), cx),
                 }
             }
             Act::SignIn(id) => self.sign_in(&id, window, cx),
@@ -584,7 +598,7 @@ impl Workspace {
                             }
                             self.store.mark_dirty();
                         }
-                        Err(e) => self.toast(format!("Could not remove the account: {e}"), true, cx),
+                        Err(e) => self.toast(format!("Could not remove the account: {e}"), cx),
                     }
                 }
             }

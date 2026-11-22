@@ -69,7 +69,7 @@ fn look(ws: &mut Workspace, url: String, asked: bool, cx: &mut Context<Workspace
     };
     if let Some(said) = busy {
         if let Some(text) = said.filter(|_| asked) {
-            ws.toast(text, false, cx);
+            ws.toast(text, cx);
         }
         return;
     }
@@ -97,8 +97,8 @@ fn look(ws: &mut Workspace, url: String, asked: bool, cx: &mut Context<Workspace
             };
             let (status, said) = outcome(previous, found, asked);
             ws.update.status = status;
-            if let Some((text, error)) = said {
-                ws.toast(text, error, cx);
+            if let Some(text) = said {
+                ws.toast(text, cx);
             }
         },
         cx,
@@ -112,15 +112,15 @@ enum Found {
     Latest(String),
 }
 
-/// The status a check leaves behind, and, when the user asked for the check, what to tell them (text, is an error).
-fn outcome(previous: Status, found: Result<Found, String>, asked: bool) -> (Status, Option<(String, bool)>) {
+/// The status a check leaves behind, and, when the user asked for the check, what to tell them.
+fn outcome(previous: Status, found: Result<Found, String>, asked: bool) -> (Status, Option<String>) {
     let (status, said) = match found {
-        Ok(Found::Newer(version)) => (Status::Available { version: version.clone() }, (format!("m4code {version} is available"), false)),
-        Ok(Found::Latest(installed)) => (Status::UpToDate, (format!("m4code {installed} is the latest version"), false)),
+        Ok(Found::Newer(version)) => (Status::Available { version: version.clone() }, format!("m4code {version} is available")),
+        Ok(Found::Latest(installed)) => (Status::UpToDate, format!("m4code {installed} is the latest version")),
         // A failed re-check (e.g. offline) keeps an update already offered.
-        Err(e) if matches!(previous, Status::Available { .. }) => (previous, (format!("Could not check for updates: {e}"), true)),
+        Err(e) if matches!(previous, Status::Available { .. }) => (previous, format!("Could not check for updates: {e}")),
         // Not installed via Velopack (dev build / portable): nothing to do, and nothing to show unless asked.
-        Err(e) => (Status::Idle, (format!("Could not check for updates: {e}"), true)),
+        Err(e) => (Status::Idle, format!("Could not check for updates: {e}")),
     };
     (status, asked.then_some(said))
 }
@@ -140,7 +140,7 @@ pub fn install(ws: &mut Workspace, cx: &mut Context<Workspace>) {
                     };
                     if let Status::Error(e) = &ws.update.status {
                         let msg = format!("Update failed: {e}");
-                        ws.toast(msg, true, cx);
+                        ws.toast(msg, cx);
                     }
                 },
                 cx,
@@ -150,7 +150,7 @@ pub fn install(ws: &mut Workspace, cx: &mut Context<Workspace>) {
             // Persist state, then hand over to the updater; it restarts m4code into the new version.
             ws.finalize(cx);
             if let Err(e) = manager.apply_updates_and_restart(&info) {
-                ws.toast(format!("Could not apply update: {e}"), true, cx);
+                ws.toast(format!("Could not apply update: {e}"), cx);
             }
         }
         _ => {}
@@ -165,11 +165,11 @@ mod tests {
     fn only_a_check_the_user_asked_for_says_what_it_found() {
         let available = Status::Available { version: "9.9.9".into() };
         assert_eq!(outcome(Status::Idle, Ok(Found::Newer("9.9.9".into())), false), (available.clone(), None));
-        assert_eq!(outcome(Status::Idle, Ok(Found::Newer("9.9.9".into())), true), (available, Some(("m4code 9.9.9 is available".into(), false))));
+        assert_eq!(outcome(Status::Idle, Ok(Found::Newer("9.9.9".into())), true), (available, Some("m4code 9.9.9 is available".into())));
         let latest = "m4code 1.2.3 is the latest version".to_string();
-        assert_eq!(outcome(Status::Idle, Ok(Found::Latest("1.2.3".into())), true), (Status::UpToDate, Some((latest, false))));
+        assert_eq!(outcome(Status::Idle, Ok(Found::Latest("1.2.3".into())), true), (Status::UpToDate, Some(latest)));
         assert_eq!(outcome(Status::Idle, Err("offline".into()), false), (Status::Idle, None));
-        assert_eq!(outcome(Status::Idle, Err("offline".into()), true), (Status::Idle, Some(("Could not check for updates: offline".into(), true))));
+        assert_eq!(outcome(Status::Idle, Err("offline".into()), true), (Status::Idle, Some("Could not check for updates: offline".into())));
     }
 
     #[test]

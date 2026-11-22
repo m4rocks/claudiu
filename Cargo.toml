@@ -92,6 +92,7 @@ opt-level = 2
 # with a double click select whole words (`snap_to_word_edge` in src/input/base/selection.rs). `SelectableText::runs` lets
 # a card's text keep its styling while selectable. `code_background` (src/text/inline_flow.rs) covers inline code's
 # whole glyph box rather than its capital height, so descenders stay inside it.
+# The selection layer (src/text_selection.rs) ends mouse drags when motion arrives without the left button.
 [patch.crates-io]
 gpui-base = { path = "vendor/gpui-base" }
 

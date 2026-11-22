@@ -28,18 +28,17 @@ impl Workspace {
                     ws.load_stored_worktrees(cx);
                 }
                 match result {
-                    Ok(summary) => ws.toast(summary, false, cx),
+                    Ok(summary) => ws.toast(summary, cx),
                     Err(fail) => match fail.conflict_in {
                         Some(cwd) => {
                             let what = if op == GitOp::Pull { "Pull" } else { "Commit & Push" };
                             ws.show_toast(
                                 format!("{what} hit a conflict. Ask an agent to fix it?"),
-                                true,
                                 Some(("Ask agent".into(), Act::FixGitWithClaude(cwd))),
                                 cx,
                             );
                         }
-                        None => ws.toast(fail.msg, true, cx),
+                        None => ws.toast(fail.msg, cx),
                     },
                 }
             });
@@ -123,7 +122,7 @@ impl Workspace {
                     ws.modal = Some(Modal::Confirm { title, body, confirm, danger, act: Act::ConfirmDeleteBranch(cwd, name) });
                     cx.notify();
                 }
-                Err(e) => ws.toast(e, true, cx),
+                Err(e) => ws.toast(e, cx),
             });
         })
         .detach();

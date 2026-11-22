@@ -59,7 +59,7 @@ impl Workspace {
             return;
         }
         let Some(view) = self.live_view(&id).and_then(|v| v.thread()).cloned() else {
-            self.toast("This session isn't running. Resume it, then try again.", false, cx);
+            self.toast("This session isn't running. Resume it, then try again.", cx);
             return;
         };
         view.update(cx, |v, cx| v.add_comment(&message, window, cx));

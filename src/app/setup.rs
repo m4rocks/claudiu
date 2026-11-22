@@ -388,7 +388,7 @@ impl Workspace {
         let current = self.store.data.settings.claude_path.clone();
         let opened = gpui_kit::open_window(window_options(cx), cx, |window, cx| cx.new(|cx| SetupView::new(Mode::Reopened, current, window, cx)));
         let Ok((handle, view)) = opened else {
-            self.toast("Could not open the setup window.", true, cx);
+            self.toast("Could not open the setup window.", cx);
             return;
         };
         self.setup_window = Some(handle);

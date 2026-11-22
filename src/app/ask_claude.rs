@@ -23,7 +23,7 @@ impl Workspace {
         };
         let Some(text) = text else {
             if ask == Ask::Problem {
-                self.toast("The language server reports no problem on this line.", false, cx);
+                self.toast("The language server reports no problem on this line.", cx);
             }
             return;
         };
@@ -51,7 +51,7 @@ impl Workspace {
             return;
         }
         let Some(view) = self.live_view(id).filter(|v| v.is_running(cx)).and_then(|v| v.thread()).cloned() else {
-            self.toast("This session isn't running. Resume it, then try again.", false, cx);
+            self.toast("This session isn't running. Resume it, then try again.", cx);
             return;
         };
         view.update(cx, |v, cx| v.send(text.to_string(), window, cx));

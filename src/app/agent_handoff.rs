@@ -24,12 +24,12 @@ impl Workspace {
             if !by_agent {
                 thread.update(cx, |v, cx| v.paste_text(&message, window, cx));
             }
-            self.toast("A harness handoff is already starting.", false, cx);
+            self.toast("A harness handoff is already starting.", cx);
             return;
         }
         let Some(mut rec) = self.store.session(id).cloned() else { return };
         if to == Harness::Antigravity && rec.claude.as_ref().is_some_and(|m| m.parent_session.is_some()) {
-            self.toast("Shared Antigravity subagents are not enabled yet.", true, cx);
+            self.toast("Shared Antigravity subagents are not enabled yet.", cx);
             return;
         }
         let cwd = rec.cwd.clone();
@@ -137,7 +137,7 @@ impl Workspace {
             });
         }
         self.live.push(pending.source);
-        self.toast(format!("Handoff failed; the original session is still open. {error}"), true, cx);
+        self.toast(format!("Handoff failed; the original session is still open. {error}"), cx);
         if self.active_id().is_some_and(|active| active == id) {
             self.focus_active(window, cx);
         }

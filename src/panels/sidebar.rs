@@ -294,7 +294,7 @@ impl Workspace {
             items.push(item("Show or hide shell", Act::ToggleShell(rec.id.clone()), false, false));
         }
         items.push(item("Rename…", Act::Rename(rec.id.clone()), false, false));
-        // The new title is written by the session's own mod, so the session has to be running.
+        // The first user message is available from the open chat.
         if rec.kind == SessionKind::Claude && running {
             items.push(item("Regenerate title", Act::RegenTitle(rec.id.clone()), false, false));
         }

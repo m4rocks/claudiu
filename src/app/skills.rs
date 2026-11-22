@@ -181,9 +181,9 @@ impl Workspace {
                         }
                         ws.store.mark_dirty();
                         ws.sync_skills(None, cx);
-                        ws.toast(format!("Installed skill “{name}”."), false, cx);
+                        ws.toast(format!("Installed skill “{name}”."), cx);
                     }
-                    Err(why) => ws.toast(format!("Couldn't install skill: {why}"), true, cx),
+                    Err(why) => ws.toast(format!("Couldn't install skill: {why}"), cx),
                 }
             },
             cx,
@@ -224,9 +224,9 @@ impl Workspace {
                         ws.store.mark_dirty();
                         ws.sync_skills(None, cx);
                         let noun = if count == 1 { "skill" } else { "skills" };
-                        ws.toast(format!("Installed {count} {noun} from {source}."), false, cx);
+                        ws.toast(format!("Installed {count} {noun} from {source}."), cx);
                     }
-                    Err(why) => ws.toast(format!("Couldn't install {source}: {why}"), true, cx),
+                    Err(why) => ws.toast(format!("Couldn't install {source}: {why}"), cx),
                 }
             },
             cx,
@@ -281,10 +281,10 @@ impl Workspace {
                 match failures.as_slice() {
                     [] => {
                         let noun = if updated == 1 { "skill" } else { "skills" };
-                        ws.toast(format!("Updated {updated} {noun}."), false, cx);
+                        ws.toast(format!("Updated {updated} {noun}."), cx);
                     }
-                    [only] => ws.toast(format!("Couldn't update {only}"), true, cx),
-                    [first, rest @ ..] => ws.toast(format!("Couldn't update {} skills. {first}", rest.len() + 1), true, cx),
+                    [only] => ws.toast(format!("Couldn't update {only}"), cx),
+                    [first, rest @ ..] => ws.toast(format!("Couldn't update {} skills. {first}", rest.len() + 1), cx),
                 }
             },
             cx,
@@ -350,8 +350,8 @@ impl Workspace {
                 uninstall(&root, &home, &removed, &projects)
             },
             move |ws, result, cx| match result {
-                Ok(()) => ws.toast(format!("Removed skill “{name}”."), false, cx),
-                Err(e) => ws.toast(format!("Removed “{name}” from settings, but cleanup failed: {e}"), true, cx),
+                Ok(()) => ws.toast(format!("Removed skill “{name}”."), cx),
+                Err(e) => ws.toast(format!("Removed “{name}” from settings, but cleanup failed: {e}"), cx),
             },
             cx,
         );
@@ -381,7 +381,7 @@ impl Workspace {
             },
             |ws, errors, cx| {
                 if let Some(first) = errors.first() {
-                    ws.toast(format!("Couldn't sync skills: {first}"), true, cx);
+                    ws.toast(format!("Couldn't sync skills: {first}"), cx);
                 }
             },
             cx,

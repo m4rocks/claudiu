@@ -393,12 +393,17 @@ impl ThreadView {
     fn render_tool(&self, ix: usize, call: &ToolCall, cx: &mut Context<Self>) -> AnyElement {
         let failed = call.status == ToolStatus::Failed;
         let has_card = self.cards.contains_key(&call.id);
-        let has_body = !call.content.is_empty() || has_card;
-        let expanded = self.detail || has_card || self.expanded_tools.contains(&call.id);
+        let shell = call.kind == "execute";
+        let card_opens_details = has_card && !shell;
+        let has_details = !call.content.is_empty() || card_opens_details;
+        let expanded = (self.detail && !self.collapsed_shell_calls.contains(&call.id))
+            || card_opens_details
+            || self.expanded_tools.contains(&call.id);
         let toggle_id = call.id.clone();
 
         let mut header = div()
             .id(SharedString::from(format!("tool-row-{ix}")))
+            .debug_selector(move || format!("tool-row-{ix}"))
             .w_full()
             .px(px(4.0))
             .py(px(2.0))
@@ -406,7 +411,7 @@ impl ThreadView {
             .flex()
             .items_center()
             .gap(px(8.0))
-            .when(has_body, |d| d.cursor_pointer().hover(|s| s.bg(hsla(theme::SURFACE_HOVER))))
+            .when(has_details, |d| d.cursor_pointer().hover(|s| s.bg(hsla(theme::SURFACE_HOVER))))
             .child(
                 div()
                     .flex_1()
@@ -451,7 +456,7 @@ impl ThreadView {
                     })),
             );
         }
-        if has_body {
+        if has_details {
             header = header
                 .child(
                     div()
@@ -460,7 +465,12 @@ impl ThreadView {
                         .child(icon(if expanded { IconName::ChevronDown } else { IconName::ChevronRight }, 12.0)),
                 )
                 .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| {
-                    if !v.expanded_tools.remove(&toggle_id) {
+                    if shell && v.detail {
+                        if !v.collapsed_shell_calls.remove(&toggle_id) {
+                            v.expanded_tools.remove(&toggle_id);
+                            v.collapsed_shell_calls.insert(toggle_id.clone());
+                        }
+                    } else if !v.expanded_tools.remove(&toggle_id) {
                         v.expanded_tools.insert(toggle_id.clone());
                     }
                     v.remeasure(ix);
@@ -469,13 +479,13 @@ impl ThreadView {
         }
 
         let mut block = div().flex().flex_col().child(header);
-        if expanded && has_body {
+        if (expanded && has_details) || has_card {
             let mut body = div().ml(px(14.0)).pl(px(10.0)).pb(px(6.0)).pt(px(2.0)).border_l_1().border_color(hsla(theme::BORDER)).flex().flex_col().gap(px(6.0));
-            for content in &call.content {
-                body = body.child(match content {
+            if expanded {
+                body = body.children(call.content.iter().map(|content| match content {
                     ToolContent::Text(text) => output(text, self.detail),
                     ToolContent::Diff { path, old, new } => diff(path, old.as_deref(), new, self.detail),
-                });
+                }));
             }
             if let Some(card) = self.cards.get(&call.id) {
                 let scope = Scope { call: card.call.clone(), ui: self.card_ui.clone() };
@@ -497,6 +507,7 @@ impl ThreadView {
     /// Show call `id`'s step: unfold it and the run of steps it is in, and scroll the conversation to it.
     pub fn reveal_step(&mut self, id: &str, cx: &mut Context<Self>) {
         let Some(ix) = self.thread.tool_at(id) else { return };
+        self.collapsed_shell_calls.remove(id);
         self.expanded_tools.insert(id.to_string());
         let start = match tool_run(&self.groupable(), ix) {
             Some(run) => {
@@ -1311,6 +1322,45 @@ fn tool_run(groupable: &[bool], ix: usize) -> Option<std::ops::Range<usize>> {
 #[cfg(test)]
 mod tests {
     use super::{keep_line_breaks, report_line, run_label, tool_run};
+
+    #[gpui::test]
+    fn conversation_selection_ends_after_a_missed_mouse_release(cx: &mut gpui::TestAppContext) {
+        use gpui::{App, IntoElement, Modifiers, MouseButton, ParentElement, Render, Styled, Window, div, point, px};
+        use gpui_kit::base::{TextSelection, TextSelectionLayer};
+        use gpui_kit::component::text::TextView;
+
+        struct Conversation;
+        impl Render for Conversation {
+            fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+                div()
+                    .text_size(px(16.0))
+                    .child(TextSelectionLayer)
+                    .child(crate::github::ui::styled_markdown(TextView::markdown("message", "A line of conversation text")))
+            }
+        }
+
+        cx.update(gpui_kit::init);
+        let (_, cx) = cx.add_window_view(|_, _| Conversation);
+        cx.update(|window, app| window.draw(app).clear(app));
+        let start = point(px(2.0), px(8.0));
+        let end = point(px(100.0), px(8.0));
+        let modifiers = Modifiers::default();
+        let selected = |window: &mut Window, app: &mut App| TextSelection::selected_text(window, app);
+
+        cx.simulate_mouse_down(start, MouseButton::Left, modifiers);
+        cx.simulate_mouse_move(end, None, modifiers);
+        assert_eq!(cx.update(selected), "");
+        cx.simulate_mouse_move(end, MouseButton::Left, modifiers);
+        assert_eq!(cx.update(selected), "");
+
+        cx.simulate_mouse_down(start, MouseButton::Left, modifiers);
+        cx.simulate_mouse_move(end, MouseButton::Left, modifiers);
+        cx.update(|window, app| window.draw(app).clear(app));
+        let text = cx.update(selected);
+        assert!(text.starts_with("A line"), "{text:?}");
+        cx.simulate_mouse_move(start, None, modifiers);
+        assert_eq!(cx.update(selected), text);
+    }
 
     #[test]
     fn a_users_lines_stay_lines_but_code_and_paragraphs_do_not_change() {

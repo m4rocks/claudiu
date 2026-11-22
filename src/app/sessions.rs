@@ -168,7 +168,7 @@ impl Workspace {
         let mut session_meta = serde_json::json!({});
         if meta.harness == Harness::Claude {
             let Some(exe) = self.claude_exe.clone() else {
-                self.show_toast("Could not find the `claude` CLI. Install Claude Code, or set its path in Settings.".into(), true, Some(("Check setup".into(), Act::OpenSetup)), cx);
+                self.show_toast("Could not find the `claude` CLI. Install Claude Code, or set its path in Settings.".into(), Some(("Check setup".into(), Act::OpenSetup)), cx);
                 return None;
             };
             env.extend(harness::claude::environment(&exe));
@@ -228,7 +228,7 @@ impl Workspace {
                     env.push(("OPENCODE_CONFIG_CONTENT".into(), config));
                 }
                 Err(error) => {
-                    self.toast(error, true, cx);
+                    self.toast(error, cx);
                     return None;
                 }
             }
@@ -320,7 +320,7 @@ impl Workspace {
         match fallback {
             Some(main) => {
                 let short = crate::panels::widgets::short_path;
-                self.toast(format!("{} is gone, so the session starts in {}.", short(&rec.cwd), short(&main)), false, cx);
+                self.toast(format!("{} is gone, so the session starts in {}.", short(&rec.cwd), short(&main)), cx);
                 // The record follows, so the shell, the files and the next resume start there too.
                 if let Some(r) = self.store.session_mut(&rec.id) {
                     r.cwd = main.clone();
@@ -591,9 +591,9 @@ impl Workspace {
         }
         self.end_live(id, window, cx);
         if let Some(err) = start_error {
-            self.toast(format!("Could not start {title}: {err}"), true, cx);
+            self.toast(format!("Could not start {title}: {err}"), cx);
         } else if let Some(code) = code.filter(|c| *c != 0) {
-            self.toast(format!("{title} ended (exit code {code})"), true, cx);
+            self.toast(format!("{title} ended (exit code {code})"), cx);
         }
     }
 

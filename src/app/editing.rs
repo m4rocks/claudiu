@@ -47,9 +47,9 @@ impl Workspace {
                         if let Some(tab) = tab {
                             tab.conflict = Some(Conflict::Changed);
                         }
-                        ws.toast("Not saved: the file changed on disk. Reload it or keep your version.", true, cx);
+                        ws.toast("Not saved: the file changed on disk. Reload it or keep your version.", cx);
                     }
-                    (Err(SaveError::Io(e)), _) => ws.toast(format!("Could not save {}: {e}", path.display()), true, cx),
+                    (Err(SaveError::Io(e)), _) => ws.toast(format!("Could not save {}: {e}", path.display()), cx),
                 }
                 cx.notify();
             });

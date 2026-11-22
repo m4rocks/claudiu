@@ -186,6 +186,7 @@ pub enum Modal {
         claude: Entity<InputState>,
         /// Default model for new sessions (General page); its harness runs new sessions.
         default_model: crate::harness::CatalogModel,
+        text_generation_model: Option<crate::store::TextGenerationModel>,
         effort: Effort,
         permission: String,
         updates: bool,
@@ -306,7 +307,7 @@ pub enum WorkspacePicker {
     /// Unified Branch & Worktree picker (top bar and Welcome screen).
     Git(GitPicker),
     /// Settings -> General: Default model selector.
-    SettingsModel { search: Entity<InputState> },
+    SettingsModel { search: Entity<InputState>, text_generation: bool },
     /// Settings -> General: Default effort selector.
     SettingsEffort,
     /// Settings -> General: Default permission mode selector.
@@ -506,7 +507,6 @@ pub struct ShellDrag {
 
 pub struct Toast {
     pub text: String,
-    pub error: bool,
     pub serial: u64,
     /// Button label and what it does; the toast stays up longer so there is time to answer.
     pub action: Option<(String, Act)>,
@@ -974,11 +974,11 @@ impl Workspace {
         cx.notify();
     }
 
-    pub fn open_settings_model_picker(&mut self, at: crate::panels::widgets::Dropdown, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn open_settings_model_picker(&mut self, at: crate::panels::widgets::Dropdown, text_generation: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.menu = None;
         self.load_models(cx);
         let search = self.picker_search("Filter models…", window, cx);
-        self.picker = Some(AnchoredPicker { at, kind: WorkspacePicker::SettingsModel { search } });
+        self.picker = Some(AnchoredPicker { at, kind: WorkspacePicker::SettingsModel { search, text_generation } });
         cx.notify();
     }
 

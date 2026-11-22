@@ -74,11 +74,11 @@ impl Workspace {
         let session_id = rec.claude_id().map(str::to_string);
         let Some(git) = rec.project_id.as_ref().and_then(|p| self.store.project(p)).and_then(|p| p.git.clone()) else { return };
         let Some(view) = self.live_view(&id).filter(|v| v.is_running(cx)).cloned() else {
-            self.toast("Resume the session to switch.", false, cx);
+            self.toast("Resume the session to switch.", cx);
             return;
         };
         if self.switching_worktree.contains_key(&id) || view.is_loading(cx) {
-            self.toast(BUSY, false, cx);
+            self.toast(BUSY, cx);
             return;
         }
         let quiet = !view.is_working(cx);
@@ -98,7 +98,7 @@ impl Workspace {
     fn after_inspection(&mut self, id: Id, folder: PathBuf, base: Base, from: PathBuf, asked: bool, checked: Checked, window: &mut Window, cx: &mut Context<Self>) {
         if !checked.idle {
             self.switching_worktree.remove(&id);
-            self.toast(BUSY, false, cx);
+            self.toast(BUSY, cx);
             return;
         }
         if checked.uncommitted > 0 && !asked {
@@ -137,7 +137,7 @@ impl Workspace {
                 Ok(()) => ws.move_into(&id, harness, folder, has_transcript, window, cx),
                 Err(why) => {
                     ws.switching_worktree.remove(&id);
-                    ws.toast(format!("Couldn't switch: {why}."), true, cx);
+                    ws.toast(format!("Couldn't switch: {why}."), cx);
                     cx.notify();
                 }
             });
@@ -214,7 +214,7 @@ impl Workspace {
         }
         if stayed > 0 {
             let files = if stayed == 1 { "1 open file stays".to_string() } else { format!("{stayed} open files stay") };
-            self.toast(format!("{files} on its old path: it has unsaved edits, or the new folder lacks it."), false, cx);
+            self.toast(format!("{files} on its old path: it has unsaved edits, or the new folder lacks it."), cx);
         }
     }
 }

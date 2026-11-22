@@ -31,7 +31,7 @@ pub(super) fn render_settings_card(
     cx: &mut Context<Workspace>,
 ) -> gpui::Stateful<gpui::Div> {
     let (page, worktrees, scroll) = (ws.settings_page, &ws.worktrees_page, &ws.settings_scroll);
-    let Some(Modal::Settings { shell, default_model, effort, permission, updates, scale, follow_up, m4code_off, skill_search, list_focus, renaming, .. }) = &ws.modal else {
+    let Some(Modal::Settings { shell, default_model, text_generation_model, effort, permission, updates, scale, follow_up, m4code_off, skill_search, list_focus, renaming, .. }) = &ws.modal else {
         return div().id("modal-card");
     };
     let (updates, scale, follow_up) = (*updates, *scale, *follow_up);
@@ -40,7 +40,14 @@ pub(super) fn render_settings_card(
 
     let content: AnyElement = match page {
         SettingsPage::General => {
-            let model_open = matches!(ws.picker_kind(), Some(WorkspacePicker::SettingsModel { .. }));
+            let model_open = matches!(ws.picker_kind(), Some(WorkspacePicker::SettingsModel { text_generation: false, .. }));
+            let generation_open = matches!(ws.picker_kind(), Some(WorkspacePicker::SettingsModel { text_generation: true, .. }));
+            let generation_label = text_generation_model.as_ref().map_or_else(|| "Local summary".into(), |model| {
+                let name = ws.store.data.settings.harness_models(model.harness).iter()
+                    .find(|item| item.id == model.id)
+                    .map_or(model.id.as_str(), |item| item.name.as_str());
+                format!("{} · {name}", model.harness.name())
+            });
             let effort_open = matches!(ws.picker_kind(), Some(WorkspacePicker::SettingsEffort));
             let perm_open = matches!(ws.picker_kind(), Some(WorkspacePicker::SettingsPermission));
             let modes = ws.store.data.settings.modes_for(default_model.harness);
@@ -78,6 +85,7 @@ pub(super) fn render_settings_card(
                 );
             }
             let env_rows: Vec<AnyElement> = vec![
+                settings_picker_row("settings-text-generation", ("Text generation model", "Writes session titles and commit messages"), generation_label, generation_open, |ws, at, window, cx| ws.open_settings_model_picker(at, true, window, cx), cx).into_any_element(),
                 row_shell(
                     "Interface scale",
                     Some("Adjusts UI text and terminal font size"),
@@ -541,7 +549,7 @@ fn default_model_row(current: &crate::harness::CatalogModel, open: bool, cx: &mu
             MouseButton::Left,
             cx.listener(move |ws, _: &MouseDownEvent, window, cx| {
                 cx.stop_propagation();
-                ws.open_settings_model_picker(pill_anchor.below_right().with_hit(row_anchor.bounds()), window, cx);
+                ws.open_settings_model_picker(pill_anchor.below_right().with_hit(row_anchor.bounds()), false, window, cx);
             }),
         )
 }
@@ -585,7 +593,7 @@ fn settings_picker_row(
                 .border_color(hsla(if open { theme::ACCENT } else { theme::PANEL_BORDER }))
                 .text_size(scaled(12.0))
                 .child(pill_anchor.probe())
-                .child(div().text_color(hsla(theme::ACCENT)).child(current))
+                .child(div().max_w(px(220.0)).overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(hsla(theme::ACCENT)).child(current))
                 .child(icon(IconName::ChevronDown, 10.5).text_color(hsla(theme::TEXT_FAINT))),
         )
         .on_mouse_down(

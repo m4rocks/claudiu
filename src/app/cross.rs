@@ -213,7 +213,7 @@ impl Workspace {
                 None => self.live_view(&p.id).is_some_and(|v| !v.is_working(cx)),
             };
             if now - p.asked > SWITCH_PATIENCE_SECS {
-                self.toast("The worktree switch was dropped: the session's turn did not end.", true, cx);
+                self.toast("The worktree switch was dropped: the session's turn did not end.", cx);
             } else if !self.is_running(&p.id, cx) {
                 // Closed in the meantime: nothing to move.
             } else if idle {

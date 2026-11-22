@@ -46,7 +46,7 @@ impl Workspace {
         let meta = ClaudeMeta { harness, ..Default::default() };
         // The same program and environment a new session gets, so Claude Code lists the active account's sessions.
         let Some(start) = self.thread_start(&new_id(), &cwd, &meta, None, None, Starter::User, cx) else { return };
-        self.toast(format!("Looking for {} sessions…", harness.name()), false, cx);
+        self.toast(format!("Looking for {} sessions…", harness.name()), cx);
         cx.spawn(async move |this, cx| {
             let server = match start.server.clone() {
                 Some(s) => Ok(s),
@@ -64,12 +64,12 @@ impl Workspace {
     fn show_listed(&mut self, harness: Harness, cwd: PathBuf, found: Result<Vec<Listed>, String>, at: gpui::Point<gpui::Pixels>, cx: &mut Context<Self>) {
         let sessions = match found {
             Ok(s) => s,
-            Err(why) => return self.toast(format!("{} couldn't list its sessions: {why}", harness.name()), true, cx),
+            Err(why) => return self.toast(format!("{} couldn't list its sessions: {why}", harness.name()), cx),
         };
         if sessions.is_empty() {
-            return self.toast(format!("{} has no sessions in this folder.", harness.name()), false, cx);
+            return self.toast(format!("{} has no sessions in this folder.", harness.name()), cx);
         }
-        self.toast("Quit a session in its terminal before picking it up here.", false, cx);
+        self.toast("Quit a session in its terminal before picking it up here.", cx);
         let items = sessions
             .into_iter()
             .map(|s| {

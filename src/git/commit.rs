@@ -1,5 +1,5 @@
-//! "Commit & Push": stage everything, have Haiku write the message through the running session's own mod
-//! (`claude/ask.rs`; no `claude -p`, no second process), commit, then push. "Pull" is a plain `git pull`; the branch menu
+//! "Commit & Push": stage everything, generate a message, commit, then push.
+//! "Pull" is a plain `git pull`; the branch menu
 //! switches branches and creates new ones from origin (which `background_fetch` keeps fresh). The `git` CLI is
 //! used rather than libgit2 so the user's hooks, signing, identity, credentials and pull config apply exactly
 //! as for a manual commit.
@@ -8,7 +8,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-/// A text-in, text-out completion: `(system, prompt)` to the model's reply. In the app it is `ask::complete`.
+/// A text-in, text-out completion: `(system, prompt)` to the model's reply. The app supplies a local summary or a model call.
 pub type Complete<'a> = &'a dyn Fn(&str, &str) -> Result<String, String>;
 
 /// Keeps the prompt small and cheap; the stat summary always covers the whole change.

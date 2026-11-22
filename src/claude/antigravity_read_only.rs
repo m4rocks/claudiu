@@ -42,11 +42,24 @@ const DENIED: &str = "m4code runs this Antigravity subagent read-only: it can re
 
 /// The Gemini folder read-only runs use, made ready with the hook, which starts the m4code running now.
 pub fn prepare(data_dir: &Path, m4code: &Path) -> std::io::Result<PathBuf> {
-    let gemini = data_dir.join("antigravity-read-only");
+    prepare_with_hook(data_dir.join("antigravity-read-only"), &hook_script(m4code))
+}
+
+pub fn prepare_text_generation(data_dir: &Path) -> std::io::Result<PathBuf> {
+    let denied = json!({"decision": "deny", "reason": "Tools are disabled for text generation."}).to_string();
+    let script = if cfg!(windows) {
+        format!("@echo off\r\necho {denied}\r\n")
+    } else {
+        format!("#!/bin/sh\nprintf '%s\\n' '{denied}'\n")
+    };
+    prepare_with_hook(data_dir.join("antigravity-text-generation"), &script)
+}
+
+fn prepare_with_hook(gemini: PathBuf, body: &str) -> std::io::Result<PathBuf> {
     let config = gemini.join("config");
     std::fs::create_dir_all(&config)?;
     let script = config.join(if cfg!(windows) { "read-only-hook.cmd" } else { "read-only-hook.sh" });
-    publish(&script, &hook_script(m4code))?;
+    publish(&script, body)?;
     publish(&config.join("hooks.json"), &hooks_json(&script).to_string())?;
     Ok(gemini)
 }

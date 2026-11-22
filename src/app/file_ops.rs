@@ -151,7 +151,7 @@ impl Workspace {
                             ws.close_tab(&id, ix, cx);
                         }
                     }
-                    Err(e) => ws.toast(format!("Could not delete it: {e}"), true, cx),
+                    Err(e) => ws.toast(format!("Could not delete it: {e}"), cx),
                 }
                 ws.refresh_files(cx);
             });

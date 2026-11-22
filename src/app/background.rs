@@ -148,7 +148,7 @@ impl Workspace {
         let shown = self.active_id().cloned();
         let mut next: HashMap<Id, Activity> = HashMap::new();
         let mut system_notices: Vec<(String, String)> = vec![];
-        let mut toast_notice: Option<(Id, String)> = None;
+        let mut toast_notice = None;
         for l in &self.live {
             let Some(rec) = self.store.session(&l.id) else { continue };
             if rec.kind == SessionKind::Shell || !l.view.is_running(cx) {
@@ -182,7 +182,7 @@ impl Workspace {
                         AttentionEvent::Finished => format!("“{title}” finished."),
                         AttentionEvent::Waiting => format!("“{title}” needs your answer."),
                     };
-                    toast_notice = Some((l.id.clone(), text));
+                    toast_notice = Some(text);
                 } else {
                     system_notices.push((title, body));
                 }
@@ -201,8 +201,8 @@ impl Workspace {
         for (title, body) in system_notices {
             platform::notify(title, body);
         }
-        if let Some((id, text)) = toast_notice {
-            self.show_toast(text, false, Some(("View".into(), Act::Select(id))), cx);
+        if let Some(text) = toast_notice {
+            self.toast(text, cx);
         }
         self.sync_claude_names();
     }

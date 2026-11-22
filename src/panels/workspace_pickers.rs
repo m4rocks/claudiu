@@ -385,28 +385,44 @@ impl Workspace {
                 let body = div().flex().flex_col().gap(px(8.0)).child(picker::search_input(&gp.search)).child(list);
                 ("git-picker-dialog", "BRANCH & WORKTREE", body.into_any_element(), Some(choices))
             }
-            WorkspacePicker::SettingsModel { search } => {
-                let Some(Modal::Settings { default_model, subagents, .. }) = &self.modal else { return None };
+            WorkspacePicker::SettingsModel { search, text_generation } => {
+                let text_generation = *text_generation;
+                let Some(Modal::Settings { default_model, text_generation_model, subagents, .. }) = &self.modal else { return None };
                 let current = default_model.clone();
                 let query = search.read(cx).value().to_lowercase();
                 let words: Vec<&str> = query.split_whitespace().collect();
                 let mut all = self.store.data.settings.aggregated_models_for(&subagents.enabled);
-                if !all.iter().any(|m| m.harness == current.harness && m.id == current.id) {
+                if text_generation {
+                    all.retain(|m| !m.id.is_empty() && m.id != "default");
+                } else if !all.iter().any(|m| m.harness == current.harness && m.id == current.id) {
                     all.insert(0, current.clone());
                 }
                 let mut choices = picker::Choices::new(&self.picker_nav, &query);
                 let mut list = choices.list("settings-model-list").max_h(px(260.0));
                 let mut shown = 0usize;
+                if text_generation && words.iter().all(|word| "local summary".contains(word)) {
+                    let row = picker::row("settings-model-local", None, "Local summary", None, None, text_generation_model.is_none(), false);
+                    list = list.child(choices.add(row, |ws, window, cx| ws.act(Act::PickTextGenerationModel(None), window, cx), cx));
+                    shown += 1;
+                }
                 for (n, m) in all.into_iter().enumerate() {
                     let hay = format!("{} {} {}", m.name, m.id, m.harness.name()).to_lowercase();
                     if !words.iter().all(|w| hay.contains(w)) {
                         continue;
                     }
-                    let selected = m.harness == current.harness && m.id == current.id;
-                    let choice = m.clone();
+                    let selected = if text_generation {
+                        text_generation_model.as_ref().is_some_and(|model| model.harness == m.harness && model.id == m.id)
+                    } else {
+                        m.harness == current.harness && m.id == current.id
+                    };
+                    let choice = if text_generation {
+                        Act::PickTextGenerationModel(Some(crate::store::TextGenerationModel { harness: m.harness, id: m.id.clone() }))
+                    } else {
+                        Act::PickDefaultModel(m.clone())
+                    };
                     let logo = logos::draw(logos::for_harness(m.harness), 11.5, if selected { accent } else { hsla(theme::TEXT_FAINT) }).into_any_element();
                     let row = picker::row(gpui::SharedString::from(format!("settings-model-opt-{n}")), Some(logo), m.name.clone(), None, None, selected, false);
-                    list = list.child(choices.add(row, move |ws, window, cx| ws.act(Act::PickDefaultModel(choice.clone()), window, cx), cx));
+                    list = list.child(choices.add(row, move |ws, window, cx| ws.act(choice.clone(), window, cx), cx));
                     shown += 1;
                 }
                 if shown == 0 {
@@ -432,7 +448,7 @@ impl Workspace {
                                 .child("Loading models…"),
                         )
                     });
-                ("settings-model-dialog", "DEFAULT MODEL", body.into_any_element(), Some(choices))
+                ("settings-model-dialog", if text_generation { "TEXT GENERATION MODEL" } else { "DEFAULT MODEL" }, body.into_any_element(), Some(choices))
             }
             WorkspacePicker::SettingsEffort => {
                 let Some(Modal::Settings { effort, .. }) = &self.modal else { return None };

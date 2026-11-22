@@ -8,7 +8,7 @@ impl Workspace {
     pub fn toggle_shell(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         let rec = self.store.session(id).filter(|r| r.kind == SessionKind::Claude).cloned();
         let Some(rec) = rec.filter(|_| self.is_running(id, cx)) else {
-            self.toast("Open a session to use its shell.", false, cx);
+            self.toast("Open a session to use its shell.", cx);
             return;
         };
         // From another session the shell is brought up with its session; only on the shown one does it toggle.
@@ -46,7 +46,7 @@ impl Workspace {
             let panel = self.new_shell_panel(HOME_SHELL, cwd, window, cx);
             self.shells.insert(HOME_SHELL.to_string(), panel);
         } else {
-            self.toast("Could not find the home folder for a shell.", true, cx);
+            self.toast("Could not find the home folder for a shell.", cx);
             return;
         }
         if self.shells.get(HOME_SHELL).is_some_and(|p| p.open) {
@@ -72,7 +72,7 @@ impl Workspace {
         let sub = cx.subscribe_in(&view, window, move |ws: &mut Workspace, view, ev: &TerminalEvent, window, cx| {
             if matches!(ev, TerminalEvent::Exited(_)) {
                 if let Some(err) = view.read(cx).start_error() {
-                    ws.toast(format!("Could not start the shell: {err}"), true, cx);
+                    ws.toast(format!("Could not start the shell: {err}"), cx);
                 }
                 let shell_had_focus = view.focus_handle(cx).is_focused(window);
                 ws.shells.remove(&owner);

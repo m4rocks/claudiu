@@ -121,7 +121,7 @@ impl Workspace {
     }
 
     /// Environment passed to `harness`'s ACP server when probing its available models.
-    fn harness_model_env(&self, harness: Harness) -> Result<Vec<(String, String)>, String> {
+    pub(super) fn harness_model_env(&self, harness: Harness) -> Result<Vec<(String, String)>, String> {
         if harness != Harness::Claude {
             return Ok(vec![]);
         }

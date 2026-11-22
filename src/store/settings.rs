@@ -87,6 +87,12 @@ impl Layout {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TextGenerationModel {
+    pub harness: crate::harness::Harness,
+    pub id: String,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Settings {
     /// Explicit path to the `claude` executable; discovery is used when empty.
@@ -115,6 +121,8 @@ pub struct Settings {
     /// Model, effort and permission mode for new sessions; empty fields leave the harness's own default.
     #[serde(default)]
     pub new_session: crate::claude::defaults::NewSessionDefaults,
+    #[serde(default)]
+    pub text_generation_model: Option<TextGenerationModel>,
     /// Parts of m4code's own MCP server switched off for new sessions (`claude/mcp.rs`). Empty means everything is on,
     /// which is also what a state file from before this setting loads as.
     #[serde(default, alias = "claudiu_tools_off")]

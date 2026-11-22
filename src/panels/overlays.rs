@@ -185,15 +185,12 @@ impl Workspace {
     pub(super) fn render_toast(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let t = self.toast.as_ref()?;
         let action = t.action.clone().map(|(label, act)| {
-            div().mt(px(8.0)).flex().gap(px(6.0)).child(button("toast-action", label, true).on_click(cx.listener(
+            div().mt(px(8.0)).flex().child(button("toast-action", label, true).on_click(cx.listener(
                 move |ws, _: &ClickEvent, window, cx| {
                     ws.toast = None;
                     ws.act(act.clone(), window, cx);
                 },
-            ))).child(button("toast-dismiss", "Dismiss", false).on_click(cx.listener(|ws, _: &ClickEvent, _w, cx| {
-                ws.toast = None;
-                cx.notify();
-            })))
+            )))
         });
         Some(
             deferred(
@@ -208,9 +205,9 @@ impl Workspace {
                         .rounded(px(8.0))
                         .bg(hsla(0x1a1a1a))
                         .border_1()
-                        .border_color(hsla(if t.error { 0x5a2327 } else { 0x2c2c2c }))
+                        .border_color(hsla(0x2c2c2c))
                         .text_size(crate::panels::scale::px(12.5))
-                        .text_color(hsla(if t.error { theme::DANGER } else { theme::TEXT }))
+                        .text_color(hsla(theme::TEXT))
                         .child(t.text.clone())
                         .children(action),
                         format!("toast-{}", t.serial),

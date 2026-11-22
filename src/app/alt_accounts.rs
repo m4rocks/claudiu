@@ -42,7 +42,7 @@ impl Workspace {
                 if let Some((id, _)) = signed_in.into_iter().find(|(_, e)| Some(e) == main.as_ref()) {
                     // The login page approves whichever claude.ai account the browser is already signed in to.
                     let text = "This alt signed in to your main account. Sign out of claude.ai in your browser (or use a private window), then sign in again.";
-                    ws.show_toast(text.into(), true, Some(("Sign in again".into(), Act::SignIn(id))), cx);
+                    ws.show_toast(text.into(), Some(("Sign in again".into(), Act::SignIn(id))), cx);
                 }
                 ws.store.save_if_dirty();
                 cx.notify();
@@ -54,7 +54,7 @@ impl Workspace {
     /// `claude auth login` for an alt account in a terminal tab; account details refresh when it ends.
     pub(super) fn sign_in(&mut self, account: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(exe) = self.claude_exe.clone() else {
-            self.toast("Could not find the `claude` CLI.", true, cx);
+            self.toast("Could not find the `claude` CLI.", cx);
             return;
         };
         let Some(env) = self.store.account(account).map(Self::account_env).filter(|e| !e.is_empty()) else { return };

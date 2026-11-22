@@ -264,6 +264,8 @@ pub struct ThreadView {
     pub(super) model_scroll: gpui::ScrollHandle,
     /// Tool call ids manually expanded by clicking their compressed single-line header.
     expanded_tools: HashSet<String>,
+    /// Shell calls closed by hand while Ctrl+O is showing tool details.
+    collapsed_shell_calls: HashSet<String>,
     effort_bounds: Rc<Cell<Bounds<Pixels>>>,
     effort_dragging: Rc<Cell<bool>>,
     last_escape: Option<Instant>,
@@ -405,6 +407,7 @@ impl ThreadView {
             mode_highlight: 0,
             model_scroll: gpui::ScrollHandle::new(),
             expanded_tools: HashSet::new(),
+            collapsed_shell_calls: HashSet::new(),
             effort_bounds: Rc::new(Cell::new(Bounds::default())),
             effort_dragging: Rc::new(Cell::new(false)),
             last_escape: None,
@@ -1457,6 +1460,7 @@ impl ThreadView {
             }
             keys::Key::ToggleDetail => {
                 self.detail = !self.detail;
+                self.collapsed_shell_calls.clear();
                 self.remeasure(0);
             }
             keys::Key::TogglePlan => self.plan_open = !self.plan_open,
@@ -1833,6 +1837,47 @@ mod tests {
             options: vec![], prompt: None, prior_entries: vec![],
             server: Some(("definitely-not-a-real-program-m4code".into(), vec![])),
         }
+    }
+
+    #[cfg(debug_assertions)]
+    #[gpui::test]
+    fn shell_output_can_be_collapsed_with_tool_details_on(cx: &mut gpui::TestAppContext) {
+        use crate::harness::thread::{ToolCall, ToolContent};
+        use gpui::Modifiers;
+
+        cx.update(gpui_kit::init);
+        let dir = tempfile::tempdir().unwrap();
+        let mut start = test_start(dir.path().into(), Harness::Claude);
+        start.prior_entries.push(Entry::Tool(ToolCall {
+            id: "shell".into(),
+            title: "Print a line".into(),
+            kind: "execute".into(),
+            content: vec![ToolContent::Text("shell output".into())],
+            ..Default::default()
+        }));
+        let (view, cx) = cx.add_window_view(|window, cx| super::ThreadView::new(start, window, cx));
+        let row = |cx: &mut gpui::VisualTestContext| {
+            cx.refresh().unwrap();
+            view.read_with(cx, |v, _| v.list.bounds_for_item(0).expect("shell call is visible"))
+        };
+
+        let collapsed = row(cx).size.height;
+        view.update(cx, |v, cx| {
+            v.detail = true;
+            v.remeasure(0);
+            cx.notify();
+        });
+        let expanded = row(cx);
+        assert!(expanded.size.height > collapsed);
+
+        let click_header = |cx: &mut gpui::VisualTestContext| {
+            let header = cx.debug_bounds("tool-row-0").expect("shell header is visible");
+            cx.simulate_click(header.center(), Modifiers::default());
+        };
+        click_header(cx);
+        assert_eq!(row(cx).size.height, collapsed);
+        click_header(cx);
+        assert_eq!(row(cx).size.height, expanded.size.height);
     }
 
     #[gpui::test]

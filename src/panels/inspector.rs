@@ -212,7 +212,7 @@ impl Workspace {
             (SideCard::Subagents, subagents.map(|(n, s)| group("SUBAGENTS", Some(n), s))),
             (SideCard::Linked, linked.map(|(n, l)| group("LINKED", Some(n), l))),
             (SideCard::Status, Some(group("STATUS", None, status))),
-            (SideCard::Empty, Some(card().h(px(72.0)))),
+            (SideCard::Empty, Some(card().min_h(px(72.0)).flex_grow_1())),
         ]
         .into_iter()
         .filter_map(|(kind, card)| Some((kind, card?)))
@@ -324,7 +324,6 @@ impl Workspace {
                     row(key, glyph, label).on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(make(repo.clone()), window, cx)))
                 }
             };
-            // The commit message is written through the running session's mod, so it needs one.
             // Until it has been read, assume there is work.
             let nothing_to_do = self.pending.as_ref().is_some_and(|(dir, p)| *dir == repo && !p.any());
             let commit = match id.filter(|_| running && claude) {

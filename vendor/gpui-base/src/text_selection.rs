@@ -1339,6 +1339,7 @@ impl WindowSelectionState {
 
     /// Ends the current gesture and keeps its selection visible.
     pub fn end(&mut self, cx: &mut App) {
+        self.mouse_down_prepared = false;
         self.pending_extension_anchor = None;
         if !self.is_selecting {
             return;
@@ -2815,9 +2816,17 @@ fn paint_text_selection(state: &Entity<WindowSelectionState>, window: &mut Windo
 
     let mouse_move_state = state.downgrade();
     window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
-        if phase.bubble()
-            && let Some(state) = mouse_move_state.upgrade()
-        {
+        let Some(state) = mouse_move_state.upgrade() else {
+            return;
+        };
+        if event.pressed_button != Some(MouseButton::Left) {
+            // A compositor can take over a window drag and consume its mouse-up.
+            if phase.capture() && state.read(cx).mouse_down_prepared {
+                state.update(cx, |state, cx| state.end(cx));
+            }
+            return;
+        }
+        if phase.bubble() {
             state.update(cx, |state, cx| {
                 // A handle drag maps the pointer through the handle's offset;
                 // the raw pointer must not fight it.
@@ -2835,10 +2844,7 @@ fn paint_text_selection(state: &Entity<WindowSelectionState>, window: &mut Windo
         if phase.bubble()
             && let Some(state) = mouse_up_state.upgrade()
         {
-            state.update(cx, |state, cx| {
-                state.mouse_down_prepared = false;
-                state.end(cx)
-            });
+            state.update(cx, |state, cx| state.end(cx));
         }
     });
 

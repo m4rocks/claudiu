@@ -148,3 +148,64 @@ fn dropdowns_answer_the_arrow_keys() {
 }
 
 
+
+#[test]
+#[ignore = "drives the workspace"]
+fn text_generation_picker_saves_a_model_independently_of_new_sessions() {
+    let data = tempfile::tempdir().unwrap();
+    unsafe { std::env::set_var("M4CODE_DATA_DIR", data.path()) };
+    let mut cx = TestAppContext::single();
+    cx.update(gpui_kit::init);
+    let (window, ws) = cx.update(|app| gpui_kit::open_window(Default::default(), app, |window, app| {
+        app.new(|cx| Workspace::new(window, vec![], cx))
+    })).unwrap();
+
+    let chosen = crate::store::TextGenerationModel { harness: Harness::Codex, id: "light".into() };
+    let previous = cx.update_window(window, |_, window, app| {
+        ws.update(app, |ws, cx| {
+            let settings = &mut ws.store.data.settings;
+            settings.enabled_harnesses = Some(vec![Harness::Claude, Harness::Codex]);
+            settings.set_harness_models(Harness::Claude, vec![crate::claude::subagents::AgentModel { id: "full".into(), name: "Full".into() }]);
+            settings.set_harness_models(Harness::Codex, vec![crate::claude::subagents::AgentModel { id: "light".into(), name: "Light".into() }]);
+            ws.model_lookups.list = |_, _, _| Err("Catalog preset by test.".into());
+            let previous = settings.default_model();
+            ws.act(Act::OpenSettings, window, cx);
+            previous
+        })
+    }).unwrap();
+
+    let open_picker = |cx: &mut TestAppContext| {
+        cx.update_window(window, |_, window, app| {
+            ws.update(app, |ws, cx| {
+                let at = crate::panels::widgets::Dropdown::at(gpui::point(gpui::px(20.0), gpui::px(20.0)));
+                ws.open_settings_model_picker(at, true, window, cx);
+            });
+            window.draw(app).clear(app);
+        }).unwrap();
+    };
+    let close_settings = |cx: &mut TestAppContext| {
+        cx.update_window(window, |_, window, app| ws.update(app, |ws, cx| ws.act(Act::Dismiss, window, cx))).unwrap();
+    };
+
+    open_picker(&mut cx);
+    let mut visual = gpui::VisualTestContext::from_window(window, &cx);
+    visual.simulate_keystrokes("down down enter");
+    assert!(ws.read_with(&visual, |ws, _| matches!(&ws.modal, Some(Modal::Settings { text_generation_model: Some(model), .. }) if model == &chosen)));
+    close_settings(&mut cx);
+    ws.read_with(&cx, |ws, _| {
+        assert_eq!(ws.store.data.settings.text_generation_model.as_ref(), Some(&chosen));
+        assert_eq!(ws.store.data.settings.default_model(), previous);
+    });
+    cx.update_window(window, |_, window, app| ws.update(app, |ws, cx| ws.act(Act::OpenSettings, window, cx))).unwrap();
+    open_picker(&mut cx);
+    cx.update_window(window, |_, window, app| {
+        let Some(WorkspacePicker::SettingsModel { search, .. }) = ws.read(app).picker_kind() else {
+            panic!("the text generation picker is open");
+        };
+        search.clone().update(app, |search, cx| search.set_value("local", window, cx));
+        window.draw(app).clear(app);
+    }).unwrap();
+    visual.simulate_keystrokes("enter");
+    close_settings(&mut cx);
+    assert!(ws.read_with(&cx, |ws, _| ws.store.data.settings.text_generation_model.is_none()));
+}

@@ -4,17 +4,16 @@ use super::*;
 use crate::panels::widgets::Dropdown;
 
 impl Workspace {
-    pub fn toast(&mut self, text: impl Into<String>, error: bool, cx: &mut Context<Self>) {
-        self.show_toast(text.into(), error, None, cx);
+    pub fn toast(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
+        self.show_toast(text.into(), None, cx);
     }
 
-    pub(super) fn show_toast(&mut self, text: String, error: bool, action: Option<(String, Act)>, cx: &mut Context<Self>) {
+    pub(super) fn show_toast(&mut self, text: String, action: Option<(String, Act)>, cx: &mut Context<Self>) {
         self.toast_serial += 1;
         let serial = self.toast_serial;
         let secs = if action.is_some() { 20 } else { 5 };
         self.toast = Some(Toast {
             text,
-            error,
             serial,
             action,
         });
@@ -76,7 +75,7 @@ impl Workspace {
                 let name = input.read(cx).value().trim().to_string();
                 if let Err(why) = self.apply_file_name(&id, &purpose, &name, window, cx) {
                     self.modal = Some(Modal::FileName { id, purpose, input });
-                    self.toast(why, true, cx);
+                    self.toast(why, cx);
                     return;
                 }
                 Act::Dismiss
@@ -85,7 +84,7 @@ impl Workspace {
                 let text = input.read(cx).value().to_string();
                 if let Err(why) = self.go_to_line(&id, &text, window, cx) {
                     self.modal = Some(Modal::GoToLine { id, input });
-                    self.toast(why, true, cx);
+                    self.toast(why, cx);
                     return;
                 }
                 Act::Dismiss
@@ -107,6 +106,7 @@ impl Workspace {
             shell,
             claude,
             default_model,
+            text_generation_model,
             effort,
             permission,
             updates,
@@ -152,6 +152,7 @@ impl Workspace {
         s.scale = (scale != 100).then_some(scale);
         s.chrome_default = chrome;
         s.follow_up = follow_up;
+        s.text_generation_model = text_generation_model;
 
         let enabled = if subagents.enabled.is_empty() { vec![default_model.harness] } else { subagents.enabled.clone() };
         let chosen = if enabled.contains(&default_model.harness) {
@@ -252,7 +253,7 @@ impl Workspace {
             self.sync_skills(None, cx);
         }
         if let Some(msg) = warnings.into_iter().next() {
-            self.toast(msg, true, cx);
+            self.toast(msg, cx);
         }
         self.focus_active(window, cx);
         cx.notify();
