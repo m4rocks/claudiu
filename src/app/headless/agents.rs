@@ -758,7 +758,11 @@ fn a_session_opens_another_with_its_model_and_effort_without_asking() {
         cx.update_window(window, |_, window, app| ws.update(app, |ws, cx| f(ws, window, cx))).unwrap();
         cx.run_until_parked();
     };
+    let state = tempfile::tempdir().unwrap();
     step(&mut cx, &|ws, window, cx| {
+        // Its stand-in offers a model list of its own. Kept in this test's own state file, it never reaches the other
+        // tests that share the throwaway data folder as Claude Code's catalog.
+        ws.store = crate::store::Store::load(state.path().join("state.json"));
         ws.acp_server = Some(server.clone());
         ws.claude_exe = Some(PathBuf::from("unused-by-the-fake-agent"));
         ws.store.data.settings.enabled_harnesses = None;
