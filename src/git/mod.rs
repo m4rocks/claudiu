@@ -3,6 +3,7 @@
 
 pub mod commit;
 pub mod lines;
+pub mod snapshot;
 pub mod worktree;
 
 use std::path::{Path, PathBuf};

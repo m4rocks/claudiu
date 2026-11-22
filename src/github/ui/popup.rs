@@ -1,6 +1,8 @@
 //! The filter, label, assignee and sort popups over the list.
 
 use super::*;
+use crate::panels::picker;
+use crate::panels::widgets::Dropdown;
 
 impl GithubView {
     pub(super) fn popup_items(&self, kind: &PopKind) -> (Vec<PopItem>, bool) {
@@ -218,68 +220,50 @@ impl GithubView {
         (out, loading)
     }
 
-    pub(super) fn render_popup(&self) -> Option<El> {
+    pub(super) fn render_popup(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let popup = self.popup.as_ref()?;
         let (items, loading) = self.popup_items(&popup.kind);
-        let needle = popup.filter.text.to_lowercase();
+        let needle = popup.filter.read(cx).value().to_lowercase();
         let searchable = !matches!(popup.kind, PopKind::Merge | PopKind::CloseReason | PopKind::Claude | PopKind::More | PopKind::React(_) | PopKind::Comment(..) | PopKind::FilterSort | PopKind::FilterReview | PopKind::FilterChecks);
-        let mut list = col().key("gh-pop-list").w_full().max_h(320.0).scroll(ScrollSpec { stick_bottom: false });
+        let mut choices = picker::Choices::new(&popup.nav, &needle);
+        let mut list = choices.list("gh-pop-list").max_h(px(320.0));
         let mut shown = 0;
         for (i, it) in items.into_iter().enumerate() {
             if searchable && !needle.is_empty() && !it.label.to_lowercase().contains(&needle) {
                 continue;
             }
             shown += 1;
-            let mut r = row()
-                .key(format!("gh-pop-{i}"))
-                .w_full()
-                .h(28.0)
-                .px(10.0)
-                .gap(8.0)
-                .center_y()
-                .radius(5.0)
-                .cursor(Cursor::Pointer)
-                .role("menuitem")
-                .hover(Color::WHITE.alpha(0.06))
-                .child(row().w(12.0).child(if it.checked == Some(true) { icon(&icons::CHECK, 13.0, theme::ACCENT) } else { el() }));
-            if let Some(c) = it.swatch {
-                r = r.child(el().size(10.0, 10.0).radius(5.0).fill(rgb(c)));
-            }
-            r = r.child(label(it.label, 12.5, theme::TEXT).truncate().grow(1.0).shrink());
-            if let Some(h) = it.hint {
-                r = r.child(faint(h));
-            }
-            list = list.child(r.on_press_tx(go(&self.id, it.act)));
+            let lead = div()
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .children(it.swatch.map(|c| div().size(px(10.0)).rounded_full().bg(hsla(c))))
+                .into_any_element();
+            let trailing = it.hint.map(|hint| faint(hint).into_any_element());
+            let row = picker::row(SharedString::from(format!("gh-pop-{i}")), Some(lead), it.label, None, trailing, it.checked == Some(true), false);
+            list = list.child(choices.add(row, move |v, window, cx| v.act(it.act.clone(), window, cx), cx));
         }
         if loading {
-            list = list.child(row().px(10.0).py(6.0).gap(8.0).center_y().child(spinner(12.0, theme::TEXT_DIM)).child(dim("Loading…")));
+            list = list.child(div().px(px(10.0)).py(px(6.0)).child(dim("Loading…")));
         } else if shown == 0 {
-            list = list.child(el().px(10.0).py(6.0).child(dim("Nothing matches")));
+            list = list.child(div().px(px(10.0)).py(px(6.0)).child(dim("Nothing matches")));
         }
-        let pane = self.id.clone();
-        let mut card = col()
-            .key(format!("gh-popup-{:?}", popup.kind))
-            .w(272.0)
-            .padding(4.0)
-            .gap(4.0)
-            .radius(9.0)
-            .fill(rgb(0x18181a))
-            .border(1.0, rgb(0x2c2c30))
-            .shadow(10.0, 28.0, Color::BLACK.alpha(0.5))
-            .role("menu")
-            .transition(Transition::scale(0.96).combined(Transition::opacity()))
-            .modal(true, move |ws: &mut Workspace| {
-                if let Some(v) = ws.gh_view_mut(&pane) {
-                    v.popup = None;
-                }
-            });
-        if searchable {
-            card = card.child(el().padding(2.0).child(gh_input(&self.id, "gh-pop-filter", &popup.filter, |v| match v.popup.as_mut() {
-                Some(p) => &mut p.filter,
-                None => &mut v.query_input,
-            }, "Filter", false, None)));
-        }
-        Some(card.child(list).anchored(popup.anchor.clone(), rune::Side::Bottom, rune::Align::Start, 4.0))
+        let body = div()
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
+            .when(searchable, |d| d.child(picker::search_input(&popup.filter)))
+            .child(list);
+        Some(picker::dropdown_overlay(
+            ("gh-popup", "GITHUB"),
+            Dropdown::at(popup.pos),
+            5,
+            body.into_any_element(),
+            Some(choices),
+            |v, window, cx| v.act(GhAct::ClosePopup, window, cx),
+            window,
+            cx,
+        ))
     }
 }
 

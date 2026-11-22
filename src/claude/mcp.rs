@@ -1,9 +1,9 @@
 //! Tab titles, model/effort switches and visuals chosen by Claude itself, through a tiny MCP server
-//! (`claudiu --mcp-title`).
+//! (`m4code --mcp-title`).
 //!
-//! It is wired in *per process*: Claudiu starts each Claude session with `--mcp-config <file>` (and
+//! It is wired in *per process*: m4code starts each Claude session with `--mcp-config <file>` (and
 //! `--allowedTools` for its tools so they never prompt). The server's `instructions` ask Claude to name the tab now
-//! and then; the tool just drops the title into a file that Claudiu picks up on its next tick. `set_model` and
+//! and then; the tool just drops the title into a file that m4code picks up on its next tick. `set_model` and
 //! `show_visual` are declared here only so Claude sees them: the per-process mod (`mod/`, loaded with
 //! `--plugin-dir`) answers those calls in-process (`show_visual` while the model is still writing it), so the
 //! server only ever sees them when the mod isn't active, and then reports that.
@@ -19,13 +19,12 @@ use crate::claude::trim::Trim;
 use crate::store::Attached;
 
 pub const FLAG: &str = "--mcp-title";
-pub const SESSION_ENV: &str = "CLAUDIU_SESSION";
-/// Claudiu's own id of the session. Unlike Claude's session id it survives `/clear`.
-pub const RECORD_ENV: &str = "CLAUDIU_RECORD";
+/// m4code's own id of the session. Unlike Claude's session id it survives `/clear`.
+pub const RECORD_ENV: &str = "M4CODE_RECORD";
 /// Comma-separated names of what the server leaves out of this session (see `tools_off`). Missing means nothing is off.
-pub const TOOLS_OFF_ENV: &str = "CLAUDIU_TOOLS_OFF";
+pub const TOOLS_OFF_ENV: &str = "M4CODE_TOOLS_OFF";
 
-/// A group of Claudiu's tools the user can switch off (Settings → Claudiu tools).
+/// A group of m4code's tools the user can switch off (Settings → m4code tools).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Feature {
@@ -48,7 +47,16 @@ impl Feature {
         }
     }
 
-    /// The name in `CLAUDIU_TOOLS_OFF`.
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::Visual => "Render charts, diagrams, and interactive UI cards inline in chat",
+            Self::Github => "Attach GitHub issues and pull requests to the right sidebar",
+            Self::Sessions => "Link and coordinate with other running m4code sessions",
+            Self::Model => "Let the agent switch its own model or effort mid-conversation",
+        }
+    }
+
+    /// The name in `M4CODE_TOOLS_OFF`.
     fn name(self) -> &'static str {
         match self {
             Self::Visual => "visual",
@@ -65,7 +73,7 @@ pub fn normalized_features(features: &[Feature]) -> Vec<Feature> {
 }
 
 /// What the server leaves out of a session: the features switched off, plus `ask_user_question` and `artifacts` when
-/// those Claude Code tools are trimmed, so Claudiu's own text stops naming them.
+/// those Claude Code tools are trimmed, so m4code's own text stops naming them.
 pub fn tools_off(features: &[Feature], trimmed: &[Trim]) -> Vec<&'static str> {
     let mut off: Vec<&'static str> = normalized_features(features).into_iter().map(Feature::name).collect();
     off.extend(trimmed.contains(&Trim::AskUserQuestion).then_some("ask_user_question"));
@@ -79,8 +87,8 @@ fn feature_of(tool: &str) -> Option<&'static str> {
         "show_visual" => Some("visual"),
         "attach_github" | "detach_github" => Some("github"),
         "link_session" | "unlink_session" => Some("sessions"),
-        "set_model" => Some("model"),
-        _ if BRIDGE_TOOLS.contains(&tool) => Some("sessions"),
+        "set_model" | "list_models" => Some("model"),
+        _ if BRIDGE_TOOLS.contains(&tool) || SUBAGENT_TOOLS.contains(&tool) => Some("sessions"),
         _ => None,
     }
 }
@@ -89,26 +97,51 @@ fn is_off(off: &[&str], tool: &str) -> bool {
     feature_of(tool).is_some_and(|f| off.contains(&f))
 }
 
-/// Tools the model uses to tell Claudiu something about itself; none of them reads or starts another session.
+/// Tools the model uses to tell m4code something about itself; none of them reads or starts another session.
 const OWN_TOOLS: [&str; 5] = ["attach_github", "detach_github", "link_session", "unlink_session", "show_visual"];
 
+/// Tools that change this session's model; m4code answers them (`app/cross.rs`), whatever the harness.
+const MODEL_TOOLS: [&str; 2] = ["list_models", "set_model"];
+
 /// Tools that reach other sessions (`claude/bridge.rs`).
+pub(crate) const SUBAGENT_TOOLS: [&str; 5] = ["spawn_subagent", "list_subagents", "send_subagent_message", "wait_subagent", "stop_subagent"];
+
 const BRIDGE_TOOLS: [&str; 6] = ["list_code_sessions", "read_code_session", "search_sessions", "search_projects", "start_code_session", "switch_worktree"];
 
-/// `mcp__<server>__<tool>` names allowed per process so Claude Code adds no prompt of its own: Claudiu's own tools only
-/// change what Claudiu shows, and the cross-session tools are limited to what the user asks of the model.
+/// `mcp__<server>__<tool>` names allowed per process so Claude Code adds no prompt of its own: m4code's own tools only
+/// change what m4code shows, and the cross-session tools are limited to what the user asks of the model.
 pub fn allowed_tools(off: &[&str]) -> Vec<String> {
-    OWN_TOOLS.iter().copied().chain(BRIDGE_TOOLS).filter(|t| !is_off(off, t)).map(|t| format!("mcp__claudiu__{t}")).collect()
+    OWN_TOOLS.iter().copied().chain(MODEL_TOOLS).chain(BRIDGE_TOOLS).chain(SUBAGENT_TOOLS).filter(|t| !is_off(off, t)).map(|t| format!("mcp__m4code__{t}")).collect()
 }
 
-const BRIDGE_INSTRUCTIONS: &str = " Claudiu also has tools that reach your other sessions: list_code_sessions, read_code_session, \
-search_sessions, search_projects and start_code_session. They act at once. Use them only when the user asks you to look at, hand \
-work to or continue in another session, or to work in a project; search_sessions may also be used unasked to find a session to link. \
-switch_worktree moves this session into another git worktree of its project; call it only when the user asks for a worktree, and \
-end your turn once it is approved.";
+/// Whether a tool call's title is one of m4code's own tools and nothing else, as a harness names it
+/// (`m4code: list_models`, `m4code_list_models`, `mcp__m4code__list_models`). Their permission prompts are answered
+/// yes: the instructions already limit them to what the user asked for. The whole title must match, because a shell
+/// command or a file path can contain the same words.
+pub fn is_own_tool(title: &str) -> bool {
+    let title = title.trim();
+    OWN_TOOLS.iter().chain(&MODEL_TOOLS).chain(&BRIDGE_TOOLS).chain(&SUBAGENT_TOOLS).any(|tool| {
+        ["mcp__m4code__", "m4code: ", "m4code_", "m4code.", "m4code/", "m4code__"].iter().any(|prefix| title.strip_prefix(prefix) == Some(tool))
+    })
+}
 
-const LINK_INSTRUCTIONS: &str = " Claudiu shows related sessions together. When this work continues or builds on another \
-Claude Code session (the user says so, or you recognise it), find it with search_sessions and call link_session once per pair; \
+const BRIDGE_INSTRUCTIONS: &str = " m4code also has tools that reach your other sessions: list_code_sessions, read_code_session, \
+search_sessions, search_projects and start_code_session. They act at once, without asking the user, so use them only when the \
+user asks you to look at, hand work to, start or continue in another session, or to work in a project; search_sessions may also be \
+used unasked to find a session to link. Never ask the user to confirm what they just asked for. start_code_session takes a project, \
+a model and an effort; name a model or effort only when the user did. \
+switch_worktree moves this session into another git worktree of its project; call it only when the user asks for a worktree, and \
+end your turn after it.";
+
+const SUBAGENT_INSTRUCTIONS: &str = " Subagents run through m4code across Claude Code, Codex and OpenCode. \
+Use spawn_subagent to delegate a task to another harness, list_subagents to inspect children, \
+send_subagent_message for a follow-up and stop_subagent to cancel. spawn_subagent returns at once; when a child's turn \
+ends, m4code sends you its report as a message starting with [m4code subagent report], so don't poll. Call \
+wait_subagent only when you must have the report before you can go on in this turn. \
+These tools use the subagent and edit permissions saved in Settings. Follow the user's and project's delegation rules.";
+
+const LINK_INSTRUCTIONS: &str = " m4code shows related sessions together. When this work continues or builds on another \
+m4code session (the user says so, or you recognise it), find it with search_sessions and call link_session once per pair; \
 call unlink_session when a link no longer fits. Both are silent.";
 
 /// What makes the model call `show_visual` (the tool's own description teaches the dialect, and stays deferred).
@@ -120,7 +153,7 @@ answers and code changes stay in text.";
 
 const ARTIFACT_INSTRUCTIONS: &str = " Artifacts are for pages to share.";
 
-const VISUAL_LOADING: &str = " Load it first with ToolSearch (select:mcp__claudiu__show_visual) if needed.";
+const VISUAL_LOADING: &str = " Load it first with ToolSearch (select:mcp__m4code__show_visual) if needed.";
 
 /// What makes the model call `attach_github`.
 const GITHUB_INSTRUCTIONS: &str = " GitHub: call attach_github (silent, free) for each issue or pull request you work on, \
@@ -128,13 +161,15 @@ as its description says; detach_github takes one off again.";
 
 /// The opening of the instructions; each feature's text follows it. The user names the session, so there is nothing
 /// about the title here.
-const INTRO: &str = "You are running inside Claudiu, a desktop app that runs this Claude Code session.";
+const INTRO: &str = "You are running inside m4code, a desktop app that runs this coding-agent session.";
 
-/// What makes the model ask before it calls `set_model`; `ask` is how it asks.
-fn model_instructions(ask: &str) -> String {
-    format!(
-        " Never switch models on your own: before set_model, ask {ask} which model and effort, unless the user \
-just named them. After set_model, end your turn and ask the user to confirm before continuing, so the switch applies."
+/// Confirmation instructions shared by every provider before switching models.
+fn model_instructions() -> String {
+    String::from(
+        " Never switch models on your own: before set_model, ask the user which model, unless the user just named one, and never ask \
+them to confirm a switch they asked for. \
+Don't ask about effort: leave it out unless the user named one, and m4code uses medium. list_models gives the exact names set_model takes (harness:model-id), including other coding agents; \
+switching to another one hands this conversation over. After set_model, end your turn."
     )
 }
 
@@ -143,7 +178,7 @@ fn instructions(off: &[&str]) -> String {
     let on = |name: &str| !off.contains(&name);
     let mut text = INTRO.to_string();
     if on("model") {
-        text += &model_instructions(if on("ask_user_question") { "with AskUserQuestion" } else { "the user" });
+        text += &model_instructions();
     }
     if on("github") {
         text += GITHUB_INSTRUCTIONS;
@@ -160,6 +195,7 @@ fn instructions(off: &[&str]) -> String {
     }
     if on("sessions") {
         text += BRIDGE_INSTRUCTIONS;
+        text += SUBAGENT_INSTRUCTIONS;
     }
     text
 }
@@ -169,7 +205,7 @@ fn titles_dir() -> PathBuf {
     crate::datadir::data_dir().join("titles")
 }
 
-/// Where Claudiu puts the Claude Code session name it wants for a session; the mod (`CLAUDIU_NAME_FILE`)
+/// Where m4code puts the Claude Code session name it wants for a session; the mod (`M4CODE_NAME_FILE`)
 /// applies it with `/rename`, so nothing is typed into the PTY.
 pub fn name_file(claude_session_id: &str) -> PathBuf {
     crate::datadir::data_dir().join("names").join(format!("{}.txt", crate::datadir::safe_file_stem(claude_session_id)))
@@ -192,16 +228,10 @@ fn config_dir() -> PathBuf {
     crate::datadir::data_dir().join("mcp")
 }
 
-/// Entry point of `claudiu --mcp-title`: newline-delimited JSON-RPC over stdio.
+/// Entry point of `m4code --mcp-title`: newline-delimited JSON-RPC over stdio.
 pub fn run() -> i32 {
-    let session = std::env::var(SESSION_ENV).unwrap_or_default();
-    let record = std::env::var(RECORD_ENV).unwrap_or_else(|_| session.clone());
+    let record = std::env::var(RECORD_ENV).unwrap_or_default();
     let from = format!("code:{record}");
-    if !session.is_empty() {
-        let config = config_file(&session);
-        let _ = mark_in_use(&config);
-        keep_config_fresh(config);
-    }
     let off_env = std::env::var(TOOLS_OFF_ENV).unwrap_or_default();
     let off: Vec<&str> = off_env.split(',').map(str::trim).filter(|n| !n.is_empty()).collect();
     serve(std::io::stdin().lock(), std::io::stdout().lock(), &record, &crate::datadir::data_dir(), &off, |tool, args| crate::claude::bridge::ask(&from, tool, args));
@@ -209,7 +239,7 @@ pub fn run() -> i32 {
 }
 
 /// `off` names what this session leaves out (see `tools_off`): those tools are neither listed nor callable and their
-/// instruction text is dropped. `ask` carries a cross-session request to Claudiu and waits for the user's answer.
+/// instruction text is dropped. `ask` carries a cross-session request to m4code and waits for the user's answer.
 fn serve(input: impl BufRead, mut out: impl Write, record: &str, data: &Path, off: &[&str], ask: impl Fn(&str, &Value) -> Result<String, String>) {
     for line in input.lines().map_while(Result::ok) {
         let Ok(msg) = serde_json::from_str::<Value>(&line) else { continue };
@@ -219,19 +249,18 @@ fn serve(input: impl BufRead, mut out: impl Write, record: &str, data: &Path, of
             "initialize" => Ok(json!({
                 "protocolVersion": msg["params"]["protocolVersion"].as_str().unwrap_or("2025-06-18"),
                 "capabilities": { "tools": {} },
-                "serverInfo": { "name": "claudiu", "version": env!("CARGO_PKG_VERSION") },
+                "serverInfo": { "name": "m4code", "version": env!("CARGO_PKG_VERSION") },
                 "instructions": instructions(off),
             })),
             "ping" => Ok(json!({})),
-            "tools/list" => Ok(json!({ "tools": own_tools(off).into_iter().chain(bridge_tools()).filter(|t| !is_off(off, t["name"].as_str().unwrap_or_default())).collect::<Vec<_>>() })),
+            "tools/list" => Ok(json!({ "tools": own_tools().into_iter().chain(model_tools()).chain(bridge_tools()).chain(subagent_tools()).filter(|t| !is_off(off, t["name"].as_str().unwrap_or_default())).collect::<Vec<_>>() })),
             "tools/call" => Ok(match msg["params"]["name"].as_str().filter(|tool| !is_off(off, tool)) {
                 Some("attach_github") => attach_github(&msg["params"], record, &attach_dir(data)),
                 Some("detach_github") => detach_github(&msg["params"], record, &attach_dir(data)),
                 Some("link_session") => link_session(&msg["params"], record, &attach_dir(data), "link"),
                 Some("unlink_session") => link_session(&msg["params"], record, &attach_dir(data), "unlink"),
-                Some("set_model") => reply("Model switching isn't available in this session (Claudiu's mod isn't loaded).", true),
-                Some("show_visual") => reply("Visuals aren't available in this session (Claudiu's mod isn't loaded).", true),
-                Some(tool) if BRIDGE_TOOLS.contains(&tool) => match ask(tool, &msg["params"]["arguments"]) {
+                Some("show_visual") => reply("Visuals aren't available in this session (m4code's mod isn't loaded).", true),
+                Some(tool) if BRIDGE_TOOLS.contains(&tool) || MODEL_TOOLS.contains(&tool) || SUBAGENT_TOOLS.contains(&tool) => match ask(tool, &msg["params"]["arguments"]) {
                     Ok(text) => reply(&text, false),
                     Err(text) => reply(&text, true),
                 },
@@ -248,11 +277,11 @@ fn serve(input: impl BufRead, mut out: impl Write, record: &str, data: &Path, of
     }
 }
 
-/// The tools that tell Claudiu something about the session.
-fn own_tools(off: &[&str]) -> Vec<Value> {
+/// The tools that tell m4code something about the session.
+fn own_tools() -> Vec<Value> {
     let link = json!({
         "name": "link_session",
-        "description": "Link this session to another one, so Claudiu shows them together in the sidebar. Use it when this work continues, builds on or was prompted by another Claude Code session. Find the id with search_sessions. Silent; once per pair.",
+        "description": "Link this session to another one, so m4code shows them together in the sidebar. Use it when this work continues, builds on or was prompted by another Claude Code session. Find the id with search_sessions. Silent; once per pair.",
         "inputSchema": {
             "type": "object",
             "properties": { "id": { "type": "string", "description": "The id of the other session, from search_sessions" } },
@@ -261,7 +290,7 @@ fn own_tools(off: &[&str]) -> Vec<Value> {
     });
     let attach = json!({
         "name": "attach_github",
-        "description": "Show a GitHub issue or pull request in Claudiu's sidebar: of this session's project, or of another repository named in `repo`. Call it once per item, before your next command, whenever you read, open, comment on, create or push to one, or the user names or asks to see one. Not for every result of a list or search. It changes nothing on GitHub.",
+        "description": "Show a GitHub issue or pull request in m4code's sidebar: of this session's project, or of another repository named in `repo`. Call it once per item, before your next command, whenever you read, open, comment on, create or push to one, or the user names or asks to see one. Not for every result of a list or search. It changes nothing on GitHub.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -314,20 +343,48 @@ fn own_tools(off: &[&str]) -> Vec<Value> {
             "required": ["content"],
         },
     });
-    vec![attach, detach, json!({
-                "name": "set_model",
-                "description": format!(
-                    "Switch this session's model and/or effort from your next request on, even mid-turn. Always ask the user first{} (which model, which effort) unless they just named them explicitly; never switch on your own. Claude Code also keeps the choice as the user's default model/effort.",
-                    if off.contains(&"ask_user_question") { "" } else { " with the AskUserQuestion tool" }
-                ),
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "model": { "type": "string", "description": "Model alias (sonnet, opus, haiku) or full model id" },
-                        "effort": { "type": "string", "description": "Effort level: low, medium, high, xhigh, max or auto" },
-                    },
+    vec![attach, detach, link, unlink, visual]
+}
+
+/// `list_models` and `set_model`: the session's model, on its own harness or another one.
+fn model_tools() -> Vec<Value> {
+    vec![
+        json!({
+            "name": "list_models",
+            "description": "List the models this session can switch to with set_model, across every coding agent the user enabled in m4code (Claude Code, Codex, OpenCode, Antigravity). One per line, as harness:model-id, then its name; the current one is marked.",
+            "inputSchema": { "type": "object", "properties": {} },
+        }),
+        json!({
+            "name": "set_model",
+            "description": (
+                "Switch this session to another model, or change its effort. Name the model exactly as list_models prints it (harness:model-id); call list_models first. On the same harness it applies from your next request. On another harness m4code hands this conversation to that agent once your turn ends. Call it only when the user asked to switch; if they didn't say which model, ask them, but never ask them to confirm a switch they asked for. Don't ask about effort."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "model": { "type": "string", "description": "harness:model-id, as list_models prints it (e.g. codex:gpt-6, claude:opus)" },
+                    "effort": { "type": "string", "description": "Only when the user named one: low, medium, high, xhigh or max. Left out, a new model runs at medium." },
+                    "message": { "type": "string", "description": "Only when switching to another harness: the first message that agent gets, saying what to do next" },
                 },
-            }), link, unlink, visual]
+            },
+        }),
+    ]
+}
+
+fn subagent_tools() -> Vec<Value> {
+    let tool = |name, description, properties, required| json!({
+        "name": name, "description": description,
+        "inputSchema": {"type": "object", "properties": properties, "required": required},
+    });
+    let id = json!({"type": "string", "description": "The subagent id returned by spawn_subagent"});
+    let prompt = json!({"type": "string", "description": "The task or follow-up, at most 20,000 characters"});
+    vec![
+        tool("spawn_subagent", "Start a background subagent in this session's working folder. Returns at once; its report arrives as a message in this chat when its turn ends. Follow the user's and project's delegation rules. The child uses the configured edit permissions; read-only parents cannot grant edits. Use list_models for model ids. Antigravity is not supported yet.", json!({"harness": {"type": "string", "enum": ["claude", "codex", "opencode"]}, "model": {"type": "string"}, "effort": {"type": "string", "enum": ["low", "medium", "high", "xhigh", "max"]}, "prompt": prompt}), json!(["harness", "prompt"])),
+        tool("list_subagents", "List this session's children, their states and latest reports.", json!({}), json!([])),
+        tool("send_subagent_message", "Queue a follow-up in the same child session, resuming it if stopped. Messages during a turn run after that turn. Its report arrives as a message when it is done.", json!({"id": id, "prompt": prompt}), json!(["id", "prompt"])),
+        tool("wait_subagent", "Block this turn until a child's turn finishes and return its latest report; a report the wait returns does not also arrive as a message. Only needed when you can't go on without it. Returns early for a user question. A timeout returns its current state without stopping it.", json!({"id": id, "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 240}}), json!(["id"])),
+        tool("stop_subagent", "Stop this session's child and its descendants. Keep their conversations for later follow-ups.", json!({"id": id}), json!(["id"])),
+    ]
 }
 
 const CONFIRM: &str = " It acts at once, so only call it when the user asked for this.";
@@ -338,17 +395,19 @@ fn bridge_tools() -> Vec<Value> {
     let target = json!({
         "prompt": { "type": "string", "description": "First message for the new session (optional)" },
         "folder": { "type": "string", "description": "Project name or folder path (optional)" },
+        "model": { "type": "string", "description": "A model exactly as list_models prints it, harness:model-id (optional: the user's default otherwise)" },
+        "effort": { "type": "string", "enum": ["low", "medium", "high", "xhigh", "max"], "description": "Only when the user named one (optional)" },
     });
     vec![
-        tool("list_code_sessions", format!("List the user's Claude Code sessions in Claudiu (id, title, folder, whether it is running, when it was created and last updated).{CONFIRM}"), json!({})),
+        tool("list_code_sessions", format!("List the user's coding-agent sessions in m4code (id, title, folder, whether it is running, when it was created and last updated).{CONFIRM}"), json!({})),
         tool(
             "read_code_session",
-            format!("Read the latest terminal output of a Claude Code session that is running in Claudiu.{CONFIRM}"),
+            format!("Read the latest terminal output of a coding-agent session that is running in m4code.{CONFIRM}"),
             json!({ "id": id("list_code_sessions")["id"], "lines": { "type": "integer", "description": "How many recent lines (default 120)" } }),
         ),
         tool(
             "search_sessions",
-            "Search the user's Claude Code sessions by words in their title, project or folder. Returns id, title, project and created/updated times of the best matches; pass an id to link_session. Read-only: use it when the user asks, or unasked to find a session to link.".to_string(),
+            "Search the user's coding-agent sessions by words in their title, project or folder. Returns id, title, project and created/updated times of the best matches; pass an id to link_session. Read-only: use it when the user asks, or unasked to find a session to link.".to_string(),
             json!({ "query": { "type": "string", "description": "Words to look for (optional: without it, the most recent)" } }),
         ),
         tool(
@@ -356,10 +415,10 @@ fn bridge_tools() -> Vec<Value> {
             format!("Search the user's projects (name, folder, git branch) by words. Pass a project's name as the folder of start_code_session.{CONFIRM}"),
             json!({ "query": { "type": "string", "description": "Words to look for (optional: without it, every project)" } }),
         ),
-        tool("start_code_session", format!("Open a new Claude Code session, optionally with a first prompt. With a prompt, the user is asked to approve it first; without one, it opens at once.{CONFIRM}"), target),
+        tool("start_code_session", format!("Open a new coding-agent session in a project, optionally with a first prompt, a model (its harness follows) and an effort. Its permission mode is the user's default for new sessions.{CONFIRM}"), target),
         tool(
             "switch_worktree",
-            "Move this session into another git worktree of its project: `main` for the main checkout, the name of a worktree the project has, or a new name to make one. The user is asked to approve it first. Claudiu then restarts this session in that folder once your turn ends and the conversation continues there, so after the approval end your turn without more tool calls.".to_string(),
+            "Move this session into another git worktree of its project: `main` for the main checkout, the name of a worktree the project has, or a new name to make one. m4code restarts this session in that folder once your turn ends and the conversation continues there, so end your turn after the call without more tool calls.".to_string(),
             json!({
                 "worktree": { "type": "string", "description": "`main`, a worktree's name, or a new name (letters, digits, - and _)" },
                 "base": { "type": "string", "enum": ["main", "current"], "description": "For a new worktree: start from origin's default branch (main, the default) or from the commit the main checkout is on (current)" },
@@ -373,7 +432,7 @@ fn reply(text: &str, is_error: bool) -> Value {
 }
 
 /// Remember an issue or pull request for the session: one JSON line per call, picked up by `read_attached`.
-/// Keyed by Claudiu's own record id, which (unlike Claude's session id) survives `/clear`.
+/// Keyed by m4code's own record id, which (unlike Claude's session id) survives `/clear`.
 fn attach_github(params: &Value, record: &str, dir: &Path) -> Value {
     let args = &params["arguments"];
     let (repo, pull, number) = match github_item(args, record) {
@@ -406,7 +465,7 @@ fn github_item(args: &Value, record: &str) -> Result<(Option<String>, bool, u32)
         },
     };
     if record.is_empty() {
-        return Err(reply("not running inside Claudiu", true));
+        return Err(reply("not running inside m4code", true));
     }
     Ok((repo, pull, number))
 }
@@ -431,20 +490,20 @@ fn detach_github(params: &Value, record: &str, dir: &Path) -> Value {
     }
 }
 
-/// One JSON line for Claudiu to pick up. Each call gets its own file, written whole and renamed into place, so
+/// One JSON line for m4code to pick up. Each call gets its own file, written whole and renamed into place, so
 /// `read_attached` never reads a file that is still being written.
 fn write_line(dir: &Path, record: &str, line: &Value) -> std::io::Result<()> {
     let name = format!("{}.{}.jsonl", crate::datadir::safe_file_stem(record), crate::store::new_id());
     crate::datadir::write_atomic(&dir.join(name), &format!("{line}\n"))
 }
 
-/// Ask Claudiu to show this session together with another one (`verb` "link"), or to stop. Claudiu checks that the
+/// Ask m4code to show this session together with another one (`verb` "link"), or to stop. m4code checks that the
 /// other exists.
 fn link_session(params: &Value, record: &str, dir: &Path, verb: &str) -> Value {
     let id = params["arguments"]["id"].as_str().map(str::trim).filter(|i| !i.is_empty() && i.len() <= 64 && i.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
     let Some(id) = id else { return reply("id must be a session id from search_sessions", true) };
     if record.is_empty() {
-        return reply("not running inside Claudiu", true);
+        return reply("not running inside m4code", true);
     }
     if id == record {
         return reply("that is this session itself", true);
@@ -455,46 +514,7 @@ fn link_session(params: &Value, record: &str, dir: &Path, verb: &str) -> Value {
     }
 }
 
-/// Write the per-session MCP config and return its path (for `--mcp-config`).
-pub fn prepare(claude_session_id: &str, record_id: &str, off: &[&str]) -> std::io::Result<PathBuf> {
-    let mut env = json!({ SESSION_ENV: claude_session_id, RECORD_ENV: record_id });
-    if !off.is_empty() {
-        env[TOOLS_OFF_ENV] = off.join(",").into();
-    }
-    let config = json!({ "mcpServers": { "claudiu": {
-        "command": std::env::current_exe()?.to_string_lossy(),
-        "args": [FLAG],
-        "env": env,
-    }}});
-    let path = config_file(claude_session_id);
-    crate::datadir::write_atomic(&path, &config.to_string())?;
-    Ok(path)
-}
-
-fn config_file(claude_session_id: &str) -> PathBuf {
-    config_dir().join(format!("{}.json", crate::datadir::safe_file_stem(claude_session_id)))
-}
-
-/// How often a running server marks its config as in use. Well under the week after which `app/lifecycle.rs` prunes it.
-const CONFIG_REFRESH: std::time::Duration = std::time::Duration::from_secs(86_400);
-
-/// Bump the modification time of an existing file so an age-based prune keeps it. Never creates the file.
-fn mark_in_use(path: &Path) -> std::io::Result<()> {
-    std::fs::OpenOptions::new().write(true).open(path)?.set_modified(std::time::SystemTime::now())
-}
-
-/// Claude Code reads the config again whenever it reconnects to the server, which can be long after the session
-/// started, so a server that is still running keeps its own config from being pruned.
-fn keep_config_fresh(path: PathBuf) {
-    std::thread::spawn(move || {
-        loop {
-            std::thread::sleep(CONFIG_REFRESH);
-            let _ = mark_in_use(&path);
-        }
-    });
-}
-
-/// What a session asked Claudiu to remember about itself.
+/// What a session asked m4code to remember about itself.
 #[derive(Debug, PartialEq)]
 pub enum Attachment {
     Github(Attached),
@@ -570,26 +590,6 @@ mod tests {
     }
 
     #[test]
-    fn a_config_in_use_survives_the_prune() {
-        let dir = std::env::temp_dir().join(format!("claudiu-mcp-prune-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let running = dir.join("running.json");
-        let stale = dir.join("stale.json");
-        let eight_days_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(8 * 86_400);
-        for file in [&running, &stale] {
-            std::fs::write(file, "{}").unwrap();
-            std::fs::File::options().write(true).open(file).unwrap().set_modified(eight_days_ago).unwrap();
-        }
-        mark_in_use(&running).unwrap();
-        crate::datadir::prune(dir.clone(), 7 * 86_400);
-        assert!(running.exists(), "a config its server keeps fresh is not pruned");
-        assert!(!stale.exists(), "an unused config still is");
-        assert!(mark_in_use(&dir.join("gone.json")).is_err());
-        assert!(!dir.join("gone.json").exists(), "marking never creates the file");
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
     fn the_session_reaching_tools_are_forwarded_and_the_bookkeeping_ones_are_loaded_upfront() {
         let tmp = tempfile::tempdir().unwrap();
         let call = |name: &str| json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":{"id":"x"}}});
@@ -603,7 +603,7 @@ mod tests {
         let names: Vec<_> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert_eq!(
             names,
-            ["attach_github", "detach_github", "set_model", "link_session", "unlink_session", "show_visual", "list_code_sessions", "read_code_session", "search_sessions", "search_projects", "start_code_session", "switch_worktree"]
+            ["attach_github", "detach_github", "link_session", "unlink_session", "show_visual", "list_models", "set_model", "list_code_sessions", "read_code_session", "search_sessions", "search_projects", "start_code_session", "switch_worktree", "spawn_subagent", "list_subagents", "send_subagent_message", "wait_subagent", "stop_subagent"]
         );
         let upfront: Vec<_> = tools.iter().filter(|t| t["_meta"]["anthropic/alwaysLoad"] == true).map(|t| t["name"].as_str().unwrap()).collect();
         assert_eq!(upfront, ["attach_github", "detach_github", "link_session", "unlink_session"], "show_visual and the session-reaching tools stay deferred");
@@ -611,8 +611,22 @@ mod tests {
         assert_eq!(r[1]["result"]["isError"], false);
         assert_eq!(r[2]["result"]["content"][0]["text"], "The user declined.");
         assert_eq!(r[2]["result"]["isError"], true);
-        assert_eq!(allowed_tools(&[]).len(), BRIDGE_TOOLS.len() + OWN_TOOLS.len());
-        assert!(allowed_tools(&[]).contains(&"mcp__claudiu__show_visual".to_string()));
+        assert_eq!(allowed_tools(&[]).len(), BRIDGE_TOOLS.len() + SUBAGENT_TOOLS.len() + OWN_TOOLS.len() + MODEL_TOOLS.len());
+        assert!(allowed_tools(&[]).contains(&"mcp__m4code__set_model".to_string()), "switching models asks nothing either");
+        assert!(allowed_tools(&[]).contains(&"mcp__m4code__show_visual".to_string()));
+    }
+
+    #[test]
+    fn own_tools_are_known_by_the_titles_harnesses_give_them() {
+        for title in ["m4code: set_model", "m4code_start_code_session", "mcp__m4code__read_code_session", "m4code.link_session"] {
+            assert!(is_own_tool(title), "{title}");
+        }
+        for title in [
+            "Bash rm -rf", "set_model", "m4code: set_models_everywhere", "other: list_models", "m4codex_set_model",
+            "grep -rn mcp__m4code__set_model src && rm -rf build", "Edit `/x/m4code/show_visual.rs`", "echo m4code: set_model",
+        ] {
+            assert!(!is_own_tool(title), "{title}");
+        }
     }
 
     #[test]
@@ -656,16 +670,16 @@ mod tests {
     }
 
     #[test]
-    fn set_model_is_listed_but_errors_when_the_mod_did_not_answer() {
+    fn the_model_tools_are_answered_by_m4code_for_every_harness() {
         let tmp = tempfile::tempdir().unwrap();
-        let call = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"set_model","arguments":{"model":"opus"}}});
-        let r = talk(&[json!({"jsonrpc":"2.0","id":9,"method":"tools/list"}), call], "abc-123", tmp.path());
-        assert_eq!(r[0]["result"]["tools"][2]["name"], "set_model");
-        assert_eq!(r[1]["result"]["isError"], true);
+        let call = |name: &str, args: Value| json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":args}});
+        let r = talk_off(&[call("list_models", json!({})), call("set_model", json!({"model": "codex:gpt-6"}))], "abc-123", tmp.path(), &[], |tool, args| Ok(format!("{tool} {}", args["model"])));
+        assert_eq!(r[0]["result"]["content"][0]["text"], "list_models null");
+        assert_eq!(r[1]["result"]["content"][0]["text"], "set_model \"codex:gpt-6\"");
     }
 
     #[test]
-    fn attach_github_appends_validated_lines_for_claudiu_to_pick_up() {
+    fn attach_github_appends_validated_lines_for_m4code_to_pick_up() {
         let tmp = tempfile::tempdir().unwrap();
         let call = |args: Value| json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"attach_github","arguments":args}});
         let r = talk(
@@ -694,11 +708,11 @@ mod tests {
         assert!(items.contains(&Attachment::Github(Attached { repo: None, pull: false, number: 52, title: None, state: None })));
         assert!(items.contains(&Attachment::Github(Attached { repo: None, pull: true, number: 7, title: None, state: None })));
         assert_eq!(talk(&[call(json!({"kind":"issue","number":1}))], "", tmp.path())[0]["result"]["isError"], true);
-        assert!(allowed_tools(&[]).contains(&"mcp__claudiu__attach_github".to_string()));
+        assert!(allowed_tools(&[]).contains(&"mcp__m4code__attach_github".to_string()));
     }
 
     #[test]
-    fn a_line_written_while_claudiu_reads_the_attach_dir_is_not_lost() {
+    fn a_line_written_while_m4code_reads_the_attach_dir_is_not_lost() {
         let tmp = tempfile::tempdir().unwrap();
         let total = 300;
         let mut seen = 0;
@@ -728,7 +742,7 @@ mod tests {
     }
 
     #[test]
-    fn link_session_appends_a_validated_id_and_claudiu_reads_it_back() {
+    fn link_session_appends_a_validated_id_and_m4code_reads_it_back() {
         let tmp = tempfile::tempdir().unwrap();
         let call = |id: Value| json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"link_session","arguments":{"id":id}}});
         let r = talk(&[call(json!("abc-123")), call(json!("")), call(json!("../x")), call(json!("s1")), call(json!(5))], "s1", tmp.path());
@@ -760,33 +774,33 @@ mod tests {
     #[test]
     fn with_nothing_off_the_server_offers_every_tool_and_all_the_text() {
         let (names, text) = offer(&[]);
-        assert_eq!(names.len(), 12);
+        assert_eq!(names.len(), 18);
         for part in [INTRO, GITHUB_INSTRUCTIONS, LINK_INSTRUCTIONS, VISUAL_INSTRUCTIONS, BRIDGE_INSTRUCTIONS] {
             assert!(text.contains(part));
         }
-        assert!(text.contains("ask with AskUserQuestion which model") && text.contains("Artifacts are for pages to share."));
+        assert!(text.contains("ask the user which model") && text.contains("Artifacts are for pages to share."));
     }
 
     #[test]
     fn each_feature_takes_its_tools_and_its_text_away() {
         let (names, text) = offer(&["visual"]);
-        assert!(!names.contains(&"show_visual".to_string()) && names.len() == 11);
+        assert!(!names.contains(&"show_visual".to_string()) && names.len() == 17);
         assert!(!text.contains("Visual:") && !text.contains("show_visual"));
 
         let (names, text) = offer(&["github"]);
-        assert!(!names.iter().any(|n| n.ends_with("_github")) && names.len() == 10);
+        assert!(!names.iter().any(|n| n.ends_with("_github")) && names.len() == 16);
         assert!(!text.contains("attach_github"));
 
         let (names, text) = offer(&["sessions"]);
-        for gone in ["link_session", "unlink_session", "list_code_sessions", "read_code_session", "search_sessions", "search_projects", "start_code_session", "switch_worktree"] {
+        for gone in ["link_session", "unlink_session", "list_code_sessions", "read_code_session", "search_sessions", "search_projects", "start_code_session", "switch_worktree", "spawn_subagent", "list_subagents", "send_subagent_message", "wait_subagent", "stop_subagent"] {
             assert!(!names.contains(&gone.to_string()), "{gone}");
         }
-        assert_eq!(names.len(), 4);
+        assert_eq!(names.len(), 5);
         assert!(!text.contains("link_session") && !text.contains("start_code_session"));
 
         let (names, text) = offer(&["model"]);
-        assert!(!names.contains(&"set_model".to_string()) && names.len() == 11);
-        assert!(!text.contains("set_model") && !text.contains("Never switch models"));
+        assert!(!names.contains(&"set_model".to_string()) && !names.contains(&"list_models".to_string()) && names.len() == 16);
+        assert!(!text.contains("set_model") && !text.contains("list_models") && !text.contains("Never switch models"));
     }
 
     #[test]
@@ -797,7 +811,7 @@ mod tests {
     }
 
     #[test]
-    fn a_call_for_an_off_tool_is_unknown_and_never_reaches_claudiu() {
+    fn a_call_for_an_off_tool_is_unknown_and_never_reaches_m4code() {
         let tmp = tempfile::tempdir().unwrap();
         let call = |name: &str| json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":{"id":"x"}}});
         let r = talk_off(&[call("list_code_sessions"), call("attach_github")], "s", tmp.path(), &["sessions", "github"], |_, _| panic!("ask must not be called"));
@@ -809,11 +823,12 @@ mod tests {
 
     #[test]
     fn allowed_tools_leaves_out_the_tools_of_features_that_are_off() {
-        assert_eq!(allowed_tools(&["github", "sessions"]), ["mcp__claudiu__show_visual"]);
+        assert_eq!(allowed_tools(&["github", "sessions"]), ["mcp__m4code__show_visual", "mcp__m4code__list_models", "mcp__m4code__set_model"]);
+        assert_eq!(allowed_tools(&["github", "sessions", "model"]), ["mcp__m4code__show_visual"]);
     }
 
     #[test]
-    fn trimming_ask_user_question_or_artifacts_changes_the_wording() {
+    fn model_confirmation_is_provider_neutral_and_artifacts_can_be_hidden() {
         let (_, text) = offer(&["ask_user_question", "artifacts"]);
         assert!(!text.contains("AskUserQuestion") && text.contains("ask the user which model") && !text.contains("Artifacts"));
         assert!(text.contains("Visual:"), "the Visual text itself stays");
@@ -822,8 +837,19 @@ mod tests {
             let r = talk_off(&[json!({"jsonrpc":"2.0","id":1,"method":"tools/list"})], "s", tmp.path(), off, |_, _| Err("no".into()));
             r[0]["result"]["tools"].as_array().unwrap().iter().find(|t| t["name"] == "set_model").unwrap()["description"].as_str().unwrap().to_string()
         };
-        assert!(described(&[]).contains("AskUserQuestion"));
-        assert!(!described(&["ask_user_question"]).contains("AskUserQuestion"));
+        assert!(described(&[]).contains("never ask them to confirm a switch they asked for"));
+        assert!(!described(&[]).contains("AskUserQuestion"));
+        assert_eq!(described(&[]), described(&["ask_user_question"]));
+    }
+
+    #[test]
+    fn every_shared_subagent_tool_is_discoverable_in_session_instructions() {
+        let (_, enabled) = offer(&[]);
+        let (_, disabled) = offer(&["sessions"]);
+        for tool in SUBAGENT_TOOLS {
+            assert!(enabled.contains(tool), "missing {tool}");
+            assert!(!disabled.contains(tool), "disabled sessions still advertise {tool}");
+        }
     }
 
     #[test]

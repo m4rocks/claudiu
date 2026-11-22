@@ -1,4 +1,4 @@
-//! Alt accounts. Each is a Claude Code config folder (`CLAUDE_CONFIG_DIR`) inside Claudiu's data dir that holds
+//! Alt accounts. Each is a Claude Code config folder (`CLAUDE_CONFIG_DIR`) inside m4code's data dir that holds
 //! only its own login (`.credentials.json`, `.claude.json`). Folders (agents, skills, plugins, session history) link
 //! back to the main `~/.claude`; settings, `CLAUDE.md`, keybindings, MCP servers and project trust are kept equal in
 //! every account by `config_sync`. The main account is the user's normal Claude Code: launched without
@@ -53,28 +53,17 @@ pub fn link_shared(main: &Path, alt: &Path) -> io::Result<()> {
         if fs::symlink_metadata(&dst).is_ok() {
             continue;
         }
-        if let Err(e) = link_dir(&src, &dst) {
+        if let Err(e) = crate::platform::link_dir(&src, &dst) {
             result = Err(e);
         }
     }
     result
 }
 
-#[cfg(windows)]
-fn link_dir(src: &Path, dst: &Path) -> io::Result<()> {
-    // Junctions need no admin rights or Developer Mode, unlike directory symlinks.
-    junction::create(src, dst)
-}
-
-#[cfg(unix)]
-fn link_dir(src: &Path, dst: &Path) -> io::Result<()> {
-    std::os::unix::fs::symlink(src, dst)
-}
-
 /// Delete an alt folder: its login plus the links, never what they point at. Refuses anything outside `root()`.
 pub fn remove(alt: &Path) -> io::Result<()> {
     if !alt.starts_with(root()) || alt == root() {
-        return Err(io::Error::other("not a Claudiu account folder"));
+        return Err(io::Error::other("not a m4code account folder"));
     }
     delete(alt)
 }
@@ -83,9 +72,7 @@ fn delete(alt: &Path) -> io::Result<()> {
     for e in fs::read_dir(alt)?.flatten() {
         // `DirEntry::file_type` doesn't follow links; on Windows junctions count as symlinks too.
         if e.file_type()?.is_symlink() {
-            let p = e.path();
-            // Windows removes directory links with RemoveDirectory; Unix removes any symlink as a file.
-            if cfg!(windows) && p.is_dir() { fs::remove_dir(&p)? } else { fs::remove_file(&p)? }
+            crate::platform::remove_dir_link(&e.path())?;
         }
     }
     // Hard links left over are just extra names: removing them leaves the main file in place.

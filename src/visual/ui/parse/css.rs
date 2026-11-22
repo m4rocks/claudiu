@@ -108,7 +108,7 @@ pub fn token(name: &str) -> Option<u32> {
     })
 }
 
-/// CSS colour names, pulled onto the app's palette so a plain `red` still looks like Claudiu.
+/// CSS colour names, pulled onto the app's palette so a plain `red` still looks like m4code.
 fn named(name: &str) -> Option<u32> {
     Some(match name {
         "red" => theme::DANGER,
@@ -440,7 +440,7 @@ pub(super) fn default_css(tag: &str) -> &'static str {
         "code" | "samp" | "tt" => "font-family:monospace;background:raised;font-size:12.5px",
         "kbd" => "font-family:monospace;background:raised;font-size:12px",
         "pre" => "font-family:monospace;font-size:12.5px;white-space:pre;background:surface;border:1px solid border;border-radius:8px;padding:10px 12px",
-        "blockquote" => "border-left:3px solid #d9775788;padding:2px 0 2px 12px;color:dim",
+        "blockquote" => "border-left:3px solid #ffffff55;padding:2px 0 2px 12px;color:dim",
         "hr" => "height:1px;background:border;margin:6px 0",
         "ul" | "ol" => "gap:3px;padding-left:2px",
         "table" => "border:1px solid border;border-radius:8px;overflow:hidden",

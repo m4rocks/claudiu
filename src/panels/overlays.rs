@@ -1,264 +1,226 @@
-//! What draws above the workspace: the open menu, the modal dialog and the toast. Each pops in with a short spring
-//! and fades away when it closes.
+//! Overlays drawn over the workspace: the context menu, the active modal and the toast.
+//! The Settings modal's content is in `settings_view`, and the anchored dropdowns are in `workspace_pickers`.
 
-use rune::{Align, Color, Cursor, El, Side, Transition, Tx, col, el, row, text, text_input};
+use gpui::{
+    AnyElement, ClickEvent, Context, FontWeight, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
+    ParentElement, StatefulInteractiveElement, Styled, Window, anchored, deferred, div,
+    px, rgba,
+};
 
-use crate::app::{Act, MenuAnchor, Modal, NameFor, Workspace, modal_field};
-use crate::panels::icons;
-use crate::panels::theme::{self, rgb};
-use crate::panels::widgets::{button, danger_button, font, icon, icon_button, label};
-
-const MENU_W: f32 = 232.0;
-
-fn act(ws: &mut Workspace, a: Act, tx: &mut Tx) {
-    ws.act(a);
-    ws.after_input(tx);
-}
-
-/// A text field of a dialog: field `n` of the open modal (see `modal_field`). Enter submits the dialog.
-pub fn modal_input(n: usize, edit: &rune::TextEdit, placeholder: &str) -> El {
-    modal_input_submitting(n, edit, placeholder, Workspace::submit_modal)
-}
-
-/// `modal_input` whose Enter runs `submit` instead of submitting the dialog.
-pub fn modal_input_submitting(n: usize, edit: &rune::TextEdit, placeholder: &str, submit: fn(&mut Workspace)) -> El {
-    let field = text_input(edit, font(13.0, 400.0))
-        .key(format!("modal-field-{n}"))
-        .single_line()
-        .placeholder(placeholder.to_string(), rgb(theme::TEXT_FAINT))
-        .color(rgb(theme::TEXT))
-        .caret(rgb(theme::ACCENT), rgb(theme::SELECTION))
-        .w_full()
-        .on_edit(move |ws: &mut Workspace| match modal_field(&mut ws.modal, n) {
-            Some(f) => f,
-            // The modal closed between frames; a scratch field takes the edit.
-            None => &mut ws.search,
-        })
-        .on_submit(move |ws: &mut Workspace, tx: &mut Tx| {
-            submit(ws);
-            ws.after_input(tx);
-        });
-    row()
-        .key(format!("modal-box-{n}"))
-        .h(30.0)
-        .w_full()
-        .px(9.0)
-        .center_y()
-        .radius(6.0)
-        .fill(rgb(0x101012))
-        .border(1.0, rgb(if edit.focused { theme::ACCENT } else { 0x2a2a2e }))
-        .motion(rune::tok::motion::SNAP)
-        .child(field)
-}
+use crate::app::{
+    Act, Modal, Workspace,
+};
+use gpui_kit::component::input::Input;
+use crate::panels::theme::{self, hsla};
+use gpui_kit::assets::IconName;
+use crate::panels::widgets::{
+    button, danger_button, dialog_card, dropdown_card, fade_in, icon, icon_button,
+};
+use crate::panels::settings_view::render_settings_card;
 
 impl Workspace {
-    pub(crate) fn overlays(&self) -> Vec<El> {
-        let mut out = vec![];
-        if let Some(m) = self.render_modal() {
-            out.push(m);
-        }
-        // Above Settings: the last modal mounted takes Escape and clicks outside it.
-        if let Some(m) = self.agent_dialog() {
-            out.push(m);
-        }
-        if let Some(m) = self.render_menu() {
-            out.push(m);
-        }
-        if let Some(t) = self.render_toast() {
-            out.push(t);
-        }
-        out
-    }
-
-    fn render_menu(&self) -> Option<El> {
+    pub(super) fn render_menu(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let menu = self.menu.as_ref()?;
-        let mut card = col()
-            .key(format!("menu-{}", menu.serial))
-            .w(MENU_W.max(menu.min_w))
-            .padding(4.0)
-            .radius(9.0)
-            .fill(rgb(0x18181a))
-            .border(1.0, rgb(0x2c2c30))
-            .shadow(10.0, 28.0, Color::BLACK.alpha(0.5))
-            .role("menu")
-            .transition(Transition::scale(0.96).combined(Transition::opacity()))
-            .modal(true, |ws: &mut Workspace| ws.menu = None);
+        let pos = menu.pos;
+        let mut card = dropdown_card("menu")
+            .w(px(232.0))
+            .min_w(menu.min_w)
+            .p(px(4.0))
+            .flex()
+            .flex_col();
         for (i, item) in menu.items.iter().enumerate() {
+            let act = item.act.clone();
             if item.separator_before {
-                card = card.child(el().h(1.0).w_full().my(4.0).fill(rgb(theme::BORDER)));
+                card = card.child(div().h(px(1.0)).my(px(4.0)).bg(hsla(theme::BORDER)));
             }
             let color = if item.disabled { theme::TEXT_FAINT } else if item.danger { theme::DANGER } else { theme::TEXT };
-            let mut words = col().grow(1.0).shrink().child(label(item.label.clone(), 12.5, color).truncate());
-            if let Some(d) = &item.detail {
-                words = words.child(label(d.clone(), 11.0, theme::TEXT_FAINT).truncate());
-            }
-            let mut r = row()
-                .key(format!("menu-{}-{i}", menu.serial))
-                .h(if item.detail.is_some() { 42.0 } else { 28.0 })
-                .w_full()
-                .px(10.0)
-                .gap(8.0)
-                .center_y()
-                .radius(5.0)
-                .role("menuitem");
-            if let Some(glyph) = item.icon {
-                r = r.child(icon(glyph, 13.0, if item.disabled { theme::TEXT_FAINT } else { theme::TEXT_DIM }));
-            }
-            r = r.child(words);
-            if let Some(h) = &item.hint {
-                r = r.child(label(h.clone(), 11.0, theme::TEXT_FAINT));
-            }
-            if let Some(remove) = item.remove.clone() {
-                r = r.hover_group().child(
-                    icon_button(&icons::X)
-                        .key(format!("menu-remove-{}-{i}", menu.serial))
-                        .group_opacity(0.0, 1.0)
-                        .on_press_tx(move |ws: &mut Workspace, tx: &mut Tx| act(ws, remove.clone(), tx)),
-                );
-            }
-            if !item.disabled {
-                let a = item.act.clone();
-                r = r.cursor(Cursor::Pointer).hover(Color::WHITE.alpha(0.06)).on_press_tx(move |ws: &mut Workspace, tx: &mut Tx| act(ws, a.clone(), tx));
-            }
-            card = card.child(r);
-        }
-        Some(match &menu.anchor {
-            MenuAnchor::Key(k) => card.anchored(k.clone(), Side::Bottom, Align::Start, 4.0),
-            MenuAnchor::Point(x, y) => {
-                // Kept inside the window: a menu opened near the right or bottom edge opens the other way.
-                let w = MENU_W.max(menu.min_w);
-                let h: f32 = menu.items.iter().map(|i| if i.detail.is_some() { 42.0 } else { 28.0 } + if i.separator_before { 9.0 } else { 0.0 }).sum::<f32>() + 10.0;
-                let (ww, wh) = self.window_size;
-                let left = if x + w + 8.0 > ww { (x - w).max(8.0) } else { *x };
-                let top = if y + h + 8.0 > wh { (y - h).max(8.0) } else { *y };
-                card.absolute(left, top)
-            }
-        })
-    }
-
-    fn render_modal(&self) -> Option<El> {
-        let modal = self.modal.as_ref()?;
-        let settings = matches!(modal, Modal::Settings { .. });
-        let (title, body, confirm_label, danger): (String, El, String, bool) = match modal {
-            Modal::Confirm { title, body, confirm, danger, .. } => (title.clone(), label(body.clone(), 13.0, theme::TEXT_DIM).wrap(), confirm.clone(), *danger),
-            Modal::Settings { .. } => ("Settings".into(), self.settings_body(), "Save".into(), false),
-            Modal::Advisor { input, .. } => (
-                "Advisor model".into(),
-                col()
-                    .gap(8.0)
-                    .child(label("A model alias or id, such as opus, sonnet or claude-opus-5-5, or “off”. Claude Code saves it as your default.", 12.0, theme::TEXT_DIM).wrap())
-                    .child(modal_input(0, input, "opus, sonnet, off, or a model id")),
-                "Set".into(),
-                false,
-            ),
-            Modal::NewWorktree { input, base, .. } => {
-                use crate::git::worktree::Base;
-                let choice = |key: &'static str, l: &'static str, this: Base| {
-                    button(l, *base == this).key(key).on_press_tx(move |ws: &mut Workspace, tx: &mut Tx| act(ws, Act::PickBase(this), tx))
-                };
-                (
-                    "New worktree".into(),
-                    col()
-                        .gap(10.0)
-                        .child(label("The session moves into it and keeps its history. Claudiu makes a folder for it in its own data folder, outside your repository, with a new branch of this name.", 12.0, theme::TEXT_DIM).wrap())
-                        .child(modal_input(0, input, "Leave empty for a generated name"))
-                        .child(row().center_y().gap(6.0).child(label("Start from", 12.0, theme::TEXT_FAINT)).child(choice("base-main", "Main", Base::Main)).child(choice("base-current", "Current branch", Base::Current))),
-                    "Create and switch".into(),
-                    false,
+            let row = div()
+                .id(gpui::SharedString::from(format!("menu-{i}")))
+                .h(px(if item.detail.is_some() { 42.0 } else { 28.0 }))
+                .px(px(10.0))
+                .flex()
+                .items_center()
+                .rounded(px(5.0))
+                .text_size(crate::panels::scale::px(12.5))
+                .text_color(hsla(color))
+                .gap(px(8.0))
+                .group(gpui::SharedString::from(format!("menu-row-{i}")))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().child(item.label.clone()))
+                        .children(item.detail.clone().map(|d| div().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(crate::panels::scale::px(11.0)).text_color(hsla(theme::TEXT_FAINT)).child(d))),
                 )
-            }
-            Modal::Rename { input, .. } => ("Rename session".into(), modal_input(0, input, ""), "Rename".into(), false),
-            Modal::GoToLine { input, .. } => ("Go to line".into(), modal_input(0, input, "Line, or line:column"), "Go".into(), false),
-            Modal::FileName { purpose, input, .. } => {
-                let (title, placeholder, ok) = match purpose {
-                    NameFor::FileIn(_) => ("New file", "name.ext", "Create"),
-                    NameFor::FolderIn(_) => ("New folder", "name", "Create"),
-                    NameFor::Rename(_) => ("Rename", "name", "Rename"),
-                };
-                (title.into(), modal_input(0, input, placeholder), ok.into(), false)
-            }
-            Modal::NewBranch { input, .. } => ("New branch".into(), modal_input(0, input, "Branch name"), "Create".into(), false),
-        };
-        let ok = if danger { danger_button(confirm_label) } else { button(confirm_label, true) };
-        let mut card = col()
-            .key("modal-card")
-            .padding(20.0)
-            .gap(12.0)
-            .radius(12.0)
-            .fill(rgb(0x151517))
-            .border(1.0, rgb(0x2c2c30))
-            .shadow(16.0, 48.0, Color::BLACK.alpha(0.55))
-            .role("dialog")
-            .transition(Transition::scale(0.96).combined(Transition::opacity()))
-            .child(text(title).font(font(15.0, 600.0)).color(rgb(theme::TEXT)))
-            .child(body)
-            .child(
-                row()
-                    .w_full()
-                    .justify_end()
-                    .gap(8.0)
-                    .mt(4.0)
-                    .child(button("Cancel", false).key("modal-cancel").on_press_tx(|ws: &mut Workspace, tx: &mut Tx| act(ws, Act::Dismiss, tx)))
-                    .child(ok.key("modal-ok").on_press_tx(|ws: &mut Workspace, tx: &mut Tx| {
-                        ws.submit_modal();
-                        ws.after_input(tx);
-                    })),
-            );
-        card = if settings {
-            // One size for every page, growing with Scale.
-            card.w(crate::panels::scale::px(720.0)).h(crate::panels::scale::px(480.0))
-        } else {
-            card.w(420.0)
+                .children(item.icon.map(|name| icon(name, 12.0).text_color(hsla(theme::TEXT_FAINT))))
+                .children(item.hint.clone().map(|h| div().flex_none().text_size(crate::panels::scale::px(11.0)).text_color(hsla(theme::TEXT_FAINT)).child(h)))
+                .children(item.remove.clone().map(|remove| {
+                    icon_button(gpui::SharedString::from(format!("menu-remove-{i}")), IconName::X)
+                        .invisible()
+                        .group_hover(gpui::SharedString::from(format!("menu-row-{i}")), |s| s.visible())
+                        .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
+                            cx.stop_propagation();
+                            ws.act(remove.clone(), window, cx);
+                        }))
+                }));
+            card = card.child(if item.disabled {
+                row
+            } else {
+                row.cursor_pointer()
+                    .hover(|s| s.bg(hsla(0x252525)))
+                    .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(act.clone(), window, cx)))
+            });
+        }
+        let close = |ws: &mut Workspace, _: &MouseDownEvent, _w: &mut Window, cx: &mut Context<Workspace>| {
+            ws.menu = None;
+            cx.notify();
         };
         Some(
-            row()
-                .key("modal-backdrop")
-                .pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
-                .center()
-                .fill(Color::BLACK.alpha(0.62))
-                .transition(Transition::opacity())
-                .modal(true, |ws: &mut Workspace| {
-                    ws.modal = None;
-                    ws.focus_active();
-                })
-                .child(card),
+            deferred(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full()
+                    .on_mouse_down(MouseButton::Left, cx.listener(close))
+                    .on_mouse_down(MouseButton::Right, cx.listener(close))
+                    .child(anchored().position(pos).snap_to_window_with_margin(px(8.0)).child(fade_in(card, "menu-in", 110, 0.0))),
+            )
+            .with_priority(25)
+            .into_any_element(),
         )
     }
 
-    fn render_toast(&self) -> Option<El> {
+    /// Active modal overlay (Settings uses its own split-pane layout; other modals share the compact 440px card).
+    pub(super) fn render_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let modal = self.modal.as_ref()?;
+        let viewport = window.viewport_size();
+        let card = if matches!(modal, Modal::Settings { .. }) {
+            render_settings_card(self, viewport, window, cx)
+        } else {
+            let (title, body, confirm_label, danger): (String, gpui::AnyElement, String, bool) = match modal {
+                Modal::Confirm { title, body, confirm, danger, .. } => (
+                    title.clone(),
+                    div().text_size(crate::panels::scale::px(13.0)).text_color(hsla(theme::TEXT_DIM)).child(body.clone()).into_any_element(),
+                    confirm.clone(),
+                    *danger,
+                ),
+                Modal::Settings { .. } => unreachable!(),
+                Modal::FileName { purpose, input, .. } => (
+                    match purpose {
+                        crate::app::NameFor::FileIn(_) => "New file",
+                        crate::app::NameFor::FolderIn(_) => "New folder",
+                        crate::app::NameFor::Rename(_) => "Rename",
+                    }
+                    .into(),
+                    Input::new(input).into_any_element(),
+                    match purpose {
+                        crate::app::NameFor::FileIn(_) | crate::app::NameFor::FolderIn(_) => "Create",
+                        crate::app::NameFor::Rename(_) => "Rename",
+                    }
+                    .into(),
+                    false,
+                ),
+                Modal::GoToLine { input, .. } => ("Go to line".into(), Input::new(input).into_any_element(), "Go".into(), false),
+                Modal::Rename { input, .. } | Modal::NewBranch { input, .. } => (
+                    if matches!(modal, Modal::NewBranch { .. }) { "New branch" } else { "Rename session" }.into(),
+                    Input::new(input).into_any_element(),
+                    if matches!(modal, Modal::NewBranch { .. }) { "Create" } else { "Rename" }.into(),
+                    false,
+                ),
+            };
+            dialog_card("modal-card")
+                .track_focus(&self.modal_focus)
+                .w(px(440.0))
+                .p(px(22.0))
+                .flex()
+                .flex_col()
+                .gap(px(12.0))
+                .on_key_down(cx.listener(|ws, ev: &KeyDownEvent, window, cx| {
+                    let key = ev.keystroke.key.as_str();
+                    match (key, ws.modal.as_ref()) {
+                        ("escape", _) => ws.act(Act::Dismiss, window, cx),
+                        ("enter", Some(Modal::Confirm { .. })) => ws.submit_modal(window, cx),
+                        _ => {}
+                    }
+                }))
+                .child(div().text_size(crate::panels::scale::px(15.0)).font_weight(FontWeight::SEMIBOLD).child(title))
+                .child(body)
+                .child(
+                    div()
+                        .flex()
+                        .justify_end()
+                        .gap(px(8.0))
+                        .mt(px(4.0))
+                        .child(button("modal-cancel", "Cancel", false).on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::Dismiss, window, cx))))
+                        .child({
+                            let b = if danger { danger_button("modal-ok", confirm_label) } else { button("modal-ok", confirm_label, true) };
+                            b.on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.submit_modal(window, cx)))
+                        }),
+                )
+        };
+        Some(
+            deferred(
+                div()
+                    .id("modal-backdrop")
+                    .occlude()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .bg(rgba(0x000000b0))
+                    .on_mouse_down(MouseButton::Left, cx.listener(|ws, _: &MouseDownEvent, window, cx| ws.act(Act::Dismiss, window, cx)))
+                    .child(card),
+            )
+            .with_priority(20)
+            .into_any_element(),
+        )
+    }
+
+    pub(super) fn render_toast(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let t = self.toast.as_ref()?;
-        let mut card = col()
-            .key(format!("toast-{}", t.serial))
-            .max_w(420.0)
-            .px(14.0)
-            .py(10.0)
-            .radius(9.0)
-            .fill(rgb(0x1a1a1c))
-            .border(1.0, rgb(if t.error { 0x5a2327 } else { 0x2c2c30 }))
-            .shadow(8.0, 24.0, Color::BLACK.alpha(0.45))
-            .role("status")
-            .transition(Transition::offset(0.0, 10.0).combined(Transition::opacity()))
-            .child(
-                row()
-                    .gap(8.0)
-                    .child(icon(if t.error { &icons::CIRCLE_X } else { &icons::CIRCLE_CHECK }, 14.0, if t.error { theme::DANGER } else { theme::OK }))
-                    .child(label(t.text.clone(), 12.5, if t.error { theme::DANGER } else { theme::TEXT }).wrap().shrink()),
-            );
-        if let Some((l, a)) = t.action.clone() {
-            card = card.child(
-                row()
-                    .mt(8.0)
-                    .gap(6.0)
-                    .child(button(l, true).key("toast-action").on_press_tx(move |ws: &mut Workspace, tx: &mut Tx| {
-                        ws.toast = None;
-                        act(ws, a.clone(), tx)
-                    }))
-                    .child(button("Dismiss", false).key("toast-dismiss").on_press_tx(|ws: &mut Workspace, tx: &mut Tx| {
-                        ws.toast = None;
-                        ws.after_input(tx);
-                    })),
-            );
-        }
-        Some(row().key("toast-slot").pin(None, None, Some(18.0), Some(18.0)).child(card))
+        let action = t.action.clone().map(|(label, act)| {
+            div().mt(px(8.0)).flex().gap(px(6.0)).child(button("toast-action", label, true).on_click(cx.listener(
+                move |ws, _: &ClickEvent, window, cx| {
+                    ws.toast = None;
+                    ws.act(act.clone(), window, cx);
+                },
+            ))).child(button("toast-dismiss", "Dismiss", false).on_click(cx.listener(|ws, _: &ClickEvent, _w, cx| {
+                ws.toast = None;
+                cx.notify();
+            })))
+        });
+        Some(
+            deferred(
+                div().absolute().bottom(px(18.0)).right(px(18.0)).child(
+                    fade_in(
+                    div()
+                        .occlude()
+                        .cursor_default()
+                        .max_w(px(420.0))
+                        .px(px(14.0))
+                        .py(px(10.0))
+                        .rounded(px(8.0))
+                        .bg(hsla(0x1a1a1a))
+                        .border_1()
+                        .border_color(hsla(if t.error { 0x5a2327 } else { 0x2c2c2c }))
+                        .text_size(crate::panels::scale::px(12.5))
+                        .text_color(hsla(if t.error { theme::DANGER } else { theme::TEXT }))
+                        .child(t.text.clone())
+                        .children(action),
+                        format!("toast-{}", t.serial),
+                        160,
+                        0.0,
+                    ),
+                ),
+            )
+            .with_priority(30)
+            .into_any_element(),
+        )
     }
 }

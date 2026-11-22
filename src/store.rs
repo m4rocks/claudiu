@@ -1,5 +1,5 @@
-//! Claudiu's own persisted state (projects, session history, cached usage, layout).
-//! Independent of the UI. Claude Code's data is only ever *read* (see `claude/`) and merged in here.
+//! m4code's own persisted state (projects, session history, cached usage, layout).
+//! Independent of GPUI. Claude Code's data is only ever *read* (see `claude/`) and merged in here.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -23,319 +23,14 @@ pub fn new_id() -> Id {
     uuid::Uuid::new_v4().to_string()
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum SessionKind {
-    Claude,
-    Shell,
-}
-
-/// Whether Claude Code's own record of the session was found on the last scan.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ExternalState {
-    /// Created by Claudiu, not yet seen on disk (or never scanned).
-    #[default]
-    Unknown,
-    Present,
-    /// Previously seen, absent from the last successful scan. Kept in history, flagged stale.
-    Missing,
-}
-
-/// A GitHub issue or pull request Claude attached to a session.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct Attached {
-    /// `owner/name` of a repository other than the session's project; `None` is the project's own.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub repo: Option<String>,
-    pub pull: bool,
-    pub number: u32,
-    /// Both come from GitHub (`app/attached_sync.rs`), never from the model.
-    #[serde(default)]
-    pub title: Option<String>,
-    #[serde(default)]
-    pub state: Option<crate::github::model::State>,
-}
-
-impl Attached {
-    /// Whether this is that item. GitHub's repository names ignore case.
-    pub fn is(&self, repo: Option<&str>, pull: bool, number: u32) -> bool {
-        let same_repo = match (self.repo.as_deref(), repo) {
-            (None, None) => true,
-            (Some(a), Some(b)) => a.eq_ignore_ascii_case(b),
-            _ => false,
-        };
-        same_repo && self.pull == pull && self.number == number
-    }
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct ClaudeMeta {
-    pub session_id: String,
-    pub model: Option<String>,
-    pub context_tokens: Option<u64>,
-    /// Exact context usage (0..=1) and window size as reported by Claude Code's status line, when seen.
-    #[serde(default)]
-    pub context_fraction: Option<f32>,
-    #[serde(default)]
-    pub context_window: Option<u64>,
-    /// Prompt-cache lifetime in seconds (300 or 3600), read from the last cache write in the transcript.
-    #[serde(default)]
-    pub cache_ttl: Option<u64>,
-    /// Unix time of the last request that read or wrote the prompt cache (the moment its TTL restarted).
-    #[serde(default)]
-    pub cache_at: Option<i64>,
-    /// The `/config` auto-compact switch, the `advisorModel` setting and the last slash command, as the mod reports them.
-    #[serde(default)]
-    pub auto_compact: Option<bool>,
-    #[serde(default)]
-    pub advisor: Option<String>,
-    /// Background compaction ("Precompute compaction" in `/config`); `None` while Claude Code does not offer it.
-    #[serde(default)]
-    pub precompute_compact: Option<bool>,
-    /// The name Claude Code held for the session (its last `/rename`) when Claudiu last read the transcript. A different
-    /// one later means the user renamed it inside Claude Code.
-    #[serde(default)]
-    pub claude_title: Option<String>,
-    /// Claude in Chrome: the session is (re)started with `--chrome`. Claudiu's own choice, so it survives restarts.
-    #[serde(default)]
-    pub chrome: bool,
-    /// The account this conversation runs under. It starts there again after closing it or restarting Claudiu, until a
-    /// hand-off moves it. `None` until Claudiu first starts it.
-    #[serde(default)]
-    pub account: Option<Id>,
-    /// The advisor declared for the current conversation. A model change is saved in `advisor` at once but only
-    /// becomes `advisor_active` on `/clear` or `/compact`; turning the advisor off/on changes it immediately.
-    #[serde(default)]
-    pub advisor_active: Option<String>,
-    /// Tokens at which auto-compaction runs (the context bar's full mark); `None` while it is off or unknown.
-    #[serde(default)]
-    pub compact_at: Option<u64>,
-    /// Issues and pull requests Claude attached to this session (the `attach_github` tool), oldest first.
-    #[serde(default)]
-    pub attached: Vec<Attached>,
-    /// Ids of the sessions this one is linked with (the other side lists this one too).
-    #[serde(default)]
-    pub linked: Vec<Id>,
-    pub transcript: Option<PathBuf>,
-    #[serde(default)]
-    pub external: ExternalState,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct SessionRecord {
-    pub id: Id,
-    pub kind: SessionKind,
-    /// Title as known from Claude Code (or a default). Never edited by the user.
-    pub title: String,
-    /// Claudiu-only display label; wins over `title` when set.
-    #[serde(default)]
-    pub custom_title: Option<String>,
-    /// Tab title Claude chose through Claudiu's former `set_tab_title` tool. Nothing sets it any more; a session that
-    /// had one keeps showing it until it is renamed. Beats `title`, loses to `custom_title`.
-    #[serde(default)]
-    pub auto_title: Option<String>,
-    pub cwd: PathBuf,
-    pub project_id: Option<Id>,
-    pub created_at: i64,
-    pub last_active: i64,
-    #[serde(default)]
-    pub exit_code: Option<i32>,
-    /// Removed from Claudiu's index. The underlying Claude transcript is untouched.
-    #[serde(default)]
-    pub hidden: bool,
-    #[serde(default)]
-    pub claude: Option<ClaudeMeta>,
-}
-
-impl SessionRecord {
-    pub fn display_title(&self) -> &str {
-        self.chosen_title().unwrap_or(&self.title)
-    }
-
-    /// The name given in Claudiu (manual rename, else Claude's own MCP title); what Claude Code is told to use.
-    pub fn chosen_title(&self) -> Option<&str> {
-        [&self.custom_title, &self.auto_title].into_iter().flatten().map(|t| t.trim()).find(|t| !t.is_empty())
-    }
-
-    pub fn claude_id(&self) -> Option<&str> {
-        self.claude.as_ref().map(|c| c.session_id.as_str())
-    }
-}
-
-fn yes() -> bool {
-    true
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct Project {
-    pub id: Id,
-    pub name: String,
-    pub path: PathBuf,
-    #[serde(default)]
-    pub git: Option<GitInfo>,
-    #[serde(default = "yes")]
-    pub collapsed: bool,
-    pub added_at: i64,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct RateLimit {
-    /// 0.0..=1.0 when known.
-    pub utilization: Option<f32>,
-    /// Unix seconds.
-    pub resets_at: Option<i64>,
-    /// When Claudiu observed this value.
-    pub seen_at: i64,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct AccountUsage {
-    pub five_hour: Option<RateLimit>,
-    pub seven_day: Option<RateLimit>,
-}
-
-impl Account {
-    pub fn is_main(&self) -> bool {
-        self.dir.is_none()
-    }
-
-    /// Email when known, else which kind of account it is.
-    pub fn name(&self) -> String {
-        match (&self.email, self.is_main()) {
-            (Some(e), _) => e.clone(),
-            (None, true) => "Main account".into(),
-            (None, false) => "Not signed in".into(),
-        }
-    }
-}
-
-/// Id of the main account: the user's normal Claude Code (`~/.claude`).
-pub const MAIN_ACCOUNT: &str = "main";
-
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct Account {
-    pub id: Id,
-    /// Alt account's Claude Code config folder (see `claude/accounts.rs`); `None` is the main account.
-    #[serde(default)]
-    pub dir: Option<PathBuf>,
-    /// From `claude auth status`; `None` until read, or when signed out.
-    #[serde(default)]
-    pub email: Option<String>,
-    #[serde(default)]
-    pub plan: Option<String>,
-    #[serde(default)]
-    pub usage: AccountUsage,
-}
-
-/// Where the window was last left, in logical pixels. `w`/`h` are the restore size while `maximized`.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
-pub struct WindowGeom {
-    pub x: f32,
-    pub y: f32,
-    pub w: f32,
-    pub h: f32,
-    pub maximized: bool,
-}
-
-impl WindowGeom {
-    /// Which of the `displays` (x, y, w, h) holds the window's center. A monitor that was unplugged or rearranged since
-    /// would otherwise open the window out of reach.
-    pub fn display_of(&self, displays: &[(f32, f32, f32, f32)]) -> Option<usize> {
-        let (cx, cy) = (self.x + self.w / 2.0, self.y + self.h / 2.0);
-        displays.iter().position(|&(x, y, w, h)| cx >= x && cx < x + w && cy >= y && cy < y + h)
-    }
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct Layout {
-    /// Last window size and position; the default centered window when unset.
-    #[serde(default)]
-    pub window: Option<WindowGeom>,
-    pub selected_session: Option<Id>,
-    pub sidebar_visible: bool,
-    /// No longer used (the "Other sessions" group is gone); still written because older Claudiu versions require it.
-    pub other_collapsed: bool,
-    /// The sidebar's RECENT list is open. It starts closed on every launch, so it isn't saved.
-    #[serde(skip)]
-    pub recent_open: bool,
-    /// The project the sidebar list is filtered to.
-    #[serde(default)]
-    pub project_filter: Option<Id>,
-    /// The right sidebar is hidden (stored negated so older state files keep it on).
-    #[serde(default)]
-    pub right_hidden: bool,
-    /// Width of the right sidebar while it shows GitHub; the menu keeps its own, `right_menu_w`.
-    #[serde(default)]
-    pub right_gh_w: Option<f32>,
-    /// Width of the left sidebar when the user has dragged it; the default otherwise.
-    #[serde(default)]
-    pub left_w: Option<f32>,
-    /// Width of the right sidebar's menu when the user has dragged it; the default otherwise.
-    #[serde(default)]
-    pub right_menu_w: Option<f32>,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct Settings {
-    /// Explicit path to the `claude` executable; discovery is used when empty.
-    pub claude_path: Option<PathBuf>,
-    /// Program for new terminal sessions (a path or a name on PATH); the platform default shell when empty.
-    #[serde(default)]
-    pub shell: Option<String>,
-    /// Update feed base URL. Empty/None disables update checks entirely.
-    pub update_url: Option<String>,
-    /// Editor the "Open in" button uses; the last one picked.
-    #[serde(default)]
-    pub editor: Option<crate::platform::Editor>,
-    /// UI scale in percent (text and terminal font); 100 when unset.
-    #[serde(default)]
-    pub scale: Option<u32>,
-    /// Whether new Claude sessions start with Claude in Chrome (`--chrome`); each session can still switch it.
-    #[serde(default)]
-    pub chrome_default: bool,
-    /// Model, effort and permission mode for new Claude sessions; empty fields leave Claude Code's own default.
-    #[serde(default)]
-    pub new_session: crate::claude::defaults::NewSessionDefaults,
-    /// Parts of Claudiu's own MCP server switched off for new sessions (`claude/mcp.rs`). Empty means everything is on,
-    /// which is also what a state file from before this setting loads as.
-    #[serde(default)]
-    pub claudiu_tools_off: Vec<crate::claude::mcp::Feature>,
-    /// Claude Code features and tools switched off for the sessions Claudiu starts (`claude/trim.rs`). Empty means
-    /// nothing is trimmed, which is also what a state file from before this setting loads as.
-    #[serde(default)]
-    pub trimmed_tools: Vec<crate::claude::trim::Trim>,
-    /// The lines Claudiu added to Claude Code's `settings.json` for those trims, so turning one off removes only them.
-    #[serde(default)]
-    pub applied_trims: Vec<String>,
-    /// Output caps and turned-off skills for Claude Code (`claude/trim.rs`); empty leaves Claude Code's own behavior.
-    #[serde(default)]
-    pub limits: crate::claude::trim::Limits,
-    /// Agent types that run a task in another coding agent (Settings → Custom subagents); all off by default.
-    #[serde(default)]
-    pub custom_subagents: crate::claude::subagents::CustomSubagents,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct Data {
-    pub version: u32,
-    pub projects: Vec<Project>,
-    pub sessions: Vec<SessionRecord>,
-    /// Usage from before accounts existed; moved into the main account on load. Still written (empty after the
-    /// move) because older Claudiu versions require the field and would set state.json aside without it.
-    #[serde(default)]
-    pub account: AccountUsage,
-    /// The last limits reading per provider key, shown at launch while the next reading runs.
-    #[serde(default)]
-    pub subagent_limits: BTreeMap<String, Vec<crate::claude::limits::Pool>>,
-    /// The main account first, then alts. Kept in `accounts.json`, not state.json: an older Claudiu still
-    /// running would rewrite state.json without them.
-    #[serde(skip)]
-    pub accounts: Vec<Account>,
-    /// Account new sessions start with; the main one when unset.
-    #[serde(skip)]
-    pub active_account: Option<Id>,
-    pub layout: Layout,
-    pub settings: Settings,
-}
+mod sessions;
+pub use sessions::{SessionKind, ExternalState, Attached, ClaudeMeta, ProviderSession, SessionRecord, Project};
+mod accounts;
+pub use accounts::{RateLimit, AccountUsage, Account, MAIN_ACCOUNT};
+mod settings;
+pub use settings::{WindowGeom, Layout, Settings};
+mod data;
+pub use data::{Data};
 
 #[derive(Default, Serialize, Deserialize)]
 struct AccountsFile {
@@ -412,37 +107,58 @@ fn write_atomic(path: &Path, text: &str) -> bool {
     fs::write(&tmp, text).is_ok() && fs::rename(&tmp, path).is_ok()
 }
 
+fn migrate_data_dir(dir: &Path, old_dirs: &[PathBuf]) {
+    if dir.join("state.json").exists() {
+        return;
+    }
+    for old in old_dirs {
+        if old.join("state.json").exists() {
+            // Same volume, so a rename moves everything at once; if it fails the app starts fresh, the old folder untouched.
+            if dir.exists() {
+                let _ = fs::remove_dir(dir);
+            }
+            if fs::create_dir_all(dir.parent().unwrap_or(dir)).and_then(|_| fs::rename(old, dir)).is_ok() {
+                break;
+            }
+        }
+    }
+}
+
 impl Store {
-    /// Platform app-data location, e.g. `%LOCALAPPDATA%\m4rocks\Claudiu\data\state.json` (`Claudiu Dev` in a debug build).
+    /// Platform app-data location, e.g. `%LOCALAPPDATA%\m4rocks\m4code\data\state.json` (`m4code Dev` in a debug build).
     pub fn default_path() -> PathBuf {
         // Tests (and anyone running a second copy) can keep their state away from the real one.
-        if let Some(dir) = std::env::var_os("CLAUDIU_DATA_DIR") {
+        if let Some(dir) = std::env::var_os("M4CODE_DATA_DIR") {
             return PathBuf::from(dir).join("state.json");
         }
         // Local (non-roaming) data: it holds machine-specific paths.
-        // On Windows the Velopack install root is `%LOCALAPPDATA%\Claudiu`, and running Setup.exe over it wipes
+        // On Windows the Velopack install root is `%LOCALAPPDATA%\m4code`, and running Setup.exe over it wipes
         // everything inside, so the data lives under an organization folder beside it instead.
         let org = if cfg!(windows) { "m4rocks" } else { "" };
         // A debug build (`cargo run`) keeps its own folder: two apps on one folder take each other's request files (#84).
-        let app = if cfg!(debug_assertions) { "Claudiu Dev" } else { "Claudiu" };
-        let Some(dirs) = directories::ProjectDirs::from("", org, app) else { return PathBuf::from("claudiu-state.json") };
+        let app = if cfg!(debug_assertions) { "m4code Dev" } else { "m4code" };
+        let Some(dirs) = directories::ProjectDirs::from("", org, app) else { return PathBuf::from("m4code-state.json") };
         let dir = dirs.data_local_dir().to_path_buf();
-        #[cfg(windows)]
-        {
-            static MIGRATE: std::sync::Once = std::sync::Once::new();
-            MIGRATE.call_once(|| {
-                // Only the released app has data at the old place; a debug build must not move it.
-                let old = directories::ProjectDirs::from("", "", "Claudiu").filter(|_| !cfg!(debug_assertions)).map(|d| d.data_local_dir().to_path_buf());
-                if let Some(old) = old.filter(|o| o.join("state.json").exists() && !dir.join("state.json").exists()) {
-                    // Same volume, so a rename moves everything at once; if it fails the app starts fresh, the old folder untouched.
-                    let _ = fs::create_dir_all(dir.parent().unwrap_or(&dir)).and_then(|_| fs::rename(&old, &dir));
-                }
-            });
-        }
+        static MIGRATE: std::sync::Once = std::sync::Once::new();
+        MIGRATE.call_once(|| {
+            // Only the released app has data at the old Claudiu locations; a debug build must not move it.
+            if cfg!(debug_assertions) {
+                return;
+            }
+            let mut old_dirs = Vec::new();
+            if let Some(d) = directories::ProjectDirs::from("", org, "Claudiu") {
+                old_dirs.push(d.data_local_dir().to_path_buf());
+            }
+            #[cfg(windows)]
+            if let Some(d) = directories::ProjectDirs::from("", "", "Claudiu") {
+                old_dirs.push(d.data_local_dir().to_path_buf());
+            }
+            migrate_data_dir(&dir, &old_dirs);
+        });
         dir.join("state.json")
     }
 
-    /// No state file yet: Claudiu has never run here. Ask before anything calls `load`, which moves a corrupt file aside
+    /// No state file yet: m4code has never run here. Ask before anything calls `load`, which moves a corrupt file aside
     /// (a corrupt file still means the user has been here).
     pub fn is_first_launch(path: &Path) -> bool {
         !path.exists()
@@ -622,12 +338,6 @@ impl Store {
         self.data.sessions.push(record);
         self.dirty = true;
     }
-
-    /// Merge a fresh scan of Claude Code's records into our index. See [`reconcile`].
-    pub fn reconcile(&mut self, external: &[ExternalSession], scan_ok: bool) -> ReconcileStats {
-        self.dirty = true;
-        reconcile(&mut self.data, external, scan_ok)
-    }
 }
 
 /// Deepest project containing `cwd` (project root or any of its worktrees).
@@ -654,546 +364,14 @@ pub fn project_for(projects: &[Project], cwd: &Path) -> Option<Id> {
         .map(|(_, id)| id)
 }
 
-/// A name the user gave the session inside Claude Code since the last read, to show in Claudiu too. Records what
-/// Claude Code holds either way. Only a change counts: Claude Code keeps the old name until a rename made in Claudiu
-/// reaches it, and that rename must not be undone meanwhile. So a name is taken only when Claudiu has none of its own,
-/// or when Claude Code already held Claudiu's name; any other change is Claude Code catching up with an older rename.
-fn adopt_claude_title(rec: &mut SessionRecord, held: Option<&str>) -> Option<String> {
-    let held = held.map(str::trim).filter(|t| !t.is_empty())?;
-    let ours = rec.custom_title.clone();
-    let meta = rec.claude.as_mut()?;
-    let before = meta.claude_title.replace(held.to_string());
-    let confirmed = match ours {
-        None => true,
-        // Claude Code holds names trimmed; an exact match would never confirm a name with spaces around it again.
-        Some(ours) => before.as_deref() == Some(ours.trim()),
-    };
-    (before.as_deref() != Some(held) && confirmed).then(|| held.to_string())
-}
-
-/// What we learned about one Claude Code session from its on-disk record.
-#[derive(Clone, Debug, PartialEq)]
-pub struct ExternalSession {
-    pub session_id: String,
-    pub cwd: Option<PathBuf>,
-    pub title: Option<String>,
-    /// The name the user gave it in Claude Code (`/rename`), apart from the generated title in `title`.
-    pub custom_title: Option<String>,
-    pub created_at: i64,
-    pub last_active: i64,
-    pub model: Option<String>,
-    pub context_tokens: Option<u64>,
-    pub cache_ttl: Option<u64>,
-    pub cache_at: Option<i64>,
-    pub transcript: PathBuf,
-}
-
-#[derive(Debug, Default, PartialEq)]
-pub struct ReconcileStats {
-    pub added: usize,
-    pub updated: usize,
-    pub marked_missing: usize,
-}
-
-/// Startup reconciliation (CLAUDE.md "Session import and synchronization"):
-/// - external records are matched by Claude session id, so sessions Claudiu launched itself never duplicate;
-/// - Claudiu-only metadata (custom title, hidden, project) is preserved;
-/// - nothing is ever deleted: absent records are flagged `Missing`, and only when the scan itself succeeded.
-pub fn reconcile(data: &mut Data, external: &[ExternalSession], scan_ok: bool) -> ReconcileStats {
-    let mut stats = ReconcileStats::default();
-    let projects = data.projects.clone();
-
-    for ext in external {
-        let existing = data.sessions.iter_mut().find(|s| s.claude_id() == Some(ext.session_id.as_str()));
-        match existing {
-            Some(rec) => {
-                let before = rec.clone();
-                if let Some(title) = ext.title.as_ref().filter(|t| !t.trim().is_empty()) {
-                    rec.title = title.clone();
-                }
-                if let Some(name) = adopt_claude_title(rec, ext.custom_title.as_deref()) {
-                    rec.custom_title = Some(name);
-                }
-                rec.last_active = rec.last_active.max(ext.last_active);
-                if rec.project_id.is_none()
-                    && let Some(cwd) = &ext.cwd {
-                        rec.project_id = project_for(&projects, cwd);
-                    }
-                let meta = rec.claude.get_or_insert_with(|| ClaudeMeta { session_id: ext.session_id.clone(), ..Default::default() });
-                meta.external = ExternalState::Present;
-                meta.transcript = Some(ext.transcript.clone());
-                if ext.model.is_some() {
-                    meta.model = ext.model.clone();
-                }
-                if ext.context_tokens.is_some() {
-                    meta.context_tokens = ext.context_tokens;
-                }
-                if ext.cache_ttl.is_some() {
-                    meta.cache_ttl = ext.cache_ttl;
-                }
-                if ext.cache_at.is_some() {
-                    meta.cache_at = ext.cache_at;
-                }
-                if *rec != before {
-                    stats.updated += 1;
-                }
-            }
-            None => {
-                let Some(cwd) = ext.cwd.clone() else { continue };
-                data.sessions.push(SessionRecord {
-                    id: new_id(),
-                    kind: SessionKind::Claude,
-                    title: ext.title.clone().unwrap_or_else(|| "Untitled session".into()),
-                    custom_title: None,
-                    auto_title: None,
-                    project_id: project_for(&projects, &cwd),
-                    cwd,
-                    created_at: ext.created_at,
-                    last_active: ext.last_active,
-                    exit_code: None,
-                    hidden: false,
-                    claude: Some(ClaudeMeta {
-                        session_id: ext.session_id.clone(),
-                        model: ext.model.clone(),
-                        context_tokens: ext.context_tokens,
-                        transcript: Some(ext.transcript.clone()),
-                        external: ExternalState::Present,
-                        ..Default::default()
-                    }),
-                });
-                stats.added += 1;
-            }
-        }
+/// The `models` whose id is in `picked`, in their own order. With nothing picked, or nothing picked that is still
+/// offered, all of them: a harness never drops out of the picker because of stale ticks.
+pub fn keep_picked<T>(models: Vec<T>, picked: &[String], id: impl Fn(&T) -> &str) -> Vec<T> {
+    if !models.iter().any(|m| picked.iter().any(|p| p == id(m))) {
+        return models;
     }
-
-    if scan_ok {
-        for rec in &mut data.sessions {
-            let Some(meta) = rec.claude.as_mut() else { continue };
-            if meta.external == ExternalState::Present && !external.iter().any(|e| e.session_id == meta.session_id) {
-                meta.external = ExternalState::Missing;
-                stats.marked_missing += 1;
-            }
-        }
-    }
-    stats
+    models.into_iter().filter(|m| picked.iter().any(|p| p == id(m))).collect()
 }
 
 #[cfg(test)]
-mod tests {
-    #[test]
-    fn the_worktree_toggle_saved_by_an_earlier_version_is_ignored() {
-        let settings: Settings = serde_json::from_str(r#"{"worktree_sessions":true}"#).unwrap();
-        assert_eq!(settings, Settings::default());
-    }
-
-    use super::*;
-
-    #[test]
-    fn the_recent_list_is_closed_after_a_restart() {
-        let layout = Layout { recent_open: true, ..Default::default() };
-        let saved = serde_json::to_string(&layout).unwrap();
-        assert!(!serde_json::from_str::<Layout>(&saved).unwrap().recent_open);
-    }
-
-    fn ext(id: &str, cwd: &str, title: &str, last: i64) -> ExternalSession {
-        ExternalSession {
-            session_id: id.into(),
-            cwd: Some(PathBuf::from(cwd)),
-            title: Some(title.into()),
-            custom_title: None,
-            created_at: 1,
-            last_active: last,
-            model: Some("claude-sonnet-5-5".into()),
-            context_tokens: Some(1000),
-            cache_ttl: None,
-            cache_at: None,
-            transcript: PathBuf::from(format!("/t/{id}.jsonl")),
-        }
-    }
-
-    fn project(id: &str, path: &str) -> Project {
-        Project { id: id.into(), name: id.into(), path: PathBuf::from(path), git: None, collapsed: false, added_at: 0 }
-    }
-
-    #[test]
-    fn the_last_antigravity_reading_is_there_after_a_restart() {
-        use crate::claude::limits::Pool;
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("state.json");
-        let mut s = Store::load(path.clone());
-        let limit = RateLimit { utilization: Some(0.5), resets_at: Some(200), seen_at: 100 };
-        s.data.subagent_limits.insert("antigravity".into(), vec![Pool { name: "Gemini 4 Argon".into(), usage: AccountUsage { five_hour: None, seven_day: Some(limit) } }]);
-        s.save();
-        assert_eq!(Store::load(path).data.subagent_limits, s.data.subagent_limits);
-        // A state.json from before the field loads with no reading.
-        let old = dir.path().join("old.json");
-        fs::write(&old, r#"{"version":1,"projects":[],"sessions":[]}"#).unwrap();
-        assert!(Store::load(old).data.subagent_limits.is_empty());
-    }
-
-    #[test]
-    fn saves_land_in_the_order_made_and_a_failed_one_is_tried_again() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("state.json");
-        let mut s = Store::load(path.clone());
-        for name in ["first", "second", "third"] {
-            s.add_project(&dir.path().join(name));
-            s.save_if_dirty();
-        }
-        s.save();
-        let names = |p: &Path| Store::load(p.to_path_buf()).data.projects.iter().map(|p| p.name.clone()).collect::<Vec<_>>();
-        assert_eq!(names(&path), ["first", "second", "third"]);
-
-        // A folder where the file should be: every write fails, and the store keeps its changes to write again.
-        let blocked = dir.path().join("blocked");
-        fs::create_dir_all(blocked.join("state.json")).unwrap();
-        let mut b = Store::load(blocked.join("state.json"));
-        b.mark_dirty();
-        b.save();
-        assert!(b.dirty);
-    }
-
-    fn store_with(projects: Vec<Project>, sessions: Vec<(&str, &str, Option<&str>)>) -> (Store, tempfile::TempDir) {
-        let dir = tempfile::tempdir().unwrap();
-        let mut s = Store::load(dir.path().join("state.json"));
-        s.data.projects = projects;
-        s.data.sessions = sessions
-            .into_iter()
-            .map(|(id, cwd, project)| SessionRecord {
-                id: id.into(),
-                kind: SessionKind::Claude,
-                title: id.into(),
-                custom_title: None,
-                auto_title: None,
-                cwd: PathBuf::from(cwd),
-                project_id: project.map(Into::into),
-                created_at: 1,
-                last_active: 1,
-                exit_code: None,
-                hidden: false,
-                claude: None,
-            })
-            .collect();
-        (s, dir)
-    }
-
-    fn order(s: &Store) -> Vec<&str> {
-        s.data.projects.iter().map(|p| p.id.as_str()).collect()
-    }
-
-    #[test]
-    fn a_removed_project_comes_back_in_its_place_with_its_sessions() {
-        let (mut s, _dir) = store_with(vec![project("a", "/a"), project("b", "/b"), project("c", "/c")], vec![("s1", "/b/x", Some("b")), ("s2", "/a", Some("a"))]);
-        let (at, removed) = s.remove_project("b").expect("b is there");
-        assert_eq!(order(&s), ["a", "c"]);
-        assert_eq!(s.session("s1").unwrap().project_id, None, "its session stays, without a project");
-        s.restore_project(at, removed);
-        assert_eq!(order(&s), ["a", "b", "c"]);
-        assert_eq!(s.session("s1").unwrap().project_id.as_deref(), Some("b"));
-        assert_eq!(s.session("s2").unwrap().project_id.as_deref(), Some("a"));
-        assert!(s.remove_project("gone").is_none());
-    }
-
-    #[test]
-    fn undoing_a_removal_after_the_folder_was_added_again_adds_nothing() {
-        let (mut s, _dir) = store_with(vec![project("a", "/a"), project("b", "/b")], vec![]);
-        let (at, removed) = s.remove_project("b").unwrap();
-        s.data.projects.push(project("b2", "/b"));
-        s.restore_project(at, removed);
-        assert_eq!(order(&s), ["a", "b2"]);
-    }
-
-    #[test]
-    fn a_project_is_renamed_and_an_empty_name_goes_back_to_its_folders() {
-        let (mut s, _dir) = store_with(vec![project("a", "/w/app")], vec![]);
-        s.rename_project("a", "  Main app ");
-        assert_eq!(s.project("a").unwrap().name, "Main app");
-        s.rename_project("a", "   ");
-        assert_eq!(s.project("a").unwrap().name, "app");
-    }
-
-    #[test]
-    fn projects_move_one_place_and_stop_at_the_ends() {
-        let (mut s, _dir) = store_with(vec![project("a", "/a"), project("b", "/b"), project("c", "/c")], vec![]);
-        s.move_project("c", true);
-        assert_eq!(order(&s), ["a", "c", "b"]);
-        s.move_project("a", true);
-        assert_eq!(order(&s), ["a", "c", "b"], "the first stays first");
-        s.move_project("a", false);
-        assert_eq!(order(&s), ["c", "a", "b"]);
-        s.move_project("b", false);
-        assert_eq!(order(&s), ["c", "a", "b"], "the last stays last");
-    }
-
-    #[test]
-    fn imports_new_sessions_and_maps_to_deepest_project() {
-        let mut d = Data { projects: vec![project("outer", "/w"), project("inner", "/w/app")], ..Default::default() };
-        let stats = reconcile(&mut d, &[ext("a", "/w/app/src", "T", 10), ext("b", "/other", "U", 5)], true);
-        assert_eq!(stats.added, 2);
-        assert_eq!(d.sessions[0].project_id.as_deref(), Some("inner"));
-        assert_eq!(d.sessions[1].project_id, None);
-    }
-
-    #[test]
-    fn a_rename_inside_claude_code_renames_the_session_in_claudiu() {
-        let mut d = Data::default();
-        let named = |name: Option<&str>| ExternalSession { custom_title: name.map(Into::into), ..ext("a", "/w", "Generated", 10) };
-        reconcile(&mut d, &[named(None)], true);
-        d.sessions[0].auto_title = Some("Old model title".into());
-        reconcile(&mut d, &[named(Some("First /rename"))], true);
-        assert_eq!(d.sessions[0].display_title(), "First /rename", "the first name of a session Claudiu never named");
-
-        // Named in Claudiu before Claudiu saw a name in Claude Code: the one Claude Code holds may be older.
-        d.sessions[0].custom_title = Some("Named in Claudiu".into());
-        d.sessions[0].claude.as_mut().unwrap().claude_title = None;
-        reconcile(&mut d, &[named(Some("Old name"))], true);
-        assert_eq!(d.sessions[0].display_title(), "Named in Claudiu", "the first name seen is only recorded");
-        reconcile(&mut d, &[named(Some("Named in Claudiu"))], true);
-
-        reconcile(&mut d, &[named(Some("From /rename"))], true);
-        assert_eq!(d.sessions[0].display_title(), "From /rename");
-
-        // Renamed in Claudiu: Claude Code still holds the old name until the mod's /rename reaches it.
-        d.sessions[0].custom_title = Some("From Claudiu".into());
-        reconcile(&mut d, &[named(Some("From /rename"))], true);
-        assert_eq!(d.sessions[0].display_title(), "From Claudiu", "a rename made in Claudiu is not undone");
-        reconcile(&mut d, &[named(None)], true);
-        assert_eq!(d.sessions[0].display_title(), "From Claudiu", "a generated title never renames it");
-        reconcile(&mut d, &[named(Some("From Claudiu"))], true);
-        reconcile(&mut d, &[named(Some("Again"))], true);
-        assert_eq!(d.sessions[0].display_title(), "Again");
-
-        // Renamed twice in Claudiu, quickly: Claude Code reaches the first name while the second is on its way.
-        d.sessions[0].custom_title = Some("Second".into());
-        reconcile(&mut d, &[named(Some("First"))], true);
-        assert_eq!(d.sessions[0].display_title(), "Second", "Claude Code catching up is not a rename");
-
-        // Claudiu's name with spaces around it, which Claude Code holds trimmed: later renames still count.
-        d.sessions[0].custom_title = Some(" Spaced ".into());
-        reconcile(&mut d, &[named(Some("Spaced"))], true);
-        reconcile(&mut d, &[named(Some("Next"))], true);
-        assert_eq!(d.sessions[0].display_title(), "Next");
-    }
-
-    #[test]
-    fn rerunning_is_idempotent_and_never_duplicates() {
-        let mut d = Data::default();
-        let e = [ext("a", "/w", "T", 10)];
-        reconcile(&mut d, &e, true);
-        let stats = reconcile(&mut d, &e, true);
-        assert_eq!(d.sessions.len(), 1);
-        assert_eq!(stats, ReconcileStats::default());
-    }
-
-    #[test]
-    fn session_launched_by_claudiu_is_matched_not_duplicated() {
-        let mut d = Data::default();
-        d.sessions.push(SessionRecord {
-            id: "local".into(),
-            kind: SessionKind::Claude,
-            title: "Claude".into(),
-            custom_title: Some("My name".into()),
-            auto_title: None,
-            cwd: PathBuf::from("/w"),
-            project_id: None,
-            created_at: 1,
-            last_active: 2,
-            exit_code: Some(0),
-            hidden: true,
-            claude: Some(ClaudeMeta { session_id: "a".into(), ..Default::default() }),
-        });
-        reconcile(&mut d, &[ext("a", "/w", "Ext title", 50)], true);
-        assert_eq!(d.sessions.len(), 1);
-        let s = &d.sessions[0];
-        assert_eq!(s.id, "local");
-        assert_eq!(s.title, "Ext title");
-        assert_eq!(s.display_title(), "My name", "Claudiu-only label survives");
-        assert!(s.hidden, "hidden flag survives");
-        assert_eq!(s.last_active, 50);
-        assert_eq!(s.claude.as_ref().unwrap().external, ExternalState::Present);
-    }
-
-    #[test]
-    fn missing_external_is_flagged_not_deleted_and_only_on_good_scan() {
-        let mut d = Data::default();
-        reconcile(&mut d, &[ext("a", "/w", "T", 1)], true);
-
-        let stats = reconcile(&mut d, &[], false);
-        assert_eq!(stats.marked_missing, 0, "unreadable scan must not change state");
-        assert_eq!(d.sessions[0].claude.as_ref().unwrap().external, ExternalState::Present);
-
-        let stats = reconcile(&mut d, &[], true);
-        assert_eq!(stats.marked_missing, 1);
-        assert_eq!(d.sessions.len(), 1, "history is never deleted");
-        assert_eq!(d.sessions[0].claude.as_ref().unwrap().external, ExternalState::Missing);
-
-        // It comes back if the file reappears.
-        reconcile(&mut d, &[ext("a", "/w", "T", 1)], true);
-        assert_eq!(d.sessions[0].claude.as_ref().unwrap().external, ExternalState::Present);
-    }
-
-    #[test]
-    fn shell_sessions_are_untouched() {
-        let mut d = Data::default();
-        d.sessions.push(SessionRecord {
-            id: "sh".into(),
-            kind: SessionKind::Shell,
-            title: "PowerShell".into(),
-            custom_title: None,
-            auto_title: None,
-            cwd: PathBuf::from("/w"),
-            project_id: None,
-            created_at: 1,
-            last_active: 1,
-            exit_code: None,
-            hidden: false,
-            claude: None,
-        });
-        let stats = reconcile(&mut d, &[], true);
-        assert_eq!(stats, ReconcileStats::default());
-        assert_eq!(d.sessions.len(), 1);
-    }
-
-    #[test]
-    fn adding_a_project_adopts_existing_unmapped_sessions() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mut store = Store::load(tmp.path().join("state.json"));
-        let proj_dir = tmp.path().join("proj");
-        fs::create_dir_all(&proj_dir).unwrap();
-        let e = ext("a", &proj_dir.join("sub").to_string_lossy(), "T", 1);
-        store.reconcile(&[e], true);
-        assert!(store.data.sessions[0].project_id.is_none());
-        let id = store.add_project(&proj_dir);
-        assert_eq!(store.data.sessions[0].project_id.as_deref(), Some(id.as_str()));
-        assert_eq!(store.add_project(&proj_dir), id, "idempotent");
-    }
-
-    #[test]
-    fn shell_sessions_are_not_restored_from_disk() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("s.json");
-        let mut a = Store::load(path.clone());
-        for (id, kind) in [("sh", SessionKind::Shell), ("cl", SessionKind::Claude)] {
-            a.data.sessions.push(SessionRecord {
-                id: id.into(),
-                kind,
-                title: id.into(),
-                custom_title: None,
-                auto_title: None,
-                cwd: PathBuf::from("/w"),
-                project_id: None,
-                created_at: 1,
-                last_active: 1,
-                exit_code: None,
-                hidden: false,
-                claude: None,
-            });
-        }
-        a.save();
-        let b = Store::load(path);
-        assert_eq!(b.data.sessions.len(), 1);
-        assert_eq!(b.data.sessions[0].id, "cl");
-    }
-
-    #[test]
-    fn usage_from_before_accounts_moves_into_the_main_account() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("s.json");
-        let old = r#"{"version":1,"projects":[],"sessions":[],"account":{"five_hour":{"utilization":0.5,"resets_at":null,"seen_at":3}},
-            "layout":{"selected_session":null,"sidebar_visible":true,"other_collapsed":false},"settings":{"claude_path":null,"update_url":null}}"#;
-        fs::write(&path, old).unwrap();
-        let mut s = Store::load(path.clone());
-        assert_eq!(s.active_account().unwrap().usage.five_hour.as_ref().unwrap().utilization, Some(0.5));
-        s.save();
-        assert!(fs::read_to_string(&path).unwrap().contains("\"account\""), "older versions require the field");
-        assert_eq!(Store::load(path).data.accounts.len(), 1, "migrates once");
-    }
-
-    #[test]
-    fn a_session_starts_under_its_own_account_while_that_exists() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mut s = Store::load(tmp.path().join("s.json"));
-        s.data.accounts.push(Account { id: "alt".into(), ..Default::default() });
-        s.data.active_account = Some("alt".into());
-        let session = |id: &str, account: Option<&str>| SessionRecord {
-            id: id.into(),
-            kind: SessionKind::Claude,
-            title: "Claude".into(),
-            custom_title: None,
-            auto_title: None,
-            cwd: PathBuf::from("/w"),
-            project_id: None,
-            created_at: 1,
-            last_active: 1,
-            exit_code: None,
-            hidden: false,
-            claude: Some(ClaudeMeta { session_id: id.into(), account: account.map(Into::into), ..Default::default() }),
-        };
-        s.add_session(session("main-owned", Some(MAIN_ACCOUNT)));
-        s.add_session(session("never-started", None));
-        s.add_session(session("removed-owner", Some("gone")));
-        let account = |s: &Store, id: &str| s.session_account(id).map(|a| a.id.clone());
-        assert_eq!(account(&s, "main-owned").as_deref(), Some(MAIN_ACCOUNT), "not the active alt");
-        assert_eq!(account(&s, "never-started").as_deref(), Some("alt"));
-        assert_eq!(account(&s, "removed-owner").as_deref(), Some("alt"));
-        assert_eq!(account(&s, "not-yet-stored").as_deref(), Some("alt"), "a new session");
-    }
-
-    #[test]
-    fn save_load_roundtrip_and_corrupt_file_is_kept() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("s.json");
-        let mut a = Store::load(path.clone());
-        a.data.projects.push(project("p", "/x"));
-        a.save();
-        let b = Store::load(path.clone());
-        assert_eq!(b.data.projects.len(), 1);
-
-        fs::write(&path, "{ not json").unwrap();
-        let c = Store::load(path.clone());
-        assert!(c.data.projects.is_empty());
-        assert_eq!(c.active_account().map(|a| a.id.as_str()), Some(MAIN_ACCOUNT), "main account always exists");
-        assert!(path.with_extension("json.corrupt").exists(), "corrupt state is preserved, not destroyed");
-    }
-
-    #[test]
-    fn a_launch_is_the_first_only_while_there_is_no_state_file() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("state.json");
-        assert!(Store::is_first_launch(&path), "nothing saved yet");
-        Store::load(path.clone()).save();
-        assert!(!Store::is_first_launch(&path), "a saved state file ends the first launch");
-
-        fs::write(&path, "{ not json").unwrap();
-        assert!(!Store::is_first_launch(&path), "a corrupt state file still means Claudiu ran here");
-    }
-
-    #[test]
-    fn window_geometry_survives_a_save_and_old_state_files_load_without_it() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("s.json");
-        let mut a = Store::load(path.clone());
-        assert_eq!(a.data.layout.window, None, "a first run has nothing saved");
-        let geom = WindowGeom { x: 40.0, y: 30.0, w: 900.0, h: 600.0, maximized: true };
-        a.data.layout.window = Some(geom);
-        a.save();
-        assert_eq!(Store::load(path.clone()).data.layout.window, Some(geom));
-
-        let mut value: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-        value["layout"].as_object_mut().unwrap().remove("window");
-        fs::write(&path, value.to_string()).unwrap();
-        assert_eq!(Store::load(path).data.layout.window, None, "state from before this setting loads");
-    }
-
-    #[test]
-    fn a_window_is_restored_only_where_a_display_still_shows_it() {
-        let geom = |x| WindowGeom { x, y: 100.0, w: 1000.0, h: 700.0, maximized: false };
-        let primary = (0.0, 0.0, 1920.0, 1080.0);
-        let right = (1920.0, 0.0, 1920.0, 1080.0);
-        assert_eq!(geom(100.0).display_of(&[primary]), Some(0));
-        assert_eq!(geom(2000.0).display_of(&[primary, right]), Some(1));
-        assert_eq!(geom(2000.0).display_of(&[primary]), None, "the second monitor was unplugged");
-        assert_eq!(geom(100.0).display_of(&[]), None, "no display reported");
-    }
-
-}
+mod tests;

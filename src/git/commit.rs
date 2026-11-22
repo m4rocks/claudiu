@@ -133,6 +133,25 @@ pub struct BranchList {
     pub current: Option<String>,
     /// Branches another working tree has checked out, with that tree's name. Git refuses to switch to these.
     pub elsewhere: Vec<Held>,
+    pub local: Vec<String>,
+    pub default: Option<String>,
+    pub worktree_paths: Vec<PathBuf>,
+}
+
+impl BranchList {
+    pub fn deletion_reason(&self, name: &str) -> Option<String> {
+        if self.current.as_deref() == Some(name) {
+            Some("Current branch".into())
+        } else if let Some(held) = self.elsewhere.iter().find(|h| h.branch == name) {
+            Some(format!("Checked out at {}", held.folder.display()))
+        } else if self.default.as_deref() == Some(name) {
+            Some("Default branch".into())
+        } else if !self.local.iter().any(|local| local == name) {
+            Some("Remote-only branch".into())
+        } else {
+            None
+        }
+    }
 }
 
 /// Branches for the branch menu. Blocking.
@@ -142,9 +161,12 @@ pub fn branches(cwd: &Path) -> Result<BranchList, String> {
         &["for-each-ref", "--sort=-committerdate", "--format=%(refname)", "refs/heads", "refs/remotes/origin"],
         None,
     )?;
-    let current = git(cwd, &["branch", "--show-current"], None).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
-    let worktrees = git(cwd, &["worktree", "list", "--porcelain"], None).unwrap_or_default();
+    let current = Some(git(cwd, &["branch", "--show-current"], None)?.trim().to_string()).filter(|s| !s.is_empty());
+    let worktrees = git(cwd, &["worktree", "list", "--porcelain", "-z"], None)?;
+    let worktree_paths = worktrees.split('\0').filter_map(|line| line.strip_prefix("worktree ")).map(PathBuf::from).collect();
     let elsewhere = checked_out(&worktrees).into_iter().filter(|h| current.as_ref() != Some(&h.branch)).collect();
+    let local = refs.lines().filter_map(|r| r.strip_prefix("refs/heads/")).map(str::to_string).collect();
+    let default = git(cwd, &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], None).ok().map(|s| s.trim().trim_start_matches("origin/").to_string());
     let mut seen = std::collections::HashSet::new();
     let names = refs
         .lines()
@@ -152,14 +174,15 @@ pub fn branches(cwd: &Path) -> Result<BranchList, String> {
         .filter(|n| *n != "HEAD" && seen.insert(n.to_string()))
         .map(str::to_string)
         .collect();
-    Ok(BranchList { names, current, elsewhere })
+    Ok(BranchList { names, current, elsewhere, local, default, worktree_paths })
 }
 
 /// The local branches the branch menu may delete: not the current one, and not origin's default branch.
-pub fn deletable_branches(cwd: &Path, current: Option<&str>) -> Vec<String> {
-    let default = git(cwd, &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], None).ok().map(|s| s.trim().trim_start_matches("origin/").to_string());
-    let local = git(cwd, &["for-each-ref", "--format=%(refname:short)", "refs/heads"], None).unwrap_or_default();
-    local.lines().filter(|b| Some(*b) != current && Some(*b) != default.as_deref()).map(str::to_string).collect()
+#[cfg(test)]
+fn deletable_branches(cwd: &Path, current: Option<&str>) -> Vec<String> {
+    let mut list = branches(cwd).unwrap();
+    list.current = current.map(str::to_string);
+    list.names.iter().filter(|name| list.deletion_reason(name).is_none()).cloned().collect()
 }
 
 /// How many commits are on this branch and on no other local branch and no remote branch. Blocking.
@@ -179,11 +202,9 @@ pub fn delete_branch(cwd: &Path, branch: &str) -> Result<String, String> {
 /// "main checkout" for the first one listed, else the folder's name.
 fn checked_out(porcelain: &str) -> Vec<Held> {
     let mut found = vec![];
-    for (i, block) in porcelain.split("
-
-").enumerate() {
-        let path = block.lines().find_map(|l| l.strip_prefix("worktree "));
-        let branch = block.lines().find_map(|l| l.strip_prefix("branch refs/heads/"));
+    for (i, block) in porcelain.split("\0\0").enumerate() {
+        let path = block.split('\0').find_map(|l| l.strip_prefix("worktree "));
+        let branch = block.split('\0').find_map(|l| l.strip_prefix("branch refs/heads/"));
         if let (Some(path), Some(branch)) = (path, branch) {
             let name = if i == 0 { "main checkout".to_string() } else { path.rsplit(['/', '\\']).next().unwrap_or(path).to_string() };
             found.push(Held { branch: branch.to_string(), tree: name, folder: PathBuf::from(path) });
@@ -246,7 +267,13 @@ fn clean_message(raw: &str) -> Option<String> {
 }
 
 pub(super) fn git(cwd: &Path, args: &[&str], stdin: Option<&str>) -> Result<String, String> {
+    git_with(cwd, args, stdin, &[])
+}
+
+/// `git` with extra environment variables, such as `GIT_INDEX_FILE`.
+pub(super) fn git_with(cwd: &Path, args: &[&str], stdin: Option<&str>, env: &[(&str, &std::ffi::OsStr)]) -> Result<String, String> {
     let mut cmd = Command::new("git");
+    cmd.envs(env.iter().copied());
     cmd.args(args).current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     // No terminal can answer a credential prompt: fail instead of hanging (GUI credential helpers still work).
     cmd.env("GIT_TERMINAL_PROMPT", "0");
@@ -271,6 +298,38 @@ mod tests {
     use super::*;
 
     #[test]
+    fn branch_deletion_reasons_distinguish_every_restriction() {
+        let list = BranchList {
+            current: Some("current".into()), default: Some("main".into()),
+            local: ["current", "main", "held", "spare"].map(String::from).to_vec(),
+            elsewhere: vec![Held { branch: "held".into(), tree: "external".into(), folder: PathBuf::from("/external/worktree") }],
+            ..Default::default()
+        };
+        assert_eq!(list.deletion_reason("current").as_deref(), Some("Current branch"));
+        assert_eq!(list.deletion_reason("main").as_deref(), Some("Default branch"));
+        assert_eq!(list.deletion_reason("held").as_deref(), Some("Checked out at /external/worktree"));
+        assert_eq!(list.deletion_reason("remote").as_deref(), Some("Remote-only branch"));
+        assert_eq!(list.deletion_reason("spare"), None);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn worktree_paths_keep_spaces_and_newlines_without_git_quoting() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(tmp.path()).unwrap();
+        let main = root.join("main");
+        std::fs::create_dir(&main).unwrap();
+        git(&main, &["init", "-q", "-b", "main"], None).unwrap();
+        commit(&main, "file.txt");
+        let folder = root.join("external worktree\nsecond line");
+        git(&main, &["worktree", "add", "-q", "-b", "held", &folder.to_string_lossy()], None).unwrap();
+        let list = branches(&main).unwrap();
+        assert!(list.worktree_paths.contains(&folder));
+        assert_eq!(list.elsewhere[0].folder, folder);
+        assert!(list.deletion_reason("held").unwrap().contains("second line"));
+    }
+
+    #[test]
     fn branches_checked_out_in_worktrees_are_found() {
         let porcelain = "worktree /p
 HEAD aaa
@@ -286,7 +345,7 @@ HEAD ccc
 detached
 ";
         let held = |b: &str, w: &str, f: &str| Held { branch: b.into(), tree: w.into(), folder: f.into() };
-        assert_eq!(checked_out(porcelain), [held("main", "main checkout", "/p"), held("feature/login", "x", "/p/.claude/worktrees/x")]);
+        assert_eq!(checked_out(&porcelain.replace('\n', "\0")), [held("main", "main checkout", "/p"), held("feature/login", "x", "/p/.claude/worktrees/x")]);
         assert!(checked_out("").is_empty());
     }
 

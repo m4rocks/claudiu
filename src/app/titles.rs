@@ -1,42 +1,33 @@
-//! "Regenerate title": a new name for a running session, written from what was said in it by the session's own mod
-//! (`claude/ask.rs`), and used as the session's chosen name (which also renames it inside Claude Code).
+//! "Regenerate title": derive a concise title from the session's conversation without depending on a specific harness.
 
 use super::*;
 
-const TITLE_SYSTEM: &str = "You name conversations. Reply with the title only: two to six words, no quotes, no trailing punctuation, \
-in the language the conversation is mostly in. Say what the conversation is about, not how it started.";
-
 impl Workspace {
-    pub(super) fn regen_title(&mut self, id: &str) {
-        if !self.is_running(id) {
-            return self.toast("Start the session first: its title is written through the running session.", true);
-        }
-        let Some(transcript) = self.store.session(id).and_then(|s| s.claude.as_ref()?.transcript.clone()) else {
-            return self.toast("Nothing to title yet.", false);
+    pub(super) fn regen_title(&mut self, id: &str, cx: &mut Context<Self>) {
+        let first_prompt = self
+            .live
+            .iter()
+            .find(|l| l.id == id)
+            .and_then(|l| l.view.thread())
+            .and_then(|t| t.read(cx).thread.sent_texts().into_iter().next());
+        let Some(raw) = first_prompt else {
+            return self.toast("Nothing to title yet.", false, cx);
         };
-        self.toast("Writing a new title…", false);
-        let id = id.to_string();
-        let record = id.clone();
-        self.rt.spawn(
-            move || {
-                    let said = crate::claude::conversation_text(&transcript);
-                    if said.trim().is_empty() {
-                        return Err("Nothing to title yet.".to_string());
-                    }
-                    let prompt = format!("Conversation:\n\n{said}\n\nWrite the title.");
-                    let raw = crate::git::commit::generate(&|system, prompt| crate::claude::ask::complete(&record, system, prompt), TITLE_SYSTEM, &prompt)?;
-                    let title: String = raw.lines().next().unwrap_or_default().trim().trim_matches(['"', '\'', '`', '.']).chars().take(60).collect();
-                    if title.is_empty() { Err("the model returned no title".to_string()) } else { Ok(title) }
-                },
-            move |ws: &mut Workspace, result| match result {
-                Ok(title) => {
-                    if let Some(rec) = ws.store.session_mut(&id) {
-                        rec.custom_title = Some(title.clone());
-                    }
-                    ws.toast(format!("Renamed to “{title}”"), false);
-                }
-                Err(e) => ws.toast(e, true),
-            },
-        );
+        let title: String = raw
+            .lines()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or_default()
+            .trim()
+            .trim_matches(['"', '\'', '`', '.'])
+            .chars()
+            .take(60)
+            .collect();
+        if title.is_empty() {
+            return self.toast("Nothing to title yet.", false, cx);
+        }
+        if let Some(rec) = self.store.session_mut(id) {
+            rec.custom_title = Some(title.clone());
+        }
+        self.toast(format!("Renamed to “{title}”"), false, cx);
     }
 }

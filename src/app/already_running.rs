@@ -1,35 +1,45 @@
-//! The window a second Claudiu shows when another one already uses its data folder, before it quits.
+//! The window a second m4code shows when another one already uses its data folder, before it quits.
 
-use rune::{Cx, El, col, row};
+use gpui::{App, AppContext, Bounds, ClickEvent, Context, IntoElement, ParentElement, Render, StatefulInteractiveElement, Styled, TitlebarOptions, Window, WindowBounds, WindowOptions, div, px, size};
 
-use crate::panels::theme;
-use crate::panels::widgets::{button, label};
-use crate::platform;
+use crate::panels::theme::{self, hsla};
+use crate::panels::widgets::button;
 
-const SIZE: (f32, f32) = (420.0, 170.0);
+struct AlreadyRunning;
 
-pub struct AlreadyRunning;
-
-fn render(_: &AlreadyRunning, _cx: &mut Cx<AlreadyRunning>) -> El {
-    col()
-        .w_full()
-        .h_full()
-        .fill(theme::rgb(theme::APP_BG))
-        .padding(24.0)
-        .gap(10.0)
-        .child(label("Claudiu is already running", 15.0, theme::TEXT))
-        .child(label("Another Claudiu window uses the same data folder. Switch to it instead.", 13.0, theme::TEXT_DIM).wrap())
-        .child(rune::el().grow(1.0))
-        .child(row().w_full().child(rune::el().grow(1.0)).child(button("OK", true).key("already-running-ok").on_press_tx(|_: &mut AlreadyRunning, tx: &mut rune::Tx| tx.quit())))
+impl Render for AlreadyRunning {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .gap(px(10.0))
+            .p(px(24.0))
+            .bg(hsla(theme::APP_BG))
+            .child(div().text_size(px(15.0)).text_color(hsla(theme::TEXT)).child("m4code is already running"))
+            .child(div().text_size(px(13.0)).text_color(hsla(theme::TEXT_DIM)).child("Another m4code window uses the same data folder. Switch to it instead."))
+            .child(div().flex_1())
+            .child(div().flex().justify_end().child(button("already-running-ok", "OK", true).on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.quit()))))
+    }
 }
 
 /// Shows the notice until it is closed, then returns.
 pub fn show() {
-    let spec = rune::AppSpec {
-        min_size: Some(SIZE),
-        families: (platform::ui_font(), platform::monospace_font()),
-        ..rune::AppSpec::new("Claudiu", SIZE, || AlreadyRunning, render)
-    };
-    let app = rune::App::new(spec).on_close(|_: &mut AlreadyRunning, tx: &mut rune::Tx| tx.quit());
-    rune::run_windows(move |_| vec![rune::WindowSpec::from_app("already-running", app).options(rune::WindowOptions { resizable: false, min_size: Some(SIZE), ..Default::default() })]);
+    gpui_kit::application().run(|cx: &mut App| {
+        gpui_kit::init(cx);
+        let bounds = size(px(420.0), px(170.0));
+        let options = WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, bounds, cx))),
+            window_min_size: Some(bounds),
+            is_resizable: false,
+            app_id: Some(crate::platform::APP_ID.into()),
+            titlebar: Some(TitlebarOptions { title: Some("m4code".into()), ..Default::default() }),
+            ..Default::default()
+        };
+        if cx.open_window(options, |_, cx| cx.new(|_| AlreadyRunning)).is_err() {
+            cx.quit();
+        }
+        cx.on_window_closed(|cx, _| cx.quit()).detach();
+        cx.activate(true);
+    });
 }

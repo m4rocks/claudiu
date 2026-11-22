@@ -25,92 +25,122 @@ fn notice(before: Option<Activity>, now: Option<Activity>, window_active: bool) 
 }
 
 impl Workspace {
-    /// Startup reconciliation: scan Claude Code's records off the UI thread, then merge.
-    pub fn start_scan(&mut self) {
-        let Some(home) = claude::claude_home() else {
-            return;
-        };
-        self.scanning = true;
-        self.rt.spawn(
-            move || claude::scan_all(&home),
-            |ws: &mut Workspace, result| {
-                ws.scanning = false;
-                ws.store.reconcile(&result.sessions, result.ok);
-                if result.ok {
-                    // Records from earlier runs that never produced a transcript: nothing to resume.
-                    let live: Vec<Id> = ws.live.iter().map(|l| l.id.clone()).collect();
-                    ws.store.data.sessions.retain(|s| {
-                        live.contains(&s.id)
-                            || !s.claude.as_ref().is_some_and(|c| {
-                                c.external == ExternalState::Unknown && c.transcript.is_none()
-                            })
-                    });
-                }
+    /// Runs `work` off the UI thread, then `done` with its result back on it; saves what `done` changed and redraws.
+    pub(crate) fn in_background<T: Send + 'static>(
+        &mut self,
+        work: impl FnOnce() -> T + Send + 'static,
+        done: impl FnOnce(&mut Self, T, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn(async move |this, cx| {
+            let result = cx.background_executor().spawn(async move { work() }).await;
+            let _ = this.update(cx, |ws, cx| {
+                done(ws, result, cx);
                 ws.store.save_if_dirty();
-            },
-        );
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
-    /// Every five seconds: `tick`.
-    pub(super) fn start_ticker(&mut self) {
-        self.rt.after_quietly(Duration::from_secs(5), |ws: &mut Workspace| {
-            ws.tick();
-            ws.start_ticker();
-        });
+    pub(super) fn start_ticker(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_secs(5)).await;
+                if this.update(cx, |ws, cx| ws.tick(cx)).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
     }
 
-    /// Whether a working session's sidebar icon turns: only while someone can see it, since every turning frame is
-    /// drawn. Rune stops drawing a hidden or occluded window by itself.
-    pub fn spin_visible(&self) -> bool {
-        // Editor mode hides the sidebar whatever its setting.
-        spin_visible(self.activity.values().any(|a| *a == Activity::Working), self.window_active, self.store.data.layout.sidebar_visible && !self.editing())
+    /// While a session works, its sidebar icon spins: the session list is redrawn many times a second (with the
+    /// window's top level, which reuses the other cached parts). It stops when idle or out of view.
+    pub(crate) fn start_spin(&mut self, window: &Window, cx: &mut Context<Self>) {
+        if self.spinning || !self.spin_visible(window) {
+            return;
+        }
+        self.spinning = true;
+        cx.spawn_in(window, async move |this, cx| {
+            loop {
+                cx.background_executor().timer(crate::panels::status_icon::SPIN_STEP).await;
+                let working = this.update_in(cx, |ws, window, cx| {
+                    let working = ws.spin_visible(window);
+                    match &ws.session_list {
+                        Some(list) if working => list.update(cx, |_, cx| cx.notify()),
+                        _ => ws.spinning = working,
+                    }
+                    working
+                });
+                if !matches!(working, Ok(true)) {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn spin_visible(&self, window: &Window) -> bool {
+        spin_visible(
+            self.activity.values().any(|a| *a == Activity::Working),
+            window.is_window_active(),
+            self.store.data.layout.sidebar_visible,
+            self.editing(),
+        )
     }
 
     /// Once a second: derive each Claude session's `Activity` from its terminal output. When one stops working
     /// while the user isn't looking at it, mark it for attention, and if the whole window is in the
     /// background as well, send a system notification.
-    pub(super) fn start_activity_poll(&mut self) {
-        self.rt.after_quietly(Duration::from_secs(1), |ws: &mut Workspace| {
-            let mut seen = std::mem::take(&mut ws.status_files);
-            ws.rt.spawn_quietly(
-                move || {
-                    let statuses = claude::claude_home().map(|h| claude::session_statuses(&h, &mut seen)).unwrap_or_default();
-                    (statuses, crate::claude::bridge::take_requests(), seen)
-                },
-                |ws: &mut Workspace, (statuses, requests, seen)| {
-                    ws.status_files = seen;
-                    // Other sessions' requests and worktree switches change what is shown when there are
-                    // any; `update_activity` says for itself.
-                    if !requests.is_empty() || !ws.pending_switches.is_empty() || !ws.pending_starts.is_empty() {
-                        ws.rt.dirty = true;
-                    }
-                    ws.serve_requests(requests);
-                    ws.run_pending_switches(&statuses);
-                    ws.check_open_files();
-                    ws.update_activity(&statuses);
-                    ws.start_activity_poll();
-                },
-            );
-        });
+    pub(super) fn start_activity_poll(&mut self, window: &Window, cx: &mut Context<Self>) {
+        cx.spawn_in(window, async move |this, cx| {
+            let mut seen = claude::StatusFiles::default();
+            loop {
+                cx.background_executor().timer(Duration::from_secs(1)).await;
+                let (statuses, requests, back) = cx
+                    .background_executor()
+                    .spawn(async move {
+                        let statuses = claude::claude_home().map(|h| claude::session_statuses(&h, &mut seen)).unwrap_or_default();
+                        (statuses, crate::claude::bridge::take_requests(), seen)
+                    })
+                    .await;
+                seen = back;
+                let update = this.update_in(cx, |ws, window, cx| {
+                    ws.serve_requests(requests, window, cx);
+                    ws.run_pending_switches(&statuses, window, cx);
+                    ws.check_open_files(window, cx);
+                    ws.update_activity(window, cx, &statuses)
+                });
+                if update.is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
     }
 
     /// `statuses` is Claude Code's own busy/idle/waiting per session id; sessions it doesn't list (older Claude
     /// Code, no registry file) fall back to the terminal-output heuristic.
-    fn update_activity(&mut self, statuses: &HashMap<String, String>) {
-        let window_active = self.window_active;
+    fn update_activity(&mut self, window: &mut Window, cx: &mut Context<Self>, statuses: &HashMap<String, String>) {
+        let window_active = window.is_window_active();
         let shown = self.active_id().cloned();
         let mut next: HashMap<Id, Activity> = HashMap::new();
         let mut notices = vec![];
         for l in &self.live {
             let is_claude = self.store.session(&l.id).is_some_and(|r| r.kind == SessionKind::Claude);
-            let view = &l.view;
-            if !is_claude || !view.is_running() {
+            if !is_claude || !l.view.is_running(cx) {
                 continue;
             }
             let viewing = window_active && shown.as_deref() == Some(l.id.as_str());
-            let status = self.store.session(&l.id).and_then(|r| statuses.get(r.claude_id()?));
-            let working = status.map_or_else(|| view.is_working(), |s| s == "busy");
-            let waiting = status.is_some_and(|s| s == "waiting");
+            // A thread knows from ACP itself: a turn is out, or a permission question is open.
+            let (working, waiting) = match &l.view {
+                SessionView::Thread(v) => (v.read(cx).is_working(), v.read(cx).is_waiting()),
+                SessionView::Terminal(v) => {
+                    let status = self.store.session(&l.id).and_then(|r| statuses.get(r.claude_id()?));
+                    (status.map_or_else(|| v.read(cx).is_working(), |s| s == "busy"), status.is_some_and(|s| s == "waiting"))
+                }
+            };
             let before = self.activity.get(&l.id).copied();
             let now = next_activity(working, waiting, before, viewing);
             if let Some(body) = notice(before, now, window_active) {
@@ -122,7 +152,10 @@ impl Workspace {
         }
         if next != self.activity {
             self.activity = next;
-            self.rt.dirty = true;
+            cx.notify();
+        }
+        if self.activity.values().any(|a| *a == Activity::Working) {
+            self.start_spin(window, cx);
         }
         for (title, body) in notices {
             platform::notify(title, body);
@@ -148,40 +181,42 @@ impl Workspace {
         }
     }
 
-    pub(super) fn tick(&mut self) {
+    pub(super) fn tick(&mut self, cx: &mut Context<Self>) {
         let purged = self.purge_dead_shells();
         self.store.save_if_dirty();
-        self.refresh_live();
-        self.remember_open();
-        self.ingest_usage();
-        self.sync_attached();
-        self.sync_configs();
-        self.refresh_if_stale();
-        self.refresh_marks();
-        self.raise_claude_priority();
-        self.refresh_pending();
+        self.remember_open(cx);
+        self.ingest_usage(cx);
+        self.sync_attached(cx);
+        self.sync_configs(cx);
+        self.refresh_if_stale(cx);
+        self.refresh_marks(cx);
+        self.raise_claude_priority(cx);
+        self.refresh_pending(cx);
         // The steps above redraw when they change something. The sidebar's "5m ago" and the reset countdowns count
-        // in minutes, so they need a redraw only when the minute turns; the prompt cache's bar shrinks as it runs out.
+        // in minutes, so they need a redraw only when the minute turns.
         let minute = crate::store::now() / 60;
-        let cache_running = self.selected_cache().is_some_and(|(_, left, _)| left > 0);
-        if purged || cache_running || minute != self.tick_minute {
+        if purged || minute != self.tick_minute {
             self.tick_minute = minute;
-            self.rt.dirty = true;
+            cx.notify();
         }
     }
 
     /// Windows: run the Claude sessions above the builds and tests they start.
-    fn raise_claude_priority(&self) {
+    fn raise_claude_priority(&self, cx: &mut Context<Self>) {
         #[cfg(windows)]
         {
+            // Only a session still drawn in a terminal has a process id here. Agents now run as ACP processes,
+            // whose ids the chat view doesn't expose yet, so they keep the normal priority until it does.
             let claude_pids: Vec<u32> = self
                 .live
                 .iter()
                 .filter(|l| self.store.session(&l.id).is_some_and(|r| r.kind == SessionKind::Claude))
-                .filter_map(|l| l.view.terminal.process_id())
+                .filter_map(|l| l.view.terminal()?.read(cx).terminal.process_id())
                 .collect();
-            self.rt.background(move || crate::priority::raise_claude_priority(&claude_pids));
+            cx.background_executor().spawn(async move { crate::priority::raise_claude_priority(&claude_pids) }).detach();
         }
+        #[cfg(not(windows))]
+        let _ = cx;
     }
 
     /// Terminal sessions live only in CURRENT SESSION: once a shell's process is gone and its pane has been
@@ -206,70 +241,13 @@ impl Workspace {
         purged
     }
 
-    /// Re-read transcripts of running Claude sessions so the context meter follows reality.
-    fn refresh_live(&mut self) {
-        let Some(home) = claude::claude_home() else {
-            return;
-        };
-        let jobs: Vec<(Id, String, Option<PathBuf>, Option<SystemTime>)> = self
-            .live
-            .iter()
-            .filter(|l| l.view.is_running())
-            .filter_map(|l| {
-                let rec = self.store.session(&l.id)?;
-                let meta = rec.claude.as_ref()?;
-                Some((
-                    l.id.clone(),
-                    meta.session_id.clone(),
-                    meta.transcript.clone(),
-                    self.transcript_mtimes.get(&l.id).copied(),
-                ))
-            })
-            .collect();
-        if jobs.is_empty() {
-            return;
-        }
-        self.rt.spawn_quietly(
-            move || {
-                    let mut out = Vec::new();
-                    for (id, claude_id, known, last_mtime) in jobs {
-                        let Some(path) = known
-                            .filter(|p| p.is_file())
-                            .or_else(|| claude::find_transcript(&home, &claude_id))
-                        else {
-                            continue;
-                        };
-                        let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
-                        if mtime.is_some() && mtime == last_mtime {
-                            continue;
-                        }
-                        if let Some(scan) = claude::read_session(&path) {
-                            out.push((id, mtime, scan));
-                        }
-                    }
-                    out
-            },
-            |ws: &mut Workspace, out| {
-                // Only transcripts that changed since the last look come back.
-                ws.rt.dirty |= !out.is_empty();
-                for (id, mtime, scan) in out {
-                    if let Some(m) = mtime {
-                        ws.transcript_mtimes.insert(id.clone(), m);
-                    }
-                    ws.store
-                        .reconcile(std::slice::from_ref(&scan.session), false);
-                }
-            },
-        );
-    }
-
-    pub fn check_updates(&mut self) {
-        crate::updater::check(self);
+    pub fn check_updates(&mut self, cx: &mut Context<Self>) {
+        crate::updater::check(self, cx);
     }
 }
 
-fn spin_visible(working: bool, active: bool, sidebar: bool) -> bool {
-    working && active && sidebar
+fn spin_visible(working: bool, active: bool, sidebar: bool, editing: bool) -> bool {
+    working && active && sidebar && !editing
 }
 
 #[cfg(test)]
@@ -292,7 +270,10 @@ mod tests {
         for working in [false, true] {
             for active in [false, true] {
                 for sidebar in [false, true] {
-                    assert_eq!(spin_visible(working, active, sidebar), working && active && sidebar);
+                    for editing in [false, true] {
+                        assert_eq!(spin_visible(working, active, sidebar, editing),
+                            working && active && sidebar && !editing);
+                    }
                 }
             }
         }

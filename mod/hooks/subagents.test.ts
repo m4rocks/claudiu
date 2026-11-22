@@ -7,10 +7,10 @@ function type(name: string, model: string) {
 
 const SUBAGENTS = JSON.stringify({ codex: { name: 'Codex', edits: false, types: [type('codex-gpt-5-5', 'gpt-5.5')] } })
 
-// What the engine answers beneath the mod for a session with Codex on. `helper` is what `claudiu --acp` writes;
+// What the engine answers beneath the mod for a session with Codex on. `helper` is what `m4code --acp` writes;
 // `requests` collects what the mod sent it.
 function engine(on: any, helper: string[] | (() => AsyncGenerator<{ stream: string, text: string }, unknown>), requests: unknown[], subagents = SUBAGENTS) {
-  mock.env(on, { CLAUDIU_SUBAGENTS: subagents, CLAUDIU_EXE: '/apps/claudiu' })
+  mock.env(on, { M4CODE_SUBAGENTS: subagents, M4CODE_EXE: '/apps/m4code' })
   mock.clock(on)
   on('fs.read', () => ({ value: '' }))
   on('session.id', () => ({ value: 's1' }))
@@ -42,6 +42,17 @@ function engine(on: any, helper: string[] | (() => AsyncGenerator<{ stream: stri
   return registered
 }
 
+test('a default model alias works before the provider catalog arrives', async ($, on) => {
+  const requests: any[] = []
+  const subagents = JSON.stringify({ codex: { name: 'Codex', edits: false, types: [type('codex-default', '')] } })
+  engine(on, ['{"kind":"report","text":"done"}'], requests, subagents)
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+  await $.agent.spawn({ subagentType: 'm4code:codex-default', prompt: 'Find the bug' })
+  await step($, 't1', 0, 'a1')
+  expect(requests[0].input.agent).toBe('codex')
+  expect(requests[0].input.model).toBe(null)
+})
+
 // The subagent's own view streams its activity; the main conversation gets none of it, since one line per step
 // buried the person's own conversation.
 test('activity streams in the subagent and leaves the main conversation alone', async ($, on) => {
@@ -56,7 +67,7 @@ test('activity streams in the subagent and leaves the main conversation alone', 
     return { value: { code: 0, signal: null } }
   }, [])
   await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
-  await $.agent.spawn({ subagentType: 'Claudiu:codex-gpt-5-5', prompt: 'Find the bug' })
+  await $.agent.spawn({ subagentType: 'm4code:codex-gpt-5-5', prompt: 'Find the bug' })
   const chunks = await step($, 't1', 0, 'a1')
 
   expect(log).toEqual([])
@@ -117,7 +128,7 @@ test('SendMessage reaches only the running Codex helper and its reaction streams
   })
   on('session.receive', (_$: any, e: any) => ({ text: e.text }))
   await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
-  await $.agent.spawn({ subagentType: 'Claudiu:codex-gpt-5-5', prompt: 'Find the bug' })
+  await $.agent.spawn({ subagentType: 'm4code:codex-gpt-5-5', prompt: 'Find the bug' })
   const running = step($, 't1', 0, 'a1').then(chunks => { finished = true; return chunks })
   await ready.promise
   expect(await $.session.receive(messageTo('someone-else', 'Other task'))).toEqual({ text: 'Other task' })
@@ -158,12 +169,12 @@ test('a delivery racing helper exit is queued by Claude and its inbox is cleaned
   })
   on('session.receive', (_$: any, e: any) => ({ text: e.text }))
   await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
-  await $.agent.spawn({ subagentType: 'Claudiu:codex-gpt-5-5', prompt: 'Find the bug' })
+  await $.agent.spawn({ subagentType: 'm4code:codex-gpt-5-5', prompt: 'Find the bug' })
   const running = step($, 't1', 0, 'a1')
   await ready.promise
   expect(await $.session.receive(messageTo('a1', 'Check one more file.'))).toEqual({ text: 'Check one more file.' })
   await running
-  expect(cleanup).toEqual([['/apps/claudiu', '--acp', '--cleanup', INBOX_ID]])
+  expect(cleanup).toEqual([['/apps/m4code', '--acp', '--cleanup', INBOX_ID]])
 })
 
 test('a Codex subagent runs the task in Codex and hands back its last message', async ($, on) => {
@@ -175,12 +186,12 @@ test('a Codex subagent runs the task in Codex and hands back its last message', 
   ], requests)
 
   await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
-  // Registered as Claudiu lists it; Claude Code names it Claudiu:codex-gpt-5-5.
+  // Registered as m4code lists it; Claude Code names it m4code:codex-gpt-5-5.
   expect(registered).toEqual([{ name: 'codex-gpt-5-5', description: 'Runs the task on gpt-5.5.', prompt: 'Say the mod lost track.', model: 'haiku', tools: [] }])
-  await $.agent.spawn({ subagentType: 'Claudiu:codex-gpt-5-5', prompt: 'Find the bug' })
+  await $.agent.spawn({ subagentType: 'm4code:codex-gpt-5-5', prompt: 'Find the bug' })
   const chunks = await step($, 't1', 0, 'a1')
 
-  expect(requests).toEqual([{ argv: ['/apps/claudiu', '--acp'], input: { agent: 'codex', model: 'gpt-5.5', effort: null, edits: false, cwd: '/work/sub', prompt: 'Find the bug', live_messages: true } }])
+  expect(requests).toEqual([{ argv: ['/apps/m4code', '--acp'], input: { agent: 'codex', model: 'gpt-5.5', effort: null, edits: false, cwd: '/work/sub', prompt: 'Find the bug', live_messages: true } }])
   // What Codex writes and does is the agent's own text, which its transcript keeps; Claude gets only the report.
   const text = chunks.filter(c => c.kind === 'text').map(c => c.text).join('')
   expect(text).toBe('Codex on gpt-5.5, read-only\n\nLooking.\n▸ Read src/a.rs\n')
@@ -217,9 +228,9 @@ test('the effort Claude asks for in its Agent call reaches Codex', async ($, on)
   async function agentCall(effort: string) {
     callId = ''
     spawned = gate<void>()
-    const call = $.tool.call({ tool: 'Agent', subagent_type: 'Claudiu:codex-gpt-5-5', prompt: 'Find the bug', description: 'Find it', effort })
+    const call = $.tool.call({ tool: 'Agent', subagent_type: 'm4code:codex-gpt-5-5', prompt: 'Find the bug', description: 'Find it', effort })
     while (!callId) await new Promise(r => setTimeout(r, 1))
-    await $.agent.spawn({ subagentType: 'Claudiu:codex-gpt-5-5', prompt: 'Find the bug', tool_use_id: callId } as any)
+    await $.agent.spawn({ subagentType: 'm4code:codex-gpt-5-5', prompt: 'Find the bug', tool_use_id: callId } as any)
     spawned.resolve()
     await call
   }
@@ -235,14 +246,14 @@ test('the effort Claude asks for in its Agent call reaches Codex', async ($, on)
 test('a first turn that starts before its spawn is noted still gets the effort its Agent call asked for', async ($, on) => {
   const requests: any[] = []
   engine(on, [JSON.stringify({ kind: 'report', text: 'Done.' })], requests)
-  on('agent.list', () => ({ value: [{ id: 'a1', type: 'Claudiu:codex-gpt-5-5', description: 'Find it' }] }))
+  on('agent.list', () => ({ value: [{ id: 'a1', type: 'm4code:codex-gpt-5-5', description: 'Find it' }] }))
   const finished = gate<void>()
   on('tool.call', { tool: 'Agent' }, async () => {
     await finished.promise
     return { result: 'done' }
   })
   await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
-  const call = $.tool.call({ tool: 'Agent', subagent_type: 'Claudiu:codex-gpt-5-5', prompt: 'Find the bug', description: 'Find it', effort: 'high' })
+  const call = $.tool.call({ tool: 'Agent', subagent_type: 'm4code:codex-gpt-5-5', prompt: 'Find the bug', description: 'Find it', effort: 'high' })
   // The agent's turn runs while the call does, before this module has seen its spawn.
   await new Promise(r => setTimeout(r, 1))
   await step($, 't1', 0, 'a1')
@@ -257,7 +268,7 @@ test('a report with many steps lists the first ones, each cut short', async ($, 
   steps[1] = JSON.stringify({ kind: 'step', text: 'bash cat <<EOF\n  a\nEOF' })
   engine(on, [...steps, JSON.stringify({ kind: 'report', text: 'Done.' })], [])
   await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
-  await $.agent.spawn({ subagentType: 'Claudiu:codex-gpt-5-5', prompt: 'Find the bug' })
+  await $.agent.spawn({ subagentType: 'm4code:codex-gpt-5-5', prompt: 'Find the bug' })
   const chunks = await step($, 't1', 0, 'a1')
   const lines = JSON.parse(chunks.filter(c => c.kind === 'input').map(c => c.json).join('')).message.split('\n')
   expect(lines.slice(0, 6)).toEqual(['Done.', '', '---', 'Steps Codex ran (32), outside Claude Code, which counts them as 0 tool uses:', '- ' + 'x'.repeat(119) + '…', '- bash cat <<EOF a EOF'])
@@ -282,10 +293,10 @@ test('a message to a finished subagent reaches Codex with the task and the repor
   let transcript: any[] = [{ role: 'user', text: 'Find the bug', toolUses: [] }]
   on('session.messages', () => ({ value: transcript }))
   await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
-  await $.agent.spawn({ subagentType: 'Claudiu:codex-gpt-5-5', prompt: 'Find the bug' })
+  await $.agent.spawn({ subagentType: 'm4code:codex-gpt-5-5', prompt: 'Find the bug' })
   await step($, 't1', 0, 'a1')
   transcript = [...FIRST_TURN, { role: 'user', text: 'Quote the line.', toolUses: [] }]
-  await $.agent.spawn({ subagentType: 'Claudiu:codex-gpt-5-5', prompt: 'Quote the line.' })
+  await $.agent.spawn({ subagentType: 'm4code:codex-gpt-5-5', prompt: 'Quote the line.' })
   await step($, 't2', 0, 'a1')
   expect(requests.map(r => r.input.prompt)).toEqual(['Find the bug', FOLLOW_UP])
 })
@@ -293,7 +304,7 @@ test('a message to a finished subagent reaches Codex with the task and the repor
 test('a message to a subagent this module did not see start reaches Codex with the task and the report too', async ($, on) => {
   const requests: any[] = []
   engine(on, [JSON.stringify({ kind: 'report', text: 'Line 1.' })], requests)
-  on('agent.list', () => ({ value: [{ id: 'a1', type: 'Claudiu:codex-gpt-5-5' }] }))
+  on('agent.list', () => ({ value: [{ id: 'a1', type: 'm4code:codex-gpt-5-5' }] }))
   on('session.messages', () => ({ value: [...FIRST_TURN, { role: 'user', text: 'Quote the line.', toolUses: [] }] }))
   await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
   await step($, 't2', 0, 'a1')
@@ -308,7 +319,7 @@ test('an OpenCode subagent runs the task in OpenCode and names it', async ($, on
   })
   engine(on, [JSON.stringify({ kind: 'failed', reason: 'opencode was not found on PATH. OpenCode subagents need OpenCode installed.' })], requests, subagents)
   await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
-  await $.agent.spawn({ subagentType: 'Claudiu:opencode-openai-gpt-6-1-sol', prompt: 'Find the bug' })
+  await $.agent.spawn({ subagentType: 'm4code:opencode-openai-gpt-6-1-sol', prompt: 'Find the bug' })
   const chunks = await step($, 't1', 0, 'a1')
 
   expect(requests.map(r => r.input)).toEqual([{ agent: 'opencode', model: 'openai/gpt-6.1-sol', effort: null, edits: true, cwd: '/work/sub', prompt: 'Find the bug', live_messages: true }])
@@ -317,14 +328,14 @@ test('an OpenCode subagent runs the task in OpenCode and names it', async ($, on
   expect(input.message).toBe('OpenCode failed: opencode was not found on PATH. OpenCode subagents need OpenCode installed.\n\n---\nOpenCode ran no steps.')
 })
 
-test('Antigravity uses the display name supplied by Claudiu', async ($, on) => {
+test('Antigravity uses the display name supplied by m4code', async ($, on) => {
   const requests: any[] = []
   const registered = engine(on, [JSON.stringify({ kind: 'report', text: 'Done.' })], requests, JSON.stringify({
     antigravity: { name: 'Antigravity', edits: false, types: [type('antigravity-gemini-4-neon', 'gemini-4-neon')] },
   }))
   await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
   expect(registered.map(r => r.name)).toEqual(['antigravity-gemini-4-neon'])
-  await $.agent.spawn({ subagentType: 'Claudiu:antigravity-gemini-4-neon', prompt: 'Find the bug' })
+  await $.agent.spawn({ subagentType: 'm4code:antigravity-gemini-4-neon', prompt: 'Find the bug' })
   const chunks = await step($, 't1', 0, 'a1')
   expect(requests[0].input.agent).toBe('antigravity')
   expect(chunks.filter(c => c.kind === 'text').map(c => c.text).join('')).toBe('Antigravity on gemini-4-neon, read-only\n\n')
@@ -336,7 +347,7 @@ test('a provider without a display name falls back to its key', async ($, on) =>
     fourth: { edits: false, types: [type('fourth-model', 'model')] },
   }))
   await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
-  await $.agent.spawn({ subagentType: 'Claudiu:fourth-model', prompt: 'Find the bug' })
+  await $.agent.spawn({ subagentType: 'm4code:fourth-model', prompt: 'Find the bug' })
   const chunks = await step($, 't1', 0, 'a1')
   expect(chunks.filter(c => c.kind === 'text').map(c => c.text).join('')).toBe('fourth on model, read-only\n\n')
   expect(JSON.parse(chunks.find(c => c.kind === 'input').json).message).toContain('fourth ran no steps.')
@@ -345,7 +356,7 @@ test('a provider without a display name falls back to its key', async ($, on) =>
 test('a failure is handed back as the report', async ($, on) => {
   engine(on, [JSON.stringify({ kind: 'failed', reason: "Codex isn't signed in. Run `codex login`, then try again." })], [])
   await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
-  await $.agent.spawn({ subagentType: 'Claudiu:codex-gpt-5-5', prompt: 'Find the bug' })
+  await $.agent.spawn({ subagentType: 'm4code:codex-gpt-5-5', prompt: 'Find the bug' })
   const chunks = await step($, 't1', 0, 'a1')
   const input = JSON.parse(chunks.filter(c => c.kind === 'input').map(c => c.json).join(''))
   expect(input.message).toBe("Codex failed: Codex isn't signed in. Run `codex login`, then try again.\n\n---\nCodex ran no steps.")
@@ -354,7 +365,7 @@ test('a failure is handed back as the report', async ($, on) => {
 test('a helper that ends without an answer is a failure too', async ($, on) => {
   engine(on, ['not json', '{"kind":"thought"}', '{"kind":"report","text":null}'], [])
   await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
-  await $.agent.spawn({ subagentType: 'Claudiu:codex-gpt-5-5', prompt: 'Find the bug' })
+  await $.agent.spawn({ subagentType: 'm4code:codex-gpt-5-5', prompt: 'Find the bug' })
   const chunks = await step($, 't1', 0, 'a1')
   const input = JSON.parse(chunks.filter(c => c.kind === 'input').map(c => c.json).join(''))
   expect(input.message).toBe('Codex failed: the helper stopped without an answer.\n\n---\nCodex ran no steps.')
@@ -370,12 +381,12 @@ test('other subagents still run on Claude', async ($, on) => {
   expect(requests).toEqual([])
 })
 
-test('without a list from Claudiu, nothing is registered and an agent named like a Codex type still runs on Claude', async ($, on) => {
+test('without a list from m4code, nothing is registered and an agent named like a Codex type still runs on Claude', async ($, on) => {
   const requests: unknown[] = []
   const registered = engine(on, [], requests, '') // an empty list reads as none, like a missing one
   await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
   expect(registered).toEqual([])
-  await $.agent.spawn({ subagentType: 'Claudiu:codex-gpt-5-5', prompt: 'Find the bug' })
+  await $.agent.spawn({ subagentType: 'm4code:codex-gpt-5-5', prompt: 'Find the bug' })
   const chunks = await step($, 't1', 0, 'a1')
   expect(chunks.map(c => c.kind)).toEqual(['text'])
   expect(requests).toEqual([])

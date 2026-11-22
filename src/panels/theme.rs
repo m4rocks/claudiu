@@ -1,41 +1,48 @@
-//! Colors. Black-first, with Claude's orange as the single accent.
+//! Colors. Minimal monochrome dark theme with white accent.
 
 use alacritty_terminal::term::color::Colors;
-use alacritty_terminal::vte::ansi::{Color as AnsiColor, NamedColor, Rgb};
-use rune::Color;
+use alacritty_terminal::vte::ansi::{Color, NamedColor, Rgb};
+use gpui::{Hsla, rgb};
 
 /// The window background the panels float on, a shade lighter than the panels themselves.
-pub const APP_BG: u32 = 0x131316;
+pub const APP_BG: u32 = 0x181818;
 /// One background for the panels and the terminal's default background.
-pub const PANEL_BG: u32 = 0x0c0c0d;
+pub const PANEL_BG: u32 = 0x121212;
 pub const TERMINAL_BG: u32 = PANEL_BG;
 pub const SIDEBAR_BG: u32 = PANEL_BG;
-pub const BORDER: u32 = 0x1f1f1f;
+/// Elevated dark surfaces (composer box, cards, popovers).
+pub const SURFACE_ELEVATED: u32 = 0x1a1a1a;
+/// A group of rows set apart on a panel, such as the right sidebar's sections. Dark enough that `ROW_HOVER` still shows.
+pub const CARD_BG: u32 = 0x161616;
+pub const SURFACE_HOVER: u32 = 0x222222;
+pub const BORDER: u32 = 0x242424;
 /// The faint outline that separates a panel from the window background.
-pub const PANEL_BORDER: u32 = 0x242428;
+pub const PANEL_BORDER: u32 = 0x282828;
+/// The outline of what has the keyboard or is open, such as the message box or a chip's dropdown. Neutral, so the
+/// accent stays for the few things that need the eye.
+pub const FOCUS_BORDER: u32 = 0x444444;
 /// Corner radius of the window's panels.
 pub const PANEL_RADIUS: f32 = 8.0;
 /// Gutter between the panels and the window edges.
 pub const PANEL_GAP: f32 = 6.0;
 /// Height of the window's top bar. macOS traffic lights are centered in it (see `main.rs`).
 pub const TOPBAR_HEIGHT: f32 = 34.0;
-pub const ROW_ACTIVE: u32 = 0x211f1e;
-pub const TEXT: u32 = 0xe4e4e4;
-pub const TEXT_DIM: u32 = 0x8a8a8a;
-pub const TEXT_FAINT: u32 = 0x5a5a5a;
-pub const ACCENT: u32 = 0xd97757;
+pub const ROW_HOVER: u32 = 0x1c1c1c;
+pub const ROW_ACTIVE: u32 = 0x242424;
+pub const TEXT: u32 = 0xf0f0f0;
+pub const TEXT_DIM: u32 = 0x8e8e8e;
+pub const TEXT_FAINT: u32 = 0x5e5e5e;
+pub const ACCENT: u32 = 0xffffff;
 pub const OK: u32 = 0x7fb069;
 pub const WARN: u32 = 0xe5c07b;
 pub const DANGER: u32 = 0xe06c75;
-pub const SELECTION: u32 = 0x3d4a5c;
+pub const SELECTION: u32 = 0x383838;
 /// Codex's usage bars, so they read apart from Claude's at a glance. The terminal palette's blue.
 pub const CODEX: u32 = 0x61afef;
 /// Antigravity's usage bars, apart from Claude's and Codex's. The terminal palette's magenta.
 pub const ANTIGRAVITY: u32 = 0xc678dd;
-/// Search matches in the editor, faint, and the current one stronger.
-pub const FOUND: u32 = 0xe5c07b;
 
-const FG: Rgb = Rgb { r: 0xe4, g: 0xe4, b: 0xe4 };
+const FG: Rgb = Rgb { r: (TEXT >> 16) as u8, g: (TEXT >> 8) as u8, b: TEXT as u8 };
 const BG: Rgb = Rgb { r: (TERMINAL_BG >> 16) as u8, g: (TERMINAL_BG >> 8) as u8, b: TERMINAL_BG as u8 };
 
 const ANSI: [u32; 16] = [
@@ -43,15 +50,12 @@ const ANSI: [u32; 16] = [
     0x5c6370, 0xff7b86, 0xa9d98a, 0xf0d08c, 0x74bdff, 0xd68aee, 0x67c7d4, 0xffffff,
 ];
 
-/// An sRGB colour written as `0xrrggbb`, in Rune's linear colour.
-pub fn rgb(hex: u32) -> Color {
-    let channel = |shift: u32| rune::color::srgb_decode(((hex >> shift) & 0xff) as f32 / 255.0);
-    Color { r: channel(16), g: channel(8), b: channel(0), a: 1.0 }
+pub fn hsla(hex: u32) -> Hsla {
+    rgb(hex).into()
 }
 
-
-pub fn term_color(c: Rgb) -> Color {
-    rgb(((c.r as u32) << 16) | ((c.g as u32) << 8) | c.b as u32)
+pub fn rgb_to_hsla(c: Rgb) -> Hsla {
+    hsla(((c.r as u32) << 16) | ((c.g as u32) << 8) | c.b as u32)
 }
 
 fn ansi(i: usize) -> Rgb {
@@ -95,19 +99,22 @@ pub fn palette(index: usize, colors: &Colors) -> Rgb {
     }
 }
 
-pub fn resolve(color: AnsiColor, colors: &Colors) -> Rgb {
+pub fn resolve(color: Color, colors: &Colors) -> Rgb {
     match color {
-        AnsiColor::Spec(c) => c,
-        AnsiColor::Indexed(i) => palette(i as usize, colors),
-        AnsiColor::Named(n) => palette(n as usize, colors),
+        Color::Spec(c) => c,
+        Color::Indexed(i) => palette(i as usize, colors),
+        Color::Named(n) => palette(n as usize, colors),
     }
 }
 
-pub fn is_default_bg(color: &AnsiColor) -> bool {
-    matches!(color, AnsiColor::Named(NamedColor::Background))
+pub fn is_default_bg(color: &Color) -> bool {
+    matches!(color, Color::Named(NamedColor::Background))
 }
 
 pub fn dimmed(c: Rgb) -> Rgb {
     dim(c)
 }
 
+pub fn default_bg() -> Rgb {
+    BG
+}

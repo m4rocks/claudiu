@@ -1,67 +1,55 @@
-// Loaded per process through `--plugin-dir`. Claudiu writes nothing to the user's Claude Code config.
+// Loaded per process through `--plugin-dir`. m4code writes nothing to the user's Claude Code config.
 //
 // What this mod does:
-// - Model and effort: answers Claudiu's `set_model` tool in-process, so the override applies from the next request,
-//   even mid-turn. It then runs /model and /effort once Claude Code is idle, so the session (and what /model shows)
-//   switches too. Claude Code saves those as the user's default.
-// - Session name: applies the name Claudiu writes to `CLAUDIU_NAME_FILE` with /rename, which Claude Code queues
+// - Session name: applies the name m4code writes to `M4CODE_NAME_FILE` with /rename, which Claude Code queues
 //   until the session is idle.
 // - Sidebar settings: applies auto-compact, background compaction and advisor changes sent through
-//   `CLAUDIU_CTL_FILE`, the same as the user choosing them in /config or typing /advisor (which Claude Code saves).
-// - Messages: sends a message Claudiu asks for through the same file (the editor's Ask Claude) as the user's own words,
-//   when the session is idle, without typing into the terminal. (Claudiu itself pastes the editor's `@file#L`
+//   `M4CODE_CTL_FILE`, the same as the user choosing them in /config or typing /advisor (which Claude Code saves).
+// - Messages: sends a message m4code asks for through the same file (the editor's Ask Claude) as the user's own words,
+//   when the session is idle, without typing into the terminal. (m4code itself pastes the editor's `@file#L`
 //   reference into Claude's input box; that is not done here.)
 // - Usage and status: reports context, the 5-hour and 7-day limits, auto-compact, background compaction and advisor to
-//   `CLAUDIU_USAGE_DIR/<claude session id>.json`, after each request, command and setting change. No tokens are spent.
+//   `M4CODE_USAGE_DIR/<claude session id>.json`, after each request, command and setting change. No tokens are spent.
 // - Cards: answers `show_visual` in-process and, while the model is still writing the call, streams its Markdown to
-//   `CLAUDIU_VISUAL_PREFIX<call>.json`. Under each call it reserves rows, each with a link naming the call, and Claudiu
-//   paints the live card over them. Claudiu's measured height comes back in `CLAUDIU_VISUAL_PREFIX<call>.rows`.
-// - One-shot completions: runs requests from `CLAUDIU_ASK_FILE` (commit messages, session titles) with
-//   `$.model.complete`, on this session's own client, so Claudiu needs no `claude -p`.
-// - Custom subagents: registers the provider agent types `CLAUDIU_SUBAGENTS` lists. Claude never runs for
-//   those agents: each turn is answered here with what the agent writes through `CLAUDIU_EXE --acp`, and its last
+//   `M4CODE_VISUAL_PREFIX<call>.json`. Under each call it reserves rows, each with a link naming the call, and m4code
+//   paints the live card over them. m4code's measured height comes back in `M4CODE_VISUAL_PREFIX<call>.rows`.
+// - One-shot completions: runs requests from `M4CODE_ASK_FILE` (commit messages, session titles) with
+//   `$.model.complete`, on this session's own client, so m4code needs no `claude -p`.
+// - Custom subagents: registers the provider agent types `M4CODE_SUBAGENTS` lists. Claude never runs for
+//   those agents: each turn is answered here with what the agent writes through `M4CODE_EXE --acp`, and its last
 //   message is handed back with SubagentHandback.
 
 // ---- Constants ----------------------------------------------------------------------------------------------------
 
-// The aliases `set_model` accepts. A full `claude-…` id is accepted too.
-const MODELS = {
-  haiku: 'claude-haiku-5-5',
-  sonnet: 'claude-sonnet-5-5',
-  opus: 'claude-opus-5-5',
-  fable: 'claude-fable-5-1',
-}
-const CARD_ROWS = 6 // reserved for a card until Claudiu has measured it
-const PROMPT_MAX = 20000 // characters of a message Claudiu asks the session to send (the editor's Ask Claude)
+const CARD_ROWS = 6 // reserved for a card until m4code has measured it
+const PROMPT_MAX = 20000 // characters of a message m4code asks the session to send (the editor's Ask Claude)
 const INBOX_TEXT_MAX = 20000 // UTF-16 units, matching the ACP helper
-const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']
 const ASK_MODELS = ['haiku', 'sonnet', 'opus']
-const VISUAL_TOOL = 'mcp__claudiu__show_visual'
+const VISUAL_TOOL = 'mcp__m4code__show_visual'
 const HANDBACK_TOOL = 'SubagentHandback'
 const STEPS_LISTED = 30 // steps a custom subagent's report lists; the rest are only counted
 const STEP_CHARS = 120 // characters of each listed step, enough for a command or a path
 // The /config row for background compaction ("Precompute compaction"). Claude Code lists it only while a server-side
-// flag enables the feature; without the row the setting does nothing, so Claudiu offers the switch only with it.
+// flag enables the feature; without the row the setting does nothing, so m4code offers the switch only with it.
 const PRECOMPUTE_ROW = 'precomputeCompactionEnabled'
 
 // ---- Per-process state --------------------------------------------------------------------------------------------
 
-let want = {} // { model?, effort? } from Claudiu, applied to each turn step until Claude Code has run /model and /effort
 let named = null // `${claude session id}\n${name}` last applied with /rename
-let namePoll // watches CLAUDIU_NAME_FILE
-let ctlPoll // watches CLAUDIU_CTL_FILE
+let namePoll // watches M4CODE_NAME_FILE
+let ctlPoll // watches M4CODE_CTL_FILE
 let ctlSeen = null // highest command number handled; null until the file was first read (older ones are not replayed)
 let pendingAdvisor = null // an advisor change Claude Code refused (see setAdvisor), tried again until it goes through
-let askPoll // watches CLAUDIU_ASK_FILE
+let askPoll // watches M4CODE_ASK_FILE
 let askSeen = null // id of the last request looked at
 let asking = false // a completion is running; a poll that finds another request waits for it
 const cardRows = new Map() // show_visual call id -> rows reserved for its card
-const AGENT_PREFIX = 'Claudiu:' // what Claude Code puts before an agent type this plugin registers
-const customTypes = new Map() // agent type name -> { agent, model, edits, name } of each custom agent type Claudiu defined
+const AGENT_PREFIX = 'm4code:' // what Claude Code puts before an agent type this plugin registers
+const customTypes = new Map() // agent type name -> { agent, model, edits, name } of each custom agent type m4code defined
 const customRuns = new Map() // agent id -> { type, prompt, effort, turnId, report, steps } of each custom subagent started
 const agentCalls = new Map() // Agent call id -> { type, description, effort } of each running call that asked for an effort
 const published = new Set() // call ids whose card file this process wrote from the transcript
-let rowsPoll // watches the heights Claudiu measures
+let rowsPoll // watches the heights m4code measures
 let visualChain = Promise.resolve() // visual writes in order, without holding up the stream
 let lastVisual = null // id of the show_visual call being written, or last written
 
@@ -121,12 +109,12 @@ function advisorAlias(value) {
   return v
 }
 
-// Writes this session's usage and status report for Claudiu's sidebar. `fresh` re-reads the compaction threshold now.
-// `override` carries a value Claudiu just asked for, so the sidebar updates before the host has refreshed its cache.
+// Writes this session's usage and status report for m4code's sidebar. `fresh` re-reads the compaction threshold now.
+// `override` carries a value m4code just asked for, so the sidebar updates before the host has refreshed its cache.
 // Every read is best effort: a failed one is left out, and reporting never fails a hook.
 async function report($, fresh = false, override = {}) {
   try {
-    const dir = await $.env.get('CLAUDIU_USAGE_DIR')
+    const dir = await $.env.get('M4CODE_USAGE_DIR')
     if (!dir) return
     const id = await $.session.id()
     if (!id) return
@@ -162,7 +150,7 @@ async function report($, fresh = false, override = {}) {
       context_tokens: ctx?.tokens ?? null,
       context_window: ctx?.window ?? null,
       model: (await $.session.model().catch(() => null)) ?? null,
-      account: (await $.env.get('CLAUDIU_ACCOUNT')) ?? null,
+      account: (await $.env.get('M4CODE_ACCOUNT')) ?? null,
       auto_compact: autoCompact,
       precompute_compact: precomputeCompact,
       compact_at: await threshold($, fresh),
@@ -183,11 +171,11 @@ async function report($, fresh = false, override = {}) {
 
 // ---- Sidebar commands ---------------------------------------------------------------------------------------------
 
-// Applies what Claudiu's sidebar asked for since the last look. The file holds the latest few `{ seq, key, value }`
+// Applies what m4code's sidebar asked for since the last look. The file holds the latest few `{ seq, key, value }`
 // commands; only known keys and plainly shaped values are acted on.
 async function applyCtl($) {
   try {
-    const file = await $.env.get('CLAUDIU_CTL_FILE')
+    const file = await $.env.get('M4CODE_CTL_FILE')
     if (!file) return
     const cmds = JSON.parse(await $.fs.read(file).catch(() => '{}')).cmds ?? []
     if (ctlSeen === null) {
@@ -286,7 +274,7 @@ async function answerAsk($) {
   let reply
   let id
   try {
-    const file = await $.env.get('CLAUDIU_ASK_FILE')
+    const file = await $.env.get('M4CODE_ASK_FILE')
     if (!file) return
     const text = await $.fs.read(file).catch(() => '')
     if (!text) return
@@ -327,9 +315,9 @@ async function answerAsk($) {
 
 // ---- Session name -------------------------------------------------------------------------------------------------
 
-// Applies the name Claudiu writes to CLAUDIU_NAME_FILE with /rename: once per name and Claude session.
+// Applies the name m4code writes to M4CODE_NAME_FILE with /rename: once per name and Claude session.
 async function watchSessionName($) {
-  const file = await $.env.get('CLAUDIU_NAME_FILE')
+  const file = await $.env.get('M4CODE_NAME_FILE')
   if (!file) return
   const read = async () => (await $.fs.read(file).catch(() => '')).trim()
   const key = async name => (await $.session.id()) + '\n' + name
@@ -350,13 +338,13 @@ async function watchSessionName($) {
 
 // ---- Custom subagents ---------------------------------------------------------------------------------------------
 
-// Registers the custom agent types Claudiu listed for this session (`claude/subagents.rs`); Claude Code names each
-// `Claudiu:<name>`. Interactive Claude Code ignores `claude --agents`, so this is where they are defined. A missing or
+// Registers the custom agent types m4code listed for this session (`claude/subagents.rs`); Claude Code names each
+// `m4code:<name>`. Interactive Claude Code ignores `claude --agents`, so this is where they are defined. A missing or
 // broken list registers none.
 async function registerSubagents($) {
   customTypes.clear()
-  const listed = await $.env.get('CLAUDIU_SUBAGENTS')
-  if (!listed || !(await $.env.get('CLAUDIU_EXE'))) return
+  const listed = await $.env.get('M4CODE_SUBAGENTS')
+  if (!listed || !(await $.env.get('M4CODE_EXE'))) return
   let agents
   try {
     agents = JSON.parse(listed)
@@ -496,10 +484,10 @@ async function* customStep($, e, next, run) {
     let previousKind
     let inbox
     let helperEnded = false
-    const exe = await $.env.get('CLAUDIU_EXE')
+    const exe = await $.env.get('M4CODE_EXE')
     const cwd = await $.session.cwd()
     // Read after the awaits above, by which time a spawn still finishing has noted the effort.
-    const request = { agent, model, effort: run.effort, edits, cwd, prompt, live_messages: true }
+    const request = { agent, model: model || null, effort: run.effort, edits, cwd, prompt, live_messages: true }
     try {
       for await (const event of helperEvents($, exe, request, next.signal)) {
         if (event.kind === 'inbox') {
@@ -608,8 +596,8 @@ async function onMeasure($, e, next) {
 
 async function onCommandRun($, e, next) {
   const r = await next(e) // the command has run: a setting it changed is read after it
-  // A name the user gave with /rename is the session's now. Claudiu reads it from the transcript and writes it back to
-  // CLAUDIU_NAME_FILE; it is already applied, so that must not run /rename again.
+  // A name the user gave with /rename is the session's now. m4code reads it from the transcript and writes it back to
+  // M4CODE_NAME_FILE; it is already applied, so that must not run /rename again.
   const name = e.command === 'rename' ? e.args.trim() : ''
   if (name) named = (await $.session.id()) + '\n' + name
   await report($, true)
@@ -637,73 +625,28 @@ async function noteCompaction($) {
   await report($, true)
 }
 
-async function onSetModel($, e) {
-  const alias = String(e.model ?? '').trim().toLowerCase()
-  const model = MODELS[alias] ?? (/^claude-[a-z0-9.-]+$/.test(alias) ? alias : undefined)
-  const effort = String(e.effort ?? '').trim().toLowerCase()
-  if (e.model != null && !model) {
-    return { result: 'Unknown model: ' + e.model + '. Use haiku, sonnet, opus, fable or a full claude-… id.', isError: true }
-  }
-  if (e.effort != null && effort !== 'auto' && !EFFORTS.includes(effort)) {
-    return { result: 'Unknown effort: ' + e.effort + '. Use ' + EFFORTS.join(', ') + ' or auto.', isError: true }
-  }
-  if (!model && e.effort == null) return { result: 'Give a model, an effort, or both.', isError: true }
-
-  if (model) want = { ...want, model }
-  if (e.effort != null) want = { ...want, effort: effort === 'auto' ? undefined : effort }
-
-  // turn.step covers the rest of this turn. The session's own model and effort (what /model shows) follow once
-  // Claude Code is idle. A command can't run from inside a hook the turn waits on, hence the timer.
-  $.clock.after(0, () => {
-    if (model) {
-      $.command.run({ command: 'model', args: model }).then(
-        () => { if (want.model === model) want = { ...want, model: undefined } },
-        () => {},
-      )
-    }
-    if (e.effort != null) {
-      $.command.run({ command: 'effort', args: effort }).then(
-        () => { if (want.effort === (effort === 'auto' ? undefined : effort)) want = { ...want, effort: undefined } },
-        () => {},
-      )
-    }
-  })
-
-  const what = [model, e.effort != null && 'effort ' + effort].filter(Boolean).join(', ')
-  // Ending the turn lets the queued /model and /effort run, so the session (and /model) switch for good.
-  return {
-    result: 'Switched to ' + what + ' from your next request. Your system prompt still names the previous model; ignore that. ' +
-      'Now stop: end your turn with one short line telling the user the switch is done and asking them to confirm ' +
-      '(or say what to do next) so the session itself switches. Do not continue the task in this turn.',
-  }
-}
-
 // The model's show_visual call streams to its card while it is written. The call's arguments arrive as pieces of JSON;
 // the Markdown read out of them so far goes to the file a few times a second at most. The tool.call hook writes the
 // finished card.
 async function onShowVisual($, e) {
-  const prefix = await $.env.get('CLAUDIU_VISUAL_PREFIX')
+  const prefix = await $.env.get('M4CODE_VISUAL_PREFIX')
   if (!prefix) {
-    return { result: "Visuals aren't available in this session (Claudiu's mod has no file for them).", isError: true }
+    return { result: "Visuals aren't available in this session (m4code's mod has no file for them).", isError: true }
   }
   if (typeof e.content !== 'string' || !e.content.trim()) return { result: 'content must be non-empty Markdown.', isError: true }
   writeVisual($, prefix, e.tool_use_id ?? lastVisual ?? 'v' + Date.now(), e.content)
   return { result: "Shown inline in the terminal. Say the key facts in a short reply; don't repeat the content." }
 }
 
-// Applies the saved model and effort to this turn's steps, and streams a show_visual call to its card while the model
-// writes it. A custom subagent's steps are answered by customStep; other subagents' steps are left alone.
+// Streams a show_visual call to its card while the model writes it. A custom subagent's steps are answered by customStep; other subagents' steps are left alone.
 async function* onTurnStep($, e, next) {
   const run = e.agentId ? await customRun($, e.agentId) : undefined
   if (run) return yield* customStep($, e, next, run)
-  const step = !e.agentId && (want.model || want.effort)
-    ? { ...e, model: want.model ?? e.model, effort: want.effort ?? e.effort }
-    : e
-  const prefix = e.agentId ? null : await $.env.get('CLAUDIU_VISUAL_PREFIX')
-  if (!prefix) return yield* next(step)
+  const prefix = e.agentId ? null : await $.env.get('M4CODE_VISUAL_PREFIX')
+  if (!prefix) return yield* next(e)
 
   const open = new Map() // block index -> the show_visual call being written there
-  for await (const c of next(step)) {
+  for await (const c of next(e)) {
     if (c.kind === 'tool' && c.name === VISUAL_TOOL) {
       open.set(c.index, { id: c.id, json: '', at: 0 })
       lastVisual = c.id
@@ -720,7 +663,7 @@ async function* onTurnStep($, e, next) {
 }
 
 // Draws a show_visual call as its title and the rows its card covers. Each row's link names the call and the row, which
-// is how Claudiu finds them on screen, and the rows scroll and clip with the transcript. Drawing a call from an earlier
+// is how m4code finds them on screen, and the rows scroll and clip with the transcript. Drawing a call from an earlier
 // process writes its card again from the transcript: that is what brings cards back after a restart.
 async function onVisualRow($, e, next) {
   if (e.props.tool !== VISUAL_TOOL || e.props.isErrored) return next(e)
@@ -729,11 +672,11 @@ async function onVisualRow($, e, next) {
   if (!cardRows.has(id)) cardRows.set(id, CARD_ROWS)
   if (!e.props.isRunning && !published.has(id) && e.props.input?.content) {
     published.add(id)
-    const prefix = await $.env.get('CLAUDIU_VISUAL_PREFIX')
+    const prefix = await $.env.get('M4CODE_VISUAL_PREFIX')
     if (prefix) writeVisual($, prefix, id, e.props.input.content)
   }
   const links = Array.from({ length: cardRows.get(id) }, (_, i) =>
-    h(Link, { key: String(i), href: `claudiu://visual/${id}/${i}` }, ' '.repeat(16)))
+    h(Link, { key: String(i), href: `m4code://visual/${id}/${i}` }, ' '.repeat(16)))
   return h(Box, { flexDirection: 'column' }, h(Text, { dimColor: true }, String(e.props.input?.title ?? 'Visual')), ...links)
 }
 
@@ -743,9 +686,9 @@ function onVisualGroup($, e, next) {
   return next({ ...e, props: { ...e.props, isExpanded: true } })
 }
 
-// Reserves the rows Claudiu measured for each card drawn in this process.
+// Reserves the rows m4code measured for each card drawn in this process.
 async function readCardRows($) {
-  const prefix = await $.env.get('CLAUDIU_VISUAL_PREFIX')
+  const prefix = await $.env.get('M4CODE_VISUAL_PREFIX')
   if (!prefix) return
   let changed = false
   for (const [id, rows] of [...cardRows]) {
@@ -760,6 +703,9 @@ async function readCardRows($) {
 
 async function onSessionStart($, e, next) {
   const r = await next(e)
+  if (await $.env.get('M4CODE_MANAGED_COMPACTION') === '1') {
+    await $.config.set({ key: 'autoCompact', value: false }).catch(() => {})
+  }
   await report($)
   await applyCtl($)
 
@@ -779,7 +725,6 @@ export function register(on) {
   on('command.run', onCommandRun)
   on('config.set', onConfigSet)
   on('session.compact', onSessionCompact)
-  on('tool.call', { tool: 'mcp__claudiu__set_model' }, onSetModel)
   on('tool.call', { tool: VISUAL_TOOL }, onShowVisual)
   on('ui.render', { component: 'ToolUse' }, onVisualRow)
   on('ui.render', { component: 'ToolGroup' }, onVisualGroup)

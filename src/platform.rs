@@ -35,7 +35,7 @@ pub fn through_login_shell(program: String, args: Vec<String>) -> (String, Vec<S
     {
         let shell = login_shell();
         let script = if shell.ends_with("/fish") { "exec $argv" } else { r#"exec "$@""# };
-        let mut wrapped = vec!["-l".into(), "-i".into(), "-c".into(), script.into(), "claudiu".into(), program];
+        let mut wrapped = vec!["-l".into(), "-i".into(), "-c".into(), script.into(), "m4code".into(), program];
         wrapped.extend(args);
         (shell, wrapped)
     }
@@ -53,39 +53,9 @@ fn login_shell() -> String {
     })
 }
 
-/// The fixed-width font for terminals and code. A missing family falls back to a proportional UI font, which breaks
-/// a terminal's grid; so Linux uses the monospace family fontconfig picks for the desktop instead of naming one that
-/// may not be installed.
-/// The UI font: the system's own on macOS and Windows, Inter (built into Rune) elsewhere.
-pub fn ui_font() -> &'static str {
-    if cfg!(target_os = "macos") {
-        "system-ui"
-    } else if cfg!(target_os = "windows") {
-        "Segoe UI"
-    } else {
-        "Inter"
-    }
-}
-
-/// Show `path` in the file manager: selected in its folder on macOS and Windows, its folder opened elsewhere.
-pub fn reveal(path: &Path) {
-    let mut cmd = if cfg!(target_os = "macos") {
-        let mut c = Command::new("open");
-        c.arg("-R").arg(path);
-        c
-    } else if cfg!(target_os = "windows") {
-        let mut c = Command::new("explorer");
-        c.arg(format!("/select,{}", path.display()));
-        c
-    } else {
-        let mut c = Command::new("xdg-open");
-        c.arg(if path.is_dir() { path } else { path.parent().unwrap_or(path) });
-        c
-    };
-    no_window(&mut cmd);
-    let _ = cmd.spawn();
-}
-
+/// The fixed-width font for terminals and code. GPUI matches family names exactly and, when one is missing, falls
+/// back to a proportional UI font, which breaks a terminal's grid; so Linux uses the monospace family fontconfig
+/// picks for the desktop instead of naming one that may not be installed.
 pub fn monospace_font() -> &'static str {
     #[cfg(target_os = "windows")]
     {
@@ -118,7 +88,7 @@ fn family_from_fc_match(output: &str) -> Option<String> {
 
 /// The window class Linux desktops match to the launcher entry (`StartupWMClass` in the AppImage's .desktop file) to
 /// pick the dock and panel icon. Without it a window gets a generic one. Other platforms ignore it.
-pub const APP_ID: &str = "Claudiu";
+pub const APP_ID: &str = "m4code";
 
 pub fn home_dir() -> Option<PathBuf> {
     directories::BaseDirs::new().map(|d| d.home_dir().to_path_buf())
@@ -185,7 +155,7 @@ pub fn with_login_path(command: &mut Command) {
     let _ = command;
 }
 
-/// Look for the PATH again, for a tool installed since Claudiu started or one that only the shell's startup files
+/// Look for the PATH again, for a tool installed since m4code started or one that only the shell's startup files
 /// put on the PATH. Windows reads the system and user PATH from the registry and uses it for this process and the
 /// programs it starts. macOS and Linux ask the login shell (blocking, up to a few seconds). Call it off the UI thread.
 pub fn reload_path() {
@@ -224,9 +194,9 @@ fn login_shell_path() -> Option<std::ffi::OsString> {
 }
 
 #[cfg(any(unix, test))]
-const PATH_BEGIN: &str = "<<claudiu-path";
+const PATH_BEGIN: &str = "<<m4code-path";
 #[cfg(any(unix, test))]
-const PATH_END: &str = "claudiu-path>>";
+const PATH_END: &str = "m4code-path>>";
 
 /// A shell command that prints `$PATH` between the markers. `printf` and the quoting mean the same in sh, bash, zsh
 /// and fish (which joins its PATH list with colons inside quotes).
@@ -282,7 +252,7 @@ fn path_between_markers(output: &str) -> Option<&str> {
 }
 
 /// The registry's directories first, then whatever this process had that the registry lacks (for example folders a
-/// launcher added for Claudiu alone). Each directory appears once.
+/// launcher added for m4code alone). Each directory appears once.
 #[cfg(any(windows, unix, test))]
 fn rebuilt_path(registry: &[PathBuf], current: &OsStr) -> std::ffi::OsString {
     let mut dirs: Vec<PathBuf> = Vec::new();
@@ -318,10 +288,48 @@ fn registry_path(root: windows_sys::Win32::System::Registry::HKEY, subkey: &str)
     }
 }
 
+/// This program's path, for the helpers m4code starts as itself (`--mcp-title`, `--acp`). When the running binary is
+/// replaced on disk, by a rebuild or an update, Linux reports its path with " (deleted)" on the end, which no child can
+/// start: Claude Code then starts without m4code's tools and instructions. The file now at the original path is the
+/// replacement, and it is the one to start.
+pub fn own_exe() -> std::io::Result<PathBuf> {
+    std::env::current_exe().map(without_deleted_mark)
+}
+
+fn without_deleted_mark(exe: PathBuf) -> PathBuf {
+    match exe.to_str().and_then(|path| path.strip_suffix(" (deleted)")) {
+        Some(original) if !exe.exists() => PathBuf::from(original),
+        _ => exe,
+    }
+}
+
 /// A program typed by the user: an existing file, or a name found on PATH.
 pub fn resolve_program(text: &str) -> Option<PathBuf> {
     let p = Path::new(text);
     if p.is_file() { Some(p.to_path_buf()) } else { find_executable(text) }
+}
+
+/// Create a directory link at `dst` pointing to `src`: a junction on Windows (no admin rights or Developer Mode
+/// required) and a symlink on Unix.
+pub fn link_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        junction::create(src, dst)
+    }
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(src, dst)
+    }
+}
+
+/// Remove a directory link at `path` without touching what it points to.
+/// Windows removes directory links with `RemoveDirectory`; Unix removes any symlink as a file.
+pub fn remove_dir_link(path: &Path) -> std::io::Result<()> {
+    if cfg!(windows) && path.is_dir() {
+        std::fs::remove_dir(path)
+    } else {
+        std::fs::remove_file(path)
+    }
 }
 
 /// Spawn a GUI/helper process fully detached and without flashing a console window.
@@ -338,58 +346,6 @@ pub fn spawn_detached(program: &Path, args: &[&OsStr]) -> std::io::Result<()> {
     cmd.spawn().map(|_| ())
 }
 
-/// Put an image on the clipboard as a bitmap, which is what Claude Code's image paste reads on Windows (it asks
-/// .NET's `Clipboard.GetImage`, which does not read the registered `PNG` format a plain image copy offers). Returns whether
-/// it worked; replaces whatever the clipboard held.
-#[cfg(target_os = "windows")]
-pub fn set_clipboard_bitmap(encoded: &[u8]) -> bool {
-    use windows_sys::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData};
-    use windows_sys::Win32::Foundation::GlobalFree;
-    use windows_sys::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
-    const CF_DIB: u32 = 8;
-    // A DIB is a BMP file without its 14-byte file header.
-    let mut bmp = Vec::new();
-    let Ok(img) = image::load_from_memory(encoded) else { return false };
-    if img.to_rgb8().write_to(&mut std::io::Cursor::new(&mut bmp), image::ImageFormat::Bmp).is_err() || bmp.len() <= 14 {
-        return false;
-    }
-    let dib = &bmp[14..];
-    unsafe {
-        let mem = GlobalAlloc(GMEM_MOVEABLE, dib.len());
-        if mem.is_null() {
-            return false;
-        }
-        let dst = GlobalLock(mem).cast::<u8>();
-        if dst.is_null() {
-            GlobalFree(mem);
-            return false;
-        }
-        std::ptr::copy_nonoverlapping(dib.as_ptr(), dst, dib.len());
-        GlobalUnlock(mem);
-        // Another program may hold the clipboard for a moment.
-        let mut opened = false;
-        for _ in 0..10 {
-            if OpenClipboard(std::ptr::null_mut()) != 0 {
-                opened = true;
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-        if !opened {
-            GlobalFree(mem);
-            return false;
-        }
-        EmptyClipboard();
-        // The clipboard owns the memory once this succeeds.
-        let ok = !SetClipboardData(CF_DIB, mem).is_null();
-        if !ok {
-            GlobalFree(mem);
-        }
-        CloseClipboard();
-        ok
-    }
-}
-
 /// Keep a helper process from flashing a console window (Windows only).
 pub fn no_window(cmd: &mut Command) {
     #[cfg(target_os = "windows")]
@@ -401,47 +357,15 @@ pub fn no_window(cmd: &mut Command) {
     let _ = cmd;
 }
 
-/// macOS: give ⌘Q to the app menu item titled `ours` and drop AppKit's own Quit, which ends the app without asking.
-/// AppKit keeps the first item that claims a key equivalent, and Rune's menu always has its Quit, so the app's item
-/// gets no ⌘Q until this. Returns false while the menu bar isn't built yet. Does nothing elsewhere.
-pub fn take_quit_key(ours: &str) -> bool {
-    #[cfg(target_os = "macos")]
-    {
-        use objc2::MainThreadMarker;
-        use objc2::sel;
-        use objc2_app_kit::NSApplication;
-        let Some(mtm) = MainThreadMarker::new() else { return false };
-        let app = NSApplication::sharedApplication(mtm);
-        let Some(menu) = app.mainMenu().and_then(|root| root.itemAtIndex(0)).and_then(|top| top.submenu()) else { return false };
-        let items: Vec<_> = (0..menu.numberOfItems()).filter_map(|i| menu.itemAtIndex(i)).collect();
-        let quit = items.iter().find(|i| i.action() == Some(sel!(terminate:)));
-        let mine = items.iter().find(|i| i.title().to_string() == ours);
-        let (Some(quit), Some(mine)) = (quit, mine) else { return false };
-        mine.setKeyEquivalent(&quit.keyEquivalent());
-        mine.setKeyEquivalentModifierMask(quit.keyEquivalentModifierMask());
-        menu.removeItem(quit);
-        // The separator that stood above it would end the menu.
-        if let Some(last) = menu.itemAtIndex(menu.numberOfItems() - 1).filter(|i| i.isSeparatorItem()) {
-            menu.removeItem(&last);
-        }
-        true
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = ours;
-        true
-    }
-}
-
 /// A system notification, for when the window is in the background. Shown from another thread: on Linux it waits for
 /// the notification server. A failure (no notification server, notifications turned off) is left silent.
 pub fn notify(title: String, body: &'static str) {
     std::thread::spawn(move || {
         // Notification Center files notifications under an app; the installed one is ours, a dev build has none.
         #[cfg(target_os = "macos")]
-        let _ = notify_rust::set_application("com.m4rocks.claudiu");
+        let _ = notify_rust::set_application("com.m4rocks.m4code");
         let mut notification = notify_rust::Notification::new();
-        notification.appname("Claudiu").summary(&title).body(body);
+        notification.appname("m4code").summary(&title).body(body);
         #[cfg(target_os = "windows")]
         if let Some(id) = windows_app_id() {
             notification.app_id(id);
@@ -450,8 +374,8 @@ pub fn notify(title: String, body: &'static str) {
     });
 }
 
-/// The app ID of the installed Claudiu, as its Start menu shortcut carries it (`velopack.Claudiu`), so Windows shows
-/// notifications as Claudiu's. Without one, notify-rust sends them as PowerShell's, which is all a dev build can do:
+/// The app ID of the installed m4code, as its Start menu shortcut carries it (`velopack.m4code`), so Windows shows
+/// notifications as m4code's. Without one, notify-rust sends them as PowerShell's, which is all a dev build can do:
 /// Windows only shows a notification under an ID that has a shortcut.
 #[cfg(target_os = "windows")]
 fn windows_app_id() -> Option<&'static str> {
@@ -471,32 +395,16 @@ fn windows_app_id() -> Option<&'static str> {
 fn register_notification_icon(id: &str) {
     use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, REG_SZ, RegSetKeyValueW};
     let icon = crate::datadir::data_dir().join("notification-icon.png");
-    if std::fs::write(&icon, include_bytes!("../assets/claudiu.png")).is_err() {
+    if std::fs::write(&icon, include_bytes!("../assets/m4code.png")).is_err() {
         return;
     }
     let wide = |s: &str| -> Vec<u16> { s.encode_utf16().chain(Some(0)).collect() };
     let key = wide(&format!(r"Software\Classes\AppUserModelId\{id}"));
-    for (name, value) in [("DisplayName", "Claudiu".to_string()), ("IconUri", icon.to_string_lossy().into_owned())] {
+    for (name, value) in [("DisplayName", "m4code".to_string()), ("IconUri", icon.to_string_lossy().into_owned())] {
         let (name, value) = (wide(name), wide(&value));
         // SAFETY: NUL-terminated names, and a value buffer whose size in bytes is passed with it.
         unsafe {
             RegSetKeyValueW(HKEY_CURRENT_USER, key.as_ptr(), name.as_ptr(), REG_SZ, value.as_ptr().cast(), (value.len() * 2) as u32);
-        }
-    }
-}
-
-/// macOS's emoji and symbols palette, which types what is picked into the focused text, as Ctrl+Cmd+Space opened it
-/// in main's editor. Nothing elsewhere.
-pub fn show_character_palette() {
-    #[cfg(target_os = "macos")]
-    {
-        use objc2::MainThreadMarker;
-        use objc2_app_kit::NSApplication;
-        if let Some(mtm) = MainThreadMarker::new() {
-            let app = NSApplication::sharedApplication(mtm);
-            // The key window as the sender, as gpui did, so the picked character goes to the text that has focus.
-            let window = app.keyWindow();
-            app.orderFrontCharacterPalette(window.as_deref().map(|w| &**w as &objc2::runtime::AnyObject));
         }
     }
 }
@@ -682,7 +590,7 @@ bye
         });
         let script = if shell.ends_with("/fish") { "exec $argv" } else { r#"exec "$@""# };
         assert_eq!(program, shell);
-        let expected: Vec<String> = ["-l", "-i", "-c", script, "claudiu", "/usr/bin/claude", "--resume", "abc"].map(String::from).to_vec();
+        let expected: Vec<String> = ["-l", "-i", "-c", script, "m4code", "/usr/bin/claude", "--resume", "abc"].map(String::from).to_vec();
         assert_eq!(args, expected);
     }
 
@@ -691,10 +599,10 @@ bye
     #[cfg(unix)]
     fn find_executable_uses_a_directory_only_the_login_shell_reported() {
         use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("claudiu-login-path-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("m4code-login-path-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let tool = dir.join("claudiu-login-path-probe");
+        let tool = dir.join("m4code-login-path-probe");
         std::fs::write(&tool, b"#!/bin/sh\n").unwrap();
         let mut perms = std::fs::metadata(&tool).unwrap().permissions();
         perms.set_mode(0o755);
@@ -703,7 +611,7 @@ bye
         let _only_test_using_login_path = LOGIN_PATH_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let previous = LOGIN_PATH.lock().unwrap().clone();
         *LOGIN_PATH.lock().unwrap() = Some(dir.as_os_str().to_os_string());
-        let found = find_executable("claudiu-login-path-probe");
+        let found = find_executable("m4code-login-path-probe");
         *LOGIN_PATH.lock().unwrap() = previous;
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(found, Some(tool));
@@ -764,6 +672,17 @@ bye
     }
 
     #[test]
+    fn a_replaced_binary_is_started_from_its_original_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let replaced = dir.path().join("m4code");
+        assert_eq!(without_deleted_mark(dir.path().join("m4code (deleted)")), replaced);
+        assert_eq!(without_deleted_mark(replaced.clone()), replaced, "a path without the mark stays");
+        let named = dir.path().join("odd (deleted)");
+        std::fs::write(&named, "").unwrap();
+        assert_eq!(without_deleted_mark(named.clone()), named, "a file that is really named so stays");
+    }
+
+    #[test]
     fn typed_programs_resolve_only_when_they_exist() {
         let exe = std::env::current_exe().unwrap();
         assert_eq!(resolve_program(exe.to_str().unwrap()), Some(exe));
@@ -799,7 +718,7 @@ bye
 
     #[test]
     fn env_expansion() {
-        unsafe { std::env::set_var("CLAUDIU_TEST_X", "val") };
-        assert_eq!(expand_env("a%CLAUDIU_TEST_X%b"), "avalb");
+        unsafe { std::env::set_var("M4CODE_TEST_X", "val") };
+        assert_eq!(expand_env("a%M4CODE_TEST_X%b"), "avalb");
     }
 }

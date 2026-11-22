@@ -1,4 +1,4 @@
-//! Settings that make Claude Code cost more, found in Claudiu's own environment and in Claude Code's `settings.json`
+//! Settings that make Claude Code cost more, found in m4code's own environment and in Claude Code's `settings.json`
 //! `env` block. Each one changed a real request in a measured run on Claude Code 2.1.319: with prompt caching off
 //! nothing was read from the cache, and with tool search off the first request grew from 18k to 26k tokens.
 
@@ -35,12 +35,12 @@ fn falsy(value: &str) -> bool {
     matches!(value.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off")
 }
 
-/// What raises cost in `process_env` (Claudiu's environment, which the sessions it starts inherit) and `file_env` (the
+/// What raises cost in `process_env` (m4code's environment, which the sessions it starts inherit) and `file_env` (the
 /// `env` block of `settings.json`). A variable set in both places is reported for the process environment.
 pub fn find(process_env: &dyn Fn(&str) -> Option<String>, file_env: &Map<String, Value>) -> Vec<Finding> {
     let look = |name: &str| -> Option<(&'static str, String)> {
         if let Some(v) = process_env(name) {
-            return Some(("Claudiu's environment", v));
+            return Some(("m4code's environment", v));
         }
         file_env.get(name).and_then(Value::as_str).map(|v| ("Claude Code's settings.json", v.to_string()))
     };
@@ -91,7 +91,7 @@ mod tests {
     fn caching_off_is_found_in_the_environment_and_says_where() {
         let env = |name: &str| (name == "DISABLE_PROMPT_CACHING_HAIKU").then(|| "1".to_string());
         let found = find(&env, &Map::new());
-        assert_eq!(found, [Finding { name: "DISABLE_PROMPT_CACHING_HAIKU", source: "Claudiu's environment", effect: NO_CACHE }]);
+        assert_eq!(found, [Finding { name: "DISABLE_PROMPT_CACHING_HAIKU", source: "m4code's environment", effect: NO_CACHE }]);
     }
 
     #[test]
@@ -112,7 +112,7 @@ mod tests {
     fn the_process_environment_wins_over_the_file() {
         let env = |name: &str| (name == "DISABLE_PROMPT_CACHING").then(|| "1".to_string());
         let file = json!({ "DISABLE_PROMPT_CACHING": "1" }).as_object().unwrap().clone();
-        assert_eq!(find(&env, &file)[0].source, "Claudiu's environment");
+        assert_eq!(find(&env, &file)[0].source, "m4code's environment");
     }
 
     #[test]

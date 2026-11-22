@@ -4,10 +4,11 @@
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Effort {
     Low,
+    #[default]
     Medium,
     High,
     Xhigh,
@@ -27,6 +28,17 @@ impl Effort {
             Self::Max => "max",
         }
     }
+
+    /// Plain-English label shown in Settings and pickers.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Low => "Low",
+            Self::Medium => "Medium",
+            Self::High => "High",
+            Self::Xhigh => "Extra High",
+            Self::Max => "Max",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,7 +53,7 @@ pub enum PermissionMode {
 }
 
 impl PermissionMode {
-    pub const ALL: [PermissionMode; 6] = [Self::AcceptEdits, Self::Auto, Self::BypassPermissions, Self::Manual, Self::DontAsk, Self::Plan];
+    pub const ALL: [PermissionMode; 6] = [Self::Manual, Self::AcceptEdits, Self::Auto, Self::DontAsk, Self::Plan, Self::BypassPermissions];
 
     /// The value `--permission-mode` takes.
     pub fn name(self) -> &'static str {
@@ -54,17 +66,40 @@ impl PermissionMode {
             Self::Plan => "plan",
         }
     }
+
+    /// Plain-English label shown in the UI.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Manual => "Ask Before Editing",
+            Self::AcceptEdits => "Accept Edits",
+            Self::Auto => "Auto",
+            Self::DontAsk => "Don't Ask",
+            Self::Plan => "Plan Mode",
+            Self::BypassPermissions => "Full Access",
+        }
+    }
+
+    /// The ACP mode id for Claude Code.
+    pub fn acp_id(self) -> &'static str {
+        match self {
+            Self::Manual => "default",
+            other => other.name(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct NewSessionDefaults {
-    /// A model alias or id, already checked with `usage::valid_model_name`.
+    /// A model alias or id, as the harness lists it.
     #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
     pub effort: Option<Effort>,
     #[serde(default)]
     pub permission_mode: Option<PermissionMode>,
+    /// Native ACP mode id chosen for the active harness (e.g. Claude, Codex, OpenCode, or Antigravity).
+    #[serde(default)]
+    pub mode_id: Option<String>,
 }
 
 /// Who is starting the session; some defaults are not for every caller.
@@ -77,22 +112,6 @@ pub enum Starter {
     /// Another session, through `start_code_session`: it can't start a session that skips every prompt unless the
     /// user chose that there.
     OtherSession,
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub struct InvalidModel;
-
-/// A model name as `--model` takes it: trimmed and lowercased, as in the Advisor dialog. `None` for an empty field;
-/// `Err` for anything that isn't an alias or id. "off" is refused because it means nothing here.
-pub fn parse_model(text: &str) -> Result<Option<String>, InvalidModel> {
-    let name = text.trim().to_lowercase();
-    if name.is_empty() {
-        return Ok(None);
-    }
-    if name == "off" || !super::usage::valid_model_name(&name) {
-        return Err(InvalidModel);
-    }
-    Ok(Some(name))
 }
 
 /// The flags to add to a new session: each default that is set, unless `leading` already carries that flag or the
@@ -118,16 +137,42 @@ pub fn flags(defaults: &NewSessionDefaults, plan_trimmed: bool, leading: &[Strin
     out
 }
 
+/// The same defaults for a session that opens through ACP: the permission mode's id, and the config options to set
+/// by category. Manual is ACP's `default` mode.
+pub fn acp_settings(defaults: &NewSessionDefaults, plan_trimmed: bool, by: Starter) -> (Option<String>, Vec<(&'static str, String)>) {
+    let flags = flags(defaults, plan_trimmed, &[], by);
+    let (mut mode, mut options) = (None, vec![]);
+    for pair in flags.chunks(2) {
+        let [flag, value] = pair else { continue };
+        match flag.as_str() {
+            "--model" => options.push(("model", value.clone())),
+            "--effort" => options.push(("thought_level", value.clone())),
+            "--permission-mode" => mode = Some(if value == PermissionMode::Manual.name() { "default".to_string() } else { value.clone() }),
+            _ => {}
+        }
+    }
+    (mode, options)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn acp_sessions_get_the_same_defaults_by_category() {
+        let (mode, options) = acp_settings(&all_set(PermissionMode::Manual), false, Starter::User);
+        assert_eq!(mode.as_deref(), Some("default"));
+        assert_eq!(options, vec![("model", "opus".to_string()), ("thought_level", "high".to_string())]);
+        let (mode, _) = acp_settings(&all_set(PermissionMode::Plan), false, Starter::FixGit);
+        assert_eq!(mode, None, "the same rules as the flags");
+    }
 
     fn strings(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| s.to_string()).collect()
     }
 
     fn all_set(mode: PermissionMode) -> NewSessionDefaults {
-        NewSessionDefaults { model: Some("opus".into()), effort: Some(Effort::High), permission_mode: Some(mode) }
+        NewSessionDefaults { model: Some("opus".into()), effort: Some(Effort::High), permission_mode: Some(mode), mode_id: None }
     }
 
     #[test]
@@ -163,14 +208,6 @@ mod tests {
         assert!(!flags(&all_set(PermissionMode::BypassPermissions), false, &[], Starter::OtherSession).contains(&"--permission-mode".to_string()));
         assert!(flags(&all_set(PermissionMode::BypassPermissions), false, &[], Starter::User).contains(&"bypassPermissions".to_string()));
         assert!(flags(&all_set(PermissionMode::BypassPermissions), false, &[], Starter::FixGit).contains(&"bypassPermissions".to_string()));
-    }
-
-    #[test]
-    fn model_names_are_cleaned_and_off_is_refused() {
-        assert_eq!(parse_model(" Opus "), Ok(Some("opus".into())));
-        assert_eq!(parse_model("  "), Ok(None));
-        assert_eq!(parse_model("off"), Err(InvalidModel));
-        assert_eq!(parse_model("op us!"), Err(InvalidModel));
     }
 
     #[test]

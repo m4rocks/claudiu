@@ -1,51 +1,47 @@
-# Generates assets/claudiu.png and assets/claudiu.ico (the Clawd-style mark on the app's black).
-# Windows PowerShell + System.Drawing only. Re-run after changing the pattern or colors.
+# Generates assets/m4code.png (512x512) and assets/m4code.ico from the `<m4/>` mark.
+# Windows PowerShell + System.Drawing only. Mirrors web/public/m4code.svg.
 Add-Type -AssemblyName System.Drawing
 $root = Split-Path $PSScriptRoot
 $assets = Join-Path $root "assets"
 New-Item -ItemType Directory -Force $assets | Out-Null
 
-$pattern = @(
-  "..#######..",
-  "..#o###o#..",
-  "###o###o###",
-  "###########",
-  "..#######..",
-  "..#.#.#.#..",
-  "..#.#.#.#.."
-)
-$orange = [System.Drawing.Color]::FromArgb(255, 0xd9, 0x77, 0x57)
-$eye = [System.Drawing.Color]::FromArgb(255, 0x1a, 0x0f, 0x0b)
-$bg = [System.Drawing.Color]::FromArgb(255, 0x0c, 0x0c, 0x0d)
+$fg = [System.Drawing.Color]::FromArgb(255, 0xff, 0xff, 0xff)
+$bg = [System.Drawing.Color]::FromArgb(255, 0x12, 0x12, 0x12)
 
 function New-Icon([int]$size) {
   $bmp = New-Object System.Drawing.Bitmap $size, $size
   $g = [System.Drawing.Graphics]::FromImage($bmp)
   $g.SmoothingMode = 'AntiAlias'
   $g.Clear([System.Drawing.Color]::Transparent)
+  $scale = $size / 512.0
   # rounded black tile
-  $r = [int]($size * 0.22)
+  $r = [float](112.0 * $scale)
   $path = New-Object System.Drawing.Drawing2D.GraphicsPath
   $path.AddArc(0, 0, 2 * $r, 2 * $r, 180, 90)
-  $path.AddArc($size - 2 * $r - 1, 0, 2 * $r, 2 * $r, 270, 90)
-  $path.AddArc($size - 2 * $r - 1, $size - 2 * $r - 1, 2 * $r, 2 * $r, 0, 90)
-  $path.AddArc(0, $size - 2 * $r - 1, 2 * $r, 2 * $r, 90, 90)
+  $path.AddArc($size - 2 * $r, 0, 2 * $r, 2 * $r, 270, 90)
+  $path.AddArc($size - 2 * $r, $size - 2 * $r, 2 * $r, 2 * $r, 0, 90)
+  $path.AddArc(0, $size - 2 * $r, 2 * $r, 2 * $r, 90, 90)
   $path.CloseFigure()
   $g.FillPath((New-Object System.Drawing.SolidBrush $bg), $path)
-  # pixel mark, pixel-aligned (no smoothing so edges stay crisp)
-  $g.SmoothingMode = 'None'
-  $g.PixelOffsetMode = 'Half'
-  $unit = [Math]::Max(1, [Math]::Floor($size * 0.70 / 11))
-  $w = $unit * 11; $h = $unit * 7
-  $ox = [int](($size - $w) / 2); $oy = [int](($size - $h) / 2) - [int]($unit * 0.2)
-  for ($y = 0; $y -lt 7; $y++) {
-    for ($x = 0; $x -lt 11; $x++) {
-      $c = $pattern[$y][$x]
-      if ($c -eq '.') { continue }
-      $brush = New-Object System.Drawing.SolidBrush ($(if ($c -eq 'o') { $eye } else { $orange }))
-      $g.FillRectangle($brush, $ox + $x * $unit, $oy + $y * $unit, $unit, $unit)
-    }
-  }
+  # `<m4/>` strokes in 512x512 coordinates
+  $g.ScaleTransform($scale, $scale)
+  $pen = New-Object System.Drawing.Pen $fg, 24.0
+  $pen.StartCap = 'Round'; $pen.EndCap = 'Round'; $pen.LineJoin = 'Round'
+  $g.DrawLines($pen, [System.Drawing.PointF[]]@([System.Drawing.PointF]::new(94, 206), [System.Drawing.PointF]::new(48, 256), [System.Drawing.PointF]::new(94, 306)))
+  $g.DrawLine($pen, 122, 306, 122, 214)
+  $m1 = New-Object System.Drawing.Drawing2D.GraphicsPath
+  $m1.AddBezier(122, 246, 122, 222, 135, 214, 148, 214)
+  $m1.AddBezier(148, 214, 164, 214, 174, 226, 174, 246)
+  $m1.AddLine(174, 246, 174, 306)
+  $g.DrawPath($pen, $m1)
+  $m2 = New-Object System.Drawing.Drawing2D.GraphicsPath
+  $m2.AddBezier(174, 246, 174, 222, 187, 214, 200, 214)
+  $m2.AddBezier(200, 214, 216, 214, 226, 226, 226, 246)
+  $m2.AddLine(226, 246, 226, 306)
+  $g.DrawPath($pen, $m2)
+  $g.DrawLines($pen, [System.Drawing.PointF[]]@([System.Drawing.PointF]::new(308, 306), [System.Drawing.PointF]::new(308, 198), [System.Drawing.PointF]::new(254, 274), [System.Drawing.PointF]::new(324, 274)))
+  $g.DrawLine($pen, 380, 198, 352, 314)
+  $g.DrawLines($pen, [System.Drawing.PointF[]]@([System.Drawing.PointF]::new(418, 206), [System.Drawing.PointF]::new(464, 256), [System.Drawing.PointF]::new(418, 306)))
   $g.Dispose()
   return $bmp
 }
@@ -57,9 +53,11 @@ foreach ($s in $sizes) {
   $ms = New-Object System.IO.MemoryStream
   $bmp.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)
   $pngs += , $ms.ToArray()
-  if ($s -eq 256) { $bmp.Save((Join-Path $assets "claudiu.png"), [System.Drawing.Imaging.ImageFormat]::Png) }
   $bmp.Dispose()
 }
+$big = New-Icon 512
+$big.Save((Join-Path $assets "m4code.png"), [System.Drawing.Imaging.ImageFormat]::Png)
+$big.Dispose()
 
 # ICO container with PNG-compressed images
 $out = New-Object System.IO.MemoryStream
@@ -76,5 +74,5 @@ for ($i = 0; $i -lt $sizes.Count; $i++) {
   $offset += $pngs[$i].Length
 }
 foreach ($p in $pngs) { $bw.Write($p) }
-[System.IO.File]::WriteAllBytes((Join-Path $assets "claudiu.ico"), $out.ToArray())
-Write-Output "Wrote assets/claudiu.ico and assets/claudiu.png"
+[System.IO.File]::WriteAllBytes((Join-Path $assets "m4code.ico"), $out.ToArray())
+Write-Output "Wrote assets/m4code.ico and assets/m4code.png"

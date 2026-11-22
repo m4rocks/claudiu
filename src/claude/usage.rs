@@ -1,9 +1,9 @@
 //! Zero-token usage and status data, reported by the per-process mod (`mod/hooks/register.js`).
 //!
-//! Every Claude session is started with `--plugin-dir` and `CLAUDIU_USAGE_DIR`; the mod runs inside Claude Code
+//! Every Claude session is started with `--plugin-dir` and `M4CODE_USAGE_DIR`; the mod runs inside Claude Code
 //! and, on each `session.measure` (context fill, 5-hour / 7-day limits), `config.set` and `command.run`, writes
 //! one small JSON file per Claude session into that directory. Nothing is sent anywhere and no tokens are spent.
-//! Claudiu reads the files back here. Nothing is written to the user's Claude Code config.
+//! m4code reads the files back here. Nothing is written to the user's Claude Code config.
 
 use std::path::{Path, PathBuf};
 
@@ -11,26 +11,21 @@ use serde::{Deserialize, Serialize};
 
 use crate::store::RateLimit;
 
-/// Env var naming the Claudiu account a Claude session was launched with, so its limits go to that account.
-pub const ACCOUNT_ENV: &str = "CLAUDIU_ACCOUNT";
+/// Env var naming the m4code account a Claude session was launched with, so its limits go to that account.
+pub const ACCOUNT_ENV: &str = "M4CODE_ACCOUNT";
 /// Env var holding the directory the mod writes its snapshot into.
-pub const USAGE_DIR_ENV: &str = "CLAUDIU_USAGE_DIR";
+pub const USAGE_DIR_ENV: &str = "M4CODE_USAGE_DIR";
 
-/// Env var holding the file Claudiu writes settings requests into for the mod to apply.
-pub const CTL_ENV: &str = "CLAUDIU_CTL_FILE";
+/// Env var holding the file m4code writes settings requests into for the mod to apply.
+pub const CTL_ENV: &str = "M4CODE_CTL_FILE";
 
 pub fn ctl_dir() -> PathBuf {
     crate::datadir::data_dir().join("ctl")
 }
 
-/// The request file of one session, named by Claudiu's own record id (which survives `/clear`).
+/// The request file of one session, named by m4code's own record id (which survives `/clear`).
 pub fn ctl_file(record_id: &str) -> PathBuf {
     ctl_dir().join(format!("{}.json", crate::datadir::safe_file_stem(record_id)))
-}
-
-/// A model alias or id as the mod accepts it for `/advisor` (it checks the same rule).
-pub fn valid_model_name(name: &str) -> bool {
-    !name.is_empty() && name.len() <= 60 && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
 /// Ask the mod of a running session to change a setting: `auto_compact` or `precompute_compact` (bool), `advisor` (a
@@ -63,7 +58,7 @@ pub struct Snapshot {
     pub context_window: Option<u64>,
     pub model: Option<String>,
     pub captured_at: i64,
-    /// Claudiu account the session ran under (`ACCOUNT_ENV`); `None` is the main account.
+    /// m4code account the session ran under (`ACCOUNT_ENV`); `None` is the main account.
     #[serde(default)]
     pub account: Option<String>,
     /// The `/config` auto-compact switch.
@@ -123,7 +118,6 @@ mod tests {
         assert_eq!(cmds.len(), 8);
         assert!(cmds.windows(2).all(|w| w[0]["seq"].as_i64() < w[1]["seq"].as_i64()), "numbers only go up");
         assert_eq!(cmds[7]["value"], "m9");
-        assert!(valid_model_name("claude-opus-5-5") && valid_model_name("off") && !valid_model_name("") && !valid_model_name("a b") && !valid_model_name("../x"));
     }
 
     #[test]

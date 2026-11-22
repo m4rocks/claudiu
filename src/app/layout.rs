@@ -5,53 +5,56 @@ use super::*;
 impl Workspace {
     /// Show or hide the shell under a Claude session. It starts on first use, in the session's folder, and lives and
     /// dies with the session.
-    pub fn toggle_shell(&mut self, id: &str) {
+    pub fn toggle_shell(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         let rec = self.store.session(id).filter(|r| r.kind == SessionKind::Claude).cloned();
-        let Some(rec) = rec.filter(|_| self.is_running(id)) else {
-            self.toast("Open a Claude session to use its shell.", false);
+        let Some(rec) = rec.filter(|_| self.is_running(id, cx)) else {
+            self.toast("Open a Claude session to use its shell.", false, cx);
             return;
         };
         // From another session the shell is brought up with its session; only on the shown one does it toggle.
         let shown = self.active.as_deref() == Some(id) && matches!(self.main, Main::Terminals);
         if !shown {
-            self.show_session(id);
+            self.show_session(id, window, cx);
         }
         if let Some(p) = self.shells.get_mut(id) {
             p.open = !shown || !p.open;
             if !p.open {
-                self.focus_active();
+                self.focus_active(window, cx);
+                cx.notify();
                 return;
             }
         } else {
             // A session's folder may be gone (temp dirs, deleted worktrees); CreateProcess then fails with "filename syntax is incorrect".
             let cwd = if rec.cwd.is_dir() { rec.cwd.clone() } else { platform::home_dir().unwrap_or(rec.cwd.clone()) };
-            let panel = self.new_shell_panel(id, cwd);
+            let panel = self.new_shell_panel(id, cwd, window, cx);
             self.shells.insert(id.to_string(), panel);
         }
-        self.focus_shell();
+        self.focus_shell(window, cx);
+        cx.notify();
     }
 
     /// Show or hide the shell of what is on screen: the shown session's, or on the welcome screen the one that needs
     /// no session. It starts in the home folder and is kept while sessions are open.
-    pub fn toggle_shell_here(&mut self) {
+    pub fn toggle_shell_here(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(id) = self.active_id().cloned() {
-            self.toggle_shell(&id);
+            self.toggle_shell(&id, window, cx);
             return;
         }
         if let Some(p) = self.shells.get_mut(HOME_SHELL) {
             p.open = !p.open;
         } else if let Some(cwd) = platform::home_dir() {
-            let panel = self.new_shell_panel(HOME_SHELL, cwd);
+            let panel = self.new_shell_panel(HOME_SHELL, cwd, window, cx);
             self.shells.insert(HOME_SHELL.to_string(), panel);
         } else {
-            self.toast("Could not find the home folder for a shell.", true);
+            self.toast("Could not find the home folder for a shell.", true, cx);
             return;
         }
         if self.shells.get(HOME_SHELL).is_some_and(|p| p.open) {
-            self.focus_shell();
+            self.focus_shell(window, cx);
         } else {
-            self.focus_active();
+            self.focus_active(window, cx);
         }
+        cx.notify();
     }
 
     /// The owner of the shell panel on screen: the shown session, or `HOME_SHELL` on the welcome screen.
@@ -59,42 +62,47 @@ impl Workspace {
         self.active_id().cloned().unwrap_or_else(|| HOME_SHELL.to_string())
     }
 
-    /// A shell for the session, started in `cwd`. When the shell ends, its panel goes away (`on_terminal_event`), with a
-    /// toast if it never started.
-    pub(super) fn new_shell_panel(&mut self, id: &str, cwd: PathBuf) -> ShellPanel {
+    /// A shell for the session, started in `cwd`. When the shell ends, its panel goes away, with a toast if it never started.
+    pub(super) fn new_shell_panel(&mut self, id: &str, cwd: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> ShellPanel {
         let (program, args) = self.shell.clone();
         let spec = SpawnSpec { program, args, cwd: Some(cwd), ..Default::default() };
         let (terminal, rx) = TerminalView::spawn(&spec);
-        ShellPanel { view: TerminalView::new(terminal, rx, shell_key(id)), open: true, height: SHELL_HEIGHT }
+        let view = cx.new(|cx| TerminalView::new(terminal, rx, cx));
+        let owner = id.to_string();
+        let sub = cx.subscribe_in(&view, window, move |ws: &mut Workspace, view, ev: &TerminalEvent, window, cx| {
+            if matches!(ev, TerminalEvent::Exited(_)) {
+                if let Some(err) = view.read(cx).start_error() {
+                    ws.toast(format!("Could not start the shell: {err}"), true, cx);
+                }
+                ws.shells.remove(&owner);
+                ws.focus_active(window, cx);
+                cx.notify();
+            }
+        });
+        ShellPanel { view, _sub: sub, open: true, height: SHELL_HEIGHT }
     }
 
-    fn focus_shell(&mut self) {
-        let owner = self.shell_owner();
-        if self.shells.get(&owner).is_some_and(|p| p.open) {
-            self.focus_terminal(&shell_key(&owner));
+    fn focus_shell(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(p) = self.shells.get(&self.shell_owner()).filter(|p| p.open) {
+            window.focus(&p.view.focus_handle(cx), cx);
         }
     }
 
     /// Move the keyboard between the Claude terminal and its open shell.
-    pub fn swap_focus(&mut self) {
-        let Some(id) = self.active_id().cloned() else { return };
-        if !self.shells.get(&id).is_some_and(|p| p.open) {
-            return;
-        }
-        if self.terminal_focused(&shell_key(&id)) {
-            self.focus_active();
+    pub fn swap_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(shell) = self.shells.get(&self.shell_owner()).filter(|p| p.open) else { return };
+        if shell.view.focus_handle(cx).is_focused(window) {
+            self.focus_active(window, cx);
         } else {
-            self.focus_shell();
+            self.focus_shell(window, cx);
         }
     }
 
-    /// The divider above the shell panel moved `dy` points since the drag began: follow it, keeping room for the terminal.
-    pub fn drag_shell(&mut self, dy: f32) {
-        let Some(d) = self.shell_drag else { return };
-        let window_h = self.window_size.1;
-        let height = (d.size - dy).clamp(SHELL_MIN, (window_h - 200.0).max(SHELL_MIN));
-        let owner = self.shell_owner();
-        if let Some(p) = self.shells.get_mut(&owner) {
+    /// The divider above the shell panel is being dragged: follow the pointer, keeping room for the terminal.
+    pub fn drag_shell(&mut self, y: f32, window_h: f32) {
+        let Some(d) = self.shell_drag.as_ref() else { return };
+        let height = (d.height + d.y - y).clamp(SHELL_MIN, (window_h - 200.0).max(SHELL_MIN));
+        if let Some(p) = self.shells.get_mut(&d.id) {
             p.height = height;
         }
     }
@@ -105,21 +113,23 @@ impl Workspace {
     }
 
     /// In editor mode the sidebar is hidden whatever the remembered setting, so asking for it leaves editor mode and shows it.
-    pub fn toggle_left(&mut self) {
+    pub fn toggle_left(&mut self, cx: &mut Context<Self>) {
         let editing = self.editing();
         let layout = &mut self.store.data.layout;
         layout.sidebar_visible = editing || !layout.sidebar_visible;
         self.editor_mode = false;
         self.store.mark_dirty();
+        cx.notify();
     }
 
-    pub fn toggle_right(&mut self) {
+    pub fn toggle_right(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let editing = self.editing();
         let layout = &mut self.store.data.layout;
         layout.right_hidden = !editing && !layout.right_hidden;
         self.editor_mode = false;
         self.store.mark_dirty();
-        self.focus_active();
+        self.focus_active(window, cx);
+        cx.notify();
     }
 
     /// GitHub is read and written in, so it gets a wider, resizable width.
@@ -142,11 +152,10 @@ impl Workspace {
         layout.right_gh_w.unwrap_or(RIGHT_GH_W).clamp(RIGHT_GH_MIN, room)
     }
 
-    /// The right sidebar's left edge moved `dx` points since the drag began: follow it, wider to the left.
-    pub fn drag_right(&mut self, dx: f32) {
-        let Some(d) = self.right_drag else { return };
-        let window_w = self.window_size.0;
-        let wanted = d.size - dx;
+    /// The right sidebar's left edge is being dragged: follow the pointer, wider to the left.
+    pub fn drag_right(&mut self, x: f32, window_w: f32) {
+        let Some(d) = self.right_drag.as_ref() else { return };
+        let wanted = d.width + d.x - x;
         let room = (window_w - 560.0).max(RIGHT_GH_MIN);
         let wide = self.right_wide();
         let layout = &mut self.store.data.layout;
@@ -164,11 +173,10 @@ impl Workspace {
         wanted.clamp(SIDEBAR_MIN, SIDEBAR_MAX.min((window_w - 560.0).max(SIDEBAR_MIN)))
     }
 
-    /// The left sidebar's right edge moved `dx` points since the drag began: follow it, wider to the right.
-    pub fn drag_left(&mut self, dx: f32) {
-        let Some(d) = self.left_drag else { return };
-        let window_w = self.window_size.0;
-        let wanted = d.size + dx;
+    /// The left sidebar's right edge is being dragged: follow the pointer, wider to the right.
+    pub fn drag_left(&mut self, x: f32, window_w: f32) {
+        let Some(d) = self.left_drag.as_ref() else { return };
+        let wanted = d.width + x - d.x;
         self.store.data.layout.left_w = Some(wanted.clamp(SIDEBAR_MIN, SIDEBAR_MAX.min((window_w - 560.0).max(SIDEBAR_MIN))));
         self.store.mark_dirty();
     }

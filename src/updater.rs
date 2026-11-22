@@ -1,4 +1,4 @@
-//! Auto-update via Velopack, fed by GitHub Releases (no Claudiu-operated server).
+//! Auto-update via Velopack, fed by GitHub Releases (no m4code-operated server).
 //!
 //! * Only active when the app was installed by the Velopack installer; dev builds and portable
 //!   copies without an install silently skip it.
@@ -8,11 +8,12 @@
 
 use std::time::Duration;
 
+use gpui::Context;
 use velopack::{UpdateCheck, UpdateInfo, UpdateManager, sources::GithubSource};
 
 use crate::app::Workspace;
 
-pub const DEFAULT_REPO: &str = "https://github.com/m4rocks/claudiu";
+pub const DEFAULT_REPO: &str = "https://github.com/m4rocks/m4code";
 
 #[derive(Default, Clone, Debug, PartialEq)]
 pub enum Status {
@@ -42,43 +43,47 @@ fn repo_url(ws: &Workspace) -> Option<String> {
 }
 
 /// Look for a newer release in the background, and again every six hours while the app stays open.
-pub fn check(ws: &mut Workspace) {
-    ws.rt.after(Duration::from_secs(6 * 3600), check);
+pub fn check(ws: &mut Workspace, cx: &mut Context<Workspace>) {
+    cx.spawn(async move |this, cx| {
+        cx.background_executor().timer(Duration::from_secs(6 * 3600)).await;
+        let _ = this.update(cx, check);
+    })
+    .detach();
     let Some(url) = repo_url(ws) else { return };
-    look(ws, url, false);
+    look(ws, url, false, cx);
 }
 
 /// The Check now button in Settings: one look, made even with background checks off, that says what it found.
-pub fn check_now(ws: &mut Workspace) {
+pub fn check_now(ws: &mut Workspace, cx: &mut Context<Workspace>) {
     let url = repo_url(ws).unwrap_or_else(|| DEFAULT_REPO.to_string());
-    look(ws, url, true);
+    look(ws, url, true, cx);
 }
 
-fn look(ws: &mut Workspace, url: String, asked: bool) {
+fn look(ws: &mut Workspace, url: String, asked: bool, cx: &mut Context<Workspace>) {
     // Once an update is downloading or downloaded, a re-check would only throw that away.
     let busy = match &ws.update.status {
         Status::Checking => Some(None),
         Status::Downloading => Some(Some("An update is downloading".to_string())),
-        Status::Ready { version } => Some(Some(format!("Claudiu {version} is ready. Restart to update."))),
+        Status::Ready { version } => Some(Some(format!("m4code {version} is ready. Restart to update."))),
         _ => None,
     };
     if let Some(said) = busy {
         if let Some(text) = said.filter(|_| asked) {
-            ws.toast(text, false);
+            ws.toast(text, false, cx);
         }
         return;
     }
     let previous = std::mem::replace(&mut ws.update.status, Status::Checking);
-    ws.rt.spawn(
+    ws.in_background(
         move || {
             let manager = UpdateManager::new(GithubSource::new(&url, None, false), None, None).map_err(|e| match e {
-                velopack::Error::NotInstalled(_) => "updates work only in a copy installed with the Claudiu installer".to_string(),
+                velopack::Error::NotInstalled(_) => "updates work only in a copy installed with the m4code installer".to_string(),
                 e => e.to_string(),
             })?;
             let check = manager.check_for_updates().map_err(|e| e.to_string())?;
             Ok::<_, String>((manager, check))
         },
-        move |ws: &mut Workspace, result| {
+        move |ws, result, cx| {
             let found = match result {
                 Ok((manager, UpdateCheck::UpdateAvailable(info))) => {
                     let version = info.TargetFullRelease.Version.clone();
@@ -93,9 +98,10 @@ fn look(ws: &mut Workspace, url: String, asked: bool) {
             let (status, said) = outcome(previous, found, asked);
             ws.update.status = status;
             if let Some((text, error)) = said {
-                ws.toast(text, error);
+                ws.toast(text, error, cx);
             }
         },
+        cx,
     );
 }
 
@@ -109,8 +115,8 @@ enum Found {
 /// The status a check leaves behind, and, when the user asked for the check, what to tell them (text, is an error).
 fn outcome(previous: Status, found: Result<Found, String>, asked: bool) -> (Status, Option<(String, bool)>) {
     let (status, said) = match found {
-        Ok(Found::Newer(version)) => (Status::Available { version: version.clone() }, (format!("Claudiu {version} is available"), false)),
-        Ok(Found::Latest(installed)) => (Status::UpToDate, (format!("Claudiu {installed} is the latest version"), false)),
+        Ok(Found::Newer(version)) => (Status::Available { version: version.clone() }, (format!("m4code {version} is available"), false)),
+        Ok(Found::Latest(installed)) => (Status::UpToDate, (format!("m4code {installed} is the latest version"), false)),
         // A failed re-check (e.g. offline) keeps an update already offered.
         Err(e) if matches!(previous, Status::Available { .. }) => (previous, (format!("Could not check for updates: {e}"), true)),
         // Not installed via Velopack (dev build / portable): nothing to do, and nothing to show unless asked.
@@ -120,30 +126,31 @@ fn outcome(previous: Status, found: Result<Found, String>, asked: bool) -> (Stat
 }
 
 /// Download (first click) then apply and restart (second click).
-pub fn install(ws: &mut Workspace) {
+pub fn install(ws: &mut Workspace, cx: &mut Context<Workspace>) {
     let (Some(manager), Some(info)) = (ws.update.manager.clone(), ws.update.info.clone()) else { return };
     match ws.update.status.clone() {
         Status::Available { version } => {
             ws.update.status = Status::Downloading;
-            ws.rt.spawn(
+            ws.in_background(
                 move || manager.download_updates(&info, None).map_err(|e| e.to_string()),
-                move |ws: &mut Workspace, result| {
+                move |ws, result, cx| {
                     ws.update.status = match result {
                         Ok(()) => Status::Ready { version },
                         Err(e) => Status::Error(e),
                     };
                     if let Status::Error(e) = &ws.update.status {
                         let msg = format!("Update failed: {e}");
-                        ws.toast(msg, true);
+                        ws.toast(msg, true, cx);
                     }
                 },
+                cx,
             );
         }
         Status::Ready { .. } => {
-            // Persist state, then hand over to the updater; it restarts Claudiu into the new version.
-            ws.finalize();
+            // Persist state, then hand over to the updater; it restarts m4code into the new version.
+            ws.finalize(cx);
             if let Err(e) = manager.apply_updates_and_restart(&info) {
-                ws.toast(format!("Could not apply update: {e}"), true);
+                ws.toast(format!("Could not apply update: {e}"), true, cx);
             }
         }
         _ => {}
@@ -158,8 +165,8 @@ mod tests {
     fn only_a_check_the_user_asked_for_says_what_it_found() {
         let available = Status::Available { version: "9.9.9".into() };
         assert_eq!(outcome(Status::Idle, Ok(Found::Newer("9.9.9".into())), false), (available.clone(), None));
-        assert_eq!(outcome(Status::Idle, Ok(Found::Newer("9.9.9".into())), true), (available, Some(("Claudiu 9.9.9 is available".into(), false))));
-        let latest = "Claudiu 1.2.3 is the latest version".to_string();
+        assert_eq!(outcome(Status::Idle, Ok(Found::Newer("9.9.9".into())), true), (available, Some(("m4code 9.9.9 is available".into(), false))));
+        let latest = "m4code 1.2.3 is the latest version".to_string();
         assert_eq!(outcome(Status::Idle, Ok(Found::Latest("1.2.3".into())), true), (Status::UpToDate, Some((latest, false))));
         assert_eq!(outcome(Status::Idle, Err("offline".into()), false), (Status::Idle, None));
         assert_eq!(outcome(Status::Idle, Err("offline".into()), true), (Status::Idle, Some(("Could not check for updates: offline".into(), true))));

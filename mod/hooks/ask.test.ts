@@ -6,7 +6,7 @@ const usage = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, c
 
 function setup($: any, on: any, request: () => string) {
   const clock = mock.clock(on)
-  mock.env(on, { CLAUDIU_ASK_FILE: 'ask/s.json' })
+  mock.env(on, { M4CODE_ASK_FILE: 'ask/s.json' })
   const writes: any[] = []
   const asked: any[] = []
   on('fs.read', () => ({ value: request() }))

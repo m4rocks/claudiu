@@ -1,9 +1,9 @@
 [package]
-name = "claudiu"
-version = "0.9.23"
+name = "m4code"
+version = "0.10.0"
 edition = "2024"
-description = "A native workspace for Claude Code sessions: real PTYs, projects, and session history"
-repository = "https://github.com/m4rocks/claudiu"
+description = "A native desktop workspace for coding agents: Claude Code, Codex, OpenCode and Antigravity sessions, projects and history"
+repository = "https://github.com/m4rocks/m4code"
 publish = false
 
 [dependencies]
@@ -14,47 +14,45 @@ dunce = "1.0.5"
 futures = "0.3.34"
 # A system notification when a session finishes while the window is in the background (`platform::notify`).
 notify-rust = "4.19.0"
-# Editor mode's file tree follows its folder on disk.
-notify = "8.2.0"
 git2 = { version = "0.21.0", default-features = false }
-# The types editor mode's language servers (`lsp`) speak.
-lsp-types = "0.97.0"
-# The UI: views, layout, text, springs and the native window. Pre-release, so pinned to a commit of its `dev` branch.
-rune = { git = "https://github.com/anomalyco/rune", rev = "a7f276c3630f85a06a0230295da4d2bd172d8d3b", features = ["native-file-dialog"] }
-rune-kit = { git = "https://github.com/anomalyco/rune", rev = "a7f276c3630f85a06a0230295da4d2bd172d8d3b", features = ["markdown"] }
+gpui = { package = "gpui-pre", version = "=0.3.8" }
+gpui-kit = { version = "0.7.1", default-features = false, features = [
+    "component",
+    "assets",
+    # Editor mode's syntax highlighting; each grammar adds to the binary, so only these.
+    "tree-sitter-bash",
+    "tree-sitter-css",
+    "tree-sitter-html",
+    "tree-sitter-javascript",
+    "tree-sitter-markdown",
+    "tree-sitter-markdown-inline",
+    "tree-sitter-rust",
+    "tree-sitter-toml",
+    "tree-sitter-tsx",
+    "tree-sitter-typescript",
+    "tree-sitter-yaml",
+] }
+raw-window-handle = "0.6"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.151", features = ["preserve_order"] }
-# File links (OSC 8) a program prints in the terminal.
+# The same versions gpui-kit's editor uses for its LSP hooks; editor mode's language servers (`lsp`) speak through them.
+lsp-types = "0.97.0"
 url = "2.5.8"
+# Editor mode's file tree follows its folder on disk; already in the build through gpui-kit.
+notify = "8.2.0"
 image = { version = "0.25", default-features = false, features = ["png", "bmp", "jpeg", "gif", "webp"] }
 ureq = "3.4.2"
 time = { version = "0.3.55", features = ["parsing"] }
-# Editor mode's syntax colours: the grammars of the languages `files::language` names, and their highlight queries.
-tree-sitter = "0.26"
-tree-sitter-highlight = "0.26"
-tree-sitter-bash = "0.23.3"
-tree-sitter-css = "0.23.2"
+# Gleam is not among gpui-kit's grammars; registered in `app::editor_mode::register_languages`.
 tree-sitter-gleam = "1.0.0"
-tree-sitter-html = "0.23.2"
-tree-sitter-javascript = "0.23.1"
-tree-sitter-json = "0.24.8"
-tree-sitter-md = "0.5.4"
-tree-sitter-rust = "0.24.2"
-tree-sitter-toml-ng = "0.7.0"
-tree-sitter-typescript = "0.23.2"
-tree-sitter-yaml = "0.7.2"
-# Where the editor may wrap a long line (Unicode line breaking) and never split a character the user sees, as main's
-# GPUI editor wrapped; main's build had both.
-unicode-linebreak = "0.1.5"
-unicode-segmentation = "1.13.3"
-# How many cells a character takes in the editor (wide CJK and emoji take two).
-unicode-width = "0.2.2"
 uuid = { version = "1.27.0", features = ["v4"] }
 # 1.2.161 requires zip ^8.6. This release is the first published one that allows zip 9.
 velopack = "1.3.39-g8d2844f"
 which = "8.0.6"
 
 [dev-dependencies]
+gpui = { package = "gpui-pre", version = "=0.3.8", features = ["test-support"] }
+gpui-kit = { version = "0.7.1", default-features = false, features = ["component", "test-support"] }
 tempfile = "3.27.0"
 
 [build-dependencies]
@@ -74,7 +72,7 @@ libc = "0.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
-objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSMenu", "NSMenuItem"] }
+objc2-app-kit = { version = "0.3", features = ["NSApplication"] }
 
 [profile.dev]
 debug = "line-tables-only"
@@ -82,5 +80,20 @@ incremental = true
 
 [profile.dev.package."*"]
 debug = false
-# Rune lays out and draws on the UI thread; unoptimised dependencies make a busy session visibly laggy.
+# gpui lays out and paints every element on every frame; unoptimised it makes a busy session visibly laggy.
 opt-level = 2
+
+# gpui-base 0.7.1 drew an editor's `set_scroll_offset` unclamped for one frame, so a wheel glide past either end
+# overshot and jumped back. Patched in `vendor/gpui-base` (`clamp_deferred_scroll_top` in src/input/base/element.rs);
+# drop this once gpui-kit releases the fix and has an action to open the completion menu by hand. The patch adds
+# `TriggerCompletion` (Ctrl+Space) and has a menu opened that way follow its word as it grows
+# (`handle_completion_trigger` in src/input/editor/lsp/completions.rs). It also makes `has_multiple_cursors`, `select_range`
+# and `replace_range` public, which the line actions (src/app/line_actions.rs) edit through, and makes a drag that began
+# with a double click select whole words (`snap_to_word_edge` in src/input/base/selection.rs). `SelectableText::runs` lets
+# a card's text keep its styling while selectable.
+[patch.crates-io]
+gpui-base = { path = "vendor/gpui-base" }
+
+[workspace]
+# Not a member, so `profile.dev.package."*"` still builds it optimised like the other dependencies.
+exclude = ["vendor"]

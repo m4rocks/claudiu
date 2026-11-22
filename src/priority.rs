@@ -27,7 +27,7 @@ pub fn raise_claude_priority(claude_pids: &[u32]) {
     }
 }
 
-/// Claudiu started from a session of an older version can have inherited a lowered priority; it runs at normal
+/// m4code started from a session of an older version can have inherited a lowered priority; it runs at normal
 /// priority whatever started it.
 #[cfg(windows)]
 pub fn restore_own_priority() {

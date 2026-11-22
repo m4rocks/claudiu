@@ -1,7 +1,17 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-test('applies the settings Claudiu asks for, once each, and not the ones sent before it started', async ($, on) => {
-  mock.env(on, { CLAUDIU_CTL_FILE: 'ctl/me.json', CLAUDIU_USAGE_DIR: 'usage' })
+test('m4code managed sessions turn off native automatic compaction', async ($, on) => {
+  mock.env(on, { M4CODE_MANAGED_COMPACTION: '1' })
+  mock.clock(on)
+  const changes: any[] = []
+  on('config.set', (_$, e) => { changes.push([e.key, e.value]); return { value: e.value } })
+  on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+  expect(changes).toEqual([['autoCompact', false]])
+})
+
+test('applies the settings m4code asks for, once each, and not the ones sent before it started', async ($, on) => {
+  mock.env(on, { M4CODE_CTL_FILE: 'ctl/me.json', M4CODE_USAGE_DIR: 'usage' })
   const clock = mock.clock(on)
   let file = JSON.stringify({ cmds: [{ seq: 5, key: 'advisor', value: 'sonnet' }] }) // from an earlier run
   const sets: unknown[] = []
@@ -37,7 +47,7 @@ test('applies the settings Claudiu asks for, once each, and not the ones sent be
       { seq: 6, key: 'auto_compact', value: false },
       { seq: 7, key: 'advisor', value: 'opus' },
       { seq: 8, key: 'advisor', value: 'rm -rf /' }, // not a model name
-      { seq: 9, key: 'theme', value: 'light' }, // not a setting Claudiu sets
+      { seq: 9, key: 'theme', value: 'light' }, // not a setting m4code sets
       { seq: 10, key: 'precompute_compact', value: false },
     ],
   })
@@ -54,8 +64,8 @@ test('applies the settings Claudiu asks for, once each, and not the ones sent be
   expect(sets.length + ran.length).toBe(3) // handled once
 })
 
-test('sends a message Claudiu asks for as the person’s own words, once', async ($, on) => {
-  mock.env(on, { CLAUDIU_CTL_FILE: 'ctl/me.json', CLAUDIU_USAGE_DIR: 'usage' })
+test('sends a message m4code asks for as the person’s own words, once', async ($, on) => {
+  mock.env(on, { M4CODE_CTL_FILE: 'ctl/me.json', M4CODE_USAGE_DIR: 'usage' })
   const clock = mock.clock(on)
   let file = JSON.stringify({ cmds: [{ seq: 1, key: 'prompt', value: 'from an earlier run' }] })
   const sent: unknown[] = []

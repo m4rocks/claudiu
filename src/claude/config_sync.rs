@@ -1,7 +1,7 @@
 //! One Claude Code configuration across the main account and every alt account, kept equal in both directions.
 //!
 //! Each account has its own config folder, so the same setting exists once per account. A setting changed in any
-//! account (or outside Claudiu) is copied to the others. Nothing is linked: Claude Code saves these files by replacing
+//! account (or outside m4code) is copied to the others. Nothing is linked: Claude Code saves these files by replacing
 //! them, which breaks a link and lets the copies drift.
 //!
 //! "Changed" means different from the value every account agreed on last time (`State`), not newer: Claude Code
@@ -152,7 +152,7 @@ fn pick<T>(held: &[Option<Held<T>>], agreed: Option<u64>) -> Option<usize> {
 }
 
 /// Copy the winning file over the others. A file is written beside its target and renamed over it, which replaces the
-/// directory entry and never writes through a link left by an earlier Claudiu.
+/// directory entry and never writes through a link left by an earlier m4code.
 fn sync_files(paths: &[PathBuf], key: &str, state: &mut State) -> io::Result<()> {
     let held: Vec<Option<Held<Vec<u8>>>> = paths
         .iter()
@@ -169,7 +169,7 @@ fn sync_files(paths: &[PathBuf], key: &str, state: &mut State) -> io::Result<()>
         if have.as_ref().is_some_and(|h| h.print == source.print) {
             continue;
         }
-        let tmp = path.with_extension("claudiu-tmp");
+        let tmp = path.with_extension("m4code-tmp");
         let written = fs::write(&tmp, &source.value).and_then(|()| fs::rename(&tmp, path));
         if written.is_err() {
             let _ = fs::remove_file(&tmp);

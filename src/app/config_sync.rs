@@ -19,9 +19,9 @@ pub struct Runner {
 impl Workspace {
     /// Where each account keeps its files. An account with a running session has its `.claude.json` left alone,
     /// because Claude Code rewrites that file from memory.
-    fn account_files(&self) -> Vec<Files> {
+    fn account_files(&self, cx: &App) -> Vec<Files> {
         let busy = |account: &Account| {
-            self.live.iter().any(|l| l.view.is_running() && self.store.session_account(&l.id).is_some_and(|a| a.id == account.id))
+            self.live.iter().any(|l| l.view.is_running(cx) && self.store.session_account(&l.id).is_some_and(|a| a.id == account.id))
         };
         self.store
             .data
@@ -34,35 +34,35 @@ impl Workspace {
             .collect()
     }
 
-    pub(super) fn sync_configs(&mut self) {
-        let accounts = self.account_files();
+    pub(super) fn sync_configs(&mut self, cx: &mut Context<Self>) {
+        let accounts = self.account_files(cx);
         if accounts.len() < 2 || self.config_sync.running || self.config_sync.last_try.is_some_and(|t| t.elapsed() < EVERY) {
             return;
         }
         self.config_sync.running = true;
         self.config_sync.last_try = Some(Instant::now());
-        // Nothing is shown unless it fails, and then the toast redraws.
-        self.rt.spawn_quietly(
-            move || { sync::sync(&accounts, &sync::state_path()) },
-            move |ws: &mut Workspace, result| {
+        cx.spawn(async move |this, cx| {
+            let result = cx.background_executor().spawn(async move { sync::sync(&accounts, &sync::state_path()) }).await;
+            let _ = this.update(cx, |ws, cx| {
                 ws.config_sync.running = false;
-                ws.tell_sync_failure(result);
-            },
-        );
+                ws.tell_sync_failure(result, cx);
+            });
+        })
+        .detach();
     }
 
     /// Before a session starts, so it begins with what the other accounts changed a moment ago.
-    pub(super) fn sync_configs_now(&mut self) {
-        let accounts = self.account_files();
+    pub(super) fn sync_configs_now(&mut self, cx: &mut Context<Self>) {
+        let accounts = self.account_files(cx);
         if accounts.len() >= 2 {
             let result = sync::sync(&accounts, &sync::state_path());
-            self.tell_sync_failure(result);
+            self.tell_sync_failure(result, cx);
         }
     }
 
-    fn tell_sync_failure(&mut self, result: std::io::Result<()>) {
+    fn tell_sync_failure(&mut self, result: std::io::Result<()>, cx: &mut Context<Self>) {
         if result.is_err() && !std::mem::replace(&mut self.config_sync.told, true) {
-            self.toast("Couldn't keep the Claude Code settings the same in every account. Will keep trying.", true);
+            self.toast("Couldn't keep the Claude Code settings the same in every account. Will keep trying.", true, cx);
         }
     }
 }

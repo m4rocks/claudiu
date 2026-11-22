@@ -1,24 +1,23 @@
 //! Switching a running session into another working tree of its repository, the way a session switches branches.
-//! The process ends and `claude --resume` continues the same conversation in the target folder; the Claudiu session
+//! The process ends and `claude --resume` continues the same conversation in the target folder; the m4code session
 //! (its title, cards, place in the sidebar) is the same record, whose folder is now the target's. A new worktree is
 //! made with git first (`worktree::add`).
 //!
 //! A session that Claude Code itself put in a worktree (`claude --worktree`) has that worktree recorded in its
 //! transcript, and Claude Code restores it on every resume, which wins over the folder `claude` is started in. So
-//! before such a session moves, Claudiu appends the line that Claude Code's own ExitWorktree writes (see
+//! before such a session moves, m4code appends the line that Claude Code's own ExitWorktree writes (see
 //! `claude::clear_recorded_worktree`).
 
 use std::path::Path;
-use std::time::Instant;
 
 use super::*;
 use crate::git::GitInfo;
 use crate::git::worktree::{self, Base};
-use crate::terminal::view::Handover;
+use crate::thread::Handover;
 
 const BUSY: &str = "Wait until Claude finishes, then switch.";
 
-/// What the skeleton says while the session moves to `folder`.
+/// What the waiting screen says while the session moves to `folder`.
 fn switching_message(git: &GitInfo, folder: &Path) -> String {
     match folder.file_name() {
         Some(name) if !git.is_main(folder) => format!("Switching to {}…", name.to_string_lossy()),
@@ -65,45 +64,47 @@ fn clear_worktree_record(transcript: &Path, claude_id: &str) -> Result<(), Strin
 impl Workspace {
     /// Switch the shown session into `folder`, a working tree of its project. `asked` is set once the user has
     /// confirmed leaving uncommitted files behind.
-    pub(super) fn switch_shown(&mut self, folder: PathBuf, base: Base, asked: bool) {
+    pub(super) fn switch_shown(&mut self, folder: PathBuf, base: Base, asked: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(id) = self.active_id().cloned() else { return };
-        self.switch_session(id, folder, base, asked);
+        self.switch_session(id, folder, base, asked, window, cx);
     }
 
     /// Switch session `id` (shown or not) into `folder`.
-    pub(super) fn switch_session(&mut self, id: Id, folder: PathBuf, base: Base, asked: bool) {
+    pub(super) fn switch_session(&mut self, id: Id, folder: PathBuf, base: Base, asked: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(rec) = self.store.session(&id).cloned() else { return };
         let Some(claude_id) = rec.claude_id().map(str::to_string) else { return };
         let Some(git) = rec.project_id.as_ref().and_then(|p| self.store.project(p)).and_then(|p| p.git.clone()) else { return };
-        let Some((loading, working)) = self.live_view(&id).filter(|v| v.is_running()).map(|v| (v.is_loading(), v.is_working())) else {
-            self.toast("Resume the session to switch.", false);
+        let Some(view) = self.live_view(&id).filter(|v| v.is_running(cx)).cloned() else {
+            self.toast("Resume the session to switch.", false, cx);
             return;
         };
         // The skeleton is up while a switch readies its target, so this also refuses a second switch.
+        let loading = view.is_loading(cx);
         if loading {
-            self.toast(BUSY, false);
+            self.toast(BUSY, false, cx);
             return;
         }
-        let quiet = !working;
+        let quiet = !view.is_working(cx);
         let from = git.folder_of(&rec.cwd).unwrap_or(&rec.cwd).to_path_buf();
         // Looking at the session takes a moment (git, the registry, the transcript): the skeleton answers the click at once.
-        self.set_handover(&id, Some(Handover { message: switching_message(&git, &folder), since: Instant::now() }));
-        let looked = from.clone();
-        self.rt.spawn(
-            move || inspect(&claude_id, &looked, quiet),
-            move |ws: &mut Workspace, checked| ws.after_inspection(id, folder, base, from, asked, checked),
-        );
+        self.set_handover(&id, Some(Handover { message: switching_message(&git, &folder) }), cx);
+        cx.spawn_in(window, async move |this, cx| {
+            let looked = from.clone();
+            let checked = cx.background_executor().spawn(async move { inspect(&claude_id, &looked, quiet) }).await;
+            let _ = this.update_in(cx, |ws, window, cx| ws.after_inspection(id, folder, base, from, asked, checked, window, cx));
+        })
+        .detach();
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn after_inspection(&mut self, id: Id, folder: PathBuf, base: Base, from: PathBuf, asked: bool, checked: Checked) {
+    fn after_inspection(&mut self, id: Id, folder: PathBuf, base: Base, from: PathBuf, asked: bool, checked: Checked, window: &mut Window, cx: &mut Context<Self>) {
         if !checked.idle {
-            self.set_handover(&id, None);
-            self.toast(BUSY, false);
+            self.set_handover(&id, None, cx);
+            self.toast(BUSY, false, cx);
             return;
         }
         if checked.uncommitted > 0 && !asked {
-            self.set_handover(&id, None);
+            self.set_handover(&id, None, cx);
             let files = if checked.uncommitted == 1 { "1 uncommitted file stays".to_string() } else { format!("{} uncommitted files stay", checked.uncommitted) };
             let name = from.file_name().map_or_else(|| from.to_string_lossy().into_owned(), |n| n.to_string_lossy().into_owned());
             self.modal = Some(Modal::Confirm {
@@ -115,64 +116,91 @@ impl Workspace {
             });
             return;
         }
-        self.perform_switch(id, folder, base, checked.transcript);
+        self.perform_switch(id, folder, base, checked.transcript, window, cx);
     }
 
     /// `transcript` is None for a session that has no conversation yet: it starts over in the folder, as a new session.
-    fn perform_switch(&mut self, id: Id, folder: PathBuf, base: Base, transcript: Option<PathBuf>) {
+    fn perform_switch(&mut self, id: Id, folder: PathBuf, base: Base, transcript: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(rec) = self.store.session(&id) else { return };
         let Some(claude_id) = rec.claude_id().map(str::to_string) else { return };
         let Some(git) = rec.project_id.as_ref().and_then(|p| self.store.project(p)).and_then(|p| p.git.clone()) else { return };
         let main = git.main_checkout().to_path_buf();
         let message = switching_message(&git, &folder);
         let fresh = transcript.is_none();
-        let (target, main_checkout) = (folder.clone(), main.clone());
-        self.rt.spawn(
-            move || prepare(&main_checkout, &target, base, transcript.as_deref(), &claude_id),
-            move |ws: &mut Workspace, ready| match ready {
-                Ok(()) => ws.move_into(&id, folder, message, fresh),
+        cx.spawn_in(window, async move |this, cx| {
+            let (target, main_checkout) = (folder.clone(), main.clone());
+            let ready = cx.background_executor().spawn(async move { prepare(&main_checkout, &target, base, transcript.as_deref(), &claude_id) }).await;
+            let _ = this.update_in(cx, |ws, window, cx| match ready {
+                Ok(()) => ws.move_into(&id, folder, message, fresh, window, cx),
                 Err(why) => {
-                    ws.set_handover(&id, None);
-                    ws.toast(format!("Couldn't switch: {why}."), true);
+                    ws.set_handover(&id, None, cx);
+                    ws.toast(format!("Couldn't switch: {why}."), true, cx);
                 }
-            },
-        );
+            });
+        })
+        .detach();
     }
 
     /// The old process ends and a new one resumes the conversation in `folder`, as a restart does; `fresh` when there is
     /// no conversation to resume.
-    fn move_into(&mut self, id: &str, folder: PathBuf, message: String, fresh: bool) {
+    fn move_into(&mut self, id: &str, folder: PathBuf, message: String, fresh: bool, window: &mut Window, cx: &mut Context<Self>) {
         // Closed while the target was readied.
-        if !self.is_running(id) {
+        if !self.is_running(id, cx) {
             return;
         }
         let was_shown = self.active_id().is_some_and(|a| a == id);
         let shell = self.shells.remove(id).map(|p| (p.open, p.height));
+        self.repoint_tabs(id, &folder, window, cx);
         if let Some(r) = self.store.session_mut(id) {
             r.cwd = folder;
         }
         // Replacing the view ends the old process.
         if fresh {
-            self.relaunch_empty(id);
+            self.relaunch_empty(id, window, cx);
         } else {
-            self.relaunch(id);
+            self.relaunch(id, window, cx);
         }
-        self.set_handover(id, Some(Handover { message, since: Instant::now() }));
-        self.restore_shell(id, shell);
+        self.set_handover(id, Some(Handover { message }), cx);
+        self.restore_shell(id, shell, window, cx);
         if was_shown {
-            self.show_session(id);
+            self.show_session(id, window, cx);
         }
         self.store.refresh_git();
     }
 
     /// A shell in the session's folder where there was one, open and as tall as before.
-    fn restore_shell(&mut self, id: &str, shell: Option<(bool, f32)>) {
+    fn restore_shell(&mut self, id: &str, shell: Option<(bool, f32)>, window: &mut Window, cx: &mut Context<Self>) {
         let Some((open, height)) = shell else { return };
         let Some(rec) = self.store.session(id) else { return };
         let cwd = if rec.cwd.is_dir() { rec.cwd.clone() } else { platform::home_dir().unwrap_or(rec.cwd.clone()) };
-        let mut panel = self.new_shell_panel(id, cwd);
+        let mut panel = self.new_shell_panel(id, cwd, window, cx);
         (panel.open, panel.height) = (open, height);
         self.shells.insert(id.to_string(), panel);
+    }
+
+    /// Open files move to the same path in `folder` when it has the file; a file with unsaved edits, or one the folder
+    /// lacks, stays on its old path and a toast says how many.
+    fn repoint_tabs(&mut self, id: &str, folder: &Path, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(pane) = self.panes.get_mut(id).filter(|p| folder.is_dir() && !p.root.as_os_str().is_empty()) else { return };
+        let folder = dunce::canonicalize(folder).unwrap_or_else(|_| folder.to_path_buf());
+        let (mut moved, mut stayed) = (vec![], 0);
+        for tab in &mut pane.tabs {
+            let there = tab.path.strip_prefix(&pane.root).ok().map(|rel| folder.join(rel)).filter(|p| p.is_file());
+            match there {
+                Some(path) if !tab.dirty => {
+                    let old = std::mem::replace(&mut tab.path, path.clone());
+                    moved.push((old, path));
+                }
+                _ => stayed += 1,
+            }
+        }
+        for (_, path) in moved {
+            self.reload_tab(&id.to_string(), path, window, cx);
+        }
+        if stayed > 0 {
+            let files = if stayed == 1 { "1 open file stays".to_string() } else { format!("{stayed} open files stay") };
+            self.toast(format!("{files} on its old path: it has unsaved edits, or the new folder lacks it."), false, cx);
+        }
     }
 }
 
