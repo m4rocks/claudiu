@@ -402,6 +402,30 @@ impl ThreadView {
         block.into_any_element()
     }
 
+    /// The calls in this conversation that run one of the harness's own subagents, oldest first.
+    pub fn native_subagents(&self) -> Vec<&ToolCall> {
+        self.thread.entries.iter().filter_map(|e| match e {
+            Entry::Tool(call) if call.subagent.is_some() => Some(call),
+            _ => None,
+        }).collect()
+    }
+
+    /// Show call `id`'s step: unfold it and the run of steps it is in, and scroll the conversation to it.
+    pub fn reveal_step(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(ix) = self.thread.tool_at(id) else { return };
+        self.expanded_tools.insert(id.to_string());
+        let start = match tool_run(&self.groupable(), ix) {
+            Some(run) => {
+                self.expanded_tools.insert(format!("run:{}", run.start));
+                run.start
+            }
+            None => ix,
+        };
+        self.remeasure(start);
+        self.list.scroll_to_reveal_item(ix);
+        cx.notify();
+    }
+
     /// Per entry: whether it is a step that folds into a run with its neighbours: a thought, a tool call or a subagent's
     /// report. A call with an inline card stays on its own, so the card is never hidden.
     pub(super) fn groupable(&self) -> Vec<bool> {

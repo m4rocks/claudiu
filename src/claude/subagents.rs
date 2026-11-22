@@ -323,6 +323,17 @@ pub fn type_name(agent: Agent, model: &str) -> Option<String> {
     Some(name)
 }
 
+/// The harness a native subagent of `agent_type` runs in: the provider of one of m4code's own types
+/// (`m4code:codex-…`), else the parent's harness, whose own agent it is.
+pub fn harness_of_type(agent_type: &str, parent: crate::harness::Harness) -> crate::harness::Harness {
+    let Some(name) = agent_type.strip_prefix("m4code:") else { return parent };
+    Agent::ALL
+        .into_iter()
+        .find(|agent| name.strip_prefix(agent.key()).is_some_and(|rest| rest.starts_with('-')))
+        .and_then(|agent| crate::harness::Harness::ALL.into_iter().find(|h| h.agent() == Some(agent)))
+        .unwrap_or(parent)
+}
+
 /// The agent types of the models switched on. A model whose type name an earlier one took gives none.
 pub fn agent_types(agent: Agent, models: &[String]) -> Vec<AgentType> {
     let mut types: Vec<AgentType> = vec![];
@@ -385,6 +396,16 @@ impl CustomSubagents {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_native_subagent_runs_in_its_m4code_provider_else_in_the_parents_harness() {
+        use crate::harness::Harness;
+        assert_eq!(harness_of_type("m4code:codex-gpt-6-1-sol", Harness::Claude), Harness::Codex);
+        assert_eq!(harness_of_type("m4code:opencode-ollama-qwen3-8b", Harness::Claude), Harness::OpenCode);
+        assert_eq!(harness_of_type("general-purpose", Harness::Claude), Harness::Claude);
+        assert_eq!(harness_of_type("explore", Harness::OpenCode), Harness::OpenCode, "a harness's own type runs in that harness");
+        assert_eq!(harness_of_type("m4code:codexy", Harness::Claude), Harness::Claude, "only a whole provider key counts");
+    }
 
     #[test]
     fn missing_subagent_settings_enable_edits_except_for_antigravity() {

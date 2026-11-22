@@ -42,6 +42,18 @@ impl SubagentState {
         }
     }
 
+    /// A native subagent's state, from the parent's tool call that runs it and whether the parent's turn goes on.
+    pub fn of_step(status: crate::harness::thread::ToolStatus, parent_working: bool) -> Self {
+        use crate::harness::thread::ToolStatus;
+        match status {
+            ToolStatus::Pending | ToolStatus::Running if parent_working => Self::Running,
+            // A step the parent's interrupted turn left behind is not running any more.
+            ToolStatus::Pending | ToolStatus::Running => Self::Stopped,
+            ToolStatus::Done => Self::Completed,
+            ToolStatus::Failed => Self::Failed,
+        }
+    }
+
     /// Its turn is over and nothing waits on the user, so the sidebar folds it away.
     pub fn finished(self) -> bool {
         matches!(self, Self::Completed | Self::Failed | Self::Stopped)
@@ -267,6 +279,17 @@ impl Workspace {
 #[cfg(test)]
 mod tests {
     use super::SubagentState::*;
+
+    #[test]
+    fn a_native_subagent_runs_only_while_its_parents_turn_does() {
+        use super::SubagentState;
+        use crate::harness::thread::ToolStatus;
+        assert_eq!(SubagentState::of_step(ToolStatus::Running, true), Running);
+        assert_eq!(SubagentState::of_step(ToolStatus::Pending, true), Running);
+        assert_eq!(SubagentState::of_step(ToolStatus::Running, false), Stopped, "an interrupted turn left it behind");
+        assert_eq!(SubagentState::of_step(ToolStatus::Done, false), Completed);
+        assert_eq!(SubagentState::of_step(ToolStatus::Failed, true), Failed);
+    }
 
     #[test]
     fn only_subagents_with_nothing_left_to_do_fold_away() {

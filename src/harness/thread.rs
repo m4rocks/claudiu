@@ -55,6 +55,9 @@ pub struct ToolCall {
     pub content: Vec<ToolContent>,
     /// The files it acts on, with a line when the agent named one.
     pub locations: Vec<(PathBuf, Option<u32>)>,
+    /// The agent type, when the call runs one of the harness's own subagents (`subagent_type`).
+    #[serde(default)]
+    pub subagent: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -246,7 +249,7 @@ impl Thread {
         })
     }
 
-    fn tool_at(&self, id: &str) -> Option<usize> {
+    pub fn tool_at(&self, id: &str) -> Option<usize> {
         self.entries.iter().position(|e| matches!(e, Entry::Tool(call) if call.id == id))
     }
 
@@ -377,6 +380,20 @@ fn merge_tool(call: &mut ToolCall, update: &Value) {
             .filter_map(|l| Some((PathBuf::from(l["path"].as_str()?), l["line"].as_u64().map(|n| n as u32))))
             .collect();
     }
+    if let Some(agent_type) = subagent_type(update) {
+        call.subagent = Some(agent_type);
+    }
+}
+
+/// The agent type a tool call starts, when it starts one of the harness's own subagents: Claude Code's Agent tool and
+/// OpenCode's task tool name it in `subagent_type`. Claude Code leaves it out for its general-purpose agent; m4code's
+/// bridge gives only that tool the `think` kind together with a description and a prompt.
+fn subagent_type(update: &Value) -> Option<String> {
+    let input = &update["rawInput"];
+    if let Some(agent_type) = input["subagent_type"].as_str().filter(|t| !t.is_empty()) {
+        return Some(agent_type.to_string());
+    }
+    (update["kind"] == "think" && input["description"].is_string() && input["prompt"].is_string()).then(|| "general-purpose".to_string())
 }
 
 fn tool_content(item: &Value) -> Option<ToolContent> {
@@ -528,6 +545,19 @@ mod tests {
     }
 
     #[test]
+    fn a_call_that_starts_a_subagent_names_its_type_and_others_do_not() {
+        let t = thread(&[
+            json!({"sessionUpdate": "tool_call", "toolCallId": "a", "title": "Review", "kind": "think", "rawInput": {"description": "Review", "prompt": "go", "subagent_type": "m4code:codex-gpt-6"}}),
+            json!({"sessionUpdate": "tool_call", "toolCallId": "b", "title": "Look", "kind": "think", "rawInput": {"description": "Look", "prompt": "go"}}),
+            json!({"sessionUpdate": "tool_call", "toolCallId": "c", "title": "Read", "kind": "read", "rawInput": {"file_path": "a.rs"}}),
+            json!({"sessionUpdate": "tool_call", "toolCallId": "d", "title": "Plan", "kind": "think", "rawInput": {"description": "only a description"}}),
+            json!({"sessionUpdate": "tool_call_update", "toolCallId": "a", "status": "completed"}),
+        ]);
+        let types: Vec<Option<&str>> = t.entries.iter().map(|e| match e { Entry::Tool(c) => c.subagent.as_deref(), _ => None }).collect();
+        assert_eq!(types, [Some("m4code:codex-gpt-6"), Some("general-purpose"), None, None]);
+    }
+
+    #[test]
     fn a_tool_update_changes_only_what_it_carries() {
         let t = thread(&[
             json!({"sessionUpdate": "tool_call", "toolCallId": "t1", "title": "Terminal", "kind": "execute", "status": "pending", "content": []}),
@@ -630,6 +660,7 @@ mod tests {
                 status: ToolStatus::Done,
                 content: vec![ToolContent::Text("ok".into())],
                 locations: vec![(PathBuf::from("a.rs"), Some(10))],
+                subagent: Some("general-purpose".into()),
             }),
             Entry::Agent("hi there".into()),
         ];

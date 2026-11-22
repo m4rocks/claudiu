@@ -18,6 +18,7 @@ use crate::platform::Editor;
 use crate::github::model::State;
 use crate::store::{Attached, Id, Project, SessionKind, SessionRecord};
 use crate::panels::theme::{self, hsla};
+use crate::app::SubagentState;
 use crate::panels::logos;
 use crate::panels::widgets::{icon, icon_button, key_hint, meter, section_label, subagent_state_icon, tick};
 use gpui_kit::assets::IconName;
@@ -186,7 +187,7 @@ impl Workspace {
         let github = (!attached.is_empty()).then(|| (attached.len(), self.attached_rows(id.as_ref(), attached, cx)));
         let links = id.as_deref().map(|i| self.links_of(i)).unwrap_or_default();
         let linked = (!links.is_empty()).then(|| (links.len(), self.linked_rows(id.as_ref(), links, cx)));
-        let children = id.as_deref().map(|i| self.subagents_of(i)).unwrap_or_default();
+        let children = id.as_deref().map(|i| self.subagent_list(i, cx)).unwrap_or_default();
         let subagents = id.as_ref().filter(|_| !children.is_empty()).map(|parent| (children.len(), self.subagent_rows(parent, children, cx)));
         let away = id.as_deref().and_then(|i| self.session_away(i, cx));
         let status = self.status_rows(&shown, id.as_ref(), running, cx);
@@ -333,19 +334,42 @@ impl Workspace {
         rows
     }
 
-    /// Subagents this session started, each with its provider's logo and where it stands: click to look at one. Those
-    /// that finished fold into one row under the rest, so a long-running parent's list stays short.
-    fn subagent_rows(&self, parent: &Id, children: Vec<(Id, String)>, cx: &mut Context<Self>) -> Div {
-        let (finished, active): (Vec<_>, Vec<_>) = children
+    /// The subagents of `parent`: the sessions it started through m4code, then the harness's own that its chat ran.
+    fn subagent_list(&self, parent: &str, cx: &gpui::App) -> Vec<SubagentRow> {
+        let mut rows: Vec<SubagentRow> = self
+            .subagents_of(parent)
             .into_iter()
-            .map(|(child, title)| {
-                let state = self.subagent_state(&child, cx);
-                (child, title, state)
+            .map(|(child, title)| SubagentRow {
+                key: format!("subagent-{child}"),
+                harness: self.store.session(&child).and_then(|r| r.claude.as_ref()).map(|m| m.harness).unwrap_or_default(),
+                title,
+                state: self.subagent_state(&child, cx),
+                open: SubagentOpen::Session(child),
             })
-            .partition(|(_, _, state)| state.finished());
+            .collect();
+        if let Some(view) = self.live_view(parent).and_then(|v| v.thread()) {
+            let view = view.read(cx);
+            for call in view.native_subagents() {
+                let state = SubagentState::of_step(call.status, view.is_working());
+                rows.push(SubagentRow {
+                    key: format!("native-subagent-{}", call.id),
+                    harness: crate::claude::subagents::harness_of_type(call.subagent.as_deref().unwrap_or_default(), view.harness),
+                    title: call.title.clone(),
+                    state,
+                    open: SubagentOpen::Step(call.id.clone()),
+                });
+            }
+        }
+        rows
+    }
+
+    /// Subagents of `parent`, each with its provider's logo and where it stands: click to look at one. Those that
+    /// finished fold into one row under the rest, so a long-running parent's list stays short.
+    fn subagent_rows(&self, parent: &Id, children: Vec<SubagentRow>, cx: &mut Context<Self>) -> Div {
+        let (finished, active): (Vec<_>, Vec<_>) = children.into_iter().partition(|child| child.state.finished());
         let mut rows = div().flex().flex_col().gap(px(1.0));
         for child in active {
-            rows = rows.child(self.subagent_row(child, cx));
+            rows = rows.child(subagent_row(parent, child, cx));
         }
         if finished.is_empty() {
             return rows;
@@ -366,21 +390,10 @@ impl Workspace {
         );
         if open {
             for child in finished {
-                rows = rows.child(self.subagent_row(child, cx));
+                rows = rows.child(subagent_row(parent, child, cx));
             }
         }
         rows
-    }
-
-    fn subagent_row(&self, (child, title, state): (Id, String, crate::app::SubagentState), cx: &mut Context<Self>) -> Stateful<Div> {
-        let harness = self.store.session(&child).and_then(|r| r.claude.as_ref()).map(|m| m.harness).unwrap_or_default();
-        let go = child.clone();
-        lead_row(format!("subagent-{child}"), logos::draw(logos::for_harness(harness), 13.0, hsla(theme::TEXT_DIM)).into_any_element(), title)
-            .text_color(hsla(if state.finished() { theme::TEXT_DIM } else { theme::TEXT }))
-            .cursor_pointer()
-            .hover(|s| s.bg(hsla(theme::ROW_HOVER)))
-            .child(div().flex_none().child(subagent_state_icon(state, 13.0)))
-            .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::Select(go.clone()), window, cx)))
     }
 
     /// Sessions linked with this one: click to go there, × to unlink.
@@ -451,6 +464,41 @@ fn auto_compact_menu(sid: &Id, current: Option<bool>) -> Vec<MenuItem> {
 
 fn precompute_compact_menu(sid: &Id, current: bool) -> Vec<MenuItem> {
     [(true, "On"), (false, "Off")].into_iter().map(|(on, name)| MenuItem::new(format!("{}{name}", tick(current == on)), Act::SetPrecomputeCompact(sid.clone(), on))).collect()
+}
+
+/// One subagent in the sidebar: a session m4code started (`spawn_subagent`), or one of the harness's own, which lives
+/// in a step of its parent's chat.
+struct SubagentRow {
+    key: String,
+    harness: crate::harness::Harness,
+    title: String,
+    state: SubagentState,
+    open: SubagentOpen,
+}
+
+enum SubagentOpen {
+    Session(Id),
+    /// The parent's tool call that ran it.
+    Step(String),
+}
+
+/// A subagent's row: a session opens; a native one unfolds its step in the parent's chat and scrolls there.
+fn subagent_row(parent: &Id, child: SubagentRow, cx: &mut Context<Workspace>) -> Stateful<Div> {
+    let parent = parent.clone();
+    let SubagentRow { key, harness, title, state, open } = child;
+    lead_row(key, logos::draw(logos::for_harness(harness), 13.0, hsla(theme::TEXT_DIM)).into_any_element(), title)
+        .text_color(hsla(if state.finished() { theme::TEXT_DIM } else { theme::TEXT }))
+        .cursor_pointer()
+        .hover(|s| s.bg(hsla(theme::ROW_HOVER)))
+        .child(div().flex_none().child(subagent_state_icon(state, 13.0)))
+        .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| match &open {
+            SubagentOpen::Session(child) => ws.act(Act::Select(child.clone()), window, cx),
+            SubagentOpen::Step(call) => {
+                if let Some(view) = ws.live_view(&parent).and_then(|v| v.thread()).cloned() {
+                    view.update(cx, |view, cx| view.reveal_step(call, cx));
+                }
+            }
+        }))
 }
 
 /// One section of the sidebar, as a card: its label, the number of entries for a list, then its rows.
