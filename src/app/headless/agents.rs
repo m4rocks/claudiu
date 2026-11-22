@@ -339,8 +339,10 @@ fn a_missing_claude_offers_the_setup_window() {
 /// exit is a toast, and the worktree stays: Claude Code already asked on `/exit`, and the X is the path that offers.
 #[test]
 fn a_process_that_ends_closes_the_session_and_leaves_its_worktree() {
-    let data = tempfile::tempdir().unwrap();
-    unsafe { std::env::set_var("M4CODE_DATA_DIR", data.path()) };
+    // Not `#[ignore]`d, so it runs beside the unit tests: it takes the run's one data folder rather than setting
+    // `M4CODE_DATA_DIR` to its own, which would move theirs while they read it (#149). Its repository is new, so
+    // its worktree folder and project are its own there.
+    crate::datadir::use_throwaway_folders();
     let work = tempfile::tempdir().unwrap();
     let repo_dir = dunce::canonicalize(work.path()).unwrap().join("proj");
     let git = |args: &[&str]| std::process::Command::new("git").args(args).current_dir(&repo_dir).output().unwrap();
@@ -360,7 +362,7 @@ fn a_process_that_ends_closes_the_session_and_leaves_its_worktree() {
     let (window, ws) = cx
         .update(|app| gpui_kit::open_window(Default::default(), app, |window, app| app.new(|cx| Workspace::new(window, vec![repo_dir.clone()], cx))))
         .unwrap();
-    let project = ws.read_with(&cx, |ws, _| ws.store.data.projects[0].id.clone());
+    let project = ws.read_with(&cx, |ws, _| ws.store.data.projects.iter().find(|p| p.path == repo_dir).expect("the project opened").id.clone());
     let step = |cx: &mut TestAppContext, f: &dyn Fn(&mut Workspace, &mut Window, &mut Context<Workspace>)| {
         cx.update_window(window, |_, window, app| ws.update(app, |ws, cx| f(ws, window, cx))).unwrap();
         cx.update_window(window, |_, window, app| window.draw(app).clear(app)).unwrap();
