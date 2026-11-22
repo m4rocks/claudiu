@@ -668,6 +668,8 @@ pub struct Workspace {
     pub search: String,
     pub search_input: Entity<InputState>,
     pub root_focus: FocusHandle,
+    /// Up/Down/Enter in the open workspace dropdown (`panels::picker::Choices`).
+    pub picker_nav: crate::panels::picker::Nav,
     /// Set when an Ask Claude request moves the keyboard to the terminal, so that arrival doesn't also put the editor's
     /// selection into Claude's input (`selection_reference`).
     pub(crate) skip_selection_reference: bool,
@@ -821,6 +823,7 @@ impl Workspace {
             search: String::new(),
             search_input,
             root_focus: cx.focus_handle(),
+            picker_nav: Default::default(),
             skip_selection_reference: false,
             modal: None,
             modal_focus: cx.focus_handle(),

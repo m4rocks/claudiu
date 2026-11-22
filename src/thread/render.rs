@@ -539,6 +539,7 @@ impl ThreadView {
             self.picker_at,
             22,
             body,
+            None,
             |v: &mut Self, window, cx| v.close_picker(window, cx),
             window,
             cx,

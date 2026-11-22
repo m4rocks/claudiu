@@ -2,9 +2,12 @@
 //! effort, skills scope, and editor selection). Uses the compact model picker as its visual base and stems directly
 //! from the button that opened it without dimming the rest of the window.
 
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
+
 use gpui::{
-    Anchor as Corner, AnyElement, ClickEvent, Context, Div, ElementId, FontWeight, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, ParentElement, Pixels, SharedString,
-    Stateful, StatefulInteractiveElement, Styled, Window, anchored, deferred, div, point, prelude::FluentBuilder, px,
+    Anchor as Corner, AnyElement, Bounds, ClickEvent, Context, Div, ElementId, FontWeight, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, ParentElement, Pixels,
+    ScrollHandle, SharedString, Stateful, StatefulInteractiveElement, Styled, Window, anchored, canvas, deferred, div, point, prelude::FluentBuilder, px,
 };
 use gpui_kit::assets::IconName;
 use gpui_kit::component::input::{Input, InputState};
@@ -16,14 +19,116 @@ use crate::panels::widgets::{Dropdown, fade_in, icon, key_badge, section_label};
 /// Default width of every universal picker dropdown.
 pub const WIDTH: f32 = 348.0;
 
+/// Up/Down/Enter for a dropdown's list, kept by whoever owns the dropdown and passed to `Choices` each frame.
+#[derive(Clone, Default)]
+pub struct Nav {
+    highlight: Rc<Cell<usize>>,
+    /// The search text the highlight was set under; new text starts it over at the first row.
+    query: Rc<RefCell<String>>,
+    /// Where each row was drawn last frame, to scroll the highlighted one into view.
+    rows: Rc<RefCell<Vec<Bounds<Pixels>>>>,
+    scroll: ScrollHandle,
+}
+
+/// What choosing a row does.
+type Choose<V> = Rc<dyn Fn(&mut V, &mut Window, &mut Context<V>)>;
+
+/// The rows a dropdown can choose from, in order, as they are drawn. A click on a row and Enter on the highlighted row
+/// run the same `choose`.
+pub struct Choices<V> {
+    nav: Nav,
+    actions: Vec<Choose<V>>,
+}
+
+impl<V: 'static> Choices<V> {
+    pub fn new(nav: &Nav, query: &str) -> Self {
+        if *nav.query.borrow() != query {
+            *nav.query.borrow_mut() = query.to_string();
+            nav.highlight.set(0);
+        }
+        Self { nav: nav.clone(), actions: Vec::new() }
+    }
+
+    /// `row`, highlighted when the keyboard is on it, and choosable by click or Enter.
+    pub fn add(&mut self, row: Stateful<Div>, choose: impl Fn(&mut V, &mut Window, &mut Context<V>) + 'static, cx: &mut Context<V>) -> AnyElement {
+        let ix = self.actions.len();
+        let choose: Choose<V> = Rc::new(choose);
+        self.actions.push(choose.clone());
+        let rows = self.nav.rows.clone();
+        let place = canvas(
+            move |bounds, _, _| {
+                let mut rows = rows.borrow_mut();
+                if rows.len() <= ix {
+                    rows.resize(ix + 1, Bounds::default());
+                }
+                rows[ix] = bounds;
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .size_full();
+        row.relative()
+            .when(self.nav.highlight.get() == ix, |d| d.bg(hsla(theme::SURFACE_HOVER)))
+            .child(place)
+            .on_click(cx.listener(move |v, _: &ClickEvent, window, cx| choose(v, window, cx)))
+            .into_any_element()
+    }
+
+    /// The scrolling list the rows go in, so the highlight can be kept in view.
+    pub fn list(&self, id: impl Into<ElementId>) -> Stateful<Div> {
+        div().id(id).overflow_y_scroll().track_scroll(&self.nav.scroll).flex().flex_col().gap(px(2.0))
+    }
+
+    /// Handle Up, Down or Enter; false for any other key.
+    fn key(&self, key: &str, v: &mut V, window: &mut Window, cx: &mut Context<V>) -> bool {
+        let Some(last) = self.actions.len().checked_sub(1) else { return false };
+        let at = self.nav.highlight.get().min(last);
+        match key {
+            "up" | "down" => {
+                let to = step(at, last, key == "down");
+                self.nav.highlight.set(to);
+                self.reveal(to);
+                cx.notify();
+            }
+            "enter" => (self.actions[at])(v, window, cx),
+            _ => return false,
+        }
+        true
+    }
+
+    fn reveal(&self, ix: usize) {
+        let Some(row) = self.nav.rows.borrow().get(ix).copied() else { return };
+        let view = self.nav.scroll.bounds();
+        let mut offset = self.nav.scroll.offset();
+        if row.top() < view.top() {
+            offset.y += view.top() - row.top();
+        } else if row.bottom() > view.bottom() {
+            offset.y -= row.bottom() - view.bottom();
+        }
+        self.nav.scroll.set_offset(offset);
+    }
+}
+
+/// The row Up or Down moves to from `at`, wrapping around a list whose last row is `last`.
+fn step(at: usize, last: usize, down: bool) -> usize {
+    match (down, at) {
+        (true, at) if at >= last => 0,
+        (true, at) => at + 1,
+        (false, 0) => last,
+        (false, at) => at - 1,
+    }
+}
+
 /// Anchored dropdown popover stemming directly from the trigger button, with a transparent click-outside dismissal
 /// layer (no dimmed backdrop), uniform header (`TITLE` + `Esc close`), and Escape handling even while searching.
 /// Automatically flips above/below the trigger if the preferred side lacks room, so it never covers its button.
+#[allow(clippy::too_many_arguments)]
 pub fn dropdown_overlay<V: 'static>(
     (id, title): (&'static str, impl Into<SharedString>),
     at: Dropdown,
     priority: usize,
     body: AnyElement,
+    choices: Option<Choices<V>>,
     on_close: impl Fn(&mut V, &mut Window, &mut Context<V>) + 'static,
     window: &Window,
     cx: &mut Context<V>,
@@ -115,10 +220,13 @@ pub fn dropdown_overlay<V: 'static>(
             cx.notify();
         }))
         .capture_key_down(cx.listener(move |v, ev: &KeyDownEvent, window, cx| {
+            let plain = !ev.keystroke.modifiers.modified();
             if ev.keystroke.key == "escape" {
                 close_key(v, window, cx);
                 cx.stop_propagation();
                 cx.notify();
+            } else if plain && choices.as_ref().is_some_and(|c| c.key(&ev.keystroke.key, v, window, cx)) {
+                cx.stop_propagation();
             }
         }))
         .child(header)
@@ -323,6 +431,17 @@ pub fn permission_description(id: &str) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use super::step;
+
+    #[test]
+    fn up_and_down_move_one_row_and_wrap_at_the_ends() {
+        assert_eq!(step(0, 3, true), 1);
+        assert_eq!(step(3, 3, true), 0, "down from the last row goes to the first");
+        assert_eq!(step(0, 3, false), 3, "up from the first row goes to the last");
+        assert_eq!(step(2, 3, false), 1);
+        assert_eq!(step(0, 0, true), 0, "one row stays put");
+    }
+
     use super::format_mode_name;
 
     #[test]

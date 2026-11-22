@@ -2334,4 +2334,33 @@ fn dropdowns_switch_on_one_click_and_load_all_harness_models() {
     // Clicking Model again opens HomeModel cleanly.
     click(&mut cx, model_pos.0, model_pos.1);
     assert!(ws.read_with(&cx, |ws, _| matches!(ws.picker_kind(), Some(crate::app::WorkspacePicker::HomeModel { .. }))));
+}#[test]
+#[ignore = "drives the workspace"]
+/// Up, Down and Enter move through a dropdown's rows and choose one while the keyboard is in its search box.
+fn dropdowns_answer_the_arrow_keys() {
+    let data = tempfile::tempdir().unwrap();
+    let (one, two) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    // SAFETY: test-isolated data dir.
+    unsafe { std::env::set_var("CLAUDIU_DATA_DIR", data.path()) };
+    let mut cx = TestAppContext::single();
+    cx.update(|app| {
+        gpui_kit::init(app);
+        gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, app);
+    });
+    let dirs = vec![one.path().to_path_buf(), two.path().to_path_buf()];
+    let (window, ws) = cx.update(|app| gpui_kit::open_window(Default::default(), app, |window, app| app.new(|cx| Workspace::new(window, dirs, cx)))).unwrap();
+    cx.update_window(window, |_, window, _| window.activate_window()).unwrap();
+    let origin = crate::panels::widgets::Dropdown::at(gpui::point(gpui::px(0.0), gpui::px(0.0)));
+    cx.update_window(window, |_, window, app| ws.update(app, |ws, cx| ws.open_project_picker(crate::app::ProjectPickerMode::Home, origin, window, cx))).unwrap();
+    cx.update_window(window, |_, window, app| window.draw(app).clear(app)).unwrap();
+    let mut visual = gpui::VisualTestContext::from_window(window, &cx);
+    let second = ws.read_with(&visual, |ws, _| ws.store.data.projects[1].id.clone());
+    // Two rows: down to the second, up to the first, down again (Down wraps past the last row).
+    visual.simulate_keystrokes("down up down enter");
+    ws.read_with(&visual, |ws, _| {
+        assert!(ws.picker.is_none(), "Enter chooses and closes the dropdown");
+        assert_eq!(ws.home_selected_project().map(|p| p.id.clone()), Some(second), "the keys moved to the second project");
+    });
 }
+
+
