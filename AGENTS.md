@@ -1,4 +1,4 @@
-# CLAUDE.md
+# AGENTS.md
 
 Claudiu is a native Rust + GPUI desktop app that manages sessions around the user's existing `claude` CLI.
 
@@ -27,6 +27,16 @@ When a task finishes, say once what changed, what you skipped or couldn't check,
 When the m4 skills are installed, route requests through them even when phrased casually, because they carry the steps that keep work consistent: a bug or error goes through m4:fix, building or changing behavior through m4:do, reviewing a diff through m4:tidy, planning through m4:shape, explaining code through m4:explore, and a repeated correction through m4:harden. One-line edits are made directly. Before writing prose that lands somewhere, such as docs, a README, comments, commit or pull request text, tracker entries, or a message to another person, run m4:unslop on the draft. In chat replies, follow its rules without invoking it.
 
 Work inline; spawn subagents only as the settings allow, except the plan review in m4:shape, because they spend tokens the maintainer wants to spend deliberately.
+
+## Tokens
+
+Every tool call re-reads the whole conversation, so the number of calls and the length of the conversation set the cost. One session here made 472 calls on a context that averaged 208k tokens, and 251 of those calls were reads, mostly three or more in a row.
+
+- Put every `sed -n`, `grep` and `wc` you need next into one command. Find a function with `grep -n` and read just that function, rather than reading a file in slices; `src/panels/workspace_view.rs` alone is about 1,900 lines.
+- The shell is zsh, which fails the whole command when an unquoted glob matches nothing. Quote globs, as in `--include='*.rs'`.
+- Run the check in the same command as the edit it checks, such as an edit followed by `cargo build`. Build, clippy and the unit tests can share one command too.
+- Look up the fields and signatures new code uses before writing it, so the first build passes.
+- In a batch of features, commit each one as it passes. Once the conversation passes about 150k tokens, finish the current feature and continue the rest in a fresh session, since the commits and the tracker carry everything over.
 
 ## Code
 
