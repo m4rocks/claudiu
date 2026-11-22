@@ -159,6 +159,8 @@ pub struct ThreadView {
     model_search: Entity<InputState>,
     cwd: PathBuf,
     connection: Option<Rc<Connection>>,
+    /// The sending end of the channel the agent's events arrive on, for `Event::TurnEnded`.
+    events: Option<futures::channel::mpsc::UnboundedSender<Event>>,
     session_id: Option<String>,
     pub thread: Thread,
     phase: Phase,
@@ -288,6 +290,7 @@ impl ThreadView {
             model_search,
             cwd: start.cwd.clone(),
             connection: None,
+            events: None,
             session_id: start.session_id.clone(),
             thread,
             phase: Phase::Starting,
@@ -335,6 +338,7 @@ impl ThreadView {
 
     fn start(&mut self, start: Start, cx: &mut Context<Self>) {
         let (events, mut incoming) = futures::channel::mpsc::unbounded();
+        self.events = Some(events.clone());
         let harness = start.harness;
         cx.spawn(async move |this, cx| {
             // Finding the server may read the login shell's PATH, so it is off the UI thread.
@@ -503,6 +507,10 @@ impl ThreadView {
                 self.ended(words, cx);
                 return;
             }
+            Event::TurnEnded(result) => {
+                self.turn_ended(result, cx);
+                return;
+            }
         }
         self.send_next(cx);
         cx.notify();
@@ -597,7 +605,7 @@ impl ThreadView {
         if self.working || self.phase != Phase::Ready {
             return;
         }
-        let (Some(connection), Some(session)) = (self.connection.clone(), self.session_id.clone()) else { return };
+        let (Some(connection), Some(session), Some(events)) = (self.connection.clone(), self.session_id.clone(), self.events.clone()) else { return };
         let command = self.harness.adapter().compact_command.filter(|name| self.thread.commands.iter().any(|c| c.name == *name));
         let next = if self.compaction.take_due(self.thread.context, command.is_some()) {
             let at = self.thread.notice("Compacting context…", false);
@@ -634,7 +642,7 @@ impl ThreadView {
             }
             let turn = connection.request("session/prompt", json!({"sessionId": session, "prompt": [{"type": "text", "text": text}]}));
             let result = turn.await;
-            let _ = this.update(cx, |v, cx| v.turn_ended(result, cx));
+            let _ = events.unbounded_send(Event::TurnEnded(result));
         })
         .detach();
     }

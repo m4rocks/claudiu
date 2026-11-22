@@ -31,6 +31,9 @@ pub enum Event {
     Permission { id: Value, params: Value },
     /// The agent stopped; the text is its last words on stderr, if any.
     Exited(String),
+    /// A `session/prompt`'s reply. The thread queues it itself once the reply arrives, which is after the reader
+    /// queued every update the agent sent before replying, so a turn never ends ahead of its last words.
+    TurnEnded(Result<Value, String>),
 }
 
 type Pending = Arc<Mutex<HashMap<i64, oneshot::Sender<Result<Value, String>>>>>;
