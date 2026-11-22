@@ -83,13 +83,23 @@ impl Render for ThreadView {
 /// where lines already stay as they are.
 fn keep_line_breaks(text: &str) -> String {
     let lines: Vec<&str> = text.lines().collect();
-    let mut in_fence = false;
+    // The open fence's marker character and length: only a run of that character at least as long closes it.
+    let mut open: Option<(char, usize)> = None;
     let mut out = String::with_capacity(text.len() + lines.len());
     for (i, line) in lines.iter().enumerate() {
-        let fence = line.trim_start().starts_with("```") || line.trim_start().starts_with("~~~");
-        if fence {
-            in_fence = !in_fence;
-        }
+        let marker = fence_marker(line);
+        let fence = match (open, marker) {
+            (None, Some(m)) => {
+                open = Some(m);
+                true
+            }
+            (Some((c, n)), Some((mc, mn))) if mc == c && mn >= n => {
+                open = None;
+                true
+            }
+            _ => false,
+        };
+        let in_fence = open.is_some();
         out.push_str(line);
         let Some(next) = lines.get(i + 1) else { break };
         let breaks = !in_fence && !fence && !line.trim().is_empty() && !next.trim().is_empty();
@@ -105,6 +115,14 @@ pub(super) fn markdown_of(cache: &mut HashMap<usize, Entity<TextViewState>>, ix:
     // Unchanged text costs a comparison; a reply still streaming in is appended to what is parsed.
     state.update(cx, |s, cx| s.set_text(text, cx));
     crate::github::ui::styled_markdown(TextView::new(&state))
+}
+
+/// A line that opens or closes a fenced code block: its marker character and how many of it there are.
+fn fence_marker(line: &str) -> Option<(char, usize)> {
+    let trimmed = line.trim_start();
+    let c = trimmed.chars().next().filter(|c| *c == '`' || *c == '~')?;
+    let n = trimmed.chars().take_while(|x| *x == c).count();
+    (n >= 3).then_some((c, n))
 }
 
 /// A message's first line with text, for a one-line row.
@@ -999,6 +1017,7 @@ impl ThreadView {
                 .child(div().flex_none().text_size(scale::px(11.0)).text_color(hsla(theme::TEXT_FAINT)).child("Read after the current step"))
         });
         let waiting_empty = waiting.is_empty();
+        let changes = self.queue_changes;
         let rows = waiting.into_iter().map(|(at, text)| {
             let first_line = first_line(text);
             div()
@@ -1011,11 +1030,11 @@ impl ThreadView {
                 .child(icon(IconName::Clock, 12.0).text_color(hsla(theme::TEXT_FAINT)))
                 .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(scale::px(12.5)).text_color(hsla(theme::TEXT_DIM)).child(first_line))
                 .child(
-                    icon_button(SharedString::from(format!("queued-edit-{at}")), IconName::Pencil)
+                    icon_button(SharedString::from(format!("queued-edit-{changes}-{at}")), IconName::Pencil)
                         .on_click(cx.listener(move |v, _: &ClickEvent, window, cx| v.edit_queued(at, window, cx))),
                 )
                 .child(
-                    icon_button(SharedString::from(format!("queued-remove-{at}")), IconName::X)
+                    icon_button(SharedString::from(format!("queued-remove-{changes}-{at}")), IconName::X)
                         .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| drop(v.unqueue(at, cx)))),
                 )
         });
@@ -1209,6 +1228,11 @@ mod tests {
         assert_eq!(keep_line_breaks("para\n\nnext"), "para\n\nnext", "a blank line already splits them");
         assert_eq!(keep_line_breaks("look:\n```\na\nb\n```\nafter"), "look:  \n```\na\nb\n```\nafter");
         assert_eq!(keep_line_breaks("single"), "single");
+        assert_eq!(
+            keep_line_breaks("````\n```\nliteral\nlines\n````\nafter\nmore"),
+            "````\n```\nliteral\nlines\n````\nafter  \nmore",
+            "a shorter marker inside a longer fence is code, not its end"
+        );
     }
 
     #[test]

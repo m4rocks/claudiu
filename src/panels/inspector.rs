@@ -246,6 +246,16 @@ impl Workspace {
                 if from == kind || !ev.bounds.contains(&ev.event.position) || !ws.pointer_moved(ev.event.position) {
                     return;
                 }
+                // Cards differ in height, so a short card dragged onto a tall one could still be over it after they
+                // swap, and swap back. It moves only once the pointer is past the middle of the card it goes over, in
+                // the direction it travels, which the card that moved out of the way never is.
+                let order = ws.store.data.layout.right_card_order();
+                let at = |card: SideCard| order.iter().position(|k| *k == card);
+                let down = at(from) < at(kind);
+                let middle = ev.bounds.center().y;
+                if (down && ev.event.position.y < middle) || (!down && ev.event.position.y > middle) {
+                    return;
+                }
                 ws.move_right_card(from, kind);
                 ws.last_swap = std::time::Instant::now();
                 cx.notify();

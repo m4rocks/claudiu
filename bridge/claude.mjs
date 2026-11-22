@@ -321,10 +321,13 @@ async function pump(session) {
         if (m.type === "result") {
           for (const uuid of answeredBy(m) ?? [...session.dropping]) session.dropping.delete(uuid);
           session.dropInterrupted = false;
+        } else if (m.type === "command_lifecycle" && ["cancelled", "discarded", "refused"].includes(m.state)) {
+          session.dropping.delete(m.command_uuid);
         } else if (!session.dropInterrupted) {
           session.dropInterrupted = true;
           session.query.interrupt().catch(() => {});
         }
+        if (!session.dropping.size) session.dropsDone?.();
         continue;
       }
       // Not in the SDK's types yet; t3code reads it the same way.
@@ -339,8 +342,14 @@ async function pump(session) {
         const ev = m.event;
         if (ev.type === "message_start") {
           session.streamed.add(ev.message.id);
-          // After a result the turn stayed open for, what Claude writes next answers the steers it still owed.
-          if (session.turn?.held) showWaitingSteers(session, [...session.turn.waiting]);
+          // After a result the turn stayed open for, what Claude writes next answers the oldest steer it still
+          // owed; a later one may still be waiting, so it shows when Claude starts or answers it.
+          const turn = session.turn;
+          if (turn?.held) {
+            turn.held = null;
+            const oldest = [...turn.waiting].find((uuid) => turn.steers.has(uuid) && !turn.shown.has(uuid));
+            if (oldest) showSteer(session, oldest);
+          }
         }
         if (ev.type === "content_block_delta" && ev.delta.type === "text_delta") update(session.id, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: ev.delta.text } });
         if (ev.type === "content_block_delta" && ev.delta.type === "thinking_delta") update(session.id, { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: ev.delta.thinking } });
@@ -365,13 +374,16 @@ async function pump(session) {
     session.turn?.reject(error);
     session.turn = null;
   }
+  // Claude Code ended with a turn still open, such as one held for a steer it never answered.
+  session.turn?.reject(new Error("Claude Code stopped before it finished the turn."));
+  session.turn = null;
   sessions.delete(session.id);
 }
 
 async function open(params, resume) {
   const id = resume ?? randomUUID();
   const extra = params._meta?.claudeCode?.options ?? {};
-  const session = { id, cwd: params.cwd, inbox: new Inbox(), tools: new Map(), streamed: new Set(), turn: null, cancelled: false, interrupted: null, dropping: new Set(), dropInterrupted: false, mode: "default", model: "", effort: "medium", models: [] };
+  const session = { id, cwd: params.cwd, inbox: new Inbox(), tools: new Map(), streamed: new Set(), turn: null, cancelled: false, interrupted: null, dropping: new Set(), dropInterrupted: false, dropsDone: null, mode: "default", model: "", effort: "medium", models: [] };
   session.query = query({
     prompt: session.inbox,
     options: {
@@ -447,9 +459,9 @@ const handlers = {
     if (!s) throw new Error("That session has ended.");
     if (s.turn) throw new Error("A turn is already running.");
     s.cancelled = false;
-    // A new message is the user's own again: stopping the steers they took back must not stop this one.
-    s.dropping.clear();
-    s.dropInterrupted = false;
+    // Steers the user stopped still run in Claude Code first; this message waits until they are gone, so their
+    // output and result can't be taken for its own.
+    await afterDropped(s);
     const text = (p.prompt ?? []).filter((c) => c.type === "text").map((c) => c.text).join("\n");
     const uuid = randomUUID();
     const done = new Promise((resolve, reject) => (s.turn = { resolve, reject, waiting: new Set([uuid]), steers: new Map(), shown: new Set(), dropped: [], held: null }));
@@ -488,6 +500,22 @@ const handlers = {
     return { configOptions: configOptions(s) };
   },
 };
+
+/**
+ * Resolves once the stopped steers (`dropping`) have run and been stopped, or after 10 s: Claude Code's receipt said
+ * it would run them, and one that hasn't started by then is taken as gone, so a new message never waits forever.
+ */
+async function afterDropped(session) {
+  if (session.dropping.size) {
+    await new Promise((resolve) => {
+      session.dropsDone = resolve;
+      setTimeout(resolve, 10_000);
+    });
+  }
+  session.dropsDone = null;
+  session.dropping.clear();
+  session.dropInterrupted = false;
+}
 
 function userMessage(session, text, uuid, priority) {
   return { type: "user", uuid, ...(priority ? { priority } : {}), message: { role: "user", content: [{ type: "text", text }] }, parent_tool_use_id: null, session_id: session.id, origin: { kind: "human" } };
