@@ -76,7 +76,7 @@ pub enum Act {
     /// A choice in the Settings dialog's default-model, effort, or permission-mode picker; kept in the dialog until Save.
     PickDefaultModel(crate::harness::CatalogModel),
     PickEffort(Effort),
-    PickPermission(String),
+    PickPermission(crate::harness::permission::Permission),
     /// The project's GitHub issues and pull requests.
     OpenGithub {
         cwd: PathBuf,
@@ -343,15 +343,7 @@ impl Workspace {
                     claude_subagents: self.store.data.settings.claude_subagents,
                     picking: None,
                 });
-                let modes = self.store.data.settings.modes_for(default_model.harness);
-                let initial_perm = defaults
-                    .mode_id
-                    .clone()
-                    .or_else(|| defaults.permission_mode.map(|m| m.acp_id().to_string()))
-                    .filter(|id| modes.iter().any(|(mid, _)| mid == id))
-                    .or_else(|| modes.first().map(|(id, _)| id.clone()))
-                    .unwrap_or_else(|| "default".into());
-                self.modal = Some(Modal::Settings { shell, claude, default_model, effort: defaults.effort.unwrap_or_default(), permission: initial_perm, updates, chrome, scale: crate::panels::scale::percent(), m4code_off: self.store.data.settings.m4code_tools_off.clone(), skills_field, skill_search, costly: claude::costly::scan(), list_focus, renaming: None, subagents });
+                self.modal = Some(Modal::Settings { shell, claude, default_model, effort: defaults.effort.unwrap_or_default(), permission: defaults.permission_mode, updates, chrome, scale: crate::panels::scale::percent(), m4code_off: self.store.data.settings.m4code_tools_off.clone(), skills_field, skill_search, costly: claude::costly::scan(), list_focus, renaming: None, subagents });
                 // After the modal exists: a page that loads something reads the dialog's fields.
                 self.set_settings_page(self.settings_page, cx);
             }
@@ -372,13 +364,7 @@ impl Workspace {
             Act::UninstallSkill(name) => self.uninstall_skill(name, cx),
             Act::UpdateSkills(names) => self.update_skills(names, cx),
             Act::PickDefaultModel(choice) => {
-                let modes = self.store.data.settings.modes_for(choice.harness);
-                if let Some(Modal::Settings { default_model, permission, list_focus, .. }) = self.modal.as_mut() {
-                    if !modes.iter().any(|(id, _)| id == permission)
-                        && let Some((first, _)) = modes.first()
-                    {
-                        *permission = first.clone();
-                    }
+                if let Some(Modal::Settings { default_model, list_focus, .. }) = self.modal.as_mut() {
                     *default_model = choice;
                     window.focus(list_focus, cx);
                 }
@@ -390,7 +376,7 @@ impl Workspace {
             }
             Act::PickPermission(choice) => {
                 if let Some(Modal::Settings { permission, .. }) = self.modal.as_mut() {
-                    *permission = choice;
+                    *permission = Some(choice);
                 }
             }
             Act::NewBranch(cwd) => {

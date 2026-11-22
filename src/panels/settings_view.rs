@@ -8,12 +8,13 @@ use gpui::{
 };
 
 use crate::claude::mcp::Feature;
+use crate::harness::permission::Permission;
 use crate::app::{
     Act, Modal,
     SettingsPage, Workspace, WorkspacePicker,
 };
 use gpui_kit::component::input::Input;
-use crate::panels::{logos, picker};
+use crate::panels::logos;
 use crate::panels::theme::{self, hsla};
 use crate::updater::Status;
 use gpui_kit::assets::IconName;
@@ -43,15 +44,13 @@ pub(super) fn render_settings_card(
             let model_open = matches!(ws.picker_kind(), Some(WorkspacePicker::SettingsModel { .. }));
             let effort_open = matches!(ws.picker_kind(), Some(WorkspacePicker::SettingsEffort));
             let perm_open = matches!(ws.picker_kind(), Some(WorkspacePicker::SettingsPermission));
-            let modes = ws.store.data.settings.modes_for(default_model.harness);
-            let perm_raw = modes.iter().find(|(id, _)| id == permission).map_or(permission.as_str(), |(_, n)| n.as_str());
-            let perm_display = picker::format_mode_name(permission, perm_raw);
+            let perm_display = permission.map_or("Harness default", |p| p.label()).to_string();
             let mut session_rows: Vec<AnyElement> = vec![
                 default_model_row(default_model, model_open, cx).into_any_element(),
                 settings_picker_row("settings-effort", ("Effort", "Reasoning depth for new sessions"), effort.label().to_string(), effort_open, |ws, at, _, cx| ws.open_settings_effort_picker(at, cx), cx).into_any_element(),
                 settings_picker_row("settings-permission", ("Permission mode", "Approval policy for tool calls and edits"), perm_display, perm_open, |ws, at, _, cx| ws.open_settings_permission_picker(at, cx), cx).into_any_element(),
             ];
-            if matches!(permission.as_str(), "bypassPermissions" | "fullAccess" | "full_access" | "yolo") {
+            if *permission == Some(Permission::FullAccess) {
                 session_rows.push(
                     div()
                         .px(px(14.0))

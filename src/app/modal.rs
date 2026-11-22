@@ -161,18 +161,14 @@ impl Workspace {
         let next_model = (!chosen.id.is_empty()).then_some(chosen.id.clone());
         let default_model_changed = s.harness != chosen.harness || s.new_session.model != next_model;
         let effort_changed = s.new_session.effort != Some(effort);
-        let permission_changed = s.new_session.mode_id.as_deref() != Some(permission.as_str());
+        let permission_changed = s.new_session.permission_mode != permission;
         let harness_changed = s.harness != chosen.harness || s.enabled_harnesses.as_ref() != Some(&enabled);
-        let legacy_perm = claude::defaults::PermissionMode::ALL
-            .into_iter()
-            .find(|m| m.acp_id() == permission || m.name() == permission);
         s.enabled_harnesses = Some(enabled);
         s.harness = chosen.harness;
         s.new_session = claude::defaults::NewSessionDefaults {
             model: next_model,
             effort: Some(effort),
-            permission_mode: legacy_perm,
-            mode_id: Some(permission.clone()),
+            permission_mode: permission,
         };
         self.home.effort = effort;
 
@@ -234,8 +230,10 @@ impl Workspace {
                             t.set_option(id, effort_id.clone(), cx);
                         }
                     }
-                    if permission_changed && t.thread.modes.iter().any(|(id, _)| id == &permission) {
-                        t.set_mode(permission.clone(), cx);
+                    if permission_changed
+                        && let Some(id) = permission.and_then(|p| p.or_safer(&crate::harness::permission::offered(t.harness, &t.thread.modes)).and_then(|p| p.native(t.harness)))
+                    {
+                        t.set_mode(id.to_string(), cx);
                     }
                     if scale_changed {
                         t.remeasure(0);

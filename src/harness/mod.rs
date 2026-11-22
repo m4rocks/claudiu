@@ -8,6 +8,7 @@ mod antigravity;
 pub mod claude;
 mod codex;
 pub(crate) mod opencode;
+pub mod permission;
 pub mod thread;
 
 use std::path::{Path, PathBuf};
