@@ -16,6 +16,9 @@ pub const SURFACE_HOVER: u32 = 0x1c1c1e;
 pub const BORDER: u32 = 0x1f1f1f;
 /// The faint outline that separates a panel from the window background.
 pub const PANEL_BORDER: u32 = 0x242428;
+/// The outline of what has the keyboard or is open, such as the message box or a chip's dropdown. Neutral, so the
+/// accent stays for the few things that need the eye.
+pub const FOCUS_BORDER: u32 = 0x3a3a40;
 /// Corner radius of the window's panels.
 pub const PANEL_RADIUS: f32 = 8.0;
 /// Gutter between the panels and the window edges.

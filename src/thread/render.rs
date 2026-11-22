@@ -114,7 +114,6 @@ impl ThreadView {
 
     fn render_entry(&mut self, ix: usize, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let Some(entry) = self.thread.entries.get(ix) else { return div().into_any_element() };
-        let accent = hsla(theme::ACCENT);
         let body = match entry {
             Entry::User(text) => div()
                 .px(px(14.0))
@@ -123,13 +122,7 @@ impl ThreadView {
                 .bg(hsla(theme::ROW_ACTIVE))
                 .border_1()
                 .border_color(hsla(theme::PANEL_BORDER))
-                .child(
-                    div()
-                        .flex()
-                        .gap(px(10.0))
-                        .child(div().w(px(2.5)).rounded_full().bg(accent))
-                        .child(div().flex_1().min_w_0().child(text.clone())),
-                )
+                .child(text.clone())
                 .into_any_element(),
             Entry::Agent(text) => div().px(px(2.0)).child(crate::github::ui::markdown(format!("thread-md-{ix}"), text)).into_any_element(),
             Entry::Thought(text) => {
@@ -375,7 +368,6 @@ impl ThreadView {
 
     fn render_question(&self, cx: &mut Context<Self>) -> Option<Div> {
         let q = self.question.as_ref()?;
-        let accent = hsla(theme::ACCENT);
         let mut options = div().flex().flex_col().gap(px(6.0)).w_full();
         for (i, opt) in q.options.iter().enumerate() {
             let primary = opt.kind == "allow_once" && i == 0;
@@ -387,7 +379,7 @@ impl ThreadView {
                 .rounded(px(7.0))
                 .bg(hsla(if primary { theme::ROW_ACTIVE } else { theme::PANEL_BG }))
                 .border_1()
-                .border_color(if primary { accent } else { hsla(theme::PANEL_BORDER) })
+                .border_color(hsla(if primary { theme::FOCUS_BORDER } else { theme::PANEL_BORDER }))
                 .hover(|s| s.bg(hsla(theme::SURFACE_HOVER)))
                 .cursor_pointer()
                 .flex()
@@ -405,7 +397,7 @@ impl ThreadView {
                             div()
                                 .text_size(scale::px(12.5))
                                 .font_weight(FontWeight::MEDIUM)
-                                .text_color(if primary { accent } else { hsla(theme::TEXT) })
+                                .text_color(hsla(theme::TEXT))
                                 .child(opt.name.clone()),
                         )
                         .children(opt.description.clone().map(|desc| {
@@ -454,11 +446,11 @@ impl ThreadView {
                     };
                     let focused = n == hi;
                     let choice = m.clone();
-                    let logo = logos::draw(logos::for_harness(m.harness), 11.5, if selected { accent } else { hsla(theme::TEXT_FAINT) }).into_any_element();
+                    let logo = logos::draw(logos::for_harness(m.harness), 11.5, hsla(if selected { theme::TEXT } else { theme::TEXT_FAINT })).into_any_element();
                     list = list.child(
                         picker::row(SharedString::from(format!("thread-model-{n}")), Some(logo), m.name.clone(), None, None, selected, false)
                             .when(focused && !selected, |d| d.bg(hsla(theme::SURFACE_HOVER)))
-                            .when(focused, |d| d.border_1().border_color(accent.opacity(0.45)))
+                            .when(focused, |d| d.border_1().border_color(hsla(theme::FOCUS_BORDER)))
                             .debug_selector(move || format!("thread-model-{n}"))
                             .on_click(cx.listener(move |v, _: &ClickEvent, window, cx| {
                                 v.pick_model(choice.clone(), cx);
@@ -520,7 +512,7 @@ impl ThreadView {
                         let current = self.thread.mode.as_deref() == Some(id.as_str());
                         let mode_id = id.clone();
                         let display = picker::format_mode_name(id, name);
-                        let lead = icon(IconName::Lock, 12.0).text_color(if current { accent } else { hsla(theme::TEXT_FAINT) }).into_any_element();
+                        let lead = icon(IconName::Lock, 12.0).text_color(hsla(if current { theme::TEXT } else { theme::TEXT_FAINT })).into_any_element();
                         rows = rows.child(
                             picker::row(
                                 SharedString::from(format!("perm-mode-{i}")),
@@ -554,7 +546,6 @@ impl ThreadView {
     }
 
     fn render_composer(&self, window: &mut Window, cx: &mut Context<Self>) -> Div {
-        let accent = hsla(theme::ACCENT);
         let mut inner = div().w_full().max_w(px(COLUMN_MAX_W)).flex().flex_col().gap(px(6.0));
 
         let commands = self.matching_commands(cx);
@@ -580,7 +571,7 @@ impl ThreadView {
                         .rounded(px(5.0))
                         .cursor_pointer()
                         .hover(|s| s.bg(hsla(theme::SURFACE_HOVER)))
-                        .child(div().text_color(accent).child(format!("/{}", c.name)))
+                        .child(div().text_color(hsla(theme::TEXT)).child(format!("/{}", c.name)))
                         .child(div().flex_1().truncate().text_color(hsla(theme::TEXT_DIM)).child(c.description.clone()))
                         .on_click(cx.listener(move |v, _: &ClickEvent, window, cx| {
                             v.set_draft(&format!("/{name} "), window, cx);
@@ -602,7 +593,7 @@ impl ThreadView {
                     .rounded(px(7.0))
                     .bg(hsla(theme::SURFACE_ELEVATED))
                     .border_1()
-                    .border_color(accent)
+                    .border_color(hsla(theme::PANEL_BORDER))
                     .child(
                         div()
                             .flex()
@@ -610,7 +601,7 @@ impl ThreadView {
                             .gap(px(6.0))
                             .text_size(scale::px(11.5))
                             .text_color(hsla(theme::TEXT))
-                            .child(logos::draw(logos::for_harness(target.harness), 11.5, accent))
+                            .child(logos::draw(logos::for_harness(target.harness), 11.5, hsla(theme::TEXT_DIM)))
                             .child(format!("Next message switches to {}", target.name)),
                     )
                     .child(

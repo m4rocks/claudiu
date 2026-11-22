@@ -9,14 +9,14 @@ use crate::panels::theme::{self, hsla};
 use crate::panels::widgets::icon;
 
 /// The box: `top` (a question waiting for an answer) above `input`, then `chips` on the left of the footer and
-/// `actions` on its right. `lit` draws the accent border, for focus or a waiting question.
+/// `actions` on its right. `lit` draws a brighter border, for focus or a waiting question.
 pub fn frame(lit: bool, top: Option<AnyElement>, input: AnyElement, chips: Vec<AnyElement>, actions: Vec<AnyElement>) -> Div {
     div()
         .w_full()
         .rounded(px(14.0))
         .bg(hsla(theme::SURFACE_ELEVATED))
         .border_1()
-        .border_color(hsla(if lit { theme::ACCENT } else { theme::PANEL_BORDER }))
+        .border_color(hsla(if lit { theme::FOCUS_BORDER } else { theme::PANEL_BORDER }))
         .overflow_hidden()
         .flex()
         .flex_col()
@@ -47,7 +47,7 @@ pub fn input_area() -> Div {
 pub fn chip(id: impl Into<ElementId>, open: bool) -> Stateful<Div> {
     chip_shape(id)
         .bg(hsla(if open { theme::ROW_ACTIVE } else { theme::PANEL_BG }))
-        .border_color(hsla(if open { theme::ACCENT } else { theme::PANEL_BORDER }))
+        .border_color(hsla(if open { theme::FOCUS_BORDER } else { theme::PANEL_BORDER }))
         .hover(|s| s.bg(hsla(theme::SURFACE_HOVER)))
         .cursor_pointer()
 }
