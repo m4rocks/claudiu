@@ -23,6 +23,10 @@ test-app:
 lint:
     cargo clippy --locked --all-targets -- -D warnings
 
+# Test the Claude bridge's handling of background shells.
+test-bridge:
+    node bridge/background-shells.test.mjs
+
 # ---- Mod (Claude Code plugin in mod/) -------------------------------------------------------------
 
 # Tests for the mod: the *.test.ts files in mod/hooks. Needs the `claude` CLI on PATH.
@@ -50,7 +54,7 @@ web-preview:
 # ---- Everything -----------------------------------------------------------------------------------
 
 # Every test: the app and the mod.
-test: test-app test-mod
+test: test-app test-bridge test-mod
 
 # What CI checks, plus the mod and the web build.
-ci: build test-app web-build test-mod
+ci: build test-app test-bridge web-build test-mod

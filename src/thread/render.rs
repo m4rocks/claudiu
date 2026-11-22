@@ -18,7 +18,7 @@ use crate::harness::CatalogModel;
 use crate::harness::thread::{Entry, SubagentReport, ToolCall, ToolContent, ToolStatus, diff_lines, parse_subagent_report};
 use crate::panels::{composer, logos, picker, scale};
 use crate::panels::theme::{self, hsla};
-use crate::panels::widgets::{EffortPick, Trigger, effort_slider, icon, icon_button, key_badge, spinner};
+use crate::panels::widgets::{EffortPick, Trigger, button, button_disabled, effort_slider, icon, icon_button, key_badge, spinner};
 use crate::visual::ui::Scope;
 
 /// Lines of a tool's output shown while it is folded (Ctrl+O shows all).
@@ -625,7 +625,7 @@ impl ThreadView {
                 })
                 .collect()
         };
-        if self.background.is_empty() && bg_tools.is_empty() {
+        if self.background.is_empty() && self.provider_shells.is_empty() && bg_tools.is_empty() {
             return None;
         }
         let mut pills = div().flex().flex_wrap().items_center().gap(px(6.0)).flex_1().min_w_0();
@@ -675,6 +675,25 @@ impl ThreadView {
                     .child(div().max_w(px(220.0)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(name)),
             );
         }
+        for shell in &self.provider_shells {
+            let read_id = shell.id.clone();
+            let stop_id = shell.id.clone();
+            let stopping = shell.stopping;
+            pills = pills.child(
+                div().flex().items_center().gap(px(6.0)).p(px(3.0))
+                    .child(spinner(format!("provider-shell-{}", shell.id), 10.0))
+                    .child(div().max_w(px(220.0)).overflow_hidden().text_ellipsis().whitespace_nowrap()
+                        .text_size(scale::px(11.5)).child(shell.label.clone()))
+                    .child(button(SharedString::from(format!("shell-output-{}", shell.id)), "Output", false)
+                        .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| v.background_shell_action(&read_id, false, cx))))
+                    .child(if stopping {
+                        button_disabled(SharedString::from(format!("shell-stop-{}", shell.id)), "Stopping…")
+                    } else {
+                        button(SharedString::from(format!("shell-stop-{}", shell.id)), "Stop", false)
+                            .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| v.background_shell_action(&stop_id, true, cx)))
+                    }),
+            );
+        }
         let bar = div()
             .w_full()
             .max_w(px(COLUMN_MAX_W))
@@ -689,16 +708,28 @@ impl ThreadView {
             .gap(px(8.0))
             .child(div().flex_none().text_size(scale::px(11.0)).text_color(hsla(theme::TEXT_FAINT)).child("Running in background"))
             .child(pills);
-        Some(div().w_full().px(px(22.0)).mb(px(6.0)).flex().justify_center().child(bar))
+        let output = self.shell_output.as_ref().map(|output| {
+            div().id("thread-shell-output").w_full().max_h(px(180.0)).overflow_y_scroll()
+                .rounded(px(6.0)).bg(hsla(theme::SURFACE_ELEVATED)).p(px(8.0))
+                .child(div().flex().justify_end()
+                    .child(button("thread-shell-output-close", "Close output", false).on_click(cx.listener(|v, _: &ClickEvent, _, cx| {
+                        v.shell_output = None;
+                        cx.notify();
+                    }))))
+                .child(div().font_family(crate::platform::monospace_font()).text_size(scale::px(11.5)).child(output.text.clone()))
+        });
+        Some(div().w_full().px(px(22.0)).mb(px(6.0)).flex().justify_center()
+            .child(div().w_full().max_w(px(COLUMN_MAX_W)).flex().flex_col().gap(px(4.0)).child(bar).children(output)))
     }
 
     fn render_question(&self, cx: &mut Context<Self>) -> Option<Div> {
-        let q = self.question.as_ref()?;
+        let q = self.questions.front()?;
+        let question_id = q.id;
         let mut options = div().flex().flex_col().gap(px(6.0)).w_full();
         for (i, opt) in q.options.iter().enumerate() {
             let lit = i == q.highlight;
             let row = div()
-                .id(SharedString::from(format!("thread-perm-{i}")))
+                .id(SharedString::from(format!("thread-perm-{question_id}-{i}")))
                 .w_full()
                 .px(px(10.0))
                 .py(px(8.0))
@@ -737,7 +768,7 @@ impl ThreadView {
                                 .child(desc)
                         })),
                 )
-                .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| v.answer(Some(i), cx)));
+                .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| { v.answer_question(question_id, Some(i), cx); }));
             options = options.child(row);
         }
         // Inside the message box, above where you type: a long list of options scrolls on its own.
@@ -753,6 +784,7 @@ impl ThreadView {
                 .flex_col()
                 .gap(px(8.0))
                 .child(div().font_weight(FontWeight::SEMIBOLD).child(q.title.clone()))
+                .when(self.questions.len() > 1, |card| card.child(div().text_size(scale::px(11.5)).text_color(hsla(theme::TEXT_DIM)).child(format!("{} more requests", self.questions.len() - 1))))
                 .child(div().id("thread-question-options").max_h(px(240.0)).overflow_y_scroll().child(options))
                 .child(
                     div()
@@ -898,7 +930,7 @@ impl ThreadView {
         ))
     }
 
-    fn render_composer(&self, window: &mut Window, cx: &mut Context<Self>) -> Div {
+    fn render_composer(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let mut inner = div().w_full().max_w(px(COLUMN_MAX_W)).flex().flex_col().gap(px(6.0));
 
         let commands = self.matching_commands(cx);
@@ -983,7 +1015,7 @@ impl ThreadView {
             .on_mouse_down(MouseButton::Left, cx.listener(|v, _, window, cx| v.composer.update(cx, |c, cx| c.focus(window, cx))))
             .child(Textarea::new(&self.composer).appearance(false))
             .into_any_element();
-        let dock = composer::render(self.composer_parts(focused, input, cx));
+        let dock = composer::render(self.composer_parts(focused, input, window.modifiers().secondary(), cx));
 
         div()
             .flex_none()
@@ -993,13 +1025,15 @@ impl ThreadView {
             .pt(px(4.0))
             .flex()
             .justify_center()
+            .id("thread-composer-dock")
+            .on_modifiers_changed(cx.listener(|_, _: &gpui::ModifiersChangedEvent, _, cx| cx.notify()))
             .child(inner.children(self.render_waiting(cx)).child(dock))
     }
 
     /// The user's messages waiting for the turn to end, above the message box, each one editable or removable
     /// before it is sent.
     fn render_waiting(&self, cx: &mut Context<Self>) -> Option<Div> {
-        let waiting = self.waiting_messages();
+        let waiting = self.waiting_messages().collect::<Vec<_>>();
         let steering: Vec<String> = self.unread_steers().map(first_line).collect();
         if waiting.is_empty() && steering.is_empty() {
             return None;
@@ -1017,9 +1051,9 @@ impl ThreadView {
                 .child(div().flex_none().text_size(scale::px(11.0)).text_color(hsla(theme::TEXT_FAINT)).child("Read after the current step"))
         });
         let waiting_empty = waiting.is_empty();
-        let changes = self.queue_changes;
-        let rows = waiting.into_iter().map(|(at, text)| {
-            let first_line = first_line(text);
+        let rows = waiting.into_iter().map(|(id, text)| {
+            let editing = self.queue_edit.as_ref().is_some_and(|edit| edit.id == id);
+            let can_act = !editing && !self.interrupting && self.questions.is_empty();
             div()
                 .w_full()
                 .flex()
@@ -1027,20 +1061,32 @@ impl ThreadView {
                 .gap(px(8.0))
                 .px(px(10.0))
                 .py(px(4.0))
+                .when(editing, |row| row.bg(hsla(theme::SURFACE_HOVER)))
                 .child(icon(IconName::Clock, 12.0).text_color(hsla(theme::TEXT_FAINT)))
-                .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(scale::px(12.5)).text_color(hsla(theme::TEXT_DIM)).child(first_line))
-                .child(
-                    icon_button(SharedString::from(format!("queued-edit-{changes}-{at}")), IconName::Pencil)
-                        .on_click(cx.listener(move |v, _: &ClickEvent, window, cx| v.edit_queued(at, window, cx))),
-                )
-                .child(
-                    icon_button(SharedString::from(format!("queued-remove-{changes}-{at}")), IconName::X)
-                        .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| drop(v.unqueue(at, cx)))),
-                )
+                .child(div().flex_1().min_w_0().overflow_hidden().text_size(scale::px(12.5)).text_color(hsla(theme::TEXT_DIM)).child(text.to_string()))
+                .when(can_act, |row| {
+                    row.child(button(SharedString::from(format!("queued-send-{id}")), "Send now", false)
+                        .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| v.send_queued_now(id, cx))))
+                    .when(self.queue_edit.is_none(), |row| row.child(
+                        icon_button(SharedString::from(format!("queued-edit-{id}")), IconName::Pencil)
+                            .on_click(cx.listener(move |v, _: &ClickEvent, window, cx| v.edit_queued(id, window, cx))),
+                    ))
+                    .child(
+                        icon_button(SharedString::from(format!("queued-remove-{id}")), IconName::X)
+                            .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| {
+                                if v.unqueue(id, cx).is_some() {
+                                    v.queue_changed();
+                                }
+                            })),
+                    )
+                })
         });
         Some(
-            div()
+            div().child(div()
+                .id("thread-queue")
                 .w_full()
+                .max_h(px(180.0))
+                .overflow_y_scroll()
                 .py(px(4.0))
                 .rounded(px(10.0))
                 .bg(hsla(theme::SURFACE_ELEVATED))
@@ -1049,14 +1095,14 @@ impl ThreadView {
                 .flex()
                 .flex_col()
                 .children(steering_rows)
-                .when(!waiting_empty, |d| d.child(div().px(px(10.0)).pt(px(2.0)).text_size(scale::px(11.0)).text_color(hsla(theme::TEXT_FAINT)).child("Queued for after this turn")))
-                .children(rows),
+                .when(!waiting_empty, |d| d.child(div().px(px(10.0)).pt(px(2.0)).text_size(scale::px(11.0)).text_color(hsla(theme::TEXT_FAINT)).child(if self.queue_held { "Queue paused" } else { "Queued for after this turn" })))
+                .children(rows)),
         )
     }
 
     /// Assemble the shared message box parts: model, permission mode, branch, review and send. What the agent is
     /// doing shows in the chat (`render_activity`) and what waits shows above the box (`render_waiting`).
-    fn composer_parts(&self, focused: bool, input: AnyElement, cx: &mut Context<Self>) -> composer::Composer {
+    fn composer_parts(&self, focused: bool, input: AnyElement, alternate: bool, cx: &mut Context<Self>) -> composer::Composer {
         let active_harness = self.pending_model.as_ref().map_or(self.harness, |m| m.harness);
         let (_, effort_labels, effort_ix, _) = self.effort_choices();
         let effort_badge = effort_labels.get(effort_ix).cloned();
@@ -1105,13 +1151,57 @@ impl ThreadView {
             };
             extra_actions.push(chip.child("Review changes").into_any_element());
         }
-        let can_send = composer::can_send(self.composer.read(cx).value().as_ref());
-        let send = composer::send_button("thread-send", can_send)
-            .when(can_send, |d| d.on_click(cx.listener(|v, _: &ClickEvent, window, cx| v.submit(window, cx))))
-            .into_any_element();
+        let draft = self.composer.read(cx).value();
+        let has_text = composer::can_send(draft.as_ref());
+        let editing = self.queue_edit.is_some();
+        let idle_for_resume = !self.working && self.queue_held && self.questions.is_empty()
+            && (self.waiting_messages().next().is_some() || self.handoff_after_turn.is_some());
+        let answering = self.questions.front().is_some_and(|q| q.takes_own_answer);
+        let follow_up = if alternate { self.follow_up.other() } else { self.follow_up };
+        let label = if editing {
+            extra_actions.push(button("thread-cancel-edit", "Cancel", false)
+                .on_click(cx.listener(|v, _: &ClickEvent, window, cx| v.finish_queue_edit(false, window, cx)))
+                .into_any_element());
+            "Save"
+        } else if answering {
+            "Answer"
+        } else if !has_text && self.interrupting {
+            "Stopping…"
+        } else if !has_text && self.working {
+            "Interrupt"
+        } else if !has_text && idle_for_resume {
+            "Resume"
+        } else if self.can_steer(draft.trim(), follow_up) {
+            "Steer"
+        } else if self.working || self.phase == super::Phase::Starting {
+            "Queue"
+        } else {
+            "Send"
+        };
+        let enabled = if editing {
+            has_text && self.questions.is_empty()
+        } else if answering {
+            has_text
+        } else {
+            has_text || (self.working && !self.interrupting) || idle_for_resume
+        };
+        let send = if enabled {
+            button("thread-send", label, true)
+                .on_click(cx.listener(|v, ev: &ClickEvent, window, cx| {
+                    if v.queue_edit.is_some() || composer::can_send(&v.draft(cx)) {
+                        v.submit_with(ev.modifiers().secondary(), window, cx);
+                    } else if v.working {
+                        v.interrupt(cx);
+                    } else if v.queue_held && v.questions.is_empty() {
+                        v.resume_queue(cx);
+                    }
+                }))
+        } else {
+            button_disabled("thread-send", label)
+        }.h(px(26.0)).px(px(12.0)).into_any_element();
 
         composer::Composer {
-            lit: focused || self.question.is_some(),
+            lit: focused || !self.questions.is_empty(),
             top: self.render_question(cx).map(IntoElement::into_any_element),
             input,
             model,

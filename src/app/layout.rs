@@ -74,8 +74,11 @@ impl Workspace {
                 if let Some(err) = view.read(cx).start_error() {
                     ws.toast(format!("Could not start the shell: {err}"), true, cx);
                 }
+                let shell_had_focus = view.focus_handle(cx).is_focused(window);
                 ws.shells.remove(&owner);
-                ws.focus_active(window, cx);
+                if shell_had_focus {
+                    ws.focus_active(window, cx);
+                }
                 cx.notify();
             }
         });
