@@ -156,7 +156,7 @@ impl Workspace {
                 }
                 (mode, options)
             }
-            Some(_) => (None, vec![]),
+            Some(_) => (None, resume_options(meta)),
         };
         let mut env = vec![];
         let mut session_meta = serde_json::json!({});
@@ -323,6 +323,15 @@ impl Workspace {
         let sub_id = id.clone();
         let sub = cx.subscribe_in(&view, window, move |ws: &mut Workspace, _view, ev: &ThreadEvent, window, cx| match ev {
             ThreadEvent::Exited(code) => ws.on_exit(&sub_id, *code, window, cx),
+            ThreadEvent::Chosen(model, effort) => {
+                if let Some(meta) = ws.store.session_mut(&sub_id).and_then(|r| r.claude.as_mut())
+                    && (&meta.chosen_model, &meta.chosen_effort) != (model, effort)
+                {
+                    meta.chosen_model = model.clone();
+                    meta.chosen_effort = effort.clone();
+                    ws.store.mark_dirty();
+                }
+            }
             ThreadEvent::SessionId(session) => {
                 if let Some(meta) = ws.store.session_mut(&sub_id).and_then(|r| r.claude.as_mut()) {
                     meta.session_id = session.clone();
@@ -656,6 +665,14 @@ impl Workspace {
     }
 }
 
+/// The options a resumed session asks for: the model and effort last picked in it.
+fn resume_options(meta: &ClaudeMeta) -> Vec<(&'static str, String)> {
+    [("model", &meta.chosen_model), ("thought_level", &meta.chosen_effort)]
+        .into_iter()
+        .filter_map(|(category, value)| Some((category, value.clone()?)))
+        .collect()
+}
+
 /// Whether Claude Code has a conversation for the session: one it listed on a scan, or a transcript on disk. A
 /// session nobody has written to has none, and `claude --resume` ends at once on it.
 fn has_conversation(meta: &ClaudeMeta) -> bool {
@@ -666,7 +683,17 @@ fn has_conversation(meta: &ClaudeMeta) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::numbered;
+    use super::{numbered, resume_options};
+    use crate::store::ClaudeMeta;
+
+    #[test]
+    fn a_resumed_session_asks_for_the_model_and_effort_picked_in_it() {
+        let picked = ClaudeMeta { chosen_model: Some("opus".into()), chosen_effort: Some("high".into()), ..Default::default() };
+        assert_eq!(resume_options(&picked), [("model", "opus".to_string()), ("thought_level", "high".to_string())]);
+        let model_only = ClaudeMeta { chosen_model: Some("gpt-5.3-codex".into()), ..Default::default() };
+        assert_eq!(resume_options(&model_only), [("model", "gpt-5.3-codex".to_string())]);
+        assert!(resume_options(&ClaudeMeta::default()).is_empty(), "nothing picked asks for nothing");
+    }
 
     #[test]
     fn numbers_count_from_one() {

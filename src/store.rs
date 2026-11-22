@@ -75,6 +75,12 @@ pub struct ClaudeMeta {
     #[serde(default)]
     pub harness: crate::harness::Harness,
     pub model: Option<String>,
+    /// The model and effort last picked in this session, as the harness's option values; a resumed session asks for
+    /// them again, since harnesses start a loaded session on their own defaults.
+    #[serde(default)]
+    pub chosen_model: Option<String>,
+    #[serde(default)]
+    pub chosen_effort: Option<String>,
     pub context_tokens: Option<u64>,
     /// Exact context usage (0..=1) and window size as reported by Claude Code's status line, when seen.
     #[serde(default)]

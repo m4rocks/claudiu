@@ -70,6 +70,8 @@ pub enum ThreadEvent {
     OpenPath(String, Option<usize>),
     /// The user picked a model served by another harness and sent a message: dynamically hand off this chat.
     Handoff { to: Harness, model: Option<String>, message: String, effort: Option<String> },
+    /// The session's model or effort changed: `(model, effort)` option values, kept for when it resumes.
+    Chosen(Option<String>, Option<String>),
 }
 
 /// How to bring a session up.
@@ -135,6 +137,8 @@ pub struct ThreadView {
     handoff_after_turn: Option<(CatalogModel, Option<String>, String)>,
     /// Effort choice staged for the next handoff or while no live `thought_level` option exists yet.
     pub pending_effort: Option<String>,
+    /// The `(model, effort)` last sent as `ThreadEvent::Chosen`.
+    chosen: (Option<String>, Option<String>),
     model_search: Entity<InputState>,
     cwd: PathBuf,
     connection: Option<Rc<Connection>>,
@@ -237,6 +241,7 @@ impl ThreadView {
             pending_model: None,
             handoff_after_turn: None,
             pending_effort: start.options.iter().find(|(k, _)| *k == "thought_level").map(|(_, v)| v.clone()),
+            chosen: (None, None),
             model_search,
             cwd: start.cwd.clone(),
             connection: None,
@@ -339,17 +344,19 @@ impl ThreadView {
             self.session_id = Some(session_id.clone());
             cx.emit(ThreadEvent::SessionId(session_id));
         }
-        if start.session_id.is_none() {
-            if let Some(mode) = start.mode.clone().filter(|m| self.thread.modes.iter().any(|(id, _)| id == m)) {
-                self.set_mode(mode, cx);
-            }
-            for (category, value) in &start.options {
-                if let Some(option) = self.thread.option(category).filter(|o| o.choices.iter().any(|(v, _)| v == value)) {
-                    let id = option.id.clone();
-                    self.set_option(id, value.clone(), cx);
-                }
+        // A resumed session keeps the mode the harness restores; its options are the model and effort picked in it.
+        if start.session_id.is_none()
+            && let Some(mode) = start.mode.clone().filter(|m| self.thread.modes.iter().any(|(id, _)| id == m))
+        {
+            self.set_mode(mode, cx);
+        }
+        for (category, value) in &start.options {
+            if let Some(option) = self.thread.option(category).filter(|o| o.current != *value && o.choices.iter().any(|(v, _)| v == value)) {
+                let id = option.id.clone();
+                self.set_option(id, value.clone(), cx);
             }
         }
+        self.report_chosen(cx);
         self.phase = Phase::Ready;
         // A move (a worktree switch, a hand-off) is over once the session is open where it went.
         self.handover = None;
@@ -377,6 +384,7 @@ impl ThreadView {
                 {
                     cx.emit(ThreadEvent::Context(used, size));
                 }
+                self.report_chosen(cx);
             }
             Event::Permission { id, params } => {
                 let options = params["options"]
@@ -607,6 +615,7 @@ impl ThreadView {
             if let Ok(result) = reply.await {
                 let _ = this.update(cx, |v, cx| {
                     v.thread.apply_session(&result);
+                    v.report_chosen(cx);
                     cx.notify();
                 });
             }
@@ -740,6 +749,15 @@ impl ThreadView {
             keys::Key::PickModel => self.toggle_model_picker(window, cx),
         }
         cx.notify();
+    }
+
+    fn report_chosen(&mut self, cx: &mut Context<Self>) {
+        let current = |category| self.thread.option(category).map(|o| o.current.clone());
+        let now = (current("model"), current("thought_level"));
+        if now != self.chosen && (now.0.is_some() || now.1.is_some()) {
+            self.chosen = now.clone();
+            cx.emit(ThreadEvent::Chosen(now.0, now.1));
+        }
     }
 
     /// Close the model or permission dropdown and give the keyboard back to the message box, which the model
