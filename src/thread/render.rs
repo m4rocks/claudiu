@@ -694,14 +694,16 @@ impl ThreadView {
         if !self.queue.is_empty() {
             actions.push(faint(format!("{} queued", self.queue.len())).into_any_element());
         }
-        if self.can_review() {
-            actions.push(
+        // Outside a git repository there are no snapshots, and so no review at all.
+        if !self.snapshots.is_empty() {
+            let chip = if self.can_review() {
                 composer::chip("thread-review-open", false)
                     .text_color(hsla(theme::TEXT_DIM))
-                    .child("Review changes")
                     .on_click(cx.listener(|v, _: &ClickEvent, _, cx| v.open_review(cx)))
-                    .into_any_element(),
-            );
+            } else {
+                composer::disabled_chip("thread-review-open")
+            };
+            actions.push(chip.child("Review changes").into_any_element());
         }
         (chips, actions)
     }

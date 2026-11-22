@@ -45,20 +45,20 @@ pub fn input_area() -> Div {
 
 /// One chip in the footer; `open` while its dropdown is up.
 pub fn chip(id: impl Into<ElementId>, open: bool) -> Stateful<Div> {
-    div()
-        .id(id)
-        .h(px(26.0))
-        .px(px(8.0))
-        .rounded(px(6.0))
+    chip_shape(id)
         .bg(hsla(if open { theme::ROW_ACTIVE } else { theme::PANEL_BG }))
-        .border_1()
         .border_color(hsla(if open { theme::ACCENT } else { theme::PANEL_BORDER }))
         .hover(|s| s.bg(hsla(theme::SURFACE_HOVER)))
-        .flex()
-        .items_center()
-        .gap(px(5.0))
         .cursor_pointer()
-        .text_size(scale::px(11.5))
+}
+
+/// A chip that does nothing for now: dimmed, with no hover.
+pub fn disabled_chip(id: impl Into<ElementId>) -> Stateful<Div> {
+    chip_shape(id).bg(hsla(theme::PANEL_BG)).border_color(hsla(theme::PANEL_BORDER)).text_color(hsla(theme::TEXT_FAINT))
+}
+
+fn chip_shape(id: impl Into<ElementId>) -> Stateful<Div> {
+    div().id(id).h(px(26.0)).px(px(8.0)).rounded(px(6.0)).border_1().flex().items_center().gap(px(5.0)).text_size(scale::px(11.5))
 }
 
 /// What the branch chip shows: the branch (or worktree) and, in a linked worktree, its name; a spinner `tail` while

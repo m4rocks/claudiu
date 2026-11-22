@@ -1875,9 +1875,10 @@ fn reviewing_what_a_turn_changed() {
     on_thread(&mut cx, &|v, w, cx| v.send_comments(w, cx));
     wait(&mut cx, "the comments to reach the agent", &|_, _| std::fs::read_to_string(&prompts).is_ok_and(|p| p.contains("@notes.txt#L2: keep it lowercase")));
 
-    // That message was a turn too: its review is empty until something changes, and putting back the earlier hunk is
-    // then the only change.
-    wait(&mut cx, "the second turn", &|ws, app| thread(ws).read(app).can_review());
+    // That message was a turn too, and it changed nothing, so there is nothing to review. Putting back the earlier
+    // hunk is then the only change.
+    wait(&mut cx, "the second turn's changes to be read", &|ws, app| thread(ws).read(app).changes_known());
+    assert!(!ws.read_with(&cx, |ws, app| thread(ws).read(app).can_review()), "a turn that changed nothing has nothing to review");
     on_thread(&mut cx, &|v, _, cx| v.open_review(cx));
     wait(&mut cx, "the changes", &|ws, app| thread(ws).read(app).review_files().is_some());
     assert!(ws.read_with(&cx, |ws, app| thread(ws).read(app).review_files().unwrap().is_empty()));

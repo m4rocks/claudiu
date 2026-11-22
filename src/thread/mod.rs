@@ -186,6 +186,8 @@ pub struct ThreadView {
     /// The working tree as it was before each message, oldest first (`git/snapshot.rs`). Empty outside a git
     /// repository.
     pub snapshots: Vec<String>,
+    /// Whether the working tree differs from the last snapshot; None while a turn runs or the check is out.
+    pub(super) changed: Option<bool>,
     /// The review of what changed since the last message, while it is open.
     review: Option<review::Review>,
     _subscriptions: Vec<Subscription>,
@@ -273,6 +275,7 @@ impl ThreadView {
             cards: HashMap::new(),
             card_ui,
             snapshots: Vec::new(),
+            changed: None,
             review: None,
             _subscriptions: subscriptions,
         };
@@ -486,6 +489,7 @@ impl ThreadView {
         self.remeasure(at);
         self.list.scroll_to_end();
         self.working = true;
+        self.changed = None;
         let cwd = self.cwd.clone();
         cx.spawn(async move |this, cx| {
             // The snapshot comes first, so the review sees what this turn changed. Outside a repository it fails, and the
@@ -506,6 +510,7 @@ impl ThreadView {
 
     fn turn_ended(&mut self, result: Result<Value, String>, cx: &mut Context<Self>) {
         self.working = false;
+        self.check_changes(cx);
         self.question = None;
         let notice = match &result {
             Ok(r) => match r["stopReason"].as_str() {

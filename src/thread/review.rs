@@ -44,9 +44,31 @@ pub fn comments_message(comments: &[Comment]) -> String {
 }
 
 impl ThreadView {
-    /// Whether there is a snapshot to review from, and no turn is changing files right now.
+    /// Whether the last turn left anything to review, and no turn is changing files right now.
     pub fn can_review(&self) -> bool {
-        !self.working && !self.snapshots.is_empty()
+        !self.working && self.changed == Some(true)
+    }
+
+    /// Whether the check for changes since the last snapshot has come back.
+    #[cfg(test)]
+    pub fn changes_known(&self) -> bool {
+        !self.working && self.changed.is_some()
+    }
+
+    /// Read in the background whether the working tree differs from the last snapshot, so Review changes is off
+    /// when there is nothing to show.
+    pub(super) fn check_changes(&mut self, cx: &mut Context<Self>) {
+        let Some(snapshot) = self.snapshots.last().cloned() else { return };
+        self.changed = None;
+        let cwd = self.cwd.clone();
+        cx.spawn(async move |this, cx| {
+            let read = cx.background_executor().spawn(async move { snapshot::changes(&cwd, &snapshot) }).await;
+            let _ = this.update(cx, |v, cx| {
+                v.changed = Some(read.is_ok_and(|files| !files.is_empty()));
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     pub fn open_review(&mut self, cx: &mut Context<Self>) {
@@ -91,6 +113,8 @@ impl ThreadView {
 
     fn close_review(&mut self, cx: &mut Context<Self>) {
         self.review = None;
+        // Hunks put back during the review may have left nothing to review.
+        self.check_changes(cx);
         cx.notify();
     }
 
