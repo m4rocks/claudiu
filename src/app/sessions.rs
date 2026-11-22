@@ -126,7 +126,7 @@ impl Workspace {
         let settings = &self.store.data.settings;
         let off = mcp::tools_off(&settings.m4code_tools_off, &claude::trim::FLUFF);
         let mut mcp_servers = vec![];
-        if let Ok(exe) = std::env::current_exe() {
+        if let Ok(exe) = crate::platform::own_exe() {
             let mut env = vec![(mcp::RECORD_ENV, record_id.to_string())];
             if !off.is_empty() {
                 env.push((mcp::TOOLS_OFF_ENV, off.join(",")));
@@ -177,7 +177,7 @@ impl Workspace {
                 env.push((crate::visual::VISUAL_ENV.into(), crate::visual::prefix(record_id).to_string_lossy().into_owned()));
                 // The mod registers the agent types and answers their turns, so they go only where it loads.
                 if let Some(subagents) = settings.custom_subagents.env_for(&settings.enabled_harnesses_list())
-                    && let Ok(exe) = std::env::current_exe()
+                    && let Ok(exe) = crate::platform::own_exe()
                 {
                     env.push((crate::claude::subagents::ENV.into(), subagents));
                     env.push((crate::claude::subagents::EXE_ENV.into(), exe.to_string_lossy().into_owned()));

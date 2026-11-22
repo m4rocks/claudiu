@@ -207,7 +207,7 @@ pub(super) fn antigravity_args(request: &Request) -> Result<Vec<String>, String>
     if request.edits {
         return Ok(vec![]);
     }
-    let m4code = std::env::current_exe().map_err(|e| format!("m4code couldn't find itself to keep Antigravity read-only ({e})"))?;
+    let m4code = crate::platform::own_exe().map_err(|e| format!("m4code couldn't find itself to keep Antigravity read-only ({e})"))?;
     let gemini = super::antigravity_read_only::prepare(&crate::datadir::data_dir(), &m4code).map_err(|e| format!("m4code couldn't set up Antigravity's read-only folder ({e})"))?;
     Ok(vec!["--gemini-dir".into(), gemini.to_string_lossy().into_owned()])
 }

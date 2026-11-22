@@ -288,6 +288,21 @@ fn registry_path(root: windows_sys::Win32::System::Registry::HKEY, subkey: &str)
     }
 }
 
+/// This program's path, for the helpers m4code starts as itself (`--mcp-title`, `--acp`). When the running binary is
+/// replaced on disk, by a rebuild or an update, Linux reports its path with " (deleted)" on the end, which no child can
+/// start: Claude Code then starts without m4code's tools and instructions. The file now at the original path is the
+/// replacement, and it is the one to start.
+pub fn own_exe() -> std::io::Result<PathBuf> {
+    std::env::current_exe().map(without_deleted_mark)
+}
+
+fn without_deleted_mark(exe: PathBuf) -> PathBuf {
+    match exe.to_str().and_then(|path| path.strip_suffix(" (deleted)")) {
+        Some(original) if !exe.exists() => PathBuf::from(original),
+        _ => exe,
+    }
+}
+
 /// A program typed by the user: an existing file, or a name found on PATH.
 pub fn resolve_program(text: &str) -> Option<PathBuf> {
     let p = Path::new(text);
@@ -706,6 +721,17 @@ bye
         let system = registry_path(HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment").expect("the system Path value exists");
         assert!(!system.contains('%'), "variables are expanded: {system}");
         assert!(system.to_lowercase().contains("system32"), "{system}");
+    }
+
+    #[test]
+    fn a_replaced_binary_is_started_from_its_original_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let replaced = dir.path().join("m4code");
+        assert_eq!(without_deleted_mark(dir.path().join("m4code (deleted)")), replaced);
+        assert_eq!(without_deleted_mark(replaced.clone()), replaced, "a path without the mark stays");
+        let named = dir.path().join("odd (deleted)");
+        std::fs::write(&named, "").unwrap();
+        assert_eq!(without_deleted_mark(named.clone()), named, "a file that is really named so stays");
     }
 
     #[test]
