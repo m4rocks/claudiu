@@ -1,4 +1,4 @@
-//! The window a second Claudiu shows when another one already uses its data folder, before it quits.
+//! The window a second m4code shows when another one already uses its data folder, before it quits.
 
 use gpui::{App, AppContext, Bounds, ClickEvent, Context, IntoElement, ParentElement, Render, StatefulInteractiveElement, Styled, TitlebarOptions, Window, WindowBounds, WindowOptions, div, px, size};
 
@@ -16,8 +16,8 @@ impl Render for AlreadyRunning {
             .gap(px(10.0))
             .p(px(24.0))
             .bg(hsla(theme::APP_BG))
-            .child(div().text_size(px(15.0)).text_color(hsla(theme::TEXT)).child("Claudiu is already running"))
-            .child(div().text_size(px(13.0)).text_color(hsla(theme::TEXT_DIM)).child("Another Claudiu window uses the same data folder. Switch to it instead."))
+            .child(div().text_size(px(15.0)).text_color(hsla(theme::TEXT)).child("m4code is already running"))
+            .child(div().text_size(px(13.0)).text_color(hsla(theme::TEXT_DIM)).child("Another m4code window uses the same data folder. Switch to it instead."))
             .child(div().flex_1())
             .child(div().flex().justify_end().child(button("already-running-ok", "OK", true).on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.quit()))))
     }
@@ -33,7 +33,7 @@ pub fn show() {
             window_min_size: Some(bounds),
             is_resizable: false,
             app_id: Some(crate::platform::APP_ID.into()),
-            titlebar: Some(TitlebarOptions { title: Some("Claudiu".into()), ..Default::default() }),
+            titlebar: Some(TitlebarOptions { title: Some("m4code".into()), ..Default::default() }),
             ..Default::default()
         };
         if cx.open_window(options, |_, cx| cx.new(|_| AlreadyRunning)).is_err() {

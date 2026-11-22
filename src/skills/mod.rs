@@ -1,4 +1,4 @@
-//! Managed `SKILL.md` packages: canonical storage inside Claudiu's data folder, global and per-project toggles, and
+//! Managed `SKILL.md` packages: canonical storage inside m4code's data folder, global and per-project toggles, and
 //! symlink syncing into each active harness's expected skills folder. No GPUI here.
 
 pub mod registry;
@@ -43,7 +43,7 @@ impl InstalledSkill {
     }
 }
 
-/// A skill the project's repository ships itself, such as `.claude/skills/<name>/SKILL.md`. Claudiu only lists these.
+/// A skill the project's repository ships itself, such as `.claude/skills/<name>/SKILL.md`. m4code only lists these.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RepoSkill {
     pub name: String,
@@ -157,7 +157,7 @@ fn toggle_flag(list: &mut Vec<String>, name: &str) -> bool {
     }
 }
 
-/// Canonical folder where Claudiu keeps downloaded `SKILL.md` packages. Storing them here (rather than directly inside
+/// Canonical folder where m4code keeps downloaded `SKILL.md` packages. Storing them here (rather than directly inside
 /// `~/.agents/skills`) lets turning a skill off hide it even from harnesses that auto-scan `~/.agents/skills`.
 pub fn skills_root() -> PathBuf {
     crate::datadir::data_dir().join("skills")
@@ -318,7 +318,7 @@ fn subagent_enabled(harness: Harness, subagents: &CustomSubagents) -> bool {
     subagents.get(agent).on
 }
 
-/// Whether `link` is a symlink/junction created by Claudiu that points inside `store_root`.
+/// Whether `link` is a symlink/junction created by m4code that points inside `store_root`.
 /// Also matches dangling links whose target path lies under `store_root`, so stale links are cleaned up.
 fn is_managed_link(link: &Path, store_root: &Path) -> bool {
     let Ok(meta) = fs::symlink_metadata(link) else { return false };
@@ -340,7 +340,7 @@ fn is_managed_link(link: &Path, store_root: &Path) -> bool {
     false
 }
 
-/// Reconcile `target_dir` so its Claudiu-managed symlinks match `enabled` exactly.
+/// Reconcile `target_dir` so its m4code-managed symlinks match `enabled` exactly.
 /// User-owned folders or links pointing outside `store_root` are never touched.
 pub fn sync_dir(store_root: &Path, target_dir: &Path, enabled: &[String]) -> io::Result<()> {
     let mut last_err = None;
@@ -392,7 +392,7 @@ pub fn sync_dir(store_root: &Path, target_dir: &Path, enabled: &[String]) -> io:
     }
 }
 
-/// Sync global and per-project skills into every active harness (and prune stale Claudiu links from inactive ones).
+/// Sync global and per-project skills into every active harness (and prune stale m4code links from inactive ones).
 /// Returns human-readable error strings for any directories that failed to sync.
 pub fn sync_all(store_root: &Path, home: &Path, active: &[Harness], config: &SkillsConfig, projects: &[(String, PathBuf)]) -> Vec<String> {
     let mut errors = Vec::new();
@@ -419,7 +419,7 @@ pub fn sync_all(store_root: &Path, home: &Path, active: &[Harness], config: &Ski
     errors
 }
 
-/// Skills the repository at `project` ships in any harness's project skills folder. Claudiu's own symlinks into
+/// Skills the repository at `project` ships in any harness's project skills folder. m4code's own symlinks into
 /// `store_root` are left out, because those are installed skills already listed elsewhere.
 pub fn repo_skills(store_root: &Path, project: &Path) -> Vec<RepoSkill> {
     let mut found = Vec::new();
@@ -445,7 +445,7 @@ pub fn repo_skills(store_root: &Path, project: &Path) -> Vec<RepoSkill> {
     found
 }
 
-/// Remove every Claudiu-managed symlink for `name` (globally and in `projects`) and delete its folder in `store_root`.
+/// Remove every m4code-managed symlink for `name` (globally and in `projects`) and delete its folder in `store_root`.
 pub fn uninstall(store_root: &Path, home: &Path, name: &str, projects: &[PathBuf]) -> io::Result<()> {
     if !valid_skill_name(name) {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid skill name"));
@@ -545,7 +545,7 @@ mod tests {
         // User-owned folder stays intact.
         assert_eq!(fs::read_to_string(user_skill.join("SKILL.md")).unwrap(), "user");
 
-        // Toggling off removes Claudiu's symlink while keeping the canonical skill and user folder intact.
+        // Toggling off removes m4code's symlink while keeping the canonical skill and user folder intact.
         cfg.set_global("alpha", false);
         let errs = sync_all(&store, &home, &active, &cfg, &[("p1".into(), project.clone())]);
         assert!(errs.is_empty(), "{errs:?}");
@@ -562,7 +562,7 @@ mod tests {
     }
 
     #[test]
-    fn repo_skills_lists_project_folders_but_not_claudiu_links() {
+    fn repo_skills_lists_project_folders_but_not_m4code_links() {
         let tmp = tempfile::tempdir().unwrap();
         let store = tmp.path().join("store");
         let home = tmp.path().join("home");

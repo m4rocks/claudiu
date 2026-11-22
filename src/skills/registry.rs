@@ -78,7 +78,7 @@ fn agent() -> &'static ureq::Agent {
 fn get_bytes(url: &str) -> Result<(u16, Vec<u8>), String> {
     let response = agent()
         .get(url)
-        .header("User-Agent", concat!("claudiu/", env!("CARGO_PKG_VERSION")))
+        .header("User-Agent", concat!("m4code/", env!("CARGO_PKG_VERSION")))
         .header("Accept", "application/json, text/plain, */*")
         .call()
         .map_err(|e| format!("Network request failed: {e}"))?;

@@ -152,7 +152,7 @@ impl Workspace {
         );
     }
 
-    /// Download `entry` into Claudiu's skills store, enable it in the currently selected scope, and sync symlinks.
+    /// Download `entry` into m4code's skills store, enable it in the currently selected scope, and sync symlinks.
     pub(crate) fn install_skill(&mut self, entry: CatalogEntry, cx: &mut Context<Self>) {
         let key = entry.key();
         if !self.skills_page.installing.insert(key.clone()) {

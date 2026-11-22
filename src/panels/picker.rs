@@ -1,4 +1,4 @@
-//! Universal anchored dropdown picker shared across Claudiu (model, project, branch & worktree, permission mode,
+//! Universal anchored dropdown picker shared across m4code (model, project, branch & worktree, permission mode,
 //! effort, skills scope, and editor selection). Uses the compact model picker as its visual base and stems directly
 //! from the button that opened it without dimming the rest of the window.
 

@@ -11,19 +11,19 @@ pub enum SettingsPage {
     General,
     Harnesses,
     Skills,
-    ClaudiuTools,
+    M4codeTools,
     Projects,
 }
 
 impl SettingsPage {
-    pub const ALL: [SettingsPage; 5] = [Self::General, Self::Harnesses, Self::Skills, Self::ClaudiuTools, Self::Projects];
+    pub const ALL: [SettingsPage; 5] = [Self::General, Self::Harnesses, Self::Skills, Self::M4codeTools, Self::Projects];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::General => "General",
             Self::Harnesses => "Harnesses",
             Self::Skills => "Skills",
-            Self::ClaudiuTools => "Claudiu tools",
+            Self::M4codeTools => "m4code tools",
             Self::Projects => "Projects",
         }
     }
@@ -34,7 +34,7 @@ impl SettingsPage {
             Self::General => IconName::Settings,
             Self::Harnesses => IconName::Terminal,
             Self::Skills => IconName::FileCode,
-            Self::ClaudiuTools => IconName::Brackets,
+            Self::M4codeTools => IconName::Brackets,
             Self::Projects => IconName::FolderOpen,
         }
     }
@@ -44,8 +44,8 @@ impl SettingsPage {
             Self::General => "Defaults for new sessions, interface scale, shell, and updates.",
             Self::Harnesses => "Link coding agents to aggregate their models into one picker and show usage limits.",
             Self::Skills => "Install SKILL.md packages from skills.sh and sync them across active harnesses.",
-            Self::ClaudiuTools => "Built-in MCP tools exposed to sessions. Applies to new sessions and after compaction.",
-            Self::Projects => "Manage projects in the sidebar and git worktrees created by Claudiu.",
+            Self::M4codeTools => "Built-in MCP tools exposed to sessions. Applies to new sessions and after compaction.",
+            Self::Projects => "Manage projects in the sidebar and git worktrees created by m4code.",
         }
     }
 
@@ -318,10 +318,10 @@ mod tests {
     fn next_and_prev_walk_the_list_and_stop_at_the_ends() {
         assert_eq!(General.next(), Harnesses);
         assert_eq!(Harnesses.next(), Skills);
-        assert_eq!(Skills.next(), ClaudiuTools);
-        assert_eq!(ClaudiuTools.next(), Projects);
+        assert_eq!(Skills.next(), M4codeTools);
+        assert_eq!(M4codeTools.next(), Projects);
         assert_eq!(Projects.next(), Projects);
-        assert_eq!(Projects.prev(), ClaudiuTools);
+        assert_eq!(Projects.prev(), M4codeTools);
         assert_eq!(Harnesses.prev(), General);
         assert_eq!(General.prev(), General);
     }

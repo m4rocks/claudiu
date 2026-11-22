@@ -976,41 +976,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "claudiu"
-version = "0.9.23"
-dependencies = [
- "alacritty_terminal",
- "anyhow",
- "directories",
- "dunce",
- "futures",
- "git2",
- "gpui-kit",
- "gpui-pre",
- "image",
- "junction",
- "libc",
- "lsp-types",
- "notify",
- "notify-rust",
- "objc2 0.6.4",
- "objc2-app-kit 0.3.2",
- "raw-window-handle",
- "serde",
- "serde_json",
- "tempfile",
- "time",
- "tree-sitter-gleam",
- "ureq",
- "url",
- "uuid",
- "velopack",
- "which",
- "windows-sys 0.61.2",
- "winresource",
-]
-
-[[package]]
 name = "cocoa"
 version = "0.25.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3967,6 +3932,41 @@ dependencies = [
  "float_next_after",
  "lyon_path",
  "num-traits",
+]
+
+[[package]]
+name = "m4code"
+version = "0.9.23"
+dependencies = [
+ "alacritty_terminal",
+ "anyhow",
+ "directories",
+ "dunce",
+ "futures",
+ "git2",
+ "gpui-kit",
+ "gpui-pre",
+ "image",
+ "junction",
+ "libc",
+ "lsp-types",
+ "notify",
+ "notify-rust",
+ "objc2 0.6.4",
+ "objc2-app-kit 0.3.2",
+ "raw-window-handle",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "time",
+ "tree-sitter-gleam",
+ "ureq",
+ "url",
+ "uuid",
+ "velopack",
+ "which",
+ "windows-sys 0.61.2",
+ "winresource",
 ]
 
 [[package]]

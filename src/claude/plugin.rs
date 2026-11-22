@@ -1,4 +1,4 @@
-//! The mod Claudiu ships (`mod/` in the repository), embedded in the binary and written to the data folder so every
+//! The mod m4code ships (`mod/` in the repository), embedded in the binary and written to the data folder so every
 //! Claude session can load it with `--plugin-dir`.
 
 use std::path::{Path, PathBuf};
@@ -11,7 +11,7 @@ const FILES: [(&str, &str); 3] = [
 ];
 
 /// The mod that answers the MCP server's tools in-process (see `mod/`), written to the data dir and loaded per
-/// process through `--plugin-dir`. Each distinct copy of the mod gets its own folder, so two builds of Claudiu (a
+/// process through `--plugin-dir`. Each distinct copy of the mod gets its own folder, so two builds of m4code (a
 /// release and a dev build) never overwrite each other's files: a rewrite reloads the mod in every running session
 /// that loaded the folder, including sessions the other build started.
 pub fn install() -> std::io::Result<PathBuf> {

@@ -1,5 +1,5 @@
 //! Generative UI in a card: Markdown that may contain fenced blocks with the info string `ui`, written as HTML with
-//! inline CSS, drawn natively in Claudiu's theme instead of shown as code (`parse` reads it, `render` draws it). The
+//! inline CSS, drawn natively in m4code's theme instead of shown as code (`parse` reads it, `render` draws it). The
 //! model is taught the dialect by `PROMPT`, which is the description of the `show_visual` tool.
 
 mod parse;
@@ -12,7 +12,7 @@ use gpui_kit::component::text::{MarkdownNode, MarkdownParseContext, TextView, ma
 
 use parse::Tree;
 
-const NODE: &str = "claudiu-ui";
+const NODE: &str = "m4code-ui";
 
 const UI_TAGS: [&str; 4] = ["button", "chart", "details", "tabs"];
 
@@ -20,7 +20,7 @@ const UI_TAGS: [&str; 4] = ["button", "chart", "details", "tabs"];
 /// `Css::set` understands.
 pub const PROMPT: &str = r#"Draws Markdown as a card inside the terminal, under this call. Use it for the part of a reply that is clearer drawn than typed: a table, comparison, flow, architecture, before/after, status board, timeline, chart or mock-up. A card shows that part, not the whole answer; the rest of the reply stays typed text. Each call adds a new card. The user sees the drawing and not the markup, so say the key facts in your reply without repeating the card's content.
 
-`content` is ordinary Markdown (headings, lists, tables, code, links, emphasis). Where a drawing helps, put it in a fenced block with the info string `ui`; Markdown and `ui` blocks mix freely, with prose before and after and several blocks per call. The block holds HTML with inline CSS, and Claudiu draws it in the app's own dark style. There are no scripts; the interactive tags are listed below.
+`content` is ordinary Markdown (headings, lists, tables, code, links, emphasis). Where a drawing helps, put it in a fenced block with the info string `ui`; Markdown and `ui` blocks mix freely, with prose before and after and several blocks per call. The block holds HTML with inline CSS, and m4code draws it in the app's own dark style. There are no scripts; the interactive tags are listed below.
 
 ````
 ```ui
@@ -44,7 +44,7 @@ Charts from data, instead of plotting SVG by hand, also inside a `ui` block: `<c
 
 Layout is flexbox: a block stacks its children vertically; `display:flex` lays them in a row (use `flex-direction:column` for a column) and `display:grid` with `grid-template-columns` (equal-width columns) or `<grid cols>` makes a grid. Supported CSS in `style="..."`: display, flex-direction, flex-wrap, flex, gap, align-items, justify-content, align-self, width, height, min/max-width, min/max-height (px, %, rem), padding, margin, background (a colour; gradients are ignored), color, border and border-left/right/top/bottom, border-radius, opacity, overflow:hidden, font-size, font-weight, font-style, font-family:monospace, text-align, line-height, text-decoration, white-space, grid-column:span N. There are no classes, `<style>`, scripts, hover states, shadows, or external images. Inline spans can change colour, weight and background but not size; put font-size on a block.
 
-Colours: prefer the theme tokens so everything matches the app: var(--text), var(--dim), var(--faint), var(--accent) (orange), var(--ok), var(--warn), var(--danger), var(--info), var(--bg), var(--surface), var(--raised), var(--border). Hex and rgb()/rgba() work too (`#d9775733` is accent at 20%). The background is near black, so never use black text or white backgrounds.
+Colours: prefer the theme tokens so everything matches the app: var(--text), var(--dim), var(--faint), var(--accent) (white), var(--ok), var(--warn), var(--danger), var(--info), var(--bg), var(--surface), var(--raised), var(--border). Hex and rgb()/rgba() work too (`#ffffff33` is accent at 20%). The background is dark (`#121212`), so never use black text or white backgrounds.
 
 Drawings: an inline `<svg>` with a viewBox (and width/height) renders shapes, paths, text, and gradients. `var(--accent)` and `currentColor` work inside it. Use SVG for diagrams, flows and icons. Give it explicit sizes and legible text (at least 11px).
 

@@ -1,4 +1,4 @@
-//! Claudiu's own persisted state (projects, session history, cached usage, layout).
+//! m4code's own persisted state (projects, session history, cached usage, layout).
 //! Independent of GPUI. Claude Code's data is only ever *read* (see `claude/`) and merged in here.
 
 use std::collections::BTreeMap;
@@ -107,37 +107,58 @@ fn write_atomic(path: &Path, text: &str) -> bool {
     fs::write(&tmp, text).is_ok() && fs::rename(&tmp, path).is_ok()
 }
 
+fn migrate_data_dir(dir: &Path, old_dirs: &[PathBuf]) {
+    if dir.join("state.json").exists() {
+        return;
+    }
+    for old in old_dirs {
+        if old.join("state.json").exists() {
+            // Same volume, so a rename moves everything at once; if it fails the app starts fresh, the old folder untouched.
+            if dir.exists() {
+                let _ = fs::remove_dir(dir);
+            }
+            if fs::create_dir_all(dir.parent().unwrap_or(dir)).and_then(|_| fs::rename(old, dir)).is_ok() {
+                break;
+            }
+        }
+    }
+}
+
 impl Store {
-    /// Platform app-data location, e.g. `%LOCALAPPDATA%\m4rocks\Claudiu\data\state.json` (`Claudiu Dev` in a debug build).
+    /// Platform app-data location, e.g. `%LOCALAPPDATA%\m4rocks\m4code\data\state.json` (`m4code Dev` in a debug build).
     pub fn default_path() -> PathBuf {
         // Tests (and anyone running a second copy) can keep their state away from the real one.
-        if let Some(dir) = std::env::var_os("CLAUDIU_DATA_DIR") {
+        if let Some(dir) = std::env::var_os("M4CODE_DATA_DIR") {
             return PathBuf::from(dir).join("state.json");
         }
         // Local (non-roaming) data: it holds machine-specific paths.
-        // On Windows the Velopack install root is `%LOCALAPPDATA%\Claudiu`, and running Setup.exe over it wipes
+        // On Windows the Velopack install root is `%LOCALAPPDATA%\m4code`, and running Setup.exe over it wipes
         // everything inside, so the data lives under an organization folder beside it instead.
         let org = if cfg!(windows) { "m4rocks" } else { "" };
         // A debug build (`cargo run`) keeps its own folder: two apps on one folder take each other's request files (#84).
-        let app = if cfg!(debug_assertions) { "Claudiu Dev" } else { "Claudiu" };
-        let Some(dirs) = directories::ProjectDirs::from("", org, app) else { return PathBuf::from("claudiu-state.json") };
+        let app = if cfg!(debug_assertions) { "m4code Dev" } else { "m4code" };
+        let Some(dirs) = directories::ProjectDirs::from("", org, app) else { return PathBuf::from("m4code-state.json") };
         let dir = dirs.data_local_dir().to_path_buf();
-        #[cfg(windows)]
-        {
-            static MIGRATE: std::sync::Once = std::sync::Once::new();
-            MIGRATE.call_once(|| {
-                // Only the released app has data at the old place; a debug build must not move it.
-                let old = directories::ProjectDirs::from("", "", "Claudiu").filter(|_| !cfg!(debug_assertions)).map(|d| d.data_local_dir().to_path_buf());
-                if let Some(old) = old.filter(|o| o.join("state.json").exists() && !dir.join("state.json").exists()) {
-                    // Same volume, so a rename moves everything at once; if it fails the app starts fresh, the old folder untouched.
-                    let _ = fs::create_dir_all(dir.parent().unwrap_or(&dir)).and_then(|_| fs::rename(&old, &dir));
-                }
-            });
-        }
+        static MIGRATE: std::sync::Once = std::sync::Once::new();
+        MIGRATE.call_once(|| {
+            // Only the released app has data at the old Claudiu locations; a debug build must not move it.
+            if cfg!(debug_assertions) {
+                return;
+            }
+            let mut old_dirs = Vec::new();
+            if let Some(d) = directories::ProjectDirs::from("", org, "Claudiu") {
+                old_dirs.push(d.data_local_dir().to_path_buf());
+            }
+            #[cfg(windows)]
+            if let Some(d) = directories::ProjectDirs::from("", "", "Claudiu") {
+                old_dirs.push(d.data_local_dir().to_path_buf());
+            }
+            migrate_data_dir(&dir, &old_dirs);
+        });
         dir.join("state.json")
     }
 
-    /// No state file yet: Claudiu has never run here. Ask before anything calls `load`, which moves a corrupt file aside
+    /// No state file yet: m4code has never run here. Ask before anything calls `load`, which moves a corrupt file aside
     /// (a corrupt file still means the user has been here).
     pub fn is_first_launch(path: &Path) -> bool {
         !path.exists()
@@ -317,12 +338,6 @@ impl Store {
         self.data.sessions.push(record);
         self.dirty = true;
     }
-
-    /// Merge a fresh scan of Claude Code's records into our index. See [`reconcile`].
-    pub fn reconcile(&mut self, external: &[ExternalSession], scan_ok: bool) -> ReconcileStats {
-        self.dirty = true;
-        reconcile(&mut self.data, external, scan_ok)
-    }
 }
 
 /// Deepest project containing `cwd` (project root or any of its worktrees).
@@ -348,9 +363,6 @@ pub fn project_for(projects: &[Project], cwd: &Path) -> Option<Id> {
         .max_by_key(|(d, _)| *d)
         .map(|(_, id)| id)
 }
-
-mod reconcile;
-pub use reconcile::{ExternalSession, ReconcileStats, reconcile};
 
 /// The `models` whose id is in `picked`, in their own order. With nothing picked, or nothing picked that is still
 /// offered, all of them: a harness never drops out of the picker because of stale ticks.

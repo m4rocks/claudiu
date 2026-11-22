@@ -1,5 +1,5 @@
 //! Per-turn snapshots: before each message a session sends, the whole working tree (untracked files too, ignored ones
-//! not) is saved as a commit under `refs/claudiu/<session>/`. The review compares the latest one with the working tree,
+//! not) is saved as a commit under `refs/m4code/<session>/`. The review compares the latest one with the working tree,
 //! and a hunk turned down there is put back as it was in the snapshot.
 //!
 //! The commit is built through a temporary index file, so the user's index, HEAD, branches and stash are untouched,
@@ -12,7 +12,7 @@ use super::commit::git_with;
 
 /// Where a session's snapshots live.
 fn prefix(session: &str) -> String {
-    format!("refs/claudiu/{}", crate::datadir::safe_file_stem(session))
+    format!("refs/m4code/{}", crate::datadir::safe_file_stem(session))
 }
 
 /// Save the working tree of the repository at `cwd` as a snapshot of `session`, and return the commit's id. The whole
@@ -23,10 +23,10 @@ pub fn take(cwd: &Path, session: &str) -> Result<String, String> {
     let index = TempIndex::new()?;
     let env: &[(&str, &OsStr)] = &[
         ("GIT_INDEX_FILE", index.path()),
-        ("GIT_AUTHOR_NAME", OsStr::new("Claudiu")),
-        ("GIT_AUTHOR_EMAIL", OsStr::new("claudiu@localhost")),
-        ("GIT_COMMITTER_NAME", OsStr::new("Claudiu")),
-        ("GIT_COMMITTER_EMAIL", OsStr::new("claudiu@localhost")),
+        ("GIT_AUTHOR_NAME", OsStr::new("m4code")),
+        ("GIT_AUTHOR_EMAIL", OsStr::new("m4code@localhost")),
+        ("GIT_COMMITTER_NAME", OsStr::new("m4code")),
+        ("GIT_COMMITTER_EMAIL", OsStr::new("m4code@localhost")),
     ];
     let run = |args: &[&str]| git_with(cwd, args, None, env);
     let head = run(&["rev-parse", "--verify", "-q", "HEAD"]).ok().map(|h| h.trim().to_string());
@@ -36,7 +36,7 @@ pub fn take(cwd: &Path, session: &str) -> Result<String, String> {
     }
     run(&["add", "-A", "."])?;
     let tree = run(&["write-tree"])?.trim().to_string();
-    let mut args = vec!["commit-tree", &tree, "-m", "Claudiu snapshot"];
+    let mut args = vec!["commit-tree", &tree, "-m", "m4code snapshot"];
     if let Some(head) = &head {
         args.extend(["-p", head]);
     }
@@ -65,7 +65,7 @@ impl TempIndex {
     fn new() -> Result<Self, String> {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        Ok(Self(std::env::temp_dir().join(format!("claudiu-index-{}-{n}", std::process::id()))))
+        Ok(Self(std::env::temp_dir().join(format!("m4code-index-{}-{n}", std::process::id()))))
     }
 
     fn path(&self) -> &OsStr {
@@ -214,7 +214,7 @@ mod tests {
         let snap = take(dir.path(), "s1").unwrap();
         assert_eq!(status(), before, "nothing got staged");
         assert!(changes(dir.path(), &snap).unwrap().is_empty(), "the snapshot holds the working tree, new files too");
-        let refs = String::from_utf8(std::process::Command::new("git").args(["for-each-ref", "refs/claudiu/s1"]).current_dir(dir.path()).output().unwrap().stdout).unwrap();
+        let refs = String::from_utf8(std::process::Command::new("git").args(["for-each-ref", "refs/m4code/s1"]).current_dir(dir.path()).output().unwrap().stdout).unwrap();
         assert!(refs.contains(&snap), "the snapshot is kept under the session's refs: {refs}");
     }
 
@@ -229,7 +229,7 @@ mod tests {
                 take(dir.path(), "s").unwrap()
             })
             .collect();
-        let refs = String::from_utf8(std::process::Command::new("git").args(["for-each-ref", "--format=%(objectname)", "refs/claudiu/s"]).current_dir(dir.path()).output().unwrap().stdout).unwrap();
+        let refs = String::from_utf8(std::process::Command::new("git").args(["for-each-ref", "--format=%(objectname)", "refs/m4code/s"]).current_dir(dir.path()).output().unwrap().stdout).unwrap();
         assert_eq!(refs.lines().count(), KEPT);
         assert!(!refs.contains(&snaps[0]) && !refs.contains(&snaps[1]) && refs.contains(snaps.last().unwrap()), "the oldest go first");
     }

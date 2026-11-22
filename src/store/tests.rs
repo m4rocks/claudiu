@@ -32,22 +32,6 @@ fn the_recent_list_is_closed_after_a_restart() {
     assert!(!serde_json::from_str::<Layout>(&saved).unwrap().recent_open);
 }
 
-fn ext(id: &str, cwd: &str, title: &str, last: i64) -> ExternalSession {
-    ExternalSession {
-        session_id: id.into(),
-        cwd: Some(PathBuf::from(cwd)),
-        title: Some(title.into()),
-        custom_title: None,
-        created_at: 1,
-        last_active: last,
-        model: Some("claude-sonnet-5-5".into()),
-        context_tokens: Some(1000),
-        cache_ttl: None,
-        cache_at: None,
-        transcript: PathBuf::from(format!("/t/{id}.jsonl")),
-    }
-}
-
 fn project(id: &str, path: &str) -> Project {
     Project { id: id.into(), name: id.into(), path: PathBuf::from(path), git: None, collapsed: false, added_at: 0 }
 }
@@ -163,142 +147,25 @@ fn projects_move_one_place_and_stop_at_the_ends() {
 }
 
 #[test]
-fn imports_new_sessions_and_maps_to_deepest_project() {
-    let mut d = Data { projects: vec![project("outer", "/w"), project("inner", "/w/app")], ..Default::default() };
-    let stats = reconcile(&mut d, &[ext("a", "/w/app/src", "T", 10), ext("b", "/other", "U", 5)], true);
-    assert_eq!(stats.added, 2);
-    assert_eq!(d.sessions[0].project_id.as_deref(), Some("inner"));
-    assert_eq!(d.sessions[1].project_id, None);
-}
-
-#[test]
-fn a_rename_inside_claude_code_renames_the_session_in_claudiu() {
-    let mut d = Data::default();
-    let named = |name: Option<&str>| ExternalSession { custom_title: name.map(Into::into), ..ext("a", "/w", "Generated", 10) };
-    reconcile(&mut d, &[named(None)], true);
-    d.sessions[0].auto_title = Some("Old model title".into());
-    reconcile(&mut d, &[named(Some("First /rename"))], true);
-    assert_eq!(d.sessions[0].display_title(), "First /rename", "the first name of a session Claudiu never named");
-
-    // Named in Claudiu before Claudiu saw a name in Claude Code: the one Claude Code holds may be older.
-    d.sessions[0].custom_title = Some("Named in Claudiu".into());
-    d.sessions[0].claude.as_mut().unwrap().claude_title = None;
-    reconcile(&mut d, &[named(Some("Old name"))], true);
-    assert_eq!(d.sessions[0].display_title(), "Named in Claudiu", "the first name seen is only recorded");
-    reconcile(&mut d, &[named(Some("Named in Claudiu"))], true);
-
-    reconcile(&mut d, &[named(Some("From /rename"))], true);
-    assert_eq!(d.sessions[0].display_title(), "From /rename");
-
-    // Renamed in Claudiu: Claude Code still holds the old name until the mod's /rename reaches it.
-    d.sessions[0].custom_title = Some("From Claudiu".into());
-    reconcile(&mut d, &[named(Some("From /rename"))], true);
-    assert_eq!(d.sessions[0].display_title(), "From Claudiu", "a rename made in Claudiu is not undone");
-    reconcile(&mut d, &[named(None)], true);
-    assert_eq!(d.sessions[0].display_title(), "From Claudiu", "a generated title never renames it");
-    reconcile(&mut d, &[named(Some("From Claudiu"))], true);
-    reconcile(&mut d, &[named(Some("Again"))], true);
-    assert_eq!(d.sessions[0].display_title(), "Again");
-
-    // Renamed twice in Claudiu, quickly: Claude Code reaches the first name while the second is on its way.
-    d.sessions[0].custom_title = Some("Second".into());
-    reconcile(&mut d, &[named(Some("First"))], true);
-    assert_eq!(d.sessions[0].display_title(), "Second", "Claude Code catching up is not a rename");
-
-    // Claudiu's name with spaces around it, which Claude Code holds trimmed: later renames still count.
-    d.sessions[0].custom_title = Some(" Spaced ".into());
-    reconcile(&mut d, &[named(Some("Spaced"))], true);
-    reconcile(&mut d, &[named(Some("Next"))], true);
-    assert_eq!(d.sessions[0].display_title(), "Next");
-}
-
-#[test]
-fn rerunning_is_idempotent_and_never_duplicates() {
-    let mut d = Data::default();
-    let e = [ext("a", "/w", "T", 10)];
-    reconcile(&mut d, &e, true);
-    let stats = reconcile(&mut d, &e, true);
-    assert_eq!(d.sessions.len(), 1);
-    assert_eq!(stats, ReconcileStats::default());
-}
-
-#[test]
-fn session_launched_by_claudiu_is_matched_not_duplicated() {
-    let mut d = Data::default();
-    d.sessions.push(SessionRecord {
-        id: "local".into(),
-        kind: SessionKind::Claude,
-        title: "Claude".into(),
-        custom_title: Some("My name".into()),
-        auto_title: None,
-        cwd: PathBuf::from("/w"),
-        project_id: None,
-        created_at: 1,
-        last_active: 2,
-        exit_code: Some(0),
-        hidden: true,
-        claude: Some(ClaudeMeta { session_id: "a".into(), ..Default::default() }),
-    });
-    reconcile(&mut d, &[ext("a", "/w", "Ext title", 50)], true);
-    assert_eq!(d.sessions.len(), 1);
-    let s = &d.sessions[0];
-    assert_eq!(s.id, "local");
-    assert_eq!(s.title, "Ext title");
-    assert_eq!(s.display_title(), "My name", "Claudiu-only label survives");
-    assert!(s.hidden, "hidden flag survives");
-    assert_eq!(s.last_active, 50);
-    assert_eq!(s.claude.as_ref().unwrap().external, ExternalState::Present);
-}
-
-#[test]
-fn missing_external_is_flagged_not_deleted_and_only_on_good_scan() {
-    let mut d = Data::default();
-    reconcile(&mut d, &[ext("a", "/w", "T", 1)], true);
-
-    let stats = reconcile(&mut d, &[], false);
-    assert_eq!(stats.marked_missing, 0, "unreadable scan must not change state");
-    assert_eq!(d.sessions[0].claude.as_ref().unwrap().external, ExternalState::Present);
-
-    let stats = reconcile(&mut d, &[], true);
-    assert_eq!(stats.marked_missing, 1);
-    assert_eq!(d.sessions.len(), 1, "history is never deleted");
-    assert_eq!(d.sessions[0].claude.as_ref().unwrap().external, ExternalState::Missing);
-
-    // It comes back if the file reappears.
-    reconcile(&mut d, &[ext("a", "/w", "T", 1)], true);
-    assert_eq!(d.sessions[0].claude.as_ref().unwrap().external, ExternalState::Present);
-}
-
-#[test]
-fn shell_sessions_are_untouched() {
-    let mut d = Data::default();
-    d.sessions.push(SessionRecord {
-        id: "sh".into(),
-        kind: SessionKind::Shell,
-        title: "PowerShell".into(),
-        custom_title: None,
-        auto_title: None,
-        cwd: PathBuf::from("/w"),
-        project_id: None,
-        created_at: 1,
-        last_active: 1,
-        exit_code: None,
-        hidden: false,
-        claude: None,
-    });
-    let stats = reconcile(&mut d, &[], true);
-    assert_eq!(stats, ReconcileStats::default());
-    assert_eq!(d.sessions.len(), 1);
-}
-
-#[test]
 fn adding_a_project_adopts_existing_unmapped_sessions() {
     let tmp = tempfile::tempdir().unwrap();
     let mut store = Store::load(tmp.path().join("state.json"));
     let proj_dir = tmp.path().join("proj");
     fs::create_dir_all(&proj_dir).unwrap();
-    let e = ext("a", &proj_dir.join("sub").to_string_lossy(), "T", 1);
-    store.reconcile(&[e], true);
+    store.add_session(SessionRecord {
+        id: "s1".into(),
+        kind: SessionKind::Claude,
+        cwd: proj_dir.join("sub"),
+        project_id: None,
+        title: "T".into(),
+        custom_title: None,
+        auto_title: None,
+        created_at: 1,
+        last_active: 1,
+        hidden: false,
+        exit_code: None,
+        claude: None,
+    });
     assert!(store.data.sessions[0].project_id.is_none());
     let id = store.add_project(&proj_dir);
     assert_eq!(store.data.sessions[0].project_id.as_deref(), Some(id.as_str()));
@@ -402,7 +269,7 @@ fn a_launch_is_the_first_only_while_there_is_no_state_file() {
     assert!(!Store::is_first_launch(&path), "a saved state file ends the first launch");
 
     fs::write(&path, "{ not json").unwrap();
-    assert!(!Store::is_first_launch(&path), "a corrupt state file still means Claudiu ran here");
+    assert!(!Store::is_first_launch(&path), "a corrupt state file still means m4code ran here");
 }
 
 #[test]
@@ -460,5 +327,43 @@ fn default_model_resolves_across_enabled_harnesses_and_falls_back_when_disabled(
     settings.enabled_harnesses = Some(vec![Harness::Claude]);
     assert_eq!(settings.default_model().harness, Harness::Claude);
     assert_eq!(settings.default_model().id, "opus");
+}
+
+#[test]
+fn migrate_data_dir_moves_claudiu_folder_when_m4code_is_empty() {
+    let root = tempfile::tempdir().unwrap();
+    let old = root.path().join("Claudiu");
+    let new = root.path().join("m4code");
+    fs::create_dir_all(&old).unwrap();
+    fs::write(old.join("state.json"), r#"{"version":1}"#).unwrap();
+    fs::write(old.join("accounts.json"), r#"{"accounts":[]}"#).unwrap();
+
+    migrate_data_dir(&new, std::slice::from_ref(&old));
+
+    assert!(new.join("state.json").exists());
+    assert!(new.join("accounts.json").exists());
+    assert!(!old.exists());
+}
+
+#[test]
+fn migrate_data_dir_keeps_existing_m4code_state() {
+    let root = tempfile::tempdir().unwrap();
+    let old = root.path().join("Claudiu");
+    let new = root.path().join("m4code");
+    fs::create_dir_all(&old).unwrap();
+    fs::create_dir_all(&new).unwrap();
+    fs::write(old.join("state.json"), r#"{"version":1,"old":true}"#).unwrap();
+    fs::write(new.join("state.json"), r#"{"version":1,"new":true}"#).unwrap();
+
+    migrate_data_dir(&new, std::slice::from_ref(&old));
+
+    assert!(fs::read_to_string(new.join("state.json")).unwrap().contains("\"new\":true"));
+    assert!(old.join("state.json").exists());
+}
+
+#[test]
+fn settings_deserializes_legacy_claudiu_tools_off() {
+    let s: Settings = serde_json::from_str(r#"{"claudiu_tools_off":["visual"]}"#).unwrap();
+    assert_eq!(s.m4code_tools_off, vec![crate::claude::mcp::Feature::Visual]);
 }
 

@@ -1,7 +1,7 @@
 use super::*;
 
 /// Editor mode with a real rust-analyzer: diagnostics arrive, hover, go-to-definition and completion answer, and a language whose
-/// server isn't installed says so. Uses `rust-analyzer` from `CLAUDIU_TEST_RUST_ANALYZER_DIR` (prepended to PATH),
+/// server isn't installed says so. Uses `rust-analyzer` from `M4CODE_TEST_RUST_ANALYZER_DIR` (prepended to PATH),
 /// else PATH. `cargo test -- --ignored language_servers`.
 fn language_servers_with_rust_analyzer() {
     use std::cell::RefCell;
@@ -9,8 +9,8 @@ fn language_servers_with_rust_analyzer() {
     let data = tempfile::tempdir().unwrap();
     // SAFETY: set before any other thread reads the environment; this test owns the process.
     unsafe {
-        std::env::set_var("CLAUDIU_DATA_DIR", data.path());
-        if let Some(dir) = std::env::var_os("CLAUDIU_TEST_RUST_ANALYZER_DIR") {
+        std::env::set_var("M4CODE_DATA_DIR", data.path());
+        if let Some(dir) = std::env::var_os("M4CODE_TEST_RUST_ANALYZER_DIR") {
             let mut paths = vec![PathBuf::from(dir)];
             paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()));
             std::env::set_var("PATH", std::env::join_paths(paths).unwrap());

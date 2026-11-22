@@ -59,23 +59,23 @@ use app::{
     SwapFocus, ToggleEditor, ToggleRight, ToggleShell, ToggleSidebar, Workspace,
 };
 
-/// The macOS menu bar. Every item is an existing Claudiu action, so menu, shortcut and sidebar share one code path;
+/// The macOS menu bar. Every item is an existing m4code action, so menu, shortcut and sidebar share one code path;
 /// shortcuts shown here come from the keymap bound in `main`.
 #[cfg(target_os = "macos")]
 fn menu_bar() -> Vec<gpui::Menu> {
     use gpui::{Menu, MenuItem, OsAction, SystemMenuType};
     use gpui_kit::component::input;
     vec![
-        Menu::new("Claudiu").items([
+        Menu::new("m4code").items([
             MenuItem::action("Settings…", OpenSettings),
             MenuItem::separator(),
             MenuItem::os_submenu("Services", SystemMenuType::Services),
             MenuItem::separator(),
-            MenuItem::action("Hide Claudiu", HideApp),
+            MenuItem::action("Hide m4code", HideApp),
             MenuItem::action("Hide Others", HideOthers),
             MenuItem::action("Show All", ShowAllApps),
             MenuItem::separator(),
-            MenuItem::action("Quit Claudiu", Quit),
+            MenuItem::action("Quit m4code", Quit),
         ]),
         Menu::new("File").items([
             MenuItem::action("New Session", NewClaude),
@@ -113,7 +113,7 @@ fn install_crash_log() {
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let report = format!(
-            "[{}] Claudiu {} panicked
+            "[{}] m4code {} panicked
 {info}
 {}
 
@@ -147,7 +147,7 @@ fn open_main_window(initial: Vec<std::path::PathBuf>, cx: &mut App) -> MainWindo
             window_bounds: Some(bounds),
             window_min_size: Some(size(px(720.0), px(420.0))),
             titlebar: Some(TitlebarOptions {
-                title: Some("Claudiu".into()),
+                title: Some("m4code".into()),
                 traffic_light_position: Some(gpui::point(px(14.0), px(traffic_light_y))),
                 ..TitleBar::title_bar_options()
             }),
@@ -200,7 +200,7 @@ fn main() {
     alacritty_terminal::tty::setup_env();
     terminal::prepare_child_env();
 
-    // `claudiu <folder>...` registers folders as projects (also what a shell "open with" would pass).
+    // `m4code <folder>...` registers folders as projects (also what a shell "open with" would pass).
     let initial: Vec<std::path::PathBuf> = std::env::args().skip(1).map(std::path::PathBuf::from).filter(|p| p.is_dir()).collect();
     platform::read_login_path_in_background();
 
@@ -208,7 +208,7 @@ fn main() {
         gpui_kit::init(cx);
         app::register_languages();
         gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, cx);
-        // Claudiu-global shortcuts. Deliberately Ctrl+Shift (Cmd+Shift on macOS) so every plain Ctrl/Alt
+        // m4code-global shortcuts. Deliberately Ctrl+Shift (Cmd+Shift on macOS) so every plain Ctrl/Alt
         // chord, e.g. Alt+P, still reaches Claude Code untouched.
         cx.bind_keys([
             KeyBinding::new("secondary-shift-n", NewClaude, None),
@@ -292,10 +292,10 @@ fn main() {
             })
             .expect("open setup window");
             cx.subscribe(&setup, move |_, ev: &app::SetupEvent, cx| {
-                let app::SetupEvent::Done { claude_path } = ev else { return };
+                let app::SetupEvent::Done { claude_path, enabled } = ev else { return };
                 // The main window opens before the setup window closes: closing the last window quits the app.
                 let (window, workspace) = open_main_window(initial.clone(), cx);
-                workspace.update(cx, |ws, cx| ws.apply_setup(claude_path.clone(), cx));
+                workspace.update(cx, |ws, cx| ws.apply_setup(claude_path.clone(), enabled.clone(), cx));
                 *main.borrow_mut() = Some((window, workspace));
                 setup_window.update(cx, |_, window, _| window.remove_window()).ok();
             })

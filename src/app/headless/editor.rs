@@ -6,7 +6,7 @@ use super::*;
 fn line_comment_into_the_message_box() {
     let data = tempfile::tempdir().unwrap();
     // SAFETY: set before any other thread reads the environment; this test owns the process.
-    unsafe { std::env::set_var("CLAUDIU_DATA_DIR", data.path()) };
+    unsafe { std::env::set_var("M4CODE_DATA_DIR", data.path()) };
     let root = dunce::canonicalize(env!("CARGO_MANIFEST_DIR")).unwrap();
     let work = tempfile::tempdir_in(root.join("target")).unwrap();
     let code = work.path().join("code.rs");
@@ -84,7 +84,7 @@ fn line_comment() {
 fn file_operations_in_the_tree() {
     let data = tempfile::tempdir().unwrap();
     // SAFETY: set before any other thread reads the environment; this test owns the process.
-    unsafe { std::env::set_var("CLAUDIU_DATA_DIR", data.path()) };
+    unsafe { std::env::set_var("M4CODE_DATA_DIR", data.path()) };
     let work = tempfile::tempdir().unwrap();
     let root = dunce::canonicalize(work.path()).unwrap();
     std::fs::write(root.join("code.rs"), "fn a() {}
@@ -188,7 +188,7 @@ fn file_operations() {
 fn line_actions_on_their_keys() {
     let data = tempfile::tempdir().unwrap();
     // SAFETY: set before any other thread reads the environment; this test owns the process.
-    unsafe { std::env::set_var("CLAUDIU_DATA_DIR", data.path()) };
+    unsafe { std::env::set_var("M4CODE_DATA_DIR", data.path()) };
     let work = tempfile::tempdir().unwrap();
     let root = dunce::canonicalize(work.path()).unwrap();
     std::fs::write(root.join("lines.txt"), "one\ntwo\nthree\nfour\n").unwrap();
@@ -299,7 +299,7 @@ fn line_actions() {
 fn double_click_in_the_editor() {
     let data = tempfile::tempdir().unwrap();
     // SAFETY: set before any other thread reads the environment; this test owns the process.
-    unsafe { std::env::set_var("CLAUDIU_DATA_DIR", data.path()) };
+    unsafe { std::env::set_var("M4CODE_DATA_DIR", data.path()) };
     let work = tempfile::tempdir().unwrap();
     let root = dunce::canonicalize(work.path()).unwrap();
     std::fs::write(root.join("words.txt"), "hello brave world\nsecond line\n").unwrap();

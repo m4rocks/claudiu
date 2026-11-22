@@ -26,7 +26,7 @@ pub struct Layout {
     pub window: Option<WindowGeom>,
     pub selected_session: Option<Id>,
     pub sidebar_visible: bool,
-    /// No longer used (the "Other sessions" group is gone); still written because older Claudiu versions require it.
+    /// No longer used (the "Other sessions" group is gone); still written because older m4code versions require it.
     pub other_collapsed: bool,
     /// The sidebar's RECENT list is open. It starts closed on every launch, so it isn't saved.
     #[serde(skip)]
@@ -76,15 +76,15 @@ pub struct Settings {
     /// Model, effort and permission mode for new sessions; empty fields leave the harness's own default.
     #[serde(default)]
     pub new_session: crate::claude::defaults::NewSessionDefaults,
-    /// Parts of Claudiu's own MCP server switched off for new sessions (`claude/mcp.rs`). Empty means everything is on,
+    /// Parts of m4code's own MCP server switched off for new sessions (`claude/mcp.rs`). Empty means everything is on,
     /// which is also what a state file from before this setting loads as.
-    #[serde(default)]
-    pub claudiu_tools_off: Vec<crate::claude::mcp::Feature>,
+    #[serde(default, alias = "claudiu_tools_off")]
+    pub m4code_tools_off: Vec<crate::claude::mcp::Feature>,
     /// The trims an earlier version wrote into Claude Code's own `settings.json`, kept only until
     /// `take_back_global_trims` has taken them out again; sessions now get `trim::FLUFF` themselves.
     #[serde(default)]
     pub trimmed_tools: Vec<crate::claude::trim::Trim>,
-    /// The lines Claudiu added to Claude Code's `settings.json` (old trims and the skill limits), so it removes only them.
+    /// The lines m4code added to Claude Code's `settings.json` (old trims and the skill limits), so it removes only them.
     #[serde(default)]
     pub applied_trims: Vec<String>,
     /// Output caps and turned-off skills for Claude Code (`claude/trim.rs`); empty leaves Claude Code's own behavior.
@@ -227,27 +227,14 @@ impl Settings {
         let all = self.aggregated_models();
         Self::resolve_model(&all, self.harness, self.new_session.model.as_deref())
     }
-    /// Harnesses enabled by the user (Settings → Harnesses). Always includes at least the configured default harness
-    /// when none have been explicitly stored yet.
+    /// Harnesses enabled by the user (Settings → Harnesses). Defaults to all supported harnesses equally when none
+    /// have been explicitly stored yet.
     pub fn enabled_harnesses_list(&self) -> Vec<crate::harness::Harness> {
-        use crate::claude::subagents::Agent;
         use crate::harness::Harness;
         if let Some(list) = &self.enabled_harnesses {
             return Harness::ALL.into_iter().filter(|h| list.contains(h)).collect();
         }
-        Harness::ALL
-            .into_iter()
-            .filter(|&h| {
-                h == Harness::Claude
-                    || h == self.harness
-                    || match h {
-                        Harness::Claude => false,
-                        Harness::Codex => self.custom_subagents.get(Agent::Codex).on,
-                        Harness::OpenCode => self.custom_subagents.get(Agent::OpenCode).on,
-                        Harness::Antigravity => self.custom_subagents.get(Agent::Antigravity).on,
-                    }
-            })
-            .collect()
+        Harness::ALL.to_vec()
     }
 
     pub fn harness_enabled(&self, harness: crate::harness::Harness) -> bool {

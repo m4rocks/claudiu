@@ -103,7 +103,7 @@ impl Workspace {
                         .min_h_0()
                         .relative()
                         .child(Editor::new(&tab.buffer).appearance(false).h_full().context_menu(move |menu, window, cx| {
-                            // The menu is Claudiu's own: the system's menu keeps the editor's text cursor over it.
+                            // The menu is m4code's own: the system's menu keeps the editor's text cursor over it.
                             let at = window.mouse_position();
                             let _ = menu_ws.update(cx, |ws, cx| ws.open_menu(at, editor_menu(), cx));
                             menu

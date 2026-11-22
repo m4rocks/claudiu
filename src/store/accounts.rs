@@ -6,7 +6,7 @@ pub struct RateLimit {
     pub utilization: Option<f32>,
     /// Unix seconds.
     pub resets_at: Option<i64>,
-    /// When Claudiu observed this value.
+    /// When m4code observed this value.
     pub seen_at: i64,
 }
 

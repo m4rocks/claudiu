@@ -1,6 +1,6 @@
-//! Claude Code, through Anthropic's Claude Agent SDK. The SDK is a Node library, so Claudiu ships a small script
+//! Claude Code, through Anthropic's Claude Agent SDK. The SDK is a Node library, so m4code ships a small script
 //! (`bridge/` in the repository) that drives it and speaks ACP like the other agents. The SDK runs the user's own
-//! `claude` binary (`CLAUDE_CODE_EXECUTABLE`), so their install, settings, plugins and sign-in apply. Claudiu's mod,
+//! `claude` binary (`CLAUDE_CODE_EXECUTABLE`), so their install, settings, plugins and sign-in apply. m4code's mod,
 //! tools and launch flags reach it through `_meta.claudeCode.options`.
 
 use std::path::Path;
@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use super::{Adapter, Reopen, Server};
 
 /// The bridge's files, embedded in the binary. The lockfile pins the SDK, so an SDK change reaches users only with a
-/// Claudiu release.
+/// m4code release.
 const FILES: [(&str, &str); 3] = [
     ("claude.mjs", include_str!("../../bridge/claude.mjs")),
     ("package.json", include_str!("../../bridge/package.json")),
@@ -68,7 +68,7 @@ pub fn environment(claude: &Path) -> Vec<(String, String)> {
 }
 
 /// Claude Code's part of `session/new`: the bridge passes `_meta.claudeCode.options` to the SDK. `plugin` is
-/// Claudiu's mod; `allowed` the tools it may use unasked; `extra` the flags given as `--name value` (None for a bare
+/// m4code's mod; `allowed` the tools it may use unasked; `extra` the flags given as `--name value` (None for a bare
 /// flag).
 /// `settings` is the session's own settings layer (the Agent SDK's `settings` option), such as its trims.
 pub fn claude_meta(plugin: Option<&Path>, allowed: &[String], extra: &[(&str, Option<String>)], settings: Option<Value>) -> Value {
@@ -94,10 +94,10 @@ mod tests {
 
     #[test]
     fn options_carry_the_mod_tools_and_flags() {
-        let meta = claude_meta(Some(Path::new("/mod")), &["mcp__claudiu__show_visual".into()], &[("name", Some("Fix it".into())), ("chrome", None)], Some(json!({"disableWorkflows": true})));
+        let meta = claude_meta(Some(Path::new("/mod")), &["mcp__m4code__show_visual".into()], &[("name", Some("Fix it".into())), ("chrome", None)], Some(json!({"disableWorkflows": true})));
         let options = &meta["claudeCode"]["options"];
         assert_eq!(options["plugins"], json!([{"type": "local", "path": "/mod"}]));
-        assert_eq!(options["allowedTools"], json!(["mcp__claudiu__show_visual"]));
+        assert_eq!(options["allowedTools"], json!(["mcp__m4code__show_visual"]));
         assert_eq!(options["extraArgs"], json!({"name": "Fix it", "chrome": null}));
         assert_eq!(options["settings"], json!({"disableWorkflows": true}));
         assert_eq!(claude_meta(None, &[], &[], None), json!({"claudeCode": {"options": {}}}), "nothing given adds nothing");

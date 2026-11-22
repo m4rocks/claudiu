@@ -223,7 +223,7 @@ mod schema {
 mod e2e {
     //! Every feature of the pane against a real, throwaway private repository on the signed-in account, driven
     //! through the view's own actions (`GithubView::act`) on gpui's test platform, so no window opens.
-    //! `cargo test -- --ignored e2e --nocapture`. It CREATES a private repo (named `claudiu-gh-pane-test-<time>`)
+    //! `cargo test -- --ignored e2e --nocapture`. It CREATES a private repo (named `m4code-gh-pane-test-<time>`)
     //! and tries to delete it at the end, which needs the `delete_repo` scope; if that is missing, delete it by hand.
     use super::cli::*;
     use super::model::*;
@@ -356,7 +356,7 @@ mod e2e {
         let setup = Gh::new(exe.clone(), work.path().to_path_buf());
         let me = setup.rest("GET", "user", None).unwrap()["login"].as_str().unwrap().to_string();
         let name = format!(
-            "claudiu-gh-pane-test-{}",
+            "m4code-gh-pane-test-{}",
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()
         );
         let full = format!("{me}/{name}");

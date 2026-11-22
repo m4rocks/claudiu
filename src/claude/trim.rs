@@ -1,6 +1,6 @@
-//! Claude Code features and tools the user trimmed (Settings → Claude Code tools). Claudiu writes the trims into
+//! Claude Code features and tools the user trimmed (Settings → Claude Code tools). m4code writes the trims into
 //! Claude Code's own `settings.json` and takes them out again when a switch goes back on; every account gets the
-//! same file through `config_sync`, and Claude Code sessions started outside Claudiu see the trims too.
+//! same file through `config_sync`, and Claude Code sessions started outside m4code see the trims too.
 //!
 //! A feature flag such as `disableWorkflows` removes the feature, its tools and Claude Code's instructions about it.
 //! A bare tool name in `permissions.deny` removes that tool's definition (a scoped rule like `Bash(rm *)` would only
@@ -46,8 +46,8 @@ enum Effect {
     Deny(&'static [&'static str]),
 }
 
-/// What every Claude Code session in Claudiu goes without: features and tools for the claude.ai app and for running
-/// Claude Code on its own, which Claudiu's own UI replaces. Plan mode, AskUserQuestion (Claudiu draws it), notebooks,
+/// What every Claude Code session in m4code goes without: features and tools for the claude.ai app and for running
+/// Claude Code on its own, which m4code's own UI replaces. Plan mode, AskUserQuestion (m4code draws it), notebooks,
 /// background tasks, the Explore and Plan agents and the git instructions stay, since the model expects them.
 pub const FLUFF: [Trim; 14] = [
     Trim::BundledSkills,
@@ -66,7 +66,7 @@ pub const FLUFF: [Trim; 14] = [
     Trim::AdvisorTool,
 ];
 
-/// The settings a Claudiu session of Claude Code starts with (the Agent SDK's `settings` option): `FLUFF` turned off,
+/// The settings a m4code session of Claude Code starts with (the Agent SDK's `settings` option): `FLUFF` turned off,
 /// for that session only, so Claude Code run in a terminal keeps everything.
 pub fn session_settings() -> Value {
     let mut settings = Map::new();
@@ -130,7 +130,7 @@ pub fn normalized(trimmed: &[Trim]) -> Vec<Trim> {
     Trim::ALL.into_iter().filter(|t| trimmed.contains(t)).collect()
 }
 
-/// One line Claudiu adds to `settings.json`.
+/// One line m4code adds to `settings.json`.
 #[derive(Clone, PartialEq)]
 enum Entry {
     Key(&'static str, bool),
@@ -288,9 +288,9 @@ impl Limits {
     }
 }
 
-/// Put the trimmed items and limits into `settings` and take out the ones Claudiu added earlier (`applied`) that are
-/// no longer wanted. A line the user had before Claudiu (a tool they denied themselves, a skill they set) is never
-/// recorded, so turning the trim off leaves it. Returns what Claudiu now owns, to pass back next time.
+/// Put the trimmed items and limits into `settings` and take out the ones m4code added earlier (`applied`) that are
+/// no longer wanted. A line the user had before m4code (a tool they denied themselves, a skill they set) is never
+/// recorded, so turning the trim off leaves it. Returns what m4code now owns, to pass back next time.
 pub fn apply(settings: &mut Map<String, Value>, trimmed: &[Trim], limits: &Limits, applied: &[String]) -> Vec<String> {
     let wanted: Vec<Entry> = normalized(trimmed).into_iter().flat_map(entries).chain(limits.entries()).collect();
     let wanted_ids: Vec<String> = wanted.iter().map(Entry::id).collect();
@@ -333,7 +333,7 @@ pub fn write_global(path: &std::path::Path, trimmed: &[Trim], limits: &Limits, a
     Ok(owned)
 }
 
-/// Write `limits` into Claude Code's own `settings.json`, and take out what Claudiu wrote there before and no longer
+/// Write `limits` into Claude Code's own `settings.json`, and take out what m4code wrote there before and no longer
 /// wants, which includes the trims earlier versions wrote there for every Claude Code session.
 pub fn write_global_limits(limits: &Limits, applied: &[String]) -> std::io::Result<Vec<String>> {
     let home = crate::claude::claude_home().ok_or_else(|| std::io::Error::other("Claude Code's folder was not found"))?;
@@ -383,9 +383,9 @@ mod tests {
     }
 
     #[test]
-    fn turning_a_trim_off_takes_out_only_what_claudiu_added() {
+    fn turning_a_trim_off_takes_out_only_what_m4code_added() {
         let mut s = object(json!({ "permissions": { "deny": ["NotebookEdit"], "defaultMode": "auto" } }));
-        // The user already denied NotebookEdit; Claudiu adds the other two.
+        // The user already denied NotebookEdit; m4code adds the other two.
         let owned = apply(&mut s, &[NotebookEdit, ScheduledTasks, Workflows], &Limits::default(), &[]);
         assert_eq!(owned, ["disableWorkflows", "deny:CronCreate", "deny:CronDelete", "deny:CronList"], "the user's own deny is not recorded");
         let owned = apply(&mut s, &[], &Limits::default(), &owned);
@@ -447,7 +447,7 @@ mod tests {
     }
 
     #[test]
-    fn an_env_block_that_claudiu_created_is_removed_when_it_ends_up_empty() {
+    fn an_env_block_that_m4code_created_is_removed_when_it_ends_up_empty() {
         let mut s = Map::new();
         let owned = apply(&mut s, &[ExplorePlanAgents], &Limits::default(), &[]);
         apply(&mut s, &[], &Limits::default(), &owned);

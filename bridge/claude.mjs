@@ -1,9 +1,9 @@
-// Claude Code for Claudiu, through Anthropic's Claude Agent SDK. Claudiu speaks ACP (newline-delimited JSON-RPC on
+// Claude Code for m4code, through Anthropic's Claude Agent SDK. m4code speaks ACP (newline-delimited JSON-RPC on
 // stdin and stdout) to every agent; this script answers it for Claude Code by driving the SDK, which runs the user's
 // own `claude` (CLAUDE_CODE_EXECUTABLE) with their settings, plugins and sign-in.
 //
-// Only the part of ACP Claudiu uses is here: initialize, session/new, session/load, session/list, session/prompt,
-// session/cancel, session/set_mode and session/set_config_option, and session/request_permission back to Claudiu.
+// Only the part of ACP m4code uses is here: initialize, session/new, session/load, session/list, session/prompt,
+// session/cancel, session/set_mode and session/set_config_option, and session/request_permission back to m4code.
 // stdout carries the protocol only, so anything logged goes to stderr.
 
 import { randomUUID } from "node:crypto";
@@ -17,7 +17,7 @@ console.info = console.error;
 const send = (message) => process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", ...message })}\n`);
 const update = (sessionId, body) => send({ method: "session/update", params: { sessionId, update: body } });
 
-// Requests to Claudiu (permission questions) and their answers.
+// Requests to m4code (permission questions) and their answers.
 let nextRequest = 1;
 const answers = new Map();
 function ask(method, params) {
@@ -255,7 +255,7 @@ function finishTurn(session, result) {
     .catch(() => {});
 }
 
-/** The session's messages from the SDK, as updates to Claudiu, until the session ends. */
+/** The session's messages from the SDK, as updates to m4code, until the session ends. */
 async function pump(session) {
   try {
     for await (const m of session.query) {
@@ -431,7 +431,7 @@ lines.on("line", (line) => {
   }
   handle(message);
 });
-// Claudiu closing stdin ends every session and then this process.
+// m4code closing stdin ends every session and then this process.
 lines.on("close", () => {
   for (const s of sessions.values()) {
     s.inbox.close();

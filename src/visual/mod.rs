@@ -1,8 +1,8 @@
 //! Cards: Markdown (and the `ui` dialect, `ui/`) the model draws inside the terminal.
 //!
-//! The model calls Claudiu's `show_visual` tool; the per-process mod answers it in-process and, while the model is
+//! The model calls m4code's `show_visual` tool; the per-process mod answers it in-process and, while the model is
 //! still writing the call, streams what it has so far into `<data>/visual/<record id>--<call>.json`
-//! (`mod/hooks/register.js`). Claudiu polls that folder and hands each card to its session's terminal, which paints it
+//! (`mod/hooks/register.js`). m4code polls that folder and hands each card to its session's terminal, which paints it
 //! over rows the mod reserves in the transcript (`terminal/view/cards.rs`). Nothing goes through the PTY.
 //!
 //! The transcript keeps every call's input, so the mod writes a card again when it next draws the call's row. That is
@@ -17,7 +17,7 @@ use std::time::SystemTime;
 use serde::Deserialize;
 
 /// Env var holding the start of the path of every card file of a session: the mod adds `<call>.json`.
-pub const VISUAL_ENV: &str = "CLAUDIU_VISUAL_PREFIX";
+pub const VISUAL_ENV: &str = "M4CODE_VISUAL_PREFIX";
 
 /// Between a session's record id and a call's id in a file name. Neither contains it.
 const SEPARATOR: &str = "--";
@@ -26,7 +26,7 @@ pub fn dir() -> PathBuf {
     crate::datadir::data_dir().join("visual")
 }
 
-/// What the mod puts a call's id after: named by Claudiu's own record id, which survives `/clear`.
+/// What the mod puts a call's id after: named by m4code's own record id, which survives `/clear`.
 pub fn prefix(record_id: &str) -> PathBuf {
     dir().join(format!("{}{SEPARATOR}", crate::datadir::safe_file_stem(record_id)))
 }

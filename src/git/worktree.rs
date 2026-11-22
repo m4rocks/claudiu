@@ -1,4 +1,4 @@
-//! Sessions in git worktrees. Claudiu makes a worktree with `git worktree add` in its own data folder, outside the
+//! Sessions in git worktrees. m4code makes a worktree with `git worktree add` in its own data folder, outside the
 //! repository, so `git status` never lists it; a session moves into one by resuming there (see `app/switch.rs`). This
 //! file holds the names, the folders, and making, finding and removing worktrees.
 
@@ -10,7 +10,7 @@ use super::GitInfo;
 use super::commit::{git, has_origin, origin_default_branch};
 use crate::platform::path_key;
 
-/// The folder in Claudiu's data folder that holds one folder of worktrees per repository.
+/// The folder in m4code's data folder that holds one folder of worktrees per repository.
 const STORE: &str = "worktrees";
 
 /// What a new worktree's branch starts from.
@@ -34,7 +34,7 @@ fn store() -> PathBuf {
 /// so two repositories with the same name don't share a folder.
 fn repo_folder(main_checkout: &Path) -> PathBuf {
     let name = main_checkout.file_name().map_or_else(|| "repo".into(), |n| crate::datadir::safe_file_stem(&n.to_string_lossy()));
-    // FNV-1a is fixed by definition, so a repository keeps its folder across Claudiu versions.
+    // FNV-1a is fixed by definition, so a repository keeps its folder across m4code versions.
     let hash = path_key(main_checkout).bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3));
     store().join(format!("{name}-{:08x}", hash as u32))
 }
@@ -103,13 +103,13 @@ pub fn folders(git: &GitInfo) -> Vec<&Path> {
     std::iter::once(main).chain(others).collect()
 }
 
-/// Only the folders Claudiu made are removed from Claudiu: a worktree made anywhere else, `claude --worktree`'s in
+/// Only the folders m4code made are removed from m4code: a worktree made anywhere else, `claude --worktree`'s in
 /// `.claude/worktrees` included, is the user's own.
 pub fn removable(main_checkout: &Path, folder: &Path) -> bool {
     folder.parent().is_some_and(|parent| path_key(parent) == path_key(&repo_folder(main_checkout)))
 }
 
-/// A worktree folder in Claudiu's data folder, found by looking at the disk.
+/// A worktree folder in m4code's data folder, found by looking at the disk.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Stored {
     pub folder: PathBuf,
@@ -117,7 +117,7 @@ pub struct Stored {
     pub main_checkout: Option<PathBuf>,
 }
 
-/// Every worktree folder in Claudiu's data folder, by path. Blocking.
+/// Every worktree folder in m4code's data folder, by path. Blocking.
 pub fn stored() -> Vec<Stored> {
     let subfolders = |parent: &Path| -> Vec<PathBuf> {
         std::fs::read_dir(parent).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect()
@@ -137,11 +137,11 @@ fn main_checkout_of(folder: &Path) -> Option<PathBuf> {
     common.is_dir().then_some(common)
 }
 
-/// Delete a folder from Claudiu's data folder that git no longer lists, which `remove` cannot handle. Blocking.
+/// Delete a folder from m4code's data folder that git no longer lists, which `remove` cannot handle. Blocking.
 pub fn delete_unlisted(folder: &Path) -> Result<String, String> {
     let in_store = folder.parent().and_then(Path::parent).is_some_and(|p| path_key(p) == path_key(&store()));
     if !in_store {
-        return Err(format!("{} is not in Claudiu's worktrees folder, so Claudiu leaves it alone.", folder.display()));
+        return Err(format!("{} is not in m4code's worktrees folder, so m4code leaves it alone.", folder.display()));
     }
     let name = folder.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
     std::fs::remove_dir_all(folder).map_err(|e| format!("Could not delete {name}: {e}"))?;
@@ -164,7 +164,7 @@ impl Leftovers {
 }
 
 /// A typed name that names an existing worktree folder switches into it; one that only an existing branch has is
-/// refused, so every branch in Claudiu's worktrees folder is one Claudiu made and removal may delete it once merged.
+/// refused, so every branch in m4code's worktrees folder is one m4code made and removal may delete it once merged.
 pub fn check_unused(main_checkout: &Path, name: &str) -> Result<(), String> {
     if folder(main_checkout, name).exists() || !branch_exists(main_checkout, name) {
         Ok(())
@@ -247,7 +247,7 @@ pub fn leftovers(folder: &Path) -> Result<Leftovers, String> {
 /// running. Returns a line for a toast. Blocking.
 pub fn remove(main_checkout: &Path, folder: &Path, discard: bool, grace: std::time::Duration) -> Result<String, String> {
     if !removable(main_checkout, folder) {
-        return Err(format!("{} is not in Claudiu's worktrees folder, so Claudiu leaves it alone.", folder.display()));
+        return Err(format!("{} is not in m4code's worktrees folder, so m4code leaves it alone.", folder.display()));
     }
     let deadline = std::time::Instant::now() + grace;
     let name = folder.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
@@ -370,7 +370,7 @@ mod tests {
         assert_eq!(generate_name(0, |_| true), "worktree-0");
     }
 
-    /// Points Claudiu's data folder at a throwaway one for the rest of the test run. A repository's worktrees go in a
+    /// Points m4code's data folder at a throwaway one for the rest of the test run. A repository's worktrees go in a
     /// folder named after its path, so the tests do not meet each other there.
     fn use_throwaway_data_folder() -> PathBuf {
         crate::datadir::use_throwaway_folders().0.join(STORE)
@@ -618,7 +618,7 @@ mod tests {
     fn only_claudes_folders_are_ever_removed() {
         let tmp = tempfile::tempdir().unwrap();
         let (main, _) = repo_with_worktree(tmp.path());
-        assert!(remove(&main, &main, true, NO_WAIT).unwrap_err().contains("not in Claudiu's worktrees folder"));
+        assert!(remove(&main, &main, true, NO_WAIT).unwrap_err().contains("not in m4code's worktrees folder"));
         assert!(main.exists());
     }
 
@@ -638,7 +638,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (_, folder) = repo_with_worktree(tmp.path());
         let elsewhere = tmp.path().join("main");
-        assert!(delete_unlisted(&elsewhere).unwrap_err().contains("not in Claudiu's worktrees folder"));
+        assert!(delete_unlisted(&elsewhere).unwrap_err().contains("not in m4code's worktrees folder"));
         assert!(elsewhere.exists());
         assert!(delete_unlisted(&folder).is_ok() && !folder.exists());
     }

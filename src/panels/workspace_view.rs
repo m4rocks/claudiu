@@ -27,7 +27,7 @@ impl Workspace {
         let hints = self.shortcuts_shown;
         let session_active = self.active_id().is_some();
 
-        let title = rec.as_ref().map(|r| r.display_title().to_string()).unwrap_or_else(|| "Claudiu".into());
+        let title = rec.as_ref().map(|r| r.display_title().to_string()).unwrap_or_else(|| "m4code".into());
         // `.occlude()` on both groups: the bar is a Windows drag (HTCAPTION) area, which would otherwise swallow clicks on the buttons inside it.
         // The top bar spans the window and is drawn as the window background, not as a panel. macOS keeps its
         // traffic lights at the left (they are hidden in fullscreen); Windows/Linux get min/max/close at the right.
@@ -102,9 +102,9 @@ impl Workspace {
 
     fn render_update_banner(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let (text, action) = match &self.update.status {
-            Status::Available { version } => (format!("Claudiu {version} is available"), Some(("Download", Act::InstallUpdate))),
+            Status::Available { version } => (format!("m4code {version} is available"), Some(("Download", Act::InstallUpdate))),
             Status::Downloading => ("Downloading update…".to_string(), None),
-            Status::Ready { version } => (format!("Claudiu {version} is ready"), Some(("Restart to update", Act::InstallUpdate))),
+            Status::Ready { version } => (format!("m4code {version} is ready"), Some(("Restart to update", Act::InstallUpdate))),
             _ => return None,
         };
         Some(
@@ -254,8 +254,8 @@ impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Window title follows the active session.
         let title = match self.active_id().and_then(|id| self.store.session(id)) {
-            Some(s) => format!("{} — Claudiu", s.display_title()),
-            None => "Claudiu".to_string(),
+            Some(s) => format!("{} — m4code", s.display_title()),
+            None => "m4code".to_string(),
         };
         if title != self.window_title {
             window.set_window_title(&title);

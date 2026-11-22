@@ -5,7 +5,7 @@ use super::*;
 #[ignore]
 fn git_change_marks_are_painted() {
     let data = tempfile::tempdir().unwrap();
-    unsafe { std::env::set_var("CLAUDIU_DATA_DIR", data.path()) };
+    unsafe { std::env::set_var("M4CODE_DATA_DIR", data.path()) };
     let work = tempfile::tempdir().unwrap();
     let cwd = dunce::canonicalize(work.path()).unwrap();
     let repo = git2::Repository::init(&cwd).unwrap();
@@ -63,7 +63,7 @@ fn git_change_marks_are_painted() {
 #[ignore]
 fn git_change_marks_follow_scrolling() {
     let data = tempfile::tempdir().unwrap();
-    unsafe { std::env::set_var("CLAUDIU_DATA_DIR", data.path()) };
+    unsafe { std::env::set_var("M4CODE_DATA_DIR", data.path()) };
     let work = tempfile::tempdir().unwrap();
     let cwd = dunce::canonicalize(work.path()).unwrap();
     let repo = git2::Repository::init(&cwd).unwrap();
@@ -132,7 +132,7 @@ fn git_change_marks_follow_scrolling() {
 #[ignore]
 fn the_editors_text_eases_to_a_wheel_notch() {
     let data = tempfile::tempdir().unwrap();
-    unsafe { std::env::set_var("CLAUDIU_DATA_DIR", data.path()) };
+    unsafe { std::env::set_var("M4CODE_DATA_DIR", data.path()) };
     let work = tempfile::tempdir().unwrap();
     let cwd = dunce::canonicalize(work.path()).unwrap();
     let repo = git2::Repository::init(&cwd).unwrap();
@@ -212,7 +212,7 @@ fn the_editors_text_eases_to_a_wheel_notch() {
 #[ignore]
 fn the_session_list_draws_rows_where_scrolling_brings_them() {
     let data = tempfile::tempdir().unwrap();
-    unsafe { std::env::set_var("CLAUDIU_DATA_DIR", data.path()) };
+    unsafe { std::env::set_var("M4CODE_DATA_DIR", data.path()) };
     let mut cx = TestAppContext::single();
     cx.update(|app| {
         gpui_kit::init(app);

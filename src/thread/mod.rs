@@ -15,7 +15,7 @@ use std::rc::Rc;
 use std::time::Instant;
 
 use futures::StreamExt;
-use gpui::{App, AppContext, Bounds, Context, Entity, EventEmitter, FocusHandle, Focusable, KeystrokeEvent, ListAlignment, ListState, Pixels, Subscription, Window, px};
+use gpui::{App, AppContext, Bounds, Context, Entity, EventEmitter, FocusHandle, Focusable, FollowMode, KeystrokeEvent, ListAlignment, ListState, Pixels, Subscription, Window, px};
 use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
 use serde_json::{Value, json};
 
@@ -77,6 +77,8 @@ pub enum ThreadEvent {
 
 /// How to bring a session up.
 pub struct Start {
+    /// m4code's session record id, used to persist conversation entries across restarts.
+    pub record_id: String,
     pub harness: Harness,
     /// Aggregated models across every enabled harness for the unified model picker.
     pub all_models: Vec<CatalogModel>,
@@ -116,6 +118,12 @@ struct Question {
     options: Vec<QuestionOption>,
 }
 
+struct Queued {
+    text: String,
+    /// Already appended to `thread.entries` so a new session shows the user's message while the agent starts.
+    shown: bool,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Phase {
     Starting,
@@ -124,6 +132,7 @@ enum Phase {
 }
 
 pub struct ThreadView {
+    record_id: String,
     pub harness: Harness,
     /// Aggregated models from every enabled harness, shown together in one picker.
     pub all_models: Vec<CatalogModel>,
@@ -149,7 +158,7 @@ pub struct ThreadView {
     /// A prompt is out and the turn hasn't ended.
     working: bool,
     /// Messages typed during a turn, sent one at a time after it.
-    queue: VecDeque<String>,
+    queue: VecDeque<Queued>,
     question: Option<Question>,
     composer: Entity<TextareaState>,
     /// Where Up has got to among the messages sent before, and what was typed before it started.
@@ -168,6 +177,7 @@ pub struct ThreadView {
     model_anchor: crate::panels::widgets::Anchor,
     /// Highlighted row index inside the Model picker for Up/Down + Enter keyboard navigation.
     model_highlight: usize,
+    mode_highlight: usize,
     /// Follows `model_highlight` so keyboard moves keep the highlighted row in view.
     pub(super) model_scroll: gpui::ScrollHandle,
     /// Tool call ids manually expanded by clicking their compressed single-line header.
@@ -179,6 +189,8 @@ pub struct ThreadView {
     error: Option<String>,
     /// Shown instead of the conversation while the session moves (a hand-off).
     pub handover: Option<Handover>,
+    /// True while showing locally cached entries for a `Reopen::Load` harness before its live replay arrives.
+    cached_replay: bool,
     /// This view took over a conversation from another harness (an in-place hand-off), and shows it while it starts.
     took_over: bool,
     cards: HashMap<String, Card>,
@@ -233,10 +245,26 @@ impl ThreadView {
         subscriptions.push(cx.intercept_keystrokes(move |ev: &KeystrokeEvent, window, cx| {
             let _ = this.update(cx, |v, cx| v.intercept(ev, window, cx));
         }));
-        let mut thread = Thread::default();
-        let rows = start.prior_entries.len();
-        thread.entries = start.prior_entries.clone();
+        let mut thread = Thread { entries: start.prior_entries.clone(), ..Default::default() };
+        let mut queue = VecDeque::new();
+        if let Some(prompt) = start.prompt.clone() {
+            // Show a new session's first message immediately instead of a blank screen while the agent starts.
+            // A resumed session replays history during startup, so keep its prompt queued until open finishes.
+            let shown = start.session_id.is_none();
+            if shown {
+                thread.sent(prompt.clone());
+            }
+            queue.push_back(Queued { text: prompt, shown });
+        }
+        let rows = thread.entries.len();
+        let list = ListState::new(rows, ListAlignment::Top, px(600.0));
+        list.set_follow_mode(FollowMode::Tail);
+        let cached_replay = start.session_id.is_some()
+            && !start.prior_entries.is_empty()
+            && start.harness.adapter().reopen == Reopen::Load;
+        let took_over = start.session_id.is_none() && !start.prior_entries.is_empty();
         let mut view = ThreadView {
+            record_id: start.record_id.clone(),
             harness: start.harness,
             all_models: start.all_models.clone(),
             picked: start.picked.clone(),
@@ -252,12 +280,12 @@ impl ThreadView {
             thread,
             phase: Phase::Starting,
             working: false,
-            queue: start.prompt.clone().into_iter().collect(),
+            queue,
             question: None,
             composer,
             history_at: None,
             draft: String::new(),
-            list: ListState::new(rows, ListAlignment::Bottom, px(600.0)),
+            list,
             rows,
             detail: false,
             plan_open: false,
@@ -265,6 +293,7 @@ impl ThreadView {
             picker_at: crate::panels::widgets::Dropdown::at(gpui::point(px(0.0), px(0.0))),
             model_anchor: crate::panels::widgets::Anchor::default(),
             model_highlight: 0,
+            mode_highlight: 0,
             model_scroll: gpui::ScrollHandle::new(),
             expanded_tools: HashSet::new(),
             effort_bounds: Rc::new(Cell::new(Bounds::default())),
@@ -272,7 +301,8 @@ impl ThreadView {
             last_escape: None,
             error: None,
             handover: None,
-            took_over: !start.prior_entries.is_empty(),
+            cached_replay,
+            took_over,
             cards: HashMap::new(),
             card_ui,
             snapshots: Vec::new(),
@@ -375,6 +405,11 @@ impl ThreadView {
     fn on_event(&mut self, event: Event, cx: &mut Context<Self>) {
         match event {
             Event::Update(update) => {
+                if self.cached_replay && !self.working && is_conversation_update(&update) {
+                    self.cached_replay = false;
+                    self.thread.entries.clear();
+                    self.remeasure(0);
+                }
                 let title = self.thread.title.clone();
                 let prev_ctx = self.thread.context;
                 if let Some(at) = self.thread.apply(&update) {
@@ -476,7 +511,11 @@ impl ThreadView {
             cx.notify();
             return;
         }
-        self.queue.push_back(text);
+        let shown = self.phase == Phase::Starting && self.session_id.is_none();
+        if shown && let Some(at) = self.thread.sent(text.clone()) {
+            self.remeasure(at);
+        }
+        self.queue.push_back(Queued { text, shown });
         self.send_next(cx);
         cx.notify();
     }
@@ -486,10 +525,15 @@ impl ThreadView {
             return;
         }
         let (Some(connection), Some(session)) = (self.connection.clone(), self.session_id.clone()) else { return };
-        let Some(text) = self.queue.pop_front() else { return };
-        if let Some(at) = self.thread.sent(text.clone()) {
+        let Some(next) = self.queue.pop_front() else { return };
+        if !next.shown
+            && let Some(at) = self.thread.sent(next.text.clone())
+        {
             self.remeasure(at);
         }
+        self.cached_replay = false;
+        let text = next.text;
+        self.persist_entries();
         self.list.scroll_to_end();
         self.working = true;
         self.changed = None;
@@ -530,6 +574,7 @@ impl ThreadView {
             let at = self.thread.notice(text, error);
             self.remeasure(at);
         }
+        self.persist_entries();
         if let Some((target, effort, message)) = self.handoff_after_turn.take() {
             let model = (!target.id.is_empty()).then_some(target.id);
             cx.emit(ThreadEvent::Handoff { to: target.harness, model, message, effort, by_agent: true });
@@ -550,14 +595,14 @@ impl ThreadView {
     pub fn switch_model(&mut self, model: Option<&CatalogModel>, effort: Option<&str>, cx: &mut Context<Self>) -> Result<String, String> {
         let mut done = vec![];
         if let Some(model) = model {
-            let option = self.thread.option("model").map(|o| o.id.clone()).ok_or("This session's agent doesn't let Claudiu change its model.")?;
+            let option = self.thread.option("model").map(|o| o.id.clone()).ok_or("This session's agent doesn't let m4code change its model.")?;
             self.set_option(option, model.id.clone(), cx);
             done.push(model.name.clone());
         }
         if let Some(effort) = effort {
             let (values, _, _, option) = self.effort_choices();
             let value = values.iter().find(|v| v.eq_ignore_ascii_case(effort)).cloned().ok_or_else(|| format!("No effort “{effort}”. Use one of: {}.", values.join(", ")))?;
-            let option = option.ok_or("This session's agent doesn't let Claudiu change its effort.")?;
+            let option = option.ok_or("This session's agent doesn't let m4code change its effort.")?;
             self.pending_effort = Some(value.clone());
             self.set_option(option, value.clone(), cx);
             done.push(format!("effort {value}"));
@@ -603,7 +648,7 @@ impl ThreadView {
         self.answer(reject, cx);
     }
 
-    fn set_mode(&mut self, mode: String, cx: &mut Context<Self>) {
+    pub(crate) fn set_mode(&mut self, mode: String, cx: &mut Context<Self>) {
         let (Some(c), Some(s)) = (self.connection.clone(), self.session_id.clone()) else { return };
         // The agent confirms with `current_mode_update`; showing it at once keeps Shift+Tab presses in step.
         self.thread.mode = Some(mode.clone());
@@ -666,6 +711,39 @@ impl ThreadView {
                     let models = self.filtered_models(cx);
                     if let Some(choice) = models.get(self.model_highlight.min(models.len().saturating_sub(1))).cloned() {
                         self.pick_model(choice, cx);
+                        self.close_picker(window, cx);
+                    }
+                    cx.stop_propagation();
+                    return;
+                }
+                _ => {}
+            }
+        }
+        // Keyboard navigation while the Permission mode picker is open.
+        if self.picker == Some(ThreadPicker::Permission)
+            && !ev.keystroke.modifiers.control
+            && !ev.keystroke.modifiers.alt
+            && !ev.keystroke.modifiers.platform
+            && !ev.keystroke.modifiers.shift
+        {
+            match ev.keystroke.key.as_str() {
+                "up" | "down" => {
+                    let count = self.thread.modes.len();
+                    if count > 0 {
+                        let cur = self.mode_highlight.min(count - 1);
+                        self.mode_highlight = if ev.keystroke.key == "up" {
+                            if cur == 0 { count - 1 } else { cur - 1 }
+                        } else {
+                            (cur + 1) % count
+                        };
+                    }
+                    cx.stop_propagation();
+                    cx.notify();
+                    return;
+                }
+                "enter" => {
+                    if let Some((mode_id, _)) = self.thread.modes.get(self.mode_highlight.min(self.thread.modes.len().saturating_sub(1))).cloned() {
+                        self.set_mode(mode_id, cx);
                         self.close_picker(window, cx);
                     }
                     cx.stop_propagation();
@@ -788,10 +866,14 @@ impl ThreadView {
 
     /// Close the model or permission dropdown and give the keyboard back to the message box, which the model
     /// search box took when the dropdown opened.
+    pub(super) fn focus_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.composer.update(cx, |c, cx| c.focus(window, cx));
+    }
+
     pub(super) fn close_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.picker = None;
         self.effort_dragging.set(false);
-        self.composer.update(cx, |c, cx| c.focus(window, cx));
+        self.focus_composer(window, cx);
         cx.notify();
     }
 
@@ -884,7 +966,7 @@ impl ThreadView {
         self.shown_commands().filter(|c| c.name.starts_with(typed)).collect()
     }
 
-    /// The agent's commands, without those Claudiu's own UI does (`Harness::hidden_commands`).
+    /// The agent's commands, without those m4code's own UI does (`Harness::hidden_commands`).
     fn shown_commands(&self) -> impl Iterator<Item = &crate::harness::thread::Command> {
         let hidden = self.harness.hidden_commands();
         self.thread.commands.iter().filter(move |c| !hidden.contains(&c.name.as_str()))
@@ -924,8 +1006,12 @@ impl ThreadView {
         });
     }
 
+    fn persist_entries(&self) {
+        crate::harness::thread::save_entries(&self.record_id, &self.thread.entries);
+    }
+
     /// Measure entry `from` and every one after it again; the list keeps its place above them.
-    fn remeasure(&mut self, from: usize) {
+    pub(crate) fn remeasure(&mut self, from: usize) {
         let rows = self.thread.entries.len();
         let from = from.min(self.rows);
         self.list.splice(from..self.rows, rows - from);
@@ -1033,6 +1119,19 @@ async fn open(c: &Connection, harness: Harness, start: &Start) -> Result<(String
     }
 }
 
+impl Drop for ThreadView {
+    fn drop(&mut self) {
+        self.persist_entries();
+    }
+}
+
+fn is_conversation_update(update: &Value) -> bool {
+    matches!(
+        update["sessionUpdate"].as_str(),
+        Some("user_message_chunk" | "agent_message_chunk" | "agent_thought_chunk" | "tool_call" | "tool_call_update")
+    )
+}
+
 /// `comment` after the text typed so far, on a line of its own, so several comments read as a list.
 fn with_comment(typed: &str, comment: &str) -> String {
     let typed = typed.trim_end();
@@ -1046,10 +1145,50 @@ fn str_of(value: &Value, key: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::with_comment;
+    use crate::harness::{Harness, thread::Entry};
 
     #[test]
     fn a_comment_goes_on_its_own_line_after_what_was_typed() {
         assert_eq!(with_comment("", "@a.rs#L1: why"), "@a.rs#L1: why");
         assert_eq!(with_comment("look at these \n", "@a.rs#L1: why"), "look at these\n@a.rs#L1: why");
+    }
+
+    #[gpui::test]
+    fn new_session_shows_prompt_immediately_at_top(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_kit::init);
+        let dir = tempfile::tempdir().unwrap();
+        let start = super::Start {
+            record_id: String::new(),
+            harness: Harness::Claude,
+            all_models: vec![],
+            picked: vec![],
+            cwd: dir.path().to_path_buf(),
+            env: vec![],
+            mcp_servers: vec![],
+            meta: serde_json::Value::Null,
+            session_id: None,
+            mode: None,
+            options: vec![],
+            prompt: Some("hello world".into()),
+            prior_entries: vec![],
+            server: Some(("definitely-not-a-real-program-m4code".into(), vec![])),
+        };
+        let (view, cx) = cx.add_window_view(|window, cx| super::ThreadView::new(start, window, cx));
+        view.read_with(cx, |v, _| {
+            assert_eq!(v.thread.entries, [Entry::User("hello world".into())]);
+            assert_eq!(v.rows, 1);
+            assert_eq!(v.queue.len(), 1);
+            assert!(v.queue[0].shown);
+        });
+        // Paint once so the list lays out, and verify the first entry sits near the top of the viewport, not the bottom.
+        cx.refresh().unwrap();
+        view.read_with(cx, |v, _| {
+            let vp = v.list.viewport_bounds();
+            let item = v.list.bounds_for_item(0).expect("first entry laid out");
+            assert!(
+                item.origin.y - vp.origin.y < vp.size.height / 2.0,
+                "expected first entry near top of viewport, got item={item:?} viewport={vp:?}"
+            );
+        });
     }
 }

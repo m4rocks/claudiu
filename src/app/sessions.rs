@@ -117,21 +117,21 @@ impl Workspace {
         self.start_thread(record, start, true, window, cx);
     }
 
-    /// What a harness session starts with: Claudiu's MCP server, which every harness gets, and for Claude Code its
+    /// What a harness session starts with: m4code's MCP server, which every harness gets, and for Claude Code its
     /// mod, account and flags. A new session (no id yet) also gets the new-session defaults. None, with a toast, when
     /// Claude Code isn't installed.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn thread_start(&mut self, record_id: &str, cwd: &std::path::Path, meta: &ClaudeMeta, name: Option<String>, prompt: Option<String>, by: Starter, cx: &mut Context<Self>) -> Option<crate::thread::Start> {
         let session_id = Some(meta.session_id.clone()).filter(|id| !id.is_empty());
         let settings = &self.store.data.settings;
-        let off = mcp::tools_off(&settings.claudiu_tools_off, &claude::trim::FLUFF);
+        let off = mcp::tools_off(&settings.m4code_tools_off, &claude::trim::FLUFF);
         let mut mcp_servers = vec![];
         if let Ok(exe) = std::env::current_exe() {
             let mut env = vec![(mcp::RECORD_ENV, record_id.to_string())];
             if !off.is_empty() {
                 env.push((mcp::TOOLS_OFF_ENV, off.join(",")));
             }
-            mcp_servers.push(harness::stdio_server("claudiu", &exe, &[mcp::FLAG], &env));
+            mcp_servers.push(harness::stdio_server("m4code", &exe, &[mcp::FLAG], &env));
         }
         let (mode, options) = match session_id {
             None => {
@@ -169,12 +169,11 @@ impl Workspace {
             let plugin = claude::plugin::install().ok();
             if plugin.is_some() {
                 if let Some(id) = &session_id {
-                    env.push(("CLAUDIU_NAME_FILE".into(), mcp::name_file(id).to_string_lossy().into_owned()));
+                    env.push(("M4CODE_NAME_FILE".into(), mcp::name_file(id).to_string_lossy().into_owned()));
                 }
                 env.push((usage::USAGE_DIR_ENV.into(), usage::snapshot_dir().to_string_lossy().into_owned()));
                 env.push((usage::CTL_ENV.into(), usage::ctl_file(record_id).to_string_lossy().into_owned()));
                 env.push((crate::visual::VISUAL_ENV.into(), crate::visual::prefix(record_id).to_string_lossy().into_owned()));
-                env.push((crate::claude::ask::ASK_ENV.into(), crate::claude::ask::request_file(record_id).to_string_lossy().into_owned()));
                 // The mod registers the agent types and answers their turns, so they go only where it loads.
                 if let Some(subagents) = settings.custom_subagents.env()
                     && let Ok(exe) = std::env::current_exe()
@@ -202,7 +201,9 @@ impl Workspace {
         self.sync_skills(Some(meta.harness), cx);
         let all_models = self.store.data.settings.aggregated_models();
         let picked = self.store.data.settings.picked_models(meta.harness).to_vec();
+        let prior_entries = if session_id.is_some() { crate::harness::thread::load_entries(record_id) } else { vec![] };
         Some(crate::thread::Start {
+            record_id: record_id.to_string(),
             harness: meta.harness,
             all_models,
             picked,
@@ -215,7 +216,7 @@ impl Workspace {
             mode,
             options,
             prompt,
-            prior_entries: vec![],
+            prior_entries,
         })
     }
 
@@ -259,7 +260,7 @@ impl Workspace {
         let Some(rec) = self.store.session(id).cloned() else { return };
         let Some(meta) = rec.claude.clone() else { return };
         let cwd = self.resume_cwd(&rec, cx);
-        // Hand Claudiu's tab title to Claude Code so its own name (/resume, Remote Control) matches.
+        // Hand m4code's tab title to Claude Code so its own name (/resume, Remote Control) matches.
         let Some(start) = self.thread_start(&rec.id, &cwd, &meta, rec.chosen_title().map(String::from), None, Starter::User, cx) else { return };
         self.start_thread(rec, start, false, window, cx);
     }
@@ -396,7 +397,6 @@ impl Workspace {
         // Dropping a running view ends its process.
         self.live.retain(|l| l.id != id);
         self.purge_dead_shells();
-        self.transcript_mtimes.remove(&id);
         if is_new {
             self.store.add_session(record);
         } else if let Some(r) = self.store.session_mut(&id) {
@@ -442,7 +442,7 @@ impl Workspace {
     }
 
     /// A Claude session that never produced a transcript (opened and closed without a prompt) has nothing
-    /// to resume. Remove Claudiu's own record of it; Claude Code's data is never touched.
+    /// to resume. Remove m4code's own record of it; Claude Code's data is never touched.
     fn drop_if_empty(&mut self, id: &str) {
         if self.ephemeral.remove(id) {
             self.store.data.sessions.retain(|s| s.id != id);

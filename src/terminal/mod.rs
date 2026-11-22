@@ -24,7 +24,7 @@ use alacritty_terminal::term::test::TermSize;
 use alacritty_terminal::term::{Config, Term};
 use alacritty_terminal::tty;
 
-/// Give child processes the environment of *this* terminal rather than whatever launched Claudiu.
+/// Give child processes the environment of *this* terminal rather than whatever launched m4code.
 /// Call once at startup, before any threads exist (mutating the environment is not thread-safe).
 ///
 /// Scrubs identity variables of other terminals and the markers Claude Code sets for its own
@@ -49,7 +49,7 @@ pub fn prepare_child_env() {
         unsafe { std::env::remove_var(key) };
     }
     unsafe {
-        std::env::set_var("TERM_PROGRAM", "Claudiu");
+        std::env::set_var("TERM_PROGRAM", "m4code");
         std::env::set_var("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
     }
 }
@@ -295,14 +295,14 @@ mod tests {
 
     #[test]
     fn spawn_produces_output_and_reports_exit() {
-        let (term, mut rx) = Terminal::spawn(&echo_spec("claudiu-lifecycle-ok"), 80, 24).expect("spawn");
+        let (term, mut rx) = Terminal::spawn(&echo_spec("m4code-lifecycle-ok"), 80, 24).expect("spawn");
         assert!(wait_for_exit(&mut rx), "child exit must be reported");
-        assert!(screen_text(&term).contains("claudiu-lifecycle-ok"), "output reaches the grid");
+        assert!(screen_text(&term).contains("m4code-lifecycle-ok"), "output reaches the grid");
     }
 
     #[test]
     fn startup_failure_is_an_error_not_a_panic() {
-        let spec = SpawnSpec { program: "definitely-not-a-real-program-claudiu".into(), args: vec![], cwd: None, ..Default::default() };
+        let spec = SpawnSpec { program: "definitely-not-a-real-program-m4code".into(), args: vec![], cwd: None, ..Default::default() };
         assert!(Terminal::spawn(&spec, 80, 24).is_err());
     }
 

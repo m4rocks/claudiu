@@ -28,7 +28,7 @@ pub enum LineAction {
 
 /// A line action as a key binding's action.
 #[derive(Clone, Debug, PartialEq, gpui::Action)]
-#[action(namespace = claudiu, no_json)]
+#[action(namespace = m4code, no_json)]
 pub struct EditLines(pub LineAction);
 
 /// VS Code's keys for the line actions, over the editor only (the pane's find box is an input too). Ctrl+X and Ctrl+C act

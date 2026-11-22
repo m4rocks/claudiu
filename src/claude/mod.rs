@@ -4,16 +4,15 @@
 //! Launching/resuming uses documented CLI flags (`--session-id`, `--resume`); the transcript scan is a
 //! best-effort, tolerant *import* aid: every field is optional and any unparseable line is skipped.
 //!
-//! Channels between Claudiu and the sessions it runs: `accounts` (alt config folders), `usage` (the mod's snapshots),
+//! Channels between m4code and the sessions it runs: `accounts` (alt config folders), `usage` (the mod's snapshots),
 //! `ask` (one-shot completions through the mod), `bridge` (requests from a session), `mcp` (the tab-title server and the
-//! per-session config) and `plugin` (the mod Claudiu ships). `codex_limits` reads Codex's own usage limits from its
+//! per-session config) and `plugin` (the mod m4code ships). `codex_limits` reads Codex's own usage limits from its
 //! session logs, and `antigravity_limits` asks the Antigravity CLI for its own.
 
 pub mod accounts;
 pub mod acp;
 pub mod antigravity_limits;
 pub mod antigravity_read_only;
-pub mod ask;
 pub mod bridge;
 pub mod codex_limits;
 pub mod config_sync;
@@ -33,7 +32,6 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use crate::platform::{find_executable, home_dir};
-use crate::store::ExternalSession;
 
 /// Locate the user's `claude` executable: explicit setting, PATH, then well-known install dirs.
 pub fn discover(configured: Option<&Path>) -> Option<PathBuf> {
@@ -123,32 +121,6 @@ fn read_status(path: &Path) -> Option<(String, i64, String)> {
     Some((id.to_string(), at, status.to_string()))
 }
 
-pub struct ScanResult {
-    pub sessions: Vec<ExternalSession>,
-    /// False when the directory couldn't be read: callers must not conclude anything is gone.
-    pub ok: bool,
-}
-
-/// Scan every transcript under `<home>/projects/*/*.jsonl`. Meant to run on a background thread.
-pub fn scan_all(home: &Path) -> ScanResult {
-    let mut out = ScanResult { sessions: vec![], ok: false };
-    let Ok(dirs) = fs::read_dir(home.join("projects")) else { return out };
-    out.ok = true;
-    for dir in dirs.flatten() {
-        let Ok(files) = fs::read_dir(dir.path()) else { continue };
-        for file in files.flatten() {
-            let path = file.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
-                continue;
-            }
-            if let Some(scan) = read_session(&path) {
-                out.sessions.push(scan.session);
-            }
-        }
-    }
-    out
-}
-
 /// Find the transcript for a session id without knowing Claude's path-encoding scheme.
 pub fn find_transcript(home: &Path, session_id: &str) -> Option<PathBuf> {
     let name = format!("{session_id}.jsonl");
@@ -207,10 +179,6 @@ pub fn clear_recorded_worktree(transcript: &Path, session_id: &str) -> std::io::
     file.write_all(line.as_bytes())
 }
 
-pub struct SessionScan {
-    pub session: ExternalSession,
-}
-
 const HEAD_BYTES: u64 = 128 * 1024;
 const TAIL_BYTES: u64 = 768 * 1024;
 
@@ -242,155 +210,7 @@ pub fn parse_rfc3339(s: &str) -> Option<i64> {
     time::OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339).ok().map(|d| d.unix_timestamp())
 }
 
-fn first_prompt_text(v: &Value) -> Option<String> {
-    if v.get("isMeta").and_then(Value::as_bool).unwrap_or(false) || v.get("isSidechain").and_then(Value::as_bool).unwrap_or(false) {
-        return None;
-    }
-    let content = v.get("message")?.get("content")?;
-    let text = match content {
-        Value::String(s) => s.clone(),
-        Value::Array(items) => items.iter().find_map(|i| i.get("text").and_then(Value::as_str).map(str::to_string))?,
-        _ => return None,
-    };
-    let text = text.trim();
-    if text.is_empty() || text.starts_with('<') || text.starts_with("Caveat:") {
-        return None;
-    }
-    let one_line: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    Some(one_line.chars().take(80).collect())
-}
 
-/// What was said in a transcript as plain text ("User: …" / "Claude: …"), the start and the newest part when long.
-/// Only for naming a session; tool calls and results are left out.
-pub fn conversation_text(path: &Path) -> String {
-    const HEAD: usize = 1500;
-    const MAX: usize = 8000;
-    let Ok(text) = std::fs::read_to_string(path) else { return String::new() };
-    let mut out = String::new();
-    for v in text.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()) {
-        let who = match v.get("type").and_then(Value::as_str) {
-            Some("user") => "User",
-            Some("assistant") => "Claude",
-            _ => continue,
-        };
-        if v.get("isMeta").and_then(Value::as_bool) == Some(true) || v.get("isSidechain").and_then(Value::as_bool) == Some(true) {
-            continue;
-        }
-        let content = v.get("message").and_then(|m| m.get("content"));
-        let said: Vec<&str> = match content {
-            Some(Value::String(s)) => vec![s.as_str()],
-            Some(Value::Array(items)) => items.iter().filter(|i| i.get("type").and_then(Value::as_str) == Some("text")).filter_map(|i| i.get("text").and_then(Value::as_str)).collect(),
-            _ => vec![],
-        };
-        for t in said.into_iter().map(str::trim).filter(|t| !t.is_empty() && !t.starts_with('<') && !t.starts_with("Caveat:")) {
-            out.push_str(&format!("{who}: {}
-
-", t.chars().take(1500).collect::<String>()));
-        }
-    }
-    let n = out.chars().count();
-    if n <= MAX {
-        return out;
-    }
-    let head: String = out.chars().take(HEAD).collect();
-    let tail: String = out.chars().skip(n - (MAX - HEAD)).collect();
-    format!("{head}
-[…]
-{tail}")
-}
-
-pub fn read_session(path: &Path) -> Option<SessionScan> {
-    let session_id = path.file_stem()?.to_str()?.to_string();
-    let (head, tail, whole, created_fs, modified_fs) = read_chunks(path).ok()?;
-
-    let mut cwd: Option<PathBuf> = None;
-    let mut created: Option<i64> = None;
-    let mut first_prompt: Option<String> = None;
-    let mut ai_title: Option<String> = None;
-    let mut custom_title: Option<String> = None;
-    let mut model: Option<String> = None;
-    let mut context_tokens: Option<u64> = None;
-    let mut cache_ttl: Option<u64> = None;
-    let mut cache_at: Option<i64> = None;
-    let mut last_ts: Option<i64> = None;
-
-    let mut visit = |line: &str, is_tail: bool| {
-        let Ok(v) = serde_json::from_str::<Value>(line) else { return };
-        let ts = v.get("timestamp").and_then(Value::as_str).and_then(parse_rfc3339);
-        if ts.is_some() {
-            if created.is_none() {
-                created = ts;
-            }
-            last_ts = ts;
-        }
-        if cwd.is_none() {
-            cwd = v.get("cwd").and_then(Value::as_str).map(PathBuf::from);
-        }
-        match v.get("type").and_then(Value::as_str) {
-            Some("user") if first_prompt.is_none() && !is_tail => first_prompt = first_prompt_text(&v),
-            Some("ai-title") => ai_title = v.get("aiTitle").and_then(Value::as_str).map(str::to_string).or(ai_title.take()),
-            Some("custom-title") => custom_title = v.get("customTitle").and_then(Value::as_str).map(str::to_string).or(custom_title.take()),
-            Some("assistant") if !v.get("isSidechain").and_then(Value::as_bool).unwrap_or(false) => {
-                if let Some(msg) = v.get("message") {
-                    if let Some(m) = msg.get("model").and_then(Value::as_str).filter(|m| !m.starts_with('<')) {
-                        model = Some(m.to_string());
-                    }
-                    if let Some(u) = msg.get("usage") {
-                        let get = |k: &str| u.get(k).and_then(Value::as_u64).unwrap_or(0);
-                        let total = get("input_tokens") + get("cache_creation_input_tokens") + get("cache_read_input_tokens");
-                        if total > 0 {
-                            context_tokens = Some(total);
-                        }
-                        // Only a response that touched the cache restarted its TTL; user messages and renames don't.
-                        if get("cache_creation_input_tokens") + get("cache_read_input_tokens") > 0 && ts.is_some() {
-                            cache_at = ts;
-                        }
-                        // The last request that wrote to the cache says which TTL tier this account gets.
-                        if let Some(c) = u.get("cache_creation") {
-                            let n = |k: &str| c.get(k).and_then(Value::as_u64).unwrap_or(0);
-                            if n("ephemeral_1h_input_tokens") > 0 {
-                                cache_ttl = Some(3600);
-                            } else if n("ephemeral_5m_input_tokens") > 0 {
-                                cache_ttl = Some(300);
-                            }
-                        }
-                    }
-                }
-            }
-            _ => {}
-        }
-    };
-    for line in head.lines() {
-        visit(line, false);
-    }
-    if !whole {
-        for line in tail.lines() {
-            visit(line, true);
-        }
-    }
-
-    let title = custom_title.clone().or(ai_title).or(first_prompt);
-    Some(SessionScan {
-        session: ExternalSession {
-            session_id,
-            cwd,
-            title,
-            custom_title,
-            created_at: created.unwrap_or(created_fs),
-            last_active: modified_fs,
-            model,
-            context_tokens,
-            cache_ttl,
-            cache_at,
-            transcript: path.to_path_buf(),
-        },
-    })
-}
-
-/// Approximate context-window usage in 0.0..=1.0. Claude Code doesn't expose the window for the
-/// model in transcripts, so assume 200k and fall back to 1M once usage exceeds it. Shown as approximate.
-/// What the context bar is full at: the auto-compact threshold while auto-compact is on (the bar fills as compaction
-/// nears), otherwise the model's window.
 pub fn context_limit(window: Option<u64>, compact_at: Option<u64>, auto_compact: Option<bool>) -> Option<u64> {
     compact_at.filter(|&t| t > 0 && auto_compact != Some(false)).or(window).filter(|&w| w > 0)
 }
@@ -427,109 +247,6 @@ mod tests {
         assert_eq!(session_statuses(home.path(), &mut seen).get("s1").map(String::as_str), Some("idle"));
         fs::remove_file(dir.join("1.json")).unwrap();
         assert!(session_statuses(home.path(), &mut seen).is_empty());
-    }
-
-    #[test]
-    fn conversation_text_keeps_what_was_said_and_drops_the_rest() {
-        let dir = tempfile::tempdir().unwrap();
-        let p = write_session(
-            dir.path(),
-            "s",
-            &[
-                r#"{"type":"user","message":{"content":"fix the login bug"}}"#,
-                r#"{"type":"user","isMeta":true,"message":{"content":"meta"}}"#,
-                r#"{"type":"user","message":{"content":"<command-name>/x</command-name>"}}"#,
-                r#"{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"hm"},{"type":"text","text":"Found it."},{"type":"tool_use","name":"Read"}]}}"#,
-            ],
-        );
-        assert_eq!(conversation_text(&p), "User: fix the login bug
-
-Claude: Found it.
-
-");
-    }
-
-    fn write_session(dir: &Path, id: &str, lines: &[&str]) -> PathBuf {
-        fs::create_dir_all(dir).unwrap();
-        let p = dir.join(format!("{id}.jsonl"));
-        fs::write(&p, lines.join("\n")).unwrap();
-        p
-    }
-
-    #[test]
-    fn reads_title_cwd_model_context() {
-        let tmp = tempfile::tempdir().unwrap();
-        let p = write_session(
-            &tmp.path().join("projects/x"),
-            "11111111-1111-1111-1111-111111111111",
-            &[
-                r#"{"type":"mode","mode":"auto","sessionId":"s"}"#,
-                r#"{"type":"user","timestamp":"2026-10-05T14:10:53.395Z","cwd":"C:\\w\\app","message":{"role":"user","content":"fix the login bug please"}}"#,
-                r#"{"type":"assistant","timestamp":"2026-10-05T14:11:00.000Z","message":{"model":"claude-sonnet-5-5","usage":{"input_tokens":2,"cache_creation_input_tokens":100,"cache_read_input_tokens":49898}}}"#,
-                "this line is not json",
-                r#"{"type":"ai-title","aiTitle":"Fix login bug","sessionId":"s"}"#,
-            ],
-        );
-        let s = read_session(&p).unwrap().session;
-        assert_eq!(s.session_id, "11111111-1111-1111-1111-111111111111");
-        assert_eq!(s.title.as_deref(), Some("Fix login bug"));
-        assert_eq!(s.cwd, Some(PathBuf::from(r"C:\w\app")));
-        assert_eq!(s.model.as_deref(), Some("claude-sonnet-5-5"));
-        assert_eq!(s.context_tokens, Some(50000));
-        assert_eq!(s.cache_at, parse_rfc3339("2026-10-05T14:11:00.000Z"));
-        assert_eq!(s.created_at, 1791209453);
-    }
-
-    #[test]
-    fn falls_back_to_first_prompt_and_skips_meta() {
-        let tmp = tempfile::tempdir().unwrap();
-        let p = write_session(
-            &tmp.path().join("projects/x"),
-            "s2",
-            &[
-                r#"{"type":"user","isMeta":true,"cwd":"/w","message":{"content":"meta"}}"#,
-                r#"{"type":"user","cwd":"/w","message":{"content":"<command-name>/clear</command-name>"}}"#,
-                r#"{"type":"user","cwd":"/w","message":{"content":[{"type":"text","text":"hello   world"}]}}"#,
-            ],
-        );
-        assert_eq!(read_session(&p).unwrap().session.title.as_deref(), Some("hello world"));
-    }
-
-    #[test]
-    fn large_file_uses_head_and_tail_only() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path().join("projects/x");
-        fs::create_dir_all(&dir).unwrap();
-        let mut text = String::new();
-        text.push_str(r#"{"type":"user","timestamp":"2026-01-01T00:00:00Z","cwd":"/w","message":{"content":"start here"}}"#);
-        text.push('\n');
-        let filler = format!(r#"{{"type":"attachment","pad":"{}"}}"#, "x".repeat(1000));
-        for _ in 0..2000 {
-            text.push_str(&filler);
-            text.push('\n');
-        }
-        text.push_str(r#"{"type":"assistant","message":{"model":"m","usage":{"input_tokens":7}}}"#);
-        text.push('\n');
-        text.push_str(r#"{"type":"ai-title","aiTitle":"Tail title"}"#);
-        let p = dir.join("big.jsonl");
-        fs::write(&p, text).unwrap();
-        assert!(fs::metadata(&p).unwrap().len() > HEAD_BYTES + TAIL_BYTES);
-        let s = read_session(&p).unwrap().session;
-        assert_eq!(s.title.as_deref(), Some("Tail title"));
-        assert_eq!(s.context_tokens, Some(7));
-        assert_eq!(s.cwd, Some(PathBuf::from("/w")));
-    }
-
-    #[test]
-    fn scan_all_reports_ok_flag_and_finds_transcripts() {
-        let tmp = tempfile::tempdir().unwrap();
-        assert!(!scan_all(tmp.path()).ok, "no projects dir => cannot conclude anything");
-        write_session(&tmp.path().join("projects/a"), "id-1", &[r#"{"type":"user","cwd":"/w","message":{"content":"hi"}}"#]);
-        let r = scan_all(tmp.path());
-        assert!(r.ok);
-        assert_eq!(r.sessions.len(), 1);
-        assert!(find_transcript(tmp.path(), "id-1").is_some());
-        assert!(find_transcript(tmp.path(), "nope").is_none());
     }
 
     #[test]

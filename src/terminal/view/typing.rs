@@ -112,7 +112,7 @@ impl TerminalView {
         let m = &ks.modifiers;
         let key = ks.key.as_str();
 
-        // Claudiu terminal shortcuts. Everything else goes to the program untouched.
+        // m4code terminal shortcuts. Everything else goes to the program untouched.
         let copy_chord = (m.control && m.shift && key == "c")
             || (m.control && !m.shift && !m.alt && key == "insert");
         let paste_chord = (m.control && m.shift && key == "v")

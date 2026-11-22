@@ -5,7 +5,7 @@ use super::*;
 #[ignore]
 fn a_missing_claude_offers_the_setup_window() {
     let data = tempfile::tempdir().unwrap();
-    unsafe { std::env::set_var("CLAUDIU_DATA_DIR", data.path()) };
+    unsafe { std::env::set_var("M4CODE_DATA_DIR", data.path()) };
     let work = tempfile::tempdir().unwrap();
     let mut cx = TestAppContext::single();
     cx.update(|app| {
@@ -36,7 +36,7 @@ fn a_missing_claude_offers_the_setup_window() {
 #[test]
 fn a_process_that_ends_closes_the_session_and_leaves_its_worktree() {
     let data = tempfile::tempdir().unwrap();
-    unsafe { std::env::set_var("CLAUDIU_DATA_DIR", data.path()) };
+    unsafe { std::env::set_var("M4CODE_DATA_DIR", data.path()) };
     let work = tempfile::tempdir().unwrap();
     let repo_dir = dunce::canonicalize(work.path()).unwrap().join("proj");
     let git = |args: &[&str]| std::process::Command::new("git").args(args).current_dir(&repo_dir).output().unwrap();
@@ -153,7 +153,7 @@ fn a_process_that_ends_closes_the_session_and_leaves_its_worktree() {
         hidden: false,
         claude: Some(ClaudeMeta { session_id: missing.clone(), external: ExternalState::Present, ..Default::default() }),
     };
-    let spec = SpawnSpec { program: "definitely-not-a-real-program-claudiu".into(), args: vec![], cwd: Some(folder), ..Default::default() };
+    let spec = SpawnSpec { program: "definitely-not-a-real-program-m4code".into(), args: vec![], cwd: Some(folder), ..Default::default() };
     step(&mut cx, &|ws, w, cx| ws.start(record.clone(), spec.clone(), true, w, cx));
     until_closed(&mut cx, &missing);
     let toast = ws.read_with(&cx, |ws, _| ws.toast.as_ref().map(|t| t.text.clone()));
@@ -167,7 +167,7 @@ fn a_process_that_ends_closes_the_session_and_leaves_its_worktree() {
 fn reviewing_what_a_turn_changed() {
     let data = tempfile::tempdir().unwrap();
     // SAFETY: set before any other thread reads the environment; this test owns the process.
-    unsafe { std::env::set_var("CLAUDIU_DATA_DIR", data.path()) };
+    unsafe { std::env::set_var("M4CODE_DATA_DIR", data.path()) };
     let work = tempfile::tempdir().unwrap();
     let cwd = dunce::canonicalize(work.path()).unwrap().join("proj");
     std::fs::create_dir_all(&cwd).unwrap();
@@ -241,14 +241,14 @@ fn reviewing_what_a_turn_changed() {
     wait(&mut cx, "the review to read again", &|ws, app| thread(ws).read(app).review_files().is_some_and(|f| f.len() == 1));
 }
 
-/// A session the agent lists for a folder opens here as a Claudiu session, loading the agent's own conversation, and
+/// A session the agent lists for a folder opens here as a m4code session, loading the agent's own conversation, and
 /// picking it up again shows the same record.
 #[test]
 #[ignore = "drives the workspace with a stand-in agent"]
 fn picking_up_a_session_started_elsewhere() {
     let data = tempfile::tempdir().unwrap();
     // SAFETY: set before any other thread reads the environment; this test owns the process.
-    unsafe { std::env::set_var("CLAUDIU_DATA_DIR", data.path()) };
+    unsafe { std::env::set_var("M4CODE_DATA_DIR", data.path()) };
     let work = tempfile::tempdir().unwrap();
     let cwd = dunce::canonicalize(work.path()).unwrap();
     let agent = fake_agent(work.path());
@@ -297,7 +297,7 @@ fn picking_up_a_session_started_elsewhere() {
 fn handing_a_session_to_another_agent() {
     let data = tempfile::tempdir().unwrap();
     // SAFETY: set before any other thread reads the environment; this test owns the process.
-    unsafe { std::env::set_var("CLAUDIU_DATA_DIR", data.path()) };
+    unsafe { std::env::set_var("M4CODE_DATA_DIR", data.path()) };
     let work = tempfile::tempdir().unwrap();
     let cwd = dunce::canonicalize(work.path()).unwrap();
     let agent = fake_agent(work.path());
@@ -399,7 +399,7 @@ fn a_session_answers_in_its_thread(harness: crate::harness::Harness) {
     use crate::harness::thread::Entry;
     let data = tempfile::tempdir().unwrap();
     // SAFETY: set before any other thread reads the environment; this test owns the process.
-    unsafe { std::env::set_var("CLAUDIU_DATA_DIR", data.path()) };
+    unsafe { std::env::set_var("M4CODE_DATA_DIR", data.path()) };
     let work = tempfile::tempdir().unwrap();
     let mut cx = TestAppContext::single();
     cx.update(|app| {

@@ -1,9 +1,9 @@
 //! Custom subagents: agent types that run a task in another coding agent instead of Claude (Settings → Custom
 //! subagents). What differs from one agent to the next lives in its `Provider`.
 //!
-//! Claudiu lists the agent types in `CLAUDIU_SUBAGENTS`, and the mod registers them, so Claude Code names them
-//! `Claudiu:<type>`. Interactive Claude Code ignores `claude --agents` (only `-p` reads it), so the mod is the one way
-//! to define them per session. The mod answers each turn of those agents through the `claudiu --acp` helper
+//! m4code lists the agent types in `M4CODE_SUBAGENTS`, and the mod registers them, so Claude Code names them
+//! `m4code:<type>`. Interactive Claude Code ignores `claude --agents` (only `-p` reads it), so the mod is the one way
+//! to define them per session. The mod answers each turn of those agents through the `m4code --acp` helper
 //! (`claude/acp.rs`).
 
 use std::time::Duration;
@@ -15,14 +15,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 /// The agent types the mod answers for, as JSON. Absent when no custom subagent is on.
-pub const ENV: &str = "CLAUDIU_SUBAGENTS";
+pub const ENV: &str = "M4CODE_SUBAGENTS";
 /// The path of this executable, which the mod runs as `<path> --acp`.
-pub const EXE_ENV: &str = "CLAUDIU_EXE";
+pub const EXE_ENV: &str = "M4CODE_EXE";
 
-/// Claude Code takes up to 64 characters in an agent type's name, before the plugin's `Claudiu:`.
+/// Claude Code takes up to 64 characters in an agent type's name, before the plugin's `m4code:`.
 const TYPE_NAME_MAX: usize = 64;
 
-/// A coding agent a custom subagent runs the task in. Its serde name is the key the mod reads in `CLAUDIU_SUBAGENTS`
+/// A coding agent a custom subagent runs the task in. Its serde name is the key the mod reads in `M4CODE_SUBAGENTS`
 /// and the prefix of its agent types. Adding one takes a variant here, its place in `ALL`, and a `Provider`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -39,7 +39,7 @@ pub struct Limits {
     pub every: Duration,
 }
 
-/// Everything Claudiu knows about one agent, including its ACP server and usage limits.
+/// Everything m4code knows about one agent, including its ACP server and usage limits.
 pub struct Provider {
     /// The limits reader and refresh cadence, absent when the provider has no limits to show.
     pub limits: Option<Limits>,
@@ -49,7 +49,7 @@ pub struct Provider {
     pub marks: fn(&str) -> (&'static [&'static logos::Logo], Option<String>),
     /// The name the settings page and the subagent's text use.
     pub name: &'static str,
-    /// The key in `CLAUDIU_SUBAGENTS` and in the state file, and the start of every agent type name.
+    /// The key in `M4CODE_SUBAGENTS` and in the state file, and the start of every agent type name.
     pub key: &'static str,
     /// The name Claude reads in the agent type's description.
     task_name: &'static str,
@@ -102,14 +102,14 @@ const CODEX: Provider = Provider {
     task_name: "OpenAI Codex",
     triggers: "Codex, GPT",
     program: "npx",
-    // Pinned so an upstream adapter change reaches users only with a Claudiu release.
+    // Pinned so an upstream adapter change reaches users only with a m4code release.
     args: &["-y", "@agentclientprotocol/codex-acp@2.6.0"],
     windows_fallback: None,
     server: "codex-acp",
     missing: "npx was not found on PATH. Codex subagents need Node.js.",
     sign_in: "Codex isn't signed in. Run `codex login`, then try again.",
     about: "Runs the task in OpenAI Codex through codex-acp. Needs Node (npx) and a `codex login`; the first run downloads codex-acp from npm.",
-    edits_on: "Claudiu accepts everything Codex asks for: editing files, running commands, writing outside the folder and using the network. None of it goes through Claude Code's permission rules or hooks.",
+    edits_on: "m4code accepts everything Codex asks for: editing files, running commands, writing outside the folder and using the network. None of it goes through Claude Code's permission rules or hooks.",
     edits_off: "Codex runs read-only: it can read and search, but not change files.",
     warning: None,
     task_args: super::acp::no_args,
@@ -136,7 +136,7 @@ const OPENCODE: Provider = Provider {
     missing: "opencode was not found on PATH. OpenCode subagents need OpenCode installed.",
     sign_in: "OpenCode isn't signed in. Run `opencode auth login`, then try again.",
     about: "Runs the task in OpenCode (`opencode acp`), on the providers you set up in OpenCode. Needs `opencode` on PATH.",
-    edits_on: "Claudiu accepts everything OpenCode asks for, and OpenCode's own permission settings decide the rest: it can edit files, run commands and use the network. None of it goes through Claude Code's permission rules or hooks.",
+    edits_on: "m4code accepts everything OpenCode asks for, and OpenCode's own permission settings decide the rest: it can edit files, run commands and use the network. None of it goes through Claude Code's permission rules or hooks.",
     edits_off: "OpenCode runs read-only: it can read, search and list files, but not change them or run any command, not even a read-only one.",
     warning: None,
     task_args: super::acp::no_args,
@@ -166,8 +166,8 @@ const ANTIGRAVITY: Provider = Provider {
     missing: "agy was not found. Antigravity subagents need the Antigravity CLI installed.",
     sign_in: "Antigravity isn't signed in. Run `agy` and sign in, then try again.",
     about: "Runs the task in Google Antigravity (`agy acp`), on the Gemini, Claude and GPT models your Google plan includes. Needs the Antigravity CLI, signed in through `agy`.",
-    edits_on: "Claudiu puts Antigravity in accept-edits mode and allows everything it asks for: editing files and running commands. None of it goes through Claude Code's permission rules or hooks.",
-    edits_off: "Antigravity runs read-only: it can read and search, but not change files or run commands. It runs from its own folder in Claudiu's data, so your Antigravity rules, skills and MCP servers don't load.",
+    edits_on: "m4code puts Antigravity in accept-edits mode and allows everything it asks for: editing files and running commands. None of it goes through Claude Code's permission rules or hooks.",
+    edits_off: "Antigravity runs read-only: it can read and search, but not change files or run commands. It runs from its own folder in m4code's data, so your Antigravity rules, skills and MCP servers don't load.",
     // Google's FAQ names Claude Code among the third-party software barred from Antigravity logins, under Section 6 of
     // the Antigravity Additional Terms (https://antigravity.google/docs/faq, https://antigravity.google/terms).
     warning: Some("Google's Antigravity terms forbid using another company's agent, such as Claude Code, with a personal Google sign-in. That covers the Free, AI Plus, Pro and Ultra plans. Google can suspend or terminate the Antigravity and Gemini CLI accounts of anyone who does. Switch this on at your own risk."),
@@ -240,7 +240,7 @@ impl Agent {
     /// the agent gone from the agent list). It then says so rather than attempt the task.
     fn stub_prompt(self) -> String {
         let name = self.name();
-        format!("Reply with exactly this and nothing else: {name} couldn't run this task because Claudiu's mod lost track of this agent. Start a new {name} subagent.")
+        format!("Reply with exactly this and nothing else: {name} couldn't run this task because m4code's mod lost track of this agent. Start a new {name} subagent.")
     }
 }
 
@@ -355,7 +355,7 @@ impl CustomSubagents {
             .collect()
     }
 
-    /// What the mod reads from `CLAUDIU_SUBAGENTS`, each type as the mod registers it; `None` when no type is on.
+    /// What the mod reads from `M4CODE_SUBAGENTS`, each type as the mod registers it; `None` when no type is on.
     pub fn env(&self) -> Option<String> {
         let types = self.types();
         if types.is_empty() {
@@ -486,7 +486,7 @@ mod tests {
                 "name": "codex-gpt-6-1-sol",
                 "model": "gpt-6.1-sol",
                 "description": "Runs the task in OpenAI Codex on gpt-6.1-sol. Use only when the user asks for Codex, GPT or gpt-6.1-sol.",
-                "prompt": "Reply with exactly this and nothing else: Codex couldn't run this task because Claudiu's mod lost track of this agent. Start a new Codex subagent.",
+                "prompt": "Reply with exactly this and nothing else: Codex couldn't run this task because m4code's mod lost track of this agent. Start a new Codex subagent.",
             })
         );
         let open = &env["opencode"]["types"][0];

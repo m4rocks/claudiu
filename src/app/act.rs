@@ -38,7 +38,7 @@ pub enum Act {
         folder: PathBuf,
         discard: bool,
     },
-    /// Ask before deleting a folder in Claudiu's worktrees folder that git no longer lists.
+    /// Ask before deleting a folder in m4code's worktrees folder that git no longer lists.
     AskDeleteUnlisted(PathBuf),
     ConfirmDeleteUnlisted(PathBuf),
     /// Show or hide the shell under a Claude session's terminal (started on first use, in the session's folder).
@@ -283,16 +283,15 @@ impl Workspace {
                 self.open_github(cwd, window, cx)
             }
             Act::RegenTitle(id) => self.regen_title(&id, cx),
-            Act::CommitPush(id, cwd) => {
-                if self.is_running(&id, cx) {
-                    self.run_git(
-                        GitOp::CommitPush,
-                        move || crate::git::commit::commit_and_push(&|system, prompt| crate::claude::ask::complete(&id, system, prompt), &cwd).map_err(|e| crate::git::commit::classify(&cwd, e)),
-                        cx,
-                    )
-                } else {
-                    self.toast("Start the session first: the message is written through the running session.", true, cx)
-                }
+            Act::CommitPush(_id, cwd) => {
+                self.run_git(
+                    GitOp::CommitPush,
+                    move || {
+                        crate::git::commit::commit_and_push(&|_system, prompt| Ok(summarize_commit_diff(prompt)), &cwd)
+                            .map_err(|e| crate::git::commit::classify(&cwd, e))
+                    },
+                    cx,
+                )
             }
             Act::Pull(cwd) => self.run_git(
                 GitOp::Pull,
@@ -307,7 +306,7 @@ impl Workspace {
                 self.run_git(GitOp::Branch, move || Ok(crate::git::commit::delete_branch(&cwd, &name)?), cx)
             }
             Act::FixGitWithClaude(cwd) => {
-                let prompt = "Claudiu's Pull or Commit & Push just failed in this repository because of a merge conflict, a diverged branch or a rejected push. Run git status, fix it (resolve conflicts keeping the intent of both sides, finish the merge or rebase, then push if the push was rejected). Ask me whenever a conflict is ambiguous or you are unsure which side to keep.";
+                let prompt = "m4code's Pull or Commit & Push just failed in this repository because of a merge conflict, a diverged branch or a rejected push. Run git status, fix it (resolve conflicts keeping the intent of both sides, finish the merge or rebase, then push if the push was rejected). Ask me whenever a conflict is ambiguous or you are unsure which side to keep.";
                 match self.running_claude_in(&cwd, cx) {
                     Some(id) => self.send_to_claude(&id, prompt, window, cx),
                     None => {
@@ -359,7 +358,7 @@ impl Workspace {
                     .filter(|id| modes.iter().any(|(mid, _)| mid == id))
                     .or_else(|| modes.first().map(|(id, _)| id.clone()))
                     .unwrap_or_else(|| "default".into());
-                self.modal = Some(Modal::Settings { shell, claude, default_model, effort: defaults.effort.unwrap_or_default(), permission: initial_perm, updates, chrome, scale: crate::panels::scale::percent(), claudiu_off: self.store.data.settings.claudiu_tools_off.clone(), skills_field, skill_search, costly: claude::costly::scan(), list_focus, renaming: None, subagents });
+                self.modal = Some(Modal::Settings { shell, claude, default_model, effort: defaults.effort.unwrap_or_default(), permission: initial_perm, updates, chrome, scale: crate::panels::scale::percent(), m4code_off: self.store.data.settings.m4code_tools_off.clone(), skills_field, skill_search, costly: claude::costly::scan(), list_focus, renaming: None, subagents });
                 // After the modal exists: a page that loads something reads the dialog's fields.
                 self.set_settings_page(self.settings_page, cx);
             }
@@ -481,6 +480,10 @@ impl Workspace {
                 cx.quit();
             }
             Act::Dismiss => {
+                if matches!(self.modal, Some(Modal::Settings { .. })) {
+                    self.close_settings(window, cx);
+                    return;
+                }
                 self.modal = None;
                 self.focus_active(window, cx);
             }
@@ -533,7 +536,7 @@ impl Workspace {
                            The new account uses your main Claude Code setup. Settings, CLAUDE.md, keybindings, MCP servers and project trust \\
                            are kept the same in every account, both ways: a change made here (like /model) also changes ~/.claude and \\
                            your other accounts, and the other way round. Agents, skills, plugins and session history are shared with \\
-                           ~/.claude. Only the login is separate. Claudiu creates this account's folder."
+                           ~/.claude. Only the login is separate. m4code creates this account's folder."
                         .into(),
                     confirm: "Add and sign in".into(),
                     danger: false,
@@ -559,7 +562,7 @@ impl Workspace {
                 let name = self.store.account(&id).and_then(|a| a.email.clone()).unwrap_or_else(|| "this account".into());
                 self.modal = Some(Modal::Confirm {
                     title: format!("Remove {name}?"),
-                    body: "Deletes this account's login from Claudiu. Shared settings and session history stay in your main \
+                    body: "Deletes this account's login from m4code. Shared settings and session history stay in your main \
                            ~/.claude. End its running sessions first."
                         .into(),
                     confirm: "Remove".into(),
@@ -589,5 +592,19 @@ impl Workspace {
         }
         self.store.save_if_dirty();
         cx.notify();
+    }
+}
+
+/// Deterministic, harness-agnostic commit subject derived from `git diff --cached --stat --patch`.
+fn summarize_commit_diff(prompt: &str) -> String {
+    let files: Vec<&str> = prompt
+        .lines()
+        .filter_map(|line| line.strip_prefix("diff --git a/").and_then(|rest| rest.split(" b/").nth(1)))
+        .collect();
+    match files.as_slice() {
+        [] => "Update files".into(),
+        [only] => format!("Update {only}"),
+        [a, b] => format!("Update {a} and {b}"),
+        many => format!("Update {} files", many.len()),
     }
 }

@@ -5,7 +5,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use gpui::{
     App, AppContext, ClipboardItem, Context, Entity, FocusHandle, Focusable, PathPromptOptions,
@@ -84,7 +84,7 @@ pub use worktrees::{GitPicker, GitPickerTarget, WorktreesPage};
 pub use setup::{Mode as SetupMode, SetupEvent, SetupView, window_options as setup_window_options};
 
 actions!(
-    claudiu,
+    m4code,
     [
         NewClaude,
         ToggleShell,
@@ -119,7 +119,7 @@ actions!(
 
 /// Ctrl+1 to Ctrl+9 (Cmd on macOS): show the running session with that number, counted down the sidebar's running sessions.
 #[derive(Clone, Debug, PartialEq, gpui::Action)]
-#[action(namespace = claudiu, no_json)]
+#[action(namespace = m4code, no_json)]
 pub struct ShowSession(pub usize);
 
 impl MenuItem {
@@ -188,8 +188,8 @@ pub enum Modal {
         updates: bool,
         chrome: bool,
         scale: u32,
-        /// Claudiu tools turned off (Claudiu tools page).
-        claudiu_off: Vec<crate::claude::mcp::Feature>,
+        /// m4code tools turned off (m4code tools page).
+        m4code_off: Vec<crate::claude::mcp::Feature>,
         /// Skills to turn off, separated by commas (Claude Code tools page).
         skills_field: Entity<InputState>,
         /// Search box on the Skills page (Browse skills.sh).
@@ -429,7 +429,7 @@ impl SessionView {
     }
 }
 
-/// A project's GitHub view, shown in the right sidebar. Kept while Claudiu runs so each project keeps its place;
+/// A project's GitHub view, shown in the right sidebar. Kept while m4code runs so each project keeps its place;
 /// never written to `state.json`.
 pub struct GhPane {
     pub id: Id,
@@ -548,14 +548,13 @@ pub struct Workspace {
     ephemeral: HashSet<Id>,
     /// `claude auth login` tabs; account details are re-read when one ends.
     logins: HashSet<Id>,
-    /// Sessions the user closed since Claudiu started, the last closed last; Ctrl+Z (Cmd+Z) resumes them in turn.
+    /// Sessions the user closed since m4code started, the last closed last; Ctrl+Z (Cmd+Z) resumes them in turn.
     closed: Vec<Id>,
     /// Whether the Custom subagents page is asking each agent for its models. Not saved to disk.
     pub model_lookups: settings::ModelLookups,
     /// When each provider's limits were last asked for; failed reads wait for its next refresh too.
     pub limits_asked: crate::claude::subagents::AgentMap<Option<std::time::Instant>>,
     pub editors: Vec<(Editor, bool)>,
-    pub transcript_mtimes: HashMap<Id, SystemTime>,
     pub window_title: String,
     /// The session being dragged in the sidebar (lifted in place while its ghost follows the cursor).
     pub dragging: Option<Id>,
@@ -592,7 +591,6 @@ pub struct Workspace {
     pub pending_switches: Vec<cross::PendingSwitch>,
     pub drag_pos: Option<gpui::Point<gpui::Pixels>>,
     pub update: UpdateState,
-    pub scanning: bool,
     pub quitting: bool,
     /// What `running.json` holds, and whether the saved list has been brought back yet (nothing is written before).
     pub remembered: Vec<Id>,
@@ -699,7 +697,6 @@ impl Workspace {
                 .iter()
                 .map(|e| (*e, e.locate().is_some()))
                 .collect(),
-            transcript_mtimes: HashMap::new(),
             window_title: String::new(),
             dragging: None,
             drag_pos: None,
@@ -720,7 +717,6 @@ impl Workspace {
             pending_starts: vec![],
             pending_switches: vec![],
             update: UpdateState::default(),
-            scanning: false,
             quitting: false,
             remembered: vec![],
             sidebar_scroll: Default::default(),
@@ -744,14 +740,13 @@ impl Workspace {
             ws.store.add_project(&path);
         }
         ws.store.refresh_git();
-        // Alt folders the list doesn't know (e.g. lost to an older Claudiu rewriting its state) are adopted again.
+        // Alt folders the list doesn't know (e.g. lost to an older m4code rewriting its state) are adopted again.
         for dir in accounts::folders() {
             if !ws.store.data.accounts.iter().any(|a| a.dir.as_ref() == Some(&dir)) {
                 ws.store.data.accounts.push(Account { id: new_id(), dir: Some(dir), ..Default::default() });
                 ws.store.mark_dirty();
             }
         }
-        ws.start_scan(cx);
         cx.background_executor().spawn(async { lifecycle::tidy_leftovers() }).detach();
         ws.ingest_usage(cx);
         ws.refresh_accounts(cx);

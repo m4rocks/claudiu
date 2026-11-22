@@ -12,7 +12,7 @@ fn skills_page_installs_toggles_syncs_and_removes() {
     // Create Antigravity's config dir so both Claude (default) and Antigravity count as active harnesses.
     std::fs::create_dir_all(home.path().join(".gemini").join("config")).unwrap();
     // SAFETY: test-isolated data dir.
-    unsafe { std::env::set_var("CLAUDIU_DATA_DIR", data.path()) };
+    unsafe { std::env::set_var("M4CODE_DATA_DIR", data.path()) };
 
     let own = proj_dir.path().join(".claude").join("skills").join("own-skill");
     std::fs::create_dir_all(&own).unwrap();
@@ -110,7 +110,7 @@ fn skills_page_installs_toggles_syncs_and_removes() {
             && project_skills_dir(Harness::Antigravity, &proj_path).join("demo-skill").join("SKILL.md").is_file()
     });
 
-    // The project's own skill shows under the repository, and Claudiu's link to demo-skill does not.
+    // The project's own skill shows under the repository, and m4code's link to demo-skill does not.
     wait(&mut cx, "repo skills", &|ws| {
         ws.skills_page.repo_skills.as_ref().is_some_and(|(id, found)| *id == project_id && found.iter().map(|s| s.name.as_str()).eq(["own-skill"]))
     });

@@ -1,4 +1,4 @@
-//! Claudiu's own data directory and the small file helpers every module that writes into it shares.
+//! m4code's own data directory and the small file helpers every module that writes into it shares.
 
 use std::path::{Path, PathBuf};
 
@@ -6,7 +6,7 @@ pub fn data_dir() -> PathBuf {
     crate::store::Store::default_path().parent().map(Path::to_path_buf).unwrap_or_default()
 }
 
-/// Points Claudiu's data folder, and Claude Code's, at throwaway ones for the rest of the test run, and returns them.
+/// Points m4code's data folder, and Claude Code's, at throwaway ones for the rest of the test run, and returns them.
 /// Set once and never changed: other tests read them from their own threads at any time.
 #[cfg(test)]
 pub fn use_throwaway_folders() -> (PathBuf, PathBuf) {
@@ -15,7 +15,7 @@ pub fn use_throwaway_folders() -> (PathBuf, PathBuf) {
         let dirs = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
         // SAFETY: set once, before the tests that need it start threads of their own.
         unsafe {
-            std::env::set_var("CLAUDIU_DATA_DIR", dirs.0.path());
+            std::env::set_var("M4CODE_DATA_DIR", dirs.0.path());
             std::env::set_var("CLAUDE_CONFIG_DIR", dirs.1.path());
             // Keeps the sidebar's Codex limits from reading the real `~/.codex`.
             std::env::set_var("CODEX_HOME", dirs.0.path().join("codex"));
@@ -39,11 +39,11 @@ pub fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
 }
 
 /// Takes the data folder for this process: the lock lasts as long as the returned file is open. `Ok(None)` when another
-/// Claudiu holds it, so two apps never race on `state.json` and the request files. It waits up to `patience` first,
+/// m4code holds it, so two apps never race on `state.json` and the request files. It waits up to `patience` first,
 /// because an update or restart starts the new app while the old one is still closing.
 pub fn lock(dir: &Path, patience: std::time::Duration) -> std::io::Result<Option<std::fs::File>> {
     std::fs::create_dir_all(dir)?;
-    let file = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(dir.join("claudiu.lock"))?;
+    let file = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(dir.join("m4code.lock"))?;
     let start = std::time::Instant::now();
     loop {
         match file.try_lock() {

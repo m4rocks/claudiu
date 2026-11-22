@@ -13,48 +13,20 @@ use gpui_kit::component::Icon;
 
 use crate::panels::theme::{self, hsla};
 
-/// The Clawd-style mark, drawn from a pixel pattern so it stays crisp at any size.
-pub fn clawd(size: f32) -> Div {
-    const PATTERN: [&str; 7] = [
-        "..#######..", //
-        "..#o###o#..",
-        "###o###o###",
-        "###########",
-        "..#######..",
-        "..#.#.#.#..",
-        "..#.#.#.#..",
-    ];
-    let unit = size / 11.0;
-    let body = hsla(theme::ACCENT);
-    let eye = hsla(0x1a0f0b);
-    let mut root = div().relative().w(px(size)).h(px(unit * 7.0)).flex_none();
-    for (y, row) in PATTERN.iter().enumerate() {
-        let mut x = 0;
-        let cells: Vec<char> = row.chars().collect();
-        while x < cells.len() {
-            let c = cells[x];
-            if c == '.' {
-                x += 1;
-                continue;
-            }
-            // Merge horizontal runs of the same color into one rect.
-            let mut end = x + 1;
-            while end < cells.len() && cells[end] == c {
-                end += 1;
-            }
-            root = root.child(
-                div()
-                    .absolute()
-                    .left(px(x as f32 * unit))
-                    .top(px(y as f32 * unit))
-                    .w(px((end - x) as f32 * unit))
-                    .h(px(unit))
-                    .bg(if c == 'o' { eye } else { body }),
-            );
-            x = end;
-        }
-    }
-    root
+/// The `<m4/>` brand mark on a dark rounded tile, matching the app icon.
+pub fn brand_mark(size: f32) -> Div {
+    let s = crate::panels::scale::px(size);
+    div()
+        .flex()
+        .items_center()
+        .justify_center()
+        .flex_none()
+        .size(s)
+        .rounded(crate::panels::scale::px(size * 0.22))
+        .bg(hsla(theme::PANEL_BG))
+        .border_1()
+        .border_color(hsla(theme::BORDER))
+        .child(crate::panels::logos::draw(&crate::panels::logos::M4CODE, size, hsla(theme::ACCENT)))
 }
 
 pub fn section_label(text: impl Into<SharedString>) -> Div {
@@ -191,8 +163,8 @@ pub fn button(
             id.into(),
             label.into(),
             hsla(theme::ACCENT),
-            hsla(0x17100d),
-            hsla(0xe58a6b),
+            hsla(theme::PANEL_BG),
+            hsla(0xdcdcdc),
             true,
         )
     } else {

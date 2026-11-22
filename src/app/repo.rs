@@ -81,7 +81,7 @@ impl Workspace {
     }
 
     /// Re-read each project's git info every few seconds, off the UI thread, so the branch badge follows a
-    /// checkout made in a terminal or by Claude, not only Claudiu's own branch actions.
+    /// checkout made in a terminal or by Claude, not only m4code's own branch actions.
     pub(super) fn start_git_watch(&mut self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             loop {

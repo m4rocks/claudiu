@@ -75,7 +75,7 @@ fn pill(text: impl Into<SharedString>, color: u32) -> Div {
         .bg(hsla(color))
         .text_size(crate::panels::scale::px(11.5))
         .font_weight(FontWeight::SEMIBOLD)
-        .text_color(hsla(0x0c0c0d))
+        .text_color(hsla(theme::PANEL_BG))
         .child(text.into())
 }
 
@@ -117,7 +117,7 @@ fn check_color(state: &str) -> u32 {
 }
 
 pub(crate) fn markdown(id: String, text: &str) -> TextView {
-    // The stock style highlights code with the light theme (dark text), which vanishes on Claudiu's dark panels.
+    // The stock style highlights code with the light theme (dark text), which vanishes on m4code's dark panels.
     let style = gpui_kit::component::text::TextViewStyle {
         highlight_theme: gpui_kit::component::highlighter::HighlightTheme::default_dark(),
         is_dark: true,
@@ -248,7 +248,7 @@ impl GithubView {
             Phase::Loading => ("Connecting to GitHub…", format!("Looking up the repository of {}.", self.project), vec![]),
             Phase::NoCli => (
                 "GitHub CLI not found",
-                "Claudiu talks to GitHub through the `gh` command-line tool, so it never handles your credentials. Install it from cli.github.com, then try again.".into(),
+                "m4code talks to GitHub through the `gh` command-line tool, so it never handles your credentials. Install it from cli.github.com, then try again.".into(),
                 vec![("Get GitHub CLI", GhAct::OpenWeb("https://cli.github.com".into()), true), ("Try again", GhAct::Retry, false)],
             ),
             Phase::SignedOut => (

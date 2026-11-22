@@ -9,7 +9,7 @@ pub enum SessionKind {
 /// Whether Claude Code's own record of the session was found on the last scan.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ExternalState {
-    /// Created by Claudiu, not yet seen on disk (or never scanned).
+    /// Created by m4code, not yet seen on disk (or never scanned).
     #[default]
     Unknown,
     Present,
@@ -78,15 +78,15 @@ pub struct ClaudeMeta {
     /// Background compaction ("Precompute compaction" in `/config`); `None` while Claude Code does not offer it.
     #[serde(default)]
     pub precompute_compact: Option<bool>,
-    /// The name Claude Code held for the session (its last `/rename`) when Claudiu last read the transcript. A different
+    /// The name Claude Code held for the session (its last `/rename`) when m4code last read the transcript. A different
     /// one later means the user renamed it inside Claude Code.
     #[serde(default)]
     pub claude_title: Option<String>,
-    /// Claude in Chrome: the session is (re)started with `--chrome`. Claudiu's own choice, so it survives restarts.
+    /// Claude in Chrome: the session is (re)started with `--chrome`. m4code's own choice, so it survives restarts.
     #[serde(default)]
     pub chrome: bool,
-    /// The account this conversation runs under. It starts there again after closing it or restarting Claudiu, until a
-    /// hand-off moves it. `None` until Claudiu first starts it.
+    /// The account this conversation runs under. It starts there again after closing it or restarting m4code, until a
+    /// hand-off moves it. `None` until m4code first starts it.
     #[serde(default)]
     pub account: Option<Id>,
     /// The advisor declared for the current conversation. A model change is saved in `advisor` at once but only
@@ -113,10 +113,10 @@ pub struct SessionRecord {
     pub kind: SessionKind,
     /// Title as known from Claude Code (or a default). Never edited by the user.
     pub title: String,
-    /// Claudiu-only display label; wins over `title` when set.
+    /// m4code-only display label; wins over `title` when set.
     #[serde(default)]
     pub custom_title: Option<String>,
-    /// Tab title Claude chose through Claudiu's former `set_tab_title` tool. Nothing sets it any more; a session that
+    /// Tab title Claude chose through m4code's former `set_tab_title` tool. Nothing sets it any more; a session that
     /// had one keeps showing it until it is renamed. Beats `title`, loses to `custom_title`.
     #[serde(default)]
     pub auto_title: Option<String>,
@@ -126,7 +126,7 @@ pub struct SessionRecord {
     pub last_active: i64,
     #[serde(default)]
     pub exit_code: Option<i32>,
-    /// Removed from Claudiu's index. The underlying Claude transcript is untouched.
+    /// Removed from m4code's index. The underlying Claude transcript is untouched.
     #[serde(default)]
     pub hidden: bool,
     #[serde(default)]
@@ -138,7 +138,7 @@ impl SessionRecord {
         self.chosen_title().unwrap_or(&self.title)
     }
 
-    /// The name given in Claudiu (manual rename, else Claude's own MCP title); what Claude Code is told to use.
+    /// The name given in m4code (manual rename, else Claude's own MCP title); what Claude Code is told to use.
     pub fn chosen_title(&self) -> Option<&str> {
         [&self.custom_title, &self.auto_title].into_iter().flatten().map(|t| t.trim()).find(|t| !t.is_empty())
     }

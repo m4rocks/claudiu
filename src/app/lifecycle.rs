@@ -1,7 +1,7 @@
-//! Ending and starting Claudiu: the quit question, remembering what was open, and bringing it back.
+//! Ending and starting m4code: the quit question, remembering what was open, and bringing it back.
 
 use super::*;
-use crate::claude::{ask, mcp, usage};
+use crate::claude::{mcp, usage};
 use crate::store::WindowGeom;
 use gpui::{Bounds, WindowBounds, point, px, size};
 
@@ -23,7 +23,6 @@ pub fn tidy_leftovers() {
     datadir::prune(titles, 7 * 86_400);
     datadir::prune(usage::snapshot_dir(), 30 * 86_400);
     datadir::prune(usage::ctl_dir(), 7 * 86_400);
-    datadir::prune(ask::dir(), 7 * 86_400);
     datadir::prune(crate::visual::dir(), 7 * 86_400);
     datadir::prune(data.join("screens"), 30 * 86_400);
     datadir::prune(data.join("pasted"), 7 * 86_400);
@@ -97,7 +96,7 @@ impl Workspace {
             body.push(format!("{unsaved} file{} in the editor {} unsaved changes that will be lost.", super::editing::plural(unsaved), if unsaved == 1 { "has" } else { "have" }));
         }
         self.modal = Some(Modal::Confirm {
-            title: "Quit Claudiu?".into(),
+            title: "Quit m4code?".into(),
             body: body.join(" "),
             confirm: "Quit anyway".into(),
             danger: true,
@@ -113,8 +112,8 @@ impl Workspace {
         self.live.iter().filter(|l| self.store.session(&l.id).is_some_and(|r| r.kind == SessionKind::Claude) && self.is_running(&l.id, cx)).map(|l| l.id.clone()).collect()
     }
 
-    /// Remember what is open, so the next start brings it back (also while running, in case Claudiu does not get to
-    /// quit). It has its own file: another Claudiu sharing the data folder rewrites `state.json` without knowing this
+    /// Remember what is open, so the next start brings it back (also while running, in case m4code does not get to
+    /// quit). It has its own file: another m4code sharing the data folder rewrites `state.json` without knowing this
     /// list.
     pub(super) fn remember_open(&mut self, cx: &App) {
         if !self.restored || self.quitting {
@@ -127,7 +126,7 @@ impl Workspace {
         }
     }
 
-    /// Bring back what was open when Claudiu last ended, then show what was on screen. (Older versions also listed
+    /// Bring back what was open when m4code last ended, then show what was on screen. (Older versions also listed
     /// chats here; those ids match no session and are skipped.)
     pub(super) fn restore_open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let saved: Vec<Id> = std::fs::read_to_string(running_file()).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();

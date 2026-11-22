@@ -1,5 +1,5 @@
 //! Git worktrees in the app: making one from the Branch & Worktree dialog, switching the shown session between them
-//! (see `switch.rs`), and removing them. Claudiu makes the worktrees with git (see `git/worktree.rs`).
+//! (see `switch.rs`), and removing them. m4code makes the worktrees with git (see `git/worktree.rs`).
 
 use std::path::Path;
 
@@ -11,7 +11,7 @@ use crate::platform::path_key;
 /// What the Worktrees page of Settings shows.
 #[derive(Default)]
 pub struct WorktreesPage {
-    /// The worktree folders in Claudiu's data folder; none until the first look at the disk ends.
+    /// The worktree folders in m4code's data folder; none until the first look at the disk ends.
     pub stored: Option<Vec<worktree::Stored>>,
     /// The removal the page is asking the user to confirm.
     pub asking: Option<Asked>,
@@ -221,7 +221,7 @@ impl Workspace {
         .detach();
     }
 
-    /// The most recently active Claudiu session that runs in `folder`.
+    /// The most recently active m4code session that runs in `folder`.
     fn running_in(&self, folder: &Path) -> Option<&SessionRecord> {
         self.live.iter().filter_map(|l| self.store.session(&l.id)).filter(|s| crate::platform::is_same_or_under(&s.cwd, folder)).max_by_key(|s| s.last_active)
     }
@@ -258,13 +258,13 @@ impl Workspace {
         .detach();
     }
 
-    /// Ask whether to delete a folder of Claudiu's that git no longer lists, so only the folder can go.
+    /// Ask whether to delete a folder of m4code's that git no longer lists, so only the folder can go.
     pub(super) fn ask_delete_unlisted(&mut self, folder: PathBuf, cx: &mut Context<Self>) {
         if self.refuse_while_running(&folder, cx) {
             return;
         }
         let name = folder.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        let body = "Git no longer lists this worktree, so Claudiu cannot say what is in it. The folder and everything in it will be deleted.".to_string();
+        let body = "Git no longer lists this worktree, so m4code cannot say what is in it. The folder and everything in it will be deleted.".to_string();
         self.show_removal_question(folder.clone(), format!("Delete the folder {name}?"), body, "Delete".into(), true, Act::ConfirmDeleteUnlisted(folder));
         cx.notify();
     }
@@ -277,7 +277,7 @@ impl Workspace {
         }
     }
 
-    /// A session that ran in `cwd` has ended: offer to remove its worktree when Claudiu made it and no
+    /// A session that ran in `cwd` has ended: offer to remove its worktree when m4code made it and no
     /// other session is still in it.
     pub(super) fn offer_worktree_removal(&mut self, cwd: &Path, project: Option<&str>, cx: &mut Context<Self>) {
         let Some(git) = project.and_then(|id| self.store.project(id)).and_then(|p| p.git.clone()) else { return };

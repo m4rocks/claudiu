@@ -1,11 +1,11 @@
 //! Read-only Antigravity subagents. Antigravity has no read-only mode: in its default mode it writes files in the
 //! workspace without asking, and `agy acp` takes no per-session settings. What it does honour is a PreToolUse hook
 //! that answers `deny`, read from the `config/hooks.json` of its Gemini folder. So a read-only run starts agy with
-//! `--gemini-dir` pointing at a folder in Claudiu's data, whose hook runs `claudiu --acp --read-only-hook`, which lets
+//! `--gemini-dir` pointing at a folder in m4code's data, whose hook runs `m4code --acp --read-only-hook`, which lets
 //! through only the tools that read or search. Sign-in lives in the system keyring, so the run stays signed in; the
 //! user's own Antigravity rules, skills and MCP servers, kept in their own Gemini folder, don't load.
 //!
-//! agy runs a hook that fails as if it had allowed the tool, so the hook script answers `deny` itself when Claudiu
+//! agy runs a hook that fails as if it had allowed the tool, so the hook script answers `deny` itself when m4code
 //! can't be started.
 
 use std::io::Read;
@@ -38,15 +38,15 @@ const READ_TOOLS: &[&str] = &[
 
 /// ASCII only: the script's fallback echoes it through cmd, whose code page could garble anything else into JSON agy
 /// can't read, and agy runs a tool whose hook gave no answer.
-const DENIED: &str = "Claudiu runs this Antigravity subagent read-only: it can read and search, but not change files or run commands. Turn on Allow edits in Settings > Custom subagents to let it.";
+const DENIED: &str = "m4code runs this Antigravity subagent read-only: it can read and search, but not change files or run commands. Turn on Allow edits in Settings > Custom subagents to let it.";
 
-/// The Gemini folder read-only runs use, made ready with the hook, which starts the Claudiu running now.
-pub fn prepare(data_dir: &Path, claudiu: &Path) -> std::io::Result<PathBuf> {
+/// The Gemini folder read-only runs use, made ready with the hook, which starts the m4code running now.
+pub fn prepare(data_dir: &Path, m4code: &Path) -> std::io::Result<PathBuf> {
     let gemini = data_dir.join("antigravity-read-only");
     let config = gemini.join("config");
     std::fs::create_dir_all(&config)?;
     let script = config.join(if cfg!(windows) { "read-only-hook.cmd" } else { "read-only-hook.sh" });
-    publish(&script, &hook_script(claudiu))?;
+    publish(&script, &hook_script(m4code))?;
     publish(&config.join("hooks.json"), &hooks_json(&script).to_string())?;
     Ok(gemini)
 }
@@ -71,19 +71,19 @@ fn publish(path: &Path, body: &str) -> std::io::Result<()> {
 /// for a path with spaces.
 fn hooks_json(script: &Path) -> Value {
     let command = format!("\"{}\"", script.display());
-    json!({ "claudiu-read-only": { "PreToolUse": [{ "matcher": "*", "hooks": [{ "command": command, "timeout": 10 }] }] } })
+    json!({ "m4code-read-only": { "PreToolUse": [{ "matcher": "*", "hooks": [{ "command": command, "timeout": 10 }] }] } })
 }
 
-/// Runs Claudiu's check, and denies when Claudiu can't be started.
-fn hook_script(claudiu: &Path) -> String {
+/// Runs m4code's check, and denies when m4code can't be started.
+fn hook_script(m4code: &Path) -> String {
     let denied = json!({ "decision": "deny", "reason": DENIED }).to_string();
     if cfg!(windows) {
         // cmd's echo prints quotes as they are; `^` keeps its own meaning off the characters it treats specially.
         let echoed: String = denied.chars().flat_map(|c| if matches!(c, '&' | '|' | '<' | '>' | '^' | '(' | ')') { vec!['^', c] } else { vec![c] }).collect();
-        format!("@echo off\r\n\"{}\" --acp {HOOK_FLAG} || echo {echoed}\r\n", claudiu.display())
+        format!("@echo off\r\n\"{}\" --acp {HOOK_FLAG} || echo {echoed}\r\n", m4code.display())
     } else {
         let quoted = |s: &str| format!("'{}'", s.replace('\'', r"'\''"));
-        format!("#!/bin/sh\n{} --acp {HOOK_FLAG} || echo {}\n", quoted(&claudiu.to_string_lossy()), quoted(&denied))
+        format!("#!/bin/sh\n{} --acp {HOOK_FLAG} || echo {}\n", quoted(&m4code.to_string_lossy()), quoted(&denied))
     }
 }
 
@@ -96,7 +96,7 @@ pub fn decision(payload: &str) -> Value {
     }
 }
 
-/// `claudiu --acp --read-only-hook`: one PreToolUse payload on stdin, the decision on stdout.
+/// `m4code --acp --read-only-hook`: one PreToolUse payload on stdin, the decision on stdout.
 pub fn run_hook() -> i32 {
     let mut payload = String::new();
     let _ = std::io::stdin().take(1 << 20).read_to_string(&mut payload);
@@ -125,30 +125,30 @@ mod tests {
     }
 
     #[test]
-    fn the_folder_holds_a_hook_that_runs_claudiu_by_its_full_path() {
+    fn the_folder_holds_a_hook_that_runs_m4code_by_its_full_path() {
         let data = tempfile::tempdir().unwrap();
-        let claudiu = Path::new(if cfg!(windows) { r"C:\Program Files\Claudiu\claudiu.exe" } else { "/opt/it's claudiu/claudiu" });
-        let gemini = prepare(data.path(), claudiu).unwrap();
+        let m4code = Path::new(if cfg!(windows) { r"C:\Program Files\m4code\m4code.exe" } else { "/opt/it's m4code/m4code" });
+        let gemini = prepare(data.path(), m4code).unwrap();
         assert_eq!(gemini, data.path().join("antigravity-read-only"));
         let hooks: Value = serde_json::from_str(&std::fs::read_to_string(gemini.join("config/hooks.json")).unwrap()).unwrap();
-        let group = &hooks["claudiu-read-only"]["PreToolUse"][0];
+        let group = &hooks["m4code-read-only"]["PreToolUse"][0];
         assert_eq!(group["matcher"], "*", "every tool goes through the check");
         let command = group["hooks"][0]["command"].as_str().unwrap();
         let script = command.trim_matches('"');
         assert!(Path::new(script).is_absolute() && command.starts_with('"'), "{command}");
         let body = std::fs::read_to_string(script).unwrap();
-        assert!(body.contains(&format!("--acp {HOOK_FLAG} || echo ")), "the script denies when Claudiu fails: {body}");
+        assert!(body.contains(&format!("--acp {HOOK_FLAG} || echo ")), "the script denies when m4code fails: {body}");
         if cfg!(windows) {
-            assert!(body.contains(r#""C:\Program Files\Claudiu\claudiu.exe" --acp"#), "{body}");
+            assert!(body.contains(r#""C:\Program Files\m4code\m4code.exe" --acp"#), "{body}");
         } else {
-            assert!(body.contains(r"'/opt/it'\''s claudiu/claudiu' --acp"), "{body}");
+            assert!(body.contains(r"'/opt/it'\''s m4code/m4code' --acp"), "{body}");
         }
         // A second run finds the files as they should be and leaves them alone, since a running hook may read them.
         let written = std::fs::metadata(script).unwrap().modified().unwrap();
         std::thread::sleep(std::time::Duration::from_millis(20));
-        assert_eq!(prepare(data.path(), claudiu).unwrap(), gemini);
+        assert_eq!(prepare(data.path(), m4code).unwrap(), gemini);
         assert_eq!(std::fs::metadata(script).unwrap().modified().unwrap(), written);
-        // A Claudiu that moved writes a new script, whole.
+        // A m4code that moved writes a new script, whole.
         prepare(data.path(), &data.path().join("moved")).unwrap();
         assert!(std::fs::read_to_string(script).unwrap().contains("moved"));
         let left: Vec<_> = std::fs::read_dir(gemini.join("config")).unwrap().flatten().filter(|e| e.path().to_string_lossy().ends_with(".tmp")).collect();
@@ -157,7 +157,7 @@ mod tests {
 
     #[test]
     #[cfg(windows)]
-    fn the_script_denies_when_claudiu_is_missing() {
+    fn the_script_denies_when_m4code_is_missing() {
         let data = tempfile::tempdir().unwrap();
         let gemini = prepare(data.path(), &data.path().join("gone.exe")).unwrap();
         let mut command = std::process::Command::new("cmd");
@@ -169,7 +169,7 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn the_script_denies_when_claudiu_is_missing() {
+    fn the_script_denies_when_m4code_is_missing() {
         let data = tempfile::tempdir().unwrap();
         let gemini = prepare(data.path(), &data.path().join("gone")).unwrap();
         let out = std::process::Command::new(gemini.join("config").join("read-only-hook.sh")).stdin(std::process::Stdio::null()).output().unwrap();

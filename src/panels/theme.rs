@@ -1,46 +1,46 @@
-//! Colors. Black-first, with a single accent.
+//! Colors. Minimal monochrome dark theme with white accent.
 
 use alacritty_terminal::term::color::Colors;
 use alacritty_terminal::vte::ansi::{Color, NamedColor, Rgb};
 use gpui::{Hsla, rgb};
 
 /// The window background the panels float on, a shade lighter than the panels themselves.
-pub const APP_BG: u32 = 0x131316;
+pub const APP_BG: u32 = 0x181818;
 /// One background for the panels and the terminal's default background.
-pub const PANEL_BG: u32 = 0x0c0c0d;
+pub const PANEL_BG: u32 = 0x121212;
 pub const TERMINAL_BG: u32 = PANEL_BG;
 pub const SIDEBAR_BG: u32 = PANEL_BG;
 /// Elevated dark surfaces (composer box, cards, popovers).
-pub const SURFACE_ELEVATED: u32 = 0x141416;
-pub const SURFACE_HOVER: u32 = 0x1c1c1e;
-pub const BORDER: u32 = 0x1f1f1f;
+pub const SURFACE_ELEVATED: u32 = 0x1a1a1a;
+pub const SURFACE_HOVER: u32 = 0x222222;
+pub const BORDER: u32 = 0x242424;
 /// The faint outline that separates a panel from the window background.
-pub const PANEL_BORDER: u32 = 0x242428;
+pub const PANEL_BORDER: u32 = 0x282828;
 /// The outline of what has the keyboard or is open, such as the message box or a chip's dropdown. Neutral, so the
 /// accent stays for the few things that need the eye.
-pub const FOCUS_BORDER: u32 = 0x3a3a40;
+pub const FOCUS_BORDER: u32 = 0x444444;
 /// Corner radius of the window's panels.
 pub const PANEL_RADIUS: f32 = 8.0;
 /// Gutter between the panels and the window edges.
 pub const PANEL_GAP: f32 = 6.0;
 /// Height of the window's top bar. macOS traffic lights are centered in it (see `main.rs`).
 pub const TOPBAR_HEIGHT: f32 = 34.0;
-pub const ROW_HOVER: u32 = 0x181818;
-pub const ROW_ACTIVE: u32 = 0x211f1e;
-pub const TEXT: u32 = 0xe4e4e4;
-pub const TEXT_DIM: u32 = 0x8a8a8a;
-pub const TEXT_FAINT: u32 = 0x5a5a5a;
-pub const ACCENT: u32 = 0xd97757;
+pub const ROW_HOVER: u32 = 0x1c1c1c;
+pub const ROW_ACTIVE: u32 = 0x242424;
+pub const TEXT: u32 = 0xf0f0f0;
+pub const TEXT_DIM: u32 = 0x8e8e8e;
+pub const TEXT_FAINT: u32 = 0x5e5e5e;
+pub const ACCENT: u32 = 0xffffff;
 pub const OK: u32 = 0x7fb069;
 pub const WARN: u32 = 0xe5c07b;
 pub const DANGER: u32 = 0xe06c75;
-pub const SELECTION: u32 = 0x3d4a5c;
+pub const SELECTION: u32 = 0x383838;
 /// Codex's usage bars, so they read apart from Claude's at a glance. The terminal palette's blue.
 pub const CODEX: u32 = 0x61afef;
 /// Antigravity's usage bars, apart from Claude's and Codex's. The terminal palette's magenta.
 pub const ANTIGRAVITY: u32 = 0xc678dd;
 
-const FG: Rgb = Rgb { r: 0xe4, g: 0xe4, b: 0xe4 };
+const FG: Rgb = Rgb { r: (TEXT >> 16) as u8, g: (TEXT >> 8) as u8, b: TEXT as u8 };
 const BG: Rgb = Rgb { r: (TERMINAL_BG >> 16) as u8, g: (TERMINAL_BG >> 8) as u8, b: TERMINAL_BG as u8 };
 
 const ANSI: [u32; 16] = [

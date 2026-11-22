@@ -32,7 +32,15 @@ impl Render for ThreadView {
             .flex_col()
             .bg(hsla(theme::PANEL_BG))
             .text_color(hsla(theme::TEXT))
-            .text_size(scale::px(13.5));
+            .text_size(scale::px(13.5))
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|v, _: &gpui::MouseDownEvent, window, cx| {
+                    if v.picker != Some(ThreadPicker::Model) && v.review.is_none() {
+                        v.focus_composer(window, cx);
+                    }
+                }),
+            );
         if let Some(handover) = &self.handover {
             return root.child(waiting(&handover.message));
         }
@@ -69,6 +77,25 @@ fn waiting(message: &str) -> Div {
         .text_color(hsla(theme::TEXT_DIM))
         .child(spinner("thread-waiting", 14.0))
         .child(message.to_string())
+}
+
+fn render_thought_body(text: &str) -> AnyElement {
+    div()
+        .ml(px(14.0))
+        .pl(px(10.0))
+        .pb(px(4.0))
+        .pt(px(2.0))
+        .border_l_1()
+        .border_color(hsla(theme::BORDER))
+        .italic()
+        .text_size(scale::px(12.0))
+        .text_color(hsla(theme::TEXT_FAINT))
+        .child(text.to_string())
+        .into_any_element()
+}
+
+fn indent_run_step(el: AnyElement) -> AnyElement {
+    div().ml(px(14.0)).pl(px(10.0)).border_l_1().border_color(hsla(theme::BORDER)).child(el).into_any_element()
 }
 
 impl ThreadView {
@@ -132,24 +159,15 @@ impl ThreadView {
                     Some(run) if !self.run_open(run) => return div().into_any_element(),
                     _ => {}
                 }
-                // Inside an open run each thought shows whole; alone it shows its first line until Ctrl+O.
-                let whole = self.detail || run.is_some_and(|r| r.len() > 1);
-                let shown = if whole { text.clone() } else { text.lines().next().unwrap_or_default().to_string() };
-                div()
-                    .px(px(10.0))
-                    .py(px(4.0))
-                    .rounded(px(6.0))
-                    .bg(hsla(0x111113))
-                    .italic()
-                    .text_size(scale::px(12.5))
-                    .text_color(hsla(theme::TEXT_FAINT))
-                    .child(format!("✻ {shown}"))
-                    .into_any_element()
+                let in_group = run.is_some_and(|r| r.len() > 1);
+                let el = self.render_thought(ix, text, cx);
+                if in_group { indent_run_step(el) } else { el }
             }
             Entry::Tool(call) => match tool_run(&self.groupable(), ix) {
                 // The run's first call draws the run's line; the rest only show while the run is open.
                 Some(run) if run.start == ix => self.render_tool_run(run, cx),
                 Some(run) if !self.run_open(&run) => return div().into_any_element(),
+                Some(run) if run.len() > 1 => indent_run_step(self.render_tool(ix, call, cx)),
                 _ => self.render_tool(ix, call, cx),
             },
             Entry::Notice { text, error } => div()
@@ -180,13 +198,45 @@ impl ThreadView {
             .into_any_element()
     }
 
+    /// Compressed single-line thinking step; click to expand the full thought, just like a tool call.
+    fn render_thought(&self, ix: usize, text: &str, cx: &mut Context<Self>) -> AnyElement {
+        let key = format!("thought:{ix}");
+        let expanded = self.detail || self.expanded_tools.contains(&key);
+        let preview = text.lines().find(|l| !l.trim().is_empty()).unwrap_or_default().trim().to_string();
+        let header = div()
+            .id(SharedString::from(format!("thought-row-{ix}")))
+            .w_full()
+            .px(px(4.0))
+            .py(px(2.0))
+            .rounded(px(5.0))
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .cursor_pointer()
+            .hover(|s| s.bg(hsla(theme::SURFACE_HOVER)))
+            .text_size(scale::px(12.0))
+            .text_color(hsla(theme::TEXT_FAINT))
+            .child(div().flex_none().italic().text_color(hsla(if expanded { theme::TEXT_DIM } else { theme::TEXT_FAINT })).child("Thought"))
+            .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().italic().child(preview))
+            .child(div().flex_none().child(icon(if expanded { IconName::ChevronDown } else { IconName::ChevronRight }, 12.0)))
+            .on_click(cx.listener(move |v, _: &ClickEvent, window, cx| {
+                if !v.expanded_tools.remove(&key) {
+                    v.expanded_tools.insert(key.clone());
+                }
+                v.remeasure(ix);
+                v.focus_composer(window, cx);
+                cx.notify();
+            }));
+        let mut block = div().flex().flex_col().child(header);
+        if expanded {
+            block = block.child(render_thought_body(text));
+        }
+        block.into_any_element()
+    }
+
     /// Compressed single-line tool call row; click to expand full output and diffs.
     fn render_tool(&self, ix: usize, call: &ToolCall, cx: &mut Context<Self>) -> AnyElement {
-        let (mark, color) = match call.status {
-            ToolStatus::Pending | ToolStatus::Running => ("●", theme::WARN),
-            ToolStatus::Done => ("●", theme::OK),
-            ToolStatus::Failed => ("●", theme::DANGER),
-        };
+        let failed = call.status == ToolStatus::Failed;
         let has_card = self.cards.contains_key(&call.id);
         let has_body = !call.content.is_empty() || has_card;
         let expanded = self.detail || has_card || self.expanded_tools.contains(&call.id);
@@ -202,7 +252,6 @@ impl ThreadView {
             .items_center()
             .gap(px(8.0))
             .when(has_body, |d| d.cursor_pointer().hover(|s| s.bg(hsla(theme::SURFACE_HOVER))))
-            .child(div().flex_none().text_size(scale::px(9.0)).text_color(hsla(color)).child(mark))
             .child(
                 div()
                     .flex_1()
@@ -211,7 +260,13 @@ impl ThreadView {
                     .whitespace_nowrap()
                     .text_ellipsis()
                     .text_size(scale::px(12.0))
-                    .text_color(hsla(if expanded { theme::TEXT_DIM } else { theme::TEXT_FAINT }))
+                    .text_color(hsla(if failed {
+                        theme::DANGER
+                    } else if expanded {
+                        theme::TEXT_DIM
+                    } else {
+                        theme::TEXT_FAINT
+                    }))
                     .child(title(call)),
             );
         for (n, (path, line)) in call.locations.iter().enumerate().take(2) {
@@ -302,16 +357,10 @@ impl ThreadView {
             _ => String::new(),
         };
         let open = self.run_open(&run);
-        let color = if calls.iter().any(|c| matches!(c.status, ToolStatus::Pending | ToolStatus::Running)) {
-            theme::WARN
-        } else if calls.iter().any(|c| c.status == ToolStatus::Failed) {
-            theme::DANGER
-        } else {
-            theme::TEXT_FAINT
-        };
+        let failed = calls.iter().any(|c| c.status == ToolStatus::Failed);
         let key = format!("run:{}", run.start);
         let start = run.start;
-        div()
+        let header = div()
             .id(SharedString::from(format!("tool-run-{start}")))
             .w_full()
             .px(px(4.0))
@@ -323,19 +372,27 @@ impl ThreadView {
             .cursor_pointer()
             .hover(|s| s.bg(hsla(theme::SURFACE_HOVER)))
             .text_size(scale::px(12.0))
-            .text_color(hsla(theme::TEXT_FAINT))
-            .child(div().flex_none().text_size(scale::px(9.0)).text_color(hsla(color)).child("●"))
-            .child(div().flex_none().text_color(hsla(theme::TEXT_DIM)).child(run_label(thoughts, calls.len())))
+            .text_color(hsla(if failed { theme::DANGER } else { theme::TEXT_FAINT }))
+            .child(div().flex_none().text_color(hsla(if failed { theme::DANGER } else { theme::TEXT_DIM })).child(run_label(thoughts, calls.len())))
             .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(latest))
             .child(div().flex_none().child(icon(if open { IconName::ChevronDown } else { IconName::ChevronRight }, 12.0)))
-            .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| {
+            .on_click(cx.listener(move |v, _: &ClickEvent, window, cx| {
                 if !v.expanded_tools.remove(&key) {
                     v.expanded_tools.insert(key.clone());
                 }
                 v.remeasure(start);
+                v.focus_composer(window, cx);
                 cx.notify();
-            }))
-            .into_any_element()
+            }));
+        if !open {
+            return header.into_any_element();
+        }
+        let first = match &steps[0] {
+            Entry::Tool(call) => self.render_tool(start, call, cx),
+            Entry::Thought(text) => self.render_thought(start, text, cx),
+            _ => return header.into_any_element(),
+        };
+        div().flex().flex_col().gap(px(4.0)).child(header).child(indent_run_step(first)).into_any_element()
     }
 
     fn render_plan(&self) -> Option<Div> {
@@ -450,7 +507,8 @@ impl ThreadView {
                     list = list.child(
                         picker::row(SharedString::from(format!("thread-model-{n}")), Some(logo), m.name.clone(), None, None, selected, false)
                             .when(focused && !selected, |d| d.bg(hsla(theme::SURFACE_HOVER)))
-                            .when(focused, |d| d.border_1().border_color(hsla(theme::FOCUS_BORDER)))
+                            .border_1()
+                            .border_color(if focused { hsla(theme::FOCUS_BORDER) } else { gpui::transparent_black() })
                             .debug_selector(move || format!("thread-model-{n}"))
                             .on_click(cx.listener(move |v, _: &ClickEvent, window, cx| {
                                 v.pick_model(choice.clone(), cx);
@@ -508,8 +566,10 @@ impl ThreadView {
                 if self.thread.modes.is_empty() {
                     rows = rows.child(picker::empty_note("No permission modes available."));
                 } else {
+                    let hi = self.mode_highlight.min(self.thread.modes.len().saturating_sub(1));
                     for (i, (id, name)) in self.thread.modes.iter().enumerate() {
                         let current = self.thread.mode.as_deref() == Some(id.as_str());
+                        let focused = i == hi;
                         let mode_id = id.clone();
                         let display = picker::format_mode_name(id, name);
                         let lead = icon(IconName::Lock, 12.0).text_color(hsla(if current { theme::TEXT } else { theme::TEXT_FAINT })).into_any_element();
@@ -523,6 +583,9 @@ impl ThreadView {
                                 current,
                                 false,
                             )
+                            .when(focused && !current, |d| d.bg(hsla(theme::SURFACE_HOVER)))
+                            .border_1()
+                            .border_color(if focused { hsla(theme::FOCUS_BORDER) } else { gpui::transparent_black() })
                             .on_click(cx.listener(move |v, _: &ClickEvent, window, cx| {
                                 v.set_mode(mode_id.clone(), cx);
                                 v.close_picker(window, cx);
@@ -684,9 +747,11 @@ impl ThreadView {
                     .child(icon(IconName::Lock, 11.0).text_color(hsla(theme::TEXT_DIM)))
                     .child(div().text_color(hsla(theme::TEXT_DIM)).child(picker::format_mode_name(mode_id, raw_name)))
                     .child(icon(IconName::ChevronDown, 10.5).text_color(hsla(theme::TEXT_FAINT)))
-                    .dropdown_above(cx, |v, at, _, cx| {
+                    .dropdown_above(cx, |v, at, window, cx| {
                         v.picker = Some(ThreadPicker::Permission);
                         v.picker_at = at;
+                        v.mode_highlight = v.thread.modes.iter().position(|(id, _)| v.thread.mode.as_deref() == Some(id.as_str())).unwrap_or(0);
+                        v.focus_composer(window, cx);
                         cx.notify();
                     })
                     .into_any_element(),
@@ -711,8 +776,9 @@ impl ThreadView {
         }
 
         let mut actions: Vec<AnyElement> = vec![];
-        if !self.queue.is_empty() {
-            actions.push(faint(format!("{} queued", self.queue.len())).into_any_element());
+        let queued = self.queue.iter().filter(|q| !q.shown).count();
+        if queued > 0 {
+            actions.push(faint(format!("{queued} queued")).into_any_element());
         }
         // Outside a git repository there are no snapshots, and so no review at all.
         if !self.snapshots.is_empty() {

@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Claudiu is a native Rust + GPUI desktop app that manages sessions around the user's existing `claude` CLI.
+m4code is a native Rust + GPUI desktop app that manages sessions around the user's existing `claude` CLI.
 
 ## Where things live
 
@@ -16,7 +16,7 @@ Claudiu is a native Rust + GPUI desktop app that manages sessions around the use
 
 ## Settings
 
-- Tracker: GitHub issues in m4rocks/claudiu
+- Tracker: GitHub issues in m4rocks/m4code
 - Tests: when a cheap test seam exists
 - Commits: only when the maintainer says
 - Pushes and pull requests: only when the maintainer says
@@ -64,7 +64,7 @@ Leave nothing behind but the change: no summary files, commented-out code, debug
 
 ## Boundaries
 
-Agents run as ACP servers and show in Claudiu's chat view (`harness/`, `thread/`); no agent runs in a PTY. The shell panel (Ctrl+J and the welcome screen's shell) is the only PTY, and Claudiu never types into it. In editor mode, the comment button beside the selected or hovered line adds `@path#L12-30: comment` to the chat's message box, or sends it with Cmd/Ctrl+Enter (`app/line_comment.rs`). Running an agent in a PTY, or typing into the shell, needs the maintainer's decision first.
+Agents run as ACP servers and show in m4code's chat view (`harness/`, `thread/`); no agent runs in a PTY. The shell panel (Ctrl+J and the welcome screen's shell) is the only PTY, and m4code never types into it. In editor mode, the comment button beside the selected or hovered line adds `@path#L12-30: comment` to the chat's message box, or sends it with Cmd/Ctrl+Enter (`app/line_comment.rs`). Running an agent in a PTY, or typing into the shell, needs the maintainer's decision first.
 
 ## Enforced rules
 

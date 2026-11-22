@@ -1,4 +1,4 @@
-//! The coding agents Claudiu runs sessions in, each through its own ACP server. The core of the app treats them
+//! The coding agents m4code runs sessions in, each through its own ACP server. The core of the app treats them
 //! alike; what is particular to one (Claude Code's plugin, accounts and flags) is in its `Profile` here and in the
 //! code that builds its launch. No GPUI here.
 
@@ -49,7 +49,7 @@ impl CatalogModel {
     }
 }
 
-/// How Claudiu drives one harness: the parts that differ between them. Each lives in its own file.
+/// How m4code drives one harness: the parts that differ between them. Each lives in its own file.
 pub struct Adapter {
     pub name: &'static str,
     /// Program / bridge name shown in error messages when listing models.
@@ -140,8 +140,8 @@ impl Harness {
         }
     }
 
-    /// Slash commands the menu leaves out because Claudiu's own UI does their job: the model and permission pickers,
-    /// New session, and Settings. Claude Code's /autocompact is the `/config` switch Claudiu manages.
+    /// Slash commands the menu leaves out because m4code's own UI does their job: the model and permission pickers,
+    /// New session, and Settings. Claude Code's /autocompact is the `/config` switch m4code manages.
     pub fn hidden_commands(self) -> &'static [&'static str] {
         match self {
             Self::Claude => &["autocompact", "model"],
@@ -196,7 +196,7 @@ pub fn stdio_server(name: &str, command: &Path, args: &[&str], env: &[(&str, Str
 #[cfg(test)]
 mod tests {
     #[test]
-    fn the_menu_leaves_out_commands_claudiu_does_itself() {
+    fn the_menu_leaves_out_commands_m4code_does_itself() {
         assert!(super::Harness::Claude.hidden_commands().contains(&"autocompact"));
         assert!(super::Harness::Codex.hidden_commands().contains(&"approvals"));
         assert!(!super::Harness::Claude.hidden_commands().contains(&"compact"), "compacting stays");
@@ -206,8 +206,8 @@ mod tests {
 
     #[test]
     fn an_mcp_server_lists_its_environment_by_name() {
-        let server = stdio_server("claudiu", Path::new("/bin/claudiu"), &["--mcp-title"], &[("CLAUDIU_RECORD", "r1".into())]);
-        assert_eq!(server, json!({"name": "claudiu", "command": "/bin/claudiu", "args": ["--mcp-title"], "env": [{"name": "CLAUDIU_RECORD", "value": "r1"}]}));
+        let server = stdio_server("m4code", Path::new("/bin/m4code"), &["--mcp-title"], &[("M4CODE_RECORD", "r1".into())]);
+        assert_eq!(server, json!({"name": "m4code", "command": "/bin/m4code", "args": ["--mcp-title"], "env": [{"name": "M4CODE_RECORD", "value": "r1"}]}));
     }
 
     #[test]

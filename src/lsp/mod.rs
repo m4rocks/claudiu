@@ -18,7 +18,7 @@ use lsp_types::request::Request;
 use lsp_types::{Diagnostic, Uri};
 use serde_json::{Value, json};
 
-/// A language server Claudiu knows how to start, and the editor languages (see `files::language`) it serves.
+/// A language server m4code knows how to start, and the editor languages (see `files::language`) it serves.
 pub struct Kind {
     pub program: &'static str,
     args: &'static [&'static str],

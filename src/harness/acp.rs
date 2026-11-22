@@ -148,13 +148,13 @@ impl Drop for Connection {
     }
 }
 
-/// What Claudiu tells every agent about itself. It reads and writes files itself and runs no terminals for the
+/// What m4code tells every agent about itself. It reads and writes files itself and runs no terminals for the
 /// agent, so the agent does those on its own.
 pub fn initialize_params() -> Value {
     json!({
         "protocolVersion": 1,
         "clientCapabilities": { "fs": { "readTextFile": false, "writeTextFile": false }, "terminal": false },
-        "clientInfo": { "name": "claudiu", "title": "Claudiu", "version": env!("CARGO_PKG_VERSION") },
+        "clientInfo": { "name": "m4code", "title": "m4code", "version": env!("CARGO_PKG_VERSION") },
     })
 }
 
@@ -181,7 +181,7 @@ fn handle(message: Value, pending: &Pending, outgoing: &mpsc::Sender<Value>, eve
         (Some("session/request_permission"), Some(id)) => {
             let _ = events.unbounded_send(Event::Permission { id, params: message["params"].clone() });
         }
-        // Every other request gets an answer so the agent never waits for one: Claudiu offers no file system or
+        // Every other request gets an answer so the agent never waits for one: m4code offers no file system or
         // terminal, and extensions it doesn't know are refused.
         (Some(_), Some(id)) => {
             let _ = outgoing.send(json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32601, "message": "method not found"}}));

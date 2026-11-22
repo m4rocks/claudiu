@@ -10,7 +10,7 @@ fn dropdowns_switch_on_one_click_and_load_all_harness_models() {
     let proj_dir = tempfile::tempdir().unwrap();
     git2::Repository::init(proj_dir.path()).unwrap();
     // SAFETY: test-isolated data dir.
-    unsafe { std::env::set_var("CLAUDIU_DATA_DIR", data.path()) };
+    unsafe { std::env::set_var("M4CODE_DATA_DIR", data.path()) };
 
     let mut cx = TestAppContext::single();
     cx.update(|app| {
@@ -125,7 +125,7 @@ fn dropdowns_answer_the_arrow_keys() {
     let data = tempfile::tempdir().unwrap();
     let (one, two) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     // SAFETY: test-isolated data dir.
-    unsafe { std::env::set_var("CLAUDIU_DATA_DIR", data.path()) };
+    unsafe { std::env::set_var("M4CODE_DATA_DIR", data.path()) };
     let mut cx = TestAppContext::single();
     cx.update(|app| {
         gpui_kit::init(app);

@@ -5,7 +5,7 @@ use super::*;
 fn switching_between_worktrees_in_the_workspace() {
     let data = tempfile::tempdir().unwrap();
     // SAFETY: set before any other thread reads the environment; this test owns the process.
-    unsafe { std::env::set_var("CLAUDIU_DATA_DIR", data.path()) };
+    unsafe { std::env::set_var("M4CODE_DATA_DIR", data.path()) };
     // Claude Code's data directory, where the conversation of a session is looked for.
     let home = tempfile::tempdir().unwrap();
     // SAFETY: as above.
@@ -212,7 +212,7 @@ fn switching_between_worktrees() {
 fn removing_a_worktree_when_its_session_ends() {
     let data = tempfile::tempdir().unwrap();
     // SAFETY: set before any other thread reads the environment; this test owns the process.
-    unsafe { std::env::set_var("CLAUDIU_DATA_DIR", data.path()) };
+    unsafe { std::env::set_var("M4CODE_DATA_DIR", data.path()) };
     let work = tempfile::tempdir().unwrap();
     let repo_dir = dunce::canonicalize(work.path()).unwrap().join("proj");
     let git = |args: &[&str]| std::process::Command::new("git").args(args).current_dir(&repo_dir).output().unwrap();
@@ -316,7 +316,7 @@ fn removing_a_worktree_when_its_session_ends() {
     step(&mut cx, &|ws, w, cx| ws.submit_modal(w, cx));
     wait(&mut cx, "the branch to go", &|_| !git(&["rev-parse", "--verify", "-q", "spare"]).status.success());
 
-    // Settings lists the worktrees in Claudiu's data folder. Removing one asks inside the page, so the dialog stays open.
+    // Settings lists the worktrees in m4code's data folder. Removing one asks inside the page, so the dialog stays open.
     let listed = crate::git::worktree::folder(&repo_dir, "listed");
     assert!(git(&["worktree", "add", "-q", "-b", "listed", &listed.to_string_lossy()]).status.success());
     step(&mut cx, &|ws, w, cx| {

@@ -1,6 +1,6 @@
-//! Requests from a Claude Code session to Claudiu, made through the MCP helper
-//! (`claudiu --mcp-title`, see `claude/mcp.rs`). The helper is a separate process, so the two talk through files:
-//! it drops `bridge/req/<id>.json` and waits for `bridge/res/<id>.json`, which Claudiu writes on its next tick.
+//! Requests from a Claude Code session to m4code, made through the MCP helper
+//! (`m4code --mcp-title`, see `claude/mcp.rs`). The helper is a separate process, so the two talk through files:
+//! it drops `bridge/req/<id>.json` and waits for `bridge/res/<id>.json`, which m4code writes on its next tick.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// How long a request stays valid: the helper gives up after this, and Claudiu ignores older files.
+/// How long a request stays valid: the helper gives up after this, and m4code ignores older files.
 pub const PATIENCE: Duration = Duration::from_secs(300);
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -36,7 +36,7 @@ fn stem(id: &str) -> String {
     crate::datadir::safe_file_stem(id)
 }
 
-/// Helper side: file a request and block until Claudiu answers (or `PATIENCE` runs out).
+/// Helper side: file a request and block until m4code answers (or `PATIENCE` runs out).
 pub fn ask(from: &str, tool: &str, args: &Value) -> Result<String, String> {
     ask_in(&crate::datadir::data_dir(), from, tool, args)
 }
@@ -46,7 +46,7 @@ fn ask_in(base: &Path, from: &str, tool: &str, args: &Value) -> Result<String, S
     let req = Request { id: id.clone(), from: from.into(), tool: tool.into(), args: args.clone(), deadline: crate::store::now() + PATIENCE.as_secs() as i64 };
     let (req_path, res_path) = (dir(base, "req").join(format!("{}.json", stem(&id))), dir(base, "res").join(format!("{}.json", stem(&id))));
     let body = serde_json::to_string(&req).map_err(|e| e.to_string())?;
-    crate::datadir::write_atomic(&req_path, &body).map_err(|e| format!("could not reach Claudiu: {e}"))?;
+    crate::datadir::write_atomic(&req_path, &body).map_err(|e| format!("could not reach m4code: {e}"))?;
     let start = Instant::now();
     while start.elapsed() < PATIENCE {
         std::thread::sleep(Duration::from_millis(200));
@@ -57,10 +57,10 @@ fn ask_in(base: &Path, from: &str, tool: &str, args: &Value) -> Result<String, S
         }
     }
     let _ = std::fs::remove_file(&req_path);
-    Err("Claudiu got no answer from the user in time.".into())
+    Err("m4code got no answer from the user in time.".into())
 }
 
-/// Claudiu side: every request filed since the last call. Files are consumed; expired or unreadable ones are dropped.
+/// m4code side: every request filed since the last call. Files are consumed; expired or unreadable ones are dropped.
 pub fn take_requests() -> Vec<Request> {
     take_requests_in(&crate::datadir::data_dir())
 }
@@ -91,7 +91,7 @@ fn prune_answers(base: &Path) {
     }
 }
 
-/// Claudiu side: answer a request (`ok = false` makes the tool report an error to the model).
+/// m4code side: answer a request (`ok = false` makes the tool report an error to the model).
 pub fn respond(id: &str, ok: bool, text: impl Into<String>) {
     respond_in(&crate::datadir::data_dir(), id, ok, text);
 }

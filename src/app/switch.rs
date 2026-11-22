@@ -1,11 +1,11 @@
 //! Switching a running session into another working tree of its repository, the way a session switches branches.
-//! The process ends and `claude --resume` continues the same conversation in the target folder; the Claudiu session
+//! The process ends and `claude --resume` continues the same conversation in the target folder; the m4code session
 //! (its title, cards, place in the sidebar) is the same record, whose folder is now the target's. A new worktree is
 //! made with git first (`worktree::add`).
 //!
 //! A session that Claude Code itself put in a worktree (`claude --worktree`) has that worktree recorded in its
 //! transcript, and Claude Code restores it on every resume, which wins over the folder `claude` is started in. So
-//! before such a session moves, Claudiu appends the line that Claude Code's own ExitWorktree writes (see
+//! before such a session moves, m4code appends the line that Claude Code's own ExitWorktree writes (see
 //! `claude::clear_recorded_worktree`).
 
 use std::path::Path;

@@ -3,20 +3,21 @@
 
 use std::path::PathBuf;
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// One block of the conversation, in the order it arrived.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Entry {
     User(String),
     Agent(String),
     Thought(String),
     Tool(ToolCall),
-    /// Something Claudiu says about the session itself: a cancelled turn, a failed prompt.
+    /// Something m4code says about the session itself: a cancelled turn, a failed prompt.
     Notice { text: String, error: bool },
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ToolStatus {
     #[default]
     Pending,
@@ -37,14 +38,14 @@ impl ToolStatus {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ToolContent {
     Text(String),
     /// A file the tool changed: its text before (none for a new file) and after.
     Diff { path: PathBuf, old: Option<String>, new: String },
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ToolCall {
     pub id: String,
     pub title: String,
@@ -212,7 +213,7 @@ impl Thread {
         self.config.iter().find(|o| o.category == category)
     }
 
-    /// Add something Claudiu says, and return where it went.
+    /// Add something m4code says, and return where it went.
     pub fn notice(&mut self, text: impl Into<String>, error: bool) -> usize {
         self.entries.push(Entry::Notice { text: text.into(), error });
         self.entries.len() - 1
@@ -377,6 +378,31 @@ fn str_of(value: &Value, key: &str) -> String {
     value[key].as_str().unwrap_or_default().to_string()
 }
 
+/// Where m4code persists a session's conversation entries so harnesses that resume without replaying (such as
+/// Antigravity) and sessions reconnecting after a restart never open blank.
+fn entries_path(record_id: &str) -> PathBuf {
+    crate::datadir::data_dir().join("threads").join(format!("{}.json", crate::datadir::safe_file_stem(record_id)))
+}
+
+pub fn save_entries(record_id: &str, entries: &[Entry]) {
+    if record_id.is_empty() || entries.is_empty() {
+        return;
+    }
+    if let Ok(json) = serde_json::to_string(entries) {
+        let _ = crate::datadir::write_atomic(&entries_path(record_id), &json);
+    }
+}
+
+pub fn load_entries(record_id: &str) -> Vec<Entry> {
+    if record_id.is_empty() {
+        return Vec::new();
+    }
+    std::fs::read_to_string(entries_path(record_id))
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -536,6 +562,26 @@ mod tests {
         assert_eq!(lines[2], ('-', "d".into()));
         assert_eq!(lines[3], ('+', "D".into()));
         assert_eq!(diff_lines("", "new\n"), vec![('+', "new".into())], "a new file is all added");
+    }
+
+    #[test]
+    fn entries_roundtrip_on_disk() {
+        let _dirs = crate::datadir::use_throwaway_folders();
+        let entries = vec![
+            Entry::User("hello".into()),
+            Entry::Thought("thinking".into()),
+            Entry::Tool(ToolCall {
+                id: "t1".into(),
+                title: "Read a.rs".into(),
+                kind: "read".into(),
+                status: ToolStatus::Done,
+                content: vec![ToolContent::Text("ok".into())],
+                locations: vec![(PathBuf::from("a.rs"), Some(10))],
+            }),
+            Entry::Agent("hi there".into()),
+        ];
+        save_entries("test-roundtrip-session", &entries);
+        assert_eq!(load_entries("test-roundtrip-session"), entries);
     }
 
     #[test]

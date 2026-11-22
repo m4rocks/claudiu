@@ -75,8 +75,8 @@ pub fn key(keystroke: &Keystroke, s: State) -> Option<Key> {
         "up" if plain && s.commands > 0 => Some(Key::MenuUp),
         "down" if plain && s.commands > 0 => Some(Key::MenuDown),
         "enter" if plain && s.commands > 0 => Some(Key::RunCommand),
-        "up" if plain && (s.draft_empty || s.in_history) => Some(Key::Older),
-        "down" if plain && s.in_history => Some(Key::Newer),
+        "up" if plain && !s.picker_open && (s.draft_empty || s.in_history) => Some(Key::Older),
+        "down" if plain && !s.picker_open && s.in_history => Some(Key::Newer),
         "o" if m.control && !m.platform && !m.alt && !m.shift => Some(Key::ToggleDetail),
         "t" if m.control && !m.platform && !m.alt && !m.shift => Some(Key::TogglePlan),
         "p" if m.alt && !m.control && !m.platform && !m.shift => Some(Key::PickModel),
@@ -136,6 +136,8 @@ mod tests {
     #[test]
     fn history_walks_only_from_an_empty_composer() {
         assert_eq!(press("up", idle()), Some(Key::Older));
+        assert_eq!(press("up", State { picker_open: true, ..idle() }), None, "a picker owns the arrows");
+        assert_eq!(press("down", State { picker_open: true, in_history: true, ..idle() }), None);
         assert_eq!(press("up", State { draft_empty: false, ..idle() }), None, "moves the cursor in a draft");
         assert_eq!(press("up", State { draft_empty: false, in_history: true, ..idle() }), Some(Key::Older));
         assert_eq!(press("down", idle()), None);

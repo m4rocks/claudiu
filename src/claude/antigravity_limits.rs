@@ -123,7 +123,7 @@ pub enum PoolMark {
     ClaudeAndGpt,
     /// A named Gemini model with limits of its own, by the first two letters of its name: `Gemini 4 Argon` → `Ar`.
     GeminiNamed(String),
-    /// A pool Claudiu doesn't know, by the first two letters of its name: `Some New models` → `So`.
+    /// A pool m4code doesn't know, by the first two letters of its name: `Some New models` → `So`.
     Other(String),
 }
 
@@ -176,7 +176,7 @@ mod tests {
         assert_eq!(parse(r#"{"status":"SUCCESS","response":"I don't have access to your quota.","num_turns":1}"#, 0), None);
         assert_eq!(parse(&READING.replace(r#""name":"usage""#, r#""name":"quota""#), 0), None);
         assert_eq!(parse("not json", 0), None);
-        assert_eq!(parse(r#"{"command":{"name":"usage","data":{"groups":[{"name":"X","buckets":[{"window":"daily"}]}]}}}"#, 0), None, "no window Claudiu shows");
+        assert_eq!(parse(r#"{"command":{"name":"usage","data":{"groups":[{"name":"X","buckets":[{"window":"daily"}]}]}}}"#, 0), None, "no window m4code shows");
     }
 
     #[test]

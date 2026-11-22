@@ -1,7 +1,7 @@
 name: release
 
 # Push a tag like v0.2.0 to publish installers and the auto-update feed to GitHub Releases.
-# Installed copies of Claudiu check this repository's releases (Velopack GithubSource) and update themselves.
+# Installed copies of m4code check this repository's releases (Velopack GithubSource) and update themselves.
 on:
   push:
     tags: ["v*"]
@@ -34,8 +34,8 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist/publish | Out-Null
-          Copy-Item target/release/claudiu.exe dist/publish/
-          vpk pack --packId Claudiu --packVersion "${{ steps.ver.outputs.version }}" --packDir dist/publish --mainExe claudiu.exe --packTitle Claudiu --icon assets/claudiu.ico --outputDir dist/releases
+          Copy-Item target/release/m4code.exe dist/publish/
+          vpk pack --packId m4code --packVersion "${{ steps.ver.outputs.version }}" --packDir dist/publish --mainExe m4code.exe --packTitle m4code --icon assets/m4code.ico --outputDir dist/releases
       - uses: actions/upload-artifact@v4
         with:
           name: releases-win
@@ -66,15 +66,15 @@ jobs:
           cargo build --release --locked --target aarch64-apple-darwin
           cargo build --release --locked --target x86_64-apple-darwin
           mkdir -p dist/publish
-          lipo -create -output dist/publish/claudiu target/aarch64-apple-darwin/release/claudiu target/x86_64-apple-darwin/release/claudiu
-          codesign --force --sign - dist/publish/claudiu   # lipo invalidates the per-arch signatures
+          lipo -create -output dist/publish/m4code target/aarch64-apple-darwin/release/m4code target/x86_64-apple-darwin/release/m4code
+          codesign --force --sign - dist/publish/m4code   # lipo invalidates the per-arch signatures
       - name: Icon
-        run: scripts/make-icns.sh dist/claudiu.icns
+        run: scripts/make-icns.sh dist/m4code.icns
       - name: Fetch previous release (for delta updates)
         continue-on-error: true
         run: vpk download github --repoUrl "${{ github.server_url }}/${{ github.repository }}" --token "${{ secrets.GITHUB_TOKEN }}"
       - name: Pack
-        run: vpk pack --packId Claudiu --packVersion "${{ steps.ver.outputs.version }}" --packDir dist/publish --mainExe claudiu --packTitle Claudiu --icon dist/claudiu.icns --bundleId com.m4rocks.claudiu --signAppIdentity - --outputDir dist/releases
+        run: vpk pack --packId m4code --packVersion "${{ steps.ver.outputs.version }}" --packDir dist/publish --mainExe m4code --packTitle m4code --icon dist/m4code.icns --bundleId com.m4rocks.m4code --signAppIdentity - --outputDir dist/releases
       - uses: actions/upload-artifact@v4
         with:
           name: releases-osx
@@ -102,12 +102,12 @@ jobs:
         run: |
           cargo build --release --locked
           mkdir -p dist/publish
-          cp target/release/claudiu dist/publish/
+          cp target/release/m4code dist/publish/
       - name: Fetch previous release (for delta updates)
         continue-on-error: true
         run: vpk download github --channel linux --repoUrl "${{ github.server_url }}/${{ github.repository }}" --token "${{ secrets.GITHUB_TOKEN }}"
       - name: Pack
-        run: vpk pack --packId Claudiu --packVersion "${{ steps.ver.outputs.version }}" --packDir dist/publish --mainExe claudiu --packTitle Claudiu --icon assets/claudiu.png --channel linux --outputDir dist/releases
+        run: vpk pack --packId m4code --packVersion "${{ steps.ver.outputs.version }}" --packDir dist/publish --mainExe m4code --packTitle m4code --icon assets/m4code.png --channel linux --outputDir dist/releases
       - uses: actions/upload-artifact@v4
         with:
           name: releases-linux
@@ -128,5 +128,5 @@ jobs:
         run: |
           version="${GITHUB_REF_NAME#v}"
           for channel in win osx linux; do
-            vpk upload github --channel "$channel" --repoUrl "${{ github.server_url }}/${{ github.repository }}" --outputDir "releases-$channel" --merge --publish --releaseName "Claudiu $version" --tag "${{ github.ref_name }}" --token "${{ secrets.GITHUB_TOKEN }}"
+            vpk upload github --channel "$channel" --repoUrl "${{ github.server_url }}/${{ github.repository }}" --outputDir "releases-$channel" --merge --publish --releaseName "m4code $version" --tag "${{ github.ref_name }}" --token "${{ secrets.GITHUB_TOKEN }}"
           done

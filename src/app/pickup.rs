@@ -1,5 +1,5 @@
-//! Picking up a session that was started outside Claudiu, such as in the agent's own terminal UI: the agent lists the
-//! sessions it has for a folder (ACP `session/list`), and the one chosen opens here as a Claudiu session. A session
+//! Picking up a session that was started outside m4code, such as in the agent's own terminal UI: the agent lists the
+//! sessions it has for a folder (ACP `session/list`), and the one chosen opens here as a m4code session. A session
 //! still open in a terminal keeps running there; the user is told to quit it first, since two programs writing one
 //! conversation mix it up.
 
@@ -81,7 +81,7 @@ impl Workspace {
         self.open_menu(at, items, cx);
     }
 
-    /// Open a listed session here: the record Claudiu already has for it, or a new one.
+    /// Open a listed session here: the record m4code already has for it, or a new one.
     pub(super) fn pick_up(&mut self, harness: Harness, cwd: PathBuf, session_id: String, title: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         let known = self.store.data.sessions.iter().find(|s| s.claude.as_ref().is_some_and(|m| m.harness == harness) && s.claude_id() == Some(session_id.as_str())).map(|s| s.id.clone());
         let id = match known {

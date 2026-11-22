@@ -30,11 +30,11 @@ pub fn toggle_switch(on: bool) -> Div {
         .h(px(18.0))
         .p(px(2.0))
         .rounded(px(999.0))
-        .bg(hsla(if on { theme::ACCENT } else { 0x2a2a2e }))
+        .bg(hsla(if on { theme::ACCENT } else { 0x2c2c2c }))
         .flex()
         .items_center()
         .when(on, |d| d.justify_end())
-        .child(div().w(px(14.0)).h(px(14.0)).rounded(px(999.0)).bg(hsla(if on { 0xffffff } else { 0x9c9ca4 })))
+        .child(div().w(px(14.0)).h(px(14.0)).rounded(px(999.0)).bg(hsla(if on { theme::PANEL_BG } else { 0x9e9e9e })))
 }
 
 /// A labelled Settings section: uppercase header (with an optional trailing control) over a single rounded card whose
@@ -117,7 +117,7 @@ pub fn flip<T: PartialEq>(items: &mut Vec<T>, item: T) {
     }
 }
 
-/// Flips whether `harness` is enabled as a provider in Claudiu. Ensures at least one harness stays enabled.
+/// Flips whether `harness` is enabled as a provider in m4code. Ensures at least one harness stays enabled.
 fn flip_harness_enabled(ws: &mut Workspace, harness: Harness, cx: &mut Context<Workspace>) {
     let enabled = {
         let Some(Modal::Settings { subagents, default_model, .. }) = ws.modal.as_mut() else { return };
@@ -345,7 +345,7 @@ impl Workspace {
         let mut list = div().flex().flex_col().gap(px(6.0));
         let mut shown = 0;
         for (model, offered) in model_rows(catalog, picked).into_iter().filter(|(m, _)| model_matches(&query, m)) {
-            let type_tag = agent.filter(|_| subagents_on).and_then(|a| type_name(a, &model.id)).map(|name| format!("Claudiu:{name}"));
+            let type_tag = agent.filter(|_| subagents_on).and_then(|a| type_name(a, &model.id)).map(|name| format!("m4code:{name}"));
             let tag = match (type_tag, offered) {
                 (Some(name), true) => Some(name),
                 (Some(name), false) => Some(format!("{name} · no longer offered")),
@@ -496,7 +496,7 @@ impl Workspace {
                 col = col.child(accounts_box);
                 col = col.child(self.model_list(Harness::Claude, search, None, cx));
 
-                // Claudiu trims the extras itself (trim::FLUFF), per session; what's left here are the user's own settings.
+                // m4code trims the extras itself (trim::FLUFF), per session; what's left here are the user's own settings.
                 for found in costly {
                     col = col.child(warn(format!("{} is set in {}. {}", found.name, found.source, found.effect)));
                 }

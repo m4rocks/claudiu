@@ -372,7 +372,7 @@
 	}
 }
 
-/* the parts, laid out where they sit in the Claudiu window */
+/* the parts, laid out where they sit in the m4code window */
 @layer components {
 	.stack {
 		display: flex;

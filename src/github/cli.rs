@@ -1,5 +1,5 @@
-//! GitHub through the user's own `gh` CLI, the same way Claudiu runs the user's own `claude`: `gh` owns the login,
-//! the tokens and Enterprise hosts, so Claudiu stores no credentials. Every call is blocking and meant for a
+//! GitHub through the user's own `gh` CLI, the same way m4code runs the user's own `claude`: `gh` owns the login,
+//! the tokens and Enterprise hosts, so m4code stores no credentials. Every call is blocking and meant for a
 //! background thread. Request bodies go in as JSON on stdin, so user-written markdown never meets argument quoting.
 
 use std::io::Write;
@@ -215,7 +215,7 @@ impl Gh {
             .method(method)
             .uri(url)
             .header("Authorization", format!("Bearer {token}"))
-            .header("User-Agent", "claudiu")
+            .header("User-Agent", "m4code")
             .header("Accept", "application/vnd.github+json")
             .header("Content-Type", "application/json")
             .body(body.unwrap_or_default().to_string())

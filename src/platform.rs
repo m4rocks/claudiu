@@ -35,7 +35,7 @@ pub fn through_login_shell(program: String, args: Vec<String>) -> (String, Vec<S
     {
         let shell = login_shell();
         let script = if shell.ends_with("/fish") { "exec $argv" } else { r#"exec "$@""# };
-        let mut wrapped = vec!["-l".into(), "-i".into(), "-c".into(), script.into(), "claudiu".into(), program];
+        let mut wrapped = vec!["-l".into(), "-i".into(), "-c".into(), script.into(), "m4code".into(), program];
         wrapped.extend(args);
         (shell, wrapped)
     }
@@ -88,7 +88,7 @@ fn family_from_fc_match(output: &str) -> Option<String> {
 
 /// The window class Linux desktops match to the launcher entry (`StartupWMClass` in the AppImage's .desktop file) to
 /// pick the dock and panel icon. Without it a window gets a generic one. Other platforms ignore it.
-pub const APP_ID: &str = "Claudiu";
+pub const APP_ID: &str = "m4code";
 
 pub fn home_dir() -> Option<PathBuf> {
     directories::BaseDirs::new().map(|d| d.home_dir().to_path_buf())
@@ -155,7 +155,7 @@ pub fn with_login_path(command: &mut Command) {
     let _ = command;
 }
 
-/// Look for the PATH again, for a tool installed since Claudiu started or one that only the shell's startup files
+/// Look for the PATH again, for a tool installed since m4code started or one that only the shell's startup files
 /// put on the PATH. Windows reads the system and user PATH from the registry and uses it for this process and the
 /// programs it starts. macOS and Linux ask the login shell (blocking, up to a few seconds). Call it off the UI thread.
 pub fn reload_path() {
@@ -194,9 +194,9 @@ fn login_shell_path() -> Option<std::ffi::OsString> {
 }
 
 #[cfg(any(unix, test))]
-const PATH_BEGIN: &str = "<<claudiu-path";
+const PATH_BEGIN: &str = "<<m4code-path";
 #[cfg(any(unix, test))]
-const PATH_END: &str = "claudiu-path>>";
+const PATH_END: &str = "m4code-path>>";
 
 /// A shell command that prints `$PATH` between the markers. `printf` and the quoting mean the same in sh, bash, zsh
 /// and fish (which joins its PATH list with colons inside quotes).
@@ -252,7 +252,7 @@ fn path_between_markers(output: &str) -> Option<&str> {
 }
 
 /// The registry's directories first, then whatever this process had that the registry lacks (for example folders a
-/// launcher added for Claudiu alone). Each directory appears once.
+/// launcher added for m4code alone). Each directory appears once.
 #[cfg(any(windows, unix, test))]
 fn rebuilt_path(registry: &[PathBuf], current: &OsStr) -> std::ffi::OsString {
     let mut dirs: Vec<PathBuf> = Vec::new();
@@ -400,9 +400,9 @@ pub fn notify(title: String, body: &'static str) {
     std::thread::spawn(move || {
         // Notification Center files notifications under an app; the installed one is ours, a dev build has none.
         #[cfg(target_os = "macos")]
-        let _ = notify_rust::set_application("com.m4rocks.claudiu");
+        let _ = notify_rust::set_application("com.m4rocks.m4code");
         let mut notification = notify_rust::Notification::new();
-        notification.appname("Claudiu").summary(&title).body(body);
+        notification.appname("m4code").summary(&title).body(body);
         #[cfg(target_os = "windows")]
         if let Some(id) = windows_app_id() {
             notification.app_id(id);
@@ -411,8 +411,8 @@ pub fn notify(title: String, body: &'static str) {
     });
 }
 
-/// The app ID of the installed Claudiu, as its Start menu shortcut carries it (`velopack.Claudiu`), so Windows shows
-/// notifications as Claudiu's. Without one, notify-rust sends them as PowerShell's, which is all a dev build can do:
+/// The app ID of the installed m4code, as its Start menu shortcut carries it (`velopack.m4code`), so Windows shows
+/// notifications as m4code's. Without one, notify-rust sends them as PowerShell's, which is all a dev build can do:
 /// Windows only shows a notification under an ID that has a shortcut.
 #[cfg(target_os = "windows")]
 fn windows_app_id() -> Option<&'static str> {
@@ -432,12 +432,12 @@ fn windows_app_id() -> Option<&'static str> {
 fn register_notification_icon(id: &str) {
     use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, REG_SZ, RegSetKeyValueW};
     let icon = crate::datadir::data_dir().join("notification-icon.png");
-    if std::fs::write(&icon, include_bytes!("../assets/claudiu.png")).is_err() {
+    if std::fs::write(&icon, include_bytes!("../assets/m4code.png")).is_err() {
         return;
     }
     let wide = |s: &str| -> Vec<u16> { s.encode_utf16().chain(Some(0)).collect() };
     let key = wide(&format!(r"Software\Classes\AppUserModelId\{id}"));
-    for (name, value) in [("DisplayName", "Claudiu".to_string()), ("IconUri", icon.to_string_lossy().into_owned())] {
+    for (name, value) in [("DisplayName", "m4code".to_string()), ("IconUri", icon.to_string_lossy().into_owned())] {
         let (name, value) = (wide(name), wide(&value));
         // SAFETY: NUL-terminated names, and a value buffer whose size in bytes is passed with it.
         unsafe {
@@ -627,7 +627,7 @@ bye
         });
         let script = if shell.ends_with("/fish") { "exec $argv" } else { r#"exec "$@""# };
         assert_eq!(program, shell);
-        let expected: Vec<String> = ["-l", "-i", "-c", script, "claudiu", "/usr/bin/claude", "--resume", "abc"].map(String::from).to_vec();
+        let expected: Vec<String> = ["-l", "-i", "-c", script, "m4code", "/usr/bin/claude", "--resume", "abc"].map(String::from).to_vec();
         assert_eq!(args, expected);
     }
 
@@ -636,10 +636,10 @@ bye
     #[cfg(unix)]
     fn find_executable_uses_a_directory_only_the_login_shell_reported() {
         use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("claudiu-login-path-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("m4code-login-path-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let tool = dir.join("claudiu-login-path-probe");
+        let tool = dir.join("m4code-login-path-probe");
         std::fs::write(&tool, b"#!/bin/sh\n").unwrap();
         let mut perms = std::fs::metadata(&tool).unwrap().permissions();
         perms.set_mode(0o755);
@@ -648,7 +648,7 @@ bye
         let _only_test_using_login_path = LOGIN_PATH_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let previous = LOGIN_PATH.lock().unwrap().clone();
         *LOGIN_PATH.lock().unwrap() = Some(dir.as_os_str().to_os_string());
-        let found = find_executable("claudiu-login-path-probe");
+        let found = find_executable("m4code-login-path-probe");
         *LOGIN_PATH.lock().unwrap() = previous;
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(found, Some(tool));
@@ -744,7 +744,7 @@ bye
 
     #[test]
     fn env_expansion() {
-        unsafe { std::env::set_var("CLAUDIU_TEST_X", "val") };
-        assert_eq!(expand_env("a%CLAUDIU_TEST_X%b"), "avalb");
+        unsafe { std::env::set_var("M4CODE_TEST_X", "val") };
+        assert_eq!(expand_env("a%M4CODE_TEST_X%b"), "avalb");
     }
 }

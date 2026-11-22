@@ -43,37 +43,6 @@ impl Workspace {
         .detach();
     }
 
-    /// Startup reconciliation: scan Claude Code's records off the UI thread, then merge.
-    pub fn start_scan(&mut self, cx: &mut Context<Self>) {
-        let Some(home) = claude::claude_home() else {
-            return;
-        };
-        self.scanning = true;
-        cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move { claude::scan_all(&home) })
-                .await;
-            let _ = this.update(cx, |ws, cx| {
-                ws.scanning = false;
-                ws.store.reconcile(&result.sessions, result.ok);
-                if result.ok {
-                    // Records from earlier runs that never produced a transcript: nothing to resume.
-                    let live: Vec<Id> = ws.live.iter().map(|l| l.id.clone()).collect();
-                    ws.store.data.sessions.retain(|s| {
-                        live.contains(&s.id)
-                            || !s.claude.as_ref().is_some_and(|c| {
-                                c.external == ExternalState::Unknown && c.transcript.is_none()
-                            })
-                    });
-                }
-                ws.store.save_if_dirty();
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
     pub(super) fn start_ticker(&mut self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             loop {
@@ -215,7 +184,6 @@ impl Workspace {
     pub(super) fn tick(&mut self, cx: &mut Context<Self>) {
         let purged = self.purge_dead_shells();
         self.store.save_if_dirty();
-        self.refresh_live(cx);
         self.remember_open(cx);
         self.ingest_usage(cx);
         self.sync_attached(cx);
@@ -269,69 +237,6 @@ impl Workspace {
             purged = true;
         }
         purged
-    }
-
-    /// Re-read transcripts of running Claude sessions so the context meter follows reality.
-    fn refresh_live(&mut self, cx: &mut Context<Self>) {
-        let Some(home) = claude::claude_home() else {
-            return;
-        };
-        let jobs: Vec<(Id, String, Option<PathBuf>, Option<SystemTime>)> = self
-            .live
-            .iter()
-            .filter(|l| l.view.is_running(cx))
-            .filter_map(|l| {
-                let rec = self.store.session(&l.id)?;
-                let meta = rec.claude.as_ref()?;
-                Some((
-                    l.id.clone(),
-                    meta.session_id.clone(),
-                    meta.transcript.clone(),
-                    self.transcript_mtimes.get(&l.id).copied(),
-                ))
-            })
-            .collect();
-        if jobs.is_empty() {
-            return;
-        }
-        cx.spawn(async move |this, cx| {
-            let out = cx
-                .background_executor()
-                .spawn(async move {
-                    let mut out = Vec::new();
-                    for (id, claude_id, known, last_mtime) in jobs {
-                        let Some(path) = known
-                            .filter(|p| p.is_file())
-                            .or_else(|| claude::find_transcript(&home, &claude_id))
-                        else {
-                            continue;
-                        };
-                        let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
-                        if mtime.is_some() && mtime == last_mtime {
-                            continue;
-                        }
-                        if let Some(scan) = claude::read_session(&path) {
-                            out.push((id, mtime, scan));
-                        }
-                    }
-                    out
-                })
-                .await;
-            if out.is_empty() {
-                return;
-            }
-            let _ = this.update(cx, |ws, cx| {
-                for (id, mtime, scan) in out {
-                    if let Some(m) = mtime {
-                        ws.transcript_mtimes.insert(id.clone(), m);
-                    }
-                    ws.store
-                        .reconcile(std::slice::from_ref(&scan.session), false);
-                }
-                cx.notify();
-            });
-        })
-        .detach();
     }
 
     pub fn check_updates(&mut self, cx: &mut Context<Self>) {

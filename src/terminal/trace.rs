@@ -1,4 +1,4 @@
-//! Start-up timing for Claude sessions, to see where the seconds go. Off unless `CLAUDIU_TRACE_START` is set; then each
+//! Start-up timing for Claude sessions, to see where the seconds go. Off unless `M4CODE_TRACE_START` is set; then each
 //! step is appended to `<data>/start-trace.log` as `session folder, time since the terminal was made, step`.
 
 use std::io::Write;
@@ -7,7 +7,7 @@ use std::time::Duration;
 
 pub fn on() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("CLAUDIU_TRACE_START").is_some())
+    *ON.get_or_init(|| std::env::var_os("M4CODE_TRACE_START").is_some())
 }
 
 pub fn note(tag: &str, since_start: Duration, step: &str) {

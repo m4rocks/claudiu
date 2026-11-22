@@ -54,7 +54,8 @@ impl Workspace {
                     list = list.child(
                         picker::row(gpui::SharedString::from(format!("home-model-opt-{n}")), Some(logo), m.name.clone(), None, None, selected, false)
                             .when(focused && !selected, |d| d.bg(hsla(theme::SURFACE_HOVER)))
-                            .when(focused, |d| d.border_1().border_color(accent.opacity(0.45)))
+                            .border_1()
+                            .border_color(if focused { hsla(theme::FOCUS_BORDER) } else { gpui::transparent_black() })
                             .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::HomeSelectModel(choice.clone()), window, cx))),
                     );
                 }

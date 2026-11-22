@@ -1,5 +1,5 @@
 //! Sessions reaching other sessions: a Claude Code session can list, search and read the others and open a new one.
-//! The MCP helper files the request (`claude/bridge.rs`) and Claudiu answers it on its next tick. Listing, searching and
+//! The MCP helper files the request (`claude/bridge.rs`) and m4code answers it on its next tick. Listing, searching and
 //! reading answer at once; opening a session with a first message of its own asks the user first, since that is a
 //! prompt the user never wrote.
 
@@ -194,7 +194,7 @@ impl Workspace {
     /// The requester's chat view, for the model tools.
     fn requester_thread(&self, req: &Request) -> Result<Entity<crate::thread::ThreadView>, String> {
         let id = req.from.split_once(':').map_or(req.from.as_str(), |(_, id)| id);
-        self.live_view(id).and_then(|v| v.thread()).cloned().ok_or_else(|| "This session isn't open in Claudiu's chat view.".to_string())
+        self.live_view(id).and_then(|v| v.thread()).cloned().ok_or_else(|| "This session isn't open in m4code's chat view.".to_string())
     }
 
     /// Resolve `set_model`'s model into `harness`, `model_id` and `name`, and mark a switch onto another harness
@@ -221,7 +221,7 @@ impl Workspace {
 
     fn prepare_switch(&self, req: &mut Request) -> Result<(), String> {
         let id = req.from.split_once(':').map_or(req.from.as_str(), |(_, id)| id);
-        let rec = self.store.session(id).ok_or("Claudiu doesn't know this session.")?;
+        let rec = self.store.session(id).ok_or("m4code doesn't know this session.")?;
         let git = rec.project_id.as_ref().and_then(|p| self.store.project(p)).and_then(|p| p.git.as_ref()).ok_or("This session's project is not a git repository.")?;
         let wanted = req.args["worktree"].as_str().unwrap_or_default();
         let listed = crate::git::worktree::folders(git).into_iter().skip(1).filter_map(|f| f.file_name().map(|n| n.to_string_lossy().into_owned())).collect::<Vec<_>>();
@@ -337,7 +337,7 @@ impl Workspace {
                 let base = if req.args["base"].as_str() == Some("current") { crate::git::worktree::Base::Current } else { crate::git::worktree::Base::Main };
                 let name = folder.file_name().map_or_else(|| "the main checkout".into(), |n| n.to_string_lossy().into_owned());
                 self.pending_switches.push(PendingSwitch { id: requester_id.to_string(), folder, base, approved: crate::store::now() });
-                Ok(format!("Approved. Claudiu switches this session to {name} as soon as your turn ends, so end your turn now: reply in one line and make no more tool calls. The user's next message continues the same conversation there."))
+                Ok(format!("Approved. m4code switches this session to {name} as soon as your turn ends, so end your turn now: reply in one line and make no more tool calls. The user's next message continues the same conversation there."))
             }
             "list_models" => {
                 let thread = self.requester_thread(req)?.read(cx);
@@ -356,7 +356,7 @@ impl Workspace {
                         let message = req.args["message"].as_str().map(str::trim).filter(|m| !m.is_empty()).map_or_else(|| "Carry on with the task from where the conversation left off.".into(), String::from);
                         let name = model.name.clone();
                         thread.update(cx, |t, cx| t.hand_off_after_turn(model, effort, message, cx));
-                        Ok(format!("Approved. Claudiu hands this conversation to {name} as soon as your turn ends, so end your turn now: reply in one line and make no more tool calls."))
+                        Ok(format!("Approved. m4code hands this conversation to {name} as soon as your turn ends, so end your turn now: reply in one line and make no more tool calls."))
                     }
                     model => {
                         let done = thread.update(cx, |t, cx| t.switch_model(model.as_ref(), effort.as_deref(), cx))?;

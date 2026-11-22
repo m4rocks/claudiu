@@ -1,4 +1,4 @@
-//! What Claudiu draws around the terminals. `workspace_view` is the root view, with the Welcome screen in `home`, the
+//! What m4code draws around the terminals. `workspace_view` is the root view, with the Welcome screen in `home`, the
 //! menu, modal and toast in `overlays`, the workspace's dropdowns in `workspace_pickers` and the Settings modal in
 //! `settings_view`; `sidebar`
 //! and `inspector` are the two side panels, `editor_pane` is editor mode's files and editor, `widgets` holds the small

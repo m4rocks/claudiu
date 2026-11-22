@@ -10,7 +10,7 @@ use gpui::{
 
 use gpui_kit::component::input::Input;
 use crate::app::{Act, Activity, MenuItem, SideDrag, Workspace};
-use crate::store::{ExternalState, Id, Project, SessionKind, SessionRecord, now};
+use crate::store::{Id, Project, SessionKind, SessionRecord, now};
 use crate::panels::theme::{self, hsla};
 use gpui_kit::assets::IconName;
 use crate::panels::status_icon::{SessionDot, StatusIcon};
@@ -41,7 +41,6 @@ struct Row {
     dim: bool,
     running: bool,
     indent: bool,
-    stale: bool,
     archived: bool,
     /// Which sidebar section renders the row; keeps element ids unique when a session shows in several.
     scope: &'static str,
@@ -259,7 +258,6 @@ impl Workspace {
                 None => SessionDot::Active,
             }
         };
-        let stale = rec.claude.as_ref().is_some_and(|c| c.external == ExternalState::Missing);
         let project = {
             let p = self.project_name(rec.project_id.as_ref());
             if p.is_empty() { rec.cwd.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default() } else { p }
@@ -279,7 +277,6 @@ impl Workspace {
             dim: !running,
             running,
             indent: !with_project,
-            stale,
             archived: rec.hidden,
             scope: if with_project { "cur" } else { "prj" },
         }
@@ -378,8 +375,8 @@ impl Workspace {
         let running = row.running;
         let ws = cx.entity().downgrade();
         let hover_key = key.clone();
-        let right_text = if row.archived { "archived".to_string() } else if row.stale { "stale".to_string() } else { row.right.clone() };
-        let right_color = hsla(if row.stale { theme::WARN } else { theme::TEXT_FAINT });
+        let right_text = if row.archived { "archived".to_string() } else { row.right.clone() };
+        let right_color = hsla(theme::TEXT_FAINT);
         let title_color = hsla(if row.dim { theme::TEXT_DIM } else { theme::TEXT });
         let ellipsis = |el: Div| el.min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis();
         let content = if row.running {
@@ -832,19 +829,8 @@ impl Workspace {
                             .cursor_pointer()
                             .hover(|s| s.opacity(0.85))
                             .on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::ShowHome, window, cx)))
-                            .child(
-                                div()
-                                    .size(px(20.0))
-                                    .rounded(px(5.0))
-                                    .bg(hsla(theme::SURFACE_ELEVATED))
-                                    .border_1()
-                                    .border_color(hsla(theme::PANEL_BORDER))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .child(icon(IconName::Terminal, 12.0).text_color(hsla(theme::ACCENT))),
-                            )
-                            .child(div().text_size(crate::panels::scale::px(13.0)).font_weight(FontWeight::BOLD).text_color(hsla(theme::TEXT)).child("CLAUDIU")),
+                            .child(crate::panels::widgets::brand_mark(20.0))
+                            .child(div().text_size(crate::panels::scale::px(13.0)).font_weight(FontWeight::BOLD).text_color(hsla(theme::TEXT)).child("m4code")),
                     )
                     .when(hints, |d| d.child(key_hint(",")))
                     .child(icon_button("settings", IconName::Settings).occlude().on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::OpenSettings, window, cx)))),
@@ -1004,7 +990,6 @@ mod tests {
             dim: false,
             running,
             indent: false,
-            stale: false,
             archived: false,
             scope: "cur",
         }

@@ -481,17 +481,17 @@ fn a_turn_ended_by_a_refusal_says_what_was_refused() {
 #[cfg(unix)]
 fn a_program_only_the_login_shell_put_on_the_path_is_found() {
     use std::os::unix::fs::PermissionsExt;
-    let dir = std::env::temp_dir().join(format!("claudiu-acp-path-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("m4code-acp-path-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let tool = dir.join("claudiu-acp-path-probe");
+    let tool = dir.join("m4code-acp-path-probe");
     std::fs::write(&tool, b"#!/bin/sh\n").unwrap();
     std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
 
     let _only_test_using_login_path = crate::platform::LOGIN_PATH_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let previous = crate::platform::LOGIN_PATH.lock().unwrap().clone();
     *crate::platform::LOGIN_PATH.lock().unwrap() = Some(dir.as_os_str().to_os_string());
-    let found = locate_reloading("claudiu-acp-path-probe");
+    let found = locate_reloading("m4code-acp-path-probe");
     *crate::platform::LOGIN_PATH.lock().unwrap() = previous;
     let _ = std::fs::remove_dir_all(&dir);
     assert_eq!(found, Some(tool));

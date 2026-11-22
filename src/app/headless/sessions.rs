@@ -11,7 +11,7 @@ fn energy_sidebar_scheduling() {
         }
     }
     let data = tempfile::tempdir().unwrap();
-    unsafe { std::env::set_var("CLAUDIU_DATA_DIR", data.path()) };
+    unsafe { std::env::set_var("M4CODE_DATA_DIR", data.path()) };
     let mut cx = TestAppContext::single();
     cx.update(gpui_kit::init);
     let (window, ws) = cx.update(|app| gpui_kit::open_window(Default::default(), app,
@@ -50,7 +50,7 @@ fn energy_sidebar_scheduling() {
 fn run() {
     let data = tempfile::tempdir().unwrap();
     // SAFETY: set before any other thread reads the environment; this test owns the process.
-    unsafe { std::env::set_var("CLAUDIU_DATA_DIR", data.path()) };
+    unsafe { std::env::set_var("M4CODE_DATA_DIR", data.path()) };
     let work = tempfile::tempdir().unwrap();
     let mut cx = TestAppContext::single();
     cx.update(|app| {
@@ -139,7 +139,7 @@ fn run() {
 fn sessions_and_shell() {
     let data = tempfile::tempdir().unwrap();
     // SAFETY: set before any other thread reads the environment; this test owns the process.
-    unsafe { std::env::set_var("CLAUDIU_DATA_DIR", data.path()) };
+    unsafe { std::env::set_var("M4CODE_DATA_DIR", data.path()) };
     let work = tempfile::tempdir().unwrap();
     let mut cx = TestAppContext::single();
     cx.update(|app| {

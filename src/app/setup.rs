@@ -1,4 +1,4 @@
-//! The setup window: a short checklist of the two tools Claudiu runs (`claude`, required; `gh`, optional). It opens
+//! The setup window: a short checklist of the two tools m4code runs (`claude`, required; `gh`, optional). It opens
 //! alone on a first launch (see `main.rs`) and again from Settings or the missing-`claude` toast. It installs nothing.
 //! It never owns the store: it hands the path the user typed back in `SetupEvent::Done`, and the main window applies it.
 
@@ -6,14 +6,14 @@ use super::*;
 
 use gpui::{
     Bounds, ClickEvent, EventEmitter, InteractiveElement, IntoElement, ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, TitlebarOptions,
-    WindowBounds, WindowOptions, div, prelude::FluentBuilder, px, size,
+    WindowBounds, WindowOptions, div, px, size,
 };
 use gpui_kit::assets::IconName;
 use gpui_kit::component::input::Input;
 
 use crate::github::cli::AuthState;
 use crate::panels::theme::{self, hsla};
-use crate::panels::widgets::{button, button_disabled, clawd, icon, section_label, spinner};
+use crate::panels::widgets::{brand_mark, button, button_disabled, icon, section_label, spinner};
 
 const CLAUDE_INSTALL_PAGE: &str = "https://code.claude.com/docs/en/setup";
 const GH_INSTALL_PAGE: &str = "https://cli.github.com";
@@ -31,8 +31,8 @@ pub enum Mode {
 }
 
 pub enum SetupEvent {
-    /// The user is done. `claude_path` is the path they gave, `None` for "find it yourself".
-    Done { claude_path: Option<PathBuf> },
+    /// The user is done. `claude_path` is the optional custom path for Claude Code; `enabled` are the harnesses found.
+    Done { claude_path: Option<PathBuf>, enabled: Vec<crate::harness::Harness> },
     /// Run `gh auth login` in a terminal tab of the main window (only sent in `Mode::Reopened`).
     SignIn,
 }
@@ -44,7 +44,7 @@ pub fn window_options(cx: &App) -> WindowOptions {
         window_min_size: Some(window),
         is_resizable: false,
         app_id: Some(crate::platform::APP_ID.into()),
-        titlebar: Some(TitlebarOptions { title: Some("Set up Claudiu".into()), ..Default::default() }),
+        titlebar: Some(TitlebarOptions { title: Some("Set up m4code".into()), ..Default::default() }),
         ..Default::default()
     }
 }
@@ -61,7 +61,30 @@ pub fn parse_path(text: &str) -> Result<Option<PathBuf>, String> {
 
 struct Checked {
     claude: Option<PathBuf>,
+    codex: bool,
+    opencode: bool,
+    antigravity: bool,
     gh: AuthState,
+}
+
+impl Checked {
+    fn enabled_harnesses(&self) -> Vec<crate::harness::Harness> {
+        use crate::harness::Harness;
+        let mut out = Vec::new();
+        if self.claude.is_some() {
+            out.push(Harness::Claude);
+        }
+        if self.codex {
+            out.push(Harness::Codex);
+        }
+        if self.opencode {
+            out.push(Harness::OpenCode);
+        }
+        if self.antigravity {
+            out.push(Harness::Antigravity);
+        }
+        out
+    }
 }
 
 pub struct SetupView {
@@ -115,7 +138,7 @@ impl SetupView {
     }
 
     /// Look for both tools off the UI thread, after reading the PATH again: a desktop-launched app starts with a
-    /// minimal one, and a tool installed since Claudiu started is not on any.
+    /// minimal one, and a tool installed since m4code started is not on any.
     fn run_checks(&mut self, cx: &mut Context<Self>) {
         self.checked = None;
         self.checks += 1;
@@ -127,7 +150,13 @@ impl SetupView {
                 .background_executor()
                 .spawn(async move {
                     reload_path();
-                    Checked { claude: claude::discover(configured.as_deref()), gh: crate::github::cli::check_auth() }
+                    Checked {
+                        claude: claude::discover(configured.as_deref()),
+                        codex: platform::find_executable("codex-acp").is_some() || platform::find_executable("codex").is_some(),
+                        opencode: platform::find_executable("opencode").is_some(),
+                        antigravity: platform::find_executable("agy").is_some(),
+                        gh: crate::github::cli::check_auth(),
+                    }
                 })
                 .await;
             let _ = this.update(cx, |view, cx| {
@@ -160,7 +189,8 @@ impl SetupView {
             return;
         }
         self.done = true;
-        cx.emit(SetupEvent::Done { claude_path: self.path_to_hand_back(cx) });
+        let enabled = self.checked.as_ref().map_or_else(Vec::new, Checked::enabled_harnesses);
+        cx.emit(SetupEvent::Done { claude_path: self.path_to_hand_back(cx), enabled });
     }
 
     /// Hand the path back and close the window. The window goes in a deferred step: the main window listens through a
@@ -171,11 +201,11 @@ impl SetupView {
     }
 
     fn can_continue(&self) -> bool {
-        self.mode == Mode::Reopened || self.checked.as_ref().is_some_and(|found| found.claude.is_some())
+        self.mode == Mode::Reopened || self.checked.as_ref().is_some_and(|found| !found.enabled_harnesses().is_empty())
     }
 
     fn needs_restart_hint(&self) -> bool {
-        self.asked_again && self.checked.as_ref().is_some_and(|found| found.claude.is_none() || found.gh == AuthState::Missing)
+        self.asked_again && self.checked.as_ref().is_some_and(|found| found.enabled_harnesses().is_empty() || found.gh == AuthState::Missing)
     }
 }
 
@@ -223,25 +253,42 @@ impl SetupView {
     }
 
     fn claude_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let found = self.checked.as_ref().map(|found| &found.claude);
-        let state = match found {
-            None => checking_line("setup-claude-spin"),
-            Some(Some(path)) => status_line(IconName::CircleCheck, theme::OK, format!("Found at {}", path.display())),
-            Some(None) => status_line(IconName::CircleX, theme::DANGER, "Not found. Claudiu cannot start sessions without it."),
-        };
-        card()
-            .child(tool_title("Claude Code", "REQUIRED"))
-            .child(state)
-            .when(found == Some(&None), |row| row.child(div().flex().child(Self::open_page("setup-get-claude", "Get Claude Code", CLAUDE_INSTALL_PAGE, cx))))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(4.0))
-                    .child(section_label("PATH TO CLAUDE (ONLY IF IT IS SOMEWHERE UNUSUAL)"))
-                    .child(Input::new(&self.path_input))
-                    .children(self.path_error.clone().map(|message| div().text_size(crate::panels::scale::px(12.0)).text_color(hsla(theme::DANGER)).child(message))),
-            )
+        let mut body = card().child(tool_title("Coding agents", "AT LEAST ONE"));
+        match &self.checked {
+            None => body = body.child(checking_line("setup-claude-spin")),
+            Some(found) => {
+                let rows = [
+                    ("Claude Code", found.claude.is_some(), found.claude.as_ref().map(|p| format!("Found at {}", p.display()))),
+                    ("Antigravity", found.antigravity, found.antigravity.then(|| "Found (agy)".into())),
+                    ("Codex", found.codex, found.codex.then(|| "Found".into())),
+                    ("OpenCode", found.opencode, found.opencode.then(|| "Found".into())),
+                ];
+                for (name, ok, detail) in rows {
+                    body = body.child(status_line(
+                        if ok { IconName::CircleCheck } else { IconName::CircleSlash },
+                        if ok { theme::OK } else { theme::TEXT_FAINT },
+                        match detail {
+                            Some(d) => format!("{name} — {d}"),
+                            None => format!("{name} — not found"),
+                        },
+                    ));
+                }
+                if found.enabled_harnesses().is_empty() {
+                    body = body
+                        .child(status_line(IconName::CircleX, theme::DANGER, "No coding agent found on PATH. Install at least one to start sessions."))
+                        .child(div().flex().child(Self::open_page("setup-get-claude", "Get Claude Code", CLAUDE_INSTALL_PAGE, cx)));
+                }
+            }
+        }
+        body.child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(4.0))
+                .child(section_label("CUSTOM CLAUDE PATH (OPTIONAL)"))
+                .child(Input::new(&self.path_input))
+                .children(self.path_error.clone().map(|message| div().text_size(crate::panels::scale::px(12.0)).text_color(hsla(theme::DANGER)).child(message))),
+        )
     }
 
     fn gh_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -296,13 +343,13 @@ impl Render for SetupView {
                     .flex()
                     .flex_col()
                     .gap(px(8.0))
-                    .child(clawd(40.0))
-                    .child(div().text_size(crate::panels::scale::px(20.0)).font_weight(gpui::FontWeight::SEMIBOLD).child("Set up Claudiu"))
+                    .child(brand_mark(40.0))
+                    .child(div().text_size(crate::panels::scale::px(20.0)).font_weight(gpui::FontWeight::SEMIBOLD).child("Set up m4code"))
                     .child(
                         div()
                             .text_size(crate::panels::scale::px(13.0))
                             .text_color(hsla(theme::TEXT_DIM))
-                            .child("Claudiu runs your own claude and reaches GitHub through your own gh. It installs nothing; this page only checks that they are there."),
+                            .child("m4code runs your own coding agents (Claude Code, Antigravity, Codex, OpenCode) and reaches GitHub through gh. It installs nothing; this page checks what is installed."),
                     ),
             )
             .child(
@@ -346,9 +393,9 @@ impl Workspace {
         };
         self.setup_window = Some(handle);
         cx.subscribe_in(&view, window, |ws: &mut Workspace, _, ev: &SetupEvent, window, cx| match ev {
-            SetupEvent::Done { claude_path } => {
+            SetupEvent::Done { claude_path, enabled } => {
                 ws.setup_window = None;
-                ws.apply_setup(claude_path.clone(), cx);
+                ws.apply_setup(claude_path.clone(), enabled.clone(), cx);
             }
             SetupEvent::SignIn => {
                 window.activate_window();
@@ -358,13 +405,19 @@ impl Workspace {
         .detach();
     }
 
-    /// Use what the setup window ended with: its `claude` path (`None` clears it), looked for again, and saved. On a
-    /// first launch the save also creates the state file.
-    pub fn apply_setup(&mut self, claude_path: Option<PathBuf>, cx: &mut Context<Self>) {
+    /// Use what the setup window ended with: its optional `claude` path and detected harnesses, saved. On a first
+    /// launch the save also creates the state file and enables whichever harnesses were found.
+    pub fn apply_setup(&mut self, claude_path: Option<PathBuf>, enabled: Vec<crate::harness::Harness>, cx: &mut Context<Self>) {
         self.store.data.settings.claude_path = claude_path;
         self.claude_exe = claude::discover(self.store.data.settings.claude_path.as_deref());
+        if self.store.data.settings.enabled_harnesses.is_none() && !enabled.is_empty() {
+            self.store.data.settings.harness = enabled[0];
+            self.store.data.settings.enabled_harnesses = Some(enabled);
+        }
         self.store.mark_dirty();
         self.store.save();
+        self.push_models_to_threads(cx);
+        self.load_enabled_models(cx);
         cx.notify();
     }
 }
@@ -455,7 +508,7 @@ mod tests {
                 .update(|app| gpui_kit::open_window(Default::default(), app, |window, app| app.new(|cx| SetupView::with_reload(mode, None, || {}, window, cx))))
                 .unwrap();
             view.update(&mut cx, |view, _| {
-                view.checked = Some(Checked { claude: None, gh: AuthState::Missing });
+                view.checked = Some(Checked { claude: None, codex: false, opencode: false, antigravity: false, gh: AuthState::Missing });
                 assert_eq!(view.can_continue(), expected);
             });
         }

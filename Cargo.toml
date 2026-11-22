@@ -1,9 +1,9 @@
 [package]
-name = "claudiu"
+name = "m4code"
 version = "0.9.23"
 edition = "2024"
 description = "A native workspace for Claude Code sessions: real PTYs, projects, and session history"
-repository = "https://github.com/m4rocks/claudiu"
+repository = "https://github.com/m4rocks/m4code"
 publish = false
 
 [dependencies]

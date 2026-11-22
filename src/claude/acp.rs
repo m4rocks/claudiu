@@ -1,5 +1,5 @@
 //! Runs one task in a custom subagent's provider (`claude/subagents.rs`), through the Agent Client
-//! Protocol: `claudiu --acp`. The Custom subagents settings page also asks the agent for its models here (`models`).
+//! Protocol: `m4code --acp`. The Custom subagents settings page also asks the agent for its models here (`models`).
 //!
 //! The mod starts this once per subagent turn and writes the task to stdin as JSON (`Request`). A mod can write a
 //! child's stdin only once, and ACP is a conversation in both directions, so the conversation happens here. Progress
@@ -207,8 +207,8 @@ pub(super) fn antigravity_args(request: &Request) -> Result<Vec<String>, String>
     if request.edits {
         return Ok(vec![]);
     }
-    let claudiu = std::env::current_exe().map_err(|e| format!("Claudiu couldn't find itself to keep Antigravity read-only ({e})"))?;
-    let gemini = super::antigravity_read_only::prepare(&crate::datadir::data_dir(), &claudiu).map_err(|e| format!("Claudiu couldn't set up Antigravity's read-only folder ({e})"))?;
+    let m4code = std::env::current_exe().map_err(|e| format!("m4code couldn't find itself to keep Antigravity read-only ({e})"))?;
+    let gemini = super::antigravity_read_only::prepare(&crate::datadir::data_dir(), &m4code).map_err(|e| format!("m4code couldn't set up Antigravity's read-only folder ({e})"))?;
     Ok(vec!["--gemini-dir".into(), gemini.to_string_lossy().into_owned()])
 }
 
@@ -228,7 +228,7 @@ pub(super) fn antigravity_options(request: &Request) -> Vec<(&'static str, Strin
     if let Some(effort) = effort_level(request.effort.as_deref()) {
         options.push(("thought_level", effort.into()));
     }
-    // Read-only keeps the default mode, where agy asks before each edit or command and Claudiu refuses.
+    // Read-only keeps the default mode, where agy asks before each edit or command and m4code refuses.
     if request.edits {
         options.push(("mode", "accept-edits".into()));
     }
@@ -295,7 +295,7 @@ pub(crate) fn probe_server(
     }
 }
 
-/// The program Claudiu starts for `agent`, as failures name it.
+/// The program m4code starts for `agent`, as failures name it.
 fn server(agent: Agent) -> &'static str {
     agent.provider().server
 }
@@ -322,7 +322,7 @@ struct Process {
     errors: JoinHandle<String>,
 }
 
-/// The program on the PATH. A desktop launch has a minimal PATH, so OpenCode or Node installed since Claudiu started,
+/// The program on the PATH. A desktop launch has a minimal PATH, so OpenCode or Node installed since m4code started,
 /// or put on the PATH only by the shell's startup files, turns up once the login shell's PATH is read again.
 fn locate_reloading(program: &str) -> Option<PathBuf> {
     find_executable(program).or_else(|| {
@@ -397,7 +397,7 @@ fn initialize() -> Value {
     json!({ "jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {
         "protocolVersion": 1,
         "clientCapabilities": { "fs": { "readTextFile": false, "writeTextFile": false }, "terminal": false },
-        "clientInfo": { "name": "claudiu", "version": env!("CARGO_PKG_VERSION") },
+        "clientInfo": { "name": "m4code", "version": env!("CARGO_PKG_VERSION") },
     }})
 }
 

@@ -1,7 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 
 test('reports context, limits, auto-compact and advisor; rewrites only on change', async ($, on) => {
-  mock.env(on, { CLAUDIU_USAGE_DIR: 'usage', CLAUDIU_ACCOUNT: 'work' })
+  mock.env(on, { M4CODE_USAGE_DIR: 'usage', M4CODE_ACCOUNT: 'work' })
   let advisor: string | undefined = 'opus'
   const writes: { path: string; snap: any }[] = []
   on('fs.write', (_$, e) => {
@@ -10,7 +10,7 @@ test('reports context, limits, auto-compact and advisor; rewrites only on change
   })
   on('session.id', () => ({ value: 'abc/123' }))
   on('session.model', () => ({ value: 'claude-haiku-5-5' }))
-  on('config.list', () => ({ value: [{ key: 'autoCompact', label: 'Auto-compact', kind: 'boolean', value: true, provider: { plugin: 'Claudiu', tier: 'user' }, isLocked: false }] }))
+  on('config.list', () => ({ value: [{ key: 'autoCompact', label: 'Auto-compact', kind: 'boolean', value: true, provider: { plugin: 'm4code', tier: 'user' }, isLocked: false }] }))
   on('settings.read', () => ({ value: { advisorModel: advisor } }))
   let compactAt: number | undefined = 167_000
   on('session.usage', () => ({
@@ -64,7 +64,7 @@ test('reports context, limits, auto-compact and advisor; rewrites only on change
 
 test('reports the auto-compact threshold of the model the session switched to', async ($, on) => {
   // Each model has its own compaction window, so a cached threshold must not outlive a model change.
-  mock.env(on, { CLAUDIU_USAGE_DIR: 'usage' })
+  mock.env(on, { M4CODE_USAGE_DIR: 'usage' })
   let model = 'claude-sonnet-5-5'
   const windows: Record<string, number> = { 'claude-sonnet-5-5': 367_000, 'claude-haiku-5-5': 67_000 }
   const writes: any[] = []

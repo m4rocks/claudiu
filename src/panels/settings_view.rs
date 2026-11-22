@@ -31,7 +31,7 @@ pub(super) fn render_settings_card(
     cx: &mut Context<Workspace>,
 ) -> gpui::Stateful<gpui::Div> {
     let (page, worktrees, scroll) = (ws.settings_page, &ws.worktrees_page, &ws.settings_scroll);
-    let Some(Modal::Settings { shell, default_model, effort, permission, updates, scale, claudiu_off, skill_search, list_focus, renaming, .. }) = &ws.modal else {
+    let Some(Modal::Settings { shell, default_model, effort, permission, updates, scale, m4code_off, skill_search, list_focus, renaming, .. }) = &ws.modal else {
         return div().id("modal-card");
     };
     let (updates, scale) = (*updates, *scale);
@@ -116,7 +116,7 @@ pub(super) fn render_settings_card(
                 .gap(px(12.0))
                 .cursor_pointer()
                 .hover(|s| s.bg(hsla(theme::SURFACE_HOVER)))
-                .child(row_labels("Automatic updates", Some("Check for new Claudiu releases in the background")))
+                .child(row_labels("Automatic updates", Some("Check for new m4code releases in the background")))
                 .child(
                     div()
                         .flex_none()
@@ -145,13 +145,13 @@ pub(super) fn render_settings_card(
         }
         SettingsPage::Harnesses => ws.harnesses_page(cx).into_any_element(),
         SettingsPage::Skills => ws.skills_page(skill_search, cx).into_any_element(),
-        SettingsPage::ClaudiuTools => {
+        SettingsPage::M4codeTools => {
             let rows: Vec<AnyElement> = Feature::ALL
                 .into_iter()
                 .map(|feature| {
-                    let on = !claudiu_off.contains(&feature);
+                    let on = !m4code_off.contains(&feature);
                     div()
-                        .id(("settings-claudiu", feature as usize))
+                        .id(("settings-m4code", feature as usize))
                         .px(px(14.0))
                         .py(px(11.0))
                         .flex()
@@ -163,8 +163,8 @@ pub(super) fn render_settings_card(
                         .child(row_labels(feature.label(), Some(feature.description())))
                         .child(toggle_switch(on))
                         .on_click(cx.listener(move |ws, _: &ClickEvent, _, cx| {
-                            if let Some(Modal::Settings { claudiu_off, .. }) = ws.modal.as_mut() {
-                                flip(claudiu_off, feature);
+                            if let Some(Modal::Settings { m4code_off, .. }) = ws.modal.as_mut() {
+                                flip(m4code_off, feature);
                             }
                             cx.notify();
                         }))
@@ -246,7 +246,7 @@ pub(super) fn render_settings_card(
                 .flex()
                 .flex_col()
                 .gap(px(2.0))
-                .child(div().text_size(scaled(11.5)).font_weight(FontWeight::MEDIUM).text_color(hsla(theme::TEXT_DIM)).child(format!("Claudiu {}", env!("CARGO_PKG_VERSION"))))
+                .child(div().text_size(scaled(11.5)).font_weight(FontWeight::MEDIUM).text_color(hsla(theme::TEXT_DIM)).child(format!("m4code {}", env!("CARGO_PKG_VERSION"))))
                 .child(div().text_size(scaled(10.5)).text_color(hsla(theme::TEXT_FAINT)).child("Independent project")),
         );
 
@@ -266,7 +266,7 @@ pub(super) fn render_settings_card(
         .py(px(12.0))
         .border_t_1()
         .border_color(hsla(theme::BORDER))
-        .bg(hsla(0x09090a))
+        .bg(hsla(theme::PANEL_BG))
         .flex()
         .items_center()
         .justify_between()
@@ -282,11 +282,9 @@ pub(super) fn render_settings_card(
         )
         .child(
             div()
-                .flex()
-                .items_center()
-                .gap(px(8.0))
-                .child(button("modal-cancel", "Cancel", false).on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::Dismiss, window, cx))))
-                .child(button("modal-ok", "Save", true).on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.submit_modal(window, cx)))),
+                .text_size(scaled(11.0))
+                .text_color(hsla(theme::TEXT_FAINT))
+                .child("Changes save automatically"),
         );
 
     let main_pane = div()
@@ -357,7 +355,7 @@ fn row_shell(title: &str, subtitle: Option<&str>, trailing: AnyElement) -> gpui:
         .child(trailing)
 }
 
-/// The Worktrees section on the Projects page: worktree folders Claudiu made, grouped by repository.
+/// The Worktrees section on the Projects page: worktree folders m4code made, grouped by repository.
 fn worktrees_section(page: &crate::app::WorktreesPage, cx: &mut Context<Workspace>) -> gpui::Div {
     let scaled = crate::panels::scale::px;
     let faint = |text: String| div().text_size(scaled(11.5)).text_color(hsla(theme::TEXT_FAINT)).child(text);
@@ -467,7 +465,7 @@ fn worktrees_section(page: &crate::app::WorktreesPage, cx: &mut Context<Workspac
         .flex_col()
         .gap(px(6.0))
         .child(settings_group("WORKTREES", None, rows))
-        .child(faint("Worktrees Claudiu makes live in its own data folder, outside your repositories.".into()))
+        .child(faint("Worktrees m4code makes live in its own data folder, outside your repositories.".into()))
 }
 
 /// Default model row inside the New sessions card; clicking opens the universal model dropdown anchored to its pill.
@@ -584,6 +582,7 @@ fn scale_step(id: &'static str, label: &'static str, by: i32, cx: &mut Context<W
         .on_click(cx.listener(move |ws, _: &ClickEvent, _w, cx| {
             if let Some(Modal::Settings { scale, .. }) = ws.modal.as_mut() {
                 *scale = (*scale as i32 + by).clamp(crate::panels::scale::MIN as i32, crate::panels::scale::MAX as i32) as u32;
+                crate::panels::scale::set(*scale);
             }
             cx.notify();
         }))

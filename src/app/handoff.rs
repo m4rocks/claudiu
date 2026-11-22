@@ -1,5 +1,5 @@
 //! Hand-off: a running Claude session moves to the active account. Claude Code can't change the account of a running
-//! process, so its process is replaced by a new one that resumes the same conversation under the active account. The Claudiu session is the same record and keeps its shell
+//! process, so its process is replaced by a new one that resumes the same conversation under the active account. The m4code session is the same record and keeps its shell
 //! and cards; the old process ends. The record remembers its new account, so it starts there from then on. The right sidebar offers the hand-off for a session that
 //! runs under another account than the active one.
 
@@ -30,7 +30,7 @@ impl Workspace {
         self.modal = Some(Modal::Confirm {
             title: format!("Hand off to {to_name}?"),
             body: format!(
-                "Claude Code can't change accounts in a running session. Claudiu restarts this session \
+                "Claude Code can't change accounts in a running session. m4code restarts this session \
                  under {to_name} with the same conversation. Its history is kept."
             ),
             confirm: "Hand off".into(),

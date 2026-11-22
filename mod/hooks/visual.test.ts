@@ -1,10 +1,10 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-const TOOL = 'mcp__claudiu__show_visual'
+const TOOL = 'mcp__m4code__show_visual'
 const STEP = { turnId: 't', index: 0, answer: '', toolUses: [], stopReason: 'tool_use' as const, usage: null }
 
 test('streams the Markdown of a show_visual call while it is written, then writes the finished card', async ($, on) => {
-  mock.env(on, { CLAUDIU_VISUAL_PREFIX: 'visual/s--' })
+  mock.env(on, { M4CODE_VISUAL_PREFIX: 'visual/s--' })
   const writes: { path: string; card: any }[] = []
   on('fs.write', (_$, e) => {
     writes.push({ path: e.path, card: JSON.parse(e.text) })
@@ -32,15 +32,15 @@ test('streams the Markdown of a show_visual call while it is written, then write
   expect(writes.at(-1)!.card).toEqual({ call: 'toolu_1', content: '# Hi\n\nsome **bold** é' })
 })
 
-test('refuses an empty card and says so when Claudiu gave no file', async ($, on) => {
-  mock.env(on, { CLAUDIU_VISUAL_PREFIX: 'visual/s--' })
+test('refuses an empty card and says so when m4code gave no file', async ($, on) => {
+  mock.env(on, { M4CODE_VISUAL_PREFIX: 'visual/s--' })
   on('fs.write', () => ({ value: undefined }))
   const empty = await $.tool.call({ tool: TOOL, tool_use_id: 'x', content: '  ' })
   expect(empty.isError).toBe(true)
 })
 
 test('other tools and subagents are not streamed', async ($, on) => {
-  mock.env(on, { CLAUDIU_VISUAL_PREFIX: 'visual/s--' })
+  mock.env(on, { M4CODE_VISUAL_PREFIX: 'visual/s--' })
   let writes = 0
   on('fs.write', () => {
     writes += 1
@@ -57,10 +57,10 @@ test('other tools and subagents are not streamed', async ($, on) => {
 })
 
 const ROW = { tool: TOOL, tool_use_id: 'toolu_9', input: { title: 'Plan', content: '# Old card' }, isRunning: false, isErrored: false, isInterrupted: false }
-const MOUNT = { plugin: 'Claudiu', surface: 'terminal' as const, component: 'ToolUse' as const, requestId: 'toolu_9', props: ROW }
+const MOUNT = { plugin: 'm4code', surface: 'terminal' as const, component: 'ToolUse' as const, requestId: 'toolu_9', props: ROW }
 
 test('a drawn call reserves linked rows and writes its card back from the transcript', async ($, on) => {
-  mock.env(on, { CLAUDIU_VISUAL_PREFIX: 'visual/s--' })
+  mock.env(on, { M4CODE_VISUAL_PREFIX: 'visual/s--' })
   const writes: { path: string; text: string }[] = []
   on('fs.write', (_$, e) => {
     writes.push({ path: e.path, text: e.text })
@@ -68,7 +68,7 @@ test('a drawn call reserves linked rows and writes its card back from the transc
   })
   const ui = await $.ui.mount(MOUNT)
   const link = await ui.find({ type: 'Link' })
-  expect(link?.props?.href).toBe('claudiu://visual/toolu_9/0')
+  expect(link?.props?.href).toBe('m4code://visual/toolu_9/0')
   expect((await ui.find({ type: 'Text', text: /Plan/ }))?.text).toBe('Plan')
   await ui.unmount()
   await new Promise(done => setTimeout(done, 10))

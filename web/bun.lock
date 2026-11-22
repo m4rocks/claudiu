@@ -3,7 +3,7 @@
   "configVersion": 0,
   "workspaces": {
     "": {
-      "name": "claudiu-web",
+      "name": "m4code-web",
       "dependencies": {
         "@astrojs/vercel": "11.0.16",
         "@fontsource-variable/schibsted-grotesk": "^5.3.0",

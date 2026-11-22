@@ -1,4 +1,4 @@
-# Claudiu task runner. `just` lists the recipes.
+# m4code task runner. `just` lists the recipes.
 
 set windows-shell := ["powershell.exe", "-NoLogo", "-Command"]
 

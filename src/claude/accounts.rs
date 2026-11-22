@@ -1,4 +1,4 @@
-//! Alt accounts. Each is a Claude Code config folder (`CLAUDE_CONFIG_DIR`) inside Claudiu's data dir that holds
+//! Alt accounts. Each is a Claude Code config folder (`CLAUDE_CONFIG_DIR`) inside m4code's data dir that holds
 //! only its own login (`.credentials.json`, `.claude.json`). Folders (agents, skills, plugins, session history) link
 //! back to the main `~/.claude`; settings, `CLAUDE.md`, keybindings, MCP servers and project trust are kept equal in
 //! every account by `config_sync`. The main account is the user's normal Claude Code: launched without
@@ -63,7 +63,7 @@ pub fn link_shared(main: &Path, alt: &Path) -> io::Result<()> {
 /// Delete an alt folder: its login plus the links, never what they point at. Refuses anything outside `root()`.
 pub fn remove(alt: &Path) -> io::Result<()> {
     if !alt.starts_with(root()) || alt == root() {
-        return Err(io::Error::other("not a Claudiu account folder"));
+        return Err(io::Error::other("not a m4code account folder"));
     }
     delete(alt)
 }

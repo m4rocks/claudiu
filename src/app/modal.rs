@@ -59,6 +59,10 @@ impl Workspace {
 
     /// Enter / OK in a modal.
     pub fn submit_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.modal, Some(Modal::Settings { .. })) {
+            self.close_settings(window, cx);
+            return;
+        }
         let act = match self.modal.take() {
             Some(Modal::Confirm { act, .. }) => act,
             Some(Modal::Rename { id, input }) => {
@@ -91,119 +95,163 @@ impl Workspace {
                 let name = input.read(cx).value().split_whitespace().collect::<Vec<_>>().join("-");
                 if name.is_empty() { Act::Dismiss } else { Act::CreateBranch(cwd, name) }
             }
-            Some(Modal::Settings { shell, claude, default_model, effort, permission, updates, chrome, scale, claudiu_off, skills_field, skill_search, costly, list_focus, renaming, subagents }) => {
-                let clean = |s: &str| s.trim().trim_matches('"').to_string();
-                let (shell_t, claude_t) = (clean(shell.read(cx).value().as_ref()), clean(claude.read(cx).value().as_ref()));
-                // In category order, then top to bottom: the first bad field decides which page the dialog shows.
-                let paths = [("Shell", &shell, &shell_t, SettingsPage::General), ("Claude path", &claude, &claude_t, SettingsPage::Harnesses)]
-                    .into_iter()
-                    .find(|(_, _, t, _)| !t.is_empty() && platform::resolve_program(t).is_none())
-                    .map(|(what, field, t, page)| (page, field.clone(), format!("{what}: “{t}” is not a file or a program on PATH")));
-                let limits = claude::trim::Limits::parse(skills_field.read(cx).value().as_ref());
-                let bad_limits = limits.as_ref().err().map(|why| (SettingsPage::Harnesses, skills_field.clone(), why.clone()));
-                if let Some((page, field, msg)) = paths.or(bad_limits) {
-                    self.settings_page = page;
-                    let mut subagents = subagents;
-                    if page == SettingsPage::Harnesses {
-                        let search = self.modal_input_then("", "Search models", Self::close_harness_dialog, window, cx);
-                        subagents.picking = Some(HarnessDialog::Claude(search));
-                    }
-                    field.update(cx, |s, cx| s.focus(window, cx));
-                    self.modal = Some(Modal::Settings { shell, claude, default_model, effort, permission, updates, chrome, scale, claudiu_off, skills_field, skill_search, costly, list_focus, renaming, subagents });
-                    self.toast(msg, true, cx);
-                    return;
-                }
-                // Save keeps a name typed on the Projects page, as it keeps the other fields.
-                if let Some((id, name)) = renaming {
-                    let name = name.read(cx).value().to_string();
-                    self.store.rename_project(&id, &name);
-                }
-                let s = &mut self.store.data.settings;
-                s.shell = (!shell_t.is_empty()).then_some(shell_t);
-                s.claude_path = platform::resolve_program(&claude_t);
-                // Only the on/off state is edited here; a custom feed URL survives while checks stay on.
-                if updates == (s.update_url.as_deref() == Some("")) {
-                    s.update_url = (!updates).then(String::new);
-                }
-                s.scale = (scale != 100).then_some(scale);
-                s.chrome_default = chrome;
-                let enabled = if subagents.enabled.is_empty() { vec![default_model.harness] } else { subagents.enabled.clone() };
-                let chosen = if enabled.contains(&default_model.harness) {
-                    default_model
-                } else {
-                    let all = s.aggregated_models_for(&enabled);
-                    crate::store::Settings::resolve_model(&all, enabled[0], None)
-                };
-                let next_model = (!chosen.id.is_empty()).then_some(chosen.id);
-                let default_model_changed = s.harness != chosen.harness || s.new_session.model != next_model;
-                let harness_changed = s.harness != chosen.harness || s.enabled_harnesses.as_ref() != Some(&enabled);
-                let legacy_perm = claude::defaults::PermissionMode::ALL
-                    .into_iter()
-                    .find(|m| m.acp_id() == permission || m.name() == permission);
-                s.enabled_harnesses = Some(enabled);
-                s.harness = chosen.harness;
-                s.new_session = claude::defaults::NewSessionDefaults {
-                    model: next_model,
-                    effort: Some(effort),
-                    permission_mode: legacy_perm,
-                    mode_id: Some(permission),
-                };
-                self.home.effort = effort;
-                let claudiu_off = mcp::normalized_features(&claudiu_off);
-                // The skill limits go into Claude Code's own settings.json (every account gets the file through
-                // config_sync). When that fails the old limits stay, so what the page shows is what Claude Code has.
-                let mut trim_error = None;
-                let mut limits = limits.unwrap_or_default();
-                if s.limits != limits {
-                    match claude::trim::write_global_limits(&limits, &s.applied_trims) {
-                        Ok(owned) => s.applied_trims = owned,
-                        Err(e) => {
-                            trim_error = Some(e);
-                            limits = s.limits.clone();
-                        }
-                    }
-                }
-                // The catalogs are what the agents last offered, kept as they are; the page edits the rest.
-                let custom_subagents = claude::subagents::CustomSubagents(claude::subagents::AgentMap::from_fn(|agent| {
-                    let form = subagents.get(agent);
-                    let catalog = s.custom_subagents.get(agent).catalog.clone();
-                    // No list means every model ticked, so subagents switched on get the whole catalog.
-                    let models = if form.on && form.models.is_empty() { catalog.iter().map(|m| m.id.clone()).collect() } else { form.models.clone() };
-                    claude::subagents::AgentChoice { on: form.on, models, edits: form.edits, catalog }
-                }));
-                let tools_changed = s.limits != limits || s.claudiu_tools_off != claudiu_off;
-                let subagents_changed = s.custom_subagents != custom_subagents || s.claude_picked != subagents.claude_models;
-                s.limits = limits;
-                s.claudiu_tools_off = claudiu_off;
-                s.custom_subagents = custom_subagents;
-                s.claude_picked = subagents.claude_models.clone();
-                crate::panels::scale::set(scale);
-                self.shell = platform::default_shell(s.shell.as_deref());
-                self.claude_exe = claude::discover(s.claude_path.as_deref());
-                self.store.mark_dirty();
-                if default_model_changed {
-                    self.home.model = None;
-                }
-                if harness_changed || subagents_changed {
-                    self.push_models_to_threads(cx);
-                    self.load_enabled_models(cx);
-                    self.sync_skills(None, cx);
-                }
-                if let Some(e) = trim_error {
-                    self.toast(format!("Settings saved, but Claude Code's settings.json could not be changed ({e}), so the tool trims stay as they were."), true, cx);
-                } else if subagents_changed && !tools_changed {
-                    self.toast("Settings saved. Custom subagents apply to new and resumed sessions.", false, cx);
-                } else if tools_changed {
-                    self.toast("Settings saved. Tool changes apply to new sessions; resumed sessions keep the old instructions until their next compaction.", false, cx);
-                } else {
-                    self.toast("Settings saved. Open sessions keep their current shell.", false, cx);
-                }
-                Act::Dismiss
-            }
-            None => return,
+            Some(Modal::Settings { .. }) | None => return,
         };
         self.focus_active(window, cx);
         self.act(act, window, cx);
+    }
+
+    /// Close Settings, auto-saving every valid change and applying it to open sessions immediately.
+    pub fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(Modal::Settings {
+            shell,
+            claude,
+            default_model,
+            effort,
+            permission,
+            updates,
+            chrome,
+            scale,
+            m4code_off,
+            skills_field,
+            renaming,
+            subagents,
+            ..
+        }) = self.modal.take()
+        else {
+            return;
+        };
+        let clean = |s: &str| s.trim().trim_matches('"').to_string();
+        let (shell_t, claude_t) = (clean(shell.read(cx).value().as_ref()), clean(claude.read(cx).value().as_ref()));
+        let mut warnings = Vec::new();
+
+        // Keep a name typed on the Projects page.
+        if let Some((id, name)) = renaming {
+            let name = name.read(cx).value().to_string();
+            self.store.rename_project(&id, &name);
+        }
+
+        let s = &mut self.store.data.settings;
+        if shell_t.is_empty() || platform::resolve_program(&shell_t).is_some() {
+            s.shell = (!shell_t.is_empty()).then_some(shell_t);
+        } else {
+            warnings.push(format!("Shell: “{shell_t}” is not a file or a program on PATH"));
+        }
+        if claude_t.is_empty() || platform::resolve_program(&claude_t).is_some() {
+            s.claude_path = platform::resolve_program(&claude_t);
+        } else {
+            warnings.push(format!("Claude path: “{claude_t}” is not a file or a program on PATH"));
+        }
+
+        // Only the on/off state is edited here; a custom feed URL survives while checks stay on.
+        if updates == (s.update_url.as_deref() == Some("")) {
+            s.update_url = (!updates).then(String::new);
+        }
+        let scale_changed = s.scale != (scale != 100).then_some(scale);
+        s.scale = (scale != 100).then_some(scale);
+        s.chrome_default = chrome;
+
+        let enabled = if subagents.enabled.is_empty() { vec![default_model.harness] } else { subagents.enabled.clone() };
+        let chosen = if enabled.contains(&default_model.harness) {
+            default_model
+        } else {
+            let all = s.aggregated_models_for(&enabled);
+            crate::store::Settings::resolve_model(&all, enabled[0], None)
+        };
+        let next_model = (!chosen.id.is_empty()).then_some(chosen.id.clone());
+        let default_model_changed = s.harness != chosen.harness || s.new_session.model != next_model;
+        let effort_changed = s.new_session.effort != Some(effort);
+        let permission_changed = s.new_session.mode_id.as_deref() != Some(permission.as_str());
+        let harness_changed = s.harness != chosen.harness || s.enabled_harnesses.as_ref() != Some(&enabled);
+        let legacy_perm = claude::defaults::PermissionMode::ALL
+            .into_iter()
+            .find(|m| m.acp_id() == permission || m.name() == permission);
+        s.enabled_harnesses = Some(enabled);
+        s.harness = chosen.harness;
+        s.new_session = claude::defaults::NewSessionDefaults {
+            model: next_model,
+            effort: Some(effort),
+            permission_mode: legacy_perm,
+            mode_id: Some(permission.clone()),
+        };
+        self.home.effort = effort;
+
+        let m4code_off = mcp::normalized_features(&m4code_off);
+        let mut limits = match claude::trim::Limits::parse(skills_field.read(cx).value().as_ref()) {
+            Ok(l) => l,
+            Err(why) => {
+                warnings.push(why);
+                s.limits.clone()
+            }
+        };
+        if s.limits != limits {
+            match claude::trim::write_global_limits(&limits, &s.applied_trims) {
+                Ok(owned) => s.applied_trims = owned,
+                Err(e) => {
+                    warnings.push(format!("Claude Code's settings.json could not be changed ({e})"));
+                    limits = s.limits.clone();
+                }
+            }
+        }
+
+        // The catalogs are what the agents last offered, kept as they are; the page edits the rest.
+        let custom_subagents = claude::subagents::CustomSubagents(claude::subagents::AgentMap::from_fn(|agent| {
+            let form = subagents.get(agent);
+            let catalog = s.custom_subagents.get(agent).catalog.clone();
+            let models = if form.on && form.models.is_empty() { catalog.iter().map(|m| m.id.clone()).collect() } else { form.models.clone() };
+            claude::subagents::AgentChoice { on: form.on, models, edits: form.edits, catalog }
+        }));
+        let subagents_changed = s.custom_subagents != custom_subagents || s.claude_picked != subagents.claude_models;
+        s.limits = limits;
+        s.m4code_tools_off = m4code_off;
+        s.custom_subagents = custom_subagents;
+        s.claude_picked = subagents.claude_models.clone();
+
+        crate::panels::scale::set(scale);
+        self.shell = platform::default_shell(s.shell.as_deref());
+        self.claude_exe = claude::discover(s.claude_path.as_deref());
+        self.store.mark_dirty();
+        if default_model_changed {
+            self.home.model = None;
+        }
+
+        // Apply updated settings to every open session immediately.
+        self.push_models_to_threads(cx);
+        let effort_id = effort.name().to_string();
+        for live in &self.live {
+            if let Some(thread) = live.view.thread() {
+                thread.update(cx, |t, cx| {
+                    if default_model_changed && t.harness == chosen.harness && !chosen.id.is_empty() {
+                        t.pick_model(chosen.clone(), cx);
+                    }
+                    if effort_changed {
+                        t.pending_effort = Some(effort_id.clone());
+                        if let Some(opt) = t.thread.option("thought_level")
+                            && opt.choices.iter().any(|(v, _)| v == &effort_id)
+                        {
+                            let id = opt.id.clone();
+                            t.set_option(id, effort_id.clone(), cx);
+                        }
+                    }
+                    if permission_changed && t.thread.modes.iter().any(|(id, _)| id == &permission) {
+                        t.set_mode(permission.clone(), cx);
+                    }
+                    if scale_changed {
+                        t.remeasure(0);
+                    }
+                    cx.notify();
+                });
+            }
+        }
+        if harness_changed || subagents_changed {
+            self.load_enabled_models(cx);
+            self.sync_skills(None, cx);
+        }
+        if let Some(msg) = warnings.into_iter().next() {
+            self.toast(msg, true, cx);
+        }
+        self.focus_active(window, cx);
+        cx.notify();
     }
 
     /// The editor "Open in" uses: the last one picked if it is still installed, else the first one found.
