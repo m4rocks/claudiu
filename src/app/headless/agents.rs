@@ -221,6 +221,8 @@ fn shared_subagents_keep_their_parent_focus_permissions_and_conversation() {
                 assert!(std::time::Instant::now() < until, "a compaction after the child's turn swallowed its report");
                 std::thread::yield_now();
             }
+            let turns = std::fs::read_to_string(work.path().join("fake_agent.py.turns")).unwrap();
+            assert!(turns.contains(r#""prompt": "/compact""#), "the child's full context started a compaction: {turns}");
             step(&mut cx, &|ws, window, cx| ws.end_live(&full, window, cx));
         }
         #[cfg(target_os = "linux")]

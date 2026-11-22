@@ -551,7 +551,6 @@ impl ThreadView {
         self.send(text, window, cx);
     }
 
-    /// Send `text` as the user's next message, now or after the turn that is running.
     /// A message m4code sends on the session's behalf, such as a subagent's report. It waits for the current turn
     /// like the user's own, but never starts or joins a hand-off the user set up in the model picker.
     pub fn deliver(&mut self, text: String, cx: &mut Context<Self>) {
@@ -560,6 +559,7 @@ impl ThreadView {
         cx.notify();
     }
 
+    /// Send `text` as the user's next message, now or after the turn that is running.
     pub fn send(&mut self, text: String, _window: &mut Window, cx: &mut Context<Self>) {
         if let Some(target) = self.pending_model.take().filter(|m| m.harness != self.harness) {
             let effort = self.pending_effort.take();
