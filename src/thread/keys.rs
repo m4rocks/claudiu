@@ -27,8 +27,13 @@ pub enum Key {
     /// Up and Down through the messages sent before.
     Older,
     Newer,
-    /// Tab on a slash command being typed: complete it.
+    /// Tab on a slash command being typed: complete it to the highlighted one.
     Complete,
+    /// Up and Down through the slash command menu.
+    MenuUp,
+    MenuDown,
+    /// Enter with the slash command menu open: run the highlighted command.
+    RunCommand,
     /// Ctrl+O: show every tool's output in full, or fold it again.
     ToggleDetail,
     /// Ctrl+T: show or hide the plan.
@@ -51,6 +56,8 @@ pub struct State {
     pub escape_just_pressed: bool,
     /// What is typed is the start of a slash command with a match.
     pub completing: bool,
+    /// How many commands the slash menu lists; 0 when it is closed.
+    pub commands: usize,
 }
 
 pub fn key(keystroke: &Keystroke, s: State) -> Option<Key> {
@@ -64,7 +71,10 @@ pub fn key(keystroke: &Keystroke, s: State) -> Option<Key> {
         "c" if m.control && !m.platform && !m.alt && !m.shift && s.working => Some(Key::Interrupt),
         "c" if m.control && !m.platform && !m.alt && !m.shift && !s.draft_empty => Some(Key::Clear),
         "tab" if m.shift && !m.control && !m.alt && !m.platform => Some(Key::CycleMode),
-        "tab" if plain && s.completing => Some(Key::Complete),
+        "tab" if plain && (s.completing || s.commands > 0) => Some(Key::Complete),
+        "up" if plain && s.commands > 0 => Some(Key::MenuUp),
+        "down" if plain && s.commands > 0 => Some(Key::MenuDown),
+        "enter" if plain && s.commands > 0 => Some(Key::RunCommand),
         "up" if plain && (s.draft_empty || s.in_history) => Some(Key::Older),
         "down" if plain && s.in_history => Some(Key::Newer),
         "o" if m.control && !m.platform && !m.alt && !m.shift => Some(Key::ToggleDetail),
@@ -130,6 +140,17 @@ mod tests {
         assert_eq!(press("up", State { draft_empty: false, in_history: true, ..idle() }), Some(Key::Older));
         assert_eq!(press("down", idle()), None);
         assert_eq!(press("down", State { draft_empty: false, in_history: true, ..idle() }), Some(Key::Newer));
+    }
+
+    #[test]
+    fn the_slash_menu_takes_the_arrows_enter_and_tab() {
+        let menu = State { draft_empty: false, commands: 3, completing: true, ..idle() };
+        assert_eq!(press("down", menu), Some(Key::MenuDown));
+        assert_eq!(press("up", menu), Some(Key::MenuUp), "not the history");
+        assert_eq!(press("enter", menu), Some(Key::RunCommand));
+        assert_eq!(press("tab", menu), Some(Key::Complete));
+        assert_eq!(press("enter", State { commands: 0, ..menu }), None, "Enter sends when no menu is open");
+        assert_eq!(press("shift-enter", menu), None, "a new line");
     }
 
     #[test]

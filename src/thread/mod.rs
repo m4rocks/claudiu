@@ -187,6 +187,9 @@ pub struct ThreadView {
     /// The working tree as it was before each message, oldest first (`git/snapshot.rs`). Empty outside a git
     /// repository.
     pub snapshots: Vec<String>,
+    /// The slash menu's highlighted row, and its scroll.
+    command_highlight: usize,
+    command_scroll: gpui::ScrollHandle,
     /// Whether the working tree differs from the last snapshot; None while a turn runs or the check is out.
     pub(super) changed: Option<bool>,
     /// The review of what changed since the last message, while it is open.
@@ -212,6 +215,7 @@ impl ThreadView {
             cx.subscribe_in(&composer, window, |v: &mut Self, _, ev: &InputEvent, window, cx| match ev {
                 InputEvent::PressEnter { .. } => v.submit(window, cx),
                 InputEvent::Change => {
+                    v.command_highlight = 0;
                     if v.reference.as_ref().is_some_and(|(_, with)| v.composer.read(cx).value().as_ref() != with) {
                         v.reference = None;
                     }
@@ -276,6 +280,8 @@ impl ThreadView {
             cards: HashMap::new(),
             card_ui,
             snapshots: Vec::new(),
+            command_highlight: 0,
+            command_scroll: gpui::ScrollHandle::new(),
             changed: None,
             review: None,
             _subscriptions: subscriptions,
@@ -711,6 +717,7 @@ impl ThreadView {
             in_history: self.history_at.is_some(),
             escape_just_pressed: self.last_escape.is_some_and(|t| t.elapsed() < keys::DOUBLE_PRESS),
             completing: self.completion(&draft).is_some(),
+            commands: self.matching_commands(cx).len(),
         };
         let is_escape = ev.keystroke.key == "escape";
         let Some(key) = keys::key(&ev.keystroke, state) else {
@@ -744,8 +751,25 @@ impl ThreadView {
             }
             keys::Key::Older | keys::Key::Newer => self.walk_history(key == keys::Key::Older, &draft, window, cx),
             keys::Key::Complete => {
-                if let Some(name) = self.completion(&draft) {
+                if let Some(name) = self.highlighted_command(cx).or_else(|| self.completion(&draft)) {
                     self.set_draft(&format!("/{name} "), window, cx);
+                }
+            }
+            keys::Key::MenuUp | keys::Key::MenuDown => {
+                let last = self.matching_commands(cx).len().saturating_sub(1);
+                let at = self.command_highlight.min(last);
+                self.command_highlight = match (key == keys::Key::MenuDown, at) {
+                    (true, at) if at >= last => 0,
+                    (true, at) => at + 1,
+                    (false, 0) => last,
+                    (false, at) => at - 1,
+                };
+                self.command_scroll.scroll_to_item(self.command_highlight);
+            }
+            keys::Key::RunCommand => {
+                if let Some(name) = self.highlighted_command(cx) {
+                    self.set_draft(&format!("/{name}"), window, cx);
+                    self.submit(window, cx);
                 }
             }
             keys::Key::ToggleDetail => {
@@ -858,11 +882,16 @@ impl ThreadView {
         self.thread.commands.iter().map(|c| &c.name).find(|n| n.starts_with(typed) && n.as_str() != typed).cloned()
     }
 
-    /// The commands a typed `/` prefix matches, for the menu over the composer.
-    fn matching_commands(&self, cx: &App) -> Vec<&crate::harness::thread::Command> {
+    /// The commands a typed `/` prefix matches, for the menu over the composer: all of them, which it scrolls.
+    pub(super) fn matching_commands(&self, cx: &App) -> Vec<&crate::harness::thread::Command> {
         let draft = self.composer.read(cx).value();
         let Some(typed) = draft.strip_prefix('/').filter(|t| !t.contains(char::is_whitespace)) else { return vec![] };
-        self.thread.commands.iter().filter(|c| c.name.starts_with(typed)).take(8).collect()
+        self.thread.commands.iter().filter(|c| c.name.starts_with(typed)).collect()
+    }
+
+    fn highlighted_command(&self, cx: &App) -> Option<String> {
+        let commands = self.matching_commands(cx);
+        commands.get(self.command_highlight.min(commands.len().saturating_sub(1))).map(|c| c.name.clone())
     }
 
     fn walk_history(&mut self, older: bool, draft: &str, window: &mut Window, cx: &mut Context<Self>) {

@@ -551,7 +551,12 @@ impl ThreadView {
 
         let commands = self.matching_commands(cx);
         if !commands.is_empty() {
+            let highlight = self.command_highlight.min(commands.len() - 1);
             let mut menu = div()
+                .id("thread-commands")
+                .max_h(px(240.0))
+                .overflow_y_scroll()
+                .track_scroll(&self.command_scroll)
                 .flex()
                 .flex_col()
                 .px(px(8.0))
@@ -571,8 +576,9 @@ impl ThreadView {
                         .py(px(3.0))
                         .rounded(px(5.0))
                         .cursor_pointer()
+                        .when(n == highlight, |d| d.bg(hsla(theme::SURFACE_HOVER)))
                         .hover(|s| s.bg(hsla(theme::SURFACE_HOVER)))
-                        .child(div().text_color(hsla(theme::TEXT)).child(format!("/{}", c.name)))
+                        .child(div().flex_none().text_color(hsla(theme::TEXT)).child(format!("/{}", c.name)))
                         .child(div().flex_1().truncate().text_color(hsla(theme::TEXT_DIM)).child(c.description.clone()))
                         .on_click(cx.listener(move |v, _: &ClickEvent, window, cx| {
                             v.set_draft(&format!("/{name} "), window, cx);
