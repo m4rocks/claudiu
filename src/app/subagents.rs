@@ -137,7 +137,7 @@ impl Workspace {
 
     /// When subagent `id`'s turn ends, its parent gets the report as a message: at once when idle, else after its
     /// current turn. A parent blocked in wait_subagent for this child gets it from the wait instead.
-    pub(super) fn report_to_parent(&mut self, id: &str, outcome: &str, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn report_to_parent(&mut self, id: &str, outcome: &str, cx: &mut Context<Self>) {
         let Some(record) = self.store.session(id) else { return };
         let Some(meta) = record.claude.as_ref() else { return };
         let Some(parent) = meta.parent_session.clone() else { return };
@@ -152,7 +152,7 @@ impl Workspace {
         }
         let prompt = crate::harness::thread::subagent_report_prompt(id, meta.harness.key(), record.display_title(), outcome, &body);
         if let Some(parent) = self.live_view(&parent).and_then(|v| v.thread()).cloned() {
-            parent.update(cx, |view, cx| view.send(prompt, window, cx));
+            parent.update(cx, |view, cx| view.deliver(prompt, cx));
         }
     }
 

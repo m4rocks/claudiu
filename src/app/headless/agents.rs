@@ -201,6 +201,28 @@ fn shared_subagents_keep_their_parent_focus_permissions_and_conversation() {
             assert!(std::time::Instant::now() < until, "the parent's chat never got the child's report");
             std::thread::yield_now();
         }
+        if harness == Harness::Claude {
+            // A turn that fills the context starts an automatic compaction; its report still reaches the parent.
+            let full = std::cell::RefCell::new(String::new());
+            step(&mut cx, &|ws, window, cx| {
+                let reply: Value = serde_json::from_str(&ws.run_request(&request("spawn_subagent", json!({"harness": harness, "prompt": "fill context"})), window, cx).unwrap()).unwrap();
+                *full.borrow_mut() = reply["id"].as_str().unwrap().to_string();
+            });
+            let full = full.into_inner();
+            let until = std::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                cx.run_until_parked();
+                let reported = ws.read_with(&cx, |ws, app| {
+                    ws.live_view(&parent).unwrap().thread().unwrap().read(app).thread.entries.iter().any(|entry| matches!(entry,
+                        crate::harness::thread::Entry::User(text) if crate::harness::thread::parse_subagent_report(text)
+                            .is_some_and(|report| report.id == full && report.body == "ok")))
+                });
+                if reported { break; }
+                assert!(std::time::Instant::now() < until, "a compaction after the child's turn swallowed its report");
+                std::thread::yield_now();
+            }
+            step(&mut cx, &|ws, window, cx| ws.end_live(&full, window, cx));
+        }
         #[cfg(target_os = "linux")]
         let child_pid = std::fs::read_to_string(work.path().join("fake_agent.py.turns")).unwrap().lines()
             .filter_map(|line| serde_json::from_str::<Value>(line).ok())

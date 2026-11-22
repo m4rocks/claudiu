@@ -470,7 +470,9 @@ impl ThreadView {
                 let call = params.pointer("/toolCall/toolCallId").and_then(Value::as_str).and_then(|call| self.thread.tool_at(call));
                 let shown = call.and_then(|at| match &self.thread.entries[at] { Entry::Tool(call) => Some(call.title.as_str()), _ => None });
                 let title = params.pointer("/toolCall/title").and_then(Value::as_str).or(shown).unwrap_or_default();
-                if crate::claude::mcp::is_own_tool(title) {
+                // A shell command or an edit is never one of m4code's tools, whatever its title says.
+                let kind = params.pointer("/toolCall/kind").and_then(Value::as_str).unwrap_or_default();
+                if !matches!(kind, "execute" | "edit" | "delete" | "move") && crate::claude::mcp::is_own_tool(title) {
                     if let Some(connection) = &self.connection {
                         connection.respond(id, json!({"outcome": crate::claude::acp::permission(&params["options"], true)}));
                     }
@@ -550,6 +552,14 @@ impl ThreadView {
     }
 
     /// Send `text` as the user's next message, now or after the turn that is running.
+    /// A message m4code sends on the session's behalf, such as a subagent's report. It waits for the current turn
+    /// like the user's own, but never starts or joins a hand-off the user set up in the model picker.
+    pub fn deliver(&mut self, text: String, cx: &mut Context<Self>) {
+        self.queue.push_back(Queued { text, shown: false, compact: false });
+        self.send_next(cx);
+        cx.notify();
+    }
+
     pub fn send(&mut self, text: String, _window: &mut Window, cx: &mut Context<Self>) {
         if let Some(target) = self.pending_model.take().filter(|m| m.harness != self.harness) {
             let effort = self.pending_effort.take();
@@ -680,8 +690,11 @@ impl ThreadView {
             cx.notify();
             return;
         }
+        // Decided before `send_next`, which may start an automatic compaction: the turn's work is done all the same,
+        // and its report is the reply above, not what the compaction says.
+        let idle = self.queue.is_empty() && !compacted;
         self.send_next(cx);
-        if !self.working && !compacted {
+        if idle {
             cx.emit(ThreadEvent::Idle(outcome));
         }
         cx.notify();
@@ -1298,6 +1311,24 @@ mod tests {
     fn a_comment_goes_on_its_own_line_after_what_was_typed() {
         assert_eq!(with_comment("", "@a.rs#L1: why"), "@a.rs#L1: why");
         assert_eq!(with_comment("look at these \n", "@a.rs#L1: why"), "look at these\n@a.rs#L1: why");
+    }
+
+    #[gpui::test]
+    fn a_message_from_m4code_never_starts_the_hand_off_the_user_picked(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_kit::init);
+        let dir = tempfile::tempdir().unwrap();
+        let start = super::Start {
+            record_id: String::new(), harness: Harness::Claude, all_models: vec![], picked: vec![], cwd: dir.path().to_path_buf(),
+            env: vec![], mcp_servers: vec![], meta: serde_json::Value::Null, session_id: None, mode: None, options: vec![],
+            prompt: None, prior_entries: vec![], server: Some(("definitely-not-a-real-program-m4code".into(), vec![])),
+        };
+        let (view, cx) = cx.add_window_view(|window, cx| super::ThreadView::new(start, window, cx));
+        view.update(cx, |v, cx| {
+            v.pending_model = Some(crate::harness::CatalogModel { harness: Harness::Codex, id: "gpt-6".into(), name: "GPT-6".into() });
+            v.deliver("[m4code subagent report]".into(), cx);
+            assert!(v.pending_model.is_some(), "the user's picked model waits for the user's own message");
+            assert_eq!(v.queue.len(), 1, "the report waits to be sent to this agent");
+        });
     }
 
     #[gpui::test]

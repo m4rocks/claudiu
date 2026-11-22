@@ -114,20 +114,14 @@ pub fn allowed_tools(off: &[&str]) -> Vec<String> {
     OWN_TOOLS.iter().copied().chain(MODEL_TOOLS).chain(BRIDGE_TOOLS).chain(SUBAGENT_TOOLS).filter(|t| !is_off(off, t)).map(|t| format!("mcp__m4code__{t}")).collect()
 }
 
-/// Whether a tool call's title names one of m4code's own tools, as a harness shows it (`m4code: list_models`,
-/// `m4code_list_models`, `mcp__m4code__list_models`). Their permission prompts are answered yes: the instructions
-/// already limit them to what the user asked for.
+/// Whether a tool call's title is one of m4code's own tools and nothing else, as a harness names it
+/// (`m4code: list_models`, `m4code_list_models`, `mcp__m4code__list_models`). Their permission prompts are answered
+/// yes: the instructions already limit them to what the user asked for. The whole title must match, because a shell
+/// command or a file path can contain the same words.
 pub fn is_own_tool(title: &str) -> bool {
-    let separator = |c: char| !c.is_alphanumeric();
-    title.match_indices("m4code").any(|(at, server)| {
-        let rest = &title[at + server.len()..];
-        if !rest.starts_with(separator) {
-            return false;
-        }
-        let rest = rest.trim_start_matches(separator);
-        OWN_TOOLS.iter().chain(&MODEL_TOOLS).chain(&BRIDGE_TOOLS).chain(&SUBAGENT_TOOLS).any(|tool| {
-            rest.strip_prefix(tool).is_some_and(|after| !after.starts_with(|c: char| c.is_alphanumeric() || c == '_'))
-        })
+    let title = title.trim();
+    OWN_TOOLS.iter().chain(&MODEL_TOOLS).chain(&BRIDGE_TOOLS).chain(&SUBAGENT_TOOLS).any(|tool| {
+        ["mcp__m4code__", "m4code: ", "m4code_", "m4code.", "m4code/", "m4code__"].iter().any(|prefix| title.strip_prefix(prefix) == Some(tool))
     })
 }
 
@@ -627,7 +621,10 @@ mod tests {
         for title in ["m4code: set_model", "m4code_start_code_session", "mcp__m4code__read_code_session", "m4code.link_session"] {
             assert!(is_own_tool(title), "{title}");
         }
-        for title in ["Bash rm -rf", "set_model", "m4code: set_models_everywhere", "other: list_models", "m4codex_set_model"] {
+        for title in [
+            "Bash rm -rf", "set_model", "m4code: set_models_everywhere", "other: list_models", "m4codex_set_model",
+            "grep -rn mcp__m4code__set_model src && rm -rf build", "Edit `/x/m4code/show_visual.rs`", "echo m4code: set_model",
+        ] {
             assert!(!is_own_tool(title), "{title}");
         }
     }

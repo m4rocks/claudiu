@@ -963,7 +963,6 @@ fn diff(path: &std::path::Path, old: Option<&str>, new: &str, full: bool) -> Any
     block.when(old.is_none(), |b| b.border_color(hsla(theme::OK))).into_any_element()
 }
 
-/// What a run's line says it holds.
 /// A report's line among the steps, such as `Codex subagent reported · done`, from its `state` key.
 fn report_line(title: &str, state: &str) -> String {
     let state = match state {
@@ -974,6 +973,7 @@ fn report_line(title: &str, state: &str) -> String {
     format!("{title} reported · {state}")
 }
 
+/// What a run's line says it holds.
 fn run_label(thoughts: usize, calls: usize) -> String {
     let calls = match calls {
         0 => None,
