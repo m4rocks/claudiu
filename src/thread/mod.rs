@@ -182,6 +182,8 @@ pub struct ThreadView {
     error: Option<String>,
     /// Shown instead of the conversation while the session moves (a hand-off).
     pub handover: Option<Handover>,
+    /// This view took over a conversation from another harness (an in-place hand-off), and shows it while it starts.
+    took_over: bool,
     cards: HashMap<String, Card>,
     card_ui: Entity<CardUi>,
     /// The working tree as it was before each message, oldest first (`git/snapshot.rs`). Empty outside a git
@@ -277,6 +279,7 @@ impl ThreadView {
             last_escape: None,
             error: None,
             handover: None,
+            took_over: !start.prior_entries.is_empty(),
             cards: HashMap::new(),
             card_ui,
             snapshots: Vec::new(),
@@ -949,6 +952,12 @@ impl ThreadView {
     /// Waiting for the user to answer a permission question.
     pub fn is_waiting(&self) -> bool {
         self.question.is_some()
+    }
+
+    /// What the message box says while the agent starts, so the wait after a hand-off is visible.
+    pub fn starting_label(&self) -> Option<String> {
+        (self.phase == Phase::Starting && self.handover.is_none())
+            .then(|| if self.took_over { format!("Handing over to {}…", self.harness.name()) } else { format!("Starting {}…", self.harness.name()) })
     }
 
     pub fn is_loading(&self) -> bool {

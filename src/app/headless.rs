@@ -2004,6 +2004,11 @@ fn handing_a_session_to_another_agent() {
     .unwrap();
     let after = ws.read_with(&cx, |ws, _| ws.active.clone().unwrap());
     assert_eq!(after, first, "dynamic handoff continues in the same session");
+    assert_eq!(
+        ws.read_with(&cx, |ws, app| thread(ws, &first).and_then(|t| t.read(app).starting_label())).as_deref(),
+        Some("Handing over to Codex…"),
+        "the message box says the hand-off is under way while the new agent starts"
+    );
     ws.read_with(&cx, |ws, _| {
         let rec = ws.store.session(&first).unwrap();
         assert_eq!((rec.claude.as_ref().unwrap().harness, &rec.cwd), (crate::harness::Harness::Codex, &cwd));

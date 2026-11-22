@@ -702,6 +702,9 @@ impl ThreadView {
             );
         }
 
+        if let Some(label) = self.starting_label() {
+            chips.push(div().ml(px(4.0)).flex().items_center().gap(px(5.0)).child(spinner("thread-starting", 11.0)).child(faint(label)).into_any_element());
+        }
         if self.working {
             chips.push(div().ml(px(4.0)).flex().items_center().gap(px(5.0)).child(spinner("thread-working", 11.0)).child(faint("Working".into())).into_any_element());
             chips.push(div().flex().gap(px(4.0)).items_center().child(key_badge("Esc")).child(faint("stop".into())).into_any_element());
