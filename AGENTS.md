@@ -2,6 +2,18 @@
 
 Claudiu is a native Rust + GPUI desktop app that manages sessions around the user's existing `claude` CLI.
 
+## Where things live
+
+- `src/main.rs`: app startup, menus, key bindings and assets.
+- `src/app/`: workspace state and behavior. `act.rs` dispatches actions; the other files group methods by task. `headless.rs` and `headless/` exercise the workspace on GPUI's test platform.
+- `src/panels/`: workspace rendering. `workspace_view.rs` is the root view; `home.rs`, `overlays.rs`, `workspace_pickers.rs` and `settings_view.rs` draw its main sections.
+- `src/harness/` and `src/thread/`: agent launch and ACP sessions, and the conversation view.
+- `src/claude/`: Claude Code integration, accounts, usage, configuration and custom subagents. `acp/` handles custom subagent conversations, configuration and messages.
+- `src/store.rs`: persisted app state and writes. `src/store/` holds state types and reconciliation with external sessions.
+- `src/git/` and `src/github/`: local Git operations and the GitHub pane.
+- `src/terminal/`: shell terminal, input and rendering. `src/lsp/` handles language servers.
+- `src/skills/` manages skills; `src/visual/` renders visual output. `src/files.rs`, `src/datadir.rs`, `src/platform.rs` and `src/updater.rs` cover their named responsibilities.
+
 ## Settings
 
 - Tracker: GitHub issues in m4rocks/claudiu
