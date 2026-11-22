@@ -217,6 +217,10 @@ pub struct ThreadView {
     /// Ctrl+O: every tool's output in full.
     pub detail: bool,
     pub(crate) subagent_edits: Option<bool>,
+    /// Each message's parsed markdown, by entry. The chat keeps it rather than the frame: a row that scrolls out of
+    /// the list would otherwise drop it and parse again when it comes back, and a long message (over 4 KB) parses
+    /// in the background, so it would draw empty for a frame and then grow, moving everything around it.
+    markdown: HashMap<usize, Entity<gpui_kit::component::text::TextViewState>>,
     /// What a message sent while the agent works does (Settings → General).
     pub(crate) follow_up: crate::store::FollowUp,
     pub compaction: crate::harness::compaction::Policy,
@@ -346,6 +350,7 @@ impl ThreadView {
             rows,
             detail: false,
             subagent_edits: None,
+            markdown: HashMap::new(),
             follow_up: crate::store::FollowUp::default(),
             compaction: Default::default(),
             canonical_history: false,
@@ -1717,6 +1722,38 @@ mod tests {
             v.queue.clear();
             v.send_as("hi".into(), FollowUp::Steer, cx);
             assert_eq!(v.waiting_messages(), [(0, "hi")]);
+        });
+    }
+
+    #[gpui::test]
+    fn a_reply_keeps_its_parsed_markdown_between_frames(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_kit::init);
+        let dir = tempfile::tempdir().unwrap();
+        let start = super::Start {
+            record_id: String::new(),
+            harness: Harness::Claude,
+            all_models: vec![],
+            picked: vec![],
+            cwd: dir.path().to_path_buf(),
+            env: vec![],
+            mcp_servers: vec![],
+            meta: serde_json::Value::Null,
+            session_id: None,
+            mode: None,
+            options: vec![],
+            prompt: None,
+            prior_entries: vec![],
+            server: Some(("definitely-not-a-real-program-m4code".into(), vec![])),
+        };
+        let (view, cx) = cx.add_window_view(|window, cx| super::ThreadView::new(start, window, cx));
+        view.update(cx, |v, cx| {
+            let mut cache = std::mem::take(&mut v.markdown);
+            super::render::markdown_of(&mut cache, 3, "**first**", cx);
+            let first = cache[&3].entity_id();
+            super::render::markdown_of(&mut cache, 3, "**first** and more", cx);
+            assert_eq!(cache[&3].entity_id(), first, "a redraw or a streamed reply keeps the parse, so the row keeps its height");
+            super::render::markdown_of(&mut cache, 4, "other", cx);
+            assert_ne!(cache[&4].entity_id(), first, "each entry has its own");
         });
     }
 

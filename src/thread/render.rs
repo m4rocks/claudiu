@@ -9,6 +9,9 @@ use gpui::{
 };
 use gpui_kit::assets::IconName;
 use gpui_kit::component::input::Textarea;
+use gpui_kit::component::text::{TextView, TextViewState};
+use std::collections::HashMap;
+use gpui::{AppContext, Entity};
 
 use super::{ThreadEvent, ThreadPicker, ThreadView};
 use crate::harness::CatalogModel;
@@ -93,6 +96,15 @@ fn keep_line_breaks(text: &str) -> String {
         out.push_str(if breaks { "  \n" } else { "\n" });
     }
     out
+}
+
+/// Entry `ix`'s text as markdown, parsed once and kept in `cache` (`ThreadView::markdown`) so it keeps its height
+/// as it scrolls.
+pub(super) fn markdown_of(cache: &mut HashMap<usize, Entity<TextViewState>>, ix: usize, text: &str, cx: &mut Context<ThreadView>) -> TextView {
+    let state = cache.entry(ix).or_insert_with(|| cx.new(|cx| TextViewState::markdown(text, cx))).clone();
+    // Unchanged text costs a comparison; a reply still streaming in is appended to what is parsed.
+    state.update(cx, |s, cx| s.set_text(text, cx));
+    crate::github::ui::styled_markdown(TextView::new(&state))
 }
 
 fn waiting(message: &str) -> Div {
@@ -187,9 +199,9 @@ impl ThreadView {
                 .bg(hsla(theme::ROW_ACTIVE))
                 .border_1()
                 .border_color(hsla(theme::PANEL_BORDER))
-                .child(crate::github::ui::markdown(format!("thread-user-md-{ix}"), &keep_line_breaks(text)))
+                .child(markdown_of(&mut self.markdown, ix, &keep_line_breaks(text), cx))
                 .into_any_element(),
-            Entry::Agent(text) => div().px(px(2.0)).child(crate::github::ui::markdown(format!("thread-md-{ix}"), text)).into_any_element(),
+            Entry::Agent(text) => div().px(px(2.0)).child(markdown_of(&mut self.markdown, ix, text, cx)).into_any_element(),
             Entry::Thought(text) => {
                 let run = tool_run(&self.groupable(), ix);
                 match &run {
