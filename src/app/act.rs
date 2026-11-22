@@ -122,8 +122,6 @@ pub enum Act {
     /// The shown session runs under another account: restart it under the active one (asks first, see `handoff.rs`).
     Handoff,
     ConfirmHandoff(Id),
-    /// A session's request to open another one with a first message, by request id (see `cross.rs`).
-    ConfirmStartSession(String),
     /// Shows the sharing warning, then `ConfirmAddAccount`.
     AddAccount,
     ConfirmAddAccount,
@@ -519,7 +517,6 @@ impl Workspace {
                 self.toast("Switched. New and resumed sessions use this account; running sessions keep theirs.", false, cx);
             }
             Act::Handoff => self.ask_handoff(window, cx),
-            Act::ConfirmStartSession(req_id) => self.confirm_start(&req_id, window, cx),
             Act::ConfirmHandoff(id) => {
                 self.modal = None;
                 self.start_handoff(&id, window, cx);

@@ -1,7 +1,6 @@
 //! Sessions reaching other sessions: a Claude Code session can list, search and read the others and open a new one.
-//! The MCP helper files the request (`claude/bridge.rs`) and m4code answers it on its next tick. Listing, searching and
-//! reading answer at once; opening a session with a first message of its own asks the user first, since that is a
-//! prompt the user never wrote.
+//! The MCP helper files the request (`claude/bridge.rs`) and m4code answers it on its next tick, without asking the
+//! user: the tools' instructions tell the model to call them only when the user asked for what they do.
 
 use super::*;
 use crate::claude::bridge::{self, Request};
@@ -12,42 +11,18 @@ use serde_json::Value;
 /// 32,000 characters.
 const MAX_PROMPT: usize = 2000;
 
-/// A `start_code_session` request that waits for the user's answer to its dialog.
-pub struct PendingStart {
-    req: Request,
-    /// The dialog is up (it needs the one modal slot, which another dialog may hold).
-    shown: bool,
-}
-
-/// A worktree switch the user approved, waiting for the turn in which the session asked for it to end: the switch restarts
-/// the process that made the call.
+/// A worktree switch a session asked for, waiting for the turn in which it asked to end: the switch restarts the
+/// process that made the call.
 pub struct PendingSwitch {
     id: Id,
     folder: PathBuf,
     base: crate::git::worktree::Base,
-    /// Unix seconds when the user approved it.
-    approved: i64,
+    /// Unix seconds when the session asked for it.
+    asked: i64,
 }
 
-/// How long an approved switch waits for the turn to end before it is given up.
+/// How long a switch waits for the turn to end before it is given up.
 const SWITCH_PATIENCE_SECS: i64 = 300;
-
-/// Longest part of the first message the dialog quotes.
-const SHOWN_PROMPT: usize = 600;
-
-/// What the dialog says about the session a session wants to open.
-fn start_question(asker: &str, folder: &std::path::Path, prompt: &str) -> String {
-    let quoted: String = prompt.chars().take(SHOWN_PROMPT).collect();
-    let more = if prompt.chars().count() > SHOWN_PROMPT { "…" } else { "" };
-    format!("“{asker}” wants to open a new Claude Code session in {} with this first message:\n\n{quoted}{more}", folder.to_string_lossy())
-}
-
-/// What the dialog says about the worktree a session wants to move into.
-fn switch_question(asker: &str, folder: &std::path::Path, new: bool) -> String {
-    let name = folder.file_name().map_or_else(|| folder.to_string_lossy().into_owned(), |n| n.to_string_lossy().into_owned());
-    let what = if new { format!("a new worktree, {name}") } else { format!("the worktree {name}") };
-    format!("“{asker}” wants to switch to {what}. Its process restarts once its turn ends, and the conversation continues there.")
-}
 
 /// `2026-10-22 09:10 UTC` for a Unix time (days since 1970 turned into a calendar date, no time crate needed).
 fn utc(ts: i64) -> String {
@@ -106,10 +81,6 @@ impl Workspace {
     pub(super) fn serve_requests(&mut self, requests: Vec<Request>, window: &mut Window, cx: &mut Context<Self>) {
         for mut req in requests.into_iter().filter(|r| r.deadline > crate::store::now()) {
             let prepared = self.prepare(&mut req, cx);
-            if prepared.is_ok() && wants_confirmation(&req) {
-                self.pending_starts.push(PendingStart { req, shown: false });
-                continue;
-            }
             if prepared.is_ok() && req.tool == "wait_subagent" && self.defer_subagent_wait(&req, cx) {
                 continue;
             }
@@ -117,60 +88,7 @@ impl Workspace {
             let ok = result.is_ok();
             answer(&req, ok, result.unwrap_or_else(|e| e));
         }
-        self.settle_pending_starts(window, cx);
         self.settle_subagent_waits(cx);
-    }
-
-    /// Once a second: drop the requests nobody waits for, show the next dialog when the modal slot is free, and tell the
-    /// session when its dialog was closed without a yes.
-    fn settle_pending_starts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let now = crate::store::now();
-        self.pending_starts.retain(|p| p.req.deadline > now);
-        let asking = match &self.modal {
-            Some(Modal::Confirm { act: Act::ConfirmStartSession(id), .. }) => Some(id.clone()),
-            _ => None,
-        };
-        let mut declined = vec![];
-        self.pending_starts.retain(|p| {
-            let gone = p.shown && asking.as_deref() != Some(p.req.id.as_str());
-            if gone {
-                declined.push(p.req.clone());
-            }
-            !gone
-        });
-        for req in declined {
-            answer(&req, false, "The user declined.");
-        }
-        if self.modal.is_some() {
-            return;
-        }
-        let Some(p) = self.pending_starts.iter_mut().find(|p| !p.shown) else { return };
-        p.shown = true;
-        let requester = p.req.from.split_once(':').map_or(p.req.from.as_str(), |(_, id)| id);
-        let asker = self.store.session(requester).map_or_else(|| "A session".to_string(), |s| s.display_title().to_string());
-        let folder = PathBuf::from(p.req.args["folder"].as_str().unwrap_or_default());
-        let (title, body, confirm) = if p.req.tool == "switch_worktree" {
-            ("Switch worktree?", switch_question(&asker, &folder, p.req.args["new"].as_bool().unwrap_or(false)), "Switch")
-        } else if p.req.tool == "set_model" {
-            let name = p.req.args["name"].as_str().unwrap_or_default();
-            ("Hand off to another agent?", format!("“{asker}” wants to switch to {name}. The conversation moves to that agent once this turn ends."), "Hand off")
-        } else {
-            let prompt = p.req.args["prompt"].as_str().unwrap_or_default().trim().to_string();
-            ("Start a Claude Code session?", start_question(&asker, &folder, &prompt), "Start session")
-        };
-        self.modal = Some(Modal::Confirm { title: title.into(), body, confirm: confirm.into(), danger: false, act: Act::ConfirmStartSession(p.req.id.clone()) });
-        window.focus(&self.modal_focus, cx);
-        cx.notify();
-    }
-
-    /// The user said yes to a waiting `start_code_session`.
-    pub(super) fn confirm_start(&mut self, req_id: &str, window: &mut Window, cx: &mut Context<Self>) {
-        self.modal = None;
-        let Some(ix) = self.pending_starts.iter().position(|p| p.req.id == req_id) else { return };
-        let req = self.pending_starts.remove(ix).req;
-        let result = self.run_request(&req, window, cx);
-        let ok = result.is_ok();
-        answer(&req, ok, result.unwrap_or_else(|e| e));
     }
 
     /// Check what the request needs. A new session's folder, or the worktree to switch to, is resolved into `req.args["folder"]`.
@@ -192,6 +110,16 @@ impl Workspace {
         if req.args["prompt"].as_str().is_some_and(|p| p.trim().chars().count() > MAX_PROMPT) {
             return Err(format!("The first message is too long ({MAX_PROMPT} characters at most). Shorten it, or write the details to a file and point to it."));
         }
+        if let Some(wanted) = req.args["model"].as_str().map(str::trim).filter(|m| !m.is_empty()) {
+            let model = find_model(&self.store.data.settings.aggregated_models(), wanted)?;
+            req.args["harness"] = model.harness.key().into();
+            req.args["model_id"] = model.id.into();
+        }
+        if let Some(effort) = req.args["effort"].as_str().filter(|e| !e.is_empty())
+            && !crate::claude::defaults::Effort::ALL.iter().any(|known| known.name() == effort)
+        {
+            return Err("Choose low, medium, high, xhigh or max effort.".into());
+        }
         Ok(())
     }
 
@@ -202,7 +130,7 @@ impl Workspace {
     }
 
     /// Resolve `set_model`'s model into `harness`, `model_id` and `name`, and mark a switch onto another harness
-    /// (`cross`), which waits for the user's yes.
+    /// (`cross`), which hands the conversation over once the turn ends.
     fn prepare_model(&self, req: &mut Request, cx: &App) -> Result<(), String> {
         let thread = self.requester_thread(req)?.read(cx);
         let wanted = req.args["model"].as_str().map(str::trim).filter(|m| !m.is_empty());
@@ -235,7 +163,7 @@ impl Workspace {
         Ok(())
     }
 
-    /// Start the approved switches whose session has ended its turn. Looks at Claude Code's own status, as a switch from
+    /// Start the switches whose session has ended its turn. Looks at Claude Code's own status, as a switch from
     /// the menu does, so the call that asked is finished and answered first.
     pub(super) fn run_pending_switches(&mut self, statuses: &std::collections::HashMap<String, String>, window: &mut Window, cx: &mut Context<Self>) {
         let now = crate::store::now();
@@ -247,7 +175,7 @@ impl Workspace {
                 Some(status) => status == "idle",
                 None => self.live_view(&p.id).is_some_and(|v| !v.is_working(cx)),
             };
-            if now - p.approved > SWITCH_PATIENCE_SECS {
+            if now - p.asked > SWITCH_PATIENCE_SECS {
                 self.toast("The worktree switch was dropped: the session's turn did not end.", true, cx);
             } else if !self.is_running(&p.id, cx) {
                 // Closed in the meantime: nothing to move.
@@ -328,23 +256,33 @@ impl Workspace {
             }
             "start_code_session" => {
                 let cwd = folder.ok_or("No folder.")?;
+                let harness = req.args["harness"].as_str().and_then(|key| crate::harness::Harness::ALL.into_iter().find(|h| h.key() == key)).unwrap_or(self.store.data.settings.harness);
+                // The model may pick the model and effort; the permission mode stays the user's default for new
+                // sessions (`Starter::OtherSession` never bypasses permissions).
+                let mut options = vec![];
+                if let Some(model) = req.args["model_id"].as_str() {
+                    options.push(("model", model.to_string()));
+                }
+                if let Some(effort) = req.args["effort"].as_str().filter(|e| !e.is_empty()) {
+                    options.push(("thought_level", effort.to_string()));
+                }
                 let before = self.selected.clone();
-                self.new_claude_with(cwd.clone(), prompt, vec![], Starter::OtherSession, window, cx);
+                self.new_session_with(harness, cwd.clone(), prompt, options, Starter::OtherSession, window, cx);
                 match self.selected.clone().filter(|s| Some(s) != before.as_ref()) {
                     Some(id) => {
                         // A session started from another one is linked with it from the start.
                         self.link(requester_id, &id);
-                        Ok(format!("Opened a Claude Code session (id {id}) in {}. It is running in the user's sidebar.", cwd.to_string_lossy()))
+                        Ok(format!("Opened a {} session (id {id}) in {}. It is running in the user's sidebar.", harness.name(), cwd.to_string_lossy()))
                     }
-                    None => Err("The session could not be started (is the `claude` CLI installed?).".into()),
+                    None => Err(format!("The {} session could not be started.", harness.name())),
                 }
             }
             "switch_worktree" => {
                 let folder = folder.ok_or("No folder.")?;
                 let base = if req.args["base"].as_str() == Some("current") { crate::git::worktree::Base::Current } else { crate::git::worktree::Base::Main };
                 let name = folder.file_name().map_or_else(|| "the main checkout".into(), |n| n.to_string_lossy().into_owned());
-                self.pending_switches.push(PendingSwitch { id: requester_id.to_string(), folder, base, approved: crate::store::now() });
-                Ok(format!("Approved. m4code switches this session to {name} as soon as your turn ends, so end your turn now: reply in one line and make no more tool calls. The user's next message continues the same conversation there."))
+                self.pending_switches.push(PendingSwitch { id: requester_id.to_string(), folder, base, asked: crate::store::now() });
+                Ok(format!("m4code switches this session to {name} as soon as your turn ends, so end your turn now: reply in one line and make no more tool calls. The user's next message continues the same conversation there."))
             }
             "list_models" => {
                 let thread = self.requester_thread(req)?.read(cx);
@@ -363,7 +301,7 @@ impl Workspace {
                         let message = req.args["message"].as_str().map(str::trim).filter(|m| !m.is_empty()).map_or_else(|| "Carry on with the task from where the conversation left off.".into(), String::from);
                         let name = model.name.clone();
                         thread.update(cx, |t, cx| t.hand_off_after_turn(model, effort, message, cx));
-                        Ok(format!("Approved. m4code hands this conversation to {name} as soon as your turn ends, so end your turn now: reply in one line and make no more tool calls."))
+                        Ok(format!("m4code hands this conversation to {name} as soon as your turn ends, so end your turn now: reply in one line and make no more tool calls."))
                     }
                     model => {
                         let done = thread.update(cx, |t, cx| t.switch_model(model.as_ref(), effort.as_deref(), cx))?;
@@ -456,43 +394,5 @@ mod tests {
         assert_eq!(utc(0), "1970-01-01 00:00 UTC");
         assert_eq!(utc(1_782_119_400), "2026-06-22 09:10 UTC");
         assert_eq!(utc(951_782_400 + 3600), "2000-02-29 01:00 UTC");
-    }
-}
-
-/// A new session with a first message of its own is a prompt the user did not write, and a worktree switch or a
-/// hand-off to another harness restarts the session: all of them wait for the user's yes.
-fn wants_confirmation(req: &Request) -> bool {
-    req.tool == "switch_worktree"
-        || (req.tool == "set_model" && req.args["cross"].as_bool() == Some(true))
-        || (req.tool == "start_code_session" && req.args["prompt"].as_str().is_some_and(|p| !p.trim().is_empty()))
-}
-
-#[cfg(test)]
-mod start_tests {
-    use super::*;
-    use serde_json::json;
-
-    fn request(tool: &str, args: Value) -> Request {
-        Request { id: "r".into(), from: "code:s".into(), tool: tool.into(), args, deadline: 0 }
-    }
-
-    #[test]
-    fn only_a_session_with_a_first_message_needs_the_users_yes() {
-        assert!(wants_confirmation(&request("start_code_session", json!({"folder": "/p", "prompt": "do it"}))));
-        assert!(!wants_confirmation(&request("start_code_session", json!({"folder": "/p"}))), "no prompt, nothing to approve");
-        assert!(!wants_confirmation(&request("start_code_session", json!({"folder": "/p", "prompt": "  "}))));
-        assert!(!wants_confirmation(&request("read_code_session", json!({"prompt": "x"}))));
-        assert!(wants_confirmation(&request("switch_worktree", json!({"worktree": "fix"}))), "a switch always asks");
-        assert!(wants_confirmation(&request("set_model", json!({"model": "codex:gpt-6", "cross": true}))), "a hand-off asks");
-        assert!(!wants_confirmation(&request("set_model", json!({"model": "opus", "cross": false}))), "the same harness switches at once");
-    }
-
-    #[test]
-    fn the_dialog_quotes_a_long_message_in_part() {
-        let long = "x".repeat(SHOWN_PROMPT + 50);
-        let text = start_question("Fix build", std::path::Path::new("/p"), &long);
-        assert!(text.starts_with("“Fix build” wants to open a new Claude Code session in /p"));
-        assert!(text.ends_with(&format!("{}…", "x".repeat(SHOWN_PROMPT))));
-        assert!(!start_question("a", std::path::Path::new("/p"), "short").contains('…'));
     }
 }

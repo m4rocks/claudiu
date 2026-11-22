@@ -467,6 +467,17 @@ impl ThreadView {
                 self.report_chosen(cx);
             }
             Event::Permission { id, params } => {
+                // m4code's own tools act only on what the user asked for, so their prompts are answered yes. The
+                // request may leave the title out and name a call the chat already shows.
+                let call = params.pointer("/toolCall/toolCallId").and_then(Value::as_str).and_then(|call| self.thread.tool_at(call));
+                let shown = call.and_then(|at| match &self.thread.entries[at] { Entry::Tool(call) => Some(call.title.as_str()), _ => None });
+                let title = params.pointer("/toolCall/title").and_then(Value::as_str).or(shown).unwrap_or_default();
+                if crate::claude::mcp::is_own_tool(title) {
+                    if let Some(connection) = &self.connection {
+                        connection.respond(id, json!({"outcome": crate::claude::acp::permission(&params["options"], true)}));
+                    }
+                    return;
+                }
                 if let Some(edits) = self.subagent_edits && acp::is_tool_permission(&params) {
                     if let Some(connection) = &self.connection {
                         connection.respond(id, json!({"outcome": crate::claude::acp::permission(&params["options"], edits)}));

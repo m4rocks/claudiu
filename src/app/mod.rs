@@ -609,13 +609,11 @@ pub struct Workspace {
     pub attached_sync: attached_sync::Sync,
     /// The shared Claude Code settings are kept equal across accounts, see `config_sync.rs`.
     pub config_sync: config_sync::Runner,
-    /// Sessions asked to open another with a first message; each waits for the user's yes (`cross.rs`).
-    pub pending_starts: Vec<cross::PendingStart>,
     pub pending_subagent_waits: Vec<subagents::PendingWait>,
     /// Parents whose finished subagents are unfolded in the right sidebar.
     pub finished_subagents_open: std::collections::HashSet<Id>,
     pub pending_handoffs: HashMap<Id, agent_handoff::Pending>,
-    /// Worktree switches the user approved that a session asked for; each waits for the session's turn to end (`cross.rs`).
+    /// Worktree switches a session asked for; each waits for the session's turn to end (`cross.rs`).
     pub pending_switches: Vec<cross::PendingSwitch>,
     pub drag_pos: Option<gpui::Point<gpui::Pixels>>,
     pub update: UpdateState,
@@ -744,7 +742,6 @@ impl Workspace {
             last_swap: std::time::Instant::now(),
             attached_sync: Default::default(),
             config_sync: Default::default(),
-            pending_starts: vec![],
             pending_subagent_waits: vec![],
             finished_subagents_open: Default::default(),
             pending_handoffs: HashMap::new(),

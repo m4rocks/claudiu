@@ -723,3 +723,78 @@ fn a_session_answers_in_its_thread(harness: crate::harness::Harness) {
     });
 }
 
+
+#[test]
+fn a_session_opens_another_with_its_model_and_effort_without_asking() {
+    use crate::claude::bridge::Request;
+    use serde_json::json;
+    let _dirs = crate::datadir::use_throwaway_folders();
+    let work = tempfile::tempdir().unwrap();
+    let server = fake_agent(work.path());
+    // The stand-in offers a model and an effort to choose, and notes each choice it is sent.
+    let script = PathBuf::from(&server.1[0]);
+    let options = r#"{"sessionId": "fake-session", "configOptions": [{"id": "model", "category": "model", "type": "select", "currentValue": "default", "options": [{"value": "default", "name": "Default"}, {"value": "gpt-6", "name": "GPT-6"}]}, {"id": "effort", "category": "thought_level", "type": "select", "currentValue": "medium", "options": [{"value": "medium", "name": "medium"}, {"value": "high", "name": "high"}]}]}"#;
+    let contents = std::fs::read_to_string(&script).unwrap()
+        .replace(r#""result": {"sessionId": "fake-session"}"#, &format!(r#""result": {options}"#))
+        .replace("    if \"id\" not in m or \"method\" not in m:\n", "    if \"id\" not in m or \"method\" not in m:\n        open(__file__ + \".answers\", \"a\").write(line)\n")
+        .replace("        if \"edit\" in text:", "        if text == \"child task\":\n            send({\"jsonrpc\": \"2.0\", \"id\": \"perm-1\", \"method\": \"session/request_permission\", \"params\": {\"sessionId\": s, \"toolCall\": {\"toolCallId\": \"c1\", \"title\": \"m4code_list_models\"}, \"options\": [{\"optionId\": \"yes\", \"kind\": \"allow_once\"}, {\"optionId\": \"no\", \"kind\": \"reject_once\"}]}})\n        if \"edit\" in text:")
+        .replace("    elif method == \"session/list\":", "    elif method == \"session/set_config_option\":\n        with open(__file__ + \".options\", \"a\") as log:\n            log.write(m[\"params\"][\"configId\"] + \"=\" + m[\"params\"][\"value\"] + \"\\n\")\n        send({\"jsonrpc\": \"2.0\", \"id\": i, \"result\": {}})\n    elif method == \"session/list\":");
+    std::fs::write(&script, contents).unwrap();
+    let mut cx = TestAppContext::single();
+    cx.update(|app| {
+        gpui_kit::init(app);
+        gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, app);
+    });
+    let (window, ws) = cx.update(|app| gpui_kit::open_window(Default::default(), app, |window, app| app.new(|cx| Workspace::new(window, vec![], cx)))).unwrap();
+    let step = |cx: &mut TestAppContext, f: &dyn Fn(&mut Workspace, &mut Window, &mut Context<Workspace>)| {
+        cx.update_window(window, |_, window, app| ws.update(app, |ws, cx| f(ws, window, cx))).unwrap();
+        cx.run_until_parked();
+    };
+    step(&mut cx, &|ws, window, cx| {
+        ws.acp_server = Some(server.clone());
+        ws.claude_exe = Some(PathBuf::from("unused-by-the-fake-agent"));
+        ws.store.data.settings.enabled_harnesses = None;
+        ws.store.data.settings.set_harness_models(Harness::Codex, vec![crate::claude::subagents::AgentModel { id: "gpt-6".into(), name: "GPT-6".into() }]);
+        ws.new_session_from_home(Harness::Claude, None, work.path().to_path_buf(), Some("parent".into()), None, window, cx);
+    });
+    let parent = ws.read_with(&cx, |ws, _| ws.active_id().unwrap().clone());
+    let request = |args| Request { id: new_id(), from: format!("code:{parent}"), tool: "start_code_session".into(), args, deadline: now() + 60 };
+    let folder = work.path().to_string_lossy().into_owned();
+    step(&mut cx, &|ws, window, cx| {
+        let unknown = request(json!({"folder": folder, "model": "codex:gpt-0"}));
+        ws.serve_requests(vec![unknown], window, cx);
+        assert_eq!(ws.live.len(), 1, "an unknown model opens nothing");
+        let effort = request(json!({"folder": folder, "effort": "extreme"}));
+        ws.serve_requests(vec![effort], window, cx);
+        assert_eq!(ws.live.len(), 1, "an unknown effort opens nothing");
+        let wanted = request(json!({"folder": folder, "model": "codex:gpt-6", "effort": "high", "prompt": "child task", "permission": "bypassPermissions"}));
+        ws.serve_requests(vec![wanted], window, cx);
+        assert!(ws.modal.is_none(), "the user is not asked to confirm what they asked for");
+        assert_eq!(ws.live.len(), 2, "the session opened at once");
+    });
+    let child = ws.read_with(&cx, |ws, _| ws.live.iter().map(|l| l.id.clone()).find(|id| *id != parent).unwrap());
+    let until = std::time::Instant::now() + Duration::from_secs(10);
+    let options = work.path().join("fake_agent.py.options");
+    while !std::fs::read_to_string(&options).is_ok_and(|o| o.contains("model=gpt-6") && o.contains("effort=high")) {
+        assert!(std::time::Instant::now() < until, "the model and effort were never chosen: {:?}", std::fs::read_to_string(&options));
+        cx.run_until_parked();
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let answers = work.path().join("fake_agent.py.answers");
+    while !std::fs::read_to_string(&answers).is_ok_and(|a| a.contains(r#""optionId": "yes""#) || a.contains(r#""optionId":"yes""#)) {
+        assert!(std::time::Instant::now() < until, "the prompt for m4code's own tool was not answered yes: {:?}", std::fs::read_to_string(&answers));
+        cx.run_until_parked();
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    ws.read_with(&cx, |ws, app| {
+        assert!(!ws.live_view(&child).unwrap().thread().unwrap().read(app).is_waiting(), "nobody was asked");
+        let record = ws.store.session(&child).unwrap();
+        assert_eq!(record.claude.as_ref().unwrap().harness, Harness::Codex, "the model's harness runs it");
+        assert!(ws.links_of(&parent).iter().any(|(id, _)| *id == child), "it is linked with the session that opened it");
+        let mode = ws.live_view(&child).unwrap().thread().unwrap().read(app).thread.mode.clone();
+        assert_ne!(mode.as_deref(), Some("bypassPermissions"), "the model cannot choose the permission mode");
+    });
+    for id in [child, parent] {
+        cx.update_window(window, |_, window, app| ws.update(app, |ws, cx| ws.end_live(&id, window, cx))).unwrap();
+    }
+}

@@ -101,7 +101,6 @@ fn is_off(off: &[&str], tool: &str) -> bool {
 const OWN_TOOLS: [&str; 5] = ["attach_github", "detach_github", "link_session", "unlink_session", "show_visual"];
 
 /// Tools that change this session's model; m4code answers them (`app/cross.rs`), whatever the harness.
-/// `list_models` only reads, so it is allowed like the own tools; `set_model` keeps the agent's own permission prompt.
 const MODEL_TOOLS: [&str; 2] = ["list_models", "set_model"];
 
 /// Tools that reach other sessions (`claude/bridge.rs`).
@@ -112,16 +111,33 @@ const BRIDGE_TOOLS: [&str; 6] = ["list_code_sessions", "read_code_session", "sea
 /// `mcp__<server>__<tool>` names allowed per process so Claude Code adds no prompt of its own: m4code's own tools only
 /// change what m4code shows, and the cross-session tools are limited to what the user asks of the model.
 pub fn allowed_tools(off: &[&str]) -> Vec<String> {
-    OWN_TOOLS.iter().copied().chain(["list_models"]).chain(BRIDGE_TOOLS).chain(SUBAGENT_TOOLS).filter(|t| !is_off(off, t)).map(|t| format!("mcp__m4code__{t}")).collect()
+    OWN_TOOLS.iter().copied().chain(MODEL_TOOLS).chain(BRIDGE_TOOLS).chain(SUBAGENT_TOOLS).filter(|t| !is_off(off, t)).map(|t| format!("mcp__m4code__{t}")).collect()
+}
+
+/// Whether a tool call's title names one of m4code's own tools, as a harness shows it (`m4code: list_models`,
+/// `m4code_list_models`, `mcp__m4code__list_models`). Their permission prompts are answered yes: the instructions
+/// already limit them to what the user asked for.
+pub fn is_own_tool(title: &str) -> bool {
+    let separator = |c: char| !c.is_alphanumeric();
+    title.match_indices("m4code").any(|(at, server)| {
+        let rest = &title[at + server.len()..];
+        if !rest.starts_with(separator) {
+            return false;
+        }
+        let rest = rest.trim_start_matches(separator);
+        OWN_TOOLS.iter().chain(&MODEL_TOOLS).chain(&BRIDGE_TOOLS).chain(&SUBAGENT_TOOLS).any(|tool| {
+            rest.strip_prefix(tool).is_some_and(|after| !after.starts_with(|c: char| c.is_alphanumeric() || c == '_'))
+        })
+    })
 }
 
 const BRIDGE_INSTRUCTIONS: &str = " m4code also has tools that reach your other sessions: list_code_sessions, read_code_session, \
-search_sessions, search_projects and start_code_session. They act at once. Use them only when the user asks you to look at, hand \
-work to or continue in another session, or to work in a project; search_sessions may also be used unasked to find a session to link. \
-One exception: when the user gives you a big task that is separate from the work in progress here, call start_code_session \
-with a full brief to suggest running it in its own session; the user sees a dialog and decides, so say so and carry on. \
+search_sessions, search_projects and start_code_session. They act at once, without asking the user, so use them only when the \
+user asks you to look at, hand work to, start or continue in another session, or to work in a project; search_sessions may also be \
+used unasked to find a session to link. Never ask the user to confirm what they just asked for. start_code_session takes a project, \
+a model and an effort; name a model or effort only when the user did. \
 switch_worktree moves this session into another git worktree of its project; call it only when the user asks for a worktree, and \
-end your turn once it is approved.";
+end your turn after it.";
 
 const SUBAGENT_INSTRUCTIONS: &str = " Subagents run through m4code across Claude Code, Codex and OpenCode. \
 Use spawn_subagent to delegate a task to another harness, list_subagents to inspect children, \
@@ -156,7 +172,8 @@ const INTRO: &str = "You are running inside m4code, a desktop app that runs this
 /// Confirmation instructions shared by every provider before switching models.
 fn model_instructions() -> String {
     String::from(
-        " Never switch models on your own: before set_model, ask the user which model, unless the user just named one. \
+        " Never switch models on your own: before set_model, ask the user which model, unless the user just named one, and never ask \
+them to confirm a switch they asked for. \
 Don't ask about effort: leave it out unless the user named one, and m4code uses medium. list_models gives the exact names set_model takes (harness:model-id), including other coding agents; \
 switching to another one hands this conversation over. After set_model, end your turn."
     )
@@ -346,7 +363,7 @@ fn model_tools() -> Vec<Value> {
         json!({
             "name": "set_model",
             "description": (
-                "Switch this session to another model, or change its effort. Name the model exactly as list_models prints it (harness:model-id); call list_models first. On the same harness it applies from your next request. On another harness the user is asked to approve, and m4code then hands this conversation to that agent once your turn ends. Always ask the user first which model unless they just named one; never switch on your own. Don't ask about effort."
+                "Switch this session to another model, or change its effort. Name the model exactly as list_models prints it (harness:model-id); call list_models first. On the same harness it applies from your next request. On another harness m4code hands this conversation to that agent once your turn ends. Call it only when the user asked to switch; if they didn't say which model, ask them, but never ask them to confirm a switch they asked for. Don't ask about effort."
             ),
             "inputSchema": {
                 "type": "object",
@@ -384,6 +401,8 @@ fn bridge_tools() -> Vec<Value> {
     let target = json!({
         "prompt": { "type": "string", "description": "First message for the new session (optional)" },
         "folder": { "type": "string", "description": "Project name or folder path (optional)" },
+        "model": { "type": "string", "description": "A model exactly as list_models prints it, harness:model-id (optional: the user's default otherwise)" },
+        "effort": { "type": "string", "enum": ["low", "medium", "high", "xhigh", "max"], "description": "Only when the user named one (optional)" },
     });
     vec![
         tool("list_code_sessions", format!("List the user's coding-agent sessions in m4code (id, title, folder, whether it is running, when it was created and last updated).{CONFIRM}"), json!({})),
@@ -402,10 +421,10 @@ fn bridge_tools() -> Vec<Value> {
             format!("Search the user's projects (name, folder, git branch) by words. Pass a project's name as the folder of start_code_session.{CONFIRM}"),
             json!({ "query": { "type": "string", "description": "Words to look for (optional: without it, every project)" } }),
         ),
-        tool("start_code_session", format!("Open a new Claude Code session, optionally with a first prompt. With a prompt, the user is asked to approve it first; without one, it opens at once.{CONFIRM}"), target),
+        tool("start_code_session", format!("Open a new coding-agent session in a project, optionally with a first prompt, a model (its harness follows) and an effort. Its permission mode is the user's default for new sessions.{CONFIRM}"), target),
         tool(
             "switch_worktree",
-            "Move this session into another git worktree of its project: `main` for the main checkout, the name of a worktree the project has, or a new name to make one. The user is asked to approve it first. m4code then restarts this session in that folder once your turn ends and the conversation continues there, so after the approval end your turn without more tool calls.".to_string(),
+            "Move this session into another git worktree of its project: `main` for the main checkout, the name of a worktree the project has, or a new name to make one. m4code restarts this session in that folder once your turn ends and the conversation continues there, so end your turn after the call without more tool calls.".to_string(),
             json!({
                 "worktree": { "type": "string", "description": "`main`, a worktree's name, or a new name (letters, digits, - and _)" },
                 "base": { "type": "string", "enum": ["main", "current"], "description": "For a new worktree: start from origin's default branch (main, the default) or from the commit the main checkout is on (current)" },
@@ -598,9 +617,19 @@ mod tests {
         assert_eq!(r[1]["result"]["isError"], false);
         assert_eq!(r[2]["result"]["content"][0]["text"], "The user declined.");
         assert_eq!(r[2]["result"]["isError"], true);
-        assert_eq!(allowed_tools(&[]).len(), BRIDGE_TOOLS.len() + SUBAGENT_TOOLS.len() + OWN_TOOLS.len() + 1, "list_models too; set_model keeps the agent's own prompt");
-        assert!(!allowed_tools(&[]).contains(&"mcp__m4code__set_model".to_string()));
+        assert_eq!(allowed_tools(&[]).len(), BRIDGE_TOOLS.len() + SUBAGENT_TOOLS.len() + OWN_TOOLS.len() + MODEL_TOOLS.len());
+        assert!(allowed_tools(&[]).contains(&"mcp__m4code__set_model".to_string()), "switching models asks nothing either");
         assert!(allowed_tools(&[]).contains(&"mcp__m4code__show_visual".to_string()));
+    }
+
+    #[test]
+    fn own_tools_are_known_by_the_titles_harnesses_give_them() {
+        for title in ["m4code: set_model", "m4code_start_code_session", "mcp__m4code__read_code_session", "m4code.link_session"] {
+            assert!(is_own_tool(title), "{title}");
+        }
+        for title in ["Bash rm -rf", "set_model", "m4code: set_models_everywhere", "other: list_models", "m4codex_set_model"] {
+            assert!(!is_own_tool(title), "{title}");
+        }
     }
 
     #[test]
@@ -797,7 +826,7 @@ mod tests {
 
     #[test]
     fn allowed_tools_leaves_out_the_tools_of_features_that_are_off() {
-        assert_eq!(allowed_tools(&["github", "sessions"]), ["mcp__m4code__show_visual", "mcp__m4code__list_models"]);
+        assert_eq!(allowed_tools(&["github", "sessions"]), ["mcp__m4code__show_visual", "mcp__m4code__list_models", "mcp__m4code__set_model"]);
         assert_eq!(allowed_tools(&["github", "sessions", "model"]), ["mcp__m4code__show_visual"]);
     }
 
@@ -811,7 +840,7 @@ mod tests {
             let r = talk_off(&[json!({"jsonrpc":"2.0","id":1,"method":"tools/list"})], "s", tmp.path(), off, |_, _| Err("no".into()));
             r[0]["result"]["tools"].as_array().unwrap().iter().find(|t| t["name"] == "set_model").unwrap()["description"].as_str().unwrap().to_string()
         };
-        assert!(described(&[]).contains("ask the user first"));
+        assert!(described(&[]).contains("never ask them to confirm a switch they asked for"));
         assert!(!described(&[]).contains("AskUserQuestion"));
         assert_eq!(described(&[]), described(&["ask_user_question"]));
     }
