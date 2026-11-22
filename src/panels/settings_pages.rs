@@ -9,7 +9,6 @@ use gpui_kit::component::input::{Input, InputState};
 
 use crate::app::{Act, HarnessDialog, Lookup, Modal, Workspace};
 use crate::claude::subagents::{Agent, AgentModel, type_name};
-use crate::claude::trim::Trim;
 use crate::harness::Harness;
 use crate::panels::logos;
 use crate::panels::theme::{self, hsla};
@@ -152,7 +151,7 @@ fn flip_subagent(ws: &mut Workspace, agent: Agent, cx: &mut Context<Workspace>) 
     ws.load_models(cx);
 }
 
-fn harness_status(harness: Harness, enabled: bool, subagents: &crate::app::HarnessesForm, trimmed: &[Trim], lookup: &Lookup, model_count: usize) -> (String, u32) {
+fn harness_status(harness: Harness, enabled: bool, subagents: &crate::app::HarnessesForm, lookup: &Lookup, model_count: usize) -> (String, u32) {
     if !enabled {
         return ("Disabled".into(), theme::TEXT_FAINT);
     }
@@ -167,13 +166,7 @@ fn harness_status(harness: Harness, enabled: bool, subagents: &crate::app::Harne
     match harness.agent() {
         None => {
             let models_note = if model_count > 0 { format!(" · {model_count} models") } else { String::new() };
-            if trimmed.is_empty() {
-                (format!("Enabled · Claude Agent SDK{models_note}"), theme::TEXT_DIM)
-            } else {
-                let n = trimmed.len();
-                let noun = if n == 1 { "trim" } else { "trims" };
-                (format!("Enabled · {n} tool {noun} off{models_note}"), theme::TEXT_DIM)
-            }
+            (format!("Enabled · Claude Agent SDK{models_note}"), theme::TEXT_DIM)
         }
         Some(agent) => {
             let form = subagents.get(agent);
@@ -240,7 +233,7 @@ impl Workspace {
     /// The Harnesses page: enable Claude Code, Codex, OpenCode and Antigravity, and open each provider's configuration
     /// popup (Claude Code tools & accounts; subagent opt-in and models for the others).
     pub(crate) fn harnesses_page(&self, cx: &mut Context<Self>) -> Div {
-        let Some(Modal::Settings { subagents, trimmed, .. }) = &self.modal else { return div() };
+        let Some(Modal::Settings { subagents, .. }) = &self.modal else { return div() };
         let saved = &self.store.data.settings.custom_subagents;
         let mut rows: Vec<AnyElement> = Vec::new();
         for harness in Harness::ALL {
@@ -248,7 +241,7 @@ impl Workspace {
             let agent = harness.agent();
             let lookup = self.model_lookups.get(harness);
             let model_count = self.store.data.settings.harness_models(harness).len();
-            let (status, tone) = harness_status(harness, enabled, subagents, trimmed, lookup, model_count);
+            let (status, tone) = harness_status(harness, enabled, subagents, lookup, model_count);
 
             let mut about = div()
                 .flex()
@@ -404,7 +397,7 @@ impl Workspace {
 
     /// Popup dialog over the Harnesses page: Claude Code tools & accounts, or an external provider's subagent controls.
     pub(crate) fn render_harness_dialog(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let Some(Modal::Settings { claude, trimmed, skills_field, costly, subagents, chrome, .. }) = &self.modal else { return None };
+        let Some(Modal::Settings { claude, skills_field, costly, subagents, chrome, .. }) = &self.modal else { return None };
         let picking = subagents.picking.as_ref()?;
         let viewport = window.viewport_size();
         let scaled = crate::panels::scale::px;
@@ -412,7 +405,6 @@ impl Workspace {
         let body: Div = match picking {
             HarnessDialog::Claude(search) => {
                 let enabled = subagents.enabled.contains(&Harness::Claude);
-                let plan_trimmed = trimmed.contains(&Trim::PlanMode);
                 let mut col = div()
                     .flex()
                     .flex_col()
@@ -504,34 +496,9 @@ impl Workspace {
                 col = col.child(accounts_box);
                 col = col.child(self.model_list(Harness::Claude, search, None, cx));
 
-                // Claude Code tools (moved from the old Claude Code tools page).
-                col = col.child(div().mt(px(6.0)).child(section_label("CLAUDE CODE TOOLS")));
+                // Claudiu trims the extras itself (trim::FLUFF), per session; what's left here are the user's own settings.
                 for found in costly {
                     col = col.child(warn(format!("{} is set in {}. {}", found.name, found.source, found.effect)));
-                }
-                col = col.child(faint(
-                    "Applies to new sessions. These switches edit Claude Code's settings.json for every account. Claudiu only turns things off; anything you turned off yourself stays off.",
-                ));
-                for (heading, items) in Trim::GROUPS {
-                    col = col.child(div().mt(px(4.0)).child(section_label(heading.to_string())));
-                    for &item in items {
-                        let tag = Some(item.saving().label().into());
-                        col = col.child(switch_row(
-                            ("settings-trim", item as usize),
-                            item.label(),
-                            tag,
-                            !trimmed.contains(&item),
-                            move |ws, _, _| {
-                                if let Some(Modal::Settings { trimmed, .. }) = ws.modal.as_mut() {
-                                    flip(trimmed, item);
-                                }
-                            },
-                            cx,
-                        ));
-                    }
-                }
-                if plan_trimmed {
-                    col = col.child(faint("With Plan mode off, Claude can't leave plan mode itself; press Shift+Tab."));
                 }
                 col.child(div().mt(px(4.0)).child(section_label("SKILLS TO TURN OFF IN CLAUDE CODE")))
                     .child(faint("Comma-separated skill names to hide from Claude Code's context. Existing entries in settings.json win."))

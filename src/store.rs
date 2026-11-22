@@ -317,11 +317,11 @@ pub struct Settings {
     /// which is also what a state file from before this setting loads as.
     #[serde(default)]
     pub claudiu_tools_off: Vec<crate::claude::mcp::Feature>,
-    /// Claude Code features and tools switched off for the sessions Claudiu starts (`claude/trim.rs`). Empty means
-    /// nothing is trimmed, which is also what a state file from before this setting loads as.
+    /// The trims an earlier version wrote into Claude Code's own `settings.json`, kept only until
+    /// `take_back_global_trims` has taken them out again; sessions now get `trim::FLUFF` themselves.
     #[serde(default)]
     pub trimmed_tools: Vec<crate::claude::trim::Trim>,
-    /// The lines Claudiu added to Claude Code's `settings.json` for those trims, so turning one off removes only them.
+    /// The lines Claudiu added to Claude Code's `settings.json` (old trims and the skill limits), so it removes only them.
     #[serde(default)]
     pub applied_trims: Vec<String>,
     /// Output caps and turned-off skills for Claude Code (`claude/trim.rs`); empty leaves Claude Code's own behavior.

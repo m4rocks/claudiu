@@ -70,13 +70,17 @@ pub fn environment(claude: &Path) -> Vec<(String, String)> {
 /// Claude Code's part of `session/new`: the bridge passes `_meta.claudeCode.options` to the SDK. `plugin` is
 /// Claudiu's mod; `allowed` the tools it may use unasked; `extra` the flags given as `--name value` (None for a bare
 /// flag).
-pub fn claude_meta(plugin: Option<&Path>, allowed: &[String], extra: &[(&str, Option<String>)]) -> Value {
+/// `settings` is the session's own settings layer (the Agent SDK's `settings` option), such as its trims.
+pub fn claude_meta(plugin: Option<&Path>, allowed: &[String], extra: &[(&str, Option<String>)], settings: Option<Value>) -> Value {
     let mut options = json!({});
     if let Some(dir) = plugin {
         options["plugins"] = json!([{ "type": "local", "path": dir }]);
     }
     if !allowed.is_empty() {
         options["allowedTools"] = json!(allowed);
+    }
+    if let Some(settings) = settings {
+        options["settings"] = settings;
     }
     if !extra.is_empty() {
         options["extraArgs"] = extra.iter().map(|(k, v)| (k.to_string(), v.clone().map_or(Value::Null, Value::String))).collect::<serde_json::Map<_, _>>().into();
@@ -90,12 +94,13 @@ mod tests {
 
     #[test]
     fn options_carry_the_mod_tools_and_flags() {
-        let meta = claude_meta(Some(Path::new("/mod")), &["mcp__claudiu__show_visual".into()], &[("name", Some("Fix it".into())), ("chrome", None)]);
+        let meta = claude_meta(Some(Path::new("/mod")), &["mcp__claudiu__show_visual".into()], &[("name", Some("Fix it".into())), ("chrome", None)], Some(json!({"disableWorkflows": true})));
         let options = &meta["claudeCode"]["options"];
         assert_eq!(options["plugins"], json!([{"type": "local", "path": "/mod"}]));
         assert_eq!(options["allowedTools"], json!(["mcp__claudiu__show_visual"]));
         assert_eq!(options["extraArgs"], json!({"name": "Fix it", "chrome": null}));
-        assert_eq!(claude_meta(None, &[], &[]), json!({"claudeCode": {"options": {}}}), "nothing given adds nothing");
+        assert_eq!(options["settings"], json!({"disableWorkflows": true}));
+        assert_eq!(claude_meta(None, &[], &[], None), json!({"claudeCode": {"options": {}}}), "nothing given adds nothing");
     }
 
     #[test]

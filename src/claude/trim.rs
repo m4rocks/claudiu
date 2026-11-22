@@ -46,36 +46,36 @@ enum Effect {
     Deny(&'static [&'static str]),
 }
 
-/// How much a trim saves; shown beside each switch (see `Trim::saving`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Saving {
-    High,
-    Medium,
-    Low,
-}
+/// What every Claude Code session in Claudiu goes without: features and tools for the claude.ai app and for running
+/// Claude Code on its own, which Claudiu's own UI replaces. Plan mode, AskUserQuestion (Claudiu draws it), notebooks,
+/// background tasks, the Explore and Plan agents and the git instructions stay, since the model expects them.
+pub const FLUFF: [Trim; 14] = [
+    Trim::BundledSkills,
+    Trim::Workflows,
+    Trim::RemoteControl,
+    Trim::ClaudeAiConnectors,
+    Trim::Artifacts,
+    Trim::ScheduledTasks,
+    Trim::ScheduleWakeup,
+    Trim::RemoteTrigger,
+    Trim::SendMessage,
+    Trim::PushNotification,
+    Trim::DesignSync,
+    Trim::ReportFindings,
+    Trim::ClaudeApiSkill,
+    Trim::AdvisorTool,
+];
 
-impl Saving {
-    pub fn label(self) -> &'static str {
-        match self {
-            Saving::High => "high savings",
-            Saving::Medium => "medium savings",
-            Saving::Low => "low savings",
-        }
-    }
-}
-
-/// What the setup window's "recommended trims" switch turns off: the high and medium savers that take nothing away
-/// from how Claude works. The Advisor tool, Git instructions, background tasks and the Explore and Plan agents save
-/// tokens too, but a new user has not chosen to lose them.
-pub const RECOMMENDED: [Trim; 6] = [Trim::Artifacts, Trim::BundledSkills, Trim::ClaudeApiSkill, Trim::ClaudeAiConnectors, Trim::ScheduleWakeup, Trim::ReportFindings];
-
-/// `trimmed` with the recommended trims added; what the user had turned off stays off.
-pub fn with_recommended(trimmed: &[Trim]) -> Vec<Trim> {
-    normalized(&[trimmed, &RECOMMENDED[..]].concat())
+/// The settings a Claudiu session of Claude Code starts with (the Agent SDK's `settings` option): `FLUFF` turned off,
+/// for that session only, so Claude Code run in a terminal keeps everything.
+pub fn session_settings() -> Value {
+    let mut settings = Map::new();
+    apply(&mut settings, &FLUFF, &Limits::default(), &[]);
+    Value::Object(settings)
 }
 
 impl Trim {
-    /// In the order the page lists them, grouped (see `GROUPS`).
+    /// Every trim, in the order `normalized` keeps them.
     pub const ALL: [Trim; 20] = [
         Self::Artifacts,
         Self::BundledSkills,
@@ -98,61 +98,6 @@ impl Trim {
         Self::ReportFindings,
         Self::GitInstructions,
     ];
-
-    /// The page's groups: a heading and the items under it.
-    pub const GROUPS: [(&'static str, &'static [Trim]); 6] = [
-        ("FEATURES", &[Self::Artifacts, Self::BundledSkills, Self::ClaudeApiSkill, Self::Workflows, Self::RemoteControl, Self::ClaudeAiConnectors]),
-        ("AGENTS AND TASKS", &[Self::ExplorePlanAgents, Self::AdvisorTool, Self::BackgroundTasks]),
-        ("PLANNING", &[Self::PlanMode, Self::AskUserQuestion]),
-        ("SCHEDULING", &[Self::ScheduledTasks, Self::ScheduleWakeup, Self::RemoteTrigger]),
-        ("MESSAGING", &[Self::SendMessage, Self::PushNotification]),
-        ("OTHER", &[Self::DesignSync, Self::NotebookEdit, Self::ReportFindings, Self::GitInstructions]),
-    ];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::BundledSkills => "Bundled skills",
-            Self::Workflows => "Workflows",
-            Self::RemoteControl => "Remote control",
-            Self::ClaudeAiConnectors => "claude.ai connectors",
-            Self::Artifacts => "Artifacts",
-            Self::PlanMode => "Plan mode",
-            Self::AskUserQuestion => "AskUserQuestion",
-            Self::ScheduledTasks => "Scheduled tasks",
-            Self::ScheduleWakeup => "ScheduleWakeup",
-            Self::RemoteTrigger => "RemoteTrigger",
-            Self::SendMessage => "SendMessage",
-            Self::PushNotification => "PushNotification",
-            Self::DesignSync => "DesignSync",
-            Self::NotebookEdit => "NotebookEdit",
-            Self::ReportFindings => "ReportFindings",
-            Self::GitInstructions => "Git instructions",
-            Self::ClaudeApiSkill => "Claude API skill",
-            Self::ExplorePlanAgents => "Explore and Plan agents",
-            Self::AdvisorTool => "Advisor tool",
-            Self::BackgroundTasks => "Background tasks",
-        }
-    }
-
-    /// How many tokens turning it off saved per request in a measured run on Claude Code 2.1.319 (first request,
-    /// alone against no trims): high is 1,300 to 13,400, medium 330 to 830, low under 100. Low ones are tools that load
-    /// only when Claude searches for them. The Advisor tool is high only when an advisor model is set, and 0 otherwise.
-    pub fn saving(self) -> Saving {
-        match self {
-            Self::Artifacts | Self::BundledSkills | Self::ClaudeAiConnectors | Self::ScheduleWakeup | Self::AdvisorTool => Saving::High,
-            Self::GitInstructions | Self::ReportFindings | Self::ClaudeApiSkill | Self::BackgroundTasks | Self::ExplorePlanAgents => Saving::Medium,
-            Self::Workflows
-            | Self::RemoteControl
-            | Self::PlanMode
-            | Self::AskUserQuestion
-            | Self::ScheduledTasks
-            | Self::RemoteTrigger
-            | Self::SendMessage
-            | Self::PushNotification
-            | Self::DesignSync
-            | Self::NotebookEdit => Saving::Low,
-        }
-    }
 
     fn effect(self) -> Effect {
         match self {
@@ -388,6 +333,13 @@ pub fn write_global(path: &std::path::Path, trimmed: &[Trim], limits: &Limits, a
     Ok(owned)
 }
 
+/// Write `limits` into Claude Code's own `settings.json`, and take out what Claudiu wrote there before and no longer
+/// wants, which includes the trims earlier versions wrote there for every Claude Code session.
+pub fn write_global_limits(limits: &Limits, applied: &[String]) -> std::io::Result<Vec<String>> {
+    let home = crate::claude::claude_home().ok_or_else(|| std::io::Error::other("Claude Code's folder was not found"))?;
+    write_global(&home.join("settings.json"), &[], limits, applied)
+}
+
 /// Where earlier versions wrote a settings file per session; only pruned now.
 pub fn settings_dir() -> PathBuf {
     crate::datadir::data_dir().join("settings")
@@ -400,6 +352,19 @@ mod tests {
 
     fn object(v: Value) -> Map<String, Value> {
         v.as_object().unwrap().clone()
+    }
+
+    #[test]
+    fn a_session_goes_without_the_fluff_and_keeps_what_the_model_expects() {
+        let settings = session_settings();
+        let deny: Vec<&str> = settings["permissions"]["deny"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
+        assert!(deny.contains(&"ScheduleWakeup") && deny.contains(&"PushNotification"));
+        for kept in ["AskUserQuestion", "EnterPlanMode", "NotebookEdit", "Bash"] {
+            assert!(!deny.contains(&kept), "{kept} stays");
+        }
+        assert_eq!(settings["disableWorkflows"], json!(true));
+        assert_eq!(settings["env"]["CLAUDE_CODE_DISABLE_ADVISOR_TOOL"], json!("1"));
+        assert!(settings["env"].get("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS").is_none(), "background tasks stay");
     }
 
     #[test]
@@ -536,33 +501,5 @@ mod tests {
     #[test]
     fn the_field_shows_the_saved_skills_as_text() {
         assert_eq!(skills(&["a", "b"]).text(), "a, b");
-    }
-
-    #[test]
-    fn each_switch_shows_the_saving_band_it_was_measured_in() {
-        let band = |saving: Saving| -> Vec<Trim> { Trim::ALL.into_iter().filter(|t| t.saving() == saving).collect() };
-        assert_eq!(band(Saving::High), [Artifacts, BundledSkills, ClaudeAiConnectors, AdvisorTool, ScheduleWakeup]);
-        assert_eq!(band(Saving::Medium), [ClaudeApiSkill, ExplorePlanAgents, BackgroundTasks, ReportFindings, GitInstructions]);
-        assert_eq!(
-            band(Saving::Low),
-            [Workflows, RemoteControl, PlanMode, AskUserQuestion, ScheduledTasks, RemoteTrigger, SendMessage, PushNotification, DesignSync, NotebookEdit]
-        );
-        assert_eq!(Saving::Medium.label(), "medium savings");
-    }
-
-    #[test]
-    fn the_recommended_trims_are_added_to_what_the_user_already_turned_off() {
-        assert_eq!(with_recommended(&[]), [Artifacts, BundledSkills, ClaudeApiSkill, ClaudeAiConnectors, ScheduleWakeup, ReportFindings]);
-        assert_eq!(
-            with_recommended(&[PlanMode, Artifacts]),
-            [Artifacts, BundledSkills, ClaudeApiSkill, ClaudeAiConnectors, PlanMode, ScheduleWakeup, ReportFindings],
-            "the user's own trim stays, and nothing is listed twice"
-        );
-    }
-
-    #[test]
-    fn every_item_is_listed_once_in_the_page_groups() {
-        let listed: Vec<Trim> = Trim::GROUPS.iter().flat_map(|(_, items)| items.iter().copied()).collect();
-        assert_eq!(listed, Trim::ALL);
     }
 }

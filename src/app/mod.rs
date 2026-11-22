@@ -332,8 +332,6 @@ pub enum Modal {
         updates: bool,
         chrome: bool,
         scale: u32,
-        /// Claude Code features and tools turned off (Claude Code tools page).
-        trimmed: Vec<crate::claude::trim::Trim>,
         /// Claudiu tools turned off (Claudiu tools page).
         claudiu_off: Vec<crate::claude::mcp::Feature>,
         /// Skills to turn off, separated by commas (Claude Code tools page).
@@ -913,6 +911,7 @@ impl Workspace {
         ws.sync_skills(None, cx);
         if !cfg!(test) {
             ws.load_enabled_models(cx);
+            ws.take_back_global_trims();
         }
         cx.observe_window_activation(window, |_, _, cx| cx.notify()).detach();
         ws.check_updates(cx);
@@ -1124,7 +1123,7 @@ impl Workspace {
                     .filter(|id| modes.iter().any(|(mid, _)| mid == id))
                     .or_else(|| modes.first().map(|(id, _)| id.clone()))
                     .unwrap_or_else(|| "default".into());
-                self.modal = Some(Modal::Settings { shell, claude, default_model, effort: defaults.effort.unwrap_or_default(), permission: initial_perm, updates, chrome, scale: crate::panels::scale::percent(), trimmed: self.store.data.settings.trimmed_tools.clone(), claudiu_off: self.store.data.settings.claudiu_tools_off.clone(), skills_field, skill_search, costly: claude::costly::scan(), list_focus, renaming: None, subagents });
+                self.modal = Some(Modal::Settings { shell, claude, default_model, effort: defaults.effort.unwrap_or_default(), permission: initial_perm, updates, chrome, scale: crate::panels::scale::percent(), claudiu_off: self.store.data.settings.claudiu_tools_off.clone(), skills_field, skill_search, costly: claude::costly::scan(), list_focus, renaming: None, subagents });
                 // After the modal exists: a page that loads something reads the dialog's fields.
                 self.set_settings_page(self.settings_page, cx);
             }

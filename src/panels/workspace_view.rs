@@ -1378,7 +1378,7 @@ fn render_settings_card(
     cx: &mut Context<Workspace>,
 ) -> gpui::Stateful<gpui::Div> {
     let (page, worktrees, scroll) = (ws.settings_page, &ws.worktrees_page, &ws.settings_scroll);
-    let Some(Modal::Settings { shell, default_model, effort, permission, updates, scale, trimmed, claudiu_off, skill_search, list_focus, renaming, .. }) = &ws.modal else {
+    let Some(Modal::Settings { shell, default_model, effort, permission, updates, scale, claudiu_off, skill_search, list_focus, renaming, .. }) = &ws.modal else {
         return div().id("modal-card");
     };
     let (updates, scale) = (*updates, *scale);
@@ -1407,16 +1407,6 @@ fn render_settings_card(
                         .text_size(scaled(11.5))
                         .text_color(hsla(theme::WARN))
                         .child("Every new session will run commands and edit files without asking.")
-                        .into_any_element(),
-                );
-            } else if permission == "plan" && trimmed.contains(&crate::claude::trim::Trim::PlanMode) {
-                session_rows.push(
-                    div()
-                        .px(px(14.0))
-                        .py(px(8.0))
-                        .text_size(scaled(11.5))
-                        .text_color(hsla(theme::TEXT_FAINT))
-                        .child("Plan mode is off under Claude Code's tools, so new Claude Code sessions start in default mode.")
                         .into_any_element(),
                 );
             }

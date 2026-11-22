@@ -91,7 +91,7 @@ impl Workspace {
                 let name = input.read(cx).value().split_whitespace().collect::<Vec<_>>().join("-");
                 if name.is_empty() { Act::Dismiss } else { Act::CreateBranch(cwd, name) }
             }
-            Some(Modal::Settings { shell, claude, default_model, effort, permission, updates, chrome, scale, trimmed, claudiu_off, skills_field, skill_search, costly, list_focus, renaming, subagents }) => {
+            Some(Modal::Settings { shell, claude, default_model, effort, permission, updates, chrome, scale, claudiu_off, skills_field, skill_search, costly, list_focus, renaming, subagents }) => {
                 let clean = |s: &str| s.trim().trim_matches('"').to_string();
                 let (shell_t, claude_t) = (clean(shell.read(cx).value().as_ref()), clean(claude.read(cx).value().as_ref()));
                 // In category order, then top to bottom: the first bad field decides which page the dialog shows.
@@ -109,7 +109,7 @@ impl Workspace {
                         subagents.picking = Some(HarnessDialog::Claude(search));
                     }
                     field.update(cx, |s, cx| s.focus(window, cx));
-                    self.modal = Some(Modal::Settings { shell, claude, default_model, effort, permission, updates, chrome, scale, trimmed, claudiu_off, skills_field, skill_search, costly, list_focus, renaming, subagents });
+                    self.modal = Some(Modal::Settings { shell, claude, default_model, effort, permission, updates, chrome, scale, claudiu_off, skills_field, skill_search, costly, list_focus, renaming, subagents });
                     self.toast(msg, true, cx);
                     return;
                 }
@@ -149,22 +149,16 @@ impl Workspace {
                     mode_id: Some(permission),
                 };
                 self.home.effort = effort;
-                let trimmed = claude::trim::normalized(&trimmed);
                 let claudiu_off = mcp::normalized_features(&claudiu_off);
-                // The trims go into Claude Code's own settings.json (every account gets the file through config_sync).
-                // When that fails the old trims stay, so what the page shows is what Claude Code has.
+                // The skill limits go into Claude Code's own settings.json (every account gets the file through
+                // config_sync). When that fails the old limits stay, so what the page shows is what Claude Code has.
                 let mut trim_error = None;
-                let mut trimmed = trimmed;
                 let mut limits = limits.unwrap_or_default();
-                if s.trimmed_tools != trimmed || s.limits != limits {
-                    let written = claude::claude_home()
-                        .ok_or_else(|| std::io::Error::other("Claude Code's folder was not found"))
-                        .and_then(|home| claude::trim::write_global(&home.join("settings.json"), &trimmed, &limits, &s.applied_trims));
-                    match written {
+                if s.limits != limits {
+                    match claude::trim::write_global_limits(&limits, &s.applied_trims) {
                         Ok(owned) => s.applied_trims = owned,
                         Err(e) => {
                             trim_error = Some(e);
-                            trimmed = s.trimmed_tools.clone();
                             limits = s.limits.clone();
                         }
                     }
@@ -177,9 +171,8 @@ impl Workspace {
                     let models = if form.on && form.models.is_empty() { catalog.iter().map(|m| m.id.clone()).collect() } else { form.models.clone() };
                     claude::subagents::AgentChoice { on: form.on, models, edits: form.edits, catalog }
                 }));
-                let tools_changed = s.trimmed_tools != trimmed || s.limits != limits || s.claudiu_tools_off != claudiu_off;
+                let tools_changed = s.limits != limits || s.claudiu_tools_off != claudiu_off;
                 let subagents_changed = s.custom_subagents != custom_subagents || s.claude_picked != subagents.claude_models;
-                s.trimmed_tools = trimmed;
                 s.limits = limits;
                 s.claudiu_tools_off = claudiu_off;
                 s.custom_subagents = custom_subagents;

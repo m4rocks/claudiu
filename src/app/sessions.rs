@@ -124,7 +124,7 @@ impl Workspace {
     pub(super) fn thread_start(&mut self, record_id: &str, cwd: &std::path::Path, meta: &ClaudeMeta, name: Option<String>, prompt: Option<String>, by: Starter, cx: &mut Context<Self>) -> Option<crate::thread::Start> {
         let session_id = Some(meta.session_id.clone()).filter(|id| !id.is_empty());
         let settings = &self.store.data.settings;
-        let off = mcp::tools_off(&settings.claudiu_tools_off, &settings.trimmed_tools);
+        let off = mcp::tools_off(&settings.claudiu_tools_off, &claude::trim::FLUFF);
         let mut mcp_servers = vec![];
         if let Ok(exe) = std::env::current_exe() {
             let mut env = vec![(mcp::RECORD_ENV, record_id.to_string())];
@@ -143,10 +143,10 @@ impl Workspace {
                 if meta.harness != settings.harness {
                     defaults.model = None;
                 }
-                let (mut mode, options) = claude::defaults::acp_settings(&defaults, settings.trimmed_tools.contains(&claude::trim::Trim::PlanMode), by);
+                let (mut mode, options) = claude::defaults::acp_settings(&defaults, claude::trim::FLUFF.contains(&claude::trim::Trim::PlanMode), by);
                 if let Some(id) = defaults.mode_id.as_deref().filter(|s| !s.is_empty()) {
                     let allowed = match id {
-                        "plan" => !settings.trimmed_tools.contains(&claude::trim::Trim::PlanMode) && by != claude::defaults::Starter::FixGit,
+                        "plan" => by != claude::defaults::Starter::FixGit,
                         "bypassPermissions" | "fullAccess" | "full_access" | "yolo" => by != claude::defaults::Starter::OtherSession,
                         _ => true,
                     };
@@ -192,7 +192,7 @@ impl Workspace {
             if meta.chrome {
                 extra.push(("chrome", None));
             }
-            session_meta = harness::claude::claude_meta(plugin.as_deref(), &mcp::allowed_tools(&off), &extra);
+            session_meta = harness::claude::claude_meta(plugin.as_deref(), &mcp::allowed_tools(&off), &extra, Some(claude::trim::session_settings()));
             self.sync_configs_now(cx);
             if let Some(acct) = self.store.session_account(record_id) {
                 env.push((usage::ACCOUNT_ENV.into(), acct.id.clone()));

@@ -140,6 +140,16 @@ impl Harness {
         }
     }
 
+    /// Slash commands the menu leaves out because Claudiu's own UI does their job: the model and permission pickers,
+    /// New session, and Settings. Claude Code's /autocompact is the `/config` switch Claudiu manages.
+    pub fn hidden_commands(self) -> &'static [&'static str] {
+        match self {
+            Self::Claude => &["autocompact", "model"],
+            Self::Codex => &["model", "approvals", "permissions", "new", "status", "logout", "quit", "exit"],
+            Self::OpenCode | Self::Antigravity => &[],
+        }
+    }
+
     pub fn from_agent(agent: Agent) -> Self {
         match agent {
             Agent::Codex => Self::Codex,
@@ -185,6 +195,13 @@ pub fn stdio_server(name: &str, command: &Path, args: &[&str], env: &[(&str, Str
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_menu_leaves_out_commands_claudiu_does_itself() {
+        assert!(super::Harness::Claude.hidden_commands().contains(&"autocompact"));
+        assert!(super::Harness::Codex.hidden_commands().contains(&"approvals"));
+        assert!(!super::Harness::Claude.hidden_commands().contains(&"compact"), "compacting stays");
+    }
+
     use super::*;
 
     #[test]

@@ -882,14 +882,20 @@ impl ThreadView {
     /// The slash command a typed `/` prefix completes to: the first one it starts.
     fn completion(&self, draft: &str) -> Option<String> {
         let typed = draft.strip_prefix('/').filter(|t| !t.contains(char::is_whitespace))?;
-        self.thread.commands.iter().map(|c| &c.name).find(|n| n.starts_with(typed) && n.as_str() != typed).cloned()
+        self.shown_commands().map(|c| &c.name).find(|n| n.starts_with(typed) && n.as_str() != typed).cloned()
     }
 
     /// The commands a typed `/` prefix matches, for the menu over the composer: all of them, which it scrolls.
     pub(super) fn matching_commands(&self, cx: &App) -> Vec<&crate::harness::thread::Command> {
         let draft = self.composer.read(cx).value();
         let Some(typed) = draft.strip_prefix('/').filter(|t| !t.contains(char::is_whitespace)) else { return vec![] };
-        self.thread.commands.iter().filter(|c| c.name.starts_with(typed)).collect()
+        self.shown_commands().filter(|c| c.name.starts_with(typed)).collect()
+    }
+
+    /// The agent's commands, without those Claudiu's own UI does (`Harness::hidden_commands`).
+    fn shown_commands(&self) -> impl Iterator<Item = &crate::harness::thread::Command> {
+        let hidden = self.harness.hidden_commands();
+        self.thread.commands.iter().filter(move |c| !hidden.contains(&c.name.as_str()))
     }
 
     fn highlighted_command(&self, cx: &App) -> Option<String> {

@@ -102,6 +102,21 @@ impl ModelLookups {
 }
 
 impl Workspace {
+    /// Earlier versions wrote the tool trims into Claude Code's own settings.json, so they reached Claude Code run in a
+    /// terminal too. Each session now gets them itself (`trim::session_settings`), so take back out what was written.
+    /// When the file can't be changed this runs again at the next start.
+    pub(super) fn take_back_global_trims(&mut self) {
+        let s = &mut self.store.data.settings;
+        if s.trimmed_tools.is_empty() {
+            return;
+        }
+        if let Ok(owned) = claude::trim::write_global_limits(&s.limits, &s.applied_trims) {
+            s.applied_trims = owned;
+            s.trimmed_tools.clear();
+            self.store.mark_dirty();
+        }
+    }
+
     /// Environment passed to `harness`'s ACP server when probing its available models.
     fn harness_model_env(&self, harness: Harness) -> Result<Vec<(String, String)>, String> {
         if harness != Harness::Claude {
