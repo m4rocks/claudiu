@@ -205,11 +205,13 @@ impl Workspace {
     fn raise_claude_priority(&self, cx: &mut Context<Self>) {
         #[cfg(windows)]
         {
+            // Only a session still drawn in a terminal has a process id here. Agents now run as ACP processes,
+            // whose ids the chat view doesn't expose yet, so they keep the normal priority until it does.
             let claude_pids: Vec<u32> = self
                 .live
                 .iter()
                 .filter(|l| self.store.session(&l.id).is_some_and(|r| r.kind == SessionKind::Claude))
-                .filter_map(|l| l.view.read(cx).terminal.process_id())
+                .filter_map(|l| l.view.terminal()?.read(cx).terminal.process_id())
                 .collect();
             cx.background_executor().spawn(async move { crate::priority::raise_claude_priority(&claude_pids) }).detach();
         }
