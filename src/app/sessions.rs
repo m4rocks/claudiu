@@ -507,8 +507,11 @@ impl Workspace {
             window.focus(&view.focus_handle(cx), cx);
             return;
         }
-        if let (Main::Home, Some(shell)) = (&self.main, self.shells.get(HOME_SHELL).filter(|p| p.open)) {
-            window.focus(&shell.view.focus_handle(cx), cx);
+        if matches!(self.main, Main::Home) {
+            match self.shells.get(HOME_SHELL).filter(|p| p.open) {
+                Some(shell) => window.focus(&shell.view.focus_handle(cx), cx),
+                None => self.home.prompt.update(cx, |p, cx| p.focus(window, cx)),
+            }
             return;
         }
         window.focus(&self.root_focus, cx);

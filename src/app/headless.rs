@@ -1971,6 +1971,20 @@ fn handing_a_session_to_another_agent() {
     cx.update_window(window, |_, window, app| thread(ws.read(app), &first).unwrap().update(app, |v, cx| v.send("plan the change".into(), window, cx))).unwrap();
     wait(&mut cx, "the reply", &|ws, app| thread(ws, &first).is_some_and(|t| !t.read(app).is_working() && t.read(app).tail_text(10).contains("Agent: ok")));
 
+    // Clicking a model in the picker hands the keyboard back to the message box, which the search box took.
+    cx.update_window(window, |_, window, app| thread(ws.read(app), &first).unwrap().update(app, |v, cx| v.toggle_model_picker(window, cx))).unwrap();
+    cx.update_window(window, |_, window, app| window.draw(app).clear(app)).unwrap();
+    let mut visual = gpui::VisualTestContext::from_window(window, &cx);
+    let row = visual.debug_bounds("thread-model-0").expect("the model picker draws its first row").center();
+    visual.simulate_event(gpui::MouseDownEvent { position: row, modifiers: Default::default(), button: gpui::MouseButton::Left, click_count: 1, first_mouse: false });
+    visual.simulate_event(gpui::MouseUpEvent { position: row, modifiers: Default::default(), button: gpui::MouseButton::Left, click_count: 1 });
+    cx.update_window(window, |_, window, app| {
+        let view = thread(ws.read(app), &first).unwrap();
+        assert!(view.read(app).picker.is_none(), "picking a model closes the picker");
+        assert!(view.focus_handle(app).is_focused(window), "the message box has the keyboard after a pick");
+    })
+    .unwrap();
+
     // Pick a model served by Codex from the unified model picker; sending the next message dynamically hands off in place.
     cx.update_window(window, |_, window, app| {
         let view = thread(ws.read(app), &first).unwrap();

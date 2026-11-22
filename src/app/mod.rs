@@ -918,8 +918,10 @@ impl Workspace {
     pub fn act(&mut self, act: Act, window: &mut Window, cx: &mut Context<Self>) {
         self.menu = None;
         // Dragging the effort slider inside the Home model picker keeps that dialog open.
-        if !matches!(act, Act::HomeSetEffort(_)) {
-            self.picker = None;
+        // A pick made in a dropdown hands the keyboard back to the message box under it; an act that opens
+        // something else moves focus on from there.
+        if !matches!(act, Act::HomeSetEffort(_)) && self.picker.take().is_some() && self.modal.is_none() {
+            self.focus_active(window, cx);
         }
         match act {
             Act::NewClaude { cwd } => self.new_claude(cwd, window, cx),

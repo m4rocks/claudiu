@@ -649,7 +649,7 @@ impl ThreadView {
                     let models = self.filtered_models(cx);
                     if let Some(choice) = models.get(self.model_highlight.min(models.len().saturating_sub(1))).cloned() {
                         self.pick_model(choice, cx);
-                        self.composer.update(cx, |c, cx| c.focus(window, cx));
+                        self.close_picker(window, cx);
                     }
                     cx.stop_propagation();
                     return;
@@ -665,9 +665,7 @@ impl ThreadView {
             && !ev.keystroke.modifiers.platform
             && !ev.keystroke.modifiers.shift
         {
-            self.picker = None;
-            self.effort_dragging.set(false);
-            self.composer.update(cx, |c, cx| c.focus(window, cx));
+            self.close_picker(window, cx);
             cx.stop_propagation();
             cx.notify();
             return;
@@ -744,11 +742,18 @@ impl ThreadView {
         cx.notify();
     }
 
+    /// Close the model or permission dropdown and give the keyboard back to the message box, which the model
+    /// search box took when the dropdown opened.
+    pub(super) fn close_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.picker = None;
+        self.effort_dragging.set(false);
+        self.composer.update(cx, |c, cx| c.focus(window, cx));
+        cx.notify();
+    }
+
     pub(super) fn toggle_model_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.picker == Some(ThreadPicker::Model) {
-            self.picker = None;
-            self.effort_dragging.set(false);
-            self.composer.update(cx, |c, cx| c.focus(window, cx));
+            self.close_picker(window, cx);
         } else {
             self.picker = Some(ThreadPicker::Model);
             self.picker_at = self.model_anchor.above();

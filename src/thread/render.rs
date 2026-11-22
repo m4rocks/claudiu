@@ -440,8 +440,10 @@ impl ThreadView {
                         picker::row(SharedString::from(format!("thread-model-{n}")), Some(logo), m.name.clone(), None, None, selected, false)
                             .when(focused && !selected, |d| d.bg(hsla(theme::SURFACE_HOVER)))
                             .when(focused, |d| d.border_1().border_color(accent.opacity(0.45)))
-                            .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| {
+                            .debug_selector(move || format!("thread-model-{n}"))
+                            .on_click(cx.listener(move |v, _: &ClickEvent, window, cx| {
                                 v.pick_model(choice.clone(), cx);
+                                v.close_picker(window, cx);
                             })),
                     );
                 }
@@ -510,10 +512,9 @@ impl ThreadView {
                                 current,
                                 false,
                             )
-                            .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| {
+                            .on_click(cx.listener(move |v, _: &ClickEvent, window, cx| {
                                 v.set_mode(mode_id.clone(), cx);
-                                v.picker = None;
-                                cx.notify();
+                                v.close_picker(window, cx);
                             })),
                         );
                     }
@@ -527,10 +528,7 @@ impl ThreadView {
             self.picker_at,
             22,
             body,
-            |v: &mut Self, _, _| {
-                v.picker = None;
-                v.effort_dragging.set(false);
-            },
+            |v: &mut Self, window, cx| v.close_picker(window, cx),
             window,
             cx,
         ))
