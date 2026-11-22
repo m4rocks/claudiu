@@ -105,26 +105,33 @@ impl Workspace {
         .detach();
     }
 
-    /// Create a new worktree from the Welcome screen and select it for the upcoming session.
-    pub(super) fn create_home_worktree(&mut self, main_checkout: PathBuf, folder: PathBuf, base: Base, cx: &mut Context<Self>) {
+    /// Create a new worktree from the Welcome screen and select it for the upcoming session. The chip shows it at once,
+    /// while git works; a session started meanwhile waits for it.
+    pub(super) fn create_home_worktree(&mut self, main_checkout: PathBuf, folder: PathBuf, base: Base, window: &mut Window, cx: &mut Context<Self>) {
         if self.git_busy.is_some() {
             return;
         }
         self.git_busy = Some(GitOp::Worktree);
+        self.home.creating = Some(folder.clone());
+        self.home.launch_when_created = false;
         cx.notify();
-        cx.spawn(async move |this, cx| {
+        cx.spawn_in(window, async move |this, cx| {
             let dir = folder.clone();
             let result = cx.background_executor().spawn(async move { worktree::add(&main_checkout, &dir, base) }).await;
-            let _ = this.update(cx, |ws, cx| {
+            let _ = this.update_in(cx, |ws, window, cx| {
                 ws.git_busy = None;
+                ws.home.creating = None;
+                let launch = std::mem::take(&mut ws.home.launch_when_created);
                 ws.store.refresh_git();
                 ws.store.save_if_dirty();
                 match result {
                     Ok(()) => {
-                        let name = folder.file_name().map_or_else(|| "worktree".into(), |n| n.to_string_lossy().into_owned());
                         ws.home.worktree = Some(folder);
-                        ws.toast(format!("Created worktree {name}"), false, cx);
+                        if launch {
+                            ws.act(Act::HomeLaunch, window, cx);
+                        }
                     }
+                    // What was typed stays in the message box, so nothing is lost when git refuses.
                     Err(why) => ws.toast(format!("Couldn't create worktree: {}", why.trim()), true, cx),
                 }
                 cx.notify();

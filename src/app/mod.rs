@@ -438,6 +438,10 @@ pub enum WorkspacePicker {
 pub struct HomeState {
     pub project: Option<Id>,
     pub worktree: Option<PathBuf>,
+    /// A worktree git is still creating; the chip shows it at once, and `worktree` becomes it once it exists.
+    pub creating: Option<PathBuf>,
+    /// Start was pressed while `creating`: the session starts once the worktree exists.
+    pub launch_when_created: bool,
     pub model: Option<crate::harness::CatalogModel>,
     pub effort: Effort,
     pub prompt: Entity<TextareaState>,
@@ -814,6 +818,8 @@ impl Workspace {
                 model_anchor: crate::panels::widgets::Anchor::default(),
                 model_highlight: 0,
                 model_scroll: gpui::ScrollHandle::new(),
+                creating: None,
+                launch_when_created: false,
                 effort_bounds: std::rc::Rc::new(std::cell::Cell::new(gpui::Bounds::default())),
                 effort_dragging: std::rc::Rc::new(std::cell::Cell::new(false)),
             },
@@ -936,7 +942,7 @@ impl Workspace {
                 }
                 Err(why) => self.toast(why, true, cx),
             },
-            Act::CreateHomeWorktree { main_checkout, folder, base } => self.create_home_worktree(main_checkout, folder, base, cx),
+            Act::CreateHomeWorktree { main_checkout, folder, base } => self.create_home_worktree(main_checkout, folder, base, window, cx),
             Act::SwitchWorktree { folder, base } => self.switch_shown(folder, base, false, window, cx),
             Act::ConfirmSwitch { id, folder, base } => {
                 self.modal = None;
@@ -975,6 +981,10 @@ impl Workspace {
             }
             Act::HomeSetEffort(effort) => {
                 self.home.effort = effort;
+            }
+            Act::HomeLaunch if self.home.creating.is_some() => {
+                // The worktree is on its way; the session starts in it as soon as git is done.
+                self.home.launch_when_created = true;
             }
             Act::HomeLaunch => {
                 let cwd = self.home_target_cwd();

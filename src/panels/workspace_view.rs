@@ -276,15 +276,18 @@ impl Workspace {
                 ws.open_project_picker(ProjectPickerMode::Home, at, window, cx);
             });
 
+        let creating = self.home.creating.as_ref().and_then(|f| f.file_name()).map(|n| n.to_string_lossy().into_owned());
         let git_chip = project.as_ref().and_then(|p| {
             let g = p.git.as_ref()?;
-            let primary = branch.clone().or_else(|| worktree_label.clone()).unwrap_or_else(|| "main".into());
-            let linked = (!g.is_main(&target_cwd)).then(|| worktree_label.clone()).flatten();
+            // A worktree git is still creating shows by its name, with a spinner, before it exists.
+            let primary = creating.clone().or_else(|| branch.clone()).or_else(|| worktree_label.clone()).unwrap_or_else(|| "main".into());
+            let linked = if creating.is_some() { None } else { (!g.is_main(&target_cwd)).then(|| worktree_label.clone()).flatten() };
+            let tail = creating.is_some().then(|| spinner("home-git-creating", 11.0).into_any_element());
             let pid = p.id.clone();
             let cwd = target_cwd.clone();
             let open = matches!(self.picker_kind(), Some(WorkspacePicker::Git(gp)) if gp.target == GitPickerTarget::Home);
             Some(
-                composer::git_chip("home-git", open, primary, linked, None)
+                composer::git_chip("home-git", open, primary, linked, tail)
                     .dropdown(cx, move |ws, at, window, cx| {
                         ws.open_git_picker(pid.clone(), cwd.clone(), GitPickerTarget::Home, at, window, cx);
                     }),
