@@ -187,7 +187,8 @@ pub enum Modal {
         /// Default model for new sessions (General page); its harness runs new sessions.
         default_model: crate::harness::CatalogModel,
         effort: Effort,
-        permission: String,
+        /// None until the user picks one: each harness then keeps its own default.
+        permission: Option<crate::harness::permission::Permission>,
         updates: bool,
         chrome: bool,
         scale: u32,
