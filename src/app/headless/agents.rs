@@ -200,7 +200,17 @@ fn shared_subagents_keep_their_parent_focus_permissions_and_conversation() {
                         .is_some_and(|report| report.id == child && report.state == "completed" && report.body == "ok")))
             });
             if reported { break; }
-            assert!(std::time::Instant::now() < until, "the parent's chat never got the child's report");
+            if std::time::Instant::now() >= until {
+                let seen = ws.read_with(&cx, |ws, app| {
+                    let view = |id: &str| ws.live_view(id).and_then(|v| v.thread()).map(|v| {
+                        let v = v.read(app);
+                        let entries: Vec<String> = v.thread.entries.iter().map(|e| format!("{e:?}").chars().take(90).collect()).collect();
+                        format!("loading {} working {} entries {entries:?}", v.is_loading(), v.is_working())
+                    });
+                    format!("{harness:?}\nparent: {:?}\nchild: {:?}", view(&parent), view(&child))
+                });
+                panic!("the parent's chat never got the child's report\n{seen}");
+            }
             std::thread::yield_now();
         }
         if harness == Harness::Claude {
