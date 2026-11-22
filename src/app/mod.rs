@@ -191,6 +191,7 @@ pub enum Modal {
         updates: bool,
         chrome: bool,
         scale: u32,
+        follow_up: crate::store::FollowUp,
         /// m4code tools turned off (m4code tools page).
         m4code_off: Vec<crate::claude::mcp::Feature>,
         /// Skills to turn off, separated by commas (Claude Code tools page).
@@ -592,6 +593,8 @@ pub struct Workspace {
     pub window_title: String,
     /// The session being dragged in the sidebar (lifted in place while its ghost follows the cursor).
     pub dragging: Option<Id>,
+    /// The right sidebar card being dragged, lifted in place like a session row.
+    pub dragging_card: Option<crate::store::SideCard>,
     /// Pointer position at the last drag-over check, see `pointer_moved`.
     /// Sidebar reorder animation: last drawn order of the running rows, and the slides in flight.
     pub prev_current: Vec<Id>,
@@ -668,7 +671,7 @@ impl Workspace {
         let home_prompt = cx.new(|cx| TextareaState::new(window, cx).auto_grow(2, 8).submit_on_enter(true).placeholder("Ask anything, or describe a task…"));
         cx.subscribe_in(&home_prompt, window, |ws: &mut Self, _, ev: &InputEvent, window, cx| {
             match ev {
-                InputEvent::PressEnter { .. } => ws.act(Act::HomeLaunch, window, cx),
+                ev if crate::panels::composer::sends(ev) => ws.act(Act::HomeLaunch, window, cx),
                 InputEvent::Change => cx.notify(),
                 _ => {}
             }
@@ -743,6 +746,7 @@ impl Workspace {
                 .collect(),
             window_title: String::new(),
             dragging: None,
+            dragging_card: None,
             drag_pos: None,
             prev_current: Vec::new(),
             slides: HashMap::new(),

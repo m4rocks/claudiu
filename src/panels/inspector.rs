@@ -13,7 +13,10 @@ use std::time::Duration;
 use gpui::{Animation, AnimationExt};
 
 use crate::app::{Act, GitOp, MenuItem, SideDrag, Workspace};
+use crate::panels::sidebar::{DragGhost, lifted, move_to};
 use crate::panels::widgets::{Trigger, button};
+use crate::store::SideCard;
+use gpui::{AppContext, DragMoveEvent, prelude::FluentBuilder};
 use crate::platform::Editor;
 use crate::github::model::State;
 use crate::store::{Attached, Id, Project, SessionKind, SessionRecord};
@@ -162,16 +165,10 @@ impl Workspace {
                 .flex_none()
                 .w(px(width))
                 .h_full()
-                .child(
-                    div()
-                        .size_full()
-                        .rounded(px(theme::PANEL_RADIUS))
-                        .overflow_hidden()
-                        .border_1()
-                        .border_color(hsla(theme::PANEL_BORDER))
-                        .bg(hsla(theme::SIDEBAR_BG))
-                        .child(body),
-                )
+                // The menu's cards sit on the window's background; GitHub is one view, so it keeps the panel around it.
+                .child(div().size_full().when(shown_view != "menu", |d| {
+                    d.rounded(px(theme::PANEL_RADIUS)).overflow_hidden().border_1().border_color(hsla(theme::PANEL_BORDER)).bg(hsla(theme::SIDEBAR_BG))
+                }).child(body))
                 .children(handle),
                 )
                 .into_any_element(),
@@ -191,13 +188,10 @@ impl Workspace {
         let subagents = id.as_ref().filter(|_| !children.is_empty()).map(|parent| (children.len(), self.subagent_rows(parent, children, cx)));
         let away = id.as_deref().and_then(|i| self.session_away(i, cx));
         let status = self.status_rows(&shown, id.as_ref(), running, cx);
-        self.menu_scroll
-            .wire(div().id("right-menu").size_full(), window)
-            .flex()
-            .flex_col()
-            .gap(px(theme::PANEL_GAP))
-            .p(px(6.0))
-            .children(away.map(|(from, to_name)| {
+        if self.dragging_card.is_some() && !cx.has_active_drag() {
+            self.dragging_card = None;
+        }
+        let account = away.map(|(from, to_name)| {
                 // Fades in when the session turns out to be on another account.
                 let body = div()
                     .flex()
@@ -210,12 +204,74 @@ impl Workspace {
                     })))
                     .with_animation("handoff-fade", Animation::new(Duration::from_millis(220)).with_easing(gpui::ease_out_quint()), |d, t| d.opacity(t));
                 group("ACCOUNT", None, body)
+        });
+        let mut cards: Vec<(SideCard, Div)> = [
+            (SideCard::Account, account),
+            (SideCard::Actions, Some(group("ACTIONS", None, actions))),
+            (SideCard::Github, github.map(|(n, g)| group("GITHUB", Some(n), g))),
+            (SideCard::Subagents, subagents.map(|(n, s)| group("SUBAGENTS", Some(n), s))),
+            (SideCard::Linked, linked.map(|(n, l)| group("LINKED", Some(n), l))),
+            (SideCard::Status, Some(group("STATUS", None, status))),
+            (SideCard::Empty, Some(card().h(px(72.0)))),
+        ]
+        .into_iter()
+        .filter_map(|(kind, card)| Some((kind, card?)))
+        .collect();
+        let order = self.store.data.layout.right_card_order();
+        cards.sort_by_key(|(kind, _)| order.iter().position(|k| k == kind));
+        let cards: Vec<Stateful<Div>> = cards.into_iter().map(|(kind, card)| self.draggable_card(kind, card, cx)).collect();
+        self.menu_scroll
+            .wire(div().id("right-menu").size_full(), window)
+            .flex()
+            .flex_col()
+            .gap(px(theme::PANEL_GAP))
+            .children(cards)
+    }
+
+    /// A card you can drag over the others to move it; the order is saved as it changes.
+    fn draggable_card(&self, kind: SideCard, card: Div, cx: &mut Context<Self>) -> Stateful<Div> {
+        let ws = cx.entity().downgrade();
+        card.id(SharedString::from(format!("right-card-{kind:?}")))
+            .on_drag(DragCard(kind), move |_, _, _, cx| {
+                ws.update(cx, |ws, cx| {
+                    ws.dragging_card = Some(kind);
+                    ws.drag_pos = None;
+                    cx.notify();
+                })
+                .ok();
+                cx.new(|_| DragGhost)
+            })
+            .on_drag_move(cx.listener(move |ws, ev: &DragMoveEvent<DragCard>, _w, cx| {
+                let from = ev.drag(cx).0;
+                if from == kind || !ev.bounds.contains(&ev.event.position) || !ws.pointer_moved(ev.event.position) {
+                    return;
+                }
+                // Cards differ in height, so a short card dragged onto a tall one could still be over it after they
+                // swap, and swap back. It moves only once the pointer is past the middle of the card it goes over, in
+                // the direction it travels, which the card that moved out of the way never is.
+                let order = ws.store.data.layout.right_card_order();
+                let at = |card: SideCard| order.iter().position(|k| *k == card);
+                let down = at(from) < at(kind);
+                let middle = ev.bounds.center().y;
+                if (down && ev.event.position.y < middle) || (!down && ev.event.position.y > middle) {
+                    return;
+                }
+                ws.move_right_card(from, kind);
+                ws.last_swap = std::time::Instant::now();
+                cx.notify();
             }))
-            .child(group("ACTIONS", None, actions))
-            .children(github.map(|(n, g)| group("GITHUB", Some(n), g)))
-            .children(subagents.map(|(n, s)| group("SUBAGENTS", Some(n), s)))
-            .children(linked.map(|(n, l)| group("LINKED", Some(n), l)))
-            .child(group("STATUS", None, status))
+            .when(self.dragging_card == Some(kind), lifted)
+    }
+
+    /// Put card `from` where card `to` is, and save the order.
+    fn move_right_card(&mut self, from: SideCard, to: SideCard) {
+        let mut order = self.store.data.layout.right_card_order();
+        let at = |card: SideCard| order.iter().position(|k| *k == card);
+        if let (Some(from), Some(to)) = (at(from), at(to)) {
+            move_to(&mut order, from, to);
+            self.store.data.layout.right_cards = order;
+            self.store.mark_dirty();
+        }
     }
 
     /// Open in the editor, the folder, git, the shell and the GitHub view.
@@ -497,6 +553,22 @@ fn subagent_row(parent: &Id, child: SubagentRow, cx: &mut Context<Workspace>) ->
         }))
 }
 
+/// Drag payload: a right sidebar card, dragged over another to move it there.
+struct DragCard(SideCard);
+
+/// A card of the right sidebar, which sits on the window's background: drawn like the chat's panel.
+fn card() -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(4.0))
+        .p(px(4.0))
+        .rounded(px(theme::PANEL_RADIUS))
+        .border_1()
+        .border_color(hsla(theme::PANEL_BORDER))
+        .bg(hsla(theme::PANEL_BG))
+}
+
 /// One section of the sidebar, as a card: its label, the number of entries for a list, then its rows.
 fn group(label: &str, count: Option<usize>, body: impl IntoElement) -> Div {
     let header = div()
@@ -507,17 +579,7 @@ fn group(label: &str, count: Option<usize>, body: impl IntoElement) -> Div {
         .pt(px(4.0))
         .child(section_label(label.to_string()))
         .children(count.map(|n| section_label(n.to_string())));
-    div()
-        .flex()
-        .flex_col()
-        .gap(px(4.0))
-        .p(px(4.0))
-        .rounded(px(theme::PANEL_RADIUS))
-        .border_1()
-        .border_color(hsla(theme::BORDER))
-        .bg(hsla(theme::CARD_BG))
-        .child(header)
-        .child(body)
+    card().child(header).child(body)
 }
 
 /// How long the grey bar of an item still waiting for its title pulses. Then it rests, because an item GitHub never

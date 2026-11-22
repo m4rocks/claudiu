@@ -14,5 +14,6 @@ pub const ADAPTER: Adapter = Adapter {
     compact_command: None,
     default_modes: super::standard_default_modes,
     default_models: || super::default_model_entry(super::Harness::Antigravity),
+    steers: false,
     // agy has no documented way to resume a session by id from its command line.
 };

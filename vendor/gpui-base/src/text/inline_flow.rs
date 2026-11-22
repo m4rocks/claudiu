@@ -963,15 +963,7 @@ fn layout_measured_flow(
                         let baseline = shaped_line.ascent;
                         let code_background = is_code
                             .then(|| {
-                                code_background(
-                                    &shaped_line,
-                                    &runs,
-                                    segment_font_size,
-                                    &mut highlights,
-                                    glyph_size,
-                                    baseline,
-                                    window,
-                                )
+                                code_background(&shaped_line, &mut highlights, glyph_size, baseline)
                             })
                             .flatten();
                         line_ascent = line_ascent.max(baseline - body_overflow_above);
@@ -1105,28 +1097,18 @@ fn layout_measured_flow(
     }
 }
 
-/// The rounded box behind a code span, relative to the fragment: centered on
-/// the capital-height body of the text, with the descender room shared
-/// between both sides instead of added only below. Takes the background
-/// color out of `highlights`, so the text does not paint it a second time
-/// at the full line height.
+/// The rounded box behind a code span, relative to the fragment: the code's
+/// whole glyph box, from the top of its tallest letters to the bottom of its
+/// descenders, so no letter sticks out of it. (m4code's patch: upstream fits
+/// it to the capital height, which leaves g, p and y hanging below.) Takes the
+/// background color out of `highlights`, so the text does not paint it a
+/// second time at the full line height.
 fn code_background(
     shaped_line: &ShapedLine,
-    runs: &[TextRun],
-    font_size: Pixels,
     highlights: &mut [(Range<usize>, InlineHighlight)],
     fragment_size: Size<Pixels>,
     baseline: Pixels,
-    window: &Window,
 ) -> Option<(Bounds<Pixels>, Hsla)> {
-    let cap_height = runs
-        .iter()
-        .map(|run| {
-            let font = window.text_system().resolve_font(&run.font);
-            window.text_system().cap_height(font, font_size)
-        })
-        .fold(Pixels::ZERO, Pixels::max);
-    let vertical_padding = font_size * 0.125 + shaped_line.descent / 2.;
     let color = highlights
         .iter()
         .find_map(|(_, h)| h.style.background_color);
@@ -1136,8 +1118,8 @@ fn code_background(
     color.map(|color| {
         (
             Bounds::new(
-                point(Pixels::ZERO, baseline - cap_height - vertical_padding),
-                size(fragment_size.width, cap_height + vertical_padding * 2.),
+                point(Pixels::ZERO, baseline - shaped_line.ascent),
+                size(fragment_size.width, shaped_line.ascent + shaped_line.descent),
             ),
             color,
         )
@@ -2014,6 +1996,48 @@ mod tests {
         window.update(|_, window, cx| {
             let layout = layout_flow(&items, &[None], &style, None, window, cx);
             assert_eq!(layout.size.height, window.pixel_snap(px(30.)));
+        });
+    }
+
+    #[test]
+    fn inline_code_background_covers_the_codes_whole_glyph_box() {
+        use super::super::inline::test_fonts::{BODY, MONO, WideMonoTextSystem};
+        use gpui::{Empty, HighlightStyle, TestApp};
+
+        let mut app = TestApp::with_text_system(Arc::new(WideMonoTextSystem));
+        let mut window = app.open_window(|_, _| Empty);
+        let style = TextStyle {
+            font_family: BODY.into(),
+            font_size: AbsoluteLength::Pixels(px(16.)),
+            ..Default::default()
+        };
+        let items = vec![MeasureItem::Text {
+            text: "a code z".into(),
+            links: vec![],
+            highlights: vec![(
+                2..6,
+                InlineHighlight {
+                    style: HighlightStyle { background_color: Some(gpui::red()), ..Default::default() },
+                    font_family: Some(MONO.into()),
+                    font_size_scale: Some(0.875),
+                },
+            )],
+        }];
+        window.update(|_, window, cx| {
+            let layout = layout_flow(&items, &[None], &style, None, window, cx);
+            let background = layout
+                .fragments
+                .iter()
+                .find_map(|fragment| match fragment {
+                    PositionedFragment::Text { code_background: Some((bounds, _)), .. } => Some(*bounds),
+                    _ => None,
+                })
+                .expect("the code span has a background");
+            // The test font rises 0.8 em and descends 0.2 em, so the 14px code's glyph box is 14px tall. Fitted to
+            // the capital height, as upstream does, it would be 16.1px and sit off center.
+            assert_eq!(background.size.height, px(14.));
+            assert!(background.origin.y >= Pixels::ZERO);
+            assert!(background.origin.y + background.size.height <= layout.size.height, "it stays inside its line");
         });
     }
 

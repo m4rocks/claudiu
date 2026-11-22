@@ -117,14 +117,18 @@ fn check_color(state: &str) -> u32 {
 }
 
 pub(crate) fn markdown(id: String, text: &str) -> TextView {
+    styled_markdown(TextView::markdown(SharedString::from(id), SharedString::from(text.to_string())))
+}
+
+/// m4code's look and link handling for a markdown view, whoever holds its parsed text.
+pub(crate) fn styled_markdown(view: TextView) -> TextView {
     // The stock style highlights code with the light theme (dark text), which vanishes on m4code's dark panels.
     let style = gpui_kit::component::text::TextViewStyle {
         highlight_theme: gpui_kit::component::highlighter::HighlightTheme::default_dark(),
         is_dark: true,
         ..Default::default()
     };
-    TextView::markdown(SharedString::from(id), SharedString::from(text.to_string()))
-        .style(style)
+    view.style(style)
         .selectable(true)
         .on_link_click(|url, _, _, cx: &mut App| {
             if url.starts_with("https://") || url.starts_with("http://") {

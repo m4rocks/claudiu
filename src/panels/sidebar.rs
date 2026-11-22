@@ -51,7 +51,7 @@ struct DragSession(Id);
 
 /// The drag view GPUI requires. It draws nothing: the dragged row itself stays in the list (lifted, see
 /// `lifted`) and slides to wherever the cursor is, so it can never leave its list.
-struct DragGhost;
+pub(super) struct DragGhost;
 
 impl Render for DragGhost {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
@@ -71,7 +71,7 @@ fn begin_drag(ws: &WeakEntity<Workspace>, id: &Id, cx: &mut gpui::App) -> gpui::
 }
 
 /// Style of the row or header being dragged.
-fn lifted<T: Styled>(el: T) -> T {
+pub(super) fn lifted<T: Styled>(el: T) -> T {
     el.bg(hsla(theme::ROW_ACTIVE)).border_1().border_color(hsla(theme::TEXT_FAINT))
 }
 
@@ -122,7 +122,7 @@ fn slid(el: impl IntoElement + gpui::Styled + 'static, id: &Id, slide: Option<Sl
 }
 
 /// Moves `v[from]` into the slot of `v[to]`, shifting the items in between.
-fn move_to<T>(v: &mut [T], from: usize, to: usize) {
+pub(super) fn move_to<T>(v: &mut [T], from: usize, to: usize) {
     if from < to {
         v[from..=to].rotate_left(1);
     } else {
@@ -224,7 +224,7 @@ impl Workspace {
     ///
     /// Also false while the previous swap is still sliding: rows are hit-tested where they are painted, so a row
     /// mid-slide sits under the pointer and would be swapped straight back (flicker).
-    fn pointer_moved(&mut self, pos: gpui::Point<Pixels>) -> bool {
+    pub(super) fn pointer_moved(&mut self, pos: gpui::Point<Pixels>) -> bool {
         if self.last_swap.elapsed() < Duration::from_millis(SLIDE_MS + 40) {
             return false;
         }

@@ -386,7 +386,9 @@ impl Workspace {
         if subagent_edits.is_some() {
             view.update(cx, |v, cx| v.composer.update(cx, |c, cx| c.set_placeholder("Message this subagent…", window, cx)));
         }
+        let follow_up = self.store.data.settings.follow_up;
         view.update(cx, |v, _| {
+            v.follow_up = follow_up;
             v.subagent_edits = subagent_edits;
             v.canonical_history = canonical_history;
             v.compaction.enabled = auto_compact;

@@ -4,6 +4,7 @@
 //
 // Only the part of ACP m4code uses is here: initialize, session/new, session/load, session/list, session/prompt,
 // session/cancel, session/set_mode and session/set_config_option, and session/request_permission back to m4code.
+// `_m4code/steer` is m4code's own: a message for the turn that is running, which ACP has no request for.
 // stdout carries the protocol only, so anything logged goes to stderr.
 
 import { randomUUID } from "node:crypto";
@@ -213,11 +214,16 @@ async function permission(session, name, input, options) {
   return { behavior: "deny", message: "The user declined this.", interrupt: chosen === null };
 }
 
-/** Claude's questions to the user, one at a time, each with its options. A multiple-choice question takes one answer. */
+/**
+ * Claude's questions to the user, one at a time, each with its options. A multiple-choice question takes one answer.
+ * ACP has no free-text answer, so `_meta.m4code.freeText` tells m4code the user may type their own instead, and
+ * m4code sends those words back in the answer's `_meta.m4code.text`.
+ */
 async function askQuestions(session, input, options) {
   const answers = {};
   for (const q of input?.questions ?? []) {
     const answer = await ask("session/request_permission", {
+      _meta: { m4code: { freeText: true } },
       sessionId: session.id,
       toolCall: { toolCallId: `${options.toolUseID}-${q.question}`, title: q.question, kind: "other", status: "pending" },
       options: [
@@ -227,7 +233,9 @@ async function askQuestions(session, input, options) {
     });
     const chosen = answer?.outcome?.outcome === "selected" ? answer.outcome.optionId : null;
     if (chosen === null) return { behavior: "deny", message: "The user dismissed the question.", interrupt: true };
-    if (chosen !== "skip") answers[q.question] = q.options[Number(chosen)].label;
+    const own = answer?._meta?.m4code?.text;
+    if (typeof own === "string" && own.trim()) answers[q.question] = own.trim();
+    else if (chosen !== "skip" && q.options[Number(chosen)]) answers[q.question] = q.options[Number(chosen)].label;
   }
   return { behavior: "allow", updatedInput: { ...input, answers } };
 }
@@ -240,13 +248,38 @@ function stopReason(session, result) {
   return "end_turn";
 }
 
-function finishTurn(session, result) {
+/** The uuids of the messages a result answered: every one Claude took into that turn. */
+function answeredBy(result) {
+  if (Array.isArray(result.user_message_uuids)) return result.user_message_uuids;
+  return result.user_message_uuid ? [result.user_message_uuid] : null;
+}
+
+/**
+ * A result ends the turn m4code sees once it has answered every message sent in it. A steer Claude takes between tool
+ * calls is answered by the same result; one it takes after the turn gets a result of its own, so the turn stays open
+ * for it. A Claude Code too old to say which messages a result answered ends the turn at its first result, as before.
+ */
+async function finishTurn(session, result) {
   const turn = session.turn;
+  if (turn && !session.cancelled && !result.is_error) {
+    const answered = answeredBy(result);
+    // A Claude Code that never said it started a steer has answered it by now, so it shows before the turn ends.
+    showWaitingSteers(session, answered);
+    if (answered) for (const uuid of answered) turn.waiting.delete(uuid);
+    else turn.waiting.clear();
+    if (turn.waiting.size) {
+      turn.held = result;
+      return;
+    }
+  }
   session.turn = null;
+  // The receipt lists the messages Claude Code still means to run, which is how `unreadSteers` tells a steer it
+  // dropped from one it already answered. An older Claude Code sends none, and its steers are left to run.
+  const receipt = session.cancelled ? await session.interrupted : undefined;
   if (turn) {
     const failed = result.is_error && !session.cancelled;
     if (failed) turn.reject(new Error(result.result || (result.errors ?? []).join("\n") || "Claude Code stopped with an error."));
-    else turn.resolve({ stopReason: stopReason(session, result) });
+    else turn.resolve({ stopReason: stopReason(session, result), ...steersBack(session, turn, receipt) });
   }
   // The context size is only shown, so the turn ends without waiting for it.
   session.query
@@ -255,15 +288,69 @@ function finishTurn(session, result) {
     .catch(() => {});
 }
 
+/**
+ * The steers the turn ends without having answered, in the reply's `_meta.m4code`. `unread` are those Claude had not
+ * read when the user stopped the turn: Claude Code keeps them and would run them as a turn of their own, which the
+ * user just asked to stop, so the bridge stops that turn too (`dropping`) and m4code puts their text back in the
+ * message box. `resend` are those Claude dropped unread on its own, which m4code sends as the next turn.
+ */
+function steersBack(session, turn, receipt) {
+  const stillQueued = new Set(receipt?.still_queued ?? []);
+  const unread = [...turn.waiting].filter((uuid) => turn.steers.has(uuid) && !turn.shown.has(uuid) && stillQueued.has(uuid));
+  for (const uuid of unread) session.dropping.add(uuid);
+  const back = {};
+  if (unread.length) back.unread = unread.map((uuid) => turn.steers.get(uuid));
+  if (turn.dropped.length) back.resend = turn.dropped;
+  return Object.keys(back).length ? { _meta: { m4code: back } } : {};
+}
+
+/** Claude Code says it took a steer off its queue without reading it (the states t3code treats the same way). */
+function steerDropped(session, m) {
+  const turn = session.turn;
+  if (!turn || session.cancelled || !["cancelled", "discarded", "refused"].includes(m.state) || !turn.steers.has(m.command_uuid)) return;
+  if (!turn.waiting.delete(m.command_uuid)) return;
+  turn.dropped.push(turn.steers.get(m.command_uuid));
+  if (turn.waiting.size === 0 && turn.held) return finishTurn(session, turn.held);
+}
+
 /** The session's messages from the SDK, as updates to m4code, until the session ends. */
 async function pump(session) {
   try {
     for await (const m of session.query) {
+      if (session.dropping.size && !session.turn) {
+        if (m.type === "result") {
+          for (const uuid of answeredBy(m) ?? [...session.dropping]) session.dropping.delete(uuid);
+          session.dropInterrupted = false;
+        } else if (m.type === "command_lifecycle" && ["cancelled", "discarded", "refused"].includes(m.state)) {
+          session.dropping.delete(m.command_uuid);
+        } else if (!session.dropInterrupted) {
+          session.dropInterrupted = true;
+          session.query.interrupt().catch(() => {});
+        }
+        if (!session.dropping.size) session.dropsDone?.();
+        continue;
+      }
+      // Not in the SDK's types yet; t3code reads it the same way.
+      if (m.type === "command_lifecycle") {
+        if (m.state === "started") showSteer(session, m.command_uuid);
+        await steerDropped(session, m);
+        continue;
+      }
       // A subagent's own steps stay inside its tool call.
       if (m.parent_tool_use_id) continue;
       if (m.type === "stream_event") {
         const ev = m.event;
-        if (ev.type === "message_start") session.streamed.add(ev.message.id);
+        if (ev.type === "message_start") {
+          session.streamed.add(ev.message.id);
+          // After a result the turn stayed open for, what Claude writes next answers the oldest steer it still
+          // owed; a later one may still be waiting, so it shows when Claude starts or answers it.
+          const turn = session.turn;
+          if (turn?.held) {
+            turn.held = null;
+            const oldest = [...turn.waiting].find((uuid) => turn.steers.has(uuid) && !turn.shown.has(uuid));
+            if (oldest) showSteer(session, oldest);
+          }
+        }
         if (ev.type === "content_block_delta" && ev.delta.type === "text_delta") update(session.id, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: ev.delta.text } });
         if (ev.type === "content_block_delta" && ev.delta.type === "thinking_delta") update(session.id, { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: ev.delta.thinking } });
       } else if (m.type === "assistant") {
@@ -280,20 +367,23 @@ async function pump(session) {
           update(session.id, { sessionUpdate: "current_mode_update", currentModeId: session.mode });
         }
       } else if (m.type === "result") {
-        finishTurn(session, m);
+        await finishTurn(session, m);
       }
     }
   } catch (error) {
     session.turn?.reject(error);
     session.turn = null;
   }
+  // Claude Code ended with a turn still open, such as one held for a steer it never answered.
+  session.turn?.reject(new Error("Claude Code stopped before it finished the turn."));
+  session.turn = null;
   sessions.delete(session.id);
 }
 
 async function open(params, resume) {
   const id = resume ?? randomUUID();
   const extra = params._meta?.claudeCode?.options ?? {};
-  const session = { id, cwd: params.cwd, inbox: new Inbox(), tools: new Map(), streamed: new Set(), turn: null, cancelled: false, mode: "default", model: "", effort: "medium", models: [] };
+  const session = { id, cwd: params.cwd, inbox: new Inbox(), tools: new Map(), streamed: new Set(), turn: null, cancelled: false, interrupted: null, dropping: new Set(), dropInterrupted: false, dropsDone: null, mode: "default", model: "", effort: "medium", models: [] };
   session.query = query({
     prompt: session.inbox,
     options: {
@@ -369,10 +459,25 @@ const handlers = {
     if (!s) throw new Error("That session has ended.");
     if (s.turn) throw new Error("A turn is already running.");
     s.cancelled = false;
+    // Steers the user stopped still run in Claude Code first; this message waits until they are gone, so their
+    // output and result can't be taken for its own.
+    await afterDropped(s);
     const text = (p.prompt ?? []).filter((c) => c.type === "text").map((c) => c.text).join("\n");
-    const done = new Promise((resolve, reject) => (s.turn = { resolve, reject }));
-    s.inbox.push({ type: "user", message: { role: "user", content: [{ type: "text", text }] }, parent_tool_use_id: null, session_id: s.id, origin: { kind: "human" } });
+    const uuid = randomUUID();
+    const done = new Promise((resolve, reject) => (s.turn = { resolve, reject, waiting: new Set([uuid]), steers: new Map(), shown: new Set(), dropped: [], held: null }));
+    s.inbox.push(userMessage(s, text, uuid));
     return done;
+  },
+  "_m4code/steer": async (p) => {
+    const s = sessions.get(p.sessionId);
+    if (!s) throw new Error("That session has ended.");
+    if (!s.turn || s.cancelled) throw new Error("No turn is running.");
+    const uuid = randomUUID();
+    s.turn.waiting.add(uuid);
+    s.turn.steers.set(uuid, p.text);
+    // "next" waits for the tool calls running to finish; "now" would cancel them, as t3code found.
+    s.inbox.push(userMessage(s, p.text, uuid, "next"));
+    return {};
   },
   "session/set_mode": async (p) => {
     const s = sessions.get(p.sessionId);
@@ -396,11 +501,48 @@ const handlers = {
   },
 };
 
+/**
+ * Resolves once the stopped steers (`dropping`) have run and been stopped, or after 10 s: Claude Code's receipt said
+ * it would run them, and one that hasn't started by then is taken as gone, so a new message never waits forever.
+ */
+async function afterDropped(session) {
+  if (session.dropping.size) {
+    await new Promise((resolve) => {
+      session.dropsDone = resolve;
+      setTimeout(resolve, 10_000);
+    });
+  }
+  session.dropsDone = null;
+  session.dropping.clear();
+  session.dropInterrupted = false;
+}
+
+function userMessage(session, text, uuid, priority) {
+  return { type: "user", uuid, ...(priority ? { priority } : {}), message: { role: "user", content: [{ type: "text", text }] }, parent_tool_use_id: null, session_id: session.id, origin: { kind: "human" } };
+}
+
+/**
+ * Show a steer in the conversation once Claude reads it, not when it was sent: what Claude was still writing then
+ * comes first. m4code knows it by `_meta.m4code.steer` and takes it off the list of steers waiting to be read.
+ */
+function showSteer(session, uuid) {
+  const turn = session.turn;
+  const text = turn?.steers.get(uuid);
+  if (text === undefined || turn.shown.has(uuid)) return;
+  turn.shown.add(uuid);
+  update(session.id, { sessionUpdate: "user_message_chunk", content: { type: "text", text }, _meta: { m4code: { steer: true } } });
+}
+
+/** Every steer not shown yet, oldest first: Claude is about to answer them, or just did. */
+function showWaitingSteers(session, only) {
+  for (const uuid of session.turn?.steers.keys() ?? []) if (!only || only.includes(uuid)) showSteer(session, uuid);
+}
+
 function cancel(p) {
   const s = sessions.get(p.sessionId);
   if (!s?.turn) return;
   s.cancelled = true;
-  s.query.interrupt().catch(() => {});
+  s.interrupted = s.query.interrupt().catch(() => undefined);
 }
 
 async function handle(m) {
