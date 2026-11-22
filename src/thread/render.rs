@@ -133,7 +133,15 @@ impl ThreadView {
                 .into_any_element(),
             Entry::Agent(text) => div().px(px(2.0)).child(crate::github::ui::markdown(format!("thread-md-{ix}"), text)).into_any_element(),
             Entry::Thought(text) => {
-                let shown = if self.detail { text.clone() } else { text.lines().next().unwrap_or_default().to_string() };
+                let run = tool_run(&self.groupable(), ix);
+                match &run {
+                    Some(run) if run.start == ix && run.len() > 1 => return self.wrap_entry(ix, self.render_tool_run(run.clone(), cx)),
+                    Some(run) if !self.run_open(run) => return div().into_any_element(),
+                    _ => {}
+                }
+                // Inside an open run each thought shows whole; alone it shows its first line until Ctrl+O.
+                let whole = self.detail || run.is_some_and(|r| r.len() > 1);
+                let shown = if whole { text.clone() } else { text.lines().next().unwrap_or_default().to_string() };
                 div()
                     .px(px(10.0))
                     .py(px(4.0))
@@ -163,6 +171,11 @@ impl ThreadView {
                 .child(text.clone())
                 .into_any_element(),
         };
+        self.wrap_entry(ix, body)
+    }
+
+    /// An entry in the conversation's centred column.
+    fn wrap_entry(&self, ix: usize, body: AnyElement) -> AnyElement {
         let is_last = ix + 1 == self.thread.entries.len();
         div()
             .w_full()
@@ -270,24 +283,31 @@ impl ThreadView {
         block.into_any_element()
     }
 
-    /// Per entry: whether it is a tool call that folds into a run with its neighbours. A call with an inline card stays
-    /// on its own, so the card is never hidden.
+    /// Per entry: whether it is a step that folds into a run with its neighbours, a thought or a tool call. A call with
+    /// an inline card stays on its own, so the card is never hidden.
     fn groupable(&self) -> Vec<bool> {
-        self.thread.entries.iter().map(|e| matches!(e, Entry::Tool(call) if !self.cards.contains_key(&call.id))).collect()
+        self.thread.entries.iter().map(|e| matches!(e, Entry::Thought(_)) || matches!(e, Entry::Tool(call) if !self.cards.contains_key(&call.id))).collect()
     }
 
-    /// A run is open while Ctrl+O shows everything or after a click on its line; one call alone is always open.
+    /// A run is open while Ctrl+O shows everything or after a click on its line; one step alone is always open. Runs
+    /// only grow at their end, so the first entry's place names a run for as long as it lasts.
     fn run_open(&self, run: &std::ops::Range<usize>) -> bool {
-        let Some(Entry::Tool(first)) = self.thread.entries.get(run.start) else { return true };
-        run.len() == 1 || self.detail || self.expanded_tools.contains(&format!("run:{}", first.id))
+        run.len() == 1 || self.detail || self.expanded_tools.contains(&format!("run:{}", run.start))
     }
 
-    /// The dimmed line of a run of tool calls: how many, and the latest one's title. Click to show each call.
+    /// The dimmed line of a run of steps: what they are, and the latest one. Click to show each step.
     fn render_tool_run(&self, run: std::ops::Range<usize>, cx: &mut Context<Self>) -> AnyElement {
-        let calls: Vec<&ToolCall> = self.thread.entries[run.clone()].iter().filter_map(|e| if let Entry::Tool(c) = e { Some(c) } else { None }).collect();
-        if calls.len() == 1 {
-            return self.render_tool(run.start, calls[0], cx);
+        let steps = &self.thread.entries[run.clone()];
+        let calls: Vec<&ToolCall> = steps.iter().filter_map(|e| if let Entry::Tool(c) = e { Some(c) } else { None }).collect();
+        if let [Entry::Tool(call)] = steps {
+            return self.render_tool(run.start, call, cx);
         }
+        let thoughts = steps.len() - calls.len();
+        let latest = match steps.last() {
+            Some(Entry::Tool(call)) => title(call),
+            Some(Entry::Thought(text)) => text.lines().next().unwrap_or_default().to_string(),
+            _ => String::new(),
+        };
         let open = self.run_open(&run);
         let color = if calls.iter().any(|c| matches!(c.status, ToolStatus::Pending | ToolStatus::Running)) {
             theme::WARN
@@ -296,9 +316,8 @@ impl ThreadView {
         } else {
             theme::TEXT_FAINT
         };
-        let key = format!("run:{}", calls[0].id);
+        let key = format!("run:{}", run.start);
         let start = run.start;
-        let latest = calls.last().map(|c| title(c)).unwrap_or_default();
         div()
             .id(SharedString::from(format!("tool-run-{start}")))
             .w_full()
@@ -313,7 +332,7 @@ impl ThreadView {
             .text_size(scale::px(12.0))
             .text_color(hsla(theme::TEXT_FAINT))
             .child(div().flex_none().text_size(scale::px(9.0)).text_color(hsla(color)).child("●"))
-            .child(div().flex_none().text_color(hsla(theme::TEXT_DIM)).child(format!("{} tool calls", calls.len())))
+            .child(div().flex_none().text_color(hsla(theme::TEXT_DIM)).child(run_label(thoughts, calls.len())))
             .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(latest))
             .child(div().flex_none().child(icon(if open { IconName::ChevronDown } else { IconName::ChevronRight }, 12.0)))
             .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| {
@@ -768,7 +787,21 @@ fn diff(path: &std::path::Path, old: Option<&str>, new: &str, full: bool) -> Any
     block.when(old.is_none(), |b| b.border_color(hsla(theme::OK))).into_any_element()
 }
 
-/// The run of foldable tool calls (`groupable`) that entry `ix` belongs to, or None when it is not one.
+/// What a run's line says it holds.
+fn run_label(thoughts: usize, calls: usize) -> String {
+    let calls = match calls {
+        0 => None,
+        1 => Some("1 tool call".to_string()),
+        n => Some(format!("{n} tool calls")),
+    };
+    match (thoughts, calls) {
+        (0, Some(calls)) => calls,
+        (_, Some(calls)) => format!("Thought, {calls}"),
+        (_, None) => "Thought".to_string(),
+    }
+}
+
+/// The run of foldable steps (`groupable`) that entry `ix` belongs to, or None when it is not one.
 fn tool_run(groupable: &[bool], ix: usize) -> Option<std::ops::Range<usize>> {
     if !groupable.get(ix).copied().unwrap_or(false) {
         return None;
@@ -780,7 +813,14 @@ fn tool_run(groupable: &[bool], ix: usize) -> Option<std::ops::Range<usize>> {
 
 #[cfg(test)]
 mod tests {
-    use super::tool_run;
+    use super::{run_label, tool_run};
+
+    #[test]
+    fn a_runs_line_says_what_it_holds() {
+        assert_eq!(run_label(0, 3), "3 tool calls");
+        assert_eq!(run_label(2, 1), "Thought, 1 tool call");
+        assert_eq!(run_label(2, 0), "Thought");
+    }
 
     #[test]
     fn consecutive_tool_calls_share_one_run() {
