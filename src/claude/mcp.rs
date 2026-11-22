@@ -116,6 +116,8 @@ pub fn allowed_tools(off: &[&str]) -> Vec<String> {
 const BRIDGE_INSTRUCTIONS: &str = " Claudiu also has tools that reach your other sessions: list_code_sessions, read_code_session, \
 search_sessions, search_projects and start_code_session. They act at once. Use them only when the user asks you to look at, hand \
 work to or continue in another session, or to work in a project; search_sessions may also be used unasked to find a session to link. \
+One exception: when the user gives you a big task that is separate from the work in progress here, call start_code_session \
+with a full brief to suggest running it in its own session; the user sees a dialog and decides, so say so and carry on. \
 switch_worktree moves this session into another git worktree of its project; call it only when the user asks for a worktree, and \
 end your turn once it is approved.";
 
@@ -145,8 +147,8 @@ const INTRO: &str = "You are running inside Claudiu, a desktop app that runs thi
 /// What makes the model ask before it calls `set_model`; `ask` is how it asks.
 fn model_instructions(ask: &str) -> String {
     format!(
-        " Never switch models on your own: before set_model, ask {ask} which model and effort, unless the user \
-just named them. list_models gives the exact names set_model takes (harness:model-id), including other coding agents; \
+        " Never switch models on your own: before set_model, ask {ask} which model, unless the user just named one. \
+Don't ask about effort: leave it out unless the user named one, and Claudiu uses medium. list_models gives the exact names set_model takes (harness:model-id), including other coding agents; \
 switching to another one hands this conversation over. After set_model, end your turn."
     )
 }
@@ -335,13 +337,13 @@ fn model_tools(off: &[&str]) -> Vec<Value> {
         json!({
             "name": "set_model",
             "description": format!(
-                "Switch this session to another model, or change its effort. Name the model exactly as list_models prints it (harness:model-id); call list_models first. On the same harness it applies from your next request. On another harness the user is asked to approve, and Claudiu then hands this conversation to that agent once your turn ends. Always ask the user first{ask} (which model, which effort) unless they just named them; never switch on your own."
+                "Switch this session to another model, or change its effort. Name the model exactly as list_models prints it (harness:model-id); call list_models first. On the same harness it applies from your next request. On another harness the user is asked to approve, and Claudiu then hands this conversation to that agent once your turn ends. Always ask the user first{ask} which model unless they just named one; never switch on your own. Don't ask about effort."
             ),
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "model": { "type": "string", "description": "harness:model-id, as list_models prints it (e.g. codex:gpt-6, claude:opus)" },
-                    "effort": { "type": "string", "description": "Effort level: low, medium, high, xhigh or max" },
+                    "effort": { "type": "string", "description": "Only when the user named one: low, medium, high, xhigh or max. Left out, a new model runs at medium." },
                     "message": { "type": "string", "description": "Only when switching to another harness: the first message that agent gets, saying what to do next" },
                 },
             },

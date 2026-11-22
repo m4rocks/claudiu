@@ -345,12 +345,12 @@ impl Workspace {
             }
             "set_model" => {
                 let thread = self.requester_thread(req)?;
-                let effort = req.args["effort"].as_str().map(str::trim).filter(|e| !e.is_empty()).map(String::from);
                 let model = req.args["harness"].as_str().and_then(|key| crate::harness::Harness::ALL.into_iter().find(|h| h.key() == key)).map(|harness| CatalogModel {
                     harness,
                     id: req.args["model_id"].as_str().unwrap_or_default().to_string(),
                     name: req.args["name"].as_str().unwrap_or_default().to_string(),
                 });
+                let effort = effort_for(req.args["effort"].as_str(), model.is_some());
                 match model {
                     Some(model) if req.args["cross"].as_bool() == Some(true) => {
                         let message = req.args["message"].as_str().map(str::trim).filter(|m| !m.is_empty()).map_or_else(|| "Carry on with the task from where the conversation left off.".into(), String::from);
@@ -366,6 +366,15 @@ impl Workspace {
             }
             other => Err(format!("unknown tool {other}")),
         }
+    }
+}
+
+/// The effort set_model asks for: the one the agent named, or medium with a new model, since agents are told to name an
+/// effort only when the user did.
+fn effort_for(named: Option<&str>, new_model: bool) -> Option<String> {
+    match named.map(str::trim).filter(|e| !e.is_empty()) {
+        Some(effort) => Some(effort.to_string()),
+        None => new_model.then(|| "medium".to_string()),
     }
 }
 
@@ -418,6 +427,15 @@ mod tests {
         let none = find_model(&models(), "claude:sonnet").unwrap_err();
         assert!(none.contains("- codex:gpt-6 · GPT-6 (Codex)"), "an unknown name lists the choices: {none}");
         assert!(find_model(&models(), "antigravity:").is_err(), "a harness's placeholder default is not a model to switch to");
+    }
+
+    #[test]
+    fn set_model_uses_medium_effort_unless_one_is_named() {
+        assert_eq!(effort_for(None, true).as_deref(), Some("medium"));
+        assert_eq!(effort_for(Some(" "), true).as_deref(), Some("medium"));
+        assert_eq!(effort_for(Some("high"), true).as_deref(), Some("high"));
+        assert_eq!(effort_for(Some("low"), false).as_deref(), Some("low"));
+        assert_eq!(effort_for(None, false), None, "an effort-only call always names one");
     }
 
     #[test]
