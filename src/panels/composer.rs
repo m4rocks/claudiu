@@ -3,6 +3,7 @@
 
 use gpui::{AnyElement, Div, ElementId, InteractiveElement, IntoElement, ParentElement, SharedString, Stateful, Styled, div, prelude::FluentBuilder, px};
 use gpui_kit::assets::IconName;
+use gpui_kit::component::input::InputEvent;
 
 use crate::harness::Harness;
 use crate::panels::{logos, picker, scale};
@@ -11,6 +12,12 @@ use crate::panels::widgets::{Anchor, button, button_disabled, icon};
 
 pub fn can_send(text: &str) -> bool {
     !text.trim().is_empty()
+}
+
+/// Whether a key in the message box sends it. The textarea reports Shift+Enter as a press of Enter too, after it has
+/// put the new line in, so only an Enter without Shift sends.
+pub fn sends(event: &InputEvent) -> bool {
+    matches!(event, InputEvent::PressEnter { shift: false, .. })
 }
 
 pub fn send_button(id: impl Into<SharedString>, enabled: bool) -> Stateful<Div> {
@@ -142,4 +149,17 @@ pub fn git_chip(id: impl Into<ElementId>, open: bool, primary: impl Into<SharedS
                 .child(div().max_w(px(100.0)).overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(hsla(theme::TEXT_DIM)).child(wt))
         })
         .child(tail.unwrap_or_else(|| icon(IconName::ChevronDown, 10.5).text_color(hsla(theme::TEXT_FAINT)).into_any_element()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn enter_sends_and_shift_enter_does_not() {
+        assert!(sends(&InputEvent::PressEnter { secondary: false, shift: false }));
+        assert!(sends(&InputEvent::PressEnter { secondary: true, shift: false }), "Cmd/Ctrl+Enter sends too");
+        assert!(!sends(&InputEvent::PressEnter { secondary: false, shift: true }), "a new line");
+        assert!(!sends(&InputEvent::Change));
+    }
 }

@@ -323,6 +323,16 @@ pub fn permission_outcome(option: Option<&str>) -> Value {
     }
 }
 
+/// A question m4code's own Claude Code bridge asks can take the user's own words instead of one of its options. ACP has
+/// no such answer, so the bridge marks the question and reads the words from the answer's `_meta` (`own_answer`).
+pub fn takes_own_answer(params: &Value) -> bool {
+    params["_meta"]["m4code"]["freeText"].as_bool() == Some(true)
+}
+
+pub fn own_answer(text: &str) -> Value {
+    json!({ "outcome": { "outcome": "selected", "optionId": "other" }, "_meta": { "m4code": { "text": text } } })
+}
+
 pub fn is_tool_permission(params: &Value) -> bool {
     matches!(params["toolCall"]["kind"].as_str(), Some("read" | "edit" | "delete" | "move" | "search" | "execute" | "think" | "fetch" | "switch_mode"))
 }
@@ -498,5 +508,13 @@ mod tests {
         assert_eq!(elicitation_accept(content), json!({"action": "accept", "content": {"db": "pg", "confirm": true, "tags": ["fast"]}}));
         assert_eq!(elicitation_cancel(), json!({"action": "cancel"}));
         assert_eq!(elicitation_decline(), json!({"action": "decline"}));
+    }
+
+    #[test]
+    fn only_a_marked_question_takes_the_users_own_words() {
+        assert!(takes_own_answer(&json!({"_meta": {"m4code": {"freeText": true}}, "options": []})));
+        assert!(!takes_own_answer(&json!({"options": []})), "a plain ACP permission question");
+        assert_eq!(own_answer("blue")["_meta"]["m4code"]["text"], "blue");
+        assert_eq!(own_answer("blue")["outcome"]["outcome"], "selected");
     }
 }

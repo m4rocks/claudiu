@@ -15,7 +15,7 @@ use crate::harness::CatalogModel;
 use crate::harness::thread::{Entry, SubagentReport, ToolCall, ToolContent, ToolStatus, diff_lines, parse_subagent_report};
 use crate::panels::{composer, logos, picker, scale};
 use crate::panels::theme::{self, hsla};
-use crate::panels::widgets::{EffortPick, Trigger, effort_slider, icon, key_badge, spinner};
+use crate::panels::widgets::{EffortPick, Trigger, effort_slider, icon, icon_button, key_badge, spinner};
 use crate::visual::ui::Scope;
 
 /// Lines of a tool's output shown while it is folded (Ctrl+O shows all).
@@ -60,6 +60,7 @@ impl Render for ThreadView {
             .min_h_0()
             .child(conversation)
             .child(div().absolute().bottom_0().left_0().right_0().h(px(18.0)).bg(fade));
+        let conversation = div().flex_1().min_h_0().flex().flex_col().child(conversation).children(self.render_activity());
         let bottom_dock = div()
             .flex_none()
             .flex()
@@ -71,6 +72,27 @@ impl Render for ThreadView {
             .child(bottom_dock)
             .children(self.render_picker_overlay(window, cx))
     }
+}
+
+/// The user's message as markdown that keeps each line they typed. Markdown would join lines with a single break
+/// between them into one, so every line before another ends in a hard break (two trailing spaces, which unlike a
+/// backslash leave nothing behind when the next line starts a list or a fence), except inside a fenced code block,
+/// where lines already stay as they are.
+fn keep_line_breaks(text: &str) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut in_fence = false;
+    let mut out = String::with_capacity(text.len() + lines.len());
+    for (i, line) in lines.iter().enumerate() {
+        let fence = line.trim_start().starts_with("```") || line.trim_start().starts_with("~~~");
+        if fence {
+            in_fence = !in_fence;
+        }
+        out.push_str(line);
+        let Some(next) = lines.get(i + 1) else { break };
+        let breaks = !in_fence && !fence && !line.trim().is_empty() && !next.trim().is_empty();
+        out.push_str(if breaks { "  \n" } else { "\n" });
+    }
+    out
 }
 
 fn waiting(message: &str) -> Div {
@@ -165,7 +187,7 @@ impl ThreadView {
                 .bg(hsla(theme::ROW_ACTIVE))
                 .border_1()
                 .border_color(hsla(theme::PANEL_BORDER))
-                .child(text.clone())
+                .child(crate::github::ui::markdown(format!("thread-user-md-{ix}"), &keep_line_breaks(text)))
                 .into_any_element(),
             Entry::Agent(text) => div().px(px(2.0)).child(crate::github::ui::markdown(format!("thread-md-{ix}"), text)).into_any_element(),
             Entry::Thought(text) => {
@@ -263,6 +285,27 @@ impl ThreadView {
     }
 
     /// An entry in the conversation's centred column.
+    /// What the agent is doing, at the foot of the conversation: the chat is where you look to see whether it works,
+    /// and the message box stays yours.
+    fn render_activity(&self) -> Option<AnyElement> {
+        let (label, stoppable) = match self.starting_label() {
+            Some(label) => (label, false),
+            None if self.is_working() => ((if self.compaction.running { "Compacting…" } else { "Working…" }).to_string(), true),
+            None => return None,
+        };
+        let row = div()
+            .w_full()
+            .max_w(px(COLUMN_MAX_W))
+            .px(px(2.0))
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .child(spinner("thread-activity", 12.0))
+            .child(div().text_size(scale::px(12.5)).text_color(hsla(theme::TEXT_DIM)).child(label))
+            .when(stoppable, |d| d.child(div().flex().gap(px(4.0)).items_center().child(key_badge("Esc")).child(div().text_size(scale::px(11.5)).text_color(hsla(theme::TEXT_FAINT)).child("to stop"))));
+        Some(div().flex_none().w_full().px(px(22.0)).pb(px(10.0)).flex().justify_center().child(row).into_any_element())
+    }
+
     fn wrap_entry(&self, ix: usize, body: AnyElement) -> AnyElement {
         let is_last = ix + 1 == self.thread.entries.len();
         div()
@@ -618,18 +661,22 @@ impl ThreadView {
         let q = self.question.as_ref()?;
         let mut options = div().flex().flex_col().gap(px(6.0)).w_full();
         for (i, opt) in q.options.iter().enumerate() {
-            let primary = opt.kind == "allow_once" && i == 0;
+            let lit = i == q.highlight;
             let row = div()
                 .id(SharedString::from(format!("thread-perm-{i}")))
                 .w_full()
                 .px(px(10.0))
                 .py(px(8.0))
                 .rounded(px(7.0))
-                .bg(hsla(if primary { theme::ROW_ACTIVE } else { theme::PANEL_BG }))
+                .bg(hsla(if lit { theme::ROW_ACTIVE } else { theme::PANEL_BG }))
                 .border_1()
-                .border_color(hsla(if primary { theme::FOCUS_BORDER } else { theme::PANEL_BORDER }))
-                .hover(|s| s.bg(hsla(theme::SURFACE_HOVER)))
+                .border_color(hsla(if lit { theme::FOCUS_BORDER } else { theme::PANEL_BORDER }))
                 .cursor_pointer()
+                .on_hover(cx.listener(move |v, hovered: &bool, _, cx| {
+                    if *hovered {
+                        v.highlight_option(i, cx);
+                    }
+                }))
                 .flex()
                 .items_start()
                 .gap(px(10.0))
@@ -672,7 +719,23 @@ impl ThreadView {
                 .gap(px(8.0))
                 .child(div().font_weight(FontWeight::SEMIBOLD).child(q.title.clone()))
                 .child(div().id("thread-question-options").max_h(px(240.0)).overflow_y_scroll().child(options))
-                .child(div().flex().gap(px(6.0)).items_center().text_color(hsla(theme::TEXT_FAINT)).text_size(scale::px(11.5)).child(key_badge("1-9")).child("to choose").child(key_badge("Esc")).child("to decline")),
+                .child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .gap(px(6.0))
+                        .items_center()
+                        .text_color(hsla(theme::TEXT_FAINT))
+                        .text_size(scale::px(11.5))
+                        .child(key_badge("↑↓"))
+                        .child(key_badge("Enter"))
+                        .child("or")
+                        .child(key_badge("1-9"))
+                        .child("to choose")
+                        .child(key_badge("Esc"))
+                        .child("to decline")
+                        .when(q.takes_own_answer, |d| d.child("· or type your own answer below")),
+                ),
         )
     }
 
@@ -895,12 +958,54 @@ impl ThreadView {
             .pt(px(4.0))
             .flex()
             .justify_center()
-            .child(inner.child(dock))
+            .child(inner.children(self.render_waiting(cx)).child(dock))
     }
 
-    /// Assemble the shared message box parts: model, permission mode, branch, status, review, queue and send.
+    /// The user's messages waiting for the turn to end, above the message box, each one editable or removable
+    /// before it is sent.
+    fn render_waiting(&self, cx: &mut Context<Self>) -> Option<Div> {
+        let waiting = self.waiting_messages();
+        if waiting.is_empty() {
+            return None;
+        }
+        let rows = waiting.into_iter().map(|(at, text)| {
+            let first_line = text.lines().find(|l| !l.trim().is_empty()).unwrap_or_default().trim().to_string();
+            div()
+                .w_full()
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .px(px(10.0))
+                .py(px(4.0))
+                .child(icon(IconName::Clock, 12.0).text_color(hsla(theme::TEXT_FAINT)))
+                .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(scale::px(12.5)).text_color(hsla(theme::TEXT_DIM)).child(first_line))
+                .child(
+                    icon_button(SharedString::from(format!("queued-edit-{at}")), IconName::Pencil)
+                        .on_click(cx.listener(move |v, _: &ClickEvent, window, cx| v.edit_queued(at, window, cx))),
+                )
+                .child(
+                    icon_button(SharedString::from(format!("queued-remove-{at}")), IconName::X)
+                        .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| drop(v.unqueue(at, cx)))),
+                )
+        });
+        Some(
+            div()
+                .w_full()
+                .py(px(4.0))
+                .rounded(px(10.0))
+                .bg(hsla(theme::SURFACE_ELEVATED))
+                .border_1()
+                .border_color(hsla(theme::PANEL_BORDER))
+                .flex()
+                .flex_col()
+                .child(div().px(px(10.0)).pt(px(2.0)).text_size(scale::px(11.0)).text_color(hsla(theme::TEXT_FAINT)).child("Queued for after this turn"))
+                .children(rows),
+        )
+    }
+
+    /// Assemble the shared message box parts: model, permission mode, branch, review and send. What the agent is
+    /// doing shows in the chat (`render_activity`) and what waits shows above the box (`render_waiting`).
     fn composer_parts(&self, focused: bool, input: AnyElement, cx: &mut Context<Self>) -> composer::Composer {
-        let faint = |text: String| div().text_size(scale::px(11.5)).text_color(hsla(theme::TEXT_FAINT)).child(text);
         let active_harness = self.pending_model.as_ref().map_or(self.harness, |m| m.harness);
         let (_, effort_labels, effort_ix, _) = self.effort_choices();
         let effort_badge = effort_labels.get(effort_ix).cloned();
@@ -936,20 +1041,8 @@ impl ThreadView {
                 .into_any_element()
         });
 
-        let mut extra_chips: Vec<AnyElement> = vec![];
-        if let Some(label) = self.starting_label() {
-            extra_chips.push(div().ml(px(4.0)).flex().items_center().gap(px(5.0)).child(spinner("thread-starting", 11.0)).child(faint(label)).into_any_element());
-        }
-        if self.is_working() {
-            extra_chips.push(div().ml(px(4.0)).flex().items_center().gap(px(5.0)).child(spinner("thread-working", 11.0)).child(faint(if self.compaction.running { "Compacting".into() } else { "Working".into() })).into_any_element());
-            extra_chips.push(div().flex().gap(px(4.0)).items_center().child(key_badge("Esc")).child(faint("stop".into())).into_any_element());
-        }
-
+        let extra_chips: Vec<AnyElement> = vec![];
         let mut extra_actions: Vec<AnyElement> = vec![];
-        let queued = self.queue.iter().filter(|q| !q.shown).count();
-        if queued > 0 {
-            extra_actions.push(faint(format!("{queued} queued")).into_any_element());
-        }
         // Outside a git repository there are no snapshots, and so no review at all.
         if !self.snapshots.is_empty() {
             let chip = if self.can_review() {
@@ -1076,7 +1169,15 @@ fn tool_run(groupable: &[bool], ix: usize) -> Option<std::ops::Range<usize>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{report_line, run_label, tool_run};
+    use super::{keep_line_breaks, report_line, run_label, tool_run};
+
+    #[test]
+    fn a_users_lines_stay_lines_but_code_and_paragraphs_do_not_change() {
+        assert_eq!(keep_line_breaks("one\ntwo\nthree"), "one  \ntwo  \nthree");
+        assert_eq!(keep_line_breaks("para\n\nnext"), "para\n\nnext", "a blank line already splits them");
+        assert_eq!(keep_line_breaks("look:\n```\na\nb\n```\nafter"), "look:  \n```\na\nb\n```\nafter");
+        assert_eq!(keep_line_breaks("single"), "single");
+    }
 
     #[test]
     fn a_runs_line_says_what_it_holds() {

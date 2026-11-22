@@ -150,11 +150,17 @@ struct Question {
     reply: QuestionReply,
     title: String,
     options: Vec<QuestionOption>,
+    /// The option Enter picks; the arrows and the mouse move it.
+    highlight: usize,
+    /// What is typed in the message box can be sent as the answer instead of an option (`acp::takes_own_answer`).
+    takes_own_answer: bool,
 }
 
 struct Queued {
     text: String,
     compact: bool,
+    /// Typed by the user, who can edit or remove it while it waits; m4code's own messages (subagent reports) cannot.
+    by_user: bool,
     /// Already appended to `thread.entries` so a new session shows the user's message while the agent starts.
     shown: bool,
 }
@@ -270,7 +276,7 @@ impl ThreadView {
         let this = cx.entity().downgrade();
         let mut subscriptions = vec![
             cx.subscribe_in(&composer, window, |v: &mut Self, _, ev: &InputEvent, window, cx| match ev {
-                InputEvent::PressEnter { .. } => v.submit(window, cx),
+                ev if crate::panels::composer::sends(ev) => v.submit(window, cx),
                 InputEvent::Change => {
                     v.command_highlight = 0;
                     cx.notify();
@@ -300,7 +306,7 @@ impl ThreadView {
             if shown {
                 thread.sent(prompt.clone());
             }
-            queue.push_back(Queued { text: prompt, shown, compact: false });
+            queue.push_back(Queued { text: prompt, shown, compact: false, by_user: false });
         }
         let rows = thread.entries.len();
         let list = ListState::new(rows, ListAlignment::Top, px(600.0));
@@ -537,7 +543,8 @@ impl ThreadView {
                     })
                     .collect();
                 let title = params.pointer("/toolCall/title").and_then(Value::as_str).unwrap_or("The agent asks for permission").to_string();
-                self.question = Some(Question { reply: QuestionReply::Acp(id), title, options });
+                let takes_own_answer = acp::takes_own_answer(&params);
+                self.question = Some(Question { reply: QuestionReply::Acp(id), title, options, highlight: 0, takes_own_answer });
             }
             Event::Elicitation { id, params } => {
                 let mut fields: VecDeque<acp::ElicitationField> = acp::parse_elicitation(&params).into();
@@ -562,6 +569,9 @@ impl ThreadView {
                         },
                         title: first.title,
                         options,
+                        highlight: 0,
+                        // A field's answer must be one of its schema's values.
+                        takes_own_answer: false,
                     });
                 } else if let Some(connection) = &self.connection {
                     connection.respond(id, acp::elicitation_decline());
@@ -622,6 +632,10 @@ impl ThreadView {
             return;
         }
         self.composer.update(cx, |c, cx| c.set_value("", window, cx));
+        if self.question.as_ref().is_some_and(|q| q.takes_own_answer) {
+            self.answer_in_own_words(&text, cx);
+            return;
+        }
         self.history_at = None;
         self.picker = None;
         self.send(text, window, cx);
@@ -630,7 +644,7 @@ impl ThreadView {
     /// A message m4code sends on the session's behalf, such as a subagent's report. It waits for the current turn
     /// like the user's own, but never starts or joins a hand-off the user set up in the model picker.
     pub fn deliver(&mut self, text: String, cx: &mut Context<Self>) {
-        self.queue.push_back(Queued { text, shown: false, compact: false });
+        self.queue.push_back(Queued { text, shown: false, compact: false, by_user: false });
         self.send_next(cx);
         cx.notify();
     }
@@ -664,7 +678,7 @@ impl ThreadView {
         if shown && let Some(at) = self.thread.sent(text.clone()) {
             self.remeasure(at);
         }
-        self.queue.push_back(Queued { text, shown, compact: false });
+        self.queue.push_back(Queued { text, shown, compact: false, by_user: true });
         self.send_next(cx);
         cx.notify();
     }
@@ -678,7 +692,7 @@ impl ThreadView {
         let next = if self.compaction.take_due(self.thread.context, command.is_some()) {
             let at = self.thread.notice("Compacting context…", false);
             self.remeasure(at);
-            Queued { text: format!("/{}", command.unwrap()), shown: true, compact: true }
+            Queued { text: format!("/{}", command.unwrap()), shown: true, compact: true, by_user: false }
         } else {
             let Some(next) = self.queue.pop_front() else { return };
             next
@@ -830,7 +844,8 @@ impl ThreadView {
         if let Some(Question { reply: QuestionReply::Bridge(prev), .. }) = self.question.take() {
             crate::claude::bridge::respond(&prev, false, "Replaced by a newer question.");
         }
-        self.question = Some(Question { reply: QuestionReply::Bridge(req_id), title, options });
+        // `ask_user` answers with text, so the user's own words are an answer too.
+        self.question = Some(Question { reply: QuestionReply::Bridge(req_id), title, options, highlight: 0, takes_own_answer: true });
         cx.notify();
     }
 
@@ -858,6 +873,8 @@ impl ThreadView {
                             reply: QuestionReply::Elicitation { id, field: next.field, kind: next.kind, answers, remaining },
                             title: next.title,
                             options,
+                            highlight: 0,
+                            takes_own_answer: false,
                         });
                     } else if let Some(c) = &self.connection {
                         c.respond(id, acp::elicitation_accept(answers));
@@ -872,6 +889,32 @@ impl ThreadView {
             },
         }
         cx.notify();
+    }
+
+    /// Answer the open question with what the user typed rather than one of its options.
+    fn answer_in_own_words(&mut self, text: &str, cx: &mut Context<Self>) {
+        let Some(q) = self.question.take_if(|q| q.takes_own_answer) else { return };
+        match q.reply {
+            QuestionReply::Acp(id) => {
+                if let Some(c) = &self.connection {
+                    c.respond(id, acp::own_answer(text));
+                }
+            }
+            QuestionReply::Bridge(req_id) => crate::claude::bridge::respond(&req_id, true, text),
+            // Never marked as taking the user's own words (`takes_own_answer`).
+            QuestionReply::Elicitation { .. } => {}
+        }
+        cx.notify();
+    }
+
+    /// Move the open question's highlight to option `index`, as the mouse does.
+    pub(super) fn highlight_option(&mut self, index: usize, cx: &mut Context<Self>) {
+        if let Some(q) = self.question.as_mut()
+            && q.highlight != index
+        {
+            q.highlight = index;
+            cx.notify();
+        }
     }
 
     /// Turn the question down with its own reject option when it has one.
@@ -1040,6 +1083,21 @@ impl ThreadView {
             keys::Key::Interrupt => self.interrupt(cx),
             keys::Key::Decline => self.decline(cx),
             keys::Key::Choose(n) => self.answer(Some(n - 1), cx),
+            keys::Key::ChooseHighlighted => {
+                let at = self.question.as_ref().map(|q| q.highlight);
+                self.answer(at, cx);
+            }
+            keys::Key::OptionUp | keys::Key::OptionDown => {
+                if let Some(q) = self.question.as_mut() {
+                    let last = q.options.len().saturating_sub(1);
+                    q.highlight = match (key == keys::Key::OptionDown, q.highlight.min(last)) {
+                        (true, at) if at >= last => 0,
+                        (true, at) => at + 1,
+                        (false, 0) => last,
+                        (false, at) => at - 1,
+                    };
+                }
+            }
             keys::Key::EditLast => {
                 if let Some(last) = self.thread.sent_texts().pop() {
                     self.set_draft(&last, window, cx);
@@ -1229,6 +1287,28 @@ impl ThreadView {
     }
 
     /// Replace what the composer holds, with the cursor after it so typing carries on from the end.
+    /// The user's messages waiting for the turn to end, with their place in `queue`.
+    pub(super) fn waiting_messages(&self) -> Vec<(usize, &str)> {
+        self.queue.iter().enumerate().filter(|(_, q)| q.by_user && !q.shown).map(|(i, q)| (i, q.text.as_str())).collect()
+    }
+
+    /// Take a waiting message out of the queue; it is never sent.
+    pub(super) fn unqueue(&mut self, at: usize, cx: &mut Context<Self>) -> Option<String> {
+        let waiting = self.queue.get(at).is_some_and(|q| q.by_user && !q.shown);
+        let text = waiting.then(|| self.queue.remove(at)).flatten().map(|q| q.text);
+        cx.notify();
+        text
+    }
+
+    /// Take a waiting message back into the message box to change it, after anything already typed there.
+    pub(super) fn edit_queued(&mut self, at: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(text) = self.unqueue(at, cx) else { return };
+        let draft = self.composer.read(cx).value().to_string();
+        let joined = if draft.trim().is_empty() { text } else { format!("{draft}\n\n{text}") };
+        self.set_draft(&joined, window, cx);
+        self.focus_composer(window, cx);
+    }
+
     fn set_draft(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
         let text = text.to_string();
         let end = text.len();
@@ -1484,6 +1564,42 @@ mod tests {
                 Entry::User("thanks".into()),
             ];
             assert_eq!(v.groupable(), [false, true, true, true, false]);
+        });
+    }
+
+    #[gpui::test]
+    fn a_waiting_message_can_be_taken_back_but_m4codes_own_cannot(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_kit::init);
+        let dir = tempfile::tempdir().unwrap();
+        let start = super::Start {
+            record_id: String::new(),
+            harness: Harness::Claude,
+            all_models: vec![],
+            picked: vec![],
+            cwd: dir.path().to_path_buf(),
+            env: vec![],
+            mcp_servers: vec![],
+            meta: serde_json::Value::Null,
+            session_id: None,
+            mode: None,
+            options: vec![],
+            prompt: None,
+            prior_entries: vec![],
+            server: Some(("definitely-not-a-real-program-m4code".into(), vec![])),
+        };
+        let (view, cx) = cx.add_window_view(|window, cx| super::ThreadView::new(start, window, cx));
+        view.update_in(cx, |v, window, cx| {
+            v.queue.clear();
+            v.queue.push_back(super::Queued { text: "report".into(), shown: false, compact: false, by_user: false });
+            v.queue.push_back(super::Queued { text: "first\nmore".into(), shown: false, compact: false, by_user: true });
+            v.queue.push_back(super::Queued { text: "second".into(), shown: false, compact: false, by_user: true });
+            assert_eq!(v.waiting_messages(), [(1, "first\nmore"), (2, "second")]);
+            assert_eq!(v.unqueue(0, cx), None, "a subagent's report is not the user's to remove");
+            v.set_draft("typed", window, cx);
+            v.edit_queued(1, window, cx);
+            assert_eq!(v.composer.read(cx).value().as_ref(), "typed\n\nfirst\nmore");
+            assert_eq!(v.unqueue(1, cx).as_deref(), Some("second"));
+            assert_eq!(v.queue.len(), 1, "only the report is left");
         });
     }
 

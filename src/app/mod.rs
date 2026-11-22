@@ -668,7 +668,7 @@ impl Workspace {
         let home_prompt = cx.new(|cx| TextareaState::new(window, cx).auto_grow(2, 8).submit_on_enter(true).placeholder("Ask anything, or describe a task…"));
         cx.subscribe_in(&home_prompt, window, |ws: &mut Self, _, ev: &InputEvent, window, cx| {
             match ev {
-                InputEvent::PressEnter { .. } => ws.act(Act::HomeLaunch, window, cx),
+                ev if crate::panels::composer::sends(ev) => ws.act(Act::HomeLaunch, window, cx),
                 InputEvent::Change => cx.notify(),
                 _ => {}
             }

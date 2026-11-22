@@ -213,11 +213,16 @@ async function permission(session, name, input, options) {
   return { behavior: "deny", message: "The user declined this.", interrupt: chosen === null };
 }
 
-/** Claude's questions to the user, one at a time, each with its options. A multiple-choice question takes one answer. */
+/**
+ * Claude's questions to the user, one at a time, each with its options. A multiple-choice question takes one answer.
+ * ACP has no free-text answer, so `_meta.m4code.freeText` tells m4code the user may type their own instead, and
+ * m4code sends those words back in the answer's `_meta.m4code.text`.
+ */
 async function askQuestions(session, input, options) {
   const answers = {};
   for (const q of input?.questions ?? []) {
     const answer = await ask("session/request_permission", {
+      _meta: { m4code: { freeText: true } },
       sessionId: session.id,
       toolCall: { toolCallId: `${options.toolUseID}-${q.question}`, title: q.question, kind: "other", status: "pending" },
       options: [
@@ -227,7 +232,9 @@ async function askQuestions(session, input, options) {
     });
     const chosen = answer?.outcome?.outcome === "selected" ? answer.outcome.optionId : null;
     if (chosen === null) return { behavior: "deny", message: "The user dismissed the question.", interrupt: true };
-    if (chosen !== "skip") answers[q.question] = q.options[Number(chosen)].label;
+    const own = answer?._meta?.m4code?.text;
+    if (typeof own === "string" && own.trim()) answers[q.question] = own.trim();
+    else if (chosen !== "skip" && q.options[Number(chosen)]) answers[q.question] = q.options[Number(chosen)].label;
   }
   return { behavior: "allow", updatedInput: { ...input, answers } };
 }

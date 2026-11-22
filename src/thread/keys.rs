@@ -18,6 +18,11 @@ pub enum Key {
     Decline,
     /// A digit on a permission question: pick that option (from 1).
     Choose(usize),
+    /// Up and Down through a question's options, with nothing typed.
+    OptionUp,
+    OptionDown,
+    /// Enter on a question with nothing typed: pick the highlighted option.
+    ChooseHighlighted,
     /// Escape twice with nothing typed: bring the last message back to edit.
     EditLast,
     /// Escape twice, or Ctrl+C, with text typed: clear it.
@@ -75,6 +80,9 @@ pub fn key(keystroke: &Keystroke, s: State) -> Option<Key> {
         "up" if plain && s.commands > 0 => Some(Key::MenuUp),
         "down" if plain && s.commands > 0 => Some(Key::MenuDown),
         "enter" if plain && s.commands > 0 => Some(Key::RunCommand),
+        "up" if plain && !s.picker_open && s.question > 0 && s.draft_empty => Some(Key::OptionUp),
+        "down" if plain && !s.picker_open && s.question > 0 && s.draft_empty => Some(Key::OptionDown),
+        "enter" if plain && !s.picker_open && s.question > 0 && s.draft_empty => Some(Key::ChooseHighlighted),
         "up" if plain && !s.picker_open && (s.draft_empty || s.in_history) => Some(Key::Older),
         "down" if plain && !s.picker_open && s.in_history => Some(Key::Newer),
         "o" if m.control && !m.platform && !m.alt && !m.shift => Some(Key::ToggleDetail),
@@ -123,6 +131,18 @@ mod tests {
         assert_eq!(press("0", asking), None);
         assert_eq!(press("2", State { draft_empty: false, ..asking }), None, "typing a reply instead");
         assert_eq!(press("2", idle()), None, "no question: a digit is typed");
+    }
+
+    #[test]
+    fn a_question_takes_the_arrows_and_enter_until_something_is_typed() {
+        let asking = State { question: 3, ..idle() };
+        assert_eq!(press("down", asking), Some(Key::OptionDown));
+        assert_eq!(press("up", asking), Some(Key::OptionUp), "not the history");
+        assert_eq!(press("enter", asking), Some(Key::ChooseHighlighted));
+        let typing = State { draft_empty: false, ..asking };
+        assert_eq!(press("enter", typing), None, "the message box sends the typed answer");
+        assert_eq!(press("up", typing), None);
+        assert_eq!(press("shift-enter", asking), None, "a new line");
     }
 
     #[test]
