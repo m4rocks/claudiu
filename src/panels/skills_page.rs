@@ -9,10 +9,22 @@ use crate::app::{Act, SkillScope, SkillsTab, Workspace, WorkspacePicker};
 use crate::panels::settings_pages::switch_row;
 use crate::panels::theme::{self, hsla};
 use crate::panels::widgets::{Trigger, button, button_disabled, icon, section_label};
+use crate::skills::InstalledSkill;
 use crate::skills::registry::{CatalogEntry, format_installs};
 
 fn faint(text: impl Into<SharedString>) -> Div {
     div().text_size(crate::panels::scale::px(11.0)).text_color(hsla(theme::TEXT_FAINT)).child(text.into())
+}
+
+fn description_line(text: impl Into<SharedString>) -> Div {
+    div()
+        .px(px(10.0))
+        .text_size(crate::panels::scale::px(11.0))
+        .text_color(hsla(theme::TEXT_FAINT))
+        .overflow_hidden()
+        .text_ellipsis()
+        .whitespace_nowrap()
+        .child(text.into())
 }
 
 fn warn(text: impl Into<SharedString>) -> Div {
@@ -65,57 +77,38 @@ impl Workspace {
                         .child(div().flex().child(button("skills-empty-browse", "Browse skills.sh", true).on_click(cx.listener(|ws, _: &ClickEvent, window, cx| {
                             ws.act(Act::SetSkillsTab(SkillsTab::Browse), window, cx)
                         }))));
-                    return page;
-                }
-                let scope = self.effective_skill_scope();
-                for (i, skill) in installed.installed.iter().enumerate() {
-                    let name = skill.name.clone();
-                    let toggle_name = name.clone();
-                    let remove_name = name.clone();
-                    let on = match &scope {
-                        SkillScope::Global => installed.is_global(&skill.name),
-                        SkillScope::Project(id) => installed.is_project(id, &skill.name),
-                    };
-                    let tag = match &scope {
-                        SkillScope::Project(_) if installed.is_global(&skill.name) => Some(SharedString::from(format!("{} · on globally", skill.source))),
-                        _ => Some(SharedString::from(skill.source.clone())),
-                    };
-                    let row = switch_row(
-                        SharedString::from(format!("skill-toggle-{i}")),
-                        skill.name.clone(),
-                        tag,
-                        on,
-                        move |ws, window, cx| ws.act(Act::ToggleSkill(toggle_name.clone()), window, cx),
-                        cx,
+                } else {
+                    let all: Vec<String> = installed.installed.iter().map(|s| s.name.clone()).collect();
+                    page = page.child(
+                        div()
+                            .mt(px(4.0))
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap(px(8.0))
+                            .child(section_label(format!("INSTALLED ({})", all.len())))
+                            .child(self.update_skills_button("skills-update-all", "Update all", all, cx)),
                     );
-                    let mut card = div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(4.0))
-                        .child(
+                    let mut i = 0;
+                    for (source, skills) in installed.by_source() {
+                        let names: Vec<String> = skills.iter().map(|s| s.name.clone()).collect();
+                        page = page.child(
                             div()
+                                .mt(px(4.0))
                                 .flex()
                                 .items_center()
-                                .gap(px(6.0))
-                                .child(div().flex_1().min_w_0().child(row))
-                                .child(button(format!("skill-remove-{i}"), "Remove", false).on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
-                                    ws.act(Act::UninstallSkill(remove_name.clone()), window, cx)
-                                }))),
+                                .justify_between()
+                                .gap(px(8.0))
+                                .child(faint(source.to_string()))
+                                .child(self.update_skills_button(format!("skills-update-repo-{i}"), "Update repo", names, cx)),
                         );
-                    if !skill.description.is_empty() {
-                        card = card.child(
-                            div()
-                                .px(px(10.0))
-                                .text_size(scaled(11.0))
-                                .text_color(hsla(theme::TEXT_FAINT))
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .whitespace_nowrap()
-                                .child(skill.description.clone()),
-                        );
+                        for skill in skills {
+                            page = page.child(self.installed_skill_card(i, skill, cx));
+                            i += 1;
+                        }
                     }
-                    page = page.child(card);
                 }
+                page = page.child(self.repo_skills_section());
             }
             SkillsTab::Browse => {
                 let mut search_bar = div()
@@ -250,6 +243,98 @@ impl Workspace {
             }
         }
         page
+    }
+
+    /// One installed skill: its scope toggle, Update and Remove buttons, and description.
+    fn installed_skill_card(&self, i: usize, skill: &InstalledSkill, cx: &mut Context<Self>) -> Div {
+        let installed = &self.store.data.settings.skills;
+        let toggle_name = skill.name.clone();
+        let remove_name = skill.name.clone();
+        let scope = self.effective_skill_scope();
+        let on = match &scope {
+            SkillScope::Global => installed.is_global(&skill.name),
+            SkillScope::Project(id) => installed.is_project(id, &skill.name),
+        };
+        let tag = match &scope {
+            SkillScope::Project(_) if installed.is_global(&skill.name) => Some(SharedString::from("on globally")),
+            _ => None,
+        };
+        let row = switch_row(
+            SharedString::from(format!("skill-toggle-{i}")),
+            skill.name.clone(),
+            tag,
+            on,
+            move |ws, window, cx| ws.act(Act::ToggleSkill(toggle_name.clone()), window, cx),
+            cx,
+        );
+        let mut card = div().flex().flex_col().gap(px(4.0)).child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .child(div().flex_1().min_w_0().child(row))
+                .child(self.update_skills_button(format!("skill-update-{i}"), "Update", vec![skill.name.clone()], cx))
+                .child(button(format!("skill-remove-{i}"), "Remove", false).on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
+                    ws.act(Act::UninstallSkill(remove_name.clone()), window, cx)
+                }))),
+        );
+        if !skill.description.is_empty() {
+            card = card.child(description_line(skill.description.clone()));
+        }
+        card
+    }
+
+    /// Button that updates `names`, shown as "Updating…" and disabled while any of them is downloading.
+    fn update_skills_button(&self, id: impl Into<SharedString>, label: &'static str, names: Vec<String>, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let busy = names.iter().any(|n| self.skills_page.installing.contains(&Workspace::update_key(n)));
+        if busy {
+            return button_disabled(id, "Updating…").into_any_element();
+        }
+        button(id, label, false)
+            .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::UpdateSkills(names.clone()), window, cx)))
+            .into_any_element()
+    }
+
+    /// Read-only list of skills the selected project's repository ships in its own skills folders.
+    fn repo_skills_section(&self) -> Div {
+        let mut section = div().mt(px(4.0)).flex().flex_col().gap(px(6.0));
+        let SkillScope::Project(id) = self.effective_skill_scope() else {
+            return section.child(section_label("IN THIS REPOSITORY")).child(faint("Pick a project above to see the skills its repository ships."));
+        };
+        let found = match &self.skills_page.repo_skills {
+            Some((for_id, found)) if *for_id == id => found,
+            _ => return section.child(section_label("IN THIS REPOSITORY")).child(faint("Looking for skills…")),
+        };
+        section = section.child(section_label(format!("IN THIS REPOSITORY ({})", found.len())));
+        if found.is_empty() {
+            return section.child(faint("This project's repository has no skills of its own."));
+        }
+        for skill in found {
+            let mut card = div()
+                .flex()
+                .flex_col()
+                .gap(px(2.0))
+                .px(px(10.0))
+                .py(px(6.0))
+                .rounded(px(6.0))
+                .bg(hsla(theme::SURFACE_ELEVATED))
+                .border_1()
+                .border_color(hsla(theme::PANEL_BORDER))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(8.0))
+                        .child(div().text_size(crate::panels::scale::px(13.0)).font_weight(FontWeight::MEDIUM).child(skill.name.clone()))
+                        .child(faint(skill.folder.display().to_string())),
+                );
+            if !skill.description.is_empty() {
+                card = card.child(description_line(skill.description.clone()).px(px(0.0)));
+            }
+            section = section.child(card);
+        }
+        section
     }
 
     /// Current scope, falling back to Global if a previously selected project was removed.

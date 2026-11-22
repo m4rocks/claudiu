@@ -29,6 +29,29 @@ pub struct InstalledSkill {
     pub installed_at: i64,
 }
 
+impl InstalledSkill {
+    /// The catalog entry that installs this skill again, so updating reuses the install path and lands in the same
+    /// folder (`folder_name()` prefers `name`, which is already a valid folder name).
+    pub fn catalog_entry(&self) -> registry::CatalogEntry {
+        registry::CatalogEntry {
+            source: self.source.clone(),
+            skill_id: self.skill_id.clone(),
+            name: self.name.clone(),
+            installs: 0,
+            is_official: false,
+        }
+    }
+}
+
+/// A skill the project's repository ships itself, such as `.claude/skills/<name>/SKILL.md`. Claudiu only lists these.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RepoSkill {
+    pub name: String,
+    pub description: String,
+    /// Skills folder relative to the project root, such as `.claude/skills`.
+    pub folder: PathBuf,
+}
+
 /// Persisted skill state (stored in `Settings.skills`).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SkillsConfig {
@@ -88,6 +111,15 @@ impl SkillsConfig {
             self.project_enabled.remove(project_id);
         }
         on
+    }
+
+    /// Installed skills grouped by the GitHub `owner/repo` they came from, groups and skills sorted by name.
+    pub fn by_source(&self) -> Vec<(&str, Vec<&InstalledSkill>)> {
+        let mut groups: BTreeMap<&str, Vec<&InstalledSkill>> = BTreeMap::new();
+        for skill in &self.installed {
+            groups.entry(skill.source.as_str()).or_default().push(skill);
+        }
+        groups.into_iter().collect()
     }
 
     /// Remove an installed skill and every global or per-project toggle referencing it.
@@ -387,6 +419,32 @@ pub fn sync_all(store_root: &Path, home: &Path, active: &[Harness], config: &Ski
     errors
 }
 
+/// Skills the repository at `project` ships in any harness's project skills folder. Claudiu's own symlinks into
+/// `store_root` are left out, because those are installed skills already listed elsewhere.
+pub fn repo_skills(store_root: &Path, project: &Path) -> Vec<RepoSkill> {
+    let mut found = Vec::new();
+    for harness in Harness::ALL {
+        let dir = project_skills_dir(harness, project);
+        let Ok(entries) = fs::read_dir(&dir) else { continue };
+        let folder = dir.strip_prefix(project).unwrap_or(&dir).to_path_buf();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if is_managed_link(&path, store_root) {
+                continue;
+            }
+            let Ok(skill_md) = fs::read_to_string(path.join("SKILL.md")) else { continue };
+            let (_, description) = parse_frontmatter(&skill_md);
+            found.push(RepoSkill {
+                name: entry.file_name().to_string_lossy().into_owned(),
+                description: description.unwrap_or_default(),
+                folder: folder.clone(),
+            });
+        }
+    }
+    found.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.folder.cmp(&b.folder)));
+    found
+}
+
 /// Remove every Claudiu-managed symlink for `name` (globally and in `projects`) and delete its folder in `store_root`.
 pub fn uninstall(store_root: &Path, home: &Path, name: &str, projects: &[PathBuf]) -> io::Result<()> {
     if !valid_skill_name(name) {
@@ -501,5 +559,54 @@ mod tests {
         assert!(fs::symlink_metadata(project_skills_dir(Harness::Claude, &project).join("beta")).is_err());
         assert!(fs::symlink_metadata(project_skills_dir(Harness::Antigravity, &project).join("beta")).is_err());
         assert!(!store.join("beta").exists());
+    }
+
+    #[test]
+    fn repo_skills_lists_project_folders_but_not_claudiu_links() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = tmp.path().join("store");
+        let home = tmp.path().join("home");
+        let project = tmp.path().join("proj");
+        write_skill(&store, "installed");
+        write_skill(&project_skills_dir(Harness::Claude, &project), "zeta");
+        write_skill(&project_skills_dir(Harness::Antigravity, &project), "alpha");
+        // A folder without SKILL.md is not a skill.
+        fs::create_dir_all(project_skills_dir(Harness::Claude, &project).join("notes")).unwrap();
+
+        let mut cfg = SkillsConfig::default();
+        cfg.set_project("p1", "installed", true);
+        let errs = sync_all(&store, &home, &[Harness::Claude], &cfg, &[("p1".into(), project.clone())]);
+        assert!(errs.is_empty(), "{errs:?}");
+        assert!(project_skills_dir(Harness::Claude, &project).join("installed").join("SKILL.md").is_file());
+
+        let found = repo_skills(&store, &project);
+        let listed: Vec<(&str, PathBuf)> = found.iter().map(|s| (s.name.as_str(), s.folder.clone())).collect();
+        assert_eq!(listed, vec![("alpha", PathBuf::from(".agents/skills")), ("zeta", PathBuf::from(".claude/skills"))]);
+        assert_eq!(found[0].description, "Test skill");
+    }
+
+    #[test]
+    fn update_entry_reinstalls_into_the_same_folder() {
+        let skill = InstalledSkill {
+            name: "agent-browser".into(),
+            source: "vercel-labs/agent-browser".into(),
+            skill_id: "Agent Browser".into(),
+            description: String::new(),
+            installed_at: 0,
+        };
+        let entry = skill.catalog_entry();
+        assert_eq!(entry.source, skill.source);
+        assert_eq!(entry.skill_id, skill.skill_id);
+        assert_eq!(entry.folder_name(), Some("agent-browser"));
+    }
+
+    #[test]
+    fn by_source_groups_installed_skills_by_repo() {
+        let mut cfg = SkillsConfig::default();
+        for (name, source) in [("b", "z/repo"), ("a", "z/repo"), ("c", "a/repo")] {
+            cfg.upsert(InstalledSkill { name: name.into(), source: source.into(), skill_id: name.into(), description: String::new(), installed_at: 0 });
+        }
+        let groups: Vec<(&str, Vec<&str>)> = cfg.by_source().into_iter().map(|(src, list)| (src, list.iter().map(|s| s.name.as_str()).collect())).collect();
+        assert_eq!(groups, vec![("a/repo", vec!["c"]), ("z/repo", vec!["a", "b"])]);
     }
 }

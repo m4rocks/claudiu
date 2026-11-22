@@ -2096,6 +2096,10 @@ fn skills_page_installs_toggles_syncs_and_removes() {
     // SAFETY: test-isolated data dir.
     unsafe { std::env::set_var("CLAUDIU_DATA_DIR", data.path()) };
 
+    let own = proj_dir.path().join(".claude").join("skills").join("own-skill");
+    std::fs::create_dir_all(&own).unwrap();
+    std::fs::write(own.join("SKILL.md"), "---\nname: own-skill\ndescription: Ships with the repo\n---\n").unwrap();
+
     let mut cx = TestAppContext::single();
     cx.update(|app| {
         gpui_kit::init(app);
@@ -2186,6 +2190,21 @@ fn skills_page_installs_toggles_syncs_and_removes() {
         std::fs::symlink_metadata(global_skills_dir(Harness::Claude, &home_path).join("demo-skill")).is_err()
             && project_skills_dir(Harness::Claude, &proj_path).join("demo-skill").join("SKILL.md").is_file()
             && project_skills_dir(Harness::Antigravity, &proj_path).join("demo-skill").join("SKILL.md").is_file()
+    });
+
+    // The project's own skill shows under the repository, and Claudiu's link to demo-skill does not.
+    wait(&mut cx, "repo skills", &|ws| {
+        ws.skills_page.repo_skills.as_ref().is_some_and(|(id, found)| *id == project_id && found.iter().map(|s| s.name.as_str()).eq(["own-skill"]))
+    });
+
+    // Updating downloads again through the install path and keeps the project toggle and its links.
+    ws.update(&mut cx, |ws, _| ws.store.data.settings.skills.installed[0].installed_at = 0);
+    cx.update_window(window, |_, window, app| ws.update(app, |ws, cx| ws.act(Act::UpdateSkills(vec!["demo-skill".into()]), window, cx))).unwrap();
+    wait(&mut cx, "skill update", &|ws| {
+        ws.skills_page.installing.is_empty()
+            && ws.store.data.settings.skills.installed[0].installed_at == 1
+            && ws.store.data.settings.skills.is_project(&project_id, "demo-skill")
+            && project_skills_dir(Harness::Claude, &proj_path).join("demo-skill").join("SKILL.md").is_file()
     });
 
     // Uninstall cleans up both project symlinks and the canonical stored folder.

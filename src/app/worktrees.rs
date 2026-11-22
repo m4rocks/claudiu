@@ -88,6 +88,7 @@ impl Workspace {
         }
         if page == SettingsPage::Skills {
             self.load_skills_catalog(cx);
+            self.load_repo_skills(cx);
         }
         self.load_models(cx);
         cx.notify();

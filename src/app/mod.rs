@@ -262,6 +262,8 @@ pub enum Act {
     InstallSkillRepo(String),
     ToggleSkill(String),
     UninstallSkill(String),
+    /// Download the latest version of these installed skills (one, one repository's, or all).
+    UpdateSkills(Vec<String>),
 }
 
 impl MenuItem {
@@ -1131,12 +1133,14 @@ impl Workspace {
             }
             Act::SetSkillScope(scope) => {
                 self.skills_page.scope = scope;
+                self.load_repo_skills(cx);
             }
             Act::SearchSkills => self.search_skills(cx),
             Act::InstallSkill(entry) => self.install_skill(entry, cx),
             Act::InstallSkillRepo(source) => self.install_skill_repo(source, cx),
             Act::ToggleSkill(name) => self.toggle_skill(name, cx),
             Act::UninstallSkill(name) => self.uninstall_skill(name, cx),
+            Act::UpdateSkills(names) => self.update_skills(names, cx),
             Act::PickDefaultModel(choice) => {
                 let modes = self.store.data.settings.modes_for(choice.harness);
                 if let Some(Modal::Settings { default_model, permission, list_focus, .. }) = self.modal.as_mut() {

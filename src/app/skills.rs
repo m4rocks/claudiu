@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 
 use super::*;
 use crate::skills::registry::CatalogEntry;
-use crate::skills::{InstalledSkill, active_harnesses, skills_root, sync_all, uninstall};
+use crate::skills::{InstalledSkill, RepoSkill, active_harnesses, repo_skills, skills_root, sync_all, uninstall};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SkillsTab {
@@ -33,8 +33,11 @@ pub struct SkillsPage {
     pub results: Option<(String, Vec<CatalogEntry>)>,
     pub loading: bool,
     pub error: Option<String>,
-    /// Keys (`source/skill_id`) currently being downloaded.
+    /// Keys currently being downloaded: `source/skill_id` for installs, `repo:<source>` for whole repositories and
+    /// `update:<name>` for updates.
     pub installing: HashSet<String>,
+    /// Skills the selected project's repository ships itself, keyed by that project's id.
+    pub repo_skills: Option<(Id, Vec<RepoSkill>)>,
     /// Serializes disk syncs and drops superseded snapshots so rapid toggles never apply out of order.
     sync_serial: Arc<AtomicU64>,
     sync_lock: Arc<Mutex<()>>,
@@ -58,6 +61,7 @@ impl Default for SkillsPage {
             loading: false,
             error: None,
             installing: HashSet::new(),
+            repo_skills: None,
             sync_serial: Arc::new(AtomicU64::new(0)),
             sync_lock: Arc::new(Mutex::new(())),
             fetch_popular: crate::skills::registry::popular,
@@ -223,6 +227,83 @@ impl Workspace {
                         ws.toast(format!("Installed {count} {noun} from {source}."), false, cx);
                     }
                     Err(why) => ws.toast(format!("Couldn't install {source}: {why}"), true, cx),
+                }
+            },
+            cx,
+        );
+    }
+
+    /// Key in `installing` while `name` is being updated.
+    pub(crate) fn update_key(name: &str) -> String {
+        format!("update:{name}")
+    }
+
+    /// Download the latest version of each named installed skill through the install path, keep its toggles, and
+    /// re-sync symlinks. Skills already updating are skipped.
+    pub(crate) fn update_skills(&mut self, names: Vec<String>, cx: &mut Context<Self>) {
+        let entries: Vec<(String, CatalogEntry)> = self
+            .store
+            .data
+            .settings
+            .skills
+            .installed
+            .iter()
+            .filter(|s| names.contains(&s.name) && self.skills_page.installing.insert(Self::update_key(&s.name)))
+            .map(|s| (s.name.clone(), s.catalog_entry()))
+            .collect();
+        if entries.is_empty() {
+            return;
+        }
+        let install_fn = self.skills_page.install_pkg;
+        let root = skills_root();
+        cx.notify();
+        self.in_background(
+            move || entries.into_iter().map(|(name, entry)| (name, install_fn(&root, &entry))).collect::<Vec<_>>(),
+            |ws, results, cx| {
+                let mut updated = 0;
+                let mut failures = Vec::new();
+                for (name, result) in results {
+                    ws.skills_page.installing.remove(&Self::update_key(&name));
+                    match result {
+                        // A skill removed while its update downloaded stays removed.
+                        Ok(skill) if ws.store.data.settings.skills.is_installed(&skill.name) => {
+                            ws.store.data.settings.skills.upsert(skill);
+                            updated += 1;
+                        }
+                        Ok(_) => {}
+                        Err(why) => failures.push(format!("{name}: {why}")),
+                    }
+                }
+                if updated > 0 {
+                    ws.store.mark_dirty();
+                    ws.sync_skills(None, cx);
+                }
+                match failures.as_slice() {
+                    [] => {
+                        let noun = if updated == 1 { "skill" } else { "skills" };
+                        ws.toast(format!("Updated {updated} {noun}."), false, cx);
+                    }
+                    [only] => ws.toast(format!("Couldn't update {only}"), true, cx),
+                    [first, rest @ ..] => ws.toast(format!("Couldn't update {} skills. {first}", rest.len() + 1), true, cx),
+                }
+            },
+            cx,
+        );
+    }
+
+    /// Look for skills the selected project's repository ships, off the UI thread. Global scope clears the list.
+    pub(crate) fn load_repo_skills(&mut self, cx: &mut Context<Self>) {
+        let SkillScope::Project(id) = self.effective_skill_scope() else {
+            self.skills_page.repo_skills = None;
+            return;
+        };
+        let Some(project) = self.store.project(&id).map(|p| p.path.clone()) else { return };
+        let root = skills_root();
+        self.in_background(
+            move || repo_skills(&root, &project),
+            move |ws, found, _| {
+                if ws.effective_skill_scope() == SkillScope::Project(id.clone()) {
+                    ws.skills_page.repo_skills = Some((id, found));
                 }
             },
             cx,
