@@ -210,7 +210,7 @@ impl Workspace {
     /// copy work on the selection, the rest does nothing.
     pub fn edit_lines(&mut self, action: LineAction, window: &mut Window, cx: &mut Context<Self>) {
         use gpui_kit::component::input::{Copy, Cut};
-        let Some(buffer) = self.active_id().and_then(|id| self.panes.get(id)).and_then(|p| p.shown()).map(|t| t.buffer.clone()) else { return };
+        let Some(buffer) = self.editor_owner().and_then(|id| self.panes.get(&id)).and_then(|p| p.shown()).map(|t| t.buffer.clone()) else { return };
         let outcome = buffer.update(cx, |b, cx| {
             if !b.focus_handle(cx).is_focused(window) || b.has_multiple_cursors() {
                 return None;

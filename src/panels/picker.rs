@@ -14,7 +14,7 @@ use gpui_kit::component::input::{Input, InputState};
 
 use crate::panels::scale;
 use crate::panels::theme::{self, hsla};
-use crate::panels::widgets::{Dropdown, fade_in, icon, key_badge, section_label};
+use crate::panels::widgets::{Dropdown, dropdown_card, fade_in, icon, key_badge, section_label};
 
 /// Default width of every universal picker dropdown.
 pub const WIDTH: f32 = 348.0;
@@ -193,18 +193,10 @@ pub fn dropdown_overlay<V: 'static>(
         );
 
     let hit = at.hit;
-    let card = div()
-        .id(id)
-        .occlude()
-        .cursor_default()
+    let card = dropdown_card(id)
         .w(px(WIDTH).max(at.min_w))
         .when_some(max_card_h, |d, h| d.max_h(h).overflow_hidden())
         .p(px(11.0))
-        .rounded(px(10.0))
-        .bg(hsla(theme::SURFACE_ELEVATED))
-        .border_1()
-        .border_color(hsla(theme::PANEL_BORDER))
-        .shadow_lg()
         .flex()
         .flex_col()
         .gap(px(8.0))

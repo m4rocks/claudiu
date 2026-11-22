@@ -156,9 +156,22 @@ const JSX_HIGHLIGHTS: &str = r#"
 "#;
 
 impl Workspace {
+    pub fn editor_owner(&self) -> Option<Id> {
+        match self.main {
+            Main::Terminals => self.active_id().cloned(),
+            Main::Home => self.home_selected_project().map(|p| format!("project:{}", p.id)),
+        }
+    }
+
+    pub(super) fn editor_cwd(&self, owner: &str) -> Option<PathBuf> {
+        if let Some(id) = owner.strip_prefix("project:") {
+            return self.store.project(id).map(|p| p.path.clone());
+        }
+        self.store.session(owner).map(|s| s.cwd.clone())
+    }
+
     pub fn toggle_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.editor_mode && !self.active_id().is_some_and(|id| self.is_running(id, cx)) {
-            self.toast("Open a Claude session to use the editor.", false, cx);
+        if !self.editor_mode && self.editor_owner().is_none() {
             return;
         }
         self.editor_mode = !self.editor_mode;
@@ -188,12 +201,12 @@ impl Workspace {
 
     /// Editor mode is on and has a session to show; the home page keeps its sidebars.
     pub fn editing(&self) -> bool {
-        self.editor_mode && self.active_id().is_some()
+        self.editor_mode && self.editor_owner().is_some()
     }
 
     /// The pane of the shown session while editor mode is on, created on first use.
     pub fn shown_pane(&mut self, cx: &mut Context<Self>) -> Option<(Id, &EditorPane)> {
-        let id = self.active_id().filter(|_| self.editing()).cloned()?;
+        let id = self.editor_owner().filter(|_| self.editing())?;
         if !self.panes.contains_key(&id) {
             let tree = cx.new(|cx| TreeState::new(cx));
             let owner = id.clone();
@@ -248,9 +261,9 @@ impl Workspace {
 
     /// List the shown session's folder again (files Claude added, changed marks), off the UI thread.
     pub(super) fn refresh_files(&mut self, cx: &mut Context<Self>) {
-        let Some(id) = self.active_id().filter(|_| self.editor_mode).cloned() else { return };
+        let Some(id) = self.editor_owner().filter(|_| self.editor_mode) else { return };
         // A worktree that Claude Code is still making has no folder to list yet.
-        let Some(root) = self.store.session(&id).map(|s| s.cwd.clone()).filter(|root| root.is_dir()) else { return };
+        let Some(root) = self.editor_cwd(&id).filter(|root| root.is_dir()) else { return };
         let Some(pane) = self.panes.get_mut(&id) else { return };
         if pane.listing {
             pane.relist = true;
@@ -303,7 +316,7 @@ impl Workspace {
     /// The tick's look at the shown pane's folder: listed again when its watcher saw a change, every time when it has
     /// no watcher, and now and then regardless, since a watcher can go quiet without a word (network folders).
     pub(super) fn refresh_if_stale(&mut self, cx: &mut Context<Self>) {
-        let Some(id) = self.active_id().filter(|_| self.editor_mode).cloned() else { return };
+        let Some(id) = self.editor_owner().filter(|_| self.editor_mode) else { return };
         let Some(pane) = self.panes.get_mut(&id) else { return };
         let overdue = pane.listed_at.is_none_or(|t| t.elapsed() >= WATCHED_RELIST);
         if pane.watcher.is_some() && !pane.stale && !overdue {
@@ -316,7 +329,7 @@ impl Workspace {
     /// Watch the session's folder, so the tree and its change marks follow the disk as soon as it changes rather than
     /// on the next tick, and an unchanged folder is never walked again.
     fn watch_folder(&mut self, id: &Id, cx: &mut Context<Self>) {
-        let Some(root) = self.store.session(id).map(|s| s.cwd.clone()) else { return };
+        let Some(root) = self.editor_cwd(id) else { return };
         let (tx, mut rx) = futures::channel::mpsc::unbounded::<Vec<PathBuf>>();
         let id = id.clone();
         cx.spawn(async move |this, cx| {
@@ -368,7 +381,7 @@ impl Workspace {
     }
 
     fn on_folder_change(&mut self, id: &Id, paths: &[PathBuf], cx: &mut Context<Self>) {
-        let shown = self.active_id() == Some(id);
+        let shown = self.editor_owner().as_ref() == Some(id);
         let Some(pane) = self.panes.get_mut(id) else { return };
         // No paths: the watcher lost track (its buffer overflowed) and anything may have changed.
         let git_dirs: Vec<&Path> = pane.git_dir.iter().chain(&pane.nested_git_dirs).map(PathBuf::as_path).collect();
@@ -402,7 +415,7 @@ impl Workspace {
 
     /// Re-read, off the UI thread, which lines of the shown file differ from the last commit.
     pub(super) fn refresh_marks(&mut self, cx: &mut Context<Self>) {
-        let Some(id) = self.active_id().filter(|_| self.editor_mode).cloned() else { return };
+        let Some(id) = self.editor_owner().filter(|_| self.editor_mode) else { return };
         let Some(path) = self.panes.get(&id).and_then(|p| p.shown()).filter(|t| t.note.is_none()).map(|t| t.path.clone()) else { return };
         cx.spawn(async move |this, cx| {
             let read = path.clone();
@@ -546,7 +559,7 @@ impl Workspace {
         if let EditorCommand::Ask(ask) = command {
             return self.ask_claude(ask, window, cx);
         }
-        let Some(buffer) = self.active_id().and_then(|id| self.panes.get(id)).and_then(|p| p.shown()).map(|t| t.buffer.clone()) else { return };
+        let Some(buffer) = self.editor_owner().and_then(|id| self.panes.get(&id)).and_then(|p| p.shown()).map(|t| t.buffer.clone()) else { return };
         buffer.update(cx, |b, cx| b.focus(window, cx));
         let action: Box<dyn gpui::Action> = match command {
             EditorCommand::GoToDefinition => Box::new(GoToDefinition),

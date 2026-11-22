@@ -19,7 +19,7 @@ pub enum Conflict {
 impl Workspace {
     /// Save the shown tab of the shown session. Refuses, and shows the conflict, when the file changed on disk meanwhile.
     pub fn save_shown(&mut self, cx: &mut Context<Self>) {
-        let Some(id) = self.active_id().cloned() else { return };
+        let Some(id) = self.editor_owner() else { return };
         let Some(pane) = self.panes.get_mut(&id) else { return };
         let Some(tab) = pane.active.and_then(|ix| pane.tabs.get_mut(ix)).filter(|t| t.note.is_none()) else { return };
         tab.saving = true;
@@ -60,7 +60,7 @@ impl Workspace {
     /// Look at the shown session's open files on disk (once a second, off the UI thread): reload the clean ones that
     /// changed, and flag a conflict on the ones with unsaved edits.
     pub(super) fn check_open_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(id) = self.active_id().filter(|_| self.editing()).cloned() else { return };
+        let Some(id) = self.editor_owner().filter(|_| self.editing()) else { return };
         let Some(pane) = self.panes.get(&id) else { return };
         // A tab without a stamp follows nothing: it was never read, or the user chose to keep their version.
         let watched: Vec<(PathBuf, Stamp)> = pane.tabs.iter().filter(|t| !t.saving).filter_map(|t| Some((t.path.clone(), t.stamp?))).collect();
@@ -147,7 +147,7 @@ impl Workspace {
     /// Ctrl+W: close the shown tab, asking first when it has unsaved edits. The closed editor had the keyboard, so it
     /// goes to the tab now shown (or the pane), and the key works again.
     pub fn close_shown_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(id) = self.active_id().cloned() else { return };
+        let Some(id) = self.editor_owner() else { return };
         let Some(ix) = self.panes.get(&id).and_then(|p| p.active) else { return };
         self.request_close_tab(&id, ix, window, cx);
         if self.modal.is_some() {

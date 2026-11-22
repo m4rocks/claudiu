@@ -14,7 +14,7 @@ use gpui_kit::component::input::Input;
 use crate::panels::theme::{self, hsla};
 use gpui_kit::assets::IconName;
 use crate::panels::widgets::{
-    button, danger_button, fade_in, icon, icon_button,
+    button, danger_button, dialog_card, dropdown_card, fade_in, icon, icon_button,
 };
 use crate::panels::settings_view::render_settings_card;
 
@@ -22,18 +22,10 @@ impl Workspace {
     pub(super) fn render_menu(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let menu = self.menu.as_ref()?;
         let pos = menu.pos;
-        let mut card = div()
-            .id("menu")
-            .occlude()
-            .cursor_default()
+        let mut card = dropdown_card("menu")
             .w(px(232.0))
             .min_w(menu.min_w)
             .p(px(4.0))
-            .rounded(px(8.0))
-            .bg(hsla(0x181818))
-            .border_1()
-            .border_color(hsla(0x2c2c2c))
-            .shadow_lg()
             .flex()
             .flex_col();
         for (i, item) in menu.items.iter().enumerate() {
@@ -139,17 +131,10 @@ impl Workspace {
                     false,
                 ),
             };
-            div()
-                .id("modal-card")
-                .occlude()
+            dialog_card("modal-card")
                 .track_focus(&self.modal_focus)
                 .w(px(440.0))
                 .p(px(22.0))
-                .rounded(px(12.0))
-                .bg(hsla(theme::PANEL_BG))
-                .border_1()
-                .border_color(hsla(theme::PANEL_BORDER))
-                .shadow_lg()
                 .flex()
                 .flex_col()
                 .gap(px(12.0))

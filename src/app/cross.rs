@@ -110,11 +110,15 @@ impl Workspace {
                 self.pending_starts.push(PendingStart { req, shown: false });
                 continue;
             }
+            if prepared.is_ok() && req.tool == "wait_subagent" && self.defer_subagent_wait(&req, cx) {
+                continue;
+            }
             let result = prepared.and_then(|()| self.run_request(&req, window, cx));
             let ok = result.is_ok();
             answer(&req, ok, result.unwrap_or_else(|e| e));
         }
         self.settle_pending_starts(window, cx);
+        self.settle_subagent_waits(cx);
     }
 
     /// Once a second: drop the requests nobody waits for, show the next dialog when the modal slot is free, and tell the
@@ -257,6 +261,9 @@ impl Workspace {
 
     /// Do what was asked.
     pub(super) fn run_request(&mut self, req: &Request, window: &mut Window, cx: &mut Context<Self>) -> Result<String, String> {
+        if crate::claude::mcp::SUBAGENT_TOOLS.contains(&req.tool.as_str()) {
+            return self.run_subagent_request(req, window, cx);
+        }
         let id = req.args["id"].as_str().unwrap_or_default().to_string();
         let count = |key: &str, default: u64, max: u64| req.args[key].as_u64().unwrap_or(default).clamp(1, max) as usize;
         let requester_id = req.from.split_once(':').map_or(req.from.as_str(), |(_, id)| id);

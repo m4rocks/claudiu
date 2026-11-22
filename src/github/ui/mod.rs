@@ -11,8 +11,8 @@ mod popup;
 use popup::sort_name;
 
 use gpui::{
-    AnyElement, App, ClickEvent, Context, Div, FontWeight, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
-    ParentElement, Render, SharedString, Stateful, StatefulInteractiveElement, Styled, TextAlign, Window, anchored, deferred, div,
+    AnyElement, App, ClickEvent, Context, Div, FontWeight, InteractiveElement, IntoElement, KeyDownEvent,
+    ParentElement, Render, SharedString, Stateful, StatefulInteractiveElement, Styled, TextAlign, Window, div,
     prelude::FluentBuilder, px, AnimationExt,
 };
 use gpui_kit::component::input::{Input, Textarea};

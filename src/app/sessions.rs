@@ -133,7 +133,7 @@ impl Workspace {
             }
             mcp_servers.push(harness::stdio_server("m4code", &exe, &[mcp::FLAG], &env));
         }
-        let (mode, options) = match session_id {
+        let (mut mode, options) = match session_id {
             None => {
                 // Only inherit the default model id when starting on the harness that serves it.
                 let mut defaults = settings.new_session.clone();
@@ -168,6 +168,7 @@ impl Workspace {
             env.extend(harness::claude::environment(&exe));
             let plugin = claude::plugin::install().ok();
             if plugin.is_some() {
+                env.push(("M4CODE_MANAGED_COMPACTION".into(), "1".into()));
                 if let Some(id) = &session_id {
                     env.push(("M4CODE_NAME_FILE".into(), mcp::name_file(id).to_string_lossy().into_owned()));
                 }
@@ -175,7 +176,7 @@ impl Workspace {
                 env.push((usage::CTL_ENV.into(), usage::ctl_file(record_id).to_string_lossy().into_owned()));
                 env.push((crate::visual::VISUAL_ENV.into(), crate::visual::prefix(record_id).to_string_lossy().into_owned()));
                 // The mod registers the agent types and answers their turns, so they go only where it loads.
-                if let Some(subagents) = settings.custom_subagents.env()
+                if let Some(subagents) = settings.custom_subagents.env_for(&settings.enabled_harnesses_list())
                     && let Ok(exe) = std::env::current_exe()
                 {
                     env.push((crate::claude::subagents::ENV.into(), subagents));
@@ -193,9 +194,37 @@ impl Workspace {
             }
             session_meta = harness::claude::claude_meta(plugin.as_deref(), &mcp::allowed_tools(&off), &extra, Some(claude::trim::session_settings()));
             self.sync_configs_now(cx);
-            if let Some(acct) = self.store.session_account(record_id) {
+            if let Some(acct) = meta.account.as_deref().and_then(|id| self.store.account(id)).or_else(|| self.store.active_account()) {
                 env.push((usage::ACCOUNT_ENV.into(), acct.id.clone()));
                 env.extend(Self::account_env(acct));
+            }
+        }
+        if meta.parent_session.is_some() {
+            mode = None;
+            if let Some(agent) = meta.harness.agent() {
+                let request = claude::acp::Request {
+                    agent, model: None, effort: None, edits: meta.subagent_edits,
+                    cwd: cwd.to_path_buf(), prompt: String::new(), live_messages: false,
+                };
+                env.extend((agent.provider().environment)(&request).into_iter().map(|(key, value)| (key.to_string(), value)));
+            } else {
+                let permission = if meta.subagent_edits { "acceptEdits" } else { "plan" };
+                mode = Some(permission.into());
+                session_meta["claudeCode"]["options"]["permissionMode"] = serde_json::json!(permission);
+            }
+        }
+        if meta.harness == Harness::OpenCode {
+            let inherited = std::env::var("OPENCODE_CONFIG_CONTENT").ok();
+            let session = env.iter().rev().find(|(key, _)| key == "OPENCODE_CONFIG_CONTENT").map(|(_, value)| value.as_str());
+            match harness::opencode::managed_compaction_config(inherited.as_deref(), session) {
+                Ok(config) => {
+                    env.retain(|(key, _)| key != "OPENCODE_CONFIG_CONTENT");
+                    env.push(("OPENCODE_CONFIG_CONTENT".into(), config));
+                }
+                Err(error) => {
+                    self.toast(error, true, cx);
+                    return None;
+                }
             }
         }
         self.sync_skills(Some(meta.harness), cx);
@@ -312,19 +341,50 @@ impl Workspace {
             TerminalEvent::Bell => {}
             TerminalEvent::OpenPath(path, line) => ws.open_from_terminal(&sub_id, path, *line, window, cx),
         });
-        self.adopt_live(id, SessionView::Terminal(view), sub, None, window, cx);
+        self.adopt_live(id, SessionView::Terminal(view), sub, None, true, window, cx);
     }
 
     /// Run a harness session in a thread view.
     pub(super) fn start_thread(&mut self, record: SessionRecord, start: crate::thread::Start, is_new: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.start_thread_with_focus(record, start, is_new, true, window, cx);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn start_thread_with_focus(&mut self, mut record: SessionRecord, start: crate::thread::Start, is_new: bool, foreground: bool, window: &mut Window, cx: &mut Context<Self>) {
         let id = record.id.clone();
         let name = record.chosen_title().map(String::from);
+        let subagent_edits = record.claude.as_ref().filter(|m| m.parent_session.is_some()).map(|m| m.subagent_edits);
+        let canonical_history = record.claude.as_ref().is_some_and(|m| !m.provider_sessions.is_empty());
+        let auto_compact = record.claude.as_ref().and_then(|m| m.auto_compact).unwrap_or(true);
+        let native_controlled = start.harness == Harness::OpenCode;
+        if let Some(meta) = record.claude.as_mut() {
+            meta.managed_compaction = true;
+            meta.auto_compact = Some(auto_compact);
+        }
         self.prepare_live(record, is_new);
+        if let Some(meta) = self.store.session_mut(&id).and_then(|r| r.claude.as_mut()) {
+            meta.managed_compaction = true;
+            meta.auto_compact = Some(auto_compact);
+            self.store.mark_dirty();
+        }
         let view = cx.new(|cx| ThreadView::new(start, window, cx));
+        view.update(cx, |v, _| {
+            v.subagent_edits = subagent_edits;
+            v.shortcuts_shown = self.shortcuts_shown;
+            v.canonical_history = canonical_history;
+            v.compaction.enabled = auto_compact;
+            v.compaction.native_controlled = native_controlled;
+        });
         let sub_id = id.clone();
         let sub = cx.subscribe_in(&view, window, move |ws: &mut Workspace, _view, ev: &ThreadEvent, window, cx| match ev {
-            ThreadEvent::Exited(code) => ws.on_exit(&sub_id, *code, window, cx),
+            ThreadEvent::Ready(session) => ws.commit_handoff(&sub_id, session, cx),
+            ThreadEvent::Exited(code) => {
+                if !ws.rollback_handoff(&sub_id, window, cx) {
+                    ws.on_exit(&sub_id, *code, window, cx);
+                }
+            }
             ThreadEvent::Chosen(model, effort) => {
+                if ws.pending_handoffs.contains_key(&sub_id) { return; }
                 if let Some(meta) = ws.store.session_mut(&sub_id).and_then(|r| r.claude.as_mut())
                     && (&meta.chosen_model, &meta.chosen_effort) != (model, effort)
                 {
@@ -334,12 +394,14 @@ impl Workspace {
                 }
             }
             ThreadEvent::SessionId(session) => {
+                if ws.pending_handoffs.contains_key(&sub_id) { return; }
                 if let Some(meta) = ws.store.session_mut(&sub_id).and_then(|r| r.claude.as_mut()) {
                     meta.session_id = session.clone();
                     ws.store.mark_dirty();
                 }
             }
             ThreadEvent::Title(title) => {
+                if ws.pending_handoffs.contains_key(&sub_id) { return; }
                 if let Some(rec) = ws.store.session_mut(&sub_id) {
                     rec.title = title.clone();
                     ws.store.mark_dirty();
@@ -368,6 +430,7 @@ impl Workspace {
                 }
             }
             ThreadEvent::Context(used, size) => {
+                if ws.pending_handoffs.contains_key(&sub_id) { return; }
                 if let Some(meta) = ws.store.session_mut(&sub_id).and_then(|r| r.claude.as_mut()) {
                     meta.context_tokens = Some(*used);
                     if *size > 0 {
@@ -386,7 +449,7 @@ impl Workspace {
             ThreadEvent::OpenPath(path, line) => ws.open_from_terminal(&sub_id, path, *line, window, cx),
             ThreadEvent::Handoff { to, model, message, effort, by_agent } => ws.dynamic_handoff(&sub_id, *to, model.clone(), message.clone(), *by_agent, effort.clone(), window, cx),
         });
-        self.adopt_live(id, SessionView::Thread(view), sub, name, window, cx);
+        self.adopt_live(id, SessionView::Thread(view), sub, name, foreground, window, cx);
     }
 
     /// Before a session's new view exists: drop the view it replaces and mark the record as running.
@@ -406,19 +469,30 @@ impl Workspace {
     }
 
     /// Keep the new view among the live sessions and show it.
-    fn adopt_live(&mut self, id: Id, view: SessionView, sub: Subscription, claude_name: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+    #[allow(clippy::too_many_arguments)]
+    fn adopt_live(&mut self, id: Id, view: SessionView, sub: Subscription, claude_name: Option<String>, foreground: bool, window: &mut Window, cx: &mut Context<Self>) {
         // The mod reads the launch name first and leaves it alone; a stale file would otherwise rename the session.
         if let Some(cid) = self.store.session(&id).and_then(|r| r.claude_id()) {
             mcp::write_name(cid, claude_name.as_deref());
         }
         // The account the launch chose: kept, so the session starts there again after closing or a restart.
-        let account = self.store.session_account(&id).map_or_else(|| MAIN_ACCOUNT.into(), |a| a.id.clone());
-        if let Some(meta) = self.store.session_mut(&id).and_then(|r| r.claude.as_mut()) {
+        let account = if let Some(pending) = self.pending_handoffs.get(&id) {
+            pending.meta.account.as_deref().and_then(|id| self.store.account(id)).or_else(|| self.store.active_account())
+        } else {
+            self.store.session_account(&id)
+        }.map_or_else(|| MAIN_ACCOUNT.into(), |a| a.id.clone());
+        if !self.pending_handoffs.contains_key(&id)
+            && let Some(meta) = self.store.session_mut(&id).and_then(|r| r.claude.as_mut())
+        {
             meta.account = Some(account.clone());
         }
         self.live.push(Live { id: id.clone(), view, _sub: sub, claude_name, account });
-        self.activate(&id, cx);
         self.remember(&id);
+        if !foreground {
+            cx.notify();
+            return;
+        }
+        self.activate(&id, cx);
         self.selected = Some(id.clone());
         self.main = Main::Terminals;
         self.sync_github(window, cx);
@@ -458,7 +532,7 @@ impl Workspace {
         let Some(meta) = rec.claude.as_ref() else {
             return;
         };
-        if !has_conversation(meta) {
+        if !has_conversation(id, meta) {
             self.store.data.sessions.retain(|s| s.id != id);
             if self.selected.as_deref() == Some(id) {
                 self.selected = None;
@@ -528,7 +602,7 @@ impl Workspace {
     /// Bring a Claude session back after a restart: resume its conversation, or start it over when it has none yet.
     pub(super) fn bring_back(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         match self.store.session(id).and_then(|s| s.claude.as_ref()) {
-            Some(meta) if !has_conversation(meta) => self.relaunch_empty(id, window, cx),
+            Some(meta) if !has_conversation(id, meta) => self.relaunch_empty(id, window, cx),
             _ => self.resume(id, window, cx),
         }
     }
@@ -558,10 +632,18 @@ impl Workspace {
     }
 
     pub(super) fn end_live(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.cancel_pending_handoff(id, cx);
+        let children: Vec<_> = self.live.iter().filter(|live| self.store.session(&live.id).and_then(|r| r.claude.as_ref()).is_some_and(|m| m.parent_session.as_deref() == Some(id))).map(|live| live.id.clone()).collect();
+        for child in children {
+            self.end_live(&child, window, cx);
+        }
         if self.logins.remove(id) {
             self.refresh_accounts(cx);
         }
         let was_active = self.active_id().is_some_and(|a| a == id);
+        if let Some(thread) = self.live_view(id).and_then(|view| view.thread()) {
+            thread.read(cx).stop();
+        }
         self.live.retain(|l| l.id != id); // dropping the view drops the Terminal, which closes the PTY
         self.shells.remove(id);
         self.panes.remove(id);
@@ -590,7 +672,8 @@ impl Workspace {
 
     /// The running sessions, in the sidebar's order.
     pub fn running_ids(&self, cx: &App) -> Vec<Id> {
-        self.live.iter().filter(|l| l.view.is_running(cx)).map(|l| l.id.clone()).collect()
+        let listed = |id: &str| !self.store.session(id).is_some_and(|rec| rec.is_subagent());
+        self.live.iter().filter(|l| l.view.is_running(cx) && listed(&l.id)).map(|l| l.id.clone()).collect()
     }
 
     /// Show running session number `n` (from 1), as the sidebar numbers them while Ctrl is held.
@@ -605,8 +688,7 @@ impl Workspace {
     pub fn modifiers_changed(&mut self, modifiers: &gpui::Modifiers, cx: &mut Context<Self>) {
         self.shortcuts_wait += 1;
         if self.shortcuts_shown {
-            self.shortcuts_shown = false;
-            cx.notify();
+            self.show_shortcuts(false, cx);
         }
         let alone = modifiers.secondary() && !modifiers.shift && !modifiers.alt && !(modifiers.control && modifiers.platform);
         if !alone {
@@ -617,12 +699,24 @@ impl Workspace {
             cx.background_executor().timer(SHORTCUT_HOLD).await;
             let _ = this.update(cx, |ws, cx| {
                 if ws.shortcuts_wait == wait {
-                    ws.shortcuts_shown = true;
-                    cx.notify();
+                    ws.show_shortcuts(true, cx);
                 }
             });
         })
         .detach();
+    }
+
+    fn show_shortcuts(&mut self, shown: bool, cx: &mut Context<Self>) {
+        self.shortcuts_shown = shown;
+        for live in &self.live {
+            if let Some(thread) = live.view.thread() {
+                thread.update(cx, |v, cx| {
+                    v.shortcuts_shown = shown;
+                    cx.notify();
+                });
+            }
+        }
+        cx.notify();
     }
 
     pub fn cycle(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
@@ -674,8 +768,10 @@ fn resume_options(meta: &ClaudeMeta) -> Vec<(&'static str, String)> {
 
 /// Whether Claude Code has a conversation for the session: one it listed on a scan, or a transcript on disk. A
 /// session nobody has written to has none, and `claude --resume` ends at once on it.
-fn has_conversation(meta: &ClaudeMeta) -> bool {
-    meta.external != ExternalState::Unknown
+fn has_conversation(record_id: &str, meta: &ClaudeMeta) -> bool {
+    crate::harness::thread::load_entries(record_id).iter().any(|entry| matches!(entry,
+        crate::harness::thread::Entry::User(_) | crate::harness::thread::Entry::Agent(_) | crate::harness::thread::Entry::Tool(_)))
+        || meta.external != ExternalState::Unknown
         || meta.transcript.is_some()
         || claude::claude_home().and_then(|h| claude::find_transcript(&h, &meta.session_id)).is_some()
 }

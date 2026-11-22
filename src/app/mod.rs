@@ -64,6 +64,7 @@ mod repo;
 mod line_comment;
 pub use line_comment::LineComment;
 mod sessions;
+mod subagents;
 mod settings;
 mod setup;
 mod skills;
@@ -218,6 +219,7 @@ pub struct HarnessesForm {
     pub agents: claude::subagents::AgentMap<AgentForm>,
     /// The ids of the Claude Code models ticked for the picker.
     pub claude_models: Vec<String>,
+    pub claude_subagents: harness::SubagentAccess,
     /// The harness whose configuration popup is open over the page.
     pub picking: Option<HarnessDialog>,
 }
@@ -231,6 +233,27 @@ pub struct AgentForm {
 }
 
 impl HarnessesForm {
+    pub fn access(&self, harness: Harness) -> harness::SubagentAccess {
+        match harness.agent() {
+            None => self.claude_subagents,
+            Some(agent) => {
+                let form = self.get(agent);
+                harness::SubagentAccess { on: form.on, edits: form.edits }
+            }
+        }
+    }
+
+    pub fn set_access(&mut self, harness: Harness, access: harness::SubagentAccess) {
+        match harness.agent() {
+            None => self.claude_subagents = access,
+            Some(agent) => {
+                let form = self.get_mut(agent);
+                form.on = access.on;
+                form.edits = access.edits;
+            }
+        }
+    }
+
     pub fn get(&self, agent: Agent) -> &AgentForm {
         self.agents.get(agent)
     }
@@ -587,6 +610,8 @@ pub struct Workspace {
     pub config_sync: config_sync::Runner,
     /// Sessions asked to open another with a first message; each waits for the user's yes (`cross.rs`).
     pub pending_starts: Vec<cross::PendingStart>,
+    pub pending_subagent_waits: Vec<subagents::PendingWait>,
+    pub pending_handoffs: HashMap<Id, agent_handoff::Pending>,
     /// Worktree switches the user approved that a session asked for; each waits for the session's turn to end (`cross.rs`).
     pub pending_switches: Vec<cross::PendingSwitch>,
     pub drag_pos: Option<gpui::Point<gpui::Pixels>>,
@@ -629,8 +654,10 @@ impl Workspace {
         .detach();
         let home_prompt = cx.new(|cx| TextareaState::new(window, cx).auto_grow(2, 8).submit_on_enter(true).placeholder("Ask anything, or describe a task…"));
         cx.subscribe_in(&home_prompt, window, |ws: &mut Self, _, ev: &InputEvent, window, cx| {
-            if matches!(ev, InputEvent::PressEnter { .. }) {
-                ws.act(Act::HomeLaunch, window, cx);
+            match ev {
+                InputEvent::PressEnter { .. } => ws.act(Act::HomeLaunch, window, cx),
+                InputEvent::Change => cx.notify(),
+                _ => {}
             }
         })
         .detach();
@@ -715,6 +742,8 @@ impl Workspace {
             attached_sync: Default::default(),
             config_sync: Default::default(),
             pending_starts: vec![],
+            pending_subagent_waits: vec![],
+            pending_handoffs: HashMap::new(),
             pending_switches: vec![],
             update: UpdateState::default(),
             quitting: false,

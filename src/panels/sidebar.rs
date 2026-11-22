@@ -4,7 +4,7 @@
 use std::time::{Duration, Instant};
 
 use gpui::{
-    Animation, AnimationExt, AnyElement, AppContext, DragMoveEvent, SharedString, WeakEntity, ease_out_quint, ClickEvent, Context, Div, FontWeight, InteractiveElement, IntoElement, MouseButton, MouseDownEvent, ParentElement, Pixels, Render,
+    Animation, AnimationExt, AnyElement, AppContext, DragMoveEvent, SharedString, WeakEntity, ease_out_quint, ClickEvent, Context, Div, InteractiveElement, IntoElement, MouseButton, MouseDownEvent, ParentElement, Pixels, Render,
     Stateful, StatefulInteractiveElement, Styled, Window, div, prelude::FluentBuilder, px,
 };
 
@@ -522,9 +522,9 @@ impl Workspace {
             })
     }
 
-    /// Code sessions shown in the list: matching the search, and in the project filter when there is one.
+    /// Code sessions shown in the list (never a subagent): matching the search, and in the project filter when there is one.
     fn listed(&self, q: &str, filter: Option<&Id>, rec: &SessionRecord) -> bool {
-        self.matches(q, rec) && filter.is_none_or(|f| rec.project_id.as_ref() == Some(f))
+        !rec.is_subagent() && self.matches(q, rec) && filter.is_none_or(|f| rec.project_id.as_ref() == Some(f))
     }
 
     /// The project the list is filtered to, if any (a removed project filters nothing).
@@ -745,6 +745,8 @@ impl Workspace {
                     },
                 ))
             })
+            .when(self.shortcuts_shown, |d| d.child(key_hint(",")))
+            .child(icon_button("settings", IconName::Settings).occlude().on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::OpenSettings, window, cx))))
     }
 
     /// The sidebar chrome around either list: header, scrolling body, usage footer.
@@ -812,29 +814,6 @@ impl Workspace {
             .px(px(8.0))
             .pt(px(10.0))
             .pb(px(8.0))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .px(px(4.0))
-                    .child(
-                        div()
-                            .id("sidebar-brand-home")
-                            .occlude()
-                            .flex()
-                            .flex_1()
-                            .items_center()
-                            .gap(px(7.0))
-                            .cursor_pointer()
-                            .hover(|s| s.opacity(0.85))
-                            .on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::ShowHome, window, cx)))
-                            .child(crate::panels::widgets::brand_mark(20.0))
-                            .child(div().text_size(crate::panels::scale::px(13.0)).font_weight(FontWeight::BOLD).text_color(hsla(theme::TEXT)).child("m4code")),
-                    )
-                    .when(hints, |d| d.child(key_hint(",")))
-                    .child(icon_button("settings", IconName::Settings).occlude().on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::OpenSettings, window, cx)))),
-            )
             .child(self.render_project_filter(cx))
             .child(
                 div().occlude().child(

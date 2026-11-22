@@ -42,6 +42,17 @@ function engine(on: any, helper: string[] | (() => AsyncGenerator<{ stream: stri
   return registered
 }
 
+test('a default model alias works before the provider catalog arrives', async ($, on) => {
+  const requests: any[] = []
+  const subagents = JSON.stringify({ codex: { name: 'Codex', edits: false, types: [type('codex-default', '')] } })
+  engine(on, ['{"kind":"report","text":"done"}'], requests, subagents)
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+  await $.agent.spawn({ subagentType: 'm4code:codex-default', prompt: 'Find the bug' })
+  await step($, 't1', 0, 'a1')
+  expect(requests[0].input.agent).toBe('codex')
+  expect(requests[0].input.model).toBe(null)
+})
+
 // The subagent's own view streams its activity; the main conversation gets none of it, since one line per step
 // buried the person's own conversation.
 test('activity streams in the subagent and leaves the main conversation alone', async ($, on) => {

@@ -1,5 +1,5 @@
 //! The Settings pages that list things to act on: Projects, and Harnesses (Claude Code, Codex, OpenCode, Antigravity)
-//! with each harness's configuration popup (Claude Code tools & accounts; subagent opt-in and models for the others).
+//! with shared model and subagent controls and provider-specific configuration.
 
 use gpui::{
     AnyElement, ClickEvent, Context, Div, FontWeight, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, ParentElement, SharedString,
@@ -8,7 +8,7 @@ use gpui::{
 use gpui_kit::component::input::{Input, InputState};
 
 use crate::app::{Act, HarnessDialog, Lookup, Modal, Workspace};
-use crate::claude::subagents::{Agent, AgentModel, type_name};
+use crate::claude::subagents::{Agent, AgentModel};
 use crate::harness::Harness;
 use crate::panels::logos;
 use crate::panels::theme::{self, hsla};
@@ -144,10 +144,11 @@ fn flip_harness_enabled(ws: &mut Workspace, harness: Harness, cx: &mut Context<W
 }
 
 /// Flips an agent's "Allow use as subagents" switch inside its harness popup.
-fn flip_subagent(ws: &mut Workspace, agent: Agent, cx: &mut Context<Workspace>) {
+fn flip_subagent(ws: &mut Workspace, harness: Harness, cx: &mut Context<Workspace>) {
     let Some(Modal::Settings { subagents, .. }) = ws.modal.as_mut() else { return };
-    let form = subagents.get_mut(agent);
-    form.on = !form.on;
+    let mut access = subagents.access(harness);
+    access.on = !access.on;
+    subagents.set_access(harness, access);
     ws.load_models(cx);
 }
 
@@ -163,31 +164,19 @@ fn harness_status(harness: Harness, enabled: bool, subagents: &crate::app::Harne
     {
         return (format!("Enabled · couldn't load models ({why})"), theme::WARN);
     }
-    match harness.agent() {
-        None => {
-            let models_note = if model_count > 0 { format!(" · {model_count} models") } else { String::new() };
-            (format!("Enabled · Claude Agent SDK{models_note}"), theme::TEXT_DIM)
-        }
-        Some(agent) => {
-            let form = subagents.get(agent);
-            if !form.on {
-                return if model_count > 0 {
-                    (format!("Enabled · {model_count} models"), theme::TEXT_DIM)
-                } else {
-                    ("Enabled · primary sessions only".into(), theme::TEXT_DIM)
-                };
-            }
-            if lookup.error.is_some() {
-                return (format!("Enabled · couldn't load {}'s models", agent.name()), theme::WARN);
-            }
-            let access = if form.edits { "edits allowed" } else { "read-only" };
-            match form.models.len() {
-                0 => ("Enabled · subagents on, choose a model".into(), theme::WARN),
-                1 => (format!("Enabled · 1 subagent · {access}"), theme::TEXT_DIM),
-                n => (format!("Enabled · {n} subagents · {access}"), theme::TEXT_DIM),
-            }
-        }
-    }
+    let access = subagents.access(harness);
+    let count = if subagents.picked(harness).is_empty() { model_count } else { subagents.picked(harness).len() };
+    let models = match count {
+        0 => String::new(),
+        1 => " · 1 model".to_string(),
+        n => format!(" · {n} models"),
+    };
+    let delegation = if access.on {
+        if access.edits { "subagents on · edits allowed" } else { "subagents on · read-only" }
+    } else {
+        "subagents off"
+    };
+    (format!("Enabled{models} · {delegation}"), theme::TEXT_DIM)
 }
 
 /// The models to list: those the agent offers, then any switched on that it no longer offers, so they can be
@@ -231,10 +220,9 @@ fn model_matches(query: &str, model: &AgentModel) -> bool {
 
 impl Workspace {
     /// The Harnesses page: enable Claude Code, Codex, OpenCode and Antigravity, and open each provider's configuration
-    /// popup (Claude Code tools & accounts; subagent opt-in and models for the others).
+    /// popup with model, subagent and provider-specific controls.
     pub(crate) fn harnesses_page(&self, cx: &mut Context<Self>) -> Div {
         let Some(Modal::Settings { subagents, .. }) = &self.modal else { return div() };
-        let saved = &self.store.data.settings.custom_subagents;
         let mut rows: Vec<AnyElement> = Vec::new();
         for harness in Harness::ALL {
             let enabled = subagents.enabled.contains(&harness);
@@ -258,18 +246,15 @@ impl Workspace {
                         .child(div().text_size(crate::panels::scale::px(13.0)).font_weight(FontWeight::MEDIUM).text_color(hsla(if enabled { theme::TEXT } else { theme::TEXT_DIM })).child(harness.name())),
                 )
                 .child(div().text_size(crate::panels::scale::px(11.5)).text_color(hsla(tone)).child(status));
-            if let Some(agent) = agent {
-                let form = subagents.get(agent);
-                let catalog = &saved.get(agent).catalog;
-                if enabled && form.on && !form.models.is_empty() {
-                    let names: Vec<&str> = form.models.iter().map(|id| catalog.iter().find(|m| &m.id == id).map_or(id.as_str(), |m| m.name.as_str())).collect();
-                    about = about.child(faint(names.join(" · ")).overflow_hidden().text_ellipsis().whitespace_nowrap());
-                }
-                if let Some(warning) = agent.provider().warning
-                    && form.on
-                {
-                    about = about.child(warn(warning));
-                }
+            let access = subagents.access(harness);
+            let picked = subagents.picked(harness);
+            let catalog = self.store.data.settings.harness_models(harness);
+            if enabled && access.on && !picked.is_empty() {
+                let names: Vec<&str> = picked.iter().map(|id| catalog.iter().find(|m| &m.id == id).map_or(id.as_str(), |m| m.name.as_str())).collect();
+                about = about.child(faint(names.join(" · ")).overflow_hidden().text_ellipsis().whitespace_nowrap());
+            }
+            if let Some(warning) = agent.and_then(|agent| agent.provider().warning).filter(|_| access.on) {
+                about = about.child(warn(warning));
             }
             let key = harness.name().to_lowercase().replace(' ', "-");
             let open = div()
@@ -333,25 +318,54 @@ impl Workspace {
             .child(faint("Open any harness to configure its tools, accounts, or subagent delegation."))
     }
 
-    /// The MODELS list of a harness popup: every model the harness offers, ticked ones in the chat's model picker. For
-    /// an agent (`agent`) with "Allow use as subagents" on, each ticked model is also a subagent and its row names the
-    /// agent type.
-    fn model_list(&self, harness: Harness, search: &gpui::Entity<InputState>, agent: Option<Agent>, cx: &mut Context<Self>) -> Div {
+    fn subagent_controls(&self, harness: Harness, cx: &mut Context<Self>) -> Div {
+        let Some(Modal::Settings { subagents, .. }) = &self.modal else { return div() };
+        let access = subagents.access(harness);
+        let key = harness.key();
+        let mut controls = div().flex().flex_col().gap(px(8.0)).child(switch_row(
+            SharedString::from(format!("agent-dialog-{key}-on")),
+            "Allow use as subagents",
+            Some("Let other m4code sessions delegate tasks to this harness".into()),
+            access.on,
+            move |ws, _, cx| flip_subagent(ws, harness, cx),
+            cx,
+        ));
+        if let Some(warning) = harness.agent().and_then(|agent| agent.provider().warning) {
+            controls = controls.child(warn(warning));
+        }
+        if access.on {
+            controls = controls.child(switch_row(
+                SharedString::from(format!("agent-dialog-{key}-edits")),
+                "Allow edits in subagent tasks",
+                None,
+                access.edits,
+                move |ws, _, _| {
+                    if let Some(Modal::Settings { subagents, .. }) = ws.modal.as_mut() {
+                        let mut access = subagents.access(harness);
+                        access.edits = !access.edits;
+                        subagents.set_access(harness, access);
+                    }
+                },
+                cx,
+            )).child(faint(if access.edits {
+                "m4code approves file edits and command requests. The harness's sandbox still applies. This can include network access or writes outside the project when permitted."
+            } else {
+                "Subagents cannot edit files. Commands follow the harness's read-only restrictions."
+            }));
+        }
+        controls
+    }
+
+    fn model_list(&self, harness: Harness, search: &gpui::Entity<InputState>, cx: &mut Context<Self>) -> Div {
         let Some(Modal::Settings { subagents, .. }) = &self.modal else { return div() };
         let picked = subagents.picked(harness);
-        let subagents_on = agent.is_some_and(|a| subagents.get(a).on);
+        let subagents_on = subagents.access(harness).on;
         let catalog = self.store.data.settings.harness_models(harness);
         let query = search.read(cx).value().to_string();
         let mut list = div().flex().flex_col().gap(px(6.0));
         let mut shown = 0;
         for (model, offered) in model_rows(catalog, picked).into_iter().filter(|(m, _)| model_matches(&query, m)) {
-            let type_tag = agent.filter(|_| subagents_on).and_then(|a| type_name(a, &model.id)).map(|name| format!("m4code:{name}"));
-            let tag = match (type_tag, offered) {
-                (Some(name), true) => Some(name),
-                (Some(name), false) => Some(format!("{name} · no longer offered")),
-                (None, true) => None,
-                (None, false) => Some("no longer offered".into()),
-            };
+            let tag = if !offered { Some("no longer offered") } else if subagents_on { Some("Available as a subagent") } else { None };
             let id = model.id.clone();
             list = list.child(switch_row(
                 gpui::SharedString::from(format!("harness-dialog-model-{}", model.id)),
@@ -379,10 +393,10 @@ impl Workspace {
             list = list.child(faint(format!("No model matches “{}”.", query.trim())));
         }
         let count = if catalog.is_empty() { String::new() } else { on_count(catalog, picked) };
-        let about = match agent {
-            Some(a) if subagents_on => format!("Ticked models show in the model picker and are subagents Claude Code can use. {} runs only when asked.", a.provider().name),
-            Some(_) => "Ticked models show in the model picker. With “Allow use as subagents” on, they are also Claude Code's subagents.".to_string(),
-            None => "Ticked models show in the model picker.".to_string(),
+        let about = if subagents_on {
+            "Ticked models appear in the model picker and are available for delegated tasks from other m4code sessions."
+        } else {
+            "Ticked models appear in the model picker. Enable subagents to allow delegated tasks from other m4code sessions."
         };
         div()
             .flex()
@@ -395,7 +409,7 @@ impl Workspace {
             .child(list)
     }
 
-    /// Popup dialog over the Harnesses page: Claude Code tools & accounts, or an external provider's subagent controls.
+    /// Harness configuration, including shared model and subagent controls.
     pub(crate) fn render_harness_dialog(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let Some(Modal::Settings { claude, skills_field, costly, subagents, chrome, .. }) = &self.modal else { return None };
         let picking = subagents.picking.as_ref()?;
@@ -418,7 +432,7 @@ impl Workspace {
                             .child(logos::draw(&logos::CLAUDE, 16.0, hsla(theme::ACCENT)))
                             .child(div().text_size(scaled(15.0)).font_weight(FontWeight::SEMIBOLD).child("Claude Code")),
                     )
-                    .child(faint("Runs through Anthropic's Claude Agent SDK with your local `claude` CLI."))
+                    .child(faint("Uses your Claude Code configuration and sign-in."))
                     .child(switch_row(
                         "harness-dialog-claude-on",
                         "Enable Claude Code",
@@ -427,6 +441,7 @@ impl Workspace {
                         |ws, _, cx| flip_harness_enabled(ws, Harness::Claude, cx),
                         cx,
                     ))
+                    .child(self.subagent_controls(Harness::Claude, cx))
                     .child(div().flex().flex_col().gap(px(4.0)).child(section_label("CLAUDE CODE PATH")).child(Input::new(claude)))
                     .child(switch_row(
                         "harness-dialog-claude-chrome",
@@ -494,7 +509,7 @@ impl Workspace {
                     ws.act(Act::AddAccount, window, cx)
                 }))));
                 col = col.child(accounts_box);
-                col = col.child(self.model_list(Harness::Claude, search, None, cx));
+                col = col.child(self.model_list(Harness::Claude, search, cx));
 
                 // m4code trims the extras itself (trim::FLUFF), per session; what's left here are the user's own settings.
                 for found in costly {
@@ -514,9 +529,7 @@ impl Workspace {
                 let provider = agent.provider();
                 let key = agent.key();
                 let enabled = subagents.enabled.contains(&harness);
-                let form = subagents.get(agent);
-
-                let mut top = div()
+                let top = div()
                     .flex()
                     .flex_col()
                     .gap(px(8.0))
@@ -529,7 +542,7 @@ impl Workspace {
                             .child(logos::draw(logos::for_harness(harness), 16.0, hsla(theme::ACCENT)))
                             .child(div().text_size(scaled(15.0)).font_weight(FontWeight::SEMIBOLD).child(provider.name)),
                     )
-                    .child(faint(provider.about))
+                    .child(faint(format!("Uses your {} configuration and sign-in.", harness.name())))
                     .child(switch_row(
                         gpui::SharedString::from(format!("harness-dialog-{key}-enabled")),
                         format!("Enable {}", provider.name),
@@ -538,36 +551,8 @@ impl Workspace {
                         move |ws, _, cx| flip_harness_enabled(ws, harness, cx),
                         cx,
                     ))
-                    .child(switch_row(
-                        gpui::SharedString::from(format!("agent-dialog-{key}-on")),
-                        "Allow use as subagents",
-                        Some("Let Claude Code delegate tasks to this provider".into()),
-                        form.on,
-                        move |ws, _, cx| flip_subagent(ws, agent, cx),
-                        cx,
-                    ));
-                // Keep Antigravity's terms/suspension warning directly under the subagent switch.
-                if let Some(warning) = provider.warning {
-                    top = top.child(warn(warning));
-                }
-                if form.on {
-                    top = top
-                        .child(switch_row(
-                            gpui::SharedString::from(format!("agent-dialog-{key}-edits")),
-                            "Allow edits in subagent tasks",
-                            None,
-                            form.edits,
-                            move |ws, _, _| {
-                                if let Some(Modal::Settings { subagents, .. }) = ws.modal.as_mut() {
-                                    let form = subagents.get_mut(agent);
-                                    form.edits = !form.edits;
-                                }
-                            },
-                            cx,
-                        ))
-                        .child(faint(if form.edits { provider.edits_on } else { provider.edits_off }));
-                }
-                let models = self.model_list(harness, search, Some(agent), cx);
+                    .child(self.subagent_controls(harness, cx));
+                let models = self.model_list(harness, search, cx);
                 div().flex().flex_col().gap(px(12.0)).w_full().child(top).child(models)
             }
         };
@@ -696,6 +681,17 @@ impl Workspace {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn harness_subtitles_use_the_same_subagent_status_for_every_provider() {
+        let form = crate::app::HarnessesForm {
+            enabled: Harness::ALL.to_vec(),
+            agents: crate::claude::subagents::AgentMap::from_fn(|_| crate::app::AgentForm { on: true, edits: true, models: vec![] }),
+            claude_models: vec![], claude_subagents: Default::default(), picking: None,
+        };
+        for harness in [Harness::Claude, Harness::Codex, Harness::OpenCode] {
+            assert_eq!(harness_status(harness, true, &form, &Lookup::default(), 2).0, "Enabled · 2 models · subagents on · edits allowed");
+        }
+    }
     #[test]
     fn every_model_starts_ticked_and_the_last_one_stays() {
         use super::{is_ticked, tick};

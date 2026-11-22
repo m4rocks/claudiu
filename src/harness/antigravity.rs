@@ -11,5 +11,6 @@ pub const ADAPTER: Adapter = Adapter {
     server: || super::subagent_server(Agent::Antigravity),
     reopen: Reopen::Resume,
     delete_model_session: false,
+    compact_command: None,
     // agy has no documented way to resume a session by id from its command line.
 };

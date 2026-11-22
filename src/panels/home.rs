@@ -3,7 +3,7 @@
 use gpui::{
     AnyElement, ClickEvent, Context, FontWeight, InteractiveElement, IntoElement, MouseButton, MouseDownEvent,
     ParentElement, StatefulInteractiveElement, Styled, Window, div,
-    px,
+    prelude::FluentBuilder, px,
 };
 
 use crate::app::{
@@ -14,7 +14,7 @@ use crate::panels::{composer, logos};
 use crate::panels::theme::{self, hsla};
 use gpui_kit::assets::IconName;
 use crate::panels::widgets::{
-    Trigger, button, icon, key_hint, spinner,
+    Trigger, icon, key_badge, key_hint, spinner,
 };
 
 impl Workspace {
@@ -76,10 +76,10 @@ impl Workspace {
                 }),
             );
 
-        let start_btn = button("home-launch", "Start", true)
-            .h(px(26.0))
-            .px(px(12.0))
-            .on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::HomeLaunch, window, cx)));
+        let can_send = composer::can_send(self.home.prompt.read(cx).value().as_ref());
+        let start_btn = composer::send_button("home-launch", can_send)
+            .when(can_send, |d| d.on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::HomeLaunch, window, cx))))
+            .when(self.shortcuts_shown, |d| d.child(key_badge("Enter")));
 
         let focused = self.home.prompt.focus_handle(cx).is_focused(window);
         let input = composer::input_area()

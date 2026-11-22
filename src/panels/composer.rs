@@ -6,7 +6,17 @@ use gpui_kit::assets::IconName;
 
 use crate::panels::scale;
 use crate::panels::theme::{self, hsla};
-use crate::panels::widgets::icon;
+use crate::panels::widgets::{button, button_disabled, icon};
+
+pub fn can_send(text: &str) -> bool {
+    !text.trim().is_empty()
+}
+
+pub fn send_button(id: impl Into<SharedString>, enabled: bool) -> Stateful<Div> {
+    let id = id.into();
+    let button = if enabled { button(id, "Send", true) } else { button_disabled(id, "Send") };
+    button.h(px(26.0)).px(px(12.0))
+}
 
 /// The box: `top` (a question waiting for an answer) above `input`, then `chips` on the left of the footer and
 /// `actions` on its right. `lit` draws a brighter border, for focus or a waiting question.

@@ -185,6 +185,8 @@ impl Workspace {
         let github = (!attached.is_empty()).then(|| self.attached_rows(id.as_ref(), attached, cx));
         let links = id.as_deref().map(|i| self.links_of(i)).unwrap_or_default();
         let linked = (!links.is_empty()).then(|| self.linked_rows(id.as_ref(), links, cx));
+        let children = id.as_deref().map(|i| self.subagents_of(i)).unwrap_or_default();
+        let subagents = (!children.is_empty()).then(|| self.subagent_rows(children, cx));
         let away = id.as_deref().and_then(|i| self.session_away(i, cx));
         let status = self.status_rows(&shown, id.as_ref(), running, cx);
         self.menu_scroll
@@ -209,6 +211,7 @@ impl Workspace {
             }))
             .child(group("ACTIONS", actions))
             .children(github.map(|g| group("GITHUB", g)))
+            .children(subagents.map(|s| group("SUBAGENTS", s)))
             .children(linked.map(|l| group("LINKED", l)))
             .child(group("STATUS", status))
     }
@@ -329,6 +332,19 @@ impl Workspace {
         rows
     }
 
+    /// Subagents this session started: click to look at one.
+    fn subagent_rows(&self, children: Vec<(Id, String)>, cx: &mut Context<Self>) -> Div {
+        let mut rows = div().flex().flex_col().gap(px(1.0));
+        for (child, title) in children {
+            let go = child.clone();
+            rows = rows.child(
+                row(format!("subagent-{child}"), IconName::Brackets, title)
+                    .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::Select(go.clone()), window, cx))),
+            );
+        }
+        rows
+    }
+
     /// Sessions linked with this one: click to go there, × to unlink.
     fn linked_rows(&self, id: Option<&Id>, links: Vec<(Id, String)>, cx: &mut Context<Self>) -> Div {
         let mut rows = div().flex().flex_col().gap(px(1.0));
@@ -364,10 +380,12 @@ impl Workspace {
         // The figures come from the snapshot the session's mod reports.
         let meta = shown.rec.as_ref().filter(|r| r.kind == SessionKind::Claude).and_then(|r| r.claude.as_ref());
         let (compact, precompute) = meta.map_or((None, None), |m| (m.auto_compact, m.precompute_compact));
-        let compact_text = compact.map_or("—", |v| if v { "On" } else { "Off" }).to_string();
+        let live = id.and_then(|id| self.live_view(id)).and_then(|view| view.thread());
+        let compact_text = live.map_or_else(|| compact.map_or("—", |v| if v { "On" } else { "Off" }).to_string(), |view| view.read(cx).compaction_status().to_string());
         let settable = id.filter(|_| meta.is_some() && running).cloned();
 
-        let compact_row = match settable.clone() {
+        let compact_settable = settable.clone().filter(|_| live.is_some_and(|view| view.read(cx).harness.adapter().compact_command.is_some()));
+        let compact_row = match compact_settable {
             Some(sid) => pick_row(cx, "set-auto-compact", "Auto-compact", compact_text, move || auto_compact_menu(&sid, compact)).into_any_element(),
             None => kv("Auto-compact", compact_text).into_any_element(),
         };

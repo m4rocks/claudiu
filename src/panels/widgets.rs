@@ -152,6 +152,14 @@ fn button_with(
         .child(label)
 }
 
+pub fn dialog_card(id: impl Into<gpui::ElementId>) -> Stateful<Div> {
+    div().id(id).occlude().rounded(px(12.0)).bg(hsla(theme::PANEL_BG)).border_1().border_color(hsla(theme::PANEL_BORDER)).shadow_lg()
+}
+
+pub fn dropdown_card(id: impl Into<gpui::ElementId>) -> Stateful<Div> {
+    div().id(id).occlude().cursor_default().rounded(px(10.0)).bg(hsla(theme::SURFACE_ELEVATED)).border_1().border_color(hsla(theme::PANEL_BORDER)).shadow_lg()
+}
+
 /// Compact text button. Caller attaches `.on_click`.
 pub fn button(
     id: impl Into<SharedString>,

@@ -16,7 +16,7 @@ pub enum Ask {
 
 impl Workspace {
     pub fn ask_claude(&mut self, ask: Ask, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(id) = self.active_id().cloned() else { return };
+        let Some(id) = self.editor_owner() else { return };
         let text = match ask {
             Ask::Problem => self.problem_at_cursor(&id, cx).map(|(reference, message)| request(ask, &reference, Some(&message))),
             _ => self.selection_reference(&id, cx).or_else(|| self.cursor_reference(&id, cx)).map(|reference| request(ask, &reference, None)),
@@ -45,6 +45,11 @@ impl Workspace {
     /// Send `text` to the session `id` as the user's next message, then move the keyboard to it. A session mid-turn
     /// queues it for after the turn; a half-written message in its composer is left alone.
     pub(super) fn send_to_claude(&mut self, id: &Id, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.main, Main::Home) && self.editor_owner().as_ref() == Some(id) {
+            self.add_home_comment(text, window, cx);
+            self.act(Act::HomeLaunch, window, cx);
+            return;
+        }
         let Some(view) = self.live_view(id).filter(|v| v.is_running(cx)).and_then(|v| v.thread()).cloned() else {
             self.toast("This session isn't running. Resume it, then try again.", false, cx);
             return;

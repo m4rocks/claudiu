@@ -272,7 +272,12 @@ impl Thread {
 
     /// The conversation as plain text, newest last, for another session to read or for a hand-off summary.
     pub fn transcript(&self, last: usize) -> String {
-        let start = self.entries.len().saturating_sub(last);
+        self.transcript_after(0, last)
+    }
+
+    pub fn transcript_after(&self, after: usize, last: usize) -> String {
+        let after = if after <= self.entries.len() { after } else { 0 };
+        let start = self.entries.len().saturating_sub(last).max(after);
         self.entries[start..]
             .iter()
             .filter_map(|e| match e {

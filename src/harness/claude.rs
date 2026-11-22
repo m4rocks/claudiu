@@ -30,6 +30,7 @@ pub const ADAPTER: Adapter = Adapter {
     server: || server(&crate::datadir::data_dir()),
     reopen: Reopen::Load,
     delete_model_session: false,
+    compact_command: Some("compact"),
 };
 
 /// Sessions starting together must not install the SDK into the same folder at once.

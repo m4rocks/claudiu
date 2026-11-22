@@ -6,7 +6,7 @@ use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
@@ -40,7 +40,8 @@ pub struct Connection {
     outgoing: mpsc::Sender<Value>,
     pending: Pending,
     next_id: AtomicI64,
-    child: Option<Child>,
+    child: Mutex<Option<Child>>,
+    closed: Arc<AtomicBool>,
 }
 
 impl Connection {
@@ -60,7 +61,7 @@ impl Connection {
             return Err(format!("{name} could not start (no pipes)"));
         };
         let mut connection = Self::connect(stdout, stdin, Some(stderr), events);
-        connection.child = Some(child);
+        connection.child = Mutex::new(Some(child));
         Ok(connection)
     }
 
@@ -92,8 +93,10 @@ impl Connection {
             });
         }
         let pending: Pending = Default::default();
+        let closed = Arc::new(AtomicBool::new(false));
         {
             let (pending, outgoing) = (pending.clone(), outgoing.clone());
+            let closed = closed.clone();
             std::thread::spawn(move || {
                 for line in BufReader::new(reader).lines().map_while(Result::ok) {
                     // Some servers print a banner or a log line on stdout; only JSON is the protocol.
@@ -101,6 +104,7 @@ impl Connection {
                         handle(message, &pending, &outgoing, &events);
                     }
                 }
+                closed.store(true, Ordering::Release);
                 pending.lock().unwrap().clear();
                 // Give stderr a moment to deliver the reason before reporting it.
                 std::thread::sleep(Duration::from_millis(200));
@@ -108,14 +112,19 @@ impl Connection {
                 let _ = events.unbounded_send(Event::Exited(words));
             });
         }
-        Connection { outgoing, pending, next_id: AtomicI64::new(1), child: None }
+        Connection { outgoing, pending, next_id: AtomicI64::new(1), child: Mutex::new(None), closed }
     }
 
     pub fn request(&self, method: &str, params: Value) -> impl Future<Output = Result<Value, String>> + use<> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
-        self.pending.lock().unwrap().insert(id, tx);
-        let _ = self.outgoing.send(json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}));
+        let mut pending = self.pending.lock().unwrap();
+        if self.closed.load(Ordering::Acquire) {
+            let _ = tx.send(Err("the agent stopped".into()));
+        } else {
+            pending.insert(id, tx);
+            let _ = self.outgoing.send(json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}));
+        }
         async move { rx.await.unwrap_or_else(|_| Err("the agent stopped".into())) }
     }
 
@@ -127,11 +136,11 @@ impl Connection {
     pub fn respond(&self, id: Value, result: Value) {
         let _ = self.outgoing.send(json!({"jsonrpc": "2.0", "id": id, "result": result}));
     }
-}
 
-impl Drop for Connection {
-    fn drop(&mut self) {
-        if let Some(mut child) = self.child.take() {
+    pub fn terminate(&self) {
+        self.closed.store(true, Ordering::Release);
+        self.pending.lock().unwrap().clear();
+        if let Some(mut child) = self.child.lock().unwrap().take() {
             // Off the UI thread: closing stdin is the polite stop, and one that lingers is ended.
             std::thread::spawn(move || {
                 drop(child.stdin.take());
@@ -145,6 +154,12 @@ impl Drop for Connection {
                 let _ = child.wait();
             });
         }
+    }
+}
+
+impl Drop for Connection {
+    fn drop(&mut self) {
+        self.terminate();
     }
 }
 
@@ -163,6 +178,20 @@ pub fn permission_outcome(option: Option<&str>) -> Value {
     match option {
         Some(id) => json!({ "outcome": { "outcome": "selected", "optionId": id } }),
         None => json!({ "outcome": { "outcome": "cancelled" } }),
+    }
+}
+
+pub fn is_tool_permission(params: &Value) -> bool {
+    matches!(params["toolCall"]["kind"].as_str(), Some("read" | "edit" | "delete" | "move" | "search" | "execute" | "think" | "fetch" | "switch_mode"))
+}
+
+pub fn reopen_method(capabilities: &Value, preferred: super::Reopen) -> Result<super::Reopen, &'static str> {
+    let load = capabilities["loadSession"].as_bool() == Some(true);
+    let resume = capabilities.pointer("/sessionCapabilities/resume").is_some_and(Value::is_object);
+    match (preferred, load, resume) {
+        (super::Reopen::Load, true, _) | (super::Reopen::Resume, true, false) => Ok(super::Reopen::Load),
+        (_, _, true) => Ok(super::Reopen::Resume),
+        _ => Err("the adapter advertised neither session/load nor session/resume"),
     }
 }
 
@@ -196,6 +225,37 @@ fn handle(message: Value, pending: &Pending, outgoing: &mpsc::Sender<Value>, eve
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn child_edit_permission_does_not_answer_user_questions() {
+        assert!(is_tool_permission(&json!({"toolCall":{"kind":"edit"}})));
+        assert!(!is_tool_permission(&json!({"toolCall":{"kind":"other"},"options":[{"kind":"allow_once"},{"kind":"allow_once"}]})));
+        assert!(!is_tool_permission(&json!({"options":[]})));
+    }
+
+    #[test]
+    fn terminating_cancels_pending_requests_and_rejects_new_ones() {
+        let (reader, _writer) = std::io::pipe().unwrap();
+        let (events, _incoming) = async_mpsc::unbounded();
+        let connection = Connection::connect(reader, Vec::<u8>::new(), None::<std::io::Empty>, events);
+        let pending = connection.request("never-answered", json!({}));
+        connection.closed.store(true, Ordering::Release);
+        connection.terminate();
+        assert!(connection.pending.lock().unwrap().is_empty(), "EOF must not prevent pending-request cleanup");
+        assert!(futures::executor::block_on(pending).is_err());
+        assert!(futures::executor::block_on(connection.request("after-close", json!({}))).is_err());
+    }
+
+    #[test]
+    fn reopen_uses_negotiated_capabilities_and_refuses_unsupported_operations() {
+        use crate::harness::Reopen;
+        assert_eq!(reopen_method(&json!({"loadSession": true}), Reopen::Resume), Ok(Reopen::Load));
+        assert_eq!(reopen_method(&json!({"sessionCapabilities": {"resume": {}}}), Reopen::Load), Ok(Reopen::Resume));
+        let both = json!({"loadSession":true,"sessionCapabilities":{"resume":{}}});
+        assert_eq!(reopen_method(&both, Reopen::Load), Ok(Reopen::Load));
+        assert_eq!(reopen_method(&both, Reopen::Resume), Ok(Reopen::Resume));
+        assert!(reopen_method(&json!({}), Reopen::Load).is_err());
+    }
     use futures::StreamExt;
 
     /// A fake agent on the other end of two pipes: it answers `initialize` and `session/new`, and for a prompt

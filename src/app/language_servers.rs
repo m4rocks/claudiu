@@ -47,7 +47,7 @@ impl Workspace {
     }
 
     fn start_server(&mut self, id: &Id, kind: &'static lsp::Kind, cx: &mut Context<Self>) {
-        let Some(root) = self.store.session(id).map(|s| s.cwd.clone()) else { return };
+        let Some(root) = self.editor_cwd(id) else { return };
         let (events, mut incoming) = futures::channel::mpsc::unbounded();
         let id = id.clone();
         cx.spawn(async move |this, cx| {

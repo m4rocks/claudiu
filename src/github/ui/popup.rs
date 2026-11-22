@@ -1,6 +1,8 @@
 //! The filter, label, assignee and sort popups over the list.
 
 use super::*;
+use crate::panels::picker;
+use crate::panels::widgets::Dropdown;
 
 impl GithubView {
     pub(super) fn popup_items(&self, kind: &PopKind) -> (Vec<PopItem>, bool) {
@@ -223,67 +225,45 @@ impl GithubView {
         let (items, loading) = self.popup_items(&popup.kind);
         let needle = popup.filter.read(cx).value().to_lowercase();
         let searchable = !matches!(popup.kind, PopKind::Merge | PopKind::CloseReason | PopKind::Claude | PopKind::More | PopKind::React(_) | PopKind::Comment(..) | PopKind::FilterSort | PopKind::FilterReview | PopKind::FilterChecks);
-        let mut list = popup.scroll.wire(div().id("gh-pop-list"), window).flex().flex_col().max_h(px(320.0));
+        let mut choices = picker::Choices::new(&popup.nav, &needle);
+        let mut list = choices.list("gh-pop-list").max_h(px(320.0));
         let mut shown = 0;
         for (i, it) in items.into_iter().enumerate() {
             if searchable && !needle.is_empty() && !it.label.to_lowercase().contains(&needle) {
                 continue;
             }
             shown += 1;
-            list = list.child(
-                div()
-                    .id(SharedString::from(format!("gh-pop-{i}")))
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .h(px(28.0))
-                    .px(px(10.0))
-                    .rounded(px(5.0))
-                    .cursor_pointer()
-                    .text_size(crate::panels::scale::px(12.5))
-                    .hover(|s| s.bg(hsla(0x252525)))
-                    .child(div().w(px(12.0)).flex_none().text_color(hsla(theme::ACCENT)).children((it.checked == Some(true)).then(|| icon(IconName::Check, 13.0))))
-                    .children(it.swatch.map(|c| div().size(px(10.0)).flex_none().rounded_full().bg(hsla(c))))
-                    .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(it.label))
-                    .children(it.hint.map(faint))
-                    .on_click(go(cx, it.act)),
-            );
+            let lead = div()
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .children(it.swatch.map(|c| div().size(px(10.0)).rounded_full().bg(hsla(c))))
+                .into_any_element();
+            let trailing = it.hint.map(|hint| faint(hint).into_any_element());
+            let row = picker::row(SharedString::from(format!("gh-pop-{i}")), Some(lead), it.label, None, trailing, it.checked == Some(true), false);
+            list = list.child(choices.add(row, move |v, window, cx| v.act(it.act.clone(), window, cx), cx));
         }
         if loading {
             list = list.child(div().px(px(10.0)).py(px(6.0)).child(dim("Loading…")));
         } else if shown == 0 {
             list = list.child(div().px(px(10.0)).py(px(6.0)).child(dim("Nothing matches")));
         }
-        let card = div()
-            .id("gh-popup")
-            .occlude()
-            .w(px(272.0))
-            .p(px(4.0))
-            .rounded(px(8.0))
-            .bg(hsla(0x181818))
-            .border_1()
-            .border_color(hsla(0x2c2c2c))
-            .shadow_lg()
+        let body = div()
             .flex()
             .flex_col()
-            .gap(px(4.0))
-            .when(searchable, |d| d.child(div().p(px(2.0)).child(Input::new(&popup.filter).h(px(28.0)).text_size(crate::panels::scale::px(12.5)))))
+            .gap(px(8.0))
+            .when(searchable, |d| d.child(picker::search_input(&popup.filter)))
             .child(list);
-        let close = cx.listener(|v: &mut GithubView, _: &MouseDownEvent, window, cx| v.act(GhAct::ClosePopup, window, cx));
-        Some(
-            deferred(
-                div()
-                    .absolute()
-                    .top_0()
-                    .left_0()
-                    .size_full()
-                    .occlude()
-                    .on_mouse_down(MouseButton::Left, close)
-                    .child(anchored().position(popup.pos).snap_to_window_with_margin(px(8.0)).child(fade_in(card, format!("gh-pop-in-{:?}", popup.kind), 110, 0.0))),
-            )
-            .with_priority(5)
-            .into_any_element(),
-        )
+        Some(picker::dropdown_overlay(
+            ("gh-popup", "GITHUB"),
+            Dropdown::at(popup.pos),
+            5,
+            body.into_any_element(),
+            Some(choices),
+            |v, window, cx| v.act(GhAct::ClosePopup, window, cx),
+            window,
+            cx,
+        ))
     }
 }
 

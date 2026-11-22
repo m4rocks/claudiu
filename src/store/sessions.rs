@@ -51,6 +51,14 @@ pub struct ClaudeMeta {
     /// The harness the session runs in. Sessions from before there was a choice ran in Claude Code.
     #[serde(default)]
     pub harness: crate::harness::Harness,
+    #[serde(default)]
+    pub parent_session: Option<Id>,
+    #[serde(default)]
+    pub subagent_edits: bool,
+    #[serde(default)]
+    pub managed_compaction: bool,
+    #[serde(default)]
+    pub provider_sessions: BTreeMap<String, ProviderSession>,
     pub model: Option<String>,
     /// The model and effort last picked in this session, as the harness's option values; a resumed session asks for
     /// them again, since harnesses start a loaded session on their own defaults.
@@ -108,6 +116,15 @@ pub struct ClaudeMeta {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ProviderSession {
+    pub session_id: String,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub account: Option<Id>,
+    pub after_entry: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SessionRecord {
     pub id: Id,
     pub kind: SessionKind,
@@ -134,6 +151,11 @@ pub struct SessionRecord {
 }
 
 impl SessionRecord {
+    /// A session another session started with `spawn_subagent`. It lives in its parent's right sidebar, not in the lists.
+    pub fn is_subagent(&self) -> bool {
+        self.claude.as_ref().is_some_and(|m| m.parent_session.is_some())
+    }
+
     pub fn display_title(&self) -> &str {
         self.chosen_title().unwrap_or(&self.title)
     }

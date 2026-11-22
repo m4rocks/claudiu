@@ -11,4 +11,5 @@ pub const ADAPTER: Adapter = Adapter {
     server: || super::subagent_server(Agent::Codex),
     reopen: Reopen::Load,
     delete_model_session: false,
+    compact_command: Some("compact"),
 };

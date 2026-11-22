@@ -487,7 +487,7 @@ async function* customStep($, e, next, run) {
     const exe = await $.env.get('M4CODE_EXE')
     const cwd = await $.session.cwd()
     // Read after the awaits above, by which time a spawn still finishing has noted the effort.
-    const request = { agent, model, effort: run.effort, edits, cwd, prompt, live_messages: true }
+    const request = { agent, model: model || null, effort: run.effort, edits, cwd, prompt, live_messages: true }
     try {
       for await (const event of helperEvents($, exe, request, next.signal)) {
         if (event.kind === 'inbox') {
@@ -703,6 +703,9 @@ async function readCardRows($) {
 
 async function onSessionStart($, e, next) {
   const r = await next(e)
+  if (await $.env.get('M4CODE_MANAGED_COMPACTION') === '1') {
+    await $.config.set({ key: 'autoCompact', value: false }).catch(() => {})
+  }
   await report($)
   await applyCtl($)
 

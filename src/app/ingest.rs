@@ -14,8 +14,8 @@ impl Workspace {
         self.ingest_subagent_limits(cx);
         self.in_background(
             || (usage::read_snapshots(&usage::snapshot_dir()), mcp::read_attached()),
-            |ws, (snaps, items), _| {
-                let mut changed = snaps.iter().fold(false, |c, snap| ws.apply_snapshot(snap) | c);
+            |ws, (snaps, items), cx| {
+                let mut changed = snaps.iter().fold(false, |c, snap| ws.apply_snapshot(snap, cx) | c);
                 changed |= items.into_iter().fold(false, |c, (stem, item)| ws.apply_attachment(&stem, item) | c);
                 if changed {
                     ws.store.mark_dirty();
@@ -55,11 +55,24 @@ impl Workspace {
     }
 
     /// One mod report: the account's limits, and the session's own figures and settings.
-    fn apply_snapshot(&mut self, snap: &Snapshot) -> bool {
+    fn apply_snapshot(&mut self, snap: &Snapshot, cx: &mut Context<Self>) -> bool {
         let account = snap.account.as_deref().unwrap_or(MAIN_ACCOUNT);
         let mut changed = self.merge_account(account, snap.five_hour.clone(), snap.seven_day.clone());
-        if let Some(meta) = self.store.data.sessions.iter_mut().find(|s| s.claude_id() == Some(snap.session_id.as_str())).and_then(|s| s.claude.as_mut()) {
-            changed |= apply_to_meta(meta, snap);
+        let id = self.store.data.sessions.iter().find(|s| s.claude_id() == Some(snap.session_id.as_str())).map(|s| s.id.clone());
+        if let Some(id) = id {
+            if let Some(meta) = self.store.session_mut(&id).and_then(|s| s.claude.as_mut()) {
+                changed |= apply_to_meta(meta, snap);
+            }
+            if let Some(native) = snap.auto_compact
+                && let Some(view) = self.live_view(&id).and_then(|v| v.thread())
+            {
+                view.update(cx, |view, cx| {
+                    if view.compaction.native_controlled == native {
+                        view.compaction.native_controlled = !native;
+                        cx.notify();
+                    }
+                });
+            }
         }
         changed
     }
@@ -116,7 +129,7 @@ fn apply_to_meta(meta: &mut ClaudeMeta, snap: &Snapshot) -> bool {
         meta.advisor_active = advisor_active;
         changed = true;
     }
-    if snap.auto_compact.is_some() && meta.auto_compact != snap.auto_compact {
+    if !meta.managed_compaction && snap.auto_compact.is_some() && meta.auto_compact != snap.auto_compact {
         meta.auto_compact = snap.auto_compact;
         changed = true;
     }

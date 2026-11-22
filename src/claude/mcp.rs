@@ -88,7 +88,7 @@ fn feature_of(tool: &str) -> Option<&'static str> {
         "attach_github" | "detach_github" => Some("github"),
         "link_session" | "unlink_session" => Some("sessions"),
         "set_model" | "list_models" => Some("model"),
-        _ if BRIDGE_TOOLS.contains(&tool) => Some("sessions"),
+        _ if BRIDGE_TOOLS.contains(&tool) || SUBAGENT_TOOLS.contains(&tool) => Some("sessions"),
         _ => None,
     }
 }
@@ -105,12 +105,14 @@ const OWN_TOOLS: [&str; 5] = ["attach_github", "detach_github", "link_session", 
 const MODEL_TOOLS: [&str; 2] = ["list_models", "set_model"];
 
 /// Tools that reach other sessions (`claude/bridge.rs`).
+pub(crate) const SUBAGENT_TOOLS: [&str; 5] = ["spawn_subagent", "list_subagents", "send_subagent_message", "wait_subagent", "stop_subagent"];
+
 const BRIDGE_TOOLS: [&str; 6] = ["list_code_sessions", "read_code_session", "search_sessions", "search_projects", "start_code_session", "switch_worktree"];
 
 /// `mcp__<server>__<tool>` names allowed per process so Claude Code adds no prompt of its own: m4code's own tools only
 /// change what m4code shows, and the cross-session tools are limited to what the user asks of the model.
 pub fn allowed_tools(off: &[&str]) -> Vec<String> {
-    OWN_TOOLS.iter().copied().chain(["list_models"]).chain(BRIDGE_TOOLS).filter(|t| !is_off(off, t)).map(|t| format!("mcp__m4code__{t}")).collect()
+    OWN_TOOLS.iter().copied().chain(["list_models"]).chain(BRIDGE_TOOLS).chain(SUBAGENT_TOOLS).filter(|t| !is_off(off, t)).map(|t| format!("mcp__m4code__{t}")).collect()
 }
 
 const BRIDGE_INSTRUCTIONS: &str = " m4code also has tools that reach your other sessions: list_code_sessions, read_code_session, \
@@ -121,8 +123,13 @@ with a full brief to suggest running it in its own session; the user sees a dial
 switch_worktree moves this session into another git worktree of its project; call it only when the user asks for a worktree, and \
 end your turn once it is approved.";
 
+const SUBAGENT_INSTRUCTIONS: &str = " Subagents run through m4code across Claude Code, Codex and OpenCode. \
+Use spawn_subagent to delegate a task to another harness, list_subagents to inspect children, \
+send_subagent_message for a follow-up, wait_subagent for a report and stop_subagent to cancel. \
+These tools use the subagent and edit permissions saved in Settings. Follow the user's and project's delegation rules.";
+
 const LINK_INSTRUCTIONS: &str = " m4code shows related sessions together. When this work continues or builds on another \
-Claude Code session (the user says so, or you recognise it), find it with search_sessions and call link_session once per pair; \
+m4code session (the user says so, or you recognise it), find it with search_sessions and call link_session once per pair; \
 call unlink_session when a link no longer fits. Both are silent.";
 
 /// What makes the model call `show_visual` (the tool's own description teaches the dialect, and stays deferred).
@@ -142,12 +149,12 @@ as its description says; detach_github takes one off again.";
 
 /// The opening of the instructions; each feature's text follows it. The user names the session, so there is nothing
 /// about the title here.
-const INTRO: &str = "You are running inside m4code, a desktop app that runs this Claude Code session.";
+const INTRO: &str = "You are running inside m4code, a desktop app that runs this coding-agent session.";
 
-/// What makes the model ask before it calls `set_model`; `ask` is how it asks.
-fn model_instructions(ask: &str) -> String {
-    format!(
-        " Never switch models on your own: before set_model, ask {ask} which model, unless the user just named one. \
+/// Confirmation instructions shared by every provider before switching models.
+fn model_instructions() -> String {
+    String::from(
+        " Never switch models on your own: before set_model, ask the user which model, unless the user just named one. \
 Don't ask about effort: leave it out unless the user named one, and m4code uses medium. list_models gives the exact names set_model takes (harness:model-id), including other coding agents; \
 switching to another one hands this conversation over. After set_model, end your turn."
     )
@@ -158,7 +165,7 @@ fn instructions(off: &[&str]) -> String {
     let on = |name: &str| !off.contains(&name);
     let mut text = INTRO.to_string();
     if on("model") {
-        text += &model_instructions(if on("ask_user_question") { "with AskUserQuestion" } else { "the user" });
+        text += &model_instructions();
     }
     if on("github") {
         text += GITHUB_INSTRUCTIONS;
@@ -175,6 +182,7 @@ fn instructions(off: &[&str]) -> String {
     }
     if on("sessions") {
         text += BRIDGE_INSTRUCTIONS;
+        text += SUBAGENT_INSTRUCTIONS;
     }
     text
 }
@@ -232,14 +240,14 @@ fn serve(input: impl BufRead, mut out: impl Write, record: &str, data: &Path, of
                 "instructions": instructions(off),
             })),
             "ping" => Ok(json!({})),
-            "tools/list" => Ok(json!({ "tools": own_tools().into_iter().chain(model_tools(off)).chain(bridge_tools()).filter(|t| !is_off(off, t["name"].as_str().unwrap_or_default())).collect::<Vec<_>>() })),
+            "tools/list" => Ok(json!({ "tools": own_tools().into_iter().chain(model_tools()).chain(bridge_tools()).chain(subagent_tools()).filter(|t| !is_off(off, t["name"].as_str().unwrap_or_default())).collect::<Vec<_>>() })),
             "tools/call" => Ok(match msg["params"]["name"].as_str().filter(|tool| !is_off(off, tool)) {
                 Some("attach_github") => attach_github(&msg["params"], record, &attach_dir(data)),
                 Some("detach_github") => detach_github(&msg["params"], record, &attach_dir(data)),
                 Some("link_session") => link_session(&msg["params"], record, &attach_dir(data), "link"),
                 Some("unlink_session") => link_session(&msg["params"], record, &attach_dir(data), "unlink"),
                 Some("show_visual") => reply("Visuals aren't available in this session (m4code's mod isn't loaded).", true),
-                Some(tool) if BRIDGE_TOOLS.contains(&tool) || MODEL_TOOLS.contains(&tool) => match ask(tool, &msg["params"]["arguments"]) {
+                Some(tool) if BRIDGE_TOOLS.contains(&tool) || MODEL_TOOLS.contains(&tool) || SUBAGENT_TOOLS.contains(&tool) => match ask(tool, &msg["params"]["arguments"]) {
                     Ok(text) => reply(&text, false),
                     Err(text) => reply(&text, true),
                 },
@@ -326,8 +334,7 @@ fn own_tools() -> Vec<Value> {
 }
 
 /// `list_models` and `set_model`: the session's model, on its own harness or another one.
-fn model_tools(off: &[&str]) -> Vec<Value> {
-    let ask = if off.contains(&"ask_user_question") { "" } else { " with the AskUserQuestion tool" };
+fn model_tools() -> Vec<Value> {
     vec![
         json!({
             "name": "list_models",
@@ -336,8 +343,8 @@ fn model_tools(off: &[&str]) -> Vec<Value> {
         }),
         json!({
             "name": "set_model",
-            "description": format!(
-                "Switch this session to another model, or change its effort. Name the model exactly as list_models prints it (harness:model-id); call list_models first. On the same harness it applies from your next request. On another harness the user is asked to approve, and m4code then hands this conversation to that agent once your turn ends. Always ask the user first{ask} which model unless they just named one; never switch on your own. Don't ask about effort."
+            "description": (
+                "Switch this session to another model, or change its effort. Name the model exactly as list_models prints it (harness:model-id); call list_models first. On the same harness it applies from your next request. On another harness the user is asked to approve, and m4code then hands this conversation to that agent once your turn ends. Always ask the user first which model unless they just named one; never switch on your own. Don't ask about effort."
             ),
             "inputSchema": {
                 "type": "object",
@@ -351,6 +358,22 @@ fn model_tools(off: &[&str]) -> Vec<Value> {
     ]
 }
 
+fn subagent_tools() -> Vec<Value> {
+    let tool = |name, description, properties, required| json!({
+        "name": name, "description": description,
+        "inputSchema": {"type": "object", "properties": properties, "required": required},
+    });
+    let id = json!({"type": "string", "description": "The subagent id returned by spawn_subagent"});
+    let prompt = json!({"type": "string", "description": "The task or follow-up, at most 20,000 characters"});
+    vec![
+        tool("spawn_subagent", "Start a background subagent in this session's working folder. Follow the user's and project's delegation rules. The child uses the configured edit permissions; read-only parents cannot grant edits. Use list_models for model ids. Antigravity is not supported yet.", json!({"harness": {"type": "string", "enum": ["claude", "codex", "opencode"]}, "model": {"type": "string"}, "effort": {"type": "string", "enum": ["low", "medium", "high", "xhigh", "max"]}, "prompt": prompt}), json!(["harness", "prompt"])),
+        tool("list_subagents", "List this session's children, their states and latest reports.", json!({}), json!([])),
+        tool("send_subagent_message", "Queue a follow-up in the same child session, resuming it if stopped. Messages during a turn run after that turn.", json!({"id": id, "prompt": prompt}), json!(["id", "prompt"])),
+        tool("wait_subagent", "Wait for a child's turn to finish and return its latest report. Returns early for a user question. A timeout returns its current state without stopping it.", json!({"id": id, "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 240}}), json!(["id"])),
+        tool("stop_subagent", "Stop this session's child and its descendants. Keep their conversations for later follow-ups.", json!({"id": id}), json!(["id"])),
+    ]
+}
+
 const CONFIRM: &str = " It acts at once, so only call it when the user asked for this.";
 
 fn bridge_tools() -> Vec<Value> {
@@ -361,15 +384,15 @@ fn bridge_tools() -> Vec<Value> {
         "folder": { "type": "string", "description": "Project name or folder path (optional)" },
     });
     vec![
-        tool("list_code_sessions", format!("List the user's Claude Code sessions in m4code (id, title, folder, whether it is running, when it was created and last updated).{CONFIRM}"), json!({})),
+        tool("list_code_sessions", format!("List the user's coding-agent sessions in m4code (id, title, folder, whether it is running, when it was created and last updated).{CONFIRM}"), json!({})),
         tool(
             "read_code_session",
-            format!("Read the latest terminal output of a Claude Code session that is running in m4code.{CONFIRM}"),
+            format!("Read the latest terminal output of a coding-agent session that is running in m4code.{CONFIRM}"),
             json!({ "id": id("list_code_sessions")["id"], "lines": { "type": "integer", "description": "How many recent lines (default 120)" } }),
         ),
         tool(
             "search_sessions",
-            "Search the user's Claude Code sessions by words in their title, project or folder. Returns id, title, project and created/updated times of the best matches; pass an id to link_session. Read-only: use it when the user asks, or unasked to find a session to link.".to_string(),
+            "Search the user's coding-agent sessions by words in their title, project or folder. Returns id, title, project and created/updated times of the best matches; pass an id to link_session. Read-only: use it when the user asks, or unasked to find a session to link.".to_string(),
             json!({ "query": { "type": "string", "description": "Words to look for (optional: without it, the most recent)" } }),
         ),
         tool(
@@ -565,7 +588,7 @@ mod tests {
         let names: Vec<_> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert_eq!(
             names,
-            ["attach_github", "detach_github", "link_session", "unlink_session", "show_visual", "list_models", "set_model", "list_code_sessions", "read_code_session", "search_sessions", "search_projects", "start_code_session", "switch_worktree"]
+            ["attach_github", "detach_github", "link_session", "unlink_session", "show_visual", "list_models", "set_model", "list_code_sessions", "read_code_session", "search_sessions", "search_projects", "start_code_session", "switch_worktree", "spawn_subagent", "list_subagents", "send_subagent_message", "wait_subagent", "stop_subagent"]
         );
         let upfront: Vec<_> = tools.iter().filter(|t| t["_meta"]["anthropic/alwaysLoad"] == true).map(|t| t["name"].as_str().unwrap()).collect();
         assert_eq!(upfront, ["attach_github", "detach_github", "link_session", "unlink_session"], "show_visual and the session-reaching tools stay deferred");
@@ -573,7 +596,7 @@ mod tests {
         assert_eq!(r[1]["result"]["isError"], false);
         assert_eq!(r[2]["result"]["content"][0]["text"], "The user declined.");
         assert_eq!(r[2]["result"]["isError"], true);
-        assert_eq!(allowed_tools(&[]).len(), BRIDGE_TOOLS.len() + OWN_TOOLS.len() + 1, "list_models too; set_model keeps the agent's own prompt");
+        assert_eq!(allowed_tools(&[]).len(), BRIDGE_TOOLS.len() + SUBAGENT_TOOLS.len() + OWN_TOOLS.len() + 1, "list_models too; set_model keeps the agent's own prompt");
         assert!(!allowed_tools(&[]).contains(&"mcp__m4code__set_model".to_string()));
         assert!(allowed_tools(&[]).contains(&"mcp__m4code__show_visual".to_string()));
     }
@@ -723,32 +746,32 @@ mod tests {
     #[test]
     fn with_nothing_off_the_server_offers_every_tool_and_all_the_text() {
         let (names, text) = offer(&[]);
-        assert_eq!(names.len(), 13);
+        assert_eq!(names.len(), 18);
         for part in [INTRO, GITHUB_INSTRUCTIONS, LINK_INSTRUCTIONS, VISUAL_INSTRUCTIONS, BRIDGE_INSTRUCTIONS] {
             assert!(text.contains(part));
         }
-        assert!(text.contains("ask with AskUserQuestion which model") && text.contains("Artifacts are for pages to share."));
+        assert!(text.contains("ask the user which model") && text.contains("Artifacts are for pages to share."));
     }
 
     #[test]
     fn each_feature_takes_its_tools_and_its_text_away() {
         let (names, text) = offer(&["visual"]);
-        assert!(!names.contains(&"show_visual".to_string()) && names.len() == 12);
+        assert!(!names.contains(&"show_visual".to_string()) && names.len() == 17);
         assert!(!text.contains("Visual:") && !text.contains("show_visual"));
 
         let (names, text) = offer(&["github"]);
-        assert!(!names.iter().any(|n| n.ends_with("_github")) && names.len() == 11);
+        assert!(!names.iter().any(|n| n.ends_with("_github")) && names.len() == 16);
         assert!(!text.contains("attach_github"));
 
         let (names, text) = offer(&["sessions"]);
-        for gone in ["link_session", "unlink_session", "list_code_sessions", "read_code_session", "search_sessions", "search_projects", "start_code_session", "switch_worktree"] {
+        for gone in ["link_session", "unlink_session", "list_code_sessions", "read_code_session", "search_sessions", "search_projects", "start_code_session", "switch_worktree", "spawn_subagent", "list_subagents", "send_subagent_message", "wait_subagent", "stop_subagent"] {
             assert!(!names.contains(&gone.to_string()), "{gone}");
         }
         assert_eq!(names.len(), 5);
         assert!(!text.contains("link_session") && !text.contains("start_code_session"));
 
         let (names, text) = offer(&["model"]);
-        assert!(!names.contains(&"set_model".to_string()) && !names.contains(&"list_models".to_string()) && names.len() == 11);
+        assert!(!names.contains(&"set_model".to_string()) && !names.contains(&"list_models".to_string()) && names.len() == 16);
         assert!(!text.contains("set_model") && !text.contains("list_models") && !text.contains("Never switch models"));
     }
 
@@ -777,7 +800,7 @@ mod tests {
     }
 
     #[test]
-    fn trimming_ask_user_question_or_artifacts_changes_the_wording() {
+    fn model_confirmation_is_provider_neutral_and_artifacts_can_be_hidden() {
         let (_, text) = offer(&["ask_user_question", "artifacts"]);
         assert!(!text.contains("AskUserQuestion") && text.contains("ask the user which model") && !text.contains("Artifacts"));
         assert!(text.contains("Visual:"), "the Visual text itself stays");
@@ -786,8 +809,19 @@ mod tests {
             let r = talk_off(&[json!({"jsonrpc":"2.0","id":1,"method":"tools/list"})], "s", tmp.path(), off, |_, _| Err("no".into()));
             r[0]["result"]["tools"].as_array().unwrap().iter().find(|t| t["name"] == "set_model").unwrap()["description"].as_str().unwrap().to_string()
         };
-        assert!(described(&[]).contains("AskUserQuestion"));
-        assert!(!described(&["ask_user_question"]).contains("AskUserQuestion"));
+        assert!(described(&[]).contains("ask the user first"));
+        assert!(!described(&[]).contains("AskUserQuestion"));
+        assert_eq!(described(&[]), described(&["ask_user_question"]));
+    }
+
+    #[test]
+    fn every_shared_subagent_tool_is_discoverable_in_session_instructions() {
+        let (_, enabled) = offer(&[]);
+        let (_, disabled) = offer(&["sessions"]);
+        for tool in SUBAGENT_TOOLS {
+            assert!(enabled.contains(tool), "missing {tool}");
+            assert!(!disabled.contains(tool), "disabled sessions still advertise {tool}");
+        }
     }
 
     #[test]

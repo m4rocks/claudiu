@@ -24,7 +24,7 @@ pub fn new_id() -> Id {
 }
 
 mod sessions;
-pub use sessions::{SessionKind, ExternalState, Attached, ClaudeMeta, SessionRecord, Project};
+pub use sessions::{SessionKind, ExternalState, Attached, ClaudeMeta, ProviderSession, SessionRecord, Project};
 mod accounts;
 pub use accounts::{RateLimit, AccountUsage, Account, MAIN_ACCOUNT};
 mod settings;

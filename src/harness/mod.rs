@@ -3,10 +3,11 @@
 //! code that builds its launch. No GPUI here.
 
 pub mod acp;
+pub mod compaction;
 mod antigravity;
 pub mod claude;
 mod codex;
-mod opencode;
+pub(crate) mod opencode;
 pub mod thread;
 
 use std::path::{Path, PathBuf};
@@ -25,6 +26,19 @@ pub enum Harness {
     Codex,
     OpenCode,
     Antigravity,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SubagentAccess {
+    pub on: bool,
+    pub edits: bool,
+}
+
+impl Default for SubagentAccess {
+    fn default() -> Self {
+        Self { on: true, edits: true }
+    }
 }
 
 /// An ACP server's program and its arguments.
@@ -60,6 +74,7 @@ pub struct Adapter {
     pub reopen: Reopen,
     /// Whether the empty session opened only to read `configOptions[category == "model"]` should be deleted again.
     pub delete_model_session: bool,
+    pub compact_command: Option<&'static str>,
 }
 
 /// One value per harness, indexed exhaustively without hashing.
@@ -195,6 +210,15 @@ pub fn stdio_server(name: &str, command: &Path, args: &[&str], env: &[(&str, Str
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn absent_subagent_permissions_default_on_and_explicit_choices_survive() {
+        let defaults: SubagentAccess = serde_json::from_value(json!({})).unwrap();
+        assert!(defaults.on && defaults.edits);
+        let explicit: SubagentAccess = serde_json::from_value(json!({"on":false,"edits":false})).unwrap();
+        assert!(!explicit.on && !explicit.edits);
+        assert_eq!(serde_json::from_value::<SubagentAccess>(serde_json::to_value(explicit).unwrap()).unwrap(), explicit);
+    }
+
     #[test]
     fn the_menu_leaves_out_commands_m4code_does_itself() {
         assert!(super::Harness::Claude.hidden_commands().contains(&"autocompact"));

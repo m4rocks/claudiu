@@ -25,7 +25,7 @@ impl Workspace {
     fn render_topbar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let crate::panels::inspector::Shown { rec, cwd, .. } = self.shown();
         let hints = self.shortcuts_shown;
-        let session_active = self.active_id().is_some();
+        let editor_available = self.editor_owner().is_some();
 
         let title = rec.as_ref().map(|r| r.display_title().to_string()).unwrap_or_else(|| "m4code".into());
         // `.occlude()` on both groups: the bar is a Windows drag (HTCAPTION) area, which would otherwise swallow clicks on the buttons inside it.
@@ -87,8 +87,8 @@ impl Workspace {
                     .items_center()
                     .gap(px(if hints { 4.0 } else { 0.0 }))
                     .occlude()
-                    .when(hints && session_active, |d| d.child(key_hint("Shift+E")))
-                    .child(if session_active {
+                    .when(hints && editor_available, |d| d.child(key_hint("Shift+E")))
+                    .child(if editor_available {
                         icon_button("toggle-editor", IconName::FileCode).on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::ToggleEditor, window, cx)))
                     } else {
                         icon_button_disabled("toggle-editor", IconName::FileCode)
@@ -428,7 +428,7 @@ impl Render for Workspace {
             .on_action(cx.listener(|ws, _: &OpenSettings, window, cx| ws.act(Act::OpenSettings, window, cx)))
             .on_action(cx.listener(|ws, _: &SwapFocus, window, cx| ws.swap_focus(window, cx)))
             .on_action(cx.listener(|ws, _: &ToggleEditor, window, cx| {
-                if ws.active_id().is_some() {
+                if ws.editor_owner().is_some() {
                     ws.act(Act::ToggleEditor, window, cx)
                 }
             }))

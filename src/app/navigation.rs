@@ -57,7 +57,7 @@ impl Workspace {
     }
 
     fn step_through_places(&mut self, back: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(id) = self.active_id().filter(|_| self.editing()).cloned() else { return };
+        let Some(id) = self.editor_owner().filter(|_| self.editing()) else { return };
         let Some(pane) = self.panes.get_mut(&id) else { return };
         let here = current_place(pane, cx);
         let (from, to) = if back { (&mut pane.back, &mut pane.forward) } else { (&mut pane.forward, &mut pane.back) };
@@ -71,7 +71,7 @@ impl Workspace {
 
     /// Ask for a line to put the cursor on in the shown tab.
     pub fn ask_go_to_line(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(id) = self.active_id().filter(|_| self.editing()).cloned() else { return };
+        let Some(id) = self.editor_owner().filter(|_| self.editing()) else { return };
         if self.panes.get(&id).and_then(|p| p.shown()).is_none_or(|t| t.note.is_some()) {
             return;
         }

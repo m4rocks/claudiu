@@ -1,5 +1,15 @@
 import { expect, mock, test } from 'claude-code/testing'
 
+test('m4code managed sessions turn off native automatic compaction', async ($, on) => {
+  mock.env(on, { M4CODE_MANAGED_COMPACTION: '1' })
+  mock.clock(on)
+  const changes: any[] = []
+  on('config.set', (_$, e) => { changes.push([e.key, e.value]); return { value: e.value } })
+  on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+  expect(changes).toEqual([['autoCompact', false]])
+})
+
 test('applies the settings m4code asks for, once each, and not the ones sent before it started', async ($, on) => {
   mock.env(on, { M4CODE_CTL_FILE: 'ctl/me.json', M4CODE_USAGE_DIR: 'usage' })
   const clock = mock.clock(on)

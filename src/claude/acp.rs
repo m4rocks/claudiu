@@ -509,7 +509,7 @@ use messages::tool_target;
 /// The answer to a permission request: an allowing option when edits are on, a refusing one when they are off.
 /// codex-acp offers two refusals of the same kind: `decline` lets Codex carry on without the action, `cancel` ends its
 /// turn, so `decline` comes first. Without a fitting option the request is answered as cancelled, which refuses it too.
-fn permission(options: &Value, edits: bool) -> Value {
+pub(crate) fn permission(options: &Value, edits: bool) -> Value {
     let options: Vec<&Value> = options.as_array().into_iter().flatten().collect();
     let of_kind = |kinds: &[&str]| options.iter().copied().find(|o| o["kind"].as_str().is_some_and(|k| kinds.contains(&k)));
     let chosen = if edits {

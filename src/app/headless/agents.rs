@@ -1,5 +1,278 @@
 use super::*;
 
+#[test]
+fn handoffs_reuse_provider_sessions_and_restore_the_source_after_failure() {
+    use crate::harness::thread::Entry;
+    let _dirs = crate::datadir::use_throwaway_folders();
+    let work = tempfile::tempdir().unwrap();
+    let failed = tempfile::tempdir().unwrap();
+    let server = fake_agent(work.path());
+    let failed_server = fake_agent(failed.path());
+    let failed_script = PathBuf::from(&failed_server.1[0]);
+    let contents = std::fs::read_to_string(&failed_script).unwrap().replace(r#""result": {"sessionId": "fake-session"}"#, r#""error": {"code": -32603, "message": "handshake failed"}"#);
+    std::fs::write(failed_script, contents).unwrap();
+    let script = PathBuf::from(&server.1[0]);
+    let contents = std::fs::read_to_string(&script).unwrap().replace(
+        "elif method == \"session/load\":\n        cwd = m[\"params\"][\"cwd\"]",
+        "elif method == \"session/load\":\n        cwd = m[\"params\"][\"cwd\"]\n        send({\"jsonrpc\": \"2.0\", \"method\": \"session/update\", \"params\": {\"sessionId\": m[\"params\"][\"sessionId\"], \"update\": {\"sessionUpdate\": \"user_message_chunk\", \"content\": {\"type\": \"text\", \"text\": \"native replay\"}}}})",
+    );
+    std::fs::write(script, contents).unwrap();
+    let mut cx = TestAppContext::single();
+    cx.update(|app| {
+        gpui_kit::init(app);
+        gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, app);
+    });
+    let (window, ws) = cx.update(|app| gpui_kit::open_window(Default::default(), app, |window, app| app.new(|cx| Workspace::new(window, vec![], cx)))).unwrap();
+    let step = |cx: &mut TestAppContext, f: &dyn Fn(&mut Workspace, &mut Window, &mut Context<Workspace>)| {
+        cx.update_window(window, |_, window, app| ws.update(app, |ws, cx| f(ws, window, cx))).unwrap();
+        cx.run_until_parked();
+    };
+    step(&mut cx, &|ws, window, cx| {
+        ws.acp_server = Some(server.clone());
+        ws.claude_exe = Some("unused-by-the-fake-agent".into());
+        ws.new_session_from_home(Harness::Claude, None, work.path().to_path_buf(), Some("initial task".into()), None, window, cx);
+    });
+    let id = ws.read_with(&cx, |ws, _| ws.active_id().unwrap().clone());
+    let wait = |cx: &mut TestAppContext, harness| {
+        let until = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            cx.run_until_parked();
+            if ws.read_with(cx, |ws, app| {
+                ws.pending_handoffs.is_empty() && ws.live_view(&id).and_then(|v| v.thread()).is_some_and(|view| {
+                    let view = view.read(app);
+                    view.harness == harness && !view.is_loading() && !view.is_working() && view.thread.entries.iter().any(|e| matches!(e, Entry::Agent(text) if text == "ok"))
+                })
+            }) { break; }
+            assert!(std::time::Instant::now() < until, "the handoff never settled");
+            std::thread::yield_now();
+        }
+    };
+    wait(&mut cx, Harness::Claude);
+    for (harness, message) in [(Harness::Codex, "continue on B"), (Harness::Claude, "continue on A")] {
+        step(&mut cx, &|ws, window, cx| ws.dynamic_handoff(&id, harness, None, message.into(), false, None, window, cx));
+        wait(&mut cx, harness);
+    }
+    ws.read_with(&cx, |ws, app| {
+        let meta = ws.store.session(&id).unwrap().claude.as_ref().unwrap();
+        assert_eq!(meta.provider_sessions.len(), 2);
+        assert_eq!(meta.session_id, "fake-session");
+        let view = ws.live_view(&id).unwrap().thread().unwrap().read(app);
+        let users: Vec<_> = view.thread.entries.iter().filter_map(|e| match e { Entry::User(text) => Some(text.as_str()), _ => None }).collect();
+        assert_eq!(users, ["initial task", "continue on B", "continue on A"], "provider replay must not replace or duplicate m4code's history");
+        let prompts = std::fs::read_to_string(work.path().join("fake_agent.py.prompts")).unwrap();
+        let last = prompts.split("\n---\n").filter(|text| !text.is_empty()).last().unwrap();
+        assert!(last.contains("continue on B") && last.contains("continue on A"));
+        assert!(!last.contains("initial task"), "the returning provider already has its earlier context");
+        assert!(prompts.contains("loaded fake-session"));
+    });
+    step(&mut cx, &|ws, window, cx| {
+        ws.acp_server = Some(failed_server.clone());
+        ws.dynamic_handoff(&id, Harness::OpenCode, None, "keep this draft".into(), false, None, window, cx);
+    });
+    wait(&mut cx, Harness::Claude);
+    ws.read_with(&cx, |ws, app| {
+        assert_eq!(ws.store.session(&id).unwrap().claude.as_ref().unwrap().harness, Harness::Claude);
+        let view = ws.live_view(&id).unwrap().thread().unwrap().read(app);
+        assert_eq!(view.draft(app), "keep this draft");
+        assert!(view.is_running());
+        assert!(ws.toast.as_ref().unwrap().text.contains("handshake failed"));
+    });
+    step(&mut cx, &|ws, window, cx| ws.end_live(&id, window, cx));
+}
+
+#[test]
+fn compaction_preserves_the_session_and_never_becomes_a_user_message() {
+    use crate::harness::thread::Entry;
+    use serde_json::Value;
+    let _dirs = crate::datadir::use_throwaway_folders();
+    for harness in [Harness::Codex, Harness::Antigravity] {
+        let work = tempfile::tempdir().unwrap();
+        let mut cx = TestAppContext::single();
+        cx.update(|app| {
+            gpui_kit::init(app);
+            gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, app);
+        });
+        let (window, ws) = cx.update(|app| gpui_kit::open_window(Default::default(), app, |window, app| app.new(|cx| Workspace::new(window, vec![], cx)))).unwrap();
+        cx.update_window(window, |_, window, app| ws.update(app, |ws, cx| {
+            ws.acp_server = Some(fake_agent(work.path()));
+            ws.new_session_from_home(harness, None, work.path().to_path_buf(), Some("fill context".into()), None, window, cx);
+        })).unwrap();
+        let id = ws.read_with(&cx, |ws, _| ws.active_id().unwrap().clone());
+        let until = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            cx.run_until_parked();
+            let done = ws.read_with(&cx, |ws, app| {
+                let view = ws.live_view(&id).unwrap().thread().unwrap().read(app);
+                !view.is_loading() && !view.is_working() && view.thread.context.is_some()
+            });
+            if done { break; }
+            assert!(std::time::Instant::now() < until, "the context update never arrived");
+            std::thread::yield_now();
+        }
+        ws.read_with(&cx, |ws, app| {
+            let view = ws.live_view(&id).unwrap().thread().unwrap().read(app);
+            let users: Vec<_> = view.thread.entries.iter().filter_map(|entry| match entry { Entry::User(text) => Some(text.as_str()), _ => None }).collect();
+            assert_eq!(users, ["fill context"]);
+            let turns: Vec<Value> = std::fs::read_to_string(work.path().join("fake_agent.py.turns")).unwrap().lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+            if harness == Harness::Codex {
+                assert_eq!(turns.iter().map(|turn| turn["prompt"].as_str().unwrap()).collect::<Vec<_>>(), ["fill context", "/compact"]);
+                assert_eq!(turns[0]["pid"], turns[1]["pid"], "compaction must keep the provider process");
+                assert_eq!(view.thread.context, Some((200, 1000)));
+            } else {
+                assert_eq!(turns.len(), 1, "unsupported providers must not receive invented commands");
+                assert_eq!(view.compaction_status(), "Unsupported by this adapter");
+            }
+        });
+        cx.update_window(window, |_, window, app| ws.update(app, |ws, cx| ws.end_live(&id, window, cx))).unwrap();
+    }
+}
+
+#[test]
+fn shared_subagents_keep_their_parent_focus_permissions_and_conversation() {
+    use crate::claude::bridge::Request;
+    use serde_json::{Value, json};
+    let _dirs = crate::datadir::use_throwaway_folders();
+    let work = tempfile::tempdir().unwrap();
+    let mut cx = TestAppContext::single();
+    cx.update(|app| {
+        gpui_kit::init(app);
+        gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, app);
+    });
+    let (window, ws) = cx.update(|app| gpui_kit::open_window(Default::default(), app, |window, app| app.new(|cx| Workspace::new(window, vec![], cx)))).unwrap();
+    let step = |cx: &mut TestAppContext, f: &dyn Fn(&mut Workspace, &mut Window, &mut Context<Workspace>)| {
+        cx.update_window(window, |_, window, app| ws.update(app, |ws, cx| f(ws, window, cx))).unwrap();
+        cx.run_until_parked();
+    };
+    step(&mut cx, &|ws, _, _| {
+        ws.acp_server = Some(fake_agent(work.path()));
+        ws.claude_exe = Some(PathBuf::from("unused-by-the-fake-agent"));
+        ws.store.data.settings.enabled_harnesses = None;
+        ws.store.data.settings.custom_subagents = Default::default();
+        ws.store.data.settings.claude_picked = vec!["haiku".into()];
+        ws.store.data.settings.new_session.model = Some("opus".into());
+    });
+    for harness in [Harness::Claude, Harness::Codex, Harness::OpenCode] {
+        step(&mut cx, &|ws, window, cx| ws.new_session_from_home(harness, None, work.path().to_path_buf(), Some("parent".into()), None, window, cx));
+        let parent = ws.read_with(&cx, |ws, _| ws.active_id().unwrap().clone());
+        if harness == Harness::Claude {
+            cx.update_window(window, |_, window, app| window.draw(app).clear(app)).unwrap();
+            let held = gpui::Modifiers { control: !cfg!(target_os = "macos"), platform: cfg!(target_os = "macos"), ..Default::default() };
+            cx.update_window(window, |_, window, app| {
+                window.dispatch_event(gpui::PlatformInput::ModifiersChanged(gpui::ModifiersChangedEvent { modifiers: held, ..Default::default() }), app);
+            }).unwrap();
+            cx.run_until_parked();
+            cx.executor().advance_clock(Duration::from_millis(450));
+            cx.run_until_parked();
+            assert!(ws.read_with(&cx, |ws, app| ws.shortcuts_shown && ws.live_view(&parent).unwrap().thread().unwrap().read(app).shortcuts_shown), "holding the modifier in the chat must reveal its shortcuts");
+            cx.update_window(window, |_, window, app| {
+                window.dispatch_event(gpui::PlatformInput::ModifiersChanged(Default::default()), app);
+            }).unwrap();
+            cx.run_until_parked();
+            assert!(ws.read_with(&cx, |ws, app| !ws.shortcuts_shown && !ws.live_view(&parent).unwrap().thread().unwrap().read(app).shortcuts_shown));
+        }
+        let request = |tool: &str, args| Request { id: new_id(), from: format!("code:{parent}"), tool: tool.into(), args, deadline: now() + 60 };
+        let spawn = request("spawn_subagent", json!({"harness": harness, "prompt": "child task"}));
+        if harness == Harness::Claude {
+            step(&mut cx, &|ws, window, cx| {
+                ws.store.data.settings.claude_subagents.on = false;
+                assert!(ws.run_request(&spawn, window, cx).is_err(), "Claude must respect its saved subagent switch");
+                ws.store.data.settings.claude_subagents.on = true;
+            });
+        }
+        let child = std::cell::RefCell::new(String::new());
+        step(&mut cx, &|ws, window, cx| {
+            let reply: Value = serde_json::from_str(&ws.run_request(&spawn, window, cx).unwrap()).unwrap();
+            *child.borrow_mut() = reply["id"].as_str().unwrap().to_string();
+            assert_eq!(ws.active_id(), Some(&parent), "spawning must not take focus from the parent");
+            let meta = ws.store.session(&child.borrow()).unwrap().claude.as_ref().unwrap();
+            assert_eq!(meta.parent_session.as_ref(), Some(&parent));
+            assert!(meta.subagent_edits);
+            assert_eq!(ws.subagents_of(&parent).iter().map(|(id, _)| id.clone()).collect::<Vec<_>>(), vec![child.borrow().clone()], "the parent's right sidebar lists the subagent");
+            assert!(!ws.running_ids(cx).contains(&child.borrow()), "a subagent is not a numbered, cycled session in the left list");
+            if harness == Harness::Claude {
+                assert_eq!(meta.chosen_model.as_deref(), Some("haiku"), "a disabled default model must not override the selected child models");
+            }
+        });
+        let child = child.into_inner();
+        let wait = request("wait_subagent", json!({"id": child}));
+        let until = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let done = std::cell::Cell::new(false);
+            step(&mut cx, &|ws, window, cx| {
+                let status: Value = serde_json::from_str(&ws.run_request(&wait, window, cx).unwrap()).unwrap();
+                done.set(status["state"] == "completed" && status["report"] == "ok");
+            });
+            if done.get() { break; }
+            assert!(std::time::Instant::now() < until, "the child never finished");
+            std::thread::yield_now();
+        }
+        #[cfg(target_os = "linux")]
+        let child_pid = std::fs::read_to_string(work.path().join("fake_agent.py.turns")).unwrap().lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .rfind(|turn| turn["prompt"] == "child task").unwrap()["pid"].as_i64().unwrap() as i32;
+        step(&mut cx, &|ws, window, cx| {
+            let forged = Request { from: format!("code:{child}"), ..wait.clone() };
+            assert!(ws.run_request(&forged, window, cx).is_err(), "a child cannot control its parent or a sibling");
+            ws.run_request(&request("stop_subagent", json!({"id": child})), window, cx).unwrap();
+            assert!(!ws.is_running(&child, cx));
+            assert!(ws.store.session(&child).is_some());
+            ws.run_request(&request("send_subagent_message", json!({"id": child, "prompt": "follow up"})), window, cx).unwrap();
+            assert!(ws.is_running(&child, cx), "follow-ups resume the same child record");
+            assert_eq!(ws.active_id(), Some(&parent));
+            if harness == Harness::Claude {
+                ws.store.data.settings.claude_subagents.edits = false;
+                let reply: Value = serde_json::from_str(&ws.run_request(&spawn, window, cx).unwrap()).unwrap();
+                assert!(!ws.store.session(reply["id"].as_str().unwrap()).unwrap().claude.as_ref().unwrap().subagent_edits, "Claude must respect its saved edit switch");
+                ws.store.data.settings.claude_subagents.edits = true;
+            }
+            ws.live_view(&parent).unwrap().thread().unwrap().update(cx, |view, _| view.thread.mode = Some("plan".into()));
+            let restricted: Value = serde_json::from_str(&ws.run_request(&request("spawn_subagent", json!({"harness":harness,"prompt":"read only"})), window, cx).unwrap()).unwrap();
+            let restricted = ws.store.session(restricted["id"].as_str().unwrap()).unwrap().clone();
+            assert!(!restricted.claude.as_ref().unwrap().subagent_edits, "a read-only parent cannot grant edits");
+            if harness == Harness::Claude {
+                let start = ws.thread_start(&restricted.id, &restricted.cwd, restricted.claude.as_ref().unwrap(), None, None, Starter::User, cx).unwrap();
+                assert_eq!(start.meta["claudeCode"]["options"]["permissionMode"], "plan", "read-only must apply before the first prompt");
+            }
+            ws.end_live(&parent, window, cx);
+            assert!(!ws.is_running(&child, cx), "ending a parent stops its children");
+        });
+        #[cfg(target_os = "linux")]
+        {
+            let until = std::time::Instant::now() + Duration::from_secs(5);
+            // Signal zero only checks whether the process is still alive.
+            while unsafe { libc::kill(child_pid, 0) } == 0 {
+                cx.run_until_parked();
+                assert!(std::time::Instant::now() < until, "the stopped child's ACP process is still alive");
+                std::thread::yield_now();
+            }
+        }
+    }
+}
+
+#[test]
+fn home_does_not_launch_without_a_message() {
+    let _dirs = crate::datadir::use_throwaway_folders();
+    let mut cx = TestAppContext::single();
+    cx.update(|app| {
+        gpui_kit::init(app);
+        gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, app);
+    });
+    let (window, ws) = cx.update(|app| gpui_kit::open_window(Default::default(), app, |window, app| app.new(|cx| Workspace::new(window, vec![], cx)))).unwrap();
+    for creating in [false, true] {
+        for text in ["", " \n\t "] {
+            cx.update_window(window, |_, window, app| ws.update(app, |ws, cx| {
+                ws.claude_exe = None;
+                ws.home.creating = creating.then(|| PathBuf::from("/pending-worktree"));
+                ws.home.prompt.update(cx, |p, cx| p.set_value(text, window, cx));
+                ws.act(Act::HomeLaunch, window, cx);
+                assert!(ws.toast.is_none(), "an empty message must not attempt to launch a harness");
+                assert!(!ws.home.launch_when_created, "an empty message must not queue a launch");
+                assert!(ws.live.is_empty());
+            })).unwrap();
+        }
+    }
+}
+
 /// With no `claude` found, starting a session says so and offers the setup window; asking for it twice shows one.
 #[test]
 #[ignore]
@@ -120,7 +393,6 @@ fn a_process_that_ends_closes_the_session_and_leaves_its_worktree() {
         ws.active = None;
         ws.toast = None;
     });
-    cx.dispatch_action(window, ToggleEditor);
     cx.dispatch_action(window, OpenGithub);
     cx.run_until_parked();
     assert!(ws.read_with(&cx, |ws, _| !ws.editor_mode && ws.gh.is_empty() && ws.right_gh.is_none() && ws.toast.is_none()), "disabled shortcuts must not open a view or show a toast");

@@ -66,10 +66,6 @@ pub struct Provider {
     pub missing: &'static str,
     /// The failure when the agent answers that it isn't signed in.
     pub sign_in: &'static str,
-    /// The settings page's text: what the agent runs on and needs, and what Allow edits on and off let it do.
-    pub about: &'static str,
-    pub edits_on: &'static str,
-    pub edits_off: &'static str,
     /// A risk the settings page shows before the agent is switched on, such as a sign-in its maker's terms forbid here.
     pub warning: Option<&'static str>,
     /// Arguments after `args` for one task's server, made ready here.
@@ -108,9 +104,6 @@ const CODEX: Provider = Provider {
     server: "codex-acp",
     missing: "npx was not found on PATH. Codex subagents need Node.js.",
     sign_in: "Codex isn't signed in. Run `codex login`, then try again.",
-    about: "Runs the task in OpenAI Codex through codex-acp. Needs Node (npx) and a `codex login`; the first run downloads codex-acp from npm.",
-    edits_on: "m4code accepts everything Codex asks for: editing files, running commands, writing outside the folder and using the network. None of it goes through Claude Code's permission rules or hooks.",
-    edits_off: "Codex runs read-only: it can read and search, but not change files.",
     warning: None,
     task_args: super::acp::no_args,
     environment: super::acp::codex_env,
@@ -135,9 +128,6 @@ const OPENCODE: Provider = Provider {
     server: "opencode",
     missing: "opencode was not found on PATH. OpenCode subagents need OpenCode installed.",
     sign_in: "OpenCode isn't signed in. Run `opencode auth login`, then try again.",
-    about: "Runs the task in OpenCode (`opencode acp`), on the providers you set up in OpenCode. Needs `opencode` on PATH.",
-    edits_on: "m4code accepts everything OpenCode asks for, and OpenCode's own permission settings decide the rest: it can edit files, run commands and use the network. None of it goes through Claude Code's permission rules or hooks.",
-    edits_off: "OpenCode runs read-only: it can read, search and list files, but not change them or run any command, not even a read-only one.",
     warning: None,
     task_args: super::acp::no_args,
     environment: super::acp::opencode_env,
@@ -165,9 +155,6 @@ const ANTIGRAVITY: Provider = Provider {
     server: "agy",
     missing: "agy was not found. Antigravity subagents need the Antigravity CLI installed.",
     sign_in: "Antigravity isn't signed in. Run `agy` and sign in, then try again.",
-    about: "Runs the task in Google Antigravity (`agy acp`), on the Gemini, Claude and GPT models your Google plan includes. Needs the Antigravity CLI, signed in through `agy`.",
-    edits_on: "m4code puts Antigravity in accept-edits mode and allows everything it asks for: editing files and running commands. None of it goes through Claude Code's permission rules or hooks.",
-    edits_off: "Antigravity runs read-only: it can read and search, but not change files or run commands. It runs from its own folder in m4code's data, so your Antigravity rules, skills and MCP servers don't load.",
     // Google's FAQ names Claude Code among the third-party software barred from Antigravity logins, under Section 6 of
     // the Antigravity Additional Terms (https://antigravity.google/docs/faq, https://antigravity.google/terms).
     warning: Some("Google's Antigravity terms forbid using another company's agent, such as Claude Code, with a personal Google sign-in. That covers the Free, AI Plus, Pro and Ultra plans. Google can suspend or terminate the Antigravity and Gemini CLI accounts of anyone who does. Switch this on at your own risk."),
@@ -233,6 +220,9 @@ impl Agent {
     /// What Claude reads to decide when to use an agent type of this agent.
     fn description(self, model: &str) -> String {
         let p = self.provider();
+        if model.is_empty() {
+            return format!("Runs the task in {} on its default model. Use only when the user asks for {}.", p.task_name, p.triggers);
+        }
         format!("Runs the task in {} on {model}. Use only when the user asks for {} or {model}.", p.task_name, p.triggers)
     }
 
@@ -264,8 +254,17 @@ pub struct AgentChoice {
 }
 
 /// Keeps the flat provider keys used by existing state files.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CustomSubagents(pub AgentMap<AgentChoice>);
+
+impl Default for CustomSubagents {
+    fn default() -> Self {
+        Self(AgentMap::from_fn(|agent| {
+            let enabled = agent != Agent::Antigravity;
+            AgentChoice { on: enabled, edits: enabled, ..Default::default() }
+        }))
+    }
+}
 
 impl Serialize for CustomSubagents {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
@@ -285,17 +284,18 @@ impl Serialize for CustomSubagents {
 impl<'de> Deserialize<'de> for CustomSubagents {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let mut stored = Map::<String, Value>::deserialize(deserializer)?;
-        fn field<T: serde::de::DeserializeOwned + Default, E: serde::de::Error>(stored: &mut Map<String, Value>, key: &str) -> Result<T, E> {
-            stored.remove(key).map(serde_json::from_value).transpose().map(|v| v.unwrap_or_default()).map_err(E::custom)
+        fn field<T: serde::de::DeserializeOwned, E: serde::de::Error>(stored: &mut Map<String, Value>, key: &str, fallback: T) -> Result<T, E> {
+            stored.remove(key).map(serde_json::from_value).transpose().map(|v| v.unwrap_or(fallback)).map_err(E::custom)
         }
         let mut result = Self::default();
         for agent in Agent::ALL {
             let key = agent.key();
+            let defaults = result.get(agent).clone();
             *result.get_mut(agent) = AgentChoice {
-                on: field::<_, D::Error>(&mut stored, key)?,
-                models: field::<_, D::Error>(&mut stored, &format!("{key}_models"))?,
-                edits: field::<_, D::Error>(&mut stored, &format!("{key}_edits"))?,
-                catalog: field::<_, D::Error>(&mut stored, &format!("{key}_catalog"))?,
+                on: field::<_, D::Error>(&mut stored, key, defaults.on)?,
+                models: field::<_, D::Error>(&mut stored, &format!("{key}_models"), vec![])?,
+                edits: field::<_, D::Error>(&mut stored, &format!("{key}_edits"), defaults.edits)?,
+                catalog: field::<_, D::Error>(&mut stored, &format!("{key}_catalog"), vec![])?,
             };
         }
         Ok(result)
@@ -350,14 +350,23 @@ impl CustomSubagents {
         Agent::ALL
             .into_iter()
             .filter(|a| self.get(*a).on)
-            .map(|a| (a, agent_types(a, &self.get(a).models)))
+            .map(|a| {
+                let choice = self.get(a);
+                let models = if choice.models.is_empty() { choice.catalog.iter().map(|m| m.id.clone()).collect() } else { choice.models.clone() };
+                let types = if models.is_empty() {
+                    vec![AgentType { name: format!("{}-default", a.key()), model: String::new() }]
+                } else {
+                    agent_types(a, &models)
+                };
+                (a, types)
+            })
             .filter(|(_, types)| !types.is_empty())
             .collect()
     }
 
     /// What the mod reads from `M4CODE_SUBAGENTS`, each type as the mod registers it; `None` when no type is on.
-    pub fn env(&self) -> Option<String> {
-        let types = self.types();
+    pub fn env_for(&self, enabled: &[crate::harness::Harness]) -> Option<String> {
+        let types: Vec<_> = self.types().into_iter().filter(|(agent, _)| enabled.contains(&crate::harness::Harness::from_agent(*agent))).collect();
         if types.is_empty() {
             return None;
         }
@@ -376,6 +385,23 @@ impl CustomSubagents {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_subagent_settings_enable_edits_except_for_antigravity() {
+        for choices in [CustomSubagents::default(), serde_json::from_str::<CustomSubagents>("{}").unwrap()] {
+            for agent in [Agent::Codex, Agent::OpenCode] {
+                assert!(choices.get(agent).on);
+                assert!(choices.get(agent).edits);
+            }
+            assert!(!choices.get(Agent::Antigravity).on);
+            assert!(!choices.get(Agent::Antigravity).edits);
+        }
+        let explicit: CustomSubagents = serde_json::from_str(r#"{"codex":false,"codex_edits":false,"opencode":true,"opencode_edits":false}"#).unwrap();
+        assert!(!explicit.get(Agent::Codex).on);
+        assert!(!explicit.get(Agent::Codex).edits);
+        assert!(explicit.get(Agent::OpenCode).on);
+        assert!(!explicit.get(Agent::OpenCode).edits);
+    }
 
     #[test]
     fn every_limits_provider_has_visible_marks_and_a_color() {
@@ -417,7 +443,7 @@ mod tests {
         assert_eq!(stored["antigravity_edits"], true);
         assert_eq!(stored["antigravity_catalog"][0]["name"], "Gemini 4 Neon");
         assert_eq!(serde_json::from_value::<CustomSubagents>(stored).unwrap(), choices);
-        let env: Value = serde_json::from_str(&choices.env().unwrap()).unwrap();
+        let env: Value = serde_json::from_str(&choices.env_for(&crate::harness::Harness::ALL).unwrap()).unwrap();
         assert_eq!(env["antigravity"]["name"], "Antigravity");
         assert_eq!(env["antigravity"]["types"][0]["description"], "Runs the task in Google Antigravity on gemini-4-neon. Use only when the user asks for Antigravity, Gemini or gemini-4-neon.");
         for agent in Agent::ALL {
@@ -463,19 +489,17 @@ mod tests {
     }
 
     #[test]
-    fn nothing_reaches_the_session_while_every_agent_is_off_or_has_no_model_on() {
+    fn nothing_reaches_the_session_while_every_agent_is_off() {
         let mut off = choices(on(&["gpt-6.1-sol"], true), on(&["openai/gpt-6.1-sol"], true));
         off.get_mut(Agent::Codex).on = false;
         off.get_mut(Agent::OpenCode).on = false;
-        assert_eq!(off.env(), None);
-        let none = choices(on(&[], false), on(&[], false));
-        assert_eq!(none.env(), None);
+        assert_eq!(off.env_for(&crate::harness::Harness::ALL), None);
     }
 
     #[test]
     fn the_mod_gets_each_agent_on_with_its_edit_switch_and_types() {
         let both = choices(on(&["gpt-6.1-sol", "gpt-5.6-luna"], false), on(&["openai/gpt-6.1-sol"], true));
-        let env: Value = serde_json::from_str(&both.env().unwrap()).unwrap();
+        let env: Value = serde_json::from_str(&both.env_for(&crate::harness::Harness::ALL).unwrap()).unwrap();
         assert_eq!(env.as_object().unwrap().keys().collect::<Vec<_>>(), ["codex", "opencode"]);
         assert_eq!((&env["codex"]["edits"], &env["opencode"]["edits"]), (&json!(false), &json!(true)));
         let names: Vec<&str> = env["codex"]["types"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
@@ -496,10 +520,14 @@ mod tests {
     }
 
     #[test]
-    fn an_agent_on_with_no_model_on_is_left_out() {
+    fn enabled_agents_use_their_default_model_before_the_catalog_arrives() {
         let codex_only = choices(on(&["gpt-6.1-sol"], false), on(&[], true));
-        let env: Value = serde_json::from_str(&codex_only.env().unwrap()).unwrap();
-        assert_eq!(env.as_object().unwrap().keys().collect::<Vec<_>>(), ["codex"]);
+        let env: Value = serde_json::from_str(&codex_only.env_for(&crate::harness::Harness::ALL).unwrap()).unwrap();
+        assert_eq!(env.as_object().unwrap().keys().collect::<Vec<_>>(), ["codex", "opencode"]);
+        assert_eq!(env["opencode"]["types"][0]["name"], "opencode-default");
+        assert_eq!(env["opencode"]["types"][0]["model"], "");
+        assert!(env["opencode"]["types"][0]["description"].as_str().unwrap().contains("default model"));
+        assert_eq!(codex_only.env_for(&[crate::harness::Harness::Claude]), None);
     }
 
     #[test]
@@ -508,7 +536,7 @@ mod tests {
         let loaded: CustomSubagents = serde_json::from_str(saved).unwrap();
         assert_eq!(
             loaded,
-            choices(AgentChoice { on: true, models: ids(&["gpt-6.1-sol"]), edits: true, catalog: vec![AgentModel { id: "gpt-6.1-sol".into(), name: "6.1 Sol".into() }] }, AgentChoice::default())
+            choices(AgentChoice { on: true, models: ids(&["gpt-6.1-sol"]), edits: true, catalog: vec![AgentModel { id: "gpt-6.1-sol".into(), name: "6.1 Sol".into() }] }, CustomSubagents::default().get(Agent::OpenCode).clone())
         );
         let again: CustomSubagents = serde_json::from_str(&serde_json::to_string(&loaded).unwrap()).unwrap();
         assert_eq!(again, loaded);

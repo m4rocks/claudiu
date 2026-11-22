@@ -41,6 +41,7 @@ pub struct GitPickerWorktree {
     pub current: bool,
     pub running: bool,
     pub remove: Option<Act>,
+    pub missing: bool,
 }
 
 /// One branch row inside the unified Branch & Worktree dialog.
@@ -48,7 +49,9 @@ pub struct GitPickerBranch {
     pub name: String,
     pub current: bool,
     pub held_tree: Option<(String, PathBuf)>,
+    pub held_missing: bool,
     pub remove: Option<Act>,
+    pub delete_reason: Option<String>,
 }
 
 /// Unified Branch & Worktree dialog state, shared by the Welcome screen and the window's top bar.
@@ -167,6 +170,7 @@ impl Workspace {
                     current,
                     running,
                     remove,
+                    missing: false,
                 }
             })
             .collect();
@@ -194,26 +198,64 @@ impl Workspace {
                 .background_executor()
                 .spawn(async move {
                     let list = crate::git::commit::branches(&dir)?;
-                    let deletable = crate::git::commit::deletable_branches(&dir, list.current.as_deref());
                     let items = list
                         .names
-                        .into_iter()
+                        .iter()
+                        .cloned()
                         .map(|name| {
                             let current = list.current.as_deref() == Some(name.as_str());
                             let held = list.elsewhere.iter().find(|h| h.branch == name);
                             let held_tree = held.map(|h| (h.tree.clone(), h.folder.clone()));
-                            let remove = (held.is_none() && deletable.contains(&name)).then(|| Act::DeleteBranch(dir.clone(), name.clone()));
-                            GitPickerBranch { name, current, held_tree, remove }
+                            let held_missing = held.is_some_and(|h| !h.folder.is_dir());
+                            let delete_reason = list.deletion_reason(&name).map(|reason| if held_missing { format!("{reason}; folder is missing") } else { reason });
+                            let remove = delete_reason.is_none().then(|| Act::DeleteBranch(dir.clone(), name.clone()));
+                            GitPickerBranch { name, current, held_tree, held_missing, remove, delete_reason }
                         })
                         .collect::<Vec<_>>();
-                    Ok::<_, String>(items)
+                    let folders = list.worktree_paths.into_iter().map(|path| {
+                        let missing = !path.is_dir();
+                        (path, missing)
+                    }).collect::<Vec<_>>();
+                    Ok::<_, String>((items, folders, crate::git::detect(&dir)))
                 })
                 .await;
             let _ = this.update(cx, |ws, cx| {
+                let running: Vec<_> = ws.live.iter().filter_map(|l| ws.store.session(&l.id).map(|s| s.cwd.clone())).collect();
+                let result = result.map(|(branches, folders, git)| {
+                    if let Some(project) = ws.store.data.projects.iter_mut().find(|p| p.id == project) {
+                        project.git = git;
+                    }
+                    (branches, folders)
+                });
                 if let Some(AnchoredPicker { kind: WorkspacePicker::Git(picker), .. }) = ws.picker.as_mut()
                     && picker.cwd == cwd
                 {
-                    picker.branches = Some(result);
+                    picker.branches = Some(result.map(|(branches, folders)| {
+                        picker.worktrees.retain(|wt| folders.iter().any(|(folder, _)| path_key(folder) == path_key(&wt.folder)));
+                        for (folder, missing) in folders {
+                            if let Some(wt) = picker.worktrees.iter_mut().find(|wt| path_key(&wt.folder) == path_key(&folder)) {
+                                wt.missing = missing;
+                                continue;
+                            }
+                            let branch = branches.iter().find(|br| br.held_tree.as_ref().is_some_and(|(_, held)| path_key(held) == path_key(&folder))).map(|br| br.name.clone());
+                            let label = if path_key(&folder) == path_key(&picker.main_checkout) {
+                                "main checkout".to_string()
+                            } else {
+                                folder.file_name().unwrap_or_default().to_string_lossy().into_owned()
+                            };
+                            let remove = (!missing && worktree::removable(&picker.main_checkout, &folder)).then(|| Act::RemoveWorktree { main_checkout: picker.main_checkout.clone(), folder: folder.clone() });
+                            picker.worktrees.push(GitPickerWorktree {
+                                label,
+                                current: path_key(&cwd) == path_key(&folder),
+                                running: running.iter().any(|cwd| crate::platform::is_same_or_under(cwd, &folder)),
+                                folder,
+                                branch,
+                                remove,
+                                missing,
+                            });
+                        }
+                        branches
+                    }));
                     cx.notify();
                 }
             });

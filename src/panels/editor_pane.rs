@@ -27,7 +27,7 @@ impl Workspace {
         let ws = cx.entity().downgrade();
         let menu_ws = ws.clone();
         let comment_ws = ws.clone();
-        let server = self.active_id().cloned().and_then(|id| self.server_status(&id));
+        let server = self.editor_owner().and_then(|id| self.server_status(&id));
         let (id, pane) = self.shown_pane(cx)?;
         let tabs = render_tabs(&id, pane, window, cx);
         let changed = pane.changed.clone();
@@ -168,13 +168,13 @@ impl Workspace {
                         .border_color(hsla(theme::BORDER))
                         // Rows don't take the keyboard themselves; the pane does, so its shortcuts work from here.
                         .on_mouse_down(MouseButton::Left, cx.listener(|ws, _: &MouseDownEvent, window, cx| {
-                            if let Some(pane) = ws.active_id().and_then(|id| ws.panes.get(id)) {
+                            if let Some(pane) = ws.editor_owner().and_then(|id| ws.panes.get(&id)) {
                                 window.focus(&pane.focus, cx);
                             }
                         }))
                         // Right-click below the rows (or on a row, which opens its own menu instead).
                         .on_mouse_down(MouseButton::Right, cx.listener(|ws, ev: &MouseDownEvent, _w, cx| {
-                            if let Some(id) = ws.active_id().cloned() {
+                            if let Some(id) = ws.editor_owner() {
                                 let items = ws.file_menu(&id, None, true);
                                 ws.open_menu(ev.position, items, cx);
                             }

@@ -1,5 +1,90 @@
 use super::*;
 
+#[test]
+fn home_editor_saves_files_and_adds_comments_without_a_session() {
+    let _dirs = crate::datadir::use_throwaway_folders();
+    let work = tempfile::tempdir().unwrap();
+    let root = dunce::canonicalize(work.path()).unwrap();
+    let file = root.join("home.txt");
+    std::fs::write(&file, "original\n").unwrap();
+    let mut cx = TestAppContext::single();
+    cx.update(|app| {
+        gpui_kit::init(app);
+        gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, app);
+    });
+    let (window, ws) = cx.update(|app| gpui_kit::open_window(Default::default(), app, |window, app| app.new(|cx| Workspace::new(window, vec![root.clone()], cx)))).unwrap();
+    let step = |cx: &mut TestAppContext, f: &dyn Fn(&mut Workspace, &mut Window, &mut Context<Workspace>)| {
+        cx.update_window(window, |_, window, app| ws.update(app, |ws, cx| f(ws, window, cx))).unwrap();
+        cx.run_until_parked();
+    };
+    step(&mut cx, &|ws, window, cx| {
+        let project = ws.store.data.projects.iter().find(|p| p.path == root).unwrap().id.clone();
+        ws.act(Act::HomeSelectProject(project), window, cx);
+        ws.toggle_editor(window, cx);
+        let id = ws.shown_pane(cx).unwrap().0;
+        ws.open_file(&id, file.clone(), None, window, cx);
+    });
+    let until = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        cx.run_until_parked();
+        if ws.read_with(&cx, |ws, _| ws.editor_owner().and_then(|id| ws.panes.get(&id)).is_some_and(|pane| pane.root == root && pane.shown().is_some())) { break; }
+        assert!(std::time::Instant::now() < until, "the project file never opened");
+        std::thread::yield_now();
+    }
+    step(&mut cx, &|ws, window, cx| {
+        let id = ws.editor_owner().unwrap();
+        ws.panes[&id].shown().unwrap().buffer.clone().update(cx, |buffer, cx| buffer.set_value("changed\n", window, cx));
+        ws.save_shown(cx);
+        ws.home.prompt.update(cx, |prompt, cx| prompt.set_value("review this", window, cx));
+        ws.start_line_comment(0, gpui::point(gpui::px(100.0), gpui::px(100.0)), window, cx);
+        assert!(ws.panes[&id].comment.is_some());
+        ws.finish_line_comment("explain this", false, window, cx);
+        assert_eq!(ws.home.prompt.read(cx).value(), "review this\n@home.txt#L1: explain this");
+        assert!(ws.live.is_empty());
+    });
+    let until = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        cx.run_until_parked();
+        if std::fs::read_to_string(&file).unwrap() == "changed\n" { break; }
+        assert!(std::time::Instant::now() < until, "the Home editor did not save the file");
+        std::thread::yield_now();
+    }
+}
+
+#[test]
+fn home_editor_follows_the_project_without_starting_a_session() {
+    let _dirs = crate::datadir::use_throwaway_folders();
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+    let mut cx = TestAppContext::single();
+    cx.update(|app| {
+        gpui_kit::init(app);
+        gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, app);
+    });
+    let (window, ws) = cx.update(|app| gpui_kit::open_window(Default::default(), app, |window, app| {
+        app.new(|cx| Workspace::new(window, vec![first.path().to_path_buf(), second.path().to_path_buf()], cx))
+    })).unwrap();
+    cx.update_window(window, |_, window, app| ws.update(app, |ws, cx| {
+        ws.main = Main::Home;
+        let first = ws.store.data.projects[0].id.clone();
+        let second = ws.store.data.projects[1].id.clone();
+        ws.act(Act::HomeSelectProject(first.clone()), window, cx);
+        ws.toggle_editor(window, cx);
+        assert!(ws.editing(), "the selected project is sufficient to open the editor");
+        let first_owner = ws.shown_pane(cx).unwrap().0;
+        ws.panes.get_mut(&first_owner).unwrap().expanded.insert("remember-me".into());
+        ws.act(Act::HomeSelectProject(second), window, cx);
+        let second_owner = ws.shown_pane(cx).unwrap().0;
+        assert_ne!(first_owner, second_owner);
+        ws.act(Act::HomeSelectProject(first), window, cx);
+        assert_eq!(ws.shown_pane(cx).unwrap().0, first_owner);
+        assert!(ws.panes[&first_owner].expanded.contains("remember-me"));
+        assert!(ws.live.is_empty(), "editing a project must not launch a harness");
+        ws.store.data.projects.clear();
+        assert!(!ws.editing(), "no project means no editor");
+    })).unwrap();
+}
+
 /// The comment button beside the editor's selection opens a box whose Enter adds `@file#L..: comment` to the message
 /// box, on a line of its own after what is typed there. Moving the keyboard to the chat adds nothing by itself. Runs the
 /// real `claude` in this repository on a file under `target`. `cargo test -- --ignored line_comment`.

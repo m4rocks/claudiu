@@ -232,8 +232,9 @@ impl Workspace {
                                 }))
                         }))
                         .into_any_element();
-                    let row = picker::row(gpui::SharedString::from(format!("git-picker-wt-{i}")), Some(lead), wt.label.clone(), None, Some(trailing), current, !can_switch).group(row_group);
-                    wt_list.push(if can_switch {
+                    let detail = if wt.missing { format!("Missing folder: {}", wt.folder.display()) } else { wt.folder.display().to_string() };
+                    let row = picker::row(gpui::SharedString::from(format!("git-picker-wt-{i}")), Some(lead), wt.label.clone(), Some(detail), Some(trailing), current, !can_switch || wt.missing).group(row_group);
+                    wt_list.push(if can_switch && !wt.missing {
                         choices.add(
                             row,
                             move |ws, window, cx| {
@@ -349,8 +350,8 @@ impl Workspace {
                                     }))
                                     .into_any_element()
                             });
-                            let row = picker::row(gpui::SharedString::from(format!("git-picker-br-{i}")), Some(lead), br.name.clone(), None, trailing, current, false).group(row_group);
-                            br_list.push(choices.add(
+                            let row = picker::row(gpui::SharedString::from(format!("git-picker-br-{i}")), Some(lead), br.name.clone(), br.delete_reason.clone(), trailing, current, br.held_missing).group(row_group);
+                            br_list.push(if br.held_missing { row.into_any_element() } else { choices.add(
                                 row,
                                 move |ws, window, cx| {
                                     if current {
@@ -360,7 +361,7 @@ impl Workspace {
                                     }
                                 },
                                 cx,
-                            ));
+                            ) });
                             br_shown += 1;
                         }
                         if br_shown == 0 {

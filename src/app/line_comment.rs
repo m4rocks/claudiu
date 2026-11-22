@@ -20,7 +20,7 @@ impl Workspace {
     /// Open the comment box at `at` in the window, about the shown tab's selection, or about `line` (0-based) when
     /// nothing is selected.
     pub(crate) fn start_line_comment(&mut self, line: usize, at: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(id) = self.active_id().cloned() else { return };
+        let Some(id) = self.editor_owner() else { return };
         let Some(reference) = self.selection_reference(&id, cx).or_else(|| self.line_reference(&id, line)) else { return };
         let input = comment_input(&reference, window, cx);
         let sub = cx.subscribe_in(&input, window, |ws: &mut Self, input, ev: &InputEvent, window, cx| {
@@ -37,7 +37,7 @@ impl Workspace {
     /// Close the comment box. A comment with text goes into the message box, or is sent when `send`; an empty one is
     /// dropped. The keyboard goes back to the editor, or to the chat once a comment was sent.
     pub(crate) fn finish_line_comment(&mut self, text: &str, send: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(id) = self.active_id().cloned() else { return };
+        let Some(id) = self.editor_owner() else { return };
         let Some(comment) = self.panes.get_mut(&id).and_then(|p| p.comment.take()) else { return };
         cx.notify();
         if text.is_empty() {
@@ -45,6 +45,15 @@ impl Workspace {
             return;
         }
         let message = format!("{}: {text}", comment.reference);
+        if matches!(self.main, Main::Home) {
+            self.add_home_comment(&message, window, cx);
+            if send {
+                self.act(Act::HomeLaunch, window, cx);
+            } else {
+                self.focus_editor(&id, window, cx);
+            }
+            return;
+        }
         if send {
             self.send_to_claude(&id, &message, window, cx);
             return;
@@ -55,6 +64,11 @@ impl Workspace {
         };
         view.update(cx, |v, cx| v.add_comment(&message, window, cx));
         self.focus_editor(&id, window, cx);
+    }
+
+    pub(super) fn add_home_comment(&mut self, message: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let text = crate::thread::with_comment(self.home.prompt.read(cx).value().as_ref(), message);
+        self.home.prompt.update(cx, |p, cx| p.set_value(text, window, cx));
     }
 
     fn focus_editor(&self, id: &Id, window: &mut Window, cx: &mut Context<Self>) {

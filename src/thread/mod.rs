@@ -53,6 +53,7 @@ pub struct GitChip {
 }
 
 pub enum ThreadEvent {
+    Ready(String),
     /// The branch chip was clicked: open the Branch & Worktree dialog there.
     OpenGitPicker(crate::panels::widgets::Dropdown),
     /// The harness stopped; the session's view closes.
@@ -120,6 +121,7 @@ struct Question {
 
 struct Queued {
     text: String,
+    compact: bool,
     /// Already appended to `thread.entries` so a new session shows the user's message while the agent starts.
     shown: bool,
 }
@@ -144,7 +146,7 @@ pub struct ThreadView {
     pub pending_model: Option<CatalogModel>,
     /// A hand-off the agent asked for with `set_model` and the user approved: the model, its effort and the first
     /// message for the new agent. It runs as soon as the turn that asked ends.
-    handoff_after_turn: Option<(CatalogModel, Option<String>, String)>,
+    handoff_after_turn: Option<(CatalogModel, Option<String>, String, bool)>,
     /// Effort choice staged for the next handoff or while no live `thought_level` option exists yet.
     pub pending_effort: Option<String>,
     /// The `(model, effort)` last sent as `ThreadEvent::Chosen`.
@@ -169,6 +171,12 @@ pub struct ThreadView {
     rows: usize,
     /// Ctrl+O: every tool's output in full.
     pub detail: bool,
+    pub shortcuts_shown: bool,
+    pub(crate) subagent_edits: Option<bool>,
+    pub compaction: crate::harness::compaction::Policy,
+    pub(crate) canonical_history: bool,
+    persist_on_drop: bool,
+    pub capabilities: Value,
     /// Ctrl+T: the plan.
     pub plan_open: bool,
     /// Active compact picker dropdown above the composer (Alt+P for Model/Provider/Effort, or click Permission).
@@ -254,7 +262,7 @@ impl ThreadView {
             if shown {
                 thread.sent(prompt.clone());
             }
-            queue.push_back(Queued { text: prompt, shown });
+            queue.push_back(Queued { text: prompt, shown, compact: false });
         }
         let rows = thread.entries.len();
         let list = ListState::new(rows, ListAlignment::Top, px(600.0));
@@ -288,6 +296,12 @@ impl ThreadView {
             list,
             rows,
             detail: false,
+            shortcuts_shown: false,
+            subagent_edits: None,
+            compaction: Default::default(),
+            canonical_history: false,
+            persist_on_drop: true,
+            capabilities: Value::Null,
             plan_open: false,
             picker: None,
             picker_at: crate::panels::widgets::Dropdown::at(gpui::point(px(0.0), px(0.0))),
@@ -341,12 +355,30 @@ impl ThreadView {
                     return;
                 }
             };
-            let _ = this.update(cx, |v, _| v.connection = Some(connection.clone()));
+            if this.update(cx, |v, _| v.connection = Some(connection.clone())).is_err() {
+                return;
+            }
             let opened = open(&connection, harness, &start).await;
             let ok = this.update(cx, |v, cx| v.opened(opened, &start, cx)).unwrap_or(false);
             if !ok {
                 return;
             }
+            while let Ok(event) = incoming.try_recv() {
+                if this.update(cx, |v, cx| v.on_event(event, cx)).is_err() {
+                    return;
+                }
+            }
+            let ready = this.update(cx, |v, cx| {
+                if v.phase != Phase::Starting { return false; }
+                v.phase = Phase::Ready;
+                v.cached_replay = false;
+                cx.emit(ThreadEvent::Ready(v.session_id.clone().unwrap_or_default()));
+                v.send_next(cx);
+                cx.notify();
+                true
+            }).unwrap_or(false);
+            if !ready { return; }
+            drop(connection);
             while let Some(event) = incoming.next().await {
                 if this.update(cx, |v, cx| v.on_event(event, cx)).is_err() {
                     break;
@@ -357,14 +389,16 @@ impl ThreadView {
     }
 
     /// The session is open, or failed to open. Returns whether to go on listening.
-    fn opened(&mut self, opened: Result<(String, Value), String>, start: &Start, cx: &mut Context<Self>) -> bool {
-        let (session_id, result) = match opened {
+    fn opened(&mut self, opened: Result<Opened, String>, start: &Start, cx: &mut Context<Self>) -> bool {
+        let Opened { session_id, result, capabilities, replayed } = match opened {
             Ok(o) => o,
             Err(why) => {
                 self.ended(Some(why), cx);
                 return false;
             }
         };
+        self.capabilities = capabilities;
+        self.cached_replay = replayed && !start.prior_entries.is_empty();
         self.thread.apply_session(&result);
         if let Some(model_opt) = self.thread.option("model")
             && !model_opt.choices.is_empty()
@@ -381,7 +415,7 @@ impl ThreadView {
             cx.emit(ThreadEvent::SessionId(session_id));
         }
         // A resumed session keeps the mode the harness restores; its options are the model and effort picked in it.
-        if start.session_id.is_none()
+        if (start.session_id.is_none() || self.subagent_edits.is_some())
             && let Some(mode) = start.mode.clone().filter(|m| self.thread.modes.iter().any(|(id, _)| id == m))
         {
             self.set_mode(mode, cx);
@@ -393,11 +427,9 @@ impl ThreadView {
             }
         }
         self.report_chosen(cx);
-        self.phase = Phase::Ready;
         // A move (a worktree switch, a hand-off) is over once the session is open where it went.
         self.handover = None;
         self.remeasure(0);
-        self.send_next(cx);
         cx.notify();
         true
     }
@@ -406,6 +438,7 @@ impl ThreadView {
         match event {
             Event::Update(update) => {
                 if self.cached_replay && !self.working && is_conversation_update(&update) {
+                    if self.canonical_history { return; }
                     self.cached_replay = false;
                     self.thread.entries.clear();
                     self.remeasure(0);
@@ -423,11 +456,18 @@ impl ThreadView {
                 if self.thread.context != prev_ctx
                     && let Some((used, size)) = self.thread.context
                 {
+                    self.compaction.observe(used, size);
                     cx.emit(ThreadEvent::Context(used, size));
                 }
                 self.report_chosen(cx);
             }
             Event::Permission { id, params } => {
+                if let Some(edits) = self.subagent_edits && acp::is_tool_permission(&params) {
+                    if let Some(connection) = &self.connection {
+                        connection.respond(id, json!({"outcome": crate::claude::acp::permission(&params["options"], edits)}));
+                    }
+                    return;
+                }
                 let options = params["options"]
                     .as_array()
                     .into_iter()
@@ -448,6 +488,7 @@ impl ThreadView {
                 return;
             }
         }
+        self.send_next(cx);
         cx.notify();
     }
 
@@ -485,19 +526,12 @@ impl ThreadView {
     /// Enter in the composer.
     fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let text = self.composer.read(cx).value().trim().to_string();
-        if text.is_empty() {
+        if !crate::panels::composer::can_send(&text) {
             return;
         }
         self.composer.update(cx, |c, cx| c.set_value("", window, cx));
         self.history_at = None;
         self.picker = None;
-        if let Some(target) = self.pending_model.take().filter(|m| m.harness != self.harness) {
-            let effort = self.pending_effort.take();
-            let model = (!target.id.is_empty()).then_some(target.id);
-            cx.emit(ThreadEvent::Handoff { to: target.harness, model, message: text, effort, by_agent: false });
-            cx.notify();
-            return;
-        }
         self.send(text, window, cx);
     }
 
@@ -505,9 +539,24 @@ impl ThreadView {
     pub fn send(&mut self, text: String, _window: &mut Window, cx: &mut Context<Self>) {
         if let Some(target) = self.pending_model.take().filter(|m| m.harness != self.harness) {
             let effort = self.pending_effort.take();
+            if self.working {
+                let previous = self.handoff_after_turn.take().filter(|(_, _, _, by_agent)| !*by_agent).map(|(_, _, text, _)| text);
+                let text = previous.map_or_else(|| text.clone(), |previous| format!("{previous}\n\n{text}"));
+                self.handoff_after_turn = Some((target, effort, text, false));
+                cx.notify();
+                return;
+            }
             let model = (!target.id.is_empty()).then_some(target.id);
             self.picker = None;
             cx.emit(ThreadEvent::Handoff { to: target.harness, model, message: text, effort, by_agent: false });
+            cx.notify();
+            return;
+        }
+        if self.working && let Some((_, _, message, by_agent)) = self.handoff_after_turn.as_mut()
+            && !*by_agent
+        {
+            message.push_str("\n\n");
+            message.push_str(&text);
             cx.notify();
             return;
         }
@@ -515,7 +564,7 @@ impl ThreadView {
         if shown && let Some(at) = self.thread.sent(text.clone()) {
             self.remeasure(at);
         }
-        self.queue.push_back(Queued { text, shown });
+        self.queue.push_back(Queued { text, shown, compact: false });
         self.send_next(cx);
         cx.notify();
     }
@@ -525,14 +574,23 @@ impl ThreadView {
             return;
         }
         let (Some(connection), Some(session)) = (self.connection.clone(), self.session_id.clone()) else { return };
-        let Some(next) = self.queue.pop_front() else { return };
-        if !next.shown
+        let command = self.harness.adapter().compact_command.filter(|name| self.thread.commands.iter().any(|c| c.name == *name));
+        let next = if self.compaction.take_due(self.thread.context, command.is_some()) {
+            let at = self.thread.notice("Compacting context…", false);
+            self.remeasure(at);
+            Queued { text: format!("/{}", command.unwrap()), shown: true, compact: true }
+        } else {
+            let Some(next) = self.queue.pop_front() else { return };
+            next
+        };
+        if !next.shown && !next.compact
             && let Some(at) = self.thread.sent(next.text.clone())
         {
             self.remeasure(at);
         }
         self.cached_replay = false;
         let text = next.text;
+        let compact = next.compact;
         self.persist_entries();
         self.list.scroll_to_end();
         self.working = true;
@@ -541,11 +599,13 @@ impl ThreadView {
         cx.spawn(async move |this, cx| {
             // The snapshot comes first, so the review sees what this turn changed. Outside a repository it fails, and the
             // message goes anyway.
-            let snapshot = {
+            let snapshot = if !compact {
                 let session = session.clone();
-                cx.background_executor().spawn(async move { crate::git::snapshot::take(&cwd, &session) }).await
+                Some(cx.background_executor().spawn(async move { crate::git::snapshot::take(&cwd, &session) }).await)
+            } else {
+                None
             };
-            if let Ok(id) = snapshot {
+            if let Some(Ok(id)) = snapshot {
                 let _ = this.update(cx, |v, _| v.snapshots.push(id));
             }
             let turn = connection.request("session/prompt", json!({"sessionId": session, "prompt": [{"type": "text", "text": text}]}));
@@ -557,7 +617,16 @@ impl ThreadView {
 
     fn turn_ended(&mut self, result: Result<Value, String>, cx: &mut Context<Self>) {
         self.working = false;
-        self.check_changes(cx);
+        if std::mem::take(&mut self.compaction.running) {
+            let completed = result.as_ref().is_ok_and(|r| r["stopReason"] == "end_turn");
+            let at = self.thread.notice(if completed { "Context compacted." } else { "Context compaction did not finish." }, !completed);
+            self.remeasure(at);
+            if let Some((used, size)) = self.thread.context {
+                self.compaction.observe(used, size);
+            }
+        } else {
+            self.check_changes(cx);
+        }
         self.question = None;
         let notice = match &result {
             Ok(r) => match r["stopReason"].as_str() {
@@ -575,9 +644,19 @@ impl ThreadView {
             self.remeasure(at);
         }
         self.persist_entries();
-        if let Some((target, effort, message)) = self.handoff_after_turn.take() {
+        if let Some((target, effort, mut message, mut by_agent)) = self.handoff_after_turn.take() {
+            let queued = self.queue.drain(..).map(|q| q.text).collect::<Vec<_>>().join("\n\n");
+            if !queued.is_empty() {
+                if by_agent {
+                    self.thread.entries.push(Entry::Agent(message));
+                    message = queued;
+                    by_agent = false;
+                } else {
+                    message = format!("{message}\n\n{queued}");
+                }
+            }
             let model = (!target.id.is_empty()).then_some(target.id);
-            cx.emit(ThreadEvent::Handoff { to: target.harness, model, message, effort, by_agent: true });
+            cx.emit(ThreadEvent::Handoff { to: target.harness, model, message, effort, by_agent });
             cx.notify();
             return;
         }
@@ -614,7 +693,7 @@ impl ThreadView {
     /// `set_model` onto another harness, once the user approved it: hand the conversation over when this turn ends.
     pub fn hand_off_after_turn(&mut self, model: CatalogModel, effort: Option<String>, message: String, cx: &mut Context<Self>) {
         if self.working {
-            self.handoff_after_turn = Some((model, effort, message));
+            self.handoff_after_turn = Some((model, effort, message, true));
         } else {
             let to = model.harness;
             let model = (!model.id.is_empty()).then_some(model.id);
@@ -1029,6 +1108,39 @@ impl ThreadView {
         self.phase != Phase::Ended
     }
 
+    pub fn set_auto_compact(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        self.compaction.enabled = enabled;
+        self.send_next(cx);
+        cx.notify();
+    }
+
+    pub fn compaction_status(&self) -> &'static str {
+        let Some(command) = self.harness.adapter().compact_command else { return "Unsupported by this adapter" };
+        if !self.thread.commands.iter().any(|c| c.name == command) {
+            return "Compact command unavailable";
+        }
+        if !self.compaction.native_controlled {
+            return if self.compaction.enabled { "80%; native fallback remains" } else { "Off; native fallback remains" };
+        }
+        if !self.compaction.enabled { return "Off"; }
+        if self.thread.context.is_none() { return "Waiting for context usage"; }
+        "80% between turns"
+    }
+
+    pub fn stop(&self) {
+        if let Some(connection) = &self.connection {
+            if let Some(session) = &self.session_id {
+                connection.notify("session/cancel", json!({"sessionId": session}));
+            }
+            connection.terminate();
+        }
+    }
+
+    pub(crate) fn relinquish_record(&mut self) {
+        self.persist_on_drop = false;
+        self.stop();
+    }
+
     pub fn is_working(&self) -> bool {
         self.working
     }
@@ -1098,30 +1210,42 @@ impl ThreadView {
 
 /// `initialize`, then open the session: a new one, or the stored one the way its harness reopens. The session's
 /// id and what opening it answered.
-async fn open(c: &Connection, harness: Harness, start: &Start) -> Result<(String, Value), String> {
-    c.request("initialize", acp::initialize_params()).await.map_err(|e| format!("{} didn't start: {e}", harness.name()))?;
+struct Opened {
+    session_id: String,
+    result: Value,
+    capabilities: Value,
+    replayed: bool,
+}
+
+async fn open(c: &Connection, harness: Harness, start: &Start) -> Result<Opened, String> {
+    let initialized = c.request("initialize", acp::initialize_params()).await.map_err(|e| format!("{} didn't start: {e}", harness.name()))?;
+    let capabilities = initialized["agentCapabilities"].clone();
     let mut params = json!({"cwd": start.cwd, "mcpServers": start.mcp_servers, "_meta": start.meta});
     match &start.session_id {
         None => {
             let result = c.request("session/new", params).await.map_err(|e| format!("{} couldn't start a session: {e}", harness.name()))?;
             let id = result["sessionId"].as_str().ok_or("the agent named no session")?.to_string();
-            Ok((id, result))
+            Ok(Opened { session_id: id, result, capabilities, replayed: false })
         }
         Some(id) => {
             params["sessionId"] = json!(id);
-            let method = match harness.adapter().reopen {
+            let reopen = acp::reopen_method(&capabilities, harness.adapter().reopen).map_err(|why| format!("{} cannot reopen this session: {why}.", harness.name()))?;
+            let method = match reopen {
                 Reopen::Load => "session/load",
                 Reopen::Resume => "session/resume",
             };
             let result = c.request(method, params).await.map_err(|e| format!("{} couldn't open the session: {e}", harness.name()))?;
-            Ok((id.clone(), result))
+            Ok(Opened { session_id: id.clone(), result, capabilities, replayed: reopen == Reopen::Load })
         }
     }
 }
 
 impl Drop for ThreadView {
     fn drop(&mut self) {
-        self.persist_entries();
+        self.stop();
+        if self.persist_on_drop {
+            self.persist_entries();
+        }
     }
 }
 
@@ -1133,7 +1257,7 @@ fn is_conversation_update(update: &Value) -> bool {
 }
 
 /// `comment` after the text typed so far, on a line of its own, so several comments read as a list.
-fn with_comment(typed: &str, comment: &str) -> String {
+pub(crate) fn with_comment(typed: &str, comment: &str) -> String {
     let typed = typed.trim_end();
     if typed.is_empty() { comment.to_string() } else { format!("{typed}\n{comment}") }
 }

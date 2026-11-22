@@ -19,7 +19,7 @@ use crate::updater::Status;
 use gpui_kit::assets::IconName;
 use crate::panels::settings_pages::{flip, settings_group, toggle_switch};
 use crate::panels::widgets::{
-    Anchor, Dropdown, button, button_disabled, danger_button, icon, key_badge, section_label,
+    Anchor, Dropdown, button, button_disabled, danger_button, dialog_card, icon, key_badge, section_label,
 };
 
 /// Split-pane Settings window: left navigation rail with icons + version footer, right scrollable page with grouped
@@ -308,18 +308,11 @@ pub(super) fn render_settings_card(
         )
         .child(footer);
 
-    div()
-        .id("modal-card")
-        .occlude()
+    dialog_card("modal-card")
         .track_focus(&ws.modal_focus)
         .w(scaled(880.0).min(viewport.width - px(48.0)))
         .h(scaled(620.0).min(viewport.height - px(48.0)))
-        .rounded(px(12.0))
         .overflow_hidden()
-        .bg(hsla(theme::PANEL_BG))
-        .border_1()
-        .border_color(hsla(theme::PANEL_BORDER))
-        .shadow_lg()
         .flex()
         .capture_key_down(cx.listener(|ws, ev: &KeyDownEvent, window, cx| ws.settings_key(ev, window, cx)))
         .on_key_down(cx.listener(|ws, ev: &KeyDownEvent, window, cx| {

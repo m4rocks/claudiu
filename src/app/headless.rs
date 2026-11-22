@@ -8,7 +8,7 @@ use gpui::{TestAppContext, VisualTestContext};
 /// names a new one `fake-session`, and ends every prompt with the reply "ok". Needs python3 on the PATH.
 fn fake_agent(dir: &std::path::Path) -> (PathBuf, Vec<String>) {
     let script = dir.join("fake_agent.py");
-    std::fs::write(&script, r#"import json, sys
+    std::fs::write(&script, r#"import json, sys, os
 def send(m):
     sys.stdout.write(json.dumps(m) + "\n"); sys.stdout.flush()
 for line in sys.stdin:
@@ -16,12 +16,17 @@ for line in sys.stdin:
     if "id" not in m or "method" not in m:
         continue
     method, i = m["method"], m["id"]
-    if method == "session/new":
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": i, "result": {"protocolVersion": 1, "agentCapabilities": {"loadSession": True, "sessionCapabilities": {"resume": {}}}}})
+    elif method == "session/new":
         cwd = m["params"]["cwd"]
+        send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "fake-session", "update": {"sessionUpdate": "available_commands_update", "availableCommands": [{"name": "compact", "description": "Compact context"}]}}})
         send({"jsonrpc": "2.0", "id": i, "result": {"sessionId": "fake-session"}})
     elif method == "session/prompt":
         s = m["params"]["sessionId"]
         text = m["params"]["prompt"][0]["text"]
+        with open(__file__ + ".turns", "a") as log:
+            log.write(json.dumps({"prompt": text, "pid": os.getpid()}) + "\n")
         # Every message is logged next to the script; one that says "edit" changes notes.txt, as an agent's turn would.
         with open(__file__ + ".prompts", "a") as log:
             log.write(text + "\n---\n")
@@ -29,6 +34,8 @@ for line in sys.stdin:
             with open(cwd + "/notes.txt", "w") as f:
                 f.write("one\nTWO\nthree\n")
         send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": s, "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "ok"}}}})
+        if text in ["fill context", "/compact"]:
+            send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": s, "update": {"sessionUpdate": "usage_update", "used": 850 if text == "fill context" else 200, "size": 1000}}})
         send({"jsonrpc": "2.0", "id": i, "result": {"stopReason": "end_turn"}})
     elif method == "session/list":
         send({"jsonrpc": "2.0", "id": i, "result": {"sessions": [{"sessionId": "from-terminal", "cwd": m["params"]["cwd"], "title": "Started in a terminal"}]}})

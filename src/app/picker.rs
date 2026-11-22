@@ -41,7 +41,7 @@ impl Drop for Picker {
 impl Workspace {
     /// Open quick open or find in files over the shown session's editor; asking for the one already up closes it.
     pub fn open_picker(&mut self, kind: PickerKind, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(id) = self.active_id().filter(|_| self.editing()).cloned() else { return };
+        let Some(id) = self.editor_owner().filter(|_| self.editing()) else { return };
         let Some(pane) = self.panes.get_mut(&id) else { return };
         if pane.picker.as_ref().is_some_and(|p| p.kind == kind) {
             self.close_picker(window, cx);
@@ -65,7 +65,7 @@ impl Workspace {
     }
 
     pub fn close_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let id = self.active_id().cloned();
+        let id = self.editor_owner();
         if let Some(pane) = id.and_then(|id| self.panes.get_mut(&id)) {
             pane.picker = None;
             if let Some(buffer) = pane.shown().map(|t| t.buffer.clone()) {
@@ -76,7 +76,7 @@ impl Workspace {
     }
 
     fn shown_picker(&mut self) -> Option<&mut Picker> {
-        let id = self.active_id().cloned()?;
+        let id = self.editor_owner()?;
         self.panes.get_mut(&id)?.picker.as_mut()
     }
 
@@ -96,7 +96,7 @@ impl Workspace {
     }
 
     pub fn choose_picked(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(id) = self.active_id().cloned() else { return };
+        let Some(id) = self.editor_owner() else { return };
         let Some(p) = self.panes.get(&id).and_then(|p| p.picker.as_ref()) else { return };
         let Some(hit) = p.hits.get(p.selected).cloned() else { return };
         let line = (p.kind == PickerKind::Text).then_some(hit.line);

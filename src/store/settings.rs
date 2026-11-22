@@ -90,9 +90,11 @@ pub struct Settings {
     /// Output caps and turned-off skills for Claude Code (`claude/trim.rs`); empty leaves Claude Code's own behavior.
     #[serde(default)]
     pub limits: crate::claude::trim::Limits,
-    /// Agent types that run a task in another coding agent (Settings → Harnesses); all off by default.
+    /// Agent types that run a task in another coding agent (Settings → Harnesses); Antigravity is opt-in.
     #[serde(default)]
     pub custom_subagents: crate::claude::subagents::CustomSubagents,
+    #[serde(default)]
+    pub claude_subagents: crate::harness::SubagentAccess,
     /// Last model list reported by Claude Code, used to populate the unified model picker before a session opens.
     #[serde(default)]
     pub claude_models: Vec<crate::claude::subagents::AgentModel>,
@@ -108,6 +110,16 @@ pub struct Settings {
 }
 
 impl Settings {
+    pub fn subagent_access(&self, harness: crate::harness::Harness) -> crate::harness::SubagentAccess {
+        match harness.agent() {
+            None => self.claude_subagents,
+            Some(agent) => {
+                let choice = self.custom_subagents.get(agent);
+                crate::harness::SubagentAccess { on: choice.on, edits: choice.edits }
+            }
+        }
+    }
+
     fn harness_key(harness: crate::harness::Harness) -> &'static str {
         harness.key()
     }
@@ -186,7 +198,7 @@ impl Settings {
             let catalog = self.harness_models(harness);
             if catalog.is_empty() {
                 match harness {
-                    Harness::Claude => out.extend(CatalogModel::default_claude_models()),
+                    Harness::Claude => out.extend(keep_picked(CatalogModel::default_claude_models(), &self.claude_picked, |model| &model.id)),
                     Harness::Codex | Harness::OpenCode | Harness::Antigravity => {
                         out.push(CatalogModel { harness, id: String::new(), name: format!("{} (default)", harness.name()) });
                     }

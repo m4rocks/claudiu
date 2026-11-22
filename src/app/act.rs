@@ -44,7 +44,6 @@ pub enum Act {
     /// Show or hide the shell under a Claude session's terminal (started on first use, in the session's folder).
     ToggleShell(Id),
     /// Return to the Welcome / New session launcher screen.
-    ShowHome,
     HomeSelectProject(Id),
     HomeSelectWorktree(PathBuf),
     HomeSelectModel(crate::harness::CatalogModel),
@@ -189,12 +188,6 @@ impl Workspace {
                 );
             }
             Act::ToggleShell(id) => self.toggle_shell(&id, window, cx),
-            Act::ShowHome => {
-                self.main = Main::Home;
-                self.editor_mode = false;
-                self.right_gh = None;
-                self.home.prompt.update(cx, |p, cx| p.focus(window, cx));
-            }
             Act::HomeSelectProject(id) => {
                 self.home.project = Some(id);
                 self.home.worktree = None;
@@ -208,6 +201,7 @@ impl Workspace {
             Act::HomeSetEffort(effort) => {
                 self.home.effort = effort;
             }
+            Act::HomeLaunch if !crate::panels::composer::can_send(self.home.prompt.read(cx).value().as_ref()) => {}
             Act::HomeLaunch if self.home.creating.is_some() => {
                 // The worktree is on its way; the session starts in it as soon as git is done.
                 self.home.launch_when_created = true;
@@ -348,6 +342,7 @@ impl Workspace {
                     enabled: self.store.data.settings.enabled_harnesses_list(),
                     agents: claude::subagents::AgentMap::from_fn(|agent| form(custom.get(agent))),
                     claude_models: self.store.data.settings.claude_picked.clone(),
+                    claude_subagents: self.store.data.settings.claude_subagents,
                     picking: None,
                 });
                 let modes = self.store.data.settings.modes_for(default_model.harness);
@@ -447,14 +442,15 @@ impl Workspace {
             }
             Act::MoveProject(id, up) => self.store.move_project(&id, up),
             Act::SetAutoCompact(id, on) => {
-                // Show the choice at once; the mod's next snapshot confirms or corrects it.
+                // Provider usage reports describe the native switch, not m4code's policy.
                 if let Some(meta) = self.store.session_mut(&id).and_then(|s| s.claude.as_mut()) {
                     meta.auto_compact = Some(on);
                 }
                 self.store.mark_dirty();
                 cx.notify();
-                usage::send_ctl(&usage::ctl_file(&id), "auto_compact", on.into());
-                self.toast(format!("Turning auto-compact {}…", if on { "on" } else { "off" }), false, cx);
+                if let Some(view) = self.live_view(&id).and_then(|v| v.thread()).cloned() {
+                    view.update(cx, |v, cx| v.set_auto_compact(on, cx));
+                }
             }
             Act::SetPrecomputeCompact(id, on) => {
                 if let Some(meta) = self.store.session_mut(&id).and_then(|s| s.claude.as_mut()) {

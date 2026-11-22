@@ -201,11 +201,12 @@ impl Workspace {
             let models = if form.on && form.models.is_empty() { catalog.iter().map(|m| m.id.clone()).collect() } else { form.models.clone() };
             claude::subagents::AgentChoice { on: form.on, models, edits: form.edits, catalog }
         }));
-        let subagents_changed = s.custom_subagents != custom_subagents || s.claude_picked != subagents.claude_models;
+        let subagents_changed = s.custom_subagents != custom_subagents || s.claude_picked != subagents.claude_models || s.claude_subagents != subagents.claude_subagents;
         s.limits = limits;
         s.m4code_tools_off = m4code_off;
         s.custom_subagents = custom_subagents;
         s.claude_picked = subagents.claude_models.clone();
+        s.claude_subagents = subagents.claude_subagents;
 
         crate::panels::scale::set(scale);
         self.shell = platform::default_shell(s.shell.as_deref());
