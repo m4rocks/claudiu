@@ -42,6 +42,11 @@ impl SubagentState {
         }
     }
 
+    /// Its turn is over and nothing waits on the user, so the sidebar folds it away.
+    pub fn finished(self) -> bool {
+        matches!(self, Self::Completed | Self::Failed | Self::Stopped)
+    }
+
     fn busy(self) -> bool {
         matches!(self, Self::Starting | Self::Running)
     }
@@ -255,6 +260,21 @@ impl Workspace {
                 Ok("Stopped the subagent and its children; its conversation is kept.".into())
             }
             _ => Err("Unknown subagent operation.".into()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SubagentState::*;
+
+    #[test]
+    fn only_subagents_with_nothing_left_to_do_fold_away() {
+        for state in [Completed, Failed, Stopped] {
+            assert!(state.finished(), "{state:?}");
+        }
+        for state in [Starting, Running, WaitingForUser] {
+            assert!(!state.finished(), "{state:?} still needs watching");
         }
     }
 }

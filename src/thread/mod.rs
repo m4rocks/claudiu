@@ -1292,6 +1292,29 @@ mod tests {
     }
 
     #[gpui::test]
+    fn a_subagent_report_folds_with_the_steps_but_a_users_message_does_not(cx: &mut gpui::TestAppContext) {
+        use crate::harness::thread::{ToolCall, subagent_report_prompt};
+        cx.update(gpui_kit::init);
+        let dir = tempfile::tempdir().unwrap();
+        let start = super::Start {
+            record_id: String::new(), harness: Harness::Claude, all_models: vec![], picked: vec![], cwd: dir.path().to_path_buf(),
+            env: vec![], mcp_servers: vec![], meta: serde_json::Value::Null, session_id: None, mode: None, options: vec![],
+            prompt: None, prior_entries: vec![], server: Some(("definitely-not-a-real-program-m4code".into(), vec![])),
+        };
+        let (view, cx) = cx.add_window_view(|window, cx| super::ThreadView::new(start, window, cx));
+        view.update(cx, |v, _| {
+            v.thread.entries = vec![
+                Entry::Agent("starting a subagent".into()),
+                Entry::Tool(ToolCall { id: "t1".into(), title: "spawn_subagent".into(), ..Default::default() }),
+                Entry::User(subagent_report_prompt("c1", "codex", "Codex subagent", "completed", "ok")),
+                Entry::Thought("reading the report".into()),
+                Entry::User("thanks".into()),
+            ];
+            assert_eq!(v.groupable(), [false, true, true, true, false]);
+        });
+    }
+
+    #[gpui::test]
     fn new_session_shows_prompt_immediately_at_top(cx: &mut gpui::TestAppContext) {
         cx.update(gpui_kit::init);
         let dir = tempfile::tempdir().unwrap();

@@ -187,7 +187,7 @@ impl Workspace {
         let links = id.as_deref().map(|i| self.links_of(i)).unwrap_or_default();
         let linked = (!links.is_empty()).then(|| (links.len(), self.linked_rows(id.as_ref(), links, cx)));
         let children = id.as_deref().map(|i| self.subagents_of(i)).unwrap_or_default();
-        let subagents = (!children.is_empty()).then(|| (children.len(), self.subagent_rows(children, cx)));
+        let subagents = id.as_ref().filter(|_| !children.is_empty()).map(|parent| (children.len(), self.subagent_rows(parent, children, cx)));
         let away = id.as_deref().and_then(|i| self.session_away(i, cx));
         let status = self.status_rows(&shown, id.as_ref(), running, cx);
         self.menu_scroll
@@ -333,23 +333,54 @@ impl Workspace {
         rows
     }
 
-    /// Subagents this session started, each with its provider's logo and where it stands: click to look at one.
-    fn subagent_rows(&self, children: Vec<(Id, String)>, cx: &mut Context<Self>) -> Div {
+    /// Subagents this session started, each with its provider's logo and where it stands: click to look at one. Those
+    /// that finished fold into one row under the rest, so a long-running parent's list stays short.
+    fn subagent_rows(&self, parent: &Id, children: Vec<(Id, String)>, cx: &mut Context<Self>) -> Div {
+        let (finished, active): (Vec<_>, Vec<_>) = children
+            .into_iter()
+            .map(|(child, title)| {
+                let state = self.subagent_state(&child, cx);
+                (child, title, state)
+            })
+            .partition(|(_, _, state)| state.finished());
         let mut rows = div().flex().flex_col().gap(px(1.0));
-        for (child, title) in children {
-            let harness = self.store.session(&child).and_then(|r| r.claude.as_ref()).map(|m| m.harness).unwrap_or_default();
-            let state = self.subagent_state(&child, cx);
-            let go = child.clone();
-            rows = rows.child(
-                lead_row(format!("subagent-{child}"), logos::draw(logos::for_harness(harness), 13.0, hsla(theme::TEXT_DIM)).into_any_element(), title)
-                    .text_color(hsla(theme::TEXT))
-                    .cursor_pointer()
-                    .hover(|s| s.bg(hsla(theme::ROW_HOVER)))
-                    .child(div().flex_none().child(subagent_state_icon(state, 13.0)))
-                    .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::Select(go.clone()), window, cx))),
-            );
+        for child in active {
+            rows = rows.child(self.subagent_row(child, cx));
+        }
+        if finished.is_empty() {
+            return rows;
+        }
+        let open = self.finished_subagents_open.contains(parent);
+        let toggle = parent.clone();
+        rows = rows.child(
+            base_row(format!("subagents-finished-{parent}"), if open { IconName::ChevronDown } else { IconName::ChevronRight }, format!("{} finished", finished.len()))
+                .text_color(hsla(theme::TEXT_FAINT))
+                .cursor_pointer()
+                .hover(|s| s.bg(hsla(theme::ROW_HOVER)).text_color(hsla(theme::TEXT_DIM)))
+                .on_click(cx.listener(move |ws, _: &ClickEvent, _, cx| {
+                    if !ws.finished_subagents_open.remove(&toggle) {
+                        ws.finished_subagents_open.insert(toggle.clone());
+                    }
+                    cx.notify();
+                })),
+        );
+        if open {
+            for child in finished {
+                rows = rows.child(self.subagent_row(child, cx));
+            }
         }
         rows
+    }
+
+    fn subagent_row(&self, (child, title, state): (Id, String, crate::app::SubagentState), cx: &mut Context<Self>) -> Stateful<Div> {
+        let harness = self.store.session(&child).and_then(|r| r.claude.as_ref()).map(|m| m.harness).unwrap_or_default();
+        let go = child.clone();
+        lead_row(format!("subagent-{child}"), logos::draw(logos::for_harness(harness), 13.0, hsla(theme::TEXT_DIM)).into_any_element(), title)
+            .text_color(hsla(if state.finished() { theme::TEXT_DIM } else { theme::TEXT }))
+            .cursor_pointer()
+            .hover(|s| s.bg(hsla(theme::ROW_HOVER)))
+            .child(div().flex_none().child(subagent_state_icon(state, 13.0)))
+            .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::Select(go.clone()), window, cx)))
     }
 
     /// Sessions linked with this one: click to go there, × to unlink.

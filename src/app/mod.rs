@@ -612,6 +612,8 @@ pub struct Workspace {
     /// Sessions asked to open another with a first message; each waits for the user's yes (`cross.rs`).
     pub pending_starts: Vec<cross::PendingStart>,
     pub pending_subagent_waits: Vec<subagents::PendingWait>,
+    /// Parents whose finished subagents are unfolded in the right sidebar.
+    pub finished_subagents_open: std::collections::HashSet<Id>,
     pub pending_handoffs: HashMap<Id, agent_handoff::Pending>,
     /// Worktree switches the user approved that a session asked for; each waits for the session's turn to end (`cross.rs`).
     pub pending_switches: Vec<cross::PendingSwitch>,
@@ -744,6 +746,7 @@ impl Workspace {
             config_sync: Default::default(),
             pending_starts: vec![],
             pending_subagent_waits: vec![],
+            finished_subagents_open: Default::default(),
             pending_handoffs: HashMap::new(),
             pending_switches: vec![],
             update: UpdateState::default(),

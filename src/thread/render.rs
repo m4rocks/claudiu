@@ -12,7 +12,7 @@ use gpui_kit::component::input::Textarea;
 
 use super::{ThreadEvent, ThreadPicker, ThreadView};
 use crate::harness::CatalogModel;
-use crate::harness::thread::{Entry, ToolCall, ToolContent, ToolStatus, diff_lines};
+use crate::harness::thread::{Entry, SubagentReport, ToolCall, ToolContent, ToolStatus, diff_lines, parse_subagent_report};
 use crate::panels::{composer, logos, picker, scale};
 use crate::panels::theme::{self, hsla};
 use crate::panels::widgets::{EffortPick, Trigger, effort_slider, icon, key_badge, key_hint, spinner};
@@ -142,7 +142,16 @@ impl ThreadView {
     fn render_entry(&mut self, ix: usize, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let Some(entry) = self.thread.entries.get(ix) else { return div().into_any_element() };
         let body = match entry {
-            Entry::User(text) if let Some(report) = crate::harness::thread::parse_subagent_report(text) => self.render_subagent_report(ix, &report, cx),
+            Entry::User(text) if let Some(report) = parse_subagent_report(text) => {
+                let run = tool_run(&self.groupable(), ix);
+                match &run {
+                    Some(run) if run.start == ix && run.len() > 1 => return self.wrap_entry(ix, self.render_tool_run(run.clone(), cx)),
+                    Some(run) if !self.run_open(run) => return div().into_any_element(),
+                    _ => {}
+                }
+                let el = self.render_subagent_report(ix, &report, cx);
+                if run.is_some_and(|r| r.len() > 1) { indent_run_step(el) } else { el }
+            }
             Entry::User(text) => div()
                 .px(px(14.0))
                 .py(px(10.0))
@@ -186,53 +195,65 @@ impl ThreadView {
         self.wrap_entry(ix, body)
     }
 
-    /// A subagent's report, which m4code sent this session as a message: drawn as the child's card, not as the user's
-    /// words. The header opens the child.
-    fn render_subagent_report(&self, ix: usize, report: &crate::harness::thread::SubagentReport, cx: &mut Context<Self>) -> AnyElement {
+    /// A subagent's report, which m4code sent this session as a message: drawn as a folded step among the tool calls,
+    /// not as the user's words. Click the row to read the report; Open shows the child.
+    fn render_subagent_report(&self, ix: usize, report: &SubagentReport, cx: &mut Context<Self>) -> AnyElement {
+        let key = format!("report:{ix}");
+        let expanded = self.detail || self.expanded_tools.contains(&key);
         let harness = crate::harness::Harness::ALL.into_iter().find(|h| h.key() == report.harness).unwrap_or_default();
-        let (state, color) = match report.state {
-            "completed" => ("Done", theme::TEXT_FAINT),
-            "interrupted" => ("Interrupted", theme::TEXT_FAINT),
-            _ => ("Failed", theme::DANGER),
-        };
+        let failed = report.state == "failed";
         let child = report.id.to_string();
-        let header = div()
+        let open = div()
             .id(SharedString::from(format!("report-open-{ix}")))
-            .group("report-head")
+            .flex_none()
+            .px(px(5.0))
+            .py(px(1.0))
+            .rounded(px(4.0))
+            .bg(hsla(theme::SURFACE_ELEVATED))
+            .border_1()
+            .border_color(hsla(theme::PANEL_BORDER))
+            .text_size(scale::px(11.0))
+            .text_color(hsla(theme::TEXT_DIM))
+            .cursor_pointer()
+            .hover(|s| s.bg(hsla(theme::SURFACE_HOVER)).text_color(hsla(theme::TEXT)))
+            .child("Open")
+            .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
+                cx.stop_propagation();
+                cx.emit(ThreadEvent::Select(child.clone()));
+            }));
+        let header = div()
+            .id(SharedString::from(format!("report-row-{ix}")))
+            .w_full()
+            .px(px(4.0))
+            .py(px(2.0))
+            .rounded(px(5.0))
             .flex()
             .items_center()
             .gap(px(8.0))
-            .px(px(12.0))
-            .py(px(8.0))
-            .border_b_1()
-            .border_color(hsla(theme::PANEL_BORDER))
-            .text_size(scale::px(12.0))
             .cursor_pointer()
-            .hover(|s| s.bg(hsla(theme::ROW_HOVER)))
-            .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| cx.emit(ThreadEvent::Select(child.clone()))))
-            .child(logos::draw(logos::for_harness(harness), 13.0, hsla(theme::TEXT_DIM)))
-            .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(hsla(theme::TEXT)).child(report.title.to_string()))
-            .child(div().flex_none().text_color(hsla(color)).child(state))
-            .child(div().flex_1())
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(2.0))
-                    .text_color(hsla(theme::TEXT_FAINT))
-                    .group_hover("report-head", |s| s.text_color(hsla(theme::TEXT)))
-                    .child("Open")
-                    .child(icon(IconName::ChevronRight, 12.0)),
+            .hover(|s| s.bg(hsla(theme::SURFACE_HOVER)))
+            .text_size(scale::px(12.0))
+            .text_color(hsla(if failed { theme::DANGER } else if expanded { theme::TEXT_DIM } else { theme::TEXT_FAINT }))
+            .child(logos::draw(logos::for_harness(harness), 12.0, hsla(if failed { theme::DANGER } else { theme::TEXT_FAINT })))
+            .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(report_line(report.title, report.state)))
+            .child(open)
+            .child(div().flex_none().text_color(hsla(theme::TEXT_FAINT)).child(icon(if expanded { IconName::ChevronDown } else { IconName::ChevronRight }, 12.0)))
+            .on_click(cx.listener(move |v, _: &ClickEvent, window, cx| {
+                if !v.expanded_tools.remove(&key) {
+                    v.expanded_tools.insert(key.clone());
+                }
+                v.remeasure(ix);
+                v.focus_composer(window, cx);
+                cx.notify();
+            }));
+        let mut block = div().flex().flex_col().child(header);
+        if expanded {
+            block = block.child(
+                div().ml(px(14.0)).pl(px(10.0)).pb(px(6.0)).pt(px(2.0)).border_l_1().border_color(hsla(theme::BORDER))
+                    .child(crate::github::ui::markdown(format!("thread-md-{ix}"), report.body)),
             );
-        div()
-            .rounded(px(9.0))
-            .overflow_hidden()
-            .bg(hsla(theme::PANEL_BG))
-            .border_1()
-            .border_color(hsla(theme::PANEL_BORDER))
-            .child(header)
-            .child(div().px(px(14.0)).py(px(10.0)).child(crate::github::ui::markdown(format!("thread-md-{ix}"), report.body)))
-            .into_any_element()
+        }
+        block.into_any_element()
     }
 
     /// An entry in the conversation's centred column.
@@ -381,10 +402,15 @@ impl ThreadView {
         block.into_any_element()
     }
 
-    /// Per entry: whether it is a step that folds into a run with its neighbours, a thought or a tool call. A call with
-    /// an inline card stays on its own, so the card is never hidden.
-    fn groupable(&self) -> Vec<bool> {
-        self.thread.entries.iter().map(|e| matches!(e, Entry::Thought(_)) || matches!(e, Entry::Tool(call) if !self.cards.contains_key(&call.id))).collect()
+    /// Per entry: whether it is a step that folds into a run with its neighbours: a thought, a tool call or a subagent's
+    /// report. A call with an inline card stays on its own, so the card is never hidden.
+    pub(super) fn groupable(&self) -> Vec<bool> {
+        self.thread.entries.iter().map(|e| match e {
+            Entry::Thought(_) => true,
+            Entry::Tool(call) => !self.cards.contains_key(&call.id),
+            Entry::User(text) => parse_subagent_report(text).is_some(),
+            _ => false,
+        }).collect()
     }
 
     /// A run is open while Ctrl+O shows everything or after a click on its line; one step alone is always open. Runs
@@ -400,14 +426,16 @@ impl ThreadView {
         if let [Entry::Tool(call)] = steps {
             return self.render_tool(run.start, call, cx);
         }
-        let thoughts = steps.len() - calls.len();
+        let reports: Vec<SubagentReport> = steps.iter().filter_map(|e| if let Entry::User(t) = e { parse_subagent_report(t) } else { None }).collect();
+        let thoughts = steps.len() - calls.len() - reports.len();
         let latest = match steps.last() {
             Some(Entry::Tool(call)) => title(call),
             Some(Entry::Thought(text)) => text.lines().next().unwrap_or_default().to_string(),
+            Some(Entry::User(text)) => parse_subagent_report(text).map(|r| report_line(r.title, r.state)).unwrap_or_default(),
             _ => String::new(),
         };
         let open = self.run_open(&run);
-        let failed = calls.iter().any(|c| c.status == ToolStatus::Failed);
+        let failed = calls.iter().any(|c| c.status == ToolStatus::Failed) || reports.iter().any(|r| r.state == "failed");
         let key = format!("run:{}", run.start);
         let start = run.start;
         let header = div()
@@ -423,7 +451,7 @@ impl ThreadView {
             .hover(|s| s.bg(hsla(theme::SURFACE_HOVER)))
             .text_size(scale::px(12.0))
             .text_color(hsla(if failed { theme::DANGER } else { theme::TEXT_FAINT }))
-            .child(div().flex_none().text_color(hsla(if failed { theme::DANGER } else { theme::TEXT_DIM })).child(run_label(thoughts, calls.len())))
+            .child(div().flex_none().text_color(hsla(if failed { theme::DANGER } else { theme::TEXT_DIM })).child(run_label(thoughts, calls.len() + reports.len())))
             .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(latest))
             .child(div().flex_none().child(icon(if open { IconName::ChevronDown } else { IconName::ChevronRight }, 12.0)))
             .on_click(cx.listener(move |v, _: &ClickEvent, window, cx| {
@@ -440,6 +468,7 @@ impl ThreadView {
         let first = match &steps[0] {
             Entry::Tool(call) => self.render_tool(start, call, cx),
             Entry::Thought(text) => self.render_thought(start, text, cx),
+            Entry::User(text) if let Some(report) = parse_subagent_report(text) => self.render_subagent_report(start, &report, cx),
             _ => return header.into_any_element(),
         };
         div().flex().flex_col().gap(px(4.0)).child(header).child(indent_run_step(first)).into_any_element()
@@ -917,6 +946,16 @@ fn diff(path: &std::path::Path, old: Option<&str>, new: &str, full: bool) -> Any
 }
 
 /// What a run's line says it holds.
+/// A report's line among the steps, such as `Codex subagent reported · done`, from its `state` key.
+fn report_line(title: &str, state: &str) -> String {
+    let state = match state {
+        "completed" => "done",
+        "interrupted" => "interrupted",
+        _ => "failed",
+    };
+    format!("{title} reported · {state}")
+}
+
 fn run_label(thoughts: usize, calls: usize) -> String {
     let calls = match calls {
         0 => None,
@@ -942,13 +981,20 @@ fn tool_run(groupable: &[bool], ix: usize) -> Option<std::ops::Range<usize>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_label, tool_run};
+    use super::{report_line, run_label, tool_run};
 
     #[test]
     fn a_runs_line_says_what_it_holds() {
         assert_eq!(run_label(0, 3), "3 tool calls");
         assert_eq!(run_label(2, 1), "Thought, 1 tool call");
         assert_eq!(run_label(2, 0), "Thought");
+    }
+
+    #[test]
+    fn a_reports_line_names_the_subagent_and_how_it_ended() {
+        assert_eq!(report_line("Codex subagent", "completed"), "Codex subagent reported · done");
+        assert_eq!(report_line("Fix login", "interrupted"), "Fix login reported · interrupted");
+        assert_eq!(report_line("Fix login", "failed"), "Fix login reported · failed");
     }
 
     #[test]
