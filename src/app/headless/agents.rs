@@ -154,22 +154,6 @@ fn shared_subagents_keep_their_parent_focus_permissions_and_conversation() {
     for harness in [Harness::Claude, Harness::Codex, Harness::OpenCode] {
         step(&mut cx, &|ws, window, cx| ws.new_session_from_home(harness, None, work.path().to_path_buf(), Some("parent".into()), None, window, cx));
         let parent = ws.read_with(&cx, |ws, _| ws.active_id().unwrap().clone());
-        if harness == Harness::Claude {
-            cx.update_window(window, |_, window, app| window.draw(app).clear(app)).unwrap();
-            let held = gpui::Modifiers { control: !cfg!(target_os = "macos"), platform: cfg!(target_os = "macos"), ..Default::default() };
-            cx.update_window(window, |_, window, app| {
-                window.dispatch_event(gpui::PlatformInput::ModifiersChanged(gpui::ModifiersChangedEvent { modifiers: held, ..Default::default() }), app);
-            }).unwrap();
-            cx.run_until_parked();
-            cx.executor().advance_clock(Duration::from_millis(450));
-            cx.run_until_parked();
-            assert!(ws.read_with(&cx, |ws, app| ws.shortcuts_shown && ws.live_view(&parent).unwrap().thread().unwrap().read(app).shortcuts_shown), "holding the modifier in the chat must reveal its shortcuts");
-            cx.update_window(window, |_, window, app| {
-                window.dispatch_event(gpui::PlatformInput::ModifiersChanged(Default::default()), app);
-            }).unwrap();
-            cx.run_until_parked();
-            assert!(ws.read_with(&cx, |ws, app| !ws.shortcuts_shown && !ws.live_view(&parent).unwrap().thread().unwrap().read(app).shortcuts_shown));
-        }
         let request = |tool: &str, args| Request { id: new_id(), from: format!("code:{parent}"), tool: tool.into(), args, deadline: now() + 60 };
         let spawn = request("spawn_subagent", json!({"harness": harness, "prompt": "child task"}));
         if harness == Harness::Claude {

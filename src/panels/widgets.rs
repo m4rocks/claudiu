@@ -427,11 +427,6 @@ pub fn key_badge(label: impl Into<SharedString>) -> Div {
         .child(label.into())
 }
 
-/// The small key label drawn beside a control while Ctrl (Cmd) is held, automatically prepending ⌘ / Ctrl+.
-pub fn key_hint(keys: &str) -> Div {
-    key_badge(shortcut(keys))
-}
-
 /// Monogram avatar: the first letter of `seed` on a color picked from it, so each account keeps its color.
 pub fn avatar(seed: &str, size: f32) -> Div {
     const COLORS: [u32; 6] = [theme::ACCENT, 0x61afef, 0x98c379, 0xc678dd, 0xe5c07b, 0x56b6c2];

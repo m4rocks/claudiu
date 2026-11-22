@@ -31,7 +31,7 @@ gpui_kit::assets::icon_assets!(
     [
         WindowMinimize, WindowMaximize, WindowRestore, WindowClose, Archive, ArchiveRestore, ArrowDownToLine, ArrowLeft, Brackets, Check, ChevronDown, ChevronRight, ChevronUp,
         CircleCheck, CircleDot, CircleDotDashed, CircleQuestionMark, CircleSlash, CircleSmall, CircleX, Clock, Ellipsis, Eye, ExternalLink, File, FileText, Folder, FolderGit2, FolderOpen, GitBranch, Link, GitCommitHorizontal, GitMerge, GitPullRequest,
-        GitPullRequestClosed, GitPullRequestDraft, HeartPlus, LoaderCircle, Lock, MessageSquare, FileCode, PanelBottom, PanelLeft, PanelRight, Pencil, Plus, RefreshCw, Search,
+        GitPullRequestClosed, GitPullRequestDraft, HeartPlus, Keyboard, LoaderCircle, Lock, MessageSquare, FileCode, PanelBottom, PanelLeft, PanelRight, Pencil, Plus, RefreshCw, Search,
         Settings, Terminal, X
     ]
 );
@@ -54,9 +54,11 @@ impl gpui::AssetSource for Assets {
     }
 }
 
+use app::{HideApp, HideOthers, Quit, ShowAllApps, Workspace};
+#[cfg(target_os = "macos")]
 use app::{
-    CloseSession, FocusSearch, HideApp, HideOthers, ImportProject, NewClaude, NextSession, OpenGithub, OpenSettings, PrevSession, Quit, ShowAllApps,
-    SwapFocus, ToggleEditor, ToggleRight, ToggleShell, ToggleSidebar, Workspace,
+    CloseSession, FocusSearch, ImportProject, NewClaude, NextSession, OpenGithub, OpenSettings, PrevSession, SwapFocus, ToggleEditor, ToggleRight,
+    ToggleShell, ToggleSidebar,
 };
 
 /// The macOS menu bar. Every item is an existing m4code action, so menu, shortcut and sidebar share one code path;
@@ -208,56 +210,13 @@ fn main() {
         gpui_kit::init(cx);
         app::register_languages();
         gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, cx);
-        // m4code-global shortcuts. Deliberately Ctrl+Shift (Cmd+Shift on macOS) so every plain Ctrl/Alt
-        // chord, e.g. Alt+P, still reaches Claude Code untouched.
-        cx.bind_keys([
-            KeyBinding::new("secondary-shift-n", NewClaude, None),
-            KeyBinding::new("ctrl-`", ToggleShell, None),
-            KeyBinding::new("secondary-j", ToggleShell, None),
-            KeyBinding::new("secondary-shift-w", CloseSession, None),
-            KeyBinding::new("secondary-shift-b", ToggleSidebar, None),
-            KeyBinding::new("secondary-shift-r", ToggleRight, None),
-            KeyBinding::new("secondary-shift-f", FocusSearch, None),
-            KeyBinding::new("secondary-shift-o", ImportProject, None),
-            KeyBinding::new("secondary-shift-g", OpenGithub, None),
-            KeyBinding::new("secondary-,", OpenSettings, None),
-            KeyBinding::new("secondary-shift-]", SwapFocus, None),
-            KeyBinding::new("secondary-shift-e", ToggleEditor, None),
-            // Only over the editor pane: elsewhere Ctrl+P belongs to Claude Code.
-            KeyBinding::new("secondary-p", app::QuickOpen, Some("EditorPane")),
-            KeyBinding::new("secondary-s", app::SaveFile, Some("EditorPane")),
-            KeyBinding::new("ctrl-g", app::GoToLine, Some("EditorPane")),
-            KeyBinding::new("secondary-w", app::CloseTab, Some("EditorPane")),
-            // VS Code's keys: Alt+arrows move by word on macOS.
-            KeyBinding::new(if cfg!(target_os = "macos") { "ctrl--" } else { "alt-left" }, app::GoBack, Some("EditorPane")),
-            KeyBinding::new(if cfg!(target_os = "macos") { "ctrl-shift--" } else { "alt-right" }, app::GoForward, Some("EditorPane")),
-            // The editor answers it from its language server; Ctrl+click (Cmd+click) does the same.
-            KeyBinding::new("f12", gpui_kit::component::input::GoToDefinition, Some("Input")),
-            // Completions for the word before the cursor, from the file's language server.
-            KeyBinding::new("ctrl-space", gpui_kit::base::input::TriggerCompletion, Some("Input")),
-            KeyBinding::new("ctrl-tab", NextSession, None),
-            KeyBinding::new("secondary-1", app::ShowSession(1), None),
-            KeyBinding::new("secondary-2", app::ShowSession(2), None),
-            KeyBinding::new("secondary-3", app::ShowSession(3), None),
-            KeyBinding::new("secondary-4", app::ShowSession(4), None),
-            KeyBinding::new("secondary-5", app::ShowSession(5), None),
-            KeyBinding::new("secondary-6", app::ShowSession(6), None),
-            KeyBinding::new("secondary-7", app::ShowSession(7), None),
-            KeyBinding::new("secondary-8", app::ShowSession(8), None),
-            KeyBinding::new("secondary-9", app::ShowSession(9), None),
-            KeyBinding::new("ctrl-shift-tab", PrevSession, None),
-            // The editor (Input) and, off macOS, a shell (Terminal) keep it for undo and job control.
-            KeyBinding::new("secondary-z", app::ReopenClosed, None),
-        ]);
-        cx.bind_keys(app::line_action_bindings());
+        cx.bind_keys(app::keymap::bindings());
         // The text-input library binds these globally (focus traversal, copy, select all, ...). A focused
         // terminal must receive them as plain keys, so unbind them inside the Terminal context.
         cx.bind_keys(
             ["tab", "shift-tab", "ctrl-a", "ctrl-c", "ctrl-x", "ctrl-y", "ctrl-z", "ctrl-v"]
                 .map(|k| KeyBinding::new(k, gpui::NoAction, Some("Terminal"))),
         );
-        #[cfg(target_os = "macos")]
-        cx.bind_keys([KeyBinding::new("cmd-q", Quit, None), KeyBinding::new("cmd-h", HideApp, None), KeyBinding::new("cmd-alt-h", HideOthers, None)]);
 
         // The main window, once there is one. Cmd+Q / the Quit menu item go through the same confirmation as closing it.
         let main: Rc<RefCell<Option<MainWindow>>> = Rc::default();

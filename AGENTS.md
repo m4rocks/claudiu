@@ -4,7 +4,7 @@ m4code is a native Rust + GPUI desktop app that manages sessions around the user
 
 ## Where things live
 
-- `src/main.rs`: app startup, menus, key bindings and assets.
+- `src/main.rs`: app startup, menus and assets. `src/app/keymap.rs` holds the key bindings and the list Settings → Keyboard shows.
 - `src/app/`: workspace state and behavior. `act.rs` dispatches actions; the other files group methods by task. `headless.rs` and `headless/` exercise the workspace on GPUI's test platform.
 - `src/panels/`: workspace rendering. `workspace_view.rs` is the root view; `home.rs`, `overlays.rs`, `workspace_pickers.rs` and `settings_view.rs` draw its main sections.
 - `src/harness/` and `src/thread/`: agent launch and ACP sessions, and the conversation view.

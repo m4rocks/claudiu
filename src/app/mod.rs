@@ -61,6 +61,7 @@ mod navigation;
 pub mod picker;
 mod pickup;
 mod repo;
+pub mod keymap;
 mod line_comment;
 pub use line_comment::LineComment;
 mod sessions;
@@ -585,10 +586,6 @@ pub struct Workspace {
     /// Pointer position at the last drag-over check, see `pointer_moved`.
     /// Sidebar reorder animation: last drawn order of the running rows, and the slides in flight.
     pub prev_current: Vec<Id>,
-    /// Ctrl (Cmd on macOS) has been held a moment, so the running rows show their Ctrl+number shortcut.
-    pub shortcuts_shown: bool,
-    /// Bumped whenever the modifier keys change, so a pending reveal of the shortcuts is dropped.
-    pub shortcuts_wait: u64,
     pub slides: HashMap<Id, crate::panels::sidebar::Slide>,
     pub slide_gen: u64,
     /// The session list's own view, made on the sidebar's first drawing (see `panels::sidebar::SessionList`).
@@ -729,8 +726,6 @@ impl Workspace {
             dragging: None,
             drag_pos: None,
             prev_current: Vec::new(),
-            shortcuts_shown: false,
-            shortcuts_wait: 0,
             slides: HashMap::new(),
             slide_gen: 0,
             session_list: None,

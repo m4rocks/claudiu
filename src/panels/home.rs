@@ -14,7 +14,7 @@ use crate::panels::{composer, logos};
 use crate::panels::theme::{self, hsla};
 use gpui_kit::assets::IconName;
 use crate::panels::widgets::{
-    Trigger, icon, key_badge, key_hint, spinner,
+    Trigger, icon, spinner,
 };
 
 impl Workspace {
@@ -78,8 +78,7 @@ impl Workspace {
 
         let can_send = composer::can_send(self.home.prompt.read(cx).value().as_ref());
         let start_btn = composer::send_button("home-launch", can_send)
-            .when(can_send, |d| d.on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::HomeLaunch, window, cx))))
-            .when(self.shortcuts_shown, |d| d.child(key_badge("Enter")));
+            .when(can_send, |d| d.on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::HomeLaunch, window, cx))));
 
         let focused = self.home.prompt.focus_handle(cx).is_focused(window);
         let input = composer::input_area()
@@ -89,17 +88,6 @@ impl Workspace {
             .into_any_element();
         let chips: Vec<AnyElement> = [Some(model_chip.into_any_element()), Some(project_chip.into_any_element()), git_chip.map(IntoElement::into_any_element)].into_iter().flatten().collect();
         let composer = composer::frame(focused, None, input, chips, vec![start_btn.into_any_element()]).max_w(px(680.0));
-
-        let shortcut_chip = |keys: &str, what: &str| {
-            div()
-                .flex()
-                .items_center()
-                .gap(px(5.0))
-                .text_size(scaled(11.0))
-                .text_color(hsla(theme::TEXT_FAINT))
-                .child(key_hint(keys))
-                .child(what.to_string())
-        };
 
         div()
             .id("home-root")
@@ -113,16 +101,5 @@ impl Workspace {
             .gap(px(20.0))
             .child(div().text_size(scaled(24.0)).font_weight(FontWeight::MEDIUM).text_color(hsla(theme::TEXT)).child("What are we working on?"))
             .child(composer)
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .justify_center()
-                    .gap(px(16.0))
-                    .child(shortcut_chip("Shift+N", "New session"))
-                    .child(shortcut_chip("Shift+E", "Editor"))
-                    .child(shortcut_chip("J", "Shell"))
-                    .child(shortcut_chip(",", "Settings")),
-            )
     }
 }

@@ -15,7 +15,7 @@ use crate::harness::CatalogModel;
 use crate::harness::thread::{Entry, SubagentReport, ToolCall, ToolContent, ToolStatus, diff_lines, parse_subagent_report};
 use crate::panels::{composer, logos, picker, scale};
 use crate::panels::theme::{self, hsla};
-use crate::panels::widgets::{EffortPick, Trigger, effort_slider, icon, key_badge, key_hint, spinner};
+use crate::panels::widgets::{EffortPick, Trigger, effort_slider, icon, key_badge, spinner};
 use crate::visual::ui::Scope;
 
 /// Lines of a tool's output shown while it is folded (Ctrl+O shows all).
@@ -847,7 +847,6 @@ impl ThreadView {
             let raw_name = self.thread.mode_name().unwrap_or(mode_id);
             chips.push(
                 composer::chip("thread-mode", self.picker == Some(ThreadPicker::Permission))
-                    .when(self.shortcuts_shown, |d| d.child(key_badge("Shift+Tab")))
                     .child(icon(IconName::Lock, 11.0).text_color(hsla(theme::TEXT_DIM)))
                     .child(div().text_color(hsla(theme::TEXT_DIM)).child(picker::format_mode_name(mode_id, raw_name)))
                     .child(icon(IconName::ChevronDown, 10.5).text_color(hsla(theme::TEXT_FAINT)))
@@ -880,10 +879,6 @@ impl ThreadView {
         }
 
         let mut actions: Vec<AnyElement> = vec![];
-        if self.shortcuts_shown {
-            actions.push(div().flex().gap(px(4.0)).child(key_hint("O")).child("Tool output").child(key_hint("T")).child("Plan").into_any_element());
-            actions.push(key_badge(if cfg!(target_os = "macos") { "Option+P · Model" } else { "Alt+P · Model" }).into_any_element());
-        }
         let queued = self.queue.iter().filter(|q| !q.shown).count();
         if queued > 0 {
             actions.push(faint(format!("{queued} queued")).into_any_element());
@@ -902,7 +897,6 @@ impl ThreadView {
         let can_send = composer::can_send(self.composer.read(cx).value().as_ref());
         actions.push(
             composer::send_button("thread-send", can_send)
-                .when(self.shortcuts_shown, |d| d.child(key_badge("Enter")))
                 .when(can_send, |d| d.on_click(cx.listener(|v, _: &ClickEvent, window, cx| v.submit(window, cx))))
                 .into_any_element(),
         );

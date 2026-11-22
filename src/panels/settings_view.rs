@@ -179,6 +179,7 @@ pub(super) fn render_settings_card(
                 .child(faint("Running sessions keep their current tools. Resumed sessions pick up changes on their next compaction.".into()))
                 .into_any_element()
         }
+        SettingsPage::Keyboard => keyboard_page().into_any_element(),
         SettingsPage::Projects => div()
             .flex()
             .flex_col()
@@ -346,6 +347,20 @@ fn row_shell(title: &str, subtitle: Option<&str>, trailing: AnyElement) -> gpui:
         .gap(px(12.0))
         .child(row_labels(title, subtitle))
         .child(trailing)
+}
+
+/// Settings → Keyboard: each group of shortcuts in its own card, what it does on the left and its keys on the right.
+fn keyboard_page() -> gpui::Div {
+    let rows = crate::app::keymap::shortcuts();
+    let mut groups: Vec<(&str, Vec<AnyElement>)> = vec![];
+    for row in rows {
+        let line = row_shell(row.what, None, key_badge(crate::app::keymap::label(&row.keys)).into_any_element()).into_any_element();
+        match groups.last_mut() {
+            Some((group, lines)) if *group == row.group => lines.push(line),
+            _ => groups.push((row.group, vec![line])),
+        }
+    }
+    groups.into_iter().fold(div().flex().flex_col().gap(px(18.0)), |page, (group, lines)| page.child(settings_group(group.to_uppercase(), None, lines)))
 }
 
 /// The Worktrees section on the Projects page: worktree folders m4code made, grouped by repository.

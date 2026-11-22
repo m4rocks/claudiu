@@ -13,10 +13,11 @@ pub enum SettingsPage {
     Skills,
     M4codeTools,
     Projects,
+    Keyboard,
 }
 
 impl SettingsPage {
-    pub const ALL: [SettingsPage; 5] = [Self::General, Self::Harnesses, Self::Skills, Self::M4codeTools, Self::Projects];
+    pub const ALL: [SettingsPage; 6] = [Self::General, Self::Harnesses, Self::Skills, Self::M4codeTools, Self::Projects, Self::Keyboard];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -25,6 +26,7 @@ impl SettingsPage {
             Self::Skills => "Skills",
             Self::M4codeTools => "m4code tools",
             Self::Projects => "Projects",
+            Self::Keyboard => "Keyboard",
         }
     }
 
@@ -36,6 +38,7 @@ impl SettingsPage {
             Self::Skills => IconName::FileCode,
             Self::M4codeTools => IconName::Brackets,
             Self::Projects => IconName::FolderOpen,
+            Self::Keyboard => IconName::Keyboard,
         }
     }
 
@@ -46,6 +49,7 @@ impl SettingsPage {
             Self::Skills => "Install SKILL.md packages from skills.sh and sync them across active harnesses.",
             Self::M4codeTools => "Built-in MCP tools exposed to sessions. Applies to new sessions and after compaction.",
             Self::Projects => "Manage projects in the sidebar and git worktrees created by m4code.",
+            Self::Keyboard => "Every keyboard shortcut m4code has. They can't be changed yet.",
         }
     }
 
@@ -320,7 +324,9 @@ mod tests {
         assert_eq!(Harnesses.next(), Skills);
         assert_eq!(Skills.next(), M4codeTools);
         assert_eq!(M4codeTools.next(), Projects);
-        assert_eq!(Projects.next(), Projects);
+        assert_eq!(Projects.next(), Keyboard);
+        assert_eq!(Keyboard.next(), Keyboard);
+        assert_eq!(Keyboard.prev(), Projects);
         assert_eq!(Projects.prev(), M4codeTools);
         assert_eq!(Harnesses.prev(), General);
         assert_eq!(General.prev(), General);

@@ -15,7 +15,7 @@ use crate::panels::theme::{self, hsla};
 use gpui_kit::assets::IconName;
 use crate::panels::status_icon::{SessionDot, StatusIcon};
 use crate::panels::logos;
-use crate::panels::widgets::{Trigger, ago, countdown, icon, icon_button, key_hint, limit_bar, section_label, shortcut};
+use crate::panels::widgets::{Trigger, ago, countdown, icon, icon_button, limit_bar, section_label};
 
 pub const SIDEBAR_W: f32 = 284.0;
 pub const SIDEBAR_MIN: f32 = 220.0;
@@ -565,14 +565,7 @@ impl Workspace {
             .filter_map(|id| self.store.session(id))
             .filter(|r| self.listed(&q, filter.as_ref(), r))
             .map(|r| {
-                let mut row = self.row_for(r, true, true);
-                // Numbered among all running sessions, so a search or project filter doesn't renumber them.
-                if self.shortcuts_shown
-                    && let Some(n) = numbered.iter().position(|id| *id == r.id).filter(|&i| i < 9)
-                {
-                    row.right = shortcut(&(n + 1).to_string());
-                }
-                row
+                self.row_for(r, true, true)
             })
             .collect();
         let ids: Vec<Id> = running.iter().map(|r| r.id.clone()).collect();
@@ -745,7 +738,6 @@ impl Workspace {
                     },
                 ))
             })
-            .when(self.shortcuts_shown, |d| d.child(key_hint(",")))
             .child(icon_button("settings", IconName::Settings).occlude().on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::OpenSettings, window, cx))))
     }
 
@@ -806,7 +798,6 @@ impl Workspace {
     }
 
     fn render_sidebar_header(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let hints = self.shortcuts_shown;
         div()
             .flex()
             .flex_col()
@@ -820,8 +811,7 @@ impl Workspace {
                     Input::new(&self.search_input)
                         .h(px(26.0))
                         .text_size(crate::panels::scale::px(12.5))
-                        .prefix(div().text_color(hsla(theme::TEXT_FAINT)).child(icon(IconName::Search, 14.0)))
-                        .when(hints, |i| i.suffix(key_hint("Shift+F"))),
+                        .prefix(div().text_color(hsla(theme::TEXT_FAINT)).child(icon(IconName::Search, 14.0))),
                 ),
             )
     }
@@ -849,7 +839,6 @@ impl Workspace {
             .hover(|s| s.bg(hsla(theme::ROW_HOVER)).text_color(hsla(theme::TEXT)))
             .child(icon(IconName::Plus, 13.0).text_color(hsla(theme::TEXT_FAINT)))
             .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(crate::panels::scale::px(13.0)).child(label))
-            .when(self.shortcuts_shown, |d| d.child(key_hint("Shift+N")))
             .on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.open_home(window, cx)))
     }
 

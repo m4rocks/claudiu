@@ -16,7 +16,7 @@ use crate::panels::theme::{self, hsla};
 use crate::updater::Status;
 use gpui_kit::assets::IconName;
 use crate::panels::widgets::{
-    button, fade_in, icon_button, icon_button_disabled, key_hint, short_path,
+    button, fade_in, icon_button, icon_button_disabled, short_path,
 };
 
 impl Workspace {
@@ -24,7 +24,6 @@ impl Workspace {
 
     fn render_topbar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let crate::panels::inspector::Shown { rec, cwd, .. } = self.shown();
-        let hints = self.shortcuts_shown;
         let editor_available = self.editor_owner().is_some();
 
         let title = rec.as_ref().map(|r| r.display_title().to_string()).unwrap_or_else(|| "m4code".into());
@@ -56,7 +55,6 @@ impl Workspace {
                             .occlude()
                             .on_click(cx.listener(|ws, _: &ClickEvent, _w, cx| ws.toggle_left(cx))),
                     )
-                    .when(hints, |d| d.child(key_hint("Shift+B")))
                     .child(
                         div()
                             .min_w_0()
@@ -85,17 +83,13 @@ impl Workspace {
                     .flex()
                     .flex_none()
                     .items_center()
-                    .gap(px(if hints { 4.0 } else { 0.0 }))
                     .occlude()
-                    .when(hints && editor_available, |d| d.child(key_hint("Shift+E")))
                     .child(if editor_available {
                         icon_button("toggle-editor", IconName::FileCode).on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::ToggleEditor, window, cx)))
                     } else {
                         icon_button_disabled("toggle-editor", IconName::FileCode)
                     })
-                    .when(hints, |d| d.child(key_hint("J")))
                     .child(icon_button("toggle-shell", IconName::PanelBottom).on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.toggle_shell_here(window, cx))))
-                    .when(hints, |d| d.child(key_hint("Shift+R")))
                     .child(icon_button("toggle-right", IconName::PanelRight).on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.toggle_right(window, cx)))),
             ))
     }
@@ -465,7 +459,6 @@ impl Render for Workspace {
             }))
             .on_action(cx.listener(|ws, _: &NextSession, window, cx| ws.cycle(1, window, cx)))
             .on_action(cx.listener(|ws, a: &crate::app::ShowSession, window, cx| ws.show_numbered(a.0, window, cx)))
-            .on_modifiers_changed(cx.listener(|ws, ev: &gpui::ModifiersChangedEvent, _w, cx| ws.modifiers_changed(&ev.modifiers, cx)))
             .on_action(cx.listener(|ws, _: &PrevSession, window, cx| ws.cycle(-1, window, cx)))
             .on_action(cx.listener(|ws, _: &ToggleSidebar, _w, cx| ws.toggle_left(cx)))
             .on_action(cx.listener(|ws, _: &ToggleRight, window, cx| ws.toggle_right(window, cx)))

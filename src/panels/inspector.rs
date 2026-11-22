@@ -10,7 +10,7 @@ use gpui::{
 
 use std::time::Duration;
 
-use gpui::{Animation, AnimationExt, prelude::FluentBuilder};
+use gpui::{Animation, AnimationExt};
 
 use crate::app::{Act, GitOp, MenuItem, SideDrag, Workspace};
 use crate::panels::widgets::{Trigger, button};
@@ -20,7 +20,7 @@ use crate::store::{Attached, Id, Project, SessionKind, SessionRecord};
 use crate::panels::theme::{self, hsla};
 use crate::app::SubagentState;
 use crate::panels::logos;
-use crate::panels::widgets::{icon, icon_button, key_hint, meter, section_label, subagent_state_icon, tick};
+use crate::panels::widgets::{icon, icon_button, meter, section_label, subagent_state_icon, tick};
 use gpui_kit::assets::IconName;
 
 /// What the top bar and the right sidebar describe: the shown session and the folder and project it is in.
@@ -224,7 +224,6 @@ impl Workspace {
         let target = shown.project.as_ref().map(|p| p.path.clone()).or_else(|| shown.cwd.clone());
         let repo = shown.project.as_ref().filter(|p| p.git.is_some()).and(shown.cwd.clone());
         let busy = self.git_busy;
-        let hints = self.shortcuts_shown;
 
         let mut actions = div().flex().flex_col().gap(px(1.0));
         if let Some(target) = &target {
@@ -249,7 +248,6 @@ impl Workspace {
         // Keep session-only actions visible, but inert when no session is shown.
         actions = actions.child(if id.is_some() {
             row("editor-mode", IconName::FileCode, "Editor mode")
-                .when(hints, |d| d.child(key_hint("Shift+E")))
                 .on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::ToggleEditor, window, cx)))
         } else {
             dim_row("editor-mode", IconName::FileCode, "Editor mode")
@@ -287,14 +285,12 @@ impl Workspace {
             let open = self.shells.get(&id).is_some_and(|p| p.open);
             actions = actions.child(
                 row("shell", IconName::Terminal, if open { "Hide shell" } else { "Show shell" })
-                    .when(hints, |d| d.child(key_hint("J")))
                     .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::ToggleShell(id.clone()), window, cx))),
             );
         }
         let cwd = self.active_cwd();
         actions.child(if id.is_some() {
             row("github", IconName::GitPullRequest, "GitHub")
-                .when(hints, |d| d.child(key_hint("Shift+G")))
                 .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::OpenGithub { cwd: cwd.clone() }, window, cx)))
         } else {
             dim_row("github", IconName::GitPullRequest, "GitHub")

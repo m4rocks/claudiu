@@ -7,8 +7,6 @@ fn numbered<T>(items: &[T], n: usize) -> Option<&T> {
     items.get(n.checked_sub(1)?)
 }
 
-/// How long Ctrl (Cmd) is held alone before the sidebar shows the session shortcuts.
-const SHORTCUT_HOLD: Duration = Duration::from_millis(400);
 
 impl Workspace {
     pub fn is_running(&self, id: &str, cx: &App) -> bool {
@@ -373,7 +371,6 @@ impl Workspace {
         }
         view.update(cx, |v, _| {
             v.subagent_edits = subagent_edits;
-            v.shortcuts_shown = self.shortcuts_shown;
             v.canonical_history = canonical_history;
             v.compaction.enabled = auto_compact;
             v.compaction.native_controlled = native_controlled;
@@ -686,42 +683,6 @@ impl Workspace {
         if let Some(id) = numbered(&self.running_ids(cx), n).cloned() {
             self.show_session(&id, window, cx);
         }
-    }
-
-    /// Ctrl (Cmd) alone, held for a moment, shows the sessions' numbers; anything else hides them. Quick chords such as
-    /// Ctrl+C never show them, since the key is let go before the wait ends.
-    pub fn modifiers_changed(&mut self, modifiers: &gpui::Modifiers, cx: &mut Context<Self>) {
-        self.shortcuts_wait += 1;
-        if self.shortcuts_shown {
-            self.show_shortcuts(false, cx);
-        }
-        let alone = modifiers.secondary() && !modifiers.shift && !modifiers.alt && !(modifiers.control && modifiers.platform);
-        if !alone {
-            return;
-        }
-        let wait = self.shortcuts_wait;
-        cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(SHORTCUT_HOLD).await;
-            let _ = this.update(cx, |ws, cx| {
-                if ws.shortcuts_wait == wait {
-                    ws.show_shortcuts(true, cx);
-                }
-            });
-        })
-        .detach();
-    }
-
-    fn show_shortcuts(&mut self, shown: bool, cx: &mut Context<Self>) {
-        self.shortcuts_shown = shown;
-        for live in &self.live {
-            if let Some(thread) = live.view.thread() {
-                thread.update(cx, |v, cx| {
-                    v.shortcuts_shown = shown;
-                    cx.notify();
-                });
-            }
-        }
-        cx.notify();
     }
 
     pub fn cycle(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {

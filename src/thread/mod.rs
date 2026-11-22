@@ -176,7 +176,6 @@ pub struct ThreadView {
     rows: usize,
     /// Ctrl+O: every tool's output in full.
     pub detail: bool,
-    pub shortcuts_shown: bool,
     pub(crate) subagent_edits: Option<bool>,
     pub compaction: crate::harness::compaction::Policy,
     pub(crate) canonical_history: bool,
@@ -301,7 +300,6 @@ impl ThreadView {
             list,
             rows,
             detail: false,
-            shortcuts_shown: false,
             subagent_edits: None,
             compaction: Default::default(),
             canonical_history: false,
