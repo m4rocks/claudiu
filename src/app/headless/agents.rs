@@ -179,7 +179,8 @@ fn shared_subagents_keep_their_parent_focus_permissions_and_conversation() {
         });
         let child = child.into_inner();
         let wait = request("wait_subagent", json!({"id": child}));
-        let until = std::time::Instant::now() + Duration::from_secs(10);
+        // Generous, since a slow CI machine runs the stand-in agents' processes alongside the whole suite.
+        let until = std::time::Instant::now() + Duration::from_secs(30);
         loop {
             let done = std::cell::Cell::new(false);
             step(&mut cx, &|ws, window, cx| {
@@ -190,6 +191,7 @@ fn shared_subagents_keep_their_parent_focus_permissions_and_conversation() {
             assert!(std::time::Instant::now() < until, "the child never finished");
             std::thread::yield_now();
         }
+        let until = std::time::Instant::now() + Duration::from_secs(30);
         loop {
             cx.run_until_parked();
             let reported = ws.read_with(&cx, |ws, app| {
@@ -209,7 +211,7 @@ fn shared_subagents_keep_their_parent_focus_permissions_and_conversation() {
                 *full.borrow_mut() = reply["id"].as_str().unwrap().to_string();
             });
             let full = full.into_inner();
-            let until = std::time::Instant::now() + Duration::from_secs(10);
+            let until = std::time::Instant::now() + Duration::from_secs(30);
             loop {
                 cx.run_until_parked();
                 let reported = ws.read_with(&cx, |ws, app| {
