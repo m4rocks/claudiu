@@ -107,6 +107,11 @@ pub(super) fn markdown_of(cache: &mut HashMap<usize, Entity<TextViewState>>, ix:
     crate::github::ui::styled_markdown(TextView::new(&state))
 }
 
+/// A message's first line with text, for a one-line row.
+fn first_line(text: &str) -> String {
+    text.lines().find(|l| !l.trim().is_empty()).unwrap_or_default().trim().to_string()
+}
+
 fn waiting(message: &str) -> Div {
     div()
         .flex_1()
@@ -977,11 +982,25 @@ impl ThreadView {
     /// before it is sent.
     fn render_waiting(&self, cx: &mut Context<Self>) -> Option<Div> {
         let waiting = self.waiting_messages();
-        if waiting.is_empty() {
+        let steering: Vec<String> = self.unread_steers().map(first_line).collect();
+        if waiting.is_empty() && steering.is_empty() {
             return None;
         }
+        let steering_rows = steering.into_iter().enumerate().map(|(i, line)| {
+            div()
+                .w_full()
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .px(px(10.0))
+                .py(px(4.0))
+                .child(spinner(SharedString::from(format!("steering-{i}")), 12.0))
+                .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(scale::px(12.5)).text_color(hsla(theme::TEXT_DIM)).child(line))
+                .child(div().flex_none().text_size(scale::px(11.0)).text_color(hsla(theme::TEXT_FAINT)).child("Read after the current step"))
+        });
+        let waiting_empty = waiting.is_empty();
         let rows = waiting.into_iter().map(|(at, text)| {
-            let first_line = text.lines().find(|l| !l.trim().is_empty()).unwrap_or_default().trim().to_string();
+            let first_line = first_line(text);
             div()
                 .w_full()
                 .flex()
@@ -1010,7 +1029,8 @@ impl ThreadView {
                 .border_color(hsla(theme::PANEL_BORDER))
                 .flex()
                 .flex_col()
-                .child(div().px(px(10.0)).pt(px(2.0)).text_size(scale::px(11.0)).text_color(hsla(theme::TEXT_FAINT)).child("Queued for after this turn"))
+                .children(steering_rows)
+                .when(!waiting_empty, |d| d.child(div().px(px(10.0)).pt(px(2.0)).text_size(scale::px(11.0)).text_color(hsla(theme::TEXT_FAINT)).child("Queued for after this turn")))
                 .children(rows),
         )
     }

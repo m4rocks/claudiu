@@ -263,6 +263,8 @@ async function finishTurn(session, result) {
   const turn = session.turn;
   if (turn && !session.cancelled && !result.is_error) {
     const answered = answeredBy(result);
+    // A Claude Code that never said it started a steer has answered it by now, so it shows before the turn ends.
+    showWaitingSteers(session, answered);
     if (answered) for (const uuid of answered) turn.waiting.delete(uuid);
     else turn.waiting.clear();
     if (turn.waiting.size) {
@@ -294,7 +296,7 @@ async function finishTurn(session, result) {
  */
 function steersBack(session, turn, receipt) {
   const stillQueued = new Set(receipt?.still_queued ?? []);
-  const unread = [...turn.waiting].filter((uuid) => turn.steers.has(uuid) && stillQueued.has(uuid));
+  const unread = [...turn.waiting].filter((uuid) => turn.steers.has(uuid) && !turn.shown.has(uuid) && stillQueued.has(uuid));
   for (const uuid of unread) session.dropping.add(uuid);
   const back = {};
   if (unread.length) back.unread = unread.map((uuid) => turn.steers.get(uuid));
@@ -327,6 +329,7 @@ async function pump(session) {
       }
       // Not in the SDK's types yet; t3code reads it the same way.
       if (m.type === "command_lifecycle") {
+        if (m.state === "started") showSteer(session, m.command_uuid);
         await steerDropped(session, m);
         continue;
       }
@@ -334,7 +337,11 @@ async function pump(session) {
       if (m.parent_tool_use_id) continue;
       if (m.type === "stream_event") {
         const ev = m.event;
-        if (ev.type === "message_start") session.streamed.add(ev.message.id);
+        if (ev.type === "message_start") {
+          session.streamed.add(ev.message.id);
+          // After a result the turn stayed open for, what Claude writes next answers the steers it still owed.
+          if (session.turn?.held) showWaitingSteers(session, [...session.turn.waiting]);
+        }
         if (ev.type === "content_block_delta" && ev.delta.type === "text_delta") update(session.id, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: ev.delta.text } });
         if (ev.type === "content_block_delta" && ev.delta.type === "thinking_delta") update(session.id, { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: ev.delta.thinking } });
       } else if (m.type === "assistant") {
@@ -445,7 +452,7 @@ const handlers = {
     s.dropInterrupted = false;
     const text = (p.prompt ?? []).filter((c) => c.type === "text").map((c) => c.text).join("\n");
     const uuid = randomUUID();
-    const done = new Promise((resolve, reject) => (s.turn = { resolve, reject, waiting: new Set([uuid]), steers: new Map(), dropped: [], held: null }));
+    const done = new Promise((resolve, reject) => (s.turn = { resolve, reject, waiting: new Set([uuid]), steers: new Map(), shown: new Set(), dropped: [], held: null }));
     s.inbox.push(userMessage(s, text, uuid));
     return done;
   },
@@ -456,7 +463,8 @@ const handlers = {
     const uuid = randomUUID();
     s.turn.waiting.add(uuid);
     s.turn.steers.set(uuid, p.text);
-    s.inbox.push(userMessage(s, p.text, uuid));
+    // "next" waits for the tool calls running to finish; "now" would cancel them, as t3code found.
+    s.inbox.push(userMessage(s, p.text, uuid, "next"));
     return {};
   },
   "session/set_mode": async (p) => {
@@ -481,8 +489,25 @@ const handlers = {
   },
 };
 
-function userMessage(session, text, uuid) {
-  return { type: "user", uuid, message: { role: "user", content: [{ type: "text", text }] }, parent_tool_use_id: null, session_id: session.id, origin: { kind: "human" } };
+function userMessage(session, text, uuid, priority) {
+  return { type: "user", uuid, ...(priority ? { priority } : {}), message: { role: "user", content: [{ type: "text", text }] }, parent_tool_use_id: null, session_id: session.id, origin: { kind: "human" } };
+}
+
+/**
+ * Show a steer in the conversation once Claude reads it, not when it was sent: what Claude was still writing then
+ * comes first. m4code knows it by `_meta.m4code.steer` and takes it off the list of steers waiting to be read.
+ */
+function showSteer(session, uuid) {
+  const turn = session.turn;
+  const text = turn?.steers.get(uuid);
+  if (text === undefined || turn.shown.has(uuid)) return;
+  turn.shown.add(uuid);
+  update(session.id, { sessionUpdate: "user_message_chunk", content: { type: "text", text }, _meta: { m4code: { steer: true } } });
+}
+
+/** Every steer not shown yet, oldest first: Claude is about to answer them, or just did. */
+function showWaitingSteers(session, only) {
+  for (const uuid of session.turn?.steers.keys() ?? []) if (!only || only.includes(uuid)) showSteer(session, uuid);
 }
 
 function cancel(p) {

@@ -221,6 +221,10 @@ pub struct ThreadView {
     /// the list would otherwise drop it and parse again when it comes back, and a long message (over 4 KB) parses
     /// in the background, so it would draw empty for a frame and then grow, moving everything around it.
     markdown: HashMap<usize, Entity<gpui_kit::component::text::TextViewState>>,
+    /// Messages steered into the running turn that the agent hasn't read yet, oldest first. They join the
+    /// conversation where the agent reads them (a `user_message_chunk` marked `_meta.m4code.steer`), because what it
+    /// was still writing when they were sent comes before them.
+    steering: VecDeque<String>,
     /// What a message sent while the agent works does (Settings → General).
     pub(crate) follow_up: crate::store::FollowUp,
     pub compaction: crate::harness::compaction::Policy,
@@ -351,6 +355,7 @@ impl ThreadView {
             detail: false,
             subagent_edits: None,
             markdown: HashMap::new(),
+            steering: VecDeque::new(),
             follow_up: crate::store::FollowUp::default(),
             compaction: Default::default(),
             canonical_history: false,
@@ -506,6 +511,9 @@ impl ThreadView {
                 if let Some(at) = self.thread.apply(&update) {
                     self.remeasure(at);
                 }
+                if update.pointer("/_meta/m4code/steer").and_then(Value::as_bool) == Some(true) {
+                    self.steering.pop_front();
+                }
                 if self.thread.title != title
                     && let Some(t) = self.thread.title.clone()
                 {
@@ -610,6 +618,10 @@ impl ThreadView {
             crate::claude::bridge::respond(&req_id, false, "The session ended before the user answered.");
         }
         self.error = why;
+        for text in std::mem::take(&mut self.steering) {
+            let at = self.thread.notice(format!("The agent stopped before reading your message, so it was not sent: {text}"), false);
+            self.remeasure(at);
+        }
         self.connection = None;
         cx.emit(ThreadEvent::Exited(if self.error.is_some() { Some(1) } else { Some(0) }));
         cx.notify();
@@ -682,18 +694,16 @@ impl ThreadView {
             cx.notify();
             return;
         }
-        if let Some(at) = self.thread.sent(text.clone()) {
-            self.remeasure(at);
-        }
-        self.persist_entries();
-        self.list.scroll_to_end();
+        self.steering.push_back(text.clone());
         let reply = connection.request("_m4code/steer", json!({"sessionId": session, "text": text}));
         cx.spawn(async move |this, cx| {
             if reply.await.is_err() {
-                // The turn ended before the message reached it, so it is the next message instead; the chat already
-                // shows it.
+                // The turn ended before the message reached it, so it is the next message instead.
                 let _ = this.update(cx, |v, cx| {
-                    v.queue.push_front(Queued { text, shown: true, compact: false, by_user: true });
+                    if let Some(at) = v.steering.iter().position(|t| *t == text) {
+                        v.steering.remove(at);
+                    }
+                    v.queue.push_front(Queued { text, shown: false, compact: false, by_user: true });
                     v.send_next(cx);
                     cx.notify();
                 });
@@ -841,12 +851,14 @@ impl ThreadView {
         // Steers the agent never read: those it dropped by itself go as the next message, and those the user stopped
         // are written out so nothing they typed is lost.
         for text in steers_back("resend").into_iter().rev() {
-            self.queue.push_front(Queued { text, shown: true, compact: false, by_user: true });
+            self.queue.push_front(Queued { text, shown: false, compact: false, by_user: true });
         }
         for text in steers_back("unread") {
             let at = self.thread.notice(format!("The agent stopped before reading your message, so it was not sent: {text}"), false);
             self.remeasure(at);
         }
+        // Every steer was read, given back above, or lost with the agent; none waits past its turn.
+        self.steering.clear();
         self.persist_entries();
         if let Some((target, effort, mut message, mut by_agent)) = self.handoff_after_turn.take() {
             let queued = self.queue.drain(..).map(|q| q.text).collect::<Vec<_>>().join("\n\n");
@@ -1370,6 +1382,11 @@ impl ThreadView {
     }
 
     /// Replace what the composer holds, with the cursor after it so typing carries on from the end.
+    /// Messages steered into the running turn that the agent hasn't read yet.
+    pub(super) fn unread_steers(&self) -> impl Iterator<Item = &str> {
+        self.steering.iter().map(String::as_str)
+    }
+
     /// The user's messages waiting for the turn to end, with their place in `queue`.
     pub(super) fn waiting_messages(&self) -> Vec<(usize, &str)> {
         self.queue.iter().enumerate().filter(|(_, q)| q.by_user && !q.shown).map(|(i, q)| (i, q.text.as_str())).collect()
@@ -1754,6 +1771,59 @@ mod tests {
             assert_eq!(cache[&3].entity_id(), first, "a redraw or a streamed reply keeps the parse, so the row keeps its height");
             super::render::markdown_of(&mut cache, 4, "other", cx);
             assert_ne!(cache[&4].entity_id(), first, "each entry has its own");
+        });
+    }
+
+    #[gpui::test]
+    fn a_steer_joins_the_chat_where_the_agent_reads_it_not_where_it_was_sent(cx: &mut gpui::TestAppContext) {
+        use crate::harness::acp::Event;
+        use crate::store::FollowUp;
+        use serde_json::json;
+        cx.update(gpui_kit::init);
+        let dir = tempfile::tempdir().unwrap();
+        let start = super::Start {
+            record_id: String::new(),
+            harness: Harness::Claude,
+            all_models: vec![],
+            picked: vec![],
+            cwd: dir.path().to_path_buf(),
+            env: vec![],
+            mcp_servers: vec![],
+            meta: serde_json::Value::Null,
+            session_id: None,
+            mode: None,
+            options: vec![],
+            prompt: None,
+            prior_entries: vec![],
+            server: Some(("definitely-not-a-real-program-m4code".into(), vec![])),
+        };
+        let (view, cx) = cx.add_window_view(|window, cx| super::ThreadView::new(start, window, cx));
+        // An agent that never answers: the steer request goes out and waits. Its ends stay open for the rest of the
+        // run, because closing them fails the request from the connection's reader thread, which GPUI's test
+        // executor rejects as activity from outside it.
+        let (from_agent, to_client) = std::io::pipe().unwrap();
+        let (from_client, to_agent) = std::io::pipe().unwrap();
+        std::mem::forget((to_client, from_client));
+        let (tx, _events) = futures::channel::mpsc::unbounded();
+        let connection = crate::harness::acp::Connection::connect(from_agent, to_agent, None::<std::io::PipeReader>, tx);
+        let chunk = |kind: &str, text: &str| json!({"sessionUpdate": kind, "content": {"type": "text", "text": text}});
+        view.update(cx, |v, cx| {
+            v.connection = Some(std::rc::Rc::new(connection));
+            v.session_id = Some("s1".into());
+            v.phase = super::Phase::Ready;
+            v.working = true;
+            v.thread.entries.clear();
+            v.on_event(Event::Update(chunk("agent_message_chunk", "Hello wor")), cx);
+            v.send_as("stop".into(), FollowUp::Steer, cx);
+            assert_eq!(v.unread_steers().collect::<Vec<_>>(), ["stop"], "waits above the message box");
+            // What the agent was still writing when the steer went out.
+            v.on_event(Event::Update(chunk("agent_message_chunk", "ld.")), cx);
+            let mut read = chunk("user_message_chunk", "stop");
+            read["_meta"] = json!({"m4code": {"steer": true}});
+            v.on_event(Event::Update(read), cx);
+            v.on_event(Event::Update(chunk("agent_message_chunk", "Stopping.")), cx);
+            assert_eq!(v.thread.entries, [Entry::Agent("Hello world.".into()), Entry::User("stop".into()), Entry::Agent("Stopping.".into())]);
+            assert_eq!(v.unread_steers().count(), 0);
         });
     }
 
