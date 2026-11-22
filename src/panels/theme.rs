@@ -12,8 +12,6 @@ pub const TERMINAL_BG: u32 = PANEL_BG;
 pub const SIDEBAR_BG: u32 = PANEL_BG;
 /// Elevated dark surfaces (composer box, cards, popovers).
 pub const SURFACE_ELEVATED: u32 = 0x1a1a1a;
-/// A group of rows set apart on a panel, such as the right sidebar's sections. Dark enough that `ROW_HOVER` still shows.
-pub const CARD_BG: u32 = 0x161616;
 pub const SURFACE_HOVER: u32 = 0x222222;
 pub const BORDER: u32 = 0x242424;
 /// The faint outline that separates a panel from the window background.

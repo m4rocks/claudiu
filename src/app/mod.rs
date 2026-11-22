@@ -593,6 +593,8 @@ pub struct Workspace {
     pub window_title: String,
     /// The session being dragged in the sidebar (lifted in place while its ghost follows the cursor).
     pub dragging: Option<Id>,
+    /// The right sidebar card being dragged, lifted in place like a session row.
+    pub dragging_card: Option<crate::store::SideCard>,
     /// Pointer position at the last drag-over check, see `pointer_moved`.
     /// Sidebar reorder animation: last drawn order of the running rows, and the slides in flight.
     pub prev_current: Vec<Id>,
@@ -744,6 +746,7 @@ impl Workspace {
                 .collect(),
             window_title: String::new(),
             dragging: None,
+            dragging_card: None,
             drag_pos: None,
             prev_current: Vec::new(),
             slides: HashMap::new(),
