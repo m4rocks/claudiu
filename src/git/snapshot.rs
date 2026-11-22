@@ -190,7 +190,9 @@ mod tests {
 
     fn repo() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
-        for args in [&["init", "-q", "-b", "main"][..], &["config", "user.email", "t@t"], &["config", "user.name", "t"]] {
+        // Without `core.autocrlf false`, git on Windows (where it is usually on) writes the files these tests
+        // compare line by line back with CRLF endings.
+        for args in [&["init", "-q", "-b", "main"][..], &["config", "user.email", "t@t"], &["config", "user.name", "t"], &["config", "core.autocrlf", "false"]] {
             assert!(std::process::Command::new("git").args(args).current_dir(dir.path()).status().unwrap().success());
         }
         dir

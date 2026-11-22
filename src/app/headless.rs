@@ -8,6 +8,8 @@ use gpui::{TestAppContext, VisualTestContext};
 /// names a new one `fake-session`, and ends every prompt with the reply "ok". Needs python3 on the PATH.
 fn fake_agent(dir: &std::path::Path) -> (PathBuf, Vec<String>) {
     let script = dir.join("fake_agent.py");
+    // Its files are written with `newline="\n"`: Python on Windows would otherwise write CRLF, and the tests split
+    // and compare them by "\n".
     std::fs::write(&script, r#"import json, sys, os
 def send(m):
     sys.stdout.write(json.dumps(m) + "\n"); sys.stdout.flush()
@@ -25,13 +27,13 @@ for line in sys.stdin:
     elif method == "session/prompt":
         s = m["params"]["sessionId"]
         text = m["params"]["prompt"][0]["text"]
-        with open(__file__ + ".turns", "a") as log:
+        with open(__file__ + ".turns", "a", newline="\n") as log:
             log.write(json.dumps({"prompt": text, "pid": os.getpid()}) + "\n")
         # Every message is logged next to the script; one that says "edit" changes notes.txt, as an agent's turn would.
-        with open(__file__ + ".prompts", "a") as log:
+        with open(__file__ + ".prompts", "a", newline="\n") as log:
             log.write(text + "\n---\n")
         if "edit" in text:
-            with open(cwd + "/notes.txt", "w") as f:
+            with open(cwd + "/notes.txt", "w", newline="\n") as f:
                 f.write("one\nTWO\nthree\n")
         send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": s, "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "ok"}}}})
         if text in ["fill context", "/compact"]:
@@ -41,7 +43,7 @@ for line in sys.stdin:
         send({"jsonrpc": "2.0", "id": i, "result": {"sessions": [{"sessionId": "from-terminal", "cwd": m["params"]["cwd"], "title": "Started in a terminal"}]}})
     elif method == "session/load":
         cwd = m["params"]["cwd"]
-        with open(__file__ + ".prompts", "a") as log:
+        with open(__file__ + ".prompts", "a", newline="\n") as log:
             log.write("loaded " + m["params"]["sessionId"] + "\n---\n")
         send({"jsonrpc": "2.0", "id": i, "result": {}})
     else:
