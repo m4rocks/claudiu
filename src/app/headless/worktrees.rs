@@ -111,20 +111,24 @@ fn switching_between_worktrees_in_the_workspace() {
     // The panels ease open over `Reveal::MS` of real time, so the pane's grid keeps changing for that long; how far
     // it has got depends on how fast the machine ran the steps above. The grid read below must be the settled one.
 
-    // A bad name changes nothing; a typed one moves the session into the worktree Claude Code will make.
+    // A bad name changes nothing; a typed one moves the session into the worktree while showing a spinner in the branch chip.
     let quick = |name: &str| Act::QuickWorktree { main_checkout: repo_dir.clone(), name: name.into(), base: crate::git::worktree::Base::Current, for_home: false };
     step(&mut cx, &|ws, w, cx| ws.act(quick("bad name"), w, cx));
-    assert!(ws.read_with(&cx, |ws, app| ws.live_view(&session.id).and_then(|v| v.thread()).is_some_and(|v| v.read(app).handover.is_none())), "a bad name is refused");
+    assert!(ws.read_with(&cx, |ws, _| !ws.switching_worktree.contains_key(&session.id)), "a bad name is refused");
     step(&mut cx, &|ws, w, cx| ws.act(quick("fix-login"), w, cx));
     let worktree = crate::git::worktree::folder(&repo_dir, "fix-login");
-    let skeleton = |ws: &Workspace, app: &App| ws.live_view(&session.id).and_then(|v| v.thread()).and_then(|v| v.read(app).handover.as_ref().map(|h| h.message.clone()));
-    assert_eq!(ws.read_with(&cx, |ws, app| skeleton(ws, app)).as_deref(), Some("Switching to fix-login…"), "the skeleton names the worktree");
-    // Until the new process is up, the session stays shown and running behind its skeleton, never an empty pane.
+    let switching_to = |ws: &Workspace, app: &App| {
+        ws.live_view(&session.id).and_then(|v| v.thread()).and_then(|v| {
+            let t = v.read(app);
+            assert!(t.handover.is_none(), "worktree switch must not show a full-screen loading skeleton");
+            t.git.as_ref().filter(|g| g.busy).map(|g| g.primary.clone())
+        })
+    };
+    assert_eq!(ws.read_with(&cx, |ws, app| switching_to(ws, app)).as_deref(), Some("fix-login"), "the branch switcher shows the target worktree with a spinner");
     let moved_to = |folder: &std::path::Path, ws: &Workspace, app: &App| {
-        let loading = ws.live_view(&session.id).is_some_and(|v| v.is_loading(app));
+        let loading = ws.switching_worktree.contains_key(&session.id) || ws.live_view(&session.id).is_some_and(|v| v.is_loading(app));
         assert!(ws.active.as_ref() == Some(&session.id) && ws.is_running(&session.id, app), "mid-switch the session is not shown running");
         let moved = ws.store.session(&session.id).is_some_and(|r| r.cwd == folder);
-        assert!(loading || moved, "mid-switch the pane has no skeleton");
         moved && !loading
     };
     wait(&mut cx, "the switch", &|ws, app| moved_to(&worktree, ws, app));
@@ -163,11 +167,11 @@ fn switching_between_worktrees_in_the_workspace() {
     // The work file stays in the worktree the session leaves, so it asks first.
     wait(&mut cx, "the question", &|ws, _| matches!(&ws.modal, Some(Modal::Confirm { body, .. }) if body.contains("1 uncommitted file stays")));
     step(&mut cx, &|ws, w, cx| ws.act(Act::Dismiss, w, cx));
-    assert!(ws.read_with(&cx, |ws, app| ws.modal.is_none() && skeleton(ws, app).is_none() && active(ws).cwd == worktree), "cancelling leaves the session where it was, with no skeleton");
+    assert!(ws.read_with(&cx, |ws, app| ws.modal.is_none() && switching_to(ws, app).is_none() && active(ws).cwd == worktree), "cancelling leaves the session where it was, with no busy branch chip");
     step(&mut cx, &|ws, w, cx| ws.act(Act::SwitchWorktree { folder: repo_dir.clone(), base: Default::default() }, w, cx));
     wait(&mut cx, "the question again", &|ws, _| matches!(&ws.modal, Some(Modal::Confirm { .. })));
     step(&mut cx, &|ws, w, cx| ws.submit_modal(w, cx));
-    assert_eq!(ws.read_with(&cx, |ws, app| skeleton(ws, app)).as_deref(), Some("Switching to the main checkout…"));
+    assert!(ws.read_with(&cx, |ws, app| switching_to(ws, app).is_some()), "the branch chip shows loading during the switch back");
     wait(&mut cx, "the switch back", &|ws, app| moved_to(&repo_dir, ws, app));
     // The tab that moved into the worktree moves back; the ones that stayed in the main checkout are not under the
     // tree's root any more, so they stay.

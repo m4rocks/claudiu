@@ -29,6 +29,8 @@ pub enum Event {
     Update(Value),
     /// `session/request_permission`: answer it with `Connection::respond` and the request's id.
     Permission { id: Value, params: Value },
+    /// `elicitation/create` or `session/elicitation`: structured user-input question from the agent.
+    Elicitation { id: Value, params: Value },
     /// The agent stopped; the text is its last words on stderr, if any.
     Exited(String),
     /// A `session/prompt`'s reply. The thread queues it itself once the reply arrives, which is after the reader
@@ -167,13 +169,150 @@ impl Drop for Connection {
 }
 
 /// What m4code tells every agent about itself. It reads and writes files itself and runs no terminals for the
-/// agent, so the agent does those on its own.
+/// agent, so the agent does those on its own. Advertising `elicitation.form` enables native structured questions
+/// (e.g. Codex's `request_user_input` through `codex-acp`).
 pub fn initialize_params() -> Value {
     json!({
         "protocolVersion": 1,
-        "clientCapabilities": { "fs": { "readTextFile": false, "writeTextFile": false }, "terminal": false },
+        "clientCapabilities": {
+            "fs": { "readTextFile": false, "writeTextFile": false },
+            "terminal": false,
+            "elicitation": { "form": {} },
+        },
         "clientInfo": { "name": "m4code", "title": "m4code", "version": env!("CARGO_PKG_VERSION") },
     })
+}
+
+/// The answer to an ACP/MCP elicitation request: `accept` with typed `content`, `cancel`, or `decline`.
+pub fn elicitation_accept(content: serde_json::Map<String, Value>) -> Value {
+    json!({ "action": "accept", "content": content })
+}
+
+pub fn elicitation_cancel() -> Value {
+    json!({ "action": "cancel" })
+}
+
+pub fn elicitation_decline() -> Value {
+    json!({ "action": "decline" })
+}
+
+/// How an elicitation field's selected option value is serialized into `content`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ElicitationKind {
+    Choice,
+    MultiChoice,
+    Boolean,
+}
+
+impl ElicitationKind {
+    pub fn to_json_value(self, selected: &str) -> Value {
+        match self {
+            Self::Choice => Value::String(selected.to_string()),
+            Self::MultiChoice => json!([selected]),
+            Self::Boolean => Value::Bool(selected == "true"),
+        }
+    }
+}
+
+/// One parsed option from an ACP form elicitation request.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ElicitationOption {
+    pub value: String,
+    pub label: String,
+    pub description: Option<String>,
+}
+
+/// One parsed question field from an ACP form elicitation request.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ElicitationField {
+    pub title: String,
+    pub field: String,
+    pub kind: ElicitationKind,
+    pub options: Vec<ElicitationOption>,
+}
+
+fn parse_titled_options(entries: &[Value]) -> Vec<ElicitationOption> {
+    entries
+        .iter()
+        .filter_map(|item| {
+            let val = item["const"].as_str()?;
+            let label = item["title"].as_str().filter(|s| !s.trim().is_empty()).unwrap_or(val).to_string();
+            let description = item["description"].as_str().filter(|s| !s.trim().is_empty()).map(String::from);
+            Some(ElicitationOption { value: val.to_string(), label, description })
+        })
+        .collect()
+}
+
+fn parse_enum_options(entries: &[Value], names: Option<&Vec<Value>>) -> Vec<ElicitationOption> {
+    entries
+        .iter()
+        .enumerate()
+        .filter_map(|(i, v)| {
+            let val = v.as_str()?;
+            let label = names.and_then(|n| n.get(i)).and_then(Value::as_str).filter(|s| !s.trim().is_empty()).unwrap_or(val).to_string();
+            Some(ElicitationOption { value: val.to_string(), label, description: None })
+        })
+        .collect()
+}
+
+/// Extract all selectable question fields from an ACP form elicitation request, matching T3 Code's `parseElicitationForm`.
+pub fn parse_elicitation(params: &Value) -> Vec<ElicitationField> {
+    if params["mode"].as_str().is_some_and(|m| m != "form") {
+        return vec![];
+    }
+    let Some(props) = params.pointer("/requestedSchema/properties").and_then(Value::as_object) else {
+        return vec![];
+    };
+    let top_message = params["message"].as_str().map(str::trim).filter(|s| !s.is_empty());
+    let mut fields = Vec::new();
+    for (field, schema) in props {
+        let field_title = schema["title"]
+            .as_str()
+            .or_else(|| schema["description"].as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let title = match (top_message, field_title) {
+            (_, Some(t)) if props.len() > 1 => t.to_string(),
+            (Some(m), _) => m.to_string(),
+            (None, Some(t)) => t.to_string(),
+            (None, None) => "The agent has a question".to_string(),
+        };
+        let parsed = match schema["type"].as_str() {
+            Some("string") => {
+                let opts = if let Some(one_of) = schema["oneOf"].as_array() {
+                    parse_titled_options(one_of)
+                } else if let Some(enums) = schema["enum"].as_array() {
+                    parse_enum_options(enums, schema["enumNames"].as_array())
+                } else {
+                    vec![]
+                };
+                (!opts.is_empty()).then_some((ElicitationKind::Choice, opts))
+            }
+            Some("array") => {
+                let items = &schema["items"];
+                let opts = if let Some(any_of) = items["anyOf"].as_array() {
+                    parse_titled_options(any_of)
+                } else if let Some(enums) = items["enum"].as_array() {
+                    parse_enum_options(enums, items["enumNames"].as_array())
+                } else {
+                    vec![]
+                };
+                (!opts.is_empty()).then_some((ElicitationKind::MultiChoice, opts))
+            }
+            Some("boolean") => Some((
+                ElicitationKind::Boolean,
+                vec![
+                    ElicitationOption { value: "true".into(), label: "Yes".into(), description: None },
+                    ElicitationOption { value: "false".into(), label: "No".into(), description: None },
+                ],
+            )),
+            _ => None,
+        };
+        if let Some((kind, options)) = parsed {
+            fields.push(ElicitationField { title, field: field.clone(), kind, options });
+        }
+    }
+    fields
 }
 
 /// The answer to a permission request: the option picked, or none when the user declined to choose.
@@ -212,6 +351,9 @@ fn handle(message: Value, pending: &Pending, outgoing: &mpsc::Sender<Value>, eve
         }
         (Some("session/request_permission"), Some(id)) => {
             let _ = events.unbounded_send(Event::Permission { id, params: message["params"].clone() });
+        }
+        (Some("elicitation/create" | "session/elicitation"), Some(id)) => {
+            let _ = events.unbounded_send(Event::Elicitation { id, params: message["params"].clone() });
         }
         // Every other request gets an answer so the agent never waits for one: m4code offers no file system or
         // terminal, and extensions it doesn't know are refused.
@@ -318,5 +460,43 @@ mod tests {
     #[test]
     fn a_cancelled_permission_says_so() {
         assert_eq!(permission_outcome(None), json!({"outcome": {"outcome": "cancelled"}}));
+    }
+
+    #[test]
+    fn elicitation_parses_one_of_and_enum_options() {
+        let one_of = json!({
+            "message": "Which database?",
+            "requestedSchema": {
+                "type": "object",
+                "properties": {
+                    "db": {
+                        "type": "string",
+                        "oneOf": [
+                            {"const": "pg", "title": "PostgreSQL", "description": "Relational"},
+                            {"const": "sqlite", "title": "SQLite"}
+                        ]
+                    }
+                }
+            }
+        });
+        let fields = parse_elicitation(&one_of);
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].title, "Which database?");
+        assert_eq!(fields[0].field, "db");
+        assert_eq!(fields[0].kind, ElicitationKind::Choice);
+        assert_eq!(
+            fields[0].options,
+            vec![
+                ElicitationOption { value: "pg".into(), label: "PostgreSQL".into(), description: Some("Relational".into()) },
+                ElicitationOption { value: "sqlite".into(), label: "SQLite".into(), description: None },
+            ]
+        );
+        let mut content = serde_json::Map::new();
+        content.insert("db".into(), ElicitationKind::Choice.to_json_value("pg"));
+        content.insert("confirm".into(), ElicitationKind::Boolean.to_json_value("true"));
+        content.insert("tags".into(), ElicitationKind::MultiChoice.to_json_value("fast"));
+        assert_eq!(elicitation_accept(content), json!({"action": "accept", "content": {"db": "pg", "confirm": true, "tags": ["fast"]}}));
+        assert_eq!(elicitation_cancel(), json!({"action": "cancel"}));
+        assert_eq!(elicitation_decline(), json!({"action": "decline"}));
     }
 }

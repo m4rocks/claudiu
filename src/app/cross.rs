@@ -81,6 +81,12 @@ impl Workspace {
     pub(super) fn serve_requests(&mut self, requests: Vec<Request>, window: &mut Window, cx: &mut Context<Self>) {
         for mut req in requests.into_iter().filter(|r| r.deadline > crate::store::now()) {
             let prepared = self.prepare(&mut req, cx);
+            if prepared.is_ok() && req.tool == "ask_user" {
+                if let Err(why) = self.ask_user_in_thread(&req, cx) {
+                    answer(&req, false, why);
+                }
+                continue;
+            }
             if prepared.is_ok() && req.tool == "wait_subagent" && self.defer_subagent_wait(&req, cx) {
                 continue;
             }
@@ -120,6 +126,37 @@ impl Workspace {
         {
             return Err("Choose low, medium, high, xhigh or max effort.".into());
         }
+        Ok(())
+    }
+
+    /// Show an `ask_user` MCP tool call in the requester's chat view (and sidebar hover popover); `ThreadView::answer`
+    /// sends the bridge reply once the user clicks an option or declines.
+    fn ask_user_in_thread(&self, req: &Request, cx: &mut Context<Self>) -> Result<(), String> {
+        let thread = self.requester_thread(req)?;
+        let title = req.args["question"].as_str().map(str::trim).filter(|s| !s.is_empty()).ok_or("Give a non-empty `question`.")?.to_string();
+        let raw_options = req.args["options"].as_array().ok_or("Give at least one option in `options`.")?;
+        let options: Vec<crate::thread::QuestionOption> = raw_options
+            .iter()
+            .enumerate()
+            .filter_map(|(i, o)| {
+                let name = o["label"].as_str().or_else(|| o["name"].as_str()).or_else(|| o.as_str())?.trim();
+                if name.is_empty() {
+                    return None;
+                }
+                let description = o["description"].as_str().map(str::trim).filter(|s| !s.is_empty()).map(String::from);
+                Some(crate::thread::QuestionOption {
+                    id: format!("opt-{i}"),
+                    name: name.to_string(),
+                    description,
+                    kind: "allow_once".into(),
+                })
+            })
+            .collect();
+        if options.is_empty() {
+            return Err("Give at least one option with a non-empty `label`.".into());
+        }
+        let req_id = req.id.clone();
+        thread.update(cx, |v, cx| v.ask_bridge_question(req_id, title, options, cx));
         Ok(())
     }
 
@@ -211,7 +248,7 @@ impl Workspace {
                         format!("- id {} · {} · {project} · {state} · {}{}", s.id, s.display_title(), stamps(s.created_at, s.last_active), if me { " · this session" } else { "" })
                     })
                     .collect();
-                Ok(if lines.is_empty() { "No Claude Code sessions.".into() } else { lines.join("\n") })
+                Ok(if lines.is_empty() { "No coding sessions.".into() } else { lines.join("\n") })
             }
             "search_sessions" => {
                 let words: Vec<String> = req.args["query"].as_str().unwrap_or_default().to_lowercase().split_whitespace().map(String::from).collect();

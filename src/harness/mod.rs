@@ -75,6 +75,20 @@ pub struct Adapter {
     /// Whether the empty session opened only to read `configOptions[category == "model"]` should be deleted again.
     pub delete_model_session: bool,
     pub compact_command: Option<&'static str>,
+    /// Fallback permission modes shown before the adapter's ACP server reports its live list.
+    pub default_modes: fn() -> Vec<(String, String)>,
+    /// Fallback model entries shown before the adapter's ACP server reports its live catalog.
+    pub default_models: fn() -> Vec<CatalogModel>,
+}
+
+/// Default permission modes for ACP adapters that haven't reported a live mode list yet.
+pub(crate) fn standard_default_modes() -> Vec<(String, String)> {
+    vec![("default".into(), "Ask Before Editing".into()), ("fullAccess".into(), "Full Access".into())]
+}
+
+/// Default single placeholder model for an adapter before its ACP server reports a live catalog.
+pub(crate) fn default_model_entry(harness: Harness) -> Vec<CatalogModel> {
+    vec![CatalogModel { harness, id: String::new(), name: format!("{} (default)", harness.name()) }]
 }
 
 /// One value per harness, indexed exhaustively without hashing.

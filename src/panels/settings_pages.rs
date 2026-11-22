@@ -7,8 +7,8 @@ use gpui::{
 };
 use gpui_kit::component::input::{Input, InputState};
 
-use crate::app::{Act, HarnessDialog, Lookup, Modal, Workspace};
-use crate::claude::subagents::{Agent, AgentModel};
+use crate::app::{Act, Lookup, Modal, Workspace};
+use crate::claude::subagents::AgentModel;
 use crate::harness::Harness;
 use crate::panels::logos;
 use crate::panels::theme::{self, hsla};
@@ -416,8 +416,8 @@ impl Workspace {
         let viewport = window.viewport_size();
         let scaled = crate::panels::scale::px;
 
-        let body: Div = match picking {
-            HarnessDialog::Claude(search) => {
+        let body: Div = match (picking.harness, &picking.search) {
+            (Harness::Claude, search) => {
                 let enabled = subagents.enabled.contains(&Harness::Claude);
                 let mut col = div()
                     .flex()
@@ -519,13 +519,8 @@ impl Workspace {
                     .child(faint("Comma-separated skill names to hide from Claude Code's context. Existing entries in settings.json win."))
                     .child(Input::new(skills_field))
             }
-            HarnessDialog::Agent(agent, search) => {
-                let agent = *agent;
-                let harness = match agent {
-                    Agent::Codex => Harness::Codex,
-                    Agent::OpenCode => Harness::OpenCode,
-                    Agent::Antigravity => Harness::Antigravity,
-                };
+            (harness, search) => {
+                let agent = harness.agent().expect("non-Claude harness has an Agent");
                 let provider = agent.provider();
                 let key = agent.key();
                 let enabled = subagents.enabled.contains(&harness);

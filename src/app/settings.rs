@@ -1,7 +1,6 @@
 //! The pages of the Settings dialog and its keyboard handling.
 
 use super::*;
-use crate::claude::subagents::Agent;
 use gpui::KeyDownEvent;
 
 /// A category in the Settings dialog's sidebar, in display order.
@@ -225,28 +224,11 @@ impl Workspace {
 
     /// Opens a harness's configuration popup over the Harnesses page.
     pub(crate) fn open_harness_dialog(&mut self, harness: Harness, window: &mut Window, cx: &mut Context<Self>) {
-        match harness {
-            Harness::Claude => {
-                let search = self.modal_input_then("", "Search models", Self::close_harness_dialog, window, cx);
-                if let Some(Modal::Settings { subagents, .. }) = self.modal.as_mut() {
-                    subagents.picking = Some(HarnessDialog::Claude(search));
-                }
-                self.load_models(cx);
-            }
-            Harness::Codex | Harness::OpenCode | Harness::Antigravity => {
-                let agent = match harness {
-                    Harness::Codex => Agent::Codex,
-                    Harness::OpenCode => Agent::OpenCode,
-                    Harness::Antigravity => Agent::Antigravity,
-                    Harness::Claude => unreachable!(),
-                };
-                let search = self.modal_input_then("", "Search models", Self::close_harness_dialog, window, cx);
-                if let Some(Modal::Settings { subagents, .. }) = self.modal.as_mut() {
-                    subagents.picking = Some(HarnessDialog::Agent(agent, search));
-                }
-                self.load_models(cx);
-            }
+        let search = self.modal_input_then("", "Search models", Self::close_harness_dialog, window, cx);
+        if let Some(Modal::Settings { subagents, .. }) = self.modal.as_mut() {
+            subagents.picking = Some(HarnessDialog { harness, search });
         }
+        self.load_models(cx);
     }
 
     /// Closes the harness popup, keeping what was switched; Settings' Save persists it.

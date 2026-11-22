@@ -33,9 +33,9 @@ impl Workspace {
                         Some(cwd) => {
                             let what = if op == GitOp::Pull { "Pull" } else { "Commit & Push" };
                             ws.show_toast(
-                                format!("{what} hit a conflict. Ask Claude to fix it?"),
+                                format!("{what} hit a conflict. Ask an agent to fix it?"),
                                 true,
-                                Some(("Ask Claude".into(), Act::FixGitWithClaude(cwd))),
+                                Some(("Ask agent".into(), Act::FixGitWithClaude(cwd))),
                                 cx,
                             );
                         }

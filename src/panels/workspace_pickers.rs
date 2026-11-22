@@ -446,6 +446,31 @@ impl Workspace {
                 }
                 ("settings-effort-dialog", "EFFORT", list.into_any_element(), Some(choices))
             }
+            WorkspacePicker::HomePermission => {
+                let harness = self.home_selected_model().harness;
+                let (current, _) = self.home_selected_permission();
+                let modes = self.store.data.settings.modes_for(harness);
+                let mut choices = picker::Choices::new(&self.picker_nav, "");
+                let mut list = choices.list("home-perm-list").max_h(px(340.0));
+                for (i, (id, name)) in modes.into_iter().enumerate() {
+                    let selected = current == id;
+                    let display = picker::format_mode_name(&id, &name);
+                    let desc = picker::permission_description(&id).to_string();
+                    let lead = icon(IconName::Lock, 12.0).text_color(if selected { accent } else { hsla(theme::TEXT_FAINT) }).into_any_element();
+                    let pick_id = id.clone();
+                    let row = picker::row(
+                        gpui::SharedString::from(format!("home-perm-{i}")),
+                        Some(lead),
+                        display,
+                        Some(desc),
+                        None,
+                        selected,
+                        false,
+                    );
+                    list = list.child(choices.add(row, move |ws, window, cx| ws.act(Act::HomeSelectPermission(pick_id.clone()), window, cx), cx));
+                }
+                ("home-perm-dialog", "PERMISSION MODE", list.into_any_element(), Some(choices))
+            }
             WorkspacePicker::SettingsPermission => {
                 let Some(Modal::Settings { default_model, permission, .. }) = &self.modal else { return None };
                 let current = permission.clone();

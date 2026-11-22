@@ -83,11 +83,11 @@ fn dropdowns_switch_on_one_click_and_load_all_harness_models() {
     };
 
     // Click the Welcome Model chip to open HomeModel, then read its exact painted bounds to locate the neighboring
-    // Project chip right beside it.
-    let (model_pos, project_pos) = {
-        // Welcome composer is centered in the main pane (x=284..996, y≈460). Scan horizontally for HomeModel first.
+    // Permission chip right beside it.
+    let (model_pos, neighbor_pos) = {
+        // Welcome composer is shifted slightly above center in the main pane. Scan horizontally for HomeModel first.
         let mut found_model = None;
-        for y in (400..520).step_by(12) {
+        for y in (340..520).step_by(12) {
             for x in (340..480).step_by(20) {
                 click(&mut cx, x as f32, y as f32);
                 if ws.read_with(&cx, |ws, _| matches!(ws.picker_kind(), Some(crate::app::WorkspacePicker::HomeModel { .. }))) {
@@ -104,15 +104,15 @@ fn dropdowns_switch_on_one_click_and_load_all_harness_models() {
         ((mx, my), (mright + 36.0, my))
     };
 
-    // While HomeModel is open, a SINGLE click on the neighboring Project chip must dismiss HomeModel and open Project.
-    click(&mut cx, project_pos.0, project_pos.1);
+    // While HomeModel is open, a SINGLE click on the neighboring Permission chip must dismiss HomeModel and open HomePermission.
+    click(&mut cx, neighbor_pos.0, neighbor_pos.1);
     assert!(
-        ws.read_with(&cx, |ws, _| matches!(ws.picker_kind(), Some(crate::app::WorkspacePicker::Project { mode: crate::app::ProjectPickerMode::Home, .. }))),
+        ws.read_with(&cx, |ws, _| matches!(ws.picker_kind(), Some(crate::app::WorkspacePicker::HomePermission))),
         "clicking another trigger while a dropdown is open must switch immediately in one click"
     );
 
-    // Clicking the Project chip again while Project is open toggles it closed.
-    click(&mut cx, project_pos.0, project_pos.1);
+    // Clicking the Permission chip again while HomePermission is open toggles it closed.
+    click(&mut cx, neighbor_pos.0, neighbor_pos.1);
     assert!(ws.read_with(&cx, |ws, _| ws.picker.is_none()), "clicking the active trigger again toggles its dropdown closed");
 
     // Clicking Model again opens HomeModel cleanly.

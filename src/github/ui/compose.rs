@@ -75,7 +75,7 @@ impl GithubView {
                 }
                 // conflicts / behind
                 if pr.mergeable == "CONFLICTING" {
-                    rows = rows.child(line(IconName::CircleX, RED, "This branch has conflicts".into(), Some("Resolve them before merging (ask Claude, or check the branch out).".into())));
+                    rows = rows.child(line(IconName::CircleX, RED, "This branch has conflicts".into(), Some("Resolve them before merging (ask an agent, or check the branch out).".into())));
                 } else if pr.merge_state == "BEHIND" && info.can_write() {
                     rows = rows.child(line(IconName::CircleDot, YELLOW, "This branch is out of date with the base branch".into(), None));
                     actions = actions.child(button("gh-update-branch", "Update branch", false).on_click(go(cx, GhAct::UpdateBranch)));

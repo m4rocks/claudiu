@@ -124,23 +124,15 @@ impl Settings {
         harness.key()
     }
 
-    /// Permission modes `(id, name)` available for `harness`: the live list reported by its ACP adapter, or sensible
-    /// fallback defaults until its adapter answers.
+    /// Permission modes `(id, name)` available for `harness`: the live list reported by its ACP adapter, or the
+    /// adapter's fallback defaults until it answers.
     pub fn modes_for(&self, harness: crate::harness::Harness) -> Vec<(String, String)> {
         if let Some(modes) = self.harness_modes.get(Self::harness_key(harness))
             && !modes.is_empty()
         {
             return modes.clone();
         }
-        match harness {
-            crate::harness::Harness::Claude => crate::claude::defaults::PermissionMode::ALL
-                .into_iter()
-                .map(|m| (m.acp_id().to_string(), m.label().to_string()))
-                .collect(),
-            crate::harness::Harness::Codex | crate::harness::Harness::OpenCode | crate::harness::Harness::Antigravity => {
-                vec![("default".into(), "Ask Before Editing".into()), ("fullAccess".into(), "Full Access".into())]
-            }
-        }
+        (harness.adapter().default_modes)()
     }
 
     /// Update the cached permission modes for `harness`; returns `true` when the list actually changed.
@@ -197,12 +189,7 @@ impl Settings {
         for harness in Harness::ALL.into_iter().filter(|h| enabled.contains(h)) {
             let catalog = self.harness_models(harness);
             if catalog.is_empty() {
-                match harness {
-                    Harness::Claude => out.extend(keep_picked(CatalogModel::default_claude_models(), &self.claude_picked, |model| &model.id)),
-                    Harness::Codex | Harness::OpenCode | Harness::Antigravity => {
-                        out.push(CatalogModel { harness, id: String::new(), name: format!("{} (default)", harness.name()) });
-                    }
-                }
+                out.extend(keep_picked((harness.adapter().default_models)(), self.picked_models(harness), |model| &model.id));
             } else {
                 let all = catalog.iter().map(|m| CatalogModel { harness, id: m.id.clone(), name: m.name.clone() }).collect();
                 out.extend(keep_picked(all, self.picked_models(harness), |m| &m.id));
@@ -236,8 +223,14 @@ impl Settings {
 
     /// Default model for new sessions (across all enabled harnesses).
     pub fn default_model(&self) -> crate::harness::CatalogModel {
-        let all = self.aggregated_models();
-        Self::resolve_model(&all, self.harness, self.new_session.model.as_deref())
+        let enabled = self.enabled_harnesses_list();
+        let all = self.aggregated_models_for(&enabled);
+        let (preferred, model_id) = if enabled.contains(&self.harness) {
+            (self.harness, self.new_session.model.as_deref())
+        } else {
+            (enabled.first().copied().unwrap_or(self.harness), None)
+        };
+        Self::resolve_model(&all, preferred, model_id)
     }
     /// Harnesses enabled by the user (Settings → Harnesses). Defaults to all supported harnesses equally when none
     /// have been explicitly stored yet.

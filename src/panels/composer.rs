@@ -4,9 +4,10 @@
 use gpui::{AnyElement, Div, ElementId, InteractiveElement, IntoElement, ParentElement, SharedString, Stateful, Styled, div, prelude::FluentBuilder, px};
 use gpui_kit::assets::IconName;
 
-use crate::panels::scale;
+use crate::harness::Harness;
+use crate::panels::{logos, picker, scale};
 use crate::panels::theme::{self, hsla};
-use crate::panels::widgets::{button, button_disabled, icon};
+use crate::panels::widgets::{Anchor, button, button_disabled, icon};
 
 pub fn can_send(text: &str) -> bool {
     !text.trim().is_empty()
@@ -16,6 +17,42 @@ pub fn send_button(id: impl Into<SharedString>, enabled: bool) -> Stateful<Div> 
     let id = id.into();
     let button = if enabled { button(id, "Send", true) } else { button_disabled(id, "Send") };
     button.h(px(26.0)).px(px(12.0))
+}
+
+/// The single shared message box used by both the Welcome screen and the Chat view:
+/// optional `top` (a waiting question), `input` area, left footer (`model`, `permission`, `git`, plus any
+/// context-specific `extra_chips`), and right footer (`extra_actions` + `send`).
+pub struct Composer {
+    pub lit: bool,
+    pub top: Option<AnyElement>,
+    pub input: AnyElement,
+    pub model: AnyElement,
+    pub permission: Option<AnyElement>,
+    pub project: Option<AnyElement>,
+    pub git: Option<AnyElement>,
+    pub extra_chips: Vec<AnyElement>,
+    pub extra_actions: Vec<AnyElement>,
+    pub send: AnyElement,
+}
+
+pub fn render(parts: Composer) -> Div {
+    let mut chips = Vec::with_capacity(4 + parts.extra_chips.len());
+    chips.push(parts.model);
+    if let Some(permission) = parts.permission {
+        chips.push(permission);
+    }
+    if let Some(project) = parts.project {
+        chips.push(project);
+    }
+    if let Some(git) = parts.git {
+        chips.push(git);
+    }
+    chips.extend(parts.extra_chips);
+
+    let mut actions = parts.extra_actions;
+    actions.push(parts.send);
+
+    frame(parts.lit, parts.top, parts.input, chips, actions)
 }
 
 /// The box: `top` (a question waiting for an answer) above `input`, then `chips` on the left of the footer and
@@ -69,6 +106,27 @@ pub fn disabled_chip(id: impl Into<ElementId>) -> Stateful<Div> {
 
 fn chip_shape(id: impl Into<ElementId>) -> Stateful<Div> {
     div().id(id).h(px(26.0)).px(px(8.0)).rounded(px(6.0)).border_1().flex().items_center().gap(px(5.0)).text_size(scale::px(11.5))
+}
+
+/// Model + effort chip shared by both composers.
+pub fn model_chip(id: impl Into<ElementId>, open: bool, anchor: &Anchor, harness: Harness, label: impl Into<SharedString>, effort: Option<String>) -> Stateful<Div> {
+    chip(id, open)
+        .relative()
+        .child(anchor.probe())
+        .child(logos::draw(logos::for_harness(harness), 11.0, hsla(theme::TEXT_DIM)))
+        .child(div().max_w(px(210.0)).overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(hsla(theme::TEXT)).child(label.into()))
+        .when_some(effort, |d, badge| {
+            d.child(div().px(px(5.0)).rounded(px(4.0)).bg(hsla(0x1f1f22)).text_size(scale::px(10.0)).text_color(hsla(theme::TEXT_DIM)).child(badge))
+        })
+        .child(icon(IconName::ChevronDown, 10.5).text_color(hsla(theme::TEXT_FAINT)))
+}
+
+/// Permission mode chip shared by both composers, always formatted in plain English.
+pub fn permission_chip(id: impl Into<ElementId>, open: bool, mode_id: &str, raw_name: &str) -> Stateful<Div> {
+    chip(id, open)
+        .child(icon(IconName::Lock, 11.0).text_color(hsla(theme::TEXT_DIM)))
+        .child(div().text_color(hsla(theme::TEXT_DIM)).child(picker::format_mode_name(mode_id, raw_name)))
+        .child(icon(IconName::ChevronDown, 10.5).text_color(hsla(theme::TEXT_FAINT)))
 }
 
 /// What the branch chip shows: the branch (or worktree) and, in a linked worktree, its name; a spinner `tail` while

@@ -15,6 +15,11 @@ pub fn managed_compaction_config(inherited: Option<&str>, session: Option<&str>)
     let options = compaction.as_object_mut().ok_or("OpenCode compaction config must be an object.")?;
     options.insert("auto".into(), json!(false));
     options.insert("background".into(), json!(false));
+    // Disable OpenCode's built-in `question` tool (not supported over ACP) so the model uses m4code's `ask_user`.
+    let permission = config.entry("permission").or_insert_with(|| json!({}));
+    if let Some(perms) = permission.as_object_mut() {
+        perms.insert("question".into(), json!("deny"));
+    }
     Ok(Value::Object(config).to_string())
 }
 
@@ -25,6 +30,8 @@ pub const ADAPTER: Adapter = Adapter {
     reopen: Reopen::Load,
     delete_model_session: true,
     compact_command: Some("compact"),
+    default_modes: super::standard_default_modes,
+    default_models: || super::default_model_entry(super::Harness::OpenCode),
 };
 
 #[cfg(test)]
@@ -40,6 +47,7 @@ mod tests {
         assert_eq!(value["model"], "provider/model");
         assert_eq!(value["compaction"], json!({"auto":false,"background":false,"keep":{"tokens":24000}}));
         assert_eq!(value["permission"]["*"], "deny");
+        assert_eq!(value["permission"]["question"], "deny");
         assert!(value["provider"]["local"].is_object());
         assert!(managed_compaction_config(Some("[]"), None).is_err());
         assert!(managed_compaction_config(Some(r#"{"compaction":false}"#), None).is_err());

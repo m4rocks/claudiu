@@ -1,7 +1,7 @@
 //! The Welcome screen: the main area when no session is shown.
 
 use gpui::{
-    AnyElement, ClickEvent, Context, FontWeight, InteractiveElement, IntoElement, MouseButton, MouseDownEvent,
+    ClickEvent, Context, FontWeight, InteractiveElement, IntoElement, MouseButton, MouseDownEvent,
     ParentElement, StatefulInteractiveElement, Styled, Window, div,
     prelude::FluentBuilder, px,
 };
@@ -10,7 +10,7 @@ use crate::app::{
     Act, GitPickerTarget, ProjectPickerMode, Workspace, WorkspacePicker,
 };
 use gpui_kit::component::input::Textarea;
-use crate::panels::{composer, logos};
+use crate::panels::composer;
 use crate::panels::theme::{self, hsla};
 use gpui_kit::assets::IconName;
 use crate::panels::widgets::{
@@ -22,6 +22,7 @@ impl Workspace {
         use gpui::Focusable;
         let scaled = crate::panels::scale::px;
         let chosen_model = self.home_selected_model();
+        let (perm_id, perm_name) = self.home_selected_permission();
 
         let project = self.home_selected_project().cloned();
         let target_cwd = self.home_target_cwd();
@@ -54,31 +55,35 @@ impl Workspace {
                 composer::git_chip("home-git", open, primary, linked, tail)
                     .dropdown(cx, move |ws, at, window, cx| {
                         ws.open_git_picker(pid.clone(), cwd.clone(), GitPickerTarget::Home, at, window, cx);
-                    }),
+                    })
+                    .into_any_element(),
             )
         });
 
         let model_open = matches!(self.picker_kind(), Some(WorkspacePicker::HomeModel { .. }));
         let effort_badge = crate::thread::short_effort_label(self.home.effort.name());
         let model_anchor = self.home.model_anchor.clone();
-        let model_chip = composer::chip("home-model", model_open)
-            .relative()
-            .child(model_anchor.probe())
-            .child(logos::draw(logos::for_harness(chosen_model.harness), 11.0, hsla(theme::TEXT_DIM)))
-            .child(div().max_w(px(190.0)).overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(hsla(theme::TEXT)).child(chosen_model.name.clone()))
-            .child(div().px(px(5.0)).rounded(px(4.0)).bg(hsla(0x1f1f22)).text_size(scaled(10.0)).text_color(hsla(theme::TEXT_DIM)).child(effort_badge))
-            .child(icon(IconName::ChevronDown, 10.5).text_color(hsla(theme::TEXT_FAINT)))
+        let model_chip = composer::model_chip("home-model", model_open, &model_anchor, chosen_model.harness, chosen_model.name.clone(), Some(effort_badge))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |ws, _: &MouseDownEvent, window, cx| {
                     cx.stop_propagation();
                     ws.open_home_model_picker(model_anchor.below(), window, cx);
                 }),
-            );
+            )
+            .into_any_element();
+
+        let perm_open = matches!(self.picker_kind(), Some(WorkspacePicker::HomePermission));
+        let perm_chip = composer::permission_chip("home-mode", perm_open, &perm_id, &perm_name)
+            .dropdown(cx, |ws, at, _window, cx| {
+                ws.open_home_permission_picker(at, cx);
+            })
+            .into_any_element();
 
         let can_send = composer::can_send(self.home.prompt.read(cx).value().as_ref());
         let start_btn = composer::send_button("home-launch", can_send)
-            .when(can_send, |d| d.on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::HomeLaunch, window, cx))));
+            .when(can_send, |d| d.on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::HomeLaunch, window, cx))))
+            .into_any_element();
 
         let focused = self.home.prompt.focus_handle(cx).is_focused(window);
         let input = composer::input_area()
@@ -86,14 +91,26 @@ impl Workspace {
             .on_mouse_down(MouseButton::Left, cx.listener(|ws, _, window, cx| ws.home.prompt.update(cx, |p, cx| p.focus(window, cx))))
             .child(Textarea::new(&self.home.prompt).appearance(false))
             .into_any_element();
-        let chips: Vec<AnyElement> = [Some(model_chip.into_any_element()), Some(project_chip.into_any_element()), git_chip.map(IntoElement::into_any_element)].into_iter().flatten().collect();
-        let composer = composer::frame(focused, None, input, chips, vec![start_btn.into_any_element()]).max_w(px(680.0));
+        let composer = composer::render(composer::Composer {
+            lit: focused,
+            top: None,
+            input,
+            model: model_chip,
+            permission: Some(perm_chip),
+            project: Some(project_chip.into_any_element()),
+            git: git_chip,
+            extra_chips: vec![],
+            extra_actions: vec![],
+            send: start_btn,
+        })
+        .max_w(px(680.0));
 
         div()
             .id("home-root")
             .relative()
             .size_full()
             .px(px(28.0))
+            .pb(px(96.0))
             .flex()
             .flex_col()
             .items_center()

@@ -88,6 +88,7 @@ fn feature_of(tool: &str) -> Option<&'static str> {
         "attach_github" | "detach_github" => Some("github"),
         "link_session" | "unlink_session" => Some("sessions"),
         "set_model" | "list_models" => Some("model"),
+        "ask_user" => Some("ask_user"),
         _ if BRIDGE_TOOLS.contains(&tool) || SUBAGENT_TOOLS.contains(&tool) => Some("sessions"),
         _ => None,
     }
@@ -108,10 +109,13 @@ pub(crate) const SUBAGENT_TOOLS: [&str; 5] = ["spawn_subagent", "list_subagents"
 
 const BRIDGE_TOOLS: [&str; 6] = ["list_code_sessions", "read_code_session", "search_sessions", "search_projects", "start_code_session", "switch_worktree"];
 
+/// Interactive UI tools served by m4code across every harness (including ones whose native question tool isn't bridged over ACP).
+const INTERACTIVE_TOOLS: [&str; 1] = ["ask_user"];
+
 /// `mcp__<server>__<tool>` names allowed per process so Claude Code adds no prompt of its own: m4code's own tools only
 /// change what m4code shows, and the cross-session tools are limited to what the user asks of the model.
 pub fn allowed_tools(off: &[&str]) -> Vec<String> {
-    OWN_TOOLS.iter().copied().chain(MODEL_TOOLS).chain(BRIDGE_TOOLS).chain(SUBAGENT_TOOLS).filter(|t| !is_off(off, t)).map(|t| format!("mcp__m4code__{t}")).collect()
+    OWN_TOOLS.iter().copied().chain(MODEL_TOOLS).chain(INTERACTIVE_TOOLS).chain(BRIDGE_TOOLS).chain(SUBAGENT_TOOLS).filter(|t| !is_off(off, t)).map(|t| format!("mcp__m4code__{t}")).collect()
 }
 
 /// Whether a tool call's title is one of m4code's own tools and nothing else, as a harness names it
@@ -120,7 +124,7 @@ pub fn allowed_tools(off: &[&str]) -> Vec<String> {
 /// command or a file path can contain the same words.
 pub fn is_own_tool(title: &str) -> bool {
     let title = title.trim();
-    OWN_TOOLS.iter().chain(&MODEL_TOOLS).chain(&BRIDGE_TOOLS).chain(&SUBAGENT_TOOLS).any(|tool| {
+    OWN_TOOLS.iter().chain(&MODEL_TOOLS).chain(&INTERACTIVE_TOOLS).chain(&BRIDGE_TOOLS).chain(&SUBAGENT_TOOLS).any(|tool| {
         ["mcp__m4code__", "m4code: ", "m4code_", "m4code.", "m4code/", "m4code__"].iter().any(|prefix| title.strip_prefix(prefix) == Some(tool))
     })
 }
@@ -197,6 +201,9 @@ fn instructions(off: &[&str]) -> String {
         text += BRIDGE_INSTRUCTIONS;
         text += SUBAGENT_INSTRUCTIONS;
     }
+    if on("ask_user") {
+        text += " To ask the user a multiple-choice question in m4code's UI, call ask_user with the question and options instead of any built-in question tool.";
+    }
     text
 }
 
@@ -253,14 +260,14 @@ fn serve(input: impl BufRead, mut out: impl Write, record: &str, data: &Path, of
                 "instructions": instructions(off),
             })),
             "ping" => Ok(json!({})),
-            "tools/list" => Ok(json!({ "tools": own_tools().into_iter().chain(model_tools()).chain(bridge_tools()).chain(subagent_tools()).filter(|t| !is_off(off, t["name"].as_str().unwrap_or_default())).collect::<Vec<_>>() })),
+            "tools/list" => Ok(json!({ "tools": own_tools().into_iter().chain(model_tools()).chain(interactive_tools()).chain(bridge_tools()).chain(subagent_tools()).filter(|t| !is_off(off, t["name"].as_str().unwrap_or_default())).collect::<Vec<_>>() })),
             "tools/call" => Ok(match msg["params"]["name"].as_str().filter(|tool| !is_off(off, tool)) {
                 Some("attach_github") => attach_github(&msg["params"], record, &attach_dir(data)),
                 Some("detach_github") => detach_github(&msg["params"], record, &attach_dir(data)),
                 Some("link_session") => link_session(&msg["params"], record, &attach_dir(data), "link"),
                 Some("unlink_session") => link_session(&msg["params"], record, &attach_dir(data), "unlink"),
                 Some("show_visual") => reply("Visuals aren't available in this session (m4code's mod isn't loaded).", true),
-                Some(tool) if BRIDGE_TOOLS.contains(&tool) || MODEL_TOOLS.contains(&tool) || SUBAGENT_TOOLS.contains(&tool) => match ask(tool, &msg["params"]["arguments"]) {
+                Some(tool) if INTERACTIVE_TOOLS.contains(&tool) || BRIDGE_TOOLS.contains(&tool) || MODEL_TOOLS.contains(&tool) || SUBAGENT_TOOLS.contains(&tool) => match ask(tool, &msg["params"]["arguments"]) {
                     Ok(text) => reply(&text, false),
                     Err(text) => reply(&text, true),
                 },
@@ -425,6 +432,34 @@ fn bridge_tools() -> Vec<Value> {
             }),
         ),
     ]
+}
+
+fn interactive_tools() -> Vec<Value> {
+    vec![json!({
+        "name": "ask_user",
+        "description": "Ask the user a multiple-choice question in m4code's UI and wait for their answer. Use this instead of any built-in question tool.",
+        "_meta": { "anthropic/alwaysLoad": true },
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "question": { "type": "string", "description": "The question to ask the user" },
+                "options": {
+                    "type": "array",
+                    "minItems": 1,
+                    "description": "Selectable choices shown to the user",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "label": { "type": "string", "description": "Short option label" },
+                            "description": { "type": "string", "description": "Optional explanation of this option" }
+                        },
+                        "required": ["label"]
+                    }
+                }
+            },
+            "required": ["question", "options"]
+        }
+    })]
 }
 
 fn reply(text: &str, is_error: bool) -> Value {
@@ -603,15 +638,15 @@ mod tests {
         let names: Vec<_> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert_eq!(
             names,
-            ["attach_github", "detach_github", "link_session", "unlink_session", "show_visual", "list_models", "set_model", "list_code_sessions", "read_code_session", "search_sessions", "search_projects", "start_code_session", "switch_worktree", "spawn_subagent", "list_subagents", "send_subagent_message", "wait_subagent", "stop_subagent"]
+            ["attach_github", "detach_github", "link_session", "unlink_session", "show_visual", "list_models", "set_model", "ask_user", "list_code_sessions", "read_code_session", "search_sessions", "search_projects", "start_code_session", "switch_worktree", "spawn_subagent", "list_subagents", "send_subagent_message", "wait_subagent", "stop_subagent"]
         );
         let upfront: Vec<_> = tools.iter().filter(|t| t["_meta"]["anthropic/alwaysLoad"] == true).map(|t| t["name"].as_str().unwrap()).collect();
-        assert_eq!(upfront, ["attach_github", "detach_github", "link_session", "unlink_session"], "show_visual and the session-reaching tools stay deferred");
+        assert_eq!(upfront, ["attach_github", "detach_github", "link_session", "unlink_session", "ask_user"], "show_visual and the session-reaching tools stay deferred");
         assert_eq!(r[1]["result"]["content"][0]["text"], "read_code_session \"x\"");
         assert_eq!(r[1]["result"]["isError"], false);
         assert_eq!(r[2]["result"]["content"][0]["text"], "The user declined.");
         assert_eq!(r[2]["result"]["isError"], true);
-        assert_eq!(allowed_tools(&[]).len(), BRIDGE_TOOLS.len() + SUBAGENT_TOOLS.len() + OWN_TOOLS.len() + MODEL_TOOLS.len());
+        assert_eq!(allowed_tools(&[]).len(), BRIDGE_TOOLS.len() + SUBAGENT_TOOLS.len() + OWN_TOOLS.len() + MODEL_TOOLS.len() + INTERACTIVE_TOOLS.len());
         assert!(allowed_tools(&[]).contains(&"mcp__m4code__set_model".to_string()), "switching models asks nothing either");
         assert!(allowed_tools(&[]).contains(&"mcp__m4code__show_visual".to_string()));
     }
@@ -774,7 +809,7 @@ mod tests {
     #[test]
     fn with_nothing_off_the_server_offers_every_tool_and_all_the_text() {
         let (names, text) = offer(&[]);
-        assert_eq!(names.len(), 18);
+        assert_eq!(names.len(), 19);
         for part in [INTRO, GITHUB_INSTRUCTIONS, LINK_INSTRUCTIONS, VISUAL_INSTRUCTIONS, BRIDGE_INSTRUCTIONS] {
             assert!(text.contains(part));
         }
@@ -784,30 +819,30 @@ mod tests {
     #[test]
     fn each_feature_takes_its_tools_and_its_text_away() {
         let (names, text) = offer(&["visual"]);
-        assert!(!names.contains(&"show_visual".to_string()) && names.len() == 17);
+        assert!(!names.contains(&"show_visual".to_string()) && names.len() == 18);
         assert!(!text.contains("Visual:") && !text.contains("show_visual"));
 
         let (names, text) = offer(&["github"]);
-        assert!(!names.iter().any(|n| n.ends_with("_github")) && names.len() == 16);
+        assert!(!names.iter().any(|n| n.ends_with("_github")) && names.len() == 17);
         assert!(!text.contains("attach_github"));
 
         let (names, text) = offer(&["sessions"]);
         for gone in ["link_session", "unlink_session", "list_code_sessions", "read_code_session", "search_sessions", "search_projects", "start_code_session", "switch_worktree", "spawn_subagent", "list_subagents", "send_subagent_message", "wait_subagent", "stop_subagent"] {
             assert!(!names.contains(&gone.to_string()), "{gone}");
         }
-        assert_eq!(names.len(), 5);
+        assert_eq!(names.len(), 6);
         assert!(!text.contains("link_session") && !text.contains("start_code_session"));
 
         let (names, text) = offer(&["model"]);
-        assert!(!names.contains(&"set_model".to_string()) && !names.contains(&"list_models".to_string()) && names.len() == 16);
+        assert!(!names.contains(&"set_model".to_string()) && !names.contains(&"list_models".to_string()) && names.len() == 17);
         assert!(!text.contains("set_model") && !text.contains("list_models") && !text.contains("Never switch models"));
     }
 
     #[test]
-    fn with_every_feature_off_only_the_opening_is_left() {
+    fn with_every_feature_off_only_the_opening_and_ask_user_are_left() {
         let (names, text) = offer(&["visual", "github", "sessions", "model"]);
-        assert!(names.is_empty());
-        assert_eq!(text, INTRO);
+        assert_eq!(names, ["ask_user"]);
+        assert!(text.starts_with(INTRO) && text.contains("ask_user"));
     }
 
     #[test]
@@ -823,8 +858,8 @@ mod tests {
 
     #[test]
     fn allowed_tools_leaves_out_the_tools_of_features_that_are_off() {
-        assert_eq!(allowed_tools(&["github", "sessions"]), ["mcp__m4code__show_visual", "mcp__m4code__list_models", "mcp__m4code__set_model"]);
-        assert_eq!(allowed_tools(&["github", "sessions", "model"]), ["mcp__m4code__show_visual"]);
+        assert_eq!(allowed_tools(&["github", "sessions"]), ["mcp__m4code__show_visual", "mcp__m4code__list_models", "mcp__m4code__set_model", "mcp__m4code__ask_user"]);
+        assert_eq!(allowed_tools(&["github", "sessions", "model"]), ["mcp__m4code__show_visual", "mcp__m4code__ask_user"]);
     }
 
     #[test]

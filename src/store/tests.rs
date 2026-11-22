@@ -26,6 +26,18 @@ fn the_picker_lists_only_the_ticked_models_once_any_are_ticked() {
 }
 
 #[test]
+fn default_model_uses_an_enabled_harness_when_claude_is_disabled() {
+    use crate::harness::Harness;
+    let settings = Settings {
+        harness: Harness::Claude,
+        enabled_harnesses: Some(vec![Harness::Codex, Harness::OpenCode]),
+        ..Default::default()
+    };
+    let chosen = settings.default_model();
+    assert_eq!(chosen.harness, Harness::Codex);
+}
+
+#[test]
 fn the_recent_list_is_closed_after_a_restart() {
     let layout = Layout { recent_open: true, ..Default::default() };
     let saved = serde_json::to_string(&layout).unwrap();

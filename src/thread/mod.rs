@@ -39,6 +39,14 @@ pub struct Handover {
     pub message: String,
 }
 
+/// A background task (such as a running child subagent) displayed in the main chat view.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BackgroundTask {
+    pub id: String,
+    pub label: String,
+    pub waiting: bool,
+}
+
 /// What the message box's branch chip shows; the workspace keeps it current (`Workspace::sync_git_chips`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct GitChip {
@@ -110,16 +118,36 @@ pub struct Start {
 }
 
 /// One selectable option in a permission or AskUserQuestion prompt.
-struct QuestionOption {
-    id: String,
-    name: String,
-    description: Option<String>,
-    kind: String,
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QuestionOption {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub kind: String,
+}
+
+/// Public read-only view of a pending question, for rendering outside the chat (e.g. sidebar hover popover).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingQuestion {
+    pub title: String,
+    pub options: Vec<QuestionOption>,
+}
+
+enum QuestionReply {
+    Acp(Value),
+    Elicitation {
+        id: Value,
+        field: String,
+        kind: acp::ElicitationKind,
+        answers: serde_json::Map<String, Value>,
+        remaining: VecDeque<acp::ElicitationField>,
+    },
+    Bridge(String),
 }
 
 /// A permission or multiple-choice question the agent is waiting for.
 struct Question {
-    id: Value,
+    reply: QuestionReply,
     title: String,
     options: Vec<QuestionOption>,
 }
@@ -147,6 +175,8 @@ pub struct ThreadView {
     pub picked: Vec<String>,
     /// The branch chip, when the session's folder is in a git repository.
     pub git: Option<GitChip>,
+    /// Running child subagents / workspace background tasks attached to this session.
+    pub background: Vec<BackgroundTask>,
     /// Model from another harness staged for dynamic handoff on the next message.
     pub pending_model: Option<CatalogModel>,
     /// A hand-off the agent asked for with `set_model` and the user approved: the model, its effort and the first
@@ -166,6 +196,8 @@ pub struct ThreadView {
     phase: Phase,
     /// A prompt is out and the turn hasn't ended.
     working: bool,
+    /// When the last live conversation update arrived (outside replay), so detached/post-turn streaming still shows as working.
+    last_update: Option<Instant>,
     /// Messages typed during a turn, sent one at a time after it.
     queue: VecDeque<Queued>,
     question: Option<Question>,
@@ -283,6 +315,7 @@ impl ThreadView {
             all_models: start.all_models.clone(),
             picked: start.picked.clone(),
             git: None,
+            background: vec![],
             pending_model: None,
             handoff_after_turn: None,
             pending_effort: start.options.iter().find(|(k, _)| *k == "thought_level").map(|(_, v)| v.clone()),
@@ -295,6 +328,7 @@ impl ThreadView {
             thread,
             phase: Phase::Starting,
             working: false,
+            last_update: None,
             queue,
             question: None,
             composer,
@@ -450,6 +484,9 @@ impl ThreadView {
                     self.thread.entries.clear();
                     self.remeasure(0);
                 }
+                if self.phase == Phase::Ready && !self.cached_replay && is_conversation_update(&update) {
+                    self.last_update = Some(Instant::now());
+                }
                 let title = self.thread.title.clone();
                 let prev_ctx = self.thread.context;
                 if let Some(at) = self.thread.apply(&update) {
@@ -500,7 +537,35 @@ impl ThreadView {
                     })
                     .collect();
                 let title = params.pointer("/toolCall/title").and_then(Value::as_str).unwrap_or("The agent asks for permission").to_string();
-                self.question = Some(Question { id, title, options });
+                self.question = Some(Question { reply: QuestionReply::Acp(id), title, options });
+            }
+            Event::Elicitation { id, params } => {
+                let mut fields: VecDeque<acp::ElicitationField> = acp::parse_elicitation(&params).into();
+                if let Some(first) = fields.pop_front() {
+                    let options = first
+                        .options
+                        .into_iter()
+                        .map(|opt| QuestionOption {
+                            id: opt.value,
+                            name: opt.label,
+                            description: opt.description,
+                            kind: "allow_once".into(),
+                        })
+                        .collect();
+                    self.question = Some(Question {
+                        reply: QuestionReply::Elicitation {
+                            id,
+                            field: first.field,
+                            kind: first.kind,
+                            answers: serde_json::Map::new(),
+                            remaining: fields,
+                        },
+                        title: first.title,
+                        options,
+                    });
+                } else if let Some(connection) = &self.connection {
+                    connection.respond(id, acp::elicitation_decline());
+                }
             }
             Event::Exited(words) => {
                 let words = (!words.is_empty()).then_some(words);
@@ -523,6 +588,9 @@ impl ThreadView {
         }
         self.phase = Phase::Ended;
         self.handover = None;
+        if let Some(Question { reply: QuestionReply::Bridge(req_id), .. }) = self.question.take() {
+            crate::claude::bridge::respond(&req_id, false, "The session ended before the user answered.");
+        }
         self.error = why;
         self.connection = None;
         cx.emit(ThreadEvent::Exited(if self.error.is_some() { Some(1) } else { Some(0) }));
@@ -649,6 +717,7 @@ impl ThreadView {
 
     fn turn_ended(&mut self, result: Result<Value, String>, cx: &mut Context<Self>) {
         self.working = false;
+        self.last_update = None;
         let compacted = self.compaction.running;
         if std::mem::take(&mut self.compaction.running) {
             let completed = result.as_ref().is_ok_and(|r| r["stopReason"] == "end_turn");
@@ -755,18 +824,58 @@ impl ThreadView {
         self.answer(None, cx);
     }
 
-    /// Answer the open permission question with option `index` (from 0), or turn it down.
-    fn answer(&mut self, index: Option<usize>, cx: &mut Context<Self>) {
+    /// Show a multiple-choice question from m4code's MCP `ask_user` tool (works on every harness, including ones
+    /// whose native question tool isn't bridged over ACP).
+    pub fn ask_bridge_question(&mut self, req_id: String, title: String, options: Vec<QuestionOption>, cx: &mut Context<Self>) {
+        if let Some(Question { reply: QuestionReply::Bridge(prev), .. }) = self.question.take() {
+            crate::claude::bridge::respond(&prev, false, "Replaced by a newer question.");
+        }
+        self.question = Some(Question { reply: QuestionReply::Bridge(req_id), title, options });
+        cx.notify();
+    }
+
+    /// Answer the open permission/ask question with option `index` (from 0), or turn it down.
+    pub fn answer(&mut self, index: Option<usize>, cx: &mut Context<Self>) {
         let Some(q) = self.question.take() else { return };
-        let option = index.and_then(|i| q.options.get(i)).map(|o| o.id.as_str());
-        if let Some(c) = &self.connection {
-            c.respond(q.id, acp::permission_outcome(option));
+        let chosen = index.and_then(|i| q.options.get(i));
+        match q.reply {
+            QuestionReply::Acp(id) => {
+                let option = chosen.map(|o| o.id.as_str());
+                if let Some(c) = &self.connection {
+                    c.respond(id, acp::permission_outcome(option));
+                }
+            }
+            QuestionReply::Elicitation { id, field, kind, mut answers, mut remaining } => {
+                if let Some(opt) = chosen {
+                    answers.insert(field, kind.to_json_value(&opt.id));
+                    if let Some(next) = remaining.pop_front() {
+                        let options = next
+                            .options
+                            .into_iter()
+                            .map(|o| QuestionOption { id: o.value, name: o.label, description: o.description, kind: "allow_once".into() })
+                            .collect();
+                        self.question = Some(Question {
+                            reply: QuestionReply::Elicitation { id, field: next.field, kind: next.kind, answers, remaining },
+                            title: next.title,
+                            options,
+                        });
+                    } else if let Some(c) = &self.connection {
+                        c.respond(id, acp::elicitation_accept(answers));
+                    }
+                } else if let Some(c) = &self.connection {
+                    c.respond(id, acp::elicitation_cancel());
+                }
+            }
+            QuestionReply::Bridge(req_id) => match chosen {
+                Some(opt) => crate::claude::bridge::respond(&req_id, true, &opt.name),
+                None => crate::claude::bridge::respond(&req_id, false, "The user dismissed the question."),
+            },
         }
         cx.notify();
     }
 
     /// Turn the question down with its own reject option when it has one.
-    fn decline(&mut self, cx: &mut Context<Self>) {
+    pub fn decline(&mut self, cx: &mut Context<Self>) {
         let reject = self.question.as_ref().and_then(|q| q.options.iter().position(|o| o.kind == "reject_once"));
         self.answer(reject, cx);
     }
@@ -1187,11 +1296,24 @@ impl ThreadView {
 
     pub fn is_working(&self) -> bool {
         self.working
+            || (self.phase == Phase::Starting && !self.queue.is_empty())
+            || (self.phase == Phase::Ready
+                && !self.cached_replay
+                && self.last_update.is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(4)))
     }
 
-    /// Waiting for the user to answer a permission question.
+    /// Waiting for the user to answer a permission or ask question.
     pub fn is_waiting(&self) -> bool {
         self.question.is_some()
+    }
+
+    /// Snapshot of the pending question, if any, so the sidebar popover can render and answer it.
+    pub fn pending_question(&self) -> Option<PendingQuestion> {
+        self.question.as_ref().map(|q| PendingQuestion { title: q.title.clone(), options: q.options.clone() })
+    }
+
+    pub fn pending_question_title(&self) -> Option<String> {
+        self.question.as_ref().map(|q| q.title.clone())
     }
 
     /// What the message box says while the agent starts, so the wait after a hand-off is visible.
@@ -1286,6 +1408,9 @@ async fn open(c: &Connection, harness: Harness, start: &Start) -> Result<Opened,
 
 impl Drop for ThreadView {
     fn drop(&mut self) {
+        if let Some(Question { reply: QuestionReply::Bridge(req_id), .. }) = self.question.take() {
+            crate::claude::bridge::respond(&req_id, false, "The session closed before the user answered.");
+        }
         self.stop();
         if self.persist_on_drop {
             self.persist_entries();

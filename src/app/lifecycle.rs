@@ -87,7 +87,7 @@ impl Workspace {
         let mut body = Vec::new();
         if working > 0 {
             body.push(format!(
-                "{working} Claude session{} still working. Quitting interrupts {} — sessions stay in your history and can be resumed.",
+                "{working} session{} still working. Quitting interrupts {} — sessions stay in your history and can be resumed.",
                 if working == 1 { " is" } else { "s are" },
                 if working == 1 { "it" } else { "them" }
             ));

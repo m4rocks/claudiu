@@ -8,7 +8,7 @@ impl Workspace {
     pub fn toggle_shell(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         let rec = self.store.session(id).filter(|r| r.kind == SessionKind::Claude).cloned();
         let Some(rec) = rec.filter(|_| self.is_running(id, cx)) else {
-            self.toast("Open a Claude session to use its shell.", false, cx);
+            self.toast("Open a session to use its shell.", false, cx);
             return;
         };
         // From another session the shell is brought up with its session; only on the shown one does it toggle.

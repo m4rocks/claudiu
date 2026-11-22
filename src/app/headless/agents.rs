@@ -30,7 +30,7 @@ fn handoffs_reuse_provider_sessions_and_restore_the_source_after_failure() {
     step(&mut cx, &|ws, window, cx| {
         ws.acp_server = Some(server.clone());
         ws.claude_exe = Some("unused-by-the-fake-agent".into());
-        ws.new_session_from_home(Harness::Claude, None, work.path().to_path_buf(), Some("initial task".into()), None, window, cx);
+        ws.new_session_from_home(Harness::Claude, None, work.path().to_path_buf(), Some("initial task".into()), None, None, window, cx);
     });
     let id = ws.read_with(&cx, |ws, _| ws.active_id().unwrap().clone());
     let wait = |cx: &mut TestAppContext, harness| {
@@ -95,7 +95,7 @@ fn compaction_preserves_the_session_and_never_becomes_a_user_message() {
         let (window, ws) = cx.update(|app| gpui_kit::open_window(Default::default(), app, |window, app| app.new(|cx| Workspace::new(window, vec![], cx)))).unwrap();
         cx.update_window(window, |_, window, app| ws.update(app, |ws, cx| {
             ws.acp_server = Some(fake_agent(work.path()));
-            ws.new_session_from_home(harness, None, work.path().to_path_buf(), Some("fill context".into()), None, window, cx);
+            ws.new_session_from_home(harness, None, work.path().to_path_buf(), Some("fill context".into()), None, None, window, cx);
         })).unwrap();
         let id = ws.read_with(&cx, |ws, _| ws.active_id().unwrap().clone());
         let until = std::time::Instant::now() + Duration::from_secs(10);
@@ -152,7 +152,7 @@ fn shared_subagents_keep_their_parent_focus_permissions_and_conversation() {
         ws.store.data.settings.new_session.model = Some("opus".into());
     });
     for harness in [Harness::Claude, Harness::Codex, Harness::OpenCode] {
-        step(&mut cx, &|ws, window, cx| ws.new_session_from_home(harness, None, work.path().to_path_buf(), Some("parent".into()), None, window, cx));
+        step(&mut cx, &|ws, window, cx| ws.new_session_from_home(harness, None, work.path().to_path_buf(), Some("parent".into()), None, None, window, cx));
         let parent = ws.read_with(&cx, |ws, _| ws.active_id().unwrap().clone());
         let request = |tool: &str, args| Request { id: new_id(), from: format!("code:{parent}"), tool: tool.into(), args, deadline: now() + 60 };
         let spawn = request("spawn_subagent", json!({"harness": harness, "prompt": "child task"}));
@@ -779,7 +779,7 @@ fn a_session_opens_another_with_its_model_and_effort_without_asking() {
         ws.claude_exe = Some(PathBuf::from("unused-by-the-fake-agent"));
         ws.store.data.settings.enabled_harnesses = None;
         ws.store.data.settings.set_harness_models(Harness::Codex, vec![crate::claude::subagents::AgentModel { id: "gpt-6".into(), name: "GPT-6".into() }]);
-        ws.new_session_from_home(Harness::Claude, None, work.path().to_path_buf(), Some("parent".into()), None, window, cx);
+        ws.new_session_from_home(Harness::Claude, None, work.path().to_path_buf(), Some("parent".into()), None, None, window, cx);
     });
     let parent = ws.read_with(&cx, |ws, _| ws.active_id().unwrap().clone());
     let request = |args| Request { id: new_id(), from: format!("code:{parent}"), tool: "start_code_session".into(), args, deadline: now() + 60 };

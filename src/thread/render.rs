@@ -60,7 +60,13 @@ impl Render for ThreadView {
             .min_h_0()
             .child(conversation)
             .child(div().absolute().bottom_0().left_0().right_0().h(px(18.0)).bg(fade));
-        let bottom_dock = div().flex_none().flex().flex_col().children(self.render_plan()).child(self.render_composer(window, cx));
+        let bottom_dock = div()
+            .flex_none()
+            .flex()
+            .flex_col()
+            .children(self.render_plan())
+            .children(self.render_background(cx))
+            .child(self.render_composer(window, cx));
         root.child(conversation)
             .child(bottom_dock)
             .children(self.render_picker_overlay(window, cx))
@@ -526,6 +532,88 @@ impl ThreadView {
         Some(div().w_full().px(px(22.0)).mb(px(8.0)).flex().justify_center().child(plan))
     }
 
+    /// Compact bar above the composer showing anything currently running in the background for this session
+    /// (running child subagents, or tool calls still in progress outside an active turn).
+    fn render_background(&self, cx: &mut Context<Self>) -> Option<Div> {
+        let bg_tools: Vec<String> = if self.working {
+            vec![]
+        } else {
+            self.thread
+                .entries
+                .iter()
+                .filter_map(|e| match e {
+                    Entry::Tool(call) if call.status == ToolStatus::Running => Some(title(call)),
+                    _ => None,
+                })
+                .collect()
+        };
+        if self.background.is_empty() && bg_tools.is_empty() {
+            return None;
+        }
+        let mut pills = div().flex().flex_wrap().items_center().gap(px(6.0)).flex_1().min_w_0();
+        for (i, task) in self.background.iter().enumerate() {
+            let child_id = task.id.clone();
+            let waiting = task.waiting;
+            pills = pills.child(
+                div()
+                    .id(SharedString::from(format!("thread-bg-task-{i}")))
+                    .flex()
+                    .items_center()
+                    .gap(px(5.0))
+                    .px(px(7.0))
+                    .py(px(2.0))
+                    .rounded(px(5.0))
+                    .bg(hsla(theme::PANEL_BG))
+                    .border_1()
+                    .border_color(hsla(if waiting { theme::FOCUS_BORDER } else { theme::PANEL_BORDER }))
+                    .hover(|s| s.bg(hsla(theme::SURFACE_HOVER)))
+                    .cursor_pointer()
+                    .text_size(scale::px(11.5))
+                    .text_color(hsla(theme::TEXT))
+                    .child(if waiting {
+                        div().text_color(hsla(theme::ACCENT)).font_weight(FontWeight::SEMIBOLD).child("?").into_any_element()
+                    } else {
+                        spinner(format!("thread-bg-spin-{i}"), 10.0).into_any_element()
+                    })
+                    .child(div().max_w(px(220.0)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(task.label.clone()))
+                    .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| cx.emit(ThreadEvent::Select(child_id.clone())))),
+            );
+        }
+        for (i, name) in bg_tools.into_iter().enumerate() {
+            pills = pills.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(5.0))
+                    .px(px(7.0))
+                    .py(px(2.0))
+                    .rounded(px(5.0))
+                    .bg(hsla(theme::PANEL_BG))
+                    .border_1()
+                    .border_color(hsla(theme::PANEL_BORDER))
+                    .text_size(scale::px(11.5))
+                    .text_color(hsla(theme::TEXT_DIM))
+                    .child(spinner(format!("thread-bg-tool-{i}"), 10.0))
+                    .child(div().max_w(px(220.0)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(name)),
+            );
+        }
+        let bar = div()
+            .w_full()
+            .max_w(px(COLUMN_MAX_W))
+            .px(px(10.0))
+            .py(px(6.0))
+            .rounded(px(8.0))
+            .bg(hsla(theme::SURFACE_ELEVATED))
+            .border_1()
+            .border_color(hsla(theme::PANEL_BORDER))
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .child(div().flex_none().text_size(scale::px(11.0)).text_color(hsla(theme::TEXT_FAINT)).child("Running in background"))
+            .child(pills);
+        Some(div().w_full().px(px(22.0)).mb(px(6.0)).flex().justify_center().child(bar))
+    }
+
     fn render_question(&self, cx: &mut Context<Self>) -> Option<Div> {
         let q = self.question.as_ref()?;
         let mut options = div().flex().flex_col().gap(px(6.0)).w_full();
@@ -797,8 +885,7 @@ impl ThreadView {
             .on_mouse_down(MouseButton::Left, cx.listener(|v, _, window, cx| v.composer.update(cx, |c, cx| c.focus(window, cx))))
             .child(Textarea::new(&self.composer).appearance(false))
             .into_any_element();
-        let (chips, actions) = self.footer(cx);
-        let dock = composer::frame(focused || self.question.is_some(), self.render_question(cx).map(IntoElement::into_any_element), input, chips, actions);
+        let dock = composer::render(self.composer_parts(focused, input, cx));
 
         div()
             .flex_none()
@@ -811,77 +898,57 @@ impl ThreadView {
             .child(inner.child(dock))
     }
 
-    /// The message box's footer: model, mode and branch chips with the turn's state on the left; review and the queue
-    /// on the right.
-    fn footer(&self, cx: &mut Context<Self>) -> (Vec<AnyElement>, Vec<AnyElement>) {
+    /// Assemble the shared message box parts: model, permission mode, branch, status, review, queue and send.
+    fn composer_parts(&self, focused: bool, input: AnyElement, cx: &mut Context<Self>) -> composer::Composer {
         let faint = |text: String| div().text_size(scale::px(11.5)).text_color(hsla(theme::TEXT_FAINT)).child(text);
         let active_harness = self.pending_model.as_ref().map_or(self.harness, |m| m.harness);
         let (_, effort_labels, effort_ix, _) = self.effort_choices();
         let effort_badge = effort_labels.get(effort_ix).cloned();
-        let mut chips: Vec<AnyElement> = vec![];
 
-        // Model + effort; its dropdown opens directly above the chip.
-        chips.push(
-            composer::chip("thread-model", self.picker == Some(ThreadPicker::Model))
-                .relative()
-                .child(self.model_anchor.probe())
-                .child(logos::draw(logos::for_harness(active_harness), 11.0, hsla(theme::TEXT_DIM)))
-                .child(div().max_w(px(220.0)).truncate().text_color(hsla(theme::TEXT)).child(self.active_model_label()))
-                .when_some(effort_badge, |d, badge| {
-                    d.child(div().px(px(5.0)).rounded(px(4.0)).bg(hsla(0x1f1f22)).text_size(scale::px(10.0)).text_color(hsla(theme::TEXT_DIM)).child(badge))
-                })
-                .child(icon(IconName::ChevronDown, 10.5).text_color(hsla(theme::TEXT_FAINT)))
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|v, _: &MouseDownEvent, window, cx| {
-                        cx.stop_propagation();
-                        v.toggle_model_picker(window, cx);
-                        cx.notify();
-                    }),
-                )
-                .into_any_element(),
-        );
+        let model = composer::model_chip("thread-model", self.picker == Some(ThreadPicker::Model), &self.model_anchor, active_harness, self.active_model_label(), effort_badge)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|v, _: &MouseDownEvent, window, cx| {
+                    cx.stop_propagation();
+                    v.toggle_model_picker(window, cx);
+                    cx.notify();
+                }),
+            )
+            .into_any_element();
 
-        // Permission mode, always in plain English.
-        if let Some(mode_id) = self.thread.mode.as_deref() {
+        let permission = self.thread.mode.as_deref().map(|mode_id| {
             let raw_name = self.thread.mode_name().unwrap_or(mode_id);
-            chips.push(
-                composer::chip("thread-mode", self.picker == Some(ThreadPicker::Permission))
-                    .child(icon(IconName::Lock, 11.0).text_color(hsla(theme::TEXT_DIM)))
-                    .child(div().text_color(hsla(theme::TEXT_DIM)).child(picker::format_mode_name(mode_id, raw_name)))
-                    .child(icon(IconName::ChevronDown, 10.5).text_color(hsla(theme::TEXT_FAINT)))
-                    .dropdown_above(cx, |v, at, window, cx| {
-                        v.picker = Some(ThreadPicker::Permission);
-                        v.picker_at = at;
-                        v.mode_highlight = v.thread.modes.iter().position(|(id, _)| v.thread.mode.as_deref() == Some(id.as_str())).unwrap_or(0);
-                        v.focus_composer(window, cx);
-                        cx.notify();
-                    })
-                    .into_any_element(),
-            );
-        }
+            composer::permission_chip("thread-mode", self.picker == Some(ThreadPicker::Permission), mode_id, raw_name)
+                .dropdown_above(cx, |v, at, window, cx| {
+                    v.picker = Some(ThreadPicker::Permission);
+                    v.picker_at = at;
+                    v.mode_highlight = v.thread.modes.iter().position(|(id, _)| v.thread.mode.as_deref() == Some(id.as_str())).unwrap_or(0);
+                    v.focus_composer(window, cx);
+                    cx.notify();
+                })
+                .into_any_element()
+        });
 
-        if let Some(git) = &self.git {
+        let git = self.git.as_ref().map(|git| {
             let tail = git.busy.then(|| spinner("thread-git-busy", 11.0).into_any_element());
-            chips.push(
-                composer::git_chip("thread-git", git.open, git.primary.clone(), git.linked.clone(), tail)
-                    .dropdown_above(cx, |_, at, _, cx| cx.emit(ThreadEvent::OpenGitPicker(at)))
-                    .into_any_element(),
-            );
-        }
+            composer::git_chip("thread-git", git.open, git.primary.clone(), git.linked.clone(), tail)
+                .dropdown_above(cx, |_, at, _, cx| cx.emit(ThreadEvent::OpenGitPicker(at)))
+                .into_any_element()
+        });
 
+        let mut extra_chips: Vec<AnyElement> = vec![];
         if let Some(label) = self.starting_label() {
-            chips.push(div().ml(px(4.0)).flex().items_center().gap(px(5.0)).child(spinner("thread-starting", 11.0)).child(faint(label)).into_any_element());
+            extra_chips.push(div().ml(px(4.0)).flex().items_center().gap(px(5.0)).child(spinner("thread-starting", 11.0)).child(faint(label)).into_any_element());
         }
-        if self.working {
-            chips.push(div().ml(px(4.0)).flex().items_center().gap(px(5.0)).child(spinner("thread-working", 11.0)).child(faint(if self.compaction.running { "Compacting".into() } else { "Working".into() })).into_any_element());
-            chips.push(div().flex().gap(px(4.0)).items_center().child(key_badge("Esc")).child(faint("stop".into())).into_any_element());
+        if self.is_working() {
+            extra_chips.push(div().ml(px(4.0)).flex().items_center().gap(px(5.0)).child(spinner("thread-working", 11.0)).child(faint(if self.compaction.running { "Compacting".into() } else { "Working".into() })).into_any_element());
+            extra_chips.push(div().flex().gap(px(4.0)).items_center().child(key_badge("Esc")).child(faint("stop".into())).into_any_element());
         }
 
-        let mut actions: Vec<AnyElement> = vec![];
+        let mut extra_actions: Vec<AnyElement> = vec![];
         let queued = self.queue.iter().filter(|q| !q.shown).count();
         if queued > 0 {
-            actions.push(faint(format!("{queued} queued")).into_any_element());
+            extra_actions.push(faint(format!("{queued} queued")).into_any_element());
         }
         // Outside a git repository there are no snapshots, and so no review at all.
         if !self.snapshots.is_empty() {
@@ -892,15 +959,25 @@ impl ThreadView {
             } else {
                 composer::disabled_chip("thread-review-open")
             };
-            actions.push(chip.child("Review changes").into_any_element());
+            extra_actions.push(chip.child("Review changes").into_any_element());
         }
         let can_send = composer::can_send(self.composer.read(cx).value().as_ref());
-        actions.push(
-            composer::send_button("thread-send", can_send)
-                .when(can_send, |d| d.on_click(cx.listener(|v, _: &ClickEvent, window, cx| v.submit(window, cx))))
-                .into_any_element(),
-        );
-        (chips, actions)
+        let send = composer::send_button("thread-send", can_send)
+            .when(can_send, |d| d.on_click(cx.listener(|v, _: &ClickEvent, window, cx| v.submit(window, cx))))
+            .into_any_element();
+
+        composer::Composer {
+            lit: focused || self.question.is_some(),
+            top: self.render_question(cx).map(IntoElement::into_any_element),
+            input,
+            model,
+            permission,
+            project: None,
+            git,
+            extra_chips,
+            extra_actions,
+            send,
+        }
     }
 }
 

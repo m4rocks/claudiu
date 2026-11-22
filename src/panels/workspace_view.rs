@@ -128,21 +128,52 @@ impl Workspace {
     /// Keep the shown session's branch chip in step with its folder, git work and the open dialog.
     fn sync_git_chip(&mut self, cx: &mut Context<Self>) {
         let crate::panels::inspector::Shown { rec, cwd, project } = self.shown();
-        let Some(thread) = rec.as_ref().and_then(|r| self.live_view(&r.id)).and_then(|v| v.thread()).cloned() else { return };
+        let Some(rec) = rec else { return };
+        let Some(thread) = self.live_view(&rec.id).and_then(|v| v.thread()).cloned() else { return };
+        let switching = self.switching_worktree.get(&rec.id).cloned();
         let chip = project.as_ref().zip(cwd.as_deref()).and_then(|(p, c)| {
             let g = p.git.as_ref()?;
-            let linked = (!g.is_main(c)).then(|| crate::git::worktree::label(g, c)).flatten();
-            let primary = g.branch_at(c).map(str::to_string).or_else(|| crate::git::worktree::label(g, c))?;
+            let (primary, linked) = if let Some(target) = switching.as_deref() {
+                let name = if g.is_main(target) {
+                    g.branch_at(target).map(str::to_string).unwrap_or_else(|| "main".into())
+                } else {
+                    target.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "worktree".into())
+                };
+                (name, None)
+            } else {
+                let linked = (!g.is_main(c)).then(|| crate::git::worktree::label(g, c)).flatten();
+                let primary = g.branch_at(c).map(str::to_string).or_else(|| crate::git::worktree::label(g, c))?;
+                (primary, linked)
+            };
             Some(crate::thread::GitChip {
                 primary,
                 linked,
-                busy: matches!(self.git_busy, Some(GitOp::Branch | GitOp::Worktree)),
+                busy: switching.is_some() || matches!(self.git_busy, Some(GitOp::Branch | GitOp::Worktree)),
                 open: matches!(self.git_picker(), Some(gp) if gp.target == GitPickerTarget::Session),
             })
         });
-        if thread.read(cx).git != chip {
+        let background: Vec<crate::thread::BackgroundTask> = self
+            .live
+            .iter()
+            .filter(|l| l.view.is_running(cx))
+            .filter_map(|l| {
+                let child = self.store.session(&l.id)?;
+                if child.claude.as_ref()?.parent_session.as_deref() != Some(rec.id.as_str()) {
+                    return None;
+                }
+                let waiting = l.view.thread().is_some_and(|t| t.read(cx).is_waiting());
+                let working = l.view.is_working(cx) || l.view.is_loading(cx);
+                (working || waiting).then(|| crate::thread::BackgroundTask {
+                    id: child.id.clone(),
+                    label: child.display_title().to_string(),
+                    waiting,
+                })
+            })
+            .collect();
+        if thread.read(cx).git != chip || thread.read(cx).background != background {
             thread.update(cx, |t, cx| {
                 t.git = chip;
+                t.background = background;
                 cx.notify();
             });
         }
@@ -365,6 +396,7 @@ impl Render for Workspace {
         let picker_dialog = self.render_picker(window, cx);
         let modal = self.render_modal(window, cx);
         let agent_dialog = self.render_harness_dialog(window, cx);
+        let question_popover = self.render_question_popover(window, cx);
         let toast = self.render_toast(cx);
         // The top bar's own background is the gutter above the panels; only an update banner needs real space.
         let content_top = if banner.is_some() { theme::PANEL_GAP } else { 0.0 };
@@ -574,6 +606,7 @@ impl Render for Workspace {
             .children(modal)
             .children(picker_dialog)
             .children(agent_dialog)
+            .children(question_popover)
             .children(toast)
     }
 }

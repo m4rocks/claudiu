@@ -48,6 +48,7 @@ pub enum Act {
     HomeSelectWorktree(PathBuf),
     HomeSelectModel(crate::harness::CatalogModel),
     HomeSetEffort(Effort),
+    HomeSelectPermission(String),
     HomeLaunch,
     /// List the default agent's sessions in a folder, to pick one up here.
     ListSessions { cwd: PathBuf },
@@ -199,6 +200,9 @@ impl Workspace {
             Act::HomeSetEffort(effort) => {
                 self.home.effort = effort;
             }
+            Act::HomeSelectPermission(mode) => {
+                self.home.permission_mode = Some(mode);
+            }
             Act::HomeLaunch if !crate::panels::composer::can_send(self.home.prompt.read(cx).value().as_ref()) => {}
             Act::HomeLaunch if self.home.creating.is_some() => {
                 // The worktree is on its way; the session starts in it as soon as git is done.
@@ -208,13 +212,14 @@ impl Workspace {
                 let cwd = self.home_target_cwd();
                 let chosen = self.home_selected_model();
                 let effort = self.home.effort;
+                let (perm_id, _) = self.home_selected_permission();
                 let text = self.home.prompt.read(cx).value().trim().to_string();
                 let prompt = (!text.is_empty()).then_some(text);
                 if prompt.is_some() {
                     self.home.prompt.update(cx, |p, cx| p.set_value("", window, cx));
                 }
                 let model = (!chosen.id.is_empty()).then_some(chosen.id);
-                self.new_session_from_home(chosen.harness, model, cwd, prompt, Some(effort), window, cx);
+                self.new_session_from_home(chosen.harness, model, cwd, prompt, Some(effort), Some(perm_id), window, cx);
             }
             Act::ListSessions { cwd } => self.list_sessions(cwd, window.mouse_position(), cx),
             Act::PickUp { harness, cwd, session_id, title } => self.pick_up(harness, cwd, session_id, title, window, cx),
@@ -250,7 +255,7 @@ impl Workspace {
                     self.selected = None;
                 }
                 if archive {
-                    self.toast("Archived. Search still finds it; the Claude transcript was not touched.", false, cx);
+                    self.toast("Archived. Search still finds it; the session transcript was not touched.", false, cx);
                 }
             }
             Act::CopyText(text) => {
@@ -488,7 +493,7 @@ impl Workspace {
                     self.modal = Some(Modal::Confirm {
                         title: "Restart to update?".into(),
                         body: format!(
-                            "{running} session{} running. Restarting ends {}. Claude sessions can be resumed afterwards.",
+                            "{running} session{} running. Restarting ends {}. Sessions can be resumed afterwards.",
                             if running == 1 { " is" } else { "s are" },
                             if running == 1 { "it" } else { "them" }
                         ),

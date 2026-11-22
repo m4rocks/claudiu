@@ -223,4 +223,125 @@ impl Workspace {
             .into_any_element(),
         )
     }
+
+    /// Floating popover next to a hovered sidebar session that has a pending question, allowing the user to answer
+    /// the ask/permission prompt directly without switching sessions.
+    pub(super) fn render_question_popover(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let pop = self.question_popover.as_ref()?;
+        let id = pop.id.clone();
+        let thread = self.live_view(&id)?.thread()?;
+        let question = thread.read(cx).pending_question()?;
+        let session_title = self.store.session(&id).map(|r| r.display_title().to_string()).unwrap_or_else(|| "Session".into());
+
+        let viewport = window.viewport_size();
+        let pop_w = 340.0_f32;
+        let est_h = (130.0 + (question.options.len() as f32) * 52.0).min(380.0);
+        let left = (f32::from(pop.row_bounds.right()) + 8.0).min((f32::from(viewport.width) - pop_w - 12.0).max(12.0));
+        let top = f32::from(pop.row_bounds.top()).clamp(12.0, (f32::from(viewport.height) - est_h - 12.0).max(12.0));
+        let scaled = crate::panels::scale::px;
+
+        let mut options = div().flex().flex_col().gap(px(5.0)).w_full();
+        for (i, opt) in question.options.iter().enumerate() {
+            let primary = opt.kind == "allow_once" && i == 0;
+            let answer_id = id.clone();
+            let row = div()
+                .id(gpui::SharedString::from(format!("sidebar-q-opt-{i}")))
+                .w_full()
+                .px(px(10.0))
+                .py(px(7.0))
+                .rounded(px(6.0))
+                .bg(hsla(if primary { theme::ROW_ACTIVE } else { theme::PANEL_BG }))
+                .border_1()
+                .border_color(hsla(if primary { theme::FOCUS_BORDER } else { theme::PANEL_BORDER }))
+                .hover(|s| s.bg(hsla(theme::SURFACE_HOVER)))
+                .cursor_pointer()
+                .flex()
+                .flex_col()
+                .gap(px(2.0))
+                .child(div().text_size(scaled(12.0)).font_weight(FontWeight::MEDIUM).text_color(hsla(theme::TEXT)).child(opt.name.clone()))
+                .children(opt.description.clone().map(|desc| div().text_size(scaled(11.0)).text_color(hsla(theme::TEXT_DIM)).child(desc)))
+                .on_click(cx.listener(move |ws, _: &ClickEvent, _w, cx| {
+                    cx.stop_propagation();
+                    ws.answer_session_question(&answer_id, Some(i), cx);
+                }));
+            options = options.child(row);
+        }
+
+        let decline_id = id.clone();
+        let open_id = id.clone();
+        let ws_weak = cx.entity().downgrade();
+        let card = div()
+            .id("sidebar-question-popover")
+            .occlude()
+            .cursor_default()
+            .w(px(pop_w))
+            .p(px(12.0))
+            .rounded(px(10.0))
+            .bg(hsla(theme::SURFACE_ELEVATED))
+            .border_1()
+            .border_color(hsla(theme::FOCUS_BORDER))
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
+            .on_hover(move |inside, _w, cx| {
+                let _ = ws_weak.update(cx, |ws, cx| {
+                    ws.question_popover_hovered = *inside;
+                    if *inside {
+                        ws.question_popover_seq = ws.question_popover_seq.wrapping_add(1);
+                    } else {
+                        ws.schedule_close_question_popover(cx);
+                    }
+                });
+            })
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(8.0))
+                    .child(div().min_w_0().flex_1().truncate().text_size(scaled(11.0)).text_color(hsla(theme::TEXT_DIM)).child(session_title))
+                    .child(
+                        div()
+                            .flex_none()
+                            .px(px(6.0))
+                            .py(px(1.5))
+                            .rounded(px(4.0))
+                            .bg(hsla(theme::ROW_ACTIVE))
+                            .text_size(scaled(10.0))
+                            .text_color(hsla(theme::ACCENT))
+                            .child("Needs answer"),
+                    ),
+            )
+            .child(div().text_size(scaled(12.5)).font_weight(FontWeight::SEMIBOLD).text_color(hsla(theme::TEXT)).child(question.title))
+            .child(div().id("sidebar-q-options").max_h(px(220.0)).overflow_y_scroll().child(options))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .pt(px(4.0))
+                    .border_t_1()
+                    .border_color(hsla(theme::BORDER))
+                    .child(
+                        button("sidebar-q-decline", "Decline", false).h(px(24.0)).on_click(cx.listener(move |ws, _: &ClickEvent, _w, cx| {
+                            cx.stop_propagation();
+                            ws.answer_session_question(&decline_id, None, cx);
+                        })),
+                    )
+                    .child(
+                        button("sidebar-q-open", "Open session", false).h(px(24.0)).on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
+                            cx.stop_propagation();
+                            ws.question_popover = None;
+                            ws.question_popover_hovered = false;
+                            ws.act(Act::Select(open_id.clone()), window, cx);
+                        })),
+                    ),
+            );
+
+        Some(
+            deferred(div().absolute().left(px(left)).top(px(top)).child(card))
+                .with_priority(25)
+                .into_any_element(),
+        )
+    }
 }

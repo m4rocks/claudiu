@@ -2,25 +2,46 @@
 
 use super::*;
 
-/// What a Claude session's row shows, given what Claude Code says it is doing, what the row showed before, and
-/// whether the user is looking at it. A question is shown even to someone looking at it, since only they can answer;
-/// a finished turn is shown only to someone who was elsewhere and clears once they look.
+/// What a session's row shows, given whether it is working or waiting on the user, what the row showed before, and
+/// whether the user is looking at it. A pending question takes precedence over working (ACP keeps the turn open until
+/// answered) and is shown even to someone looking at the session; a finished turn is shown only to someone who was
+/// elsewhere and clears once they look.
 fn next_activity(working: bool, waiting: bool, before: Option<Activity>, viewing: bool) -> Option<Activity> {
-    match (working, waiting, before) {
-        (true, _, _) => Some(Activity::Working),
-        (false, true, _) => Some(Activity::Waiting),
+    match (waiting, working, before) {
+        (true, _, _) => Some(Activity::Waiting),
+        (false, true, _) => Some(Activity::Working),
         (false, false, Some(Activity::Working | Activity::Attention)) if !viewing => Some(Activity::Attention),
         _ => None,
     }
 }
 
-/// What the system notification says when a session stops working while the window is in the background: it
-/// finished its turn, or it asks something. Nothing for any other change.
-fn notice(before: Option<Activity>, now: Option<Activity>, window_active: bool) -> Option<&'static str> {
-    match (window_active, before, now) {
-        (false, Some(Activity::Working), Some(Activity::Attention)) => Some("Claude finished."),
-        (false, Some(Activity::Working), Some(Activity::Waiting)) => Some("Claude is waiting for your answer."),
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AttentionEvent {
+    Finished,
+    Waiting,
+}
+
+/// Whether a transition should alert the user (with a system notification when the window is in the background, or an
+/// in-app toast when another session is shown).
+fn attention_event(before: Option<Activity>, now: Option<Activity>, viewing: bool) -> Option<AttentionEvent> {
+    if viewing {
+        return None;
+    }
+    match (before, now) {
+        (Some(Activity::Working), Some(Activity::Attention)) => Some(AttentionEvent::Finished),
+        (prev, Some(Activity::Waiting)) if prev != Some(Activity::Waiting) => Some(AttentionEvent::Waiting),
         _ => None,
+    }
+}
+
+fn notice_body(event: AttentionEvent, harness: Harness, question: Option<&str>) -> String {
+    let who = harness.name();
+    match event {
+        AttentionEvent::Finished => format!("{who} finished."),
+        AttentionEvent::Waiting => match question.filter(|q| !q.trim().is_empty()) {
+            Some(q) => format!("{who} needs your answer: {q}"),
+            None => format!("{who} is waiting for your answer."),
+        },
     }
 }
 
@@ -126,25 +147,45 @@ impl Workspace {
         let window_active = window.is_window_active();
         let shown = self.active_id().cloned();
         let mut next: HashMap<Id, Activity> = HashMap::new();
-        let mut notices = vec![];
+        let mut system_notices: Vec<(String, String)> = vec![];
+        let mut toast_notice: Option<(Id, String)> = None;
         for l in &self.live {
-            let is_claude = self.store.session(&l.id).is_some_and(|r| r.kind == SessionKind::Claude);
-            if !is_claude || !l.view.is_running(cx) {
+            let Some(rec) = self.store.session(&l.id) else { continue };
+            if rec.kind == SessionKind::Shell || !l.view.is_running(cx) {
                 continue;
             }
             let viewing = window_active && shown.as_deref() == Some(l.id.as_str());
-            // A thread knows from ACP itself: a turn is out, or a permission question is open.
-            let (working, waiting) = match &l.view {
-                SessionView::Thread(v) => (v.read(cx).is_working(), v.read(cx).is_waiting()),
+            // A thread knows from ACP itself: a turn is out, or a permission/ask question is open.
+            let (working, waiting, question_title) = match &l.view {
+                SessionView::Thread(v) => {
+                    let t = v.read(cx);
+                    (t.is_working(), t.is_waiting(), t.pending_question_title())
+                }
                 SessionView::Terminal(v) => {
-                    let status = self.store.session(&l.id).and_then(|r| statuses.get(r.claude_id()?));
-                    (status.map_or_else(|| v.read(cx).is_working(), |s| s == "busy"), status.is_some_and(|s| s == "waiting"))
+                    let status = rec.claude_id().and_then(|cid| statuses.get(cid));
+                    (status.map_or_else(|| v.read(cx).is_working(), |s| s == "busy"), status.is_some_and(|s| s == "waiting"), None)
                 }
             };
             let before = self.activity.get(&l.id).copied();
             let now = next_activity(working, waiting, before, viewing);
-            if let Some(body) = notice(before, now, window_active) {
-                notices.push((self.store.session(&l.id).map(|r| r.display_title().to_string()).unwrap_or_default(), body));
+            if before == Some(Activity::Working) && now != Some(Activity::Working)
+                && let SessionView::Thread(v) = &l.view
+            {
+                v.update(cx, |_, cx| cx.notify());
+            }
+            if let Some(ev) = attention_event(before, now, viewing) {
+                let title = rec.display_title().to_string();
+                let harness = rec.claude.as_ref().map_or(self.store.data.settings.harness, |m| m.harness);
+                let body = notice_body(ev, harness, question_title.as_deref());
+                if window_active {
+                    let text = match ev {
+                        AttentionEvent::Finished => format!("“{title}” finished."),
+                        AttentionEvent::Waiting => format!("“{title}” needs your answer."),
+                    };
+                    toast_notice = Some((l.id.clone(), text));
+                } else {
+                    system_notices.push((title, body));
+                }
             }
             if let Some(now) = now {
                 next.insert(l.id.clone(), now);
@@ -157,8 +198,11 @@ impl Workspace {
         if self.activity.values().any(|a| *a == Activity::Working) {
             self.start_spin(window, cx);
         }
-        for (title, body) in notices {
+        for (title, body) in system_notices {
             platform::notify(title, body);
+        }
+        if let Some((id, text)) = toast_notice {
+            self.show_toast(text, false, Some(("View".into(), Act::Select(id))), cx);
         }
         self.sync_claude_names();
     }
@@ -171,6 +215,7 @@ impl Workspace {
             let Some((cid, w)) = self
                 .store
                 .session(&l.id)
+                .filter(|r| r.claude.as_ref().is_some_and(|m| m.harness == Harness::Claude))
                 .and_then(|r| Some((r.claude_id()?, r.chosen_title()?)))
                 .filter(|(_, w)| l.claude_name.as_deref() != Some(*w))
             else {
@@ -252,17 +297,21 @@ fn spin_visible(working: bool, active: bool, sidebar: bool, editing: bool) -> bo
 
 #[cfg(test)]
 mod tests {
-    use super::{Activity, next_activity, notice, spin_visible};
+    use super::{Activity, AttentionEvent, Harness, attention_event, next_activity, notice_body, spin_visible};
 
     #[test]
     fn a_notification_says_a_background_session_finished_or_asks() {
         use Activity::*;
-        assert_eq!(notice(Some(Working), Some(Attention), false), Some("Claude finished."));
-        assert_eq!(notice(Some(Working), Some(Waiting), false), Some("Claude is waiting for your answer."));
-        assert_eq!(notice(Some(Working), Some(Attention), true), None, "the window is in front");
-        assert_eq!(notice(Some(Attention), Some(Attention), false), None, "already told");
-        assert_eq!(notice(Some(Waiting), Some(Working), false), None, "it started working");
-        assert_eq!(notice(None, Some(Waiting), false), None, "it never worked meanwhile");
+        assert_eq!(attention_event(Some(Working), Some(Attention), false), Some(AttentionEvent::Finished));
+        assert_eq!(attention_event(Some(Working), Some(Waiting), false), Some(AttentionEvent::Waiting));
+        assert_eq!(attention_event(None, Some(Waiting), false), Some(AttentionEvent::Waiting));
+        assert_eq!(attention_event(Some(Working), Some(Attention), true), None, "already viewing it");
+        assert_eq!(attention_event(Some(Working), Some(Waiting), true), None, "already viewing it");
+        assert_eq!(attention_event(Some(Attention), Some(Attention), false), None, "already told");
+        assert_eq!(attention_event(Some(Waiting), Some(Waiting), false), None, "already told");
+        assert_eq!(attention_event(Some(Waiting), Some(Working), false), None, "it started working");
+        assert_eq!(notice_body(AttentionEvent::Finished, Harness::Codex, None), "Codex finished.");
+        assert_eq!(notice_body(AttentionEvent::Waiting, Harness::Claude, Some("Run tests?")), "Claude Code needs your answer: Run tests?");
     }
 
     #[test]
@@ -280,10 +329,12 @@ mod tests {
     }
 
     #[test]
-    fn busy_is_working_whatever_came_before() {
+    fn busy_is_working_whatever_came_before_unless_waiting() {
         for before in [None, Some(Activity::Working), Some(Activity::Waiting), Some(Activity::Attention)] {
             assert_eq!(next_activity(true, false, before, true), Some(Activity::Working));
             assert_eq!(next_activity(true, false, before, false), Some(Activity::Working));
+            assert_eq!(next_activity(true, true, before, true), Some(Activity::Waiting), "a pending question mid-turn shows as waiting");
+            assert_eq!(next_activity(true, true, before, false), Some(Activity::Waiting));
         }
     }
 

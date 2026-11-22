@@ -96,7 +96,7 @@ impl GithubView {
             .flex_wrap()
             .gap(px(6.0))
             // Claude would work in the folder, which is not a clone of a repository named from elsewhere.
-            .when(self.named.is_none(), |d| d.child(button("gh-claude", "Ask Claude", true).child(div().ml(px(4.0)).child(icon(IconName::ChevronDown, 12.0))).popup(cx, PopKind::Claude)))
+            .when(self.named.is_none(), |d| d.child(button("gh-claude", "Ask agent", true).child(div().ml(px(4.0)).child(icon(IconName::ChevronDown, 12.0))).popup(cx, PopKind::Claude)))
             .child(button("gh-open-web", "Open on GitHub", false).child(div().ml(px(4.0)).child(icon(IconName::ExternalLink, 12.0))).on_click(go(cx, GhAct::OpenWeb(url))))
             .child(button("gh-more-menu", "", false).child(icon(IconName::Ellipsis, 14.0)).popup(cx, PopKind::More))
             .when(ds.loading, |d| d.child(dim("Refreshing…")));

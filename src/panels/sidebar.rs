@@ -373,6 +373,10 @@ impl Workspace {
         let hovered = self.hovered_row.as_ref() == Some(&key);
         let closing = !hovered && self.unhovered_rows.contains(&key);
         let running = row.running;
+        let waiting = row.dot == SessionDot::Waiting;
+        let row_anchor = crate::panels::widgets::Anchor::default();
+        let hover_anchor = row_anchor.clone();
+        let hover_id = id.clone();
         let ws = cx.entity().downgrade();
         let hover_key = key.clone();
         let right_text = if row.archived { "archived".to_string() } else { row.right.clone() };
@@ -423,14 +427,30 @@ impl Workspace {
         };
         div()
             .id(key)
+            .relative()
             .group("row")
+            .when(waiting && running, |d| d.child(row_anchor.probe()))
             .on_hover(move |inside, _window, cx| {
                 let changed = ws
                     .update(cx, |ws, cx| {
                         let now = if *inside { Some(hover_key.clone()) } else { ws.hovered_row.clone().filter(|k| *k != hover_key) };
                         let moved = std::mem::replace(&mut ws.hovered_row, now.clone()) != now;
                         if *inside {
+                            if waiting
+                                && running
+                                && ws.live_view(&hover_id).and_then(|v| v.thread()).is_some_and(|t| t.read(cx).is_waiting())
+                            {
+                                ws.question_popover_seq = ws.question_popover_seq.wrapping_add(1);
+                                ws.question_popover = Some(crate::app::QuestionPopover {
+                                    id: hover_id.clone(),
+                                    row_bounds: hover_anchor.bounds(),
+                                });
+                                cx.notify();
+                            }
                             return ws.unhovered_rows.remove(&hover_key) || moved;
+                        }
+                        if ws.question_popover.as_ref().is_some_and(|p| p.id == hover_id) {
+                            ws.schedule_close_question_popover(cx);
                         }
                         if running {
                             ws.shrink_close_slot(hover_key.clone(), cx);

@@ -359,13 +359,14 @@ pub fn no_window(cmd: &mut Command) {
 
 /// A system notification, for when the window is in the background. Shown from another thread: on Linux it waits for
 /// the notification server. A failure (no notification server, notifications turned off) is left silent.
-pub fn notify(title: String, body: &'static str) {
+pub fn notify(title: String, body: impl Into<String>) {
+    let body = body.into();
     std::thread::spawn(move || {
         // Notification Center files notifications under an app; the installed one is ours, a dev build has none.
         #[cfg(target_os = "macos")]
         let _ = notify_rust::set_application("com.m4rocks.m4code");
         let mut notification = notify_rust::Notification::new();
-        notification.appname("m4code").summary(&title).body(body);
+        notification.appname("m4code").summary(&title).body(&body);
         #[cfg(target_os = "windows")]
         if let Some(id) = windows_app_id() {
             notification.app_id(id);

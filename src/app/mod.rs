@@ -208,11 +208,10 @@ pub enum Modal {
     },
 }
 
-/// Which harness's configuration popup is open over Settings → Harnesses.
-pub enum HarnessDialog {
-    /// With the search box over its model list.
-    Claude(Entity<InputState>),
-    Agent(Agent, Entity<InputState>),
+/// The configuration popup opened over Settings → Harnesses, uniform across every harness adapter.
+pub struct HarnessDialog {
+    pub harness: Harness,
+    pub search: Entity<InputState>,
 }
 
 /// The Harnesses page of the Settings dialog, as edited so far.
@@ -299,6 +298,8 @@ pub struct AnchoredPicker {
 pub enum WorkspacePicker {
     /// Model + draggable effort picker on the Welcome screen.
     HomeModel { search: Entity<InputState> },
+    /// Permission mode selector on the Welcome screen.
+    HomePermission,
     /// Project selector for Welcome, sidebar filter, or "+ New session".
     Project { mode: ProjectPickerMode, search: Entity<InputState> },
     /// Unified Branch & Worktree picker (top bar and Welcome screen).
@@ -325,6 +326,7 @@ pub struct HomeState {
     pub launch_when_created: bool,
     pub model: Option<crate::harness::CatalogModel>,
     pub effort: Effort,
+    pub permission_mode: Option<String>,
     pub prompt: Entity<TextareaState>,
     pub model_anchor: crate::panels::widgets::Anchor,
     pub model_highlight: usize,
@@ -509,6 +511,13 @@ pub struct Toast {
     pub action: Option<(String, Act)>,
 }
 
+/// Floating hover popover next to a sidebar session that is waiting for an answer.
+#[derive(Clone)]
+pub struct QuestionPopover {
+    pub id: Id,
+    pub row_bounds: gpui::Bounds<Pixels>,
+}
+
 pub struct Workspace {
     pub store: Store,
     pub claude_exe: Option<PathBuf>,
@@ -596,6 +605,10 @@ pub struct Workspace {
     pub hovered_row: Option<gpui::SharedString>,
     /// Running rows the pointer just left, whose × slot is still shrinking away (see `shrink_close_slot`).
     pub unhovered_rows: std::collections::HashSet<gpui::SharedString>,
+    /// Interactive hover popover for answering a waiting session's question without switching to it.
+    pub question_popover: Option<QuestionPopover>,
+    pub question_popover_hovered: bool,
+    pub question_popover_seq: u64,
     /// The minute (Unix time / 60) of the last tick's redraw, see `tick`.
     pub tick_minute: i64,
     /// The working icon's spin is running, see `start_spin`.
@@ -624,6 +637,8 @@ pub struct Workspace {
     /// Sessions that are working or waiting for the user; absent = idle and already seen.
     pub activity: HashMap<Id, Activity>,
     pub git_busy: Option<GitOp>,
+    /// Sessions currently switching into a target worktree folder; shown as a spinner in the branch switcher chip.
+    pub switching_worktree: HashMap<Id, PathBuf>,
     /// What Commit & Push would do in the shown session's folder, as last read; `None` until it has been.
     pub pending: Option<(PathBuf, crate::git::commit::Pending)>,
     /// The setup window while it is open, so a second request shows it instead of opening another.
@@ -660,6 +675,9 @@ impl Workspace {
         })
         .detach();
         let home_effort = store.data.settings.new_session.effort;
+        let home_permission = store.data.settings.new_session.mode_id.clone().or_else(|| {
+            store.data.settings.new_session.permission_mode.map(|m| m.acp_id().to_string())
+        });
         let mut ws = Self {
             claude_exe,
             acp_server: None,
@@ -689,6 +707,7 @@ impl Workspace {
                 worktree: None,
                 model: None,
                 effort: home_effort.unwrap_or_default(),
+                permission_mode: home_permission,
                 prompt: home_prompt,
                 model_anchor: crate::panels::widgets::Anchor::default(),
                 model_highlight: 0,
@@ -732,6 +751,9 @@ impl Workspace {
             list_model: Default::default(),
             hovered_row: None,
             unhovered_rows: Default::default(),
+            question_popover: None,
+            question_popover_hovered: false,
+            question_popover_seq: 0,
             tick_minute: 0,
             spinning: false,
             last_swap: std::time::Instant::now(),
@@ -749,6 +771,7 @@ impl Workspace {
             restored: false,
             activity: HashMap::new(),
             git_busy: None,
+            switching_worktree: HashMap::new(),
             pending: None,
             setup_window: None,
             store,
@@ -830,6 +853,68 @@ impl Workspace {
             return m.clone();
         }
         self.store.data.settings.default_model()
+    }
+
+    pub fn home_selected_permission(&self) -> (String, String) {
+        let harness = self.home_selected_model().harness;
+        let modes = self.store.data.settings.modes_for(harness);
+        if let Some(chosen) = self.home.permission_mode.as_deref()
+            && let Some(found) = modes.iter().find(|(id, _)| id == chosen)
+        {
+            return found.clone();
+        }
+        if let Some(default_id) = self.store.data.settings.new_session.mode_id.as_deref()
+            && let Some(found) = modes.iter().find(|(id, _)| id == default_id)
+        {
+            return found.clone();
+        }
+        modes.into_iter().next().unwrap_or_else(|| ("default".into(), "Ask Before Editing".into()))
+    }
+
+    /// Close the sidebar question popover after a brief grace period so the pointer can cross from the row into it.
+    pub fn schedule_close_question_popover(&mut self, cx: &mut Context<Self>) {
+        self.question_popover_seq = self.question_popover_seq.wrapping_add(1);
+        let seq = self.question_popover_seq;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_millis(180)).await;
+            let _ = this.update(cx, |ws, cx| {
+                if ws.question_popover_seq != seq || ws.question_popover_hovered {
+                    return;
+                }
+                let still_on_row = ws
+                    .question_popover
+                    .as_ref()
+                    .and_then(|p| ws.hovered_row.as_ref().map(|h| h.ends_with(&format!("-{}", p.id))))
+                    .unwrap_or(false);
+                if !still_on_row && ws.question_popover.take().is_some() {
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Answer (or decline when `choice` is `None`) a session's pending question directly from the sidebar popover
+    /// without switching the active view to that session.
+    pub fn answer_session_question(&mut self, id: &str, choice: Option<usize>, cx: &mut Context<Self>) {
+        if let Some(thread) = self.live_view(id).and_then(|v| v.thread()).cloned() {
+            thread.update(cx, |v, cx| match choice {
+                Some(ix) => v.answer(Some(ix), cx),
+                None => v.decline(cx),
+            });
+        }
+        self.question_popover = None;
+        self.question_popover_hovered = false;
+        if self.activity.get(id) == Some(&Activity::Waiting) {
+            self.activity.insert(id.to_string(), Activity::Working);
+        }
+        cx.notify();
+    }
+
+    pub fn open_home_permission_picker(&mut self, at: crate::panels::widgets::Dropdown, cx: &mut Context<Self>) {
+        self.menu = None;
+        self.picker = Some(AnchoredPicker { at, kind: WorkspacePicker::HomePermission });
+        cx.notify();
     }
 
     pub fn picker_kind(&self) -> Option<&WorkspacePicker> {

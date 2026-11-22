@@ -57,12 +57,15 @@ impl Workspace {
         self.new_session_with(harness, cwd, prompt, options, by, window, cx);
     }
 
-    /// A new session in `harness` directly inside `cwd` (preserving a chosen worktree) with optional model and effort overrides.
+    /// A new session in `harness` directly inside `cwd` (preserving a chosen worktree) with optional model, effort and permission mode overrides.
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn new_session_from_home(&mut self, harness: Harness, model: Option<String>, cwd: PathBuf, prompt: Option<String>, effort: Option<Effort>, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn new_session_from_home(&mut self, harness: Harness, model: Option<String>, cwd: PathBuf, prompt: Option<String>, effort: Option<Effort>, permission_mode: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         let record_id = new_id();
         let meta = ClaudeMeta { chrome: self.store.data.settings.chrome_default, harness, ..Default::default() };
         let Some(mut start) = self.thread_start(&record_id, &cwd, &meta, None, prompt, Starter::User, cx) else { return };
+        if let Some(mode_id) = permission_mode.filter(|m| !m.is_empty()) {
+            start.mode = Some(mode_id);
+        }
         if let Some(model_id) = model.filter(|m| !m.is_empty()) {
             start.options.retain(|(category, _)| *category != "model");
             start.options.push(("model", model_id));
@@ -122,7 +125,12 @@ impl Workspace {
     pub(super) fn thread_start(&mut self, record_id: &str, cwd: &std::path::Path, meta: &ClaudeMeta, name: Option<String>, prompt: Option<String>, by: Starter, cx: &mut Context<Self>) -> Option<crate::thread::Start> {
         let session_id = Some(meta.session_id.clone()).filter(|id| !id.is_empty());
         let settings = &self.store.data.settings;
-        let off = mcp::tools_off(&settings.m4code_tools_off, &claude::trim::FLUFF);
+        let mut off = mcp::tools_off(&settings.m4code_tools_off, &claude::trim::FLUFF);
+        // Harnesses with native ACP question support (Claude via AskUserQuestion, Codex/Antigravity via ACP form
+        // elicitation) use their own ask tool; OpenCode's ACP lacks question bridging so it gets m4code's `ask_user`.
+        if meta.harness != Harness::OpenCode {
+            off.push("ask_user");
+        }
         let mut mcp_servers = vec![];
         if let Ok(exe) = crate::platform::own_exe() {
             let mut env = vec![(mcp::RECORD_ENV, record_id.to_string())];
@@ -284,11 +292,20 @@ impl Workspace {
     /// Open the session again in its harness, in the record's folder. A running view of it is replaced, which ends
     /// its process.
     pub(super) fn relaunch(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let prior = self.live_view(id).and_then(|v| v.thread()).map(|t| t.read(cx).thread.entries.clone()).unwrap_or_default();
+        self.relaunch_with_entries(id, prior, window, cx);
+    }
+
+    /// Like `relaunch`, carrying over `prior_entries` directly so the visible conversation never flashes blank or
+    /// disappears while the replacement process opens.
+    pub(super) fn relaunch_with_entries(&mut self, id: &str, prior_entries: Vec<crate::harness::thread::Entry>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(rec) = self.store.session(id).cloned() else { return };
         let Some(meta) = rec.claude.clone() else { return };
         let cwd = self.resume_cwd(&rec, cx);
-        // Hand m4code's tab title to Claude Code so its own name (/resume, Remote Control) matches.
-        let Some(start) = self.thread_start(&rec.id, &cwd, &meta, rec.chosen_title().map(String::from), None, Starter::User, cx) else { return };
+        let Some(mut start) = self.thread_start(&rec.id, &cwd, &meta, rec.chosen_title().map(String::from), None, Starter::User, cx) else { return };
+        if !prior_entries.is_empty() {
+            start.prior_entries = prior_entries;
+        }
         self.start_thread(rec, start, false, window, cx);
     }
 
@@ -377,8 +394,16 @@ impl Workspace {
         });
         let sub_id = id.clone();
         let sub = cx.subscribe_in(&view, window, move |ws: &mut Workspace, _view, ev: &ThreadEvent, window, cx| match ev {
-            ThreadEvent::Ready(session) => ws.commit_handoff(&sub_id, session, cx),
+            ThreadEvent::Ready(session) => {
+                if ws.switching_worktree.remove(&sub_id).is_some() {
+                    cx.notify();
+                }
+                ws.commit_handoff(&sub_id, session, cx);
+            }
             ThreadEvent::Exited(code) => {
+                if ws.switching_worktree.remove(&sub_id).is_some() {
+                    cx.notify();
+                }
                 if !ws.rollback_handoff(&sub_id, window, cx) {
                     ws.on_exit(&sub_id, *code, window, cx);
                 }
