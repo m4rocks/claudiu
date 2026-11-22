@@ -207,7 +207,27 @@ fn model_rows(catalog: &[AgentModel], on: &[String]) -> Vec<(AgentModel, bool)> 
 /// How many of the models the agent offers are switched on, as "2 of 107 on". A model switched on that the agent no
 /// longer offers isn't one of them.
 fn on_count(catalog: &[AgentModel], on: &[String]) -> String {
-    format!("{} of {} on", catalog.iter().filter(|m| on.contains(&m.id)).count(), catalog.len())
+    format!("{} of {} on", catalog.iter().filter(|m| is_ticked(on, &m.id)).count(), catalog.len())
+}
+
+/// Whether `id` is ticked. A harness nobody has set up yet has every model ticked, which `ticked` saves as no list.
+fn is_ticked(ticked: &[String], id: &str) -> bool {
+    ticked.is_empty() || ticked.iter().any(|t| t == id)
+}
+
+/// Tick or untick `id` among `catalog`'s models. The last ticked model stays ticked, so the model picker always has
+/// one and an empty list only ever means all of them.
+fn tick(ticked: &mut Vec<String>, catalog: &[AgentModel], id: &str) {
+    if ticked.is_empty() {
+        *ticked = catalog.iter().map(|m| m.id.clone()).collect();
+    }
+    match ticked.iter().position(|t| t == id) {
+        Some(_) if ticked.len() == 1 => {}
+        Some(at) => {
+            ticked.remove(at);
+        }
+        None => ticked.push(id.to_string()),
+    }
 }
 
 /// Whether `model` fits what was typed in the picker's search: every word, in its name or its id, ignoring case.
@@ -344,10 +364,11 @@ impl Workspace {
                 gpui::SharedString::from(format!("harness-dialog-model-{}", model.id)),
                 model.name.clone(),
                 tag.map(Into::into),
-                picked.contains(&model.id),
+                is_ticked(picked, &model.id),
                 move |ws, _, _| {
+                    let catalog = ws.store.data.settings.harness_models(harness).to_vec();
                     if let Some(Modal::Settings { subagents, .. }) = ws.modal.as_mut() {
-                        flip(subagents.picked_mut(harness), id.clone());
+                        tick(subagents.picked_mut(harness), &catalog, &id);
                     }
                 },
                 cx,
@@ -366,9 +387,9 @@ impl Workspace {
         }
         let count = if catalog.is_empty() { String::new() } else { on_count(catalog, picked) };
         let about = match agent {
-            Some(a) if subagents_on => format!("Ticked models show in the model picker and are subagents Claude Code can use. With none ticked, the picker shows them all and there are no subagents. {} runs only when asked.", a.provider().name),
-            Some(_) => "Ticked models show in the model picker; with none ticked, it shows them all. With “Allow use as subagents” on, the ticked models are also Claude Code's subagents.".to_string(),
-            None => "Ticked models show in the model picker; with none ticked, it shows them all.".to_string(),
+            Some(a) if subagents_on => format!("Ticked models show in the model picker and are subagents Claude Code can use. {} runs only when asked.", a.provider().name),
+            Some(_) => "Ticked models show in the model picker. With “Allow use as subagents” on, they are also Claude Code's subagents.".to_string(),
+            None => "Ticked models show in the model picker.".to_string(),
         };
         div()
             .flex()
@@ -708,6 +729,21 @@ impl Workspace {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn every_model_starts_ticked_and_the_last_one_stays() {
+        use super::{is_ticked, tick};
+        let catalog: Vec<_> = ["a", "b", "c"].iter().map(|id| crate::claude::subagents::AgentModel { id: id.to_string(), name: id.to_string() }).collect();
+        let mut ticked = vec![];
+        assert!(catalog.iter().all(|m| is_ticked(&ticked, &m.id)), "a harness nobody set up has every model ticked");
+        tick(&mut ticked, &catalog, "b");
+        assert_eq!(ticked, ["a", "c"]);
+        tick(&mut ticked, &catalog, "a");
+        tick(&mut ticked, &catalog, "c");
+        assert_eq!(ticked, ["c"], "the last ticked model can't be unticked");
+        tick(&mut ticked, &catalog, "b");
+        assert_eq!(ticked, ["c", "b"]);
+    }
+
     use super::*;
 
     fn model(id: &str, name: &str) -> AgentModel {

@@ -172,7 +172,10 @@ impl Workspace {
                 // The catalogs are what the agents last offered, kept as they are; the page edits the rest.
                 let custom_subagents = claude::subagents::CustomSubagents(claude::subagents::AgentMap::from_fn(|agent| {
                     let form = subagents.get(agent);
-                    claude::subagents::AgentChoice { on: form.on, models: form.models.clone(), edits: form.edits, catalog: s.custom_subagents.get(agent).catalog.clone() }
+                    let catalog = s.custom_subagents.get(agent).catalog.clone();
+                    // No list means every model ticked, so subagents switched on get the whole catalog.
+                    let models = if form.on && form.models.is_empty() { catalog.iter().map(|m| m.id.clone()).collect() } else { form.models.clone() };
+                    claude::subagents::AgentChoice { on: form.on, models, edits: form.edits, catalog }
                 }));
                 let tools_changed = s.trimmed_tools != trimmed || s.limits != limits || s.claudiu_tools_off != claudiu_off;
                 let subagents_changed = s.custom_subagents != custom_subagents || s.claude_picked != subagents.claude_models;
