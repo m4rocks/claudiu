@@ -18,7 +18,8 @@ use super::model::*;
 
 /// What the pane asks the workspace to do; the workspace owns toasts, sessions and the terminal.
 pub enum GhEvent {
-    Toast { text: String, error: bool },
+    Toast(String),
+    Error(String),
     /// Start a Claude session next to this pane with this prompt.
     AskClaude(String),
     /// `gh pr checkout <n>` in the project folder.

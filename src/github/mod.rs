@@ -260,8 +260,10 @@ mod e2e {
             let sink = toasts.clone();
             let _sub = cx.update(|app| {
                 app.subscribe(&view, move |_, ev: &GhEvent, _| {
-                    if let GhEvent::Toast { text, error } = ev {
-                        sink.borrow_mut().push((text.clone(), *error));
+                    match ev {
+                        GhEvent::Toast(text) => sink.borrow_mut().push((text.clone(), false)),
+                        GhEvent::Error(text) => sink.borrow_mut().push((text.clone(), true)),
+                        _ => {}
                     }
                 })
             });

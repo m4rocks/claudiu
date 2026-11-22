@@ -7,11 +7,11 @@ fn empty_card_fills_the_right_sidebar() {
     let data = tempfile::tempdir().unwrap();
     unsafe { std::env::set_var("M4CODE_DATA_DIR", data.path()) };
     let mut cx = TestAppContext::single();
-    cx.update(|app| gpui_kit::init(app));
+    cx.update(gpui_kit::init);
     let (window, ws) = cx.update(|app| gpui_kit::open_window(Default::default(), app, |window, app| app.new(|cx| Workspace::new(window, vec![], cx)))).unwrap();
 
     for height in [700.0, 900.0] {
-        cx.simulate_window_resize(window.into(), gpui::size(px(1200.0), px(height)));
+        cx.simulate_window_resize(window, gpui::size(px(1200.0), px(height)));
         cx.update_window(window, |_, window, app| window.draw(app).clear(app)).unwrap();
 
         let scroll = ws.read_with(&cx, |ws, _| ws.menu_scroll.handle());

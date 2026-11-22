@@ -108,7 +108,7 @@ impl Workspace {
     fn on_gh_event(&mut self, pane: &str, ev: &GhEvent, window: &mut Window, cx: &mut Context<Self>) {
         let Some(cwd) = self.gh_pane(pane).map(|p| p.cwd.clone()) else { return };
         match ev {
-            GhEvent::Toast { text, .. } => self.toast(text.clone(), cx),
+            GhEvent::Toast(text) | GhEvent::Error(text) => self.toast(text.clone(), cx),
             GhEvent::AskClaude(prompt) => match self.running_claude_in(&cwd, cx) {
                 Some(id) => self.send_to_claude(&id, prompt, window, cx),
                 None => self.new_claude_with(cwd, Some(prompt.clone()), vec![], Starter::User, window, cx),

@@ -4,7 +4,8 @@ use super::*;
 
 impl GithubView {
     pub(super) fn toast(&mut self, text: impl Into<String>, error: bool, cx: &mut Context<Self>) {
-        cx.emit(GhEvent::Toast { text: text.into(), error });
+        let text = text.into();
+        cx.emit(if error { GhEvent::Error(text) } else { GhEvent::Toast(text) });
     }
 
     // ------------------------------------------------------------------------------------------------- actions
