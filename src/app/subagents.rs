@@ -8,6 +8,53 @@ pub struct PendingWait {
     until: i64,
 }
 
+/// Where a subagent stands, as the parent's tools and the sidebar show it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SubagentState {
+    Starting,
+    Running,
+    WaitingForUser,
+    Completed,
+    Failed,
+    Stopped,
+}
+
+impl SubagentState {
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Starting => "starting",
+            Self::Running => "running",
+            Self::WaitingForUser => "waiting_for_user",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Stopped => "stopped",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Starting => "Starting",
+            Self::Running => "Running",
+            Self::WaitingForUser => "Needs you",
+            Self::Completed => "Done",
+            Self::Failed => "Failed",
+            Self::Stopped => "Stopped",
+        }
+    }
+
+    fn busy(self) -> bool {
+        matches!(self, Self::Starting | Self::Running)
+    }
+}
+
+/// The agent's last message after the user's last one: what the latest turn reported.
+fn last_reply(entries: &[Entry]) -> Option<&str> {
+    entries.iter().rev().take_while(|entry| !matches!(entry, Entry::User(_))).find_map(|entry| match entry {
+        Entry::Agent(text) => Some(text.as_str()),
+        _ => None,
+    })
+}
+
 fn requester(req: &Request) -> &str {
     req.from.strip_prefix("code:").unwrap_or(&req.from)
 }
@@ -37,25 +84,63 @@ impl Workspace {
             .ok_or_else(|| "This subagent does not belong to the requesting session.".into())
     }
 
+    /// Where a subagent stands, from its live view, else from how its process last ended.
+    pub fn subagent_state(&self, id: &str, cx: &App) -> SubagentState {
+        if let Some(view) = self.live_view(id).and_then(|v| v.thread()) {
+            let view = view.read(cx);
+            return if view.is_loading() {
+                SubagentState::Starting
+            } else if view.is_waiting() {
+                SubagentState::WaitingForUser
+            } else if view.is_working() {
+                SubagentState::Running
+            } else if view.start_error().is_some() || matches!(view.thread.entries.last(), Some(Entry::Notice { error: true, .. })) {
+                SubagentState::Failed
+            } else {
+                SubagentState::Completed
+            };
+        }
+        match self.store.session(id).and_then(|rec| rec.exit_code) {
+            Some(code) if code != 0 => SubagentState::Failed,
+            _ => SubagentState::Stopped,
+        }
+    }
+
     fn subagent_status(&self, req: &Request, cx: &App) -> Result<Value, String> {
         let record = self.owned_subagent(req)?;
-        if let Some(view) = self.live_view(&record.id).and_then(|v| v.thread()) {
-            let view = view.read(cx);
-            let state = if view.is_loading() { "starting" } else if view.is_waiting() { "waiting_for_user" } else if view.is_working() { "running" } else { "completed" };
-            let report = view.thread.entries.iter().rev().find_map(|entry| match entry { Entry::Agent(text) => Some(text.clone()), _ => None });
-            return Ok(json!({"id": record.id, "state": state, "report": report, "error": view.start_error()}));
+        let state = self.subagent_state(&record.id, cx);
+        let live = self.live_view(&record.id).and_then(|v| v.thread());
+        let report = match live {
+            Some(view) => last_reply(&view.read(cx).thread.entries).map(String::from),
+            None => last_reply(&crate::harness::thread::load_entries(&record.id)).map(String::from),
+        };
+        let error = live.and_then(|view| view.read(cx).start_error());
+        Ok(json!({"id": record.id, "state": state.key(), "report": report, "error": error}))
+    }
+
+    /// When subagent `id`'s turn ends, its parent gets the report as a message: at once when idle, else after its
+    /// current turn. A parent blocked in wait_subagent for this child gets it from the wait instead.
+    pub(super) fn report_to_parent(&mut self, id: &str, outcome: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(record) = self.store.session(id) else { return };
+        let Some(meta) = record.claude.as_ref() else { return };
+        let Some(parent) = meta.parent_session.clone() else { return };
+        if self.pending_subagent_waits.iter().any(|wait| wait.request.args["id"].as_str() == Some(id)) {
+            return;
         }
-        let state = if record.exit_code.is_some_and(|code| code != 0) { "failed" } else { "stopped" };
-        let entries = crate::harness::thread::load_entries(&record.id);
-        let report = entries.iter().rev().find_map(|entry| match entry {
-            Entry::Agent(text) => Some(text.as_str()),
-            _ => None,
-        });
-        Ok(json!({"id": record.id, "state": state, "report": report, "error": null}))
+        let Some(child) = self.live_view(id).and_then(|v| v.thread()) else { return };
+        let entries = &child.read(cx).thread.entries;
+        let mut body = last_reply(entries).unwrap_or_default().to_string();
+        if let Some(Entry::Notice { text, error: true }) = entries.last() {
+            body = if body.is_empty() { text.clone() } else { format!("{body}\n\n{text}") };
+        }
+        let prompt = crate::harness::thread::subagent_report_prompt(id, meta.harness.key(), record.display_title(), outcome, &body);
+        if let Some(parent) = self.live_view(&parent).and_then(|v| v.thread()).cloned() {
+            parent.update(cx, |view, cx| view.send(prompt, window, cx));
+        }
     }
 
     pub(super) fn defer_subagent_wait(&mut self, req: &Request, cx: &App) -> bool {
-        if !self.subagent_status(req, cx).is_ok_and(|status| matches!(status["state"].as_str(), Some("starting" | "running"))) {
+        if !self.owned_subagent(req).is_ok_and(|child| self.subagent_state(&child.id, cx).busy()) {
             return false;
         }
         let seconds = req.args["timeout_seconds"].as_i64().unwrap_or(60).clamp(1, 240);
@@ -69,7 +154,7 @@ impl Workspace {
                 continue;
             }
             let status = self.subagent_status(&pending.request, cx);
-            let busy = status.as_ref().is_ok_and(|status| matches!(status["state"].as_str(), Some("starting" | "running")));
+            let busy = self.owned_subagent(&pending.request).is_ok_and(|child| self.subagent_state(&child.id, cx).busy());
             if busy && pending.until > now() {
                 self.pending_subagent_waits.push(pending);
             } else {

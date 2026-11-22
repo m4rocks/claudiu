@@ -163,6 +163,7 @@ impl Workspace {
             SessionView::Thread(v) => v.into_any_element(),
             SessionView::Terminal(v) => v.into_any_element(),
         };
+        let strip = self.subagent_strip(&id, cx);
 
         let pane = fade_in(
             div()
@@ -174,12 +175,72 @@ impl Workspace {
                 .min_w_0()
                 .min_h_0()
                 .bg(hsla(theme::TERMINAL_BG))
+                .children(strip.map(|strip| div().flex_none().px(px(6.0)).pt(px(6.0)).child(strip)))
                 .child(div().flex_1().min_h_0().p(px(6.0)).child(term)),
             format!("pane-in-{id}"),
             150,
             0.4,
         );
         pane.into_any_element()
+    }
+
+    /// Above a subagent's chat: the way back to its parent, then which agent this is and where it stands, so its chat
+    /// is never mistaken for the parent's.
+    fn subagent_strip(&self, id: &str, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let record = self.store.session(id)?;
+        let meta = record.claude.as_ref()?;
+        let parent_id = meta.parent_session.clone()?;
+        let parent = self.store.session(&parent_id).map(|p| p.display_title().to_string());
+        let state = self.subagent_state(id, cx);
+        let ellipsis = |d: gpui::Div| d.min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis();
+        let back = div()
+            .id("subagent-back")
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .min_w_0()
+            .max_w(gpui::relative(0.45))
+            .h(px(24.0))
+            .px(px(6.0))
+            .rounded(px(6.0))
+            .text_color(hsla(theme::TEXT_DIM))
+            .child(crate::panels::widgets::icon(IconName::ArrowLeft, 13.0))
+            .child(ellipsis(div()).child(parent.clone().unwrap_or_else(|| "Parent session".into())))
+            .when(parent.is_some(), |d| {
+                d.cursor_pointer()
+                    .hover(|s| s.bg(hsla(theme::ROW_HOVER)).text_color(hsla(theme::TEXT)))
+                    .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::Select(parent_id.clone()), window, cx)))
+            });
+        let failed = state == crate::app::SubagentState::Failed;
+        Some(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .h(px(32.0))
+                .px(px(4.0))
+                .rounded(px(theme::PANEL_RADIUS))
+                .border_1()
+                .border_color(hsla(theme::PANEL_BORDER))
+                .bg(hsla(theme::PANEL_BG))
+                .text_size(crate::panels::scale::px(12.0))
+                .child(back)
+                .child(div().flex_none().text_color(hsla(theme::TEXT_FAINT)).child("/"))
+                .child(crate::panels::logos::draw(crate::panels::logos::for_harness(meta.harness), 12.0, hsla(theme::TEXT_DIM)))
+                .child(ellipsis(div().flex_1()).text_color(hsla(theme::TEXT)).child(record.display_title().to_string()))
+                .child(
+                    div()
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .gap(px(5.0))
+                        .pr(px(6.0))
+                        .text_color(hsla(if failed { theme::DANGER } else { theme::TEXT_FAINT }))
+                        .child(crate::panels::widgets::subagent_state_icon(state, 12.0))
+                        .child(state.label()),
+                )
+                .into_any_element(),
+        )
     }
 
     /// The session's shell as its own panel under the main one: same gutter, rounding, grip and slide as the sidebars.

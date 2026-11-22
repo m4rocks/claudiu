@@ -18,7 +18,8 @@ use crate::platform::Editor;
 use crate::github::model::State;
 use crate::store::{Attached, Id, Project, SessionKind, SessionRecord};
 use crate::panels::theme::{self, hsla};
-use crate::panels::widgets::{icon, icon_button, key_hint, meter, section_label, tick};
+use crate::panels::logos;
+use crate::panels::widgets::{icon, icon_button, key_hint, meter, section_label, subagent_state_icon, tick};
 use gpui_kit::assets::IconName;
 
 /// What the top bar and the right sidebar describe: the shown session and the folder and project it is in.
@@ -182,18 +183,18 @@ impl Workspace {
         let running = id.as_ref().is_some_and(|id| self.is_running(id, cx));
         let actions = self.action_rows(&shown, id.as_ref(), running, cx);
         let attached = id.as_deref().map(|i| self.attached_of(i)).unwrap_or_default();
-        let github = (!attached.is_empty()).then(|| self.attached_rows(id.as_ref(), attached, cx));
+        let github = (!attached.is_empty()).then(|| (attached.len(), self.attached_rows(id.as_ref(), attached, cx)));
         let links = id.as_deref().map(|i| self.links_of(i)).unwrap_or_default();
-        let linked = (!links.is_empty()).then(|| self.linked_rows(id.as_ref(), links, cx));
+        let linked = (!links.is_empty()).then(|| (links.len(), self.linked_rows(id.as_ref(), links, cx)));
         let children = id.as_deref().map(|i| self.subagents_of(i)).unwrap_or_default();
-        let subagents = (!children.is_empty()).then(|| self.subagent_rows(children, cx));
+        let subagents = (!children.is_empty()).then(|| (children.len(), self.subagent_rows(children, cx)));
         let away = id.as_deref().and_then(|i| self.session_away(i, cx));
         let status = self.status_rows(&shown, id.as_ref(), running, cx);
         self.menu_scroll
             .wire(div().id("right-menu").size_full(), window)
             .flex()
             .flex_col()
-            .gap(px(10.0))
+            .gap(px(theme::PANEL_GAP))
             .p(px(6.0))
             .children(away.map(|(from, to_name)| {
                 // Fades in when the session turns out to be on another account.
@@ -207,13 +208,13 @@ impl Workspace {
                         ws.act(Act::Handoff, window, cx)
                     })))
                     .with_animation("handoff-fade", Animation::new(Duration::from_millis(220)).with_easing(gpui::ease_out_quint()), |d, t| d.opacity(t));
-                group("ACCOUNT", body)
+                group("ACCOUNT", None, body)
             }))
-            .child(group("ACTIONS", actions))
-            .children(github.map(|g| group("GITHUB", g)))
-            .children(subagents.map(|s| group("SUBAGENTS", s)))
-            .children(linked.map(|l| group("LINKED", l)))
-            .child(group("STATUS", status))
+            .child(group("ACTIONS", None, actions))
+            .children(github.map(|(n, g)| group("GITHUB", Some(n), g)))
+            .children(subagents.map(|(n, s)| group("SUBAGENTS", Some(n), s)))
+            .children(linked.map(|(n, l)| group("LINKED", Some(n), l)))
+            .child(group("STATUS", None, status))
     }
 
     /// Open in the editor, the folder, git, the shell and the GitHub view.
@@ -332,13 +333,19 @@ impl Workspace {
         rows
     }
 
-    /// Subagents this session started: click to look at one.
+    /// Subagents this session started, each with its provider's logo and where it stands: click to look at one.
     fn subagent_rows(&self, children: Vec<(Id, String)>, cx: &mut Context<Self>) -> Div {
         let mut rows = div().flex().flex_col().gap(px(1.0));
         for (child, title) in children {
+            let harness = self.store.session(&child).and_then(|r| r.claude.as_ref()).map(|m| m.harness).unwrap_or_default();
+            let state = self.subagent_state(&child, cx);
             let go = child.clone();
             rows = rows.child(
-                row(format!("subagent-{child}"), IconName::Brackets, title)
+                lead_row(format!("subagent-{child}"), logos::draw(logos::for_harness(harness), 13.0, hsla(theme::TEXT_DIM)).into_any_element(), title)
+                    .text_color(hsla(theme::TEXT))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(hsla(theme::ROW_HOVER)))
+                    .child(div().flex_none().child(subagent_state_icon(state, 13.0)))
                     .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::Select(go.clone()), window, cx))),
             );
         }
@@ -355,7 +362,7 @@ impl Workspace {
                 cx,
                 self.leaving.contains(&key),
                 key,
-                IconName::Brackets,
+                IconName::Link,
                 title,
                 move |ws, window, cx| ws.act(Act::Select(go.clone()), window, cx),
                 move |ws| {
@@ -415,8 +422,27 @@ fn precompute_compact_menu(sid: &Id, current: bool) -> Vec<MenuItem> {
     [(true, "On"), (false, "Off")].into_iter().map(|(on, name)| MenuItem::new(format!("{}{name}", tick(current == on)), Act::SetPrecomputeCompact(sid.clone(), on))).collect()
 }
 
-fn group(label: &str, body: impl IntoElement) -> Div {
-    div().flex().flex_col().gap(px(4.0)).child(div().px(px(8.0)).child(section_label(label.to_string()))).child(body)
+/// One section of the sidebar, as a card: its label, the number of entries for a list, then its rows.
+fn group(label: &str, count: Option<usize>, body: impl IntoElement) -> Div {
+    let header = div()
+        .flex()
+        .items_center()
+        .justify_between()
+        .px(px(8.0))
+        .pt(px(4.0))
+        .child(section_label(label.to_string()))
+        .children(count.map(|n| section_label(n.to_string())));
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(4.0))
+        .p(px(4.0))
+        .rounded(px(theme::PANEL_RADIUS))
+        .border_1()
+        .border_color(hsla(theme::BORDER))
+        .bg(hsla(theme::CARD_BG))
+        .child(header)
+        .child(body)
 }
 
 /// How long the grey bar of an item still waiting for its title pulses. Then it rests, because an item GitHub never
@@ -441,6 +467,11 @@ fn pending_title(name: &str, key: &str) -> AnyElement {
 }
 
 fn base_row(id: impl Into<SharedString>, glyph: IconName, label: impl IntoElement) -> Stateful<Div> {
+    lead_row(id, div().text_color(hsla(theme::TEXT_DIM)).child(icon(glyph, 14.0)).into_any_element(), label)
+}
+
+/// A row that starts with `lead`, such as a provider's logo, instead of an icon.
+fn lead_row(id: impl Into<SharedString>, lead: AnyElement, label: impl IntoElement) -> Stateful<Div> {
     div()
         .id(id.into())
         .h(px(26.0))
@@ -450,7 +481,7 @@ fn base_row(id: impl Into<SharedString>, glyph: IconName, label: impl IntoElemen
         .gap(px(8.0))
         .rounded(px(6.0))
         .text_size(crate::panels::scale::px(12.5))
-        .child(div().flex_none().text_color(hsla(theme::TEXT_DIM)).child(icon(glyph, 14.0)))
+        .child(div().flex_none().child(lead))
         .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(label))
 }
 

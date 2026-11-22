@@ -233,7 +233,7 @@ impl Thread {
     /// What the user sent, oldest first: the composer's history.
     pub fn sent_texts(&self) -> Vec<String> {
         self.entries.iter().filter_map(|e| match e {
-            Entry::User(t) => Some(t.clone()),
+            Entry::User(t) if parse_subagent_report(t).is_none() => Some(t.clone()),
             _ => None,
         }).collect()
     }
@@ -322,6 +322,41 @@ fn typed_part(text: &str) -> Option<&str> {
         return None;
     }
     text.find(HANDOFF_NEXT).map(|at| &text[at + HANDOFF_NEXT.len()..])
+}
+
+const REPORT_OPENING: &str = "[m4code subagent report]\n";
+const REPORT_BODY: &str = "\n\n";
+
+/// What a subagent said when its turn ended, as m4code sends it to the parent session (`subagent_report_prompt`).
+#[derive(Debug, PartialEq)]
+pub struct SubagentReport<'a> {
+    pub id: &'a str,
+    /// The child's harness key, such as `codex`.
+    pub harness: &'a str,
+    pub title: &'a str,
+    /// `completed`, `failed` or `interrupted`.
+    pub state: &'a str,
+    pub body: &'a str,
+}
+
+/// The message that hands a subagent's report to its parent. The header lines are for both the model and
+/// `parse_subagent_report`, which lets the parent's chat draw it as a report card instead of a user message.
+pub fn subagent_report_prompt(id: &str, harness: &str, title: &str, state: &str, body: &str) -> String {
+    let title = title.replace(['\n', '\r'], " ");
+    format!(
+        "{REPORT_OPENING}id: {id}\nharness: {harness}\ntitle: {title}\nstate: {state}\n\
+         note: Your subagent's turn ended. Continue your task with its report below; send_subagent_message reaches it again.\
+         {REPORT_BODY}{}",
+        if body.trim().is_empty() { "(The subagent wrote no report.)" } else { body }
+    )
+}
+
+/// A parent's chat message that is a subagent's report, read back from `subagent_report_prompt`'s text.
+pub fn parse_subagent_report(text: &str) -> Option<SubagentReport<'_>> {
+    let rest = text.strip_prefix(REPORT_OPENING)?;
+    let (header, body) = rest.split_once(REPORT_BODY)?;
+    let field = |key: &str| header.lines().find_map(|line| line.strip_prefix(key)?.strip_prefix(": "));
+    Some(SubagentReport { id: field("id")?, harness: field("harness")?, title: field("title")?, state: field("state")?, body })
 }
 
 fn merge_tool(call: &mut ToolCall, update: &Value) {
@@ -423,6 +458,19 @@ mod tests {
 
     fn chunk(kind: &str, text: &str) -> Value {
         json!({"sessionUpdate": kind, "content": {"type": "text", "text": text}})
+    }
+
+    #[test]
+    fn a_subagent_report_reads_back_and_other_messages_do_not() {
+        let text = subagent_report_prompt("c1", "codex", "Fix\nlogin", "completed", "Done.\n\nTwo files changed.");
+        assert_eq!(
+            parse_subagent_report(&text),
+            Some(SubagentReport { id: "c1", harness: "codex", title: "Fix login", state: "completed", body: "Done.\n\nTwo files changed." })
+        );
+        let empty = subagent_report_prompt("c2", "claude", "t", "failed", "  ");
+        assert_eq!(parse_subagent_report(&empty).unwrap().body, "(The subagent wrote no report.)");
+        assert_eq!(parse_subagent_report("id: c1\nharness: codex"), None, "a user's own text is not a report");
+        assert_eq!(parse_subagent_report("[m4code subagent report]\nid: c1\n\nbody"), None, "missing fields are not a report");
     }
 
     #[test]

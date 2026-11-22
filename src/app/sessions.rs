@@ -368,6 +368,9 @@ impl Workspace {
             self.store.mark_dirty();
         }
         let view = cx.new(|cx| ThreadView::new(start, window, cx));
+        if subagent_edits.is_some() {
+            view.update(cx, |v, cx| v.composer.update(cx, |c, cx| c.set_placeholder("Message this subagent…", window, cx)));
+        }
         view.update(cx, |v, _| {
             v.subagent_edits = subagent_edits;
             v.shortcuts_shown = self.shortcuts_shown;
@@ -447,6 +450,8 @@ impl Workspace {
                 }
             }
             ThreadEvent::OpenPath(path, line) => ws.open_from_terminal(&sub_id, path, *line, window, cx),
+            ThreadEvent::Idle(outcome) => ws.report_to_parent(&sub_id, outcome, window, cx),
+            ThreadEvent::Select(child) => ws.act(Act::Select(child.clone()), window, cx),
             ThreadEvent::Handoff { to, model, message, effort, by_agent } => ws.dynamic_handoff(&sub_id, *to, model.clone(), message.clone(), *by_agent, effort.clone(), window, cx),
         });
         self.adopt_live(id, SessionView::Thread(view), sub, name, foreground, window, cx);

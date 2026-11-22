@@ -142,6 +142,7 @@ impl ThreadView {
     fn render_entry(&mut self, ix: usize, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let Some(entry) = self.thread.entries.get(ix) else { return div().into_any_element() };
         let body = match entry {
+            Entry::User(text) if let Some(report) = crate::harness::thread::parse_subagent_report(text) => self.render_subagent_report(ix, &report, cx),
             Entry::User(text) => div()
                 .px(px(14.0))
                 .py(px(10.0))
@@ -183,6 +184,55 @@ impl ThreadView {
                 .into_any_element(),
         };
         self.wrap_entry(ix, body)
+    }
+
+    /// A subagent's report, which m4code sent this session as a message: drawn as the child's card, not as the user's
+    /// words. The header opens the child.
+    fn render_subagent_report(&self, ix: usize, report: &crate::harness::thread::SubagentReport, cx: &mut Context<Self>) -> AnyElement {
+        let harness = crate::harness::Harness::ALL.into_iter().find(|h| h.key() == report.harness).unwrap_or_default();
+        let (state, color) = match report.state {
+            "completed" => ("Done", theme::TEXT_FAINT),
+            "interrupted" => ("Interrupted", theme::TEXT_FAINT),
+            _ => ("Failed", theme::DANGER),
+        };
+        let child = report.id.to_string();
+        let header = div()
+            .id(SharedString::from(format!("report-open-{ix}")))
+            .group("report-head")
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .px(px(12.0))
+            .py(px(8.0))
+            .border_b_1()
+            .border_color(hsla(theme::PANEL_BORDER))
+            .text_size(scale::px(12.0))
+            .cursor_pointer()
+            .hover(|s| s.bg(hsla(theme::ROW_HOVER)))
+            .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| cx.emit(ThreadEvent::Select(child.clone()))))
+            .child(logos::draw(logos::for_harness(harness), 13.0, hsla(theme::TEXT_DIM)))
+            .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(hsla(theme::TEXT)).child(report.title.to_string()))
+            .child(div().flex_none().text_color(hsla(color)).child(state))
+            .child(div().flex_1())
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(2.0))
+                    .text_color(hsla(theme::TEXT_FAINT))
+                    .group_hover("report-head", |s| s.text_color(hsla(theme::TEXT)))
+                    .child("Open")
+                    .child(icon(IconName::ChevronRight, 12.0)),
+            );
+        div()
+            .rounded(px(9.0))
+            .overflow_hidden()
+            .bg(hsla(theme::PANEL_BG))
+            .border_1()
+            .border_color(hsla(theme::PANEL_BORDER))
+            .child(header)
+            .child(div().px(px(14.0)).py(px(10.0)).child(crate::github::ui::markdown(format!("thread-md-{ix}"), report.body)))
+            .into_any_element()
     }
 
     /// An entry in the conversation's centred column.

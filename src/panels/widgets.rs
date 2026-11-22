@@ -359,6 +359,20 @@ pub fn effort_slider<V: 'static>(
     div().flex().flex_col().gap(px(2.0)).w_full().child(track).child(label_row)
 }
 
+/// Where a subagent stands, as one Lucide circle. It does not spin while the subagent works, since an animation would
+/// redraw the whole window for as long as the sidebar shows it.
+pub fn subagent_state_icon(state: crate::app::SubagentState, size: f32) -> Icon {
+    use crate::app::SubagentState::*;
+    let (name, color) = match state {
+        Starting | Running => (IconName::CircleDotDashed, 0xc8c8c8),
+        WaitingForUser => (IconName::CircleQuestionMark, theme::WARN),
+        Completed => (IconName::CircleCheck, theme::TEXT_DIM),
+        Failed => (IconName::CircleX, theme::DANGER),
+        Stopped => (IconName::CircleSlash, theme::TEXT_FAINT),
+    };
+    icon(name, size).text_color(hsla(color))
+}
+
 /// The "working" icon: Lucide's loader, turning.
 pub fn spinner(id: impl Into<ElementId>, size: f32) -> AnimationElement<Icon> {
     icon(IconName::LoaderCircle, size).with_animation(

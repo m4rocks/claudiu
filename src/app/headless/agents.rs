@@ -206,6 +206,17 @@ fn shared_subagents_keep_their_parent_focus_permissions_and_conversation() {
             assert!(std::time::Instant::now() < until, "the child never finished");
             std::thread::yield_now();
         }
+        loop {
+            cx.run_until_parked();
+            let reported = ws.read_with(&cx, |ws, app| {
+                ws.live_view(&parent).unwrap().thread().unwrap().read(app).thread.entries.iter().any(|entry| matches!(entry,
+                    crate::harness::thread::Entry::User(text) if crate::harness::thread::parse_subagent_report(text)
+                        .is_some_and(|report| report.id == child && report.state == "completed" && report.body == "ok")))
+            });
+            if reported { break; }
+            assert!(std::time::Instant::now() < until, "the parent's chat never got the child's report");
+            std::thread::yield_now();
+        }
         #[cfg(target_os = "linux")]
         let child_pid = std::fs::read_to_string(work.path().join("fake_agent.py.turns")).unwrap().lines()
             .filter_map(|line| serde_json::from_str::<Value>(line).ok())

@@ -74,6 +74,11 @@ pub enum ThreadEvent {
     Handoff { to: Harness, model: Option<String>, message: String, effort: Option<String>, by_agent: bool },
     /// The session's model or effort changed: `(model, effort)` option values, kept for when it resumes.
     Chosen(Option<String>, Option<String>),
+    /// A turn ended with nothing queued after it: `completed`, `interrupted` or `failed`. A subagent's report goes
+    /// to its parent then (`app/subagents.rs`).
+    Idle(&'static str),
+    /// A subagent's report card was clicked: show that session.
+    Select(String),
 }
 
 /// How to bring a session up.
@@ -162,7 +167,7 @@ pub struct ThreadView {
     /// Messages typed during a turn, sent one at a time after it.
     queue: VecDeque<Queued>,
     question: Option<Question>,
-    composer: Entity<TextareaState>,
+    pub composer: Entity<TextareaState>,
     /// Where Up has got to among the messages sent before, and what was typed before it started.
     history_at: Option<usize>,
     draft: String,
@@ -617,6 +622,7 @@ impl ThreadView {
 
     fn turn_ended(&mut self, result: Result<Value, String>, cx: &mut Context<Self>) {
         self.working = false;
+        let compacted = self.compaction.running;
         if std::mem::take(&mut self.compaction.running) {
             let completed = result.as_ref().is_ok_and(|r| r["stopReason"] == "end_turn");
             let at = self.thread.notice(if completed { "Context compacted." } else { "Context compaction did not finish." }, !completed);
@@ -638,6 +644,11 @@ impl ThreadView {
             },
             Err(why) if self.phase == Phase::Ready => Some((why.clone(), true)),
             Err(_) => None,
+        };
+        let outcome = match &result {
+            Ok(r) if r["stopReason"] == "cancelled" => "interrupted",
+            Ok(_) if notice.is_none() => "completed",
+            _ => "failed",
         };
         if let Some((text, error)) = notice {
             let at = self.thread.notice(text, error);
@@ -661,6 +672,9 @@ impl ThreadView {
             return;
         }
         self.send_next(cx);
+        if !self.working && !compacted {
+            cx.emit(ThreadEvent::Idle(outcome));
+        }
         cx.notify();
     }
 

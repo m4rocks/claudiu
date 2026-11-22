@@ -65,6 +65,7 @@ mod line_comment;
 pub use line_comment::LineComment;
 mod sessions;
 mod subagents;
+pub use subagents::SubagentState;
 mod settings;
 mod setup;
 mod skills;
