@@ -79,6 +79,6 @@ Repository layout:
 - `bridge/` — the Node script that runs Claude Code sessions through the Claude Agent SDK
 - `web/` — the project website
 
-See [AGENTS.md](AGENTS.md) for conventions. Debug builds store data in a separate folder so they can run alongside an installed release; launching a second instance against the same data folder reports that m4code is already running and exits.
+See [AGENTS.md](AGENTS.md) for the code layout and commands. Debug builds store data in a separate folder so they can run alongside an installed release; launching a second instance against the same data folder reports that m4code is already running and exits.
 
 To release, bump `version` in `Cargo.toml` and push a `vX.Y.Z` tag.
