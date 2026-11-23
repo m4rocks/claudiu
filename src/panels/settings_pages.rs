@@ -574,7 +574,7 @@ impl Workspace {
                     cx.notify();
                 }
             }))
-            .child(div().id("agent-dialog-body").flex_1().min_h_0().flex().flex_col().gap(px(12.0)).overflow_y_scroll().child(body))
+            .child(self.harness_dialog_scroll.wire(div().id("agent-dialog-body").flex_1().min_h_0(), window).flex().flex_col().gap(px(12.0)).child(body))
             .child(div().flex().justify_end().child(button("agent-dialog-done", "Done", true).on_click(cx.listener(|ws, _: &ClickEvent, window, cx| {
                 ws.close_harness_dialog(window, cx);
                 cx.notify();

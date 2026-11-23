@@ -215,7 +215,7 @@ impl Workspace {
 
     /// Floating popover next to a hovered sidebar session that has a pending question, allowing the user to answer
     /// the ask/permission prompt directly without switching sessions.
-    pub(super) fn render_question_popover(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub(super) fn render_question_popover(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let pop = self.question_popover.as_ref()?;
         let id = pop.id.clone();
         let thread = self.live_view(&id)?.thread()?;
@@ -303,7 +303,7 @@ impl Workspace {
                     ),
             )
             .child(div().text_size(scaled(12.5)).font_weight(FontWeight::SEMIBOLD).text_color(hsla(theme::TEXT)).child(question.title))
-            .child(div().id("sidebar-q-options").max_h(px(220.0)).overflow_y_scroll().child(options))
+            .child(self.sidebar_question_scroll.wire(div().id("sidebar-q-options").max_h(px(220.0)), window).child(options))
             .child(
                 div()
                     .flex()

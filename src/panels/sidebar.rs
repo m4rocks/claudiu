@@ -635,7 +635,7 @@ impl Workspace {
     /// RECENT at the bottom of the sidebar: a header that opens a list of the sessions that aren't running. The list
     /// takes at most `RECENT_SHARE` of the window and scrolls. A search opens it, so what matches shows. Hidden when
     /// there are no such sessions and nothing is searched.
-    fn recent_section(&self, window: &Window, cx: &mut Context<Self>) -> Option<Div> {
+    fn recent_section(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<Div> {
         let rows = self.recent_rows(cx);
         let searching = !self.search.trim().is_empty();
         if rows.is_empty() && !searching && self.project_filter().is_none() {
@@ -666,7 +666,7 @@ impl Workspace {
                 list = list.child(self.session_row(r, false, me, cx));
             }
             let max = (f32::from(window.viewport_size().height) * RECENT_SHARE).max(ROW_H * 4.0);
-            section = section.child(div().id("recent-scroll").w_full().max_h(px(max)).overflow_y_scroll().child(list));
+            section = section.child(self.recent_scroll.wire(div().id("recent-scroll").w_full().max_h(px(max)), window).child(list));
         }
         Some(section)
     }

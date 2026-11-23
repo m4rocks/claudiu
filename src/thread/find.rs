@@ -32,12 +32,22 @@ fn matching_rows(entries: &[Entry], query: &str) -> Vec<usize> {
 }
 
 impl ThreadView {
-    pub(super) fn open_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn can_find(&self) -> bool {
+        self.review.is_none() && self.screenshot.is_none()
+    }
+
+    pub(crate) fn open_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.can_find() {
+            return;
+        }
+        if self.picker.is_some() {
+            self.close_picker(window, cx);
+        }
         if let Some(find) = &self.find {
             find.input.update(cx, |input, cx| input.focus(window, cx));
             return;
         }
-        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Find in thread"));
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Find in session"));
         let subscription = cx.subscribe_in(&input, window, |v: &mut Self, input, ev: &InputEvent, _, cx| {
             if matches!(ev, InputEvent::Change) {
                 if let Some(find) = &mut v.find {
@@ -54,7 +64,7 @@ impl ThreadView {
     }
 
     pub(super) fn intercept_find(&mut self, key: &Keystroke, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        if self.review.is_some() || self.picker.is_some() {
+        if !self.can_find() || self.picker.is_some() {
             return false;
         }
         let modifiers = key.modifiers;
@@ -101,6 +111,7 @@ impl ThreadView {
 
     fn reveal_find(&mut self, cx: &mut Context<Self>) {
         if let Some(row) = self.find.as_ref().and_then(|find| find.matches.get(find.selected).copied()) {
+            self.chat_glide.cancel();
             self.list.pause_following_tail();
             self.reveal_timeline_row(row, cx);
             self.list.scroll_to(gpui::ListOffset { item_ix: row, offset_in_item: px(0.0) });

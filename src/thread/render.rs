@@ -51,7 +51,7 @@ impl Render for ThreadView {
         if let Some(handover) = &self.handover {
             return root.child(waiting(&handover.message));
         }
-        if let Some(review) = self.render_review(cx) {
+        if let Some(review) = self.render_review(window, cx) {
             return root.child(review);
         }
         let conversation = list(self.list.clone(), cx.processor(|v: &mut Self, ix: usize, window, cx| v.render_entry(ix, window, cx)))
@@ -78,24 +78,26 @@ impl Render for ThreadView {
                 }),
             )
             .child(conversation)
-            .child(div().absolute().bottom_0().left_0().right_0().h(px(18.0)).bg(fade));
+            .child(self.chat_glide.overlay(&self.list, px(64.0), self.picker.is_none() && self.screenshot.is_none()))
+            .child(div().absolute().bottom_0().left_0().right_0().h(px(18.0)).bg(fade))
+            .child(gpui_kit::base::Scrollbar::vertical(&self.list).mode(gpui_kit::base::ScrollbarMode::Always));
         let conversation = conversation.when(!self.list.is_following_tail(), |view| {
             view.child(div().absolute().bottom(px(22.0)).right(px(24.0)).child(
-                button("jump-to-latest", "Jump to latest", true).debug_selector(|| "jump-to-latest".into()).on_click(cx.listener(|v, _: &ClickEvent, _, cx| {
+                button_colored("jump-to-latest", Some(IconName::ArrowDownToLine), "Jump to latest", hsla(theme::ACCENT), hsla(theme::PANEL_BG), hsla(0xdcdcdc), None, true).debug_selector(|| "jump-to-latest".into()).on_click(cx.listener(|v, _: &ClickEvent, _, cx| {
+                    v.chat_glide.cancel();
                     v.list.set_follow_mode(gpui::FollowMode::Tail);
                     cx.notify();
                 })),
             ))
         });
-        let conversation = conversation.children(self.render_outline(cx));
         let conversation = div().flex_1().min_h_0().flex().flex_col().child(conversation).children(self.render_activity());
         let bottom_dock = div()
             .flex_none()
             .flex()
             .flex_col()
-            .children(self.render_telemetry(cx))
+            .children(self.render_session_notices())
             .children(self.render_plan())
-            .children(self.render_background(cx))
+            .children(self.render_background(window, cx))
             .child(self.render_composer(window, cx));
         root.children(self.render_find(cx))
             .child(conversation)
@@ -415,34 +417,6 @@ impl ThreadView {
     }
 
     /// Reasoning step: auto-expands with a live spinner while streaming, then folds to `"Thought for Ns"` once done.
-    fn render_outline(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if !self.outline_open {
-            return None;
-        }
-        let rows: Vec<_> = self.thread.entries.iter().enumerate().filter_map(|(row, entry)| {
-            let label = match entry {
-                Entry::User(text) if parse_subagent_report(text).is_none() => first_line(text),
-                Entry::Notice { text, error: true } => first_line(text),
-                _ => return None,
-            };
-            Some((row, label))
-        }).collect();
-        let top = self.list.logical_scroll_top().item_ix;
-        let mut items = div().id("thread-outline").overflow_y_scroll().min_h_0().flex().flex_col().gap(px(3.0));
-        for (row, label) in rows {
-            items = items.child(button(SharedString::from(format!("thread-outline-{row}")), label, row == top)
-                .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| {
-                    v.list.pause_following_tail();
-                    v.list.scroll_to(gpui::ListOffset { item_ix: row, offset_in_item: px(0.0) });
-                    v.outline_open = false;
-                    cx.notify();
-                })));
-        }
-        Some(div().absolute().right(px(16.0)).top(px(8.0)).bottom(px(62.0)).w(px(220.0)).flex().flex_col().gap(px(4.0))
-            .p(px(6.0)).rounded(px(8.0)).bg(hsla(theme::PANEL_BG)).border_1().border_color(hsla(theme::PANEL_BORDER))
-            .child(items).into_any_element())
-    }
-
     fn render_thought(&self, ix: usize, text: &str, cx: &mut Context<Self>) -> AnyElement {
         let key = format!("thought:{ix}");
         let timing = self.thought_timing.get(&ix);
@@ -780,7 +754,7 @@ impl ThreadView {
 
     /// Compact bar above the composer showing anything currently running in the background for this session
     /// (running child subagents, or tool calls still in progress outside an active turn).
-    fn render_background(&self, cx: &mut Context<Self>) -> Option<Div> {
+    fn render_background(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<Div> {
         let bg_tools: Vec<String> = if self.working {
             vec![]
         } else {
@@ -877,7 +851,7 @@ impl ThreadView {
             .child(div().flex_none().text_size(scale::px(11.0)).text_color(hsla(theme::TEXT_FAINT)).child("Running in background"))
             .child(pills);
         let output = self.shell_output.as_ref().map(|output| {
-            div().id("thread-shell-output").w_full().max_h(px(180.0)).overflow_y_scroll()
+            self.shell_output_scroll.wire(div().id("thread-shell-output").w_full().max_h(px(180.0)), window)
                 .rounded(px(6.0)).bg(hsla(theme::SURFACE_ELEVATED)).p(px(8.0))
                 .child(div().flex().justify_end()
                     .child(button("thread-shell-output-close", "Close output", false).on_click(cx.listener(|v, _: &ClickEvent, _, cx| {
@@ -890,7 +864,7 @@ impl ThreadView {
             .child(div().w_full().max_w(px(COLUMN_MAX_W)).flex().flex_col().gap(px(4.0)).child(bar).children(output)))
     }
 
-    fn render_question(&self, cx: &mut Context<Self>) -> Option<Div> {
+    fn render_question(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<Div> {
         let q = self.questions.front()?;
         let question_id = q.id;
         let mut options = div().flex().flex_col().gap(px(6.0)).w_full();
@@ -953,7 +927,7 @@ impl ThreadView {
                 .gap(px(8.0))
                 .child(div().font_weight(FontWeight::SEMIBOLD).child(q.title.clone()))
                 .when(self.questions.len() > 1, |card| card.child(div().text_size(scale::px(11.5)).text_color(hsla(theme::TEXT_DIM)).child(format!("{} more requests", self.questions.len() - 1))))
-                .child(div().id("thread-question-options").max_h(px(240.0)).overflow_y_scroll().child(options))
+                .child(self.question_scroll.wire(div().id("thread-question-options").max_h(px(240.0)), window).child(options))
                 .child(
                     div()
                         .flex()
@@ -974,14 +948,13 @@ impl ThreadView {
         )
     }
 
-    fn render_async_ask(&self, cx: &mut Context<Self>) -> Option<Div> {
+    fn render_async_ask(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<Div> {
         let ask = self.async_ask()?;
         let id = ask.id;
         let typing = self.async_answer_id().is_some();
-        let options = div()
-            .id("thread-async-ask-options")
-            .max_h(px(240.0))
-            .overflow_y_scroll()
+        let options = self.question_scroll.wire(
+            div().id("thread-async-ask-options").max_h(px(240.0)), window,
+        )
             .flex()
             .flex_col()
             .items_start()
@@ -1009,7 +982,7 @@ impl ThreadView {
     }
 
     /// Universal floating picker dialog over the chat view: unified model + draggable effort picker, or permission mode selector.
-    fn render_picker_overlay(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn render_picker_overlay(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let active = self.picker?;
         let accent = hsla(theme::ACCENT);
 
@@ -1018,7 +991,7 @@ impl ThreadView {
                 let current_id = self.thread.option("model").map(|m| m.current.as_str());
                 let models = self.filtered_models(cx);
                 let hi = self.model_highlight.min(models.len().saturating_sub(1));
-                let mut list = div().id("picker-model-list").max_h(px(176.0)).overflow_y_scroll().track_scroll(&self.model_scroll).flex().flex_col().gap(px(2.0));
+                let mut list = self.model_scroll.wire(div().id("picker-model-list").max_h(px(176.0)), window).flex().flex_col().gap(px(2.0));
                 for (n, m) in models.iter().enumerate() {
                     let selected = match &self.pending_model {
                         Some(p) => p.harness == m.harness && p.id == m.id,
@@ -1085,7 +1058,7 @@ impl ThreadView {
                 ("thread-model-dialog", "MODEL", body.into_any_element())
             }
             ThreadPicker::Permission => {
-                let mut rows = div().id("picker-perm-list").max_h(px(340.0)).overflow_y_scroll().flex().flex_col().gap(px(2.0));
+                let mut rows = self.permission_scroll.wire(div().id("picker-perm-list").max_h(px(340.0)), window).flex().flex_col().gap(px(2.0));
                 let offered = self.permissions();
                 if offered.is_empty() {
                     rows = rows.child(picker::empty_note("No permission modes available."));
@@ -1129,11 +1102,7 @@ impl ThreadView {
         let commands = self.matching_commands(cx);
         if !commands.is_empty() {
             let highlight = self.command_highlight.min(commands.len() - 1);
-            let mut menu = div()
-                .id("thread-commands")
-                .max_h(px(240.0))
-                .overflow_y_scroll()
-                .track_scroll(&self.command_scroll)
+            let mut menu = self.command_scroll.wire(div().id("thread-commands").max_h(px(240.0)), window)
                 .flex()
                 .flex_col()
                 .px(px(8.0))
@@ -1209,7 +1178,7 @@ impl ThreadView {
             .on_mouse_down(MouseButton::Left, cx.listener(|v, _, window, cx| v.composer.update(cx, |c, cx| c.focus(window, cx))))
             .child(Textarea::new(&self.composer).appearance(false))
             .into_any_element();
-        let dock = composer::render(self.composer_parts(focused, input, window.modifiers().secondary(), cx));
+        let dock = composer::render(self.composer_parts(focused, input, window.modifiers().secondary(), window, cx));
 
         div()
             .flex_none()
@@ -1221,12 +1190,12 @@ impl ThreadView {
             .justify_center()
             .id("thread-composer-dock")
             .on_modifiers_changed(cx.listener(|_, _: &gpui::ModifiersChangedEvent, _, cx| cx.notify()))
-            .child(inner.children(self.render_waiting(cx)).child(dock))
+            .child(inner.children(self.render_waiting(window, cx)).child(dock))
     }
 
     /// The user's messages waiting for the turn to end, above the message box, each one editable or removable
     /// before it is sent.
-    fn render_waiting(&self, cx: &mut Context<Self>) -> Option<Div> {
+    fn render_waiting(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<Div> {
         let waiting = self.waiting_messages().collect::<Vec<_>>();
         let steering: Vec<String> = self.unread_steers().map(first_line).collect();
         if waiting.is_empty() && steering.is_empty() {
@@ -1281,11 +1250,7 @@ impl ThreadView {
                 })
         });
         Some(
-            div().child(div()
-                .id("thread-queue")
-                .w_full()
-                .max_h(px(180.0))
-                .overflow_y_scroll()
+            div().child(self.queue_scroll.wire(div().id("thread-queue").w_full().max_h(px(180.0)), window)
                 .py(px(4.0))
                 .rounded(px(10.0))
                 .bg(hsla(theme::SURFACE_ELEVATED))
@@ -1301,7 +1266,7 @@ impl ThreadView {
 
     /// Assemble the shared message box parts: model, permission mode, branch, review and send. What the agent is
     /// doing shows in the chat (`render_activity`) and what waits shows above the box (`render_waiting`).
-    fn composer_parts(&self, focused: bool, input: AnyElement, alternate: bool, cx: &mut Context<Self>) -> composer::Composer {
+    fn composer_parts(&self, focused: bool, input: AnyElement, alternate: bool, window: &mut Window, cx: &mut Context<Self>) -> composer::Composer {
         let active_harness = self.pending_model.as_ref().map_or(self.harness, |m| m.harness);
         let (_, effort_labels, effort_ix, _) = self.effort_choices();
         let effort_badge = effort_labels.get(effort_ix).cloned();
@@ -1350,14 +1315,7 @@ impl ThreadView {
         });
 
         let extra_chips: Vec<AnyElement> = vec![];
-        let mut extra_actions = vec![
-            button("thread-outline-toggle", "Timeline", self.outline_open)
-                .on_click(cx.listener(|v, _: &ClickEvent, _, cx| { v.outline_open = !v.outline_open; cx.notify(); }))
-                .into_any_element(),
-            button("thread-find-open", "Find", false)
-                .on_click(cx.listener(|v, _: &ClickEvent, window, cx| v.open_find(window, cx)))
-                .into_any_element(),
-        ];
+        let mut extra_actions: Vec<AnyElement> = vec![];
         if self.has_chat_selection(cx) {
             extra_actions.push(button("thread-quote-selection", "Quote selection", false)
                 .on_click(cx.listener(|v, _: &ClickEvent, window, cx| v.quote_selection(window, cx))).into_any_element());
@@ -1450,7 +1408,7 @@ impl ThreadView {
 
         composer::Composer {
             lit: focused || !self.questions.is_empty(),
-            top: self.render_question(cx).or_else(|| self.render_async_ask(cx)).map(IntoElement::into_any_element),
+            top: self.render_question(window, cx).or_else(|| self.render_async_ask(window, cx)).map(IntoElement::into_any_element),
             input,
             model,
             permission,

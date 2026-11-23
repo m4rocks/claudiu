@@ -217,7 +217,7 @@ impl GithubView {
         let content: AnyElement = if ds.partial { skeleton() } else { match ds.tab {
             DetailTab::Conversation => self.render_conversation(d, ds, t, cx).into_any_element(),
             DetailTab::Commits => self.render_commits(d, t).into_any_element(),
-            DetailTab::Files => self.render_files(ds, cx).into_any_element(),
+            DetailTab::Files => self.render_files(ds, window, cx).into_any_element(),
         } };
         let scroll = self.scrolls[1]
             .wire(div().id("gh-detail").flex_1().min_h_0(), window)

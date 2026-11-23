@@ -266,10 +266,8 @@ function turnUsage(result) {
   const cachedWrite = Number(u.cache_creation_input_tokens ?? 0);
   const input = uncachedInput + cachedRead + cachedWrite;
   const total = input + output;
-  const cost = result.total_cost_usd;
-  const costUsd = Number.isFinite(cost) && cost >= 0 ? { costUsd: cost } : {};
-  if (!total && !Object.hasOwn(costUsd, "costUsd")) return undefined;
-  return { inputTokens: input, outputTokens: output, cachedReadTokens: cachedRead, cachedWriteTokens: cachedWrite, totalTokens: total, ...costUsd };
+  if (!total) return undefined;
+  return { inputTokens: input, outputTokens: output, cachedReadTokens: cachedRead, cachedWriteTokens: cachedWrite, totalTokens: total };
 }
 
 /** The uuids of the messages a result answered: every one Claude took into that turn. */
@@ -357,9 +355,6 @@ async function pump(session) {
     for await (const m of session.query) {
       if (m.type === "system") {
         if (session.shells.update(m)) publishShells(session);
-        if (m.subtype === "init" && Array.isArray(m.mcp_servers)) {
-          update(session.id, { sessionUpdate: "_m4code/session_resources", mcpServers: m.mcp_servers });
-        }
         if (m.subtype === "task_notification") await finishShell(session, m);
       }
       if (session.dropping.size && !session.turn) {

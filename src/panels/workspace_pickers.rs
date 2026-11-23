@@ -22,7 +22,7 @@ use crate::panels::widgets::{
 impl Workspace {
     /// Universal anchored dropdown picker (based on the Model Picker) used for model, project, branch & worktree,
     /// Settings selectors, Skills scope, and editor selection.
-    pub(super) fn render_picker(&mut self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub(super) fn render_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let active = self.picker.as_ref()?;
         let at = active.at;
         let scaled = crate::panels::scale::px;
@@ -46,7 +46,7 @@ impl Workspace {
                     })
                     .collect();
                 let hi = self.home.model_highlight.min(filtered.len().saturating_sub(1));
-                let mut list = div().id("home-model-list").max_h(px(176.0)).overflow_y_scroll().track_scroll(&self.home.model_scroll).flex().flex_col().gap(px(2.0));
+                let mut list = self.home.model_scroll.wire(div().id("home-model-list").max_h(px(176.0)), window).flex().flex_col().gap(px(2.0));
                 for (n, m) in filtered.iter().enumerate() {
                     let selected = chosen_model.harness == m.harness && chosen_model.id == m.id;
                     let focused = n == hi;
@@ -126,7 +126,7 @@ impl Workspace {
                     ProjectPickerMode::SidebarFilter => self.project_filter().map(|p| p.id.clone()),
                 };
                 let mut choices = picker::Choices::new(&self.picker_nav, &query);
-                let mut list = choices.list("project-picker-list").max_h(px(260.0));
+                let mut list = choices.list("project-picker-list", window).max_h(px(260.0));
                 let mut shown = 0usize;
                 if mode == ProjectPickerMode::SidebarFilter && matches("all projects") {
                     let selected = current_id.is_none();
@@ -373,7 +373,7 @@ impl Workspace {
 
                 // One scrolling list, so Up and Down move through worktrees and branches alike.
                 let list = choices
-                    .list("git-picker-list")
+                    .list("git-picker-list", window)
                     .max_h(px(320.0))
                     .child(new_wt_row)
                     .child(div().pt(px(6.0)).child(picker::section_header("WORKTREES", None)))
@@ -399,7 +399,7 @@ impl Workspace {
                     all.insert(0, current.clone());
                 }
                 let mut choices = picker::Choices::new(&self.picker_nav, &query);
-                let mut list = choices.list("settings-model-list").max_h(px(260.0));
+                let mut list = choices.list("settings-model-list", window).max_h(px(260.0));
                 let mut shown = 0usize;
                 if text_generation && words.iter().all(|word| "local summary".contains(word)) {
                     let row = picker::row("settings-model-local", None, "Local summary", None, None, text_generation_model.is_none(), false);
@@ -455,7 +455,7 @@ impl Workspace {
                 let Some(Modal::Settings { effort, .. }) = &self.modal else { return None };
                 let current = *effort;
                 let mut choices = picker::Choices::new(&self.picker_nav, "");
-                let mut list = choices.list("settings-effort-list");
+                let mut list = choices.list("settings-effort-list", window);
                 for (i, &opt) in Effort::ALL.iter().enumerate() {
                     let selected = current == opt;
                     let row = picker::row(gpui::SharedString::from(format!("settings-effort-{i}")), None, opt.label(), None, None, selected, false);
@@ -467,7 +467,7 @@ impl Workspace {
                 let current = self.home_selected_permission();
                 let offered = self.store.data.settings.permissions_for(self.home_selected_model().harness);
                 let mut choices = picker::Choices::new(&self.picker_nav, "");
-                let mut list = choices.list("home-perm-list").max_h(px(340.0));
+                let mut list = choices.list("home-perm-list", window).max_h(px(340.0));
                 for (i, mode) in offered.into_iter().enumerate() {
                     let selected = current == Some(mode);
                     let lead = icon(IconName::Lock, 12.0).text_color(if selected { accent } else { hsla(theme::TEXT_FAINT) }).into_any_element();
@@ -488,7 +488,7 @@ impl Workspace {
                 let Some(Modal::Settings { permission, .. }) = &self.modal else { return None };
                 let current = *permission;
                 let mut choices = picker::Choices::new(&self.picker_nav, "");
-                let mut list = choices.list("settings-perm-list").max_h(px(340.0));
+                let mut list = choices.list("settings-perm-list", window).max_h(px(340.0));
                 for (i, mode) in Permission::ALL.into_iter().enumerate() {
                     let selected = current == Some(mode);
                     let lead = icon(IconName::Lock, 12.0).text_color(if selected { accent } else { hsla(theme::TEXT_FAINT) }).into_any_element();
@@ -514,7 +514,7 @@ impl Workspace {
                 };
                 let current = self.effective_skill_scope();
                 let mut choices = picker::Choices::new(&self.picker_nav, &query);
-                let mut list = choices.list("skills-scope-list").max_h(px(250.0));
+                let mut list = choices.list("skills-scope-list", window).max_h(px(250.0));
                 let mut shown = 0usize;
                 if matches("global all workspaces") {
                     let selected = current == SkillScope::Global;
@@ -545,7 +545,7 @@ impl Workspace {
                 let current = self.preferred_editor();
                 let target = target.clone();
                 let mut choices = picker::Choices::new(&self.picker_nav, "");
-                let mut list = choices.list("editor-picker-list");
+                let mut list = choices.list("editor-picker-list", window);
                 let mut shown = 0usize;
                 for (i, &(ed, found)) in self.editors.iter().enumerate() {
                     if !found {

@@ -1,7 +1,7 @@
-use gpui::{ClickEvent, Context, Div, ParentElement, Styled, div, prelude::FluentBuilder, px};
+use gpui::{Div, ParentElement, Styled, div, px};
 
-use super::{Phase, ThreadView};
-use crate::panels::{scale, theme::{self, hsla}, widgets::{button, countdown, limit_bar}};
+use super::ThreadView;
+use crate::panels::{scale, theme::{self, hsla}, widgets::countdown};
 use crate::store::AccountUsage;
 
 pub(crate) fn exhausted_usage(usage: &AccountUsage, now: i64) -> Option<String> {
@@ -13,13 +13,10 @@ pub(crate) fn exhausted_usage(usage: &AccountUsage, now: i64) -> Option<String> 
 }
 
 impl ThreadView {
-    pub(super) fn render_telemetry(&self, cx: &mut Context<Self>) -> Option<Div> {
-        let context = self.thread.context.filter(|(_, limit)| *limit > 0);
+    pub(super) fn render_session_notices(&self) -> Option<Div> {
         let usage_limit = self.usage_limit.as_ref();
         let error = self.error.as_ref();
-        if context.is_none() && usage_limit.is_none() && error.is_none()
-            && self.mcp_names.is_empty() && self.rule_files.is_empty() && self.last_cost_usd.is_none() && self.thread.cache_usage.turns == 0
-        {
+        if usage_limit.is_none() && error.is_none() {
             return None;
         }
         let mut contents = div().w_full().max_w(px(840.0)).px(px(8.0)).py(px(4.0))
@@ -30,46 +27,6 @@ impl ThreadView {
         if let Some(error) = error {
             contents = contents.child(div().text_color(hsla(theme::DANGER)).child(format!("{}: {error}", self.harness.name())));
         }
-        let label = context.map_or_else(|| "Session details".to_string(), |(used, limit)| format!("Context {}%", ((used as f64 / limit as f64) * 100.0).round() as u64));
-        let mut controls = div().flex().items_center().gap(px(6.0))
-            .child(button("chat-telemetry", label, self.telemetry_open).on_click(cx.listener(|v, _: &ClickEvent, _, cx| {
-                v.telemetry_open = !v.telemetry_open;
-                cx.notify();
-            })));
-        if self.phase == Phase::Ready && !self.working && self.questions.is_empty()
-            && !self.compaction.running && context.is_some()
-        {
-            controls = controls.child(button("chat-compact", "Compact context", false)
-                .on_click(cx.listener(|v, _: &ClickEvent, _, cx| {
-                    if !v.working && v.questions.is_empty() && !v.compaction.running {
-                        v.try_run_builtin_command("/compact", cx);
-                    }
-                })));
-        }
-        contents = contents.child(controls).when(self.telemetry_open, |mut contents| {
-            if let Some((used, limit)) = context {
-                contents = contents.child(limit_bar(
-                    "chat-context-meter",
-                    Some((used as f64 / limit as f64).min(1.0) as f32),
-                    format!("{used} / {limit} context tokens"),
-                    String::new(),
-                    Some(hsla(theme::ACCENT)),
-                ));
-            }
-            if let Some(cache) = self.thread.cache_usage.summary() {
-                contents = contents.child(div().child(format!("Prompt cache: {cache}")));
-            }
-            if let Some(cost) = self.last_cost_usd {
-                contents = contents.child(div().child(format!("Last turn: ${cost:.4} reported by {}", self.harness.name())));
-            }
-            if !self.mcp_names.is_empty() {
-                contents = contents.child(div().child(format!("MCP servers: {}", self.mcp_names.join(", "))));
-            }
-            if !self.rule_files.is_empty() {
-                contents = contents.child(div().child(format!("Workspace rule files: {}", self.rule_files.join(", "))));
-            }
-            contents
-        });
         Some(div().w_full().px(px(22.0)).flex().justify_center().child(contents))
     }
 }

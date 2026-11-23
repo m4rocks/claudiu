@@ -1,7 +1,7 @@
 use crate::input::EditorMode;
 use std::{collections::BTreeMap, ops::Range};
 
-use gpui::{App, Context, HighlightStyle, Hsla, WeakEntity};
+use gpui::{App, Context, HighlightStyle, Hsla, Pixels, WeakEntity};
 use ropey::Rope;
 use sum_tree::Bias;
 
@@ -72,12 +72,19 @@ impl RangeDecoration {
 pub struct TextDecoration {
     pub range: Range<usize>,
     pub style: HighlightStyle,
+    pub(crate) padded_background: Option<(Hsla, Pixels)>,
 }
 
 impl TextDecoration {
     /// Create a text decoration from a UTF-8 byte range and a GPUI style.
     pub fn new(range: Range<usize>, style: HighlightStyle) -> Self {
-        Self { range, style }
+        Self { range, style, padded_background: None }
+    }
+
+    /// Extend the painted background without changing glyph metrics, wrapping, or caret positions.
+    pub fn with_background_padding(mut self, padding: Pixels) -> Self {
+        self.padded_background = self.style.background_color.take().map(|color| (color, padding));
+        self
     }
 }
 

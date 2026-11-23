@@ -312,18 +312,14 @@ pub struct ThreadView {
     history_at: Option<usize>,
     draft: String,
     list: ListState,
+    chat_glide: crate::panels::glide::SmoothList,
     screenshot: Option<std::sync::Arc<gpui::Image>>,
     screenshot_focus: FocusHandle,
-    outline_open: bool,
     viewing: bool,
     unread_from: Option<usize>,
     visit_watermark: Option<usize>,
     tool_images: std::cell::RefCell<HashMap<(String, usize), std::sync::Arc<gpui::Image>>>,
     find: Option<find::Find>,
-    telemetry_open: bool,
-    last_cost_usd: Option<f64>,
-    mcp_names: Vec<String>,
-    rule_files: Vec<String>,
     pub(crate) usage_limit: Option<String>,
     /// How many rows the list has measured.
     rows: usize,
@@ -357,7 +353,7 @@ pub struct ThreadView {
     model_highlight: usize,
     mode_highlight: usize,
     /// Follows `model_highlight` so keyboard moves keep the highlighted row in view.
-    pub(super) model_scroll: gpui::ScrollHandle,
+    pub(super) model_scroll: crate::panels::glide::Smooth,
     /// Tool call ids manually expanded by clicking their compressed single-line header.
     expanded_tools: HashSet<String>,
     /// Shell calls closed by hand while Ctrl+O is showing tool details.
@@ -386,7 +382,12 @@ pub struct ThreadView {
     active_turn_review: Option<review::ActiveTurn>,
     /// The slash menu's highlighted row, and its scroll.
     command_highlight: usize,
-    command_scroll: gpui::ScrollHandle,
+    command_scroll: crate::panels::glide::Smooth,
+    permission_scroll: crate::panels::glide::Smooth,
+    question_scroll: crate::panels::glide::Smooth,
+    queue_scroll: crate::panels::glide::Smooth,
+    shell_output_scroll: crate::panels::glide::Smooth,
+    review_scroll: crate::panels::glide::Smooth,
     /// Whether the working tree differs from the last snapshot; None while a turn runs or the check is out.
     pub(super) changed: Option<bool>,
     /// The review of what changed since the last message, while it is open.
@@ -497,19 +498,14 @@ impl ThreadView {
             history_at: None,
             draft: String::new(),
             list,
+            chat_glide: Default::default(),
             screenshot: None,
             screenshot_focus: cx.focus_handle(),
-            outline_open: false,
             viewing: false,
             unread_from: None,
             visit_watermark: None,
             tool_images: Default::default(),
             find: None,
-            telemetry_open: false,
-            last_cost_usd: None,
-            mcp_names: start.mcp_servers.iter().filter_map(|server| server["name"].as_str().map(String::from)).collect(),
-            rule_files: ["AGENTS.md", "CLAUDE.md", "GEMINI.md"].into_iter()
-                .filter(|name| start.cwd.join(name).is_file()).map(String::from).collect(),
             usage_limit: None,
             rows,
             detail: false,
@@ -529,7 +525,7 @@ impl ThreadView {
             model_anchor: crate::panels::widgets::Anchor::default(),
             model_highlight: 0,
             mode_highlight: 0,
-            model_scroll: gpui::ScrollHandle::new(),
+            model_scroll: Default::default(),
             expanded_tools: HashSet::new(),
             collapsed_shell_calls: HashSet::new(),
             collapsed_thoughts: HashSet::new(),
@@ -547,7 +543,12 @@ impl ThreadView {
             turn_reviews,
             active_turn_review: None,
             command_highlight: 0,
-            command_scroll: gpui::ScrollHandle::new(),
+            command_scroll: Default::default(),
+            permission_scroll: Default::default(),
+            question_scroll: Default::default(),
+            queue_scroll: Default::default(),
+            shell_output_scroll: Default::default(),
+            review_scroll: Default::default(),
             changed: None,
             review: None,
             _subscriptions: subscriptions,
@@ -670,19 +671,6 @@ impl ThreadView {
             Event::Update(update) => {
                 if update["sessionUpdate"] == "_m4code/session_ended" {
                     self.ended(update["error"].as_str().map(String::from), cx);
-                    return;
-                }
-                if update["sessionUpdate"] == "_m4code/session_resources" {
-                    if let Some(servers) = update["mcpServers"].as_array() {
-                        self.mcp_names = servers.iter().filter_map(|server| {
-                            let name = server["name"].as_str()?;
-                            Some(server["status"].as_str().map_or_else(|| name.to_string(), |status| format!("{name} ({status})")))
-                        }).collect();
-                    }
-                    if let Some(rules) = update["rules"].as_array() {
-                        self.rule_files = rules.iter().filter_map(Value::as_str).map(String::from).collect();
-                    }
-                    cx.notify();
                     return;
                 }
                 if update["sessionUpdate"] == "_m4code/background_shells" {
@@ -1043,6 +1031,12 @@ impl ThreadView {
                 cx.notify();
                 true
             }
+            _ if self.harness.hides_command(cmd) && self.thread.commands.iter().any(|command| command.name == cmd) => {
+                let at = self.thread.notice(format!("Use the m4code controls for /{cmd}."), false);
+                self.remeasure(at);
+                cx.notify();
+                true
+            }
             _ => false,
         }
     }
@@ -1275,9 +1269,6 @@ impl ThreadView {
         {
             cx.emit(ThreadEvent::Usage(turn));
         }
-        self.last_cost_usd = result.as_ref().ok()
-            .and_then(|r| r.pointer("/usage/costUsd"))
-            .and_then(Value::as_f64).filter(|cost| *cost >= 0.0 && cost.is_finite());
         let compacted = self.compaction.running;
         if std::mem::take(&mut self.compaction.running) {
             let completed = result.as_ref().is_ok_and(|r| r["stopReason"] == "end_turn");
@@ -1911,7 +1902,6 @@ impl ThreadView {
 
     /// m4code's built-in commands (`/compact`, `/new`, `/clear`) followed by the agent's own commands, deduplicated.
     pub(super) fn shown_commands(&self) -> Vec<crate::harness::thread::Command> {
-        let hidden = self.harness.hidden_commands();
         let mut out: Vec<crate::harness::thread::Command> = BUILTIN_COMMANDS
             .iter()
             .map(|(name, description)| crate::harness::thread::Command {
@@ -1920,7 +1910,7 @@ impl ThreadView {
             })
             .collect();
         for c in &self.thread.commands {
-            if hidden.contains(&c.name.as_str()) || out.iter().any(|existing| existing.name == c.name) {
+            if self.harness.hides_command(&c.name) || out.iter().any(|existing| existing.name == c.name) {
                 continue;
             }
             out.push(c.clone());
@@ -1969,10 +1959,9 @@ impl ThreadView {
                     gpui::HighlightStyle {
                         color: Some(accent),
                         background_color: Some(accent.opacity(if exact { 0.18 } else { 0.10 })),
-                        font_weight: exact.then_some(gpui::FontWeight::SEMIBOLD),
                         ..Default::default()
                     },
-                ));
+                ).with_background_padding(px(3.0)));
             }
         }
         self.composer.update(cx, |c, cx| c.set_decorations(decorations, cx));
@@ -2050,10 +2039,14 @@ impl ThreadView {
     pub(crate) fn remeasure(&mut self, from: usize) {
         let rows = self.thread.entries.len();
         let from = self.group_start_before(from).min(from).min(self.rows).min(rows);
-        let anchor = (!self.list.is_following_tail()).then(|| self.list.logical_scroll_top());
-        self.list.splice(from..self.rows, rows - from);
-        if let Some(anchor) = anchor {
-            self.list.scroll_to(anchor);
+        let shared = self.rows.min(rows);
+        if rows > self.rows {
+            self.list.splice(self.rows..self.rows, rows - self.rows);
+        } else if rows < self.rows {
+            self.list.splice(rows..self.rows, 0);
+        }
+        if from < shared {
+            self.list.remeasure_items(from..shared);
         }
         self.rows = rows;
         self.refresh_find(from);
@@ -2395,6 +2388,8 @@ mod tests {
         let (view, cx) = cx.add_window_view(|window, cx| super::ThreadView::new(start, window, cx));
         cx.update(|window, app| window.draw(app).clear(app));
         assert!(view.read_with(cx, |view, _| view.list.is_following_tail()));
+        assert!(view.read_with(cx, |view, _| view.list.max_offset_for_scrollbar().y) > gpui::px(2500.0),
+            "the scrollbar includes rows before the viewport on first render");
         cx.simulate_event(gpui::ScrollWheelEvent {
             position: gpui::point(gpui::px(180.0), gpui::px(140.0)),
             delta: gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.0), gpui::px(140.0))),
@@ -2417,6 +2412,40 @@ mod tests {
         cx.update(|window, app| window.draw(app).clear(app));
         assert!(view.read_with(cx, |view, _| view.list.is_following_tail()));
         assert!(cx.debug_bounds("jump-to-latest").is_none());
+
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: gpui::point(gpui::px(180.0), gpui::px(140.0)),
+            delta: gpui::ScrollDelta::Lines(gpui::point(0.0, 5.0)),
+            ..Default::default()
+        });
+        cx.update(|window, app| window.draw(app).clear(app));
+        let first = view.read_with(cx, |view, _| {
+            assert!(!view.list.is_following_tail(), "wheel notches release tail-follow immediately");
+            view.list.scroll_px_offset_for_scrollbar().y
+        });
+        for _ in 0..15 {
+            std::thread::sleep(std::time::Duration::from_millis(12));
+            cx.update(|window, app| window.draw(app).clear(app));
+        }
+        let last = view.read_with(cx, |view, _| view.list.scroll_px_offset_for_scrollbar().y);
+        assert!(last > first + gpui::px(4.0), "the notch should glide across frames, from {first:?} to {last:?}");
+    }
+
+    #[gpui::test]
+    fn slash_background_padding_preserves_text_geometry(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_kit::init);
+        let dir = tempfile::tempdir().unwrap();
+        let start = test_start(dir.path().into(), Harness::Claude);
+        let (view, cx) = cx.add_window_view(|window, cx| super::ThreadView::new(start, window, cx));
+        view.update_in(cx, |view, window, cx| view.set_draft("/new example", window, cx));
+        cx.update(|window, app| window.draw(app).clear(app));
+        let bounds = |cx: &gpui::VisualTestContext| {
+            view.read_with(cx, |view, app| view.composer.read(app).range_to_bounds(&(5..12))).unwrap()
+        };
+        let decorated = bounds(cx);
+        view.update(cx, |view, cx| view.composer.update(cx, |input, cx| input.set_decorations(Vec::new(), cx)));
+        cx.update(|window, app| window.draw(app).clear(app));
+        assert_eq!(decorated, bounds(cx), "the slash command must not change the position of the following text");
     }
 
     #[cfg(debug_assertions)]

@@ -3,7 +3,7 @@
 use super::*;
 
 impl GithubView {
-    pub(super) fn render_files(&self, ds: &DetailState, cx: &mut Context<Self>) -> Div {
+    pub(super) fn render_files(&self, ds: &DetailState, window: &mut Window, cx: &mut Context<Self>) -> Div {
         if let Some(e) = &ds.files_error {
             return div().text_color(hsla(theme::DANGER)).child(e.clone());
         }
@@ -35,14 +35,16 @@ impl GithubView {
                 .on_click(go(cx, GhAct::ToggleFile(f.path.clone())));
             let mut card = div().rounded(px(8.0)).border_1().border_color(hsla(CARD_BORDER)).overflow_hidden().child(head);
             if open {
-                card = card.child(self.render_diff(f, ds.full.contains(&f.path), n, cx));
+                let scroll = ds.file_scrolls.borrow_mut().entry(f.path.clone())
+                    .or_insert_with(crate::panels::glide::Smooth::horizontal_only).clone();
+                card = card.child(self.render_diff(f, ds.full.contains(&f.path), n, &scroll, window, cx));
             }
             col = col.child(card);
         }
         col
     }
 
-    pub(super) fn render_diff(&self, f: &FileDiff, full: bool, n: usize, cx: &mut Context<Self>) -> Div {
+    fn render_diff(&self, f: &FileDiff, full: bool, n: usize, scroll: &crate::panels::glide::Smooth, window: &mut Window, cx: &mut Context<Self>) -> Div {
         const SHOWN: usize = 400;
         if f.no_patch {
             return div().p(px(12.0)).child(faint("No inline diff for this file (binary or too large). Open on GitHub to view it."));
@@ -68,7 +70,7 @@ impl GithubView {
         }
         let hidden = f.lines.len().saturating_sub(SHOWN);
         div()
-            .child(div().id(SharedString::from(format!("gh-diff-{n}"))).overflow_x_scroll().child(lines))
+            .child(scroll.wire(div().id(SharedString::from(format!("gh-diff-{n}"))), window).child(lines))
             .when(!full && hidden > 0, |d| {
                 d.child(div().p(px(8.0)).child(button(SharedString::from(format!("gh-diff-all-{n}")), format!("Show {hidden} more lines"), false).on_click(go(cx, GhAct::ShowAllLines(f.path.clone())))))
             })

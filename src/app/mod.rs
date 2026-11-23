@@ -344,7 +344,7 @@ pub struct HomeState {
     pub model_anchor: crate::panels::widgets::Anchor,
     pub model_highlight: usize,
     /// Follows `model_highlight` so keyboard moves keep the highlighted row in view.
-    pub model_scroll: gpui::ScrollHandle,
+    pub model_scroll: crate::panels::glide::Smooth,
     pub effort_bounds: std::rc::Rc<std::cell::Cell<gpui::Bounds<Pixels>>>,
     pub effort_dragging: std::rc::Rc<std::cell::Cell<bool>>,
 }
@@ -585,6 +585,7 @@ pub struct Workspace {
     pub skills_page: skills::SkillsPage,
     /// Smooth wheel scrolling of the settings page.
     pub settings_scroll: crate::panels::glide::Smooth,
+    pub harness_dialog_scroll: crate::panels::glide::Smooth,
     /// Whether this run already said it couldn't write a session's tool settings file (said at most once).
     pub menu: Option<Menu>,
     /// Active universal anchored picker dropdown (model, project, branch & worktree, settings, scope, editor).
@@ -648,6 +649,8 @@ pub struct Workspace {
     pub remembered: Vec<Id>,
     /// Smooth wheel scrolling of the left list and the right menu.
     pub sidebar_scroll: crate::panels::glide::Smooth,
+    pub recent_scroll: crate::panels::glide::Smooth,
+    pub sidebar_question_scroll: crate::panels::glide::Smooth,
     pub menu_scroll: crate::panels::glide::Smooth,
     pub restored: bool,
     /// Sessions that are working or waiting for the user; absent = idle and already seen.
@@ -725,7 +728,7 @@ impl Workspace {
                 prompt: home_prompt,
                 model_anchor: crate::panels::widgets::Anchor::default(),
                 model_highlight: 0,
-                model_scroll: gpui::ScrollHandle::new(),
+                model_scroll: Default::default(),
                 creating: None,
                 launch_when_created: false,
                 effort_bounds: std::rc::Rc::new(std::cell::Cell::new(gpui::Bounds::default())),
@@ -743,6 +746,7 @@ impl Workspace {
             worktrees_page: Default::default(),
             skills_page: Default::default(),
             settings_scroll: Default::default(),
+            harness_dialog_scroll: Default::default(),
             menu: None,
             picker: None,
             toast: None,
@@ -783,6 +787,8 @@ impl Workspace {
             quitting: false,
             remembered: vec![],
             sidebar_scroll: Default::default(),
+            recent_scroll: Default::default(),
+            sidebar_question_scroll: Default::default(),
             menu_scroll: Default::default(),
             restored: false,
             activity: HashMap::new(),

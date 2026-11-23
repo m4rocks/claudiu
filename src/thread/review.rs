@@ -388,9 +388,9 @@ impl ThreadView {
         cx.notify();
     }
 
-    pub(super) fn render_review(&self, cx: &mut Context<Self>) -> Option<Div> {
+    pub(super) fn render_review(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<Div> {
         let review = self.review.as_ref()?;
-        let mut body = div().id("thread-review").flex_1().overflow_y_scroll().px(px(18.0)).pt(px(12.0)).flex().flex_col().gap(px(12.0));
+        let mut body = self.review_scroll.wire(div().id("thread-review").flex_1(), window).px(px(18.0)).pt(px(12.0)).flex().flex_col().gap(px(12.0));
         if let Some(why) = &review.error {
             body = body.child(div().text_color(hsla(theme::DANGER)).child(why.clone()));
         }

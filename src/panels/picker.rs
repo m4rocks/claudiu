@@ -7,7 +7,7 @@ use std::rc::Rc;
 
 use gpui::{
     Anchor as Corner, AnyElement, App, Bounds, ClickEvent, Context, Div, ElementId, FocusHandle, FontWeight, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, ParentElement, Pixels,
-    ScrollHandle, SharedString, Stateful, StatefulInteractiveElement, Styled, Window, anchored, canvas, deferred, div, point, prelude::FluentBuilder, px,
+    SharedString, Stateful, StatefulInteractiveElement, Styled, Window, anchored, canvas, deferred, div, point, prelude::FluentBuilder, px,
 };
 use gpui_kit::assets::IconName;
 use gpui_kit::component::input::{Input, InputState};
@@ -29,7 +29,7 @@ pub struct Nav {
     query: Rc<RefCell<String>>,
     /// Where each row was drawn last frame, to scroll the highlighted one into view.
     rows: Rc<RefCell<Vec<Bounds<Pixels>>>>,
-    scroll: ScrollHandle,
+    scroll: super::glide::Smooth,
 }
 
 impl Nav {
@@ -94,8 +94,8 @@ impl<V: 'static> Choices<V> {
     }
 
     /// The scrolling list the rows go in, so the highlight can be kept in view.
-    pub fn list(&self, id: impl Into<ElementId>) -> Stateful<Div> {
-        div().id(id).overflow_y_scroll().track_scroll(&self.nav.scroll).flex().flex_col().gap(px(2.0))
+    pub fn list(&self, id: impl Into<ElementId>, window: &mut Window) -> Stateful<Div> {
+        self.nav.scroll.wire(div().id(id), window).flex().flex_col().gap(px(2.0))
     }
 
     /// Handle Up, Down or Enter; false for any other key.
@@ -117,14 +117,14 @@ impl<V: 'static> Choices<V> {
 
     fn reveal(&self, ix: usize) {
         let Some(row) = self.nav.rows.borrow().get(ix).copied() else { return };
-        let view = self.nav.scroll.bounds();
-        let mut offset = self.nav.scroll.offset();
+        let view = self.nav.scroll.handle().bounds();
+        let mut offset = self.nav.scroll.handle().offset();
         if row.top() < view.top() {
             offset.y += view.top() - row.top();
         } else if row.bottom() > view.bottom() {
             offset.y -= row.bottom() - view.bottom();
         }
-        self.nav.scroll.set_offset(offset);
+        self.nav.scroll.scroll_to(offset);
     }
 }
 

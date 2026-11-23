@@ -343,6 +343,16 @@ impl Workspace {
                     .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::ToggleShell(id.clone()), window, cx))),
             );
         }
+        if let Some((id, thread)) = id.and_then(|id| {
+            let view = self.live_view(id)?.thread()?;
+            view.read(cx).can_find().then(|| (id.clone(), view.clone()))
+        }) {
+            actions = actions.child(row("find-in-session", IconName::Search, "Find in session")
+                .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
+                    ws.show_session(&id, window, cx);
+                    thread.update(cx, |view, cx| view.open_find(window, cx));
+                })));
+        }
         let cwd = self.active_cwd();
         actions.child(if id.is_some() {
             row("github", IconName::GitPullRequest, "GitHub")

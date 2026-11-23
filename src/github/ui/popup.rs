@@ -226,7 +226,7 @@ impl GithubView {
         let needle = popup.filter.read(cx).value().to_lowercase();
         let searchable = popup.kind.searchable();
         let mut choices = picker::Choices::new(&popup.nav, &needle);
-        let mut list = choices.list("gh-pop-list").max_h(px(320.0));
+        let mut list = choices.list("gh-pop-list", window).max_h(px(320.0));
         let mut shown = 0;
         for (i, it) in items.into_iter().enumerate() {
             if searchable && !needle.is_empty() && !it.label.to_lowercase().contains(&needle) {

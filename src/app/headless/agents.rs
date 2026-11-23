@@ -106,8 +106,14 @@ fn compaction_preserves_the_session_and_never_becomes_a_user_message() {
                 !view.is_loading() && !view.is_working() && view.thread.context.is_some()
             });
             if done { break; }
-            assert!(std::time::Instant::now() < until, "the context update never arrived");
-            std::thread::yield_now();
+            if std::time::Instant::now() >= until {
+                ws.read_with(&cx, |ws, app| {
+                    let view = ws.live_view(&id).unwrap().thread().unwrap().read(app);
+                    panic!("{} never settled after the context update: context={:?}, loading={}, working={}, error={:?}",
+                        harness.name(), view.thread.context, view.is_loading(), view.is_working(), view.start_error());
+                });
+            }
+            std::thread::sleep(Duration::from_millis(10));
         }
         ws.read_with(&cx, |ws, app| {
             let view = ws.live_view(&id).unwrap().thread().unwrap().read(app);

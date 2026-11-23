@@ -738,7 +738,15 @@ impl<M: InputModeKind> TextElement<M> {
         bounds: &Bounds<Pixels>,
     ) -> Option<Path<Pixels>> {
         let corners = Self::layout_range_corners(&range, last_layout)?;
-        let points = frame_outline_points(&corners);
+        Self::layout_match_corners(&corners, last_layout, bounds)
+    }
+
+    fn layout_match_corners(
+        corners: &[Corners<Point<Pixels>>],
+        last_layout: &LastLayout,
+        bounds: &Bounds<Pixels>,
+    ) -> Option<Path<Pixels>> {
+        let points = frame_outline_points(corners);
         let origin = bounds.origin + point(last_layout.line_number_width, px(0.));
         let mut builder = gpui::PathBuilder::fill();
         builder.move_to(origin + *points.first()?);
@@ -814,6 +822,14 @@ impl<M: InputModeKind> TextElement<M> {
         let state = self.state.read(cx);
         let mut fills = Vec::new();
         let mut frames = Vec::new();
+        for decoration in state.extras.decoration_layers().into_iter().flatten() {
+            if let Some((color, padding)) = decoration.padded_background
+                && let Some(corners) = Self::layout_range_corners(&decoration.range, last_layout)
+                && let Some(path) = Self::layout_match_corners(&pad_frame_corners(&corners, padding), last_layout, bounds)
+            {
+                fills.push((path, color));
+            }
+        }
         // Query separate buffer spans across folds instead of scanning annotations
         // in the hidden text between the first and last visible buffer offsets.
         let mut visible_spans: Vec<Range<usize>> = Vec::new();

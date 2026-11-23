@@ -55,6 +55,7 @@ impl Glide {
 enum Axis {
     Vertical,
     Horizontal,
+    HorizontalOnly,
 }
 
 /// `logical` pixels moved to a whole device pixel. gpui draws text at whole device pixels in y, so an offset in
@@ -103,6 +104,86 @@ impl Follow {
     }
 }
 
+/// Smooth wheel notches on a virtual list without replacing its native trackpad or scrollbar handling.
+#[derive(Clone, Default)]
+pub struct SmoothList(Rc<RefCell<ListMotion>>);
+
+#[derive(Default)]
+struct ListMotion {
+    glide: Option<Glide>,
+    width: Option<Pixels>,
+}
+
+impl SmoothList {
+    pub fn cancel(&self) {
+        self.0.borrow_mut().glide = None;
+    }
+
+    pub fn overlay(&self, list: &gpui::ListState, estimated_height: Pixels, wheel_enabled: bool) -> impl gpui::IntoElement {
+        let glide = self.clone();
+        let list = list.clone();
+        let wheel_glide = glide.clone();
+        let wheel_list = list.clone();
+        gpui::canvas(
+            move |viewport, window, _| {
+                let mut motion = glide.0.borrow_mut();
+                if motion.width.replace(viewport.size.width) != Some(viewport.size.width) {
+                    // GPUI clears size hints when the list is first laid out or its width changes.
+                    // Seed estimates after its prepaint so unvisited rows take up scrollbar space.
+                    list.clone().with_uniform_item_height(estimated_height);
+                    motion.glide = None;
+                }
+                if !wheel_enabled || list.is_scrollbar_dragging() {
+                    motion.glide = None;
+                } else if let Some(glide) = &mut motion.glide {
+                    // Virtual rows change the absolute offset as their estimates are replaced.
+                    // Apply each eased step relative to the current visible row.
+                    let scale = window.scale_factor();
+                    let before = snap(glide.shown, scale);
+                    let more = glide.step(0.5);
+                    let delta = snap(glide.shown, scale) - before;
+                    list.scroll_by(px(-delta));
+                    if !more {
+                        motion.glide = None;
+                    }
+                    if more || delta != 0.0 {
+                        window.request_animation_frame();
+                    }
+                }
+                window.insert_hitbox(viewport, gpui::HitboxBehavior::Normal)
+            },
+            move |_, hitbox, window, _| {
+                let glide = wheel_glide;
+                let list = wheel_list;
+                let view = window.current_view();
+                window.on_mouse_event(move |ev: &ScrollWheelEvent, phase, window, cx| {
+                    if !wheel_enabled || phase != gpui::DispatchPhase::Capture || !hitbox.should_handle_scroll(window) || ev.modifiers.modified() {
+                        return;
+                    }
+                    if ev.delta.precise() || list.is_scrollbar_dragging() {
+                        glide.cancel();
+                        return;
+                    }
+                    let mut by = f32::from(ev.delta.pixel_delta(window.line_height()).y) * NOTCH;
+                    if by == 0.0 {
+                        return;
+                    }
+                    if by > 0.0 && list.is_following_tail() {
+                        // The list reattaches within one pixel of the end. Move just past that
+                        // threshold before the first eased frame, which may still round to zero.
+                        let lead_in = by.min(2.0);
+                        list.scroll_by(px(-lead_in));
+                        by -= lead_in;
+                    }
+                    Glide::nudge(&mut glide.0.borrow_mut().glide, 0.0, by, f32::MIN, f32::MAX);
+                    cx.stop_propagation();
+                    cx.notify(view);
+                });
+            },
+        ).absolute().top_0().left_0().size_full()
+    }
+}
+
 struct State {
     axis: Axis,
     handle: ScrollHandle,
@@ -141,6 +222,7 @@ impl Smooth {
         let mut el = el;
         el.interactivity().on_scroll_wheel(move |ev, window, cx| {
             if me.wheel(ev, window) {
+                cx.stop_propagation();
                 cx.notify(view);
             }
         });
@@ -150,6 +232,11 @@ impl Smooth {
     /// A row that scrolls sideways; a vertical wheel notch moves it, as in gpui's own sideways areas.
     pub fn horizontal() -> Self {
         Self::new(Axis::Horizontal)
+    }
+
+    /// Ease horizontal wheel input while letting vertical gestures reach the enclosing scroller.
+    pub fn horizontal_only() -> Self {
+        Self::new(Axis::HorizontalOnly)
     }
 
     fn offset(&self) -> f32 {
@@ -162,13 +249,28 @@ impl Smooth {
         self.0.borrow().handle.clone()
     }
 
+    pub fn scroll_to_item(&self, index: usize) {
+        self.0.borrow_mut().glide = None;
+        self.handle().scroll_to_item(index);
+    }
+
+    pub fn scroll_to(&self, offset: gpui::Point<Pixels>) {
+        self.0.borrow_mut().glide = None;
+        self.handle().set_offset(offset);
+    }
+
     /// Make `el` a vertically scrolling area whose wheel notches ease. Call it while building the view, every frame.
     pub fn wire<E: InteractiveElement + StatefulInteractiveElement + Styled>(&self, el: E, window: &mut Window) -> E {
         self.step(window);
         let (me, view) = (self.clone(), window.current_view());
-        let el = if self.0.borrow().axis == Axis::Vertical { el.overflow_y_scroll() } else { el.overflow_x_scroll() };
+        let el = match self.0.borrow().axis {
+            Axis::Vertical => el.overflow_y_scroll(),
+            Axis::Horizontal => el.overflow_x_scroll(),
+            Axis::HorizontalOnly => el.overflow_x_scroll().restrict_scroll_to_axis(),
+        };
         el.track_scroll(&self.handle()).on_scroll_wheel(move |ev, window, cx| {
             if me.wheel(ev, window) {
+                cx.stop_propagation();
                 cx.notify(view);
             }
         })
@@ -206,9 +308,17 @@ impl Smooth {
         let (max, by) = match st.axis {
             Axis::Vertical => (max.y, notch.y),
             Axis::Horizontal => (max.x, if notch.x == Pixels::ZERO { notch.y } else { notch.x }),
+            Axis::HorizontalOnly => (max.x, notch.x),
         };
+        if max <= Pixels::ZERO || by == Pixels::ZERO {
+            return false;
+        }
         let (max, by) = (f32::from(max), f32::from(by) * NOTCH);
         let rest = st.rest;
+        let target = st.glide.as_ref().map_or(rest, |glide| glide.target).clamp(-max, 0.0);
+        if (target + by).clamp(-max, 0.0) == target {
+            return false;
+        }
         Glide::nudge(&mut st.glide, rest, by, -max, 0.0);
         true
     }

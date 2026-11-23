@@ -87,6 +87,7 @@ pub struct DetailState {
     pub files_error: Option<String>,
     pub expanded: HashSet<String>,
     pub full: HashSet<String>,
+    pub file_scrolls: std::cell::RefCell<std::collections::HashMap<String, crate::panels::glide::Smooth>>,
     /// `data` is only what the list row knew (title, labels, ...); the description and history are still on their way.
     pub partial: bool,
 }
@@ -106,6 +107,7 @@ impl DetailState {
             files_error: None,
             expanded: HashSet::new(),
             full: HashSet::new(),
+            file_scrolls: Default::default(),
             partial: false,
         }
     }
