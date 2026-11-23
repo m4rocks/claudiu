@@ -202,16 +202,6 @@ impl Thread {
         }
     }
 
-    /// The mode after the current one, as Shift+Tab steps through them.
-    pub fn next_mode(&self) -> Option<&str> {
-        let at = self.modes.iter().position(|(id, _)| Some(id) == self.mode.as_ref()).map_or(0, |i| i + 1);
-        self.modes.get(at % self.modes.len().max(1)).map(|(id, _)| id.as_str())
-    }
-
-    pub fn mode_name(&self) -> Option<&str> {
-        self.modes.iter().find(|(id, _)| Some(id) == self.mode.as_ref()).map(|(_, name)| name.as_str())
-    }
-
     pub fn option(&self, category: &str) -> Option<&ConfigOption> {
         self.config.iter().find(|o| o.category == category)
     }
@@ -600,24 +590,17 @@ mod tests {
     }
 
     #[test]
-    fn the_mode_cycle_wraps_and_follows_the_config_option() {
+    fn the_mode_follows_the_config_option() {
         let mut t = Thread::default();
         t.apply_session(&json!({
             "modes": {"currentModeId": "auto", "availableModes": [{"id": "default", "name": "Manual"}, {"id": "plan", "name": "Plan"}, {"id": "auto", "name": "Auto"}]},
         }));
-        assert_eq!(t.mode_name(), Some("Auto"));
-        assert_eq!(t.next_mode(), Some("default"), "after the last comes the first");
+        assert_eq!(t.mode.as_deref(), Some("auto"));
         t.apply(&json!({"sessionUpdate": "config_option_update", "configOptions": [
             {"id": "mode", "name": "Mode", "category": "mode", "currentValue": "plan", "options": [{"value": "default", "name": "Manual"}]},
         ]}));
         assert_eq!(t.mode.as_deref(), Some("plan"));
-        assert_eq!(t.next_mode(), Some("auto"));
         assert_eq!(t.modes.len(), 3, "the modes the session listed stay");
-    }
-
-    #[test]
-    fn an_agent_with_no_modes_has_no_next_mode() {
-        assert_eq!(Thread::default().next_mode(), None);
     }
 
     #[test]

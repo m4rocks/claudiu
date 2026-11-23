@@ -6,7 +6,7 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::input::InputEvent;
 
 use crate::harness::Harness;
-use crate::panels::{logos, picker, scale};
+use crate::panels::{logos, scale};
 use crate::panels::theme::{self, hsla};
 use crate::panels::widgets::{Anchor, button, button_disabled, icon};
 
@@ -128,11 +128,11 @@ pub fn model_chip(id: impl Into<ElementId>, open: bool, anchor: &Anchor, harness
         .child(icon(IconName::ChevronDown, 10.5).text_color(hsla(theme::TEXT_FAINT)))
 }
 
-/// Permission mode chip shared by both composers, always formatted in plain English.
-pub fn permission_chip(id: impl Into<ElementId>, open: bool, mode_id: &str, raw_name: &str) -> Stateful<Div> {
+/// Permission mode chip shared by both composers.
+pub fn permission_chip(id: impl Into<ElementId>, open: bool, label: impl Into<SharedString>) -> Stateful<Div> {
     chip(id, open)
         .child(icon(IconName::Lock, 11.0).text_color(hsla(theme::TEXT_DIM)))
-        .child(div().text_color(hsla(theme::TEXT_DIM)).child(picker::format_mode_name(mode_id, raw_name)))
+        .child(div().text_color(hsla(theme::TEXT)).child(label.into()))
         .child(icon(IconName::ChevronDown, 10.5).text_color(hsla(theme::TEXT_FAINT)))
 }
 

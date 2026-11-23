@@ -20,6 +20,7 @@ use crate::panels::sidebar::{SIDEBAR_MAX, SIDEBAR_MIN, SIDEBAR_W};
 use crate::github::view::{GhEvent, GithubView};
 use crate::claude::defaults::{Effort, Starter};
 use crate::claude::mcp;
+use crate::harness::permission::Permission;
 use crate::harness::{self, Harness};
 use crate::git::worktree::Base;
 use crate::platform::{self, Editor};
@@ -188,7 +189,8 @@ pub enum Modal {
         default_model: crate::harness::CatalogModel,
         text_generation_model: Option<crate::store::TextGenerationModel>,
         effort: Effort,
-        permission: String,
+        /// None until the user picks one: each harness then keeps its own default.
+        permission: Option<crate::harness::permission::Permission>,
         updates: bool,
         chrome: bool,
         scale: u32,
@@ -328,7 +330,7 @@ pub struct HomeState {
     pub launch_when_created: bool,
     pub model: Option<crate::harness::CatalogModel>,
     pub effort: Effort,
-    pub permission_mode: Option<String>,
+    pub permission_mode: Option<Permission>,
     pub prompt: Entity<TextareaState>,
     pub model_anchor: crate::panels::widgets::Anchor,
     pub model_highlight: usize,
@@ -678,9 +680,7 @@ impl Workspace {
         })
         .detach();
         let home_effort = store.data.settings.new_session.effort;
-        let home_permission = store.data.settings.new_session.mode_id.clone().or_else(|| {
-            store.data.settings.new_session.permission_mode.map(|m| m.acp_id().to_string())
-        });
+        let home_permission = store.data.settings.new_session.permission_mode;
         let mut ws = Self {
             claude_exe,
             acp_server: None,
@@ -859,20 +859,12 @@ impl Workspace {
         self.store.data.settings.default_model()
     }
 
-    pub fn home_selected_permission(&self) -> (String, String) {
-        let harness = self.home_selected_model().harness;
-        let modes = self.store.data.settings.modes_for(harness);
-        if let Some(chosen) = self.home.permission_mode.as_deref()
-            && let Some(found) = modes.iter().find(|(id, _)| id == chosen)
-        {
-            return found.clone();
-        }
-        if let Some(default_id) = self.store.data.settings.new_session.mode_id.as_deref()
-            && let Some(found) = modes.iter().find(|(id, _)| id == default_id)
-        {
-            return found.clone();
-        }
-        modes.into_iter().next().unwrap_or_else(|| ("default".into(), "Ask Before Editing".into()))
+    /// The mode the home composer starts a session in: the one picked there or the default, stepped down to what
+    /// the selected harness offers (`Permission::or_safer`), else its safest mode.
+    pub fn home_selected_permission(&self) -> Option<Permission> {
+        let offered = self.store.data.settings.permissions_for(self.home_selected_model().harness);
+        let wanted = self.home.permission_mode.or(self.store.data.settings.new_session.permission_mode);
+        wanted.and_then(|p| p.or_safer(&offered)).or_else(|| offered.first().copied())
     }
 
     /// Close the sidebar question popover after a brief grace period so the pointer can cross from the row into it.

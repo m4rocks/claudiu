@@ -10,6 +10,7 @@ use crate::app::{
     Act, GitPickerTarget, ProjectPickerMode, Workspace, WorkspacePicker,
 };
 use gpui_kit::component::input::Textarea;
+use crate::harness::permission::Permission;
 use crate::panels::composer;
 use crate::panels::theme::{self, hsla};
 use gpui_kit::assets::IconName;
@@ -22,7 +23,7 @@ impl Workspace {
         use gpui::Focusable;
         let scaled = crate::panels::scale::px;
         let chosen_model = self.home_selected_model();
-        let (perm_id, perm_name) = self.home_selected_permission();
+        let permission = self.home_selected_permission();
 
         let project = self.home_selected_project().cloned();
         let target_cwd = self.home_target_cwd();
@@ -74,7 +75,7 @@ impl Workspace {
             .into_any_element();
 
         let perm_open = matches!(self.picker_kind(), Some(WorkspacePicker::HomePermission));
-        let perm_chip = composer::permission_chip("home-mode", perm_open, &perm_id, &perm_name)
+        let perm_chip = composer::permission_chip("home-mode", perm_open, permission.map_or("Harness default", Permission::label))
             .dropdown(cx, |ws, at, _window, cx| {
                 ws.open_home_permission_picker(at, cx);
             })

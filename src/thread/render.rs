@@ -15,6 +15,7 @@ use gpui::{AppContext, Entity};
 
 use super::{ThreadEvent, ThreadPicker, ThreadView};
 use crate::harness::CatalogModel;
+use crate::harness::permission::Permission;
 use crate::harness::thread::{Entry, SubagentReport, ToolCall, ToolContent, ToolStatus, diff_lines, parse_subagent_report};
 use crate::panels::{composer, logos, picker, scale};
 use crate::panels::theme::{self, hsla};
@@ -932,33 +933,24 @@ impl ThreadView {
             }
             ThreadPicker::Permission => {
                 let mut rows = div().id("picker-perm-list").max_h(px(340.0)).overflow_y_scroll().flex().flex_col().gap(px(2.0));
-                if self.thread.modes.is_empty() {
+                let offered = self.permissions();
+                if offered.is_empty() {
                     rows = rows.child(picker::empty_note("No permission modes available."));
                 } else {
-                    let hi = self.mode_highlight.min(self.thread.modes.len().saturating_sub(1));
-                    for (i, (id, name)) in self.thread.modes.iter().enumerate() {
-                        let current = self.thread.mode.as_deref() == Some(id.as_str());
+                    let hi = self.mode_highlight.min(offered.len() - 1);
+                    for (i, (mode, id)) in offered.into_iter().enumerate() {
+                        let current = self.thread.mode.as_deref() == Some(id);
                         let focused = i == hi;
-                        let mode_id = id.clone();
-                        let display = picker::format_mode_name(id, name);
                         let lead = icon(IconName::Lock, 12.0).text_color(hsla(if current { theme::TEXT } else { theme::TEXT_FAINT })).into_any_element();
                         rows = rows.child(
-                            picker::row(
-                                SharedString::from(format!("perm-mode-{i}")),
-                                Some(lead),
-                                display,
-                                Some(picker::permission_description(id).into()),
-                                None,
-                                current,
-                                false,
-                            )
-                            .when(focused && !current, |d| d.bg(hsla(theme::SURFACE_HOVER)))
-                            .border_1()
-                            .border_color(if focused { hsla(theme::FOCUS_BORDER) } else { gpui::transparent_black() })
-                            .on_click(cx.listener(move |v, _: &ClickEvent, window, cx| {
-                                v.set_mode(mode_id.clone(), cx);
-                                v.close_picker(window, cx);
-                            })),
+                            picker::row(SharedString::from(format!("perm-mode-{i}")), Some(lead), mode.label(), Some(mode.description().into()), None, current, false)
+                                .when(focused && !current, |d| d.bg(hsla(theme::SURFACE_HOVER)))
+                                .border_1()
+                                .border_color(if focused { hsla(theme::FOCUS_BORDER) } else { gpui::transparent_black() })
+                                .on_click(cx.listener(move |v, _: &ClickEvent, window, cx| {
+                                    v.set_mode(id.to_string(), cx);
+                                    v.close_picker(window, cx);
+                                })),
                         );
                     }
                 }
@@ -1166,13 +1158,17 @@ impl ThreadView {
             )
             .into_any_element();
 
+        // Permission mode: one of the four, or the harness's own name for a mode outside them.
         let permission = self.thread.mode.as_deref().map(|mode_id| {
-            let raw_name = self.thread.mode_name().unwrap_or(mode_id);
-            composer::permission_chip("thread-mode", self.picker == Some(ThreadPicker::Permission), mode_id, raw_name)
+            let label = match Permission::of(self.harness, mode_id) {
+                Some(mode) => mode.label().to_string(),
+                None => picker::format_mode_name(mode_id, self.thread.modes.iter().find(|(id, _)| id == mode_id).map_or(mode_id, |(_, name)| name)),
+            };
+            composer::permission_chip("thread-mode", self.picker == Some(ThreadPicker::Permission), label)
                 .dropdown_above(cx, |v, at, window, cx| {
                     v.picker = Some(ThreadPicker::Permission);
                     v.picker_at = at;
-                    v.mode_highlight = v.thread.modes.iter().position(|(id, _)| v.thread.mode.as_deref() == Some(id.as_str())).unwrap_or(0);
+                    v.mode_highlight = v.permissions().iter().position(|(_, id)| v.thread.mode.as_deref() == Some(*id)).unwrap_or(0);
                     v.focus_composer(window, cx);
                     cx.notify();
                 })

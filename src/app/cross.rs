@@ -295,7 +295,7 @@ impl Workspace {
                 let cwd = folder.ok_or("No folder.")?;
                 let harness = req.args["harness"].as_str().and_then(|key| crate::harness::Harness::ALL.into_iter().find(|h| h.key() == key)).unwrap_or(self.store.data.settings.harness);
                 // The model may pick the model and effort; the permission mode stays the user's default for new
-                // sessions (`Starter::OtherSession` never bypasses permissions).
+                // sessions (`Starter::OtherSession` never starts with full access).
                 let mut options = vec![];
                 if let Some(model) = req.args["model_id"].as_str() {
                     options.push(("model", model.to_string()));

@@ -27,6 +27,7 @@ use self::queue::Queued;
 use crate::harness::acp::{self, Connection, Event, Launch};
 use crate::harness::codex;
 use crate::harness::thread::{Entry, Thread};
+use crate::harness::permission::{self, Permission};
 use crate::harness::{CatalogModel, Harness, Reopen};
 use crate::visual::Card;
 use crate::visual::ui::{CardUi, SendText};
@@ -523,7 +524,7 @@ impl ThreadView {
         }
         // A resumed session keeps the mode the harness restores; its options are the model and effort picked in it.
         if (start.session_id.is_none() || self.subagent_edits.is_some())
-            && let Some(mode) = start.mode.clone().filter(|m| self.thread.modes.iter().any(|(id, _)| id == m))
+            && let Some(mode) = start.mode.as_deref().and_then(|m| self.listed_or_safer(m))
         {
             self.set_mode(mode, cx);
         }
@@ -1266,6 +1267,21 @@ impl ThreadView {
         self.answer(reject, cx);
     }
 
+    /// `wanted` when the session lists it. Otherwise, for one of the four modes, the nearest safer one it lists: the
+    /// mode came from the cached list, and an account can have fewer modes than that (Claude's Auto).
+    fn listed_or_safer(&self, wanted: &str) -> Option<String> {
+        if self.thread.modes.iter().any(|(id, _)| id == wanted) {
+            return Some(wanted.to_string());
+        }
+        let offered = permission::offered(self.harness, &self.thread.modes);
+        Permission::of(self.harness, wanted)?.or_safer(&offered)?.native(self.harness).map(String::from)
+    }
+
+    /// The universal modes this session offers, each with its harness's mode id, least access first.
+    pub(crate) fn permissions(&self) -> Vec<(Permission, &'static str)> {
+        permission::offered(self.harness, &self.thread.modes).into_iter().filter_map(|p| Some((p, p.native(self.harness)?))).collect()
+    }
+
     pub(crate) fn set_mode(&mut self, mode: String, cx: &mut Context<Self>) {
         let (Some(c), Some(s)) = (self.connection.clone(), self.session_id.clone()) else { return };
         // The agent confirms with `current_mode_update`; showing it at once keeps Shift+Tab presses in step.
@@ -1346,7 +1362,7 @@ impl ThreadView {
         {
             match ev.keystroke.key.as_str() {
                 "up" | "down" => {
-                    let count = self.thread.modes.len();
+                    let count = self.permissions().len();
                     if count > 0 {
                         let cur = self.mode_highlight.min(count - 1);
                         self.mode_highlight = if ev.keystroke.key == "up" {
@@ -1360,8 +1376,9 @@ impl ThreadView {
                     return;
                 }
                 "enter" => {
-                    if let Some((mode_id, _)) = self.thread.modes.get(self.mode_highlight.min(self.thread.modes.len().saturating_sub(1))).cloned() {
-                        self.set_mode(mode_id, cx);
+                    let offered = self.permissions();
+                    if let Some((_, mode_id)) = offered.get(self.mode_highlight.min(offered.len().saturating_sub(1))) {
+                        self.set_mode(mode_id.to_string(), cx);
                         self.close_picker(window, cx);
                     }
                     cx.stop_propagation();
@@ -1456,8 +1473,8 @@ impl ThreadView {
                 self.set_draft("", window, cx);
             }
             keys::Key::CycleMode => {
-                if let Some(next) = self.thread.next_mode().map(String::from) {
-                    self.set_mode(next, cx);
+                if let Some(next) = permission::next(self.harness, &self.thread.modes, self.thread.mode.as_deref()) {
+                    self.set_mode(next.to_string(), cx);
                 }
             }
             keys::Key::Older | keys::Key::Newer => self.walk_history(key == keys::Key::Older, &draft, window, cx),

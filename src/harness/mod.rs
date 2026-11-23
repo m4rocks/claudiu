@@ -8,6 +8,7 @@ mod antigravity;
 pub mod claude;
 pub(crate) mod codex;
 pub(crate) mod opencode;
+pub mod permission;
 pub mod text_generation;
 pub mod thread;
 
@@ -78,15 +79,8 @@ pub struct Adapter {
     pub compact_command: Option<&'static str>,
     /// Whether the agent takes a message in the turn it is working on (`_m4code/steer`, the Claude Code bridge's own).
     pub steers: bool,
-    /// Fallback permission modes shown before the adapter's ACP server reports its live list.
-    pub default_modes: fn() -> Vec<(String, String)>,
     /// Fallback model entries shown before the adapter's ACP server reports its live catalog.
     pub default_models: fn() -> Vec<CatalogModel>,
-}
-
-/// Default permission modes for ACP adapters that haven't reported a live mode list yet.
-pub(crate) fn standard_default_modes() -> Vec<(String, String)> {
-    vec![("default".into(), "Ask Before Editing".into()), ("fullAccess".into(), "Full Access".into())]
 }
 
 /// Default single placeholder model for an adapter before its ACP server reports a live catalog.

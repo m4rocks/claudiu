@@ -48,7 +48,7 @@ pub enum Act {
     HomeSelectWorktree(PathBuf),
     HomeSelectModel(crate::harness::CatalogModel),
     HomeSetEffort(Effort),
-    HomeSelectPermission(String),
+    HomeSelectPermission(Permission),
     HomeLaunch,
     /// List the default agent's sessions in a folder, to pick one up here.
     ListSessions { cwd: PathBuf },
@@ -78,7 +78,7 @@ pub enum Act {
     PickDefaultModel(crate::harness::CatalogModel),
     PickTextGenerationModel(Option<crate::store::TextGenerationModel>),
     PickEffort(Effort),
-    PickPermission(String),
+    PickPermission(crate::harness::permission::Permission),
     /// The project's GitHub issues and pull requests.
     OpenGithub {
         cwd: PathBuf,
@@ -213,14 +213,14 @@ impl Workspace {
                 let cwd = self.home_target_cwd();
                 let chosen = self.home_selected_model();
                 let effort = self.home.effort;
-                let (perm_id, _) = self.home_selected_permission();
+                let mode_id = self.home_selected_permission().and_then(|p| p.native(chosen.harness)).map(str::to_string);
                 let text = self.home.prompt.read(cx).value().trim().to_string();
                 let prompt = (!text.is_empty()).then_some(text);
                 if prompt.is_some() {
                     self.home.prompt.update(cx, |p, cx| p.set_value("", window, cx));
                 }
                 let model = (!chosen.id.is_empty()).then_some(chosen.id);
-                self.new_session_from_home(chosen.harness, model, cwd, prompt, Some(effort), Some(perm_id), window, cx);
+                self.new_session_from_home(chosen.harness, model, cwd, prompt, Some(effort), mode_id, window, cx);
             }
             Act::ListSessions { cwd } => self.list_sessions(cwd, window.mouse_position(), cx),
             Act::PickUp { harness, cwd, session_id, title } => self.pick_up(harness, cwd, session_id, title, window, cx),
@@ -357,15 +357,7 @@ impl Workspace {
                     claude_subagents: self.store.data.settings.claude_subagents,
                     picking: None,
                 });
-                let modes = self.store.data.settings.modes_for(default_model.harness);
-                let initial_perm = defaults
-                    .mode_id
-                    .clone()
-                    .or_else(|| defaults.permission_mode.map(|m| m.acp_id().to_string()))
-                    .filter(|id| modes.iter().any(|(mid, _)| mid == id))
-                    .or_else(|| modes.first().map(|(id, _)| id.clone()))
-                    .unwrap_or_else(|| "default".into());
-                self.modal = Some(Modal::Settings { shell, claude, default_model, text_generation_model, effort: defaults.effort.unwrap_or_default(), permission: initial_perm, updates, chrome, scale: crate::panels::scale::percent(), follow_up: s_follow_up, m4code_off: self.store.data.settings.m4code_tools_off.clone(), skills_field, skill_search, costly: claude::costly::scan(), list_focus, renaming: None, subagents });
+                self.modal = Some(Modal::Settings { shell, claude, default_model, text_generation_model, effort: defaults.effort.unwrap_or_default(), permission: defaults.permission_mode, updates, chrome, scale: crate::panels::scale::percent(), follow_up: s_follow_up, m4code_off: self.store.data.settings.m4code_tools_off.clone(), skills_field, skill_search, costly: claude::costly::scan(), list_focus, renaming: None, subagents });
                 // After the modal exists: a page that loads something reads the dialog's fields.
                 self.set_settings_page(self.settings_page, cx);
             }
@@ -386,13 +378,7 @@ impl Workspace {
             Act::UninstallSkill(name) => self.uninstall_skill(name, cx),
             Act::UpdateSkills(names) => self.update_skills(names, cx),
             Act::PickDefaultModel(choice) => {
-                let modes = self.store.data.settings.modes_for(choice.harness);
-                if let Some(Modal::Settings { default_model, permission, list_focus, .. }) = self.modal.as_mut() {
-                    if !modes.iter().any(|(id, _)| id == permission)
-                        && let Some((first, _)) = modes.first()
-                    {
-                        *permission = first.clone();
-                    }
+                if let Some(Modal::Settings { default_model, list_focus, .. }) = self.modal.as_mut() {
                     *default_model = choice;
                     window.focus(list_focus, cx);
                 }
@@ -410,7 +396,7 @@ impl Workspace {
             }
             Act::PickPermission(choice) => {
                 if let Some(Modal::Settings { permission, .. }) = self.modal.as_mut() {
-                    *permission = choice;
+                    *permission = Some(choice);
                 }
             }
             Act::NewBranch(cwd) => {

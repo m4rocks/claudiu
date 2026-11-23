@@ -195,15 +195,14 @@ impl Settings {
         harness.key()
     }
 
-    /// Permission modes `(id, name)` available for `harness`: the live list reported by its ACP adapter, or the
-    /// adapter's fallback defaults until it answers.
-    pub fn modes_for(&self, harness: crate::harness::Harness) -> Vec<(String, String)> {
-        if let Some(modes) = self.harness_modes.get(Self::harness_key(harness))
-            && !modes.is_empty()
-        {
-            return modes.clone();
+    /// The universal permission modes `harness` has: those its ACP adapter last listed, or every mode it maps until
+    /// its adapter answers.
+    pub fn permissions_for(&self, harness: crate::harness::Harness) -> Vec<crate::harness::permission::Permission> {
+        use crate::harness::permission::{self, Permission};
+        match self.harness_modes.get(Self::harness_key(harness)).filter(|modes| !modes.is_empty()) {
+            Some(modes) => permission::offered(harness, modes),
+            None => Permission::ALL.into_iter().filter(|p| p.native(harness).is_some()).collect(),
         }
-        (harness.adapter().default_modes)()
     }
 
     /// Update the cached permission modes for `harness`; returns `true` when the list actually changed.

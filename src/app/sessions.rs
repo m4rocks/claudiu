@@ -149,18 +149,9 @@ impl Workspace {
                 if meta.harness != settings.harness {
                     defaults.model = None;
                 }
-                let (mut mode, options) = claude::defaults::acp_settings(&defaults, claude::trim::FLUFF.contains(&claude::trim::Trim::PlanMode), by);
-                if let Some(id) = defaults.mode_id.as_deref().filter(|s| !s.is_empty()) {
-                    let allowed = match id {
-                        "plan" => by != claude::defaults::Starter::FixGit,
-                        "bypassPermissions" | "fullAccess" | "full_access" | "yolo" => by != claude::defaults::Starter::OtherSession,
-                        _ => true,
-                    };
-                    if allowed && (meta.harness == settings.harness || settings.modes_for(meta.harness).iter().any(|(mid, _)| mid == id)) {
-                        mode = Some(id.to_string());
-                    }
-                }
-                (mode, options)
+                let plan_trimmed = claude::trim::FLUFF.contains(&claude::trim::Trim::PlanMode);
+                let (mode, options) = claude::defaults::acp_settings(&defaults, meta.harness, &settings.permissions_for(meta.harness), plan_trimmed, by);
+                (mode.map(String::from), options)
             }
             Some(_) => (None, resume_options(meta)),
         };

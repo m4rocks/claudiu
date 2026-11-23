@@ -32,12 +32,6 @@ pub const ADAPTER: Adapter = Adapter {
     reopen: Reopen::Load,
     delete_model_session: false,
     compact_command: Some("compact"),
-    default_modes: || {
-        crate::claude::defaults::PermissionMode::ALL
-            .into_iter()
-            .map(|m| (m.acp_id().to_string(), m.label().to_string()))
-            .collect()
-    },
     default_models: super::CatalogModel::default_claude_models,
     steers: true,
 };

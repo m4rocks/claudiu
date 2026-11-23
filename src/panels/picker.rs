@@ -408,19 +408,6 @@ fn humanize_identifier(s: &str) -> String {
         .join(" ")
 }
 
-/// One-line explanation for a permission mode id (shared by in-chat and Settings permission pickers).
-pub fn permission_description(id: &str) -> &'static str {
-    match id {
-        "default" | "manual" | "ask" | "review" => "Ask before running commands or editing files",
-        "acceptEdits" | "accept_edits" | "auto_edit" | "autoEdit" => "Auto-accept file edits; ask before commands",
-        "plan" | "read_only" | "readOnly" | "read-only" => "Read-only planning; propose changes first",
-        "auto" => "Approve safe edits and commands automatically",
-        "dontAsk" | "dont_ask" => "Deny tools not explicitly allowed",
-        "bypassPermissions" | "bypass_permissions" | "yolo" | "fullAccess" | "full_access" | "full-access" => "Run all commands and edits without asking",
-        _ => "Agent permission mode",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::step;
