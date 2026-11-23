@@ -3,9 +3,11 @@
 
 use std::rc::Rc;
 
+use base64::Engine;
+
 use gpui::{
     AnyElement, ClickEvent, Context, Div, Focusable, FontWeight, InteractiveElement, IntoElement, MouseButton, MouseDownEvent, ParentElement, Render, SharedString,
-    StatefulInteractiveElement, Styled, Window, div, linear_color_stop, linear_gradient, list, prelude::FluentBuilder, px,
+    StatefulInteractiveElement, Styled, StyledImage, Window, div, linear_color_stop, linear_gradient, list, prelude::FluentBuilder, px,
 };
 use gpui_kit::assets::IconName;
 use gpui_kit::component::input::Textarea;
@@ -16,6 +18,7 @@ use gpui::{AppContext, Entity};
 use super::{ThreadEvent, ThreadPicker, ThreadView, elements};
 use crate::harness::CatalogModel;
 use crate::harness::permission::Permission;
+use super::timeline::{self, RunKind};
 use crate::harness::thread::{Entry, SubagentReport, ToolCall, ToolContent, ToolStatus, parse_subagent_report};
 use crate::panels::{composer, logos, picker, scale};
 use crate::panels::theme::{self, hsla};
@@ -40,7 +43,7 @@ impl Render for ThreadView {
             .on_mouse_down(
                 gpui::MouseButton::Left,
                 cx.listener(|v, _: &gpui::MouseDownEvent, window, cx| {
-                    if v.picker != Some(ThreadPicker::Model) && v.review.is_none() {
+                    if v.picker != Some(ThreadPicker::Model) && v.review.is_none() && v.screenshot.is_none() && v.find.is_none() {
                         v.focus_composer(window, cx);
                     }
                 }),
@@ -66,26 +69,39 @@ impl Render for ThreadView {
                 MouseButton::Left,
                 cx.listener(|v, _: &gpui::MouseUpEvent, window, cx| {
                     if v.picker != Some(ThreadPicker::Model)
-                        && v.review.is_none()
+                        && v.review.is_none() && v.find.is_none()
                         && !v.has_chat_selection(cx)
                     {
                         v.focus_composer(window, cx);
                     }
+                    cx.notify();
                 }),
             )
             .child(conversation)
             .child(div().absolute().bottom_0().left_0().right_0().h(px(18.0)).bg(fade));
+        let conversation = conversation.when(!self.list.is_following_tail(), |view| {
+            view.child(div().absolute().bottom(px(22.0)).right(px(24.0)).child(
+                button("jump-to-latest", "Jump to latest", true).debug_selector(|| "jump-to-latest".into()).on_click(cx.listener(|v, _: &ClickEvent, _, cx| {
+                    v.list.set_follow_mode(gpui::FollowMode::Tail);
+                    cx.notify();
+                })),
+            ))
+        });
+        let conversation = conversation.children(self.render_outline(cx));
         let conversation = div().flex_1().min_h_0().flex().flex_col().child(conversation).children(self.render_activity());
         let bottom_dock = div()
             .flex_none()
             .flex()
             .flex_col()
+            .children(self.render_telemetry(cx))
             .children(self.render_plan())
             .children(self.render_background(cx))
             .child(self.render_composer(window, cx));
-        root.child(conversation)
+        root.children(self.render_find(cx))
+            .child(conversation)
             .child(bottom_dock)
             .children(self.render_picker_overlay(window, cx))
+            .children(self.render_screenshot(cx))
     }
 }
 
@@ -127,6 +143,17 @@ pub(super) fn markdown_of(cache: &mut HashMap<usize, Entity<TextViewState>>, ix:
     // Unchanged text costs a comparison; a reply still streaming in is appended to what is parsed.
     state.update(cx, |s, cx| s.set_text(text, cx));
     crate::github::ui::styled_markdown(TextView::new(&state))
+}
+
+fn chat_markdown(cache: &mut HashMap<usize, Entity<TextViewState>>, ix: usize, text: &str, cx: &mut Context<ThreadView>) -> TextView {
+    let thread = cx.entity().downgrade();
+    markdown_of(cache, ix, text, cx).on_link_click(move |target, _, _, app| {
+        if target.starts_with("https://") || target.starts_with("http://") {
+            app.open_url(target);
+        } else if let Some((path, line)) = timeline::file_link(target) {
+            let _ = thread.update(app, |view, cx| view.open_location(path, line, cx));
+        }
+    })
 }
 
 /// A line that opens or closes a fenced code block: its marker character and how many of it there are.
@@ -203,7 +230,7 @@ impl ThreadView {
         let Some(entry) = self.thread.entries.get(ix) else { return div().into_any_element() };
         let body = match entry {
             Entry::User(text) if let Some(report) = parse_subagent_report(text) => {
-                let run = tool_run(&self.groupable(), ix);
+                let run = self.tool_run(ix);
                 match &run {
                     Some(run) if run.start == ix && run.len() > 1 => return self.wrap_entry(ix, self.render_tool_run(run.clone(), cx)),
                     Some(run) if !self.run_open(run) => return div().into_any_element(),
@@ -212,14 +239,20 @@ impl ThreadView {
                 let el = self.render_subagent_report(ix, &report, cx);
                 if run.is_some_and(|r| r.len() > 1) { indent_run_step(el) } else { el }
             }
-            Entry::User(text) => div()
+            Entry::User(text) => div().flex().flex_col().items_start().gap(px(4.0))
                 .px(px(14.0))
                 .py(px(10.0))
                 .rounded(px(9.0))
                 .bg(hsla(theme::ROW_ACTIVE))
                 .border_1()
                 .border_color(hsla(theme::PANEL_BORDER))
-                .child(markdown_of(&mut self.markdown, ix, &keep_line_breaks(text), cx))
+                .child(chat_markdown(&mut self.markdown, ix, &keep_line_breaks(text), cx))
+                .children(self.turn_reviews.iter().filter(|turn| turn.row == ix && turn.text == *text).map(|turn| {
+                    let id = turn.id;
+                    let count = turn.file_count;
+                    button(SharedString::from(format!("review-turn-{id}")), format!("Review Changes ({count})"), false)
+                        .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| v.open_turn_review(id, cx)))
+                }))
                 .into_any_element(),
             Entry::Agent(text) => {
                 let citations = elements::inline_citations_row(ix, elements::extract_citations(text));
@@ -227,12 +260,13 @@ impl ThreadView {
                     .px(px(2.0))
                     .flex()
                     .flex_col()
-                    .child(markdown_of(&mut self.markdown, ix, text, cx))
+                    .child(chat_markdown(&mut self.markdown, ix, text, cx))
                     .children(citations)
+                    .children(self.render_html_preview(ix, text, cx))
                     .into_any_element()
             }
             Entry::Thought(text) => {
-                let run = tool_run(&self.groupable(), ix);
+                let run = self.tool_run(ix);
                 match &run {
                     Some(run) if run.start == ix && run.len() > 1 => return self.wrap_entry(ix, self.render_tool_run(run.clone(), cx)),
                     Some(run) if !self.run_open(run) => return div().into_any_element(),
@@ -242,7 +276,7 @@ impl ThreadView {
                 let el = self.render_thought(ix, text, cx);
                 if in_group { indent_run_step(el) } else { el }
             }
-            Entry::Tool(call) => match tool_run(&self.groupable(), ix) {
+            Entry::Tool(call) => match self.tool_run(ix) {
                 // The run's first call draws the run's line; the rest only show while the run is open.
                 Some(run) if run.start == ix => self.render_tool_run(run, cx),
                 Some(run) if !self.run_open(&run) => return div().into_any_element(),
@@ -262,6 +296,25 @@ impl ThreadView {
                 .into_any_element(),
         };
         self.wrap_entry(ix, body)
+    }
+
+    fn render_html_preview(&self, row: usize, markdown: &str, cx: &mut Context<Self>) -> Option<Div> {
+        let preview = timeline::html_preview(markdown)?;
+        let key = format!("html-preview:{row}");
+        let expanded = self.expanded_tools.contains(&key);
+        Some(div().flex().flex_col().gap(px(6.0))
+            .child(button(SharedString::from(key.clone()), if expanded { "Hide preview" } else { "Preview HTML" }, false)
+                .on_click(cx.listener(move |view, _: &ClickEvent, _, cx| {
+                    if !view.expanded_tools.remove(&key) {
+                        view.expanded_tools.insert(key.clone());
+                    }
+                    view.remeasure(row);
+                    cx.notify();
+                })))
+            .when(expanded, |panel| {
+                let call = format!("html-preview-{row}");
+                panel.child(crate::visual::ui::markdown(call.clone(), &preview, Scope { call, ui: self.card_ui.clone() }))
+            }))
     }
 
     /// A subagent's report, which m4code sent this session as a message: drawn as a folded step among the tool calls,
@@ -353,11 +406,43 @@ impl ThreadView {
             .pb(px(if is_last { 18.0 } else { 10.0 }))
             .flex()
             .justify_center()
-            .child(div().w_full().max_w(px(COLUMN_MAX_W)).child(body))
+            .child(div().w_full().max_w(px(COLUMN_MAX_W))
+                .when(self.find_highlights(ix), |row| row.rounded(px(5.0)).bg(hsla(theme::SURFACE_ELEVATED)))
+                .children((self.visit_watermark == Some(ix)).then(|| div()
+                    .pb(px(4.0)).text_size(scale::px(11.0)).text_color(hsla(theme::ACCENT)).child("New since last visit")))
+                .child(body))
             .into_any_element()
     }
 
     /// Reasoning step: auto-expands with a live spinner while streaming, then folds to `"Thought for Ns"` once done.
+    fn render_outline(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.outline_open {
+            return None;
+        }
+        let rows: Vec<_> = self.thread.entries.iter().enumerate().filter_map(|(row, entry)| {
+            let label = match entry {
+                Entry::User(text) if parse_subagent_report(text).is_none() => first_line(text),
+                Entry::Notice { text, error: true } => first_line(text),
+                _ => return None,
+            };
+            Some((row, label))
+        }).collect();
+        let top = self.list.logical_scroll_top().item_ix;
+        let mut items = div().id("thread-outline").overflow_y_scroll().min_h_0().flex().flex_col().gap(px(3.0));
+        for (row, label) in rows {
+            items = items.child(button(SharedString::from(format!("thread-outline-{row}")), label, row == top)
+                .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| {
+                    v.list.pause_following_tail();
+                    v.list.scroll_to(gpui::ListOffset { item_ix: row, offset_in_item: px(0.0) });
+                    v.outline_open = false;
+                    cx.notify();
+                })));
+        }
+        Some(div().absolute().right(px(16.0)).top(px(8.0)).bottom(px(62.0)).w(px(220.0)).flex().flex_col().gap(px(4.0))
+            .p(px(6.0)).rounded(px(8.0)).bg(hsla(theme::PANEL_BG)).border_1().border_color(hsla(theme::PANEL_BORDER))
+            .child(items).into_any_element())
+    }
+
     fn render_thought(&self, ix: usize, text: &str, cx: &mut Context<Self>) -> AnyElement {
         let key = format!("thought:{ix}");
         let timing = self.thought_timing.get(&ix);
@@ -398,7 +483,10 @@ impl ThreadView {
         let has_card = self.cards.contains_key(&call.id);
         let shell = call.kind == "execute";
         let card_opens_details = has_card && !shell;
-        let has_details = !call.content.is_empty() || card_opens_details;
+        let details = &call.details;
+        let has_details = call.content.iter().any(|item| !matches!(item, ToolContent::Diff { .. }))
+            || details.command.is_some() || details.stdout.is_some() || details.stderr.is_some()
+            || details.output.is_some() || details.request.is_some() || details.response.is_some() || card_opens_details;
         let expanded = (self.detail && !self.collapsed_shell_calls.contains(&call.id))
             || card_opens_details
             || self.expanded_tools.contains(&call.id);
@@ -407,7 +495,8 @@ impl ThreadView {
         let mut location_chips = Vec::new();
         for (n, (path, line)) in call.locations.iter().enumerate().take(2) {
             let (path, line) = (path.clone(), *line);
-            let label = path.file_name().map_or_else(|| path.display().to_string(), |f| f.to_string_lossy().into_owned());
+            let label = path.strip_prefix(&self.cwd).unwrap_or(&path).display().to_string();
+            let end_line = (n == 0).then_some(details.end_line).flatten();
             location_chips.push(
                 div()
                     .id(SharedString::from(format!("tool-loc-{ix}-{n}")))
@@ -422,9 +511,10 @@ impl ThreadView {
                     .text_color(hsla(theme::TEXT_DIM))
                     .cursor_pointer()
                     .hover(|s| s.bg(hsla(theme::SURFACE_HOVER)).text_color(hsla(theme::TEXT)))
-                    .child(match line {
-                        Some(l) => format!("{label}:{l}"),
-                        None => label,
+                    .child(match (line, end_line) {
+                        (Some(start), Some(end)) if end > start => format!("{label}:L{start}-L{end}"),
+                        (Some(line), _) => format!("{label}:L{line}"),
+                        _ => label,
                     })
                     .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| {
                         cx.stop_propagation();
@@ -434,6 +524,14 @@ impl ThreadView {
             );
         }
 
+        if let Some(ms) = details.elapsed_ms {
+            location_chips.push(div().text_color(hsla(theme::TEXT_FAINT))
+                .child(elements::format_duration(std::time::Duration::from_millis(ms))).into_any_element());
+        }
+        if let Some(code) = details.exit_code {
+            let color = if code == 0 { theme::OK } else { theme::DANGER };
+            location_chips.push(div().text_color(hsla(color)).child(format!("Exit {code}")).into_any_element());
+        }
         let mut header = elements::tool_header(ix, call, title(call), location_chips, has_details, expanded);
         if has_details {
             header = header.on_click(cx.listener(move |v, _: &ClickEvent, _, cx| {
@@ -454,9 +552,27 @@ impl ThreadView {
         if (expanded && has_details) || has_card {
             let mut body = div().py(px(4.0)).flex().flex_col().gap(px(6.0));
             if expanded {
-                body = body.children(call.content.iter().map(|content| match content {
-                    ToolContent::Text(text) => elements::tool_output_block(text, FOLDED_LINES, self.detail),
-                    ToolContent::Diff { path, old, new } => elements::tool_diff_block(path, old.as_deref(), new, FOLDED_LINES, self.detail),
+                if let Some(command) = &details.command {
+                    let command_for_shell = command.clone();
+                    body = body.child(elements::tool_output_block(command, FOLDED_LINES, self.detail))
+                        .child(button(SharedString::from(format!("tool-shell-{ix}")), "Copy and open shell", false)
+                            .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| cx.emit(ThreadEvent::OpenToolShell(command_for_shell.clone())))));
+                }
+                for (name, text) in [("stdout", &details.stdout), ("stderr", &details.stderr),
+                    ("Output", &details.output), ("Request", &details.request), ("Response", &details.response)]
+                {
+                    if let Some(text) = text {
+                        let lines: Vec<_> = text.lines().collect();
+                        let count = if self.detail { lines.len() } else { lines.len().min(FOLDED_LINES) };
+                        let recent = lines.len().saturating_sub(count);
+                        body = body.child(elements::code_block(Some(name.into()), &lines[recent..], count, None));
+                    }
+                }
+                body = body.children(call.content.iter().enumerate().filter_map(|(index, content)| match content {
+                    ToolContent::Text(text) if !text.is_empty() && details.stdout.is_none() && details.stderr.is_none() && details.output.is_none() =>
+                        Some(elements::tool_output_block(text, FOLDED_LINES, self.detail)),
+                    ToolContent::Image { mime, data } => self.render_tool_image(ix, (&call.id, index), (mime, data), cx),
+                    _ => None,
                 }));
             }
             if let Some(card) = self.cards.get(&call.id) {
@@ -466,6 +582,54 @@ impl ThreadView {
             block = block.child(elements::trace_content(body.into_any_element()));
         }
         block.into_any_element()
+    }
+
+    fn render_tool_image(&self, row: usize, image_key: (&str, usize), encoded: (&str, &str), cx: &mut Context<Self>) -> Option<AnyElement> {
+        let key = (image_key.0.to_string(), image_key.1);
+        let mut images = self.tool_images.borrow_mut();
+        let image = if let Some(image) = images.get(&key) {
+            image.clone()
+        } else {
+            let format = match encoded.0 {
+                "image/png" => gpui::ImageFormat::Png,
+                "image/jpeg" => gpui::ImageFormat::Jpeg,
+                "image/webp" => gpui::ImageFormat::Webp,
+                _ => return None,
+            };
+            let data = base64::engine::general_purpose::STANDARD.decode(encoded.1).ok()?;
+            let reader = image::ImageReader::new(std::io::Cursor::new(&data)).with_guessed_format().ok()?;
+            let (width, height) = reader.into_dimensions().ok()?;
+            if width == 0 || height == 0 || u64::from(width) * u64::from(height) > 16_000_000 {
+                return None;
+            }
+            let image = std::sync::Arc::new(gpui::Image::from_bytes(format, data));
+            images.insert(key, image.clone());
+            image
+        };
+        Some(div()
+            .id(SharedString::from(format!("tool-screenshot-{row}-{}", image_key.1)))
+            .cursor_pointer()
+            .child(gpui::img(image.clone()).w(px(240.0)).h(px(140.0)).object_fit(gpui::ObjectFit::Contain))
+            .on_click(cx.listener(move |v, _: &ClickEvent, window, cx| {
+                v.screenshot = Some(image.clone());
+                v.screenshot_focus.focus(window, cx);
+                cx.notify();
+            }))
+            .into_any_element())
+    }
+
+    fn render_screenshot(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let image = self.screenshot.clone()?;
+        Some(div().id("thread-screenshot-preview").track_focus(&self.screenshot_focus).absolute().inset_0().occlude()
+            .bg(hsla(theme::APP_BG).opacity(0.95)).flex().flex_col().items_center().p(px(16.0)).gap(px(10.0))
+            .child(button("thread-screenshot-close", "Close screenshot", false)
+                .on_click(cx.listener(|v, _: &ClickEvent, window, cx| {
+                    v.screenshot = None;
+                    v.focus_composer(window, cx);
+                    cx.notify();
+                })))
+            .child(div().flex_1().w_full().min_h_0().child(gpui::img(image).size_full().object_fit(gpui::ObjectFit::Contain)))
+            .into_any_element())
     }
 
     /// The calls in this conversation that run one of the harness's own subagents, oldest first.
@@ -479,9 +643,25 @@ impl ThreadView {
     /// Show call `id`'s step: unfold it and the run of steps it is in, and scroll the conversation to it.
     pub fn reveal_step(&mut self, id: &str, cx: &mut Context<Self>) {
         let Some(ix) = self.thread.tool_at(id) else { return };
-        self.collapsed_shell_calls.remove(id);
-        self.expanded_tools.insert(id.to_string());
-        let start = match tool_run(&self.groupable(), ix) {
+        self.reveal_timeline_row(ix, cx);
+    }
+
+    pub(super) fn reveal_timeline_row(&mut self, ix: usize, cx: &mut Context<Self>) {
+        match self.thread.entries.get(ix) {
+            Some(Entry::Tool(call)) => {
+                self.collapsed_shell_calls.remove(&call.id);
+                self.expanded_tools.insert(call.id.clone());
+            }
+            Some(Entry::Thought(_)) => {
+                self.collapsed_thoughts.remove(&ix);
+                self.expanded_tools.insert(format!("thought:{ix}"));
+            }
+            Some(Entry::User(text)) if parse_subagent_report(text).is_some() => {
+                self.expanded_tools.insert(format!("report:{ix}"));
+            }
+            _ => {}
+        }
+        let start = match self.tool_run(ix) {
             Some(run) => {
                 self.expanded_tools.insert(format!("run:{}", run.start));
                 run.start
@@ -495,13 +675,18 @@ impl ThreadView {
 
     /// Per entry: whether it is a step that folds into a run with its neighbours: a thought, a tool call or a subagent's
     /// report. A call with an inline card stays on its own, so the card is never hidden.
-    pub(super) fn groupable(&self) -> Vec<bool> {
-        self.thread.entries.iter().map(|e| match e {
-            Entry::Thought(_) => true,
-            Entry::Tool(call) => !self.cards.contains_key(&call.id),
-            Entry::User(text) => parse_subagent_report(text).is_some(),
-            _ => false,
-        }).collect()
+    pub(super) fn run_kind(&self, ix: usize) -> Option<RunKind> {
+        let entry = self.thread.entries.get(ix)?;
+        let has_card = matches!(entry, Entry::Tool(call) if self.cards.contains_key(&call.id));
+        timeline::run_kind(entry, has_card)
+    }
+
+    pub(super) fn group_start_before(&self, ix: usize) -> usize {
+        ix.checked_sub(1).and_then(|row| self.tool_run(row)).map_or(ix, |run| run.start)
+    }
+
+    fn tool_run(&self, ix: usize) -> Option<std::ops::Range<usize>> {
+        timeline::tool_run(self.thread.entries.len(), ix, |index| self.run_kind(index))
     }
 
     /// A run is open while Ctrl+O shows everything or after a click on its line; one step alone is always open. Runs
@@ -534,7 +719,11 @@ impl ThreadView {
         let preview = first_line(&latest);
         let header = elements::chain_of_thought_header(
             start,
-            run_label(thoughts, calls.len() + reports.len()),
+            if self.run_kind(start) == Some(RunKind::Exploration) {
+                timeline::exploration_label(calls.iter().copied())
+            } else {
+                run_label(thoughts, calls.len() + reports.len())
+            },
             preview,
             steps.len(),
             running,
@@ -1076,6 +1265,11 @@ impl ThreadView {
                         icon_button(SharedString::from(format!("queued-edit-{id}")), IconName::Pencil)
                             .on_click(cx.listener(move |v, _: &ClickEvent, window, cx| v.edit_queued(id, window, cx))),
                     ))
+                    .children([(true, "Move up"), (false, "Move down")].into_iter().filter_map(|(earlier, label)| {
+                        self.adjacent_queued(id, earlier)?;
+                        Some(button(SharedString::from(format!("queued-move-{id}-{earlier}")), label, false)
+                            .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| v.move_queued(id, earlier, cx))))
+                    }))
                     .child(
                         icon_button(SharedString::from(format!("queued-remove-{id}")), IconName::X)
                             .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| {
@@ -1156,7 +1350,18 @@ impl ThreadView {
         });
 
         let extra_chips: Vec<AnyElement> = vec![];
-        let mut extra_actions: Vec<AnyElement> = vec![];
+        let mut extra_actions = vec![
+            button("thread-outline-toggle", "Timeline", self.outline_open)
+                .on_click(cx.listener(|v, _: &ClickEvent, _, cx| { v.outline_open = !v.outline_open; cx.notify(); }))
+                .into_any_element(),
+            button("thread-find-open", "Find", false)
+                .on_click(cx.listener(|v, _: &ClickEvent, window, cx| v.open_find(window, cx)))
+                .into_any_element(),
+        ];
+        if self.has_chat_selection(cx) {
+            extra_actions.push(button("thread-quote-selection", "Quote selection", false)
+                .on_click(cx.listener(|v, _: &ClickEvent, window, cx| v.quote_selection(window, cx))).into_any_element());
+        }
         // Outside a git repository there are no snapshots, and so no review at all.
         if !self.snapshots.is_empty() {
             let can_review = self.can_review();
@@ -1304,19 +1509,9 @@ fn run_label(thoughts: usize, calls: usize) -> String {
     }
 }
 
-/// The run of foldable steps (`groupable`) that entry `ix` belongs to, or None when it is not one.
-fn tool_run(groupable: &[bool], ix: usize) -> Option<std::ops::Range<usize>> {
-    if !groupable.get(ix).copied().unwrap_or(false) {
-        return None;
-    }
-    let start = (0..ix).rev().take_while(|&i| groupable[i]).last().unwrap_or(ix);
-    let end = (ix..groupable.len()).take_while(|&i| groupable[i]).last().map_or(ix + 1, |i| i + 1);
-    Some(start..end)
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{keep_line_breaks, report_line, run_label, tool_run};
+    use super::{keep_line_breaks, report_line, run_label};
 
     #[gpui::test]
     fn conversation_selection_ends_after_a_missed_mouse_release(cx: &mut gpui::TestAppContext) {
@@ -1384,15 +1579,4 @@ mod tests {
         assert_eq!(report_line("Fix login", "failed"), "Fix login reported · failed");
     }
 
-    #[test]
-    fn consecutive_tool_calls_share_one_run() {
-        // agent, tool, tool, tool, agent, tool, tool-with-card, tool
-        let groupable = [false, true, true, true, false, true, false, true];
-        assert_eq!(tool_run(&groupable, 1), Some(1..4));
-        assert_eq!(tool_run(&groupable, 3), Some(1..4), "a later call of the run finds the same run");
-        assert_eq!(tool_run(&groupable, 5), Some(5..6), "a call with a card ends the run before it");
-        assert_eq!(tool_run(&groupable, 7), Some(7..8));
-        assert_eq!(tool_run(&groupable, 0), None, "not a tool call");
-        assert_eq!(tool_run(&groupable, 6), None, "a call with a card stands on its own");
-    }
 }

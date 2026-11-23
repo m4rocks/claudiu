@@ -397,13 +397,13 @@ fn compaction_respects_toggle_does_not_loop_on_failure_and_rearms() {
     let script = PathBuf::from(&server.1[0]);
     let contents = std::fs::read_to_string(&script).unwrap().replace(
         &r#"        if text in ["fill context", "/compact"]:
-            send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": s, "update": {"sessionUpdate": "usage_update", "used": 850 if text == "fill context" else 200, "size": 1000}}})
+            send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": s, "update": {"sessionUpdate": "usage_update", "used": 950 if text == "fill context" else 200, "size": 1000}}})
         send({"jsonrpc": "2.0", "id": i, "result": {"stopReason": "end_turn"}})"#.replace("\r\n", "\n"),
         r#"        compact_count = 0
         if os.path.exists(__file__ + ".compacts"):
             compact_count = int(open(__file__ + ".compacts").read().strip() or "0")
         if text == "fill context":
-            send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": s, "update": {"sessionUpdate": "usage_update", "used": 850, "size": 1000}}})
+            send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": s, "update": {"sessionUpdate": "usage_update", "used": 950, "size": 1000}}})
             send({"jsonrpc": "2.0", "id": i, "result": {"stopReason": "end_turn"}})
         elif text == "drop context":
             send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": s, "update": {"sessionUpdate": "usage_update", "used": 400, "size": 1000}}})
@@ -412,7 +412,7 @@ fn compaction_respects_toggle_does_not_loop_on_failure_and_rearms() {
             compact_count += 1
             open(__file__ + ".compacts", "w").write(str(compact_count))
             if compact_count == 1:
-                send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": s, "update": {"sessionUpdate": "usage_update", "used": 850, "size": 1000}}})
+                send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": s, "update": {"sessionUpdate": "usage_update", "used": 950, "size": 1000}}})
                 send({"jsonrpc": "2.0", "id": i, "result": {"stopReason": "max_tokens"}})
             else:
                 send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": s, "update": {"sessionUpdate": "usage_update", "used": 200, "size": 1000}}})
@@ -463,7 +463,7 @@ fn compaction_respects_toggle_does_not_loop_on_failure_and_rearms() {
         let view = ws.live_view(&id).unwrap().thread().unwrap().clone();
         view.update(cx, |v, cx| v.send("fill context".into(), window, cx));
     });
-    wait_idle(&mut cx, &|v| v.thread.context == Some((850, 1000)));
+    wait_idle(&mut cx, &|v| v.thread.context == Some((950, 1000)));
     let turns = || -> Vec<String> {
         std::fs::read_to_string(work.path().join("fake_agent.py.turns"))
             .unwrap()
@@ -478,7 +478,7 @@ fn compaction_respects_toggle_does_not_loop_on_failure_and_rearms() {
     wait_idle(&mut cx, &|v| v.thread.entries.iter().any(|e| matches!(e, crate::harness::thread::Entry::Notice { text, error: true } if text == "Context compaction did not finish.")));
     assert_eq!(turns(), ["fill context", "/compact"], "failed compaction must not loop");
 
-    // Dropping below 80% re-arms compaction; hitting 85% again runs /compact and brings usage down to 20%.
+    // Dropping below 90% re-arms compaction; hitting 95% again runs /compact and brings usage down to 20%.
     step(&mut cx, &|ws, window, cx| {
         let view = ws.live_view(&id).unwrap().thread().unwrap().clone();
         view.update(cx, |v, cx| v.send("drop context".into(), window, cx));
@@ -844,6 +844,7 @@ fn reviewing_what_a_turn_changed() {
     std::fs::create_dir_all(&cwd).unwrap();
     let git = |args: &[&str]| assert!(std::process::Command::new("git").args(["-c", "user.name=t", "-c", "user.email=t@t"]).args(args).current_dir(&cwd).status().unwrap().success());
     git(&["init", "-q", "-b", "main"]);
+    git(&["config", "core.autocrlf", "false"]);
     std::fs::write(cwd.join("notes.txt"), "one\ntwo\nthree\n").unwrap();
     git(&["add", "-A"]);
     git(&["commit", "-q", "-m", "one"]);
@@ -906,6 +907,15 @@ fn reviewing_what_a_turn_changed() {
     on_thread(&mut cx, &|v, _, cx| v.open_review(cx));
     wait(&mut cx, "the changes", &|ws, app| thread(ws).read(app).review_files().is_some());
     assert!(ws.read_with(&cx, |ws, app| thread(ws).read(app).review_files().unwrap().is_empty()));
+    let turn_id = ws.read_with(&cx, |ws, app| {
+        let ids = thread(ws).read(app).turn_review_ids();
+        assert_eq!(ids.len(), 1, "only the file-changing turn has a captured review");
+        ids[0]
+    });
+    on_thread(&mut cx, &|v, _, cx| v.open_turn_review(turn_id, cx));
+    wait(&mut cx, "the historical review", &|ws, app| thread(ws).read(app).review_files().is_some());
+    assert_eq!(ws.read_with(&cx, |ws, app| thread(ws).read(app).review_files().unwrap().to_vec()), files);
+    on_thread(&mut cx, &|v, _, cx| v.open_review(cx));
     let hunk = files[0].hunks[0].clone();
     on_thread(&mut cx, &|v, _, cx| v.revert_hunk(hunk.clone(), cx));
     wait(&mut cx, "the hunk to go back", &|_, _| std::fs::read_to_string(cwd.join("notes.txt")).unwrap() == "one\ntwo\nthree\n");

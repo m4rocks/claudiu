@@ -381,7 +381,7 @@ impl Workspace {
         view.update(cx, |v, _| {
             v.follow_up = follow_up;
             v.subagent_edits = subagent_edits;
-            v.canonical_history = canonical_history;
+            v.canonical_history |= canonical_history;
             v.compaction.enabled = auto_compact;
             v.compaction.native_controlled = native_controlled;
         });
@@ -473,6 +473,7 @@ impl Workspace {
                 }
             }
             ThreadEvent::OpenPath(path, line) => ws.open_from_terminal(&sub_id, path, *line, window, cx),
+            ThreadEvent::AbortChildren => ws.end_child_sessions(&sub_id, window, cx),
             ThreadEvent::Idle(outcome) => ws.report_to_parent(&sub_id, outcome, cx),
             ThreadEvent::Select(child) => ws.act(Act::Select(child.clone()), window, cx),
             ThreadEvent::Handoff { to, model, message, effort, by_agent } => ws.dynamic_handoff(&sub_id, *to, model.clone(), message.clone(), *by_agent, effort.clone(), window, cx),
@@ -484,10 +485,55 @@ impl Workspace {
                     .unwrap_or_else(|| (ws.store.data.settings.harness, ws.new_session_cwd()));
                 ws.new_session_with(harness, cwd, prompt.clone(), vec![], Starter::User, window, cx);
             }
+            ThreadEvent::OpenToolShell(command) => {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(command.clone()));
+                if ws.shells.get(&sub_id).is_some_and(|panel| panel.open) {
+                    ws.focus_shell(window, cx);
+                } else {
+                    ws.toggle_shell(&sub_id, window, cx);
+                }
+                ws.toast("Command copied. Paste it in the shell to run it.", cx);
+            }
+            ThreadEvent::Fork(end) => ws.fork_thread(&sub_id, *end, window, cx),
             ThreadEvent::ClearSession => ws.clear_session(&sub_id, window, cx),
             ThreadEvent::Compact { transcript, instructions } => ws.compact_session(&sub_id, transcript.clone(), instructions.clone(), window, cx),
         });
         self.adopt_live(id, SessionView::Thread(view), sub, name, foreground, window, cx);
+    }
+
+    fn fork_thread(&mut self, source: &str, end: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(mut record) = self.store.session(source).cloned() else { return };
+        let Some(thread) = self.live_view(source).and_then(|view| view.thread()).cloned() else { return };
+        let view = thread.read(cx);
+        let Some(entries) = view.thread.entries.get(..end) else {
+            self.toast("The original turn is unavailable in this transcript.", cx);
+            return;
+        };
+        let mut history = entries.to_vec();
+        history.push(crate::harness::thread::Entry::Notice { text: crate::thread::FORK_SEED.into(), error: false });
+        let harness = view.harness;
+        let mode = view.thread.mode.clone();
+        let options = ["model", "thought_level"].into_iter().filter_map(|category| {
+            view.thread.option(category).map(|option| (category, option.current.clone()))
+        }).collect::<Vec<_>>();
+        let account = record.claude.as_ref().and_then(|meta| meta.account.clone());
+        let meta = ClaudeMeta { harness, account, chrome: self.store.data.settings.chrome_default, ..Default::default() };
+        record.id = new_id();
+        record.title = format!("Fork of {}", record.display_title());
+        record.auto_title = None;
+        record.custom_title = None;
+        record.created_at = now();
+        record.last_active = now();
+        record.exit_code = None;
+        record.hidden = false;
+        record.claude = Some(meta.clone());
+        let Some(mut start) = self.thread_start(&record.id, &record.cwd, &meta, Some(record.title.clone()), None, Starter::User, cx) else { return };
+        start.mode = mode;
+        start.options.retain(|(category, _)| options.iter().all(|(kept, _)| kept != category));
+        start.options.extend(options);
+        crate::harness::thread::save_entries(&record.id, &history);
+        start.prior_entries = history;
+        self.start_thread(record, start, true, window, cx);
     }
 
     /// Before a session's new view exists: drop the view it replaces and mark the record as running.
@@ -673,12 +719,16 @@ impl Workspace {
         }
     }
 
-    pub(super) fn end_live(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
-        self.cancel_pending_handoff(id, cx);
+    fn end_child_sessions(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         let children: Vec<_> = self.live.iter().filter(|live| self.store.session(&live.id).and_then(|r| r.claude.as_ref()).is_some_and(|m| m.parent_session.as_deref() == Some(id))).map(|live| live.id.clone()).collect();
         for child in children {
             self.end_live(&child, window, cx);
         }
+    }
+
+    pub(super) fn end_live(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.cancel_pending_handoff(id, cx);
+        self.end_child_sessions(id, window, cx);
         if self.logins.remove(id) {
             self.refresh_accounts(cx);
         }

@@ -8,7 +8,6 @@
 //! styled to m4code's monochrome dark theme (`panels::theme`).
 
 use std::collections::HashSet;
-use std::path::Path;
 use std::time::Duration;
 
 use gpui::{
@@ -18,7 +17,7 @@ use gpui::{
 use gpui_kit::assets::IconName;
 use gpui_kit::base::Button;
 
-use crate::harness::thread::{ToolCall, ToolStatus, diff_lines};
+use crate::harness::thread::{ToolCall, ToolStatus};
 use crate::panels::scale;
 use crate::panels::theme::{self, hsla};
 use crate::panels::widgets::{focusable, icon, spinner};
@@ -359,58 +358,6 @@ pub fn tool_output_block(text: &str, folded_lines: usize, full: bool) -> AnyElem
     let lines: Vec<&str> = text.lines().collect();
     let shown = if full { lines.len() } else { lines.len().min(folded_lines) };
     code_block(None, &lines, shown, None)
-}
-
-/// Render a tool's file diff inside a native `CodeBlock` with file path header and added/removed line tones.
-pub fn tool_diff_block(path: &Path, old: Option<&str>, new: &str, folded_lines: usize, full: bool) -> AnyElement {
-    let lines = diff_lines(old.unwrap_or_default(), new);
-    let shown = if full { lines.len() } else { lines.len().min(folded_lines * 3) };
-    let mut block = div()
-        .font_family(crate::platform::monospace_font())
-        .text_size(scale::px(12.0))
-        .rounded(px(6.0))
-        .border_1()
-        .border_color(hsla(if old.is_none() { theme::OK } else { theme::PANEL_BORDER }))
-        .flex()
-        .flex_col()
-        .overflow_hidden();
-
-    block = block.child(
-        div()
-            .px(px(9.0))
-            .py(px(4.0))
-            .bg(hsla(theme::SURFACE_ELEVATED))
-            .border_b_1()
-            .border_color(hsla(theme::BORDER))
-            .flex()
-            .items_center()
-            .gap(px(6.0))
-            .text_size(scale::px(11.0))
-            .text_color(hsla(theme::TEXT_DIM))
-            .child(icon(IconName::FileCode, 11.5).text_color(hsla(theme::TEXT_FAINT)))
-            .child(path.display().to_string()),
-    );
-
-    for (sign, text) in &lines[..shown] {
-        let (bg, fg) = match sign {
-            '+' => (theme::DIFF_ADDED_BG, theme::OK),
-            '-' => (theme::DIFF_REMOVED_BG, theme::DANGER),
-            _ => (theme::PANEL_BG, theme::TEXT_DIM),
-        };
-        block = block.child(div().px(px(9.0)).bg(hsla(bg)).text_color(hsla(fg)).whitespace_nowrap().child(format!("{sign} {text}")));
-    }
-    if shown < lines.len() {
-        block = block.child(
-            div()
-                .px(px(9.0))
-                .py(px(3.0))
-                .bg(hsla(theme::APP_BG))
-                .text_size(scale::px(11.0))
-                .text_color(hsla(theme::TEXT_FAINT))
-                .child(format!("… {} more lines (Ctrl+O)", lines.len() - shown)),
-        );
-    }
-    block.into_any_element()
 }
 
 // ---------------------------------------------------------------------------

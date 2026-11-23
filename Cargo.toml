@@ -9,6 +9,7 @@ publish = false
 [dependencies]
 alacritty_terminal = "0.26.0"
 anyhow = "1.0.104"
+base64 = "0.22.1"
 directories = "6.0.0"
 dunce = "1.0.5"
 futures = "0.3.34"

@@ -126,10 +126,11 @@ impl Workspace {
     // ------------------------------------------------------------------ the shown session
 
     /// Keep the shown session's branch chip in step with its folder, git work and the open dialog.
-    fn sync_git_chip(&mut self, cx: &mut Context<Self>) {
+    fn sync_chat_state(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let crate::panels::inspector::Shown { rec, cwd, project } = self.shown();
         let Some(rec) = rec else { return };
         let Some(thread) = self.live_view(&rec.id).and_then(|v| v.thread()).cloned() else { return };
+        thread.update(cx, |view, cx| view.set_viewing(window.is_window_active(), cx));
         let switching = self.switching_worktree.get(&rec.id).cloned();
         let chip = project.as_ref().zip(cwd.as_deref()).and_then(|(p, c)| {
             let g = p.git.as_ref()?;
@@ -170,17 +171,25 @@ impl Workspace {
                 })
             })
             .collect();
-        if thread.read(cx).git != chip || thread.read(cx).background != background {
+        let usage_limit = match thread.read(cx).harness {
+            crate::harness::Harness::Claude => self.store.session_account(&rec.id)
+                .and_then(|account| crate::thread::exhausted_usage(&account.usage, crate::store::now())),
+            crate::harness::Harness::Codex => self.store.data.subagent_limits.get("codex")
+                .and_then(|pools| pools.iter().find_map(|pool| crate::thread::exhausted_usage(&pool.usage, crate::store::now()))),
+            _ => None,
+        };
+        if thread.read(cx).git != chip || thread.read(cx).background != background || thread.read(cx).usage_limit != usage_limit {
             thread.update(cx, |t, cx| {
                 t.git = chip;
                 t.background = background;
+                t.usage_limit = usage_limit;
                 cx.notify();
             });
         }
     }
 
-    fn render_session(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        self.sync_git_chip(cx);
+    fn render_session(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        self.sync_chat_state(window, cx);
         let blank = || div().size_full().bg(hsla(theme::TERMINAL_BG)).into_any_element();
         let Some(id) = self.active.clone() else { return blank() };
         let Some(view) = self.live_view(&id).cloned() else { return blank() };
@@ -389,7 +398,7 @@ impl Render for Workspace {
         let editor = self.render_editor_pane(window, cx);
         let window_w = f32::from(window.viewport_size().width);
         let main: AnyElement = match &self.main {
-            Main::Terminals => self.render_session(cx),
+            Main::Terminals => self.render_session(window, cx),
             Main::Home => self.render_home(window, cx).into_any_element(),
         };
         let menu = self.render_menu(cx);

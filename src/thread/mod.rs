@@ -8,6 +8,11 @@ mod keys;
 mod queue;
 mod render;
 mod review;
+pub(crate) use review::clear_turn_reviews;
+mod timeline;
+mod find;
+mod telemetry;
+pub(crate) use telemetry::exhausted_usage;
 
 pub use render::short_effort_label;
 
@@ -80,6 +85,8 @@ pub struct GitChip {
     pub open: bool,
 }
 
+pub(crate) const FORK_SEED: &str = "Forked thread. Send a message to continue.";
+
 pub enum ThreadEvent {
     Ready(String),
     /// The branch chip was clicked: open the Branch & Worktree dialog there.
@@ -107,10 +114,13 @@ pub enum ThreadEvent {
     /// A turn ended with nothing queued after it: `completed`, `interrupted` or `failed`. A subagent's report goes
     /// to its parent then (`app/subagents.rs`).
     Idle(&'static str),
+    AbortChildren,
     /// A subagent's report card was clicked: show that session.
     Select(String),
     /// Built-in `/new [prompt]` command: start a new session in this project.
     NewSession(Option<String>),
+    Fork(usize),
+    OpenToolShell(String),
     /// Built-in `/clear` command: clear this session's conversation and start fresh in place.
     ClearSession,
     /// Built-in `/compact [instructions]` fallback when the harness doesn't provide native compaction.
@@ -293,7 +303,6 @@ pub struct ThreadView {
     queue_held: bool,
     queue_edit: Option<queue::Edit>,
     preparing: Option<Queued>,
-    restarting_for_steer: bool,
     interrupting: bool,
     queue_save_error: bool,
     questions: VecDeque<Question>,
@@ -303,6 +312,19 @@ pub struct ThreadView {
     history_at: Option<usize>,
     draft: String,
     list: ListState,
+    screenshot: Option<std::sync::Arc<gpui::Image>>,
+    screenshot_focus: FocusHandle,
+    outline_open: bool,
+    viewing: bool,
+    unread_from: Option<usize>,
+    visit_watermark: Option<usize>,
+    tool_images: std::cell::RefCell<HashMap<(String, usize), std::sync::Arc<gpui::Image>>>,
+    find: Option<find::Find>,
+    telemetry_open: bool,
+    last_cost_usd: Option<f64>,
+    mcp_names: Vec<String>,
+    rule_files: Vec<String>,
+    pub(crate) usage_limit: Option<String>,
     /// How many rows the list has measured.
     rows: usize,
     /// Ctrl+O: every tool's output in full.
@@ -360,6 +382,8 @@ pub struct ThreadView {
     /// The working tree as it was before each message, oldest first (`git/snapshot.rs`). Empty outside a git
     /// repository.
     pub snapshots: Vec<String>,
+    turn_reviews: Vec<review::TurnReview>,
+    active_turn_review: Option<review::ActiveTurn>,
     /// The slash menu's highlighted row, and its scroll.
     command_highlight: usize,
     command_scroll: gpui::ScrollHandle,
@@ -432,6 +456,13 @@ impl ThreadView {
             && !start.prior_entries.is_empty()
             && start.harness.adapter().reopen == Reopen::Load;
         let took_over = start.session_id.is_none() && !start.prior_entries.is_empty();
+        let turn_reviews = if start.prior_entries.is_empty() { Vec::new() } else { review::load_turn_reviews(&start.record_id) };
+        let canonical_history = !turn_reviews.is_empty()
+            || start.prior_entries.iter().any(|entry| matches!(entry, Entry::Notice { text, error: false } if text == FORK_SEED));
+        let this = cx.entity().downgrade();
+        list.set_scroll_handler(move |_, _, cx| {
+            let _ = this.update(cx, |_, cx| cx.notify());
+        });
         let mut view = ThreadView {
             record_id: start.record_id.clone(),
             harness: start.harness,
@@ -458,7 +489,6 @@ impl ThreadView {
             queue_held,
             queue_edit: None,
             preparing: None,
-            restarting_for_steer: false,
             interrupting: false,
             queue_save_error: false,
             questions: VecDeque::new(),
@@ -467,6 +497,20 @@ impl ThreadView {
             history_at: None,
             draft: String::new(),
             list,
+            screenshot: None,
+            screenshot_focus: cx.focus_handle(),
+            outline_open: false,
+            viewing: false,
+            unread_from: None,
+            visit_watermark: None,
+            tool_images: Default::default(),
+            find: None,
+            telemetry_open: false,
+            last_cost_usd: None,
+            mcp_names: start.mcp_servers.iter().filter_map(|server| server["name"].as_str().map(String::from)).collect(),
+            rule_files: ["AGENTS.md", "CLAUDE.md", "GEMINI.md"].into_iter()
+                .filter(|name| start.cwd.join(name).is_file()).map(String::from).collect(),
+            usage_limit: None,
             rows,
             detail: false,
             subagent_edits: None,
@@ -475,7 +519,7 @@ impl ThreadView {
             running_command: false,
             follow_up: crate::store::FollowUp::default(),
             compaction: Default::default(),
-            canonical_history: false,
+            canonical_history,
             persist_on_drop: true,
             capabilities: Value::Null,
             agent_meta: Value::Null,
@@ -500,6 +544,8 @@ impl ThreadView {
             cards: HashMap::new(),
             card_ui,
             snapshots: Vec::new(),
+            turn_reviews,
+            active_turn_review: None,
             command_highlight: 0,
             command_scroll: gpui::ScrollHandle::new(),
             changed: None,
@@ -626,6 +672,19 @@ impl ThreadView {
                     self.ended(update["error"].as_str().map(String::from), cx);
                     return;
                 }
+                if update["sessionUpdate"] == "_m4code/session_resources" {
+                    if let Some(servers) = update["mcpServers"].as_array() {
+                        self.mcp_names = servers.iter().filter_map(|server| {
+                            let name = server["name"].as_str()?;
+                            Some(server["status"].as_str().map_or_else(|| name.to_string(), |status| format!("{name} ({status})")))
+                        }).collect();
+                    }
+                    if let Some(rules) = update["rules"].as_array() {
+                        self.rule_files = rules.iter().filter_map(Value::as_str).map(String::from).collect();
+                    }
+                    cx.notify();
+                    return;
+                }
                 if update["sessionUpdate"] == "_m4code/background_shells" {
                     let mut previous = std::mem::take(&mut self.provider_shells);
                     self.provider_shells = update["shells"].as_array().into_iter().flatten().filter_map(|task| {
@@ -646,6 +705,7 @@ impl ThreadView {
                     self.cached_replay = false;
                     self.thread.entries.clear();
                     self.markdown.clear();
+                    self.tool_images.get_mut().clear();
                     self.thought_timing.clear();
                     self.collapsed_thoughts.clear();
                     self.remeasure(0);
@@ -662,6 +722,12 @@ impl ThreadView {
                     self.thread.apply(&update)
                 };
                 if let Some(at) = at {
+                    if self.phase == Phase::Ready && !self.viewing && is_conversation_update(&update) {
+                        self.unread_from = Some(self.unread_from.map_or(at, |previous| previous.min(at)));
+                    }
+                    if let Some(Entry::Tool(call)) = self.thread.entries.get(at) {
+                        self.tool_images.get_mut().retain(|(id, _), _| *id != call.id);
+                    }
                     if self.phase == Phase::Ready && !self.cached_replay && is_conversation_update(&update) {
                         if matches!(self.thread.entries.get(at), Some(Entry::Thought(_))) {
                             self.thought_timing.entry(at).or_insert((Instant::now(), None));
@@ -691,7 +757,7 @@ impl ThreadView {
                 self.report_chosen(cx);
             }
             Event::Permission { id, params } => {
-                if self.interrupting || self.restarting_for_steer {
+                if self.interrupting {
                     if let Some(connection) = &self.connection {
                         connection.respond(id, acp::permission_outcome(None));
                     }
@@ -732,7 +798,7 @@ impl ThreadView {
                 self.questions.push_back(Question { id: Uuid::new_v4(), reply: QuestionReply::Acp(id), title, options, highlight: 0, takes_own_answer });
             }
             Event::Elicitation { id, params } => {
-                if self.interrupting || self.restarting_for_steer {
+                if self.interrupting {
                     if let Some(connection) = &self.connection {
                         connection.respond(id, acp::elicitation_cancel());
                     }
@@ -784,7 +850,7 @@ impl ThreadView {
                 return;
             }
             Event::TurnEnded(result) => {
-                self.turn_ended(result, cx);
+                self.capture_turn_review(result, cx);
                 return;
             }
         }
@@ -985,6 +1051,7 @@ impl ThreadView {
     /// steered into a turn would replace the agent's task; so does a message while the context is compacted.
     fn can_steer(&self, text: &str, follow_up: crate::store::FollowUp) -> bool {
         follow_up == crate::store::FollowUp::Steer
+            && (self.harness.adapter().steers || self.native_steering())
             && self.working
             && !self.queue_held
             && self.preparing.is_none()
@@ -996,36 +1063,30 @@ impl ThreadView {
             && !text.starts_with('/')
     }
 
-    fn native_codex_steering(&self) -> bool {
-        self.harness == Harness::Codex
+    fn native_steering(&self) -> bool {
+        matches!(self.harness, Harness::Codex | Harness::OpenCode)
             && self.agent_meta.pointer("/steering/supported").and_then(Value::as_bool) == Some(true)
     }
 
-    fn steer(&mut self, mut item: Queued, cx: &mut Context<Self>) {
+    fn native_codex_steering(&self) -> bool {
+        self.harness == Harness::Codex && self.native_steering()
+    }
+
+    fn steer(&mut self, item: Queued, cx: &mut Context<Self>) {
         let (Some(connection), Some(session)) = (self.connection.clone(), self.session_id.clone()) else {
             self.queue.push_back(item);
             self.queue_changed();
             cx.notify();
             return;
         };
-        let codex = self.native_codex_steering();
-        if !self.harness.adapter().steers && !codex {
-            let at = self.queue.iter().take_while(|q| q.ahead).count();
-            item.ahead = true;
-            self.queue.insert(at, item);
-            self.queue_changed();
-            if !std::mem::replace(&mut self.restarting_for_steer, true) {
-                connection.notify("session/cancel", json!({"sessionId": session}));
-                self.cancel_questions();
-            }
-            cx.notify();
-            return;
-        }
+        let native = self.native_steering();
         let id = item.id;
         let text = item.text.clone();
         self.steering.push_back(item);
         self.queue_changed();
-        let reply = if codex {
+        let reply = if native {
+            // Require a separate prompt to start a turn. Otherwise an idle adapter could begin
+            // work without a matching in-flight request or a checkpoint.
             connection.request("_session/steering", json!({
                 "sessionId": session,
                 "prompt": [{"type": "text", "text": text}],
@@ -1037,12 +1098,12 @@ impl ThreadView {
         cx.spawn(async move |this, cx| {
             let result = reply.await;
             let _ = this.update(cx, |v, cx| {
-                if codex && result.as_ref().is_ok_and(|r| r["outcome"] == "injected") {
+                if native && result.as_ref().is_ok_and(|r| r["outcome"] == "injected") {
                     if let Some(at) = v.accept_steer(id) {
                         v.remeasure(at);
                         v.persist_entries();
                     }
-                } else if codex || result.is_err() {
+                } else if native || result.is_err() {
                     v.requeue_steers([id]);
                 }
                 v.send_next(cx);
@@ -1116,7 +1177,7 @@ impl ThreadView {
     }
 
     fn send_next(&mut self, cx: &mut Context<Self>) {
-        if self.working || self.phase != Phase::Ready || !self.steering.is_empty() || !self.questions.is_empty() {
+        if self.working || self.phase != Phase::Ready || !self.steering.is_empty() || !self.questions.is_empty() || self.restoring_checkpoint() {
             return;
         }
         let (Some(connection), Some(session), Some(events)) = (self.connection.clone(), self.session_id.clone(), self.events.clone()) else { return };
@@ -1140,25 +1201,44 @@ impl ThreadView {
         self.queue_changed();
         let cwd = self.cwd.clone();
         cx.spawn(async move |this, cx| {
+            let before_cwd = cwd.clone();
             let snapshot = if !compact {
                 let session = session.clone();
-                cx.background_executor().spawn(async move { crate::git::snapshot::take(&cwd, &session) }).await.ok()
+                cx.background_executor().spawn(async move { crate::git::snapshot::take(&before_cwd, &session) }).await.ok()
             } else {
                 None
             };
             let prompt = this.update(cx, |v, cx| {
                 let next = v.take_prepared(id)?;
-                if let Some(snapshot) = snapshot {
-                    v.snapshots.push(snapshot);
+                if let Some(snapshot) = &snapshot {
+                    v.snapshots.push(snapshot.clone());
                 }
+                let seed = !next.compact && matches!(v.thread.entries.last(),
+                    Some(Entry::Notice { text, error: false }) if text == FORK_SEED);
+                let outgoing = if seed {
+                    let history = v.thread.transcript(400);
+                    crate::harness::thread::handoff_prompt(v.harness.name(), &history, &next.text)
+                } else {
+                    next.text.clone()
+                };
                 if !next.shown && !next.compact && let Some(at) = v.thread.sent(next.text.clone()) {
                     v.remeasure(at);
                 }
                 v.cached_replay = false;
                 v.running_command = next.text.starts_with('/');
                 v.persist_entries();
-                v.list.scroll_to_end();
-                let request = connection.request("session/prompt", json!({"sessionId": session, "prompt": [{"type": "text", "text": next.text}]}));
+                if v.list.is_following_tail() {
+                    v.list.scroll_to_end();
+                }
+                v.active_turn_review = snapshot.zip(v.thread.entries.len().checked_sub(1)).and_then(|(before, row)| {
+                    match &v.thread.entries[row] {
+                        Entry::User(text) if !v.record_id.is_empty() => Some(review::ActiveTurn {
+                            id, row, before, text: text.clone(), cwd: cwd.clone(),
+                        }),
+                        _ => None,
+                    }
+                });
+                let request = connection.request("session/prompt", json!({"sessionId": session, "prompt": [{"type": "text", "text": outgoing}]}));
                 v.queue_changed();
                 cx.notify();
                 Some(request)
@@ -1195,6 +1275,9 @@ impl ThreadView {
         {
             cx.emit(ThreadEvent::Usage(turn));
         }
+        self.last_cost_usd = result.as_ref().ok()
+            .and_then(|r| r.pointer("/usage/costUsd"))
+            .and_then(Value::as_f64).filter(|cost| *cost >= 0.0 && cost.is_finite());
         let compacted = self.compaction.running;
         if std::mem::take(&mut self.compaction.running) {
             let completed = result.as_ref().is_ok_and(|r| r["stopReason"] == "end_turn");
@@ -1228,8 +1311,7 @@ impl ThreadView {
             let at = self.thread.notice(text, error);
             self.remeasure(at);
         }
-        let restarting = std::mem::take(&mut self.restarting_for_steer);
-        if outcome == "failed" || (outcome == "interrupted" && !restarting) {
+        if matches!(outcome, "failed" | "interrupted") {
             self.queue_held = true;
         }
         if self.harness.adapter().steers {
@@ -1293,7 +1375,9 @@ impl ThreadView {
 
     fn interrupt(&mut self, cx: &mut Context<Self>) {
         self.queue_held = true;
-        self.restarting_for_steer = false;
+        if !self.interrupting {
+            cx.emit(ThreadEvent::AbortChildren);
+        }
         if let Some(mut item) = self.preparing.take() {
             item.startup = false;
             if item.compact {
@@ -1324,7 +1408,7 @@ impl ThreadView {
     /// Show a multiple-choice question from m4code's MCP `ask_user` tool (works on every harness, including ones
     /// whose native question tool isn't bridged over ACP).
     pub fn ask_bridge_question(&mut self, req_id: String, title: String, options: Vec<QuestionOption>, cx: &mut Context<Self>) {
-        if self.interrupting || self.restarting_for_steer {
+        if self.interrupting {
             crate::claude::bridge::respond(&req_id, false, "The turn was interrupted.");
             return;
         }
@@ -1483,6 +1567,17 @@ impl ThreadView {
     }
 
     fn intercept(&mut self, ev: &KeystrokeEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.screenshot.is_some() && self.screenshot_focus.contains_focused(window, cx) && ev.keystroke.key == "escape" {
+            self.screenshot = None;
+            self.focus_composer(window, cx);
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
+        if self.intercept_find(&ev.keystroke, window, cx) {
+            cx.stop_propagation();
+            return;
+        }
         // Keyboard navigation while the Model picker is open (works even when the search input has focus):
         // Up/Down moves the highlighted model, Left/Right steps effort, Enter confirms, Escape closes.
         if self.picker == Some(ThreadPicker::Model)
@@ -1888,6 +1983,36 @@ impl ThreadView {
         self.markdown.values().any(|s| !s.read(cx).selected_text().is_empty())
     }
 
+    pub(crate) fn set_viewing(&mut self, viewing: bool, cx: &mut Context<Self>) {
+        if viewing == self.viewing {
+            return;
+        }
+        self.viewing = viewing;
+        if viewing && let Some(row) = self.unread_from.take() {
+            self.visit_watermark = Some(row);
+        }
+        if !viewing {
+            self.visit_watermark = None;
+        }
+        cx.notify();
+    }
+
+    pub(super) fn quote_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let mut selected = self.markdown.iter().filter_map(|(row, state)| {
+            let text = state.read(cx).selected_text();
+            (!text.trim().is_empty()).then_some((*row, text))
+        }).collect::<Vec<_>>();
+        selected.sort_by_key(|(row, _)| *row);
+        let quoted = selected.into_iter().map(|(_, text)| text.lines()
+            .map(|line| format!("> {line}")).collect::<Vec<_>>().join("\n"))
+            .collect::<Vec<_>>().join("\n>\n");
+        if !quoted.is_empty() {
+            self.paste_text(&format!("{quoted}\n\n"), window, cx);
+        }
+        self.focus_composer(window, cx);
+        cx.notify();
+    }
+
     fn walk_history(&mut self, older: bool, draft: &str, window: &mut Window, cx: &mut Context<Self>) {
         let sent = self.thread.sent_texts();
         if sent.is_empty() {
@@ -1924,9 +2049,14 @@ impl ThreadView {
     /// Measure entry `from` and every one after it again; the list keeps its place above them.
     pub(crate) fn remeasure(&mut self, from: usize) {
         let rows = self.thread.entries.len();
-        let from = from.min(self.rows);
+        let from = self.group_start_before(from).min(from).min(self.rows).min(rows);
+        let anchor = (!self.list.is_following_tail()).then(|| self.list.logical_scroll_top());
         self.list.splice(from..self.rows, rows - from);
+        if let Some(anchor) = anchor {
+            self.list.scroll_to(anchor);
+        }
         self.rows = rows;
+        self.refresh_find(from);
     }
 
     fn open_location(&mut self, path: PathBuf, line: Option<u32>, cx: &mut Context<Self>) {
@@ -1952,11 +2082,11 @@ impl ThreadView {
             return "Compact command unavailable";
         }
         if !self.compaction.native_controlled {
-            return if self.compaction.enabled { "80%; native fallback remains" } else { "Off; native fallback remains" };
+            return if self.compaction.enabled { "90%; native fallback remains" } else { "Off; native fallback remains" };
         }
         if !self.compaction.enabled { return "Off"; }
         if self.thread.context.is_none() { return "Waiting for context usage"; }
-        "80% between turns"
+        "90% between turns"
     }
 
     pub fn stop(&mut self) {
@@ -2179,6 +2309,7 @@ mod tests {
             }
             assert!(matches!(&v.thread.entries[..], [Entry::Agent(text)] if text == "I have a follow-up."));
             assert!(!v.is_waiting());
+            v.agent_meta = json!({"steering":{"supported":true}});
             assert!(v.can_steer("Ordinary message", crate::store::FollowUp::Steer));
             assert!(v.async_answer_id().is_none());
             v.send_as("Ordinary message".into(), crate::store::FollowUp::Queue, cx);
@@ -2252,6 +2383,40 @@ mod tests {
         assert_eq!(steer["method"], "_session/steering");
         assert_eq!(steer["params"]["sessionId"], "codex-session");
         assert_eq!(steer["params"]["prompt"][0]["text"], "> Which test?\n\nThe unit test.");
+    }
+
+    #[cfg(debug_assertions)]
+    #[gpui::test]
+    fn wheel_scroll_releases_chat_tail_until_jump_to_latest(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_kit::init);
+        let dir = tempfile::tempdir().unwrap();
+        let mut start = test_start(dir.path().into(), Harness::Claude);
+        start.prior_entries = (0..80).map(|row| Entry::User(format!("Prompt {row}"))).collect();
+        let (view, cx) = cx.add_window_view(|window, cx| super::ThreadView::new(start, window, cx));
+        cx.update(|window, app| window.draw(app).clear(app));
+        assert!(view.read_with(cx, |view, _| view.list.is_following_tail()));
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: gpui::point(gpui::px(180.0), gpui::px(140.0)),
+            delta: gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.0), gpui::px(140.0))),
+            ..Default::default()
+        });
+        cx.update(|window, app| window.draw(app).clear(app));
+        let top = view.read_with(cx, |view, _| {
+            assert!(!view.list.is_following_tail());
+            view.list.logical_scroll_top().item_ix
+        });
+        view.update(cx, |view, _| {
+            let row = view.thread.entries.len();
+            view.thread.entries.push(Entry::Agent("A streamed reply".into()));
+            view.remeasure(row);
+        });
+        cx.update(|window, app| window.draw(app).clear(app));
+        assert_eq!(view.read_with(cx, |view, _| view.list.logical_scroll_top().item_ix), top);
+        let jump = cx.debug_bounds("jump-to-latest").expect("Jump to latest shown while scrolled up");
+        cx.simulate_click(jump.center(), gpui::Modifiers::default());
+        cx.update(|window, app| window.draw(app).clear(app));
+        assert!(view.read_with(cx, |view, _| view.list.is_following_tail()));
+        assert!(cx.debug_bounds("jump-to-latest").is_none());
     }
 
     #[cfg(debug_assertions)]
@@ -2441,7 +2606,7 @@ mod tests {
                 Entry::Thought("reading the report".into()),
                 Entry::User("thanks".into()),
             ];
-            assert_eq!(v.groupable(), [false, true, true, true, false]);
+            assert_eq!((0..v.thread.entries.len()).map(|ix| v.run_kind(ix).is_some()).collect::<Vec<_>>(), [false, true, true, true, false]);
         });
     }
 
@@ -2486,6 +2651,9 @@ mod tests {
             v.finish_queue_edit(true, window, cx);
             assert_eq!(v.draft(cx), "typed");
             assert_eq!((v.queue[1].id, v.queue[1].text.as_str()), (id, "changed"));
+            v.move_queued(id, false, cx);
+            assert_eq!(v.queue.iter().map(|item| item.text.as_str()).collect::<Vec<_>>(), ["report", "second", "changed"]);
+            v.move_queued(id, true, cx);
             assert_eq!(v.unqueue(v.queue[2].id, cx).unwrap().text, "second");
         });
     }
@@ -2514,6 +2682,7 @@ mod tests {
         let (view, cx) = cx.add_window_view(|window, cx| super::ThreadView::new(start, window, cx));
         view.update(cx, |v, cx| {
             v.phase = super::Phase::Ready;
+            v.agent_meta = serde_json::json!({"steering":{"supported":true}});
             assert!(!v.can_steer("hi", FollowUp::Steer), "nothing to steer while idle");
             v.working = true;
             assert!(v.can_steer("hi", FollowUp::Steer));
@@ -2634,7 +2803,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn steers_an_agent_restarts_for_go_in_the_order_sent_before_the_queue(cx: &mut gpui::TestAppContext) {
+    fn unsupported_steering_queues_without_interrupting(cx: &mut gpui::TestAppContext) {
         use crate::store::FollowUp;
         cx.update(gpui_kit::init);
         let dir = tempfile::tempdir().unwrap();
@@ -2671,7 +2840,9 @@ mod tests {
             v.send_as("first".into(), FollowUp::Steer, cx);
             v.send_as("second".into(), FollowUp::Steer, cx);
             let order: Vec<&str> = v.queue.iter().map(|q| q.text.as_str()).collect();
-            assert_eq!(order, ["first", "second", "queued"]);
+            assert_eq!(order, ["queued", "first", "second"]);
+            assert!(v.working && !v.interrupting);
+            assert!(v.steering.is_empty());
         });
     }
 

@@ -37,7 +37,7 @@ for line in sys.stdin:
                 f.write("one\nTWO\nthree\n")
         send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": s, "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "ok"}}}})
         if text in ["fill context", "/compact"]:
-            send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": s, "update": {"sessionUpdate": "usage_update", "used": 850 if text == "fill context" else 200, "size": 1000}}})
+            send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": s, "update": {"sessionUpdate": "usage_update", "used": 950 if text == "fill context" else 200, "size": 1000}}})
         send({"jsonrpc": "2.0", "id": i, "result": {"stopReason": "end_turn"}})
     elif method == "session/list":
         send({"jsonrpc": "2.0", "id": i, "result": {"sessions": [{"sessionId": "from-terminal", "cwd": m["params"]["cwd"], "title": "Started in a terminal"}]}})

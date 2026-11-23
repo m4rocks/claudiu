@@ -3940,6 +3940,7 @@ version = "0.10.1"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
+ "base64 0.22.1",
  "directories",
  "dunce",
  "futures",

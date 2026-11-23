@@ -97,6 +97,29 @@ impl ThreadView {
         self.queue.iter().filter(|item| item.by_user).map(|item| (item.id, item.text.as_str()))
     }
 
+    pub(super) fn adjacent_queued(&self, id: Uuid, earlier: bool) -> Option<(usize, usize)> {
+        let index = self.queue.iter().position(|item| item.by_user && item.id == id)?;
+        let neighbor = if earlier {
+            (0..index).rev().find(|&i| self.queue[i].by_user)
+        } else {
+            (index + 1..self.queue.len()).find(|&i| self.queue[i].by_user)
+        }?;
+        Some((index, neighbor))
+    }
+
+    pub(super) fn move_queued(&mut self, id: Uuid, earlier: bool, cx: &mut Context<Self>) {
+        if self.queue_edit.is_some() || self.interrupting || !self.questions.is_empty() {
+            return;
+        }
+        let Some((from, to)) = self.adjacent_queued(id, earlier) else { return };
+        let slots = [(self.queue[from].order, self.queue[from].ahead), (self.queue[to].order, self.queue[to].ahead)];
+        self.queue.swap(from, to);
+        (self.queue[from].order, self.queue[from].ahead) = slots[0];
+        (self.queue[to].order, self.queue[to].ahead) = slots[1];
+        self.queue_changed();
+        cx.notify();
+    }
+
     pub(super) fn unqueue(&mut self, id: Uuid, cx: &mut Context<Self>) -> Option<Queued> {
         let at = self.queue.iter().position(|item| item.by_user && item.id == id)?;
         let item = self.queue.remove(at)?;

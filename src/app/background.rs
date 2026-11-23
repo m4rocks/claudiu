@@ -158,6 +158,7 @@ impl Workspace {
             // A thread knows from ACP itself: a turn is out, or a permission/ask question is open.
             let (working, waiting, question_title) = match &l.view {
                 SessionView::Thread(v) => {
+                    v.update(cx, |thread, cx| thread.set_viewing(viewing, cx));
                     let t = v.read(cx);
                     (t.is_working(), t.is_waiting(), t.pending_question_title())
                 }

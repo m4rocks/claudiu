@@ -164,10 +164,9 @@ pub struct Settings {
 #[serde(rename_all = "snake_case")]
 pub enum FollowUp {
     /// Wait for the turn to end.
-    Queue,
-    /// Reach the agent in the turn it is working on: Claude Code reads it between tool calls; an agent that can't
-    /// stops its turn and starts again with the message.
     #[default]
+    Queue,
+    /// Reach the agent in the turn it is working on when the harness advertises support.
     Steer,
 }
 
@@ -333,9 +332,9 @@ mod tests {
     }
 
     #[test]
-    fn messages_mid_turn_steer_unless_the_user_chose_to_queue() {
+    fn messages_mid_turn_queue_unless_the_user_chose_to_steer() {
         let older: super::Settings = serde_json::from_str("{}").unwrap();
-        assert_eq!(older.follow_up, FollowUp::Steer, "a state file from before the setting steers, as t3code does");
+        assert_eq!(older.follow_up, FollowUp::Queue, "the default Enter action queues while a turn is running");
         let queue: super::Settings = serde_json::from_str(r#"{"follow_up":"queue"}"#).unwrap();
         assert_eq!(queue.follow_up, FollowUp::Queue);
         assert_eq!(FollowUp::Queue.other(), FollowUp::Steer);

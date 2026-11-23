@@ -141,15 +141,13 @@ function titleOf(name, input = {}) {
   return mcp ? `${mcp[1]}: ${mcp[2]}` : name;
 }
 
-/** An edit shows as a diff of what it changes. */
-function diffOf(name, input = {}) {
-  if (name === "Edit" && input.file_path) return [{ type: "diff", path: input.file_path, oldText: input.old_string ?? "", newText: input.new_string ?? "" }];
-  if (name === "Write" && input.file_path) return [{ type: "diff", path: input.file_path, oldText: null, newText: input.content ?? "" }];
-  return [];
-}
-
 function toolCall(block, status) {
   const path = block.input?.file_path ?? block.input?.notebook_path;
+  const offset = block.name === "Read" ? block.input?.offset : undefined;
+  const limit = block.input?.limit;
+  const endLine = Number.isSafeInteger(offset) && offset > 0 && Number.isSafeInteger(limit) && limit > 0
+    ? offset + limit - 1 : undefined;
+  const mcpServer = /^mcp__(.+?)__/.exec(block.name)?.[1];
   return {
     sessionUpdate: "tool_call",
     toolCallId: block.id,
@@ -157,8 +155,9 @@ function toolCall(block, status) {
     kind: kindOf(block.name),
     status,
     rawInput: block.input,
-    content: diffOf(block.name, block.input),
-    locations: path ? [{ path }] : [],
+    content: [],
+    locations: path ? [{ path, ...(Number.isSafeInteger(offset) && offset > 0 ? { line: offset } : {}) }] : [],
+    _meta: { m4code: { endLine, mcpServer } },
   };
 }
 
@@ -179,19 +178,26 @@ function* updatesOf(session, role, content) {
     if (b.type === "text" && b.text) yield { sessionUpdate: role === "user" ? "user_message_chunk" : "agent_message_chunk", content: { type: "text", text: b.text } };
     else if (b.type === "thinking" && b.thinking) yield { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: b.thinking } };
     else if (b.type === "tool_use") {
-      session.tools.set(b.id, b);
+      session.tools.set(b.id, { ...b, startedAt: performance.now() });
       yield b.name === "TodoWrite" ? plan(b.input) : toolCall(b, "in_progress");
     } else if (b.type === "tool_result") {
       const call = session.tools.get(b.tool_use_id);
       if (call?.name === "TodoWrite") continue;
       const failed = b.is_error === true;
-      // An edit keeps its diff; its result text only says it succeeded.
-      const keepsDiff = !failed && call && diffOf(call.name, call.input).length;
+      const contents = [{ type: "content", content: { type: "text", text: resultText(b.content) } }];
+      if (Array.isArray(b.content)) {
+        for (const part of b.content) {
+          if (part.type === "image" && part.source?.type === "base64") {
+            contents.push({ type: "content", content: { type: "image", mimeType: part.source.media_type, data: part.source.data } });
+          }
+        }
+      }
       yield {
         sessionUpdate: "tool_call_update",
         toolCallId: b.tool_use_id,
         status: failed ? "failed" : "completed",
-        ...(keepsDiff ? {} : { content: [{ type: "content", content: { type: "text", text: resultText(b.content) } }] }),
+        ...(call ? { _meta: { m4code: { elapsedMs: Math.round(performance.now() - call.startedAt) } } } : {}),
+        content: contents,
       };
     }
   }
@@ -260,8 +266,10 @@ function turnUsage(result) {
   const cachedWrite = Number(u.cache_creation_input_tokens ?? 0);
   const input = uncachedInput + cachedRead + cachedWrite;
   const total = input + output;
-  if (!total) return undefined;
-  return { inputTokens: input, outputTokens: output, cachedReadTokens: cachedRead, cachedWriteTokens: cachedWrite, totalTokens: total };
+  const cost = result.total_cost_usd;
+  const costUsd = Number.isFinite(cost) && cost >= 0 ? { costUsd: cost } : {};
+  if (!total && !Object.hasOwn(costUsd, "costUsd")) return undefined;
+  return { inputTokens: input, outputTokens: output, cachedReadTokens: cachedRead, cachedWriteTokens: cachedWrite, totalTokens: total, ...costUsd };
 }
 
 /** The uuids of the messages a result answered: every one Claude took into that turn. */
@@ -349,6 +357,9 @@ async function pump(session) {
     for await (const m of session.query) {
       if (m.type === "system") {
         if (session.shells.update(m)) publishShells(session);
+        if (m.subtype === "init" && Array.isArray(m.mcp_servers)) {
+          update(session.id, { sessionUpdate: "_m4code/session_resources", mcpServers: m.mcp_servers });
+        }
         if (m.subtype === "task_notification") await finishShell(session, m);
       }
       if (session.dropping.size && !session.turn) {

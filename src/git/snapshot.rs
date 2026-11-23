@@ -117,6 +117,10 @@ pub struct Line {
 
 /// What changed in the working tree since `snapshot`, file by file. Binary files are left out: they have no lines.
 pub fn changes(cwd: &Path, snapshot: &str) -> Result<Vec<FileChange>, String> {
+    capture(cwd, snapshot).map(|patch| parse(&patch))
+}
+
+pub fn capture(cwd: &Path, snapshot: &str) -> Result<String, String> {
     let root = root(cwd)?;
     // Untracked files only show in a diff once git knows of them; `--intent-to-add` in a throwaway index does that
     // without staging anything the user can see.
@@ -125,12 +129,11 @@ pub fn changes(cwd: &Path, snapshot: &str) -> Result<Vec<FileChange>, String> {
     let root = root.as_path();
     git_with(root, &["read-tree", snapshot], None, env)?;
     git_with(root, &["add", "-A", "--intent-to-add", "."], None, env)?;
-    let patch = git_with(root, &["-c", "core.quotePath=false", "diff", "--no-color", "--no-ext-diff", "--no-renames", "-U3", snapshot], None, env)?;
-    Ok(parse(&patch))
+    git_with(root, &["-c", "core.quotePath=false", "diff", "--no-color", "--no-ext-diff", "--no-renames", "--src-prefix=a/", "--dst-prefix=b/", "--binary", "-U3", snapshot], None, env)
 }
 
 /// A `git diff` split into files and hunks, each hunk carrying a patch of its own.
-fn parse(patch: &str) -> Vec<FileChange> {
+pub fn parse(patch: &str) -> Vec<FileChange> {
     let mut files: Vec<FileChange> = Vec::new();
     // The current file's header (`diff --git`, `---`, `+++` and the like), repeated in front of each of its hunks.
     let mut header = String::new();
@@ -139,6 +142,9 @@ fn parse(patch: &str) -> Vec<FileChange> {
     let mut new_line = 0u32;
     for line in patch.lines() {
         if line.starts_with("diff --git ") {
+            if in_header && let Some(path) = new.take().or_else(|| old.take()) {
+                files.push(FileChange { path: PathBuf::from(path), hunks: Vec::new() });
+            }
             (header, old, new, in_header) = (String::new(), None, None, true);
         }
         if in_header && !line.starts_with("@@") {
@@ -149,6 +155,10 @@ fn parse(patch: &str) -> Vec<FileChange> {
                 old = Some(path.trim_end_matches('\t').to_string());
             } else if let Some(path) = line.strip_prefix("+++ b/") {
                 new = Some(path.trim_end_matches('\t').to_string());
+            } else if let Some(paths) = line.strip_prefix("diff --git a/")
+                && let Some((path, _)) = paths.rsplit_once(" b/")
+            {
+                old = Some(path.to_string());
             }
             continue;
         }
@@ -175,7 +185,30 @@ fn parse(patch: &str) -> Vec<FileChange> {
         }
         hunk.lines.push(Line { origin, text: line[1..].to_string(), new_line: number });
     }
+    if in_header && let Some(path) = new.or(old) {
+        files.push(FileChange { path: PathBuf::from(path), hunks: Vec::new() });
+    }
     files
+}
+
+fn checkpoint_ref(record: &str, id: uuid::Uuid) -> String {
+    format!("refs/m4code-checkpoints/{}/{id}", crate::datadir::safe_file_stem(record))
+}
+
+pub fn keep_checkpoint(cwd: &Path, record: &str, id: uuid::Uuid, before: &str) -> Result<(), String> {
+    git_with(cwd, &["update-ref", &checkpoint_ref(record, id), before], None, &[]).map(|_| ())
+}
+
+pub fn forget_checkpoint(cwd: &Path, record: &str, id: uuid::Uuid) {
+    let _ = git_with(cwd, &["update-ref", "-d", &checkpoint_ref(record, id)], None, &[]);
+}
+
+/// Restore a turn as a single patch, only when the checkout still matches its captured end state.
+pub fn restore(cwd: &Path, before: &str, patch: &str) -> Result<(), String> {
+    if capture(cwd, before)? != patch {
+        return Err("The checkout has changed since that turn.".into());
+    }
+    git_with(&root(cwd)?, &["apply", "--reverse", "--whitespace=nowarn", "-"], Some(patch), &[]).map(|_| ())
 }
 
 /// Put one hunk back as it was in the snapshot. Fails, leaving the file alone, when the file has changed since the
@@ -271,6 +304,29 @@ mod tests {
 
         revert(dir.path(), &files[1].hunks[0]).unwrap();
         assert!(!dir.path().join("new file.txt").exists(), "turning down a new file removes it");
+    }
+
+    #[test]
+    fn checkpoint_restore_rejects_later_edits_and_restores_new_binary_files() {
+        let dir = repo();
+        let text = dir.path().join("note.txt");
+        let binary = dir.path().join("new.bin");
+        std::fs::write(&text, "before\n").unwrap();
+        commit_all(dir.path());
+        let before = take(dir.path(), "s").unwrap();
+        std::fs::write(&text, "after\n").unwrap();
+        std::fs::write(&binary, [0, 1, 2, 3]).unwrap();
+        let patch = capture(dir.path(), &before).unwrap();
+        assert_eq!(parse(&patch).iter().map(|file| file.path.clone()).collect::<Vec<_>>(),
+            [PathBuf::from("new.bin"), PathBuf::from("note.txt")]);
+        std::fs::write(&text, "later\n").unwrap();
+        assert!(restore(dir.path(), &before, &patch).is_err());
+        assert!(binary.exists());
+        assert_eq!(std::fs::read_to_string(&text).unwrap(), "later\n");
+        std::fs::write(&text, "after\n").unwrap();
+        restore(dir.path(), &before, &patch).unwrap();
+        assert!(!binary.exists());
+        assert_eq!(std::fs::read_to_string(text).unwrap(), "before\n");
     }
 
     #[test]

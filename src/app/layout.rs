@@ -85,7 +85,7 @@ impl Workspace {
         ShellPanel { view, _sub: sub, open: true, height: SHELL_HEIGHT }
     }
 
-    fn focus_shell(&self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn focus_shell(&self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(p) = self.shells.get(&self.shell_owner()).filter(|p| p.open) {
             window.focus(&p.view.focus_handle(cx), cx);
         }

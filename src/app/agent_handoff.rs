@@ -157,7 +157,11 @@ impl Workspace {
 
     /// Built-in `/clear`: erase the current conversation and relaunch a fresh ACP session on the same record.
     pub(super) fn clear_session(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(thread) = self.live_view(id).and_then(|view| view.thread()).cloned() {
+            thread.update(cx, |view, _| view.relinquish_record());
+        }
         crate::harness::thread::save_entries(id, &[]);
+        crate::thread::clear_turn_reviews(id, cx.background_executor());
         if let Some(meta) = self.store.session_mut(id).and_then(|r| r.claude.as_mut()) {
             meta.session_id.clear();
             meta.provider_sessions.clear();

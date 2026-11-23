@@ -41,6 +41,7 @@ impl ToolStatus {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ToolContent {
     Text(String),
+    Image { mime: String, data: String },
     /// A file the tool changed: its text before (none for a new file) and after.
     Diff { path: PathBuf, old: Option<String>, new: String },
 }
@@ -58,6 +59,84 @@ pub struct ToolCall {
     /// The agent type, when the call runs one of the harness's own subagents (`subagent_type`).
     #[serde(default)]
     pub subagent: Option<String>,
+    #[serde(default, skip_serializing_if = "ToolDetails::is_empty")]
+    pub details: Box<ToolDetails>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ToolDetails {
+    pub command: Option<String>,
+    pub stdout: Option<String>,
+    pub stderr: Option<String>,
+    pub output: Option<String>,
+    pub elapsed_ms: Option<u64>,
+    pub exit_code: Option<i64>,
+    pub end_line: Option<u32>,
+    pub server: Option<String>,
+    pub request: Option<String>,
+    pub response: Option<String>,
+}
+
+impl ToolDetails {
+    fn is_empty(&self) -> bool {
+        self == &Self::default()
+    }
+
+    fn apply(&mut self, kind: &str, update: &Value) {
+        let raw = &update["rawInput"];
+        let out = &update["rawOutput"];
+        let metadata = &update["_meta"]["m4code"];
+        let set_text = |target: &mut Option<String>, value: &Value| {
+            if let Some(text) = value.as_str() {
+                *target = Some(text.to_string());
+            }
+        };
+        if kind == "execute" {
+            set_text(&mut self.command, &raw["command"]);
+            set_text(&mut self.stdout, &out["stdout"]);
+            set_text(&mut self.stderr, &out["stderr"]);
+            let terminal = &update["_meta"]["terminal_output_delta"];
+            if let Some(delta) = terminal["data"].as_str() {
+                let stream = match terminal["stream"].as_str() {
+                    Some("stdout") => &mut self.stdout,
+                    Some("stderr") => &mut self.stderr,
+                    _ => &mut self.output,
+                };
+                stream.get_or_insert_with(String::new).push_str(delta);
+            } else if out["stdout"].is_string() || out["stderr"].is_string() {
+                self.output = None;
+            } else if let Some(output) = out.as_str().or_else(|| out["formatted_output"].as_str()).or_else(|| out["output"].as_str()) {
+                self.output = Some(output.to_string());
+            }
+            if let Some(code) = out["exitCode"].as_i64().or_else(|| out["exit_code"].as_i64()) {
+                self.exit_code = Some(code);
+            }
+        }
+        if let Some(ms) = metadata["elapsedMs"].as_u64() {
+            self.elapsed_ms = Some(ms);
+        }
+        if let Some(line) = metadata["endLine"].as_u64().and_then(|line| u32::try_from(line).ok()) {
+            self.end_line = Some(line);
+        }
+        set_text(&mut self.server, &metadata["mcpServer"]);
+        if let Some(delta) = update["_meta"]["mcp_output_delta"]["data"].as_str() {
+            self.response.get_or_insert_with(String::new).push_str(delta);
+        }
+        if self.server.is_some() || kind == "fetch" {
+            for (slot, value) in [(&mut self.request, raw), (&mut self.response, out)] {
+                if !value.is_null() {
+                    *slot = serde_json::to_string_pretty(value).ok().map(|mut text| {
+                        if text.len() > 65_536 {
+                            text.truncate(text.floor_char_boundary(65_536));
+                            text.push_str("\n[Preview truncated]");
+                        }
+                        text
+                    });
+                }
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -468,6 +547,7 @@ fn merge_tool(call: &mut ToolCall, update: &Value) {
             .filter_map(|l| Some((PathBuf::from(l["path"].as_str()?), l["line"].as_u64().map(|n| n as u32))))
             .collect();
     }
+    call.details.apply(&call.kind, update);
     if let Some(agent_type) = subagent_type(update) {
         call.subagent = Some(agent_type);
     }
@@ -486,7 +566,17 @@ fn subagent_type(update: &Value) -> Option<String> {
 
 fn tool_content(item: &Value) -> Option<ToolContent> {
     match item["type"].as_str()? {
-        "content" => item.pointer("/content/text").and_then(Value::as_str).map(|t| ToolContent::Text(t.to_string())),
+        "content" => {
+            let content = &item["content"];
+            if content["type"] == "image" {
+                let mime = content["mimeType"].as_str()?;
+                let data = content["data"].as_str()?;
+                (matches!(mime, "image/png" | "image/jpeg" | "image/webp") && data.len() <= 8 * 1024 * 1024)
+                    .then(|| ToolContent::Image { mime: mime.into(), data: data.into() })
+            } else {
+                content["text"].as_str().map(|text| ToolContent::Text(text.to_string()))
+            }
+        }
         "diff" => Some(ToolContent::Diff {
             path: PathBuf::from(item["path"].as_str()?),
             old: item["oldText"].as_str().map(String::from),
@@ -494,25 +584,6 @@ fn tool_content(item: &Value) -> Option<ToolContent> {
         }),
         _ => None,
     }
-}
-
-/// The changed lines of a file and a few around them, each marked `+`, `-` or ` `, through git's own diff.
-pub fn diff_lines(old: &str, new: &str) -> Vec<(char, String)> {
-    let mut out = vec![];
-    let mut options = git2::DiffOptions::new();
-    options.context_lines(2);
-    let Ok(patch) = git2::Patch::from_buffers(old.as_bytes(), None, new.as_bytes(), None, Some(&mut options)) else { return out };
-    for hunk in 0..patch.num_hunks() {
-        for line in 0..patch.num_lines_in_hunk(hunk).unwrap_or(0) {
-            let Ok(l) = patch.line_in_hunk(hunk, line) else { continue };
-            let sign = match l.origin() {
-                '+' | '-' => l.origin(),
-                _ => ' ',
-            };
-            out.push((sign, String::from_utf8_lossy(l.content()).trim_end_matches(['\n', '\r']).to_string()));
-        }
-    }
-    out
 }
 
 fn items<'a>(value: &'a Value, key: &str) -> impl Iterator<Item = &'a Value> {
@@ -662,6 +733,23 @@ mod tests {
     }
 
     #[test]
+    fn shell_deltas_accumulate_and_final_output_replaces_the_snapshot() {
+        let state = thread(&[
+            json!({"sessionUpdate":"tool_call", "toolCallId":"shell", "kind":"execute", "rawInput":{"command":"npm test"}}),
+            json!({"sessionUpdate":"tool_call_update", "toolCallId":"shell", "_meta":{"terminal_output_delta":{"data":"first\n"}}}),
+            json!({"sessionUpdate":"tool_call_update", "toolCallId":"shell", "_meta":{"terminal_output_delta":{"data":"second\n"}}}),
+        ]);
+        assert_eq!(state.tool("shell").unwrap().details.output.as_deref(), Some("first\nsecond\n"));
+        let mut state = state;
+        state.apply(&json!({"sessionUpdate":"tool_call_update", "toolCallId":"shell", "status":"failed",
+            "rawOutput":{"formatted_output":"first\nsecond\nfailed\n","exit_code":1}}));
+        let tool = state.tool("shell").unwrap();
+        assert_eq!(tool.details.command.as_deref(), Some("npm test"));
+        assert_eq!(tool.details.output.as_deref(), Some("first\nsecond\nfailed\n"));
+        assert_eq!(tool.details.exit_code, Some(1));
+    }
+
+    #[test]
     fn each_update_names_the_entry_it_changed() {
         let mut t = Thread::default();
         assert_eq!(t.apply(&chunk("agent_message_chunk", "a")), Some(0));
@@ -717,18 +805,6 @@ mod tests {
     }
 
     #[test]
-    fn a_diff_marks_what_changed_with_context_around_it() {
-        let old = "a\nb\nc\nd\ne\nf\ng\n";
-        let new = "a\nb\nc\nD\ne\nf\ng\n";
-        let lines = diff_lines(old, new);
-        let marks: String = lines.iter().map(|(m, _)| *m).collect();
-        assert_eq!(marks, "  -+  ");
-        assert_eq!(lines[2], ('-', "d".into()));
-        assert_eq!(lines[3], ('+', "D".into()));
-        assert_eq!(diff_lines("", "new\n"), vec![('+', "new".into())], "a new file is all added");
-    }
-
-    #[test]
     fn entries_roundtrip_on_disk() {
         let _dirs = crate::datadir::use_throwaway_folders();
         let entries = vec![
@@ -740,6 +816,7 @@ mod tests {
                 kind: "read".into(),
                 status: ToolStatus::Done,
                 content: vec![ToolContent::Text("ok".into())],
+                details: Default::default(),
                 locations: vec![(PathBuf::from("a.rs"), Some(10))],
                 subagent: Some("general-purpose".into()),
             }),

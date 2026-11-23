@@ -1,3 +1,5 @@
+pub const THRESHOLD_PERCENT: u64 = 90;
+
 #[derive(Clone, Debug)]
 pub struct Policy {
     pub enabled: bool,
@@ -14,13 +16,13 @@ impl Default for Policy {
 
 impl Policy {
     pub fn observe(&mut self, used: u64, size: u64) {
-        if !self.running && size > 0 && (used as u128) * 100 < (size as u128) * 80 {
+        if !self.running && size > 0 && (used as u128) * 100 < (size as u128) * u128::from(THRESHOLD_PERCENT) {
             self.attempted = false;
         }
     }
 
     pub fn take_due(&mut self, context: Option<(u64, u64)>, supported: bool) -> bool {
-        let full = context.is_some_and(|(used, size)| size > 0 && (used as u128) * 100 >= (size as u128) * 80);
+        let full = context.is_some_and(|(used, size)| size > 0 && (used as u128) * 100 >= (size as u128) * u128::from(THRESHOLD_PERCENT));
         if !self.enabled || !supported || self.running || self.attempted || !full {
             return false;
         }
@@ -37,13 +39,13 @@ mod tests {
     #[test]
     fn compact_at_eighty_percent_and_rearm_only_after_usage_drops() {
         let mut policy = Policy::default();
-        assert!(!policy.take_due(Some((799, 1000)), true));
-        assert!(policy.take_due(Some((800, 1000)), true));
+        assert!(!policy.take_due(Some((899, 1000)), true));
+        assert!(policy.take_due(Some((900, 1000)), true));
         assert!(!policy.take_due(Some((900, 1000)), true));
         policy.running = false;
-        assert!(!policy.take_due(Some((900, 1000)), true), "stale usage or a failed compaction must not loop");
+        assert!(!policy.take_due(Some((950, 1000)), true), "stale usage or a failed compaction must not loop");
         policy.observe(200, 1000);
-        assert!(policy.take_due(Some((800, 1000)), true));
+        assert!(policy.take_due(Some((900, 1000)), true));
     }
 
     #[test]
