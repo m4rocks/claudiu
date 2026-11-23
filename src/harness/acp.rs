@@ -42,7 +42,7 @@ type Pending = Arc<Mutex<HashMap<i64, oneshot::Sender<Result<Value, String>>>>>;
 
 /// A running harness. Dropping it ends the process.
 pub struct Connection {
-    outgoing: mpsc::Sender<Value>,
+    outgoing: mpsc::Sender<Option<Value>>,
     pending: Pending,
     next_id: AtomicI64,
     child: Mutex<Option<Child>>,
@@ -72,10 +72,10 @@ impl Connection {
 
     /// Talk to an agent over `reader` and `writer` (its stdout and stdin).
     pub fn connect(reader: impl Read + Send + 'static, writer: impl Write + Send + 'static, stderr: Option<impl Read + Send + 'static>, events: async_mpsc::UnboundedSender<Event>) -> Connection {
-        let (outgoing, queue) = mpsc::channel::<Value>();
+        let (outgoing, queue) = mpsc::channel::<Option<Value>>();
         std::thread::spawn(move || {
             let mut writer = writer;
-            while let Ok(message) = queue.recv() {
+            while let Ok(Some(message)) = queue.recv() {
                 let Ok(mut line) = serde_json::to_vec(&message) else { continue };
                 line.push(b'\n');
                 if writer.write_all(&line).and_then(|_| writer.flush()).is_err() {
@@ -128,32 +128,41 @@ impl Connection {
             let _ = tx.send(Err("the agent stopped".into()));
         } else {
             pending.insert(id, tx);
-            let _ = self.outgoing.send(json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}));
+            let _ = self.outgoing.send(Some(json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params})));
         }
         async move { rx.await.unwrap_or_else(|_| Err("the agent stopped".into())) }
     }
 
     pub fn notify(&self, method: &str, params: Value) {
-        let _ = self.outgoing.send(json!({"jsonrpc": "2.0", "method": method, "params": params}));
+        let _ = self.outgoing.send(Some(json!({"jsonrpc": "2.0", "method": method, "params": params})));
     }
 
     /// Answer a request the agent made.
     pub fn respond(&self, id: Value, result: Value) {
-        let _ = self.outgoing.send(json!({"jsonrpc": "2.0", "id": id, "result": result}));
+        let _ = self.outgoing.send(Some(json!({"jsonrpc": "2.0", "id": id, "result": result})));
     }
 
     pub fn terminate(&self) {
         self.closed.store(true, Ordering::Release);
         self.pending.lock().unwrap().clear();
+        // Telling the writer thread to stop drops the child's stdin pipe, which is the polite shutdown signal
+        // (`bridge/claude.mjs`, `codex-acp`, and `opencode acp` all exit cleanly on stdin EOF).
+        let _ = self.outgoing.send(None);
         if let Some(mut child) = self.child.lock().unwrap().take() {
-            // Off the UI thread: closing stdin is the polite stop, and one that lingers is ended.
+            // Off the UI thread: wait briefly for stdin EOF to stop the server cleanly, then force-kill the tree.
             std::thread::spawn(move || {
-                drop(child.stdin.take());
-                for _ in 0..10 {
+                for _ in 0..30 {
                     if child.try_wait().ok().flatten().is_some() {
                         return;
                     }
                     std::thread::sleep(Duration::from_millis(100));
+                }
+                #[cfg(windows)]
+                {
+                    let mut kill_tree = Command::new("taskkill");
+                    kill_tree.args(["/F", "/T", "/PID", &child.id().to_string()]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+                    crate::platform::no_window(&mut kill_tree);
+                    let _ = kill_tree.status();
                 }
                 let _ = child.kill();
                 let _ = child.wait();
@@ -347,7 +356,7 @@ pub fn reopen_method(capabilities: &Value, preferred: super::Reopen) -> Result<s
     }
 }
 
-fn handle(message: Value, pending: &Pending, outgoing: &mpsc::Sender<Value>, events: &async_mpsc::UnboundedSender<Event>) {
+fn handle(message: Value, pending: &Pending, outgoing: &mpsc::Sender<Option<Value>>, events: &async_mpsc::UnboundedSender<Event>) {
     let method = message.get("method").and_then(Value::as_str);
     let id = message.get("id").cloned();
     match (method, id) {
@@ -368,7 +377,7 @@ fn handle(message: Value, pending: &Pending, outgoing: &mpsc::Sender<Value>, eve
         // Every other request gets an answer so the agent never waits for one: m4code offers no file system or
         // terminal, and extensions it doesn't know are refused.
         (Some(_), Some(id)) => {
-            let _ = outgoing.send(json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32601, "message": "method not found"}}));
+            let _ = outgoing.send(Some(json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32601, "message": "method not found"}})));
         }
         (Some("session/update"), None) => {
             let _ = events.unbounded_send(Event::Update(message["params"]["update"].clone()));
@@ -390,15 +399,19 @@ mod tests {
 
     #[test]
     fn terminating_cancels_pending_requests_and_rejects_new_ones() {
-        let (reader, _writer) = std::io::pipe().unwrap();
+        let (reader, _stdout_writer) = std::io::pipe().unwrap();
+        let (mut stdin_reader, writer) = std::io::pipe().unwrap();
         let (events, _incoming) = async_mpsc::unbounded();
-        let connection = Connection::connect(reader, Vec::<u8>::new(), None::<std::io::Empty>, events);
+        let connection = Connection::connect(reader, writer, None::<std::io::Empty>, events);
         let pending = connection.request("never-answered", json!({}));
         connection.closed.store(true, Ordering::Release);
         connection.terminate();
         assert!(connection.pending.lock().unwrap().is_empty(), "EOF must not prevent pending-request cleanup");
         assert!(futures::executor::block_on(pending).is_err());
         assert!(futures::executor::block_on(connection.request("after-close", json!({}))).is_err());
+        let mut buf = String::new();
+        stdin_reader.read_to_string(&mut buf).unwrap();
+        assert!(buf.contains("never-answered"), "terminate must flush and close the child's stdin while stdout is still open");
     }
 
     #[test]

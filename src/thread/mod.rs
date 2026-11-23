@@ -94,6 +94,8 @@ pub enum ThreadEvent {
     Modes(Harness, Vec<(String, String)>),
     /// The harness reported live context usage `(used_tokens, max_tokens)`.
     Context(u64, u64),
+    /// The harness reported per-turn token and prompt-cache usage.
+    Usage(crate::harness::thread::TurnUsage),
     /// A file a tool acted on was clicked: its path and line (1-based).
     OpenPath(String, Option<usize>),
     /// The user picked a model served by another harness and sent a message: dynamically hand off this chat.
@@ -1023,6 +1025,11 @@ impl ThreadView {
         self.working = false;
         self.interrupting = false;
         self.last_update = None;
+        if let Ok(r) = &result
+            && let Some(turn) = self.thread.record_usage(&r["usage"])
+        {
+            cx.emit(ThreadEvent::Usage(turn));
+        }
         let compacted = self.compaction.running;
         if std::mem::take(&mut self.compaction.running) {
             let completed = result.as_ref().is_ok_and(|r| r["stopReason"] == "end_turn");

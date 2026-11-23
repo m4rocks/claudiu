@@ -35,6 +35,26 @@ pub const OK: u32 = 0x7fb069;
 pub const WARN: u32 = 0xe5c07b;
 pub const DANGER: u32 = 0xe06c75;
 pub const SELECTION: u32 = 0x383838;
+/// A plain button, and under the pointer.
+pub const CONTROL: u32 = 0x1b1b1b;
+pub const CONTROL_HOVER: u32 = 0x262626;
+/// The dimmed window behind a dialog, as RGBA.
+pub const BACKDROP: u32 = 0x000000b0;
+/// The grip between two panels, and under the pointer.
+pub const RESIZE_HANDLE: u32 = 0x2b2b30;
+pub const RESIZE_HANDLE_HOVER: u32 = 0x4a4a52;
+/// A warm band that asks for attention, such as a file changed on disk.
+pub const NOTICE_BG: u32 = 0x1d1512;
+pub const NOTICE_BORDER: u32 = 0x3a2a24;
+/// The warm tint of the current or own item in a list, such as your own review.
+pub const CURRENT_TINT: u32 = 0x2a211d;
+/// A placeholder bar while content loads.
+pub const SKELETON: u32 = 0x1f1f21;
+/// The icon of something still working.
+pub const BUSY: u32 = 0xc8c8c8;
+/// Backgrounds of added and removed lines in a diff.
+pub const DIFF_ADDED_BG: u32 = 0x16301e;
+pub const DIFF_REMOVED_BG: u32 = 0x3a1a1d;
 /// Codex's usage bars, so they read apart from Claude's at a glance. The terminal palette's blue.
 pub const CODEX: u32 = 0x61afef;
 /// Antigravity's usage bars, apart from Claude's and Codex's. The terminal palette's magenta.

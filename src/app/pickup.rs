@@ -41,13 +41,13 @@ async fn list(launch: Launch, cwd: PathBuf, cx: &mut gpui::AsyncApp) -> Result<V
 
 impl Workspace {
     /// The project menu's "Pick up a session here…": list the default agent's sessions in `cwd` in a menu at `at`.
-    pub(super) fn list_sessions(&mut self, cwd: PathBuf, at: gpui::Point<gpui::Pixels>, cx: &mut Context<Self>) {
+    pub(super) fn list_sessions(&mut self, cwd: PathBuf, at: gpui::Point<gpui::Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         let harness = self.store.data.settings.harness;
         let meta = ClaudeMeta { harness, ..Default::default() };
         // The same program and environment a new session gets, so Claude Code lists the active account's sessions.
         let Some(start) = self.thread_start(&new_id(), &cwd, &meta, None, None, Starter::User, cx) else { return };
         self.toast(format!("Looking for {} sessions…", harness.name()), cx);
-        cx.spawn(async move |this, cx| {
+        cx.spawn_in(window, async move |this, cx| {
             let server = match start.server.clone() {
                 Some(s) => Ok(s),
                 None => cx.background_executor().spawn(async move { (harness.adapter().server)() }).await,
@@ -56,12 +56,12 @@ impl Workspace {
                 Ok((program, args)) => list(Launch { program, args, cwd: cwd.clone(), env: start.env.clone() }, cwd.clone(), cx).await,
                 Err(why) => Err(why),
             };
-            let _ = this.update(cx, |ws, cx| ws.show_listed(harness, cwd, found, at, cx));
+            let _ = this.update_in(cx, |ws, window, cx| ws.show_listed(harness, cwd, found, at, window, cx));
         })
         .detach();
     }
 
-    fn show_listed(&mut self, harness: Harness, cwd: PathBuf, found: Result<Vec<Listed>, String>, at: gpui::Point<gpui::Pixels>, cx: &mut Context<Self>) {
+    fn show_listed(&mut self, harness: Harness, cwd: PathBuf, found: Result<Vec<Listed>, String>, at: gpui::Point<gpui::Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         let sessions = match found {
             Ok(s) => s,
             Err(why) => return self.toast(format!("{} couldn't list its sessions: {why}", harness.name()), cx),
@@ -78,7 +78,7 @@ impl Workspace {
                 MenuItem { hint: s.updated.map(|u| u.chars().take(10).collect()), ..MenuItem::new(label, act) }
             })
             .collect();
-        self.open_menu(at, items, cx);
+        self.open_menu(at, items, window, cx);
     }
 
     /// Open a listed session here: the record m4code already has for it, or a new one.

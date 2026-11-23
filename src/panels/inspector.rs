@@ -145,8 +145,8 @@ impl Workspace {
                         .w(px(2.0))
                         .h(px(28.0))
                         .rounded_full()
-                        .bg(hsla(0x2b2b30))
-                        .group_hover("right-resize", |s| s.bg(hsla(0x4a4a52))),
+                        .bg(hsla(theme::RESIZE_HANDLE))
+                        .group_hover("right-resize", |s| s.bg(hsla(theme::RESIZE_HANDLE_HOVER))),
                 ),
         );
         Some(
@@ -295,8 +295,8 @@ impl Workspace {
                                 .flex_1()
                                 .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::OpenEditor(editor, t.clone()), window, cx))),
                         )
-                        .child(icon_button("open-in-pick", IconName::ChevronDown).dropdown_right(cx, move |ws, at, _, cx| {
-                            ws.open_editor_picker(pick_target.clone(), at, cx);
+                        .child(icon_button("open-in-pick", IconName::ChevronDown).dropdown_right(cx, move |ws, at, window, cx| {
+                            ws.open_editor_picker(pick_target.clone(), at, window, cx);
                         })),
                 );
             }
@@ -499,13 +499,14 @@ impl Workspace {
                 None => kv("Background compaction", text).into_any_element(),
             }
         });
+        let cache_row = meta.and_then(|m| m.cache_usage.summary()).map(|summary| kv("Prompt cache", summary).into_any_element());
         div()
             .flex()
             .flex_col()
             .gap(px(10.0))
             .px(px(8.0))
             .child(meter("CONTEXT", ctx_fraction, ctx_caption, None))
-            .child(div().flex().flex_col().gap(px(2.0)).child(compact_row).children(precompute_row))
+            .child(div().flex().flex_col().gap(px(2.0)).children(cache_row).child(compact_row).children(precompute_row))
     }
 }
 
@@ -594,7 +595,7 @@ fn pending_opacity(t: f32) -> f32 {
 
 /// `#12` with a grey bar where the title will be, until GitHub answers.
 fn pending_title(name: &str, key: &str) -> AnyElement {
-    let bar = div().flex_none().h(px(8.0)).w(px(96.0)).rounded(px(4.0)).bg(hsla(0x1f1f21)).with_animation(
+    let bar = div().flex_none().h(px(8.0)).w(px(96.0)).rounded(px(4.0)).bg(hsla(theme::SKELETON)).with_animation(
         SharedString::from(format!("pending-{key}")),
         Animation::new(PENDING_PULSE).with_easing(pending_opacity),
         |d, opacity| d.opacity(opacity),
@@ -702,7 +703,7 @@ fn pick_row(cx: &mut Context<Workspace>, id: &'static str, label: &str, value: S
                 .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(value))
                 .child(div().flex_none().text_color(hsla(theme::TEXT_FAINT)).child(icon(IconName::ChevronDown, 12.0))),
         )
-        .dropdown(cx, move |ws, at, _w, cx| ws.open_dropdown(at, menu(), cx))
+        .dropdown(cx, move |ws, at, window, cx| ws.open_dropdown(at, menu(), window, cx))
 }
 
 fn kv(label: &str, value: String) -> Div {

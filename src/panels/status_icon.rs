@@ -65,7 +65,7 @@ fn icon_of(state: SessionDot) -> Option<(IconName, u32)> {
     match state {
         SessionDot::Waiting => Some((IconName::CircleQuestionMark, theme::WARN)),
         SessionDot::Attention => Some((IconName::CircleCheck, theme::ACCENT)),
-        SessionDot::Working => Some((IconName::CircleDotDashed, 0xc8c8c8)),
+        SessionDot::Working => Some((IconName::CircleDotDashed, theme::BUSY)),
         SessionDot::Active => Some((IconName::CircleSmall, theme::TEXT_DIM)),
         SessionDot::Inactive => None,
     }

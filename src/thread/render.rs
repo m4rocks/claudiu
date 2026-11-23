@@ -1308,8 +1308,8 @@ fn diff(path: &std::path::Path, old: Option<&str>, new: &str, full: bool) -> Any
     block = block.child(div().px(px(8.0)).py(px(3.0)).bg(hsla(theme::APP_BG)).text_color(hsla(theme::TEXT_DIM)).child(path.display().to_string()));
     for (sign, text) in &lines[..shown] {
         let (bg, fg) = match sign {
-            '+' => (0x16301e, theme::OK),
-            '-' => (0x3a1a1d, theme::DANGER),
+            '+' => (theme::DIFF_ADDED_BG, theme::OK),
+            '-' => (theme::DIFF_REMOVED_BG, theme::DANGER),
             _ => (theme::PANEL_BG, theme::TEXT_DIM),
         };
         block = block.child(div().px(px(8.0)).bg(hsla(bg)).text_color(hsla(fg)).whitespace_nowrap().child(format!("{sign} {text}")));

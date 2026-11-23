@@ -195,7 +195,7 @@ fn item(label: impl Into<String>, act: GhAct) -> PopItem {
 
 /// Grey bars where the description and the history will be, pulsing until they arrive.
 fn skeleton() -> AnyElement {
-    let bar = |w: f32, h: f32| div().h(px(h)).w(gpui::relative(w)).rounded(px(4.0)).bg(hsla(0x1f1f21));
+    let bar = |w: f32, h: f32| div().h(px(h)).w(gpui::relative(w)).rounded(px(4.0)).bg(hsla(theme::SKELETON));
     let card = |lines: &[f32]| {
         let mut body = div().flex().flex_col().gap(px(8.0)).p(px(12.0));
         for w in lines {
@@ -392,9 +392,9 @@ impl GithubView {
             .rounded(px(12.0))
             .cursor_pointer()
             .text_size(crate::panels::scale::px(12.0))
-            .bg(hsla(if active { 0x2a211d } else { 0x161616 }))
+            .bg(hsla(if active { theme::CURRENT_TINT } else { 0x161616 }))
             .text_color(hsla(if active { theme::ACCENT } else { theme::TEXT_DIM }))
-            .hover(|s| s.bg(hsla(0x262626)))
+            .hover(|s| s.bg(hsla(theme::CONTROL_HOVER)))
             .flex()
             .items_center()
             .gap(px(4.0))

@@ -210,7 +210,7 @@ impl SetupView {
 }
 
 fn card() -> gpui::Div {
-    div().flex().flex_col().gap(px(10.0)).p(px(14.0)).rounded(px(8.0)).bg(hsla(0x111111)).border_1().border_color(hsla(0x242424))
+    div().flex().flex_col().gap(px(10.0)).p(px(14.0)).rounded(px(8.0)).bg(hsla(0x111111)).border_1().border_color(hsla(theme::BORDER))
 }
 
 fn status_line(glyph: IconName, color: u32, text: impl Into<SharedString>) -> gpui::Div {

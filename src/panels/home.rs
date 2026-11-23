@@ -76,8 +76,8 @@ impl Workspace {
 
         let perm_open = matches!(self.picker_kind(), Some(WorkspacePicker::HomePermission));
         let perm_chip = composer::permission_chip("home-mode", perm_open, permission.map_or("Harness default", Permission::label))
-            .dropdown(cx, |ws, at, _window, cx| {
-                ws.open_home_permission_picker(at, cx);
+            .dropdown(cx, |ws, at, window, cx| {
+                ws.open_home_permission_picker(at, window, cx);
             })
             .into_any_element();
 

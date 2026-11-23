@@ -16,12 +16,14 @@ use gpui_kit::assets::IconName;
 use crate::panels::widgets::{
     button, danger_button, dialog_card, dropdown_card, fade_in, icon, icon_button,
 };
+use crate::panels::picker;
 use crate::panels::settings_view::render_settings_card;
 
 impl Workspace {
     pub(super) fn render_menu(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let menu = self.menu.as_ref()?;
         let pos = menu.pos;
+        let mut choices = picker::Choices::new(&self.menu_nav, "");
         let mut card = dropdown_card("menu")
             .w(px(232.0))
             .min_w(menu.min_w)
@@ -66,17 +68,13 @@ impl Workspace {
                         }))
                 }));
             card = card.child(if item.disabled {
-                row
+                row.into_any_element()
             } else {
-                row.cursor_pointer()
-                    .hover(|s| s.bg(hsla(0x252525)))
-                    .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(act.clone(), window, cx)))
+                choices.add(row.cursor_pointer().hover(|s| s.bg(hsla(theme::SURFACE_HOVER))), move |ws, window, cx| ws.act(act.clone(), window, cx), cx)
             });
         }
-        let close = |ws: &mut Workspace, _: &MouseDownEvent, _w: &mut Window, cx: &mut Context<Workspace>| {
-            ws.menu = None;
-            cx.notify();
-        };
+        let card = picker::keyboard(card, Some(choices), |ws, window, cx| ws.close_menu(window, cx), cx);
+        let close = |ws: &mut Workspace, _: &MouseDownEvent, window: &mut Window, cx: &mut Context<Workspace>| ws.close_menu(window, cx);
         Some(
             deferred(
                 div()
@@ -173,7 +171,7 @@ impl Workspace {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .bg(rgba(0x000000b0))
+                    .bg(rgba(theme::BACKDROP))
                     .on_mouse_down(MouseButton::Left, cx.listener(|ws, _: &MouseDownEvent, window, cx| ws.act(Act::Dismiss, window, cx)))
                     .child(card),
             )
@@ -196,16 +194,10 @@ impl Workspace {
             deferred(
                 div().absolute().bottom(px(18.0)).right(px(18.0)).child(
                     fade_in(
-                    div()
-                        .occlude()
-                        .cursor_default()
+                    dropdown_card("toast")
                         .max_w(px(420.0))
                         .px(px(14.0))
                         .py(px(10.0))
-                        .rounded(px(8.0))
-                        .bg(hsla(0x1a1a1a))
-                        .border_1()
-                        .border_color(hsla(0x2c2c2c))
                         .text_size(crate::panels::scale::px(12.5))
                         .text_color(hsla(theme::TEXT))
                         .child(t.text.clone())

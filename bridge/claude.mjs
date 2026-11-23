@@ -109,6 +109,7 @@ function kindOf(name) {
   if (["Grep", "Glob", "LSP"].includes(name)) return "search";
   if (["WebFetch", "WebSearch"].includes(name)) return "fetch";
   if (["Agent", "Task"].includes(name)) return "think";
+  if (["ExitPlanMode", "EnterPlanMode"].includes(name)) return "switch_mode";
   return "other";
 }
 
@@ -249,6 +250,20 @@ function stopReason(session, result) {
   return "end_turn";
 }
 
+/** Per-turn token and prompt-cache counts in ACP's `PromptResponse.usage` shape. */
+function turnUsage(result) {
+  const u = result?.usage;
+  if (!u || typeof u !== "object") return undefined;
+  const uncachedInput = Number(u.input_tokens ?? 0);
+  const output = Number(u.output_tokens ?? 0);
+  const cachedRead = Number(u.cache_read_input_tokens ?? 0);
+  const cachedWrite = Number(u.cache_creation_input_tokens ?? 0);
+  const input = uncachedInput + cachedRead + cachedWrite;
+  const total = input + output;
+  if (!total) return undefined;
+  return { inputTokens: input, outputTokens: output, cachedReadTokens: cachedRead, cachedWriteTokens: cachedWrite, totalTokens: total };
+}
+
 /** The uuids of the messages a result answered: every one Claude took into that turn. */
 function answeredBy(result) {
   if (Array.isArray(result.user_message_uuids)) return result.user_message_uuids;
@@ -286,7 +301,8 @@ async function finishTurn(session, result) {
           if (turn.steers.has(uuid) && !turn.shown.has(uuid)) session.dropping.add(uuid);
         }
       }
-      turn.resolve({ stopReason: stopReason(session, result) });
+      const usage = turnUsage(result);
+      turn.resolve({ stopReason: stopReason(session, result), ...(usage ? { usage } : {}) });
     }
   }
   // The context size is only shown, so the turn ends without waiting for it.

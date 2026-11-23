@@ -146,6 +146,13 @@ pub enum PopKind {
     Comment(String, bool, bool, String),
 }
 
+impl PopKind {
+    /// Whether the popup has a filter box. One without takes the keyboard for its list itself.
+    pub fn searchable(&self) -> bool {
+        !matches!(self, Self::Merge | Self::CloseReason | Self::Claude | Self::More | Self::React(_) | Self::Comment(..) | Self::FilterSort | Self::FilterReview | Self::FilterChecks)
+    }
+}
+
 pub struct Popup {
     pub kind: PopKind,
     pub pos: Point<Pixels>,

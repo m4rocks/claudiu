@@ -154,6 +154,8 @@ pub struct Menu {
     pub pos: Point<Pixels>,
     pub min_w: Pixels,
     pub items: Vec<MenuItem>,
+    /// What had the keyboard before the menu took it, to get it back when the menu closes.
+    pub return_focus: Option<FocusHandle>,
 }
 
 pub enum Modal {
@@ -318,6 +320,13 @@ pub enum WorkspacePicker {
     SkillsScope { search: Entity<InputState> },
     /// Right sidebar: Choose which installed editor to open in.
     Editor { target: PathBuf },
+}
+
+impl WorkspacePicker {
+    /// Whether the dropdown has a search box, which then holds the keyboard.
+    fn has_search(&self) -> bool {
+        !matches!(self, Self::HomePermission | Self::SettingsEffort | Self::SettingsPermission | Self::Editor { .. })
+    }
 }
 
 /// Interactive state for the Welcome / "Start a new session" page (`Main::Home`).
@@ -564,6 +573,8 @@ pub struct Workspace {
     pub root_focus: FocusHandle,
     /// Up/Down/Enter in the open workspace dropdown (`panels::picker::Choices`).
     pub picker_nav: crate::panels::picker::Nav,
+    /// Up/Down/Enter in the open context menu.
+    pub menu_nav: crate::panels::picker::Nav,
     pub modal: Option<Modal>,
     pub modal_focus: FocusHandle,
     /// The Settings category last shown. Kept here because opening Settings builds the modal anew; not saved to disk.
@@ -724,7 +735,8 @@ impl Workspace {
             search: String::new(),
             search_input,
             root_focus: cx.focus_handle(),
-            picker_nav: Default::default(),
+            picker_nav: crate::panels::picker::Nav::new(cx),
+            menu_nav: crate::panels::picker::Nav::new(cx),
             modal: None,
             modal_focus: cx.focus_handle(),
             settings_page: SettingsPage::default(),
@@ -905,10 +917,28 @@ impl Workspace {
         cx.notify();
     }
 
-    pub fn open_home_permission_picker(&mut self, at: crate::panels::widgets::Dropdown, cx: &mut Context<Self>) {
+    pub fn open_home_permission_picker(&mut self, at: crate::panels::widgets::Dropdown, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_picker(at, WorkspacePicker::HomePermission, window, cx);
+    }
+
+    /// Show `kind` under `at`, starting on its first row. One with no search box takes the keyboard itself.
+    fn show_picker(&mut self, at: crate::panels::widgets::Dropdown, kind: WorkspacePicker, window: &mut Window, cx: &mut Context<Self>) {
         self.menu = None;
-        self.picker = Some(AnchoredPicker { at, kind: WorkspacePicker::HomePermission });
+        self.picker_nav.reset();
+        if !kind.has_search() {
+            self.picker_nav.focus(window, cx);
+        }
+        self.picker = Some(AnchoredPicker { at, kind });
         cx.notify();
+    }
+
+    /// Hand the keyboard back to what a closing dropdown sat over: an open dialog, or else the shown session.
+    pub(crate) fn focus_under_picker(&self, window: &mut Window, cx: &mut Context<Self>) {
+        match &self.modal {
+            Some(Modal::Settings { list_focus, .. }) => window.focus(list_focus, cx),
+            Some(_) => window.focus(&self.modal_focus, cx),
+            None => self.focus_active(window, cx),
+        }
     }
 
     pub fn picker_kind(&self) -> Option<&WorkspacePicker> {
@@ -955,58 +985,44 @@ impl Workspace {
         self.home.model_highlight = all.iter().position(|m| m.harness == chosen.harness && m.id == chosen.id).unwrap_or(0);
         self.home.model_scroll.scroll_to_item(self.home.model_highlight);
         let search = self.picker_search("Filter models…", window, cx);
-        self.picker = Some(AnchoredPicker { at, kind: WorkspacePicker::HomeModel { search } });
-        cx.notify();
+        self.show_picker(at, WorkspacePicker::HomeModel { search }, window, cx);
     }
 
     pub fn open_project_picker(&mut self, mode: ProjectPickerMode, at: crate::panels::widgets::Dropdown, window: &mut Window, cx: &mut Context<Self>) {
         self.menu = None;
         let search = self.picker_search("Filter projects…", window, cx);
-        self.picker = Some(AnchoredPicker { at, kind: WorkspacePicker::Project { mode, search } });
-        cx.notify();
+        self.show_picker(at, WorkspacePicker::Project { mode, search }, window, cx);
     }
 
     pub fn open_settings_model_picker(&mut self, at: crate::panels::widgets::Dropdown, text_generation: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.menu = None;
         self.load_models(cx);
         let search = self.picker_search("Filter models…", window, cx);
-        self.picker = Some(AnchoredPicker { at, kind: WorkspacePicker::SettingsModel { search, text_generation } });
-        cx.notify();
+        self.show_picker(at, WorkspacePicker::SettingsModel { search, text_generation }, window, cx);
     }
 
-    pub fn open_settings_effort_picker(&mut self, at: crate::panels::widgets::Dropdown, cx: &mut Context<Self>) {
-        self.menu = None;
-        self.picker = Some(AnchoredPicker { at, kind: WorkspacePicker::SettingsEffort });
-        cx.notify();
+    pub fn open_settings_effort_picker(&mut self, at: crate::panels::widgets::Dropdown, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_picker(at, WorkspacePicker::SettingsEffort, window, cx);
     }
 
-    pub fn open_settings_permission_picker(&mut self, at: crate::panels::widgets::Dropdown, cx: &mut Context<Self>) {
-        self.menu = None;
-        self.picker = Some(AnchoredPicker { at, kind: WorkspacePicker::SettingsPermission });
-        cx.notify();
+    pub fn open_settings_permission_picker(&mut self, at: crate::panels::widgets::Dropdown, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_picker(at, WorkspacePicker::SettingsPermission, window, cx);
     }
 
     pub fn open_skills_scope_picker(&mut self, at: crate::panels::widgets::Dropdown, window: &mut Window, cx: &mut Context<Self>) {
         self.menu = None;
         let search = self.picker_search("Filter scope…", window, cx);
-        self.picker = Some(AnchoredPicker { at, kind: WorkspacePicker::SkillsScope { search } });
-        cx.notify();
+        self.show_picker(at, WorkspacePicker::SkillsScope { search }, window, cx);
     }
 
-    pub fn open_editor_picker(&mut self, target: PathBuf, at: crate::panels::widgets::Dropdown, cx: &mut Context<Self>) {
-        self.menu = None;
-        self.picker = Some(AnchoredPicker { at, kind: WorkspacePicker::Editor { target } });
-        cx.notify();
+    pub fn open_editor_picker(&mut self, target: PathBuf, at: crate::panels::widgets::Dropdown, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_picker(at, WorkspacePicker::Editor { target }, window, cx);
     }
 
     pub fn dismiss_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.picker = None;
         self.home.effort_dragging.set(false);
-        if let Some(Modal::Settings { list_focus, .. }) = &self.modal {
-            window.focus(list_focus, cx);
-        } else {
-            self.focus_active(window, cx);
-        }
+        self.focus_under_picker(window, cx);
         cx.notify();
     }
 }

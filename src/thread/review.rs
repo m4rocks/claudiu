@@ -245,8 +245,8 @@ impl ThreadView {
         }
         for (l, line) in hunk.lines.iter().enumerate() {
             let (bg, fg) = match line.origin {
-                '+' => (0x16301e, theme::OK),
-                '-' => (0x3a1a1d, theme::DANGER),
+                '+' => (theme::DIFF_ADDED_BG, theme::OK),
+                '-' => (theme::DIFF_REMOVED_BG, theme::DANGER),
                 _ => (theme::PANEL_BG, theme::TEXT_DIM),
             };
             let number = line.new_line.map_or(String::new(), |n| n.to_string());

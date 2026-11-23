@@ -458,6 +458,14 @@ impl Workspace {
                     cx.notify();
                 }
             }
+            ThreadEvent::Usage(turn) => {
+                if ws.pending_handoffs.contains_key(&sub_id) { return; }
+                if let Some(meta) = ws.store.session_mut(&sub_id).and_then(|r| r.claude.as_mut()) {
+                    meta.cache_usage.record(*turn);
+                    ws.store.mark_dirty();
+                    cx.notify();
+                }
+            }
             ThreadEvent::OpenGitPicker(at) => {
                 let (project, cwd) = (ws.store.session(&sub_id).and_then(|r| r.project_id.clone()), ws.store.session(&sub_id).map(|r| r.cwd.clone()));
                 if let (Some(project), Some(cwd)) = (project, cwd) {

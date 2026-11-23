@@ -125,7 +125,7 @@ impl GithubView {
                     .rounded(px(5.0))
                     .text_size(crate::panels::scale::px(12.0))
                     .text_color(hsla(theme::TEXT_FAINT))
-                    .hover(|s| s.bg(hsla(0x262626)).text_color(hsla(theme::TEXT)))
+                    .hover(|s| s.bg(hsla(theme::CONTROL_HOVER)).text_color(hsla(theme::TEXT)))
                     .child("＋ Edit")
                     .popup(cx, kind)
             })
@@ -244,8 +244,8 @@ impl GithubView {
                     .text_size(crate::panels::scale::px(12.0))
                     .border_1()
                     .border_color(hsla(if r.mine { theme::ACCENT } else { CARD_BORDER }))
-                    .bg(hsla(if r.mine { 0x2a211d } else { CARD_HEAD }))
-                    .hover(|s| s.bg(hsla(0x262626)))
+                    .bg(hsla(if r.mine { theme::CURRENT_TINT } else { CARD_HEAD }))
+                    .hover(|s| s.bg(hsla(theme::CONTROL_HOVER)))
                     .child(format!("{} {}", emoji(&r.content), r.count))
                     .on_click(go(cx, act)),
             );
@@ -262,7 +262,7 @@ impl GithubView {
                     .cursor_pointer()
                     .text_size(crate::panels::scale::px(12.0))
                     .text_color(hsla(theme::TEXT_FAINT))
-                    .hover(|s| s.bg(hsla(0x262626)).text_color(hsla(theme::TEXT)))
+                    .hover(|s| s.bg(hsla(theme::CONTROL_HOVER)).text_color(hsla(theme::TEXT)))
                     .child(icon(IconName::HeartPlus, 14.0))
                     .popup(cx, PopKind::React(subject.to_string())),
             );
@@ -316,7 +316,7 @@ impl GithubView {
                     .rounded(px(5.0))
                     .cursor_pointer()
                     .text_color(hsla(theme::TEXT_DIM))
-                    .hover(|s| s.bg(hsla(0x262626)).text_color(hsla(theme::TEXT)))
+                    .hover(|s| s.bg(hsla(theme::CONTROL_HOVER)).text_color(hsla(theme::TEXT)))
                     .child("⋯")
                     .popup(cx, m)
             }));

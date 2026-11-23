@@ -147,6 +147,89 @@ fn dropdowns_answer_the_arrow_keys() {
     });
 }
 
+/// A workspace on the test platform, its window active so keys reach it.
+fn keyboard_workspace(cx: &mut TestAppContext) -> (gpui::AnyWindowHandle, Entity<Workspace>) {
+    cx.update(|app| {
+        gpui_kit::init(app);
+        gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, app);
+    });
+    let (window, ws) = cx.update(|app| gpui_kit::open_window(Default::default(), app, |window, app| app.new(|cx| Workspace::new(window, vec![], cx)))).unwrap();
+    cx.update_window(window, |_, window, _| window.activate_window()).unwrap();
+    (window, ws)
+}
+
+#[test]
+#[ignore = "drives the workspace"]
+/// A dropdown with no search box takes the keyboard itself, and hands it back to Settings when it closes.
+fn dropdowns_without_a_search_box_answer_the_arrow_keys() {
+    let data = tempfile::tempdir().unwrap();
+    // SAFETY: test-isolated data dir.
+    unsafe { std::env::set_var("M4CODE_DATA_DIR", data.path()) };
+    let mut cx = TestAppContext::single();
+    let (window, ws) = keyboard_workspace(&mut cx);
+    cx.update_window(window, |_, window, app| {
+        ws.update(app, |ws, cx| {
+            ws.act(Act::OpenSettings, window, cx);
+            ws.open_settings_effort_picker(crate::panels::widgets::Dropdown::at(gpui::point(gpui::px(20.0), gpui::px(20.0))), window, cx);
+        });
+        window.draw(app).clear(app);
+    })
+    .unwrap();
+    let mut visual = gpui::VisualTestContext::from_window(window, &cx);
+    visual.simulate_keystrokes("down enter");
+    cx.update_window(window, |_, window, app| {
+        let ws = ws.read(app);
+        assert!(ws.picker.is_none(), "Enter chooses and closes the dropdown");
+        let Some(Modal::Settings { effort, list_focus, .. }) = &ws.modal else { panic!("Settings stays open") };
+        assert_eq!(*effort, Effort::ALL[1], "Down moved to the second row");
+        assert!(list_focus.is_focused(window), "the keyboard is back in Settings");
+    })
+    .unwrap();
+}
+
+#[test]
+#[ignore = "drives the workspace"]
+/// Up and Down skip a menu's greyed-out rows, Enter runs the highlighted one, and Esc gives the keyboard back.
+fn context_menus_answer_the_keyboard() {
+    let data = tempfile::tempdir().unwrap();
+    // SAFETY: test-isolated data dir.
+    unsafe { std::env::set_var("M4CODE_DATA_DIR", data.path()) };
+    let mut cx = TestAppContext::single();
+    let (window, ws) = keyboard_workspace(&mut cx);
+    let open = |cx: &mut TestAppContext| {
+        cx.update_window(window, |_, window, app| {
+            ws.update(app, |ws, cx| {
+                window.focus(&ws.root_focus, cx);
+                let items = vec![
+                    MenuItem::new("First", Act::Dismiss),
+                    MenuItem { disabled: true, ..MenuItem::new("Greyed out", Act::Dismiss) },
+                    MenuItem::new("Settings", Act::OpenSettings),
+                ];
+                ws.open_menu(gpui::point(gpui::px(20.0), gpui::px(20.0)), items, window, cx);
+            });
+            window.draw(app).clear(app);
+        })
+        .unwrap();
+    };
+
+    open(&mut cx);
+    let mut visual = gpui::VisualTestContext::from_window(window, &cx);
+    visual.simulate_keystrokes("escape");
+    cx.update_window(window, |_, window, app| {
+        let ws = ws.read(app);
+        assert!(ws.menu.is_none(), "Esc closes the menu");
+        assert!(ws.root_focus.is_focused(window), "the keyboard goes back to what had it");
+    })
+    .unwrap();
+
+    open(&mut cx);
+    visual.simulate_keystrokes("down enter");
+    ws.read_with(&visual, |ws, _| {
+        assert!(ws.menu.is_none());
+        assert!(matches!(ws.modal, Some(Modal::Settings { .. })), "Down skipped the greyed-out row to Settings");
+    });
+}
+
 
 
 #[test]

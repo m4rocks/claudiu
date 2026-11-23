@@ -65,12 +65,12 @@ pub fn limit_bar(id: impl Into<ElementId>, fraction: Option<f32>, left: String, 
         .text_size(crate::panels::scale::px(10.5))
         .child(div().flex_none().text_color(hsla(percent_color)).child(left))
         .child(div().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().text_color(hsla(theme::TEXT_DIM)).child(right));
-    div().id(id.into()).relative().h(height).w_full().rounded(radius).overflow_hidden().bg(hsla(0x1c1c1c)).child(fill).child(texts)
+    div().id(id.into()).relative().h(height).w_full().rounded(radius).overflow_hidden().bg(hsla(theme::ROW_HOVER)).child(fill).child(texts)
 }
 
 /// Progress bar. `fraction == None` renders the neutral "unavailable" state.
 pub fn meter(label: &str, fraction: Option<f32>, caption: String, tone: Option<Hsla>) -> Div {
-    let track = hsla(0x1c1c1c);
+    let track = hsla(theme::ROW_HOVER);
     let color = tone.unwrap_or_else(|| match fraction {
         Some(f) if f >= 0.9 => hsla(theme::DANGER),
         Some(f) if f >= METER_WARN_AT => hsla(theme::WARN),
@@ -179,9 +179,9 @@ pub fn button(
         button_with(
             id.into(),
             label.into(),
-            hsla(0x1b1b1b),
+            hsla(theme::CONTROL),
             hsla(theme::TEXT),
-            hsla(0x262626),
+            hsla(theme::CONTROL_HOVER),
             false,
         )
     }
@@ -194,7 +194,7 @@ pub fn button_leading(id: impl Into<SharedString>, name: IconName, label: impl I
 
 /// A button that can't be pressed right now: dimmed, no hover, no click handler attached by the caller.
 pub fn button_disabled(id: impl Into<SharedString>, label: impl Into<SharedString>) -> Stateful<Div> {
-    button_with(id.into(), label.into(), hsla(0x1b1b1b), hsla(theme::TEXT_FAINT), hsla(0x1b1b1b), false).cursor_default()
+    button_with(id.into(), label.into(), hsla(theme::CONTROL), hsla(theme::TEXT_FAINT), hsla(theme::CONTROL), false).cursor_default()
 }
 
 /// Destructive action (end session, quit).
@@ -364,7 +364,7 @@ pub fn effort_slider<V: 'static>(
 pub fn subagent_state_icon(state: crate::app::SubagentState, size: f32) -> Icon {
     use crate::app::SubagentState::*;
     let (name, color) = match state {
-        Starting | Running => (IconName::CircleDotDashed, 0xc8c8c8),
+        Starting | Running => (IconName::CircleDotDashed, theme::BUSY),
         WaitingForUser => (IconName::CircleQuestionMark, theme::WARN),
         Completed => (IconName::CircleCheck, theme::TEXT_DIM),
         Failed => (IconName::CircleX, theme::DANGER),
@@ -386,7 +386,7 @@ pub fn icon_button(id: impl Into<SharedString>, glyph: IconName) -> Stateful<Div
     icon_button_base(id, glyph)
         .text_color(hsla(theme::TEXT_DIM))
         .cursor_pointer()
-        .hover(|s| s.bg(hsla(0x262626)).text_color(hsla(theme::TEXT)))
+        .hover(|s| s.bg(hsla(theme::CONTROL_HOVER)).text_color(hsla(theme::TEXT)))
 }
 
 /// A dimmed icon button with no hover or click handler.

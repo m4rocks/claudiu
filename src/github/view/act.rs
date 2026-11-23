@@ -35,8 +35,9 @@ impl GithubView {
 
     pub fn act(&mut self, act: GhAct, window: &mut Window, cx: &mut Context<Self>) {
         // Choosing anything closes an open picker, except the multi-select ones that stay for more clicks.
-        if !matches!(act, GhAct::ToggleLabel(_) | GhAct::ToggleAssignee(_) | GhAct::ToggleReviewer(_) | GhAct::Popup(..)) {
-            self.popup = None;
+        // The keyboard goes back to the pane; an act that opens a box of its own moves it on from there.
+        if !matches!(act, GhAct::ToggleLabel(_) | GhAct::ToggleAssignee(_) | GhAct::ToggleReviewer(_) | GhAct::Popup(..)) && self.popup.take().is_some() {
+            window.focus(&self.focus, cx);
         }
         match act {
             GhAct::Refresh => {
@@ -261,8 +262,13 @@ impl GithubView {
                 cx.notify();
             }
         });
-        filter.update(cx, |s, cx| s.focus(window, cx));
-        self.popup = Some(Popup { kind, pos, filter, nav: Default::default(), _sub: sub });
+        let nav = crate::panels::picker::Nav::new(cx);
+        if kind.searchable() {
+            filter.update(cx, |s, cx| s.focus(window, cx));
+        } else {
+            nav.focus(window, cx);
+        }
+        self.popup = Some(Popup { kind, pos, filter, nav, _sub: sub });
     }
 
     pub(super) fn comment(&mut self, close: Option<bool>, window: &mut Window, cx: &mut Context<Self>) {

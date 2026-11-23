@@ -54,8 +54,8 @@ pub(super) fn render_settings_card(
             let perm_display = permission.map_or("Harness default", |p| p.label()).to_string();
             let mut session_rows: Vec<AnyElement> = vec![
                 default_model_row(default_model, model_open, cx).into_any_element(),
-                settings_picker_row("settings-effort", ("Effort", "Reasoning depth for new sessions"), effort.label().to_string(), effort_open, |ws, at, _, cx| ws.open_settings_effort_picker(at, cx), cx).into_any_element(),
-                settings_picker_row("settings-permission", ("Permission mode", "Approval policy for tool calls and edits"), perm_display, perm_open, |ws, at, _, cx| ws.open_settings_permission_picker(at, cx), cx).into_any_element(),
+                settings_picker_row("settings-effort", ("Effort", "Reasoning depth for new sessions"), effort.label().to_string(), effort_open, |ws, at, window, cx| ws.open_settings_effort_picker(at, window, cx), cx).into_any_element(),
+                settings_picker_row("settings-permission", ("Permission mode", "Approval policy for tool calls and edits"), perm_display, perm_open, |ws, at, window, cx| ws.open_settings_permission_picker(at, window, cx), cx).into_any_element(),
             ];
             session_rows.push(
                 row_shell(

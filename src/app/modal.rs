@@ -281,14 +281,30 @@ impl Workspace {
         .detach();
     }
 
-    pub fn open_menu(&mut self, pos: Point<Pixels>, items: Vec<MenuItem>, cx: &mut Context<Self>) {
-        self.menu = Some(Menu { pos, min_w: gpui::px(0.0), items });
-        cx.notify();
+    pub fn open_menu(&mut self, pos: Point<Pixels>, items: Vec<MenuItem>, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_menu(pos, gpui::px(0.0), items, window, cx);
     }
 
     /// A menu hanging under its trigger button.
-    pub fn open_dropdown(&mut self, at: Dropdown, items: Vec<MenuItem>, cx: &mut Context<Self>) {
-        self.menu = Some(Menu { pos: at.pos, min_w: at.min_w, items });
+    pub fn open_dropdown(&mut self, at: Dropdown, items: Vec<MenuItem>, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_menu(at.pos, at.min_w, items, window, cx);
+    }
+
+    /// The menu takes the keyboard for Up, Down, Enter and Esc, and remembers who had it.
+    fn show_menu(&mut self, pos: Point<Pixels>, min_w: Pixels, items: Vec<MenuItem>, window: &mut Window, cx: &mut Context<Self>) {
+        // A menu opened over another one keeps the first one's place to go back to.
+        let return_focus = self.menu.take().and_then(|m| m.return_focus).or_else(|| window.focused(cx));
+        self.menu = Some(Menu { pos, min_w, items, return_focus });
+        self.menu_nav.reset();
+        self.menu_nav.focus(window, cx);
+        cx.notify();
+    }
+
+    /// Close the menu and hand the keyboard back to what had it before.
+    pub fn close_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(focus) = self.menu.take().and_then(|m| m.return_focus) {
+            window.focus(&focus, cx);
+        }
         cx.notify();
     }
 }

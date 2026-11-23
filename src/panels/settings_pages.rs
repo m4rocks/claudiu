@@ -591,7 +591,7 @@ impl Workspace {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .bg(rgba(0x00000088))
+                    .bg(rgba(theme::BACKDROP))
                     .on_mouse_down(MouseButton::Left, cx.listener(|ws, _: &MouseDownEvent, window, cx| {
                         ws.close_harness_dialog(window, cx);
                         cx.notify();

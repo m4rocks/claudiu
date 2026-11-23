@@ -151,12 +151,12 @@ pub enum Act {
 
 impl Workspace {
     pub fn act(&mut self, act: Act, window: &mut Window, cx: &mut Context<Self>) {
-        self.menu = None;
+        self.close_menu(window, cx);
         // Dragging the effort slider inside the Home model picker keeps that dialog open.
-        // A pick made in a dropdown hands the keyboard back to the message box under it; an act that opens
+        // A pick made in a dropdown hands the keyboard back to what is under it; an act that opens
         // something else moves focus on from there.
-        if !matches!(act, Act::HomeSetEffort(_)) && self.picker.take().is_some() && self.modal.is_none() {
-            self.focus_active(window, cx);
+        if !matches!(act, Act::HomeSetEffort(_)) && self.picker.take().is_some() {
+            self.focus_under_picker(window, cx);
         }
         match act {
             Act::NewClaude { cwd } => self.new_claude(cwd, window, cx),
@@ -222,7 +222,7 @@ impl Workspace {
                 let model = (!chosen.id.is_empty()).then_some(chosen.id);
                 self.new_session_from_home(chosen.harness, model, cwd, prompt, Some(effort), mode_id, window, cx);
             }
-            Act::ListSessions { cwd } => self.list_sessions(cwd, window.mouse_position(), cx),
+            Act::ListSessions { cwd } => self.list_sessions(cwd, window.mouse_position(), window, cx),
             Act::PickUp { harness, cwd, session_id, title } => self.pick_up(harness, cwd, session_id, title, window, cx),
             Act::ToggleEditor => self.toggle_editor(window, cx),
             Act::Editor(command) => self.run_editor_command(command, window, cx),
@@ -378,15 +378,13 @@ impl Workspace {
             Act::UninstallSkill(name) => self.uninstall_skill(name, cx),
             Act::UpdateSkills(names) => self.update_skills(names, cx),
             Act::PickDefaultModel(choice) => {
-                if let Some(Modal::Settings { default_model, list_focus, .. }) = self.modal.as_mut() {
+                if let Some(Modal::Settings { default_model, .. }) = self.modal.as_mut() {
                     *default_model = choice;
-                    window.focus(list_focus, cx);
                 }
             }
             Act::PickTextGenerationModel(choice) => {
-                if let Some(Modal::Settings { text_generation_model, list_focus, .. }) = self.modal.as_mut() {
+                if let Some(Modal::Settings { text_generation_model, .. }) = self.modal.as_mut() {
                     *text_generation_model = choice;
-                    window.focus(list_focus, cx);
                 }
             }
             Act::PickEffort(choice) => {

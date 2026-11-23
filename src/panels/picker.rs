@@ -6,7 +6,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use gpui::{
-    Anchor as Corner, AnyElement, Bounds, ClickEvent, Context, Div, ElementId, FontWeight, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, ParentElement, Pixels,
+    Anchor as Corner, AnyElement, App, Bounds, ClickEvent, Context, Div, ElementId, FocusHandle, FontWeight, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, ParentElement, Pixels,
     ScrollHandle, SharedString, Stateful, StatefulInteractiveElement, Styled, Window, anchored, canvas, deferred, div, point, prelude::FluentBuilder, px,
 };
 use gpui_kit::assets::IconName;
@@ -20,14 +20,33 @@ use crate::panels::widgets::{Dropdown, dropdown_card, fade_in, icon, key_badge, 
 pub const WIDTH: f32 = 348.0;
 
 /// Up/Down/Enter for a dropdown's list, kept by whoever owns the dropdown and passed to `Choices` each frame.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct Nav {
+    /// Held by the dropdown's frame. A dropdown with no search box takes it on opening, so its keys reach the list.
+    focus: FocusHandle,
     highlight: Rc<Cell<usize>>,
     /// The search text the highlight was set under; new text starts it over at the first row.
     query: Rc<RefCell<String>>,
     /// Where each row was drawn last frame, to scroll the highlighted one into view.
     rows: Rc<RefCell<Vec<Bounds<Pixels>>>>,
     scroll: ScrollHandle,
+}
+
+impl Nav {
+    pub fn new(cx: &mut App) -> Self {
+        Self { focus: cx.focus_handle(), highlight: Default::default(), query: Default::default(), rows: Default::default(), scroll: Default::default() }
+    }
+
+    /// Start a newly opened dropdown on its first row.
+    pub fn reset(&self) {
+        self.highlight.set(0);
+        self.query.borrow_mut().clear();
+    }
+
+    /// Give the keyboard to the dropdown, for one with no search box to type in.
+    pub fn focus(&self, window: &mut Window, cx: &mut App) {
+        window.focus(&self.focus, cx);
+    }
 }
 
 /// What choosing a row does.
@@ -210,17 +229,8 @@ pub fn dropdown_overlay<V: 'static>(
                 cx.stop_propagation();
             }
             cx.notify();
-        }))
-        .capture_key_down(cx.listener(move |v, ev: &KeyDownEvent, window, cx| {
-            let plain = !ev.keystroke.modifiers.modified();
-            if ev.keystroke.key == "escape" {
-                close_key(v, window, cx);
-                cx.stop_propagation();
-                cx.notify();
-            } else if plain && choices.as_ref().is_some_and(|c| c.key(&ev.keystroke.key, v, window, cx)) {
-                cx.stop_propagation();
-            }
-        }))
+        }));
+    let card = keyboard(card, choices, move |v, window, cx| close_key(v, window, cx), cx)
         .child(header)
         .child(body);
 
@@ -233,6 +243,28 @@ pub fn dropdown_overlay<V: 'static>(
     )
     .with_priority(priority)
     .into_any_element()
+}
+
+/// The keys of a dropdown `frame`: Esc runs `on_close`, and Up, Down and Enter move through and choose `choices`.
+/// The frame holds the list's focus, so the keys arrive when the dropdown has no search box.
+pub fn keyboard<V: 'static>(
+    frame: Stateful<Div>,
+    choices: Option<Choices<V>>,
+    on_close: impl Fn(&mut V, &mut Window, &mut Context<V>) + 'static,
+    cx: &mut Context<V>,
+) -> Stateful<Div> {
+    frame.when_some(choices.as_ref().map(|c| c.nav.focus.clone()), |d, focus| d.track_focus(&focus)).capture_key_down(cx.listener(
+        move |v, ev: &KeyDownEvent, window, cx| {
+            let plain = !ev.keystroke.modifiers.modified();
+            if ev.keystroke.key == "escape" {
+                on_close(v, window, cx);
+                cx.stop_propagation();
+                cx.notify();
+            } else if plain && choices.as_ref().is_some_and(|c| c.key(&ev.keystroke.key, v, window, cx)) {
+                cx.stop_propagation();
+            }
+        },
+    ))
 }
 
 /// Uniform search input at the top of a filterable picker dialog.

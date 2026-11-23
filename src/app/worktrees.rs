@@ -177,9 +177,9 @@ impl Workspace {
         let new_worktree_reason = worktree::source(Some(&git)).err().map(str::to_string);
         let search = self.picker_search("Filter branches & worktrees…", window, cx);
         let main_checkout = git.main_checkout().to_path_buf();
-        self.picker = Some(AnchoredPicker {
+        self.show_picker(
             at,
-            kind: WorkspacePicker::Git(GitPicker {
+            WorkspacePicker::Git(GitPicker {
                 cwd: cwd.clone(),
                 main_checkout,
                 target,
@@ -189,8 +189,9 @@ impl Workspace {
                 worktrees,
                 branches: None,
             }),
-        });
-        cx.notify();
+            window,
+            cx,
+        );
 
         let dir = cwd.clone();
         cx.spawn(async move |this, cx| {

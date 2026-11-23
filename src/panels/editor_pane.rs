@@ -17,7 +17,7 @@ use crate::app::{Act, Ask, AskExplain, AskFix, AskFixProblem, AskTests, EditorCo
 use crate::panels::glide::Follow;
 use crate::panels::theme::{self, hsla};
 use crate::panels::comment_box::comment_box;
-use crate::panels::widgets::{button, icon};
+use crate::panels::widgets::{button, dropdown_card, icon};
 use crate::platform::path_key;
 
 const TREE_W: f32 = 240.0;
@@ -67,11 +67,11 @@ impl Workspace {
                 .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(entry.item().label.clone()))
                 .children(badge.map(|b| div().flex_none().text_size(crate::panels::scale::px(if folder { 8.0 } else { 11.0 })).child(b)));
             let (menu_ws, menu_id, menu_path) = (ws.clone(), tree_id.clone(), path.clone());
-            let item = ListItem::new(entry.item().id.clone()).py(px(2.0)).child(row).on_mouse_down(MouseButton::Right, move |ev, _w, cx| {
+            let item = ListItem::new(entry.item().id.clone()).py(px(2.0)).child(row).on_mouse_down(MouseButton::Right, move |ev, window, cx| {
                 cx.stop_propagation(); // the tree's own menu is for the session folder
                 let _ = menu_ws.update(cx, |ws, cx| {
                     let items = ws.file_menu(&menu_id, Some(&menu_path), folder);
-                    ws.open_menu(ev.position, items, cx);
+                    ws.open_menu(ev.position, items, window, cx);
                 });
             });
             if folder {
@@ -105,7 +105,7 @@ impl Workspace {
                         .child(Editor::new(&tab.buffer).appearance(false).h_full().context_menu(move |menu, window, cx| {
                             // The menu is m4code's own: the system's menu keeps the editor's text cursor over it.
                             let at = window.mouse_position();
-                            let _ = menu_ws.update(cx, |ws, cx| ws.open_menu(at, editor_menu(), cx));
+                            let _ = menu_ws.update(cx, |ws, cx| ws.open_menu(at, editor_menu(), window, cx));
                             menu
                         }))
                         .child(change_marks(tab.buffer.clone(), tab.marks.clone(), tab.follow.clone()))
@@ -173,10 +173,10 @@ impl Workspace {
                             }
                         }))
                         // Right-click below the rows (or on a row, which opens its own menu instead).
-                        .on_mouse_down(MouseButton::Right, cx.listener(|ws, ev: &MouseDownEvent, _w, cx| {
+                        .on_mouse_down(MouseButton::Right, cx.listener(|ws, ev: &MouseDownEvent, window, cx| {
                             if let Some(id) = ws.editor_owner() {
                                 let items = ws.file_menu(&id, None, true);
-                                ws.open_menu(ev.position, items, cx);
+                                ws.open_menu(ev.position, items, window, cx);
                             }
                         }))
                         .child(pane.tree_scroll.watch(div().id("file-tree").flex_1().min_h_0(), window).child(files))
@@ -462,9 +462,9 @@ fn render_conflict(id: &crate::store::Id, path: &std::path::Path, conflict: Conf
         .gap(px(8.0))
         .px(px(12.0))
         .py(px(6.0))
-        .bg(hsla(0x1d1512))
+        .bg(hsla(theme::NOTICE_BG))
         .border_b_1()
-        .border_color(hsla(0x3a2a24))
+        .border_color(hsla(theme::NOTICE_BORDER))
         .text_size(crate::panels::scale::px(12.0))
         .text_color(hsla(theme::WARN))
         .child(text)
@@ -541,17 +541,10 @@ fn floating(
         .flex()
         .justify_center()
         .child(
-            div()
-                .id(id)
-                .occlude()
+            dropdown_card(id)
                 .w(px(560.0))
                 .max_w_full()
                 .p(px(6.0))
-                .rounded(px(8.0))
-                .bg(hsla(0x181818))
-                .border_1()
-                .border_color(hsla(0x2c2c2c))
-                .shadow_lg()
                 .capture_key_down(cx.listener(move |ws, ev: &KeyDownEvent, window, cx| {
                     if ev.keystroke.key == "escape" {
                         close(ws, window, cx);

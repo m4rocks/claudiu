@@ -476,11 +476,11 @@ impl Workspace {
             .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::Select(click_id.clone()), window, cx)))
             .on_mouse_down(
                 MouseButton::Right,
-                cx.listener(move |ws, ev: &MouseDownEvent, _window, cx| {
+                cx.listener(move |ws, ev: &MouseDownEvent, window, cx| {
                     if let Some(rec) = ws.store.session(&menu_id).cloned() {
                         let running = ws.is_running(&menu_id, cx);
                         let items = ws.session_menu(&rec, running);
-                        ws.open_menu(ev.position, items, cx);
+                        ws.open_menu(ev.position, items, window, cx);
                     }
                 }),
             )
@@ -734,7 +734,7 @@ impl Workspace {
             .border_1()
             .border_color(hsla(if filter_open { theme::ACCENT } else { 0x141414 }))
             .cursor_pointer()
-            .hover(|s| s.bg(hsla(0x1b1b1b)))
+            .hover(|s| s.bg(hsla(theme::CONTROL)))
             .text_size(crate::panels::scale::px(12.0))
             .text_color(hsla(if current.is_some() || filter_open { theme::TEXT } else { theme::TEXT_DIM }))
             .child(icon(IconName::FolderOpen, 13.0))
@@ -752,9 +752,9 @@ impl Workspace {
             .when_some(current, |d, p| {
                 d.child(icon_button("project-more", IconName::Ellipsis).dropdown(
                     cx,
-                    move |ws, at, _w, cx| {
+                    move |ws, at, window, cx| {
                         let items = ws.project_menu(&p);
-                        ws.open_dropdown(at, items, cx);
+                        ws.open_dropdown(at, items, window, cx);
                     },
                 ))
             })
@@ -790,8 +790,8 @@ impl Workspace {
                     .w(px(2.0))
                     .h(px(28.0))
                     .rounded_full()
-                    .bg(hsla(0x2b2b30))
-                    .group_hover("left-resize", |s| s.bg(hsla(0x4a4a52))),
+                    .bg(hsla(theme::RESIZE_HANDLE))
+                    .group_hover("left-resize", |s| s.bg(hsla(theme::RESIZE_HANDLE_HOVER))),
             );
         div()
             .id("sidebar")

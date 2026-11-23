@@ -86,6 +86,95 @@ pub struct ConfigOption {
     pub choices: Vec<(String, String)>,
 }
 
+/// Token and prompt-cache counts reported for one completed turn.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnUsage {
+    /// Total prompt input tokens (including cached reads and writes).
+    pub input_tokens: u64,
+    pub cached_read_tokens: u64,
+    pub cached_write_tokens: u64,
+    pub output_tokens: u64,
+}
+
+impl TurnUsage {
+    /// Read token and cache counts from an ACP `PromptResponse.usage` object (or Anthropic snake_case fields).
+    pub fn parse(value: &Value) -> Option<Self> {
+        let obj = value.as_object()?;
+        let num = |keys: &[&str]| keys.iter().find_map(|k| obj.get(*k).and_then(Value::as_u64));
+        let cached_read = num(&["cachedReadTokens", "cacheReadTokens", "cached_read_tokens", "cache_read_input_tokens"]).unwrap_or(0);
+        let cached_write = num(&["cachedWriteTokens", "cacheWriteTokens", "cached_write_tokens", "cache_creation_input_tokens"]).unwrap_or(0);
+        let output_tokens = num(&["outputTokens", "output_tokens"]).unwrap_or(0);
+        let input_tokens = if let Some(total_input) = num(&["inputTokens"]) {
+            total_input.max(cached_read.saturating_add(cached_write))
+        } else if let Some(raw_input) = num(&["input_tokens"]) {
+            // Anthropic's snake_case `input_tokens` excludes cache reads and writes.
+            raw_input.saturating_add(cached_read).saturating_add(cached_write)
+        } else {
+            cached_read.saturating_add(cached_write)
+        };
+        if input_tokens == 0 && output_tokens == 0 && cached_read == 0 && cached_write == 0 {
+            return None;
+        }
+        Some(Self { input_tokens, cached_read_tokens: cached_read, cached_write_tokens: cached_write, output_tokens })
+    }
+}
+
+/// Cumulative and last-turn prompt-cache measurements for a session.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CacheUsage {
+    pub turns: u64,
+    pub input_tokens: u64,
+    pub cached_read_tokens: u64,
+    pub cached_write_tokens: u64,
+    pub output_tokens: u64,
+    pub last_input_tokens: u64,
+    pub last_cached_read_tokens: u64,
+    pub last_cached_write_tokens: u64,
+}
+
+impl CacheUsage {
+    pub fn record(&mut self, turn: TurnUsage) {
+        self.turns = self.turns.saturating_add(1);
+        self.input_tokens = self.input_tokens.saturating_add(turn.input_tokens);
+        self.cached_read_tokens = self.cached_read_tokens.saturating_add(turn.cached_read_tokens);
+        self.cached_write_tokens = self.cached_write_tokens.saturating_add(turn.cached_write_tokens);
+        self.output_tokens = self.output_tokens.saturating_add(turn.output_tokens);
+        self.last_input_tokens = turn.input_tokens;
+        self.last_cached_read_tokens = turn.cached_read_tokens;
+        self.last_cached_write_tokens = turn.cached_write_tokens;
+    }
+
+    /// Fraction of all measured input tokens served from prompt cache (0.0..=1.0).
+    pub fn hit_rate(&self) -> Option<f32> {
+        (self.input_tokens > 0).then(|| (self.cached_read_tokens as f64 / self.input_tokens as f64).clamp(0.0, 1.0) as f32)
+    }
+
+    /// Fraction of the most recent turn's input tokens served from prompt cache (0.0..=1.0).
+    #[cfg(test)]
+    pub fn last_hit_rate(&self) -> Option<f32> {
+        (self.last_input_tokens > 0).then(|| (self.last_cached_read_tokens as f64 / self.last_input_tokens as f64).clamp(0.0, 1.0) as f32)
+    }
+
+    /// Short human-readable summary for the inspector, e.g. `"84% hit · 120k read"`.
+    pub fn summary(&self) -> Option<String> {
+        let rate = self.hit_rate()?;
+        let pct = (rate * 100.0).round() as u64;
+        let read = format_tokens(self.cached_read_tokens);
+        Some(format!("{pct}% hit · {read} read"))
+    }
+}
+
+fn format_tokens(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{}k", n / 1_000)
+    } else {
+        n.to_string()
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Thread {
     pub entries: Vec<Entry>,
@@ -99,6 +188,8 @@ pub struct Thread {
     pub config: Vec<ConfigOption>,
     /// Tokens of context in use, and how many fit.
     pub context: Option<(u64, u64)>,
+    /// Measured prompt-cache usage across turns in this view.
+    pub cache_usage: CacheUsage,
 }
 
 impl Thread {
@@ -204,6 +295,13 @@ impl Thread {
 
     pub fn option(&self, category: &str) -> Option<&ConfigOption> {
         self.config.iter().find(|o| o.category == category)
+    }
+
+    /// Record token/cache usage from a completed turn's `usage` payload.
+    pub fn record_usage(&mut self, usage: &Value) -> Option<TurnUsage> {
+        let turn = TurnUsage::parse(usage)?;
+        self.cache_usage.record(turn);
+        Some(turn)
     }
 
     /// Add something m4code says, and return where it went.
@@ -657,5 +755,42 @@ mod tests {
         t.notice("Interrupted", false);
         assert_eq!(t.transcript(10), "User: hi\n\nAgent: hello");
         assert_eq!(t.transcript(2), "Agent: hello", "only the last entries");
+    }
+
+    #[test]
+    fn cache_usage_parses_acp_and_anthropic_shapes_and_computes_hit_rates() {
+        let acp = TurnUsage::parse(&json!({
+            "inputTokens": 10_000,
+            "cachedReadTokens": 8_000,
+            "cachedWriteTokens": 500,
+            "outputTokens": 250,
+        }))
+        .unwrap();
+        assert_eq!(acp, TurnUsage { input_tokens: 10_000, cached_read_tokens: 8_000, cached_write_tokens: 500, output_tokens: 250 });
+
+        let anthropic = TurnUsage::parse(&json!({
+            "input_tokens": 1_000,
+            "cache_read_input_tokens": 7_000,
+            "cache_creation_input_tokens": 2_000,
+            "output_tokens": 300,
+        }))
+        .unwrap();
+        assert_eq!(anthropic, TurnUsage { input_tokens: 10_000, cached_read_tokens: 7_000, cached_write_tokens: 2_000, output_tokens: 300 });
+
+        assert_eq!(TurnUsage::parse(&json!({})), None);
+        assert_eq!(TurnUsage::parse(&Value::Null), None);
+
+        let mut usage = CacheUsage::default();
+        assert_eq!(usage.summary(), None);
+        usage.record(acp);
+        assert!((usage.hit_rate().unwrap() - 0.8).abs() < 1e-6);
+        assert_eq!(usage.summary().as_deref(), Some("80% hit · 8k read"));
+        usage.record(anthropic);
+        assert_eq!(usage.turns, 2);
+        assert_eq!(usage.input_tokens, 20_000);
+        assert_eq!(usage.cached_read_tokens, 15_000);
+        assert!((usage.hit_rate().unwrap() - 0.75).abs() < 1e-6);
+        assert!((usage.last_hit_rate().unwrap() - 0.7).abs() < 1e-6);
+        assert_eq!(usage.summary().as_deref(), Some("75% hit · 15k read"));
     }
 }

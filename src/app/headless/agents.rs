@@ -128,6 +128,372 @@ fn compaction_preserves_the_session_and_never_becomes_a_user_message() {
 }
 
 #[test]
+fn restart_reuses_provider_session_respects_capabilities_and_records_cache_usage() {
+    use crate::harness::thread::Entry;
+    let _dirs = crate::datadir::use_throwaway_folders();
+    let work = tempfile::tempdir().unwrap();
+    let server = fake_agent(work.path());
+    let script = PathBuf::from(&server.1[0]);
+    let contents = std::fs::read_to_string(&script)
+        .unwrap()
+        .replace(
+            r#"send({"jsonrpc": "2.0", "id": i, "result": {"stopReason": "end_turn"}})"#,
+            r#"send({"jsonrpc": "2.0", "id": i, "result": {"stopReason": "end_turn", "usage": {"inputTokens": 10000, "cachedReadTokens": 8000, "cachedWriteTokens": 500, "outputTokens": 200}}})"#,
+        )
+        .replace(
+            "    elif method == \"session/load\":\n        cwd = m[\"params\"][\"cwd\"]",
+            "    elif method == \"session/load\":\n        cwd = m[\"params\"][\"cwd\"]\n        send({\"jsonrpc\": \"2.0\", \"method\": \"session/update\", \"params\": {\"sessionId\": m[\"params\"][\"sessionId\"], \"update\": {\"sessionUpdate\": \"user_message_chunk\", \"content\": {\"type\": \"text\", \"text\": \"first turn\"}}}})\n        send({\"jsonrpc\": \"2.0\", \"method\": \"session/update\", \"params\": {\"sessionId\": m[\"params\"][\"sessionId\"], \"update\": {\"sessionUpdate\": \"agent_message_chunk\", \"content\": {\"type\": \"text\", \"text\": \"ok\"}}}})",
+        )
+        .replace(
+            "    else:\n        send({\"jsonrpc\": \"2.0\", \"id\": i, \"result\": {}})",
+            "    elif method == \"session/resume\":\n        with open(__file__ + \".prompts\", \"a\", newline=\"\\n\") as log:\n            log.write(\"resumed \" + m[\"params\"][\"sessionId\"] + \"\\n---\\n\")\n        send({\"jsonrpc\": \"2.0\", \"id\": i, \"result\": {}})\n    else:\n        send({\"jsonrpc\": \"2.0\", \"id\": i, \"result\": {}})",
+        );
+    assert!(contents.contains("cachedReadTokens"), "usage patch did not match fake_agent.py");
+    std::fs::write(&script, contents).unwrap();
+
+    let resume_only_dir = tempfile::tempdir().unwrap();
+    let resume_only_server = fake_agent(resume_only_dir.path());
+    let resume_only_script = PathBuf::from(&resume_only_server.1[0]);
+    let resume_contents = std::fs::read_to_string(&resume_only_script)
+        .unwrap()
+        .replace(
+            r#""agentCapabilities": {"loadSession": True, "sessionCapabilities": {"resume": {}}}"#,
+            r#""agentCapabilities": {"loadSession": False, "sessionCapabilities": {"resume": {}}}"#,
+        )
+        .replace(
+            "    else:\n        send({\"jsonrpc\": \"2.0\", \"id\": i, \"result\": {}})",
+            "    elif method == \"session/resume\":\n        with open(__file__ + \".prompts\", \"a\", newline=\"\\n\") as log:\n            log.write(\"resumed \" + m[\"params\"][\"sessionId\"] + \"\\n---\\n\")\n        send({\"jsonrpc\": \"2.0\", \"id\": i, \"result\": {}})\n    else:\n        send({\"jsonrpc\": \"2.0\", \"id\": i, \"result\": {}})",
+        );
+    std::fs::write(&resume_only_script, resume_contents).unwrap();
+
+    let no_reopen_dir = tempfile::tempdir().unwrap();
+    let no_reopen_server = fake_agent(no_reopen_dir.path());
+    let no_reopen_script = PathBuf::from(&no_reopen_server.1[0]);
+    let no_reopen_contents = std::fs::read_to_string(&no_reopen_script)
+        .unwrap()
+        .replace(
+            r#""agentCapabilities": {"loadSession": True, "sessionCapabilities": {"resume": {}}}"#,
+            r#""agentCapabilities": {}"#,
+        );
+    std::fs::write(&no_reopen_script, no_reopen_contents).unwrap();
+
+    let mut cx = TestAppContext::single();
+    cx.update(|app| {
+        gpui_kit::init(app);
+        gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, app);
+    });
+    let (window, ws) = cx.update(|app| gpui_kit::open_window(Default::default(), app, |window, app| app.new(|cx| Workspace::new(window, vec![], cx)))).unwrap();
+    let step = |cx: &mut TestAppContext, f: &dyn Fn(&mut Workspace, &mut Window, &mut Context<Workspace>)| {
+        cx.update_window(window, |_, window, app| ws.update(app, |ws, cx| f(ws, window, cx))).unwrap();
+        cx.run_until_parked();
+    };
+    let state = tempfile::tempdir().unwrap();
+    step(&mut cx, &|ws, window, cx| {
+        ws.store = crate::store::Store::load(state.path().join("state.json"));
+        ws.acp_server = Some(server.clone());
+        ws.claude_exe = Some("unused-by-the-fake-agent".into());
+        ws.new_session_from_home(Harness::Claude, None, work.path().to_path_buf(), Some("first turn".into()), None, None, window, cx);
+    });
+    let id = ws.read_with(&cx, |ws, _| ws.active_id().unwrap().clone());
+    let wait_ready = |cx: &mut TestAppContext, expect_ok: bool| {
+        let until = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            cx.run_until_parked();
+            let done = ws.read_with(cx, |ws, app| {
+                ws.pending_handoffs.is_empty()
+                    && ws.live_view(&id).and_then(|v| v.thread()).is_some_and(|view| {
+                        let view = view.read(app);
+                        !view.is_loading() && !view.is_working() && (!expect_ok || view.thread.entries.iter().any(|e| matches!(e, Entry::Agent(t) if t == "ok")))
+                    })
+            });
+            if done { break; }
+            assert!(std::time::Instant::now() < until, "the session never settled");
+            std::thread::yield_now();
+        }
+    };
+    wait_ready(&mut cx, true);
+    ws.read_with(&cx, |ws, app| {
+        let meta = ws.store.session(&id).unwrap().claude.as_ref().unwrap();
+        let view = ws.live_view(&id).unwrap().thread().unwrap().read(app);
+        assert_eq!(meta.session_id, "fake-session");
+        assert_eq!(view.thread.cache_usage.turns, 1);
+        assert_eq!(meta.cache_usage.turns, 1);
+        assert_eq!(meta.cache_usage.cached_read_tokens, 8_000);
+        assert_eq!(meta.cache_usage.summary().as_deref(), Some("80% hit · 8k read"));
+        assert_eq!(view.thread.cache_usage.cached_read_tokens, 8_000);
+    });
+
+    // Restarting reuses the saved provider session via session/load and preserves cache metrics and history.
+    step(&mut cx, &|ws, window, cx| ws.restart_session(&id, window, cx));
+    wait_ready(&mut cx, true);
+    ws.read_with(&cx, |ws, app| {
+        let meta = ws.store.session(&id).unwrap().claude.as_ref().unwrap();
+        assert_eq!(meta.session_id, "fake-session");
+        assert_eq!(meta.cache_usage.turns, 1, "restart preserves accumulated cache metrics");
+        let view = ws.live_view(&id).unwrap().thread().unwrap().read(app);
+        let users: Vec<_> = view.thread.entries.iter().filter_map(|e| match e { Entry::User(t) => Some(t.as_str()), _ => None }).collect();
+        assert_eq!(users, ["first turn"], "session/load replay must not duplicate history");
+        let prompts = std::fs::read_to_string(work.path().join("fake_agent.py.prompts")).unwrap();
+        assert!(prompts.contains("loaded fake-session"));
+    });
+
+    // After a handoff, restarting keeps m4code's canonical history instead of letting provider replay clobber it.
+    step(&mut cx, &|ws, window, cx| ws.dynamic_handoff(&id, Harness::Codex, None, "second turn".into(), false, None, window, cx));
+    wait_ready(&mut cx, true);
+    step(&mut cx, &|ws, window, cx| ws.restart_session(&id, window, cx));
+    wait_ready(&mut cx, true);
+    ws.read_with(&cx, |ws, app| {
+        let view = ws.live_view(&id).unwrap().thread().unwrap().read(app);
+        let users: Vec<_> = view.thread.entries.iter().filter_map(|e| match e { Entry::User(t) => Some(t.as_str()), _ => None }).collect();
+        assert_eq!(users, ["first turn", "second turn"], "canonical history survives restart after handoff");
+    });
+
+    // When the adapter advertises only session/resume (not loadSession), reopening uses session/resume.
+    step(&mut cx, &|ws, window, cx| {
+        ws.acp_server = Some(resume_only_server.clone());
+        ws.restart_session(&id, window, cx);
+    });
+    wait_ready(&mut cx, true);
+    ws.read_with(&cx, |ws, app| {
+        let prompts = std::fs::read_to_string(resume_only_dir.path().join("fake_agent.py.prompts")).unwrap();
+        assert!(prompts.contains("resumed fake-session"), "resume-only adapter must be reopened with session/resume");
+        let view = ws.live_view(&id).unwrap().thread().unwrap().read(app);
+        let users: Vec<_> = view.thread.entries.iter().filter_map(|e| match e { Entry::User(t) => Some(t.as_str()), _ => None }).collect();
+        assert_eq!(users, ["first turn", "second turn"]);
+    });
+
+    // When the adapter advertises neither loadSession nor resume, reopening fails explicitly.
+    step(&mut cx, &|ws, window, cx| {
+        ws.acp_server = Some(no_reopen_server.clone());
+        ws.restart_session(&id, window, cx);
+    });
+    let until = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        cx.run_until_parked();
+        if ws.read_with(&cx, |ws, _| ws.live_view(&id).is_none()) {
+            break;
+        }
+        assert!(std::time::Instant::now() < until, "unsupported reopen should end the replacement");
+        std::thread::yield_now();
+    }
+    ws.read_with(&cx, |ws, _| {
+        assert!(ws.toast.as_ref().is_some_and(|t| t.text.contains("neither session/load nor session/resume")));
+    });
+}
+
+#[test]
+fn interrupted_handoff_preserves_source_session_and_history() {
+    use crate::harness::thread::Entry;
+    let _dirs = crate::datadir::use_throwaway_folders();
+    let work = tempfile::tempdir().unwrap();
+    let server = fake_agent(work.path());
+
+    // A replacement server that blocks on session/new so the handoff stays pending until interrupted.
+    let hanging_dir = tempfile::tempdir().unwrap();
+    let hanging_server = fake_agent(hanging_dir.path());
+    let hanging_script = PathBuf::from(&hanging_server.1[0]);
+    let hanging_contents = std::fs::read_to_string(&hanging_script)
+        .unwrap()
+        .replace(
+            r#"send({"jsonrpc": "2.0", "id": i, "result": {"sessionId": "fake-session"}})"#,
+            "import time; time.sleep(30)",
+        );
+    std::fs::write(&hanging_script, hanging_contents).unwrap();
+
+    // A replacement server that crashes (EOF) during session/new without sending a JSON-RPC error.
+    let crashing_dir = tempfile::tempdir().unwrap();
+    let crashing_server = fake_agent(crashing_dir.path());
+    let crashing_script = PathBuf::from(&crashing_server.1[0]);
+    let crashing_contents = std::fs::read_to_string(&crashing_script)
+        .unwrap()
+        .replace(
+            r#"send({"jsonrpc": "2.0", "id": i, "result": {"sessionId": "fake-session"}})"#,
+            "sys.stderr.write('replacement crashed\\n'); sys.stderr.flush(); sys.exit(1)",
+        );
+    std::fs::write(&crashing_script, crashing_contents).unwrap();
+
+    let mut cx = TestAppContext::single();
+    cx.update(|app| {
+        gpui_kit::init(app);
+        gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, app);
+    });
+    let (window, ws) = cx.update(|app| gpui_kit::open_window(Default::default(), app, |window, app| app.new(|cx| Workspace::new(window, vec![], cx)))).unwrap();
+    let step = |cx: &mut TestAppContext, f: &dyn Fn(&mut Workspace, &mut Window, &mut Context<Workspace>)| {
+        cx.update_window(window, |_, window, app| ws.update(app, |ws, cx| f(ws, window, cx))).unwrap();
+        cx.run_until_parked();
+    };
+    let state = tempfile::tempdir().unwrap();
+    step(&mut cx, &|ws, window, cx| {
+        ws.store = crate::store::Store::load(state.path().join("state.json"));
+        ws.acp_server = Some(server.clone());
+        ws.claude_exe = Some("unused-by-the-fake-agent".into());
+        ws.new_session_from_home(Harness::Claude, None, work.path().to_path_buf(), Some("before handoff".into()), None, None, window, cx);
+    });
+    let id = ws.read_with(&cx, |ws, _| ws.active_id().unwrap().clone());
+    let wait_settled = |cx: &mut TestAppContext, sid: &str| {
+        let until = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            cx.run_until_parked();
+            if ws.read_with(cx, |ws, app| {
+                ws.pending_handoffs.is_empty()
+                    && ws.live_view(sid).and_then(|v| v.thread()).is_some_and(|view| {
+                        let view = view.read(app);
+                        !view.is_loading() && !view.is_working() && view.thread.entries.iter().any(|e| matches!(e, Entry::Agent(t) if t == "ok"))
+                    })
+            }) {
+                break;
+            }
+            assert!(std::time::Instant::now() < until, "session never settled");
+            std::thread::yield_now();
+        }
+    };
+    wait_settled(&mut cx, &id);
+
+    // 1. Replacement crashes mid-startup: rollback restores source view, original harness, and draft.
+    step(&mut cx, &|ws, window, cx| {
+        ws.acp_server = Some(crashing_server.clone());
+        ws.dynamic_handoff(&id, Harness::Codex, None, "draft after crash".into(), false, None, window, cx);
+    });
+    wait_settled(&mut cx, &id);
+    ws.read_with(&cx, |ws, app| {
+        let meta = ws.store.session(&id).unwrap().claude.as_ref().unwrap();
+        assert_eq!(meta.harness, Harness::Claude);
+        assert_eq!(meta.session_id, "fake-session");
+        let view = ws.live_view(&id).unwrap().thread().unwrap().read(app);
+        assert_eq!(view.draft(app), "draft after crash");
+        assert!(ws.toast.as_ref().is_some_and(|t| t.text.contains("Handoff failed")));
+    });
+
+    // 2. Replacement hangs: a concurrent handoff is refused, and ending the session cancels the pending handoff cleanly.
+    step(&mut cx, &|ws, window, cx| {
+        ws.acp_server = Some(hanging_server.clone());
+        ws.dynamic_handoff(&id, Harness::Codex, None, "pending msg".into(), false, None, window, cx);
+    });
+    ws.read_with(&cx, |ws, _| assert!(ws.pending_handoffs.contains_key(&id)));
+    step(&mut cx, &|ws, window, cx| {
+        ws.dynamic_handoff(&id, Harness::OpenCode, None, "second attempt".into(), false, None, window, cx);
+    });
+    ws.read_with(&cx, |ws, _| {
+        assert!(ws.toast.as_ref().is_some_and(|t| t.text.contains("already starting")));
+    });
+    step(&mut cx, &|ws, window, cx| ws.end_live(&id, window, cx));
+    ws.read_with(&cx, |ws, _| {
+        assert!(ws.pending_handoffs.is_empty(), "closing during handoff must clean up pending state");
+        let meta = ws.store.session(&id).unwrap().claude.as_ref().unwrap();
+        assert_eq!(meta.harness, Harness::Claude, "aborted handoff must not overwrite the stored harness");
+        assert_eq!(meta.session_id, "fake-session", "aborted handoff must preserve the original provider session");
+    });
+    let persisted = crate::harness::thread::load_entries(&id);
+    assert!(persisted.iter().any(|e| matches!(e, Entry::User(t) if t == "before handoff")));
+    assert!(!persisted.iter().any(|e| matches!(e, Entry::Notice { text, .. } if text.contains("Switched to"))), "uncommitted handoff notice must not overwrite persisted history");
+}
+
+#[test]
+fn compaction_respects_toggle_does_not_loop_on_failure_and_rearms() {
+    use serde_json::Value;
+    let _dirs = crate::datadir::use_throwaway_folders();
+    let work = tempfile::tempdir().unwrap();
+    let server = fake_agent(work.path());
+    let script = PathBuf::from(&server.1[0]);
+    let contents = std::fs::read_to_string(&script).unwrap().replace(
+        &r#"        if text in ["fill context", "/compact"]:
+            send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": s, "update": {"sessionUpdate": "usage_update", "used": 850 if text == "fill context" else 200, "size": 1000}}})
+        send({"jsonrpc": "2.0", "id": i, "result": {"stopReason": "end_turn"}})"#.replace("\r\n", "\n"),
+        r#"        compact_count = 0
+        if os.path.exists(__file__ + ".compacts"):
+            compact_count = int(open(__file__ + ".compacts").read().strip() or "0")
+        if text == "fill context":
+            send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": s, "update": {"sessionUpdate": "usage_update", "used": 850, "size": 1000}}})
+            send({"jsonrpc": "2.0", "id": i, "result": {"stopReason": "end_turn"}})
+        elif text == "drop context":
+            send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": s, "update": {"sessionUpdate": "usage_update", "used": 400, "size": 1000}}})
+            send({"jsonrpc": "2.0", "id": i, "result": {"stopReason": "end_turn"}})
+        elif text == "/compact":
+            compact_count += 1
+            open(__file__ + ".compacts", "w").write(str(compact_count))
+            if compact_count == 1:
+                send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": s, "update": {"sessionUpdate": "usage_update", "used": 850, "size": 1000}}})
+                send({"jsonrpc": "2.0", "id": i, "result": {"stopReason": "max_tokens"}})
+            else:
+                send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": s, "update": {"sessionUpdate": "usage_update", "used": 200, "size": 1000}}})
+                send({"jsonrpc": "2.0", "id": i, "result": {"stopReason": "end_turn"}})
+        else:
+            send({"jsonrpc": "2.0", "id": i, "result": {"stopReason": "end_turn"}})"#,
+    );
+    std::fs::write(&script, contents).unwrap();
+
+    let mut cx = TestAppContext::single();
+    cx.update(|app| {
+        gpui_kit::init(app);
+        gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, app);
+    });
+    let (window, ws) = cx.update(|app| gpui_kit::open_window(Default::default(), app, |window, app| app.new(|cx| Workspace::new(window, vec![], cx)))).unwrap();
+    let step = |cx: &mut TestAppContext, f: &dyn Fn(&mut Workspace, &mut Window, &mut Context<Workspace>)| {
+        cx.update_window(window, |_, window, app| ws.update(app, |ws, cx| f(ws, window, cx))).unwrap();
+        cx.run_until_parked();
+    };
+    let state = tempfile::tempdir().unwrap();
+    step(&mut cx, &|ws, window, cx| {
+        ws.store = crate::store::Store::load(state.path().join("state.json"));
+        ws.acp_server = Some(server.clone());
+        ws.new_session_from_home(Harness::Codex, None, work.path().to_path_buf(), None, None, None, window, cx);
+    });
+    let id = ws.read_with(&cx, |ws, _| ws.active_id().unwrap().clone());
+    let wait_idle = |cx: &mut TestAppContext, check: &dyn Fn(&crate::thread::ThreadView) -> bool| {
+        let until = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            cx.run_until_parked();
+            if ws.read_with(cx, |ws, app| {
+                ws.live_view(&id).and_then(|v| v.thread()).is_some_and(|view| {
+                    let view = view.read(app);
+                    !view.is_loading() && !view.is_working() && check(view)
+                })
+            }) {
+                break;
+            }
+            assert!(std::time::Instant::now() < until, "compaction scenario timed out");
+            std::thread::yield_now();
+        }
+    };
+    wait_idle(&mut cx, &|_| true);
+
+    // Turning auto-compact off stops /compact even when context reaches 85%.
+    step(&mut cx, &|ws, window, cx| {
+        ws.act(Act::SetAutoCompact(id.clone(), false), window, cx);
+        let view = ws.live_view(&id).unwrap().thread().unwrap().clone();
+        view.update(cx, |v, cx| v.send("fill context".into(), window, cx));
+    });
+    wait_idle(&mut cx, &|v| v.thread.context == Some((850, 1000)));
+    let turns = || -> Vec<String> {
+        std::fs::read_to_string(work.path().join("fake_agent.py.turns"))
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str::<Value>(l).unwrap()["prompt"].as_str().unwrap().to_string())
+            .collect()
+    };
+    assert_eq!(turns(), ["fill context"], "disabled auto-compact must not trigger /compact");
+
+    // Turning auto-compact back on triggers /compact; the first attempt fails and must not loop.
+    step(&mut cx, &|ws, window, cx| ws.act(Act::SetAutoCompact(id.clone(), true), window, cx));
+    wait_idle(&mut cx, &|v| v.thread.entries.iter().any(|e| matches!(e, crate::harness::thread::Entry::Notice { text, error: true } if text == "Context compaction did not finish.")));
+    assert_eq!(turns(), ["fill context", "/compact"], "failed compaction must not loop");
+
+    // Dropping below 80% re-arms compaction; hitting 85% again runs /compact and brings usage down to 20%.
+    step(&mut cx, &|ws, window, cx| {
+        let view = ws.live_view(&id).unwrap().thread().unwrap().clone();
+        view.update(cx, |v, cx| v.send("drop context".into(), window, cx));
+    });
+    wait_idle(&mut cx, &|v| v.thread.context == Some((400, 1000)));
+    step(&mut cx, &|ws, window, cx| {
+        let view = ws.live_view(&id).unwrap().thread().unwrap().clone();
+        view.update(cx, |v, cx| v.send("fill context".into(), window, cx));
+    });
+    wait_idle(&mut cx, &|v| v.thread.context == Some((200, 1000)));
+    assert_eq!(turns(), ["fill context", "/compact", "drop context", "fill context", "/compact"]);
+    step(&mut cx, &|ws, window, cx| ws.end_live(&id, window, cx));
+}
+
+#[test]
 fn shared_subagents_keep_their_parent_focus_permissions_and_conversation() {
     use crate::claude::bridge::Request;
     use serde_json::{Value, json};

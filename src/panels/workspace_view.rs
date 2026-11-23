@@ -110,9 +110,9 @@ impl Workspace {
                 .flex_none()
                 .px(px(10.0))
                 .rounded(px(6.0))
-                .bg(hsla(0x1d1512))
+                .bg(hsla(theme::NOTICE_BG))
                 .border_1()
-                .border_color(hsla(0x3a2a24))
+                .border_color(hsla(theme::NOTICE_BORDER))
                 .child(div().text_size(crate::panels::scale::px(12.0)).text_color(hsla(theme::ACCENT)).child(text))
                 .when_some(action, |d, (label, act)| {
                     d.child(button("update-action", label, true).h(px(22.0)).on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
@@ -302,7 +302,7 @@ impl Workspace {
                     cx.notify();
                 }),
             )
-            .child(div().w(px(28.0)).h(px(2.0)).rounded_full().bg(hsla(0x2b2b30)).group_hover("shell-resize", |s| s.bg(hsla(0x4a4a52))));
+            .child(div().w(px(28.0)).h(px(2.0)).rounded_full().bg(hsla(theme::RESIZE_HANDLE)).group_hover("shell-resize", |s| s.bg(hsla(theme::RESIZE_HANDLE_HOVER))));
         Some(
             div()
                 .flex()

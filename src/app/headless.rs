@@ -48,8 +48,12 @@ for line in sys.stdin:
         send({"jsonrpc": "2.0", "id": i, "result": {}})
     else:
         send({"jsonrpc": "2.0", "id": i, "result": {}})
-"#).unwrap();
-    let python = crate::platform::find_executable("python3").expect("python3 for the stand-in agent");
+"#.replace("\r\n", "\n")).unwrap();
+    let candidates: &[&str] = if cfg!(windows) { &["python", "python3"] } else { &["python3", "python"] };
+    let python = candidates
+        .iter()
+        .find_map(|name| crate::platform::find_executable(name))
+        .expect("python3 for the stand-in agent");
     (python, vec![script.to_string_lossy().into_owned()])
 }
 

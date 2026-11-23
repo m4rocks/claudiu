@@ -72,6 +72,9 @@ pub struct ClaudeMeta {
     pub context_fraction: Option<f32>,
     #[serde(default)]
     pub context_window: Option<u64>,
+    /// Measured prompt-cache token counts across completed turns in this session.
+    #[serde(default)]
+    pub cache_usage: crate::harness::thread::CacheUsage,
     /// Prompt-cache lifetime in seconds (300 or 3600), read from the last cache write in the transcript.
     #[serde(default)]
     pub cache_ttl: Option<u64>,

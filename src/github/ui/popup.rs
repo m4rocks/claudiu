@@ -224,7 +224,7 @@ impl GithubView {
         let popup = self.popup.as_ref()?;
         let (items, loading) = self.popup_items(&popup.kind);
         let needle = popup.filter.read(cx).value().to_lowercase();
-        let searchable = !matches!(popup.kind, PopKind::Merge | PopKind::CloseReason | PopKind::Claude | PopKind::More | PopKind::React(_) | PopKind::Comment(..) | PopKind::FilterSort | PopKind::FilterReview | PopKind::FilterChecks);
+        let searchable = popup.kind.searchable();
         let mut choices = picker::Choices::new(&popup.nav, &needle);
         let mut list = choices.list("gh-pop-list").max_h(px(320.0));
         let mut shown = 0;
