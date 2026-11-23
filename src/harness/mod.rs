@@ -6,7 +6,7 @@ pub mod acp;
 pub mod compaction;
 mod antigravity;
 pub mod claude;
-mod codex;
+pub(crate) mod codex;
 pub(crate) mod opencode;
 pub mod text_generation;
 pub mod thread;

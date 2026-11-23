@@ -2,6 +2,7 @@
 //! creates the session, and sends what the user types. Every harness looks and behaves the same here, keyboard
 //! included (`keys`); what differs between them is in `harness`.
 
+mod asks;
 mod keys;
 mod queue;
 mod render;
@@ -24,6 +25,7 @@ use uuid::Uuid;
 use self::queue::Queued;
 
 use crate::harness::acp::{self, Connection, Event, Launch};
+use crate::harness::codex;
 use crate::harness::thread::{Entry, Thread};
 use crate::harness::{CatalogModel, Harness, Reopen};
 use crate::visual::Card;
@@ -224,6 +226,7 @@ pub struct ThreadView {
     interrupting: bool,
     queue_save_error: bool,
     questions: VecDeque<Question>,
+    asks: asks::AsyncAsks,
     pub composer: Entity<TextareaState>,
     /// Where Up has got to among the messages sent before, and what was typed before it started.
     history_at: Option<usize>,
@@ -383,6 +386,7 @@ impl ThreadView {
             interrupting: false,
             queue_save_error: false,
             questions: VecDeque::new(),
+            asks: asks::AsyncAsks::default(),
             composer,
             history_at: None,
             draft: String::new(),
@@ -578,6 +582,9 @@ impl ThreadView {
                     self.thread.apply(&update)
                 };
                 if let Some(at) = at {
+                    if self.harness == Harness::Codex && is_conversation_update(&update) {
+                        self.asks.record_message_chunk(at, &update);
+                    }
                     self.remeasure(at);
                 }
                 if update.pointer("/_meta/m4code/backgroundShell").and_then(Value::as_bool) == Some(true) {
@@ -644,6 +651,15 @@ impl ThreadView {
                     }
                     return;
                 }
+                if self.harness == Harness::Codex && let Some(questions) = codex::async_questions(&params) {
+                    // The adapter can only steer an answer into the original turn. Own the reply here so it can
+                    // reach Codex as a follow-up even after that turn ends.
+                    if let Some(connection) = &self.connection {
+                        connection.respond(id, acp::elicitation_decline());
+                    }
+                    self.show_async_ask(questions, cx);
+                    return;
+                }
                 let mut fields: VecDeque<acp::ElicitationField> = acp::parse_elicitation(&params).into();
                 if let Some(first) = fields.pop_front() {
                     let options = first
@@ -698,6 +714,7 @@ impl ThreadView {
         self.handover = None;
         self.preserve_handoff_message();
         self.cancel_questions();
+        self.asks = Default::default();
         self.error = why;
         if let Some(item) = self.preparing.take() {
             self.queue.push_front(item);
@@ -780,6 +797,9 @@ impl ThreadView {
             self.finish_queue_edit(true, window, cx);
             return;
         }
+        if self.async_answer_blocked() {
+            return;
+        }
         let text = self.composer.read(cx).value().trim().to_string();
         if !crate::panels::composer::can_send(&text) {
             if self.queue_held && !self.working && self.questions.is_empty() {
@@ -790,6 +810,10 @@ impl ThreadView {
         self.composer.update(cx, |c, cx| c.set_value("", window, cx));
         if self.questions.front().is_some_and(|q| q.takes_own_answer) {
             self.answer_in_own_words(&text, cx);
+            return;
+        }
+        if let Some(id) = self.async_answer_id() {
+            self.answer_async_ask(id, Some(text), cx);
             return;
         }
         self.history_at = None;
@@ -881,7 +905,7 @@ impl ThreadView {
         for id in ids {
             if let Some(at) = self.steering.iter().position(|item| item.id == id) {
                 let item = self.steering.remove(at).unwrap();
-                let at = self.queue.iter().position(|waiting| !waiting.ahead && waiting.order > item.order)
+                let at = self.queue.iter().position(|waiting| !waiting.ahead && (item.ahead || waiting.order > item.order))
                     .unwrap_or(self.queue.len());
                 self.queue.insert(at, item);
             }
@@ -1010,6 +1034,7 @@ impl ThreadView {
             self.check_changes(cx);
         }
         self.cancel_questions();
+        self.asks.turn_ended();
         let notice = match &result {
             Ok(r) => match r["stopReason"].as_str() {
                 Some("cancelled") => Some(("Interrupted".to_string(), false)),
@@ -1379,7 +1404,7 @@ impl ThreadView {
             picker_open: self.picker.is_some(),
             working: self.working,
             question: self.questions.front().map_or(0, |q| q.options.len()),
-            draft_empty: draft.trim().is_empty(),
+            draft_empty: draft.trim().is_empty() || self.async_answer_blocked(),
             in_history: self.history_at.is_some(),
             escape_just_pressed: self.last_escape.is_some_and(|t| t.elapsed() < keys::DOUBLE_PRESS),
             completing: self.completion(&draft).is_some(),
@@ -1569,6 +1594,9 @@ impl ThreadView {
 
     /// The slash command a typed `/` prefix completes to: the first one it starts.
     fn completion(&self, draft: &str) -> Option<String> {
+        if self.asks.composing_answer() {
+            return None;
+        }
         let typed = draft.strip_prefix('/').filter(|t| !t.contains(char::is_whitespace))?;
         self.shown_commands().map(|c| &c.name).find(|n| n.starts_with(typed) && n.as_str() != typed).cloned()
     }
@@ -1577,7 +1605,7 @@ impl ThreadView {
     pub(super) fn matching_commands(&self, cx: &App) -> Vec<&crate::harness::thread::Command> {
         let draft = self.composer.read(cx).value();
         // What is typed answers the open question, so it is never a command to complete.
-        if self.queue_edit.is_some() || self.questions.front().is_some_and(|q| q.takes_own_answer) {
+        if self.queue_edit.is_some() || self.questions.front().is_some_and(|q| q.takes_own_answer) || self.asks.composing_answer() {
             return vec![];
         }
         let Some(typed) = draft.strip_prefix('/').filter(|t| !t.contains(char::is_whitespace)) else { return vec![] };
@@ -1668,6 +1696,7 @@ impl ThreadView {
     pub fn stop(&mut self) {
         self.preserve_handoff_message();
         self.cancel_questions();
+        self.asks = Default::default();
         if let Some(connection) = &self.connection {
             if let Some(session) = &self.session_id {
                 connection.notify("session/cancel", json!({"sessionId": session}));
@@ -1837,6 +1866,149 @@ mod tests {
             options: vec![], prompt: None, prior_entries: vec![],
             server: Some(("definitely-not-a-real-program-m4code".into(), vec![])),
         }
+    }
+
+    #[gpui::test]
+    fn codex_async_questions_show_once_and_accept_answers_after_the_turn(cx: &mut gpui::TestAppContext) {
+        use futures::StreamExt;
+        use serde_json::json;
+        use super::{Connection, Event, Phase, ThreadView};
+
+        cx.update(gpui_kit::init);
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = cx.add_window_view(|window, cx| ThreadView::new(test_start(dir.path().into(), Harness::Codex), window, cx));
+        let chunk = |id: &str, text: &str| json!({"jsonrpc":"2.0","method":"session/update","params":{
+            "sessionId":"codex-session", "update":{"sessionUpdate":"agent_message_chunk","messageId":id,"content":{"type":"text","text":text}}
+        }});
+        let frames = [
+            chunk("unrelated-message", "I have a follow-up."),
+            chunk("async-question-item", "Choose a branch.\n- main\n- dev\n\nWhat should I check?"),
+            json!({"jsonrpc":"2.0","id":"question-form","method":"elicitation/create","params":{
+                "sessionId":"codex-session", "mode":"form",
+                "message":"Codex keeps working while you answer. An answer sent after it finishes is not delivered.",
+                "_meta":{"codex":{"delivery":"async"}},
+                "requestedSchema":{"type":"object","properties":{
+                    "question_0":{"title":"Choose a branch.","type":"string","oneOf":[
+                        {"const":"main","title":"main"}, {"const":"dev","title":"dev"},
+                        {"const":"None of the above","title":"None of the above","description":"Provide a different answer in the note field."}
+                    ]},
+                    "question_0_note":{"title":"Additional answer or note","type":"string"},
+                    "question_1":{"title":"What should I check?","type":"string"}
+                }}
+            }}),
+        ];
+        let mut wire = Vec::new();
+        for frame in frames {
+            serde_json::to_writer(&mut wire, &frame).unwrap();
+            wire.push(b'\n');
+        }
+        let (tx, mut events) = futures::channel::mpsc::unbounded();
+        let _connection = Connection::connect(std::io::Cursor::new(wire), Vec::<u8>::new(), None::<std::io::Empty>, tx);
+        cx.update(|window, app| view.update(app, |v, cx| {
+            v.phase = Phase::Ready;
+            v.working = true;
+            while let Some(event) = futures::executor::block_on(events.next()) {
+                if matches!(event, Event::Exited(_)) { break; }
+                v.on_event(event, cx);
+            }
+            assert!(matches!(&v.thread.entries[..], [Entry::Agent(text)] if text == "I have a follow-up."));
+            assert!(!v.is_waiting());
+            assert!(v.can_steer("Ordinary message", crate::store::FollowUp::Steer));
+            assert!(v.async_answer_id().is_none());
+            v.send_as("Ordinary message".into(), crate::store::FollowUp::Queue, cx);
+            let ask_id = v.async_ask().unwrap().id;
+            v.toggle_async_answer(ask_id, window, cx);
+            v.set_draft("My answer", window, cx);
+            v.on_event(Event::Permission { id: json!("approval"), params: json!({
+                "toolCall":{"title":"Run a command","kind":"execute"},
+                "options":[{"optionId":"allow","name":"Allow","kind":"allow_once"}]
+            }) }, cx);
+            assert_eq!(v.pending_question_title().as_deref(), Some("Run a command"));
+            assert!(v.async_ask().is_none());
+            v.submit_with(false, window, cx);
+            assert_eq!(v.draft(cx), "My answer");
+            assert_eq!(v.queue.len(), 1);
+            v.answer(Some(0), cx);
+            assert_eq!(v.async_answer_id(), Some(ask_id));
+            v.toggle_async_answer(ask_id, window, cx);
+            v.set_draft("", window, cx);
+            v.on_event(Event::TurnEnded(Ok(json!({"stopReason":"end_turn"}))), cx);
+            let ask = v.async_ask().expect("the ask card survives turn completion");
+            assert_eq!(ask.question.title, "Choose a branch.");
+            assert_eq!(ask.question.options, ["main", "dev"]);
+            v.choose_async_ask(ask.id, 1, cx);
+            let ask = v.async_ask().unwrap();
+            assert_eq!(ask.question.title, "What should I check?");
+            v.answer_async_ask(ask.id, Some("The regression test.".into()), cx);
+            assert!(!v.is_waiting());
+            assert_eq!(v.queue.front().unwrap().text, "> Choose a branch.\n\ndev\n\n> What should I check?\n\nThe regression test.");
+            assert_eq!(v.queue.back().unwrap().text, "Ordinary message");
+            assert!(v.async_ask().is_none());
+        }));
+    }
+
+    #[gpui::test]
+    fn codex_async_answer_steers_the_running_turn_and_preserves_unmatched_text(cx: &mut gpui::TestAppContext) {
+        use std::io::{BufRead, BufReader};
+        use serde_json::{Value, json};
+        use super::{Connection, Event, Phase, ThreadView};
+
+        cx.update(gpui_kit::init);
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = cx.add_window_view(|window, cx| ThreadView::new(test_start(dir.path().into(), Harness::Codex), window, cx));
+        let (from_agent, _keep_open) = std::io::pipe().unwrap();
+        let (from_client, to_agent) = std::io::pipe().unwrap();
+        let (tx, _events) = futures::channel::mpsc::unbounded();
+        let connection = Connection::connect(from_agent, to_agent, None::<std::io::Empty>, tx);
+        view.update(cx, |v, cx| {
+            v.connection = Some(std::rc::Rc::new(connection));
+            v.session_id = Some("codex-session".into());
+            v.agent_meta = json!({"steering":{"supported":true}});
+            v.phase = Phase::Ready;
+            v.working = true;
+            v.on_event(Event::Update(json!({
+                "sessionUpdate":"agent_message_chunk","messageId":"async-question-item",
+                "content":{"type":"text","text":"There are two things I could investigate."}
+            })), cx);
+            v.on_event(Event::Elicitation { id: json!("question-form"), params: json!({
+                "mode":"form", "_meta":{"codex":{"delivery":"async"}},
+                "requestedSchema":{"properties":{"question_0":{"title":"Which test?","type":"string"}}}
+            }) }, cx);
+            assert!(matches!(&v.thread.entries[..], [Entry::Agent(text)] if text == "There are two things I could investigate."));
+            v.answer_async_ask(v.async_ask().unwrap().id, Some("The unit test.".into()), cx);
+            assert_eq!(v.steering.len(), 1);
+            assert!(v.queue.is_empty());
+        });
+        let mut wire = BufReader::new(from_client).lines();
+        let decline: Value = serde_json::from_str(&wire.next().unwrap().unwrap()).unwrap();
+        assert_eq!(decline, json!({"jsonrpc":"2.0","id":"question-form","result":{"action":"decline"}}));
+        let steer: Value = serde_json::from_str(&wire.next().unwrap().unwrap()).unwrap();
+        assert_eq!(steer["method"], "_session/steering");
+        assert_eq!(steer["params"]["sessionId"], "codex-session");
+        assert_eq!(steer["params"]["prompt"][0]["text"], "> Which test?\n\nThe unit test.");
+    }
+
+    #[cfg(debug_assertions)]
+    #[gpui::test]
+    fn collapsed_tool_group_keeps_multiline_commands_to_one_line(cx: &mut gpui::TestAppContext) {
+        use crate::harness::thread::{ToolCall, ToolStatus};
+        use gpui::Modifiers;
+
+        cx.update(gpui_kit::init);
+        let dir = tempfile::tempdir().unwrap();
+        let mut start = test_start(dir.path().into(), Harness::Codex);
+        start.prior_entries = vec![
+            Entry::Thought("Run a check.".into()),
+            Entry::Tool(ToolCall { id: "check".into(), title: "first line\nsecond line\nthird line".into(), status: ToolStatus::Failed, ..Default::default() }),
+        ];
+        let (_, cx) = cx.add_window_view(|window, cx| super::ThreadView::new(start, window, cx));
+        cx.update(|window, app| window.draw(app).clear(app));
+        let header = cx.debug_bounds("tool-run-0").expect("collapsed group header");
+        assert!(header.size.height < gpui::px(32.0), "the collapsed header was {header:?}");
+        assert!(cx.debug_bounds("tool-row-1").is_none());
+        cx.simulate_click(header.center(), Modifiers::default());
+        cx.update(|window, app| window.draw(app).clear(app));
+        assert!(cx.debug_bounds("tool-row-1").is_some(), "expand to see the tool call");
     }
 
     #[cfg(debug_assertions)]

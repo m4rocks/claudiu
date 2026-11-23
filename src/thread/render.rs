@@ -549,16 +549,17 @@ impl ThreadView {
         let thoughts = steps.len() - calls.len() - reports.len();
         let latest = match steps.last() {
             Some(Entry::Tool(call)) => title(call),
-            Some(Entry::Thought(text)) => text.lines().next().unwrap_or_default().to_string(),
+            Some(Entry::Thought(text)) => text.clone(),
             Some(Entry::User(text)) => parse_subagent_report(text).map(|r| report_line(r.title, r.state)).unwrap_or_default(),
             _ => String::new(),
         };
         let open = self.run_open(&run);
-        let failed = calls.iter().any(|c| c.status == ToolStatus::Failed) || reports.iter().any(|r| r.state == "failed");
+        let failed = open && (calls.iter().any(|c| c.status == ToolStatus::Failed) || reports.iter().any(|r| r.state == "failed"));
         let key = format!("run:{}", run.start);
         let start = run.start;
         let header = div()
             .id(SharedString::from(format!("tool-run-{start}")))
+            .debug_selector(move || format!("tool-run-{start}"))
             .w_full()
             .px(px(4.0))
             .py(px(2.0))
@@ -571,7 +572,9 @@ impl ThreadView {
             .text_size(scale::px(12.0))
             .text_color(hsla(if failed { theme::DANGER } else { theme::TEXT_FAINT }))
             .child(div().flex_none().text_color(hsla(if failed { theme::DANGER } else { theme::TEXT_DIM })).child(run_label(thoughts, calls.len() + reports.len())))
-            .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(latest))
+            .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(
+                latest.lines().map(str::trim).find(|line| !line.is_empty()).unwrap_or_default().to_string(),
+            ))
             .child(div().flex_none().child(icon(if open { IconName::ChevronDown } else { IconName::ChevronRight }, 12.0)))
             .on_click(cx.listener(move |v, _: &ClickEvent, window, cx| {
                 if !v.expanded_tools.remove(&key) {
@@ -815,6 +818,40 @@ impl ThreadView {
                         .when(q.takes_own_answer, |d| d.child("· or type your own answer below")),
                 ),
         )
+    }
+
+    fn render_async_ask(&self, cx: &mut Context<Self>) -> Option<Div> {
+        let ask = self.async_ask()?;
+        let id = ask.id;
+        let typing = self.async_answer_id().is_some();
+        let options = div()
+            .id("thread-async-ask-options")
+            .max_h(px(240.0))
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .items_start()
+            .gap(px(6.0))
+            .children(ask.question.options.iter().enumerate().map(|(index, label)| {
+                button(SharedString::from(format!("thread-async-ask-{id}-{index}")), label.clone(), false)
+                    .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| v.choose_async_ask(id, index, cx)))
+            }));
+        Some(div()
+            .w_full()
+            .px(px(12.0))
+            .py(px(8.0))
+            .border_b_1()
+            .border_color(hsla(theme::BORDER))
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
+            .child(div().font_weight(FontWeight::SEMIBOLD).child(ask.question.title.clone()))
+            .when(!ask.question.options.is_empty(), |card| card.child(options))
+            .child(div().flex().gap(px(6.0))
+                .child(button("thread-async-ask-type", if typing { "Cancel answer" } else { "Type an answer" }, false)
+                    .on_click(cx.listener(move |v, _: &ClickEvent, window, cx| v.toggle_async_answer(id, window, cx))))
+                .child(button("thread-async-ask-dismiss", "Dismiss", false)
+                    .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| v.answer_async_ask(id, None, cx))))))
     }
 
     /// Universal floating picker dialog over the chat view: unified model + draggable effort picker, or permission mode selector.
@@ -1167,7 +1204,7 @@ impl ThreadView {
         let editing = self.queue_edit.is_some();
         let idle_for_resume = !self.working && self.queue_held && self.questions.is_empty()
             && (self.waiting_messages().next().is_some() || self.handoff_after_turn.is_some());
-        let answering = self.questions.front().is_some_and(|q| q.takes_own_answer);
+        let answering = self.questions.front().is_some_and(|q| q.takes_own_answer) || self.async_answer_id().is_some();
         let follow_up = if alternate { self.follow_up.other() } else { self.follow_up };
         let label = if editing {
             extra_actions.push(button("thread-cancel-edit", "Cancel", false)
@@ -1191,6 +1228,8 @@ impl ThreadView {
         };
         let enabled = if editing {
             has_text && self.questions.is_empty()
+        } else if self.async_answer_blocked() {
+            false
         } else if answering {
             has_text
         } else {
@@ -1213,7 +1252,7 @@ impl ThreadView {
 
         composer::Composer {
             lit: focused || !self.questions.is_empty(),
-            top: self.render_question(cx).map(IntoElement::into_any_element),
+            top: self.render_question(cx).or_else(|| self.render_async_ask(cx)).map(IntoElement::into_any_element),
             input,
             model,
             permission,
