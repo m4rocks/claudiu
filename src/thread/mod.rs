@@ -3,6 +3,7 @@
 //! included (`keys`); what differs between them is in `harness`.
 
 mod asks;
+mod elements;
 mod keys;
 mod queue;
 mod render;
@@ -108,6 +109,73 @@ pub enum ThreadEvent {
     Idle(&'static str),
     /// A subagent's report card was clicked: show that session.
     Select(String),
+    /// Built-in `/new [prompt]` command: start a new session in this project.
+    NewSession(Option<String>),
+    /// Built-in `/clear` command: clear this session's conversation and start fresh in place.
+    ClearSession,
+    /// Built-in `/compact [instructions]` fallback when the harness doesn't provide native compaction.
+    Compact { transcript: String, instructions: Option<String> },
+}
+
+/// Built-in slash commands always offered by m4code regardless of harness.
+const BUILTIN_COMMANDS: &[(&str, &str)] = &[
+    ("compact", "Compact conversation context"),
+    ("new", "Start a new session in this project"),
+    ("clear", "Clear conversation and start fresh"),
+];
+
+/// Find an active `/command` token around `cursor` (byte offset in `draft`).
+/// Triggers at the start of `draft` OR immediately after any whitespace so paths like `src/mod.rs` and URLs are ignored.
+/// Returns `(token_start, token_end, typed_after_slash_up_to_cursor)`.
+pub(super) fn active_slash_token(draft: &str, cursor: usize) -> Option<(usize, usize, &str)> {
+    let mut cur = cursor.min(draft.len());
+    while cur > 0 && !draft.is_char_boundary(cur) {
+        cur -= 1;
+    }
+    let before = &draft[..cur];
+    let start = before
+        .char_indices()
+        .rev()
+        .find(|(_, c)| c.is_whitespace())
+        .map_or(0, |(i, c)| i + c.len_utf8());
+    if !draft[start..].starts_with('/') {
+        return None;
+    }
+    let after = &draft[cur..];
+    let end = cur
+        + after
+            .char_indices()
+            .find(|(_, c)| c.is_whitespace())
+            .map_or(after.len(), |(i, _)| i);
+    let typed = &draft[start + 1..cur];
+    Some((start, end, typed))
+}
+
+/// Find byte ranges of all `/command` tokens in `draft` (at start or after whitespace) together with their name slice.
+pub(super) fn slash_command_spans(draft: &str) -> Vec<(std::ops::Range<usize>, &str)> {
+    let mut out = Vec::new();
+    let mut prev_ws = true;
+    let mut iter = draft.char_indices().peekable();
+    while let Some((i, ch)) = iter.next() {
+        if prev_ws && ch == '/' {
+            let start = i;
+            let mut end = i + 1;
+            while let Some(&(j, next)) = iter.peek() {
+                if next.is_whitespace() {
+                    break;
+                }
+                end = j + next.len_utf8();
+                iter.next();
+            }
+            if end > start + 1 {
+                out.push((start..end, &draft[start + 1..end]));
+            }
+            prev_ws = false;
+        } else {
+            prev_ws = ch.is_whitespace();
+        }
+    }
+    out
 }
 
 /// How to bring a session up.
@@ -272,6 +340,10 @@ pub struct ThreadView {
     expanded_tools: HashSet<String>,
     /// Shell calls closed by hand while Ctrl+O is showing tool details.
     collapsed_shell_calls: HashSet<String>,
+    /// Thoughts collapsed by hand while they are still streaming (overrides auto-expand).
+    collapsed_thoughts: HashSet<usize>,
+    /// Per-thought `(started_at, finished_duration)` so `Reasoning` shows live streaming state and elapsed time.
+    thought_timing: HashMap<usize, (Instant, Option<std::time::Duration>)>,
     effort_bounds: Rc<Cell<Bounds<Pixels>>>,
     effort_dragging: Rc<Cell<bool>>,
     last_escape: Option<Instant>,
@@ -317,6 +389,7 @@ impl ThreadView {
                 InputEvent::PressEnter { secondary, .. } if crate::panels::composer::sends(ev) => v.submit_with(*secondary, window, cx),
                 InputEvent::Change => {
                     v.command_highlight = 0;
+                    v.sync_command_highlights(cx);
                     cx.notify();
                 }
                 _ => {}
@@ -415,6 +488,8 @@ impl ThreadView {
             model_scroll: gpui::ScrollHandle::new(),
             expanded_tools: HashSet::new(),
             collapsed_shell_calls: HashSet::new(),
+            collapsed_thoughts: HashSet::new(),
+            thought_timing: HashMap::new(),
             effort_bounds: Rc::new(Cell::new(Bounds::default())),
             effort_dragging: Rc::new(Cell::new(false)),
             last_escape: None,
@@ -571,6 +646,8 @@ impl ThreadView {
                     self.cached_replay = false;
                     self.thread.entries.clear();
                     self.markdown.clear();
+                    self.thought_timing.clear();
+                    self.collapsed_thoughts.clear();
                     self.remeasure(0);
                 }
                 if self.phase == Phase::Ready && !self.cached_replay && is_conversation_update(&update) {
@@ -585,6 +662,13 @@ impl ThreadView {
                     self.thread.apply(&update)
                 };
                 if let Some(at) = at {
+                    if self.phase == Phase::Ready && !self.cached_replay && is_conversation_update(&update) {
+                        if matches!(self.thread.entries.get(at), Some(Entry::Thought(_))) {
+                            self.thought_timing.entry(at).or_insert((Instant::now(), None));
+                        } else {
+                            self.finish_open_thoughts();
+                        }
+                    }
                     if self.harness == Harness::Codex && is_conversation_update(&update) {
                         self.asks.record_message_chunk(at, &update);
                     }
@@ -821,8 +905,80 @@ impl ThreadView {
         }
         self.history_at = None;
         self.picker = None;
+        if self.try_run_builtin_command(&text, cx) {
+            self.sync_command_highlights(cx);
+            return;
+        }
         let follow_up = if the_other_way { self.follow_up.other() } else { self.follow_up };
         self.send_as(text, follow_up, cx);
+        self.sync_command_highlights(cx);
+    }
+
+    /// Handle m4code's own built-in slash commands (`/new`, `/clear`, `/compact`).
+    /// Returns `true` when the command was handled here and should not be sent as an ordinary chat message.
+    fn try_run_builtin_command(&mut self, text: &str, cx: &mut Context<Self>) -> bool {
+        let trimmed = text.trim();
+        let Some(rest) = trimmed.strip_prefix('/') else { return false };
+        let (cmd, arg) = match rest.split_once(char::is_whitespace) {
+            Some((c, a)) => (c, Some(a.trim()).filter(|s| !s.is_empty())),
+            None => (rest, None),
+        };
+        match cmd {
+            "new" => {
+                cx.emit(ThreadEvent::NewSession(arg.map(String::from)));
+                cx.notify();
+                true
+            }
+            "clear" => {
+                if self.working {
+                    self.interrupt(cx);
+                }
+                cx.emit(ThreadEvent::ClearSession);
+                cx.notify();
+                true
+            }
+            "compact" => {
+                if self.compaction.running {
+                    let at = self.thread.notice("Context compaction is already running.", false);
+                    self.remeasure(at);
+                    cx.notify();
+                    return true;
+                }
+                let native = self.harness.adapter().compact_command.filter(|name| self.thread.commands.iter().any(|c| c.name == *name));
+                if let Some(native_cmd) = native {
+                    let prompt = match arg {
+                        Some(extra) => format!("/{native_cmd} {extra}"),
+                        None => format!("/{native_cmd}"),
+                    };
+                    let at = self.thread.notice("Compacting context…", false);
+                    self.remeasure(at);
+                    self.compaction.running = true;
+                    self.queue.push_front(Queued { shown: true, compact: true, ..Queued::new(prompt, true) });
+                    self.queue_changed();
+                    if self.queue_held && !self.working {
+                        self.resume_queue(cx);
+                    } else {
+                        self.send_next(cx);
+                    }
+                    cx.notify();
+                    return true;
+                }
+                let transcript = self.thread.transcript_after(0, 400);
+                if transcript.trim().is_empty() {
+                    let at = self.thread.notice("Nothing to compact yet.", false);
+                    self.remeasure(at);
+                    cx.notify();
+                    return true;
+                }
+                let at = self.thread.notice("Compacting context…", false);
+                self.remeasure(at);
+                self.compaction.running = true;
+                cx.emit(ThreadEvent::Compact { transcript, instructions: arg.map(String::from) });
+                cx.notify();
+                true
+            }
+            _ => false,
+        }
     }
 
     /// Whether `text` goes to the turn that is running. A slash command waits, as t3code's do, because a command
@@ -1021,10 +1177,19 @@ impl ThreadView {
         self.preparing.take_if(|next| next.id == id)
     }
 
+    fn finish_open_thoughts(&mut self) {
+        for (started, done) in self.thought_timing.values_mut() {
+            if done.is_none() {
+                *done = Some(started.elapsed());
+            }
+        }
+    }
+
     fn turn_ended(&mut self, result: Result<Value, String>, cx: &mut Context<Self>) {
         self.working = false;
         self.interrupting = false;
         self.last_update = None;
+        self.finish_open_thoughts();
         if let Ok(r) = &result
             && let Some(turn) = self.thread.record_usage(&r["usage"])
         {
@@ -1431,7 +1596,7 @@ impl ThreadView {
             draft_empty: draft.trim().is_empty() || self.async_answer_blocked(),
             in_history: self.history_at.is_some(),
             escape_just_pressed: self.last_escape.is_some_and(|t| t.elapsed() < keys::DOUBLE_PRESS),
-            completing: self.completion(&draft).is_some(),
+            completing: self.completion(&draft, self.composer.read(cx).selected_range().end).is_some(),
             commands: self.matching_commands(cx).len(),
         };
         let is_escape = ev.keystroke.key == "escape";
@@ -1486,8 +1651,9 @@ impl ThreadView {
             }
             keys::Key::Older | keys::Key::Newer => self.walk_history(key == keys::Key::Older, &draft, window, cx),
             keys::Key::Complete => {
-                if let Some(name) = self.highlighted_command(cx).or_else(|| self.completion(&draft)) {
-                    self.set_draft(&format!("/{name} "), window, cx);
+                let cursor = self.composer.read(cx).selected_range().end;
+                if let Some(name) = self.highlighted_command(cx).or_else(|| self.completion(&draft, cursor)) {
+                    self.replace_active_command(&name, true, window, cx);
                 }
             }
             keys::Key::MenuUp | keys::Key::MenuDown => {
@@ -1503,8 +1669,15 @@ impl ThreadView {
             }
             keys::Key::RunCommand => {
                 if let Some(name) = self.highlighted_command(cx) {
-                    self.set_draft(&format!("/{name}"), window, cx);
-                    self.submit(window, cx);
+                    let cursor = self.composer.read(cx).selected_range().end;
+                    let standalone = active_slash_token(&draft, cursor)
+                        .is_some_and(|(start, end, _)| start == 0 && draft[end..].trim().is_empty());
+                    if standalone {
+                        self.replace_active_command(&name, false, window, cx);
+                        self.submit(window, cx);
+                    } else {
+                        self.replace_active_command(&name, true, window, cx);
+                    }
                 }
             }
             keys::Key::ToggleDetail => {
@@ -1616,35 +1789,103 @@ impl ThreadView {
         }
     }
 
-    /// The slash command a typed `/` prefix completes to: the first one it starts.
-    fn completion(&self, draft: &str) -> Option<String> {
+    /// The slash command a typed `/` token completes to: the first one it starts.
+    fn completion(&self, draft: &str, cursor: usize) -> Option<String> {
         if self.asks.composing_answer() {
             return None;
         }
-        let typed = draft.strip_prefix('/').filter(|t| !t.contains(char::is_whitespace))?;
-        self.shown_commands().map(|c| &c.name).find(|n| n.starts_with(typed) && n.as_str() != typed).cloned()
+        let (_, _, typed) = active_slash_token(draft, cursor)?;
+        self.shown_commands()
+            .into_iter()
+            .map(|c| c.name)
+            .find(|n| n.starts_with(typed) && n.as_str() != typed)
     }
 
-    /// The commands a typed `/` prefix matches, for the menu over the composer: all of them, which it scrolls.
-    pub(super) fn matching_commands(&self, cx: &App) -> Vec<&crate::harness::thread::Command> {
-        let draft = self.composer.read(cx).value();
+    /// The commands an active `/` token matches (at start of draft or after whitespace), for the menu over the composer.
+    pub(super) fn matching_commands(&self, cx: &App) -> Vec<crate::harness::thread::Command> {
+        let input = self.composer.read(cx);
+        let draft = input.value();
+        let cursor = input.selected_range().end;
         // What is typed answers the open question, so it is never a command to complete.
         if self.queue_edit.is_some() || self.questions.front().is_some_and(|q| q.takes_own_answer) || self.asks.composing_answer() {
             return vec![];
         }
-        let Some(typed) = draft.strip_prefix('/').filter(|t| !t.contains(char::is_whitespace)) else { return vec![] };
-        self.shown_commands().filter(|c| c.name.starts_with(typed)).collect()
+        let Some((_, _, typed)) = active_slash_token(draft.as_ref(), cursor) else { return vec![] };
+        self.shown_commands().into_iter().filter(|c| c.name.starts_with(typed)).collect()
     }
 
-    /// The agent's commands, without those m4code's own UI does (`Harness::hidden_commands`).
-    fn shown_commands(&self) -> impl Iterator<Item = &crate::harness::thread::Command> {
+    /// m4code's built-in commands (`/compact`, `/new`, `/clear`) followed by the agent's own commands, deduplicated.
+    pub(super) fn shown_commands(&self) -> Vec<crate::harness::thread::Command> {
         let hidden = self.harness.hidden_commands();
-        self.thread.commands.iter().filter(move |c| !hidden.contains(&c.name.as_str()))
+        let mut out: Vec<crate::harness::thread::Command> = BUILTIN_COMMANDS
+            .iter()
+            .map(|(name, description)| crate::harness::thread::Command {
+                name: (*name).to_string(),
+                description: (*description).to_string(),
+            })
+            .collect();
+        for c in &self.thread.commands {
+            if hidden.contains(&c.name.as_str()) || out.iter().any(|existing| existing.name == c.name) {
+                continue;
+            }
+            out.push(c.clone());
+        }
+        out
     }
 
     fn highlighted_command(&self, cx: &App) -> Option<String> {
         let commands = self.matching_commands(cx);
         commands.get(self.command_highlight.min(commands.len().saturating_sub(1))).map(|c| c.name.clone())
+    }
+
+    /// Replace the active `/...` token around the cursor with `/{name}` (optionally followed by a space).
+    pub(super) fn replace_active_command(&mut self, name: &str, trailing_space: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let (draft, cursor) = {
+            let c = self.composer.read(cx);
+            (c.value().to_string(), c.selected_range().end)
+        };
+        let replacement = if trailing_space { format!("/{name} ") } else { format!("/{name}") };
+        let (new_text, new_cursor) = if let Some((start, end, _)) = active_slash_token(&draft, cursor) {
+            let text = format!("{}{}{}", &draft[..start], replacement, &draft[end..]);
+            (text, start + replacement.len())
+        } else {
+            let len = replacement.len();
+            (replacement, len)
+        };
+        self.composer.update(cx, |c, cx| {
+            c.set_value(new_text, window, cx);
+            c.set_selected_range(new_cursor..new_cursor, cx);
+        });
+        self.sync_command_highlights(cx);
+    }
+
+    /// Highlight recognized `/command` tokens directly inside the composer textarea.
+    pub(super) fn sync_command_highlights(&self, cx: &mut Context<Self>) {
+        let draft = self.composer.read(cx).value().to_string();
+        let commands = self.shown_commands();
+        let accent = crate::panels::theme::hsla(crate::panels::theme::CODEX);
+        let mut decorations = Vec::new();
+        for (range, name) in slash_command_spans(&draft) {
+            let exact = commands.iter().any(|c| c.name == name);
+            let prefix = !exact && commands.iter().any(|c| c.name.starts_with(name));
+            if exact || prefix {
+                decorations.push(gpui_kit::base::input::TextDecoration::new(
+                    range,
+                    gpui::HighlightStyle {
+                        color: Some(accent),
+                        background_color: Some(accent.opacity(if exact { 0.18 } else { 0.10 })),
+                        font_weight: exact.then_some(gpui::FontWeight::SEMIBOLD),
+                        ..Default::default()
+                    },
+                ));
+            }
+        }
+        self.composer.update(cx, |c, cx| c.set_decorations(decorations, cx));
+    }
+
+    /// True when any rendered markdown entry currently holds a non-empty text selection.
+    pub(super) fn has_chat_selection(&self, cx: &App) -> bool {
+        self.markdown.values().any(|s| !s.read(cx).selected_text().is_empty())
     }
 
     fn walk_history(&mut self, older: bool, draft: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -1673,6 +1914,7 @@ impl ThreadView {
             c.set_value(text, window, cx);
             c.set_selected_range(end..end, cx);
         });
+        self.sync_command_highlights(cx);
     }
 
     fn persist_entries(&self) {
@@ -2470,5 +2712,21 @@ mod tests {
                 "expected first entry near top of viewport, got item={item:?} viewport={vp:?}"
             );
         });
+    }
+
+    #[test]
+    fn active_slash_token_triggers_at_start_and_mid_message_but_skips_paths_and_urls() {
+        assert_eq!(super::active_slash_token("/com", 4), Some((0, 4, "com")));
+        assert_eq!(super::active_slash_token("please run /com", 15), Some((11, 15, "com")));
+        assert_eq!(super::active_slash_token("please /comp now", 12), Some((7, 12, "comp")));
+        assert_eq!(super::active_slash_token("check src/thread/mod.rs", 23), None);
+        assert_eq!(super::active_slash_token("see https://example.com", 23), None);
+        assert_eq!(super::active_slash_token("hello world", 11), None);
+    }
+
+    #[test]
+    fn slash_command_spans_finds_all_command_tokens_and_skips_paths() {
+        let spans = super::slash_command_spans("please /compact and /clear src/main.rs https://a.b/c");
+        assert_eq!(spans, vec![(7..15, "compact"), (20..26, "clear")]);
     }
 }

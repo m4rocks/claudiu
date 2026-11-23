@@ -5,10 +5,11 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use gpui::{
-    Anchor as Corner, Animation, AnimationElement, AnimationExt, Bounds, Canvas, ClickEvent, Context, Div, ElementId, FontWeight, Hsla, InteractiveElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, SharedString,
+    Anchor as Corner, Animation, AnimationElement, AnimationExt, Bounds, Canvas, ClickEvent, Context, Div, ElementId, FontWeight, Hsla, InteractiveElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, SharedString,
     Stateful, StatefulInteractiveElement, Styled, Window, canvas, div, point, px,
 };
 use gpui_kit::assets::IconName;
+use gpui_kit::base::Button;
 use gpui_kit::component::Icon;
 
 use crate::panels::theme::{self, hsla};
@@ -123,22 +124,34 @@ pub fn meter(label: &str, fraction: Option<f32>, caption: String, tone: Option<H
         )
 }
 
-fn button_with(
-    id: SharedString,
-    label: SharedString,
+/// An accessible, Tab-focusable button primitive with a visible keyboard focus ring (`focus_visible`) and native
+/// Enter/Space activation.
+pub fn focusable(id: impl Into<ElementId>) -> Button {
+    Button::new(id)
+        .border_1()
+        .border_color(gpui::transparent_black())
+        .focus_visible(|s| s.border_color(hsla(theme::ACCENT)))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn button_colored(
+    id: impl Into<SharedString>,
+    glyph: Option<IconName>,
+    label: impl Into<SharedString>,
     bg: Hsla,
     fg: Hsla,
     hover: Hsla,
+    border: Option<Hsla>,
     bold: bool,
-) -> Stateful<Div> {
-    div()
-        .id(id)
+) -> Button {
+    let label = label.into();
+    let mut btn = focusable(id.into())
         .px(px(10.0))
         .h(px(26.0))
-        .flex()
-        .items_center()
+        .gap(px(5.0))
         .rounded(px(6.0))
         .bg(bg)
+        .border_color(border.unwrap_or_else(gpui::transparent_black))
         .text_color(fg)
         .text_size(crate::panels::scale::px(12.0))
         .font_weight(if bold {
@@ -147,9 +160,25 @@ fn button_with(
             FontWeight::NORMAL
         })
         .cursor_pointer()
-        // GPUI panics if `hover` is set twice on one element, so every variant sets it exactly once, here.
-        .hover(move |s| s.bg(hover))
-        .child(label)
+        .hover(move |s| s.bg(hover));
+    if let Some(name) = glyph {
+        btn = btn.child(icon(name, 13.0));
+    }
+    if !label.is_empty() {
+        btn = btn.child(label);
+    }
+    btn
+}
+
+fn button_with(
+    id: SharedString,
+    label: SharedString,
+    bg: Hsla,
+    fg: Hsla,
+    hover: Hsla,
+    bold: bool,
+) -> Button {
+    button_colored(id, None, label, bg, fg, hover, None, bold)
 }
 
 pub fn dialog_card(id: impl Into<gpui::ElementId>) -> Stateful<Div> {
@@ -165,7 +194,7 @@ pub fn button(
     id: impl Into<SharedString>,
     label: impl Into<SharedString>,
     primary: bool,
-) -> Stateful<Div> {
+) -> Button {
     if primary {
         button_with(
             id.into(),
@@ -188,17 +217,46 @@ pub fn button(
 }
 
 /// `button` with a Lucide icon before the label.
-pub fn button_leading(id: impl Into<SharedString>, name: IconName, label: impl Into<SharedString>, primary: bool) -> Stateful<Div> {
-    button(id, "", primary).child(icon(name, 13.0)).child(div().ml(px(5.0)).child(label.into()))
+pub fn button_leading(id: impl Into<SharedString>, name: IconName, label: impl Into<SharedString>, primary: bool) -> Button {
+    if primary {
+        button_colored(id, Some(name), label, hsla(theme::ACCENT), hsla(theme::PANEL_BG), hsla(0xdcdcdc), None, true)
+    } else {
+        button_colored(id, Some(name), label, hsla(theme::CONTROL), hsla(theme::TEXT), hsla(theme::CONTROL_HOVER), None, false)
+    }
 }
 
 /// A button that can't be pressed right now: dimmed, no hover, no click handler attached by the caller.
-pub fn button_disabled(id: impl Into<SharedString>, label: impl Into<SharedString>) -> Stateful<Div> {
-    button_with(id.into(), label.into(), hsla(theme::CONTROL), hsla(theme::TEXT_FAINT), hsla(theme::CONTROL), false).cursor_default()
+pub fn button_disabled(id: impl Into<SharedString>, label: impl Into<SharedString>) -> Button {
+    button_disabled_leading(id, None, label)
+}
+
+/// A disabled button with an optional leading icon.
+pub fn button_disabled_leading(id: impl Into<SharedString>, glyph: Option<IconName>, label: impl Into<SharedString>) -> Button {
+    let label = label.into();
+    let mut btn = Button::new(id.into())
+        .disabled(true)
+        .px(px(10.0))
+        .h(px(26.0))
+        .gap(px(5.0))
+        .rounded(px(6.0))
+        .bg(hsla(theme::CONTROL))
+        .border_1()
+        .border_color(hsla(theme::BORDER))
+        .text_color(hsla(theme::TEXT_FAINT))
+        .text_size(crate::panels::scale::px(12.0))
+        .opacity(0.6)
+        .cursor_default();
+    if let Some(name) = glyph {
+        btn = btn.child(icon(name, 13.0));
+    }
+    if !label.is_empty() {
+        btn = btn.child(label);
+    }
+    btn
 }
 
 /// Destructive action (end session, quit).
-pub fn danger_button(id: impl Into<SharedString>, label: impl Into<SharedString>) -> Stateful<Div> {
+pub fn danger_button(id: impl Into<SharedString>, label: impl Into<SharedString>) -> Button {
     button_with(
         id.into(),
         label.into(),
@@ -382,26 +440,24 @@ pub fn spinner(id: impl Into<ElementId>, size: f32) -> AnimationElement<Icon> {
     )
 }
 
-pub fn icon_button(id: impl Into<SharedString>, glyph: IconName) -> Stateful<Div> {
-    icon_button_base(id, glyph)
+pub fn icon_button(id: impl Into<SharedString>, glyph: IconName) -> Button {
+    focusable(id.into())
+        .size(px(22.0))
+        .rounded(px(5.0))
         .text_color(hsla(theme::TEXT_DIM))
         .cursor_pointer()
         .hover(|s| s.bg(hsla(theme::CONTROL_HOVER)).text_color(hsla(theme::TEXT)))
+        .child(icon(glyph, 14.0))
 }
 
 /// A dimmed icon button with no hover or click handler.
-pub fn icon_button_disabled(id: impl Into<SharedString>, glyph: IconName) -> Stateful<Div> {
-    icon_button_base(id, glyph).text_color(hsla(theme::TEXT_FAINT)).cursor_default()
-}
-
-fn icon_button_base(id: impl Into<SharedString>, glyph: IconName) -> Stateful<Div> {
-    div()
-        .id(id.into())
+pub fn icon_button_disabled(id: impl Into<SharedString>, glyph: IconName) -> Button {
+    Button::new(id.into())
+        .disabled(true)
         .size(px(22.0))
-        .flex()
-        .items_center()
-        .justify_center()
         .rounded(px(5.0))
+        .text_color(hsla(theme::TEXT_FAINT))
+        .cursor_default()
         .child(icon(glyph, 14.0))
 }
 
@@ -650,42 +706,78 @@ impl Anchor {
     }
 }
 
-/// Any element that opens a menu or picker anchored directly to itself on mouse-down.
+/// Any element that opens a menu or picker anchored directly to itself on mouse-down or Enter/Space.
 pub trait Trigger: InteractiveElement + ParentElement + Styled + Sized {
     /// Open directly below the trigger, left-aligned.
     fn dropdown<V: 'static>(self, cx: &Context<V>, open: impl Fn(&mut V, Dropdown, &mut Window, &mut Context<V>) + 'static) -> Self {
         let anchor = Anchor::default();
-        self.relative().child(anchor.probe()).on_mouse_down(
-            MouseButton::Left,
-            cx.listener(move |v, _: &MouseDownEvent, window, cx| {
-                cx.stop_propagation();
-                open(v, anchor.below(), window, cx);
-            }),
-        )
+        let open = Rc::new(open);
+        let key_anchor = anchor.clone();
+        let key_open = open.clone();
+        self.relative()
+            .child(anchor.probe())
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |v, _: &MouseDownEvent, window, cx| {
+                    cx.stop_propagation();
+                    open(v, anchor.below(), window, cx);
+                }),
+            )
+            .on_key_down(cx.listener(move |v, ev: &KeyDownEvent, window, cx| {
+                let plain = !ev.keystroke.modifiers.control && !ev.keystroke.modifiers.alt && !ev.keystroke.modifiers.platform && !ev.keystroke.modifiers.shift;
+                if plain && matches!(ev.keystroke.key.as_str(), "enter" | "space") {
+                    cx.stop_propagation();
+                    key_open(v, key_anchor.below(), window, cx);
+                }
+            }))
     }
 
     /// Open directly below the trigger, right-aligned (for controls near the right edge).
     fn dropdown_right<V: 'static>(self, cx: &Context<V>, open: impl Fn(&mut V, Dropdown, &mut Window, &mut Context<V>) + 'static) -> Self {
         let anchor = Anchor::default();
-        self.relative().child(anchor.probe()).on_mouse_down(
-            MouseButton::Left,
-            cx.listener(move |v, _: &MouseDownEvent, window, cx| {
-                cx.stop_propagation();
-                open(v, anchor.below_right(), window, cx);
-            }),
-        )
+        let open = Rc::new(open);
+        let key_anchor = anchor.clone();
+        let key_open = open.clone();
+        self.relative()
+            .child(anchor.probe())
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |v, _: &MouseDownEvent, window, cx| {
+                    cx.stop_propagation();
+                    open(v, anchor.below_right(), window, cx);
+                }),
+            )
+            .on_key_down(cx.listener(move |v, ev: &KeyDownEvent, window, cx| {
+                let plain = !ev.keystroke.modifiers.control && !ev.keystroke.modifiers.alt && !ev.keystroke.modifiers.platform && !ev.keystroke.modifiers.shift;
+                if plain && matches!(ev.keystroke.key.as_str(), "enter" | "space") {
+                    cx.stop_propagation();
+                    key_open(v, key_anchor.below_right(), window, cx);
+                }
+            }))
     }
 
     /// Open directly above the trigger, left-aligned (for bottom-docked triggers like the composer bar).
     fn dropdown_above<V: 'static>(self, cx: &Context<V>, open: impl Fn(&mut V, Dropdown, &mut Window, &mut Context<V>) + 'static) -> Self {
         let anchor = Anchor::default();
-        self.relative().child(anchor.probe()).on_mouse_down(
-            MouseButton::Left,
-            cx.listener(move |v, _: &MouseDownEvent, window, cx| {
-                cx.stop_propagation();
-                open(v, anchor.above(), window, cx);
-            }),
-        )
+        let open = Rc::new(open);
+        let key_anchor = anchor.clone();
+        let key_open = open.clone();
+        self.relative()
+            .child(anchor.probe())
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |v, _: &MouseDownEvent, window, cx| {
+                    cx.stop_propagation();
+                    open(v, anchor.above(), window, cx);
+                }),
+            )
+            .on_key_down(cx.listener(move |v, ev: &KeyDownEvent, window, cx| {
+                let plain = !ev.keystroke.modifiers.control && !ev.keystroke.modifiers.alt && !ev.keystroke.modifiers.platform && !ev.keystroke.modifiers.shift;
+                if plain && matches!(ev.keystroke.key.as_str(), "enter" | "space") {
+                    cx.stop_propagation();
+                    key_open(v, key_anchor.above(), window, cx);
+                }
+            }))
     }
 }
 

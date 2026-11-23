@@ -5,7 +5,7 @@
 use super::*;
 
 use gpui::{
-    Bounds, ClickEvent, EventEmitter, InteractiveElement, IntoElement, ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, TitlebarOptions,
+    Bounds, ClickEvent, EventEmitter, InteractiveElement, IntoElement, ParentElement, Render, SharedString, Styled, TitlebarOptions,
     WindowBounds, WindowOptions, div, px, size,
 };
 use gpui_kit::assets::IconName;

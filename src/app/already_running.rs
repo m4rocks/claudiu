@@ -1,6 +1,6 @@
 //! The window a second m4code shows when another one already uses its data folder, before it quits.
 
-use gpui::{App, AppContext, Bounds, ClickEvent, Context, IntoElement, ParentElement, Render, StatefulInteractiveElement, Styled, TitlebarOptions, Window, WindowBounds, WindowOptions, div, px, size};
+use gpui::{App, AppContext, Bounds, ClickEvent, Context, IntoElement, ParentElement, Render, Styled, TitlebarOptions, Window, WindowBounds, WindowOptions, div, px, size};
 
 use crate::panels::theme::{self, hsla};
 use crate::panels::widgets::button;

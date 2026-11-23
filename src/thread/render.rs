@@ -13,13 +13,13 @@ use gpui_kit::component::text::{TextView, TextViewState};
 use std::collections::HashMap;
 use gpui::{AppContext, Entity};
 
-use super::{ThreadEvent, ThreadPicker, ThreadView};
+use super::{ThreadEvent, ThreadPicker, ThreadView, elements};
 use crate::harness::CatalogModel;
 use crate::harness::permission::Permission;
-use crate::harness::thread::{Entry, SubagentReport, ToolCall, ToolContent, ToolStatus, diff_lines, parse_subagent_report};
+use crate::harness::thread::{Entry, SubagentReport, ToolCall, ToolContent, ToolStatus, parse_subagent_report};
 use crate::panels::{composer, logos, picker, scale};
 use crate::panels::theme::{self, hsla};
-use crate::panels::widgets::{EffortPick, Trigger, button, button_disabled, effort_slider, icon, icon_button, key_badge, spinner};
+use crate::panels::widgets::{EffortPick, Trigger, button, button_colored, button_disabled, button_disabled_leading, effort_slider, icon, icon_button, key_badge, spinner};
 use crate::visual::ui::Scope;
 
 /// Lines of a tool's output shown while it is folded (Ctrl+O shows all).
@@ -62,6 +62,17 @@ impl Render for ThreadView {
             .relative()
             .flex_1()
             .min_h_0()
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|v, _: &gpui::MouseUpEvent, window, cx| {
+                    if v.picker != Some(ThreadPicker::Model)
+                        && v.review.is_none()
+                        && !v.has_chat_selection(cx)
+                    {
+                        v.focus_composer(window, cx);
+                    }
+                }),
+            )
             .child(conversation)
             .child(div().absolute().bottom_0().left_0().right_0().h(px(18.0)).bg(fade));
         let conversation = div().flex_1().min_h_0().flex().flex_col().child(conversation).children(self.render_activity());
@@ -143,23 +154,8 @@ fn waiting(message: &str) -> Div {
         .child(message.to_string())
 }
 
-fn render_thought_body(text: &str) -> AnyElement {
-    div()
-        .ml(px(14.0))
-        .pl(px(10.0))
-        .pb(px(4.0))
-        .pt(px(2.0))
-        .border_l_1()
-        .border_color(hsla(theme::BORDER))
-        .italic()
-        .text_size(scale::px(12.0))
-        .text_color(hsla(theme::TEXT_FAINT))
-        .child(text.to_string())
-        .into_any_element()
-}
-
 fn indent_run_step(el: AnyElement) -> AnyElement {
-    div().ml(px(14.0)).pl(px(10.0)).border_l_1().border_color(hsla(theme::BORDER)).child(el).into_any_element()
+    elements::trace_content(el)
 }
 
 impl ThreadView {
@@ -225,7 +221,16 @@ impl ThreadView {
                 .border_color(hsla(theme::PANEL_BORDER))
                 .child(markdown_of(&mut self.markdown, ix, &keep_line_breaks(text), cx))
                 .into_any_element(),
-            Entry::Agent(text) => div().px(px(2.0)).child(markdown_of(&mut self.markdown, ix, text, cx)).into_any_element(),
+            Entry::Agent(text) => {
+                let citations = elements::inline_citations_row(ix, elements::extract_citations(text));
+                div()
+                    .px(px(2.0))
+                    .flex()
+                    .flex_col()
+                    .child(markdown_of(&mut self.markdown, ix, text, cx))
+                    .children(citations)
+                    .into_any_element()
+            }
             Entry::Thought(text) => {
                 let run = tool_run(&self.groupable(), ix);
                 match &run {
@@ -320,13 +325,11 @@ impl ThreadView {
         block.into_any_element()
     }
 
-    /// An entry in the conversation's centred column.
-    /// What the agent is doing, at the foot of the conversation: the chat is where you look to see whether it works,
-    /// and the message box stays yours.
+    /// Startup or compaction status at the foot of the conversation; active turns show their own trace spinners.
     fn render_activity(&self) -> Option<AnyElement> {
         let (label, stoppable) = match self.starting_label() {
             Some(label) => (label, false),
-            None if self.is_working() => ((if self.compaction.running { "Compacting…" } else { "Working…" }).to_string(), true),
+            None if self.is_working() && self.compaction.running => ("Compacting…".to_string(), true),
             None => return None,
         };
         let row = div()
@@ -354,45 +357,44 @@ impl ThreadView {
             .into_any_element()
     }
 
-    /// Compressed single-line thinking step; click to expand the full thought, just like a tool call.
+    /// Reasoning step: auto-expands with a live spinner while streaming, then folds to `"Thought for Ns"` once done.
     fn render_thought(&self, ix: usize, text: &str, cx: &mut Context<Self>) -> AnyElement {
         let key = format!("thought:{ix}");
-        let expanded = self.detail || self.expanded_tools.contains(&key);
-        let preview = text.lines().find(|l| !l.trim().is_empty()).unwrap_or_default().trim().to_string();
-        let header = div()
-            .id(SharedString::from(format!("thought-row-{ix}")))
-            .w_full()
-            .px(px(4.0))
-            .py(px(2.0))
-            .rounded(px(5.0))
-            .flex()
-            .items_center()
-            .gap(px(8.0))
-            .cursor_pointer()
-            .hover(|s| s.bg(hsla(theme::SURFACE_HOVER)))
-            .text_size(scale::px(12.0))
-            .text_color(hsla(theme::TEXT_FAINT))
-            .child(div().flex_none().italic().text_color(hsla(if expanded { theme::TEXT_DIM } else { theme::TEXT_FAINT })).child("Thought"))
-            .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().italic().child(preview))
-            .child(div().flex_none().child(icon(if expanded { IconName::ChevronDown } else { IconName::ChevronRight }, 12.0)))
-            .on_click(cx.listener(move |v, _: &ClickEvent, window, cx| {
-                if !v.expanded_tools.remove(&key) {
+        let timing = self.thought_timing.get(&ix);
+        let streaming = self.is_working()
+            && ix + 1 == self.thread.entries.len()
+            && timing.is_some_and(|(_, done)| done.is_none());
+        let duration = timing.and_then(|(_, done)| *done);
+        let expanded = self.detail
+            || if streaming {
+                !self.collapsed_thoughts.contains(&ix)
+            } else {
+                self.expanded_tools.contains(&key)
+            };
+        let preview = first_line(text);
+        let header = elements::reasoning_header(ix, preview, streaming, duration, expanded).on_click(cx.listener(
+            move |v, _: &ClickEvent, window, cx| {
+                if streaming {
+                    if !v.collapsed_thoughts.remove(&ix) {
+                        v.collapsed_thoughts.insert(ix);
+                    }
+                } else if !v.expanded_tools.remove(&key) {
                     v.expanded_tools.insert(key.clone());
                 }
                 v.remeasure(ix);
                 v.focus_composer(window, cx);
                 cx.notify();
-            }));
+            },
+        ));
         let mut block = div().flex().flex_col().child(header);
         if expanded {
-            block = block.child(render_thought_body(text));
+            block = block.child(elements::reasoning_body(text));
         }
         block.into_any_element()
     }
 
-    /// Compressed single-line tool call row; click to expand full output and diffs.
+    /// Tool call row built on `Trace` + `CodeBlock`: kind icon, status badge, file location chips, and collapsible output.
     fn render_tool(&self, ix: usize, call: &ToolCall, cx: &mut Context<Self>) -> AnyElement {
-        let failed = call.status == ToolStatus::Failed;
         let has_card = self.cards.contains_key(&call.id);
         let shell = call.kind == "execute";
         let card_opens_details = has_card && !shell;
@@ -402,38 +404,11 @@ impl ThreadView {
             || self.expanded_tools.contains(&call.id);
         let toggle_id = call.id.clone();
 
-        let mut header = div()
-            .id(SharedString::from(format!("tool-row-{ix}")))
-            .debug_selector(move || format!("tool-row-{ix}"))
-            .w_full()
-            .px(px(4.0))
-            .py(px(2.0))
-            .rounded(px(5.0))
-            .flex()
-            .items_center()
-            .gap(px(8.0))
-            .when(has_details, |d| d.cursor_pointer().hover(|s| s.bg(hsla(theme::SURFACE_HOVER))))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .text_size(scale::px(12.0))
-                    .text_color(hsla(if failed {
-                        theme::DANGER
-                    } else if expanded {
-                        theme::TEXT_DIM
-                    } else {
-                        theme::TEXT_FAINT
-                    }))
-                    .child(title(call)),
-            );
+        let mut location_chips = Vec::new();
         for (n, (path, line)) in call.locations.iter().enumerate().take(2) {
             let (path, line) = (path.clone(), *line);
             let label = path.file_name().map_or_else(|| path.display().to_string(), |f| f.to_string_lossy().into_owned());
-            header = header.child(
+            location_chips.push(
                 div()
                     .id(SharedString::from(format!("tool-loc-{ix}-{n}")))
                     .flex_none()
@@ -454,45 +429,41 @@ impl ThreadView {
                     .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| {
                         cx.stop_propagation();
                         v.open_location(path.clone(), line, cx);
-                    })),
+                    }))
+                    .into_any_element(),
             );
         }
+
+        let mut header = elements::tool_header(ix, call, title(call), location_chips, has_details, expanded);
         if has_details {
-            header = header
-                .child(
-                    div()
-                        .flex_none()
-                        .text_color(hsla(theme::TEXT_FAINT))
-                        .child(icon(if expanded { IconName::ChevronDown } else { IconName::ChevronRight }, 12.0)),
-                )
-                .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| {
-                    if shell && v.detail {
-                        if !v.collapsed_shell_calls.remove(&toggle_id) {
-                            v.expanded_tools.remove(&toggle_id);
-                            v.collapsed_shell_calls.insert(toggle_id.clone());
-                        }
-                    } else if !v.expanded_tools.remove(&toggle_id) {
-                        v.expanded_tools.insert(toggle_id.clone());
+            header = header.on_click(cx.listener(move |v, _: &ClickEvent, _, cx| {
+                if shell && v.detail {
+                    if !v.collapsed_shell_calls.remove(&toggle_id) {
+                        v.expanded_tools.remove(&toggle_id);
+                        v.collapsed_shell_calls.insert(toggle_id.clone());
                     }
-                    v.remeasure(ix);
-                    cx.notify();
-                }));
+                } else if !v.expanded_tools.remove(&toggle_id) {
+                    v.expanded_tools.insert(toggle_id.clone());
+                }
+                v.remeasure(ix);
+                cx.notify();
+            }));
         }
 
         let mut block = div().flex().flex_col().child(header);
         if (expanded && has_details) || has_card {
-            let mut body = div().ml(px(14.0)).pl(px(10.0)).pb(px(6.0)).pt(px(2.0)).border_l_1().border_color(hsla(theme::BORDER)).flex().flex_col().gap(px(6.0));
+            let mut body = div().py(px(4.0)).flex().flex_col().gap(px(6.0));
             if expanded {
                 body = body.children(call.content.iter().map(|content| match content {
-                    ToolContent::Text(text) => output(text, self.detail),
-                    ToolContent::Diff { path, old, new } => diff(path, old.as_deref(), new, self.detail),
+                    ToolContent::Text(text) => elements::tool_output_block(text, FOLDED_LINES, self.detail),
+                    ToolContent::Diff { path, old, new } => elements::tool_diff_block(path, old.as_deref(), new, FOLDED_LINES, self.detail),
                 }));
             }
             if let Some(card) = self.cards.get(&call.id) {
                 let scope = Scope { call: card.call.clone(), ui: self.card_ui.clone() };
                 body = body.child(div().mt(px(2.0)).child(crate::visual::ui::markdown(format!("thread-card-{}", card.call), &card.content, scope)));
             }
-            block = block.child(body);
+            block = block.child(elements::trace_content(body.into_any_element()));
         }
         block.into_any_element()
     }
@@ -539,7 +510,7 @@ impl ThreadView {
         run.len() == 1 || self.detail || self.expanded_tools.contains(&format!("run:{}", run.start))
     }
 
-    /// The dimmed line of a run of steps: what they are, and the latest one. Click to show each step.
+    /// Chain of Thought: collapsible summary line for a run of agent steps (thoughts, tool calls, subagent reports).
     fn render_tool_run(&self, run: std::ops::Range<usize>, cx: &mut Context<Self>) -> AnyElement {
         let steps = &self.thread.entries[run.clone()];
         let calls: Vec<&ToolCall> = steps.iter().filter_map(|e| if let Entry::Tool(c) = e { Some(c) } else { None }).collect();
@@ -555,36 +526,29 @@ impl ThreadView {
             _ => String::new(),
         };
         let open = self.run_open(&run);
-        let failed = open && (calls.iter().any(|c| c.status == ToolStatus::Failed) || reports.iter().any(|r| r.state == "failed"));
+        let running = calls.iter().any(|c| c.status == ToolStatus::Running)
+            || (self.is_working() && run.end == self.thread.entries.len() && matches!(steps.last(), Some(Entry::Thought(_))));
+        let failed = calls.iter().any(|c| c.status == ToolStatus::Failed) || reports.iter().any(|r| r.state == "failed");
         let key = format!("run:{}", run.start);
         let start = run.start;
-        let header = div()
-            .id(SharedString::from(format!("tool-run-{start}")))
-            .debug_selector(move || format!("tool-run-{start}"))
-            .w_full()
-            .px(px(4.0))
-            .py(px(2.0))
-            .rounded(px(5.0))
-            .flex()
-            .items_center()
-            .gap(px(8.0))
-            .cursor_pointer()
-            .hover(|s| s.bg(hsla(theme::SURFACE_HOVER)))
-            .text_size(scale::px(12.0))
-            .text_color(hsla(if failed { theme::DANGER } else { theme::TEXT_FAINT }))
-            .child(div().flex_none().text_color(hsla(if failed { theme::DANGER } else { theme::TEXT_DIM })).child(run_label(thoughts, calls.len() + reports.len())))
-            .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(
-                latest.lines().map(str::trim).find(|line| !line.is_empty()).unwrap_or_default().to_string(),
-            ))
-            .child(div().flex_none().child(icon(if open { IconName::ChevronDown } else { IconName::ChevronRight }, 12.0)))
-            .on_click(cx.listener(move |v, _: &ClickEvent, window, cx| {
-                if !v.expanded_tools.remove(&key) {
-                    v.expanded_tools.insert(key.clone());
-                }
-                v.remeasure(start);
-                v.focus_composer(window, cx);
-                cx.notify();
-            }));
+        let preview = first_line(&latest);
+        let header = elements::chain_of_thought_header(
+            start,
+            run_label(thoughts, calls.len() + reports.len()),
+            preview,
+            steps.len(),
+            running,
+            failed,
+            open,
+        )
+        .on_click(cx.listener(move |v, _: &ClickEvent, window, cx| {
+            if !v.expanded_tools.remove(&key) {
+                v.expanded_tools.insert(key.clone());
+            }
+            v.remeasure(start);
+            v.focus_composer(window, cx);
+            cx.notify();
+        }));
         if !open {
             return header.into_any_element();
         }
@@ -1005,7 +969,8 @@ impl ThreadView {
                         .child(div().flex_none().text_color(hsla(theme::TEXT)).child(format!("/{}", c.name)))
                         .child(div().flex_1().truncate().text_color(hsla(theme::TEXT_DIM)).child(c.description.clone()))
                         .on_click(cx.listener(move |v, _: &ClickEvent, window, cx| {
-                            v.set_draft(&format!("/{name} "), window, cx);
+                            v.replace_active_command(&name, true, window, cx);
+                            v.focus_composer(window, cx);
                             cx.notify();
                         })),
                 );
@@ -1156,6 +1121,14 @@ impl ThreadView {
                     cx.notify();
                 }),
             )
+            .on_key_down(cx.listener(|v, ev: &gpui::KeyDownEvent, window, cx| {
+                let plain = !ev.keystroke.modifiers.control && !ev.keystroke.modifiers.alt && !ev.keystroke.modifiers.platform && !ev.keystroke.modifiers.shift;
+                if plain && matches!(ev.keystroke.key.as_str(), "enter" | "space") {
+                    cx.stop_propagation();
+                    v.toggle_model_picker(window, cx);
+                    cx.notify();
+                }
+            }))
             .into_any_element();
 
         // Permission mode: one of the four, or the harness's own name for a mode outside them.
@@ -1186,14 +1159,10 @@ impl ThreadView {
         let mut extra_actions: Vec<AnyElement> = vec![];
         // Outside a git repository there are no snapshots, and so no review at all.
         if !self.snapshots.is_empty() {
-            let chip = if self.can_review() {
-                composer::chip("thread-review-open", false)
-                    .text_color(hsla(theme::TEXT_DIM))
-                    .on_click(cx.listener(|v, _: &ClickEvent, _, cx| v.open_review(cx)))
-            } else {
-                composer::disabled_chip("thread-review-open")
-            };
-            extra_actions.push(chip.child("Review changes").into_any_element());
+            let can_review = self.can_review();
+            let review = composer::review_button("thread-review-open", can_review)
+                .when(can_review, |b| b.on_click(cx.listener(|v, _: &ClickEvent, _, cx| v.open_review(cx))));
+            extra_actions.push(review.into_any_element());
         }
         let draft = self.composer.read(cx).value();
         let has_text = composer::can_send(draft.as_ref());
@@ -1202,25 +1171,46 @@ impl ThreadView {
             && (self.waiting_messages().next().is_some() || self.handoff_after_turn.is_some());
         let answering = self.questions.front().is_some_and(|q| q.takes_own_answer) || self.async_answer_id().is_some();
         let follow_up = if alternate { self.follow_up.other() } else { self.follow_up };
-        let label = if editing {
+        #[derive(Clone, Copy)]
+        enum ActionKind {
+            Save,
+            Answer,
+            Stopping,
+            Interrupt,
+            Resume,
+            Steer,
+            Queue,
+            Send,
+        }
+        let action = if editing {
             extra_actions.push(button("thread-cancel-edit", "Cancel", false)
                 .on_click(cx.listener(|v, _: &ClickEvent, window, cx| v.finish_queue_edit(false, window, cx)))
                 .into_any_element());
-            "Save"
+            ActionKind::Save
         } else if answering {
-            "Answer"
+            ActionKind::Answer
         } else if !has_text && self.interrupting {
-            "Stopping…"
+            ActionKind::Stopping
         } else if !has_text && self.working {
-            "Interrupt"
+            ActionKind::Interrupt
         } else if !has_text && idle_for_resume {
-            "Resume"
+            ActionKind::Resume
         } else if self.can_steer(draft.trim(), follow_up) {
-            "Steer"
+            ActionKind::Steer
         } else if self.working || self.phase == super::Phase::Starting {
-            "Queue"
+            ActionKind::Queue
         } else {
-            "Send"
+            ActionKind::Send
+        };
+        let (label, glyph) = match action {
+            ActionKind::Save => ("Save", IconName::Check),
+            ActionKind::Answer => ("Answer", IconName::Check),
+            ActionKind::Stopping => ("Stopping…", IconName::Square),
+            ActionKind::Interrupt => ("Interrupt", IconName::Square),
+            ActionKind::Resume => ("Resume", IconName::Play),
+            ActionKind::Steer => ("Steer", IconName::CornerDownRight),
+            ActionKind::Queue => ("Queue", IconName::ListPlus),
+            ActionKind::Send => ("Send", IconName::ArrowUp),
         };
         let enabled = if editing {
             has_text && self.questions.is_empty()
@@ -1232,7 +1222,14 @@ impl ThreadView {
             has_text || (self.working && !self.interrupting) || idle_for_resume
         };
         let send = if enabled {
-            button("thread-send", label, true)
+            let (bg, fg, hover, border) = match action {
+                ActionKind::Interrupt => (hsla(0x7a242a), hsla(0xffe4e6), hsla(0x942c33), Some(hsla(theme::DANGER).opacity(0.65))),
+                ActionKind::Steer => (hsla(theme::WARN), hsla(0x16120b), hsla(0xedd092), None),
+                ActionKind::Queue => (hsla(theme::CODEX), hsla(0x0c141c), hsla(0x7cc0f5), None),
+                ActionKind::Resume => (hsla(theme::OK), hsla(0x0e160c), hsla(0x92c27d), None),
+                ActionKind::Save | ActionKind::Answer | ActionKind::Send | ActionKind::Stopping => (hsla(theme::ACCENT), hsla(theme::PANEL_BG), hsla(0xdcdcdc), None),
+            };
+            button_colored("thread-send", Some(glyph), label, bg, fg, hover, border, true)
                 .on_click(cx.listener(|v, ev: &ClickEvent, window, cx| {
                     if v.queue_edit.is_some() || composer::can_send(&v.draft(cx)) {
                         v.submit_with(ev.modifiers().secondary(), window, cx);
@@ -1243,7 +1240,7 @@ impl ThreadView {
                     }
                 }))
         } else {
-            button_disabled("thread-send", label)
+            button_disabled_leading("thread-send", Some(glyph), label)
         }.h(px(26.0)).px(px(12.0)).into_any_element();
 
         composer::Composer {
@@ -1281,43 +1278,6 @@ fn title(call: &ToolCall) -> String {
         return call.title.clone();
     }
     if call.kind.is_empty() { "Tool".into() } else { call.kind.clone() }
-}
-
-fn mono() -> Div {
-    div().font_family(crate::platform::monospace_font()).text_size(scale::px(12.5))
-}
-
-fn output(text: &str, full: bool) -> AnyElement {
-    let text = text.trim_matches('\n').trim_start_matches("```console\n").trim_end_matches("```").trim_end();
-    let lines: Vec<&str> = text.lines().collect();
-    let shown = if full { lines.len() } else { lines.len().min(FOLDED_LINES) };
-    let mut block = mono().pl(px(14.0)).text_color(hsla(theme::TEXT_DIM)).flex().flex_col();
-    for l in &lines[..shown] {
-        block = block.child(div().whitespace_nowrap().child(l.to_string()));
-    }
-    if shown < lines.len() {
-        block = block.child(div().text_color(hsla(theme::TEXT_FAINT)).child(format!("… {} more lines (Ctrl+O)", lines.len() - shown)));
-    }
-    block.into_any_element()
-}
-
-fn diff(path: &std::path::Path, old: Option<&str>, new: &str, full: bool) -> AnyElement {
-    let lines = diff_lines(old.unwrap_or_default(), new);
-    let shown = if full { lines.len() } else { lines.len().min(FOLDED_LINES * 3) };
-    let mut block = mono().rounded(px(6.0)).border_1().border_color(hsla(theme::PANEL_BORDER)).flex().flex_col().overflow_hidden();
-    block = block.child(div().px(px(8.0)).py(px(3.0)).bg(hsla(theme::APP_BG)).text_color(hsla(theme::TEXT_DIM)).child(path.display().to_string()));
-    for (sign, text) in &lines[..shown] {
-        let (bg, fg) = match sign {
-            '+' => (theme::DIFF_ADDED_BG, theme::OK),
-            '-' => (theme::DIFF_REMOVED_BG, theme::DANGER),
-            _ => (theme::PANEL_BG, theme::TEXT_DIM),
-        };
-        block = block.child(div().px(px(8.0)).bg(hsla(bg)).text_color(hsla(fg)).whitespace_nowrap().child(format!("{sign} {text}")));
-    }
-    if shown < lines.len() {
-        block = block.child(div().px(px(8.0)).text_color(hsla(theme::TEXT_FAINT)).child(format!("… {} more lines (Ctrl+O)", lines.len() - shown)));
-    }
-    block.when(old.is_none(), |b| b.border_color(hsla(theme::OK))).into_any_element()
 }
 
 /// A report's line among the steps, such as `Codex subagent reported · done`, from its `state` key.

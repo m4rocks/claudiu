@@ -340,11 +340,26 @@ impl InputModeKind for InputMode {
     /// them would cost more in dispatch than it saves.
     type Extras = ();
 }
+/// Decoration state for a multi-line textarea (e.g. inline slash-command highlights).
+#[derive(Default)]
+pub struct TextareaExtras {
+    pub(crate) decorations: Vec<TextDecoration>,
+}
+
+impl InputExtras for TextareaExtras {
+    fn decoration_layers(&self) -> Vec<&[TextDecoration]> {
+        if self.decorations.is_empty() {
+            Vec::new()
+        } else {
+            vec![self.decorations.as_slice()]
+        }
+    }
+}
+
 impl InputModeKind for TextareaMode {
     const MULTI_LINE: bool = true;
 
-    /// Ordinary multi-line text needs nothing beyond the shared engine.
-    type Extras = ();
+    type Extras = TextareaExtras;
 }
 // `EditorMode`'s implementation lives with the editor code, next to the
 // language features it dispatches to.

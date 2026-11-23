@@ -1,6 +1,6 @@
-use gpui::{App, Entity, IntoElement, RenderOnce, Window};
+use gpui::{App, Context, Entity, IntoElement, RenderOnce, Window};
 
-use super::{InputBaseState, TextareaMode};
+use super::{InputBaseState, TextDecoration, TextareaMode};
 
 /// State for editing ordinary multi-line text.
 ///
@@ -8,6 +8,23 @@ use super::{InputBaseState, TextareaMode};
 /// facilities such as languages, diagnostics, folding, and LSP do not exist on
 /// this type — those methods live on [`super::EditorState`].
 pub type TextareaState = InputBaseState<TextareaMode>;
+
+impl TextareaState {
+    /// Replace the inline text decorations rendered over this textarea's content.
+    pub fn set_decorations(
+        &mut self,
+        mut decorations: Vec<TextDecoration>,
+        cx: &mut Context<Self>,
+    ) {
+        let len = self.text.len();
+        decorations.retain(|d| d.range.start < d.range.end && d.range.end <= len);
+        decorations.sort_by_key(|d| (d.range.start, d.range.end));
+        if self.extras.decorations != decorations {
+            self.extras.decorations = decorations;
+            cx.notify();
+        }
+    }
+}
 
 /// An unstyled ordinary multi-line text input.
 #[derive(IntoElement)]

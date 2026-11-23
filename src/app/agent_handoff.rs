@@ -154,4 +154,111 @@ impl Workspace {
             }
         }
     }
+
+    /// Built-in `/clear`: erase the current conversation and relaunch a fresh ACP session on the same record.
+    pub(super) fn clear_session(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        crate::harness::thread::save_entries(id, &[]);
+        if let Some(meta) = self.store.session_mut(id).and_then(|r| r.claude.as_mut()) {
+            meta.session_id.clear();
+            meta.provider_sessions.clear();
+            meta.transcript = None;
+            meta.context_tokens = None;
+            meta.context_fraction = None;
+            meta.context_window = None;
+            meta.cache_ttl = None;
+            self.store.mark_dirty();
+        }
+        let shell = self.shells.remove(id);
+        self.relaunch_empty(id, window, cx);
+        if let Some(shell) = shell {
+            self.shells.insert(id.into(), shell);
+        }
+    }
+
+    /// Built-in `/compact` fallback for harnesses without native compaction: summarize the transcript via text
+    /// generation (falling back to a condensed tail of the transcript if unavailable) and restart the session in place
+    /// seeded with the compacted context.
+    pub(super) fn compact_session(&mut self, id: &str, transcript: String, instructions: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(rec) = self.store.session(id).cloned() else { return };
+        let meta = rec.claude.clone().unwrap_or_default();
+        let gen_model = self.store.data.settings.text_generation_model.clone().unwrap_or_else(|| {
+            crate::store::TextGenerationModel {
+                harness: meta.harness,
+                id: meta.chosen_model.clone().unwrap_or_default(),
+            }
+        });
+        let env = self.harness_model_env(gen_model.harness).ok();
+        let system = match instructions {
+            Some(ref extra) if !extra.trim().is_empty() => format!(
+                "Summarize the following coding-session conversation concisely so work can continue in a fresh context window. \
+                 Preserve key decisions, file paths, symbol names, errors, and open next steps. Focus especially on: {extra}"
+            ),
+            _ => "Summarize the following coding-session conversation concisely so work can continue in a fresh context window. \
+                  Preserve key decisions, file paths, symbol names, errors, and open next steps.".to_string(),
+        };
+        let session_id = id.to_string();
+        let fallback = condensed_transcript(&transcript, 6000);
+        cx.spawn_in(window, async move |this, cx| {
+            let summary = if let Some(env) = env {
+                let timeout = cx.background_executor().timer(std::time::Duration::from_secs(60));
+                match crate::harness::text_generation::complete(&gen_model, env, &system, &transcript, timeout).await {
+                    Ok(text) if !text.trim().is_empty() => text.trim().to_string(),
+                    _ => fallback,
+                }
+            } else {
+                fallback
+            };
+            let _ = this.update_in(cx, |ws, window, cx| {
+                ws.finish_compact_session(&session_id, summary, window, cx);
+            });
+        })
+        .detach();
+    }
+
+    fn finish_compact_session(&mut self, id: &str, summary: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(mut rec) = self.store.session(id).cloned() else { return };
+        let Some(thread) = self.live_view(id).and_then(|v| v.thread()).cloned() else { return };
+        let mut prior_entries = thread.read(cx).thread.entries.clone();
+        prior_entries.push(Entry::Notice { text: "Context compacted.".into(), error: false });
+        let mut meta = rec.claude.clone().unwrap_or_default();
+        meta.session_id.clear();
+        meta.provider_sessions.clear();
+        meta.transcript = None;
+        meta.context_tokens = None;
+        meta.context_fraction = None;
+        meta.context_window = None;
+        meta.cache_ttl = None;
+        rec.claude = Some(meta.clone());
+        if let Some(m) = self.store.session_mut(id).and_then(|r| r.claude.as_mut()) {
+            *m = meta.clone();
+            self.store.mark_dirty();
+        }
+        let cwd = self.resume_cwd(&rec, cx);
+        let prompt = format!(
+            "The previous conversation context was compacted into the summary below. \
+             Acknowledge briefly that you have the compacted context and are ready to continue.\n\n\
+             ## Compacted context\n{summary}"
+        );
+        let Some(mut start) = self.thread_start(&rec.id, &cwd, &meta, rec.chosen_title().map(String::from), Some(prompt), Starter::User, cx) else {
+            return;
+        };
+        start.prior_entries = prior_entries;
+        let shell = self.shells.remove(id);
+        self.start_thread(rec, start, false, window, cx);
+        if let Some(shell) = shell {
+            self.shells.insert(id.into(), shell);
+        }
+    }
+}
+
+/// Fallback condensation when headless text generation isn't available: keeps the trailing `max_bytes` on a UTF-8 boundary.
+fn condensed_transcript(transcript: &str, max_bytes: usize) -> String {
+    if transcript.len() <= max_bytes {
+        return transcript.to_string();
+    }
+    let mut start = transcript.len() - max_bytes;
+    while start < transcript.len() && !transcript.is_char_boundary(start) {
+        start += 1;
+    }
+    format!("…\n{}", &transcript[start..])
 }

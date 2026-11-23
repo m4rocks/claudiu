@@ -1,14 +1,15 @@
 //! The message box, as the Welcome screen and the chat both draw it: where you type on top, a row of chips (model,
 //! mode, project, branch) and actions under it.
 
-use gpui::{AnyElement, Div, ElementId, InteractiveElement, IntoElement, ParentElement, SharedString, Stateful, Styled, div, prelude::FluentBuilder, px};
+use gpui::{AnyElement, Div, ElementId, FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString, Styled, div, prelude::FluentBuilder, px};
 use gpui_kit::assets::IconName;
+use gpui_kit::base::Button;
 use gpui_kit::component::input::InputEvent;
 
 use crate::harness::Harness;
 use crate::panels::{logos, scale};
 use crate::panels::theme::{self, hsla};
-use crate::panels::widgets::{Anchor, button, button_disabled, icon};
+use crate::panels::widgets::{Anchor, button_colored, button_disabled_leading, button_leading, focusable, icon};
 
 pub fn can_send(text: &str) -> bool {
     !text.trim().is_empty()
@@ -20,9 +21,37 @@ pub fn sends(event: &InputEvent) -> bool {
     matches!(event, InputEvent::PressEnter { shift: false, .. })
 }
 
-pub fn send_button(id: impl Into<SharedString>, enabled: bool) -> Stateful<Div> {
+pub fn send_button(id: impl Into<SharedString>, enabled: bool) -> Button {
     let id = id.into();
-    let button = if enabled { button(id, "Send", true) } else { button_disabled(id, "Send") };
+    let button = if enabled {
+        button_leading(id, IconName::ArrowUp, "Send", true)
+    } else {
+        button_disabled_leading(id, Some(IconName::ArrowUp), "Send")
+    };
+    button.h(px(26.0)).px(px(12.0))
+}
+
+/// Review changes action button in the composer footer: same height and padding as the Send button, with a clear
+/// visual contrast between enabled (emerald-accented active control) and disabled (dimmed flat surface).
+pub fn review_button(id: impl Into<SharedString>, enabled: bool) -> Button {
+    let id = id.into();
+    let button = if enabled {
+        button_colored(
+            id,
+            Some(IconName::FileDiff),
+            "Review changes",
+            hsla(0x1b2b20),
+            hsla(0xd9f2df),
+            hsla(0x233829),
+            Some(hsla(theme::OK).opacity(0.55)),
+            false,
+        )
+        .font_weight(FontWeight::MEDIUM)
+    } else {
+        button_disabled_leading(id, Some(IconName::FileDiff), "Review changes")
+            .bg(hsla(theme::PANEL_BG))
+            .opacity(0.42)
+    };
     button.h(px(26.0)).px(px(12.0))
 }
 
@@ -98,25 +127,21 @@ pub fn input_area() -> Div {
 }
 
 /// One chip in the footer; `open` while its dropdown is up.
-pub fn chip(id: impl Into<ElementId>, open: bool) -> Stateful<Div> {
-    chip_shape(id)
+pub fn chip(id: impl Into<ElementId>, open: bool) -> Button {
+    focusable(id)
+        .h(px(26.0))
+        .px(px(8.0))
+        .rounded(px(6.0))
+        .gap(px(5.0))
+        .text_size(scale::px(11.5))
         .bg(hsla(if open { theme::ROW_ACTIVE } else { theme::PANEL_BG }))
         .border_color(hsla(if open { theme::FOCUS_BORDER } else { theme::PANEL_BORDER }))
         .hover(|s| s.bg(hsla(theme::SURFACE_HOVER)))
         .cursor_pointer()
 }
 
-/// A chip that does nothing for now: dimmed, with no hover.
-pub fn disabled_chip(id: impl Into<ElementId>) -> Stateful<Div> {
-    chip_shape(id).bg(hsla(theme::PANEL_BG)).border_color(hsla(theme::PANEL_BORDER)).text_color(hsla(theme::TEXT_FAINT))
-}
-
-fn chip_shape(id: impl Into<ElementId>) -> Stateful<Div> {
-    div().id(id).h(px(26.0)).px(px(8.0)).rounded(px(6.0)).border_1().flex().items_center().gap(px(5.0)).text_size(scale::px(11.5))
-}
-
 /// Model + effort chip shared by both composers.
-pub fn model_chip(id: impl Into<ElementId>, open: bool, anchor: &Anchor, harness: Harness, label: impl Into<SharedString>, effort: Option<String>) -> Stateful<Div> {
+pub fn model_chip(id: impl Into<ElementId>, open: bool, anchor: &Anchor, harness: Harness, label: impl Into<SharedString>, effort: Option<String>) -> Button {
     chip(id, open)
         .relative()
         .child(anchor.probe())
@@ -129,7 +154,7 @@ pub fn model_chip(id: impl Into<ElementId>, open: bool, anchor: &Anchor, harness
 }
 
 /// Permission mode chip shared by both composers.
-pub fn permission_chip(id: impl Into<ElementId>, open: bool, label: impl Into<SharedString>) -> Stateful<Div> {
+pub fn permission_chip(id: impl Into<ElementId>, open: bool, label: impl Into<SharedString>) -> Button {
     chip(id, open)
         .child(icon(IconName::Lock, 11.0).text_color(hsla(theme::TEXT_DIM)))
         .child(div().text_color(hsla(theme::TEXT)).child(label.into()))
@@ -138,7 +163,7 @@ pub fn permission_chip(id: impl Into<ElementId>, open: bool, label: impl Into<Sh
 
 /// What the branch chip shows: the branch (or worktree) and, in a linked worktree, its name; a spinner `tail` while
 /// git works.
-pub fn git_chip(id: impl Into<ElementId>, open: bool, primary: impl Into<SharedString>, linked: Option<String>, tail: Option<AnyElement>) -> Stateful<Div> {
+pub fn git_chip(id: impl Into<ElementId>, open: bool, primary: impl Into<SharedString>, linked: Option<String>, tail: Option<AnyElement>) -> Button {
     chip(id, open)
         .text_color(hsla(theme::TEXT))
         .child(icon(IconName::GitBranch, 12.0).text_color(hsla(theme::TEXT_DIM)))

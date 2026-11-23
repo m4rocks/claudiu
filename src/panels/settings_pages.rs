@@ -620,7 +620,7 @@ impl Workspace {
                 .into_any_element();
             return settings_group("PROJECTS", Some(add), vec![empty]);
         }
-        let pressed = |b: gpui::Stateful<Div>, act: Act, cx: &mut Context<Self>| b.on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(act.clone(), window, cx)));
+        let pressed = |b: gpui_kit::base::Button, act: Act, cx: &mut Context<Self>| b.on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(act.clone(), window, cx)));
         let last = projects.len() - 1;
         let mut rows: Vec<AnyElement> = Vec::with_capacity(projects.len());
         for (i, p) in projects.iter().enumerate() {

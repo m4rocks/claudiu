@@ -1,7 +1,7 @@
 //! Settings → Skills page: browse/install `SKILL.md` packages from `skills.sh`, toggle them globally or per project,
 //! and show which active harnesses receive synced symlinks.
 
-use gpui::{ClickEvent, Context, Div, FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString, StatefulInteractiveElement, Styled, div, px};
+use gpui::{ClickEvent, Context, Div, FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString, Styled, div, px};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::input::{Input, InputState};
 

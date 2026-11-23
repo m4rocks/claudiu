@@ -2,7 +2,7 @@
 
 use gpui::{
     ClickEvent, Context, FontWeight, InteractiveElement, IntoElement, MouseButton, MouseDownEvent,
-    ParentElement, StatefulInteractiveElement, Styled, Window, div,
+    ParentElement, Styled, Window, div,
     prelude::FluentBuilder, px,
 };
 
@@ -64,6 +64,7 @@ impl Workspace {
         let model_open = matches!(self.picker_kind(), Some(WorkspacePicker::HomeModel { .. }));
         let effort_badge = crate::thread::short_effort_label(self.home.effort.name());
         let model_anchor = self.home.model_anchor.clone();
+        let key_model_anchor = model_anchor.clone();
         let model_chip = composer::model_chip("home-model", model_open, &model_anchor, chosen_model.harness, chosen_model.name.clone(), Some(effort_badge))
             .on_mouse_down(
                 MouseButton::Left,
@@ -72,6 +73,13 @@ impl Workspace {
                     ws.open_home_model_picker(model_anchor.below(), window, cx);
                 }),
             )
+            .on_key_down(cx.listener(move |ws, ev: &gpui::KeyDownEvent, window, cx| {
+                let plain = !ev.keystroke.modifiers.control && !ev.keystroke.modifiers.alt && !ev.keystroke.modifiers.platform && !ev.keystroke.modifiers.shift;
+                if plain && matches!(ev.keystroke.key.as_str(), "enter" | "space") {
+                    cx.stop_propagation();
+                    ws.open_home_model_picker(key_model_anchor.below(), window, cx);
+                }
+            }))
             .into_any_element();
 
         let perm_open = matches!(self.picker_kind(), Some(WorkspacePicker::HomePermission));

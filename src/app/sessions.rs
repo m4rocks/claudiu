@@ -302,7 +302,7 @@ impl Workspace {
 
     /// Where a resumed session starts: its folder, or its project's main checkout when the folder is gone (Claude Code's
     /// exit prompt removes a worktree). Claude Code then tells the user in the session that the worktree is gone.
-    fn resume_cwd(&mut self, rec: &SessionRecord, cx: &mut Context<Self>) -> PathBuf {
+    pub(super) fn resume_cwd(&mut self, rec: &SessionRecord, cx: &mut Context<Self>) -> PathBuf {
         if rec.cwd.is_dir() {
             return rec.cwd.clone();
         }
@@ -476,6 +476,16 @@ impl Workspace {
             ThreadEvent::Idle(outcome) => ws.report_to_parent(&sub_id, outcome, cx),
             ThreadEvent::Select(child) => ws.act(Act::Select(child.clone()), window, cx),
             ThreadEvent::Handoff { to, model, message, effort, by_agent } => ws.dynamic_handoff(&sub_id, *to, model.clone(), message.clone(), *by_agent, effort.clone(), window, cx),
+            ThreadEvent::NewSession(prompt) => {
+                let (harness, cwd) = ws
+                    .store
+                    .session(&sub_id)
+                    .map(|r| (r.claude.as_ref().map_or(ws.store.data.settings.harness, |m| m.harness), r.cwd.clone()))
+                    .unwrap_or_else(|| (ws.store.data.settings.harness, ws.new_session_cwd()));
+                ws.new_session_with(harness, cwd, prompt.clone(), vec![], Starter::User, window, cx);
+            }
+            ThreadEvent::ClearSession => ws.clear_session(&sub_id, window, cx),
+            ThreadEvent::Compact { transcript, instructions } => ws.compact_session(&sub_id, transcript.clone(), instructions.clone(), window, cx),
         });
         self.adopt_live(id, SessionView::Thread(view), sub, name, foreground, window, cx);
     }

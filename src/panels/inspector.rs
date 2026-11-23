@@ -622,13 +622,35 @@ fn lead_row(id: impl Into<SharedString>, lead: AnyElement, label: impl IntoEleme
         .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(label))
 }
 
-fn row(id: impl Into<SharedString>, glyph: IconName, label: impl IntoElement) -> Stateful<Div> {
-    base_row(id, glyph, label).text_color(hsla(theme::TEXT)).cursor_pointer().hover(|s| s.bg(hsla(theme::ROW_HOVER)))
+fn row(id: impl Into<SharedString>, glyph: IconName, label: impl IntoElement) -> gpui_kit::base::Button {
+    crate::panels::widgets::focusable(id.into())
+        .h(px(26.0))
+        .px(px(8.0))
+        .justify_start()
+        .gap(px(8.0))
+        .rounded(px(6.0))
+        .text_size(crate::panels::scale::px(12.5))
+        .text_color(hsla(theme::TEXT))
+        .cursor_pointer()
+        .hover(|s| s.bg(hsla(theme::ROW_HOVER)))
+        .child(div().flex_none().text_color(hsla(theme::TEXT_DIM)).child(icon(glyph, 14.0)))
+        .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(label))
 }
 
 /// The row as it looks while its action is unavailable: no hover, no pointer (give it no click handler either).
-fn dim_row(id: impl Into<SharedString>, glyph: IconName, label: impl IntoElement) -> Stateful<Div> {
-    base_row(id, glyph, label).text_color(hsla(theme::TEXT_FAINT)).cursor_default()
+fn dim_row(id: impl Into<SharedString>, glyph: IconName, label: impl IntoElement) -> gpui_kit::base::Button {
+    gpui_kit::base::Button::new(id.into())
+        .disabled(true)
+        .h(px(26.0))
+        .px(px(8.0))
+        .justify_start()
+        .gap(px(8.0))
+        .rounded(px(6.0))
+        .text_size(crate::panels::scale::px(12.5))
+        .text_color(hsla(theme::TEXT_FAINT))
+        .cursor_default()
+        .child(div().flex_none().text_color(hsla(theme::TEXT_DIM)).child(icon(glyph, 14.0)))
+        .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(label))
 }
 
 /// A list row that does something when clicked and has a × that removes the entry.
@@ -678,11 +700,8 @@ fn removable_row(
 }
 
 /// A setting row that opens a menu (built when it is clicked): the value with a chevron, lit on hover.
-fn pick_row(cx: &mut Context<Workspace>, id: &'static str, label: &str, value: String, menu: impl Fn() -> Vec<MenuItem> + 'static) -> Stateful<Div> {
-    div()
-        .id(id)
-        .flex()
-        .items_center()
+fn pick_row(cx: &mut Context<Workspace>, id: &'static str, label: &str, value: String, menu: impl Fn() -> Vec<MenuItem> + 'static) -> gpui_kit::base::Button {
+    crate::panels::widgets::focusable(id)
         .justify_between()
         .gap(px(10.0))
         // Text lines up with the rows above; the hover background reaches out past it.

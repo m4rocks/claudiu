@@ -29,10 +29,10 @@ use gpui_kit::component::TitleBar;
 gpui_kit::assets::icon_assets!(
     AppIcons,
     [
-        WindowMinimize, WindowMaximize, WindowRestore, WindowClose, Archive, ArchiveRestore, ArrowDownToLine, ArrowLeft, Brackets, Check, ChevronDown, ChevronRight, ChevronUp,
-        CircleCheck, CircleDot, CircleDotDashed, CircleQuestionMark, CircleSlash, CircleSmall, CircleX, Clock, Ellipsis, Eye, ExternalLink, File, FileText, Folder, FolderGit2, FolderOpen, GitBranch, Link, GitCommitHorizontal, GitMerge, GitPullRequest,
-        GitPullRequestClosed, GitPullRequestDraft, HeartPlus, Keyboard, LoaderCircle, Lock, MessageSquare, FileCode, PanelBottom, PanelLeft, PanelRight, Pencil, Plus, RefreshCw, Search,
-        Settings, Terminal, X
+        WindowMinimize, WindowMaximize, WindowRestore, WindowClose, Archive, ArchiveRestore, ArrowDownToLine, ArrowLeft, ArrowUp, Brackets, Check, ChevronDown, ChevronRight, ChevronUp,
+        CircleCheck, CircleDot, CircleDotDashed, CircleQuestionMark, CircleSlash, CircleSmall, CircleX, Clock, CornerDownRight, Ellipsis, Eye, ExternalLink, File, FileDiff, FileText, Folder, FolderGit2, FolderOpen, GitBranch, Link, GitCommitHorizontal, GitMerge, GitPullRequest,
+        GitPullRequestClosed, GitPullRequestDraft, HeartPlus, Keyboard, ListPlus, LoaderCircle, Lock, MessageSquare, FileCode, PanelBottom, PanelLeft, PanelRight, Pencil, Play, Plus, RefreshCw, Search,
+        Settings, Square, Terminal, X
     ]
 );
 

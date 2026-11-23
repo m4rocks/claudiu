@@ -15,7 +15,7 @@ use crate::panels::theme::{self, hsla};
 use gpui_kit::assets::IconName;
 use crate::panels::status_icon::{SessionDot, StatusIcon};
 use crate::panels::logos;
-use crate::panels::widgets::{Trigger, ago, countdown, icon, icon_button, limit_bar, section_label};
+use crate::panels::widgets::{Trigger, ago, countdown, focusable, icon, icon_button, limit_bar, section_label};
 
 pub const SIDEBAR_W: f32 = 284.0;
 pub const SIDEBAR_MIN: f32 = 220.0;
@@ -720,18 +720,15 @@ impl Workspace {
             self.picker_kind(),
             Some(crate::app::WorkspacePicker::Project { mode: crate::app::ProjectPickerMode::SidebarFilter, .. })
         );
-        let chip = div()
-            .id("project-filter")
+        let chip = focusable("project-filter")
             .flex_1()
             .min_w_0()
             .h(px(24.0))
             .px(px(6.0))
-            .flex()
-            .items_center()
+            .justify_start()
             .gap(px(6.0))
             .rounded(px(6.0))
             .bg(hsla(if filter_open { theme::ROW_ACTIVE } else { 0x141414 }))
-            .border_1()
             .border_color(hsla(if filter_open { theme::ACCENT } else { 0x141414 }))
             .cursor_pointer()
             .hover(|s| s.bg(hsla(theme::CONTROL)))
@@ -838,15 +835,13 @@ impl Workspace {
 
     /// The first row of the session list: a neutral row like a session's, which opens the Welcome screen. With a
     /// project chosen a new session starts there, and the row says so; with "All projects" the Welcome screen asks.
-    fn new_session_row(&self, project: Option<String>, shown: bool, cx: &mut Context<Self>) -> Stateful<Div> {
+    fn new_session_row(&self, project: Option<String>, shown: bool, cx: &mut Context<Self>) -> gpui_kit::base::Button {
         let label = match project {
             Some(name) => format!("New session in {name}"),
             None => "New session".to_string(),
         };
-        div()
-            .id("new-claude")
-            .flex()
-            .items_center()
+        focusable("new-claude")
+            .justify_start()
             .gap(px(ROW_GAP))
             .h(px(NEW_ROW_H))
             .pl(px(10.0))
