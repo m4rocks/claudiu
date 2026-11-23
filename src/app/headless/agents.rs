@@ -524,7 +524,9 @@ fn shared_subagents_keep_their_parent_focus_permissions_and_conversation() {
         ws.store.data.settings.new_session.model = Some("opus".into());
     });
     for harness in [Harness::Claude, Harness::Codex, Harness::OpenCode] {
-        step(&mut cx, &|ws, window, cx| ws.new_session_from_home(harness, None, work.path().to_path_buf(), Some("parent".into()), None, None, window, cx));
+        step(&mut cx, &|ws, window, cx| {
+            ws.new_session_from_home(harness, None, work.path().to_path_buf(), Some("parent".into()), None, None, window, cx);
+        });
         let parent = ws.read_with(&cx, |ws, _| ws.active_id().unwrap().clone());
         let request = |tool: &str, args| Request { id: new_id(), from: format!("code:{parent}"), tool: tool.into(), args, deadline: now() + 60 };
         let spawn = request("spawn_subagent", json!({"harness": harness, "prompt": "child task"}));

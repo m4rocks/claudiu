@@ -341,6 +341,7 @@ pub struct HomeState {
     pub effort: Effort,
     pub permission_mode: Option<Permission>,
     pub prompt: Entity<TextareaState>,
+    pub attachments: crate::panels::attachments::Attachments,
     pub model_anchor: crate::panels::widgets::Anchor,
     pub model_highlight: usize,
     /// Follows `model_highlight` so keyboard moves keep the highlighted row in view.
@@ -726,6 +727,7 @@ impl Workspace {
                 effort: home_effort.unwrap_or_default(),
                 permission_mode: home_permission,
                 prompt: home_prompt,
+                attachments: Default::default(),
                 model_anchor: crate::panels::widgets::Anchor::default(),
                 model_highlight: 0,
                 model_scroll: Default::default(),

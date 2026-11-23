@@ -552,9 +552,9 @@ impl Render for Workspace {
             .on_drop(cx.listener(|ws, paths: &gpui::ExternalPaths, window, cx| {
                 let focused = ws.active.as_ref().and_then(|id| ws.live_view(id)).cloned();
                 if let (Some(view), Main::Terminals) = (focused, &ws.main) {
-                    // Over a session, files go to it as paths.
+                    // Over a session, files go to its composer or shell.
                     match view {
-                        SessionView::Thread(v) => v.update(cx, |v, cx| v.paste_paths(paths.paths(), window, cx)),
+                        SessionView::Thread(v) => v.update(cx, |v, cx| v.attach_paths(paths.paths(), window, cx)),
                         SessionView::Terminal(v) => v.update(cx, |v, cx| v.paste_paths(paths.paths(), cx)),
                     }
                     return;

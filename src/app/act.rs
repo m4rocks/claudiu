@@ -204,7 +204,8 @@ impl Workspace {
             Act::HomeSelectPermission(mode) => {
                 self.home.permission_mode = Some(mode);
             }
-            Act::HomeLaunch if !crate::panels::composer::can_send(self.home.prompt.read(cx).value().as_ref()) => {}
+            Act::HomeLaunch if !self.home.attachments.has_files()
+                && !crate::panels::composer::can_send(self.home.prompt.read(cx).value().as_ref()) => {}
             Act::HomeLaunch if self.home.creating.is_some() => {
                 // The worktree is on its way; the session starts in it as soon as git is done.
                 self.home.launch_when_created = true;
@@ -215,12 +216,15 @@ impl Workspace {
                 let effort = self.home.effort;
                 let mode_id = self.home_selected_permission().and_then(|p| p.native(chosen.harness)).map(str::to_string);
                 let text = self.home.prompt.read(cx).value().trim().to_string();
-                let prompt = (!text.is_empty()).then_some(text);
-                if prompt.is_some() {
+                let Some(prompt) = self.home.attachments.message(&text) else {
+                    cx.notify();
+                    return;
+                };
+                let model = (!chosen.id.is_empty()).then_some(chosen.id);
+                if self.new_session_from_home(chosen.harness, model, cwd, Some(prompt), Some(effort), mode_id, window, cx) {
+                    self.home.attachments = Default::default();
                     self.home.prompt.update(cx, |p, cx| p.set_value("", window, cx));
                 }
-                let model = (!chosen.id.is_empty()).then_some(chosen.id);
-                self.new_session_from_home(chosen.harness, model, cwd, prompt, Some(effort), mode_id, window, cx);
             }
             Act::ListSessions { cwd } => self.list_sessions(cwd, window.mouse_position(), window, cx),
             Act::PickUp { harness, cwd, session_id, title } => self.pick_up(harness, cwd, session_id, title, window, cx),

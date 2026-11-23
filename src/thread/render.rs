@@ -10,7 +10,7 @@ use gpui::{
     StatefulInteractiveElement, Styled, StyledImage, Window, div, linear_color_stop, linear_gradient, list, prelude::FluentBuilder, px,
 };
 use gpui_kit::assets::IconName;
-use gpui_kit::component::input::Textarea;
+use gpui_kit::component::input::{Paste, Textarea};
 use gpui_kit::component::text::{TextView, TextViewState};
 use std::collections::HashMap;
 use gpui::{AppContext, Entity};
@@ -20,7 +20,7 @@ use crate::harness::CatalogModel;
 use crate::harness::permission::Permission;
 use super::timeline::{self, RunKind};
 use crate::harness::thread::{Entry, SubagentReport, ToolCall, ToolContent, ToolStatus, parse_subagent_report};
-use crate::panels::{composer, logos, picker, scale};
+use crate::panels::{attachments, composer, logos, picker, scale};
 use crate::panels::theme::{self, hsla};
 use crate::panels::widgets::{EffortPick, Trigger, button, button_colored, button_disabled, button_disabled_leading, effort_slider, icon, icon_button, key_badge, spinner};
 use crate::visual::ui::Scope;
@@ -1175,8 +1175,18 @@ impl ThreadView {
 
         let focused = self.composer.focus_handle(cx).is_focused(window);
         let input = composer::input_area()
-            .on_mouse_down(MouseButton::Left, cx.listener(|v, _, window, cx| v.composer.update(cx, |c, cx| c.focus(window, cx))))
-            .child(Textarea::new(&self.composer).appearance(false))
+            .capture_action(cx.listener(|v, _: &Paste, _, cx| {
+                if v.attachments_enabled() && v.attachments.paste(cx) {
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+            }))
+            .when(self.attachments_enabled(), |d| {
+                d.children(self.attachments.render(|v: &mut Self| &mut v.attachments, cx))
+            })
+            .child(div()
+                .on_mouse_down(MouseButton::Left, cx.listener(|v, _, window, cx| v.focus_composer(window, cx)))
+                .child(Textarea::new(&self.composer).appearance(false)))
             .into_any_element();
         let dock = composer::render(self.composer_parts(focused, input, window.modifiers().secondary(), window, cx));
 
@@ -1327,8 +1337,12 @@ impl ThreadView {
                 .when(can_review, |b| b.on_click(cx.listener(|v, _: &ClickEvent, _, cx| v.open_review(cx))));
             extra_actions.push(review.into_any_element());
         }
+        if self.attachments_enabled() {
+            extra_actions.push(attachments::button(&self.composer, |v: &mut Self| &mut v.attachments, cx).into_any_element());
+        }
         let draft = self.composer.read(cx).value();
-        let has_text = composer::can_send(draft.as_ref());
+        let has_message = self.can_submit_draft(cx);
+        let steering_text = if self.attachments.has_files() { "" } else { draft.trim() };
         let editing = self.queue_edit.is_some();
         let idle_for_resume = !self.working && self.queue_held && self.questions.is_empty()
             && (self.waiting_messages().next().is_some() || self.handoff_after_turn.is_some());
@@ -1352,13 +1366,13 @@ impl ThreadView {
             ActionKind::Save
         } else if answering {
             ActionKind::Answer
-        } else if !has_text && self.interrupting {
+        } else if !has_message && self.interrupting {
             ActionKind::Stopping
-        } else if !has_text && self.working {
+        } else if !has_message && self.working {
             ActionKind::Interrupt
-        } else if !has_text && idle_for_resume {
+        } else if !has_message && idle_for_resume {
             ActionKind::Resume
-        } else if self.can_steer(draft.trim(), follow_up) {
+        } else if self.can_steer(steering_text, follow_up) {
             ActionKind::Steer
         } else if self.working || self.phase == super::Phase::Starting {
             ActionKind::Queue
@@ -1376,13 +1390,13 @@ impl ThreadView {
             ActionKind::Send => ("Send", IconName::ArrowUp),
         };
         let enabled = if editing {
-            has_text && self.questions.is_empty()
+            has_message && self.questions.is_empty()
         } else if self.async_answer_blocked() {
             false
         } else if answering {
-            has_text
+            has_message
         } else {
-            has_text || (self.working && !self.interrupting) || idle_for_resume
+            has_message || (self.working && !self.interrupting) || idle_for_resume
         };
         let send = if enabled {
             let (bg, fg, hover, border) = match action {
@@ -1394,7 +1408,7 @@ impl ThreadView {
             };
             button_colored("thread-send", Some(glyph), label, bg, fg, hover, border, true)
                 .on_click(cx.listener(|v, ev: &ClickEvent, window, cx| {
-                    if v.queue_edit.is_some() || composer::can_send(&v.draft(cx)) {
+                    if v.queue_edit.is_some() || v.can_submit_draft(cx) {
                         v.submit_with(ev.modifiers().secondary(), window, cx);
                     } else if v.working {
                         v.interrupt(cx);

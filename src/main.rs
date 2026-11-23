@@ -41,7 +41,7 @@ struct Assets;
 
 impl gpui::AssetSource for Assets {
     fn load(&self, path: &str) -> gpui::Result<Option<std::borrow::Cow<'static, [u8]>>> {
-        match panels::logos::load(path) {
+        match panels::logos::load(path).or_else(|| panels::attachments::asset(path)) {
             Some(svg) => Ok(Some(std::borrow::Cow::Borrowed(svg))),
             None => AppIcons.load(path),
         }

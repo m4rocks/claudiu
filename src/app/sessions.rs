@@ -59,10 +59,10 @@ impl Workspace {
 
     /// A new session in `harness` directly inside `cwd` (preserving a chosen worktree) with optional model, effort and permission mode overrides.
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn new_session_from_home(&mut self, harness: Harness, model: Option<String>, cwd: PathBuf, prompt: Option<String>, effort: Option<Effort>, permission_mode: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn new_session_from_home(&mut self, harness: Harness, model: Option<String>, cwd: PathBuf, prompt: Option<String>, effort: Option<Effort>, permission_mode: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let record_id = new_id();
         let meta = ClaudeMeta { chrome: self.store.data.settings.chrome_default, harness, ..Default::default() };
-        let Some(mut start) = self.thread_start(&record_id, &cwd, &meta, None, prompt, Starter::User, cx) else { return };
+        let Some(mut start) = self.thread_start(&record_id, &cwd, &meta, None, prompt, Starter::User, cx) else { return false };
         if let Some(mode_id) = permission_mode.filter(|m| !m.is_empty()) {
             start.mode = Some(mode_id);
         }
@@ -89,6 +89,7 @@ impl Workspace {
             claude: Some(meta),
         };
         self.start_thread(record, start, true, window, cx);
+        true
     }
 
     /// A new session in `harness`, as `new_claude_with`.

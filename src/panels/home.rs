@@ -9,9 +9,9 @@ use gpui::{
 use crate::app::{
     Act, GitPickerTarget, ProjectPickerMode, Workspace, WorkspacePicker,
 };
-use gpui_kit::component::input::Textarea;
+use gpui_kit::component::input::{Paste, Textarea};
 use crate::harness::permission::Permission;
-use crate::panels::composer;
+use crate::panels::{attachments, composer};
 use crate::panels::theme::{self, hsla};
 use gpui_kit::assets::IconName;
 use crate::panels::widgets::{
@@ -89,16 +89,24 @@ impl Workspace {
             })
             .into_any_element();
 
-        let can_send = composer::can_send(self.home.prompt.read(cx).value().as_ref());
+        let can_send = self.home.attachments.has_files() || composer::can_send(self.home.prompt.read(cx).value().as_ref());
         let start_btn = composer::send_button("home-launch", can_send)
             .when(can_send, |d| d.on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::HomeLaunch, window, cx))))
             .into_any_element();
 
         let focused = self.home.prompt.focus_handle(cx).is_focused(window);
         let input = composer::input_area()
-            .min_h(px(74.0))
-            .on_mouse_down(MouseButton::Left, cx.listener(|ws, _, window, cx| ws.home.prompt.update(cx, |p, cx| p.focus(window, cx))))
-            .child(Textarea::new(&self.home.prompt).appearance(false))
+            .capture_action(cx.listener(|ws, _: &Paste, _, cx| {
+                if ws.home.attachments.paste(cx) {
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+            }))
+            .children(self.home.attachments.render(|ws: &mut Self| &mut ws.home.attachments, cx))
+            .child(div()
+                .min_h(px(54.0))
+                .on_mouse_down(MouseButton::Left, cx.listener(|ws, _, window, cx| ws.home.prompt.update(cx, |p, cx| p.focus(window, cx))))
+                .child(Textarea::new(&self.home.prompt).appearance(false)))
             .into_any_element();
         let composer = composer::render(composer::Composer {
             lit: focused,
@@ -109,10 +117,15 @@ impl Workspace {
             project: Some(project_chip.into_any_element()),
             git: git_chip,
             extra_chips: vec![],
-            extra_actions: vec![],
+            extra_actions: vec![attachments::button(&self.home.prompt, |ws: &mut Self| &mut ws.home.attachments, cx).into_any_element()],
             send: start_btn,
         })
-        .max_w(px(680.0));
+        .max_w(px(680.0))
+        .on_drop(cx.listener(|ws, paths: &gpui::ExternalPaths, window, cx| {
+            ws.home.attachments.add_paths(paths.paths());
+            ws.home.prompt.update(cx, |p, cx| p.focus(window, cx));
+            cx.notify();
+        }));
 
         div()
             .id("home-root")

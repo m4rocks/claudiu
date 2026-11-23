@@ -308,6 +308,7 @@ pub struct ThreadView {
     questions: VecDeque<Question>,
     asks: asks::AsyncAsks,
     pub composer: Entity<TextareaState>,
+    attachments: crate::panels::attachments::Attachments,
     /// Where Up has got to among the messages sent before, and what was typed before it started.
     history_at: Option<usize>,
     draft: String,
@@ -495,6 +496,7 @@ impl ThreadView {
             questions: VecDeque::new(),
             asks: asks::AsyncAsks::default(),
             composer,
+            attachments: Default::default(),
             history_at: None,
             draft: String::new(),
             list,
@@ -942,12 +944,23 @@ impl ThreadView {
             return;
         }
         let text = self.composer.read(cx).value().trim().to_string();
-        if !crate::panels::composer::can_send(&text) {
+        if !self.can_submit_draft(cx) {
             if self.queue_held && !self.working && self.questions.is_empty() {
                 self.resume_queue(cx);
             }
             return;
         }
+        let has_attachments = self.attachments_enabled() && self.attachments.has_files();
+        let text = if has_attachments {
+            let Some(message) = self.attachments.message(&text) else {
+                cx.notify();
+                return;
+            };
+            self.attachments = Default::default();
+            message
+        } else {
+            text
+        };
         self.composer.update(cx, |c, cx| c.set_value("", window, cx));
         if self.questions.front().is_some_and(|q| q.takes_own_answer) {
             self.answer_in_own_words(&text, cx);
@@ -959,7 +972,7 @@ impl ThreadView {
         }
         self.history_at = None;
         self.picker = None;
-        if self.try_run_builtin_command(&text, cx) {
+        if !has_attachments && self.try_run_builtin_command(&text, cx) {
             self.sync_command_highlights(cx);
             return;
         }
@@ -1679,7 +1692,7 @@ impl ThreadView {
             picker_open: self.picker.is_some(),
             working: self.working,
             question: self.questions.front().map_or(0, |q| q.options.len()),
-            draft_empty: draft.trim().is_empty() || self.async_answer_blocked(),
+            draft_empty: !self.can_submit_draft(cx) || self.async_answer_blocked(),
             in_history: self.history_at.is_some(),
             escape_just_pressed: self.last_escape.is_some_and(|t| t.elapsed() < keys::DOUBLE_PRESS),
             completing: self.completion(&draft, self.composer.read(cx).selected_range().end).is_some(),
@@ -1728,6 +1741,9 @@ impl ThreadView {
             }
             keys::Key::Clear => {
                 self.history_at = None;
+                if self.attachments_enabled() {
+                    self.attachments = Default::default();
+                }
                 self.set_draft("", window, cx);
             }
             keys::Key::CycleMode => {
@@ -2146,10 +2162,20 @@ impl ThreadView {
         self.composer.update(cx, |c, cx| c.insert(text, window, cx));
     }
 
-    /// Dropped files go in as `@path` mentions, which every harness reads as files to look at.
-    pub fn paste_paths(&mut self, paths: &[PathBuf], window: &mut Window, cx: &mut Context<Self>) {
-        let mentions: Vec<String> = paths.iter().map(|p| format!("@{}", p.to_string_lossy())).collect();
-        self.paste_text(&format!("{} ", mentions.join(" ")), window, cx);
+    // Queue edits and agent questions use the textarea for a separate, text-only input.
+    fn attachments_enabled(&self) -> bool {
+        self.queue_edit.is_none() && self.questions.is_empty() && self.async_answer_id().is_none()
+    }
+
+    fn can_submit_draft(&self, cx: &App) -> bool {
+        crate::panels::composer::can_send(self.composer.read(cx).value().as_ref())
+            || (self.attachments_enabled() && self.attachments.has_files())
+    }
+
+    pub fn attach_paths(&mut self, paths: &[PathBuf], window: &mut Window, cx: &mut Context<Self>) {
+        self.attachments.add_paths(paths);
+        self.focus_composer(window, cx);
+        cx.notify();
     }
 
     /// Editor mode's `@path#L12-30: comment`, after whatever the composer holds.
@@ -2255,6 +2281,58 @@ mod tests {
             options: vec![], prompt: None, prior_entries: vec![],
             server: Some(("definitely-not-a-real-program-m4code".into(), vec![])),
         }
+    }
+
+    #[gpui::test]
+    fn composer_pastes_files_and_images_and_queues_an_attachment_only_message(cx: &mut gpui::TestAppContext) {
+        use gpui::{ClipboardEntry, ClipboardItem, ExternalPaths, Image, ImageFormat};
+        use gpui_kit::component::input::Paste;
+
+        let (data, _) = crate::datadir::use_throwaway_folders();
+        cx.update(gpui_kit::init);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("task notes.txt");
+        std::fs::write(&path, "notes").unwrap();
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            super::ThreadView::new(test_start(dir.path().into(), Harness::Codex), window, cx)
+        });
+        let paste = |cx: &mut gpui::VisualTestContext, item| {
+            cx.update(|window, app| {
+                view.update(app, |v, cx| v.focus_composer(window, cx));
+                app.write_to_clipboard(item);
+            });
+            cx.dispatch_action(Paste);
+        };
+
+        paste(cx, ClipboardItem::new_string("ordinary text".into()));
+        cx.update(|window, app| view.update(app, |v, cx| {
+            assert_eq!(v.draft(cx), "ordinary text");
+            assert!(!v.attachments.has_files());
+            v.set_draft("", window, cx);
+        }));
+
+        paste(cx, ClipboardItem { entries: vec![
+            ClipboardEntry::ExternalPaths(ExternalPaths([path.clone()].into_iter().collect())),
+        ] });
+        let image = Image::from_bytes(ImageFormat::Png, include_bytes!("../../assets/m4code.png").to_vec());
+        paste(cx, ClipboardItem::new_image(&image));
+        cx.update(|_, app| view.update(app, |v, cx| {
+            assert!(v.draft(cx).is_empty());
+            assert!(v.can_submit_draft(cx));
+            v.phase = super::Phase::Starting;
+        }));
+        cx.simulate_keystrokes("enter");
+        cx.update(|_, app| view.update(app, |v, _| {
+            assert!(!v.attachments.has_files());
+            let message = &v.queue.front().unwrap().text;
+            let paths = message.lines().skip(1).map(|line| {
+                serde_json::from_str::<std::path::PathBuf>(line.strip_prefix("- ").unwrap()).unwrap()
+            }).collect::<Vec<_>>();
+            assert_eq!(paths.len(), 2);
+            assert_eq!(paths[0], path);
+            assert_eq!(paths[1].parent().unwrap(), data.join("attachments"));
+            assert_eq!(std::fs::read(&paths[1]).unwrap(), image.bytes);
+        }));
     }
 
     #[gpui::test]
