@@ -65,9 +65,11 @@ struct ProviderShell {
 struct BackgroundToolTask {
     id: String,
     label: String,
+    log_path: Option<PathBuf>,
 }
 
 const BG_TASK_PREFIX: &str = "Tool is running as a background task with task id:";
+const BG_TASK_LOG_PREFIX: &str = "Task logs are available at:";
 
 fn tool_output_texts(call: &crate::harness::thread::ToolCall) -> Vec<&str> {
     let mut texts = Vec::new();
@@ -85,12 +87,19 @@ fn tool_output_texts(call: &crate::harness::thread::ToolCall) -> Vec<&str> {
     texts
 }
 
-fn background_task_from_tool(call: &crate::harness::thread::ToolCall) -> Option<(String, String)> {
-    let task_id = tool_output_texts(call).into_iter().find_map(|text| {
+fn background_task_from_tool(call: &crate::harness::thread::ToolCall) -> Option<(String, String, Option<PathBuf>)> {
+    let texts = tool_output_texts(call);
+    let task_id = texts.iter().find_map(|text| {
         let rest = text.split_once(BG_TASK_PREFIX)?.1.trim_start();
         let id = rest.split_whitespace().next()?.trim_matches(|c: char| matches!(c, '"' | '\'' | ',' | '.'));
         (!id.is_empty()).then(|| id.to_string())
     })?;
+    let log_path = texts.iter().find_map(|text| {
+        let rest = text.split_once(BG_TASK_LOG_PREFIX)?.1.trim_start();
+        let raw = rest.lines().next()?.trim();
+        let path = raw.strip_prefix("file://").unwrap_or(raw);
+        (!path.is_empty()).then(|| PathBuf::from(path))
+    });
     let label = call
         .details
         .command
@@ -100,7 +109,7 @@ fn background_task_from_tool(call: &crate::harness::thread::ToolCall) -> Option<
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "Background task".into());
-    Some((task_id, label))
+    Some((task_id, label, log_path))
 }
 
 fn settle_running_tools(entries: &mut [Entry]) -> Option<usize> {
@@ -213,7 +222,7 @@ pub(super) fn active_slash_token(draft: &str, cursor: usize) -> Option<(usize, u
         .rev()
         .find(|(_, c)| c.is_whitespace())
         .map_or(0, |(i, c)| i + c.len_utf8());
-    if !draft[start..].starts_with('/') {
+    if cur <= start || !draft[start..].starts_with('/') {
         return None;
     }
     let after = &draft[cur..];
@@ -222,7 +231,7 @@ pub(super) fn active_slash_token(draft: &str, cursor: usize) -> Option<(usize, u
             .char_indices()
             .find(|(_, c)| c.is_whitespace())
             .map_or(after.len(), |(i, _)| i);
-    let typed = &draft[start + 1..cur];
+    let typed = draft.get(start + 1..cur)?;
     Some((start, end, typed))
 }
 
@@ -928,10 +937,10 @@ impl ThreadView {
                             if let Some(raw) = update.get("rawOutput").and_then(Value::as_str) {
                                 texts.push(raw.to_string());
                             }
-                            if let Some((task_id, label)) = started
+                            if let Some((task_id, label, log_path)) = started
                                 && self.seen_background_tasks.insert(task_id.clone())
                             {
-                                self.background_tasks.push(BackgroundToolTask { id: task_id, label });
+                                self.background_tasks.push(BackgroundToolTask { id: task_id, label, log_path });
                             }
                             for text in &texts {
                                 self.retire_finished_background_tasks(text);
@@ -1061,8 +1070,7 @@ impl ThreadView {
                         highlight: 0,
                         multi_select,
                         selected: BTreeSet::new(),
-                        // A field's answer must be one of its schema's values.
-                        takes_own_answer: false,
+                        takes_own_answer: true,
                     });
                 } else if let Some(connection) = &self.connection {
                     connection.respond(id, acp::elicitation_decline());
@@ -1090,6 +1098,7 @@ impl ThreadView {
         self.phase = Phase::Ended;
         self.settle_running_tools();
         self.background_tasks.clear();
+        self.shell_output = None;
         self.preserve_handoff_message();
         self.cancel_questions();
         self.asks = Default::default();
@@ -1112,9 +1121,32 @@ impl ThreadView {
             || text.contains("All your subagents and background tasks have been stopped")
         {
             self.background_tasks.clear();
-            return;
+        } else {
+            self.background_tasks.retain(|task| !text_retires_background_task(text, &task.id));
         }
-        self.background_tasks.retain(|task| !text_retires_background_task(text, &task.id));
+        if self.shell_output.as_ref().is_some_and(|out| {
+            !self.provider_shells.iter().any(|s| s.id == out.task_id)
+                && !self.background_tasks.iter().any(|t| t.id == out.task_id)
+        }) {
+            self.shell_output = None;
+        }
+    }
+
+    fn open_background_task_output(&mut self, task_id: &str, cx: &mut Context<Self>) {
+        let Some(path) = self.background_tasks.iter().find(|t| t.id == task_id).and_then(|t| t.log_path.clone()) else {
+            return;
+        };
+        let text = match std::fs::read(&path) {
+            Ok(bytes) if bytes.is_empty() => "The task has produced no output yet.".into(),
+            Ok(bytes) => {
+                const LIMIT: usize = 16 * 1024;
+                let tail = if bytes.len() > LIMIT { &bytes[bytes.len() - LIMIT..] } else { &bytes[..] };
+                String::from_utf8_lossy(tail).into_owned()
+            }
+            Err(_) => "Live output is unavailable. Open the finished command to see its output.".into(),
+        };
+        self.shell_output = Some(ShellOutput { task_id: task_id.to_string(), text, loading: false });
+        cx.notify();
     }
 
     fn background_shell_action(&mut self, task_id: &str, stop: bool, cx: &mut Context<Self>) {
@@ -1311,7 +1343,7 @@ impl ThreadView {
     }
 
     fn native_steering(&self) -> bool {
-        matches!(self.harness, Harness::Codex | Harness::OpenCode)
+        self.harness != Harness::Claude
             && self.agent_meta.pointer("/steering/supported").and_then(Value::as_bool) == Some(true)
     }
 
@@ -1855,27 +1887,37 @@ impl ThreadView {
                 }
             }
             QuestionReply::Elicitation { id, field, kind, mut answers, mut remaining } => {
-                let ids: Vec<&str> = chosen.iter().map(|o| o.id.as_str()).collect();
-                answers.insert(field, kind.to_json_values(&ids));
-                if let Some(next) = remaining.pop_front() {
-                    let multi_select = next.kind == acp::ElicitationKind::MultiChoice;
-                    let options = next
-                        .options
-                        .into_iter()
-                        .map(|o| QuestionOption { id: o.value, name: o.label, description: o.description, kind: "allow_once".into() })
-                        .collect();
-                    self.questions.push_front(Question {
-                        id: Uuid::new_v4(),
-                        reply: QuestionReply::Elicitation { id, field: next.field, kind: next.kind, answers, remaining },
-                        title: next.title,
-                        options,
-                        highlight: 0,
-                        multi_select,
-                        selected: BTreeSet::new(),
-                        takes_own_answer: false,
-                    });
-                } else if let Some(c) = &self.connection {
-                    c.respond(id, acp::elicitation_accept(answers));
+                if extra.is_some() {
+                    if let Some(c) = &self.connection {
+                        c.respond(id, acp::elicitation_decline());
+                    }
+                    let text = joined();
+                    if !text.is_empty() {
+                        self.queue_quoted_answer(&q.title, &text, cx);
+                    }
+                } else {
+                    let ids: Vec<&str> = chosen.iter().map(|o| o.id.as_str()).collect();
+                    answers.insert(field, kind.to_json_values(&ids));
+                    if let Some(next) = remaining.pop_front() {
+                        let multi_select = next.kind == acp::ElicitationKind::MultiChoice;
+                        let options = next
+                            .options
+                            .into_iter()
+                            .map(|o| QuestionOption { id: o.value, name: o.label, description: o.description, kind: "allow_once".into() })
+                            .collect();
+                        self.questions.push_front(Question {
+                            id: Uuid::new_v4(),
+                            reply: QuestionReply::Elicitation { id, field: next.field, kind: next.kind, answers, remaining },
+                            title: next.title,
+                            options,
+                            highlight: 0,
+                            multi_select,
+                            selected: BTreeSet::new(),
+                            takes_own_answer: true,
+                        });
+                    } else if let Some(c) = &self.connection {
+                        c.respond(id, acp::elicitation_accept(answers));
+                    }
                 }
             }
             QuestionReply::Bridge(req_id) => crate::mcp::bridge::respond(&req_id, true, joined()),
@@ -1917,7 +1959,7 @@ impl ThreadView {
                             highlight: 0,
                             multi_select,
                             selected: BTreeSet::new(),
-                            takes_own_answer: false,
+                            takes_own_answer: true,
                         });
                     } else if let Some(c) = &self.connection {
                         c.respond(id, acp::elicitation_accept(answers));
@@ -1956,11 +1998,28 @@ impl ThreadView {
             QuestionReply::AsyncAsk { remaining, replies } => {
                 self.finish_async_ask(q.title, remaining, replies, Some(text.to_string()), cx);
             }
-            // Never marked as taking the user's own words (`takes_own_answer`).
-            QuestionReply::Elicitation { .. } => {}
+            QuestionReply::Elicitation { id, .. } => {
+                if let Some(c) = &self.connection {
+                    c.respond(id, acp::elicitation_decline());
+                }
+                self.queue_quoted_answer(&q.title, text, cx);
+            }
         }
         self.send_next(cx);
         cx.notify();
+    }
+
+    fn queue_quoted_answer(&mut self, title: &str, answer: &str, cx: &mut Context<Self>) {
+        let quoted = title.lines().map(|line| format!("> {line}")).collect::<Vec<_>>().join("\n");
+        let mut item = Queued::new(format!("{quoted}\n\n{answer}"), true);
+        item.ahead = true;
+        if self.native_steering() && self.can_steer(&item.text, crate::store::FollowUp::Steer) {
+            self.steer(item, cx);
+        } else {
+            let at = self.queue.iter().take_while(|entry| entry.ahead).count();
+            self.queue.insert(at, item);
+            self.queue_changed();
+        }
     }
 
     /// Move the open question's highlight to option `index`, as the mouse does.
@@ -4114,11 +4173,76 @@ mod tests {
     #[test]
     fn active_slash_token_triggers_at_start_and_mid_message_but_skips_paths_and_urls() {
         assert_eq!(super::active_slash_token("/com", 4), Some((0, 4, "com")));
+        assert_eq!(super::active_slash_token("/com", 1), Some((0, 4, "")));
+        assert_eq!(super::active_slash_token("/com", 0), None, "cursor before the leading slash must not panic");
         assert_eq!(super::active_slash_token("please run /com", 15), Some((11, 15, "com")));
+        assert_eq!(super::active_slash_token("please run /com", 11), None, "cursor before a mid-message slash must not panic");
         assert_eq!(super::active_slash_token("please /comp now", 12), Some((7, 12, "comp")));
         assert_eq!(super::active_slash_token("check src/thread/mod.rs", 23), None);
         assert_eq!(super::active_slash_token("see https://example.com", 23), None);
         assert_eq!(super::active_slash_token("hello world", 11), None);
+    }
+
+    #[gpui::test]
+    fn antigravity_elicitation_accepts_free_text_and_background_task_reads_log_output(cx: &mut gpui::TestAppContext) {
+        use std::io::{BufRead, BufReader};
+        use serde_json::{Value, json};
+        use super::{Connection, Event, Phase, ThreadView};
+
+        cx.update(gpui_kit::init);
+        let dir = tempfile::tempdir().unwrap();
+        let log_file = dir.path().join("task.log");
+        std::fs::write(&log_file, "line 1\nline 2\n").unwrap();
+        let (from_agent, _keep_open) = std::io::pipe().unwrap();
+        let (from_client, to_agent) = std::io::pipe().unwrap();
+        let (tx, _events) = futures::channel::mpsc::unbounded();
+        let connection = Connection::connect(from_agent, to_agent, None::<std::io::Empty>, tx);
+        let (view, cx) = cx.add_window_view(|window, cx| ThreadView::new(test_start(dir.path().into(), Harness::Antigravity), window, cx));
+        cx.update(|window, app| view.update(app, |v, cx| {
+            v.connection = Some(std::rc::Rc::new(connection));
+            v.session_id = Some("agy-1".into());
+            v.phase = Phase::Ready;
+            v.working = true;
+            v.agent_meta = json!({"steering": {"supported": true}});
+            assert!(v.native_steering(), "Antigravity uses native steering when advertised");
+
+            // Free-text answer on an ACP elicitation declines the form and delivers the typed answer.
+            v.on_event(Event::Elicitation { id: json!("agy-q"), params: json!({
+                "mode": "form",
+                "message": "Pick a color",
+                "requestedSchema": {
+                    "type": "object",
+                    "properties": {
+                        "color": { "type": "string", "enum": ["red", "blue"] }
+                    }
+                }
+            }) }, cx);
+            assert!(v.active_question().is_some_and(|q| q.takes_own_answer));
+            v.set_draft("green", window, cx);
+            v.submit_with(false, window, cx);
+            assert!(v.active_question().is_none());
+
+            // Background task parses log_path and opens log tail into shell_output.
+            v.on_event(Event::Update(json!({
+                "sessionUpdate": "tool_call",
+                "toolCallId": "bg-1",
+                "title": "Run build",
+                "kind": "execute",
+                "status": "completed",
+                "rawInput": { "command": "cargo build" },
+                "rawOutput": format!("Tool is running as a background task with task id: conv/task-7\nTask logs are available at: file://{}", log_file.display())
+            })), cx);
+            assert_eq!(v.background_tasks.len(), 1);
+            assert_eq!(v.background_tasks[0].log_path.as_deref(), Some(log_file.as_path()));
+            v.open_background_task_output("conv/task-7", cx);
+            assert_eq!(v.shell_output.as_ref().map(|o| o.text.as_str()), Some("line 1\nline 2\n"));
+        }));
+        let mut wire = BufReader::new(from_client).lines();
+        let decline: Value = serde_json::from_str(&wire.next().unwrap().unwrap()).unwrap();
+        assert_eq!(decline, json!({"jsonrpc": "2.0", "id": "agy-q", "result": {"action": "decline"}}));
+        let steer: Value = serde_json::from_str(&wire.next().unwrap().unwrap()).unwrap();
+        assert_eq!(steer["method"], "_session/steering");
+        assert_eq!(steer["params"]["prompt"][0]["text"], "> Pick a color\n\ngreen");
     }
 
     #[test]

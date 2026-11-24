@@ -334,7 +334,6 @@ async function askQuestions(session, input, options) {
       ...(o.description ? { description: o.description } : {}),
       kind: "allow_once",
     }));
-    if (!multiSelect) choices.push({ optionId: "skip", name: "Skip", kind: "reject_once" });
     const answer = await ask("session/request_permission", {
       _meta: { m4code: meta },
       sessionId: session.id,

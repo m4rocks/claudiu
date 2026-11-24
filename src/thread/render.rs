@@ -1031,6 +1031,8 @@ impl ThreadView {
             );
         }
         for (i, task) in self.background_tasks.iter().enumerate() {
+            let task_id = task.id.clone();
+            let has_log = task.log_path.is_some();
             pills = pills.child(
                 div()
                     .flex()
@@ -1045,7 +1047,13 @@ impl ThreadView {
                     .text_size(scale::px(11.5))
                     .text_color(hsla(theme::TEXT_DIM))
                     .child(spinner(format!("thread-bg-async-task-{i}"), 10.0))
-                    .child(div().max_w(px(220.0)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(task.label.clone())),
+                    .child(div().max_w(px(220.0)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(task.label.clone()))
+                    .when(has_log, |pill| {
+                        pill.child(
+                            button(SharedString::from(format!("bg-task-output-{i}")), "Output", false)
+                                .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| v.open_background_task_output(&task_id, cx))),
+                        )
+                    }),
             );
         }
         for (i, name) in bg_tools.into_iter().enumerate() {
@@ -1071,10 +1079,20 @@ impl ThreadView {
             let stop_id = shell.id.clone();
             let stopping = shell.stopping;
             pills = pills.child(
-                div().flex().items_center().gap(px(6.0)).p(px(3.0))
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(5.0))
+                    .px(px(7.0))
+                    .py(px(2.0))
+                    .rounded(px(5.0))
+                    .bg(hsla(theme::PANEL_BG))
+                    .border_1()
+                    .border_color(hsla(theme::PANEL_BORDER))
+                    .text_size(scale::px(11.5))
+                    .text_color(hsla(theme::TEXT_DIM))
                     .child(spinner(format!("provider-shell-{}", shell.id), 10.0))
-                    .child(div().max_w(px(220.0)).overflow_hidden().text_ellipsis().whitespace_nowrap()
-                        .text_size(scale::px(11.5)).child(shell.label.clone()))
+                    .child(div().max_w(px(220.0)).overflow_hidden().text_ellipsis().whitespace_nowrap().child(shell.label.clone()))
                     .child(button(SharedString::from(format!("shell-output-{}", shell.id)), "Output", false)
                         .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| v.background_shell_action(&read_id, false, cx))))
                     .child(if stopping {
