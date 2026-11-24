@@ -18,6 +18,7 @@ pub use render::short_effort_label;
 
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::future::Future;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Instant;
@@ -32,6 +33,7 @@ use self::queue::Queued;
 
 use crate::harness::acp::{self, Connection, Event, Launch};
 use crate::harness::codex;
+use crate::harness::defaults::{self, Starter};
 use crate::harness::thread::{Entry, Thread, ToolStatus};
 use crate::harness::permission::{self, Permission};
 use crate::harness::{CatalogModel, Harness, Reopen};
@@ -154,6 +156,7 @@ pub enum ThreadEvent {
     UsageLimits(Harness, crate::store::UsageLimits),
     /// A file a tool acted on was clicked: its path and line (1-based).
     OpenPath(String, Option<usize>),
+    ReconnectPermission(Permission),
     /// The user picked a model served by another harness and sent a message: dynamically hand off this chat.
     /// `by_agent` when the agent asked for it (set_model): its `message` is then the agent's, not the user's.
     Handoff { to: Harness, model: Option<String>, message: String, effort: Option<String>, by_agent: bool },
@@ -238,6 +241,20 @@ pub(super) fn slash_command_spans(draft: &str) -> Vec<(std::ops::Range<usize>, &
 
 type InitialOption = (&'static str, String, String);
 
+pub(crate) struct ComposerState {
+    text: String,
+    attachments: crate::panels::attachments::Attachments,
+    permission: Option<Permission>,
+    git: Option<GitChip>,
+}
+
+#[cfg(test)]
+impl ComposerState {
+    pub(crate) fn has_attachments(&self) -> bool {
+        self.attachments.has_files()
+    }
+}
+
 /// How to bring a session up.
 pub struct Start {
     /// m4code's session record id, used to persist conversation entries across restarts.
@@ -256,9 +273,9 @@ pub struct Start {
     /// `_meta` for `session/new` and `session/load`.
     pub meta: Value,
     pub mcp_servers: Vec<Value>,
-    /// Applied once a new session is open: the permission mode, and config options by category (`model`,
-    /// `thought_level`) with the value wanted.
-    pub mode: Option<String>,
+    pub permission: Option<Permission>,
+    pub starter: Starter,
+    /// Options to apply before the first prompt (`model`, `thought_level`).
     pub options: Vec<(&'static str, String)>,
     /// Sent as soon as the session is ready.
     pub prompt: Option<String>,
@@ -416,6 +433,9 @@ pub struct ThreadView {
     /// Ctrl+O: every tool's output in full.
     pub detail: bool,
     pub(crate) subagent_edits: Option<bool>,
+    pub(super) initial_permission: Option<Permission>,
+    antigravity_full_access: bool,
+    auto_fallback: bool,
     /// Each message's parsed markdown, by entry. The chat keeps it rather than the frame: a row that scrolls out of
     /// the list would otherwise drop it and parse again when it comes back, and a long message (over 4 KB) parses
     /// in the background, so it would draw empty for a frame and then grow, moving everything around it.
@@ -625,6 +645,9 @@ impl ThreadView {
             rows,
             detail: false,
             subagent_edits: None,
+            initial_permission: start.permission,
+            antigravity_full_access: false,
+            auto_fallback: false,
             markdown: HashMap::new(),
             user_md_len: HashMap::new(),
             agent_cache: HashMap::new(),
@@ -679,43 +702,44 @@ impl ThreadView {
     }
 
     fn start(&mut self, start: Start, cx: &mut Context<Self>) {
-        let (events, mut incoming) = futures::channel::mpsc::unbounded();
-        self.events = Some(events.clone());
         let harness = start.harness;
         cx.spawn(async move |this, cx| {
-            // Finding the server may read the login shell's PATH, so it is off the UI thread.
-            let cwd = start.cwd.clone();
-            let env = start.env.clone();
-            let server = start.server.clone();
-            let codex_model = (harness == Harness::Codex)
-                .then(|| start.options.iter().find(|(k, _)| *k == "model").map(|(_, v)| v.clone()))
-                .flatten()
-                .filter(|m| !m.is_empty());
-            let started = cx
-                .background_executor()
-                .spawn(async move {
-                    let (program, mut args) = match server {
-                        Some(s) => s,
-                        None => (harness.adapter().server)()?,
-                    };
-                    if let Some(model) = codex_model {
-                        args.push("-c".into());
-                        args.push(format!("model={model:?}"));
+            let mut full_access = harness == Harness::Antigravity
+                && start.permission == Some(Permission::FullAccess)
+                && start.starter != Starter::OtherSession;
+            let (connection, mut incoming, opened) = loop {
+                let (events, incoming) = futures::channel::mpsc::unbounded();
+                let launched = launch_session(&start, full_access, events.clone(), cx).await;
+                let connection = match launched {
+                    Ok(c) => Rc::new(c),
+                    Err(why) => {
+                        let _ = this.update(cx, |v, cx| v.ended(Some(why), cx));
+                        return;
                     }
-                    Connection::start(&Launch { program, args, cwd, env }, events)
-                })
-                .await;
-            let connection = match started {
-                Ok(c) => Rc::new(c),
-                Err(why) => {
-                    let _ = this.update(cx, |v, cx| v.ended(Some(why), cx));
+                };
+                if this.update(cx, |v, _| {
+                    v.connection = Some(connection.clone());
+                    v.events = Some(events);
+                }).is_err() {
                     return;
                 }
+                let opened = open(&connection, harness, &start).await;
+                if harness == Harness::Antigravity && !full_access && start.permission == Some(Permission::Auto)
+                    && start.starter != Starter::OtherSession && let Ok(session) = &opened
+                {
+                    let mut thread = Thread::default();
+                    thread.apply_session(&session.result);
+                    if Permission::Auto.listed(harness, &thread.modes).is_none()
+                        && Permission::FullAccess.listed(harness, &thread.modes).is_some()
+                    {
+                        connection.terminate();
+                        full_access = true;
+                        continue;
+                    }
+                }
+                break (connection, incoming, opened);
             };
-            if this.update(cx, |v, _| v.connection = Some(connection.clone())).is_err() {
-                return;
-            }
-            let opened = open(&connection, harness, &start).await;
+            let _ = this.update(cx, |v, _| v.antigravity_full_access = full_access);
             let Some((sid, mut initial_options)) = this.update(cx, |v, cx| v.opened(opened, &start, cx)).ok().flatten() else {
                 return;
             };
@@ -756,9 +780,46 @@ impl ThreadView {
                     return;
                 }
             }
+            if let Some(wanted) = start.permission {
+                let Ok((chosen, mode, config, current, reported_modes)) = this.update(cx, |v, _| {
+                    let offered = v.permissions();
+                    let chosen = if full_access {
+                        Some(Permission::FullAccess)
+                    } else {
+                        defaults::initial_permission(wanted, &offered, start.starter)
+                    };
+                    let mode = chosen.and_then(|p| p.listed(harness, &v.thread.modes));
+                    let config = v.thread.option("mode").map(|opt| opt.id.clone());
+                    (chosen, mode, config, v.thread.mode.clone(), !v.thread.modes.is_empty())
+                }) else { return };
+                let applied = match mode {
+                    Some(mode) if current.as_deref() == Some(mode) => Ok(None),
+                    Some(mode) => request_mode(&connection, &sid, mode, config.as_deref()).await.map(Some),
+                    None => Err(format!("{} couldn't apply {} permissions.", harness.name(), wanted.label())),
+                };
+                match applied {
+                    Ok(result) => {
+                        while let Ok(event) = incoming.try_recv() {
+                            if this.update(cx, |v, cx| v.on_event(event, cx)).is_err() { return; }
+                        }
+                        let _ = this.update(cx, |v, _| {
+                            if let Some(result) = result { v.thread.apply_session(&result); }
+                            v.thread.mode = mode.map(String::from);
+                            v.auto_fallback = wanted == Permission::Auto && chosen == Some(Permission::FullAccess);
+                        });
+                    }
+                    Err(why) if reported_modes || start.starter == Starter::Handoff || start.starter == Starter::OtherSession || full_access => {
+                        connection.terminate();
+                        let _ = this.update(cx, |v, cx| v.ended(Some(why), cx));
+                        return;
+                    }
+                    Err(_) => {}
+                }
+            }
             let ready = this.update(cx, |v, cx| {
                 if v.phase != Phase::Starting { return false; }
                 v.phase = Phase::Ready;
+                v.initial_permission = None;
                 v.cached_replay = false;
                 v.settle_opencode_shells();
                 cx.emit(ThreadEvent::Ready(v.session_id.clone().unwrap_or_default()));
@@ -804,12 +865,6 @@ impl ThreadView {
         if self.session_id.as_deref() != Some(&session_id) {
             self.session_id = Some(session_id.clone());
             cx.emit(ThreadEvent::SessionId(session_id.clone()));
-        }
-        // A resumed session keeps the mode the harness restores; its options are the model and effort picked in it.
-        if (start.session_id.is_none() || self.subagent_edits.is_some())
-            && let Some(mode) = start.mode.as_deref().and_then(|m| self.listed_or_safer(m))
-        {
-            self.set_mode(mode, cx);
         }
         let mut initial_options = Vec::new();
         for (category, value) in &start.options {
@@ -1829,32 +1884,96 @@ impl ThreadView {
         self.answer(reject, cx);
     }
 
-    /// `wanted` when the session lists it. Otherwise, for one of the four modes, the nearest safer one it lists: the
-    /// mode came from the cached list, and an account can have fewer modes than that (Claude's Auto).
-    fn listed_or_safer(&self, wanted: &str) -> Option<String> {
-        if self.thread.modes.iter().any(|(id, _)| id == wanted) {
-            return Some(wanted.to_string());
-        }
-        let offered = permission::offered(self.harness, &self.thread.modes);
-        Permission::of(self.harness, wanted)?.or_safer(&offered)?.native(self.harness).map(String::from)
+    pub(crate) fn permissions(&self) -> Vec<Permission> {
+        if self.subagent_edits.is_some() { return Vec::new(); }
+        permission::offered(self.harness, &self.thread.modes)
     }
 
-    /// The universal modes this session offers, each with its harness's mode id, least access first.
-    pub(crate) fn permissions(&self) -> Vec<(Permission, &'static str)> {
-        permission::offered(self.harness, &self.thread.modes).into_iter().filter_map(|p| Some((p, p.native(self.harness)?))).collect()
+    pub(crate) fn permission(&self) -> Option<Permission> {
+        if self.antigravity_full_access {
+            Some(Permission::FullAccess)
+        } else {
+            Permission::of(self.harness, self.thread.mode.as_deref()?)
+        }
     }
 
-    pub(crate) fn set_mode(&mut self, mode: String, cx: &mut Context<Self>) {
-        let (Some(c), Some(s)) = (self.connection.clone(), self.session_id.clone()) else { return };
-        // The agent confirms with `current_mode_update`; showing it at once keeps Shift+Tab presses in step.
-        self.thread.mode = Some(mode.clone());
-        if let Some(opt) = self.thread.option("mode") {
-            let id = opt.id.clone();
-            self.set_option(id, mode.clone(), cx);
+    pub(crate) fn handoff_permission(&self) -> Option<Permission> {
+        match self.permission()? {
+            Permission::FullAccess if self.auto_fallback => Some(Permission::Auto),
+            permission => Some(permission),
         }
-        let reply = c.request("session/set_mode", json!({"sessionId": s, "modeId": mode}));
-        cx.spawn(async move |_, _| drop(reply.await)).detach();
+    }
+
+    pub(crate) fn composer_state(&self, cx: &App) -> ComposerState {
+        ComposerState {
+            text: self.composer.read(cx).value().to_string(),
+            attachments: self.attachments.clone(),
+            permission: self.permission(),
+            git: self.git.clone(),
+        }
+    }
+
+    pub(crate) fn restore_composer(&mut self, state: ComposerState, window: &mut Window, cx: &mut Context<Self>) {
+        self.composer.update(cx, |composer, cx| composer.set_value(state.text, window, cx));
+        self.attachments = state.attachments;
+        if self.phase == Phase::Starting {
+            self.initial_permission = self.initial_permission.or(state.permission);
+            self.git = state.git;
+        }
         cx.notify();
+    }
+
+    pub(crate) fn permission_for_relaunch(&self) -> Option<Permission> {
+        let permission = self.permission()?;
+        if self.antigravity_full_access || permission.native(self.harness) == self.thread.mode.as_deref() {
+            self.handoff_permission()
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn antigravity_full_access(&self) -> bool {
+        self.antigravity_full_access
+    }
+
+    pub(crate) fn permission_error(&mut self, why: String, cx: &mut Context<Self>) {
+        let at = self.thread.notice(why, true);
+        self.remeasure(at);
+        cx.notify();
+    }
+
+    pub(crate) fn set_permission(&mut self, wanted: Permission, cx: &mut Context<Self>) {
+        if self.phase != Phase::Ready || self.subagent_edits.is_some() { return; }
+        let Some(permission) = wanted.resolve(&self.permissions()) else { return };
+        let Some(mode) = permission.listed(self.harness, &self.thread.modes) else { return };
+        let (Some(connection), Some(session)) = (self.connection.clone(), self.session_id.clone()) else { return };
+        if self.harness == Harness::Antigravity && self.antigravity_full_access != (permission == Permission::FullAccess) {
+            if self.working || self.compaction.running || self.is_waiting() || self.has_background_work() {
+                self.permission_error("Wait for Antigravity to finish its current work before reconnecting.".into(), cx);
+            } else {
+                cx.emit(ThreadEvent::ReconnectPermission(wanted));
+            }
+            return;
+        }
+        let auto_fallback = wanted == Permission::Auto && permission == Permission::FullAccess;
+        if self.thread.mode.as_deref() == Some(mode) {
+            self.auto_fallback = auto_fallback;
+            return;
+        }
+        let config = self.thread.option("mode").map(|opt| opt.id.clone());
+        let reply = request_mode(&connection, &session, mode, config.as_deref());
+        cx.spawn(async move |this, cx| {
+            let result = reply.await;
+            let _ = this.update(cx, |v, cx| match result {
+                Ok(result) => {
+                    v.thread.apply_session(&result);
+                    v.thread.mode = Some(mode.into());
+                    v.auto_fallback = auto_fallback;
+                    cx.notify();
+                }
+                Err(why) => v.permission_error(why, cx),
+            });
+        }).detach();
     }
 
     pub(crate) fn set_option(&mut self, id: String, value: String, cx: &mut Context<Self>) {
@@ -1952,23 +2071,25 @@ impl ThreadView {
         {
             match ev.keystroke.key.as_str() {
                 "up" | "down" => {
-                    let count = self.permissions().len();
-                    if count > 0 {
-                        let cur = self.mode_highlight.min(count - 1);
-                        self.mode_highlight = if ev.keystroke.key == "up" {
-                            if cur == 0 { count - 1 } else { cur - 1 }
+                    let offered = self.permissions();
+                    let index = (1..=Permission::ALL.len())
+                        .map(|step| if ev.keystroke.key == "up" {
+                            (self.mode_highlight + Permission::ALL.len() - step) % Permission::ALL.len()
                         } else {
-                            (cur + 1) % count
-                        };
+                            (self.mode_highlight + step) % Permission::ALL.len()
+                        })
+                        .find(|&i| offered.contains(&Permission::ALL[i]));
+                    if let Some(index) = index {
+                        self.mode_highlight = index;
                     }
                     cx.stop_propagation();
                     cx.notify();
                     return;
                 }
                 "enter" => {
-                    let offered = self.permissions();
-                    if let Some((_, mode_id)) = offered.get(self.mode_highlight.min(offered.len().saturating_sub(1))) {
-                        self.set_mode(mode_id.to_string(), cx);
+                    let mode = Permission::ALL[self.mode_highlight];
+                    if self.permissions().contains(&mode) {
+                        self.set_permission(mode, cx);
                         self.close_picker(window, cx);
                     }
                     cx.stop_propagation();
@@ -2066,8 +2187,8 @@ impl ThreadView {
                 self.set_draft("", window, cx);
             }
             keys::Key::CycleMode => {
-                if let Some(next) = permission::next(self.harness, &self.thread.modes, self.thread.mode.as_deref()) {
-                    self.set_mode(next.to_string(), cx);
+                if let Some(next) = permission::next(&self.permissions(), self.permission()) {
+                    self.set_permission(next, cx);
                 }
             }
             keys::Key::Older | keys::Key::Newer => self.walk_history(key == keys::Key::Older, &draft, window, cx),
@@ -2631,6 +2752,41 @@ struct Opened {
     replayed: bool,
 }
 
+async fn launch_session(start: &Start, full_access: bool, events: futures::channel::mpsc::UnboundedSender<Event>, cx: &gpui::AsyncApp) -> Result<Connection, String> {
+    let cwd = start.cwd.clone();
+    let env = start.env.clone();
+    let server = start.server.clone();
+    let harness = start.harness;
+    let codex_model = (harness == Harness::Codex)
+        .then(|| start.options.iter().find(|(k, _)| *k == "model").map(|(_, v)| v.clone()))
+        .flatten()
+        .filter(|m| !m.is_empty());
+    // Finding the server can read PATH through the login shell.
+    cx.background_executor().spawn(async move {
+        let (program, mut args) = match server {
+            Some(s) => s,
+            None => (harness.adapter().server)()?,
+        };
+        if let Some(model) = codex_model {
+            args.push("-c".into());
+            args.push(format!("model={model:?}"));
+        }
+        if full_access {
+            args.push("--dangerously-skip-permissions".into());
+        }
+        Connection::start(&Launch { program, args, cwd, env }, events)
+    }).await
+}
+
+fn request_mode(connection: &Connection, session: &str, mode: &str, config: Option<&str>) -> impl Future<Output = Result<Value, String>> + use<> {
+    let (method, params) = if let Some(id) = config {
+        ("session/set_config_option", json!({"sessionId": session, "configId": id, "value": mode}))
+    } else {
+        ("session/set_mode", json!({"sessionId": session, "modeId": mode}))
+    };
+    connection.request(method, params)
+}
+
 async fn open(c: &Connection, harness: Harness, start: &Start) -> Result<Opened, String> {
     let initialized = c.request("initialize", acp::initialize_params()).await.map_err(|e| format!("{} didn't start: {e}", harness.name()))?;
     let capabilities = initialized["agentCapabilities"].clone();
@@ -2693,7 +2849,7 @@ mod tests {
     fn test_start(cwd: std::path::PathBuf, harness: Harness) -> super::Start {
         super::Start {
             record_id: String::new(), harness, all_models: vec![], picked: vec![], cwd,
-            env: vec![], mcp_servers: vec![], meta: serde_json::Value::Null, session_id: None, mode: None,
+            env: vec![], mcp_servers: vec![], meta: serde_json::Value::Null, session_id: None, permission: None, starter: crate::harness::defaults::Starter::User,
             options: vec![], prompt: None, prior_entries: vec![], inline_visuals: true,
             server: Some(("definitely-not-a-real-program-m4code".into(), vec![])),
         }
@@ -3305,7 +3461,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let start = super::Start {
             record_id: String::new(), harness: Harness::Claude, all_models: vec![], picked: vec![], cwd: dir.path().to_path_buf(),
-            env: vec![], mcp_servers: vec![], meta: serde_json::Value::Null, session_id: None, mode: None, options: vec![],
+            env: vec![], mcp_servers: vec![], meta: serde_json::Value::Null, session_id: None, permission: None, starter: crate::harness::defaults::Starter::User, options: vec![],
             prompt: None, prior_entries: vec![], inline_visuals: true, server: Some(("definitely-not-a-real-program-m4code".into(), vec![])),
         };
         let (view, cx) = cx.add_window_view(|window, cx| super::ThreadView::new(start, window, cx));
@@ -3324,7 +3480,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let start = super::Start {
             record_id: String::new(), harness: Harness::Claude, all_models: vec![], picked: vec![], cwd: dir.path().to_path_buf(),
-            env: vec![], mcp_servers: vec![], meta: serde_json::Value::Null, session_id: None, mode: None, options: vec![],
+            env: vec![], mcp_servers: vec![], meta: serde_json::Value::Null, session_id: None, permission: None, starter: crate::harness::defaults::Starter::User, options: vec![],
             prompt: None, prior_entries: vec![], inline_visuals: true, server: Some(("definitely-not-a-real-program-m4code".into(), vec![])),
         };
         let (view, cx) = cx.add_window_view(|window, cx| super::ThreadView::new(start, window, cx));
@@ -3354,7 +3510,7 @@ mod tests {
             mcp_servers: vec![],
             meta: serde_json::Value::Null,
             session_id: None,
-            mode: None,
+            permission: None, starter: crate::harness::defaults::Starter::User,
             options: vec![],
             prompt: None,
             prior_entries: vec![], inline_visuals: true,
@@ -3403,7 +3559,7 @@ mod tests {
             mcp_servers: vec![],
             meta: serde_json::Value::Null,
             session_id: None,
-            mode: None,
+            permission: None, starter: crate::harness::defaults::Starter::User,
             options: vec![],
             prompt: None,
             prior_entries: vec![], inline_visuals: true,
@@ -3445,7 +3601,7 @@ mod tests {
             mcp_servers: vec![],
             meta: serde_json::Value::Null,
             session_id: None,
-            mode: None,
+            permission: None, starter: crate::harness::defaults::Starter::User,
             options: vec![],
             prompt: None,
             prior_entries: vec![], inline_visuals: true,
@@ -3480,7 +3636,7 @@ mod tests {
             mcp_servers: vec![],
             meta: serde_json::Value::Null,
             session_id: None,
-            mode: None,
+            permission: None, starter: crate::harness::defaults::Starter::User,
             options: vec![],
             prompt: None,
             prior_entries: vec![], inline_visuals: true,
@@ -3547,7 +3703,7 @@ mod tests {
             mcp_servers: vec![],
             meta: serde_json::Value::Null,
             session_id: None,
-            mode: None,
+            permission: None, starter: crate::harness::defaults::Starter::User,
             options: vec![],
             prompt: None,
             prior_entries: vec![], inline_visuals: true,
@@ -3590,7 +3746,7 @@ mod tests {
             mcp_servers: vec![],
             meta: serde_json::Value::Null,
             session_id: None,
-            mode: None,
+            permission: None, starter: crate::harness::defaults::Starter::User,
             options: vec![],
             prompt: Some("hello world".into()),
             prior_entries: vec![], inline_visuals: true,

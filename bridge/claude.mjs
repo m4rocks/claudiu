@@ -530,7 +530,7 @@ async function pump(session) {
 async function open(params, resume) {
   const id = resume ?? randomUUID();
   const extra = params._meta?.claudeCode?.options ?? {};
-  const session = { id, cwd: params.cwd, inbox: new Inbox(), tools: new Map(), streamed: new Set(), shells: new BackgroundShells(), turn: null, cancelled: false, interrupted: null, dropping: new Set(), dropInterrupted: false, dropsDone: null, mode: "default", model: "", effort: "medium", models: [] };
+  const session = { id, cwd: params.cwd, inbox: new Inbox(), tools: new Map(), streamed: new Set(), shells: new BackgroundShells(), turn: null, cancelled: false, interrupted: null, dropping: new Set(), dropInterrupted: false, dropsDone: null, mode: extra.permissionMode ?? "default", model: "", effort: "medium", models: [] };
   session.query = query({
     prompt: session.inbox,
     options: {

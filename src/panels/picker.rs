@@ -402,60 +402,6 @@ pub fn empty_note(text: impl Into<SharedString>) -> Div {
         .child(text.into())
 }
 
-/// Plain-English display name for any harness permission mode id/name (converts camelCase / snake_case / kebab-case).
-pub fn format_mode_name(id: &str, raw_name: &str) -> String {
-    match id {
-        "default" | "manual" => return "Ask Before Editing".into(),
-        "acceptEdits" | "accept_edits" | "auto_edit" | "autoEdit" => return "Accept Edits".into(),
-        "auto" => return "Auto".into(),
-        "dontAsk" | "dont_ask" => return "Don't Ask".into(),
-        "plan" => return "Plan Mode".into(),
-        "bypassPermissions" | "bypass_permissions" | "yolo" | "fullAccess" | "full_access" | "full-access" => return "Full Access".into(),
-        _ => {}
-    }
-    let src = if raw_name.trim().is_empty() { id } else { raw_name };
-    humanize_identifier(src)
-}
-
-/// Turn `dontAsk`, `read_only`, `auto-edit`, or `auto` into `"Dont Ask"`, `"Read Only"`, `"Auto Edit"`, `"Auto"`.
-fn humanize_identifier(s: &str) -> String {
-    let mut words: Vec<String> = Vec::new();
-    let mut cur = String::new();
-    let chars: Vec<char> = s.chars().collect();
-    for (i, &c) in chars.iter().enumerate() {
-        if c == '_' || c == '-' || c.is_whitespace() {
-            if !cur.is_empty() {
-                words.push(std::mem::take(&mut cur));
-            }
-            continue;
-        }
-        let prev_lower = i > 0 && chars[i - 1].is_lowercase();
-        let next_lower = i + 1 < chars.len() && chars[i + 1].is_lowercase();
-        let prev_upper = i > 0 && chars[i - 1].is_uppercase();
-        if c.is_uppercase() && (prev_lower || (prev_upper && next_lower)) && !cur.is_empty() {
-            words.push(std::mem::take(&mut cur));
-        }
-        cur.push(c);
-    }
-    if !cur.is_empty() {
-        words.push(cur);
-    }
-    words
-        .into_iter()
-        .map(|w| {
-            if w.eq_ignore_ascii_case("dont") {
-                return "Don't".to_string();
-            }
-            let mut it = w.chars();
-            match it.next() {
-                None => String::new(),
-                Some(first) => first.to_uppercase().chain(it.flat_map(char::to_lowercase)).collect(),
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
 #[cfg(test)]
 mod tests {
     use super::step;
@@ -467,17 +413,5 @@ mod tests {
         assert_eq!(step(0, 3, false), 3, "up from the first row goes to the last");
         assert_eq!(step(2, 3, false), 1);
         assert_eq!(step(0, 0, true), 0, "one row stays put");
-    }
-
-    use super::format_mode_name;
-
-    #[test]
-    fn formats_permission_modes_in_plain_english() {
-        assert_eq!(format_mode_name("dontAsk", "dontAsk"), "Don't Ask");
-        assert_eq!(format_mode_name("auto", "auto"), "Auto");
-        assert_eq!(format_mode_name("acceptEdits", "acceptEdits"), "Accept Edits");
-        assert_eq!(format_mode_name("bypassPermissions", "bypassPermissions"), "Full Access");
-        assert_eq!(format_mode_name("read_only", "read_only"), "Read Only");
-        assert_eq!(format_mode_name("agentDecides", "agentDecides"), "Agent Decides");
     }
 }

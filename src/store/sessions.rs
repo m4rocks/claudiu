@@ -54,6 +54,8 @@ pub struct AgentMeta {
     #[serde(default)]
     pub harness: crate::harness::Harness,
     #[serde(default)]
+    pub antigravity_full_access: bool,
+    #[serde(default)]
     pub parent_session: Option<Id>,
     #[serde(default)]
     pub subagent_edits: bool,

@@ -153,6 +153,10 @@ impl Workspace {
                 open: matches!(self.git_picker(), Some(gp) if gp.target == GitPickerTarget::Session),
             })
         });
+        let chip = chip.or_else(|| {
+            let thread = thread.read(cx);
+            if switching.is_some() || thread.is_loading() { thread.git.clone() } else { None }
+        });
         let background: Vec<crate::thread::BackgroundTask> = self
             .live
             .iter()

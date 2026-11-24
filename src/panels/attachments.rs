@@ -22,12 +22,13 @@ pub fn asset(path: &str) -> Option<&'static [u8]> {
     (path == PAPERCLIP).then_some(include_bytes!("../../assets/composer-paperclip.svg"))
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Attachments {
     files: Vec<Attachment>,
     error: Option<String>,
 }
 
+#[derive(Clone)]
 struct Attachment {
     path: PathBuf,
     pasted: Option<Arc<Image>>,

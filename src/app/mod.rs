@@ -869,12 +869,16 @@ impl Workspace {
         self.store.data.settings.default_model()
     }
 
-    /// The mode the home composer starts a session in: the one picked there or the default, stepped down to what
-    /// the selected harness offers (`Permission::or_safer`), else its safest mode.
+    pub fn home_permission_preference(&self) -> Option<Permission> {
+        self.home.permission_mode.or(self.store.data.settings.new_session.permission_mode)
+    }
+
     pub fn home_selected_permission(&self) -> Option<Permission> {
         let offered = self.store.data.settings.permissions_for(self.home_selected_model().harness);
-        let wanted = self.home.permission_mode.or(self.store.data.settings.new_session.permission_mode);
-        wanted.and_then(|p| p.or_safer(&offered)).or_else(|| offered.first().copied())
+        match self.home_permission_preference() {
+            Some(preference) => preference.resolve(&offered),
+            None => offered.first().copied(),
+        }
     }
 
     /// Close the sidebar question popover after a brief grace period so the pointer can cross from the row into it.

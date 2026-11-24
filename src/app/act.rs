@@ -204,14 +204,14 @@ impl Workspace {
                 let cwd = self.home_target_cwd();
                 let chosen = self.home_selected_model();
                 let effort = self.home.effort;
-                let mode_id = self.home_selected_permission().and_then(|p| p.native(chosen.harness)).map(str::to_string);
+                let permission = self.home_permission_preference().or_else(|| self.home_selected_permission());
                 let text = self.home.prompt.read(cx).value().trim().to_string();
                 let Some(prompt) = self.home.attachments.message(&text) else {
                     cx.notify();
                     return;
                 };
                 let model = (!chosen.id.is_empty()).then_some(chosen.id);
-                if self.new_session_from_home(chosen.harness, model, cwd, Some(prompt), Some(effort), mode_id, window, cx) {
+                if self.new_session_from_home(chosen.harness, model, cwd, Some(prompt), Some(effort), permission, window, cx) {
                     self.home.attachments = Default::default();
                     self.home.prompt.update(cx, |p, cx| p.set_value("", window, cx));
                 }

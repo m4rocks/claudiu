@@ -1319,25 +1319,23 @@ impl ThreadView {
             ThreadPicker::Permission => {
                 let mut rows = self.permission_scroll.wire(div().id("picker-perm-list").max_h(px(340.0)), window).flex().flex_col().gap(px(2.0));
                 let offered = self.permissions();
-                if offered.is_empty() {
-                    rows = rows.child(picker::empty_note("No permission modes available."));
-                } else {
-                    let hi = self.mode_highlight.min(offered.len() - 1);
-                    for (i, (mode, id)) in offered.into_iter().enumerate() {
-                        let current = self.thread.mode.as_deref() == Some(id);
-                        let focused = i == hi;
-                        let lead = icon(IconName::Lock, 12.0).text_color(hsla(if current { theme::TEXT } else { theme::TEXT_FAINT })).into_any_element();
-                        rows = rows.child(
-                            picker::row(SharedString::from(format!("perm-mode-{i}")), Some(lead), mode.label(), Some(mode.description().into()), None, current, false)
-                                .when(focused && !current, |d| d.bg(hsla(theme::SURFACE_HOVER)))
-                                .border_1()
-                                .border_color(if focused { hsla(theme::FOCUS_BORDER) } else { gpui::transparent_black() })
-                                .on_click(cx.listener(move |v, _: &ClickEvent, window, cx| {
-                                    v.set_mode(id.to_string(), cx);
-                                    v.close_picker(window, cx);
-                                })),
-                        );
+                for (i, mode) in Permission::ALL.into_iter().enumerate() {
+                    let available = offered.contains(&mode);
+                    let current = self.permission() == Some(mode);
+                    let focused = available && i == self.mode_highlight;
+                    let lead = icon(IconName::Lock, 12.0).text_color(hsla(if current { theme::TEXT } else { theme::TEXT_FAINT })).into_any_element();
+                    let mut row = picker::row(SharedString::from(format!("perm-mode-{i}")), Some(lead), mode.label(), Some(mode.detail(available)), None, current, !available)
+                        .debug_selector(move || format!("perm-mode-{i}"))
+                        .when(focused && !current, |d| d.bg(hsla(theme::SURFACE_HOVER)))
+                        .border_1()
+                        .border_color(if focused { hsla(theme::FOCUS_BORDER) } else { gpui::transparent_black() });
+                    if available {
+                        row = row.on_click(cx.listener(move |v, _: &ClickEvent, window, cx| {
+                            v.set_permission(mode, cx);
+                            v.close_picker(window, cx);
+                        }));
                     }
+                    rows = rows.child(row);
                 }
                 ("thread-permission-dialog", "PERMISSION MODE", rows.into_any_element())
             }
@@ -1566,22 +1564,19 @@ impl ThreadView {
             }))
             .into_any_element();
 
-        // Permission mode: one of the four, or the harness's own name for a mode outside them.
-        let permission = self.thread.mode.as_deref().map(|mode_id| {
-            let label = match Permission::of(self.harness, mode_id) {
-                Some(mode) => mode.label().to_string(),
-                None => picker::format_mode_name(mode_id, self.thread.modes.iter().find(|(id, _)| id == mode_id).map_or(mode_id, |(_, name)| name)),
-            };
-            composer::permission_chip("thread-mode", self.picker == Some(ThreadPicker::Permission), label)
-                .dropdown_above(cx, |v, at, window, cx| {
-                    v.picker = Some(ThreadPicker::Permission);
-                    v.picker_at = at;
-                    v.mode_highlight = v.permissions().iter().position(|(_, id)| v.thread.mode.as_deref() == Some(*id)).unwrap_or(0);
-                    v.focus_composer(window, cx);
-                    cx.notify();
-                })
-                .into_any_element()
-        });
+        let label = self.initial_permission.or_else(|| self.permission()).map_or("Harness default", Permission::label);
+        let permission = Some(composer::permission_chip("thread-mode", self.picker == Some(ThreadPicker::Permission), label)
+            .debug_selector(|| "thread-mode".into())
+            .dropdown_above(cx, |v, at, window, cx| {
+                v.picker = Some(ThreadPicker::Permission);
+                v.picker_at = at;
+                let offered = v.permissions();
+                let current = v.permission().filter(|p| offered.contains(p)).or_else(|| offered.first().copied());
+                v.mode_highlight = Permission::ALL.iter().position(|p| Some(*p) == current).unwrap_or(0);
+                v.focus_composer(window, cx);
+                cx.notify();
+            })
+            .into_any_element());
 
         let git = self.git.as_ref().map(|git| {
             let tail = git.busy.then(|| spinner("thread-git-busy", 11.0).into_any_element());

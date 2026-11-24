@@ -1,18 +1,13 @@
-//! The four permission modes m4code shows for every harness, and the mode id each harness's ACP adapter uses for
-//! them. A harness that has no mode for one of them doesn't offer it; its other modes (Claude Code's `acceptEdits`
-//! and `dontAsk`, Antigravity's `accept-edits`) stay out of the pickers.
+//! Shared permission choices and their ACP mode IDs.
 
 use serde::{Deserialize, Serialize};
 
 use super::Harness;
 
-/// Ordered from the least access to the most; `or_safer` relies on that order.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Permission {
-    #[serde(rename = "read-only", alias = "plan")]
+    #[serde(rename = "read-only", alias = "plan", alias = "ask", alias = "manual", alias = "dontAsk")]
     ReadOnly,
-    #[serde(rename = "ask", alias = "manual", alias = "dontAsk")]
-    Ask,
     #[serde(rename = "auto", alias = "acceptEdits")]
     Auto,
     #[serde(rename = "full-access", alias = "bypassPermissions")]
@@ -20,70 +15,73 @@ pub enum Permission {
 }
 
 impl Permission {
-    pub const ALL: [Permission; 4] = [Self::ReadOnly, Self::Ask, Self::Auto, Self::FullAccess];
+    pub const ALL: [Self; 3] = [Self::ReadOnly, Self::Auto, Self::FullAccess];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::ReadOnly => "Read-only",
-            Self::Ask => "Ask",
             Self::Auto => "Auto",
             Self::FullAccess => "Full Access",
         }
     }
 
-    pub fn description(self) -> &'static str {
-        match self {
-            Self::ReadOnly => "Read and plan; no edits or commands",
-            Self::Ask => "Ask before running commands or editing files",
-            Self::Auto => "Approve safe edits and commands automatically",
-            Self::FullAccess => "Run all commands and edits without asking",
-        }
+    pub fn detail(self, available: bool) -> String {
+        match (self, available) {
+            (Self::Auto, false) => "Unavailable for this adapter",
+            (Self::ReadOnly, _) => "Read and plan without editing",
+            (Self::Auto, true) => "Let the adapter decide when to ask for approval",
+            (Self::FullAccess, _) => "Approve commands and edits without asking",
+        }.into()
     }
 
-    /// The ACP mode id that sets this mode in `harness`, if it has one.
     pub fn native(self, harness: Harness) -> Option<&'static str> {
         match (harness, self) {
-            (Harness::Claude, Self::ReadOnly) => Some("plan"),
-            (Harness::Claude, Self::Ask) => Some("default"),
-            (Harness::Claude, Self::Auto) => Some("auto"),
-            (Harness::Claude, Self::FullAccess) => Some("bypassPermissions"),
+            (Harness::Claude | Harness::Antigravity | Harness::OpenCode, Self::ReadOnly) => Some("plan"),
             (Harness::Codex, Self::ReadOnly) => Some("read-only"),
-            (Harness::Codex, Self::Ask) => Some("workspace-write"),
+            (Harness::Claude | Harness::Antigravity, Self::Auto) => Some("auto"),
             (Harness::Codex, Self::Auto) => Some("agent"),
+            (Harness::Claude, Self::FullAccess) => Some("bypassPermissions"),
             (Harness::Codex, Self::FullAccess) => Some("agent-full-access"),
-            (Harness::Antigravity, Self::ReadOnly) => Some("plan"),
-            (Harness::Antigravity, Self::Ask) => Some("default"),
-            (Harness::Antigravity, Self::Auto) => Some("auto"),
-            (Harness::Antigravity, Self::FullAccess) => None,
-            (Harness::OpenCode, Self::ReadOnly) => Some("plan"),
-            (Harness::OpenCode, Self::Ask | Self::Auto) => None,
             (Harness::OpenCode, Self::FullAccess) => Some("build"),
+            // The bypass comes from the launch flag. Default leaves the agent out of Plan mode.
+            (Harness::Antigravity, Self::FullAccess) => Some("default"),
+            (Harness::OpenCode, Self::Auto) => None,
         }
     }
 
-    /// The mode `harness`'s mode id `id` stands for; None for a mode outside the four.
-    pub fn of(harness: Harness, id: &str) -> Option<Permission> {
-        Self::ALL.into_iter().find(|p| p.native(harness) == Some(id))
+    /// Existing sessions can be in an adapter's older approval policy.
+    pub fn of(harness: Harness, id: &str) -> Option<Self> {
+        match (harness, id) {
+            (Harness::Claude, "default" | "acceptEdits" | "dontAsk")
+            | (Harness::Antigravity, "default" | "accept-edits")
+            | (Harness::Codex, "workspace-write") => Some(Self::Auto),
+            (_, "read_only" | "readOnly") => Some(Self::ReadOnly),
+            _ => Self::ALL.into_iter().find(|p| p.native(harness) == Some(id)),
+        }
     }
 
-    /// This mode when `offered` has it, or else the nearest one below it, so a session never gets more access than
-    /// the user chose. None when nothing that safe is offered.
-    pub fn or_safer(self, offered: &[Permission]) -> Option<Permission> {
-        offered.iter().copied().filter(|p| *p <= self).max()
+    pub fn resolve(self, offered: &[Self]) -> Option<Self> {
+        if offered.contains(&self) {
+            Some(self)
+        } else if self == Self::Auto && offered.contains(&Self::FullAccess) {
+            Some(Self::FullAccess)
+        } else {
+            None
+        }
+    }
+
+    pub fn listed(self, harness: Harness, modes: &[(String, String)]) -> Option<&'static str> {
+        self.native(harness).filter(|id| modes.iter().any(|(mode, _)| mode == id))
     }
 }
 
-/// The modes a `harness` session can switch to, given the `(id, name)` modes its adapter listed, least access first.
 pub fn offered(harness: Harness, modes: &[(String, String)]) -> Vec<Permission> {
-    Permission::ALL.into_iter().filter(|p| p.native(harness).is_some_and(|id| modes.iter().any(|(m, _)| m == id))).collect()
+    Permission::ALL.into_iter().filter(|p| p.listed(harness, modes).is_some()).collect()
 }
 
-/// The mode id Shift+Tab moves to from `current`: the next offered mode, wrapping, or the first one when the session
-/// is in a mode outside the four.
-pub fn next(harness: Harness, modes: &[(String, String)], current: Option<&str>) -> Option<&'static str> {
-    let offered = offered(harness, modes);
-    let at = offered.iter().position(|p| p.native(harness) == current).map_or(0, |i| i + 1);
-    offered.get(at % offered.len().max(1)).and_then(|p| p.native(harness))
+pub fn next(offered: &[Permission], current: Option<Permission>) -> Option<Permission> {
+    let at = offered.iter().position(|p| Some(*p) == current).map_or(0, |i| i + 1);
+    offered.get(at % offered.len().max(1)).copied()
 }
 
 #[cfg(test)]
@@ -95,39 +93,39 @@ mod tests {
     }
 
     #[test]
-    fn only_the_mapped_modes_a_harness_lists_are_offered() {
+    fn only_native_auto_modes_enable_auto() {
         let claude = modes(&["default", "acceptEdits", "auto", "plan", "dontAsk", "bypassPermissions"]);
-        assert_eq!(offered(Harness::Claude, &claude), Permission::ALL.to_vec());
-        assert_eq!(offered(Harness::OpenCode, &modes(&["build", "plan"])), vec![Permission::ReadOnly, Permission::FullAccess]);
-        assert_eq!(offered(Harness::Antigravity, &modes(&["default", "accept-edits", "auto", "plan"])), vec![Permission::ReadOnly, Permission::Ask, Permission::Auto]);
-        assert_eq!(Permission::of(Harness::Claude, "acceptEdits"), None);
-        assert_eq!(Permission::of(Harness::Codex, "agent"), Some(Permission::Auto));
+        assert_eq!(offered(Harness::Claude, &claude), Permission::ALL);
+        let without_auto = modes(&["default", "acceptEdits", "plan", "dontAsk", "bypassPermissions"]);
+        assert_eq!(offered(Harness::Claude, &without_auto), [Permission::ReadOnly, Permission::FullAccess]);
+        assert_eq!(offered(Harness::OpenCode, &modes(&["build", "plan"])), [Permission::ReadOnly, Permission::FullAccess]);
+        assert_eq!(offered(Harness::Antigravity, &modes(&["default", "accept-edits", "auto", "plan"])), Permission::ALL);
+        assert_eq!(Permission::of(Harness::Antigravity, "default"), Some(Permission::Auto));
+        assert_eq!(Permission::of(Harness::Codex, "workspace-write"), Some(Permission::Auto));
     }
 
     #[test]
-    fn a_missing_mode_steps_down_never_up() {
-        let opencode = [Permission::ReadOnly, Permission::FullAccess];
-        assert_eq!(Permission::Ask.or_safer(&opencode), Some(Permission::ReadOnly));
-        assert_eq!(Permission::FullAccess.or_safer(&opencode), Some(Permission::FullAccess));
-        assert_eq!(Permission::FullAccess.or_safer(&[Permission::ReadOnly, Permission::Ask]), Some(Permission::Ask));
-        assert_eq!(Permission::ReadOnly.or_safer(&[Permission::Ask]), None);
+    fn only_auto_falls_back_to_full_access() {
+        let offered = [Permission::ReadOnly, Permission::FullAccess];
+        assert_eq!(Permission::Auto.resolve(&offered), Some(Permission::FullAccess));
+        assert_eq!(Permission::Auto.resolve(&Permission::ALL), Some(Permission::Auto));
+        assert_eq!(Permission::ReadOnly.resolve(&[Permission::FullAccess]), None);
+        assert_eq!(Permission::FullAccess.resolve(&[Permission::ReadOnly]), None);
     }
 
     #[test]
-    fn the_cycle_wraps_through_the_offered_modes() {
-        let codex = modes(&["read-only", "workspace-write", "agent", "agent-full-access"]);
-        assert_eq!(next(Harness::Codex, &codex, Some("agent")), Some("agent-full-access"));
-        assert_eq!(next(Harness::Codex, &codex, Some("agent-full-access")), Some("read-only"), "after the last comes the first");
-        let claude = modes(&["default", "acceptEdits", "plan"]);
-        assert_eq!(next(Harness::Claude, &claude, Some("acceptEdits")), Some("plan"), "a mode outside the four goes to the first");
-        assert_eq!(next(Harness::Claude, &[], None), None);
+    fn the_cycle_skips_unavailable_modes() {
+        let offered = [Permission::ReadOnly, Permission::FullAccess];
+        assert_eq!(next(&offered, Some(Permission::ReadOnly)), Some(Permission::FullAccess));
+        assert_eq!(next(&offered, Some(Permission::FullAccess)), Some(Permission::ReadOnly));
+        assert_eq!(next(&[], None), None);
     }
 
     #[test]
-    fn saved_names_from_before_the_four_modes_still_load() {
+    fn previous_saved_permissions_still_load() {
         let load = |s: &str| serde_json::from_str::<Permission>(&format!("\"{s}\"")).unwrap();
-        assert_eq!(load("manual"), Permission::Ask);
-        assert_eq!(load("dontAsk"), Permission::Ask);
+        assert_eq!(load("manual"), Permission::ReadOnly);
+        assert_eq!(load("dontAsk"), Permission::ReadOnly);
         assert_eq!(load("acceptEdits"), Permission::Auto);
         assert_eq!(load("plan"), Permission::ReadOnly);
         assert_eq!(load("bypassPermissions"), Permission::FullAccess);

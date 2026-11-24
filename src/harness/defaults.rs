@@ -72,6 +72,7 @@ impl From<SavedDefaults> for NewSessionDefaults {
     fn from(saved: SavedDefaults) -> Self {
         // `accept-edits` was Antigravity's, and `fullAccess` the id Settings showed before an adapter had answered.
         let from_id = |id: String| match id.as_str() {
+            "default" | "workspace-write" | "ask" | "manual" | "dontAsk" => Some(Permission::ReadOnly),
             "accept-edits" => Some(Permission::Auto),
             "fullAccess" => Some(Permission::FullAccess),
             _ => Harness::ALL.into_iter().find_map(|h| Permission::of(h, &id)),
@@ -85,6 +86,7 @@ impl From<SavedDefaults> for NewSessionDefaults {
 pub enum Starter {
     /// The user: the New session button, or the GitHub pane's Ask Claude.
     User,
+    Handoff,
     /// Fix Git with Claude, which has to edit files and run git, so plan mode would stop it.
     FixGit,
     /// Another session, through `start_code_session`: it can't start a session that skips every prompt unless the
@@ -92,11 +94,15 @@ pub enum Starter {
     OtherSession,
 }
 
-/// What a new `harness` session starts with: the mode id to switch to, and the config options to set by category.
-/// `offered` is what the harness has of the four modes. Read-only is not for Fix Git, which has to edit, nor for
-/// Claude Code while Plan mode is trimmed (`trim.rs`), since the model couldn't propose leaving it; another session
-/// can't start one with full access. A default the session can't have falls to the nearest safer mode.
-pub fn acp_settings(defaults: &NewSessionDefaults, harness: Harness, offered: &[Permission], plan_trimmed: bool, by: Starter) -> (Option<&'static str>, Vec<(&'static str, String)>) {
+/// Keep agent-started sessions from inheriting Full Access, including through Auto's fallback.
+pub fn initial_permission(wanted: Permission, offered: &[Permission], by: Starter) -> Option<Permission> {
+    if by == Starter::OtherSession && wanted != Permission::ReadOnly {
+        return [Permission::Auto, Permission::ReadOnly].into_iter().find(|p| offered.contains(p));
+    }
+    wanted.resolve(offered)
+}
+
+pub fn config_options(defaults: &NewSessionDefaults) -> Vec<(&'static str, String)> {
     let mut options = vec![];
     if let Some(model) = &defaults.model {
         options.push(("model", model.clone()));
@@ -104,17 +110,7 @@ pub fn acp_settings(defaults: &NewSessionDefaults, harness: Harness, offered: &[
     if let Some(effort) = defaults.effort {
         options.push(("thought_level", effort.name().to_string()));
     }
-    let allowed: Vec<Permission> = offered
-        .iter()
-        .copied()
-        .filter(|p| match p {
-            Permission::ReadOnly => by != Starter::FixGit && !(plan_trimmed && harness == Harness::Claude),
-            Permission::FullAccess => by != Starter::OtherSession,
-            _ => true,
-        })
-        .collect();
-    let mode = defaults.permission_mode.and_then(|p| p.or_safer(&allowed)).and_then(|p| p.native(harness));
-    (mode, options)
+    options
 }
 
 #[cfg(test)]
@@ -125,46 +121,26 @@ mod tests {
         NewSessionDefaults { model: Some("opus".into()), effort: Some(Effort::High), permission_mode: Some(mode) }
     }
 
-    fn mode(defaults: &NewSessionDefaults, harness: Harness, plan_trimmed: bool, by: Starter) -> Option<&'static str> {
-        acp_settings(defaults, harness, &Permission::ALL, plan_trimmed, by).0
+    #[test]
+    fn options_are_set_by_category() {
+        assert!(config_options(&NewSessionDefaults::default()).is_empty());
+        assert_eq!(config_options(&all_set(Permission::Auto)), vec![("model", "opus".to_string()), ("thought_level", "high".to_string())]);
     }
 
     #[test]
-    fn nothing_set_sets_nothing() {
-        assert_eq!(acp_settings(&NewSessionDefaults::default(), Harness::Claude, &Permission::ALL, false, Starter::User), (None, vec![]));
+    fn only_user_started_sessions_can_inherit_the_full_access_fallback() {
+        let offered = [Permission::ReadOnly, Permission::FullAccess];
+        assert_eq!(initial_permission(Permission::Auto, &offered, Starter::User), Some(Permission::FullAccess));
+        assert_eq!(initial_permission(Permission::Auto, &offered, Starter::Handoff), Some(Permission::FullAccess));
+        assert_eq!(initial_permission(Permission::Auto, &offered, Starter::OtherSession), Some(Permission::ReadOnly));
+        assert_eq!(initial_permission(Permission::FullAccess, &Permission::ALL, Starter::OtherSession), Some(Permission::Auto));
     }
 
     #[test]
-    fn each_harness_gets_its_own_mode_id_and_the_options_by_category() {
-        let (mode, options) = acp_settings(&all_set(Permission::Ask), Harness::Claude, &Permission::ALL, false, Starter::User);
-        assert_eq!(mode, Some("default"));
-        assert_eq!(options, vec![("model", "opus".to_string()), ("thought_level", "high".to_string())]);
-        let opencode = [Permission::ReadOnly, Permission::FullAccess];
-        assert_eq!(acp_settings(&all_set(Permission::Ask), Harness::OpenCode, &opencode, false, Starter::User).0, Some("plan"), "no Ask in OpenCode: the safer read-only");
-        assert_eq!(acp_settings(&all_set(Permission::Auto), Harness::Codex, &Permission::ALL, false, Starter::User).0, Some("agent"));
-    }
-
-    #[test]
-    fn read_only_is_not_passed_while_plan_mode_is_trimmed_in_claude() {
-        assert_eq!(mode(&all_set(Permission::ReadOnly), Harness::Claude, true, Starter::User), None);
-        assert_eq!(mode(&all_set(Permission::ReadOnly), Harness::Codex, true, Starter::User), Some("read-only"));
-        assert_eq!(mode(&all_set(Permission::Auto), Harness::Claude, true, Starter::User), Some("auto"));
-    }
-
-    #[test]
-    fn fix_git_gets_no_read_only_and_other_sessions_get_no_full_access() {
-        assert_eq!(mode(&all_set(Permission::ReadOnly), Harness::Claude, false, Starter::FixGit), None);
-        assert_eq!(mode(&all_set(Permission::ReadOnly), Harness::Claude, false, Starter::OtherSession), Some("plan"));
-        assert_eq!(mode(&all_set(Permission::FullAccess), Harness::Claude, false, Starter::OtherSession), Some("auto"), "steps down, never up");
-        assert_eq!(mode(&all_set(Permission::FullAccess), Harness::Claude, false, Starter::User), Some("bypassPermissions"));
-        assert_eq!(mode(&all_set(Permission::FullAccess), Harness::Claude, false, Starter::FixGit), Some("bypassPermissions"));
-    }
-
-    #[test]
-    fn saved_defaults_load_into_the_four_modes() {
+    fn saved_defaults_load_into_the_shared_modes() {
         let load = |json: &str| serde_json::from_str::<NewSessionDefaults>(json).unwrap().permission_mode;
         assert_eq!(serde_json::from_str::<NewSessionDefaults>("{}").unwrap(), NewSessionDefaults::default());
-        assert_eq!(load(r#"{"permission_mode": "manual", "mode_id": "default"}"#), Some(Permission::Ask));
+        assert_eq!(load(r#"{"permission_mode": "manual", "mode_id": "default"}"#), Some(Permission::ReadOnly));
         assert_eq!(load(r#"{"mode_id": "agent-full-access"}"#), Some(Permission::FullAccess), "a Codex default saved only by its id");
         assert_eq!(load(r#"{"mode_id": "accept-edits"}"#), Some(Permission::Auto));
         assert_eq!(load(r#"{"mode_id": "custom"}"#), None);

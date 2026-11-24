@@ -60,7 +60,7 @@ impl Workspace {
 
     /// A new session in `harness` directly inside `cwd` (preserving a chosen worktree) with optional model, effort and permission mode overrides.
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn new_session_from_home(&mut self, harness: Harness, model: Option<String>, cwd: PathBuf, prompt: Option<String>, effort: Option<Effort>, permission_mode: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> bool {
+    pub(super) fn new_session_from_home(&mut self, harness: Harness, model: Option<String>, cwd: PathBuf, prompt: Option<String>, effort: Option<Effort>, permission_mode: Option<Permission>, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let record_id = new_id();
         let meta = AgentMeta {
             chrome: self.store.data.settings.chrome_default,
@@ -70,8 +70,8 @@ impl Workspace {
             ..Default::default()
         };
         let Some(mut start) = self.thread_start(&record_id, &cwd, &meta, None, prompt, Starter::User, cx) else { return false };
-        if let Some(mode_id) = permission_mode.filter(|m| !m.is_empty()) {
-            start.mode = Some(mode_id);
+        if let Some(permission) = permission_mode {
+            start.permission = Some(permission);
         }
         if let Some(model_id) = model.filter(|m| !m.is_empty()) {
             start.options.retain(|(category, _)| *category != "model");
@@ -149,7 +149,7 @@ impl Workspace {
         if meta.harness != Harness::OpenCode {
             off.push("ask_user");
         }
-        let (mut mode, options) = match session_id {
+        let (mut permission, options) = match session_id {
             None => {
                 // Only inherit the default model id when starting on the harness that serves it.
                 let mut defaults = settings.new_session.clone();
@@ -160,10 +160,15 @@ impl Workspace {
                     defaults.model = None;
                 }
                 let plan_trimmed = claude::trim::FLUFF.contains(&claude::trim::Trim::PlanMode);
-                let (mode, options) = harness::defaults::acp_settings(&defaults, meta.harness, &settings.permissions_for(meta.harness), plan_trimmed, by);
-                (mode.map(String::from), options)
+                let permission = defaults.permission_mode.filter(|p| {
+                    *p != Permission::ReadOnly || (by != Starter::FixGit && !(plan_trimmed && meta.harness == Harness::Claude))
+                });
+                (permission, harness::defaults::config_options(&defaults))
             }
-            Some(_) => (None, resume_options(meta)),
+            Some(_) => (
+                (meta.harness == Harness::Antigravity && meta.antigravity_full_access).then_some(Permission::FullAccess),
+                resume_options(meta),
+            ),
         };
         let mut env = vec![];
         let mut session_meta = serde_json::json!({});
@@ -185,7 +190,7 @@ impl Workspace {
             mcp_servers.push(harness::stdio_server("m4code", &exe, &[mcp::FLAG], &server_env));
         }
         if meta.parent_session.is_some() {
-            mode = None;
+            permission = None;
             if let Some(agent) = meta.harness.agent() {
                 let request = harness::runner::Request {
                     agent, model: None, effort: None, edits: meta.subagent_edits,
@@ -194,7 +199,6 @@ impl Workspace {
                 env.extend((agent.provider().environment)(&request).into_iter().map(|(key, value)| (key.to_string(), value)));
             } else {
                 let permission = if meta.subagent_edits { "acceptEdits" } else { "plan" };
-                mode = Some(permission.into());
                 session_meta["claudeCode"]["options"]["permissionMode"] = serde_json::json!(permission);
             }
         }
@@ -228,7 +232,8 @@ impl Workspace {
             session_id,
             meta: session_meta,
             mcp_servers,
-            mode,
+            permission,
+            starter: by,
             options,
             prompt,
             prior_entries,
@@ -238,12 +243,15 @@ impl Workspace {
 
     /// Start the session over in its folder. For a session with no conversation yet, nothing is lost. A running view
     /// of it is replaced, which ends its process.
-    pub(super) fn relaunch_empty(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn relaunch_empty(&mut self, id: &str, permission: Option<Permission>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(rec) = self.store.session(id).cloned() else { return };
         let Some(mut meta) = rec.agent.clone() else { return };
         meta.session_id.clear();
         let cwd = self.resume_cwd(&rec, cx);
-        let Some(start) = self.thread_start(&rec.id, &cwd, &meta, rec.chosen_title().map(String::from), None, Starter::User, cx) else { return };
+        let Some(mut start) = self.thread_start(&rec.id, &cwd, &meta, rec.chosen_title().map(String::from), None, Starter::User, cx) else { return };
+        if permission.is_some() {
+            start.permission = permission;
+        }
         if let Some(m) = self.store.session_mut(id).and_then(|r| r.agent.as_mut()) {
             m.session_id.clear();
         }
@@ -274,18 +282,21 @@ impl Workspace {
     /// its process.
     pub(super) fn relaunch(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         let prior = self.live_view(id).and_then(|v| v.thread()).map(|t| t.read(cx).thread.entries.clone()).unwrap_or_default();
-        self.relaunch_with_entries(id, prior, window, cx);
+        self.relaunch_with_entries(id, prior, None, window, cx);
     }
 
     /// Like `relaunch`, carrying over `prior_entries` directly so the visible conversation never flashes blank or
     /// disappears while the replacement process opens.
-    pub(super) fn relaunch_with_entries(&mut self, id: &str, prior_entries: Vec<crate::harness::thread::Entry>, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn relaunch_with_entries(&mut self, id: &str, prior_entries: Vec<crate::harness::thread::Entry>, permission: Option<Permission>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(rec) = self.store.session(id).cloned() else { return };
         let Some(meta) = rec.agent.clone() else { return };
         let cwd = self.resume_cwd(&rec, cx);
         let Some(mut start) = self.thread_start(&rec.id, &cwd, &meta, rec.chosen_title().map(String::from), None, Starter::User, cx) else { return };
         if !prior_entries.is_empty() {
             start.prior_entries = prior_entries;
+        }
+        if permission.is_some() {
+            start.permission = permission;
         }
         self.start_thread(rec, start, false, window, cx);
     }
@@ -377,12 +388,19 @@ impl Workspace {
             v.compaction.native_controlled = native_controlled;
         });
         let sub_id = id.clone();
-        let sub = cx.subscribe_in(&view, window, move |ws: &mut Workspace, _view, ev: &ThreadEvent, window, cx| match ev {
+        let sub = cx.subscribe_in(&view, window, move |ws: &mut Workspace, view, ev: &ThreadEvent, window, cx| match ev {
             ThreadEvent::Ready(session) => {
                 if ws.switching_worktree.remove(&sub_id).is_some() {
                     cx.notify();
                 }
                 ws.commit_handoff(&sub_id, session, cx);
+                let full_access = view.read(cx).antigravity_full_access();
+                if let Some(meta) = ws.store.session_mut(&sub_id).and_then(|r| r.agent.as_mut())
+                    && meta.antigravity_full_access != full_access
+                {
+                    meta.antigravity_full_access = full_access;
+                    ws.store.mark_dirty();
+                }
             }
             ThreadEvent::Exited(code) => {
                 if ws.switching_worktree.remove(&sub_id).is_some() {
@@ -476,6 +494,7 @@ impl Workspace {
             }
             ThreadEvent::Select(child) => ws.act(Act::Select(child.clone()), window, cx),
             ThreadEvent::Handoff { to, model, message, effort, by_agent } => ws.dynamic_handoff(&sub_id, *to, model.clone(), message.clone(), *by_agent, effort.clone(), window, cx),
+            ThreadEvent::ReconnectPermission(permission) => ws.reconnect_antigravity_permission(&sub_id, *permission, window, cx),
             ThreadEvent::NewSession(prompt) => {
                 let (harness, cwd) = ws
                     .store
@@ -511,7 +530,7 @@ impl Workspace {
         let mut history = entries.to_vec();
         history.push(crate::harness::thread::Entry::Notice { text: crate::thread::FORK_SEED.into(), error: false });
         let harness = view.harness;
-        let mode = view.thread.mode.clone();
+        let permission = view.handoff_permission();
         let options = ["model", "thought_level"].into_iter().filter_map(|category| {
             view.thread.option(category).map(|option| (category, option.current.clone()))
         }).collect::<Vec<_>>();
@@ -526,7 +545,7 @@ impl Workspace {
         record.hidden = false;
         record.agent = Some(meta.clone());
         let Some(mut start) = self.thread_start(&record.id, &record.cwd, &meta, Some(record.title.clone()), None, Starter::User, cx) else { return };
-        start.mode = mode;
+        start.permission = permission;
         start.options.retain(|(category, _)| options.iter().all(|(kept, _)| kept != category));
         start.options.extend(options);
         crate::harness::thread::save_entries(&record.id, &history);
@@ -677,7 +696,7 @@ impl Workspace {
     /// Bring a Claude session back after a restart: resume its conversation, or start it over when it has none yet.
     pub(super) fn bring_back(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         match self.store.session(id).and_then(|s| s.agent.as_ref()) {
-            Some(meta) if !has_conversation(id, meta) => self.relaunch_empty(id, window, cx),
+            Some(meta) if !has_conversation(id, meta) => self.relaunch_empty(id, None, window, cx),
             _ => self.resume(id, window, cx),
         }
     }
