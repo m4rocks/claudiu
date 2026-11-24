@@ -2421,7 +2421,9 @@ mod tests {
             }).collect::<Vec<_>>();
             assert_eq!(paths.len(), 2);
             assert_eq!(paths[0], path);
-            assert_eq!(paths[1].parent().unwrap(), data.join("attachments"));
+            // Temp folders can be reached by more than one name (8.3 names on Windows, `/private` on macOS).
+            let canonical = |p: &std::path::Path| std::fs::canonicalize(p).unwrap();
+            assert_eq!(canonical(paths[1].parent().unwrap()), canonical(&data.join("attachments")));
             assert_eq!(std::fs::read(&paths[1]).unwrap(), image.bytes);
         }));
     }
