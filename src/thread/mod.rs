@@ -32,7 +32,7 @@ use self::queue::Queued;
 
 use crate::harness::acp::{self, Connection, Event, Launch};
 use crate::harness::codex;
-use crate::harness::thread::{Entry, Thread};
+use crate::harness::thread::{Entry, Thread, ToolStatus};
 use crate::harness::permission::{self, Permission};
 use crate::harness::{CatalogModel, Harness, Reopen};
 use crate::visual::Card;
@@ -318,8 +318,6 @@ pub struct ThreadView {
     screenshot: Option<std::sync::Arc<gpui::Image>>,
     screenshot_focus: FocusHandle,
     viewing: bool,
-    unread_from: Option<usize>,
-    visit_watermark: Option<usize>,
     tool_images: std::cell::RefCell<HashMap<(String, usize), std::sync::Arc<gpui::Image>>>,
     find: Option<find::Find>,
     pub(crate) usage_limit: Option<String>,
@@ -506,8 +504,6 @@ impl ThreadView {
             screenshot: None,
             screenshot_focus: cx.focus_handle(),
             viewing: false,
-            unread_from: None,
-            visit_watermark: None,
             tool_images: Default::default(),
             find: None,
             usage_limit: None,
@@ -717,9 +713,6 @@ impl ThreadView {
                     self.thread.apply(&update)
                 };
                 if let Some(at) = at {
-                    if self.phase == Phase::Ready && !self.viewing && is_conversation_update(&update) {
-                        self.unread_from = Some(self.unread_from.map_or(at, |previous| previous.min(at)));
-                    }
                     if let Some(Entry::Tool(call)) = self.thread.entries.get(at) {
                         self.tool_images.get_mut().retain(|(id, _), _| *id != call.id);
                     }
@@ -2068,12 +2061,6 @@ impl ThreadView {
             return;
         }
         self.viewing = viewing;
-        if viewing && let Some(row) = self.unread_from.take() {
-            self.visit_watermark = Some(row);
-        }
-        if !viewing {
-            self.visit_watermark = None;
-        }
         cx.notify();
     }
 
@@ -2217,6 +2204,14 @@ impl ThreadView {
             || (self.phase == Phase::Ready
                 && !self.cached_replay
                 && self.last_update.is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(4)))
+    }
+
+    /// Work the agent left running when its turn ended: a background shell, a subagent, or a tool call still out.
+    /// The agent usually wakes again when it finishes, so its turn ending isn't the session being done.
+    pub fn has_background_work(&self) -> bool {
+        !self.provider_shells.is_empty()
+            || !self.background.is_empty()
+            || self.thread.entries.iter().any(|e| matches!(e, Entry::Tool(call) if call.status == ToolStatus::Running))
     }
 
     /// Waiting for the user to answer a permission or ask question.
@@ -2550,6 +2545,42 @@ mod tests {
         assert_eq!(steer["method"], "_session/steering");
         assert_eq!(steer["params"]["sessionId"], "codex-session");
         assert_eq!(steer["params"]["prompt"][0]["text"], "> Which test?\n\nThe unit test.");
+    }
+
+    #[gpui::test]
+    fn long_bullets_wrap_inside_the_message(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_kit::init);
+        let dir = tempfile::tempdir().unwrap();
+        let long = "words that keep going on and on well past the width of the chat column so that they have to wrap onto another line rather than run off the side of the message box ".repeat(3);
+        let md = format!("Intro paragraph.
+
+- {long}
+- **Bold:** with `code` {long}
+  - nested {long}
+
+1. ordered {long}
+2. second
+
+   continuation {long}");
+        let mut start = test_start(dir.path().into(), Harness::Claude);
+        start.prior_entries = vec![Entry::User(md.clone()), Entry::Agent(md)];
+        let (view, cx) = cx.add_window_view(|window, cx| super::ThreadView::new(start, window, cx));
+        for _ in 0..3 {
+            cx.update(|window, app| window.draw(app).clear(app));
+        }
+        view.read_with(cx, |view, app| {
+            assert_eq!(view.markdown.len(), 2);
+            for (row, state) in &view.markdown {
+                let state = state.read(app);
+                let frame = state.bounds();
+                let painted = state.painted_text_bounds();
+                assert!(!painted.is_empty(), "row {row} painted no text");
+                assert!(frame.size.width <= gpui::px(super::render::COLUMN_MAX_W), "row {row}: the text is wider than the chat column: {frame:?}");
+                for bounds in painted {
+                    assert!(bounds.right() <= frame.right() + gpui::px(1.0), "row {row}: text ran past the message: {bounds:?} in {frame:?}");
+                }
+            }
+        });
     }
 
     #[cfg(debug_assertions)]

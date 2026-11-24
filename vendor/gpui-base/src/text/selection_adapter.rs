@@ -281,7 +281,6 @@ impl TextViewSelectionAdapter {
         self.selection.snapshot(cx).is_some()
     }
 
-    #[cfg(test)]
     pub(super) fn text_bounds(&self) -> Vec<Bounds<Pixels>> {
         self.text_bounds.clone()
     }

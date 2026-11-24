@@ -28,7 +28,7 @@ use crate::visual::ui::Scope;
 /// Lines of a tool's output shown while it is folded (Ctrl+O shows all).
 const FOLDED_LINES: usize = 6;
 /// Shared max width for conversation entries, plan/question cards, and the bottom composer so edges align cleanly.
-const COLUMN_MAX_W: f32 = 840.0;
+pub(super) const COLUMN_MAX_W: f32 = 840.0;
 
 impl Render for ThreadView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -283,7 +283,9 @@ impl ThreadView {
                 .bg(hsla(theme::ROW_ACTIVE))
                 .border_1()
                 .border_color(hsla(theme::PANEL_BORDER))
-                .child(chat_markdown(&mut self.markdown, ix, &keep_line_breaks(text), cx))
+                // `items_start` sizes children to their content, so a long list row would lay out on one line and run
+                // past the bubble; capping the text at the bubble's width makes it wrap.
+                .child(div().max_w_full().min_w_0().child(chat_markdown(&mut self.markdown, ix, &keep_line_breaks(text), cx)))
                 .children(self.turn_reviews.iter().filter(|turn| turn.row == ix && turn.text == *text).map(|turn| {
                     let id = turn.id;
                     let count = turn.file_count;
@@ -448,8 +450,6 @@ impl ThreadView {
             .justify_center()
             .child(div().w_full().max_w(px(COLUMN_MAX_W))
                 .when(self.find_highlights(ix), |row| row.rounded(px(5.0)).bg(hsla(theme::SURFACE_ELEVATED)))
-                .children((self.visit_watermark == Some(ix)).then(|| div()
-                    .pb(px(4.0)).text_size(scale::px(11.0)).text_color(hsla(theme::ACCENT)).child("New since last visit")))
                 .child(body))
             .into_any_element()
     }
@@ -726,7 +726,7 @@ impl ThreadView {
         let preview = first_line(&latest);
         let header = elements::chain_of_thought_header(
             start,
-            if self.run_kind(start) == Some(RunKind::Exploration) {
+            if run.clone().all(|row| self.run_kind(row) == Some(RunKind::Exploration)) {
                 timeline::exploration_label(calls.iter().copied())
             } else {
                 run_label(thoughts, calls.len() + reports.len())

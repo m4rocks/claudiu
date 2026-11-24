@@ -787,6 +787,12 @@ impl TextViewState {
         self.bounds
     }
 
+    /// Where each painted piece of text landed in the last frame, for layout tests.
+    #[doc(hidden)]
+    pub fn painted_text_bounds(&self) -> Vec<Bounds<Pixels>> {
+        self.selection_adapter.text_bounds()
+    }
+
     #[doc(hidden)]
     pub fn list_state(&self) -> &ListState {
         &self.list_state

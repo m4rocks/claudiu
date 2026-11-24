@@ -21,14 +21,19 @@ enum AttentionEvent {
     Waiting,
 }
 
+/// How long a session must stay idle before its turn counts as finished. Agents often end one turn and start the next
+/// a moment later (a queued follow-up, a steer, a background task reporting back), which isn't worth an alert.
+const SETTLE: Duration = Duration::from_secs(6);
+
 /// Whether a transition should alert the user (with a system notification when the window is in the background, or an
-/// in-app toast when another session is shown).
-fn attention_event(before: Option<Activity>, now: Option<Activity>, viewing: bool) -> Option<AttentionEvent> {
+/// in-app toast when another session is shown). A turn that ended with work still running in the background
+/// (`pending`) gets its check mark quietly: the agent will usually pick the work up again and finish later.
+fn attention_event(before: Option<Activity>, now: Option<Activity>, viewing: bool, pending: bool) -> Option<AttentionEvent> {
     if viewing {
         return None;
     }
     match (before, now) {
-        (Some(Activity::Working), Some(Activity::Attention)) => Some(AttentionEvent::Finished),
+        (Some(Activity::Working), Some(Activity::Attention)) if !pending => Some(AttentionEvent::Finished),
         (prev, Some(Activity::Waiting)) if prev != Some(Activity::Waiting) => Some(AttentionEvent::Waiting),
         _ => None,
     }
@@ -156,25 +161,32 @@ impl Workspace {
             }
             let viewing = window_active && shown.as_deref() == Some(l.id.as_str());
             // A thread knows from ACP itself: a turn is out, or a permission/ask question is open.
-            let (working, waiting, question_title) = match &l.view {
+            let (mut working, waiting, question_title, pending) = match &l.view {
                 SessionView::Thread(v) => {
                     v.update(cx, |thread, cx| thread.set_viewing(viewing, cx));
                     let t = v.read(cx);
-                    (t.is_working(), t.is_waiting(), t.pending_question_title())
+                    (t.is_working(), t.is_waiting(), t.pending_question_title(), t.has_background_work())
                 }
                 SessionView::Terminal(v) => {
                     let status = rec.claude_id().and_then(|cid| statuses.get(cid));
-                    (status.map_or_else(|| v.read(cx).is_working(), |s| s == "busy"), status.is_some_and(|s| s == "waiting"), None)
+                    (status.map_or_else(|| v.read(cx).is_working(), |s| s == "busy"), status.is_some_and(|s| s == "waiting"), None, false)
                 }
             };
             let before = self.activity.get(&l.id).copied();
+            if !working && !waiting && before == Some(Activity::Working) {
+                let since = *self.idle_since.entry(l.id.clone()).or_insert_with(std::time::Instant::now);
+                working = since.elapsed() < SETTLE;
+            }
+            if working || waiting || before != Some(Activity::Working) {
+                self.idle_since.remove(&l.id);
+            }
             let now = next_activity(working, waiting, before, viewing);
             if before == Some(Activity::Working) && now != Some(Activity::Working)
                 && let SessionView::Thread(v) = &l.view
             {
                 v.update(cx, |_, cx| cx.notify());
             }
-            if let Some(ev) = attention_event(before, now, viewing) {
+            if let Some(ev) = attention_event(before, now, viewing, pending) {
                 let title = rec.display_title().to_string();
                 let harness = rec.claude.as_ref().map_or(self.store.data.settings.harness, |m| m.harness);
                 let body = notice_body(ev, harness, question_title.as_deref());
@@ -303,14 +315,16 @@ mod tests {
     #[test]
     fn a_notification_says_a_background_session_finished_or_asks() {
         use Activity::*;
-        assert_eq!(attention_event(Some(Working), Some(Attention), false), Some(AttentionEvent::Finished));
-        assert_eq!(attention_event(Some(Working), Some(Waiting), false), Some(AttentionEvent::Waiting));
-        assert_eq!(attention_event(None, Some(Waiting), false), Some(AttentionEvent::Waiting));
-        assert_eq!(attention_event(Some(Working), Some(Attention), true), None, "already viewing it");
-        assert_eq!(attention_event(Some(Working), Some(Waiting), true), None, "already viewing it");
-        assert_eq!(attention_event(Some(Attention), Some(Attention), false), None, "already told");
-        assert_eq!(attention_event(Some(Waiting), Some(Waiting), false), None, "already told");
-        assert_eq!(attention_event(Some(Waiting), Some(Working), false), None, "it started working");
+        assert_eq!(attention_event(Some(Working), Some(Attention), false, false), Some(AttentionEvent::Finished));
+        assert_eq!(attention_event(Some(Working), Some(Waiting), false, false), Some(AttentionEvent::Waiting));
+        assert_eq!(attention_event(None, Some(Waiting), false, false), Some(AttentionEvent::Waiting));
+        assert_eq!(attention_event(Some(Working), Some(Attention), true, false), None, "already viewing it");
+        assert_eq!(attention_event(Some(Working), Some(Waiting), true, false), None, "already viewing it");
+        assert_eq!(attention_event(Some(Attention), Some(Attention), false, false), None, "already told");
+        assert_eq!(attention_event(Some(Waiting), Some(Waiting), false, false), None, "already told");
+        assert_eq!(attention_event(Some(Waiting), Some(Working), false, false), None, "it started working");
+        assert_eq!(attention_event(Some(Working), Some(Attention), false, true), None, "work is still running in the background");
+        assert_eq!(attention_event(Some(Working), Some(Waiting), false, true), Some(AttentionEvent::Waiting), "a question still asks");
         assert_eq!(notice_body(AttentionEvent::Finished, Harness::Codex, None), "Codex finished.");
         assert_eq!(notice_body(AttentionEvent::Waiting, Harness::Claude, Some("Run tests?")), "Claude Code needs your answer: Run tests?");
     }

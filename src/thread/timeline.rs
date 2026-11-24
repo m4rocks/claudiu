@@ -19,10 +19,12 @@ pub(super) fn run_kind(entry: &Entry, has_card: bool) -> Option<RunKind> {
     }
 }
 
+/// The run of steps around `ix`: every thought, tool call and subagent report between two things the agent or the
+/// user said folds into one line, whatever kind of step each is.
 pub(super) fn tool_run(len: usize, ix: usize, kind_at: impl Fn(usize) -> Option<RunKind>) -> Option<Range<usize>> {
-    let kind = kind_at(ix)?;
-    let start = (0..ix).rev().take_while(|&row| kind_at(row) == Some(kind)).last().unwrap_or(ix);
-    let end = (ix + 1..len).take_while(|&row| kind_at(row) == Some(kind)).last().unwrap_or(ix) + 1;
+    kind_at(ix)?;
+    let start = (0..ix).rev().take_while(|&row| kind_at(row).is_some()).last().unwrap_or(ix);
+    let end = (ix + 1..len).take_while(|&row| kind_at(row).is_some()).last().unwrap_or(ix) + 1;
     Some(start..end)
 }
 
@@ -108,14 +110,19 @@ mod tests {
     }
 
     #[test]
-    fn exploration_runs_stop_at_writes_and_messages() {
+    fn every_step_between_messages_folds_into_one_run() {
         let tool = |kind: &str| Entry::Tool(ToolCall { kind: kind.into(), ..Default::default() });
-        let entries = [tool("read"), tool("search"), tool("edit"), tool("read"), Entry::Agent("done".into())];
+        let entries = [
+            tool("read"), tool("search"), Entry::Thought("hm".into()), tool("edit"), tool("read"),
+            Entry::Agent("halfway".into()), tool("execute"), Entry::Thought("ok".into()), Entry::Agent("done".into()),
+        ];
         let range = |ix| tool_run(entries.len(), ix, |row| run_kind(&entries[row], false));
-        assert_eq!(range(0), Some(0..2));
-        assert_eq!(range(1), Some(0..2));
-        assert_eq!(range(2), Some(2..3));
-        assert_eq!(range(3), Some(3..4));
-        assert_eq!(range(4), None);
+        for ix in 0..5 {
+            assert_eq!(range(ix), Some(0..5));
+        }
+        assert_eq!(range(5), None);
+        assert_eq!(range(6), Some(6..8));
+        assert_eq!(range(7), Some(6..8));
+        assert_eq!(range(8), None);
     }
 }
