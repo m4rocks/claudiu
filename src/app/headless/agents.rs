@@ -100,6 +100,7 @@ fn compaction_preserves_the_session_and_never_becomes_a_user_message() {
         let id = ws.read_with(&cx, |ws, _| ws.active_id().unwrap().clone());
         let until = std::time::Instant::now() + Duration::from_secs(10);
         loop {
+            cx.update_window(window, |_, window, app| window.draw(app).clear(app)).unwrap();
             cx.run_until_parked();
             let done = ws.read_with(&cx, |ws, app| {
                 let view = ws.live_view(&id).unwrap().thread().unwrap().read(app);
@@ -126,7 +127,7 @@ fn compaction_preserves_the_session_and_never_becomes_a_user_message() {
                 assert_eq!(view.thread.context, Some((200, 1000)));
             } else {
                 assert_eq!(turns.len(), 1, "unsupported providers must not receive invented commands");
-                assert_eq!(view.compaction_status(), "Unsupported by this adapter");
+                assert_eq!(view.compaction_status(false), "Unsupported");
             }
         });
         cx.update_window(window, |_, window, app| ws.update(app, |ws, cx| ws.end_live(&id, window, cx))).unwrap();

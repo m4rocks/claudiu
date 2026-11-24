@@ -268,6 +268,19 @@ impl Workspace {
             _ => Vec::new(),
         };
         let on_list = list_focus.is_focused(window);
+        if self.settings_page == SettingsPage::Skills && self.picker.is_none()
+            && matches!(ev.keystroke.key.as_str(), "pageup" | "pagedown")
+            && ev.keystroke.modifiers.control
+        {
+            let tab = if ev.keystroke.key == "pageup" { SkillsTab::Installed } else { SkillsTab::Browse };
+            self.act(Act::SetSkillsTab(tab), window, cx);
+            if let Some(Modal::Settings { skill_search, skill_filter, .. }) = &self.modal {
+                let input = if tab == SkillsTab::Installed { skill_filter } else { skill_search };
+                input.update(cx, |s, cx| s.focus(window, cx));
+            }
+            cx.stop_propagation();
+            return;
+        }
         match ev.keystroke.key.as_str() {
             "up" if on_list => self.set_settings_page(self.settings_page.prev(), cx),
             "down" if on_list => self.set_settings_page(self.settings_page.next(), cx),

@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use super::{InstalledSkill, parse_frontmatter, valid_skill_name, valid_source};
+use super::{CatalogStatus, InstalledSkill, catalog_status, parse_frontmatter, valid_skill_name, valid_source};
 
 const SKILLS_SH_POPULAR: &str = "https://skills.sh/api/skills/all-time/0";
 const SKILLS_SH_SEARCH: &str = "https://skills.sh/api/search";
@@ -269,14 +269,28 @@ pub fn install_from_github(store_root: &Path, entry: &CatalogEntry) -> Result<In
 }
 
 /// Install every `SKILL.md` package inside a GitHub `owner/repo` using a single Git Trees lookup.
-pub fn install_repo_from_github(store_root: &Path, source: &str) -> Result<Vec<InstalledSkill>, String> {
+pub fn install_repo_from_github(store_root: &Path, source: &str, installed: &[InstalledSkill]) -> Result<Vec<InstalledSkill>, String> {
     if !valid_source(source) {
         return Err(format!("Invalid GitHub repository “{source}”."));
     }
     let blobs = fetch_repo_blobs(source)?;
-    let entries = entries_from_tree(source, &blobs);
+    let mut entries = entries_from_tree(source, &blobs);
     if entries.is_empty() {
         return Err(format!("No SKILL.md packages found in {source}."));
+    }
+    entries.retain(|entry| catalog_status(installed, entry) != CatalogStatus::Installed);
+    let mut folders = std::collections::HashSet::new();
+    for entry in &entries {
+        let Some(folder) = entry.folder_name() else { continue };
+        if let CatalogStatus::NameInUse(owner) = catalog_status(installed, entry) {
+            return Err(format!("{folder} is already installed from {owner}."));
+        }
+        if !folders.insert(folder.to_ascii_lowercase()) {
+            return Err(format!("Several packages in {source} would install to {folder}."));
+        }
+    }
+    if entries.is_empty() {
+        return Err(format!("All skills from {source} are already installed. Use Update repo to refresh them."));
     }
     fs::create_dir_all(store_root).map_err(|e| format!("Couldn't create skills folder: {e}"))?;
     let mut installed = Vec::new();

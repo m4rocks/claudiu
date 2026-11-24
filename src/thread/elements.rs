@@ -28,13 +28,15 @@ pub enum TraceStatus {
     Pending,
     Running,
     Done,
+    Ended,
     Error,
 }
 
 impl From<ToolStatus> for TraceStatus {
     fn from(status: ToolStatus) -> Self {
         match status {
-            ToolStatus::Pending | ToolStatus::Ended => Self::Pending,
+            ToolStatus::Pending => Self::Pending,
+            ToolStatus::Ended => Self::Ended,
             ToolStatus::Running => Self::Running,
             ToolStatus::Done => Self::Done,
             ToolStatus::Failed => Self::Error,
@@ -59,12 +61,15 @@ pub fn trace_line(
         TraceStatus::Error => theme::DANGER,
         TraceStatus::Running => theme::BUSY,
         TraceStatus::Done if expanded => theme::TEXT_DIM,
+        TraceStatus::Ended => theme::TEXT_DIM,
         TraceStatus::Pending | TraceStatus::Done => theme::TEXT_FAINT,
     };
+    let has_desc = description.as_ref().is_some_and(|d| !d.is_empty());
     let mut row = focusable(id.into())
         .focusable(collapsible)
         .tab_stop(collapsible)
         .w_full()
+        .overflow_hidden()
         .px(px(6.0))
         .py(px(3.0))
         .rounded(px(6.0))
@@ -76,8 +81,9 @@ pub fn trace_line(
         .child(div().flex_none().w(px(14.0)).flex().items_center().justify_center().child(leading))
         .child(
             div()
-                .flex_none()
-                .max_w(px(460.0))
+                .min_w_0()
+                .when(has_desc, |d| d.flex_shrink(1.0).max_w(px(360.0)))
+                .when(!has_desc, |d| d.flex_1())
                 .overflow_hidden()
                 .whitespace_nowrap()
                 .text_ellipsis()
@@ -98,8 +104,6 @@ pub fn trace_line(
                 .text_color(hsla(theme::TEXT_FAINT))
                 .child(desc),
         );
-    } else {
-        row = row.child(div().flex_1().min_w_0());
     }
 
     for chip in chips {
@@ -335,7 +339,7 @@ pub fn tool_header(
     let mut chips = Vec::new();
     match call.status {
         ToolStatus::Running => chips.push(trace_badge("Running", theme::BUSY, theme::SURFACE_ELEVATED, theme::PANEL_BORDER)),
-        ToolStatus::Failed => chips.push(trace_badge("Error", theme::DANGER, 0x251417, 0x55242a)),
+        ToolStatus::Failed => chips.push(trace_badge("Failed", theme::DANGER, 0x251417, 0x55242a)),
         ToolStatus::Ended => chips.push(trace_badge("Ended", theme::TEXT_DIM, theme::SURFACE_ELEVATED, theme::PANEL_BORDER)),
         _ => {}
     }

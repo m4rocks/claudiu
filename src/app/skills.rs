@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 
 use super::*;
 use crate::skills::registry::CatalogEntry;
-use crate::skills::{InstalledSkill, RepoSkill, active_harnesses, repo_skills, skills_root, sync_all, uninstall};
+use crate::skills::{CatalogStatus, InstalledSkill, RepoSkill, active_harnesses, repo_skills, skills_root, sync_all, uninstall};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SkillsTab {
@@ -22,6 +22,8 @@ pub enum SkillScope {
     Global,
     Project(Id),
 }
+
+type InstallRepo = fn(&Path, &str, &[InstalledSkill]) -> Result<Vec<InstalledSkill>, String>;
 
 /// Ephemeral UI state for Settings → Skills. Not saved to disk.
 pub struct SkillsPage {
@@ -46,7 +48,7 @@ pub struct SkillsPage {
     pub fetch_popular: fn() -> Result<Vec<CatalogEntry>, String>,
     pub fetch_search: fn(&str) -> Result<Vec<CatalogEntry>, String>,
     pub install_pkg: fn(&Path, &CatalogEntry) -> Result<InstalledSkill, String>,
-    pub install_repo_pkg: fn(&Path, &str) -> Result<Vec<InstalledSkill>, String>,
+    pub install_repo_pkg: InstallRepo,
     /// Override for the user's home directory; tests use a tempdir so global symlinks stay isolated.
     #[cfg(test)]
     pub home_override: Option<PathBuf>,
@@ -174,8 +176,16 @@ impl Workspace {
 
     /// Download `entry` into m4code's skills store, enable it in the currently selected scope, and sync symlinks.
     pub(crate) fn install_skill(&mut self, entry: CatalogEntry, cx: &mut Context<Self>) {
+        match self.store.data.settings.skills.catalog_status(&entry) {
+            CatalogStatus::Installed => return,
+            CatalogStatus::NameInUse(source) => {
+                self.toast(format!("A skill with this name is already installed from {source}."), cx);
+                return;
+            }
+            CatalogStatus::Available => {}
+        }
         let key = entry.key();
-        if !self.skills_page.installing.insert(key.clone()) {
+        if !self.begin_skill_install(&key, cx) {
             return;
         }
         let scope = self.skills_page.scope.clone();
@@ -213,16 +223,17 @@ impl Workspace {
     /// Download every `SKILL.md` package from a GitHub `owner/repo`, enable them in the selected scope, and sync symlinks.
     pub(crate) fn install_skill_repo(&mut self, source: String, cx: &mut Context<Self>) {
         let key = format!("repo:{source}");
-        if !self.skills_page.installing.insert(key.clone()) {
+        if !self.begin_skill_install(&key, cx) {
             return;
         }
         let scope = self.skills_page.scope.clone();
+        let installed = self.store.data.settings.skills.installed.clone();
         let install_fn = self.skills_page.install_repo_pkg;
         let root = skills_root();
         let repo = source.clone();
         cx.notify();
         self.in_background(
-            move || install_fn(&root, &repo),
+            move || install_fn(&root, &repo, &installed),
             move |ws, result, cx| {
                 ws.skills_page.installing.remove(&key);
                 match result {
@@ -253,6 +264,15 @@ impl Workspace {
         );
     }
 
+    fn begin_skill_install(&mut self, key: &str, cx: &mut Context<Self>) -> bool {
+        // Both individual and repository installers write to the same namespace.
+        if !self.skills_page.installing.is_empty() {
+            self.toast("Wait for the current skill operation to finish.", cx);
+            return false;
+        }
+        self.skills_page.installing.insert(key.to_string())
+    }
+
     /// Key in `installing` while `name` is being updated.
     pub(crate) fn update_key(name: &str) -> String {
         format!("update:{name}")
@@ -261,6 +281,9 @@ impl Workspace {
     /// Download the latest version of each named installed skill through the install path, keep its toggles, and
     /// re-sync symlinks. Skills already updating are skipped.
     pub(crate) fn update_skills(&mut self, names: Vec<String>, cx: &mut Context<Self>) {
+        if !self.skills_page.installing.is_empty() {
+            return;
+        }
         let entries: Vec<(String, CatalogEntry)> = self
             .store
             .data
@@ -350,6 +373,10 @@ impl Workspace {
 
     /// Remove an installed skill, its symlinks across all harnesses and projects, and its stored files.
     pub(crate) fn uninstall_skill(&mut self, name: String, cx: &mut Context<Self>) {
+        if !self.skills_page.installing.is_empty() {
+            self.toast("Wait for the current skill operation to finish.", cx);
+            return;
+        }
         if !self.store.data.settings.skills.remove(&name) {
             return;
         }
@@ -359,6 +386,8 @@ impl Workspace {
         let home = self.skills_home();
         let projects: Vec<PathBuf> = self.store.data.projects.iter().map(|p| p.path.clone()).collect();
         let removed = name.clone();
+        let key = format!("remove:{name}");
+        self.skills_page.installing.insert(key.clone());
         self.skills_page.sync_serial.fetch_add(1, Ordering::SeqCst);
         let lock = self.skills_page.sync_lock.clone();
         self.in_background(
@@ -369,9 +398,12 @@ impl Workspace {
                 };
                 uninstall(&root, &home, &removed, &projects)
             },
-            move |ws, result, cx| match result {
-                Ok(()) => ws.toast(format!("Removed skill “{name}”."), cx),
-                Err(e) => ws.toast(format!("Removed “{name}” from settings, but cleanup failed: {e}"), cx),
+            move |ws, result, cx| {
+                ws.skills_page.installing.remove(&key);
+                match result {
+                    Ok(()) => ws.toast(format!("Removed skill “{name}”."), cx),
+                    Err(e) => ws.toast(format!("Removed “{name}” from settings, but cleanup failed: {e}"), cx),
+                }
             },
             cx,
         );

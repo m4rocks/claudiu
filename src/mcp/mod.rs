@@ -45,7 +45,7 @@ impl Feature {
 
     pub fn description(self) -> &'static str {
         match self {
-            Self::Visual => "Render charts, diagrams, and interactive UI cards in Claude Code chat",
+            Self::Visual => "Render charts, diagrams, and interactive inline UI natively in chat across all harnesses",
             Self::Github => "Attach GitHub issues and pull requests to the right sidebar",
             Self::Sessions => "Link and coordinate with other running m4code sessions",
             Self::Model => "Let the agent switch its own model or effort mid-conversation",
@@ -146,12 +146,14 @@ const LINK_INSTRUCTIONS: &str = " m4code shows related sessions together. When t
 m4code session (the user says so, or you recognise it), find it with search_sessions and call link_session once per pair; \
 call unlink_session when a link no longer fits. Both are silent.";
 
-/// What makes the model call `show_visual` (the tool's own description teaches the dialect, and stays deferred).
-const VISUAL_INSTRUCTIONS: &str = " Visual: show_visual draws a card inside this terminal, under the call. Use it for the part \
-of a reply that is easier to see than to read: a table, a comparison, a flow, an architecture, a before/after, a status \
-board or numbers worth a chart. It is private and needs no approval, so call it unasked for that part. The answer stays \
-typed text: a card shows one part of it, never the whole reply, and most replies need none. Lists, explanations, short \
-answers and code changes stay in text.";
+/// What makes the model call `show_visual` or emit inline ` ```ui ` generative UI blocks natively in chat.
+const VISUAL_INSTRUCTIONS: &str = " Visual: m4code natively renders interactive UI cards, charts, SVG diagrams, \
+tables, tabs, progress bars, and action buttons inside chat. You can either call show_visual (silent, needs no approval) OR \
+write a closed ```ui fenced block directly in your reply — m4code renders ```ui blocks natively inline with no preview button. \
+Inside ```ui blocks use m4code's dark-theme HTML/CSS dialect (<card>, <badge>, <callout>, <progress value=\"..\">, <row>, <col>, \
+<grid cols=\"3\">, <tabs>, <details>, <button send=\"..\">, <chart type=\"bar|line\" labels=\"..\" values=\"..\">, \
+or inline <svg> with theme tokens var(--text), var(--dim), var(--accent), var(--ok), var(--warn), var(--danger), var(--info), \
+var(--surface), var(--border)). Use inline UI for the part of a reply that is clearer drawn than typed; keep normal prose and code in text.";
 
 const ARTIFACT_INSTRUCTIONS: &str = " Artifacts are for pages to share.";
 
@@ -249,7 +251,14 @@ fn serve(input: impl BufRead, mut out: impl Write, record: &str, data: &Path, of
                 Some("detach_github") => detach_github(&msg["params"], record, &attach_dir(data)),
                 Some("link_session") => link_session(&msg["params"], record, &attach_dir(data), "link"),
                 Some("unlink_session") => link_session(&msg["params"], record, &attach_dir(data), "unlink"),
-                Some("show_visual") => reply("Visuals aren't available in this session (m4code's mod isn't loaded).", true),
+                Some("show_visual") => {
+                    let content = msg["params"]["arguments"]["content"].as_str().unwrap_or_default();
+                    if content.trim().is_empty() {
+                        reply("content is required", true)
+                    } else {
+                        reply("Shown.", false)
+                    }
+                }
                 Some(tool) if INTERACTIVE_TOOLS.contains(&tool) || BRIDGE_TOOLS.contains(&tool) || MODEL_TOOLS.contains(&tool) || SUBAGENT_TOOLS.contains(&tool) => match ask(tool, &msg["params"]["arguments"]) {
                     Ok(text) => reply(&text, false),
                     Err(text) => reply(&text, true),
@@ -661,7 +670,7 @@ mod tests {
         let tool = r[0]["result"]["tools"].as_array().unwrap().iter().find(|t| t["name"] == "show_visual").unwrap().clone();
         assert!(tool["description"].as_str().unwrap().contains("```ui"), "the dialect is in the description");
         assert_eq!(tool["inputSchema"]["required"][0], "content");
-        assert_eq!(r[1]["result"]["isError"], true);
+        assert_eq!(r[1]["result"]["isError"], false);
     }
 
     #[test]

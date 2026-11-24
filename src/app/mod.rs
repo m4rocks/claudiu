@@ -968,6 +968,14 @@ impl Workspace {
         self.home.model_highlight = all.iter().position(|m| m.harness == chosen.harness && m.id == chosen.id).unwrap_or(0);
         self.home.model_scroll.scroll_to_item(self.home.model_highlight);
         let search = self.picker_search("Filter models…", window, cx);
+        cx.subscribe_in(&search, window, |ws: &mut Self, _, ev: &gpui_kit::component::input::InputEvent, _, cx| {
+            if matches!(ev, gpui_kit::component::input::InputEvent::Change) {
+                ws.home.model_highlight = 0;
+                ws.home.model_scroll.scroll_to_item(0);
+                cx.notify();
+            }
+        })
+        .detach();
         self.show_picker(at, WorkspacePicker::HomeModel { search }, window, cx);
     }
 

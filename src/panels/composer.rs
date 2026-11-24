@@ -108,7 +108,7 @@ pub fn frame(lit: bool, top: Option<AnyElement>, input: AnyElement, chips: Vec<A
         .child(
             div()
                 .flex()
-                .items_center()
+                .items_end()
                 .justify_between()
                 .gap(px(8.0))
                 .px(px(10.0))
@@ -145,7 +145,7 @@ pub fn model_chip(id: impl Into<ElementId>, open: bool, anchor: &Anchor, harness
         .relative()
         .child(anchor.probe())
         .child(logos::draw(logos::for_harness(harness), 11.0, hsla(theme::TEXT_DIM)))
-        .child(div().max_w(px(210.0)).overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(hsla(theme::TEXT)).child(label.into()))
+        .child(div().max_w(px(165.0)).overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(hsla(theme::TEXT)).child(label.into()))
         .when_some(effort, |d, badge| {
             d.child(div().px(px(5.0)).rounded(px(4.0)).bg(hsla(0x1f1f22)).text_size(scale::px(10.0)).text_color(hsla(theme::TEXT_DIM)).child(badge))
         })

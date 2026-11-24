@@ -6,6 +6,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use gpui::{Subscription, ClickEvent, Context, Div, Entity, FontWeight, InteractiveElement, IntoElement, KeyDownEvent, ParentElement, SharedString, Styled, Window, div, prelude::FluentBuilder, px};
+use gpui_kit::{assets::IconName, base::{AlertDialog, AlertDialogDescription, AlertDialogPopup, AlertDialogTitle}};
 use gpui_kit::component::input::{InputEvent, InputState};
 
 use serde::{Deserialize, Serialize};
@@ -17,7 +18,7 @@ use crate::git::snapshot::{self, FileChange, Hunk};
 use crate::panels::comment_box::{COMMENT_SIZE, comment_box, comment_input, comment_trigger};
 use crate::panels::scale;
 use crate::panels::theme::{self, hsla};
-use crate::panels::widgets::{button, spinner};
+use crate::panels::widgets::{button, button_colored, empty_panel, skeleton_rows, spinner};
 
 pub(super) struct ActiveTurn {
     pub id: Uuid,
@@ -359,13 +360,10 @@ impl ThreadView {
 
     fn restore_turn(&mut self, id: Uuid, cx: &mut Context<Self>) {
         let Some(turn) = self.turn_reviews.iter().find(|turn| turn.id == id).filter(|turn| self.can_restore(turn)) else { return };
-        let Some(review) = self.review.as_mut().filter(|review| review.id == id && !review.restoring && review.files.is_some()) else { return };
-        if !review.restore_confirm {
-            review.restore_confirm = true;
-            cx.notify();
+        let Some(review) = self.review.as_mut().filter(|review| review.id == id && !review.restoring && review.files.is_some() && review.error.is_none()) else { return };
+        if !std::mem::take(&mut review.restore_confirm) {
             return;
         }
-        review.restore_confirm = false;
         review.restoring = true;
         review.error = None;
         let (cwd, before, path) = (turn.cwd.clone(), turn.before.clone(), patch_path(&self.record_id, id));
@@ -395,8 +393,8 @@ impl ThreadView {
             body = body.child(div().text_color(hsla(theme::DANGER)).child(why.clone()));
         }
         match &review.files {
-            None => body = body.child(div().flex().gap(px(8.0)).items_center().text_color(hsla(theme::TEXT_DIM)).child(spinner("review-reading", 12.0)).child("Reading the changes…")),
-            Some(files) if files.is_empty() && review.error.is_none() => body = body.child(div().text_color(hsla(theme::TEXT_DIM)).child("Nothing changed since your last message.")),
+            None => body = body.child(div().text_color(hsla(theme::TEXT_DIM)).child("Reading changes")).child(skeleton_rows(5)),
+            Some(files) if files.is_empty() && review.error.is_none() => body = body.child(empty_panel(IconName::FileDiff, "No changes to review")),
             Some(files) => {
                 for (f, file) in files.iter().enumerate() {
                     body = body.child(self.render_file(f, file, review, cx));
@@ -420,10 +418,15 @@ impl ThreadView {
                 footer.when(!review.restoring, |footer| footer.child(
                     button("review-fork", "Fork Thread", false)
                         .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| cx.emit(ThreadEvent::Fork(end)))),
-                )).when(!review.restoring && review.files.is_some() && self.can_restore(turn), |footer| {
-                    let label = if review.restore_confirm { "Confirm restore" } else { "Restore Checkpoint" };
-                    footer.child(button("review-restore", label, review.restore_confirm)
-                        .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| v.restore_turn(id, cx))))
+                )).when(!review.restoring && review.files.is_some() && review.error.is_none() && self.can_restore(turn), |footer| {
+                    footer.child(button("review-restore", "Restore checkpoint", false).debug_selector(|| "review-restore".into())
+                        .on_click(cx.listener(move |v, _: &ClickEvent, window, cx| {
+                            if let Some(review) = v.review.as_mut().filter(|review| review.id == id && review.error.is_none()) {
+                                review.restore_confirm = true;
+                                window.focus(&v.restore_focus, cx);
+                                cx.notify();
+                            }
+                        })))
                 })
             })
             .when(review.restoring, |footer| footer.child(spinner("review-restoring", 12.0)))
@@ -434,7 +437,41 @@ impl ThreadView {
                 let label = if count == 1 { "Send 1 comment".to_string() } else { format!("Send {count} comments") };
                 d.child(button("review-send", label, true).on_click(cx.listener(|v, _: &ClickEvent, window, cx| v.send_comments(window, cx))))
             });
-        Some(div().flex_1().flex().flex_col().min_h_0().child(body).child(footer))
+        let alert = review.restore_confirm.then(|| {
+            let id = review.id;
+            let clear = cx.entity().downgrade();
+            AlertDialog::new(cx)
+                .focus_handle(self.restore_focus.clone())
+                .on_open_change(move |open, _, _, cx| {
+                    if !open {
+                        let _ = clear.update(cx, |v, cx| v.cancel_restore(cx));
+                    }
+                })
+                .backdrop(div().absolute().inset_0().bg(gpui::black().opacity(0.6)))
+                .popup(AlertDialogPopup::new().w(px(420.0)).max_w_full().p(px(20.0))
+                    .flex().flex_col().gap(px(10.0)).rounded(px(10.0))
+                    .bg(hsla(theme::PANEL_BG)).border_1().border_color(hsla(theme::PANEL_BORDER))
+                    .child(AlertDialogTitle::new().font_weight(FontWeight::SEMIBOLD).text_size(scale::px(16.0)).child("Restore this checkpoint?"))
+                    .child(AlertDialogDescription::new().text_color(hsla(theme::TEXT_DIM))
+                        .child("This puts files changed in this turn back to their earlier state. Restore is blocked if those files have changed since."))
+                    .child(div().flex().justify_end().gap(px(8.0)).pt(px(6.0))
+                        .child(button("restore-cancel", "Cancel", false).debug_selector(|| "restore-cancel".into())
+                            .on_click(cx.listener(|v, _: &ClickEvent, _, cx| v.cancel_restore(cx))))
+                        .child(button_colored("restore-confirm", None, "Restore checkpoint", hsla(theme::DANGER),
+                            hsla(theme::PANEL_BG), hsla(theme::DANGER).opacity(0.8), None, true)
+                            .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| {
+                                v.restore_turn(id, cx);
+                                v.cancel_restore(cx);
+                            })))))
+        });
+        Some(div().flex_1().flex().flex_col().min_h_0().child(body).child(footer).children(alert))
+    }
+
+    fn cancel_restore(&mut self, cx: &mut Context<Self>) {
+        if let Some(review) = &mut self.review {
+            review.restore_confirm = false;
+            cx.notify();
+        }
     }
 
     fn render_file(&self, f: usize, file: &FileChange, review: &Review, cx: &mut Context<Self>) -> Div {
@@ -481,7 +518,7 @@ impl ThreadView {
             let comment = review.snapshot.is_some().then(|| {
                 if let Some(n) = line.new_line {
                     let path = path.to_path_buf();
-                    comment_trigger(format!("review-comment-{f}-{h}-{l}"))
+                    comment_trigger(format!("review-comment-{f}-{h}-{l}"), false)
                         .opacity(0.65)
                         .group_hover("review-diff-line", |style| style.opacity(1.0))
                         .focus_visible(|style| style.opacity(1.0))

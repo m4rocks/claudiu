@@ -45,36 +45,67 @@ pub(super) fn exploration_label<'a>(calls: impl Iterator<Item = &'a ToolCall>) -
     format!("Explored: {activity}")
 }
 
-/// Keep HTML as code in the transcript. An explicitly opened preview uses the same native
-/// renderer as visual cards, which does not execute scripts or load external images.
-pub(super) fn html_preview(markdown: &str) -> Option<String> {
+/// Split an agent markdown message into ordinary markdown segments and closed ```` ```ui ```` (or `~~~ui`) blocks
+/// so inline generative UI renders natively in the transcript with no preview button.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum InlineSegment {
+    Markdown(String),
+    Ui(String),
+}
+
+pub(super) fn split_inline_ui(markdown: &str) -> Vec<InlineSegment> {
+    let mut segments = Vec::new();
+    let mut text_buf = String::new();
+    let mut ui_buf = String::new();
     let mut open: Option<(char, usize, bool)> = None;
-    let mut out = None;
-    for line in markdown.lines() {
+    for line in markdown.split_inclusive('\n') {
         let trimmed = line.trim();
         let marker = trimmed.chars().next().filter(|c| matches!(c, '`' | '~'));
-        let len = marker.map_or(0, |marker| trimmed.chars().take_while(|c| *c == marker).count());
-        if let Some((delimiter, count, html)) = open {
+        let len = marker.map_or(0, |m| trimmed.chars().take_while(|c| *c == m).count());
+        if let Some((delimiter, count, is_ui)) = open {
             if marker == Some(delimiter) && len >= count && trimmed[len..].trim().is_empty() {
-                if html {
-                    let html = out?;
+                if is_ui {
                     let fence = delimiter.to_string().repeat(count);
-                    return Some(format!("{fence}ui\n{html}{fence}"));
+                    if !text_buf.trim().is_empty() {
+                        segments.push(InlineSegment::Markdown(std::mem::take(&mut text_buf)));
+                    } else {
+                        text_buf.clear();
+                    }
+                    let body = std::mem::take(&mut ui_buf);
+                    segments.push(InlineSegment::Ui(format!("{fence}ui\n{body}{fence}")));
+                } else {
+                    text_buf.push_str(line);
                 }
                 open = None;
-            } else if html {
-                let contents = out.get_or_insert_with(String::new);
-                if contents.len() + line.len() >= 128 * 1024 {
-                    return None;
+            } else if is_ui {
+                if ui_buf.len() + line.len() < 128 * 1024 {
+                    ui_buf.push_str(line);
                 }
-                contents.push_str(line);
-                contents.push('\n');
+            } else {
+                text_buf.push_str(line);
             }
-        } else if len >= 3 && let Some(marker) = marker {
-            open = Some((marker, len, trimmed[len..].trim().eq_ignore_ascii_case("html")));
+        } else if len >= 3 && let Some(m) = marker {
+            let lang = trimmed[len..].trim();
+            if lang.eq_ignore_ascii_case("ui") {
+                open = Some((m, len, true));
+                ui_buf.clear();
+            } else {
+                open = Some((m, len, false));
+                text_buf.push_str(line);
+            }
+        } else {
+            text_buf.push_str(line);
         }
     }
-    None
+    if let Some((delimiter, count, true)) = open {
+        let fence = delimiter.to_string().repeat(count);
+        text_buf.push_str(&format!("{fence}ui\n"));
+        text_buf.push_str(&ui_buf);
+    }
+    if !text_buf.is_empty() || segments.is_empty() {
+        segments.push(InlineSegment::Markdown(text_buf));
+    }
+    segments
 }
 
 pub(super) fn file_link(target: &str) -> Option<(PathBuf, Option<u32>)> {
@@ -98,9 +129,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn preview_waits_for_a_complete_html_fence() {
-        assert!(html_preview("~~~html\n<p>Still streaming").is_none());
-        assert_eq!(html_preview("~~~html\n<p>Ready</p>\n~~~").as_deref(), Some("~~~ui\n<p>Ready</p>\n~~~"));
+    fn inline_ui_waits_for_a_complete_ui_fence() {
+        assert_eq!(
+            split_inline_ui("~~~ui\n<p>Still streaming"),
+            vec![InlineSegment::Markdown("~~~ui\n<p>Still streaming".into())]
+        );
+        assert_eq!(
+            split_inline_ui("Before\n```ui\n<card>Hi</card>\n```\nAfter"),
+            vec![
+                InlineSegment::Markdown("Before\n".into()),
+                InlineSegment::Ui("```ui\n<card>Hi</card>\n```".into()),
+                InlineSegment::Markdown("After".into()),
+            ]
+        );
     }
 
     #[test]

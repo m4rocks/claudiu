@@ -77,6 +77,7 @@ pub struct ToolDetails {
     pub server: Option<String>,
     pub request: Option<String>,
     pub response: Option<String>,
+    pub visual: Option<String>,
 }
 
 impl ToolDetails {
@@ -296,10 +297,16 @@ impl Thread {
                 }
                 return at;
             }
-            "agent_message_chunk" => return self.append(text(), Entry::Agent, |e| match e {
-                Entry::Agent(t) => Some(t),
-                _ => None,
-            }),
+            "agent_message_chunk" => {
+                let chunk = text();
+                if is_codex_resume_model_warning(chunk) {
+                    return None;
+                }
+                return self.append(chunk, Entry::Agent, |e| match e {
+                    Entry::Agent(t) => Some(t),
+                    _ => None,
+                });
+            }
             "agent_thought_chunk" => return self.append(text(), Entry::Thought, |e| match e {
                 Entry::Thought(t) => Some(t),
                 _ => None,
@@ -544,11 +551,19 @@ fn merge_tool(call: &mut ToolCall, update: &Value) {
         call.content = items(update, "content").filter_map(tool_content).collect();
     }
     if update.get("locations").is_some_and(Value::is_array) {
-        call.locations = items(update, "locations")
+        let parsed: Vec<_> = items(update, "locations")
             .filter_map(|l| Some((PathBuf::from(l["path"].as_str()?), l["line"].as_u64().map(|n| n as u32))))
             .collect();
+        if !parsed.is_empty() {
+            call.locations = parsed;
+        }
     }
     call.details.apply(&call.kind, update);
+    if is_show_visual_title(&call.title)
+        && let Some(content) = update.pointer("/rawInput/content").and_then(Value::as_str).filter(|s| !s.trim().is_empty())
+    {
+        call.details.visual = Some(content.to_string());
+    }
     if let Some(agent_type) = subagent_type(update) {
         call.subagent = Some(agent_type);
     }
@@ -557,6 +572,21 @@ fn merge_tool(call: &mut ToolCall, update: &Value) {
 /// The agent type a tool call starts, when it starts one of the harness's own subagents: Claude Code's Agent tool and
 /// OpenCode's task tool name it in `subagent_type`. Claude Code leaves it out for its general-purpose agent; m4code's
 /// bridge gives only that tool the `think` kind together with a description and a prompt.
+fn is_codex_resume_model_warning(chunk: &str) -> bool {
+    let trimmed = chunk.trim();
+    trimmed.starts_with("Warning: This session was recorded with model ")
+        && trimmed.contains(" but is resuming with ")
+        && trimmed.contains("Consider switching back to ")
+}
+
+fn is_show_visual_title(title: &str) -> bool {
+    let t = title.trim();
+    t == "show_visual"
+        || ["mcp__m4code__", "m4code: ", "m4code_", "m4code.", "m4code/", "m4code__"]
+            .iter()
+            .any(|prefix| t.strip_prefix(prefix) == Some("show_visual"))
+}
+
 fn subagent_type(update: &Value) -> Option<String> {
     let input = &update["rawInput"];
     if let Some(agent_type) = input["subagent_type"].as_str().filter(|t| !t.is_empty()) {

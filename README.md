@@ -39,7 +39,7 @@ When upgrading from a version with multiple Claude accounts, resumed sessions us
 
 ### Workspace, Git, and editor
 
-- **Comments**: Select text in chat and use the comment icon to add context to your next message. The same icon opens comments on lines in Review changes and in the editor.
+- **Comments**: Select text in chat and use the comment icon or press Cmd/Ctrl+Shift+M to add context to your next message. The same icon opens comments on lines in Review changes and in the editor.
 
 - **Branches and worktrees**: Create a branch or spin up a new worktree (from `main` or the current checkout) in one click from the branch chip, inspect external worktrees, or move a session between worktrees.
 - **Change review and snapshots**: Review a file-changing turn from its prompt to see the changes captured when that turn ended. **Restore Checkpoint** rolls the files back when the checkout still matches, and **Fork Thread** copies the conversation through that turn into a new session. The composer?s **Review changes** button compares the working tree to the latest snapshot and supports hunk actions and line comments.
@@ -59,7 +59,7 @@ When upgrading from a version with multiple Claude accounts, resumed sessions us
 
 ### Skills
 
-**Settings → Skills** lets you filter installed skills, browse or search `skills.sh`, installs single `SKILL.md` packages or entire GitHub repositories (grouped by repository, with single-skill, per-repo, and Update All controls), and symlinks enabled skills globally or per project into each active harness. When scoped to a project, it also lists skills shipped in the repository (such as `.claude/skills`) read-only.
+**Settings → Skills** identifies packages by repository and skill ID. A package from another author that needs the same harness folder is marked **Name in use**. The page lets you filter installed skills, browse or search `skills.sh`, installs single `SKILL.md` packages or entire GitHub repositories (grouped by repository, with single-skill, per-repo, and Update All controls), and symlinks enabled skills globally or per project into each active harness. When scoped to a project, it also lists skills shipped in the repository (such as `.claude/skills`) read-only.
 
 ## What it touches
 

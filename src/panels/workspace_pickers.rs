@@ -46,14 +46,30 @@ impl Workspace {
                     })
                     .collect();
                 let hi = self.home.model_highlight.min(filtered.len().saturating_sub(1));
-                let mut list = self.home.model_scroll.wire(div().id("home-model-list").max_h(px(176.0)), window).flex().flex_col().gap(px(2.0));
+                let mut list = self.home.model_scroll.wire(div().id("home-model-list").role(gpui::Role::ListBox).aria_label("Models").max_h(px(176.0)), window).flex().flex_col().gap(px(2.0));
+                let mut last_harness = None;
                 for (n, m) in filtered.iter().enumerate() {
+                    if last_harness != Some(m.harness) {
+                        last_harness = Some(m.harness);
+                        list = list.child(
+                            div()
+                                .px(px(8.0))
+                                .pt(px(if n == 0 { 2.0 } else { 6.0 }))
+                                .pb(px(2.0))
+                                .text_size(scaled(10.5))
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(hsla(theme::TEXT_FAINT))
+                                .child(m.harness.name()),
+                        );
+                    }
                     let selected = chosen_model.harness == m.harness && chosen_model.id == m.id;
                     let focused = n == hi;
                     let choice = m.clone();
                     let logo = logos::draw(logos::for_harness(m.harness), 11.5, if selected { accent } else { hsla(theme::TEXT_FAINT) }).into_any_element();
                     list = list.child(
                         picker::row(gpui::SharedString::from(format!("home-model-opt-{n}")), Some(logo), m.name.clone(), None, None, selected, false)
+                            .role(gpui::Role::ListBoxOption)
+                            .aria_selected(selected)
                             .when(focused && !selected, |d| d.bg(hsla(theme::SURFACE_HOVER)))
                             .border_1()
                             .border_color(if focused { hsla(theme::FOCUS_BORDER) } else { gpui::transparent_black() })
@@ -399,17 +415,33 @@ impl Workspace {
                     all.insert(0, current.clone());
                 }
                 let mut choices = picker::Choices::new(&self.picker_nav, &query);
-                let mut list = choices.list("settings-model-list", window).max_h(px(260.0));
+                let mut list = choices.list("settings-model-list", window).role(gpui::Role::ListBox).aria_label("Models").max_h(px(260.0));
                 let mut shown = 0usize;
                 if text_generation && words.iter().all(|word| "local summary".contains(word)) {
-                    let row = picker::row("settings-model-local", None, "Local summary", None, None, text_generation_model.is_none(), false);
+                    let row = picker::row("settings-model-local", None, "Local summary", None, None, text_generation_model.is_none(), false)
+                        .role(gpui::Role::ListBoxOption)
+                        .aria_selected(text_generation_model.is_none());
                     list = list.child(choices.add(row, |ws, window, cx| ws.act(Act::PickTextGenerationModel(None), window, cx), cx));
                     shown += 1;
                 }
+                let mut last_harness = None;
                 for (n, m) in all.into_iter().enumerate() {
                     let hay = format!("{} {} {}", m.name, m.id, m.harness.name()).to_lowercase();
                     if !words.iter().all(|w| hay.contains(w)) {
                         continue;
+                    }
+                    if last_harness != Some(m.harness) {
+                        last_harness = Some(m.harness);
+                        list = list.child(
+                            div()
+                                .px(px(8.0))
+                                .pt(px(if shown == 0 { 2.0 } else { 6.0 }))
+                                .pb(px(2.0))
+                                .text_size(scaled(10.5))
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(hsla(theme::TEXT_FAINT))
+                                .child(m.harness.name()),
+                        );
                     }
                     let selected = if text_generation {
                         text_generation_model.as_ref().is_some_and(|model| model.harness == m.harness && model.id == m.id)
@@ -422,7 +454,9 @@ impl Workspace {
                         Act::PickDefaultModel(m.clone())
                     };
                     let logo = logos::draw(logos::for_harness(m.harness), 11.5, if selected { accent } else { hsla(theme::TEXT_FAINT) }).into_any_element();
-                    let row = picker::row(gpui::SharedString::from(format!("settings-model-opt-{n}")), Some(logo), m.name.clone(), None, None, selected, false);
+                    let row = picker::row(gpui::SharedString::from(format!("settings-model-opt-{n}")), Some(logo), m.name.clone(), None, None, selected, false)
+                        .role(gpui::Role::ListBoxOption)
+                        .aria_selected(selected);
                     list = list.child(choices.add(row, move |ws, window, cx| ws.act(choice.clone(), window, cx), cx));
                     shown += 1;
                 }
@@ -514,12 +548,13 @@ impl Workspace {
                 };
                 let current = self.effective_skill_scope();
                 let mut choices = picker::Choices::new(&self.picker_nav, &query);
-                let mut list = choices.list("skills-scope-list", window).max_h(px(250.0));
+                let mut list = choices.list("skills-scope-list", window).role(gpui::Role::ListBox).aria_label("Skill scopes").max_h(px(250.0));
                 let mut shown = 0usize;
                 if matches("global all workspaces") {
                     let selected = current == SkillScope::Global;
                     let lead = icon(IconName::FolderOpen, 12.0).text_color(if selected { accent } else { hsla(theme::TEXT_FAINT) }).into_any_element();
-                    let row = picker::row("skills-scope-global", Some(lead), "Global (all workspaces)", Some("Symlink into global harness skills folders".into()), None, selected, false);
+                    let row = picker::row("skills-scope-global", Some(lead), "Global (all workspaces)", Some("Symlink into global harness skills folders".into()), None, selected, false)
+                        .role(gpui::Role::ListBoxOption).aria_selected(selected);
                     list = list.child(choices.add(row, |ws, window, cx| ws.act(Act::SetSkillScope(SkillScope::Global), window, cx), cx));
                     shown += 1;
                 }
@@ -531,14 +566,22 @@ impl Workspace {
                     let scope = SkillScope::Project(p.id.clone());
                     let selected = current == scope;
                     let lead = icon(IconName::FolderOpen, 12.0).text_color(if selected { accent } else { hsla(theme::TEXT_FAINT) }).into_any_element();
-                    let row = picker::row(gpui::SharedString::from(format!("skills-scope-{i}")), Some(lead), p.name.clone(), Some(path_str), None, selected, false);
+                    let row = picker::row(gpui::SharedString::from(format!("skills-scope-{i}")), Some(lead), p.name.clone(), Some(path_str), None, selected, false)
+                        .role(gpui::Role::ListBoxOption).aria_selected(selected);
                     list = list.child(choices.add(row, move |ws, window, cx| ws.act(Act::SetSkillScope(scope.clone()), window, cx), cx));
                     shown += 1;
                 }
                 if shown == 0 {
-                    list = list.child(picker::empty_note("No matching scope."));
+                    list = list.child(crate::panels::widgets::empty_panel(IconName::Search, "No matching projects"));
                 }
-                let body = div().flex().flex_col().gap(px(8.0)).child(picker::search_input(search)).child(list);
+                let field = gpui_kit::component::input::Input::new(search)
+                    .h(px(30.0)).appearance(false).aria_label("Find a project or choose Global");
+                let body = div().flex().flex_col().gap(px(5.0))
+                    .child(div().flex().items_center().gap(px(7.0)).px(px(8.0)).rounded(px(6.0))
+                        .bg(hsla(theme::PANEL_BG)).border_1().border_color(hsla(theme::PANEL_BORDER))
+                        .child(icon(IconName::Search, 14.0).text_color(hsla(theme::TEXT_DIM)))
+                        .child(div().flex_1().min_w_0().child(field)))
+                    .child(list);
                 ("skills-scope-dialog", "SKILL SCOPE", body.into_any_element(), Some(choices))
             }
             WorkspacePicker::Editor { target } => {

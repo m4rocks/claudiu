@@ -58,14 +58,23 @@ pub fn limit_bar(id: impl Into<ElementId>, fraction: Option<f32>, left: String, 
         .top_0()
         .left_0()
         .size_full()
-        .px(crate::panels::scale::px(4.0))
+        .px(crate::panels::scale::px(5.0))
         .flex()
         .items_center()
         .justify_between()
-        .gap(crate::panels::scale::px(3.0))
+        .gap(crate::panels::scale::px(4.0))
         .text_size(crate::panels::scale::px(10.5))
         .child(div().flex_none().text_color(hsla(percent_color)).child(left))
-        .child(div().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().text_color(hsla(theme::TEXT_DIM)).child(right));
+        .child(
+            div()
+                .min_w_0()
+                .overflow_hidden()
+                .text_ellipsis()
+                .whitespace_nowrap()
+                .text_size(crate::panels::scale::px(10.0))
+                .text_color(hsla(theme::TEXT_DIM))
+                .child(right),
+        );
     div().id(id.into()).relative().h(height).w_full().rounded(radius).overflow_hidden().bg(hsla(theme::ROW_HOVER)).child(fill).child(texts)
 }
 
@@ -606,6 +615,21 @@ pub fn fade_in<E: gpui::IntoElement + Styled + 'static>(el: E, key: impl Into<Sh
         Animation::new(std::time::Duration::from_millis(ms)).with_easing(gpui::ease_out_quint()),
         move |el, t| el.opacity(from + (1.0 - from) * t),
     )
+}
+
+pub fn empty_panel(glyph: IconName, label: impl Into<SharedString>) -> Div {
+    div().flex().flex_col().items_center().justify_center().gap(px(10.0)).p(px(24.0))
+        .child(div().flex().items_center().justify_center().size(px(32.0)).rounded(px(8.0))
+            .bg(hsla(theme::SURFACE_HOVER)).child(icon(glyph, 16.0).text_color(hsla(theme::TEXT_DIM))))
+        .child(div().text_center().text_size(crate::panels::scale::px(13.0)).text_color(hsla(theme::TEXT_DIM)).child(label.into()))
+}
+
+pub fn skeleton_rows(count: usize) -> Div {
+    div().flex().flex_col().gap(px(14.0)).p(px(12.0)).children((0..count).map(|row| {
+        div().flex().flex_col().gap(px(6.0))
+            .child(div().h(px(10.0)).w(px(112.0 + (row % 3) as f32 * 22.0)).rounded(px(4.0)).bg(hsla(theme::SKELETON)))
+            .child(div().h(px(8.0)).w(px(76.0)).rounded(px(4.0)).bg(hsla(theme::SKELETON)))
+    }))
 }
 
 #[cfg(test)]

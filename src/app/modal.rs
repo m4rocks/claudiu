@@ -224,12 +224,17 @@ impl Workspace {
 
         // Apply updated settings to every open session immediately.
         self.push_models_to_threads(cx);
+        let inline_visuals = !self.store.data.settings.m4code_tools_off.contains(&mcp::Feature::Visual);
         let effort_id = effort.name().to_string();
         for live in &self.live {
             let inherits_auto_compact = self.store.session(&live.id).and_then(|r| r.agent.as_ref()).is_none_or(|m| m.auto_compact_override.is_none());
             if let Some(thread) = live.view.thread() {
                 thread.update(cx, |t, cx| {
                     t.follow_up = follow_up;
+                    if t.inline_visuals != inline_visuals {
+                        t.inline_visuals = inline_visuals;
+                        t.remeasure(0);
+                    }
                     if (auto_compact_changed && inherits_auto_compact) || auto_compact_threshold_changed {
                         let enabled = if inherits_auto_compact { auto_compact } else { t.compaction.enabled };
                         t.set_compaction_policy(enabled, auto_compact_threshold, cx);

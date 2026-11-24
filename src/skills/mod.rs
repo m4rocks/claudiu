@@ -65,7 +65,30 @@ pub struct SkillsConfig {
     pub project_enabled: BTreeMap<String, Vec<String>>,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum CatalogStatus<'a> {
+    Available,
+    Installed,
+    NameInUse(&'a str),
+}
+
+pub fn catalog_status<'a>(installed: &'a [InstalledSkill], entry: &registry::CatalogEntry) -> CatalogStatus<'a> {
+    if installed.iter().any(|skill| skill.source.eq_ignore_ascii_case(&entry.source) && skill.skill_id == entry.skill_id) {
+        return CatalogStatus::Installed;
+    }
+    if let Some(folder) = entry.folder_name()
+        && let Some(skill) = installed.iter().find(|skill| skill.name.eq_ignore_ascii_case(folder))
+    {
+        return CatalogStatus::NameInUse(&skill.source);
+    }
+    CatalogStatus::Available
+}
+
 impl SkillsConfig {
+    pub fn catalog_status(&self, entry: &registry::CatalogEntry) -> CatalogStatus<'_> {
+        catalog_status(&self.installed, entry)
+    }
+
     pub fn is_installed(&self, name: &str) -> bool {
         self.installed.iter().any(|s| s.name == name)
     }
@@ -598,6 +621,16 @@ mod tests {
         assert_eq!(entry.source, skill.source);
         assert_eq!(entry.skill_id, skill.skill_id);
         assert_eq!(entry.folder_name(), Some("agent-browser"));
+    }
+
+    #[test]
+    fn catalogue_status_distinguishes_identically_named_skills_by_author() {
+        let mut config = SkillsConfig::default();
+        config.upsert(InstalledSkill { name: "review".into(), source: "alice/skills".into(), skill_id: "review".into(), description: String::new(), installed_at: 1 });
+        let entry = registry::CatalogEntry { name: "review".into(), source: "bob/skills".into(), skill_id: "review".into(), installs: 0, is_official: false };
+        assert_eq!(config.catalog_status(&entry), CatalogStatus::NameInUse("alice/skills"));
+        assert_eq!(config.catalog_status(&registry::CatalogEntry { source: "Alice/Skills".into(), ..entry.clone() }), CatalogStatus::Installed);
+        assert_eq!(config.catalog_status(&registry::CatalogEntry { name: "audit".into(), ..entry }), CatalogStatus::Available);
     }
 
     #[test]

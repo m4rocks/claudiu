@@ -2,14 +2,14 @@
 //! and show which active harnesses receive synced symlinks.
 
 use gpui::{AnyElement, ClickEvent, Context, Div, FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString, Styled, div, px};
-use gpui_kit::assets::IconName;
+use gpui_kit::{assets::IconName, base::{Tab, Tabs}};
 use gpui_kit::component::input::{Input, InputState};
 
 use crate::app::{Act, SkillScope, SkillsTab, Workspace, WorkspacePicker};
 use crate::panels::settings_pages::{settings_group, toggle_switch};
 use crate::panels::theme::{self, hsla};
-use crate::panels::widgets::{Trigger, button, button_disabled, fade_in, focusable, icon, spinner};
-use crate::skills::InstalledSkill;
+use crate::panels::widgets::{Trigger, button, button_disabled, fade_in, focusable, icon, empty_panel, skeleton_rows};
+use crate::skills::{CatalogStatus, InstalledSkill};
 use crate::skills::registry::{CatalogEntry, format_installs};
 
 fn faint(text: impl Into<SharedString>) -> Div {
@@ -21,7 +21,16 @@ fn warn(text: impl Into<SharedString>) -> Div {
 }
 
 fn empty_state(text: impl Into<SharedString>) -> Div {
-    div().flex().flex_col().items_start().gap(px(8.0)).p(px(14.0)).child(faint(text))
+    empty_panel(IconName::Search, text)
+}
+
+fn search_group(input: &gpui::Entity<InputState>, action: Option<AnyElement>) -> Div {
+    div().flex().flex_1().min_w_0().items_center().gap(px(6.0)).px(px(8.0)).py(px(3.0))
+        .rounded(px(7.0)).border_1().border_color(hsla(theme::PANEL_BORDER))
+        .bg(hsla(theme::PANEL_BG))
+        .child(div().flex_none().child(icon(IconName::Search, 14.0).text_color(hsla(theme::TEXT_DIM))))
+        .child(div().flex_1().min_w_0().child(Input::new(input).appearance(false)))
+        .children(action)
 }
 
 fn skill_row(name: &str, description: &str, actions: Vec<AnyElement>) -> Div {
@@ -42,17 +51,21 @@ impl Workspace {
         let state = &self.skills_page;
         let count = self.store.data.settings.skills.installed.len();
         let harnesses: Vec<_> = self.active_skill_harnesses(None).into_iter().map(|h| h.name()).collect();
-        let tabs = div()
-            .flex()
-            .items_center()
-            .gap(px(4.0))
-            .p(px(3.0))
-            .rounded(px(7.0))
-            .bg(hsla(theme::SURFACE_ELEVATED))
-            .child(button("skills-tab-installed", format!("Installed ({count})"), state.tab == SkillsTab::Installed)
-                .on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::SetSkillsTab(SkillsTab::Installed), window, cx))))
-            .child(button("skills-tab-browse", "Browse", state.tab == SkillsTab::Browse)
-                .on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::SetSkillsTab(SkillsTab::Browse), window, cx))));
+        let tabs = Tabs::new("skills-tabs")
+            .flex().items_center().gap(px(2.0)).p(px(3.0)).rounded(px(8.0))
+            .bg(hsla(theme::SURFACE_HOVER))
+            .children([
+                ("skills-tab-installed", format!("Installed ({count})"), SkillsTab::Installed),
+                ("skills-tab-browse", "Browse".into(), SkillsTab::Browse),
+            ].into_iter().enumerate().map(|(i, (id, label, tab))| {
+                Tab::new(id).set_position(i + 1, 2).selected(state.tab == tab)
+                    .cursor_pointer().h(px(28.0)).px(px(10.0)).rounded(px(6.0))
+                    .text_color(hsla(theme::TEXT_DIM)).text_size(crate::panels::scale::px(12.5))
+                    .font_weight(FontWeight::MEDIUM)
+                    .styles(|styles| styles.selected(|s| s.bg(hsla(theme::PANEL_BG)).text_color(hsla(theme::TEXT))))
+                    .child(label)
+                    .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::SetSkillsTab(tab), window, cx)))
+            }));
         let header = div()
             .flex()
             .flex_wrap()
@@ -83,7 +96,7 @@ impl Workspace {
         } else {
             let all: Vec<_> = installed.installed.iter().map(|skill| skill.name.clone()).collect();
             page = page.child(div().flex().items_center().gap(px(8.0))
-                .child(div().flex_1().min_w_0().child(Input::new(filter)))
+                .child(search_group(filter, None))
                 .child(self.update_skills_button("skills-update-all", "Update all", all, cx)));
             let query = filter.read(cx).value().trim().to_lowercase();
             let mut matching = 0;
@@ -111,10 +124,9 @@ impl Workspace {
     fn browse_skills(&self, search: &gpui::Entity<InputState>, cx: &mut Context<Self>) -> Div {
         let state = &self.skills_page;
         let mut search_bar = div().flex().items_center().gap(px(8.0))
-            .child(div().flex_1().min_w_0().child(Input::new(search)))
-            .child(button("skills-search-go", "Search", true).on_click(cx.listener(|ws, _: &ClickEvent, window, cx| {
-                ws.act(Act::SearchSkills, window, cx)
-            })));
+            .child(search_group(search, Some(button("skills-search-go", "Search", true)
+                .on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::SearchSkills, window, cx)))
+                .into_any_element())));
         if state.search_query.is_some() || state.error.is_some() {
             search_bar = search_bar.child(button("skills-search-clear", "Popular", false).on_click(cx.listener(|ws, _: &ClickEvent, window, cx| {
                 if let Some(crate::app::Modal::Settings { skill_search, .. }) = &ws.modal {
@@ -129,9 +141,7 @@ impl Workspace {
                 || "Loading popular skills from skills.sh".into(),
                 |query| format!("Searching for {query}"),
             );
-            return page.child(div().flex().items_center().gap(px(8.0)).p(px(12.0))
-                .child(spinner("skills-catalog-loading", 12.0))
-                .child(faint(status)));
+            return page.child(settings_group(status, None, vec![skeleton_rows(5).into_any_element()]));
         }
         if let Some(error) = &state.error {
             return page.child(empty_state("Could not load skills").child(warn(error.clone())));
@@ -150,8 +160,9 @@ impl Workspace {
             }
         });
         let install_repo = repo.map(|repo| {
-            if state.installing.contains(&format!("repo:{repo}")) {
-                button_disabled("skills-install-repo", "Installing repository").into_any_element()
+            if !state.installing.is_empty() {
+                let label = if state.installing.contains(&format!("repo:{repo}")) { "Installing repository" } else { "Install repository" };
+                button_disabled("skills-install-repo", label).into_any_element()
             } else {
                 button("skills-install-repo", "Install repository", false)
                     .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::InstallSkillRepo(repo.clone()), window, cx)))
@@ -167,18 +178,22 @@ impl Workspace {
 
     fn catalog_skill_row(&self, entry: &CatalogEntry, cx: &mut Context<Self>) -> Div {
         let key = entry.key();
-        let folder = entry.folder_name().unwrap_or(&entry.name);
-        let already = self.store.data.settings.skills.is_installed(folder);
+        let status = self.store.data.settings.skills.catalog_status(entry);
         let busy = self.skills_page.installing.contains(&key)
             || self.skills_page.installing.contains(&format!("repo:{}", entry.source));
-        let installed_label = if busy { "Installing" } else { "Installed" };
-        let action = if busy || already {
-            button_disabled(format!("skill-install-{key}"), installed_label).into_any_element()
-        } else {
-            let entry = entry.clone();
-            button(format!("skill-install-{key}"), "Install", false)
-                .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::InstallSkill(entry.clone()), window, cx)))
-                .into_any_element()
+        let action = match (busy, &status) {
+            (true, _) => button_disabled(format!("skill-install-{key}"), "Installing").into_any_element(),
+            (_, CatalogStatus::Installed) => button_disabled(format!("skill-install-{key}"), "Installed").into_any_element(),
+            (_, CatalogStatus::NameInUse(_)) => button_disabled(format!("skill-install-{key}"), "Name in use").into_any_element(),
+            (_, CatalogStatus::Available) if !self.skills_page.installing.is_empty() => {
+                button_disabled(format!("skill-install-{key}"), "Install").into_any_element()
+            }
+            (_, CatalogStatus::Available) => {
+                let entry = entry.clone();
+                button(format!("skill-install-{key}"), "Install", false)
+                    .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::InstallSkill(entry.clone()), window, cx)))
+                    .into_any_element()
+            }
         };
         let mut metadata = entry.source.clone();
         if entry.installs > 0 {
@@ -186,6 +201,9 @@ impl Workspace {
         }
         if entry.is_official {
             metadata.push_str(" · Official");
+        }
+        if let CatalogStatus::NameInUse(source) = status {
+            metadata.push_str(&format!(" · Name used by {source}"));
         }
         skill_row(&entry.name, &metadata, vec![action])
     }
@@ -216,17 +234,21 @@ impl Workspace {
         skill_row(&skill.name, &description, vec![
             toggle.into_any_element(),
             self.update_skills_button(format!("skill-update-{}", skill.name), "Update", vec![skill.name.clone()], cx),
-            button(format!("skill-remove-{}", skill.name), "Remove", false).on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
-                ws.act(Act::UninstallSkill(remove_name.clone()), window, cx)
-            })).into_any_element(),
+            if self.skills_page.installing.is_empty() {
+                button(format!("skill-remove-{}", skill.name), "Remove", false).on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
+                    ws.act(Act::UninstallSkill(remove_name.clone()), window, cx)
+                })).into_any_element()
+            } else {
+                button_disabled(format!("skill-remove-{}", skill.name), "Remove").into_any_element()
+            },
         ])
     }
 
     /// Button that updates `names`, shown as "Updating…" and disabled while any of them is downloading.
     fn update_skills_button(&self, id: impl Into<SharedString>, label: &'static str, names: Vec<String>, cx: &mut Context<Self>) -> gpui::AnyElement {
         let busy = names.iter().any(|n| self.skills_page.installing.contains(&Workspace::update_key(n)));
-        if busy {
-            return button_disabled(id, "Updating…").into_any_element();
+        if !self.skills_page.installing.is_empty() {
+            return button_disabled(id, if busy { "Updating…" } else { label }).into_any_element();
         }
         button(id, label, false)
             .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::UpdateSkills(names.clone()), window, cx)))

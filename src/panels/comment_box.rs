@@ -2,7 +2,7 @@
 //! Enter and Cmd/Ctrl+Enter mean different things in each, so the caller handles `InputEvent::PressEnter`; the box only
 //! says what the two do.
 
-use gpui::{App, AppContext, Entity, InteractiveElement, ParentElement, Styled, Window, div, px};
+use gpui::{App, AppContext, Entity, InteractiveElement, ParentElement, StatefulInteractiveElement, Styled, Window, div, px};
 use gpui_kit::{assets::IconName, base::Button, component::input::{Input, InputState}};
 
 use crate::panels::scale;
@@ -13,9 +13,13 @@ pub const COMMENT_ICON: IconName = IconName::MessageSquare;
 pub const COMMENT_SIZE: f32 = 22.0;
 pub const COMMENT_ICON_SIZE: f32 = 14.0;
 
-pub fn comment_trigger(id: impl Into<gpui::SharedString>) -> Button {
+pub const COMMENT_SHORTCUT: &str = "Shift+M";
+
+pub fn comment_trigger(id: impl Into<gpui::SharedString>, shortcut_label: bool) -> Button {
+    let hint = if shortcut_label { format!("Add comment ({})", shortcut(COMMENT_SHORTCUT)) } else { "Add comment".into() };
     focusable(id.into())
         .accessibility_label("Add comment")
+        .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(hint.clone()).build(window, cx))
         .size(px(COMMENT_SIZE))
         .rounded(px(4.0))
         .bg(hsla(theme::SURFACE_ELEVATED))

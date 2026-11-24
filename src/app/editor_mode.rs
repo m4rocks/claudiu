@@ -175,6 +175,9 @@ impl Workspace {
             return;
         }
         self.editor_mode = !self.editor_mode;
+        if let Some(view) = self.active_id().and_then(|id| self.live_view(id)).and_then(|v| v.thread()).cloned() {
+            view.update(cx, |v, cx| v.clear_comment_anchor(cx));
+        }
         if self.editor_mode {
             self.refresh_files(cx);
         }

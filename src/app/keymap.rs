@@ -64,6 +64,7 @@ pub fn shortcuts() -> Vec<Shortcut> {
     let mut rows = vec![
         row("General", &["secondary-shift-n"], "New session"),
         row("General", &["secondary-,"], "Settings"),
+        row("General", &["ctrl-pageup", "ctrl-pagedown"], "Switch Skills tabs in Settings"),
         row("General", &["secondary-shift-o"], "Add a project"),
         row("General", &["secondary-shift-f"], "Find sessions"),
         row("General", &["secondary-shift-b"], "Show or hide the sidebar"),
@@ -91,6 +92,7 @@ pub fn shortcuts() -> Vec<Shortcut> {
         row("Chat", &["escape escape"], "Edit your last message, or clear the one you're typing"),
         row("Chat", &["shift-tab"], "Next permission mode"),
         row("Chat", &["up", "down"], "Earlier messages you sent"),
+        row("Chat", &["secondary-shift-m"], "Comment on selected chat text"),
         row("Chat", &["alt-p"], "Choose the model"),
         row("Chat", &["ctrl-o"], "Show every tool's output in full"),
         row("Chat", &["ctrl-t"], "Show or hide the plan"),
@@ -131,6 +133,12 @@ fn stroke_label(stroke: &str, macos: bool) -> String {
         "enter" => "Enter".to_string(),
         "tab" => "Tab".to_string(),
         "space" => "Space".to_string(),
+        "pageup" => "PageUp".to_string(),
+        "pagedown" => "PageDown".to_string(),
+        "home" => "Home".to_string(),
+        "end" => "End".to_string(),
+        "backspace" => "Backspace".to_string(),
+        "delete" => "Delete".to_string(),
         "up" => "↑".to_string(),
         "down" => "↓".to_string(),
         "left" => "←".to_string(),
@@ -174,6 +182,8 @@ mod tests {
         assert_eq!(stroke_label("ctrl--", false), "Ctrl+-");
         assert_eq!(stroke_label("alt-left", false), "Alt+←");
         assert_eq!(stroke_label("escape", false), "Esc");
+        assert_eq!(stroke_label("ctrl-pageup", false), "Ctrl+PageUp");
+        assert_eq!(stroke_label("ctrl-pagedown", false), "Ctrl+PageDown");
         assert_eq!(label(&["a".into(), "b".into()]), "A or B");
         assert_eq!(label(&["ctrl-1".into(), "ctrl-2".into(), "ctrl-9".into()]), if cfg!(target_os = "macos") { "⌃1 … ⌃9" } else { "Ctrl+1 … Ctrl+9" });
         assert_eq!(label(&["escape escape".into()]), "Esc Esc");

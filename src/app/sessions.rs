@@ -61,7 +61,13 @@ impl Workspace {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn new_session_from_home(&mut self, harness: Harness, model: Option<String>, cwd: PathBuf, prompt: Option<String>, effort: Option<Effort>, permission_mode: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let record_id = new_id();
-        let meta = AgentMeta { chrome: self.store.data.settings.chrome_default, harness, ..Default::default() };
+        let meta = AgentMeta {
+            chrome: self.store.data.settings.chrome_default,
+            harness,
+            chosen_model: model.clone().filter(|m| !m.is_empty()),
+            chosen_effort: effort.map(|e| e.name().to_string()),
+            ..Default::default()
+        };
         let Some(mut start) = self.thread_start(&record_id, &cwd, &meta, None, prompt, Starter::User, cx) else { return false };
         if let Some(mode_id) = permission_mode.filter(|m| !m.is_empty()) {
             start.mode = Some(mode_id);
@@ -98,7 +104,13 @@ impl Workspace {
         // A new session starts in the main checkout, not in a linked worktree. Fix-with-Claude works where the failure was.
         let cwd = if by == Starter::FixGit { cwd } else { self.outside_linked_worktree(cwd) };
         let record_id = new_id();
-        let meta = AgentMeta { chrome: self.store.data.settings.chrome_default, harness, ..Default::default() };
+        let meta = AgentMeta {
+            chrome: self.store.data.settings.chrome_default,
+            harness,
+            chosen_model: options.iter().find(|(k, _)| *k == "model").map(|(_, v)| v.clone()),
+            chosen_effort: options.iter().find(|(k, _)| *k == "thought_level").map(|(_, v)| v.clone()),
+            ..Default::default()
+        };
         let Some(mut start) = self.thread_start(&record_id, &cwd, &meta, None, prompt, by, cx) else { return };
         start.options.retain(|(category, _)| options.iter().all(|(c, _)| c != category));
         start.options.extend(options);
@@ -129,9 +141,6 @@ impl Workspace {
         let extra_off = if meta.harness == Harness::Claude { claude::trimmed_mcp_tools() } else { vec![] };
         let mut off = mcp::tools_off(&settings.m4code_tools_off, &extra_off);
         if meta.harness != Harness::Claude {
-            if !off.contains(&"visual") {
-                off.push("visual");
-            }
             off.push("artifacts");
         }
         // Harnesses with native ACP question support (Claude via AskUserQuestion, Codex/Antigravity via ACP form
@@ -206,6 +215,7 @@ impl Workspace {
         let all_models = self.store.data.settings.aggregated_models();
         let picked = self.store.data.settings.picked_models(meta.harness).to_vec();
         let prior_entries = if session_id.is_some() { crate::harness::thread::load_entries(record_id) } else { vec![] };
+        let inline_visuals = !self.store.data.settings.m4code_tools_off.contains(&mcp::Feature::Visual);
         Some(crate::thread::Start {
             record_id: record_id.to_string(),
             harness: meta.harness,
@@ -221,6 +231,7 @@ impl Workspace {
             options,
             prompt,
             prior_entries,
+            inline_visuals,
         })
     }
 

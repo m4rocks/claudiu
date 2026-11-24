@@ -480,8 +480,12 @@ impl Workspace {
         let effective_compact = live
             .map(|view| view.read(cx).compaction.enabled)
             .or_else(|| meta.map(|_| compact.unwrap_or(self.store.data.settings.auto_compact)));
-        let mut compact_text = live.map_or_else(|| effective_compact.map_or("—", |v| if v { "On" } else { "Off" }).to_string(), |view| view.read(cx).compaction_status());
+        let mut compact_text = live.map_or_else(
+            || effective_compact.map_or("—", |v| if v { "On" } else { "Off" }).to_string(),
+            |view| view.read(cx).compaction_status(ctx_fraction.is_some()),
+        );
         if compact.is_none() && effective_compact.is_some()
+            && !matches!(compact_text.as_str(), "Unsupported" | "Unavailable" | "Waiting…")
             && live.is_none_or(|view| view.read(cx).harness.adapter().compact_command.is_some())
         {
             compact_text.push_str(" (global)");
@@ -621,7 +625,7 @@ fn lead_row(id: impl Into<SharedString>, lead: AnyElement, label: impl IntoEleme
         .rounded(px(6.0))
         .text_size(crate::panels::scale::px(12.5))
         .child(div().flex_none().child(lead))
-        .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(label))
+        .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().line_height(gpui::relative(1.35)).child(label))
 }
 
 fn row(id: impl Into<SharedString>, glyph: IconName, label: impl IntoElement) -> gpui_kit::base::Button {
@@ -636,7 +640,7 @@ fn row(id: impl Into<SharedString>, glyph: IconName, label: impl IntoElement) ->
         .cursor_pointer()
         .hover(|s| s.bg(hsla(theme::ROW_HOVER)))
         .child(div().flex_none().text_color(hsla(theme::TEXT_DIM)).child(icon(glyph, 14.0)))
-        .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(label))
+        .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().line_height(gpui::relative(1.35)).child(label))
 }
 
 /// The row as it looks while its action is unavailable: no hover, no pointer (give it no click handler either).
@@ -652,7 +656,7 @@ fn dim_row(id: impl Into<SharedString>, glyph: IconName, label: impl IntoElement
         .text_color(hsla(theme::TEXT_FAINT))
         .cursor_default()
         .child(div().flex_none().text_color(hsla(theme::TEXT_DIM)).child(icon(glyph, 14.0)))
-        .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(label))
+        .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().line_height(gpui::relative(1.35)).child(label))
 }
 
 /// A list row that does something when clicked and has a × that removes the entry.
@@ -707,7 +711,7 @@ fn pick_row(cx: &mut Context<Workspace>, id: &'static str, label: &str, value: S
         .justify_between()
         .gap(px(10.0))
         // Text lines up with the rows above; the hover background reaches out past it.
-        .h(px(22.0))
+        .h(px(24.0))
         .mx(px(-6.0))
         .px(px(6.0))
         .rounded(px(5.0))
@@ -721,7 +725,7 @@ fn pick_row(cx: &mut Context<Workspace>, id: &'static str, label: &str, value: S
                 .items_center()
                 .gap(px(4.0))
                 .min_w_0()
-                .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(value))
+                .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().line_height(gpui::relative(1.35)).child(value))
                 .child(div().flex_none().text_color(hsla(theme::TEXT_FAINT)).child(icon(IconName::ChevronDown, 12.0))),
         )
         .dropdown(cx, move |ws, at, window, cx| ws.open_dropdown(at, menu(), window, cx))
@@ -733,10 +737,10 @@ fn kv(label: &str, value: String) -> Div {
         .items_center()
         .justify_between()
         .gap(px(10.0))
-        .h(px(22.0))
+        .h(px(24.0))
         .text_size(crate::panels::scale::px(12.0))
         .child(div().flex_none().text_color(hsla(theme::TEXT_DIM)).child(label.to_string()))
-        .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(value))
+        .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().line_height(gpui::relative(1.35)).child(value))
 }
 
 fn editor_name(editor: Editor) -> &'static str {

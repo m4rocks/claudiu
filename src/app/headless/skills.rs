@@ -101,6 +101,14 @@ fn skills_page_installs_toggles_syncs_and_removes() {
     });
     assert!(!global_skills_dir(Harness::Codex, &home_path).exists(), "inactive harness is untouched");
 
+    cx.update_window(window, |_, window, app| ws.update(app, |ws, cx| {
+        let mut same_name = fake_popular().unwrap().pop().unwrap();
+        same_name.source = "another-author/skills".into();
+        ws.act(Act::InstallSkill(same_name), window, cx);
+        assert!(ws.skills_page.installing.is_empty(), "a same-name install cannot replace the installed package");
+        assert_eq!(ws.store.data.settings.skills.installed[0].source, "acme/demo-skills");
+    })).unwrap();
+
     // Toggle off globally and enable per-project instead.
     let project_id = ws.read_with(&cx, |ws, _| ws.store.data.projects[0].id.clone());
     cx.update_window(window, |_, window, app| {

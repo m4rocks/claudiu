@@ -234,6 +234,8 @@ pub(super) fn slash_command_spans(draft: &str) -> Vec<(std::ops::Range<usize>, &
     out
 }
 
+type InitialOption = (&'static str, String, String);
+
 /// How to bring a session up.
 pub struct Start {
     /// m4code's session record id, used to persist conversation entries across restarts.
@@ -260,6 +262,8 @@ pub struct Start {
     pub prompt: Option<String>,
     /// Entries carried over visually from a previous harness during an in-chat handoff.
     pub prior_entries: Vec<Entry>,
+    /// Whether native inline generative UI (` ```ui ` blocks and `show_visual` cards) is enabled.
+    pub inline_visuals: bool,
 }
 
 /// One selectable option in a permission or AskUserQuestion prompt.
@@ -332,9 +336,16 @@ pub struct ThreadView {
     seen_background_tasks: HashSet<String>,
     comment_anchor: Option<(Point<Pixels>, String)>,
     selection_comment: Option<SelectionComment>,
+    restore_focus: FocusHandle,
     shell_output: Option<ShellOutput>,
     /// Model from another harness staged for dynamic handoff on the next message.
     pub pending_model: Option<CatalogModel>,
+    /// Model requested at session start/resume, shown until the harness applies it.
+    initial_model: Option<String>,
+    /// Right-click context menu position in the chat view.
+    chat_menu: Option<Point<Pixels>>,
+    /// Whether native inline generative UI (` ```ui ` blocks and `show_visual` cards) is enabled.
+    pub inline_visuals: bool,
     /// A hand-off the agent asked for with `set_model` and the user approved: the model, its effort and the first
     /// message for the new agent. It runs as soon as the turn that asked ends.
     handoff_after_turn: Option<(CatalogModel, Option<String>, String, bool)>,
@@ -473,8 +484,10 @@ impl ThreadView {
                 }
                 _ => {}
             }),
-            cx.subscribe_in(&model_search, window, |_: &mut Self, _, ev: &InputEvent, _, cx| {
+            cx.subscribe_in(&model_search, window, |v: &mut Self, _, ev: &InputEvent, _, cx| {
                 if matches!(ev, InputEvent::Change) {
+                    v.model_highlight = 0;
+                    v.model_scroll.scroll_to_item(0);
                     cx.notify();
                 }
             }),
@@ -530,8 +543,12 @@ impl ThreadView {
             seen_background_tasks: HashSet::new(),
             comment_anchor: None,
             selection_comment: None,
+            restore_focus: cx.focus_handle(),
             shell_output: None,
             pending_model: None,
+            initial_model: start.options.iter().find(|(k, _)| *k == "model").map(|(_, v)| v.clone()),
+            chat_menu: None,
+            inline_visuals: start.inline_visuals,
             handoff_after_turn: None,
             pending_effort: start.options.iter().find(|(k, _)| *k == "thought_level").map(|(_, v)| v.clone()),
             chosen: (None, None),
@@ -626,13 +643,21 @@ impl ThreadView {
             let cwd = start.cwd.clone();
             let env = start.env.clone();
             let server = start.server.clone();
+            let codex_model = (harness == Harness::Codex)
+                .then(|| start.options.iter().find(|(k, _)| *k == "model").map(|(_, v)| v.clone()))
+                .flatten()
+                .filter(|m| !m.is_empty());
             let started = cx
                 .background_executor()
                 .spawn(async move {
-                    let (program, args) = match server {
+                    let (program, mut args) = match server {
                         Some(s) => s,
                         None => (harness.adapter().server)()?,
                     };
+                    if let Some(model) = codex_model {
+                        args.push("-c".into());
+                        args.push(format!("model={model:?}"));
+                    }
                     Connection::start(&Launch { program, args, cwd, env }, events)
                 })
                 .await;
@@ -647,10 +672,41 @@ impl ThreadView {
                 return;
             }
             let opened = open(&connection, harness, &start).await;
-            let ok = this.update(cx, |v, cx| v.opened(opened, &start, cx)).unwrap_or(false);
-            if !ok {
+            let Some((sid, mut initial_options)) = this.update(cx, |v, cx| v.opened(opened, &start, cx)).ok().flatten() else {
                 return;
+            };
+            // Drain any stale session/new or session/load notifications (such as default config_option_update)
+            // BEFORE applying the requested model/effort so they cannot overwrite our selection.
+            while let Ok(event) = incoming.try_recv() {
+                if this.update(cx, |v, cx| v.on_event(event, cx)).is_err() {
+                    return;
+                }
             }
+            // Apply model before thought_level because switching models can change available effort options.
+            initial_options.sort_by_key(|(cat, _, _)| if *cat == "model" { 0 } else { 1 });
+            for (category, config_id, value) in initial_options {
+                if let Ok(result) = connection
+                    .request("session/set_config_option", json!({"sessionId": &sid, "configId": &config_id, "value": &value}))
+                    .await
+                {
+                    let _ = this.update(cx, |v, cx| {
+                        v.thread.apply_session(&result);
+                        // If the harness returned an empty/unchanged payload, keep the requested value visible.
+                        if let Some(opt) = v.thread.config.iter_mut().find(|o| o.category == category)
+                            && opt.current != value
+                            && opt.choices.iter().any(|(c, _)| c == &value)
+                        {
+                            opt.current = value.clone();
+                        }
+                        v.report_chosen(cx);
+                        cx.notify();
+                    });
+                }
+            }
+            let _ = this.update(cx, |v, cx| {
+                v.initial_model = None;
+                cx.notify();
+            });
             while let Ok(event) = incoming.try_recv() {
                 if this.update(cx, |v, cx| v.on_event(event, cx)).is_err() {
                     return;
@@ -677,13 +733,14 @@ impl ThreadView {
         .detach();
     }
 
-    /// The session is open, or failed to open. Returns whether to go on listening.
-    fn opened(&mut self, opened: Result<Opened, String>, start: &Start, cx: &mut Context<Self>) -> bool {
+    /// The session is open, or failed to open. Returns the session id and any initial config options to apply before
+    /// the first prompt runs.
+    fn opened(&mut self, opened: Result<Opened, String>, start: &Start, cx: &mut Context<Self>) -> Option<(String, Vec<InitialOption>)> {
         let Opened { session_id, result, capabilities, agent_meta, replayed } = match opened {
             Ok(o) => o,
             Err(why) => {
                 self.ended(Some(why), cx);
-                return false;
+                return None;
             }
         };
         self.capabilities = capabilities;
@@ -702,7 +759,7 @@ impl ThreadView {
         }
         if self.session_id.as_deref() != Some(&session_id) {
             self.session_id = Some(session_id.clone());
-            cx.emit(ThreadEvent::SessionId(session_id));
+            cx.emit(ThreadEvent::SessionId(session_id.clone()));
         }
         // A resumed session keeps the mode the harness restores; its options are the model and effort picked in it.
         if (start.session_id.is_none() || self.subagent_edits.is_some())
@@ -710,16 +767,19 @@ impl ThreadView {
         {
             self.set_mode(mode, cx);
         }
+        let mut initial_options = Vec::new();
         for (category, value) in &start.options {
             if let Some(option) = self.thread.option(category).filter(|o| o.current != *value && o.choices.iter().any(|(v, _)| v == value)) {
-                let id = option.id.clone();
-                self.set_option(id, value.clone(), cx);
+                initial_options.push((*category, option.id.clone(), value.clone()));
             }
+        }
+        if initial_options.is_empty() {
+            self.initial_model = None;
         }
         self.report_chosen(cx);
         self.remeasure(0);
         cx.notify();
-        true
+        Some((session_id, initial_options))
     }
 
     fn on_event(&mut self, event: Event, cx: &mut Context<Self>) {
@@ -1749,11 +1809,28 @@ impl ThreadView {
     }
 
     fn intercept(&mut self, ev: &KeystrokeEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.chat_menu.is_some() && ev.keystroke.key == "escape" {
+            self.chat_menu = None;
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
         if self.screenshot.is_some() && self.screenshot_focus.contains_focused(window, cx) && ev.keystroke.key == "escape" {
             self.screenshot = None;
             self.focus_composer(window, cx);
             cx.stop_propagation();
             cx.notify();
+            return;
+        }
+        let modifiers = ev.keystroke.modifiers;
+        if (self.composer.focus_handle(cx).contains_focused(window, cx) || window.focused(cx).is_none())
+            && self.comment_anchor.is_some() && self.selection_comment.is_none() && self.review.is_none()
+            && self.picker.is_none() && self.find.is_none() && self.screenshot.is_none()
+            && ev.keystroke.key.eq_ignore_ascii_case("m") && modifiers.shift && !modifiers.alt
+            && if cfg!(target_os = "macos") { modifiers.platform } else { modifiers.control }
+        {
+            self.start_selection_comment(window, cx);
+            cx.stop_propagation();
             return;
         }
         if self.intercept_find(&ev.keystroke, window, cx) {
@@ -2207,6 +2284,12 @@ impl ThreadView {
         cx.notify();
     }
 
+    pub fn clear_comment_anchor(&mut self, cx: &mut Context<Self>) {
+        if self.selection_comment.is_none() && self.comment_anchor.take().is_some() {
+            cx.notify();
+        }
+    }
+
     fn dismiss_selection_comment(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.selection_comment = None;
         self.comment_anchor = None;
@@ -2301,18 +2384,18 @@ impl ThreadView {
         cx.notify();
     }
 
-    pub fn compaction_status(&self) -> String {
-        let Some(command) = self.harness.adapter().compact_command else { return "Unsupported by this adapter".into() };
+    pub fn compaction_status(&self, has_persisted_context: bool) -> String {
+        let Some(command) = self.harness.adapter().compact_command else { return "Unsupported".into() };
         if !self.thread.commands.iter().any(|c| c.name == command) {
-            return "Compact command unavailable".into();
+            return "Unavailable".into();
         }
         let threshold = crate::harness::compaction::clamp_threshold(self.compaction.threshold_percent);
         if !self.compaction.native_controlled {
-            return if self.compaction.enabled { format!("{threshold}%; native fallback remains") } else { "Off; native fallback remains".into() };
+            return if self.compaction.enabled { format!("{threshold}% (fallback)") } else { "Off (fallback)".into() };
         }
         if !self.compaction.enabled { return "Off".into(); }
-        if self.thread.context.is_none() { return "Waiting for context usage".into(); }
-        format!("{threshold}% between turns")
+        if self.thread.context.is_none() && !has_persisted_context { return "Waiting…".into(); }
+        format!("{threshold}%")
     }
 
     pub fn stop(&mut self) {
@@ -2515,7 +2598,7 @@ mod tests {
         super::Start {
             record_id: String::new(), harness, all_models: vec![], picked: vec![], cwd,
             env: vec![], mcp_servers: vec![], meta: serde_json::Value::Null, session_id: None, mode: None,
-            options: vec![], prompt: None, prior_entries: vec![],
+            options: vec![], prompt: None, prior_entries: vec![], inline_visuals: true,
             server: Some(("definitely-not-a-real-program-m4code".into(), vec![])),
         }
     }
@@ -2736,6 +2819,52 @@ mod tests {
             assert!(v.selection_comment.is_none());
             assert_eq!(v.draft(app), "> A line of conversation text\n\nCan you clarify?");
         });
+    }
+
+    #[cfg(debug_assertions)]
+    #[gpui::test]
+    fn checkpoint_restore_prompt_dismisses_with_escape(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext;
+        cx.update(gpui_kit::init);
+        let (data, _) = crate::datadir::use_throwaway_folders();
+        let dir = tempfile::tempdir().unwrap();
+        let mut start = test_start(dir.path().into(), Harness::Claude);
+        start.record_id = crate::store::new_id();
+        let id = uuid::Uuid::new_v4();
+        let patch_dir = data.join("turn-reviews").join(&start.record_id);
+        std::fs::create_dir_all(&patch_dir).unwrap();
+        std::fs::write(patch_dir.join(format!("{id}.patch")), "").unwrap();
+        let mut thread = None;
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| super::ThreadView::new(start, window, cx));
+            thread = Some(view.clone());
+            gpui_kit::base::Root::new(view, window, cx)
+        });
+        let view = thread.unwrap();
+        view.update(cx, |v, cx| {
+            v.turn_reviews.push(super::review::TurnReview {
+                id, row: 0, end: 1, text: "test".into(), before: "test".into(),
+                cwd: dir.path().into(), file_count: 0, checkpoint: true,
+            });
+            v.open_turn_review(id, cx);
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let restore = loop {
+            cx.update(|window, app| window.draw(app).clear(app));
+            if let Some(bounds) = cx.debug_bounds("review-restore") {
+                break bounds;
+            }
+            assert!(std::time::Instant::now() < deadline, "restore action should appear");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            cx.run_until_parked();
+        };
+        cx.simulate_click(restore.center(), gpui::Modifiers::default());
+        cx.update(|window, app| window.draw(app).clear(app));
+        assert!(cx.debug_bounds("restore-cancel").is_some());
+        cx.simulate_keystrokes("escape");
+        cx.update(|window, app| window.draw(app).clear(app));
+        assert!(cx.debug_bounds("restore-cancel").is_none());
+        assert!(cx.debug_bounds("review-restore").is_some());
     }
 
     #[gpui::test]
@@ -3001,7 +3130,7 @@ mod tests {
         let start = super::Start {
             record_id: String::new(), harness: Harness::Claude, all_models: vec![], picked: vec![], cwd: dir.path().to_path_buf(),
             env: vec![], mcp_servers: vec![], meta: serde_json::Value::Null, session_id: None, mode: None, options: vec![],
-            prompt: None, prior_entries: vec![], server: Some(("definitely-not-a-real-program-m4code".into(), vec![])),
+            prompt: None, prior_entries: vec![], inline_visuals: true, server: Some(("definitely-not-a-real-program-m4code".into(), vec![])),
         };
         let (view, cx) = cx.add_window_view(|window, cx| super::ThreadView::new(start, window, cx));
         view.update(cx, |v, cx| {
@@ -3020,7 +3149,7 @@ mod tests {
         let start = super::Start {
             record_id: String::new(), harness: Harness::Claude, all_models: vec![], picked: vec![], cwd: dir.path().to_path_buf(),
             env: vec![], mcp_servers: vec![], meta: serde_json::Value::Null, session_id: None, mode: None, options: vec![],
-            prompt: None, prior_entries: vec![], server: Some(("definitely-not-a-real-program-m4code".into(), vec![])),
+            prompt: None, prior_entries: vec![], inline_visuals: true, server: Some(("definitely-not-a-real-program-m4code".into(), vec![])),
         };
         let (view, cx) = cx.add_window_view(|window, cx| super::ThreadView::new(start, window, cx));
         view.update(cx, |v, _| {
@@ -3052,7 +3181,7 @@ mod tests {
             mode: None,
             options: vec![],
             prompt: None,
-            prior_entries: vec![],
+            prior_entries: vec![], inline_visuals: true,
             server: Some(("definitely-not-a-real-program-m4code".into(), vec![])),
         };
         let (view, cx) = cx.add_window_view(|window, cx| super::ThreadView::new(start, window, cx));
@@ -3101,7 +3230,7 @@ mod tests {
             mode: None,
             options: vec![],
             prompt: None,
-            prior_entries: vec![],
+            prior_entries: vec![], inline_visuals: true,
             server: Some(("definitely-not-a-real-program-m4code".into(), vec![])),
         };
         let (view, cx) = cx.add_window_view(|window, cx| super::ThreadView::new(start, window, cx));
@@ -3143,7 +3272,7 @@ mod tests {
             mode: None,
             options: vec![],
             prompt: None,
-            prior_entries: vec![],
+            prior_entries: vec![], inline_visuals: true,
             server: Some(("definitely-not-a-real-program-m4code".into(), vec![])),
         };
         let (view, cx) = cx.add_window_view(|window, cx| super::ThreadView::new(start, window, cx));
@@ -3178,7 +3307,7 @@ mod tests {
             mode: None,
             options: vec![],
             prompt: None,
-            prior_entries: vec![],
+            prior_entries: vec![], inline_visuals: true,
             server: Some(("definitely-not-a-real-program-m4code".into(), vec![])),
         };
         let (view, cx) = cx.add_window_view(|window, cx| super::ThreadView::new(start, window, cx));
@@ -3245,7 +3374,7 @@ mod tests {
             mode: None,
             options: vec![],
             prompt: None,
-            prior_entries: vec![],
+            prior_entries: vec![], inline_visuals: true,
             server: Some(("definitely-not-a-real-program-m4code".into(), vec![])),
         };
         let (view, cx) = cx.add_window_view(|window, cx| super::ThreadView::new(start, window, cx));
@@ -3288,7 +3417,7 @@ mod tests {
             mode: None,
             options: vec![],
             prompt: Some("hello world".into()),
-            prior_entries: vec![],
+            prior_entries: vec![], inline_visuals: true,
             server: Some(("definitely-not-a-real-program-m4code".into(), vec![])),
         };
         let (view, cx) = cx.add_window_view(|window, cx| super::ThreadView::new(start, window, cx));

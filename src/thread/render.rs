@@ -63,12 +63,24 @@ impl Render for ThreadView {
             .flex_1()
             .min_h_0()
             .on_mouse_down(MouseButton::Left, cx.listener(|v, _: &MouseDownEvent, _, cx| {
+                let mut changed = v.chat_menu.take().is_some();
                 if v.selection_comment.is_none() && v.comment_anchor.take().is_some() {
+                    changed = true;
+                }
+                if changed {
                     cx.notify();
                 }
             }))
+            .on_mouse_down(MouseButton::Right, cx.listener(|v, ev: &MouseDownEvent, _, cx| {
+                v.chat_menu = Some(ev.position);
+                cx.notify();
+            }))
             .on_scroll_wheel(cx.listener(|v, _: &gpui::ScrollWheelEvent, _, cx| {
+                let mut changed = v.chat_menu.take().is_some();
                 if v.selection_comment.is_none() && v.comment_anchor.take().is_some() {
+                    changed = true;
+                }
+                if changed {
                     cx.notify();
                 }
             }))
@@ -77,9 +89,10 @@ impl Render for ThreadView {
                 cx.listener(|v, event: &gpui::MouseUpEvent, window, cx| {
                     if v.selection_comment.is_none() {
                         let quote = v.selected_quote(cx);
-                        v.comment_anchor = (!quote.is_empty()).then(|| (
-                            event.position + gpui::point(px(8.0), px(8.0)), quote,
-                        ));
+                        let anchor = gpui_kit::base::TextSelection::selection_edges(window, cx)
+                            .map(|(_, end)| gpui::point(end.right() + px(8.0), end.top()))
+                            .unwrap_or_else(|| event.position + gpui::point(px(8.0), px(8.0)));
+                        v.comment_anchor = (!quote.is_empty()).then_some((anchor, quote));
                     }
                     if v.picker != Some(ThreadPicker::Model)
                         && v.review.is_none() && v.find.is_none()
@@ -116,6 +129,7 @@ impl Render for ThreadView {
             .child(conversation)
             .child(bottom_dock)
             .children(self.render_selection_comment(cx))
+            .children(self.render_chat_menu(window, cx))
             .children(self.render_picker_overlay(window, cx))
             .children(self.render_screenshot(cx))
     }
@@ -143,7 +157,7 @@ impl ThreadView {
                 .into_any_element()
         } else {
             div().occlude().child(
-                comment_box::comment_trigger("comment-on-selection")
+                comment_box::comment_trigger("comment-on-selection", true)
                     .debug_selector(|| "comment-on-selection".into())
                     .on_click(cx.listener(|v, _: &ClickEvent, window, cx| v.start_selection_comment(window, cx))),
             )
@@ -151,6 +165,74 @@ impl ThreadView {
         };
         Some(deferred(anchored().position(*at).snap_to_window_with_margin(px(8.0)).child(content))
             .with_priority(20).into_any_element())
+    }
+
+    fn render_chat_menu(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let at = self.chat_menu?;
+        let quote = self.selected_quote(cx);
+        let has_selection = !quote.is_empty();
+        let selection_anchor = gpui_kit::base::TextSelection::selection_edges(window, cx)
+            .map(|(_, end)| gpui::point(end.right() + px(8.0), end.top()))
+            .unwrap_or(at);
+        let copy_quote = quote.clone();
+        let comment_quote = quote;
+        let menu_item = |id: &'static str, glyph: IconName, label: &'static str, enabled: bool| {
+            crate::panels::widgets::focusable(id)
+                .disabled(!enabled)
+                .w_full()
+                .h(px(28.0))
+                .px(px(10.0))
+                .rounded(px(5.0))
+                .justify_start()
+                .gap(px(8.0))
+                .text_size(scale::px(12.5))
+                .text_color(hsla(if enabled { theme::TEXT } else { theme::TEXT_FAINT }))
+                .when(enabled, |d| d.cursor_pointer().hover(|s| s.bg(hsla(theme::ROW_HOVER))))
+                .child(icon(glyph, 13.0).text_color(hsla(if enabled { theme::TEXT_DIM } else { theme::TEXT_FAINT })))
+                .child(label)
+        };
+        let menu = div()
+            .id("chat-context-menu")
+            .occlude()
+            .w(px(180.0))
+            .p(px(4.0))
+            .rounded(px(8.0))
+            .bg(hsla(theme::SURFACE_ELEVATED))
+            .border_1()
+            .border_color(hsla(theme::PANEL_BORDER))
+            .flex()
+            .flex_col()
+            .gap(px(2.0))
+            .on_mouse_down_out(cx.listener(|v, _: &MouseDownEvent, _, cx| {
+                v.chat_menu = None;
+                cx.notify();
+            }))
+            .child(menu_item("chat-ctx-copy", IconName::Copy, "Copy", has_selection).when(has_selection, |b| {
+                b.on_click(cx.listener(move |v, _: &ClickEvent, _, cx| {
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(copy_quote.clone()));
+                    v.chat_menu = None;
+                    cx.notify();
+                }))
+            }))
+            .child(menu_item("chat-ctx-comment", IconName::MessageSquare, "Add comment", has_selection).when(has_selection, |b| {
+                b.on_click(cx.listener(move |v, _: &ClickEvent, window, cx| {
+                    v.chat_menu = None;
+                    v.comment_anchor = Some((selection_anchor, comment_quote.clone()));
+                    v.start_selection_comment(window, cx);
+                }))
+            }))
+            .child(menu_item("chat-ctx-paste", IconName::Clipboard, "Paste", true).on_click(cx.listener(|v, _: &ClickEvent, window, cx| {
+                v.chat_menu = None;
+                if !v.attachments.paste(cx)
+                    && let Some(text) = cx.read_from_clipboard().and_then(|item| item.text())
+                {
+                    v.paste_text(&text, window, cx);
+                } else {
+                    v.focus_composer(window, cx);
+                }
+                cx.notify();
+            })));
+        Some(deferred(anchored().position(at).snap_to_window_with_margin(px(8.0)).child(menu)).with_priority(25).into_any_element())
     }
 }
 
@@ -284,6 +366,16 @@ impl ThreadView {
         if let Some(pending) = &self.pending_model {
             return pending.name.clone();
         }
+        if let Some(initial) = &self.initial_model {
+            if let Some(model) = self.thread.option("model")
+                && let Some((_, name)) = model.choices.iter().find(|(v, _)| v == initial)
+            {
+                return name.clone();
+            }
+            if let Some(found) = self.all_models.iter().find(|m| m.harness == self.harness && m.id == *initial) {
+                return found.name.clone();
+            }
+        }
         if let Some(model) = self.thread.option("model") {
             if let Some((_, name)) = model.choices.iter().find(|(v, _)| *v == model.current && v != "default") {
                 return name.clone();
@@ -324,20 +416,44 @@ impl ThreadView {
                 .children(self.turn_reviews.iter().filter(|turn| turn.row == ix && turn.text == *text).map(|turn| {
                     let id = turn.id;
                     let count = turn.file_count;
-                    button(SharedString::from(format!("review-turn-{id}")), format!("Review Changes ({count})"), false)
+                    let label = if turn.checkpoint { "Checkpoint" } else { "Captured changes" };
+                    let files = if count == 1 { "1 file".into() } else { format!("{count} files") };
+                    crate::panels::widgets::focusable(SharedString::from(format!("review-turn-{id}")))
+                        .px(px(9.0)).py(px(5.0)).gap(px(7.0)).rounded(px(6.0))
+                        .bg(hsla(theme::SURFACE_ELEVATED)).border_color(hsla(theme::PANEL_BORDER))
+                        .hover(|style| style.bg(hsla(theme::SURFACE_HOVER)))
+                        .child(icon(IconName::GitCommitHorizontal, 14.0))
+                        .child(format!("{label} · {files}"))
                         .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| v.open_turn_review(id, cx)))
                 }))
                 .into_any_element(),
             Entry::Agent(text) => {
                 let citations = elements::inline_citations_row(ix, elements::extract_citations(text));
-                div()
-                    .px(px(2.0))
-                    .flex()
-                    .flex_col()
-                    .child(chat_markdown(&mut self.markdown, ix, text, cx))
-                    .children(citations)
-                    .children(self.render_html_preview(ix, text, cx))
-                    .into_any_element()
+                let segments = if self.inline_visuals {
+                    timeline::split_inline_ui(text)
+                } else {
+                    vec![timeline::InlineSegment::Markdown(text.clone())]
+                };
+                let has_inline_ui = segments.iter().any(|s| matches!(s, timeline::InlineSegment::Ui(_)));
+                let mut col = div().px(px(2.0)).flex().flex_col().gap(px(6.0));
+                if !has_inline_ui {
+                    col = col.child(chat_markdown(&mut self.markdown, ix, text, cx));
+                } else {
+                    for (seg_ix, seg) in segments.into_iter().enumerate() {
+                        match seg {
+                            timeline::InlineSegment::Markdown(md) if !md.trim().is_empty() => {
+                                let key = ix.wrapping_mul(10_000).wrapping_add(seg_ix + 1);
+                                col = col.child(chat_markdown(&mut self.markdown, key, &md, cx));
+                            }
+                            timeline::InlineSegment::Ui(ui_md) => {
+                                let call = format!("inline-ui-{ix}-{seg_ix}");
+                                col = col.child(crate::visual::ui::markdown(call.clone(), &ui_md, Scope { call, ui: self.card_ui.clone() }));
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                col.children(citations).into_any_element()
             }
             Entry::Thought(text) => {
                 let run = self.tool_run(ix);
@@ -372,32 +488,17 @@ impl ThreadView {
         self.wrap_entry(ix, body)
     }
 
-    fn render_html_preview(&self, row: usize, markdown: &str, cx: &mut Context<Self>) -> Option<Div> {
-        let preview = timeline::html_preview(markdown)?;
-        let key = format!("html-preview:{row}");
-        let expanded = self.expanded_tools.contains(&key);
-        Some(div().flex().flex_col().gap(px(6.0))
-            .child(button(SharedString::from(key.clone()), if expanded { "Hide preview" } else { "Preview HTML" }, false)
-                .on_click(cx.listener(move |view, _: &ClickEvent, _, cx| {
-                    if !view.expanded_tools.remove(&key) {
-                        view.expanded_tools.insert(key.clone());
-                    }
-                    view.remeasure(row);
-                    cx.notify();
-                })))
-            .when(expanded, |panel| {
-                let call = format!("html-preview-{row}");
-                panel.child(crate::visual::ui::markdown(call.clone(), &preview, Scope { call, ui: self.card_ui.clone() }))
-            }))
-    }
-
     /// A subagent's report, which m4code sent this session as a message: drawn as a folded step among the tool calls,
     /// not as the user's words. Click the row to read the report; Open shows the child.
     fn render_subagent_report(&self, ix: usize, report: &SubagentReport, cx: &mut Context<Self>) -> AnyElement {
         let key = format!("report:{ix}");
         let expanded = self.detail || self.expanded_tools.contains(&key);
         let harness = crate::harness::Harness::ALL.into_iter().find(|h| h.key() == report.harness).unwrap_or_default();
-        let failed = report.state == "failed";
+        let status = match report.state {
+            "completed" => elements::TraceStatus::Done,
+            "interrupted" => elements::TraceStatus::Ended,
+            _ => elements::TraceStatus::Error,
+        };
         let child = report.id.to_string();
         let open = div()
             .id(SharedString::from(format!("report-open-{ix}")))
@@ -417,23 +518,25 @@ impl ThreadView {
                 cx.stop_propagation();
                 cx.emit(ThreadEvent::Select(child.clone()));
             }));
-        let header = div()
-            .id(SharedString::from(format!("report-row-{ix}")))
-            .w_full()
-            .px(px(4.0))
-            .py(px(2.0))
-            .rounded(px(5.0))
-            .flex()
-            .items_center()
-            .gap(px(8.0))
-            .cursor_pointer()
-            .hover(|s| s.bg(hsla(theme::SURFACE_HOVER)))
-            .text_size(scale::px(12.0))
-            .text_color(hsla(if failed { theme::DANGER } else if expanded { theme::TEXT_DIM } else { theme::TEXT_FAINT }))
-            .child(logos::draw(logos::for_harness(harness), 12.0, hsla(if failed { theme::DANGER } else { theme::TEXT_FAINT })))
-            .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(report_line(report.title, report.state)))
-            .child(open)
-            .child(div().flex_none().text_color(hsla(theme::TEXT_FAINT)).child(icon(if expanded { IconName::ChevronDown } else { IconName::ChevronRight }, 12.0)))
+        let header = elements::trace_line(
+            SharedString::from(format!("report-row-{ix}")),
+            status,
+            logos::draw(logos::for_harness(harness), 12.0, hsla(theme::TEXT_DIM)).into_any_element(),
+            report.title.to_string(),
+            None,
+            vec![elements::trace_badge(
+                match status {
+                    elements::TraceStatus::Done => "Completed",
+                    elements::TraceStatus::Ended => "Interrupted",
+                    _ => "Failed",
+                },
+                if status == elements::TraceStatus::Error { theme::DANGER } else { theme::TEXT_DIM },
+                theme::SURFACE_ELEVATED,
+                theme::PANEL_BORDER,
+            ), open.into_any_element()],
+            true,
+            expanded,
+        )
             .on_click(cx.listener(move |v, _: &ClickEvent, window, cx| {
                 if !v.expanded_tools.remove(&key) {
                     v.expanded_tools.insert(key.clone());
@@ -445,21 +548,18 @@ impl ThreadView {
         let mut block = div().flex().flex_col().child(header);
         if expanded {
             block = block.child(
-                div().ml(px(14.0)).pl(px(10.0)).pb(px(6.0)).pt(px(2.0)).border_l_1().border_color(hsla(theme::BORDER))
-                    .child(crate::github::ui::markdown(format!("thread-md-{ix}"), report.body)),
+                elements::trace_content(crate::github::ui::markdown(format!("thread-md-{ix}"), report.body).into_any_element()),
             );
         }
         block.into_any_element()
     }
 
-    /// Handoff, compaction, or optimistic pre-response working status at the foot of the conversation.
+    /// Handoff, compaction, or active working status fixed above the composer for the entire duration of the turn.
     fn render_activity(&self) -> Option<AnyElement> {
         let (label, stoppable) = match self.starting_label() {
             Some(label) => (label, false),
             None if self.is_working() && self.compaction.running => ("Compacting…".to_string(), true),
-            None if self.has_active_turn() && matches!(self.thread.entries.last(), Some(Entry::User(_))) => {
-                ("Working…".to_string(), true)
-            }
+            None if self.is_working() || self.has_active_turn() => ("Working…".to_string(), true),
             None => return None,
         };
         let row = div()
@@ -524,7 +624,11 @@ impl ThreadView {
 
     /// Tool call row built on `Trace` + `CodeBlock`: kind icon, status badge, file location chips, and collapsible output.
     fn render_tool(&self, ix: usize, call: &ToolCall, cx: &mut Context<Self>) -> AnyElement {
-        let has_card = self.cards.contains_key(&call.id);
+        let inline_card = self
+            .inline_visuals
+            .then(|| self.cards.get(&call.id).map(|c| c.content.as_str()).or(call.details.visual.as_deref()))
+            .flatten();
+        let has_card = inline_card.is_some();
         let shell = call.kind == "execute";
         let details = &call.details;
         let has_details = call.content.iter().any(|item| !matches!(item, ToolContent::Diff { .. }))
@@ -537,12 +641,16 @@ impl ThreadView {
         let mut location_chips = Vec::new();
         for (n, (path, line)) in call.locations.iter().enumerate().take(2) {
             let (path, line) = (path.clone(), *line);
-            let label = path.strip_prefix(&self.cwd).unwrap_or(&path).display().to_string();
+            let label = relative_to_cwd(&self.cwd, &path);
             let end_line = (n == 0).then_some(details.end_line).flatten();
             location_chips.push(
                 div()
                     .id(SharedString::from(format!("tool-loc-{ix}-{n}")))
                     .flex_none()
+                    .max_w(px(240.0))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
                     .px(px(5.0))
                     .py(px(1.0))
                     .rounded(px(4.0))
@@ -558,6 +666,7 @@ impl ThreadView {
                         (Some(line), _) => format!("{label}:L{line}"),
                         _ => label,
                     })
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| {
                         cx.stop_propagation();
                         v.open_location(path.clone(), line, cx);
@@ -574,7 +683,7 @@ impl ThreadView {
             let color = if code == 0 { theme::OK } else { theme::DANGER };
             location_chips.push(div().text_color(hsla(color)).child(format!("Exit {code}")).into_any_element());
         }
-        let mut header = elements::tool_header(ix, call, title(call), location_chips, has_details, expanded);
+        let mut header = elements::tool_header(ix, call, title_in_cwd(call, &self.cwd), location_chips, has_details, expanded);
         if has_details {
             header = header.on_click(cx.listener(move |v, _: &ClickEvent, _, cx| {
                 if shell && v.detail {
@@ -617,9 +726,9 @@ impl ThreadView {
                     _ => None,
                 }));
             }
-            if let Some(card) = self.cards.get(&call.id) {
-                let scope = Scope { call: card.call.clone(), ui: self.card_ui.clone() };
-                body = body.child(div().mt(px(2.0)).child(crate::visual::ui::markdown(format!("thread-card-{}", card.call), &card.content, scope)));
+            if let Some(content) = inline_card {
+                let scope = Scope { call: call.id.clone(), ui: self.card_ui.clone() };
+                body = body.child(div().mt(px(2.0)).child(crate::visual::ui::markdown(format!("thread-card-{}", call.id), content, scope)));
             }
             block = block.child(elements::trace_content(body.into_any_element()));
         }
@@ -719,7 +828,7 @@ impl ThreadView {
     /// report. A call with an inline card stays on its own, so the card is never hidden.
     pub(super) fn run_kind(&self, ix: usize) -> Option<RunKind> {
         let entry = self.thread.entries.get(ix)?;
-        let has_card = matches!(entry, Entry::Tool(call) if self.cards.contains_key(&call.id));
+        let has_card = matches!(entry, Entry::Tool(call) if self.inline_visuals && (self.cards.contains_key(&call.id) || call.details.visual.is_some()));
         timeline::run_kind(entry, has_card)
     }
 
@@ -747,7 +856,7 @@ impl ThreadView {
         let reports: Vec<SubagentReport> = steps.iter().filter_map(|e| if let Entry::User(t) = e { parse_subagent_report(t) } else { None }).collect();
         let thoughts = steps.len() - calls.len() - reports.len();
         let latest = match steps.last() {
-            Some(Entry::Tool(call)) => title(call),
+            Some(Entry::Tool(call)) => title_in_cwd(call, &self.cwd),
             Some(Entry::Thought(text)) => text.clone(),
             Some(Entry::User(text)) => parse_subagent_report(text).map(|r| report_line(r.title, r.state)).unwrap_or_default(),
             _ => String::new(),
@@ -1077,8 +1186,11 @@ impl ThreadView {
                 let current_id = self.thread.option("model").map(|m| m.current.as_str());
                 let models = self.filtered_models(cx);
                 let hi = self.model_highlight.min(models.len().saturating_sub(1));
-                let mut list = self.model_scroll.wire(div().id("picker-model-list").max_h(px(176.0)), window).flex().flex_col().gap(px(2.0));
+                let mut list = self.model_scroll.wire(div().id("picker-model-list").role(gpui::Role::ListBox).aria_label("Models").max_h(px(210.0)), window).flex().flex_col().gap(px(2.0));
+                let mut previous = None;
                 for (n, m) in models.iter().enumerate() {
+                    let heading = (previous != Some(m.harness)).then(|| picker::section_header(m.harness.name(), None));
+                    previous = Some(m.harness);
                     let selected = match &self.pending_model {
                         Some(p) => p.harness == m.harness && p.id == m.id,
                         None => m.harness == self.harness && current_id == Some(m.id.as_str()),
@@ -1086,8 +1198,10 @@ impl ThreadView {
                     let focused = n == hi;
                     let choice = m.clone();
                     let logo = logos::draw(logos::for_harness(m.harness), 11.5, hsla(if selected { theme::TEXT } else { theme::TEXT_FAINT })).into_any_element();
-                    list = list.child(
+                    list = list.child(div().flex().flex_col().children(heading).child(
                         picker::row(SharedString::from(format!("thread-model-{n}")), Some(logo), m.name.clone(), None, None, selected, false)
+                            .role(gpui::Role::ListBoxOption)
+                            .aria_selected(selected)
                             .when(focused && !selected, |d| d.bg(hsla(theme::SURFACE_HOVER)))
                             .border_1()
                             .border_color(if focused { hsla(theme::FOCUS_BORDER) } else { gpui::transparent_black() })
@@ -1096,10 +1210,10 @@ impl ThreadView {
                                 v.pick_model(choice.clone(), cx);
                                 v.close_picker(window, cx);
                             })),
-                    );
+                    ));
                 }
                 if models.is_empty() {
-                    list = list.child(picker::empty_note("No models match."));
+                    list = list.child(crate::panels::widgets::empty_panel(IconName::Search, "No matching models"));
                 }
 
                 let (effort_values, effort_labels, current_effort_ix, option_id) = self.effort_choices();
@@ -1314,6 +1428,9 @@ impl ThreadView {
             let editing = self.queue_edit.as_ref().is_some_and(|edit| edit.id == id);
             let can_act = !editing && !self.interrupting && self.questions.is_empty();
             div()
+                .id(SharedString::from(format!("queue-item-{id}")))
+                .rounded(px(6.0))
+                .hover(|style| style.bg(hsla(theme::SURFACE_HOVER)))
                 .w_full()
                 .flex()
                 .items_center()
@@ -1328,6 +1445,8 @@ impl ThreadView {
                         .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| v.send_queued_now(id, cx))))
                     .when(self.queue_edit.is_none(), |row| row.child(
                         icon_button(SharedString::from(format!("queued-edit-{id}")), IconName::Pencil)
+                            .accessibility_label("Edit queued message")
+                            .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new("Edit queued message").build(window, cx))
                             .on_click(cx.listener(move |v, _: &ClickEvent, window, cx| v.edit_queued(id, window, cx))),
                     ))
                     .children([(true, "Move up"), (false, "Move down")].into_iter().filter_map(|(earlier, label)| {
@@ -1337,6 +1456,8 @@ impl ThreadView {
                     }))
                     .child(
                         icon_button(SharedString::from(format!("queued-remove-{id}")), IconName::X)
+                            .accessibility_label("Remove queued message")
+                            .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new("Remove queued message").build(window, cx))
                             .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| {
                                 if v.unqueue(id, cx).is_some() {
                                     v.queue_changed();
@@ -1347,7 +1468,7 @@ impl ThreadView {
         });
         Some(
             div().child(self.queue_scroll.wire(div().id("thread-queue").w_full().max_h(px(180.0)), window)
-                .py(px(4.0))
+                .p(px(4.0))
                 .rounded(px(10.0))
                 .bg(hsla(theme::SURFACE_ELEVATED))
                 .border_1()
@@ -1532,6 +1653,48 @@ pub fn short_effort_label(name: &str) -> String {
     }
 }
 
+/// Display `path` relative to `cwd` when inside it, normalizing separators and Windows drive-letter casing.
+fn relative_to_cwd(cwd: &std::path::Path, path: &std::path::Path) -> String {
+    let cwd = dunce::simplified(cwd);
+    let path = dunce::simplified(path);
+    if let Ok(rel) = path.strip_prefix(cwd) {
+        let s = rel.to_string_lossy();
+        if !s.is_empty() {
+            return s.replace('\\', "/");
+        }
+    }
+    let cwd_norm = cwd.to_string_lossy().replace('\\', "/");
+    let cwd_trimmed = cwd_norm.trim_end_matches('/');
+    let path_norm = path.to_string_lossy().replace('\\', "/");
+    let matches_prefix = if cfg!(windows) {
+        path_norm.len() > cwd_trimmed.len()
+            && path_norm.as_bytes().get(cwd_trimmed.len()) == Some(&b'/')
+            && path_norm[..cwd_trimmed.len()].eq_ignore_ascii_case(cwd_trimmed)
+    } else {
+        path_norm.starts_with(cwd_trimmed) && path_norm.as_bytes().get(cwd_trimmed.len()) == Some(&b'/')
+    };
+    if matches_prefix {
+        return path_norm[cwd_trimmed.len() + 1..].to_string();
+    }
+    path.display().to_string()
+}
+
+/// A tool's title with any `cwd`-prefixed file path shortened to a relative path.
+fn title_in_cwd(call: &ToolCall, cwd: &std::path::Path) -> String {
+    let raw = title(call);
+    if let Some((verb, rest)) = raw.split_once(' ') {
+        let trimmed = rest.trim();
+        let p = std::path::Path::new(trimmed);
+        if p.is_absolute() {
+            let short = relative_to_cwd(cwd, p);
+            if short != trimmed {
+                return format!("{verb} {short}");
+            }
+        }
+    }
+    raw
+}
+
 /// A tool's title, or its kind while the agent hasn't named it.
 fn title(call: &ToolCall) -> String {
     if !call.title.is_empty() {
@@ -1566,7 +1729,25 @@ fn run_label(thoughts: usize, calls: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{keep_line_breaks, report_line, run_label};
+    use super::{keep_line_breaks, relative_to_cwd, report_line, run_label, title_in_cwd};
+
+    #[test]
+    fn tool_paths_shorten_relative_to_cwd() {
+        let cwd = std::path::Path::new(if cfg!(windows) { r"C:\Users\dev\proj" } else { "/Users/dev/proj" });
+        let file = std::path::Path::new(if cfg!(windows) { r"c:\Users\dev\proj\src\main.rs" } else { "/Users/dev/proj/src/main.rs" });
+        assert_eq!(relative_to_cwd(cwd, file), "src/main.rs");
+        let call = crate::harness::thread::ToolCall {
+            id: "1".into(),
+            title: format!("Read {}", file.display()),
+            kind: "read".into(),
+            status: crate::harness::thread::ToolStatus::Done,
+            content: vec![],
+            locations: vec![],
+            details: Default::default(),
+            subagent: None,
+        };
+        assert_eq!(title_in_cwd(&call, cwd), "Read src/main.rs");
+    }
 
     #[gpui::test]
     fn conversation_selection_ends_after_a_missed_mouse_release(cx: &mut gpui::TestAppContext) {

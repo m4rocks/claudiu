@@ -1102,6 +1102,8 @@ struct WindowSelectionState {
     anchor: Option<SelectionEndpoint>,
     cursor: Option<SelectionEndpoint>,
     pending_extension_anchor: Option<SelectionEndpoint>,
+    drag_granularity: usize,
+    multi_click_origin: Option<(SelectionEndpoint, SelectionEndpoint)>,
     is_selecting: bool,
     did_hit_text: bool,
     frame_generation: u64,
@@ -1341,6 +1343,8 @@ impl WindowSelectionState {
     pub fn end(&mut self, cx: &mut App) {
         self.mouse_down_prepared = false;
         self.pending_extension_anchor = None;
+        self.drag_granularity = 1;
+        self.multi_click_origin = None;
         if !self.is_selecting {
             return;
         }
@@ -1364,6 +1368,8 @@ impl WindowSelectionState {
         self.anchor = None;
         self.cursor = None;
         self.pending_extension_anchor = None;
+        self.drag_granularity = 1;
+        self.multi_click_origin = None;
         self.is_selecting = false;
         self.did_hit_text = false;
         if self.touch.reset() {
@@ -1484,6 +1490,8 @@ impl WindowSelectionState {
         self.anchor = None;
         self.cursor = None;
         self.pending_extension_anchor = None;
+        self.drag_granularity = 1;
+        self.multi_click_origin = None;
         self.is_selecting = false;
         self.did_hit_text = false;
         if self.touch.reset() {
@@ -1838,10 +1846,14 @@ impl WindowSelectionState {
                     .map(|resolver| (resolver, content_point)),
             }
         };
-        self.anchor = Some(to_endpoint(anchor));
-        self.cursor = Some(to_endpoint(cursor));
+        let start_ep = to_endpoint(anchor);
+        let end_ep = to_endpoint(cursor);
+        self.anchor = Some(start_ep.clone());
+        self.cursor = Some(end_ep.clone());
+        self.drag_granularity = click_count.clamp(2, 3);
+        self.multi_click_origin = Some((start_ep, end_ep));
         self.did_hit_text = true;
-        self.is_selecting = false;
+        self.is_selecting = true;
         participant.update(cx, |state, cx| state.focus(window, cx));
         self.publish_snapshots(cx);
     }
@@ -1891,6 +1903,8 @@ impl WindowSelectionState {
         let anchor = previous_anchor.unwrap_or_else(|| endpoint.clone());
         self.anchor = Some(anchor.clone());
         self.cursor = Some(endpoint.clone());
+        self.drag_granularity = 1;
+        self.multi_click_origin = None;
         self.did_hit_text = anchor.inside_text || endpoint.inside_text;
         self.is_selecting = true;
         if let Some(participant) = focus_participant.and_then(|participant| participant.upgrade()) {
@@ -1907,7 +1921,51 @@ impl WindowSelectionState {
         }
         let endpoint = self.endpoint(position, window, cx);
         self.did_hit_text |= endpoint.inside_text;
-        self.cursor = Some(endpoint);
+        if self.drag_granularity >= 2
+            && let Some((orig_start, orig_end)) = self.multi_click_origin.clone()
+        {
+            let snapped = endpoint
+                .participant
+                .as_ref()
+                .and_then(|p| p.upgrade())
+                .and_then(|participant| {
+                    let (a, b) = points_for_multi_click(
+                        &participant.read(cx).runs,
+                        position,
+                        self.drag_granularity,
+                    )?;
+                    let reg = self.participants.get(&participant.entity_id())?;
+                    let resolver = participant.read(cx).content_key_resolver.clone();
+                    let make = |pt: Point<Pixels>| {
+                        let content_point = pt - reg.registration.bounds.origin - reg.registration.scroll_offset;
+                        SelectionEndpoint {
+                            participant: Some(participant.downgrade()),
+                            point: content_point,
+                            inside: true,
+                            inside_text: true,
+                            content_key: None,
+                            content_key_resolver: resolver.clone().map(|r| (r, content_point)),
+                        }
+                    };
+                    Some((make(a), make(b)))
+                });
+            let (cur_start, cur_end) = snapped.unwrap_or_else(|| (endpoint.clone(), endpoint.clone()));
+            let orig_pos = orig_start.resolve(&self.participants);
+            let cur_pos = cur_start.resolve(&self.participants);
+            let backward = match (orig_pos, cur_pos) {
+                (Some(o), Some(c)) => c.y < o.y || (c.y == o.y && c.x < o.x),
+                _ => false,
+            };
+            if backward {
+                self.anchor = Some(orig_end);
+                self.cursor = Some(cur_start);
+            } else {
+                self.anchor = Some(orig_start);
+                self.cursor = Some(cur_end);
+            }
+        } else {
+            self.cursor = Some(endpoint);
+        }
         if window.is_none() {
             self.update_participant_auto_scroll(position, cx);
         }
@@ -2316,6 +2374,25 @@ impl TextSelection {
         };
         let items = state.read(cx).copy_items(cx);
         resolve_copy_items(items, cx)
+    }
+
+    /// Returns the window-coordinate caret boxes for the start and end of the current selection.
+    pub fn selection_edges(window: &Window, cx: &mut App) -> Option<(Bounds<Pixels>, Bounds<Pixels>)> {
+        let state = live_text_selection_state(window, cx)?;
+        let state = state.read(cx);
+        let mut active: Vec<(u64, Bounds<Pixels>, Bounds<Pixels>)> = state
+            .participants
+            .values()
+            .filter(|reg| reg.registration.scope == state.active_scope && reg.participant.upgrade().is_some())
+            .filter_map(|reg| {
+                let (start, end) = reg.registration.selection_edges?;
+                Some((reg.registration.document_order, start, end))
+            })
+            .collect();
+        active.sort_by_key(|(order, _, _)| *order);
+        let first = active.first()?.1;
+        let last = active.last()?.2;
+        Some((first, last))
     }
 
     /// Returns whether the window has a geometry selection or any participant
