@@ -790,7 +790,7 @@ impl ThreadView {
                 if v.phase != Phase::Starting { return false; }
                 v.phase = Phase::Ready;
                 v.cached_replay = false;
-                v.settle_opencode_shells();
+                v.settle_running_tools();
                 cx.emit(ThreadEvent::Ready(v.session_id.clone().unwrap_or_default()));
                 v.send_next(cx);
                 cx.notify();
@@ -1088,9 +1088,7 @@ impl ThreadView {
             return;
         }
         self.phase = Phase::Ended;
-        if let Some(row) = settle_running_tools(&mut self.thread.entries) {
-            self.remeasure(row);
-        }
+        self.settle_running_tools();
         self.background_tasks.clear();
         self.preserve_handoff_message();
         self.cancel_questions();
@@ -1562,31 +1560,16 @@ impl ThreadView {
         }
     }
 
-    // OpenCode's shell calls belong to the prompt. A missing final tool update leaves no exit status.
-    fn settle_opencode_shells(&mut self) {
-        if self.harness != Harness::OpenCode {
-            return;
-        }
-        let mut first_changed = None;
-        for (row, entry) in self.thread.entries.iter_mut().enumerate() {
-            if let Entry::Tool(call) = entry
-                && call.kind == "execute" && call.status == ToolStatus::Running
-            {
-                call.status = match call.details.exit_code {
-                    Some(0) => ToolStatus::Done,
-                    Some(_) => ToolStatus::Failed,
-                    None => ToolStatus::Ended,
-                };
-                first_changed.get_or_insert(row);
-            }
-        }
-        if let Some(row) = first_changed {
+    // Tool calls in the transcript belong to the turn (real background work lives in `provider_shells`,
+    // `background_tasks`, or `background`). A missing final tool update leaves no exit status.
+    fn settle_running_tools(&mut self) {
+        if let Some(row) = settle_running_tools(&mut self.thread.entries) {
             self.remeasure(row);
         }
     }
 
     fn turn_ended(&mut self, result: Result<Value, String>, cx: &mut Context<Self>) {
-        self.settle_opencode_shells();
+        self.settle_running_tools();
         self.working = false;
         self.interrupting = false;
         self.last_update = None;
@@ -4056,6 +4039,27 @@ mod tests {
         view.read_with(cx, |v, _| {
             assert!(!v.has_background_work(), "stale running tools from before a restart must not show as background work");
             assert_eq!(v.thread.tool("stale-cmd").unwrap().status, super::ToolStatus::Ended);
+        });
+    }
+
+    #[gpui::test]
+    fn antigravity_tool_without_final_status_settles_when_turn_ends(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_kit::init);
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = cx.add_window_view(|window, cx| super::ThreadView::new(test_start(dir.path().into(), Harness::Antigravity), window, cx));
+        view.update(cx, |v, cx| {
+            v.phase = super::Phase::Ready;
+            v.on_event(super::Event::Update(serde_json::json!({
+                "sessionUpdate": "tool_call",
+                "toolCallId": "grep-1",
+                "kind": "execute",
+                "status": "in_progress",
+                "rawInput": { "command": "grep -rn foo src/" }
+            })), cx);
+            assert!(v.has_background_work());
+            v.turn_ended(Ok(serde_json::json!({"stopReason": "end_turn"})), cx);
+            assert!(!v.has_background_work());
+            assert_eq!(v.thread.tool("grep-1").unwrap().status, super::ToolStatus::Ended);
         });
     }
 
