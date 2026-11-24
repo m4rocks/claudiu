@@ -42,12 +42,16 @@ impl Workspace {
         }
         if let Some(p) = self.shells.get_mut(HOME_SHELL) {
             p.open = !p.open;
-        } else if let Some(cwd) = platform::home_dir() {
-            let panel = self.new_shell_panel(HOME_SHELL, cwd, window, cx);
-            self.shells.insert(HOME_SHELL.to_string(), panel);
         } else {
-            self.toast("Could not find the home folder for a shell.", cx);
-            return;
+            let target = self.home_target_cwd();
+            let cwd = if target.is_dir() { Some(target) } else { platform::home_dir() };
+            if let Some(cwd) = cwd {
+                let panel = self.new_shell_panel(HOME_SHELL, cwd, window, cx);
+                self.shells.insert(HOME_SHELL.to_string(), panel);
+            } else {
+                self.toast("Could not find a folder for a shell.", cx);
+                return;
+            }
         }
         if self.shells.get(HOME_SHELL).is_some_and(|p| p.open) {
             self.focus_shell(window, cx);

@@ -345,6 +345,7 @@ pub struct HomeState {
     pub model_highlight: usize,
     /// Follows `model_highlight` so keyboard moves keep the highlighted row in view.
     pub model_scroll: crate::panels::glide::Smooth,
+    pub model_rows: std::rc::Rc<std::cell::RefCell<Vec<gpui::Bounds<Pixels>>>>,
     pub effort_bounds: std::rc::Rc<std::cell::Cell<gpui::Bounds<Pixels>>>,
     pub effort_dragging: std::rc::Rc<std::cell::Cell<bool>>,
 }
@@ -597,6 +598,11 @@ pub struct Workspace {
     pub dragging: Option<Id>,
     /// The right sidebar card being dragged, lifted in place like a session row.
     pub dragging_card: Option<crate::store::SideCard>,
+    /// Right sidebar card reorder animation: last drawn order, each card's last `(top, height)` and slides in flight.
+    pub prev_right_cards: Vec<crate::store::SideCard>,
+    pub card_bounds: std::rc::Rc<std::cell::RefCell<HashMap<crate::store::SideCard, (f32, f32)>>>,
+    pub card_slides: HashMap<crate::store::SideCard, crate::panels::sidebar::Slide>,
+    pub card_slide_gen: u64,
     /// Pointer position at the last drag-over check, see `pointer_moved`.
     /// Sidebar reorder animation: last drawn order of the running rows, and the slides in flight.
     pub prev_current: Vec<Id>,
@@ -718,6 +724,7 @@ impl Workspace {
                 model_anchor: crate::panels::widgets::Anchor::default(),
                 model_highlight: 0,
                 model_scroll: Default::default(),
+                model_rows: Default::default(),
                 creating: None,
                 launch_when_created: false,
                 effort_bounds: std::rc::Rc::new(std::cell::Cell::new(gpui::Bounds::default())),
@@ -752,6 +759,10 @@ impl Workspace {
             window_title: String::new(),
             dragging: None,
             dragging_card: None,
+            prev_right_cards: Vec::new(),
+            card_bounds: Default::default(),
+            card_slides: HashMap::new(),
+            card_slide_gen: 0,
             drag_pos: None,
             prev_current: Vec::new(),
             slides: HashMap::new(),
@@ -844,7 +855,7 @@ impl Workspace {
             }
             return project.path.clone();
         }
-        self.active_cwd()
+        platform::home_dir().unwrap_or_else(|| PathBuf::from("."))
     }
 
     /// Model currently chosen on the Welcome screen (from the aggregated catalog across enabled harnesses).

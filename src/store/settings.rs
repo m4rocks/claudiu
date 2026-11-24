@@ -52,7 +52,7 @@ pub struct Layout {
 }
 
 /// One card of the right sidebar.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SideCard {
     Actions,

@@ -13,7 +13,7 @@ use std::time::Duration;
 use gpui::{Animation, AnimationExt};
 
 use crate::app::{Act, GitOp, MenuItem, SideDrag, Workspace};
-use crate::panels::sidebar::{DragGhost, lifted, move_to};
+use crate::panels::sidebar::{DragGhost, Slide, is_reorder, lifted, move_to, slid};
 use crate::panels::widgets::Trigger;
 use crate::store::SideCard;
 use gpui::{AppContext, DragMoveEvent, prelude::FluentBuilder};
@@ -36,8 +36,16 @@ pub struct Shown {
 impl Workspace {
     pub fn shown(&self) -> Shown {
         let rec = self.active_id().and_then(|id| self.store.session(id)).cloned();
-        let project = rec.as_ref().and_then(|r| r.project_id.clone()).and_then(|p| self.store.project(&p)).cloned();
-        let cwd = rec.as_ref().map(|r| r.cwd.clone());
+        let project = rec
+            .as_ref()
+            .and_then(|r| r.project_id.clone())
+            .and_then(|p| self.store.project(&p))
+            .cloned()
+            .or_else(|| rec.is_none().then(|| self.home_selected_project().cloned()).flatten());
+        let cwd = rec
+            .as_ref()
+            .map(|r| r.cwd.clone())
+            .or_else(|| project.is_some().then(|| self.home_target_cwd()));
         Shown { rec, cwd, project }
     }
 
@@ -203,7 +211,44 @@ impl Workspace {
         .collect();
         let order = self.store.data.layout.right_card_order();
         cards.sort_by_key(|(kind, _)| order.iter().position(|k| k == kind));
-        let cards: Vec<Stateful<Div>> = cards.into_iter().map(|(kind, card)| self.draggable_card(kind, card, cx)).collect();
+        let visible_kinds: Vec<SideCard> = cards.iter().map(|(kind, _)| *kind).collect();
+        if is_reorder(&self.prev_right_cards, &visible_kinds) {
+            self.card_slide_gen += 1;
+            let bounds = self.card_bounds.borrow();
+            let base_y = self
+                .prev_right_cards
+                .first()
+                .and_then(|k| bounds.get(k))
+                .map(|(top, _)| *top)
+                .unwrap_or(0.0);
+            let mut y = base_y;
+            for kind in &visible_kinds {
+                let (old_top, height) = bounds.get(kind).copied().unwrap_or((y, 0.0));
+                let delta = old_top - y;
+                if delta.abs() > 0.5 && self.dragging_card != Some(*kind) {
+                    self.card_slides.insert(*kind, Slide { from: delta, epoch: self.card_slide_gen });
+                }
+                y += height + theme::PANEL_GAP;
+            }
+        }
+        self.prev_right_cards = visible_kinds;
+        let cards: Vec<AnyElement> = cards
+            .into_iter()
+            .map(|(kind, card)| {
+                let slide = self.card_slides.get(&kind).copied();
+                let card_bounds = self.card_bounds.clone();
+                let probe = gpui::canvas(
+                    move |bounds, _, _| {
+                        card_bounds.borrow_mut().insert(kind, (f32::from(bounds.origin.y), f32::from(bounds.size.height)));
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_full();
+                let el = self.draggable_card(kind, card, cx).relative().child(probe);
+                slid(el, &format!("card-{kind:?}"), slide)
+            })
+            .collect();
         self.menu_scroll
             .wire(div().id("right-menu").size_full(), window)
             .flex()
@@ -285,20 +330,20 @@ impl Workspace {
                 );
             }
         }
-        // Keep session-only actions visible, but inert when no session is shown.
-        actions = actions.child(if id.is_some() {
+        let editor_available = self.editor_owner().is_some();
+        actions = actions.child(if editor_available {
             row("editor-mode", IconName::FileCode, "Editor mode")
                 .on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::ToggleEditor, window, cx)))
         } else {
             dim_row("editor-mode", IconName::FileCode, "Editor mode")
         });
-        if let Some(target) = target {
+        if let Some(target) = target.clone() {
             actions = actions.child(
                 row("reveal", IconName::FolderOpen, "Open folder")
                     .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::Reveal(target.clone()), window, cx))),
             );
         }
-        if let Some(repo) = repo {
+        if let Some(repo) = repo.clone() {
             // One git operation at a time: while one runs, both rows are disabled.
             let git_row = |cx: &mut Context<Self>, key: &'static str, glyph: IconName, label: &'static str, doing: &'static str, op: GitOp, make: Box<dyn Fn(PathBuf) -> Act>| {
                 if busy.is_some() {
@@ -310,13 +355,10 @@ impl Workspace {
             };
             // Until it has been read, assume there is work.
             let nothing_to_do = self.pending.as_ref().is_some_and(|(dir, p)| *dir == repo && !p.any());
-            let commit = match id.filter(|_| running && claude) {
-                Some(_) if nothing_to_do && busy.is_none() => dim_row("commit-push", IconName::GitCommitHorizontal, "Commit & Push · nothing to commit or push"),
-                Some(id) => {
-                    let id = id.clone();
-                    git_row(cx, "commit-push", IconName::GitCommitHorizontal, "Commit & Push", "Committing…", GitOp::CommitPush, Box::new(move |cwd| Act::CommitPush(id.clone(), cwd)))
-                }
-                None => dim_row("commit-push", IconName::GitCommitHorizontal, "Commit & Push · needs a running session"),
+            let commit = if nothing_to_do && busy.is_none() {
+                dim_row("commit-push", IconName::GitCommitHorizontal, "Commit & Push · nothing to commit or push")
+            } else {
+                git_row(cx, "commit-push", IconName::GitCommitHorizontal, "Commit & Push", "Committing…", GitOp::CommitPush, Box::new(Act::CommitPush))
             };
             actions = actions.child(commit).child(git_row(cx, "pull", IconName::ArrowDownToLine, "Pull", "Pulling…", GitOp::Pull, Box::new(Act::Pull)));
         }
@@ -325,6 +367,12 @@ impl Workspace {
             actions = actions.child(
                 row("shell", IconName::Terminal, if open { "Hide shell" } else { "Show shell" })
                     .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::ToggleShell(id.clone()), window, cx))),
+            );
+        } else if id.is_none() {
+            let open = self.shells.get(crate::app::HOME_SHELL).is_some_and(|p| p.open);
+            actions = actions.child(
+                row("shell", IconName::Terminal, if open { "Hide shell" } else { "Show shell" })
+                    .on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.toggle_shell_here(window, cx))),
             );
         }
         if let Some((id, thread)) = id.and_then(|id| {
@@ -336,9 +384,11 @@ impl Workspace {
                     ws.show_session(&id, window, cx);
                     thread.update(cx, |view, cx| view.open_find(window, cx));
                 })));
+        } else if id.is_none() {
+            actions = actions.child(dim_row("find-in-session", IconName::Search, "Find in session"));
         }
-        let cwd = self.active_cwd();
-        actions.child(if id.is_some() {
+        let gh_cwd = shown.cwd.clone();
+        actions.child(if let Some(cwd) = gh_cwd {
             row("github", IconName::GitPullRequest, "GitHub")
                 .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::OpenGithub { cwd: cwd.clone() }, window, cx)))
         } else {

@@ -145,9 +145,9 @@ pub fn model_chip(id: impl Into<ElementId>, open: bool, anchor: &Anchor, harness
         .relative()
         .child(anchor.probe())
         .child(logos::draw(logos::for_harness(harness), 11.0, hsla(theme::TEXT_DIM)))
-        .child(div().max_w(px(165.0)).overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(hsla(theme::TEXT)).child(label.into()))
+        .child(div().max_w(px(165.0)).overflow_hidden().whitespace_nowrap().text_ellipsis().line_height(gpui::relative(1.35)).text_color(hsla(theme::TEXT)).child(label.into()))
         .when_some(effort, |d, badge| {
-            d.child(div().px(px(5.0)).rounded(px(4.0)).bg(hsla(0x1f1f22)).text_size(scale::px(10.0)).text_color(hsla(theme::TEXT_DIM)).child(badge))
+            d.child(div().px(px(5.0)).py(px(1.0)).rounded(px(4.0)).bg(hsla(0x1f1f22)).text_size(scale::px(10.0)).line_height(gpui::relative(1.25)).text_color(hsla(theme::TEXT_DIM)).child(badge))
         })
         .child(icon(IconName::ChevronDown, 10.5).text_color(hsla(theme::TEXT_FAINT)))
 }
@@ -156,7 +156,7 @@ pub fn model_chip(id: impl Into<ElementId>, open: bool, anchor: &Anchor, harness
 pub fn permission_chip(id: impl Into<ElementId>, open: bool, label: impl Into<SharedString>) -> Button {
     chip(id, open)
         .child(icon(IconName::Lock, 11.0).text_color(hsla(theme::TEXT_DIM)))
-        .child(div().text_color(hsla(theme::TEXT)).child(label.into()))
+        .child(div().line_height(gpui::relative(1.35)).text_color(hsla(theme::TEXT)).child(label.into()))
         .child(icon(IconName::ChevronDown, 10.5).text_color(hsla(theme::TEXT_FAINT)))
 }
 
@@ -166,11 +166,11 @@ pub fn git_chip(id: impl Into<ElementId>, open: bool, primary: impl Into<SharedS
     chip(id, open)
         .text_color(hsla(theme::TEXT))
         .child(icon(IconName::GitBranch, 12.0).text_color(hsla(theme::TEXT_DIM)))
-        .child(div().max_w(px(150.0)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(primary.into()))
+        .child(div().max_w(px(150.0)).overflow_hidden().whitespace_nowrap().text_ellipsis().line_height(gpui::relative(1.35)).child(primary.into()))
         .when_some(linked, |d, wt| {
             d.child(div().text_color(hsla(theme::TEXT_FAINT)).child("·"))
                 .child(icon(IconName::FolderGit2, 11.0).text_color(hsla(theme::TEXT_FAINT)))
-                .child(div().max_w(px(100.0)).overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(hsla(theme::TEXT_DIM)).child(wt))
+                .child(div().max_w(px(100.0)).overflow_hidden().whitespace_nowrap().text_ellipsis().line_height(gpui::relative(1.35)).text_color(hsla(theme::TEXT_DIM)).child(wt))
         })
         .child(tail.unwrap_or_else(|| icon(IconName::ChevronDown, 10.5).text_color(hsla(theme::TEXT_FAINT)).into_any_element()))
 }

@@ -39,9 +39,10 @@ When upgrading from a version with multiple Claude accounts, resumed sessions us
 
 ### Workspace, Git, and editor
 
-- **Comments**: Select text in chat and use the comment icon or press Cmd/Ctrl+Shift+M to add context to your next message. The same icon opens comments on lines in Review changes and in the editor.
+- **Comments**: Select text in chat and use the comment icon, choose **Add comment** from the context menu, or press Cmd/Ctrl+Shift+M to add context to your next message. The same icon opens comments on lines in Review changes and in the editor.
 
 - **Branches and worktrees**: Create a branch or spin up a new worktree (from `main` or the current checkout) in one click from the branch chip, inspect external worktrees, or move a session between worktrees.
+- **Welcome actions**: Open the selected project in the editor or on GitHub, pull changes, or use **Commit & Push** before starting a session.
 - **Change review and snapshots**: The composer's **Review changes** button compares the working tree to the latest snapshot and supports hunk actions and line comments.
 - **Built-in editor (`Ctrl+Shift+E`)**: File tree, tabs, syntax highlighting, Git gutter marks, and LSP diagnostics, hover, completions, and go-to-definition using language servers already on your `PATH`. Works in active sessions and on Home, keeping each project's tabs and unsaved edits. Click the comment button beside hovered or selected lines to add `@path#L12-30: comment` to the composer.
 - **Shell panel (`Ctrl+J` / `Ctrl+\``)**: A real PTY shell in the session's folder. Agents never run in a PTY and m4code never types into the shell.

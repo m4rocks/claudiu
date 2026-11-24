@@ -97,17 +97,17 @@ const ROW_GAP: f32 = 7.0;
 /// `epoch` makes each reorder a fresh animation.
 #[derive(Clone, Copy)]
 pub struct Slide {
-    from: f32,
-    epoch: u64,
+    pub(super) from: f32,
+    pub(super) epoch: u64,
 }
 
 /// True when `new` holds the same items as `prev` in a different order (not an add or remove).
-fn is_reorder(prev: &[Id], new: &[Id]) -> bool {
+pub(super) fn is_reorder<T: PartialEq>(prev: &[T], new: &[T]) -> bool {
     prev != new && prev.len() == new.len() && new.iter().all(|i| prev.contains(i))
 }
 
 /// Wraps `el` in the slide-in animation when `slide` is set.
-fn slid(el: impl IntoElement + gpui::Styled + 'static, id: &Id, slide: Option<Slide>) -> AnyElement {
+pub(super) fn slid(el: impl IntoElement + gpui::Styled + 'static, id: &str, slide: Option<Slide>) -> AnyElement {
     match slide {
         Some(Slide { from, epoch }) => el
             .with_animation(

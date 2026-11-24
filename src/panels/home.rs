@@ -36,7 +36,7 @@ impl Workspace {
         let project_chip = composer::chip("home-project", project_open)
             .text_color(hsla(if project.is_some() { theme::TEXT } else { theme::TEXT_DIM }))
             .child(icon(IconName::FolderOpen, 12.0).text_color(hsla(theme::TEXT_DIM)))
-            .child(div().max_w(px(150.0)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(project_label))
+            .child(div().max_w(px(150.0)).overflow_hidden().whitespace_nowrap().text_ellipsis().line_height(gpui::relative(1.35)).child(project_label))
             .child(icon(IconName::ChevronDown, 10.5).text_color(hsla(theme::TEXT_FAINT)))
             .dropdown(cx, |ws, at, window, cx| {
                 ws.open_project_picker(ProjectPickerMode::Home, at, window, cx);

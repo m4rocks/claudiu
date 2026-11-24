@@ -71,8 +71,12 @@ impl Render for ThreadView {
                     cx.notify();
                 }
             }))
-            .on_mouse_down(MouseButton::Right, cx.listener(|v, ev: &MouseDownEvent, _, cx| {
-                v.chat_menu = Some(ev.position);
+            .on_mouse_down(MouseButton::Right, cx.listener(|v, ev: &MouseDownEvent, window, cx| {
+                let quote = v.selected_quote(cx);
+                let anchor = gpui_kit::base::TextSelection::selection_edges(window, cx)
+                    .map(|(_, end)| gpui::point(end.right() + px(8.0), end.top()))
+                    .unwrap_or(ev.position);
+                v.chat_menu = Some(super::ChatMenu { at: ev.position, quote, anchor });
                 cx.notify();
             }))
             .on_scroll_wheel(cx.listener(|v, _: &gpui::ScrollWheelEvent, _, cx| {
@@ -107,11 +111,14 @@ impl Render for ThreadView {
             .child(self.chat_glide.overlay(&self.list, px(64.0), self.picker.is_none() && self.screenshot.is_none()))
             .child(div().absolute().bottom_0().left_0().right_0().h(px(18.0)).bg(fade))
             .child(gpui_kit::base::Scrollbar::vertical(&self.list).mode(gpui_kit::base::ScrollbarMode::Always));
-        let conversation = conversation.when(!self.list.is_following_tail(), |view| {
+        let show_jump = self.show_jump_to_latest();
+        self.jump_visible.set(show_jump);
+        let conversation = conversation.when(show_jump, |view| {
             view.child(div().absolute().bottom(px(22.0)).right(px(24.0)).child(
                 button_colored("jump-to-latest", Some(IconName::ArrowDownToLine), "Jump to latest", hsla(theme::ACCENT), hsla(theme::PANEL_BG), hsla(0xdcdcdc), None, true).debug_selector(|| "jump-to-latest".into()).on_click(cx.listener(|v, _: &ClickEvent, _, cx| {
                     v.chat_glide.cancel();
                     v.list.set_follow_mode(gpui::FollowMode::Tail);
+                    v.jump_visible.set(false);
                     cx.notify();
                 })),
             ))
@@ -167,13 +174,12 @@ impl ThreadView {
             .with_priority(20).into_any_element())
     }
 
-    fn render_chat_menu(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let at = self.chat_menu?;
-        let quote = self.selected_quote(cx);
+    fn render_chat_menu(&self, _window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let menu_state = self.chat_menu.as_ref()?;
+        let at = menu_state.at;
+        let quote = menu_state.quote.clone();
         let has_selection = !quote.is_empty();
-        let selection_anchor = gpui_kit::base::TextSelection::selection_edges(window, cx)
-            .map(|(_, end)| gpui::point(end.right() + px(8.0), end.top()))
-            .unwrap_or(at);
+        let selection_anchor = menu_state.anchor;
         let copy_quote = quote.clone();
         let comment_quote = quote;
         let menu_item = |id: &'static str, glyph: IconName, label: &'static str, enabled: bool| {
@@ -203,6 +209,9 @@ impl ThreadView {
             .flex()
             .flex_col()
             .gap(px(2.0))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                gpui_kit::base::GlobalState::suppress_text_selection(cx);
+            })
             .on_mouse_down_out(cx.listener(|v, _: &MouseDownEvent, _, cx| {
                 v.chat_menu = None;
                 cx.notify();
@@ -214,7 +223,9 @@ impl ThreadView {
                     cx.notify();
                 }))
             }))
-            .child(menu_item("chat-ctx-comment", IconName::MessageSquare, "Add comment", has_selection).when(has_selection, |b| {
+            .child(menu_item("chat-ctx-comment", IconName::MessageSquare, "Add comment", has_selection)
+                .debug_selector(|| "chat-ctx-comment".into())
+                .when(has_selection, |b| {
                 b.on_click(cx.listener(move |v, _: &ClickEvent, window, cx| {
                     v.chat_menu = None;
                     v.comment_anchor = Some((selection_anchor, comment_quote.clone()));
@@ -299,8 +310,10 @@ pub(super) fn ensure_markdown_state(
             entity
         })
         .clone();
-    // Unchanged text costs a comparison; a reply still streaming in is appended to what is parsed.
-    state.update(cx, |s, cx| s.set_text(text, cx));
+    // Unchanged text skips `update` altogether so scrolling never triggers entity writes.
+    if state.read(cx).rendered_text().source() != text {
+        state.update(cx, |s, cx| s.set_text(text, cx));
+    }
     state
 }
 
@@ -403,29 +416,64 @@ impl ThreadView {
                 let el = self.render_subagent_report(ix, &report, cx);
                 if run.is_some_and(|r| r.len() > 1) { indent_run_step(el) } else { el }
             }
-            Entry::User(text) => div().flex().flex_col().items_start().gap(px(4.0))
-                .px(px(14.0))
-                .py(px(10.0))
-                .rounded(px(9.0))
-                .bg(hsla(theme::ROW_ACTIVE))
-                .border_1()
-                .border_color(hsla(theme::PANEL_BORDER))
-                // `items_start` sizes children to their content, so a long list row would lay out on one line and run
-                // past the bubble; capping the text at the bubble's width makes it wrap.
-                .child(div().max_w_full().min_w_0().child(chat_markdown(&mut self.markdown, ix, &keep_line_breaks(text), cx)))
-                .into_any_element(),
-            Entry::Agent(text) => {
-                let citations = elements::inline_citations_row(ix, elements::extract_citations(text));
-                let segments = if self.inline_visuals {
-                    timeline::split_inline_ui(text)
+            Entry::User(text) => {
+                let md_view = if self.user_md_len.get(&ix) == Some(&text.len())
+                    && let Some(state) = self.markdown.get(&ix)
+                {
+                    let thread = cx.entity().downgrade();
+                    crate::github::ui::styled_markdown(TextView::new(state)).on_link_click(move |target, _, _, app| {
+                        if target.starts_with("https://") || target.starts_with("http://") {
+                            app.open_url(target);
+                        } else if let Some((path, line)) = timeline::file_link(target) {
+                            let _ = thread.update(app, |view, cx| view.open_location(path, line, cx));
+                        }
+                    })
                 } else {
-                    vec![timeline::InlineSegment::Markdown(text.clone())]
+                    self.user_md_len.insert(ix, text.len());
+                    let formatted = keep_line_breaks(text);
+                    chat_markdown(&mut self.markdown, ix, &formatted, cx)
                 };
-                let has_inline_ui = segments.iter().any(|s| matches!(s, timeline::InlineSegment::Ui(_)));
+                div()
+                    .w_full()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.0))
+                    .px(px(14.0))
+                    .py(px(10.0))
+                    .rounded(px(9.0))
+                    .bg(hsla(theme::ROW_ACTIVE))
+                    .border_1()
+                    .border_color(hsla(theme::PANEL_BORDER))
+                    .child(div().w_full().min_w_0().child(md_view))
+                    .into_any_element()
+            }
+            Entry::Agent(text) => {
+                let inline_visuals = self.inline_visuals;
+                let cached = match self.agent_cache.get(&ix) {
+                    Some(c) if c.text_len == text.len() && c.inline_visuals == inline_visuals => c,
+                    _ => {
+                        let citations = elements::extract_citations(text);
+                        let segments = if inline_visuals {
+                            timeline::split_inline_ui(text)
+                        } else {
+                            vec![timeline::InlineSegment::Markdown(text.clone())]
+                        };
+                        self.agent_cache.insert(ix, super::AgentCache {
+                            text_len: text.len(),
+                            inline_visuals,
+                            citations,
+                            segments,
+                        });
+                        &self.agent_cache[&ix]
+                    }
+                };
+                let citations = elements::inline_citations_row(ix, cached.citations.clone());
+                let has_inline_ui = cached.segments.iter().any(|s| matches!(s, timeline::InlineSegment::Ui(_)));
                 let mut col = div().px(px(2.0)).flex().flex_col().gap(px(6.0));
                 if !has_inline_ui {
                     col = col.child(chat_markdown(&mut self.markdown, ix, text, cx));
                 } else {
+                    let segments = cached.segments.clone();
                     for (seg_ix, seg) in segments.into_iter().enumerate() {
                         match seg {
                             timeline::InlineSegment::Markdown(md) if !md.trim().is_empty() => {
@@ -630,6 +678,7 @@ impl ThreadView {
             location_chips.push(
                 div()
                     .id(SharedString::from(format!("tool-loc-{ix}-{n}")))
+                    .debug_selector(move || format!("tool-loc-{ix}-{n}"))
                     .flex_none()
                     .max_w(px(240.0))
                     .overflow_hidden()
@@ -650,7 +699,6 @@ impl ThreadView {
                         (Some(line), _) => format!("{label}:L{line}"),
                         _ => label,
                     })
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| {
                         cx.stop_propagation();
                         v.open_location(path.clone(), line, cx);
@@ -821,7 +869,29 @@ impl ThreadView {
     }
 
     fn tool_run(&self, ix: usize) -> Option<std::ops::Range<usize>> {
-        timeline::tool_run(self.thread.entries.len(), ix, |index| self.run_kind(index))
+        let len = self.thread.entries.len();
+        let cards_len = self.cards.len();
+        let mut cache = self.run_cache.borrow_mut();
+        if cache.entries != len || cache.cards != cards_len || cache.inline_visuals != self.inline_visuals || cache.ranges.len() != len {
+            let mut ranges = vec![None; len];
+            let mut start = 0;
+            while start < len {
+                if self.run_kind(start).is_some() {
+                    let mut end = start + 1;
+                    while end < len && self.run_kind(end).is_some() {
+                        end += 1;
+                    }
+                    for slot in &mut ranges[start..end] {
+                        *slot = Some(start..end);
+                    }
+                    start = end;
+                } else {
+                    start += 1;
+                }
+            }
+            *cache = super::RunCache { entries: len, cards: cards_len, inline_visuals: self.inline_visuals, ranges };
+        }
+        cache.ranges.get(ix).cloned().flatten()
     }
 
     /// A run is open while Ctrl+O shows everything or after a click on its line; one step alone is always open. Runs
@@ -1170,7 +1240,8 @@ impl ThreadView {
                 let current_id = self.thread.option("model").map(|m| m.current.as_str());
                 let models = self.filtered_models(cx);
                 let hi = self.model_highlight.min(models.len().saturating_sub(1));
-                let mut list = self.model_scroll.wire(div().id("picker-model-list").role(gpui::Role::ListBox).aria_label("Models").max_h(px(210.0)), window).flex().flex_col().gap(px(2.0));
+                self.model_rows.borrow_mut().truncate(models.len());
+                let mut list = self.model_scroll.wire(div().id("picker-model-list").role(gpui::Role::ListBox).aria_label("Models").flex_1().min_h_0().max_h(px(210.0)), window).flex().flex_col().gap(px(2.0));
                 let mut previous = None;
                 for (n, m) in models.iter().enumerate() {
                     let heading = (previous != Some(m.harness)).then(|| picker::section_header(m.harness.name(), None));
@@ -1182,14 +1253,16 @@ impl ThreadView {
                     let focused = n == hi;
                     let choice = m.clone();
                     let logo = logos::draw(logos::for_harness(m.harness), 11.5, hsla(if selected { theme::TEXT } else { theme::TEXT_FAINT })).into_any_element();
-                    list = list.child(div().flex().flex_col().children(heading).child(
+                    list = list.child(div().flex_none().flex().flex_col().children(heading).child(
                         picker::row(SharedString::from(format!("thread-model-{n}")), Some(logo), m.name.clone(), None, None, selected, false)
+                            .relative()
                             .role(gpui::Role::ListBoxOption)
                             .aria_selected(selected)
                             .when(focused && !selected, |d| d.bg(hsla(theme::SURFACE_HOVER)))
                             .border_1()
                             .border_color(if focused { hsla(theme::FOCUS_BORDER) } else { gpui::transparent_black() })
                             .debug_selector(move || format!("thread-model-{n}"))
+                            .child(picker::track_row(self.model_rows.clone(), n))
                             .on_click(cx.listener(move |v, _: &ClickEvent, window, cx| {
                                 v.pick_model(choice.clone(), cx);
                                 v.close_picker(window, cx);
@@ -1232,6 +1305,8 @@ impl ThreadView {
                     ));
 
                 let body = div()
+                    .flex_1()
+                    .min_h_0()
                     .flex()
                     .flex_col()
                     .gap(px(8.0))
@@ -1637,43 +1712,66 @@ pub fn short_effort_label(name: &str) -> String {
     }
 }
 
-/// Display `path` relative to `cwd` when inside it, normalizing separators and Windows drive-letter casing.
+/// Display `path` relative to `cwd` when inside it, normalizing `file://` URLs, separators, Windows drive-letter casing,
+/// and symlinks/canonicalized forms.
 fn relative_to_cwd(cwd: &std::path::Path, path: &std::path::Path) -> String {
-    let cwd = dunce::simplified(cwd);
-    let path = dunce::simplified(path);
-    if let Ok(rel) = path.strip_prefix(cwd) {
-        let s = rel.to_string_lossy();
-        if !s.is_empty() {
-            return s.replace('\\', "/");
+    let owned = path
+        .to_str()
+        .filter(|s| s.starts_with("file:"))
+        .and_then(|s| url::Url::parse(s).ok())
+        .and_then(|u| u.to_file_path().ok());
+    let path = owned.as_deref().unwrap_or(path);
+    let strip = |base: &std::path::Path, target: &std::path::Path| -> Option<String> {
+        let base = dunce::simplified(base);
+        let target = dunce::simplified(target);
+        if let Ok(rel) = target.strip_prefix(base) {
+            let s = rel.to_string_lossy();
+            if !s.is_empty() {
+                return Some(s.replace('\\', "/"));
+            }
         }
-    }
-    let cwd_norm = cwd.to_string_lossy().replace('\\', "/");
-    let cwd_trimmed = cwd_norm.trim_end_matches('/');
-    let path_norm = path.to_string_lossy().replace('\\', "/");
-    let matches_prefix = if cfg!(windows) {
-        path_norm.len() > cwd_trimmed.len()
-            && path_norm.as_bytes().get(cwd_trimmed.len()) == Some(&b'/')
-            && path_norm[..cwd_trimmed.len()].eq_ignore_ascii_case(cwd_trimmed)
-    } else {
-        path_norm.starts_with(cwd_trimmed) && path_norm.as_bytes().get(cwd_trimmed.len()) == Some(&b'/')
+        let cwd_norm = base.to_string_lossy().replace('\\', "/");
+        let cwd_trimmed = cwd_norm.trim_end_matches('/');
+        let path_norm = target.to_string_lossy().replace('\\', "/");
+        let matches_prefix = if cfg!(windows) {
+            path_norm.len() > cwd_trimmed.len()
+                && path_norm.as_bytes().get(cwd_trimmed.len()) == Some(&b'/')
+                && path_norm[..cwd_trimmed.len()].eq_ignore_ascii_case(cwd_trimmed)
+        } else {
+            path_norm.starts_with(cwd_trimmed) && path_norm.as_bytes().get(cwd_trimmed.len()) == Some(&b'/')
+        };
+        matches_prefix.then(|| path_norm[cwd_trimmed.len() + 1..].to_string())
     };
-    if matches_prefix {
-        return path_norm[cwd_trimmed.len() + 1..].to_string();
+    if let Some(rel) = strip(cwd, path) {
+        return rel;
     }
-    path.display().to_string()
+    if let (Ok(canon_cwd), Ok(canon_path)) = (dunce::canonicalize(cwd), dunce::canonicalize(path))
+        && let Some(rel) = strip(&canon_cwd, &canon_path)
+    {
+        return rel;
+    }
+    dunce::simplified(path).display().to_string()
 }
 
 /// A tool's title with any `cwd`-prefixed file path shortened to a relative path.
 fn title_in_cwd(call: &ToolCall, cwd: &std::path::Path) -> String {
     let raw = title(call);
-    if let Some((verb, rest)) = raw.split_once(' ') {
-        let trimmed = rest.trim();
-        let p = std::path::Path::new(trimmed);
-        if p.is_absolute() {
-            let short = relative_to_cwd(cwd, p);
-            if short != trimmed {
-                return format!("{verb} {short}");
-            }
+    let cwd_norm = dunce::simplified(cwd).to_string_lossy().replace('\\', "/");
+    let cwd_trimmed = cwd_norm.trim_end_matches('/');
+    if !cwd_trimmed.is_empty() {
+        let raw_norm = raw.replace('\\', "/");
+        let needle = format!("{cwd_trimmed}/");
+        let found = if cfg!(windows) {
+            raw_norm.to_ascii_lowercase().find(&needle.to_ascii_lowercase())
+        } else {
+            raw_norm.find(&needle)
+        };
+        if let Some(pos) = found {
+            let after = pos + needle.len();
+            let mut out = String::with_capacity(raw.len());
+            out.push_str(&raw[..pos]);
+            out.push_str(&raw_norm[after..]);
+            return out;
         }
     }
     raw

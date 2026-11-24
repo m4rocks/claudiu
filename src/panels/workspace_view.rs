@@ -462,7 +462,7 @@ impl Render for Workspace {
                                 } else {
                                     (cur + 1) % filtered.len()
                                 };
-                                ws.home.model_scroll.scroll_to_item(ws.home.model_highlight);
+                                crate::panels::picker::reveal_row(&ws.home.model_scroll, &ws.home.model_rows.borrow(), ws.home.model_highlight);
                             }
                             cx.stop_propagation();
                             cx.notify();
@@ -514,7 +514,7 @@ impl Render for Workspace {
             }))
             .on_action(cx.listener(|ws, _: &ImportProject, window, cx| ws.act(Act::ImportProject, window, cx)))
             .on_action(cx.listener(|ws, _: &OpenGithub, window, cx| {
-                if ws.active_id().is_some() {
+                if ws.active_id().is_some() || ws.home_selected_project().is_some() {
                     let cwd = ws.active_cwd();
                     ws.act(Act::OpenGithub { cwd }, window, cx)
                 }

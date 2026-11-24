@@ -91,7 +91,7 @@ pub enum Act {
     /// Filter the sidebar list to a project (`None`: all).
     FilterProject(Option<Id>),
     /// Stage changes, generate a commit message, commit and push.
-    CommitPush(Id, PathBuf),
+    CommitPush(PathBuf),
     Pull(PathBuf),
     SwitchBranch(PathBuf, String),
     /// Read what deleting the local branch would lose, then ask.
@@ -179,9 +179,11 @@ impl Workspace {
             Act::HomeSelectProject(id) => {
                 self.home.project = Some(id);
                 self.home.worktree = None;
+                self.refresh_pending(cx);
             }
             Act::HomeSelectWorktree(path) => {
                 self.home.worktree = Some(path);
+                self.refresh_pending(cx);
             }
             Act::HomeSelectModel(model) => {
                 self.home.model = Some(model);
@@ -273,7 +275,7 @@ impl Workspace {
                 self.open_github(cwd, window, cx)
             }
             Act::RegenTitle(id) => self.regen_title(&id, cx),
-            Act::CommitPush(_id, cwd) => {
+            Act::CommitPush(cwd) => {
                 let generator = self.text_generator(cx);
                 self.run_git(
                     GitOp::CommitPush,

@@ -795,15 +795,21 @@ fn a_process_that_ends_closes_the_session_and_leaves_its_worktree() {
         }
     };
 
-    // Session-only shortcuts are inert on Home, even with a project available as a fallback folder.
+    // The GitHub shortcut works on Home and uses the selected project.
     step(&mut cx, &|ws, _, _| {
         ws.main = Main::Home;
         ws.active = None;
+        ws.home.project = Some(project.clone());
         ws.toast = None;
     });
     cx.dispatch_action(window, OpenGithub);
     cx.run_until_parked();
-    assert!(ws.read_with(&cx, |ws, _| !ws.editor_mode && ws.gh.is_empty() && ws.right_gh.is_none() && ws.toast.is_none()), "disabled shortcuts must not open a view or show a toast");
+    ws.read_with(&cx, |ws, _| {
+        let pane = ws.right_gh.as_deref().and_then(|id| ws.gh_pane(id)).expect("GitHub opens on Home");
+        assert_eq!(pane.cwd, repo_dir);
+        assert!(ws.active_id().is_none());
+    });
+    step(&mut cx, &|ws, _, _| ws.right_gh = None);
 
     let clean = start_one(&mut cx, "Fix login", exit_spec(0));
     until_closed(&mut cx, &clean);

@@ -210,6 +210,9 @@ fn main() {
         gpui_kit::init(cx);
         app::register_languages();
         gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, cx);
+        gpui_kit::component::Theme::update(cx, |theme| {
+            theme.colors.selection = panels::theme::hsla(panels::theme::ACCENT).opacity(0.24);
+        });
         cx.bind_keys(app::keymap::bindings());
         // The text-input library binds these globally (focus traversal, copy, select all, ...). A focused
         // terminal must receive them as plain keys, so unbind them inside the Terminal context.

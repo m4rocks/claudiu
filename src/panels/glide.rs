@@ -168,6 +168,12 @@ impl SmoothList {
                     if by == 0.0 {
                         return;
                     }
+                    // When the list isn't tall enough to scroll, leave tail-following alone so scrolling up
+                    // cannot detach it and flash "Jump to latest".
+                    if list.max_offset_for_scrollbar().y <= px(1.0) {
+                        glide.cancel();
+                        return;
+                    }
                     if by > 0.0 && list.is_following_tail() {
                         // The list reattaches within one pixel of the end. Move just past that
                         // threshold before the first eased frame, which may still round to zero.

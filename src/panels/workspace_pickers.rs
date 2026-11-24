@@ -46,13 +46,15 @@ impl Workspace {
                     })
                     .collect();
                 let hi = self.home.model_highlight.min(filtered.len().saturating_sub(1));
-                let mut list = self.home.model_scroll.wire(div().id("home-model-list").role(gpui::Role::ListBox).aria_label("Models").max_h(px(176.0)), window).flex().flex_col().gap(px(2.0));
+                self.home.model_rows.borrow_mut().truncate(filtered.len());
+                let mut list = self.home.model_scroll.wire(div().id("home-model-list").role(gpui::Role::ListBox).aria_label("Models").flex_1().min_h_0().max_h(px(176.0)), window).flex().flex_col().gap(px(2.0));
                 let mut last_harness = None;
                 for (n, m) in filtered.iter().enumerate() {
                     if last_harness != Some(m.harness) {
                         last_harness = Some(m.harness);
                         list = list.child(
                             div()
+                                .flex_none()
                                 .px(px(8.0))
                                 .pt(px(if n == 0 { 2.0 } else { 6.0 }))
                                 .pb(px(2.0))
@@ -68,11 +70,14 @@ impl Workspace {
                     let logo = logos::draw(logos::for_harness(m.harness), 11.5, if selected { accent } else { hsla(theme::TEXT_FAINT) }).into_any_element();
                     list = list.child(
                         picker::row(gpui::SharedString::from(format!("home-model-opt-{n}")), Some(logo), m.name.clone(), None, None, selected, false)
+                            .relative()
+                            .flex_none()
                             .role(gpui::Role::ListBoxOption)
                             .aria_selected(selected)
                             .when(focused && !selected, |d| d.bg(hsla(theme::SURFACE_HOVER)))
                             .border_1()
                             .border_color(if focused { hsla(theme::FOCUS_BORDER) } else { gpui::transparent_black() })
+                            .child(picker::track_row(self.home.model_rows.clone(), n))
                             .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::HomeSelectModel(choice.clone()), window, cx))),
                     );
                 }
@@ -90,6 +95,8 @@ impl Workspace {
                 let effort_trailing = div().text_size(scaled(10.5)).text_color(hsla(theme::TEXT_FAINT)).child("←/→ or drag").into_any_element();
                 let loading = self.model_lookups.any_loading(&self.store.data.settings.enabled_harnesses_list());
                 let body = div()
+                    .flex_1()
+                    .min_h_0()
                     .flex()
                     .flex_col()
                     .gap(px(8.0))

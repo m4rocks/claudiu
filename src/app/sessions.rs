@@ -39,11 +39,12 @@ impl Workspace {
     }
 
     pub fn active_cwd(&self) -> PathBuf {
-        self.active_id()
-            .and_then(|id| self.store.session(id).map(|s| s.cwd.clone()))
-            .or_else(|| self.store.data.projects.first().map(|p| p.path.clone()))
-            .or_else(platform::home_dir)
-            .unwrap_or_else(|| PathBuf::from("."))
+        if let Some(id) = self.active_id()
+            && let Some(s) = self.store.session(id)
+        {
+            return s.cwd.clone();
+        }
+        self.home_target_cwd()
     }
 
     pub fn new_session(&mut self, cwd: PathBuf, window: &mut Window, cx: &mut Context<Self>) {

@@ -59,6 +59,42 @@ pub struct Choices<V> {
     actions: Vec<Choose<V>>,
 }
 
+/// Invisible overlay that records a row's last painted bounds into `rows[ix]`, so `reveal_row` can scroll it into view.
+pub fn track_row(rows: Rc<RefCell<Vec<Bounds<Pixels>>>>, ix: usize) -> AnyElement {
+    canvas(
+        move |bounds, _, _| {
+            let mut rows = rows.borrow_mut();
+            if rows.len() <= ix {
+                rows.resize(ix + 1, Bounds::default());
+            }
+            rows[ix] = bounds;
+        },
+        |_, _, _, _| {},
+    )
+    .absolute()
+    .size_full()
+    .into_any_element()
+}
+
+/// Scroll `scroll` by the smallest amount needed to bring `rows[ix]` fully inside its viewport.
+pub fn reveal_row(scroll: &super::glide::Smooth, rows: &[Bounds<Pixels>], ix: usize) {
+    let Some(row) = rows.get(ix).copied() else { return };
+    if row.size.height <= px(0.0) {
+        return;
+    }
+    let view = scroll.handle().bounds();
+    if view.size.height <= px(0.0) {
+        return;
+    }
+    let mut offset = scroll.handle().offset();
+    if row.top() < view.top() {
+        offset.y += view.top() - row.top();
+    } else if row.bottom() > view.bottom() {
+        offset.y -= row.bottom() - view.bottom();
+    }
+    scroll.scroll_to(offset);
+}
+
 impl<V: 'static> Choices<V> {
     pub fn new(nav: &Nav, query: &str) -> Self {
         if *nav.query.borrow() != query {
@@ -73,19 +109,7 @@ impl<V: 'static> Choices<V> {
         let ix = self.actions.len();
         let choose: Choose<V> = Rc::new(choose);
         self.actions.push(choose.clone());
-        let rows = self.nav.rows.clone();
-        let place = canvas(
-            move |bounds, _, _| {
-                let mut rows = rows.borrow_mut();
-                if rows.len() <= ix {
-                    rows.resize(ix + 1, Bounds::default());
-                }
-                rows[ix] = bounds;
-            },
-            |_, _, _, _| {},
-        )
-        .absolute()
-        .size_full();
+        let place = track_row(self.nav.rows.clone(), ix);
         row.relative()
             .when(self.nav.highlight.get() == ix, |d| d.bg(hsla(theme::SURFACE_HOVER)))
             .child(place)
@@ -116,15 +140,7 @@ impl<V: 'static> Choices<V> {
     }
 
     fn reveal(&self, ix: usize) {
-        let Some(row) = self.nav.rows.borrow().get(ix).copied() else { return };
-        let view = self.nav.scroll.handle().bounds();
-        let mut offset = self.nav.scroll.handle().offset();
-        if row.top() < view.top() {
-            offset.y += view.top() - row.top();
-        } else if row.bottom() > view.bottom() {
-            offset.y -= row.bottom() - view.bottom();
-        }
-        self.nav.scroll.scroll_to(offset);
+        reveal_row(&self.nav.scroll, &self.nav.rows.borrow(), ix);
     }
 }
 

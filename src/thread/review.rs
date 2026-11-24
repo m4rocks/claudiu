@@ -5,7 +5,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use gpui::{Subscription, ClickEvent, Context, Div, Entity, FontWeight, InteractiveElement, IntoElement, KeyDownEvent, ParentElement, SharedString, Styled, Window, div, prelude::FluentBuilder, px};
+use gpui::{AnyElement, ClickEvent, Context, Div, Entity, FontWeight, InteractiveElement, IntoElement, KeyDownEvent, ListAlignment, ListState, ParentElement, SharedString, Styled, Subscription, Window, div, list, prelude::FluentBuilder, px};
 use gpui_kit::{assets::IconName, base::{AlertDialog, AlertDialogDescription, AlertDialogPopup, AlertDialogTitle}};
 use gpui_kit::component::input::{InputEvent, InputState};
 
@@ -85,6 +85,16 @@ pub(super) fn load_turn_reviews(record: &str) -> Vec<TurnReview> {
     turns
 }
 
+enum ReviewRow {
+    Error(String),
+    FileHeader { file_ix: usize },
+    NoDiff,
+    HunkHeader { file_ix: usize, hunk_ix: usize, kept: bool },
+    DiffLine { file_ix: usize, hunk_ix: usize, line_ix: usize, last_in_hunk: bool, kept: bool },
+    Comment { text: String },
+    CommentInput,
+}
+
 pub struct Review {
     /// A live review has a baseline and supports hunk edits. A completed turn has captured files.
     snapshot: Option<String>,
@@ -99,6 +109,82 @@ pub struct Review {
     /// The line being commented on, the comment's input and the subscription to its Enter.
     commenting: Option<(Comment, Entity<InputState>, Subscription)>,
     error: Option<String>,
+    /// Flattened rows rendered lazily by the virtual list so huge diffs stay fast.
+    rows: Vec<ReviewRow>,
+    list: ListState,
+    glide: crate::panels::glide::SmoothList,
+}
+
+impl Review {
+    fn hunk(&self, file_ix: usize, hunk_ix: usize) -> Option<&Hunk> {
+        self.files.as_ref()?.get(file_ix)?.hunks.get(hunk_ix)
+    }
+
+    fn new(id: Uuid, snapshot: Option<String>) -> Self {
+        Self {
+            snapshot,
+            id,
+            restore_confirm: false,
+            restoring: false,
+            files: None,
+            kept: HashSet::new(),
+            comments: Vec::new(),
+            commenting: None,
+            error: None,
+            rows: Vec::new(),
+            list: ListState::new(0, ListAlignment::Top, px(600.0)),
+            glide: Default::default(),
+        }
+    }
+
+    fn rebuild_rows(&mut self) {
+        let mut rows = Vec::new();
+        if let Some(why) = &self.error {
+            rows.push(ReviewRow::Error(why.clone()));
+        }
+        if let Some(files) = &self.files {
+            for (file_ix, file) in files.iter().enumerate() {
+                rows.push(ReviewRow::FileHeader { file_ix });
+                if file.hunks.is_empty() {
+                    rows.push(ReviewRow::NoDiff);
+                    continue;
+                }
+                for (hunk_ix, hunk) in file.hunks.iter().enumerate() {
+                    let kept = self.kept.contains(&hunk.patch);
+                    rows.push(ReviewRow::HunkHeader { file_ix, hunk_ix, kept });
+                    if kept {
+                        continue;
+                    }
+                    let last_line = hunk.lines.len().saturating_sub(1);
+                    for (line_ix, line) in hunk.lines.iter().enumerate() {
+                        rows.push(ReviewRow::DiffLine {
+                            file_ix,
+                            hunk_ix,
+                            line_ix,
+                            last_in_hunk: line_ix == last_line,
+                            kept,
+                        });
+                        if self.snapshot.is_some()
+                            && let Some(n) = line.new_line
+                        {
+                            for c in self.comments.iter().filter(|c| c.path == file.path && c.line == n) {
+                                rows.push(ReviewRow::Comment { text: c.text.clone() });
+                            }
+                            if self.commenting.as_ref().is_some_and(|(c, _, _)| c.path == file.path && c.line == n) {
+                                rows.push(ReviewRow::CommentInput);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let scroll = self.list.logical_scroll_top();
+        self.rows = rows;
+        self.list.reset(self.rows.len());
+        if scroll.item_ix < self.rows.len() {
+            self.list.scroll_to(scroll);
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -184,10 +270,7 @@ impl ThreadView {
         if !self.turn_reviews.iter().any(|turn| turn.id == id) {
             return;
         }
-        self.review = Some(Review {
-            id, snapshot: None, files: None, restore_confirm: false, restoring: false, kept: HashSet::new(),
-            comments: Vec::new(), commenting: None, error: None,
-        });
+        self.review = Some(Review::new(id, None));
         let path = patch_path(&self.record_id, id);
         cx.spawn(async move |this, cx| {
             let read = cx.background_executor().spawn(async move {
@@ -202,6 +285,7 @@ impl ThreadView {
                         review.error = Some(format!("Could not open the turn review: {error}"));
                     }
                 }
+                review.rebuild_rows();
                 cx.notify();
             });
         }).detach();
@@ -240,7 +324,7 @@ impl ThreadView {
 
     pub fn open_review(&mut self, cx: &mut Context<Self>) {
         let Some(snapshot) = self.snapshots.last().cloned() else { return };
-        self.review = Some(Review { id: Uuid::new_v4(), restore_confirm: false, restoring: false, snapshot: Some(snapshot), files: None, kept: HashSet::new(), comments: Vec::new(), commenting: None, error: None });
+        self.review = Some(Review::new(Uuid::new_v4(), Some(snapshot)));
         self.reload_review(cx);
     }
 
@@ -259,6 +343,7 @@ impl ThreadView {
                             review.error = Some(why);
                         }
                     }
+                    review.rebuild_rows();
                 }
                 cx.notify();
             });
@@ -291,9 +376,10 @@ impl ThreadView {
         cx.notify();
     }
 
-    fn keep_hunk(&mut self, hunk: &Hunk, cx: &mut Context<Self>) {
+    fn keep_hunk(&mut self, patch: String, cx: &mut Context<Self>) {
         if let Some(review) = &mut self.review {
-            review.kept.insert(hunk.patch.clone());
+            review.kept.insert(patch);
+            review.rebuild_rows();
         }
         cx.notify();
     }
@@ -305,6 +391,7 @@ impl ThreadView {
             let _ = this.update(cx, |v, cx| {
                 if let (Err(why), Some(review)) = (done, &mut v.review) {
                     review.error = Some(format!("Couldn't put the hunk back, the file changed since: {why}"));
+                    review.rebuild_rows();
                 }
                 v.reload_review(cx);
             });
@@ -325,6 +412,7 @@ impl ThreadView {
         });
         if let Some(review) = &mut self.review {
             review.commenting = Some((Comment { path, line, text: String::new() }, input, sub));
+            review.rebuild_rows();
         }
         cx.notify();
     }
@@ -338,6 +426,7 @@ impl ThreadView {
             comment.text = text;
             review.comments.push(comment);
         }
+        review.rebuild_rows();
         self.composer.update(cx, |c, cx| c.focus(window, cx));
         cx.notify();
     }
@@ -378,7 +467,10 @@ impl ThreadView {
                 review.restoring = false;
                 match result {
                     Ok(()) => v.close_review(cx),
-                    Err(error) => review.error = Some(error),
+                    Err(error) => {
+                        review.error = Some(error);
+                        review.rebuild_rows();
+                    }
                 }
                 v.send_next(cx);
                 cx.notify();
@@ -387,21 +479,43 @@ impl ThreadView {
         cx.notify();
     }
 
-    pub(super) fn render_review(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<Div> {
+    pub(super) fn render_review(&self, _window: &mut Window, cx: &mut Context<Self>) -> Option<Div> {
         let review = self.review.as_ref()?;
-        let mut body = self.review_scroll.wire(div().id("thread-review").flex_1(), window).px(px(18.0)).pt(px(12.0)).flex().flex_col().gap(px(12.0));
-        if let Some(why) = &review.error {
-            body = body.child(div().text_color(hsla(theme::DANGER)).child(why.clone()));
-        }
-        match &review.files {
-            None => body = body.child(div().text_color(hsla(theme::TEXT_DIM)).child("Reading changes")).child(skeleton_rows(5)),
-            Some(files) if files.is_empty() && review.error.is_none() => body = body.child(empty_panel(IconName::FileDiff, "No changes to review")),
-            Some(files) => {
-                for (f, file) in files.iter().enumerate() {
-                    body = body.child(self.render_file(f, file, review, cx));
-                }
+        let body: AnyElement = match &review.files {
+            None => div()
+                .flex_1()
+                .min_h_0()
+                .px(px(18.0))
+                .pt(px(12.0))
+                .flex()
+                .flex_col()
+                .gap(px(12.0))
+                .child(div().text_color(hsla(theme::TEXT_DIM)).child("Reading changes"))
+                .child(skeleton_rows(5))
+                .into_any_element(),
+            Some(files) if files.is_empty() && review.error.is_none() => div()
+                .flex_1()
+                .min_h_0()
+                .px(px(18.0))
+                .pt(px(12.0))
+                .child(empty_panel(IconName::FileDiff, "No changes to review"))
+                .into_any_element(),
+            Some(_) => {
+                let rows_list = list(review.list.clone(), cx.processor(|v: &mut Self, ix: usize, _w, cx| v.render_review_row(ix, cx)))
+                    .size_full()
+                    .pt(px(12.0))
+                    .pb(px(12.0));
+                div()
+                    .id("thread-review")
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .child(rows_list)
+                    .child(review.glide.overlay(&review.list, px(24.0), !review.restore_confirm))
+                    .child(gpui_kit::base::Scrollbar::vertical(&review.list).mode(gpui_kit::base::ScrollbarMode::Always))
+                    .into_any_element()
             }
-        }
+        };
         let count = review.comments.len();
         let turn = self.turn_reviews.iter().find(|turn| turn.id == review.id);
         let footer = div()
@@ -475,93 +589,145 @@ impl ThreadView {
         }
     }
 
-    fn render_file(&self, f: usize, file: &FileChange, review: &Review, cx: &mut Context<Self>) -> Div {
-        let mut block = div().flex().flex_col().gap(px(6.0));
-        block = block.child(div().font_weight(FontWeight::SEMIBOLD).child(file.path.display().to_string()));
-        if file.hunks.is_empty() {
-            block = block.child(div().text_color(hsla(theme::TEXT_DIM)).child("No textual diff"));
-        }
-        for (h, hunk) in file.hunks.iter().enumerate() {
-            block = block.child(self.render_hunk(f, h, &file.path, hunk, review, cx));
-        }
-        block
-    }
-
-    fn render_hunk(&self, f: usize, h: usize, path: &Path, hunk: &Hunk, review: &Review, cx: &mut Context<Self>) -> Div {
-        let kept = review.kept.contains(&hunk.patch);
-        let (keep, revert) = (hunk.clone(), hunk.clone());
-        let header = div()
-            .flex()
-            .items_center()
-            .gap(px(6.0))
-            .px(px(8.0))
-            .py(px(3.0))
-            .bg(hsla(theme::APP_BG))
-            .child(div().flex_1().text_color(hsla(theme::TEXT_FAINT)).child(hunk.header.clone()))
-            .when(review.snapshot.is_some(), |header| header.child(if kept {
-                div().text_color(hsla(theme::OK)).child("Kept").into_any_element()
-            } else {
-                button(SharedString::from(format!("review-keep-{f}-{h}")), "Keep", false).on_click(cx.listener(move |v, _: &ClickEvent, _, cx| v.keep_hunk(&keep, cx))).into_any_element()
-            })
-            .child(button(SharedString::from(format!("review-revert-{f}-{h}")), "Revert", false).on_click(cx.listener(move |v, _: &ClickEvent, _, cx| v.revert_hunk(revert.clone(), cx)))));
-        let mut block = div().font_family(crate::platform::monospace_font()).text_size(scale::px(12.5)).rounded(px(4.0)).border_1().border_color(hsla(if kept { theme::OK } else { theme::PANEL_BORDER })).flex().flex_col().overflow_hidden().child(header);
-        // A kept hunk folds to its header.
-        if kept {
-            return block;
-        }
-        for (l, line) in hunk.lines.iter().enumerate() {
-            let (bg, fg) = match line.origin {
-                '+' => (theme::DIFF_ADDED_BG, theme::OK),
-                '-' => (theme::DIFF_REMOVED_BG, theme::DANGER),
-                _ => (theme::PANEL_BG, theme::TEXT_DIM),
-            };
-            let number = line.new_line.map_or(String::new(), |n| n.to_string());
-            let comment = review.snapshot.is_some().then(|| {
-                if let Some(n) = line.new_line {
-                    let path = path.to_path_buf();
-                    comment_trigger(format!("review-comment-{f}-{h}-{l}"), false)
-                        .opacity(0.65)
-                        .group_hover("review-diff-line", |style| style.opacity(1.0))
-                        .focus_visible(|style| style.opacity(1.0))
-                        .on_click(cx.listener(move |v, _: &ClickEvent, window, cx| v.start_comment(path.clone(), n, window, cx)))
-                        .into_any_element()
-                } else {
-                    div().size(px(COMMENT_SIZE)).into_any_element()
-                }
-            });
-            let row = div()
-                .id(SharedString::from(format!("review-line-{f}-{h}-{l}")))
-                .group("review-diff-line")
-                .flex()
-                .bg(hsla(bg))
-                .text_color(hsla(fg))
-                .whitespace_nowrap()
-                .items_center()
-                .children(comment)
-                .child(div().w(px(44.0)).flex_none().pr(px(8.0)).text_right().text_color(hsla(theme::TEXT_FAINT)).child(number))
-                .child(div().child(format!("{} {}", line.origin, line.text)));
-            block = block.child(row);
-            if review.snapshot.is_some() && let Some(n) = line.new_line {
-                for c in review.comments.iter().filter(|c| c.path == path && c.line == n) {
-                    block = block.child(div().ml(px(44.0 + COMMENT_SIZE)).px(px(8.0)).py(px(3.0)).text_color(hsla(theme::ACCENT)).child(c.text.clone()));
-                }
-                if let Some((_, input, _)) = review.commenting.as_ref().filter(|(c, _, _)| c.path == path && c.line == n) {
-                    block = block.child(
-                        div()
-                            .ml(px(44.0 + COMMENT_SIZE))
-                            .p(px(4.0))
-                            .on_key_down(cx.listener(|v, ev: &KeyDownEvent, window, cx| {
-                                if ev.keystroke.key == "escape" {
-                                    v.finish_comment(String::new(), window, cx);
-                                    cx.stop_propagation();
-                                }
-                            }))
-                            .child(comment_box(input, "keeps it", "sends all")),
-                    );
-                }
+    fn render_review_row(&self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
+        let Some(review) = self.review.as_ref() else { return div().into_any_element() };
+        let Some(row) = review.rows.get(ix) else { return div().into_any_element() };
+        let files = review.files.as_deref().unwrap_or(&[]);
+        let wrap = |el: AnyElement| div().w_full().px(px(18.0)).child(el).into_any_element();
+        match row {
+            ReviewRow::Error(why) => wrap(div().pb(px(8.0)).text_color(hsla(theme::DANGER)).child(why.clone()).into_any_element()),
+            ReviewRow::FileHeader { file_ix } => {
+                let Some(file) = files.get(*file_ix) else { return div().into_any_element() };
+                wrap(
+                    div()
+                        .pt(px(if *file_ix == 0 { 0.0 } else { 12.0 }))
+                        .pb(px(6.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(file.path.display().to_string())
+                        .into_any_element(),
+                )
+            }
+            ReviewRow::NoDiff => wrap(div().pb(px(6.0)).text_color(hsla(theme::TEXT_DIM)).child("No textual diff").into_any_element()),
+            ReviewRow::HunkHeader { file_ix, hunk_ix, kept } => {
+                let Some(hunk) = review.hunk(*file_ix, *hunk_ix) else { return div().into_any_element() };
+                let (file_ix, hunk_ix) = (*file_ix, *hunk_ix);
+                let border_color = hsla(if *kept { theme::OK } else { theme::PANEL_BORDER });
+                let header = div()
+                    .mt(px(if hunk_ix == 0 { 0.0 } else { 6.0 }))
+                    .font_family(crate::platform::monospace_font())
+                    .text_size(scale::px(12.5))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .px(px(8.0))
+                    .py(px(3.0))
+                    .bg(hsla(theme::APP_BG))
+                    .border_t_1()
+                    .border_l_1()
+                    .border_r_1()
+                    .when(*kept, |d| d.border_b_1().rounded(px(4.0)))
+                    .when(!*kept, |d| d.rounded_t(px(4.0)))
+                    .border_color(border_color)
+                    .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(hsla(theme::TEXT_FAINT)).child(hunk.header.clone()))
+                    .when(review.snapshot.is_some(), |header| {
+                        header
+                            .child(if *kept {
+                                div().text_color(hsla(theme::OK)).child("Kept").into_any_element()
+                            } else {
+                                button(SharedString::from(format!("review-keep-{file_ix}-{hunk_ix}")), "Keep", false)
+                                    .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| {
+                                        if let Some(hunk) = v.review.as_ref().and_then(|r| r.hunk(file_ix, hunk_ix)) {
+                                            v.keep_hunk(hunk.patch.clone(), cx);
+                                        }
+                                    }))
+                                    .into_any_element()
+                            })
+                            .child(
+                                button(SharedString::from(format!("review-revert-{file_ix}-{hunk_ix}")), "Revert", false)
+                                    .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| {
+                                        if let Some(hunk) = v.review.as_ref().and_then(|r| r.hunk(file_ix, hunk_ix)) {
+                                            v.revert_hunk(hunk.clone(), cx);
+                                        }
+                                    })),
+                            )
+                    });
+                wrap(header.into_any_element())
+            }
+            ReviewRow::DiffLine { file_ix, hunk_ix, line_ix, last_in_hunk, kept } => {
+                let Some(file) = files.get(*file_ix) else { return div().into_any_element() };
+                let Some(line) = file.hunks.get(*hunk_ix).and_then(|h| h.lines.get(*line_ix)) else { return div().into_any_element() };
+                let (bg, fg) = match line.origin {
+                    '+' => (theme::DIFF_ADDED_BG, theme::OK),
+                    '-' => (theme::DIFF_REMOVED_BG, theme::DANGER),
+                    _ => (theme::PANEL_BG, theme::TEXT_DIM),
+                };
+                let number = line.new_line.map_or(String::new(), |n| n.to_string());
+                let comment = review.snapshot.is_some().then(|| {
+                    if let Some(n) = line.new_line {
+                        let path = file.path.clone();
+                        comment_trigger(format!("review-comment-{file_ix}-{hunk_ix}-{line_ix}"), false)
+                            .opacity(0.65)
+                            .group_hover("review-diff-line", |style| style.opacity(1.0))
+                            .focus_visible(|style| style.opacity(1.0))
+                            .on_click(cx.listener(move |v, _: &ClickEvent, window, cx| v.start_comment(path.clone(), n, window, cx)))
+                            .into_any_element()
+                    } else {
+                        div().size(px(COMMENT_SIZE)).into_any_element()
+                    }
+                });
+                let border_color = hsla(if *kept { theme::OK } else { theme::PANEL_BORDER });
+                let row = div()
+                    .id(SharedString::from(format!("review-line-{file_ix}-{hunk_ix}-{line_ix}")))
+                    .group("review-diff-line")
+                    .font_family(crate::platform::monospace_font())
+                    .text_size(scale::px(12.5))
+                    .flex()
+                    .bg(hsla(bg))
+                    .text_color(hsla(fg))
+                    .whitespace_nowrap()
+                    .overflow_hidden()
+                    .items_center()
+                    .border_l_1()
+                    .border_r_1()
+                    .when(*last_in_hunk, |d| d.border_b_1().rounded_b(px(4.0)))
+                    .border_color(border_color)
+                    .children(comment)
+                    .child(div().w(px(44.0)).flex_none().pr(px(8.0)).text_right().text_color(hsla(theme::TEXT_FAINT)).child(number))
+                    .child(div().min_w_0().overflow_hidden().child(format!("{} {}", line.origin, line.text)));
+                wrap(row.into_any_element())
+            }
+            ReviewRow::Comment { text } => wrap(
+                div()
+                    .border_l_1()
+                    .border_r_1()
+                    .border_color(hsla(theme::PANEL_BORDER))
+                    .pl(px(44.0 + COMMENT_SIZE))
+                    .pr(px(8.0))
+                    .py(px(3.0))
+                    .text_color(hsla(theme::ACCENT))
+                    .child(text.clone())
+                    .into_any_element(),
+            ),
+            ReviewRow::CommentInput => {
+                let Some((_, input, _)) = review.commenting.as_ref() else { return div().into_any_element() };
+                wrap(
+                    div()
+                        .border_l_1()
+                        .border_r_1()
+                        .border_color(hsla(theme::PANEL_BORDER))
+                        .pl(px(44.0 + COMMENT_SIZE))
+                        .p(px(4.0))
+                        .on_key_down(cx.listener(|v, ev: &KeyDownEvent, window, cx| {
+                            if ev.keystroke.key == "escape" {
+                                v.finish_comment(String::new(), window, cx);
+                                cx.stop_propagation();
+                            }
+                        }))
+                        .child(comment_box(input, "keeps it", "sends all"))
+                        .into_any_element(),
+                )
             }
         }
-        block
     }
 }
 

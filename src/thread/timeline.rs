@@ -1,3 +1,4 @@
+#[cfg(test)]
 use std::ops::Range;
 use std::path::PathBuf;
 
@@ -21,6 +22,7 @@ pub(super) fn run_kind(entry: &Entry, has_card: bool) -> Option<RunKind> {
 
 /// The run of steps around `ix`: every thought, tool call and subagent report between two things the agent or the
 /// user said folds into one line, whatever kind of step each is.
+#[cfg(test)]
 pub(super) fn tool_run(len: usize, ix: usize, kind_at: impl Fn(usize) -> Option<RunKind>) -> Option<Range<usize>> {
     kind_at(ix)?;
     let start = (0..ix).rev().take_while(|&row| kind_at(row).is_some()).last().unwrap_or(ix);

@@ -254,9 +254,27 @@ fn render_comment(comment: &LineComment, cx: &mut Context<Workspace>) -> AnyElem
 /// mouse when nothing is selected. Painted over the editor like `change_marks`, since the editor has no gutter of its
 /// own to put an element in.
 fn comment_button(buffer: gpui::Entity<EditorState>, hovered: std::rc::Rc<std::cell::Cell<Option<usize>>>, ws: gpui::WeakEntity<Workspace>) -> impl IntoElement {
+    let prepaint_buffer = buffer.clone();
+    let prepaint_hovered = hovered.clone();
     gpui::canvas(
-        |_, _, _| (),
-        move |viewport, _, window, cx| {
+        move |viewport, window, cx| {
+            let editor = prepaint_buffer.read(cx);
+            let (Some(area), Some(visible)) = (editor.text_bounds(), editor.visible_row_range()) else { return None };
+            let text = editor.text();
+            let range = editor.selected_range();
+            let line = if range.is_empty() { prepaint_hovered.get() } else { Some(text.offset_to_point(range.start).row) };
+            let line = line.filter(|l| visible.contains(l) && *l < text.lines_len())?;
+            let start = text.line_start_offset(line);
+            let row = editor.range_to_bounds(&(start..start))?;
+            let top = row.origin.y + (row.size.height - px(COMMENT_SIZE)) / 2.0;
+            let button = gpui::Bounds::new(gpui::point(area.origin.x + px(6.0), top), gpui::size(px(COMMENT_SIZE), px(COMMENT_SIZE)));
+            if !viewport.intersects(&button) {
+                return None;
+            }
+            let hitbox = window.insert_hitbox(button, gpui::HitboxBehavior::Normal);
+            Some((line, button, hitbox))
+        },
+        move |viewport, prepainted, window, cx| {
             let (move_buffer, move_hovered, view) = (buffer.clone(), hovered.clone(), window.current_view());
             window.on_mouse_event(move |ev: &gpui::MouseMoveEvent, phase, _, cx| {
                 if phase != gpui::DispatchPhase::Bubble {
@@ -267,19 +285,8 @@ fn comment_button(buffer: gpui::Entity<EditorState>, hovered: std::rc::Rc<std::c
                     cx.notify(view);
                 }
             });
-            let editor = buffer.read(cx);
-            let (Some(area), Some(visible)) = (editor.text_bounds(), editor.visible_row_range()) else { return };
-            let text = editor.text();
-            let range = editor.selected_range();
-            let line = if range.is_empty() { hovered.get() } else { Some(text.offset_to_point(range.start).row) };
-            let Some(line) = line.filter(|l| visible.contains(l) && *l < text.lines_len()) else { return };
-            let start = text.line_start_offset(line);
-            let Some(row) = editor.range_to_bounds(&(start..start)) else { return };
-            let top = row.origin.y + (row.size.height - px(COMMENT_SIZE)) / 2.0;
-            let button = gpui::Bounds::new(gpui::point(area.origin.x + px(6.0), top), gpui::size(px(COMMENT_SIZE), px(COMMENT_SIZE)));
-            if !viewport.intersects(&button) {
-                return;
-            }
+            let Some((line, button, hitbox)) = prepainted else { return };
+            window.set_cursor_style(gpui::CursorStyle::PointingHand, &hitbox);
             let over = button.contains(&window.mouse_position());
             window.with_content_mask(Some(gpui::ContentMask { bounds: viewport }), |window| {
                 let bg = if over { theme::CONTROL_HOVER } else { theme::SURFACE_ELEVATED };

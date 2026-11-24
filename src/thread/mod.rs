@@ -322,6 +322,27 @@ struct SelectionComment {
     _subscription: Subscription,
 }
 
+struct ChatMenu {
+    at: Point<Pixels>,
+    quote: String,
+    anchor: Point<Pixels>,
+}
+
+struct AgentCache {
+    text_len: usize,
+    inline_visuals: bool,
+    citations: Vec<elements::Citation>,
+    segments: Vec<timeline::InlineSegment>,
+}
+
+#[derive(Default)]
+struct RunCache {
+    entries: usize,
+    cards: usize,
+    inline_visuals: bool,
+    ranges: Vec<Option<std::ops::Range<usize>>>,
+}
+
 pub struct ThreadView {
     record_id: String,
     pub harness: Harness,
@@ -344,8 +365,8 @@ pub struct ThreadView {
     pub pending_model: Option<CatalogModel>,
     /// Model requested at session start/resume, shown until the harness applies it.
     initial_model: Option<String>,
-    /// Right-click context menu position in the chat view.
-    chat_menu: Option<Point<Pixels>>,
+    /// Right-click context menu snapshot in the chat view.
+    chat_menu: Option<ChatMenu>,
     /// Whether native inline generative UI (` ```ui ` blocks and `show_visual` cards) is enabled.
     pub inline_visuals: bool,
     /// A hand-off the agent asked for with `set_model` and the user approved: the model, its effort and the first
@@ -399,6 +420,13 @@ pub struct ThreadView {
     /// the list would otherwise drop it and parse again when it comes back, and a long message (over 4 KB) parses
     /// in the background, so it would draw empty for a frame and then grow, moving everything around it.
     markdown: HashMap<usize, Entity<gpui_kit::component::text::TextViewState>>,
+    /// Cached formatted length for `Entry::User` and parsed citations/segments for `Entry::Agent` so scroll frames
+    /// never re-scan markdown text.
+    user_md_len: HashMap<usize, usize>,
+    agent_cache: HashMap<usize, AgentCache>,
+    /// Cached `tool_run` ranges keyed by `(entries.len(), cards.len())` for O(1) lookup during scroll.
+    run_cache: std::cell::RefCell<RunCache>,
+    jump_visible: Cell<bool>,
     /// Messages steered into the running turn that the agent hasn't read yet, oldest first. They join the
     /// conversation where the agent reads them (a `user_message_chunk` marked `_meta.m4code.steer`), because what it
     /// was still writing when they were sent comes before them.
@@ -423,6 +451,7 @@ pub struct ThreadView {
     mode_highlight: usize,
     /// Follows `model_highlight` so keyboard moves keep the highlighted row in view.
     pub(super) model_scroll: crate::panels::glide::Smooth,
+    pub(super) model_rows: Rc<std::cell::RefCell<Vec<Bounds<Pixels>>>>,
     /// Tool call ids manually expanded by clicking their compressed single-line header.
     expanded_tools: HashSet<String>,
     /// Shell calls closed by hand while Ctrl+O is showing tool details.
@@ -454,7 +483,6 @@ pub struct ThreadView {
     question_scroll: crate::panels::glide::Smooth,
     queue_scroll: crate::panels::glide::Smooth,
     shell_output_scroll: crate::panels::glide::Smooth,
-    review_scroll: crate::panels::glide::Smooth,
     /// Whether the working tree differs from the last snapshot; None while a turn runs or the check is out.
     pub(super) changed: Option<bool>,
     /// The review of what changed since the last message, while it is open.
@@ -531,7 +559,17 @@ impl ThreadView {
             || start.prior_entries.iter().any(|entry| matches!(entry, Entry::Notice { text, error: false } if text == FORK_SEED));
         let this = cx.entity().downgrade();
         list.set_scroll_handler(move |_, _, cx| {
-            let _ = this.update(cx, |_, cx| cx.notify());
+            // GPUI still holds the list state while it calls its scroll handler.
+            let this = this.clone();
+            cx.defer(move |cx| {
+                let _ = this.update(cx, |v, cx| {
+                    let show_jump = v.show_jump_to_latest();
+                    let changed = v.jump_visible.replace(show_jump) != show_jump;
+                    if changed || v.chat_menu.is_some() || v.comment_anchor.is_some() {
+                        cx.notify();
+                    }
+                });
+            });
         });
         let mut view = ThreadView {
             record_id: start.record_id.clone(),
@@ -588,6 +626,10 @@ impl ThreadView {
             detail: false,
             subagent_edits: None,
             markdown: HashMap::new(),
+            user_md_len: HashMap::new(),
+            agent_cache: HashMap::new(),
+            run_cache: Default::default(),
+            jump_visible: Cell::new(false),
             steering: VecDeque::new(),
             running_command: false,
             follow_up: crate::store::FollowUp::default(),
@@ -603,6 +645,7 @@ impl ThreadView {
             model_highlight: 0,
             mode_highlight: 0,
             model_scroll: Default::default(),
+            model_rows: Default::default(),
             expanded_tools: HashSet::new(),
             collapsed_shell_calls: HashSet::new(),
             collapsed_thoughts: HashSet::new(),
@@ -624,7 +667,6 @@ impl ThreadView {
             question_scroll: Default::default(),
             queue_scroll: Default::default(),
             shell_output_scroll: Default::default(),
-            review_scroll: Default::default(),
             changed: None,
             review: None,
             _subscriptions: subscriptions,
@@ -817,6 +859,9 @@ impl ThreadView {
                     self.cached_replay = false;
                     self.thread.entries.clear();
                     self.markdown.clear();
+                    self.user_md_len.clear();
+                    self.agent_cache.clear();
+                    self.run_cache.get_mut().ranges.clear();
                     for item in &mut self.queue {
                         item.shown = false;
                     }
@@ -1615,6 +1660,8 @@ impl ThreadView {
                     let at = self.thread.entries.len() - 1;
                     self.thread.entries.pop();
                     self.markdown.remove(&at);
+                    self.user_md_len.remove(&at);
+                    self.agent_cache.remove(&at);
                     item.shown = false;
                     self.remeasure(at);
                 }
@@ -1635,6 +1682,8 @@ impl ThreadView {
                 let at = self.thread.entries.len() - 1;
                 self.thread.entries.pop();
                 self.markdown.remove(&at);
+                self.user_md_len.remove(&at);
+                self.agent_cache.remove(&at);
                 item.shown = false;
                 self.remeasure(at);
             }
@@ -1870,7 +1919,7 @@ impl ThreadView {
                         } else {
                             (cur + 1) % count
                         };
-                        self.model_scroll.scroll_to_item(self.model_highlight);
+                        crate::panels::picker::reveal_row(&self.model_scroll, &self.model_rows.borrow(), self.model_highlight);
                     }
                     cx.stop_propagation();
                     cx.notify();
@@ -2378,8 +2427,20 @@ impl ThreadView {
         self.refresh_find(from);
     }
 
+    pub(super) fn show_jump_to_latest(&self) -> bool {
+        !self.list.is_following_tail()
+            && self.list.max_offset_for_scrollbar().y > px(1.0)
+            && self.list.is_scrolled_to_end() != Some(true)
+    }
+
     fn open_location(&mut self, path: PathBuf, line: Option<u32>, cx: &mut Context<Self>) {
-        let path = if path.is_absolute() { path } else { self.cwd.join(path) };
+        let normalized = path
+            .to_str()
+            .filter(|s| s.starts_with("file:"))
+            .and_then(|s| url::Url::parse(s).ok())
+            .and_then(|u| u.to_file_path().ok())
+            .unwrap_or(path);
+        let path = if normalized.is_absolute() { normalized } else { self.cwd.join(normalized) };
         cx.emit(ThreadEvent::OpenPath(path.to_string_lossy().into_owned(), line.map(|l| l as usize)));
     }
 
@@ -2819,6 +2880,17 @@ mod tests {
     #[cfg(debug_assertions)]
     #[gpui::test]
     fn selected_chat_text_can_be_commented_on_from_the_conversation(cx: &mut gpui::TestAppContext) {
+        check_selection_comment(cx, false);
+    }
+
+    #[cfg(debug_assertions)]
+    #[gpui::test]
+    fn chat_context_menu_keeps_the_quote_for_a_comment(cx: &mut gpui::TestAppContext) {
+        check_selection_comment(cx, true);
+    }
+
+    #[cfg(debug_assertions)]
+    fn check_selection_comment(cx: &mut gpui::TestAppContext, context_menu: bool) {
         use gpui::AppContext;
 
         cx.update(gpui_kit::init);
@@ -2843,8 +2915,21 @@ mod tests {
         cx.update(|window, app| window.draw(app).clear(app));
         cx.simulate_mouse_up(end, gpui::MouseButton::Left, modifiers);
         cx.update(|window, app| window.draw(app).clear(app));
-        let comment = cx.debug_bounds("comment-on-selection").expect("selection shows the comment button");
-        cx.simulate_click(comment.center(), modifiers);
+        let comment = if context_menu {
+            cx.simulate_mouse_down(end, gpui::MouseButton::Right, modifiers);
+            cx.simulate_mouse_up(end, gpui::MouseButton::Right, modifiers);
+            cx.update(|window, app| window.draw(app).clear(app));
+            let bounds = cx.debug_bounds("chat-ctx-comment").expect("context menu shows Add comment");
+            cx.simulate_mouse_down(bounds.center(), gpui::MouseButton::Left, modifiers);
+            cx.update(|window, app| window.draw(app).clear(app));
+            cx.simulate_mouse_up(bounds.center(), gpui::MouseButton::Left, modifiers);
+            None
+        } else {
+            Some(cx.debug_bounds("comment-on-selection").expect("selection shows the comment button"))
+        };
+        if let Some(comment) = comment {
+            cx.simulate_click(comment.center(), modifiers);
+        }
         cx.update(|window, app| {
             view.update(app, |v, cx| {
                 let comment = v.selection_comment.as_ref().expect("comment input opened");
@@ -2943,6 +3028,24 @@ mod tests {
 
     #[cfg(debug_assertions)]
     #[gpui::test]
+    fn a_conversation_that_fits_never_shows_jump_to_latest(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_kit::init);
+        let dir = tempfile::tempdir().unwrap();
+        let mut start = test_start(dir.path().into(), Harness::Claude);
+        start.prior_entries = vec![Entry::User("Short message".into())];
+        let (_, cx) = cx.add_window_view(|window, cx| super::ThreadView::new(start, window, cx));
+        cx.update(|window, app| window.draw(app).clear(app));
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: gpui::point(gpui::px(180.0), gpui::px(140.0)),
+            delta: gpui::ScrollDelta::Lines(gpui::point(0.0, 5.0)),
+            ..Default::default()
+        });
+        cx.update(|window, app| window.draw(app).clear(app));
+        assert!(cx.debug_bounds("jump-to-latest").is_none());
+    }
+
+    #[cfg(debug_assertions)]
+    #[gpui::test]
     fn wheel_scroll_releases_chat_tail_until_jump_to_latest(cx: &mut gpui::TestAppContext) {
         cx.update(gpui_kit::init);
         let dir = tempfile::tempdir().unwrap();
@@ -3009,6 +3112,42 @@ mod tests {
         view.update(cx, |view, cx| view.composer.update(cx, |input, cx| input.set_decorations(Vec::new(), cx)));
         cx.update(|window, app| window.draw(app).clear(app));
         assert_eq!(decorated, bounds(cx), "the slash command must not change the position of the following text");
+    }
+
+    #[cfg(debug_assertions)]
+    #[gpui::test]
+    fn a_tool_file_chip_opens_its_file_and_line(cx: &mut gpui::TestAppContext) {
+        use crate::harness::thread::{ToolCall, ToolContent, ToolStatus};
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        cx.update(gpui_kit::init);
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("two words.rs");
+        std::fs::write(&file, "\nfn main() {}").unwrap();
+        let url = url::Url::from_file_path(&file).unwrap();
+        let mut start = test_start(dir.path().into(), Harness::Codex);
+        start.prior_entries.push(Entry::Tool(ToolCall {
+            id: "read".into(),
+            title: "Read file".into(),
+            kind: "read".into(),
+            status: ToolStatus::Done,
+            locations: vec![(url.as_str().into(), Some(2))],
+            content: vec![ToolContent::Text("fn main() {}".into())],
+            ..Default::default()
+        }));
+        let (view, cx) = cx.add_window_view(|window, cx| super::ThreadView::new(start, window, cx));
+        let opened = Rc::new(RefCell::new(None));
+        let capture = opened.clone();
+        let _sub = cx.update(|_, app| app.subscribe(&view, move |_, event, _| {
+            if let super::ThreadEvent::OpenPath(path, line) = event {
+                capture.replace(Some((std::path::PathBuf::from(path), *line)));
+            }
+        }));
+        cx.update(|window, app| window.draw(app).clear(app));
+        let chip = cx.debug_bounds("tool-loc-0-0").expect("file chip");
+        cx.simulate_click(chip.center(), gpui::Modifiers::default());
+        assert_eq!(opened.take(), Some((file, Some(2))));
     }
 
     #[cfg(debug_assertions)]

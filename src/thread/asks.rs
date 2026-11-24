@@ -68,6 +68,8 @@ impl ThreadView {
                 self.thread.entries.pop();
             }
             self.markdown.remove(&chunk.entry);
+            self.user_md_len.remove(&chunk.entry);
+            self.agent_cache.remove(&chunk.entry);
             self.remeasure(chunk.entry);
         }
         let mut remaining = questions.into_iter();

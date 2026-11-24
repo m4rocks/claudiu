@@ -2345,6 +2345,7 @@ pub(super) struct PrepaintState {
     range_decoration_fills: Vec<(Path<Pixels>, Hsla)>,
     range_decoration_frames: Vec<(Path<Pixels>, Hsla)>,
     hover_definition_hitbox: Option<Hitbox>,
+    gutter_hitbox: Option<Hitbox>,
     indent_guides_path: Option<Path<Pixels>>,
     /// The whole input, for deciding whether a long press started in it.
     hitbox: Hitbox,
@@ -2988,8 +2989,19 @@ impl<M: InputModeKind> Element for TextElement<M> {
                 cursor_scroll_offset,
                 state,
             )));
+        let editor_paddings = state.editor_paddings;
         let fold_icon_layout =
             self.layout_fold_icons(original_x, &bounds, &last_layout, window, cx);
+        let gutter_hitbox = (line_numbers.is_some() && last_layout.line_number_width > px(0.))
+            .then(|| {
+                let gutter_bounds = editor_gutter_bounds(
+                    input_bounds,
+                    last_layout.line_number_width,
+                    ghost_lines_height,
+                    editor_paddings,
+                );
+                window.insert_hitbox(gutter_bounds, HitboxBehavior::Normal)
+            });
         let hitbox = window.insert_hitbox(input_bounds, HitboxBehavior::Normal);
 
         let token_elements = self.prepaint_tokens(&last_layout, bounds, token_elements, window, cx);
@@ -3007,6 +3019,7 @@ impl<M: InputModeKind> Element for TextElement<M> {
             search_match_paths,
             hover_highlight_path,
             hover_definition_hitbox,
+            gutter_hitbox,
             document_color_paths,
             range_decoration_fills,
             range_decoration_frames,
@@ -3307,6 +3320,10 @@ impl<M: InputModeKind> Element for TextElement<M> {
                     offset_y += prepaint.ghost_lines_height;
                 }
             }
+        }
+
+        if let Some(hitbox) = prepaint.gutter_hitbox.as_ref() {
+            window.set_cursor_style(gpui::CursorStyle::Arrow, hitbox);
         }
 
         // Paint fold icons (only visible on hover or for current line)

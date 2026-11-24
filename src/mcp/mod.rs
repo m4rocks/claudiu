@@ -148,11 +148,13 @@ call unlink_session when a link no longer fits. Both are silent.";
 /// What teaches the model to emit native inline ` ```ui ` generative UI blocks directly in chat.
 const VISUAL_INSTRUCTIONS: &str = " Visual: m4code natively renders closed ```ui fenced blocks directly inside chat as \
 interactive dark-theme UI cards, charts, SVG diagrams, tables, tabs, progress bars, and action buttons (no tool call or preview button needed). \
-Inside ```ui blocks use HTML with inline CSS and m4code shortcuts: <card>, <badge>, <callout>, <progress value=\"..\">, <row>, <col>, \
-<grid cols=\"3\">, <tabs>, <details>, <button send=\"..\">, <chart type=\"bar|line\" labels=\"..\" values=\"..\">, \
-or inline <svg viewBox=\"...\" width=\"...\" height=\"...\"> with theme tokens var(--text), var(--dim), var(--faint), var(--accent), \
-var(--ok), var(--warn), var(--danger), var(--info), var(--bg), var(--surface), var(--raised), var(--border) (dark background, no scripts or <style> tags). \
-Use ```ui for the part of a reply that is clearer drawn than typed; keep normal prose and code in text.";
+m4code does NOT support Mermaid (```mermaid), PlantUML, or similar diagram fences—never emit Mermaid or ASCII art for graphs or diagrams. \
+Whenever the user asks for a chart, graph, diagram, flowchart, architecture view, timeline, comparison, or dashboard (or whenever a visual is clearer than prose), \
+always render it with a closed ```ui block: use <chart type=\"bar|line\" labels=\"..\" values=\"..\"> (or <series name=\"..\" values=\"..\"/> children) for data charts/graphs, \
+inline <svg viewBox=\"...\" width=\"...\" height=\"...\"> for flowcharts, architecture diagrams, and graphs, \
+and HTML with inline CSS and m4code shortcuts (<card>, <badge>, <callout>, <progress value=\"..\">, <row>, <col>, <grid cols=\"3\">, <tabs>, <details>, <button send=\"..\">) \
+with theme tokens var(--text), var(--dim), var(--faint), var(--accent), var(--ok), var(--warn), var(--danger), var(--info), var(--bg), var(--surface), var(--raised), var(--border) \
+(dark background, no scripts or <style> tags). Keep normal prose and code in text.";
 
 const ARTIFACT_INSTRUCTIONS: &str = " Artifacts are for pages to share.";
 
