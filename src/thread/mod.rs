@@ -3248,6 +3248,7 @@ mod tests {
         assert_eq!(steer["method"], "_session/steering");
         assert_eq!(steer["params"]["sessionId"], "codex-session");
         assert_eq!(steer["params"]["prompt"][0]["text"], "> Which test?\n\nThe unit test.");
+        std::mem::forget(_keep_open);
     }
 
     #[gpui::test]
@@ -4399,6 +4400,7 @@ mod tests {
         let steer: Value = serde_json::from_str(&wire.next().unwrap().unwrap()).unwrap();
         assert_eq!(steer["method"], "_session/steering");
         assert_eq!(steer["params"]["prompt"][0]["text"], "> Pick a color\n\ngreen");
+        std::mem::forget(_keep_open);
     }
 
     #[test]
