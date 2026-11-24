@@ -67,7 +67,6 @@ pub fn antigravity_marks(pool: &str) -> (&'static [&'static Logo], Option<String
     match mark(pool) {
         PoolMark::Gemini => (&GEMINI_MARKS, None),
         PoolMark::ClaudeAndGpt => (&CLAUDE_AND_GPT_MARKS, None),
-        PoolMark::GeminiNamed(name) => (&GEMINI_MARKS, Some(name)),
         PoolMark::Other(name) => (&OTHER_MARKS, Some(name)),
     }
 }

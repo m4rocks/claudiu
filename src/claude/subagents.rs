@@ -430,7 +430,7 @@ mod tests {
             let provider = agent.provider();
             if provider.limits.is_some() {
                 assert_ne!(provider.color, theme::PANEL_BG, "{}", provider.name);
-                for pool in ["Codex", "Gemini Models", "Claude and GPT models", "Gemini 4 Argon", "Some New models"] {
+                for pool in ["Codex", "Gemini Models", "Claude and GPT models", "Some New models"] {
                     let (marks, name) = (provider.marks)(pool);
                     assert!(!marks.is_empty() || name.is_some_and(|name| !name.is_empty()), "{}: {pool}", provider.name);
                     assert!(marks.iter().all(|mark| !mark.svg.is_empty()), "{}: {pool}", provider.name);

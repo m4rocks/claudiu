@@ -121,8 +121,6 @@ pub enum PoolMark {
     Gemini,
     /// `Claude and GPT models`.
     ClaudeAndGpt,
-    /// A named Gemini model with limits of its own, by the first two letters of its name: `Gemini 4 Argon` → `Ar`.
-    GeminiNamed(String),
     /// A pool m4code doesn't know, by the first two letters of its name: `Some New models` → `So`.
     Other(String),
 }
@@ -132,13 +130,12 @@ pub fn mark(pool: &str) -> PoolMark {
     match lower.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
         ["gemini"] => PoolMark::Gemini,
         ["claude", "and", "gpt"] => PoolMark::ClaudeAndGpt,
-        ["gemini", version, name] if version.parse::<u32>().is_ok() => PoolMark::GeminiNamed(symbol(name)),
         [first, ..] => PoolMark::Other(symbol(first)),
         [] => PoolMark::Other(symbol(&pool.to_lowercase())),
     }
 }
 
-/// A name's first two letters, written like an element's symbol: `argon` → `Ar`.
+/// A name's first two letters, capitalised: `mistral` → `Mi`.
 fn symbol(name: &str) -> String {
     let mut letters = name.chars();
     letters.next().map(|first| first.to_uppercase().chain(letters.take(1)).collect()).unwrap_or_default()
@@ -148,18 +145,19 @@ fn symbol(name: &str) -> String {
 mod tests {
     use super::*;
 
-    // What agy 1.5.12 answered, with the descriptions cut short.
-    const READING: &str = r#"{"conversation_id":"","status":"SUCCESS","response":"Gemini Models\tWeekly Limit Remaining\t100%\n","num_turns":0,"usage":{"input_tokens":0,"output_tokens":0},"command":{"name":"usage","data":{"description":"Within each group, models share a weekly limit and a 5-hour limit.","groups":[{"name":"Gemini Models","description":"Models within this group: Gemini 4 Neon","buckets":[{"id":"gemini-weekly","name":"Weekly Limit Remaining","window":"weekly","remaining_fraction":0.75,"reset_time":"2026-11-26T06:49:30Z"},{"id":"gemini-5h","name":"Five Hour Limit Remaining","window":"5h","remaining_fraction":0.5,"reset_time":"2026-11-19T11:49:30Z"}]},{"name":"Claude and GPT models","buckets":[{"id":"3p-weekly","window":"weekly","remaining_fraction":1,"reset_time":"2026-11-26T06:55:31Z"},{"id":"3p-5h","window":"5h","remaining_fraction":1,"reset_time":"2026-11-19T11:55:31Z"}]},{"name":"Gemini 4 Argon","buckets":[{"id":"gemini-argon-wtu-weekly","window":"weekly","remaining_fraction":1,"reset_time":"2026-11-26T06:55:31Z"}]}]}}}"#;
+    // What agy 1.5.13 answered, with the descriptions cut short.
+    const READING: &str = r#"{"conversation_id":"","status":"SUCCESS","response":"Gemini Models\tWeekly Limit Remaining\t100%\n","num_turns":0,"usage":{"input_tokens":0,"output_tokens":0},"command":{"name":"usage","data":{"description":"Within each group, models share a weekly limit and a 5-hour limit.","groups":[{"name":"Gemini Models","description":"Models within this group: Gemini 4 Neon","buckets":[{"id":"gemini-weekly","name":"Weekly Limit Remaining","window":"weekly","remaining_fraction":0.75,"reset_time":"2026-11-26T06:49:30Z"},{"id":"gemini-5h","name":"Five Hour Limit Remaining","window":"5h","remaining_fraction":0.5,"reset_time":"2026-11-19T11:49:30Z"}]},{"name":"Claude and GPT models","buckets":[{"id":"3p-weekly","window":"weekly","remaining_fraction":1,"reset_time":"2026-11-26T06:55:31Z"},{"id":"3p-5h","window":"5h","remaining_fraction":1,"reset_time":"2026-11-19T11:55:31Z"}]}]}}}"#;
 
     #[test]
     fn each_group_is_a_pool_with_its_windows_as_used_fractions() {
         let pools = parse(READING, 100).unwrap();
-        assert_eq!(pools.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), ["Gemini Models", "Claude and GPT models", "Gemini 4 Argon"]);
+        assert_eq!(pools.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), ["Gemini Models", "Claude and GPT models"]);
         let gemini = &pools[0].usage;
         assert_eq!(gemini.five_hour, Some(RateLimit { utilization: Some(0.5), resets_at: super::super::parse_rfc3339("2026-11-19T11:49:30Z"), seen_at: 100 }));
         assert_eq!(gemini.seven_day.as_ref().unwrap().utilization, Some(0.25));
         assert_eq!(pools[1].usage.five_hour.as_ref().unwrap().utilization, Some(0.0));
-        assert_eq!((pools[2].usage.five_hour.is_none(), pools[2].usage.seven_day.is_some()), (true, true), "a pool with only a weekly limit");
+        let weekly_only = parse(r#"{"command":{"name":"usage","data":{"groups":[{"name":"Weekly Only","buckets":[{"window":"weekly","remaining_fraction":1,"reset_time":"2026-11-26T06:55:31Z"}]}]}}}"#, 100).unwrap();
+        assert_eq!((weekly_only[0].usage.five_hour.is_none(), weekly_only[0].usage.seven_day.is_some()), (true, true), "a pool with only a weekly limit");
     }
 
     #[test]
@@ -195,10 +193,7 @@ mod tests {
     fn each_pool_gets_the_mark_of_its_models() {
         assert_eq!(mark("Gemini Models"), PoolMark::Gemini);
         assert_eq!(mark("Claude and GPT models"), PoolMark::ClaudeAndGpt);
-        assert_eq!(mark("Gemini 4 Argon"), PoolMark::GeminiNamed("Ar".into()));
-        assert_eq!(mark("Gemini 5 XENON"), PoolMark::GeminiNamed("Xe".into()));
         assert_eq!(mark("Gemini custom pool"), PoolMark::Other("Ge".into()));
-        assert_eq!(mark("Other 4 Argon"), PoolMark::Other("Ot".into()));
         assert_eq!(mark("Mistral and Llama models"), PoolMark::Other("Mi".into()));
     }
 }

@@ -55,7 +55,7 @@ fn the_last_antigravity_reading_is_there_after_a_restart() {
     let path = dir.path().join("state.json");
     let mut s = Store::load(path.clone());
     let limit = RateLimit { utilization: Some(0.5), resets_at: Some(200), seen_at: 100 };
-    s.data.subagent_limits.insert("antigravity".into(), vec![Pool { name: "Gemini 4 Argon".into(), usage: AccountUsage { five_hour: None, seven_day: Some(limit) } }]);
+    s.data.subagent_limits.insert("antigravity".into(), vec![Pool { name: "Gemini Models".into(), usage: AccountUsage { five_hour: None, seven_day: Some(limit) } }]);
     s.save();
     assert_eq!(Store::load(path).data.subagent_limits, s.data.subagent_limits);
     // A state.json from before the field loads with no reading.
