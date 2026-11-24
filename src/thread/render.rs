@@ -111,7 +111,7 @@ impl Render for ThreadView {
 /// between them into one, so every line before another ends in a hard break (two trailing spaces, which unlike a
 /// backslash leave nothing behind when the next line starts a list or a fence), except inside a fenced code block,
 /// where lines already stay as they are.
-fn keep_line_breaks(text: &str) -> String {
+pub(super) fn keep_line_breaks(text: &str) -> String {
     let lines: Vec<&str> = text.lines().collect();
     // The open fence's marker character and length: only a run of that character at least as long closes it.
     let mut open: Option<(char, usize)> = None;
@@ -138,12 +138,47 @@ fn keep_line_breaks(text: &str) -> String {
     out
 }
 
+/// Ensure entry `ix`'s cached `TextViewState` exists, starts parsing `text` immediately, and remeasures row `ix`
+/// whenever a background parse (streaming append or >4 KB message) commits new rendered text.
+pub(super) fn ensure_markdown_state(
+    cache: &mut HashMap<usize, Entity<TextViewState>>,
+    ix: usize,
+    text: &str,
+    cx: &mut Context<ThreadView>,
+) -> Entity<TextViewState> {
+    let state = cache
+        .entry(ix)
+        .or_insert_with(|| {
+            let entity = cx.new(|cx| TextViewState::markdown(text, cx));
+            let source_key = |state: &Entity<TextViewState>, app: &gpui::App| {
+                let rendered = state.read(app).rendered_text();
+                let source = rendered.source();
+                (source.as_ptr() as usize, source.len())
+            };
+            let mut seen = source_key(&entity, cx);
+            cx.observe(&entity, move |view, state, cx| {
+                let current = source_key(&state, cx);
+                if current != seen
+                    && view.markdown.get(&ix).is_some_and(|cached| cached.entity_id() == state.entity_id())
+                {
+                    seen = current;
+                    view.remeasure(ix);
+                    cx.notify();
+                }
+            })
+            .detach();
+            entity
+        })
+        .clone();
+    // Unchanged text costs a comparison; a reply still streaming in is appended to what is parsed.
+    state.update(cx, |s, cx| s.set_text(text, cx));
+    state
+}
+
 /// Entry `ix`'s text as markdown, parsed once and kept in `cache` (`ThreadView::markdown`) so it keeps its height
 /// as it scrolls.
 pub(super) fn markdown_of(cache: &mut HashMap<usize, Entity<TextViewState>>, ix: usize, text: &str, cx: &mut Context<ThreadView>) -> TextView {
-    let state = cache.entry(ix).or_insert_with(|| cx.new(|cx| TextViewState::markdown(text, cx))).clone();
-    // Unchanged text costs a comparison; a reply still streaming in is appended to what is parsed.
-    state.update(cx, |s, cx| s.set_text(text, cx));
+    let state = ensure_markdown_state(cache, ix, text, cx);
     crate::github::ui::styled_markdown(TextView::new(&state))
 }
 
@@ -380,11 +415,14 @@ impl ThreadView {
         block.into_any_element()
     }
 
-    /// Startup or compaction status at the foot of the conversation; active turns show their own trace spinners.
+    /// Handoff, compaction, or optimistic pre-response working status at the foot of the conversation.
     fn render_activity(&self) -> Option<AnyElement> {
         let (label, stoppable) = match self.starting_label() {
             Some(label) => (label, false),
             None if self.is_working() && self.compaction.running => ("Compacting…".to_string(), true),
+            None if self.has_active_turn() && matches!(self.thread.entries.last(), Some(Entry::User(_))) => {
+                ("Working…".to_string(), true)
+            }
             None => return None,
         };
         let row = div()
@@ -416,7 +454,7 @@ impl ThreadView {
             .into_any_element()
     }
 
-    /// Reasoning step: auto-expands with a live spinner while streaming, then folds to `"Thought for Ns"` once done.
+    /// Reasoning step: collapsed by default (with a live spinner while streaming, then `"Thought for Ns"` once done).
     fn render_thought(&self, ix: usize, text: &str, cx: &mut Context<Self>) -> AnyElement {
         let key = format!("thought:{ix}");
         let timing = self.thought_timing.get(&ix);
@@ -424,17 +462,14 @@ impl ThreadView {
             && ix + 1 == self.thread.entries.len()
             && timing.is_some_and(|(_, done)| done.is_none());
         let duration = timing.and_then(|(_, done)| *done);
-        let expanded = self.detail
-            || if streaming {
-                !self.collapsed_thoughts.contains(&ix)
-            } else {
-                self.expanded_tools.contains(&key)
-            };
+        let expanded = (self.detail && !self.collapsed_thoughts.contains(&ix))
+            || self.expanded_tools.contains(&key);
         let preview = first_line(text);
         let header = elements::reasoning_header(ix, preview, streaming, duration, expanded).on_click(cx.listener(
             move |v, _: &ClickEvent, window, cx| {
-                if streaming {
+                if v.detail {
                     if !v.collapsed_thoughts.remove(&ix) {
+                        v.expanded_tools.remove(&key);
                         v.collapsed_thoughts.insert(ix);
                     }
                 } else if !v.expanded_tools.remove(&key) {
@@ -446,7 +481,7 @@ impl ThreadView {
             },
         ));
         let mut block = div().flex().flex_col().child(header);
-        if expanded {
+        if expanded && !text.trim().is_empty() {
             block = block.child(elements::reasoning_body(text));
         }
         block.into_any_element()
@@ -456,13 +491,11 @@ impl ThreadView {
     fn render_tool(&self, ix: usize, call: &ToolCall, cx: &mut Context<Self>) -> AnyElement {
         let has_card = self.cards.contains_key(&call.id);
         let shell = call.kind == "execute";
-        let card_opens_details = has_card && !shell;
         let details = &call.details;
         let has_details = call.content.iter().any(|item| !matches!(item, ToolContent::Diff { .. }))
             || details.command.is_some() || details.stdout.is_some() || details.stderr.is_some()
-            || details.output.is_some() || details.request.is_some() || details.response.is_some() || card_opens_details;
+            || details.output.is_some() || details.request.is_some() || details.response.is_some();
         let expanded = (self.detail && !self.collapsed_shell_calls.contains(&call.id))
-            || card_opens_details
             || self.expanded_tools.contains(&call.id);
         let toggle_id = call.id.clone();
 
@@ -1344,7 +1377,8 @@ impl ThreadView {
         let has_message = self.can_submit_draft(cx);
         let steering_text = if self.attachments.has_files() { "" } else { draft.trim() };
         let editing = self.queue_edit.is_some();
-        let idle_for_resume = !self.working && self.queue_held && self.questions.is_empty()
+        let active_turn = self.has_active_turn();
+        let idle_for_resume = !active_turn && self.queue_held && self.questions.is_empty()
             && (self.waiting_messages().next().is_some() || self.handoff_after_turn.is_some());
         let answering = self.questions.front().is_some_and(|q| q.takes_own_answer) || self.async_answer_id().is_some();
         let follow_up = if alternate { self.follow_up.other() } else { self.follow_up };
@@ -1368,13 +1402,13 @@ impl ThreadView {
             ActionKind::Answer
         } else if !has_message && self.interrupting {
             ActionKind::Stopping
-        } else if !has_message && self.working {
+        } else if !has_message && active_turn {
             ActionKind::Interrupt
         } else if !has_message && idle_for_resume {
             ActionKind::Resume
         } else if self.can_steer(steering_text, follow_up) {
             ActionKind::Steer
-        } else if self.working || self.phase == super::Phase::Starting {
+        } else if active_turn {
             ActionKind::Queue
         } else {
             ActionKind::Send
@@ -1396,7 +1430,7 @@ impl ThreadView {
         } else if answering {
             has_message
         } else {
-            has_message || (self.working && !self.interrupting) || idle_for_resume
+            has_message || (active_turn && !self.interrupting) || idle_for_resume
         };
         let send = if enabled {
             let (bg, fg, hover, border) = match action {
@@ -1410,7 +1444,7 @@ impl ThreadView {
                 .on_click(cx.listener(|v, ev: &ClickEvent, window, cx| {
                     if v.queue_edit.is_some() || v.can_submit_draft(cx) {
                         v.submit_with(ev.modifiers().secondary(), window, cx);
-                    } else if v.working {
+                    } else if v.has_active_turn() {
                         v.interrupt(cx);
                     } else if v.queue_held && v.questions.is_empty() {
                         v.resume_queue(cx);

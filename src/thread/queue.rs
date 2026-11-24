@@ -94,7 +94,7 @@ impl ThreadView {
     }
 
     pub(super) fn waiting_messages(&self) -> impl Iterator<Item = (Uuid, &str)> {
-        self.queue.iter().filter(|item| item.by_user).map(|item| (item.id, item.text.as_str()))
+        self.queue.iter().filter(|item| item.by_user && !item.shown).map(|item| (item.id, item.text.as_str()))
     }
 
     pub(super) fn adjacent_queued(&self, id: Uuid, earlier: bool) -> Option<(usize, usize)> {

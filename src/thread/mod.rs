@@ -303,6 +303,7 @@ pub struct ThreadView {
     queue_held: bool,
     queue_edit: Option<queue::Edit>,
     preparing: Option<Queued>,
+    restarting_for_steer: bool,
     interrupting: bool,
     queue_save_error: bool,
     questions: VecDeque<Question>,
@@ -359,7 +360,7 @@ pub struct ThreadView {
     expanded_tools: HashSet<String>,
     /// Shell calls closed by hand while Ctrl+O is showing tool details.
     collapsed_shell_calls: HashSet<String>,
-    /// Thoughts collapsed by hand while they are still streaming (overrides auto-expand).
+    /// Thoughts closed by hand while Ctrl+O is showing tool details.
     collapsed_thoughts: HashSet<usize>,
     /// Per-thought `(started_at, finished_duration)` so `Reasoning` shows live streaming state and elapsed time.
     thought_timing: HashMap<usize, (Instant, Option<std::time::Duration>)>,
@@ -491,6 +492,7 @@ impl ThreadView {
             queue_held,
             queue_edit: None,
             preparing: None,
+            restarting_for_steer: false,
             interrupting: false,
             queue_save_error: false,
             questions: VecDeque::new(),
@@ -695,6 +697,9 @@ impl ThreadView {
                     self.cached_replay = false;
                     self.thread.entries.clear();
                     self.markdown.clear();
+                    for item in &mut self.queue {
+                        item.shown = false;
+                    }
                     self.tool_images.get_mut().clear();
                     self.thought_timing.clear();
                     self.collapsed_thoughts.clear();
@@ -728,6 +733,7 @@ impl ThreadView {
                     if self.harness == Harness::Codex && is_conversation_update(&update) {
                         self.asks.record_message_chunk(at, &update);
                     }
+                    self.sync_markdown(at, cx);
                     self.remeasure(at);
                 }
                 if update.pointer("/_meta/m4code/backgroundShell").and_then(Value::as_bool) == Some(true) {
@@ -747,7 +753,7 @@ impl ThreadView {
                 self.report_chosen(cx);
             }
             Event::Permission { id, params } => {
-                if self.interrupting {
+                if self.interrupting || self.restarting_for_steer {
                     if let Some(connection) = &self.connection {
                         connection.respond(id, acp::permission_outcome(None));
                     }
@@ -788,7 +794,7 @@ impl ThreadView {
                 self.questions.push_back(Question { id: Uuid::new_v4(), reply: QuestionReply::Acp(id), title, options, highlight: 0, takes_own_answer });
             }
             Event::Elicitation { id, params } => {
-                if self.interrupting {
+                if self.interrupting || self.restarting_for_steer {
                     if let Some(connection) = &self.connection {
                         connection.respond(id, acp::elicitation_cancel());
                     }
@@ -1058,7 +1064,6 @@ impl ThreadView {
     /// steered into a turn would replace the agent's task; so does a message while the context is compacted.
     fn can_steer(&self, text: &str, follow_up: crate::store::FollowUp) -> bool {
         follow_up == crate::store::FollowUp::Steer
-            && (self.harness.adapter().steers || self.native_steering())
             && self.working
             && !self.queue_held
             && self.preparing.is_none()
@@ -1079,7 +1084,7 @@ impl ThreadView {
         self.harness == Harness::Codex && self.native_steering()
     }
 
-    fn steer(&mut self, item: Queued, cx: &mut Context<Self>) {
+    fn steer(&mut self, mut item: Queued, cx: &mut Context<Self>) {
         let (Some(connection), Some(session)) = (self.connection.clone(), self.session_id.clone()) else {
             self.queue.push_back(item);
             self.queue_changed();
@@ -1087,6 +1092,18 @@ impl ThreadView {
             return;
         };
         let native = self.native_steering();
+        if !self.harness.adapter().steers && !native {
+            let at = self.queue.iter().take_while(|q| q.ahead).count();
+            item.ahead = true;
+            self.queue.insert(at, item);
+            self.queue_changed();
+            if !std::mem::replace(&mut self.restarting_for_steer, true) {
+                connection.notify("session/cancel", json!({"sessionId": session}));
+                self.cancel_questions();
+            }
+            cx.notify();
+            return;
+        }
         let id = item.id;
         let text = item.text.clone();
         self.steering.push_back(item);
@@ -1173,7 +1190,25 @@ impl ThreadView {
             self.steer(Queued::new(text, true), cx);
             return;
         }
-        self.queue.push_back(Queued::new(text, true));
+        let mut item = Queued::new(text, true);
+        if self.phase == Phase::Starting
+            && !self.working
+            && !self.queue_held
+            && self.questions.is_empty()
+            && !self.queue.iter().any(|q| q.startup)
+        {
+            item.startup = true;
+            if let Some(at) = self.thread.sent(item.text.clone()) {
+                item.shown = true;
+                self.sync_markdown(at, cx);
+                self.remeasure(at);
+                self.persist_entries();
+                if self.list.is_following_tail() {
+                    self.list.scroll_to_end();
+                }
+            }
+        }
+        self.queue.push_back(item);
         self.queue_changed();
         if self.queue_held && !self.working {
             self.resume_queue(cx);
@@ -1189,7 +1224,7 @@ impl ThreadView {
         }
         let (Some(connection), Some(session), Some(events)) = (self.connection.clone(), self.session_id.clone(), self.events.clone()) else { return };
         let command = self.harness.adapter().compact_command.filter(|name| self.thread.commands.iter().any(|c| c.name == *name));
-        let next = if !self.queue_held && self.compaction.take_due(self.thread.context, command.is_some()) {
+        let mut next = if !self.queue_held && self.compaction.take_due(self.thread.context, command.is_some()) {
             let at = self.thread.notice("Compacting context…", false);
             self.remeasure(at);
             Queued { shown: true, compact: true, ..Queued::new(format!("/{}", command.unwrap()), false) }
@@ -1202,10 +1237,31 @@ impl ThreadView {
         };
         let id = next.id;
         let compact = next.compact;
+        let seed_history = (!compact
+            && matches!(self.thread.entries.last(), Some(Entry::Notice { text, error: false }) if text == FORK_SEED))
+            .then(|| self.thread.transcript(400));
+        let mut shown_row = if next.shown {
+            self.thread.entries.len().checked_sub(1)
+                .filter(|&row| matches!(&self.thread.entries[row], Entry::User(text) if text == &next.text))
+        } else {
+            None
+        };
+        if !next.shown && !compact && let Some(at) = self.thread.sent(next.text.clone()) {
+            next.shown = true;
+            shown_row = Some(at);
+            self.cached_replay = false;
+            self.sync_markdown(at, cx);
+            self.remeasure(at);
+            self.persist_entries();
+            if self.list.is_following_tail() {
+                self.list.scroll_to_end();
+            }
+        }
         self.preparing = Some(next);
         self.working = true;
         self.changed = None;
         self.queue_changed();
+        cx.notify();
         let cwd = self.cwd.clone();
         cx.spawn(async move |this, cx| {
             let before_cwd = cwd.clone();
@@ -1220,15 +1276,12 @@ impl ThreadView {
                 if let Some(snapshot) = &snapshot {
                     v.snapshots.push(snapshot.clone());
                 }
-                let seed = !next.compact && matches!(v.thread.entries.last(),
-                    Some(Entry::Notice { text, error: false }) if text == FORK_SEED);
-                let outgoing = if seed {
-                    let history = v.thread.transcript(400);
-                    crate::harness::thread::handoff_prompt(v.harness.name(), &history, &next.text)
-                } else {
-                    next.text.clone()
+                let outgoing = match &seed_history {
+                    Some(history) => crate::harness::thread::handoff_prompt(v.harness.name(), history, &next.text),
+                    None => next.text.clone(),
                 };
                 if !next.shown && !next.compact && let Some(at) = v.thread.sent(next.text.clone()) {
+                    v.sync_markdown(at, cx);
                     v.remeasure(at);
                 }
                 v.cached_replay = false;
@@ -1237,9 +1290,9 @@ impl ThreadView {
                 if v.list.is_following_tail() {
                     v.list.scroll_to_end();
                 }
-                v.active_turn_review = snapshot.zip(v.thread.entries.len().checked_sub(1)).and_then(|(before, row)| {
-                    match &v.thread.entries[row] {
-                        Entry::User(text) if !v.record_id.is_empty() => Some(review::ActiveTurn {
+                v.active_turn_review = snapshot.zip(shown_row.or_else(|| v.thread.entries.len().checked_sub(1))).and_then(|(before, row)| {
+                    match v.thread.entries.get(row) {
+                        Some(Entry::User(text)) if !v.record_id.is_empty() => Some(review::ActiveTurn {
                             id, row, before, text: text.clone(), cwd: cwd.clone(),
                         }),
                         _ => None,
@@ -1315,7 +1368,8 @@ impl ThreadView {
             let at = self.thread.notice(text, error);
             self.remeasure(at);
         }
-        if matches!(outcome, "failed" | "interrupted") {
+        let restarting = std::mem::take(&mut self.restarting_for_steer);
+        if outcome == "failed" || (outcome == "interrupted" && !restarting) {
             self.queue_held = true;
         }
         if self.harness.adapter().steers {
@@ -1379,6 +1433,7 @@ impl ThreadView {
 
     fn interrupt(&mut self, cx: &mut Context<Self>) {
         self.queue_held = true;
+        self.restarting_for_steer = false;
         if !self.interrupting {
             cx.emit(ThreadEvent::AbortChildren);
         }
@@ -1390,12 +1445,31 @@ impl ThreadView {
                 if item.shown && matches!(self.thread.entries.last(), Some(Entry::User(text)) if text == &item.text) {
                     let at = self.thread.entries.len() - 1;
                     self.thread.entries.pop();
+                    self.markdown.remove(&at);
                     item.shown = false;
                     self.remeasure(at);
                 }
                 self.queue.push_front(item);
             }
             self.working = false;
+            self.queue_changed();
+            self.cancel_questions();
+            cx.notify();
+            return;
+        }
+        if self.phase == Phase::Starting
+            && let Some(pos) = self.queue.iter().position(|item| item.startup)
+        {
+            let mut item = self.queue.remove(pos).unwrap();
+            item.startup = false;
+            if item.shown && matches!(self.thread.entries.last(), Some(Entry::User(text)) if text == &item.text) {
+                let at = self.thread.entries.len() - 1;
+                self.thread.entries.pop();
+                self.markdown.remove(&at);
+                item.shown = false;
+                self.remeasure(at);
+            }
+            self.queue.push_front(item);
             self.queue_changed();
             self.cancel_questions();
             cx.notify();
@@ -1412,7 +1486,7 @@ impl ThreadView {
     /// Show a multiple-choice question from m4code's MCP `ask_user` tool (works on every harness, including ones
     /// whose native question tool isn't bridged over ACP).
     pub fn ask_bridge_question(&mut self, req_id: String, title: String, options: Vec<QuestionOption>, cx: &mut Context<Self>) {
-        if self.interrupting {
+        if self.interrupting || self.restarting_for_steer {
             crate::claude::bridge::respond(&req_id, false, "The turn was interrupted.");
             return;
         }
@@ -1690,7 +1764,7 @@ impl ThreadView {
         let draft = self.composer.read(cx).value().to_string();
         let state = keys::State {
             picker_open: self.picker.is_some(),
-            working: self.working,
+            working: self.has_active_turn(),
             question: self.questions.front().map_or(0, |q| q.options.len()),
             draft_empty: !self.can_submit_draft(cx) || self.async_answer_blocked(),
             in_history: self.history_at.is_some(),
@@ -1785,6 +1859,7 @@ impl ThreadView {
             keys::Key::ToggleDetail => {
                 self.detail = !self.detail;
                 self.collapsed_shell_calls.clear();
+                self.collapsed_thoughts.clear();
                 self.remeasure(0);
             }
             keys::Key::TogglePlan => self.plan_open = !self.plan_open,
@@ -2051,6 +2126,22 @@ impl ThreadView {
         crate::harness::thread::save_entries(&self.record_id, &self.thread.entries);
     }
 
+    /// Start or update the cached markdown parser for entry `ix` as soon as its text arrives, instead of waiting
+    /// for the next paint frame.
+    fn sync_markdown(&mut self, ix: usize, cx: &mut Context<Self>) {
+        match self.thread.entries.get(ix) {
+            Some(Entry::User(text)) if crate::harness::thread::parse_subagent_report(text).is_none() => {
+                let formatted = render::keep_line_breaks(text);
+                render::ensure_markdown_state(&mut self.markdown, ix, &formatted, cx);
+            }
+            Some(Entry::Agent(text)) => {
+                let text = text.clone();
+                render::ensure_markdown_state(&mut self.markdown, ix, &text, cx);
+            }
+            _ => {}
+        }
+    }
+
     /// Measure entry `from` and every one after it again; the list keeps its place above them.
     pub(crate) fn remeasure(&mut self, from: usize) {
         let rows = self.thread.entries.len();
@@ -2115,8 +2206,13 @@ impl ThreadView {
         self.stop();
     }
 
+    /// A turn is actively running, or an optimistic startup prompt is waiting to run as soon as the harness opens.
+    pub(super) fn has_active_turn(&self) -> bool {
+        self.working || (self.phase == Phase::Starting && self.queue.iter().any(|item| item.startup))
+    }
+
     pub fn is_working(&self) -> bool {
-        self.working
+        self.has_active_turn()
             || (self.phase == Phase::Starting && !self.queue.is_empty())
             || (self.phase == Phase::Ready
                 && !self.cached_replay
@@ -2137,10 +2233,10 @@ impl ThreadView {
         self.questions.front().map(|q| q.title.clone())
     }
 
-    /// What the message box says while the agent starts, so the wait after a hand-off is visible.
+    /// Only cross-harness hand-offs announce themselves; ordinary session startup stays invisible to the user.
     pub fn starting_label(&self) -> Option<String> {
-        (self.phase == Phase::Starting && self.handover.is_none())
-            .then(|| if self.took_over { format!("Handing over to {}…", self.harness.name()) } else { format!("Starting {}…", self.harness.name()) })
+        (self.phase == Phase::Starting && self.handover.is_none() && self.took_over)
+            .then(|| format!("Handing over to {}…", self.harness.name()))
     }
 
     pub fn is_loading(&self) -> bool {
@@ -2910,7 +3006,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn unsupported_steering_queues_without_interrupting(cx: &mut gpui::TestAppContext) {
+    fn steers_an_agent_restarts_for_go_in_the_order_sent_before_the_queue(cx: &mut gpui::TestAppContext) {
         use crate::store::FollowUp;
         cx.update(gpui_kit::init);
         let dir = tempfile::tempdir().unwrap();
@@ -2947,8 +3043,8 @@ mod tests {
             v.send_as("first".into(), FollowUp::Steer, cx);
             v.send_as("second".into(), FollowUp::Steer, cx);
             let order: Vec<&str> = v.queue.iter().map(|q| q.text.as_str()).collect();
-            assert_eq!(order, ["queued", "first", "second"]);
-            assert!(v.working && !v.interrupting);
+            assert_eq!(order, ["first", "second", "queued"]);
+            assert!(v.restarting_for_steer);
             assert!(v.steering.is_empty());
         });
     }
@@ -2979,6 +3075,8 @@ mod tests {
             assert_eq!(v.rows, 1);
             assert_eq!(v.queue.len(), 1);
             assert!(v.queue[0].shown);
+            assert!(v.starting_label().is_none(), "normal session startup is invisible to the user");
+            assert!(v.waiting_messages().next().is_none(), "already-shown startup prompt is not duplicated in the queue");
         });
         // Paint once so the list lays out, and verify the first entry sits near the top of the viewport, not the bottom.
         cx.refresh().unwrap();
@@ -2990,6 +3088,77 @@ mod tests {
                 "expected first entry near top of viewport, got item={item:?} viewport={vp:?}"
             );
         });
+    }
+
+    #[gpui::test]
+    fn optimistic_startup_shows_user_message_immediately_and_can_be_interrupted(cx: &mut gpui::TestAppContext) {
+        use crate::store::FollowUp;
+        cx.update(gpui_kit::init);
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = cx.add_window_view(|window, cx| super::ThreadView::new(test_start(dir.path().into(), Harness::Claude), window, cx));
+        view.update(cx, |v, cx| {
+            v.phase = super::Phase::Starting;
+            assert!(v.starting_label().is_none());
+            assert!(!v.has_active_turn());
+            v.send_as("first prompt".into(), FollowUp::Queue, cx);
+            assert_eq!(v.thread.entries, [Entry::User("first prompt".into())]);
+            assert!(v.has_active_turn());
+            assert!(v.is_working());
+            assert!(v.waiting_messages().next().is_none(), "shown startup prompt is not duplicated in queued list");
+            v.interrupt(cx);
+            assert!(v.thread.entries.is_empty());
+            assert!(!v.has_active_turn());
+            assert!(v.queue_held);
+            assert_eq!(v.waiting_messages().map(|(_, t)| t).collect::<Vec<_>>(), ["first prompt"]);
+        });
+    }
+
+    #[gpui::test]
+    fn sending_in_ready_session_shows_user_message_immediately_before_snapshot(cx: &mut gpui::TestAppContext) {
+        use crate::store::FollowUp;
+        cx.update(gpui_kit::init);
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = cx.add_window_view(|window, cx| super::ThreadView::new(test_start(dir.path().into(), Harness::Claude), window, cx));
+        let (from_agent, to_client) = std::io::pipe().unwrap();
+        let (from_client, to_agent) = std::io::pipe().unwrap();
+        std::mem::forget((to_client, from_client));
+        let (tx, _events) = futures::channel::mpsc::unbounded();
+        let connection = crate::harness::acp::Connection::connect(from_agent, to_agent, None::<std::io::PipeReader>, tx);
+        view.update(cx, |v, cx| {
+            v.connection = Some(std::rc::Rc::new(connection));
+            v.session_id = Some("s1".into());
+            v.phase = super::Phase::Ready;
+            v.send_as("instant message".into(), FollowUp::Queue, cx);
+            assert_eq!(v.thread.entries, [Entry::User("instant message".into())]);
+            assert!(v.working);
+            assert!(v.preparing.as_ref().is_some_and(|p| p.shown));
+        });
+    }
+
+    #[cfg(debug_assertions)]
+    #[gpui::test]
+    fn streaming_thought_stays_collapsed_by_default_until_clicked(cx: &mut gpui::TestAppContext) {
+        use gpui::Modifiers;
+        cx.update(gpui_kit::init);
+        let dir = tempfile::tempdir().unwrap();
+        let mut start = test_start(dir.path().into(), Harness::Claude);
+        start.prior_entries = vec![Entry::Thought("line 1\nline 2\nline 3\nline 4\n\n".into())];
+        let (view, cx) = cx.add_window_view(|window, cx| super::ThreadView::new(start, window, cx));
+        view.update(cx, |v, cx| {
+            v.phase = super::Phase::Ready;
+            v.working = true;
+            v.thought_timing.insert(0, (std::time::Instant::now(), None));
+            v.remeasure(0);
+            cx.notify();
+        });
+        cx.update(|window, app| window.draw(app).clear(app));
+        let collapsed = view.read_with(cx, |v, _| v.list.bounds_for_item(0).expect("thought row").size.height);
+        assert!(collapsed < gpui::px(48.0), "streaming thought should stay collapsed by default, got {collapsed:?}");
+        let center = view.read_with(cx, |v, _| v.list.bounds_for_item(0).unwrap().center());
+        cx.simulate_click(center, Modifiers::default());
+        cx.update(|window, app| window.draw(app).clear(app));
+        let expanded = view.read_with(cx, |v, _| v.list.bounds_for_item(0).expect("thought row").size.height);
+        assert!(expanded > collapsed, "clicking a collapsed thought should expand it: {expanded:?} vs {collapsed:?}");
     }
 
     #[test]

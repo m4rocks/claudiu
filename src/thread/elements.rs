@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use gpui::{
     AnyElement, AppContext, ClickEvent, Context, FontWeight, InteractiveElement, IntoElement, ParentElement, Render, SharedString,
-    StatefulInteractiveElement, Styled, Window, div, prelude::FluentBuilder, px,
+    StatefulInteractiveElement, Styled, Window, div, prelude::FluentBuilder, px, relative,
 };
 use gpui_kit::assets::IconName;
 use gpui_kit::base::Button;
@@ -71,6 +71,7 @@ pub fn trace_line(
         .justify_start()
         .gap(px(7.0))
         .text_size(scale::px(12.0))
+        .line_height(relative(1.4))
         .when(collapsible, |d| d.cursor_pointer().hover(|s| s.bg(hsla(theme::SURFACE_HOVER))))
         .child(div().flex_none().w(px(14.0)).flex().items_center().justify_center().child(leading))
         .child(
@@ -286,11 +287,11 @@ pub fn reasoning_header(ix: usize, preview: String, streaming: bool, duration: O
 pub fn reasoning_body(text: &str) -> AnyElement {
     trace_content(
         div()
-            .py(px(4.0))
+            .py(px(2.0))
             .italic()
             .text_size(scale::px(12.0))
             .text_color(hsla(theme::TEXT_DIM))
-            .child(text.to_string())
+            .child(text.trim().to_string())
             .into_any_element(),
     )
 }
