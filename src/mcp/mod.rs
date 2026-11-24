@@ -424,6 +424,10 @@ fn interactive_tools() -> Vec<Value> {
                         },
                         "required": ["label"]
                     }
+                },
+                "multi_select": {
+                    "type": "boolean",
+                    "description": "Allow the user to select multiple options with checkboxes (default false)"
                 }
             },
             "required": ["question", "options"]

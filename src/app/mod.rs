@@ -900,6 +900,32 @@ impl Workspace {
         .detach();
     }
 
+    /// Toggle a checkbox option on a session's pending multi-select question without closing the popover.
+    pub fn toggle_session_question_option(&mut self, id: &str, question: uuid::Uuid, option: usize, cx: &mut Context<Self>) {
+        let Some(thread) = self.live_view(id).and_then(|v| v.thread()).cloned() else { return };
+        if thread.update(cx, |v, cx| v.toggle_question_option(question, option, cx)) {
+            cx.notify();
+        }
+    }
+
+    /// Submit all checked options on a session's pending multi-select question from the sidebar popover.
+    pub fn submit_session_question(&mut self, id: &str, question: uuid::Uuid, cx: &mut Context<Self>) {
+        let Some(thread) = self.live_view(id).and_then(|v| v.thread()).cloned() else { return };
+        if !thread.update(cx, |v, cx| v.submit_multi_question(question, cx)) {
+            return;
+        }
+        self.question_popover = None;
+        self.question_popover_hovered = false;
+        if self.activity.get(id) == Some(&Activity::Waiting) && !thread.read(cx).is_waiting() {
+            if thread.read(cx).is_working() {
+                self.activity.insert(id.to_string(), Activity::Working);
+            } else {
+                self.activity.remove(id);
+            }
+        }
+        cx.notify();
+    }
+
     /// Answer (or decline when `choice` is `None`) a session's pending question directly from the sidebar popover
     /// without switching the active view to that session.
     pub fn answer_session_question(&mut self, id: &str, question: uuid::Uuid, choice: Option<usize>, cx: &mut Context<Self>) {

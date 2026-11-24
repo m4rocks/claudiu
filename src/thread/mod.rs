@@ -17,7 +17,7 @@ pub(crate) use telemetry::exhausted_usage;
 pub use render::short_effort_label;
 
 use std::cell::Cell;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Instant;
@@ -101,6 +101,23 @@ fn background_task_from_tool(call: &crate::harness::thread::ToolCall) -> Option<
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "Background task".into());
     Some((task_id, label))
+}
+
+fn settle_running_tools(entries: &mut [Entry]) -> Option<usize> {
+    let mut first_changed = None;
+    for (row, entry) in entries.iter_mut().enumerate() {
+        if let Entry::Tool(call) = entry
+            && matches!(call.status, ToolStatus::Running | ToolStatus::Pending)
+        {
+            call.status = match call.details.exit_code {
+                Some(0) => ToolStatus::Done,
+                Some(_) => ToolStatus::Failed,
+                None => ToolStatus::Ended,
+            };
+            first_changed.get_or_insert(row);
+        }
+    }
+    first_changed
 }
 
 fn text_retires_background_task(text: &str, task_id: &str) -> bool {
@@ -283,6 +300,8 @@ pub struct PendingQuestion {
     pub id: Uuid,
     pub title: String,
     pub options: Vec<QuestionOption>,
+    pub multi_select: bool,
+    pub selected: BTreeSet<usize>,
 }
 
 enum QuestionReply {
@@ -295,6 +314,10 @@ enum QuestionReply {
         remaining: VecDeque<acp::ElicitationField>,
     },
     Bridge(String),
+    AsyncAsk {
+        remaining: VecDeque<crate::harness::codex::AsyncQuestion>,
+        replies: Vec<String>,
+    },
 }
 
 /// A permission or multiple-choice question the agent is waiting for.
@@ -303,8 +326,12 @@ struct Question {
     reply: QuestionReply,
     title: String,
     options: Vec<QuestionOption>,
-    /// The option Enter picks; the arrows and the mouse move it.
+    /// The option Enter picks (single-select) or Space toggles (multi-select); the arrows and the mouse move it.
     highlight: usize,
+    /// When true, options toggle checkboxes and submit together instead of submitting on a single click.
+    multi_select: bool,
+    /// Indices of checked options when `multi_select` is true, kept in option order.
+    selected: BTreeSet<usize>,
     /// What is typed in the message box can be sent as the answer instead of an option (`acp::takes_own_answer`).
     takes_own_answer: bool,
 }
@@ -531,6 +558,9 @@ impl ThreadView {
             let _ = this.update(cx, |v, cx| v.intercept(ev, window, cx));
         }));
         let mut thread = Thread { entries: start.prior_entries.clone(), ..Default::default() };
+        // A tool call left `Running` in persisted history belonged to an earlier process (e.g. before a crash or
+        // reboot) and cannot still be running in the new session.
+        settle_running_tools(&mut thread.entries);
         let mut queue = queue::load(&start.record_id);
         for item in &mut queue {
             item.order = queue::next_order();
@@ -894,7 +924,10 @@ impl ThreadView {
                             && (update.get("rawOutput").is_some() || update.get("content").is_some())
                         {
                             let started = (call.kind == "execute").then(|| background_task_from_tool(call)).flatten();
-                            let texts: Vec<String> = tool_output_texts(call).into_iter().map(str::to_string).collect();
+                            let mut texts: Vec<String> = tool_output_texts(call).into_iter().map(str::to_string).collect();
+                            if let Some(raw) = update.get("rawOutput").and_then(Value::as_str) {
+                                texts.push(raw.to_string());
+                            }
                             if let Some((task_id, label)) = started
                                 && self.seen_background_tasks.insert(task_id.clone())
                             {
@@ -973,7 +1006,17 @@ impl ThreadView {
                     .collect();
                 let title = params.pointer("/toolCall/title").and_then(Value::as_str).unwrap_or("The agent asks for permission").to_string();
                 let takes_own_answer = acp::takes_own_answer(&params);
-                self.questions.push_back(Question { id: Uuid::new_v4(), reply: QuestionReply::Acp(id), title, options, highlight: 0, takes_own_answer });
+                let multi_select = acp::is_multi_select(&params);
+                self.questions.push_back(Question {
+                    id: Uuid::new_v4(),
+                    reply: QuestionReply::Acp(id),
+                    title,
+                    options,
+                    highlight: 0,
+                    multi_select,
+                    selected: BTreeSet::new(),
+                    takes_own_answer,
+                });
             }
             Event::Elicitation { id, params } => {
                 if self.interrupting || self.restarting_for_steer {
@@ -993,6 +1036,7 @@ impl ThreadView {
                 }
                 let mut fields: VecDeque<acp::ElicitationField> = acp::parse_elicitation(&params).into();
                 if let Some(first) = fields.pop_front() {
+                    let multi_select = first.kind == acp::ElicitationKind::MultiChoice;
                     let options = first
                         .options
                         .into_iter()
@@ -1015,6 +1059,8 @@ impl ThreadView {
                         title: first.title,
                         options,
                         highlight: 0,
+                        multi_select,
+                        selected: BTreeSet::new(),
                         // A field's answer must be one of its schema's values.
                         takes_own_answer: false,
                     });
@@ -1042,7 +1088,9 @@ impl ThreadView {
             return;
         }
         self.phase = Phase::Ended;
-        self.settle_opencode_shells();
+        if let Some(row) = settle_running_tools(&mut self.thread.entries) {
+            self.remeasure(row);
+        }
         self.background_tasks.clear();
         self.preserve_handoff_message();
         self.cancel_questions();
@@ -1060,6 +1108,12 @@ impl ThreadView {
 
     fn retire_finished_background_tasks(&mut self, text: &str) {
         if self.background_tasks.is_empty() {
+            return;
+        }
+        if text.contains("No background tasks are currently running")
+            || text.contains("All your subagents and background tasks have been stopped")
+        {
+            self.background_tasks.clear();
             return;
         }
         self.background_tasks.retain(|task| !text_retires_background_task(text, &task.id));
@@ -1136,9 +1190,6 @@ impl ThreadView {
             self.finish_queue_edit(true, window, cx);
             return;
         }
-        if self.async_answer_blocked() {
-            return;
-        }
         let text = self.composer.read(cx).value().trim().to_string();
         if !self.can_submit_draft(cx) {
             if self.queue_held && !self.working && self.questions.is_empty() {
@@ -1158,12 +1209,8 @@ impl ThreadView {
             text
         };
         self.composer.update(cx, |c, cx| c.set_value("", window, cx));
-        if self.questions.front().is_some_and(|q| q.takes_own_answer) {
+        if self.active_question().is_some_and(|q| q.takes_own_answer) {
             self.answer_in_own_words(&text, cx);
-            return;
-        }
-        if let Some(id) = self.async_answer_id() {
-            self.answer_async_ask(id, Some(text), cx);
             return;
         }
         self.history_at = None;
@@ -1704,14 +1751,45 @@ impl ThreadView {
         cx.notify();
     }
 
+    /// The active question shown in the composer: turn-scoped questions (permissions, sync elicitations, MCP bridge)
+    /// always take priority over turn-surviving Codex async asks.
+    fn active_question(&self) -> Option<&Question> {
+        self.questions.front().or_else(|| self.asks.front())
+    }
+
+    fn active_question_mut(&mut self) -> Option<&mut Question> {
+        if !self.questions.is_empty() {
+            self.questions.front_mut()
+        } else {
+            self.asks.front_mut()
+        }
+    }
+
+    fn pop_active_question(&mut self) -> Option<Question> {
+        self.questions.pop_front().or_else(|| self.asks.pop_front())
+    }
+
+    pub(super) fn pending_question_count(&self) -> usize {
+        self.questions.len() + self.asks.len()
+    }
+
     /// Show a multiple-choice question from m4code's MCP `ask_user` tool (works on every harness, including ones
     /// whose native question tool isn't bridged over ACP).
-    pub fn ask_bridge_question(&mut self, req_id: String, title: String, options: Vec<QuestionOption>, cx: &mut Context<Self>) {
+    pub fn ask_bridge_question(&mut self, req_id: String, title: String, options: Vec<QuestionOption>, multi_select: bool, cx: &mut Context<Self>) {
         if self.interrupting || self.restarting_for_steer {
             crate::mcp::bridge::respond(&req_id, false, "The turn was interrupted.");
             return;
         }
-        self.questions.push_back(Question { id: Uuid::new_v4(), reply: QuestionReply::Bridge(req_id), title, options, highlight: 0, takes_own_answer: true });
+        self.questions.push_back(Question {
+            id: Uuid::new_v4(),
+            reply: QuestionReply::Bridge(req_id),
+            title,
+            options,
+            highlight: 0,
+            multi_select,
+            selected: BTreeSet::new(),
+            takes_own_answer: true,
+        });
         cx.notify();
     }
 
@@ -1729,31 +1807,107 @@ impl ThreadView {
                         c.respond(id, acp::elicitation_cancel());
                     }
                 }
+                QuestionReply::AsyncAsk { .. } => {}
             }
         }
     }
 
     pub(crate) fn answer_question(&mut self, id: Uuid, choice: Option<usize>, cx: &mut Context<Self>) -> bool {
-        if self.questions.front().is_some_and(|question| question.id == id) {
-            match choice {
-                Some(ix) => self.answer(Some(ix), cx),
-                None => self.decline(cx),
-            }
-            return true;
+        let Some(q) = self.active_question() else { return false };
+        if q.id != id {
+            return false;
         }
-        if self.async_ask().is_some_and(|ask| ask.id == id) {
-            match choice {
-                Some(ix) => self.choose_async_ask(id, ix, cx),
-                None => self.answer_async_ask(id, None, cx),
+        match choice {
+            Some(ix) if q.multi_select => self.toggle_question_option(id, ix, cx),
+            Some(ix) => {
+                self.answer(Some(ix), cx);
+                true
             }
-            return true;
+            None => {
+                self.decline(cx);
+                true
+            }
         }
-        false
+    }
+
+    /// Toggle a checkbox option on the active multi-select question.
+    pub(crate) fn toggle_question_option(&mut self, id: Uuid, index: usize, cx: &mut Context<Self>) -> bool {
+        let Some(q) = self.active_question_mut() else { return false };
+        if q.id != id || !q.multi_select || index >= q.options.len() {
+            return false;
+        }
+        if !q.selected.remove(&index) {
+            q.selected.insert(index);
+        }
+        q.highlight = index;
+        cx.notify();
+        true
+    }
+
+    /// Submit all checked options on the active multi-select question.
+    pub(crate) fn submit_multi_question(&mut self, id: Uuid, cx: &mut Context<Self>) -> bool {
+        if !self.active_question().is_some_and(|q| q.id == id && q.multi_select && !q.selected.is_empty()) {
+            return false;
+        }
+        self.submit_selected(None, cx);
+        true
+    }
+
+    fn submit_selected(&mut self, extra_text: Option<&str>, cx: &mut Context<Self>) {
+        let Some(q) = self.pop_active_question() else { return };
+        let chosen: Vec<&QuestionOption> = q.selected.iter().filter_map(|&i| q.options.get(i)).collect();
+        let extra = extra_text.map(str::trim).filter(|s| !s.is_empty());
+        let joined = || {
+            let mut parts: Vec<&str> = chosen.iter().map(|o| o.name.as_str()).collect();
+            if let Some(t) = extra {
+                parts.push(t);
+            }
+            parts.join(", ")
+        };
+        match q.reply {
+            QuestionReply::Acp(id) => {
+                let ids: Vec<String> = chosen.iter().map(|o| o.id.clone()).collect();
+                if let Some(c) = &self.connection {
+                    c.respond(id, acp::multi_answer(&ids, extra));
+                }
+            }
+            QuestionReply::Elicitation { id, field, kind, mut answers, mut remaining } => {
+                let ids: Vec<&str> = chosen.iter().map(|o| o.id.as_str()).collect();
+                answers.insert(field, kind.to_json_values(&ids));
+                if let Some(next) = remaining.pop_front() {
+                    let multi_select = next.kind == acp::ElicitationKind::MultiChoice;
+                    let options = next
+                        .options
+                        .into_iter()
+                        .map(|o| QuestionOption { id: o.value, name: o.label, description: o.description, kind: "allow_once".into() })
+                        .collect();
+                    self.questions.push_front(Question {
+                        id: Uuid::new_v4(),
+                        reply: QuestionReply::Elicitation { id, field: next.field, kind: next.kind, answers, remaining },
+                        title: next.title,
+                        options,
+                        highlight: 0,
+                        multi_select,
+                        selected: BTreeSet::new(),
+                        takes_own_answer: false,
+                    });
+                } else if let Some(c) = &self.connection {
+                    c.respond(id, acp::elicitation_accept(answers));
+                }
+            }
+            QuestionReply::Bridge(req_id) => crate::mcp::bridge::respond(&req_id, true, joined()),
+            QuestionReply::AsyncAsk { remaining, replies } => {
+                let text = joined();
+                self.finish_async_ask(q.title, remaining, replies, (!text.is_empty()).then_some(text), cx);
+            }
+        }
+        self.send_next(cx);
+        cx.notify();
     }
 
     /// Answer the open permission/ask question with option `index` (from 0), or turn it down.
     pub fn answer(&mut self, index: Option<usize>, cx: &mut Context<Self>) {
-        let Some(q) = self.questions.pop_front() else { return };
+        let Some(q) = self.pop_active_question() else { return };
         let chosen = index.and_then(|i| q.options.get(i));
         match q.reply {
             QuestionReply::Acp(id) => {
@@ -1764,8 +1918,9 @@ impl ThreadView {
             }
             QuestionReply::Elicitation { id, field, kind, mut answers, mut remaining } => {
                 if let Some(opt) = chosen {
-                    answers.insert(field, kind.to_json_value(&opt.id));
+                    answers.insert(field, kind.to_json_values(&[&opt.id]));
                     if let Some(next) = remaining.pop_front() {
+                        let multi_select = next.kind == acp::ElicitationKind::MultiChoice;
                         let options = next
                             .options
                             .into_iter()
@@ -1777,6 +1932,8 @@ impl ThreadView {
                             title: next.title,
                             options,
                             highlight: 0,
+                            multi_select,
+                            selected: BTreeSet::new(),
                             takes_own_answer: false,
                         });
                     } else if let Some(c) = &self.connection {
@@ -1790,6 +1947,9 @@ impl ThreadView {
                 Some(opt) => crate::mcp::bridge::respond(&req_id, true, &opt.name),
                 None => crate::mcp::bridge::respond(&req_id, false, "The user dismissed the question."),
             },
+            QuestionReply::AsyncAsk { remaining, replies } => {
+                self.finish_async_ask(q.title, remaining, replies, chosen.map(|o| o.name.clone()), cx);
+            }
         }
         self.send_next(cx);
         cx.notify();
@@ -1797,8 +1957,12 @@ impl ThreadView {
 
     /// Answer the open question with what the user typed rather than one of its options.
     fn answer_in_own_words(&mut self, text: &str, cx: &mut Context<Self>) {
-        if !self.questions.front().is_some_and(|q| q.takes_own_answer) { return; }
-        let Some(q) = self.questions.pop_front() else { return };
+        if !self.active_question().is_some_and(|q| q.takes_own_answer) { return; }
+        if self.active_question().is_some_and(|q| q.multi_select && !q.selected.is_empty()) {
+            self.submit_selected(Some(text), cx);
+            return;
+        }
+        let Some(q) = self.pop_active_question() else { return };
         match q.reply {
             QuestionReply::Acp(id) => {
                 if let Some(c) = &self.connection {
@@ -1806,6 +1970,9 @@ impl ThreadView {
                 }
             }
             QuestionReply::Bridge(req_id) => crate::mcp::bridge::respond(&req_id, true, text),
+            QuestionReply::AsyncAsk { remaining, replies } => {
+                self.finish_async_ask(q.title, remaining, replies, Some(text.to_string()), cx);
+            }
             // Never marked as taking the user's own words (`takes_own_answer`).
             QuestionReply::Elicitation { .. } => {}
         }
@@ -1815,7 +1982,7 @@ impl ThreadView {
 
     /// Move the open question's highlight to option `index`, as the mouse does.
     pub(super) fn highlight_option(&mut self, index: usize, cx: &mut Context<Self>) {
-        if let Some(q) = self.questions.front_mut()
+        if let Some(q) = self.active_question_mut()
             && q.highlight != index
         {
             q.highlight = index;
@@ -1825,7 +1992,7 @@ impl ThreadView {
 
     /// Turn the question down with its own reject option when it has one.
     pub fn decline(&mut self, cx: &mut Context<Self>) {
-        let reject = self.questions.front().and_then(|q| q.options.iter().position(|o| o.kind == "reject_once"));
+        let reject = self.active_question().and_then(|q| q.options.iter().position(|o| o.kind == "reject_once"));
         self.answer(reject, cx);
     }
 
@@ -2010,8 +2177,10 @@ impl ThreadView {
         let state = keys::State {
             picker_open: self.picker.is_some(),
             working: self.can_interrupt(),
-            question: self.questions.front().map_or(0, |q| q.options.len()),
-            draft_empty: !self.can_submit_draft(cx) || self.async_answer_blocked(),
+            question: self.active_question().map_or(0, |q| q.options.len()),
+            question_open: self.active_question().is_some(),
+            question_multi: self.active_question().is_some_and(|q| q.multi_select),
+            draft_empty: !self.can_submit_draft(cx),
             in_history: self.history_at.is_some(),
             escape_just_pressed: self.last_escape.is_some_and(|t| t.elapsed() < keys::DOUBLE_PRESS),
             completing: self.completion(&draft, self.composer.read(cx).selected_range().end).is_some(),
@@ -2037,13 +2206,38 @@ impl ThreadView {
             }
             keys::Key::Interrupt => self.interrupt(cx),
             keys::Key::Decline => self.decline(cx),
-            keys::Key::Choose(n) => self.answer(Some(n - 1), cx),
+            keys::Key::Choose(n) => {
+                if let Some(q) = self.active_question()
+                    && q.multi_select
+                {
+                    let id = q.id;
+                    self.toggle_question_option(id, n - 1, cx);
+                } else {
+                    self.answer(Some(n - 1), cx);
+                }
+            }
+            keys::Key::ToggleHighlighted => {
+                if let Some(q) = self.active_question()
+                    && q.multi_select
+                {
+                    let (id, at) = (q.id, q.highlight);
+                    self.toggle_question_option(id, at, cx);
+                }
+            }
             keys::Key::ChooseHighlighted => {
-                let at = self.questions.front().map(|q| q.highlight);
-                self.answer(at, cx);
+                if let Some(q) = self.active_question() {
+                    if q.multi_select {
+                        if !q.selected.is_empty() {
+                            self.submit_selected(None, cx);
+                        }
+                    } else {
+                        let at = q.highlight;
+                        self.answer(Some(at), cx);
+                    }
+                }
             }
             keys::Key::OptionUp | keys::Key::OptionDown => {
-                if let Some(q) = self.questions.front_mut() {
+                if let Some(q) = self.active_question_mut() {
                     let last = q.options.len().saturating_sub(1);
                     q.highlight = match (key == keys::Key::OptionDown, q.highlight.min(last)) {
                         (true, at) if at >= last => 0,
@@ -2213,7 +2407,7 @@ impl ThreadView {
 
     /// The slash command a typed `/` token completes to: the first one it starts.
     fn completion(&self, draft: &str, cursor: usize) -> Option<String> {
-        if self.asks.composing_answer() {
+        if self.active_question().is_some_and(|q| q.takes_own_answer) {
             return None;
         }
         let (_, _, typed) = active_slash_token(draft, cursor)?;
@@ -2229,7 +2423,7 @@ impl ThreadView {
         let draft = input.value();
         let cursor = input.selected_range().end;
         // What is typed answers the open question, so it is never a command to complete.
-        if self.queue_edit.is_some() || self.questions.front().is_some_and(|q| q.takes_own_answer) || self.asks.composing_answer() {
+        if self.queue_edit.is_some() || self.active_question().is_some_and(|q| q.takes_own_answer) {
             return vec![];
         }
         let Some((_, _, typed)) = active_slash_token(draft.as_ref(), cursor) else { return vec![] };
@@ -2525,32 +2719,17 @@ impl ThreadView {
 
     /// Snapshot of the pending question, if any, so the sidebar popover can render and answer it.
     pub fn pending_question(&self) -> Option<PendingQuestion> {
-        self.questions
-            .front()
-            .map(|q| PendingQuestion { id: q.id, title: q.title.clone(), options: q.options.clone() })
-            .or_else(|| {
-                let ask = self.async_ask()?;
-                let options = ask
-                    .question
-                    .options
-                    .iter()
-                    .enumerate()
-                    .map(|(i, name)| QuestionOption {
-                        id: format!("async-{i}"),
-                        name: name.clone(),
-                        description: None,
-                        kind: "allow_once".into(),
-                    })
-                    .collect();
-                Some(PendingQuestion { id: ask.id, title: ask.question.title.clone(), options })
-            })
+        self.active_question().map(|q| PendingQuestion {
+            id: q.id,
+            title: q.title.clone(),
+            options: q.options.clone(),
+            multi_select: q.multi_select,
+            selected: q.selected.clone(),
+        })
     }
 
     pub fn pending_question_title(&self) -> Option<String> {
-        self.questions
-            .front()
-            .map(|q| q.title.clone())
-            .or_else(|| self.async_ask().map(|ask| ask.question.title.clone()))
+        self.active_question().map(|q| q.title.clone())
     }
 
     /// Only cross-harness hand-offs announce themselves; ordinary session startup stays invisible to the user.
@@ -2580,7 +2759,7 @@ impl ThreadView {
 
     // Queue edits and agent questions use the textarea for a separate, text-only input.
     fn attachments_enabled(&self) -> bool {
-        self.queue_edit.is_none() && self.questions.is_empty() && self.async_answer_id().is_none()
+        self.queue_edit.is_none() && self.active_question().is_none()
     }
 
     fn can_submit_draft(&self, cx: &App) -> bool {
@@ -2802,36 +2981,32 @@ mod tests {
             assert_eq!(v.pending_question_title().as_deref(), Some("Choose a branch."));
             v.agent_meta = json!({"steering":{"supported":true}});
             assert!(v.can_steer("Ordinary message", crate::store::FollowUp::Steer));
-            assert!(v.async_answer_id().is_none());
             v.send_as("Ordinary message".into(), crate::store::FollowUp::Queue, cx);
-            let ask_id = v.async_ask().unwrap().id;
-            v.toggle_async_answer(ask_id, window, cx);
+            let ask_id = v.active_question().unwrap().id;
             v.set_draft("My answer", window, cx);
             v.on_event(Event::Permission { id: json!("approval"), params: json!({
                 "toolCall":{"title":"Run a command","kind":"execute"},
                 "options":[{"optionId":"allow","name":"Allow","kind":"allow_once"}]
             }) }, cx);
             assert_eq!(v.pending_question_title().as_deref(), Some("Run a command"));
-            assert!(v.async_ask().is_none());
-            v.submit_with(false, window, cx);
-            assert_eq!(v.draft(cx), "My answer");
-            assert_eq!(v.queue.len(), 1);
+            assert_ne!(v.active_question().unwrap().id, ask_id);
             v.answer(Some(0), cx);
-            assert_eq!(v.async_answer_id(), Some(ask_id));
-            v.toggle_async_answer(ask_id, window, cx);
+            assert_eq!(v.active_question().unwrap().id, ask_id);
             v.set_draft("", window, cx);
             v.on_event(Event::TurnEnded(Ok(json!({"stopReason":"end_turn"}))), cx);
-            let ask = v.async_ask().expect("the ask card survives turn completion");
-            assert_eq!(ask.question.title, "Choose a branch.");
-            assert_eq!(ask.question.options, ["main", "dev"]);
-            v.choose_async_ask(ask.id, 1, cx);
-            let ask = v.async_ask().unwrap();
-            assert_eq!(ask.question.title, "What should I check?");
-            v.answer_async_ask(ask.id, Some("The regression test.".into()), cx);
+            let ask = v.active_question().expect("the ask card survives turn completion");
+            assert_eq!(ask.title, "Choose a branch.");
+            let names: Vec<&str> = ask.options.iter().map(|o| o.name.as_str()).collect();
+            assert_eq!(names, ["main", "dev"]);
+            assert!(v.answer_question(ask_id, Some(1), cx));
+            let next = v.active_question().unwrap();
+            assert_eq!(next.title, "What should I check?");
+            v.set_draft("The regression test.", window, cx);
+            v.submit_with(false, window, cx);
             assert!(!v.is_waiting());
             assert_eq!(v.queue.front().unwrap().text, "> Choose a branch.\n\ndev\n\n> What should I check?\n\nThe regression test.");
             assert_eq!(v.queue.back().unwrap().text, "Ordinary message");
-            assert!(v.async_ask().is_none());
+            assert!(v.active_question().is_none());
         }));
     }
 
@@ -2843,12 +3018,12 @@ mod tests {
 
         cx.update(gpui_kit::init);
         let dir = tempfile::tempdir().unwrap();
-        let (view, cx) = cx.add_window_view(|window, cx| ThreadView::new(test_start(dir.path().into(), Harness::Codex), window, cx));
         let (from_agent, _keep_open) = std::io::pipe().unwrap();
         let (from_client, to_agent) = std::io::pipe().unwrap();
         let (tx, _events) = futures::channel::mpsc::unbounded();
         let connection = Connection::connect(from_agent, to_agent, None::<std::io::Empty>, tx);
-        view.update(cx, |v, cx| {
+        let (view, cx) = cx.add_window_view(|window, cx| ThreadView::new(test_start(dir.path().into(), Harness::Codex), window, cx));
+        cx.update(|window, app| view.update(app, |v, cx| {
             v.connection = Some(std::rc::Rc::new(connection));
             v.session_id = Some("codex-session".into());
             v.agent_meta = json!({"steering":{"supported":true}});
@@ -2863,10 +3038,11 @@ mod tests {
                 "requestedSchema":{"properties":{"question_0":{"title":"Which test?","type":"string"}}}
             }) }, cx);
             assert!(matches!(&v.thread.entries[..], [Entry::Agent(text)] if text == "There are two things I could investigate."));
-            v.answer_async_ask(v.async_ask().unwrap().id, Some("The unit test.".into()), cx);
+            v.set_draft("The unit test.", window, cx);
+            v.submit_with(false, window, cx);
             assert_eq!(v.steering.len(), 1);
             assert!(v.queue.is_empty());
-        });
+        }));
         let mut wire = BufReader::new(from_client).lines();
         let decline: Value = serde_json::from_str(&wire.next().unwrap().unwrap()).unwrap();
         assert_eq!(decline, json!({"jsonrpc":"2.0","id":"question-form","result":{"action":"decline"}}));
@@ -2874,6 +3050,119 @@ mod tests {
         assert_eq!(steer["method"], "_session/steering");
         assert_eq!(steer["params"]["sessionId"], "codex-session");
         assert_eq!(steer["params"]["prompt"][0]["text"], "> Which test?\n\nThe unit test.");
+    }
+
+    #[gpui::test]
+    fn multi_select_checkboxes_work_across_acp_elicitation_and_codex(cx: &mut gpui::TestAppContext) {
+        use std::io::{BufRead, BufReader};
+        use serde_json::{Value, json};
+        use super::{Connection, Event, Phase, ThreadView};
+
+        cx.update(gpui_kit::init);
+        let dir = tempfile::tempdir().unwrap();
+        let (from_agent, _keep_open) = std::io::pipe().unwrap();
+        let (from_client, to_agent) = std::io::pipe().unwrap();
+        let (tx, _events) = futures::channel::mpsc::unbounded();
+        let connection = Connection::connect(from_agent, to_agent, None::<std::io::Empty>, tx);
+        let (view, cx) = cx.add_window_view(|window, cx| ThreadView::new(test_start(dir.path().into(), Harness::Codex), window, cx));
+        cx.update(|window, app| view.update(app, |v, cx| {
+            v.connection = Some(std::rc::Rc::new(connection));
+            v.session_id = Some("s1".into());
+            v.phase = Phase::Ready;
+            v.working = true;
+
+            // 1. Claude-style ACP permission multi-select with optional free-text.
+            v.on_event(Event::Permission { id: json!("claude-multi"), params: json!({
+                "_meta": {"m4code": {"freeText": true, "multiSelect": true}},
+                "toolCall": {"title": "Pick topics", "kind": "other"},
+                "options": [
+                    {"optionId": "0", "name": "Rust", "kind": "allow_once"},
+                    {"optionId": "1", "name": "Go", "kind": "allow_once"},
+                    {"optionId": "2", "name": "Zig", "kind": "allow_once"}
+                ]
+            }) }, cx);
+            let q = v.pending_question().unwrap();
+            assert!(q.multi_select);
+            assert!(!v.submit_multi_question(q.id, cx), "cannot submit with nothing checked");
+            assert!(v.toggle_question_option(q.id, 2, cx));
+            assert!(v.toggle_question_option(q.id, 0, cx));
+            assert_eq!(v.pending_question().unwrap().selected.iter().copied().collect::<Vec<_>>(), vec![0, 2]);
+            v.set_draft("OCaml", window, cx);
+            v.submit_with(false, window, cx);
+            assert!(v.active_question().is_none());
+
+            // 2. Standard ACP form elicitation multi-select (Antigravity / sync elicitation).
+            v.on_event(Event::Elicitation { id: json!("elicit-multi"), params: json!({
+                "mode": "form",
+                "message": "Select languages",
+                "requestedSchema": {
+                    "type": "object",
+                    "properties": {
+                        "langs": {
+                            "type": "array",
+                            "items": {
+                                "anyOf": [
+                                    {"const": "rs", "title": "Rust", "description": "Systems"},
+                                    {"const": "ts", "title": "TypeScript"},
+                                    {"const": "py", "title": "Python"}
+                                ]
+                            }
+                        }
+                    }
+                }
+            }) }, cx);
+            let q = v.pending_question().unwrap();
+            assert!(q.multi_select);
+            assert_eq!(q.options[0].description.as_deref(), Some("Systems"));
+            assert!(v.toggle_question_option(q.id, 0, cx));
+            assert!(v.toggle_question_option(q.id, 1, cx));
+            assert!(v.toggle_question_option(q.id, 1, cx)); // uncheck
+            assert!(v.toggle_question_option(q.id, 2, cx));
+            assert!(v.submit_multi_question(q.id, cx));
+            assert!(v.active_question().is_none());
+
+            // 3. Codex async multi-select elicitation.
+            v.on_event(Event::Elicitation { id: json!("codex-multi"), params: json!({
+                "mode": "form",
+                "_meta": {"codex": {"delivery": "async"}},
+                "requestedSchema": {
+                    "type": "object",
+                    "properties": {
+                        "question_0": {
+                            "title": "Which targets?",
+                            "type": "array",
+                            "items": {
+                                "anyOf": [
+                                    {"const": "macOS", "title": "macOS", "description": "Apple Silicon"},
+                                    {"const": "Linux", "title": "Linux"}
+                                ]
+                            }
+                        }
+                    }
+                }
+            }) }, cx);
+            let q = v.pending_question().unwrap();
+            assert!(q.multi_select);
+            assert_eq!(q.options[0].description.as_deref(), Some("Apple Silicon"));
+            assert!(v.toggle_question_option(q.id, 0, cx));
+            assert!(v.toggle_question_option(q.id, 1, cx));
+            assert!(v.submit_multi_question(q.id, cx));
+            assert_eq!(v.queue.front().unwrap().text, "> Which targets?\n\nmacOS, Linux");
+        }));
+
+        let mut wire = BufReader::new(from_client).lines();
+        let claude_reply: Value = serde_json::from_str(&wire.next().unwrap().unwrap()).unwrap();
+        assert_eq!(claude_reply["id"], "claude-multi");
+        assert_eq!(claude_reply["result"]["_meta"]["m4code"]["optionIds"], json!(["0", "2"]));
+        assert_eq!(claude_reply["result"]["_meta"]["m4code"]["text"], "OCaml");
+
+        let elicit_reply: Value = serde_json::from_str(&wire.next().unwrap().unwrap()).unwrap();
+        assert_eq!(elicit_reply["id"], "elicit-multi");
+        assert_eq!(elicit_reply["result"], json!({"action": "accept", "content": {"langs": ["rs", "py"]}}));
+
+        let codex_decline: Value = serde_json::from_str(&wire.next().unwrap().unwrap()).unwrap();
+        assert_eq!(codex_decline["id"], "codex-multi");
+        assert_eq!(codex_decline["result"], json!({"action": "decline"}));
     }
 
     #[cfg(debug_assertions)]
@@ -3721,6 +4010,52 @@ mod tests {
                 "content": [{ "type": "content", "content": { "type": "text", "text": "Late output" } }]
             })), cx);
             assert!(v.background_tasks.is_empty(), "late output must not resurrect a finished task");
+
+            // A server restart notice or empty manage_task(list) response clears all tracked tasks.
+            v.on_event(super::Event::Update(serde_json::json!({
+                "sessionUpdate": "tool_call",
+                "toolCallId": "cmd-2",
+                "title": "Run tests",
+                "kind": "execute",
+                "status": "completed",
+                "rawInput": { "command": "cargo test" },
+                "rawOutput": "Tool is running as a background task with task id: conv/task-99"
+            })), cx);
+            assert_eq!(v.background_tasks.len(), 1);
+            v.on_event(super::Event::Update(serde_json::json!({
+                "sessionUpdate": "tool_call",
+                "toolCallId": "list-1",
+                "title": "Manage task",
+                "kind": "other",
+                "status": "completed",
+                "rawOutput": "No background tasks are currently running."
+            })), cx);
+            assert!(v.background_tasks.is_empty(), "empty task list clears stale background tasks");
+        });
+    }
+
+    #[gpui::test]
+    fn reopened_session_settles_stale_running_tools_from_prior_entries(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_kit::init);
+        let dir = tempfile::tempdir().unwrap();
+        let mut start = test_start(dir.path().into(), Harness::Antigravity);
+        start.prior_entries = vec![Entry::Tool(crate::harness::thread::ToolCall {
+            id: "stale-cmd".into(),
+            title: "Run tests".into(),
+            kind: "execute".into(),
+            status: super::ToolStatus::Running,
+            content: vec![],
+            locations: vec![],
+            details: Box::new(crate::harness::thread::ToolDetails {
+                command: Some("cargo test -- thread::".into()),
+                ..Default::default()
+            }),
+            subagent: None,
+        })];
+        let (view, cx) = cx.add_window_view(|window, cx| super::ThreadView::new(start, window, cx));
+        view.read_with(cx, |v, _| {
+            assert!(!v.has_background_work(), "stale running tools from before a restart must not show as background work");
+            assert_eq!(v.thread.tool("stale-cmd").unwrap().status, super::ToolStatus::Ended);
         });
     }
 

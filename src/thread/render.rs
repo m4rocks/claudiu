@@ -1114,20 +1114,23 @@ impl ThreadView {
     }
 
     fn render_question(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<Div> {
-        let q = self.questions.front()?;
+        let q = self.active_question()?;
         let question_id = q.id;
+        let multi = q.multi_select;
+        let selected_count = q.selected.len();
         let mut options = div().flex().flex_col().gap(px(6.0)).w_full();
         for (i, opt) in q.options.iter().enumerate() {
             let lit = i == q.highlight;
+            let checked = multi && q.selected.contains(&i);
             let row = div()
                 .id(SharedString::from(format!("thread-perm-{question_id}-{i}")))
                 .w_full()
                 .px(px(10.0))
                 .py(px(8.0))
                 .rounded(px(7.0))
-                .bg(hsla(if lit { theme::ROW_ACTIVE } else { theme::PANEL_BG }))
+                .bg(hsla(if lit || checked { theme::ROW_ACTIVE } else { theme::PANEL_BG }))
                 .border_1()
-                .border_color(hsla(if lit { theme::FOCUS_BORDER } else { theme::PANEL_BORDER }))
+                .border_color(hsla(if lit || checked { theme::FOCUS_BORDER } else { theme::PANEL_BORDER }))
                 .cursor_pointer()
                 .on_hover(cx.listener(move |v, hovered: &bool, _, cx| {
                     if *hovered {
@@ -1137,6 +1140,22 @@ impl ThreadView {
                 .flex()
                 .items_start()
                 .gap(px(10.0))
+                .when(multi, |row| {
+                    row.child(
+                        div()
+                            .mt(px(2.0))
+                            .flex_none()
+                            .size(px(15.0))
+                            .rounded(px(4.0))
+                            .border_1()
+                            .border_color(hsla(if checked { theme::ACCENT } else { theme::PANEL_BORDER }))
+                            .bg(hsla(if checked { theme::ACCENT } else { theme::PANEL_BG }))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .when(checked, |box_el| box_el.child(icon(IconName::Check, 11.0).text_color(hsla(theme::PANEL_BG)))),
+                    )
+                })
                 .child(div().pt(px(1.0)).child(key_badge(format!("{}", i + 1))))
                 .child(
                     div()
@@ -1159,9 +1178,94 @@ impl ThreadView {
                                 .child(desc)
                         })),
                 )
-                .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| { v.answer_question(question_id, Some(i), cx); }));
+                .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| {
+                    if multi {
+                        v.toggle_question_option(question_id, i, cx);
+                    } else {
+                        v.answer_question(question_id, Some(i), cx);
+                    }
+                }));
             options = options.child(row);
         }
+        let pending_count = self.pending_question_count();
+        let footer = if multi {
+            let submit_label = if selected_count > 0 { format!("Submit ({selected_count})") } else { "Submit".into() };
+            let submit_btn = if selected_count > 0 {
+                button_colored(
+                    "thread-question-submit",
+                    Some(IconName::Check),
+                    &submit_label,
+                    hsla(theme::ACCENT),
+                    hsla(theme::PANEL_BG),
+                    hsla(0xdcdcdc),
+                    None,
+                    true,
+                )
+                .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| {
+                    v.submit_multi_question(question_id, cx);
+                }))
+                .h(px(24.0))
+                .px(px(10.0))
+                .into_any_element()
+            } else {
+                button_disabled_leading("thread-question-submit", Some(IconName::Check), &submit_label)
+                    .h(px(24.0))
+                    .px(px(10.0))
+                    .into_any_element()
+            };
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap(px(8.0))
+                .child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .gap(px(6.0))
+                        .items_center()
+                        .text_color(hsla(theme::TEXT_FAINT))
+                        .text_size(scale::px(11.5))
+                        .child(key_badge("↑↓"))
+                        .child(key_badge("Space"))
+                        .child("or")
+                        .child(key_badge("1-9"))
+                        .child("to toggle")
+                        .child(key_badge("Enter"))
+                        .child("to submit")
+                        .child(key_badge("Esc"))
+                        .child("to decline")
+                        .when(q.takes_own_answer, |d| d.child("· or type below")),
+                )
+                .child(submit_btn)
+        } else if q.options.is_empty() {
+            div()
+                .flex()
+                .flex_wrap()
+                .gap(px(6.0))
+                .items_center()
+                .text_color(hsla(theme::TEXT_FAINT))
+                .text_size(scale::px(11.5))
+                .child(key_badge("Esc"))
+                .child("to dismiss")
+                .child("· type your answer below")
+        } else {
+            div()
+                .flex()
+                .flex_wrap()
+                .gap(px(6.0))
+                .items_center()
+                .text_color(hsla(theme::TEXT_FAINT))
+                .text_size(scale::px(11.5))
+                .child(key_badge("↑↓"))
+                .child(key_badge("Enter"))
+                .child("or")
+                .child(key_badge("1-9"))
+                .child("to choose")
+                .child(key_badge("Esc"))
+                .child("to decline")
+                .when(q.takes_own_answer, |d| d.child("· or type your own answer below"))
+        };
         // Inside the message box, above where you type: a long list of options scrolls on its own.
         Some(
             div()
@@ -1175,59 +1279,19 @@ impl ThreadView {
                 .flex_col()
                 .gap(px(8.0))
                 .child(div().font_weight(FontWeight::SEMIBOLD).child(q.title.clone()))
-                .when(self.questions.len() > 1, |card| card.child(div().text_size(scale::px(11.5)).text_color(hsla(theme::TEXT_DIM)).child(format!("{} more requests", self.questions.len() - 1))))
-                .child(self.question_scroll.wire(div().id("thread-question-options").max_h(px(240.0)), window).child(options))
-                .child(
-                    div()
-                        .flex()
-                        .flex_wrap()
-                        .gap(px(6.0))
-                        .items_center()
-                        .text_color(hsla(theme::TEXT_FAINT))
-                        .text_size(scale::px(11.5))
-                        .child(key_badge("↑↓"))
-                        .child(key_badge("Enter"))
-                        .child("or")
-                        .child(key_badge("1-9"))
-                        .child("to choose")
-                        .child(key_badge("Esc"))
-                        .child("to decline")
-                        .when(q.takes_own_answer, |d| d.child("· or type your own answer below")),
-                ),
+                .when(pending_count > 1, |card| {
+                    card.child(
+                        div()
+                            .text_size(scale::px(11.5))
+                            .text_color(hsla(theme::TEXT_DIM))
+                            .child(format!("{} more requests", pending_count - 1)),
+                    )
+                })
+                .when(!q.options.is_empty(), |card| {
+                    card.child(self.question_scroll.wire(div().id("thread-question-options").max_h(px(240.0)), window).child(options))
+                })
+                .child(footer),
         )
-    }
-
-    fn render_async_ask(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<Div> {
-        let ask = self.async_ask()?;
-        let id = ask.id;
-        let typing = self.async_answer_id().is_some();
-        let options = self.question_scroll.wire(
-            div().id("thread-async-ask-options").max_h(px(240.0)), window,
-        )
-            .flex()
-            .flex_col()
-            .items_start()
-            .gap(px(6.0))
-            .children(ask.question.options.iter().enumerate().map(|(index, label)| {
-                button(SharedString::from(format!("thread-async-ask-{id}-{index}")), label.clone(), false)
-                    .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| v.choose_async_ask(id, index, cx)))
-            }));
-        Some(div()
-            .w_full()
-            .px(px(12.0))
-            .py(px(8.0))
-            .border_b_1()
-            .border_color(hsla(theme::BORDER))
-            .flex()
-            .flex_col()
-            .gap(px(8.0))
-            .child(div().font_weight(FontWeight::SEMIBOLD).child(ask.question.title.clone()))
-            .when(!ask.question.options.is_empty(), |card| card.child(options))
-            .child(div().flex().gap(px(6.0))
-                .child(button("thread-async-ask-type", if typing { "Cancel answer" } else { "Type an answer" }, false)
-                    .on_click(cx.listener(move |v, _: &ClickEvent, window, cx| v.toggle_async_answer(id, window, cx))))
-                .child(button("thread-async-ask-dismiss", "Dismiss", false)
-                    .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| v.answer_async_ask(id, None, cx))))))
     }
 
     /// Universal floating picker dialog over the chat view: unified model + draggable effort picker, or permission mode selector.
@@ -1606,7 +1670,7 @@ impl ThreadView {
         let can_interrupt = self.can_interrupt();
         let idle_for_resume = !active_turn && self.queue_held && self.questions.is_empty()
             && (self.waiting_messages().next().is_some() || self.handoff_after_turn.is_some());
-        let answering = self.questions.front().is_some_and(|q| q.takes_own_answer) || self.async_answer_id().is_some();
+        let answering = self.active_question().is_some_and(|q| q.takes_own_answer);
         let follow_up = if alternate { self.follow_up.other() } else { self.follow_up };
         #[derive(Clone, Copy)]
         enum ActionKind {
@@ -1650,8 +1714,6 @@ impl ThreadView {
         };
         let enabled = if editing {
             has_message && self.questions.is_empty()
-        } else if self.async_answer_blocked() {
-            false
         } else if answering && has_message {
             true
         } else if !has_message && can_interrupt {
@@ -1684,8 +1746,8 @@ impl ThreadView {
         }.h(px(26.0)).px(px(12.0)).into_any_element();
 
         composer::Composer {
-            lit: focused || !self.questions.is_empty(),
-            top: self.render_question(window, cx).or_else(|| self.render_async_ask(window, cx)).map(IntoElement::into_any_element),
+            lit: focused || self.active_question().is_some(),
+            top: self.render_question(window, cx).map(IntoElement::into_any_element),
             input,
             model,
             permission,
