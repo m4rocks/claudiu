@@ -1,12 +1,9 @@
-//! Tab titles, model/effort switches and visuals chosen by Claude itself, through a tiny MCP server
-//! (`m4code --mcp-title`).
+//! m4code's built-in MCP server (`m4code --mcp-title`), wired into every harness session over stdio.
 //!
-//! It is wired in *per process*: m4code starts each Claude session with `--mcp-config <file>` (and
-//! `--allowedTools` for its tools so they never prompt). The server's `instructions` ask Claude to name the tab now
-//! and then; the tool just drops the title into a file that m4code picks up on its next tick. `set_model` and
-//! `show_visual` are declared here only so Claude sees them: the per-process mod (`mod/`, loaded with
-//! `--plugin-dir`) answers those calls in-process (`show_visual` while the model is still writing it), so the
-//! server only ever sees them when the mod isn't active, and then reports that.
+//! Provides cross-harness tools for inline visual cards (`show_visual`), GitHub sidebar attachment, session linking,
+//! model switching (`list_models` / `set_model`), cross-agent subagents, and interactive questions (`ask_user`).
+
+pub mod bridge;
 
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
@@ -15,7 +12,6 @@ use serde_json::{Value, json};
 
 use serde::{Deserialize, Serialize};
 
-use crate::claude::trim::Trim;
 use crate::store::Attached;
 
 pub const FLAG: &str = "--mcp-title";
@@ -72,12 +68,14 @@ pub fn normalized_features(features: &[Feature]) -> Vec<Feature> {
     Feature::ALL.into_iter().filter(|f| features.contains(f)).collect()
 }
 
-/// What the server leaves out of a session: the features switched off, plus `ask_user_question` and `artifacts` when
-/// those Claude Code tools are trimmed, so m4code's own text stops naming them.
-pub fn tools_off(features: &[Feature], trimmed: &[Trim]) -> Vec<&'static str> {
+/// What the server leaves out of a session: the features switched off plus any adapter-provided tool names to hide.
+pub fn tools_off(features: &[Feature], extra_off: &[&'static str]) -> Vec<&'static str> {
     let mut off: Vec<&'static str> = normalized_features(features).into_iter().map(Feature::name).collect();
-    off.extend(trimmed.contains(&Trim::AskUserQuestion).then_some("ask_user_question"));
-    off.extend(trimmed.contains(&Trim::Artifacts).then_some("artifacts"));
+    for &name in extra_off {
+        if !off.contains(&name) {
+            off.push(name);
+        }
+    }
     off
 }
 
@@ -104,7 +102,7 @@ const OWN_TOOLS: [&str; 5] = ["attach_github", "detach_github", "link_session", 
 /// Tools that change this session's model; m4code answers them (`app/cross.rs`), whatever the harness.
 const MODEL_TOOLS: [&str; 2] = ["list_models", "set_model"];
 
-/// Tools that reach other sessions (`claude/bridge.rs`).
+/// Tools that reach other sessions (`mcp/bridge.rs`).
 pub(crate) const SUBAGENT_TOOLS: [&str; 5] = ["spawn_subagent", "list_subagents", "send_subagent_message", "wait_subagent", "stop_subagent"];
 
 const BRIDGE_TOOLS: [&str; 6] = ["list_code_sessions", "read_code_session", "search_sessions", "search_projects", "start_code_session", "switch_worktree"];
@@ -212,21 +210,6 @@ fn titles_dir() -> PathBuf {
     crate::datadir::data_dir().join("titles")
 }
 
-/// Where m4code puts the Claude Code session name it wants for a session; the mod (`M4CODE_NAME_FILE`)
-/// applies it with `/rename`, so nothing is typed into the PTY.
-pub fn name_file(claude_session_id: &str) -> PathBuf {
-    crate::datadir::data_dir().join("names").join(format!("{}.txt", crate::datadir::safe_file_stem(claude_session_id)))
-}
-
-/// Ask the mod for this session name (or none, for a nameless session).
-pub fn write_name(claude_session_id: &str, name: Option<&str>) {
-    let path = name_file(claude_session_id);
-    let _ = match name {
-        Some(name) => crate::datadir::write_atomic(&path, name),
-        None => std::fs::remove_file(&path),
-    };
-}
-
 fn attach_dir(data: &Path) -> PathBuf {
     data.join("attach")
 }
@@ -241,7 +224,7 @@ pub fn run() -> i32 {
     let from = format!("code:{record}");
     let off_env = std::env::var(TOOLS_OFF_ENV).unwrap_or_default();
     let off: Vec<&str> = off_env.split(',').map(str::trim).filter(|n| !n.is_empty()).collect();
-    serve(std::io::stdin().lock(), std::io::stdout().lock(), &record, &crate::datadir::data_dir(), &off, |tool, args| crate::claude::bridge::ask(&from, tool, args));
+    serve(std::io::stdin().lock(), std::io::stdout().lock(), &record, &crate::datadir::data_dir(), &off, |tool, args| bridge::ask(&from, tool, args));
     0
 }
 
@@ -890,6 +873,6 @@ mod tests {
     #[test]
     fn the_off_list_comes_from_both_settings_in_the_pages_order() {
         assert_eq!(tools_off(&[], &[]), Vec::<&str>::new());
-        assert_eq!(tools_off(&[Feature::Model, Feature::Visual, Feature::Visual], &[Trim::Artifacts, Trim::PlanMode, Trim::AskUserQuestion]), ["visual", "model", "ask_user_question", "artifacts"]);
+        assert_eq!(tools_off(&[Feature::Model, Feature::Visual, Feature::Visual], &["ask_user_question", "artifacts", "artifacts"]), ["visual", "model", "ask_user_question", "artifacts"]);
     }
 }

@@ -2,9 +2,9 @@ use gpui::{Div, ParentElement, Styled, div, px};
 
 use super::ThreadView;
 use crate::panels::{scale, theme::{self, hsla}, widgets::countdown};
-use crate::store::AccountUsage;
+use crate::store::UsageLimits;
 
-pub(crate) fn exhausted_usage(usage: &AccountUsage, now: i64) -> Option<String> {
+pub(crate) fn exhausted_usage(usage: &UsageLimits, now: i64) -> Option<String> {
     let reset = [usage.five_hour.as_ref(), usage.seven_day.as_ref()].into_iter().flatten()
         .filter(|limit| limit.utilization.is_some_and(|used| used >= 1.0))
         .filter_map(|limit| limit.resets_at.filter(|reset| *reset > now))
@@ -39,7 +39,7 @@ mod tests {
     #[test]
     fn recovery_waits_for_both_exhausted_windows() {
         let limit = |reset| Some(RateLimit { utilization: Some(1.0), resets_at: Some(reset), seen_at: 50 });
-        let usage = AccountUsage { five_hour: limit(200), seven_day: limit(400) };
+        let usage = UsageLimits { five_hour: limit(200), seven_day: limit(400) };
         assert_eq!(exhausted_usage(&usage, 100), Some("Usage limit reached. Resets in 5m.".into()));
         assert_eq!(exhausted_usage(&usage, 400), None);
     }

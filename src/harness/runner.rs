@@ -1,4 +1,4 @@
-//! Runs one task in a custom subagent's provider (`claude/subagents.rs`), through the Agent Client
+//! Runs one task in a custom subagent's provider (`harness/subagents.rs`), through the Agent Client
 //! Protocol: `m4code --acp`. The Custom subagents settings page also asks the agent for its models here (`models`).
 //!
 //! The mod starts this once per subagent turn and writes the task to stdin as JSON (`Request`). A mod can write a
@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use crate::claude::subagents::{Agent, AgentModel};
+use super::subagents::{Agent, AgentModel};
 use crate::platform::{find_executable, reload_path};
 
 pub const FLAG: &str = "--acp";
@@ -90,7 +90,7 @@ pub enum Event {
 pub fn run() -> i32 {
     match std::env::args().nth(2).as_deref() {
         Some("--cleanup") => return cleanup_inbox(),
-        Some(super::antigravity_read_only::HOOK_FLAG) => return super::antigravity_read_only::run_hook(),
+        Some(super::antigravity::read_only::HOOK_FLAG) => return super::antigravity::read_only::run_hook(),
         _ => {}
     }
     let mut out = std::io::stdout().lock();
@@ -208,7 +208,7 @@ pub(super) fn antigravity_args(request: &Request) -> Result<Vec<String>, String>
         return Ok(vec![]);
     }
     let m4code = crate::platform::own_exe().map_err(|e| format!("m4code couldn't find itself to keep Antigravity read-only ({e})"))?;
-    let gemini = super::antigravity_read_only::prepare(&crate::datadir::data_dir(), &m4code).map_err(|e| format!("m4code couldn't set up Antigravity's read-only folder ({e})"))?;
+    let gemini = super::antigravity::read_only::prepare(&crate::datadir::data_dir(), &m4code).map_err(|e| format!("m4code couldn't set up Antigravity's read-only folder ({e})"))?;
     Ok(vec!["--gemini-dir".into(), gemini.to_string_lossy().into_owned()])
 }
 

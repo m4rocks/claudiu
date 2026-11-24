@@ -53,7 +53,7 @@ fn handoffs_reuse_provider_sessions_and_restore_the_source_after_failure() {
         wait(&mut cx, harness);
     }
     ws.read_with(&cx, |ws, app| {
-        let meta = ws.store.session(&id).unwrap().claude.as_ref().unwrap();
+        let meta = ws.store.session(&id).unwrap().agent.as_ref().unwrap();
         assert_eq!(meta.provider_sessions.len(), 2);
         assert_eq!(meta.session_id, "fake-session");
         let view = ws.live_view(&id).unwrap().thread().unwrap().read(app);
@@ -71,7 +71,7 @@ fn handoffs_reuse_provider_sessions_and_restore_the_source_after_failure() {
     });
     wait(&mut cx, Harness::Claude);
     ws.read_with(&cx, |ws, app| {
-        assert_eq!(ws.store.session(&id).unwrap().claude.as_ref().unwrap().harness, Harness::Claude);
+        assert_eq!(ws.store.session(&id).unwrap().agent.as_ref().unwrap().harness, Harness::Claude);
         let view = ws.live_view(&id).unwrap().thread().unwrap().read(app);
         assert_eq!(view.draft(app), "keep this draft");
         assert!(view.is_running());
@@ -219,7 +219,7 @@ fn restart_reuses_provider_session_respects_capabilities_and_records_cache_usage
     };
     wait_ready(&mut cx, true);
     ws.read_with(&cx, |ws, app| {
-        let meta = ws.store.session(&id).unwrap().claude.as_ref().unwrap();
+        let meta = ws.store.session(&id).unwrap().agent.as_ref().unwrap();
         let view = ws.live_view(&id).unwrap().thread().unwrap().read(app);
         assert_eq!(meta.session_id, "fake-session");
         assert_eq!(view.thread.cache_usage.turns, 1);
@@ -233,7 +233,7 @@ fn restart_reuses_provider_session_respects_capabilities_and_records_cache_usage
     step(&mut cx, &|ws, window, cx| ws.restart_session(&id, window, cx));
     wait_ready(&mut cx, true);
     ws.read_with(&cx, |ws, app| {
-        let meta = ws.store.session(&id).unwrap().claude.as_ref().unwrap();
+        let meta = ws.store.session(&id).unwrap().agent.as_ref().unwrap();
         assert_eq!(meta.session_id, "fake-session");
         assert_eq!(meta.cache_usage.turns, 1, "restart preserves accumulated cache metrics");
         let view = ws.live_view(&id).unwrap().thread().unwrap().read(app);
@@ -362,7 +362,7 @@ fn interrupted_handoff_preserves_source_session_and_history() {
     });
     wait_settled(&mut cx, &id);
     ws.read_with(&cx, |ws, app| {
-        let meta = ws.store.session(&id).unwrap().claude.as_ref().unwrap();
+        let meta = ws.store.session(&id).unwrap().agent.as_ref().unwrap();
         assert_eq!(meta.harness, Harness::Claude);
         assert_eq!(meta.session_id, "fake-session");
         let view = ws.live_view(&id).unwrap().thread().unwrap().read(app);
@@ -385,7 +385,7 @@ fn interrupted_handoff_preserves_source_session_and_history() {
     step(&mut cx, &|ws, window, cx| ws.end_live(&id, window, cx));
     ws.read_with(&cx, |ws, _| {
         assert!(ws.pending_handoffs.is_empty(), "closing during handoff must clean up pending state");
-        let meta = ws.store.session(&id).unwrap().claude.as_ref().unwrap();
+        let meta = ws.store.session(&id).unwrap().agent.as_ref().unwrap();
         assert_eq!(meta.harness, Harness::Claude, "aborted handoff must not overwrite the stored harness");
         assert_eq!(meta.session_id, "fake-session", "aborted handoff must preserve the original provider session");
     });
@@ -501,7 +501,7 @@ fn compaction_respects_toggle_does_not_loop_on_failure_and_rearms() {
 
 #[test]
 fn shared_subagents_keep_their_parent_focus_permissions_and_conversation() {
-    use crate::claude::bridge::Request;
+    use crate::mcp::bridge::Request;
     use serde_json::{Value, json};
     let _dirs = crate::datadir::use_throwaway_folders();
     let work = tempfile::tempdir().unwrap();
@@ -542,7 +542,7 @@ fn shared_subagents_keep_their_parent_focus_permissions_and_conversation() {
             let reply: Value = serde_json::from_str(&ws.run_request(&spawn, window, cx).unwrap()).unwrap();
             *child.borrow_mut() = reply["id"].as_str().unwrap().to_string();
             assert_eq!(ws.active_id(), Some(&parent), "spawning must not take focus from the parent");
-            let meta = ws.store.session(&child.borrow()).unwrap().claude.as_ref().unwrap();
+            let meta = ws.store.session(&child.borrow()).unwrap().agent.as_ref().unwrap();
             assert_eq!(meta.parent_session.as_ref(), Some(&parent));
             assert!(meta.subagent_edits);
             assert_eq!(ws.subagents_of(&parent).iter().map(|(id, _)| id.clone()).collect::<Vec<_>>(), vec![child.borrow().clone()], "the parent's right sidebar lists the subagent");
@@ -627,15 +627,15 @@ fn shared_subagents_keep_their_parent_focus_permissions_and_conversation() {
             if harness == Harness::Claude {
                 ws.store.data.settings.claude_subagents.edits = false;
                 let reply: Value = serde_json::from_str(&ws.run_request(&spawn, window, cx).unwrap()).unwrap();
-                assert!(!ws.store.session(reply["id"].as_str().unwrap()).unwrap().claude.as_ref().unwrap().subagent_edits, "Claude must respect its saved edit switch");
+                assert!(!ws.store.session(reply["id"].as_str().unwrap()).unwrap().agent.as_ref().unwrap().subagent_edits, "Claude must respect its saved edit switch");
                 ws.store.data.settings.claude_subagents.edits = true;
             }
             ws.live_view(&parent).unwrap().thread().unwrap().update(cx, |view, _| view.thread.mode = Some("plan".into()));
             let restricted: Value = serde_json::from_str(&ws.run_request(&request("spawn_subagent", json!({"harness":harness,"prompt":"read only"})), window, cx).unwrap()).unwrap();
             let restricted = ws.store.session(restricted["id"].as_str().unwrap()).unwrap().clone();
-            assert!(!restricted.claude.as_ref().unwrap().subagent_edits, "a read-only parent cannot grant edits");
+            assert!(!restricted.agent.as_ref().unwrap().subagent_edits, "a read-only parent cannot grant edits");
             if harness == Harness::Claude {
-                let start = ws.thread_start(&restricted.id, &restricted.cwd, restricted.claude.as_ref().unwrap(), None, None, Starter::User, cx).unwrap();
+                let start = ws.thread_start(&restricted.id, &restricted.cwd, restricted.agent.as_ref().unwrap(), None, None, Starter::User, cx).unwrap();
                 assert_eq!(start.meta["claudeCode"]["options"]["permissionMode"], "plan", "read-only must apply before the first prompt");
             }
             ws.end_live(&parent, window, cx);
@@ -695,7 +695,7 @@ fn a_missing_claude_offers_the_setup_window() {
     cx.update_window(window, |_, window, app| {
         ws.update(app, |ws, cx| {
             ws.claude_exe = None;
-            ws.new_claude(work.path().to_path_buf(), window, cx);
+            ws.new_session(work.path().to_path_buf(), window, cx);
         })
     })
     .unwrap();
@@ -755,7 +755,7 @@ fn a_process_that_ends_closes_the_session_and_leaves_its_worktree() {
         let id = new_id();
         let record = SessionRecord {
             id: id.clone(),
-            kind: SessionKind::Claude,
+            kind: SessionKind::Agent,
             title,
             custom_title: None,
             auto_title: None,
@@ -766,7 +766,7 @@ fn a_process_that_ends_closes_the_session_and_leaves_its_worktree() {
             exit_code: None,
             hidden: false,
             // Present, so closing it keeps the history record instead of treating it as an empty new session.
-            claude: Some(ClaudeMeta { session_id: id.clone(), external: ExternalState::Present, ..Default::default() }),
+            agent: Some(AgentMeta { session_id: id.clone(), external: ExternalState::Present, ..Default::default() }),
         };
         step(cx, &|ws, w, cx| ws.start(record.clone(), spec.clone(), true, w, cx));
         id
@@ -820,7 +820,7 @@ fn a_process_that_ends_closes_the_session_and_leaves_its_worktree() {
     let missing = new_id();
     let record = SessionRecord {
         id: missing.clone(),
-        kind: SessionKind::Claude,
+        kind: SessionKind::Agent,
         title: "Missing".into(),
         custom_title: None,
         auto_title: None,
@@ -830,7 +830,7 @@ fn a_process_that_ends_closes_the_session_and_leaves_its_worktree() {
         last_active: now(),
         exit_code: None,
         hidden: false,
-        claude: Some(ClaudeMeta { session_id: missing.clone(), external: ExternalState::Present, ..Default::default() }),
+        agent: Some(AgentMeta { session_id: missing.clone(), external: ExternalState::Present, ..Default::default() }),
     };
     let spec = SpawnSpec { program: "definitely-not-a-real-program-m4code".into(), args: vec![], cwd: Some(folder), ..Default::default() };
     step(&mut cx, &|ws, w, cx| ws.start(record.clone(), spec.clone(), true, w, cx));
@@ -878,7 +878,7 @@ fn reviewing_what_a_turn_changed() {
         }
     };
     ws.update(&mut cx, |ws, _| ws.acp_server = Some(agent.clone()));
-    cx.update_window(window, |_, window, app| ws.update(app, |ws, cx| ws.new_claude(cwd.clone(), window, cx))).unwrap();
+    cx.update_window(window, |_, window, app| ws.update(app, |ws, cx| ws.new_session(cwd.clone(), window, cx))).unwrap();
     draw(&mut cx);
     let id = ws.read_with(&cx, |ws, _| ws.active.clone().expect("a session is shown"));
     let thread = |ws: &Workspace| ws.live_view(&id).and_then(|v| v.thread()).cloned().expect("a thread view");
@@ -973,10 +973,10 @@ fn picking_up_a_session_started_elsewhere() {
     assert!(std::fs::read_to_string(&prompts).unwrap().contains("loaded from-terminal"), "the agent's own conversation was loaded");
     ws.read_with(&cx, |ws, _| {
         let rec = ws.store.session(&id).unwrap();
-        assert_eq!((rec.claude_id(), rec.title.as_str()), (Some("from-terminal"), "Started in a terminal"));
+        assert_eq!((rec.provider_session_id(), rec.title.as_str()), (Some("from-terminal"), "Started in a terminal"));
     });
     act(&mut cx, pick);
-    assert_eq!(ws.read_with(&cx, |ws, _| ws.store.data.sessions.iter().filter(|s| s.claude_id() == Some("from-terminal")).count()), 1, "no second record");
+    assert_eq!(ws.read_with(&cx, |ws, _| ws.store.data.sessions.iter().filter(|s| s.provider_session_id() == Some("from-terminal")).count()), 1, "no second record");
 }
 
 /// Handing a session to another agent starts a session of that agent in the same folder, whose first message carries
@@ -1007,7 +1007,7 @@ fn handing_a_session_to_another_agent() {
         }
     };
     ws.update(&mut cx, |ws, _| ws.acp_server = Some(agent.clone()));
-    cx.update_window(window, |_, window, app| ws.update(app, |ws, cx| ws.new_claude(cwd.clone(), window, cx))).unwrap();
+    cx.update_window(window, |_, window, app| ws.update(app, |ws, cx| ws.new_session(cwd.clone(), window, cx))).unwrap();
     let first = ws.read_with(&cx, |ws, _| ws.active.clone().unwrap());
     let thread = |ws: &Workspace, id: &str| ws.live_view(id).and_then(|v| v.thread()).cloned();
     wait(&mut cx, "the session to open", &|ws, app| thread(ws, &first).is_some_and(|t| !t.read(app).is_loading()));
@@ -1053,7 +1053,7 @@ fn handing_a_session_to_another_agent() {
     );
     ws.read_with(&cx, |ws, _| {
         let rec = ws.store.session(&first).unwrap();
-        assert_eq!((rec.claude.as_ref().unwrap().harness, &rec.cwd), (crate::harness::Harness::Claude, &cwd));
+        assert_eq!((rec.agent.as_ref().unwrap().harness, &rec.cwd), (crate::harness::Harness::Claude, &cwd));
     });
     wait(&mut cx, "the hand-off message", &|_, _| {
         std::fs::read_to_string(&prompts).is_ok_and(|p| {
@@ -1064,7 +1064,7 @@ fn handing_a_session_to_another_agent() {
     });
     ws.read_with(&cx, |ws, _| {
         let rec = ws.store.session(&first).unwrap();
-        assert_eq!((rec.claude.as_ref().unwrap().harness, &rec.cwd), (crate::harness::Harness::Codex, &cwd));
+        assert_eq!((rec.agent.as_ref().unwrap().harness, &rec.cwd), (crate::harness::Harness::Codex, &cwd));
     });
 }
 
@@ -1114,13 +1114,13 @@ fn a_session_answers_in_its_thread(harness: crate::harness::Harness) {
     };
     let cwd = dunce::canonicalize(work.path()).unwrap();
     ws.update(&mut cx, |ws, _| ws.store.data.settings.harness = harness);
-    cx.update_window(window, |_, window, app| ws.update(app, |ws, cx| ws.new_claude(cwd.clone(), window, cx))).unwrap();
+    cx.update_window(window, |_, window, app| ws.update(app, |ws, cx| ws.new_session(cwd.clone(), window, cx))).unwrap();
     draw(&mut cx);
     let id = ws.read_with(&cx, |ws, _| ws.active.clone().expect("a session is shown"));
     let thread = |ws: &Workspace| ws.live_view(&id).and_then(|v| v.thread()).cloned().expect("a thread view");
     wait(&mut cx, "the session to open", 120, &|ws, app| !thread(ws).read(app).is_loading() || !ws.is_running(&id, app));
     assert!(ws.read_with(&cx, |ws, app| ws.is_running(&id, app)), "the harness stopped: {:?}", ws.read_with(&cx, |ws, app| thread(ws).read(app).start_error()));
-    assert!(ws.read_with(&cx, |ws, _| ws.store.session(&id).and_then(|r| r.claude_id()).is_some()), "the session's id was kept");
+    assert!(ws.read_with(&cx, |ws, _| ws.store.session(&id).and_then(|r| r.provider_session_id()).is_some()), "the session's id was kept");
     cx.update_window(window, |_, window, app| {
         let view = ws.read(app).live_view(&id).and_then(|v| v.thread()).cloned().unwrap();
         view.update(app, |v, cx| v.send("Reply with exactly one word: pong".into(), window, cx));
@@ -1136,7 +1136,7 @@ fn a_session_answers_in_its_thread(harness: crate::harness::Harness) {
 
 #[test]
 fn a_session_opens_another_with_its_model_and_effort_without_asking() {
-    use crate::claude::bridge::Request;
+    use crate::mcp::bridge::Request;
     use serde_json::json;
     let _dirs = crate::datadir::use_throwaway_folders();
     let work = tempfile::tempdir().unwrap();
@@ -1168,7 +1168,7 @@ fn a_session_opens_another_with_its_model_and_effort_without_asking() {
         ws.acp_server = Some(server.clone());
         ws.claude_exe = Some(PathBuf::from("unused-by-the-fake-agent"));
         ws.store.data.settings.enabled_harnesses = None;
-        ws.store.data.settings.set_harness_models(Harness::Codex, vec![crate::claude::subagents::AgentModel { id: "gpt-6".into(), name: "GPT-6".into() }]);
+        ws.store.data.settings.set_harness_models(Harness::Codex, vec![crate::harness::subagents::AgentModel { id: "gpt-6".into(), name: "GPT-6".into() }]);
         ws.new_session_from_home(Harness::Claude, None, work.path().to_path_buf(), Some("parent".into()), None, None, window, cx);
     });
     let parent = ws.read_with(&cx, |ws, _| ws.active_id().unwrap().clone());
@@ -1203,7 +1203,7 @@ fn a_session_opens_another_with_its_model_and_effort_without_asking() {
     ws.read_with(&cx, |ws, app| {
         assert!(!ws.live_view(&child).unwrap().thread().unwrap().read(app).is_waiting(), "nobody was asked");
         let record = ws.store.session(&child).unwrap();
-        assert_eq!(record.claude.as_ref().unwrap().harness, Harness::Codex, "the model's harness runs it");
+        assert_eq!(record.agent.as_ref().unwrap().harness, Harness::Codex, "the model's harness runs it");
         assert!(ws.links_of(&parent).iter().any(|(id, _)| *id == child), "it is linked with the session that opened it");
         let mode = ws.live_view(&child).unwrap().thread().unwrap().read(app).thread.mode.clone();
         assert_ne!(mode.as_deref(), Some("bypassPermissions"), "the model cannot choose the permission mode");

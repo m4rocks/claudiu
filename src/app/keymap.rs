@@ -10,7 +10,7 @@ use super::*;
 /// still reaches the agent untouched.
 pub fn bindings() -> Vec<KeyBinding> {
     let mut keys = vec![
-        KeyBinding::new("secondary-shift-n", NewClaude, None),
+        KeyBinding::new("secondary-shift-n", NewSession, None),
         KeyBinding::new("ctrl-`", ToggleShell, None),
         KeyBinding::new("secondary-j", ToggleShell, None),
         KeyBinding::new("secondary-shift-w", CloseSession, None),

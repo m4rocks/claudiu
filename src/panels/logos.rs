@@ -60,7 +60,7 @@ pub fn codex_marks(_: &str) -> (&'static [&'static Logo], Option<String>) {
 }
 
 pub fn antigravity_marks(pool: &str) -> (&'static [&'static Logo], Option<String>) {
-    use crate::claude::antigravity_limits::{PoolMark, mark};
+    use crate::harness::antigravity::limits::{PoolMark, mark};
     static GEMINI_MARKS: [&Logo; 1] = [&GEMINI];
     static CLAUDE_AND_GPT_MARKS: [&Logo; 2] = [&CLAUDE, &OPENAI];
     static OTHER_MARKS: [&Logo; 1] = [&ANTIGRAVITY];

@@ -557,7 +557,7 @@ impl Workspace {
     pub(super) fn run_editor_command(&mut self, command: EditorCommand, window: &mut Window, cx: &mut Context<Self>) {
         use gpui_kit::component::input::{Copy, Cut, GoToDefinition, Paste, SelectAll};
         if let EditorCommand::Ask(ask) = command {
-            return self.ask_claude(ask, window, cx);
+            return self.ask_agent(ask, window, cx);
         }
         let Some(buffer) = self.editor_owner().and_then(|id| self.panes.get(&id)).and_then(|p| p.shown()).map(|t| t.buffer.clone()) else { return };
         buffer.update(cx, |b, cx| b.focus(window, cx));

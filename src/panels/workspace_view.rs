@@ -7,9 +7,9 @@ use gpui::{
     px,
 };
 
-use crate::claude::defaults::Effort;
+use crate::harness::defaults::Effort;
 use crate::app::{
-    Act, CloseSession, FocusSearch, GitOp, GitPickerTarget, ImportProject, Main, NewClaude, NextSession, OpenGithub, OpenSettings, PrevSession, SessionView, ShellDrag, SwapFocus, ToggleEditor, ToggleRight, ToggleShell, ToggleSidebar, Workspace, WorkspacePicker, SHELL_HEIGHT,
+    Act, CloseSession, FocusSearch, GitOp, GitPickerTarget, ImportProject, Main, NewSession, NextSession, OpenGithub, OpenSettings, PrevSession, SessionView, ShellDrag, SwapFocus, ToggleEditor, ToggleRight, ToggleShell, ToggleSidebar, Workspace, WorkspacePicker, SHELL_HEIGHT,
 };
 use gpui_kit::component::TitleBar;
 use crate::panels::theme::{self, hsla};
@@ -159,7 +159,7 @@ impl Workspace {
             .filter(|l| l.view.is_running(cx))
             .filter_map(|l| {
                 let child = self.store.session(&l.id)?;
-                if child.claude.as_ref()?.parent_session.as_deref() != Some(rec.id.as_str()) {
+                if child.agent.as_ref()?.parent_session.as_deref() != Some(rec.id.as_str()) {
                     return None;
                 }
                 let waiting = l.view.thread().is_some_and(|t| t.read(cx).is_waiting());
@@ -172,8 +172,7 @@ impl Workspace {
             })
             .collect();
         let usage_limit = match thread.read(cx).harness {
-            crate::harness::Harness::Claude => self.store.session_account(&rec.id)
-                .and_then(|account| crate::thread::exhausted_usage(&account.usage, crate::store::now())),
+            crate::harness::Harness::Claude => crate::thread::exhausted_usage(&self.store.data.claude_usage, crate::store::now()),
             crate::harness::Harness::Codex => self.store.data.subagent_limits.get("codex")
                 .and_then(|pools| pools.iter().find_map(|pool| crate::thread::exhausted_usage(&pool.usage, crate::store::now()))),
             _ => None,
@@ -222,7 +221,7 @@ impl Workspace {
     /// is never mistaken for the parent's.
     fn subagent_strip(&self, id: &str, cx: &mut Context<Self>) -> Option<AnyElement> {
         let record = self.store.session(id)?;
-        let meta = record.claude.as_ref()?;
+        let meta = record.agent.as_ref()?;
         let parent_id = meta.parent_session.clone()?;
         let parent = self.store.session(&parent_id).map(|p| p.display_title().to_string());
         let state = self.subagent_state(id, cx);
@@ -485,9 +484,9 @@ impl Render for Workspace {
                     }
                 }
             }))
-            .on_action(cx.listener(|ws, _: &NewClaude, window, cx| {
+            .on_action(cx.listener(|ws, _: &NewSession, window, cx| {
                 let cwd = ws.new_session_cwd();
-                ws.act(Act::NewClaude { cwd }, window, cx)
+                ws.act(Act::NewSession { cwd }, window, cx)
             }))
             .on_action(cx.listener(|ws, _: &ToggleShell, window, cx| ws.toggle_shell_here(window, cx)))
             .on_action(cx.listener(|ws, _: &crate::app::ReopenClosed, window, cx| {

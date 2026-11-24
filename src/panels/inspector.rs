@@ -14,7 +14,7 @@ use gpui::{Animation, AnimationExt};
 
 use crate::app::{Act, GitOp, MenuItem, SideDrag, Workspace};
 use crate::panels::sidebar::{DragGhost, lifted, move_to};
-use crate::panels::widgets::{Trigger, button};
+use crate::panels::widgets::Trigger;
 use crate::store::SideCard;
 use gpui::{AppContext, DragMoveEvent, prelude::FluentBuilder};
 use crate::platform::Editor;
@@ -186,27 +186,11 @@ impl Workspace {
         let linked = (!links.is_empty()).then(|| (links.len(), self.linked_rows(id.as_ref(), links, cx)));
         let children = id.as_deref().map(|i| self.subagent_list(i, cx)).unwrap_or_default();
         let subagents = id.as_ref().filter(|_| !children.is_empty()).map(|parent| (children.len(), self.subagent_rows(parent, children, cx)));
-        let away = id.as_deref().and_then(|i| self.session_away(i, cx));
         let status = self.status_rows(&shown, id.as_ref(), running, cx);
         if self.dragging_card.is_some() && !cx.has_active_drag() {
             self.dragging_card = None;
         }
-        let account = away.map(|(from, to_name)| {
-                // Fades in when the session turns out to be on another account.
-                let body = div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(6.0))
-                    .px(px(8.0))
-                    .child(div().text_size(crate::panels::scale::px(12.0)).text_color(hsla(theme::WARN)).child(format!("This session runs on {from}.")))
-                    .child(button("handoff-session", format!("Hand off to {to_name}"), true).on_click(cx.listener(|ws, _: &ClickEvent, window, cx| {
-                        ws.act(Act::Handoff, window, cx)
-                    })))
-                    .with_animation("handoff-fade", Animation::new(Duration::from_millis(220)).with_easing(gpui::ease_out_quint()), |d, t| d.opacity(t));
-                group("ACCOUNT", None, body)
-        });
         let mut cards: Vec<(SideCard, Div)> = [
-            (SideCard::Account, account),
             (SideCard::Actions, Some(group("ACTIONS", None, actions))),
             (SideCard::Github, github.map(|(n, g)| group("GITHUB", Some(n), g))),
             (SideCard::Subagents, subagents.map(|(n, s)| group("SUBAGENTS", Some(n), s))),
@@ -276,7 +260,7 @@ impl Workspace {
 
     /// Open in the editor, the folder, git, the shell and the GitHub view.
     fn action_rows(&self, shown: &Shown, id: Option<&Id>, running: bool, cx: &mut Context<Self>) -> Div {
-        let claude = shown.rec.as_ref().is_some_and(|r| r.kind == SessionKind::Claude);
+        let claude = shown.rec.as_ref().is_some_and(|r| r.kind == SessionKind::Agent);
         let target = shown.project.as_ref().map(|p| p.path.clone()).or_else(|| shown.cwd.clone());
         let repo = shown.project.as_ref().filter(|p| p.git.is_some()).and(shown.cwd.clone());
         let busy = self.git_busy;
@@ -402,7 +386,7 @@ impl Workspace {
             .into_iter()
             .map(|(child, title)| SubagentRow {
                 key: format!("subagent-{child}"),
-                harness: self.store.session(&child).and_then(|r| r.claude.as_ref()).map(|m| m.harness).unwrap_or_default(),
+                harness: self.store.session(&child).and_then(|r| r.agent.as_ref()).map(|m| m.harness).unwrap_or_default(),
                 title,
                 state: self.subagent_state(&child, cx),
                 open: SubagentOpen::Session(child),
@@ -414,7 +398,7 @@ impl Workspace {
                 let state = SubagentState::of_step(call.status, view.is_working());
                 rows.push(SubagentRow {
                     key: format!("native-subagent-{}", call.id),
-                    harness: crate::claude::subagents::harness_of_type(call.subagent.as_deref().unwrap_or_default(), view.harness),
+                    harness: crate::harness::subagents::harness_of_type(call.subagent.as_deref().unwrap_or_default(), view.harness),
                     title: call.title.clone(),
                     state,
                     open: SubagentOpen::Step(call.id.clone()),
@@ -490,15 +474,18 @@ impl Workspace {
         };
 
         // The figures come from the snapshot the session's mod reports.
-        let meta = shown.rec.as_ref().filter(|r| r.kind == SessionKind::Claude).and_then(|r| r.claude.as_ref());
+        let meta = shown.rec.as_ref().filter(|r| r.kind == SessionKind::Agent).and_then(|r| r.agent.as_ref());
         let (compact, precompute) = meta.map_or((None, None), |m| (m.auto_compact, m.precompute_compact));
         let live = id.and_then(|id| self.live_view(id)).and_then(|view| view.thread());
-        let compact_text = live.map_or_else(|| compact.map_or("—", |v| if v { "On" } else { "Off" }).to_string(), |view| view.read(cx).compaction_status().to_string());
+        let effective_compact = live
+            .map(|view| view.read(cx).compaction.enabled)
+            .or_else(|| meta.map(|_| compact.unwrap_or(self.store.data.settings.auto_compact)));
+        let compact_text = live.map_or_else(|| effective_compact.map_or("—", |v| if v { "On" } else { "Off" }).to_string(), |view| view.read(cx).compaction_status());
         let settable = id.filter(|_| meta.is_some() && running).cloned();
 
         let compact_settable = settable.clone().filter(|_| live.is_some_and(|view| view.read(cx).harness.adapter().compact_command.is_some()));
         let compact_row = match compact_settable {
-            Some(sid) => pick_row(cx, "set-auto-compact", "Auto-compact", compact_text, move || auto_compact_menu(&sid, compact)).into_any_element(),
+            Some(sid) => pick_row(cx, "set-auto-compact", "Auto-compact", compact_text, move || auto_compact_menu(&sid, effective_compact)).into_any_element(),
             None => kv("Auto-compact", compact_text).into_any_element(),
         };
         // Only while Claude Code offers the setting; without its feature flag the setting does nothing.

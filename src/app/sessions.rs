@@ -46,13 +46,13 @@ impl Workspace {
             .unwrap_or_else(|| PathBuf::from("."))
     }
 
-    pub fn new_claude(&mut self, cwd: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        self.new_claude_with(cwd, None, vec![], Starter::User, window, cx);
+    pub fn new_session(&mut self, cwd: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        self.new_session_default(cwd, None, vec![], Starter::User, window, cx);
     }
 
     /// A new session in the default harness, sent `prompt` once it is ready. `options` (by category, such as
     /// `model`) win over the new-session defaults.
-    pub(super) fn new_claude_with(&mut self, cwd: PathBuf, prompt: Option<String>, options: Vec<(&'static str, String)>, by: Starter, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn new_session_default(&mut self, cwd: PathBuf, prompt: Option<String>, options: Vec<(&'static str, String)>, by: Starter, window: &mut Window, cx: &mut Context<Self>) {
         let harness = self.store.data.settings.harness;
         self.new_session_with(harness, cwd, prompt, options, by, window, cx);
     }
@@ -61,7 +61,7 @@ impl Workspace {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn new_session_from_home(&mut self, harness: Harness, model: Option<String>, cwd: PathBuf, prompt: Option<String>, effort: Option<Effort>, permission_mode: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let record_id = new_id();
-        let meta = ClaudeMeta { chrome: self.store.data.settings.chrome_default, harness, ..Default::default() };
+        let meta = AgentMeta { chrome: self.store.data.settings.chrome_default, harness, ..Default::default() };
         let Some(mut start) = self.thread_start(&record_id, &cwd, &meta, None, prompt, Starter::User, cx) else { return false };
         if let Some(mode_id) = permission_mode.filter(|m| !m.is_empty()) {
             start.mode = Some(mode_id);
@@ -76,7 +76,7 @@ impl Workspace {
         }
         let record = SessionRecord {
             id: record_id,
-            kind: SessionKind::Claude,
+            kind: SessionKind::Agent,
             title: "New session".into(),
             custom_title: None,
             auto_title: None,
@@ -86,25 +86,25 @@ impl Workspace {
             last_active: now(),
             exit_code: None,
             hidden: false,
-            claude: Some(meta),
+            agent: Some(meta),
         };
         self.start_thread(record, start, true, window, cx);
         true
     }
 
-    /// A new session in `harness`, as `new_claude_with`.
+    /// A new session in `harness`, as `new_session_default`.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn new_session_with(&mut self, harness: Harness, cwd: PathBuf, prompt: Option<String>, options: Vec<(&'static str, String)>, by: Starter, window: &mut Window, cx: &mut Context<Self>) {
         // A new session starts in the main checkout, not in a linked worktree. Fix-with-Claude works where the failure was.
         let cwd = if by == Starter::FixGit { cwd } else { self.outside_linked_worktree(cwd) };
         let record_id = new_id();
-        let meta = ClaudeMeta { chrome: self.store.data.settings.chrome_default, harness, ..Default::default() };
+        let meta = AgentMeta { chrome: self.store.data.settings.chrome_default, harness, ..Default::default() };
         let Some(mut start) = self.thread_start(&record_id, &cwd, &meta, None, prompt, by, cx) else { return };
         start.options.retain(|(category, _)| options.iter().all(|(c, _)| c != category));
         start.options.extend(options);
         let record = SessionRecord {
             id: record_id,
-            kind: SessionKind::Claude,
+            kind: SessionKind::Agent,
             title: "New session".into(),
             custom_title: None,
             auto_title: None,
@@ -114,19 +114,20 @@ impl Workspace {
             last_active: now(),
             exit_code: None,
             hidden: false,
-            claude: Some(meta),
+            agent: Some(meta),
         };
         self.start_thread(record, start, true, window, cx);
     }
 
     /// What a harness session starts with: m4code's MCP server, which every harness gets, and for Claude Code its
-    /// mod, account and flags. A new session (no id yet) also gets the new-session defaults. None, with a toast, when
+    /// mod and flags. A new session (no id yet) also gets the new-session defaults. None, with a toast, when
     /// Claude Code isn't installed.
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn thread_start(&mut self, record_id: &str, cwd: &std::path::Path, meta: &ClaudeMeta, name: Option<String>, prompt: Option<String>, by: Starter, cx: &mut Context<Self>) -> Option<crate::thread::Start> {
+    pub(super) fn thread_start(&mut self, record_id: &str, cwd: &std::path::Path, meta: &AgentMeta, name: Option<String>, prompt: Option<String>, by: Starter, cx: &mut Context<Self>) -> Option<crate::thread::Start> {
         let session_id = Some(meta.session_id.clone()).filter(|id| !id.is_empty());
         let settings = &self.store.data.settings;
-        let mut off = mcp::tools_off(&settings.m4code_tools_off, &claude::trim::FLUFF);
+        let extra_off = if meta.harness == Harness::Claude { claude::trimmed_mcp_tools() } else { vec![] };
+        let mut off = mcp::tools_off(&settings.m4code_tools_off, &extra_off);
         // Harnesses with native ACP question support (Claude via AskUserQuestion, Codex/Antigravity via ACP form
         // elicitation) use their own ask tool; OpenCode's ACP lacks question bridging so it gets m4code's `ask_user`.
         if meta.harness != Harness::OpenCode {
@@ -145,13 +146,13 @@ impl Workspace {
                 // Only inherit the default model id when starting on the harness that serves it.
                 let mut defaults = settings.new_session.clone();
                 if defaults.effort.is_none() {
-                    defaults.effort = Some(claude::defaults::Effort::default());
+                    defaults.effort = Some(harness::defaults::Effort::default());
                 }
                 if meta.harness != settings.harness {
                     defaults.model = None;
                 }
                 let plan_trimmed = claude::trim::FLUFF.contains(&claude::trim::Trim::PlanMode);
-                let (mode, options) = claude::defaults::acp_settings(&defaults, meta.harness, &settings.permissions_for(meta.harness), plan_trimmed, by);
+                let (mode, options) = harness::defaults::acp_settings(&defaults, meta.harness, &settings.permissions_for(meta.harness), plan_trimmed, by);
                 (mode.map(String::from), options)
             }
             Some(_) => (None, resume_options(meta)),
@@ -163,44 +164,14 @@ impl Workspace {
                 self.show_toast("Could not find the `claude` CLI. Install Claude Code, or set its path in Settings.".into(), Some(("Check setup".into(), Act::OpenSetup)), cx);
                 return None;
             };
-            env.extend(harness::claude::environment(&exe));
-            let plugin = claude::plugin::install().ok();
-            if plugin.is_some() {
-                env.push(("M4CODE_MANAGED_COMPACTION".into(), "1".into()));
-                if let Some(id) = &session_id {
-                    env.push(("M4CODE_NAME_FILE".into(), mcp::name_file(id).to_string_lossy().into_owned()));
-                }
-                env.push((usage::USAGE_DIR_ENV.into(), usage::snapshot_dir().to_string_lossy().into_owned()));
-                env.push((usage::CTL_ENV.into(), usage::ctl_file(record_id).to_string_lossy().into_owned()));
-                env.push((crate::visual::VISUAL_ENV.into(), crate::visual::prefix(record_id).to_string_lossy().into_owned()));
-                // The mod registers the agent types and answers their turns, so they go only where it loads.
-                if let Some(subagents) = settings.custom_subagents.env_for(&settings.enabled_harnesses_list())
-                    && let Ok(exe) = crate::platform::own_exe()
-                {
-                    env.push((crate::claude::subagents::ENV.into(), subagents));
-                    env.push((crate::claude::subagents::EXE_ENV.into(), exe.to_string_lossy().into_owned()));
-                }
-            }
-            env.push(("CLAUDE_CODE_AUTO_CONNECT_IDE".into(), "false".into()));
-            env.push(("CLAUDE_CODE_IDE_SKIP_AUTO_INSTALL".into(), "1".into()));
-            let mut extra = vec![];
-            if let Some(name) = name {
-                extra.push(("name", Some(name)));
-            }
-            if meta.chrome {
-                extra.push(("chrome", None));
-            }
-            session_meta = harness::claude::claude_meta(plugin.as_deref(), &mcp::allowed_tools(&off), &extra, Some(claude::trim::session_settings()));
-            self.sync_configs_now(cx);
-            if let Some(acct) = meta.account.as_deref().and_then(|id| self.store.account(id)).or_else(|| self.store.active_account()) {
-                env.push((usage::ACCOUNT_ENV.into(), acct.id.clone()));
-                env.extend(Self::account_env(acct));
-            }
+            let (claude_env, claude_meta) = claude::prepare_session(&exe, record_id, session_id.as_deref(), name, meta.chrome, &off, settings);
+            env.extend(claude_env);
+            session_meta = claude_meta;
         }
         if meta.parent_session.is_some() {
             mode = None;
             if let Some(agent) = meta.harness.agent() {
-                let request = claude::acp::Request {
+                let request = harness::runner::Request {
                     agent, model: None, effort: None, edits: meta.subagent_edits,
                     cwd: cwd.to_path_buf(), prompt: String::new(), live_messages: false,
                 };
@@ -251,11 +222,11 @@ impl Workspace {
     /// of it is replaced, which ends its process.
     pub(super) fn relaunch_empty(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(rec) = self.store.session(id).cloned() else { return };
-        let Some(mut meta) = rec.claude.clone() else { return };
+        let Some(mut meta) = rec.agent.clone() else { return };
         meta.session_id.clear();
         let cwd = self.resume_cwd(&rec, cx);
         let Some(start) = self.thread_start(&rec.id, &cwd, &meta, rec.chosen_title().map(String::from), None, Starter::User, cx) else { return };
-        if let Some(m) = self.store.session_mut(id).and_then(|r| r.claude.as_mut()) {
+        if let Some(m) = self.store.session_mut(id).and_then(|r| r.agent.as_mut()) {
             m.session_id.clear();
         }
         self.start_thread(rec, start, false, window, cx);
@@ -292,7 +263,7 @@ impl Workspace {
     /// disappears while the replacement process opens.
     pub(super) fn relaunch_with_entries(&mut self, id: &str, prior_entries: Vec<crate::harness::thread::Entry>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(rec) = self.store.session(id).cloned() else { return };
-        let Some(meta) = rec.claude.clone() else { return };
+        let Some(meta) = rec.agent.clone() else { return };
         let cwd = self.resume_cwd(&rec, cx);
         let Some(mut start) = self.thread_start(&rec.id, &cwd, &meta, rec.chosen_title().map(String::from), None, Starter::User, cx) else { return };
         if !prior_entries.is_empty() {
@@ -324,6 +295,7 @@ impl Workspace {
     }
 
     /// End the session's process and resume the same conversation. The shell and cards belong to the session, so they stay.
+    #[cfg(test)]
     pub(super) fn restart_session(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         let was_shown = self.active_id().is_some_and(|a| a == id);
         let shell = self.shells.remove(id);
@@ -360,18 +332,17 @@ impl Workspace {
     pub(super) fn start_thread_with_focus(&mut self, mut record: SessionRecord, start: crate::thread::Start, is_new: bool, foreground: bool, window: &mut Window, cx: &mut Context<Self>) {
         let id = record.id.clone();
         let name = record.chosen_title().map(String::from);
-        let subagent_edits = record.claude.as_ref().filter(|m| m.parent_session.is_some()).map(|m| m.subagent_edits);
-        let canonical_history = record.claude.as_ref().is_some_and(|m| !m.provider_sessions.is_empty());
-        let auto_compact = record.claude.as_ref().and_then(|m| m.auto_compact).unwrap_or(true);
+        let subagent_edits = record.agent.as_ref().filter(|m| m.parent_session.is_some()).map(|m| m.subagent_edits);
+        let canonical_history = record.agent.as_ref().is_some_and(|m| !m.provider_sessions.is_empty());
+        let auto_compact = record.agent.as_ref().and_then(|m| m.auto_compact).unwrap_or(self.store.data.settings.auto_compact);
+        let auto_compact_threshold = crate::harness::compaction::clamp_threshold(self.store.data.settings.auto_compact_threshold);
         let native_controlled = start.harness == Harness::OpenCode;
-        if let Some(meta) = record.claude.as_mut() {
+        if let Some(meta) = record.agent.as_mut() {
             meta.managed_compaction = true;
-            meta.auto_compact = Some(auto_compact);
         }
         self.prepare_live(record, is_new);
-        if let Some(meta) = self.store.session_mut(&id).and_then(|r| r.claude.as_mut()) {
+        if let Some(meta) = self.store.session_mut(&id).and_then(|r| r.agent.as_mut()) {
             meta.managed_compaction = true;
-            meta.auto_compact = Some(auto_compact);
             self.store.mark_dirty();
         }
         let view = cx.new(|cx| ThreadView::new(start, window, cx));
@@ -384,6 +355,7 @@ impl Workspace {
             v.subagent_edits = subagent_edits;
             v.canonical_history |= canonical_history;
             v.compaction.enabled = auto_compact;
+            v.compaction.threshold_percent = auto_compact_threshold;
             v.compaction.native_controlled = native_controlled;
         });
         let sub_id = id.clone();
@@ -404,7 +376,7 @@ impl Workspace {
             }
             ThreadEvent::Chosen(model, effort) => {
                 if ws.pending_handoffs.contains_key(&sub_id) { return; }
-                if let Some(meta) = ws.store.session_mut(&sub_id).and_then(|r| r.claude.as_mut())
+                if let Some(meta) = ws.store.session_mut(&sub_id).and_then(|r| r.agent.as_mut())
                     && (&meta.chosen_model, &meta.chosen_effort) != (model, effort)
                 {
                     meta.chosen_model = model.clone();
@@ -414,7 +386,7 @@ impl Workspace {
             }
             ThreadEvent::SessionId(session) => {
                 if ws.pending_handoffs.contains_key(&sub_id) { return; }
-                if let Some(meta) = ws.store.session_mut(&sub_id).and_then(|r| r.claude.as_mut()) {
+                if let Some(meta) = ws.store.session_mut(&sub_id).and_then(|r| r.agent.as_mut()) {
                     meta.session_id = session.clone();
                     ws.store.mark_dirty();
                 }
@@ -428,9 +400,9 @@ impl Workspace {
                 }
             }
             ThreadEvent::Models(harness, choices) => {
-                let catalog: Vec<crate::claude::subagents::AgentModel> = choices
+                let catalog: Vec<crate::harness::subagents::AgentModel> = choices
                     .iter()
-                    .map(|(id, name)| crate::claude::subagents::AgentModel { id: id.clone(), name: name.clone() })
+                    .map(|(id, name)| crate::harness::subagents::AgentModel { id: id.clone(), name: name.clone() })
                     .collect();
                 if !catalog.is_empty() {
                     let lookup = ws.model_lookups.get_mut(*harness);
@@ -450,7 +422,7 @@ impl Workspace {
             }
             ThreadEvent::Context(used, size) => {
                 if ws.pending_handoffs.contains_key(&sub_id) { return; }
-                if let Some(meta) = ws.store.session_mut(&sub_id).and_then(|r| r.claude.as_mut()) {
+                if let Some(meta) = ws.store.session_mut(&sub_id).and_then(|r| r.agent.as_mut()) {
                     meta.context_tokens = Some(*used);
                     if *size > 0 {
                         meta.context_window = Some(*size);
@@ -461,7 +433,7 @@ impl Workspace {
             }
             ThreadEvent::Usage(turn) => {
                 if ws.pending_handoffs.contains_key(&sub_id) { return; }
-                if let Some(meta) = ws.store.session_mut(&sub_id).and_then(|r| r.claude.as_mut()) {
+                if let Some(meta) = ws.store.session_mut(&sub_id).and_then(|r| r.agent.as_mut()) {
                     meta.cache_usage.record(*turn);
                     ws.store.mark_dirty();
                     cx.notify();
@@ -482,7 +454,7 @@ impl Workspace {
                 let (harness, cwd) = ws
                     .store
                     .session(&sub_id)
-                    .map(|r| (r.claude.as_ref().map_or(ws.store.data.settings.harness, |m| m.harness), r.cwd.clone()))
+                    .map(|r| (r.agent.as_ref().map_or(ws.store.data.settings.harness, |m| m.harness), r.cwd.clone()))
                     .unwrap_or_else(|| (ws.store.data.settings.harness, ws.new_session_cwd()));
                 ws.new_session_with(harness, cwd, prompt.clone(), vec![], Starter::User, window, cx);
             }
@@ -517,8 +489,7 @@ impl Workspace {
         let options = ["model", "thought_level"].into_iter().filter_map(|category| {
             view.thread.option(category).map(|option| (category, option.current.clone()))
         }).collect::<Vec<_>>();
-        let account = record.claude.as_ref().and_then(|meta| meta.account.clone());
-        let meta = ClaudeMeta { harness, account, chrome: self.store.data.settings.chrome_default, ..Default::default() };
+        let meta = AgentMeta { harness, chrome: self.store.data.settings.chrome_default, ..Default::default() };
         record.id = new_id();
         record.title = format!("Fork of {}", record.display_title());
         record.auto_title = None;
@@ -527,7 +498,7 @@ impl Workspace {
         record.last_active = now();
         record.exit_code = None;
         record.hidden = false;
-        record.claude = Some(meta.clone());
+        record.agent = Some(meta.clone());
         let Some(mut start) = self.thread_start(&record.id, &record.cwd, &meta, Some(record.title.clone()), None, Starter::User, cx) else { return };
         start.mode = mode;
         start.options.retain(|(category, _)| options.iter().all(|(kept, _)| kept != category));
@@ -557,21 +528,10 @@ impl Workspace {
     #[allow(clippy::too_many_arguments)]
     fn adopt_live(&mut self, id: Id, view: SessionView, sub: Subscription, claude_name: Option<String>, foreground: bool, window: &mut Window, cx: &mut Context<Self>) {
         // The mod reads the launch name first and leaves it alone; a stale file would otherwise rename the session.
-        if let Some(cid) = self.store.session(&id).and_then(|r| r.claude_id()) {
-            mcp::write_name(cid, claude_name.as_deref());
+        if let Some(cid) = self.store.session(&id).and_then(|r| r.provider_session_id()) {
+            claude::write_name(cid, claude_name.as_deref());
         }
-        // The account the launch chose: kept, so the session starts there again after closing or a restart.
-        let account = if let Some(pending) = self.pending_handoffs.get(&id) {
-            pending.meta.account.as_deref().and_then(|id| self.store.account(id)).or_else(|| self.store.active_account())
-        } else {
-            self.store.session_account(&id)
-        }.map_or_else(|| MAIN_ACCOUNT.into(), |a| a.id.clone());
-        if !self.pending_handoffs.contains_key(&id)
-            && let Some(meta) = self.store.session_mut(&id).and_then(|r| r.claude.as_mut())
-        {
-            meta.account = Some(account.clone());
-        }
-        self.live.push(Live { id: id.clone(), view, _sub: sub, claude_name, account });
+        self.live.push(Live { id: id.clone(), view, _sub: sub, claude_name });
         self.remember(&id);
         if !foreground {
             cx.notify();
@@ -618,7 +578,7 @@ impl Workspace {
         let Some(rec) = self.store.session(id) else {
             return;
         };
-        let Some(meta) = rec.claude.as_ref() else {
+        let Some(meta) = rec.agent.as_ref() else {
             return;
         };
         if !has_conversation(id, meta) {
@@ -690,7 +650,7 @@ impl Workspace {
 
     /// Bring a Claude session back after a restart: resume its conversation, or start it over when it has none yet.
     pub(super) fn bring_back(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
-        match self.store.session(id).and_then(|s| s.claude.as_ref()) {
+        match self.store.session(id).and_then(|s| s.agent.as_ref()) {
             Some(meta) if !has_conversation(id, meta) => self.relaunch_empty(id, window, cx),
             _ => self.resume(id, window, cx),
         }
@@ -700,7 +660,7 @@ impl Workspace {
     /// not running again. Whether there was one.
     pub fn reopen_closed(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         while let Some(id) = self.closed.pop() {
-            if !self.is_running(&id, cx) && self.store.session(&id).is_some_and(|r| r.claude.is_some()) {
+            if !self.is_running(&id, cx) && self.store.session(&id).is_some_and(|r| r.agent.is_some()) {
                 self.resume(&id, window, cx);
                 return true;
             }
@@ -721,7 +681,7 @@ impl Workspace {
     }
 
     fn end_child_sessions(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let children: Vec<_> = self.live.iter().filter(|live| self.store.session(&live.id).and_then(|r| r.claude.as_ref()).is_some_and(|m| m.parent_session.as_deref() == Some(id))).map(|live| live.id.clone()).collect();
+        let children: Vec<_> = self.live.iter().filter(|live| self.store.session(&live.id).and_then(|r| r.agent.as_ref()).is_some_and(|m| m.parent_session.as_deref() == Some(id))).map(|live| live.id.clone()).collect();
         for child in children {
             self.end_live(&child, window, cx);
         }
@@ -730,9 +690,6 @@ impl Workspace {
     pub(super) fn end_live(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.cancel_pending_handoff(id, cx);
         self.end_child_sessions(id, window, cx);
-        if self.logins.remove(id) {
-            self.refresh_accounts(cx);
-        }
         let was_active = self.active_id().is_some_and(|a| a == id);
         if let Some(thread) = self.live_view(id).and_then(|view| view.thread()) {
             thread.update(cx, |view, _| view.stop());
@@ -804,7 +761,7 @@ impl Workspace {
             return Some((frac, used, true, Some(size)));
         }
         let scaled = |tokens: u64, limit: Option<u64>| limit.map(|l| (tokens as f64 / l as f64).min(1.0) as f32);
-        let meta = self.store.session(id)?.claude.as_ref()?;
+        let meta = self.store.session(id)?.agent.as_ref()?;
         let limit = claude::context_limit(meta.context_window, meta.compact_at, meta.auto_compact);
         if let Some(f) = meta.context_fraction {
             let tokens = meta.context_tokens.unwrap_or_else(|| meta.context_window.map_or(0, |w| (w as f64 * f as f64) as u64));
@@ -816,7 +773,7 @@ impl Workspace {
 }
 
 /// The options a resumed session asks for: the model and effort last picked in it.
-fn resume_options(meta: &ClaudeMeta) -> Vec<(&'static str, String)> {
+fn resume_options(meta: &AgentMeta) -> Vec<(&'static str, String)> {
     [("model", &meta.chosen_model), ("thought_level", &meta.chosen_effort)]
         .into_iter()
         .filter_map(|(category, value)| Some((category, value.clone()?)))
@@ -825,7 +782,7 @@ fn resume_options(meta: &ClaudeMeta) -> Vec<(&'static str, String)> {
 
 /// Whether Claude Code has a conversation for the session: one it listed on a scan, or a transcript on disk. A
 /// session nobody has written to has none, and `claude --resume` ends at once on it.
-fn has_conversation(record_id: &str, meta: &ClaudeMeta) -> bool {
+fn has_conversation(record_id: &str, meta: &AgentMeta) -> bool {
     crate::harness::thread::load_entries(record_id).iter().any(|entry| matches!(entry,
         crate::harness::thread::Entry::User(_) | crate::harness::thread::Entry::Agent(_) | crate::harness::thread::Entry::Tool(_)))
         || meta.external != ExternalState::Unknown
@@ -836,15 +793,15 @@ fn has_conversation(record_id: &str, meta: &ClaudeMeta) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{numbered, resume_options};
-    use crate::store::ClaudeMeta;
+    use crate::store::AgentMeta;
 
     #[test]
     fn a_resumed_session_asks_for_the_model_and_effort_picked_in_it() {
-        let picked = ClaudeMeta { chosen_model: Some("opus".into()), chosen_effort: Some("high".into()), ..Default::default() };
+        let picked = AgentMeta { chosen_model: Some("opus".into()), chosen_effort: Some("high".into()), ..Default::default() };
         assert_eq!(resume_options(&picked), [("model", "opus".to_string()), ("thought_level", "high".to_string())]);
-        let model_only = ClaudeMeta { chosen_model: Some("gpt-5.3-codex".into()), ..Default::default() };
+        let model_only = AgentMeta { chosen_model: Some("gpt-5.3-codex".into()), ..Default::default() };
         assert_eq!(resume_options(&model_only), [("model", "gpt-5.3-codex".to_string())]);
-        assert!(resume_options(&ClaudeMeta::default()).is_empty(), "nothing picked asks for nothing");
+        assert!(resume_options(&AgentMeta::default()).is_empty(), "nothing picked asks for nothing");
     }
 
     #[test]

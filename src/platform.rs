@@ -27,24 +27,6 @@ pub fn default_shell(custom: Option<&str>) -> (String, Vec<String>) {
     }
 }
 
-/// On macOS and Linux a desktop-launched app inherits a minimal PATH (no nvm, fnm or a Homebrew node), so Claude
-/// Code hooks that call `node` fail. Run the program through the user's login shell so it sees their normal
-/// environment. Windows is returned unchanged.
-pub fn through_login_shell(program: String, args: Vec<String>) -> (String, Vec<String>) {
-    #[cfg(unix)]
-    {
-        let shell = login_shell();
-        let script = if shell.ends_with("/fish") { "exec $argv" } else { r#"exec "$@""# };
-        let mut wrapped = vec!["-l".into(), "-i".into(), "-c".into(), script.into(), "m4code".into(), program];
-        wrapped.extend(args);
-        (shell, wrapped)
-    }
-    #[cfg(not(unix))]
-    {
-        (program, args)
-    }
-}
-
 /// `SHELL` when a desktop launch set it, otherwise the platform's usual login shell.
 #[cfg(unix)]
 fn login_shell() -> String {
@@ -576,23 +558,6 @@ bye
     fn posix_shell() -> Option<PathBuf> {
         let candidates = if cfg!(windows) { vec![PathBuf::from(expand_env(r"%ProgramFiles%\Git\bin\bash.exe"))] } else { vec![PathBuf::from("/bin/sh")] };
         candidates.into_iter().find(|p| p.is_file())
-    }
-
-    #[test]
-    fn a_desktop_launch_starts_the_program_through_the_login_shell() {
-        let (program, args) = through_login_shell("/usr/bin/claude".into(), vec!["--resume".into(), "abc".into()]);
-        if cfg!(windows) {
-            assert_eq!(program, "/usr/bin/claude");
-            assert_eq!(args, ["--resume".to_string(), "abc".into()]);
-            return;
-        }
-        let shell = std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| {
-            if cfg!(target_os = "macos") { "/bin/zsh".into() } else { "/bin/bash".into() }
-        });
-        let script = if shell.ends_with("/fish") { "exec $argv" } else { r#"exec "$@""# };
-        assert_eq!(program, shell);
-        let expected: Vec<String> = ["-l", "-i", "-c", script, "m4code", "/usr/bin/claude", "--resume", "abc"].map(String::from).to_vec();
-        assert_eq!(args, expected);
     }
 
     /// A tool that is not on this process's PATH, sitting in a directory recorded as the login shell's.

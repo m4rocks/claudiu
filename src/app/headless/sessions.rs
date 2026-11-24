@@ -77,18 +77,18 @@ fn run() {
     };
     let cwd = work.path().to_path_buf();
     draw(&mut cx);
-    step(&mut cx, &|ws, w, cx| ws.new_claude(cwd.clone(), w, cx));
+    step(&mut cx, &|ws, w, cx| ws.new_session(cwd.clone(), w, cx));
     let id = ws.read_with(&cx, |ws, _| ws.active.clone().expect("a session is shown"));
     // Cross-session tools are answered on the spot, and one that can't work says why.
     use serde_json::{Value, json};
-    let ask = |from: String, tool: &'static str, args: Value| std::thread::spawn(move || crate::claude::bridge::ask(&from, tool, &args));
+    let ask = |from: String, tool: &'static str, args: Value| std::thread::spawn(move || crate::mcp::bridge::ask(&from, tool, &args));
     let take = || loop {
-        if let Some(r) = crate::claude::bridge::take_requests().pop() {
+        if let Some(r) = crate::mcp::bridge::take_requests().pop() {
             break r;
         }
         std::thread::sleep(Duration::from_millis(50));
     };
-    let serve = |cx: &mut TestAppContext, req: crate::claude::bridge::Request| step(cx, &|ws, w, cx| ws.serve_requests(vec![req.clone()], w, cx));
+    let serve = |cx: &mut TestAppContext, req: crate::mcp::bridge::Request| step(cx, &|ws, w, cx| ws.serve_requests(vec![req.clone()], w, cx));
     let from_session = format!("code:{id}");
 
     let h = ask(from_session.clone(), "list_code_sessions", json!({}));
@@ -97,7 +97,7 @@ fn run() {
     assert!(text.contains(&id) && text.contains("this session"), "{text}");
 
     // A request whose asker gave up is dropped.
-    let stale = crate::claude::bridge::Request { id: "late".into(), from: from_session.clone(), tool: "start_code_session".into(), args: json!({"folder": cwd.to_string_lossy()}), deadline: now() - 1 };
+    let stale = crate::mcp::bridge::Request { id: "late".into(), from: from_session.clone(), tool: "start_code_session".into(), args: json!({"folder": cwd.to_string_lossy()}), deadline: now() - 1 };
     let before = ws.read_with(&cx, |ws, _| ws.live.len());
     serve(&mut cx, stale);
     assert_eq!(ws.read_with(&cx, |ws, _| ws.live.len()), before, "an expired request was carried out");
@@ -153,7 +153,7 @@ fn sessions_and_shell() {
         assert!(acted < Duration::from_millis(400), "the window was blocked for {acted:?}");
     };
     let cwd = work.path().to_path_buf();
-    step(&mut cx, &|ws, w, cx| ws.new_claude(cwd.clone(), w, cx));
+    step(&mut cx, &|ws, w, cx| ws.new_session(cwd.clone(), w, cx));
     let first = ws.read_with(&cx, |ws, _| ws.active.clone().expect("a session is shown"));
     // A filter on a project that no longer exists filters nothing; the list still draws.
     step(&mut cx, &|ws, w, cx| ws.act(Act::FilterProject(Some("gone".into())), w, cx));
@@ -162,7 +162,7 @@ fn sessions_and_shell() {
     // The shell under a Claude session: starts on first use, survives switching away, goes with its session.
     step(&mut cx, &|ws, w, cx| ws.toggle_shell(&first, w, cx));
     assert!(ws.read_with(&cx, |ws, _| ws.shells.get(&first).is_some_and(|p| p.open)), "shell opened");
-    step(&mut cx, &|ws, w, cx| ws.new_claude(cwd.clone(), w, cx));
+    step(&mut cx, &|ws, w, cx| ws.new_session(cwd.clone(), w, cx));
     let second = ws.read_with(&cx, |ws, _| ws.active.clone().unwrap());
     assert_ne!(first, second);
     assert!(ws.read_with(&cx, |ws, _| ws.shells.contains_key(&first) && !ws.shells.contains_key(&second)), "the shell stays with its own session");
@@ -373,7 +373,7 @@ fn sessions_and_shell() {
     // A new session in another folder: the open GitHub view moves to that folder.
     let other = tempfile::tempdir().unwrap();
     let other_cwd = other.path().to_path_buf();
-    step(&mut cx, &|ws, w, cx| ws.new_claude(other_cwd.clone(), w, cx));
+    step(&mut cx, &|ws, w, cx| ws.new_session(other_cwd.clone(), w, cx));
     assert!(
         ws.read_with(&cx, |ws, _| ws.gh.len() == 2 && ws.right_gh.as_ref().and_then(|id| ws.gh_pane(id)).is_some_and(|p| platform::path_key(&p.cwd) == platform::path_key(&other_cwd))),
         "GitHub follows a new session"

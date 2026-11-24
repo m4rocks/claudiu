@@ -3,7 +3,7 @@
 //! user: the tools' instructions tell the model to call them only when the user asked for what they do.
 
 use super::*;
-use crate::claude::bridge::{self, Request};
+use crate::mcp::bridge::{self, Request};
 use crate::harness::CatalogModel;
 use serde_json::Value;
 
@@ -122,7 +122,7 @@ impl Workspace {
             req.args["model_id"] = model.id.into();
         }
         if let Some(effort) = req.args["effort"].as_str().filter(|e| !e.is_empty())
-            && !crate::claude::defaults::Effort::ALL.iter().any(|known| known.name() == effort)
+            && !crate::harness::defaults::Effort::ALL.iter().any(|known| known.name() == effort)
         {
             return Err("Choose low, medium, high, xhigh or max effort.".into());
         }
@@ -206,7 +206,7 @@ impl Workspace {
         let now = crate::store::now();
         let pending = std::mem::take(&mut self.pending_switches);
         for p in pending {
-            let claude_id = self.store.session(&p.id).and_then(|r| r.claude_id());
+            let claude_id = self.store.session(&p.id).and_then(|r| r.provider_session_id());
             // Without a registry entry (older Claude Code) the terminal's own activity decides, as in `switch::inspect`.
             let idle = match claude_id.and_then(|c| statuses.get(c)) {
                 Some(status) => status == "idle",
@@ -226,7 +226,7 @@ impl Workspace {
 
     /// Do what was asked.
     pub(super) fn run_request(&mut self, req: &Request, window: &mut Window, cx: &mut Context<Self>) -> Result<String, String> {
-        if crate::claude::mcp::SUBAGENT_TOOLS.contains(&req.tool.as_str()) {
+        if crate::mcp::SUBAGENT_TOOLS.contains(&req.tool.as_str()) {
             return self.run_subagent_request(req, window, cx);
         }
         let id = req.args["id"].as_str().unwrap_or_default().to_string();
@@ -236,7 +236,7 @@ impl Workspace {
         let prompt = req.args["prompt"].as_str().map(str::trim).filter(|p| !p.is_empty()).map(String::from);
         match req.tool.as_str() {
             "list_code_sessions" => {
-                let mut sessions: Vec<&SessionRecord> = self.store.data.sessions.iter().filter(|s| s.kind == SessionKind::Claude && !s.hidden).collect();
+                let mut sessions: Vec<&SessionRecord> = self.store.data.sessions.iter().filter(|s| s.kind == SessionKind::Agent && !s.hidden).collect();
                 sessions.sort_by_key(|s| std::cmp::Reverse(s.last_active));
                 let lines: Vec<String> = sessions
                     .iter()
@@ -254,7 +254,7 @@ impl Workspace {
                 let words: Vec<String> = req.args["query"].as_str().unwrap_or_default().to_lowercase().split_whitespace().map(String::from).collect();
                 let project_of = |cwd: &std::path::Path| self.store.project_for_cwd(cwd).and_then(|p| self.store.project(&p)).map(|p| p.name.clone());
                 let mut found: Vec<(i64, String)> = vec![];
-                for s in self.store.data.sessions.iter().filter(|s| s.kind == SessionKind::Claude && !s.hidden) {
+                for s in self.store.data.sessions.iter().filter(|s| s.kind == SessionKind::Agent && !s.hidden) {
                     let project = project_of(&s.cwd);
                     let hay = format!("{} {} {}", s.display_title(), project.clone().unwrap_or_default(), s.cwd.to_string_lossy()).to_lowercase();
                     if words.iter().all(|w| hay.contains(w)) {
@@ -286,7 +286,7 @@ impl Workspace {
                 Ok(if lines.is_empty() { "No project matches.".into() } else { lines.join("\n") })
             }
             "read_code_session" => {
-                let rec = self.store.session(&id).filter(|s| s.kind == SessionKind::Claude).ok_or("No session with that id.")?;
+                let rec = self.store.session(&id).filter(|s| s.kind == SessionKind::Agent).ok_or("No session with that id.")?;
                 let view = self.live_view(&id).filter(|v| v.is_running(cx)).ok_or_else(|| format!("The session “{}” has ended; only running sessions can be read.", rec.display_title()))?;
                 let text = view.tail_text(count("lines", 120, 400), cx);
                 Ok(format!("Session “{}” ({}), latest conversation:\n\n{text}", rec.display_title(), stamps(rec.created_at, rec.last_active)))

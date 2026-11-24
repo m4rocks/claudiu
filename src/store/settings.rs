@@ -55,7 +55,6 @@ pub struct Layout {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SideCard {
-    Account,
     Actions,
     Github,
     Subagents,
@@ -63,14 +62,14 @@ pub enum SideCard {
     Status,
     /// A blank card, kept in the layout for something later.
     Empty,
-    /// A card this version doesn't know, from a newer state file; it keeps the rest of the file loading.
+    /// A card this version doesn't know (or a removed one like `account`), keeping older/newer state files loading.
     #[serde(other)]
     Unknown,
 }
 
 impl SideCard {
     /// Every card in its default place.
-    pub const ALL: [SideCard; 7] = [Self::Account, Self::Actions, Self::Github, Self::Subagents, Self::Linked, Self::Status, Self::Empty];
+    pub const ALL: [SideCard; 6] = [Self::Actions, Self::Github, Self::Subagents, Self::Linked, Self::Status, Self::Empty];
 }
 
 impl Layout {
@@ -93,14 +92,24 @@ pub struct TextGenerationModel {
     pub id: String,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+fn default_auto_compact() -> bool {
+    true
+}
+
+fn default_auto_compact_threshold() -> u64 {
+    crate::harness::compaction::THRESHOLD_PERCENT
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Settings {
     /// Explicit path to the `claude` executable; discovery is used when empty.
+    #[serde(default)]
     pub claude_path: Option<PathBuf>,
     /// Program for new terminal sessions (a path or a name on PATH); the platform default shell when empty.
     #[serde(default)]
     pub shell: Option<String>,
     /// Update feed base URL. Empty/None disables update checks entirely.
+    #[serde(default)]
     pub update_url: Option<String>,
     /// Editor the "Open in" button uses; the last one picked.
     #[serde(default)]
@@ -114,37 +123,36 @@ pub struct Settings {
     /// The harness new sessions run in.
     #[serde(default)]
     pub harness: crate::harness::Harness,
-    /// Harnesses enabled under Settings → Harnesses. `None` (older state files) enables Claude Code plus the default
-    /// harness and any harness previously enabled under Custom subagents.
+    /// Harnesses enabled under Settings → Harnesses. `None` (older state files) enables all supported harnesses.
     #[serde(default)]
     pub enabled_harnesses: Option<Vec<crate::harness::Harness>>,
     /// Model, effort and permission mode for new sessions; empty fields leave the harness's own default.
     #[serde(default)]
-    pub new_session: crate::claude::defaults::NewSessionDefaults,
+    pub new_session: crate::harness::defaults::NewSessionDefaults,
     #[serde(default)]
     pub text_generation_model: Option<TextGenerationModel>,
-    /// Parts of m4code's own MCP server switched off for new sessions (`claude/mcp.rs`). Empty means everything is on,
+    /// Parts of m4code's own MCP server switched off for new sessions (`mcp/mod.rs`). Empty means everything is on,
     /// which is also what a state file from before this setting loads as.
     #[serde(default, alias = "claudiu_tools_off")]
-    pub m4code_tools_off: Vec<crate::claude::mcp::Feature>,
+    pub m4code_tools_off: Vec<crate::mcp::Feature>,
     /// The trims an earlier version wrote into Claude Code's own `settings.json`, kept only until
     /// `take_back_global_trims` has taken them out again; sessions now get `trim::FLUFF` themselves.
     #[serde(default)]
-    pub trimmed_tools: Vec<crate::claude::trim::Trim>,
+    pub trimmed_tools: Vec<crate::harness::claude::trim::Trim>,
     /// The lines m4code added to Claude Code's `settings.json` (old trims and the skill limits), so it removes only them.
     #[serde(default)]
     pub applied_trims: Vec<String>,
-    /// Output caps and turned-off skills for Claude Code (`claude/trim.rs`); empty leaves Claude Code's own behavior.
+    /// Output caps and turned-off skills for Claude Code (`harness/claude/trim.rs`); empty leaves Claude Code's own behavior.
     #[serde(default)]
-    pub limits: crate::claude::trim::Limits,
+    pub limits: crate::harness::claude::trim::Limits,
     /// Agent types that run a task in another coding agent (Settings → Harnesses); Antigravity is opt-in.
     #[serde(default)]
-    pub custom_subagents: crate::claude::subagents::CustomSubagents,
+    pub custom_subagents: crate::harness::subagents::CustomSubagents,
     #[serde(default)]
     pub claude_subagents: crate::harness::SubagentAccess,
     /// Last model list reported by Claude Code, used to populate the unified model picker before a session opens.
     #[serde(default)]
-    pub claude_models: Vec<crate::claude::subagents::AgentModel>,
+    pub claude_models: Vec<crate::harness::subagents::AgentModel>,
     /// The Claude Code models ticked in Settings → Harnesses; empty shows every model in the picker.
     #[serde(default)]
     pub claude_picked: Vec<String>,
@@ -157,6 +165,42 @@ pub struct Settings {
     /// What a message sent while the agent works does (Settings → General).
     #[serde(default)]
     pub follow_up: FollowUp,
+    /// Whether m4code automatically compacts conversation context between turns (Settings → General).
+    #[serde(default = "default_auto_compact")]
+    pub auto_compact: bool,
+    /// Context usage percentage at which automatic compaction runs (50..=95, default 90).
+    #[serde(default = "default_auto_compact_threshold")]
+    pub auto_compact_threshold: u64,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            claude_path: None,
+            shell: None,
+            update_url: None,
+            editor: None,
+            scale: None,
+            chrome_default: false,
+            harness: Default::default(),
+            enabled_harnesses: None,
+            new_session: Default::default(),
+            text_generation_model: None,
+            m4code_tools_off: Vec::new(),
+            trimmed_tools: Vec::new(),
+            applied_trims: Vec::new(),
+            limits: Default::default(),
+            custom_subagents: Default::default(),
+            claude_subagents: Default::default(),
+            claude_models: Vec::new(),
+            claude_picked: Vec::new(),
+            harness_modes: BTreeMap::new(),
+            skills: Default::default(),
+            follow_up: Default::default(),
+            auto_compact: default_auto_compact(),
+            auto_compact_threshold: default_auto_compact_threshold(),
+        }
+    }
 }
 
 /// What a message sent while the agent works does. Cmd/Ctrl+Enter does the other one for a single message.
@@ -217,7 +261,7 @@ impl Settings {
         true
     }
     /// Cached model catalog for `harness` (empty until its adapter or a live session reports models).
-    pub fn harness_models(&self, harness: crate::harness::Harness) -> &[crate::claude::subagents::AgentModel] {
+    pub fn harness_models(&self, harness: crate::harness::Harness) -> &[crate::harness::subagents::AgentModel] {
         match harness.agent() {
             None => &self.claude_models,
             Some(agent) => &self.custom_subagents.get(agent).catalog,
@@ -225,7 +269,7 @@ impl Settings {
     }
 
     /// Update the cached model catalog for `harness`; returns `true` when the list actually changed.
-    pub fn set_harness_models(&mut self, harness: crate::harness::Harness, models: Vec<crate::claude::subagents::AgentModel>) -> bool {
+    pub fn set_harness_models(&mut self, harness: crate::harness::Harness, models: Vec<crate::harness::subagents::AgentModel>) -> bool {
         let slot = match harness.agent() {
             None => &mut self.claude_models,
             Some(agent) => &mut self.custom_subagents.get_mut(agent).catalog,
@@ -327,8 +371,18 @@ mod tests {
         let moved: Layout = serde_json::from_str(r#"{"selected_session":null,"sidebar_visible":true,"other_collapsed":false,"right_cards":["status","from_the_future","actions","status"]}"#).unwrap();
         assert_eq!(
             moved.right_card_order(),
-            [SideCard::Status, SideCard::Actions, SideCard::Account, SideCard::Github, SideCard::Subagents, SideCard::Linked, SideCard::Empty]
+            [SideCard::Status, SideCard::Actions, SideCard::Github, SideCard::Subagents, SideCard::Linked, SideCard::Empty]
         );
+    }
+
+    #[test]
+    fn auto_compact_settings_default_on_at_ninety_percent() {
+        let older: super::Settings = serde_json::from_str("{}").unwrap();
+        assert!(older.auto_compact);
+        assert_eq!(older.auto_compact_threshold, 90);
+        let custom: super::Settings = serde_json::from_str(r#"{"auto_compact":false,"auto_compact_threshold":75}"#).unwrap();
+        assert!(!custom.auto_compact);
+        assert_eq!(custom.auto_compact_threshold, 75);
     }
 
     #[test]

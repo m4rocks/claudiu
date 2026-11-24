@@ -7,9 +7,9 @@ m4code is a native desktop app, written in Rust with GPUI, that runs coding-agen
 - `src/main.rs`: startup, menus and assets.
 - `src/app/`: workspace state and behavior. `act.rs` dispatches actions, `keymap.rs` holds the key bindings, and the other files group methods by task. `headless.rs` and `headless/` drive the workspace on GPUI's test platform.
 - `src/panels/`: workspace rendering. `workspace_view.rs` is the root view.
-- `src/harness/`: one file per agent harness, the ACP client, and `permission.rs`, which maps the four permission modes to each harness's own mode ids.
+- `src/harness/`: harness-agnostic core (`mod.rs`, `acp.rs`, `compaction.rs`, `defaults.rs`, `limits.rs`, `permission.rs`, `runner.rs`, `subagents.rs`, `text_generation.rs`, `thread.rs`) plus isolated per-harness adapters (`claude/`, `codex/`, `opencode.rs`, `antigravity/`).
+- `src/mcp/`: m4code's built-in MCP server (`mod.rs`) and IPC request bridge (`bridge.rs`), shared across harnesses.
 - `src/thread/`: the conversation view and its composer.
-- `src/claude/`: accounts, usage limits, session defaults, the MCP server, and custom subagents (`acp/`).
 - `src/store.rs` and `src/store/`: persisted app state.
 - `src/git/` and `src/github/`: local Git and the GitHub pane.
 - `src/terminal/`: the shell panel, the only PTY in the app. `src/lsp/`: language servers.

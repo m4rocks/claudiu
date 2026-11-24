@@ -128,7 +128,7 @@ impl Workspace {
                     .background_executor()
                     .spawn(async move {
                         let statuses = claude::claude_home().map(|h| claude::session_statuses(&h, &mut seen)).unwrap_or_default();
-                        (statuses, crate::claude::bridge::take_requests(), seen)
+                        (statuses, crate::mcp::bridge::take_requests(), seen)
                     })
                     .await;
                 seen = back;
@@ -168,7 +168,7 @@ impl Workspace {
                     (t.is_working(), t.is_waiting(), t.pending_question_title(), t.has_background_work())
                 }
                 SessionView::Terminal(v) => {
-                    let status = rec.claude_id().and_then(|cid| statuses.get(cid));
+                    let status = rec.provider_session_id().and_then(|cid| statuses.get(cid));
                     (status.map_or_else(|| v.read(cx).is_working(), |s| s == "busy"), status.is_some_and(|s| s == "waiting"), None, false)
                 }
             };
@@ -188,7 +188,7 @@ impl Workspace {
             }
             if let Some(ev) = attention_event(before, now, viewing, pending) {
                 let title = rec.display_title().to_string();
-                let harness = rec.claude.as_ref().map_or(self.store.data.settings.harness, |m| m.harness);
+                let harness = rec.agent.as_ref().map_or(self.store.data.settings.harness, |m| m.harness);
                 let body = notice_body(ev, harness, question_title.as_deref());
                 if window_active {
                     let text = match ev {
@@ -228,14 +228,14 @@ impl Workspace {
             let Some((cid, w)) = self
                 .store
                 .session(&l.id)
-                .filter(|r| r.claude.as_ref().is_some_and(|m| m.harness == Harness::Claude))
-                .and_then(|r| Some((r.claude_id()?, r.chosen_title()?)))
+                .filter(|r| r.agent.as_ref().is_some_and(|m| m.harness == Harness::Claude))
+                .and_then(|r| Some((r.provider_session_id()?, r.chosen_title()?)))
                 .filter(|(_, w)| l.claude_name.as_deref() != Some(*w))
             else {
                 continue;
             };
             l.claude_name = Some(w.to_string());
-            mcp::write_name(cid, Some(w));
+            claude::write_name(cid, Some(w));
         }
     }
 
@@ -245,7 +245,6 @@ impl Workspace {
         self.remember_open(cx);
         self.ingest_usage(cx);
         self.sync_attached(cx);
-        self.sync_configs(cx);
         self.refresh_if_stale(cx);
         self.refresh_marks(cx);
         self.raise_claude_priority(cx);
@@ -268,7 +267,7 @@ impl Workspace {
             let claude_pids: Vec<u32> = self
                 .live
                 .iter()
-                .filter(|l| self.store.session(&l.id).is_some_and(|r| r.kind == SessionKind::Claude))
+                .filter(|l| self.store.session(&l.id).is_some_and(|r| r.kind == SessionKind::Agent))
                 .filter_map(|l| l.view.terminal()?.read(cx).terminal.process_id())
                 .collect();
             cx.background_executor().spawn(async move { crate::priority::raise_claude_priority(&claude_pids) }).detach();

@@ -1,5 +1,5 @@
-//! Left sidebar: the running Claude Code sessions, a project filter, the recent ones in a list that opens at the
-//! bottom, and the account usage meters.
+//! Left sidebar: the running agent sessions, a project filter, the recent ones in a list that opens at the
+//! bottom, and the harness usage meters.
 
 use std::time::{Duration, Instant};
 
@@ -20,7 +20,6 @@ use crate::panels::widgets::{Trigger, ago, countdown, focusable, icon, icon_butt
 pub const SIDEBAR_W: f32 = 284.0;
 pub const SIDEBAR_MIN: f32 = 220.0;
 pub const SIDEBAR_MAX: f32 = 520.0;
-/// The account warning's entrance: its height at the end of the expand (the box grows to it), and its duration.
 /// The open RECENT list takes at most this share of the window's height, and scrolls.
 const RECENT_SHARE: f32 = 0.4;
 
@@ -268,7 +267,7 @@ impl Workspace {
         Row {
             id: rec.id.clone(),
             dot,
-            harness: rec.claude.as_ref().map(|c| c.harness),
+            harness: rec.agent.as_ref().map(|c| c.harness),
             title: rec.display_title().to_string(),
             right: if with_project && !running { project.clone() } else { ago(rec.last_active, now()) },
             project,
@@ -287,21 +286,21 @@ impl Workspace {
         let item = |label: &str, act: Act, danger: bool, sep: bool| MenuItem { label: label.into(), hint: None, detail: None, act, danger, disabled: false, separator_before: sep, remove: None, icon: None };
         if running {
             items.push(item("Switch to session", Act::Select(rec.id.clone()), false, false));
-        } else if rec.kind == SessionKind::Claude {
+        } else if rec.kind == SessionKind::Agent {
             items.push(item("Resume session", Act::Resume(rec.id.clone()), false, false));
         }
-        if running && rec.kind == SessionKind::Claude {
+        if running && rec.kind == SessionKind::Agent {
             items.push(item("Show or hide shell", Act::ToggleShell(rec.id.clone()), false, false));
         }
         items.push(item("Rename…", Act::Rename(rec.id.clone()), false, false));
         // The first user message is available from the open chat.
-        if rec.kind == SessionKind::Claude && running {
+        if rec.kind == SessionKind::Agent && running {
             items.push(item("Regenerate title", Act::RegenTitle(rec.id.clone()), false, false));
         }
-        if let Some(c) = &rec.claude {
+        if let Some(c) = &rec.agent {
             items.push(item("Copy session ID", Act::CopyText(c.session_id.clone()), false, true));
         }
-        items.push(item("Copy folder path", Act::CopyText(rec.cwd.to_string_lossy().into_owned()), false, rec.claude.is_none()));
+        items.push(item("Copy folder path", Act::CopyText(rec.cwd.to_string_lossy().into_owned()), false, rec.agent.is_none()));
         items.push(item(reveal_label(), Act::Reveal(rec.cwd.clone()), false, false));
         if running {
             items.push(item("End session", Act::CloseLive(rec.id.clone()), true, true));
@@ -314,7 +313,7 @@ impl Workspace {
     fn project_menu(&self, p: &Project) -> Vec<MenuItem> {
         let item = |label: String, act: Act, danger: bool, sep: bool| MenuItem { label, hint: None, detail: None, act, danger, disabled: false, separator_before: sep, remove: None, icon: None };
         let mut items = vec![
-            item("New session here".into(), Act::NewClaude { cwd: p.path.clone() }, false, false),
+            item("New session here".into(), Act::NewSession { cwd: p.path.clone() }, false, false),
             item("Pick up a session here…".into(), Act::ListSessions { cwd: p.path.clone() }, false, false),
         ];
         if p.git.is_some() {
@@ -619,7 +618,7 @@ impl Workspace {
             .data
             .sessions
             .iter()
-            .filter(|s| s.kind == SessionKind::Claude && (!q.is_empty() || !s.hidden) && !running.contains(&s.id) && self.listed(&q, filter.as_ref(), s))
+            .filter(|s| s.kind == SessionKind::Agent && (!q.is_empty() || !s.hidden) && !running.contains(&s.id) && self.listed(&q, filter.as_ref(), s))
             .collect();
         recent.sort_by_key(|r| std::cmp::Reverse(r.last_active));
         recent
@@ -857,12 +856,12 @@ impl Workspace {
             .on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.open_home(window, cx)))
     }
 
-    /// Connected harnesses' usage limits only (no account picker). Hidden when no connected harness has a limits adapter.
+    /// Connected harnesses' usage limits. Hidden when no connected harness has a limits adapter.
     fn render_footer(&self, _cx: &mut Context<Self>) -> Option<Div> {
         use crate::harness::Harness;
         let t = now();
         let settings = &self.store.data.settings;
-        let usage = self.store.active_account().map(|a| a.usage.clone()).unwrap_or_default();
+        let usage = &self.store.data.claude_usage;
 
         // A reset time stays true however old the reading is, so it shows whenever it is still ahead, including for a
         // reading saved before launch. Without one, the reading's age says how far to trust it.
@@ -904,18 +903,14 @@ impl Workspace {
             rows.push(source_row(
                 &[&logos::CLAUDE],
                 None,
-                theme::ACCENT,
-                limit("meter-5h".into(), &usage.five_hour, theme::ACCENT).into_any_element(),
-                limit("meter-7d".into(), &usage.seven_day, theme::ACCENT).into_any_element(),
+                theme::CLAUDE,
+                limit("meter-5h".into(), &usage.five_hour, theme::CLAUDE).into_any_element(),
+                limit("meter-7d".into(), &usage.seven_day, theme::CLAUDE).into_any_element(),
             ));
         }
         let subagents = &settings.custom_subagents;
-        for agent in crate::claude::subagents::Agent::ALL {
-            let harness = match agent {
-                crate::claude::subagents::Agent::Codex => Harness::Codex,
-                crate::claude::subagents::Agent::OpenCode => Harness::OpenCode,
-                crate::claude::subagents::Agent::Antigravity => Harness::Antigravity,
-            };
+        for agent in crate::harness::subagents::Agent::ALL {
+            let harness = Harness::from_agent(agent);
             let provider = agent.provider();
             if !(settings.harness_enabled(harness) || subagents.get(agent).on) {
                 continue;

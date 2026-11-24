@@ -15,7 +15,7 @@ use crate::github::cli::AuthState;
 use crate::panels::theme::{self, hsla};
 use crate::panels::widgets::{brand_mark, button, button_disabled, icon, section_label, spinner};
 
-const CLAUDE_INSTALL_PAGE: &str = "https://code.claude.com/docs/en/setup";
+const CLAUDE_INSTALL_PAGE: &str = "https://code.agent.com/docs/en/setup";
 const GH_INSTALL_PAGE: &str = "https://cli.github.com";
 
 /// Said after Check again when a tool is still missing. Every check reads the PATH again (`platform::reload_path`),

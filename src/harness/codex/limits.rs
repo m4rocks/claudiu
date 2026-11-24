@@ -10,7 +10,7 @@ use std::time::SystemTime;
 
 use serde_json::Value;
 
-use crate::store::{AccountUsage, RateLimit};
+use crate::store::{RateLimit, UsageLimits};
 
 /// Codex files a log under the day its session started, so a session still running from yesterday writes into
 /// yesterday's folder. Looking at the last few days finds it.
@@ -25,7 +25,7 @@ static LAST: LazyLock<Mutex<HashMap<PathBuf, Seen>>> = LazyLock::new(Default::de
 
 struct Seen {
     logs: Vec<Log>,
-    usage: Option<AccountUsage>,
+    usage: Option<UsageLimits>,
 }
 
 /// A rollout log, with its write time and size: either changes when Codex writes to it.
@@ -44,7 +44,7 @@ pub fn codex_home() -> Option<PathBuf> {
 }
 
 /// The newest limits Codex logged, or `None` when there are none to read.
-pub fn read(codex_home: &Path) -> Option<AccountUsage> {
+pub fn read(codex_home: &Path) -> Option<UsageLimits> {
     let logs = newest_logs(&codex_home.join("sessions"));
     let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(seen) = last.get(codex_home)
@@ -101,13 +101,13 @@ fn subdirs_newest_first(dir: &Path) -> Vec<PathBuf> {
     dirs
 }
 
-fn read_log(path: &Path) -> std::io::Result<Option<AccountUsage>> {
-    let (head, tail, whole, _, _) = super::read_chunks(path)?;
+fn read_log(path: &Path) -> std::io::Result<Option<UsageLimits>> {
+    let (head, tail, whole, _, _) = crate::harness::limits::read_chunks(path)?;
     let text = if whole { head } else { tail };
     Ok(text.lines().rev().filter(|line| line.contains("\"rate_limits\"")).find_map(parse_line))
 }
 
-fn parse_line(line: &str) -> Option<AccountUsage> {
+fn parse_line(line: &str) -> Option<UsageLimits> {
     let v: Value = serde_json::from_str(line).ok()?;
     let payload = v.get("payload")?;
     if payload.get("type")?.as_str()? != "token_count" {
@@ -118,8 +118,8 @@ fn parse_line(line: &str) -> Option<AccountUsage> {
     if limits.get("limit_id").and_then(Value::as_str).is_some_and(|id| id != "codex") {
         return None;
     }
-    let seen_at = super::parse_rfc3339(v.get("timestamp")?.as_str()?)?;
-    let mut usage = AccountUsage::default();
+    let seen_at = crate::harness::limits::parse_rfc3339(v.get("timestamp")?.as_str()?)?;
+    let mut usage = UsageLimits::default();
     for window in [limits.get("primary"), limits.get("secondary")].into_iter().flatten() {
         let Some(minutes) = window.get("window_minutes").and_then(Value::as_i64) else { continue };
         let limit = RateLimit {

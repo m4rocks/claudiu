@@ -108,16 +108,15 @@ pub fn frame(lit: bool, top: Option<AnyElement>, input: AnyElement, chips: Vec<A
         .child(
             div()
                 .flex()
-                .flex_wrap()
                 .items_center()
                 .justify_between()
-                .gap(px(6.0))
+                .gap(px(8.0))
                 .px(px(10.0))
                 .py(px(8.0))
                 .border_t_1()
                 .border_color(hsla(theme::BORDER))
-                .child(div().flex().flex_wrap().items_center().gap(px(6.0)).children(chips))
-                .child(div().flex().flex_wrap().items_center().gap(px(6.0)).children(actions)),
+                .child(div().flex_1().min_w_0().flex().flex_wrap().items_center().gap(px(6.0)).children(chips))
+                .child(div().flex_none().flex().items_center().gap(px(6.0)).children(actions)),
         )
 }
 

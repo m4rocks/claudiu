@@ -594,10 +594,15 @@ function showWaitingSteers(session, only) {
 
 function cancel(p) {
   const s = sessions.get(p.sessionId);
-  if (!s || (!s.turn && !s.preparing)) return;
-  s.cancelled = true;
-  if (!s.turn) return;
-  s.interrupted = s.query.interrupt().catch(() => undefined);
+  if (!s) return;
+  if (s.turn || s.preparing) {
+    s.cancelled = true;
+    if (!s.turn) return;
+    s.interrupted = s.query.interrupt().catch(() => undefined);
+    return;
+  }
+  // Background continuation (e.g. after a subagent or background shell woke Claude up with no open session/prompt).
+  s.query.interrupt().catch(() => undefined);
 }
 
 async function handle(m) {

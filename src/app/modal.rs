@@ -113,6 +113,8 @@ impl Workspace {
             chrome,
             scale,
             follow_up,
+            auto_compact,
+            auto_compact_threshold,
             m4code_off,
             skills_field,
             renaming,
@@ -152,6 +154,11 @@ impl Workspace {
         s.scale = (scale != 100).then_some(scale);
         s.chrome_default = chrome;
         s.follow_up = follow_up;
+        let auto_compact_threshold = crate::harness::compaction::clamp_threshold(auto_compact_threshold);
+        let auto_compact_changed = s.auto_compact != auto_compact;
+        let auto_compact_threshold_changed = s.auto_compact_threshold != auto_compact_threshold;
+        s.auto_compact = auto_compact;
+        s.auto_compact_threshold = auto_compact_threshold;
         s.text_generation_model = text_generation_model;
 
         let enabled = if subagents.enabled.is_empty() { vec![default_model.harness] } else { subagents.enabled.clone() };
@@ -168,7 +175,7 @@ impl Workspace {
         let harness_changed = s.harness != chosen.harness || s.enabled_harnesses.as_ref() != Some(&enabled);
         s.enabled_harnesses = Some(enabled);
         s.harness = chosen.harness;
-        s.new_session = claude::defaults::NewSessionDefaults {
+        s.new_session = harness::defaults::NewSessionDefaults {
             model: next_model,
             effort: Some(effort),
             permission_mode: permission,
@@ -194,11 +201,11 @@ impl Workspace {
         }
 
         // The catalogs are what the agents last offered, kept as they are; the page edits the rest.
-        let custom_subagents = claude::subagents::CustomSubagents(claude::subagents::AgentMap::from_fn(|agent| {
+        let custom_subagents = harness::subagents::CustomSubagents(harness::subagents::AgentMap::from_fn(|agent| {
             let form = subagents.get(agent);
             let catalog = s.custom_subagents.get(agent).catalog.clone();
             let models = if form.on && form.models.is_empty() { catalog.iter().map(|m| m.id.clone()).collect() } else { form.models.clone() };
-            claude::subagents::AgentChoice { on: form.on, models, edits: form.edits, catalog }
+            harness::subagents::AgentChoice { on: form.on, models, edits: form.edits, catalog }
         }));
         let subagents_changed = s.custom_subagents != custom_subagents || s.claude_picked != subagents.claude_models || s.claude_subagents != subagents.claude_subagents;
         s.limits = limits;
@@ -219,9 +226,16 @@ impl Workspace {
         self.push_models_to_threads(cx);
         let effort_id = effort.name().to_string();
         for live in &self.live {
+            let inherits_auto_compact = self.store.session(&live.id).and_then(|r| r.agent.as_ref()).is_none_or(|m| m.auto_compact.is_none());
             if let Some(thread) = live.view.thread() {
                 thread.update(cx, |t, cx| {
                     t.follow_up = follow_up;
+                    if auto_compact_changed && inherits_auto_compact {
+                        t.set_auto_compact(auto_compact, cx);
+                    }
+                    if auto_compact_threshold_changed {
+                        t.set_compaction_threshold(auto_compact_threshold, cx);
+                    }
                     if default_model_changed && t.harness == chosen.harness && !chosen.id.is_empty() {
                         t.pick_model(chosen.clone(), cx);
                     }

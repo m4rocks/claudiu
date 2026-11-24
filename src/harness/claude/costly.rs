@@ -65,7 +65,7 @@ pub fn read_file_env(path: &Path) -> Map<String, Value> {
 
 /// `find` on the real environment and Claude Code's own `settings.json`.
 pub fn scan() -> Vec<Finding> {
-    let file_env = crate::claude::claude_home().map(|home| read_file_env(&home.join("settings.json"))).unwrap_or_default();
+    let file_env = super::claude_home().map(|home| read_file_env(&home.join("settings.json"))).unwrap_or_default();
     find(&|name| std::env::var(name).ok(), &file_env)
 }
 

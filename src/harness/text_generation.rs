@@ -110,7 +110,7 @@ fn configure(mut launch: Launch, harness: Harness, data: &Path) -> Result<(Launc
             launch.env.push(("OPENCODE_CONFIG_CONTENT".into(), json!(config).to_string()));
         }
         Harness::Antigravity => {
-            let folder = crate::claude::antigravity_read_only::prepare_text_generation(data)
+            let folder = super::antigravity::read_only::prepare_text_generation(data)
                 .map_err(|e| format!("Could not disable Antigravity tools: {e}"))?;
             launch.args.extend(["--gemini-dir".into(), folder.to_string_lossy().into_owned()]);
         }

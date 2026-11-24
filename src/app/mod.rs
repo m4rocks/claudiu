@@ -1,7 +1,7 @@
 //! Workspace: the app's state and `new`. `act` holds the `Act` table that menus, shortcuts and clicks all go through,
 //! and its dispatch. The methods are split by topic: `sessions` (start, show, close), `background` (timers and polls),
 //! `layout` (panels), `editor_mode` (files and editor beside the terminal), `modal` (toasts, menus, modals), `repo`
-//! (git), `github_pane`, `alt_accounts`. Rendering lives in `panels/`.
+//! (git), `github_pane`. Rendering lives in `panels/`.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -13,40 +13,35 @@ use gpui::{
 };
 
 use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
-use crate::claude::accounts;
-use crate::claude::subagents::Agent;
-use crate::claude;
-use crate::panels::sidebar::{SIDEBAR_MAX, SIDEBAR_MIN, SIDEBAR_W};
-use crate::github::view::{GhEvent, GithubView};
-use crate::claude::defaults::{Effort, Starter};
-use crate::claude::mcp;
-use crate::harness::permission::Permission;
-use crate::harness::{self, Harness};
+use crate::datadir;
 use crate::git::worktree::Base;
+use crate::github::view::{GhEvent, GithubView};
+use crate::harness::claude::{self, usage};
+use crate::harness::defaults::{Effort, Starter};
+use crate::harness::permission::Permission;
+use crate::harness::subagents::Agent;
+use crate::harness::{self, Harness};
+use crate::mcp;
+use crate::panels::sidebar::{SIDEBAR_MAX, SIDEBAR_MIN, SIDEBAR_W};
 use crate::platform::{self, Editor};
-use crate::{claude::usage, datadir};
 use crate::store::{
-    Account, Attached, ClaudeMeta, ExternalState, Id, MAIN_ACCOUNT, Project, SessionKind, SessionRecord, Store, new_id, now,
+    Attached, AgentMeta, ExternalState, Id, Project, SessionKind, SessionRecord, Store, new_id, now,
 };
 use crate::terminal::SpawnSpec;
 use crate::terminal::view::{TerminalEvent, TerminalView};
-use crate::thread::Handover;
 use crate::thread::{ThreadEvent, ThreadView};
 use crate::updater::UpdateState;
 
 mod act;
 mod agent_handoff;
-mod alt_accounts;
 pub mod already_running;
 mod attached_sync;
-mod config_sync;
-mod ask_claude;
+mod ask_agent;
 mod background;
 mod cross;
 pub mod editing;
 mod editor_mode;
 mod github_pane;
-mod handoff;
 #[cfg(test)]
 mod headless;
 mod ingest;
@@ -78,7 +73,7 @@ mod worktrees;
 
 pub use act::Act;
 pub use editor_mode::{EditorPane, Tab, register_languages};
-pub use ask_claude::Ask;
+pub use ask_agent::Ask;
 pub use lifecycle::saved_window_bounds;
 pub use editor_mode::EditorCommand;
 pub use file_ops::NameFor;
@@ -90,7 +85,7 @@ pub use setup::{Mode as SetupMode, SetupEvent, SetupView, window_options as setu
 actions!(
     m4code,
     [
-        NewClaude,
+        NewSession,
         ToggleShell,
         CloseSession,
         NextSession,
@@ -197,14 +192,16 @@ pub enum Modal {
         chrome: bool,
         scale: u32,
         follow_up: crate::store::FollowUp,
+        auto_compact: bool,
+        auto_compact_threshold: u64,
         /// m4code tools turned off (m4code tools page).
-        m4code_off: Vec<crate::claude::mcp::Feature>,
+        m4code_off: Vec<crate::mcp::Feature>,
         /// Skills to turn off, separated by commas (Claude Code tools page).
         skills_field: Entity<InputState>,
         /// Search box on the Skills page (Browse skills.sh).
         skill_search: Entity<InputState>,
         /// Settings found at open time that make Claude Code cost more (Claude Code tools page).
-        costly: Vec<crate::claude::costly::Finding>,
+        costly: Vec<crate::harness::claude::costly::Finding>,
         /// Focus of the category list, which has the keyboard when the dialog opens.
         list_focus: FocusHandle,
         /// The project being renamed on the Projects page, and the name typed so far.
@@ -223,7 +220,7 @@ pub struct HarnessDialog {
 /// The Harnesses page of the Settings dialog, as edited so far.
 pub struct HarnessesForm {
     pub enabled: Vec<Harness>,
-    pub agents: claude::subagents::AgentMap<AgentForm>,
+    pub agents: harness::subagents::AgentMap<AgentForm>,
     /// The ids of the Claude Code models ticked for the picker.
     pub claude_models: Vec<String>,
     pub claude_subagents: harness::SubagentAccess,
@@ -382,8 +379,6 @@ pub struct Live {
     pub _sub: Subscription,
     /// The session name Claude Code was last given (`--name` or `/rename`), so a changed title is sent once.
     pub claude_name: Option<String>,
-    /// The account this process was started under; a session on another account than the active one can be handed off.
-    pub account: Id,
 }
 
 /// What a session is drawn as: a harness session's conversation, or the terminal of a shell tab (a sign-in).
@@ -442,16 +437,6 @@ impl SessionView {
         match self {
             Self::Thread(v) => v.entity_id(),
             Self::Terminal(v) => v.entity_id(),
-        }
-    }
-
-    /// Only a harness session moves; a shell terminal has nothing to say while it restarts.
-    pub fn set_handover(&self, handover: Option<Handover>, cx: &mut App) {
-        if let Self::Thread(v) = self {
-            v.update(cx, |v, cx| {
-                v.handover = handover;
-                cx.notify();
-            })
         }
     }
 
@@ -596,14 +581,12 @@ pub struct Workspace {
     /// Requests from sessions to other sessions, waiting for the user's answer.
     /// Sessions that leave no history once they end (the "fix with Claude" helper).
     ephemeral: HashSet<Id>,
-    /// `claude auth login` tabs; account details are re-read when one ends.
-    logins: HashSet<Id>,
     /// Sessions the user closed since m4code started, the last closed last; Ctrl+Z (Cmd+Z) resumes them in turn.
     closed: Vec<Id>,
     /// Whether the Custom subagents page is asking each agent for its models. Not saved to disk.
     pub model_lookups: settings::ModelLookups,
     /// When each provider's limits were last asked for; failed reads wait for its next refresh too.
-    pub limits_asked: crate::claude::subagents::AgentMap<Option<std::time::Instant>>,
+    pub limits_asked: crate::harness::subagents::AgentMap<Option<std::time::Instant>>,
     pub editors: Vec<(Editor, bool)>,
     pub window_title: String,
     /// The session being dragged in the sidebar (lifted in place while its ghost follows the cursor).
@@ -635,8 +618,6 @@ pub struct Workspace {
     pub last_swap: std::time::Instant,
     /// Attached issues and pull requests are asked about on GitHub from time to time, see `attached_sync.rs`.
     pub attached_sync: attached_sync::Sync,
-    /// The shared Claude Code settings are kept equal across accounts, see `config_sync.rs`.
-    pub config_sync: config_sync::Runner,
     pub pending_subagent_waits: Vec<subagents::PendingWait>,
     /// Parents whose finished subagents are unfolded in the right sidebar.
     pub finished_subagents_open: std::collections::HashSet<Id>,
@@ -756,7 +737,6 @@ impl Workspace {
             toast: None,
             toast_serial: 0,
             ephemeral: HashSet::new(),
-            logins: HashSet::new(),
             closed: vec![],
             model_lookups: Default::default(),
             limits_asked: Default::default(),
@@ -782,7 +762,6 @@ impl Workspace {
             spinning: false,
             last_swap: std::time::Instant::now(),
             attached_sync: Default::default(),
-            config_sync: Default::default(),
             pending_subagent_waits: vec![],
             finished_subagents_open: Default::default(),
             pending_handoffs: HashMap::new(),
@@ -815,16 +794,8 @@ impl Workspace {
             ws.store.add_project(&path);
         }
         ws.store.refresh_git();
-        // Alt folders the list doesn't know (e.g. lost to an older m4code rewriting its state) are adopted again.
-        for dir in accounts::folders() {
-            if !ws.store.data.accounts.iter().any(|a| a.dir.as_ref() == Some(&dir)) {
-                ws.store.data.accounts.push(Account { id: new_id(), dir: Some(dir), ..Default::default() });
-                ws.store.mark_dirty();
-            }
-        }
         cx.background_executor().spawn(async { lifecycle::tidy_leftovers() }).detach();
         ws.ingest_usage(cx);
-        ws.refresh_accounts(cx);
         // After the first frame: starting every saved session is the slow part of coming back.
         cx.spawn_in(window, async move |this, cx| {
             let _ = this.update_in(cx, |ws, window, cx| ws.restore_open(window, cx));

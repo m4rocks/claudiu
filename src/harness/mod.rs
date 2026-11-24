@@ -1,14 +1,18 @@
 //! The coding agents m4code runs sessions in, each through its own ACP server. The core of the app treats them
-//! alike; what is particular to one (Claude Code's plugin, accounts and flags) is in its `Profile` here and in the
-//! code that builds its launch. No GPUI here.
+//! alike; what is particular to one adapter lives inside its own submodule (`claude/`, `codex/`, `opencode`,
+//! `antigravity/`). No GPUI here.
 
 pub mod acp;
-pub mod compaction;
-mod antigravity;
+pub mod antigravity;
 pub mod claude;
-pub(crate) mod codex;
-pub(crate) mod opencode;
+pub mod codex;
+pub mod compaction;
+pub mod defaults;
+pub mod limits;
+pub mod opencode;
 pub mod permission;
+pub mod runner;
+pub mod subagents;
 pub mod text_generation;
 pub mod thread;
 
@@ -17,8 +21,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-
-use crate::claude::subagents::Agent;
+use self::subagents::{Agent, AgentModel};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -120,15 +123,15 @@ impl<T> HarnessMap<T> {
 /// Models and permission modes reported by a harness's ACP adapter.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct HarnessCatalog {
-    pub models: Vec<crate::claude::subagents::AgentModel>,
+    pub models: Vec<AgentModel>,
     pub modes: Vec<(String, String)>,
 }
 
-/// Ask `harness`'s ACP adapter for the models and permission modes it offers this account, using the same
+/// Ask `harness`'s ACP adapter for the models and permission modes it offers, using the same
 /// `initialize` -> `session/new` handshake for every harness (Claude Code, Codex, OpenCode, and Antigravity).
 pub fn probe(harness: Harness, cwd: &Path, env: &[(String, String)]) -> Result<HarnessCatalog, String> {
     let (program, args) = (harness.adapter().server)()?;
-    crate::claude::acp::probe_server(harness, program, args, cwd, env)
+    runner::probe_server(harness, program, args, cwd, env)
 }
 
 /// ACP has two ways to open a stored session: `session/load` replays the conversation into the client, and
@@ -198,7 +201,7 @@ impl Harness {
 /// The server of a harness that shares its ACP server with a subagent provider.
 fn subagent_server(agent: Agent) -> Result<Server, String> {
     let provider = agent.provider();
-    let program = crate::claude::acp::locate(agent).ok_or(provider.missing)?;
+    let program = runner::locate(agent).ok_or(provider.missing)?;
     Ok((program, provider.args.iter().map(|s| s.to_string()).collect()))
 }
 

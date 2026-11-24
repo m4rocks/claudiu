@@ -49,7 +49,7 @@ fn language_servers_with_rust_analyzer() {
             draw(cx);
         }
     };
-    act(&mut cx, &|ws, w, cx| ws.new_claude(root.clone(), w, cx));
+    act(&mut cx, &|ws, w, cx| ws.new_session(root.clone(), w, cx));
     let id = ws.read_with(&cx, |ws, _| ws.active.clone().unwrap());
     act(&mut cx, &|ws, w, cx| ws.toggle_editor(w, cx));
     wait(&mut cx, "the editor pane", 20, &|ws, _| ws.panes.contains_key(&id));

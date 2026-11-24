@@ -48,9 +48,6 @@ impl Render for ThreadView {
                     }
                 }),
             );
-        if let Some(handover) = &self.handover {
-            return root.child(waiting(&handover.message));
-        }
         if let Some(review) = self.render_review(window, cx) {
             return root.child(review);
         }
@@ -204,18 +201,6 @@ fn fence_marker(line: &str) -> Option<(char, usize)> {
 /// A message's first line with text, for a one-line row.
 fn first_line(text: &str) -> String {
     text.lines().find(|l| !l.trim().is_empty()).unwrap_or_default().trim().to_string()
-}
-
-fn waiting(message: &str) -> Div {
-    div()
-        .flex_1()
-        .flex()
-        .items_center()
-        .justify_center()
-        .gap(px(8.0))
-        .text_color(hsla(theme::TEXT_DIM))
-        .child(spinner("thread-waiting", 14.0))
-        .child(message.to_string())
 }
 
 fn indent_run_step(el: AnyElement) -> AnyElement {
@@ -800,7 +785,7 @@ impl ThreadView {
                 })
                 .collect()
         };
-        if self.background.is_empty() && self.provider_shells.is_empty() && bg_tools.is_empty() {
+        if self.background.is_empty() && self.provider_shells.is_empty() && self.background_tasks.is_empty() && bg_tools.is_empty() {
             return None;
         }
         let mut pills = div().flex().flex_wrap().items_center().gap(px(6.0)).flex_1().min_w_0();
@@ -830,6 +815,24 @@ impl ThreadView {
                     })
                     .child(div().max_w(px(220.0)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(task.label.clone()))
                     .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| cx.emit(ThreadEvent::Select(child_id.clone())))),
+            );
+        }
+        for (i, task) in self.background_tasks.iter().enumerate() {
+            pills = pills.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(5.0))
+                    .px(px(7.0))
+                    .py(px(2.0))
+                    .rounded(px(5.0))
+                    .bg(hsla(theme::PANEL_BG))
+                    .border_1()
+                    .border_color(hsla(theme::PANEL_BORDER))
+                    .text_size(scale::px(11.5))
+                    .text_color(hsla(theme::TEXT_DIM))
+                    .child(spinner(format!("thread-bg-async-task-{i}"), 10.0))
+                    .child(div().max_w(px(220.0)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(task.label.clone())),
             );
         }
         for (i, name) in bg_tools.into_iter().enumerate() {
@@ -1363,6 +1366,9 @@ impl ThreadView {
             extra_actions.push(button("thread-quote-selection", "Quote selection", false)
                 .on_click(cx.listener(|v, _: &ClickEvent, window, cx| v.quote_selection(window, cx))).into_any_element());
         }
+        if self.attachments_enabled() {
+            extra_actions.push(attachments::button(&self.composer, |v: &mut Self| &mut v.attachments, cx).into_any_element());
+        }
         // Outside a git repository there are no snapshots, and so no review at all.
         if !self.snapshots.is_empty() {
             let can_review = self.can_review();
@@ -1370,14 +1376,12 @@ impl ThreadView {
                 .when(can_review, |b| b.on_click(cx.listener(|v, _: &ClickEvent, _, cx| v.open_review(cx))));
             extra_actions.push(review.into_any_element());
         }
-        if self.attachments_enabled() {
-            extra_actions.push(attachments::button(&self.composer, |v: &mut Self| &mut v.attachments, cx).into_any_element());
-        }
         let draft = self.composer.read(cx).value();
         let has_message = self.can_submit_draft(cx);
         let steering_text = if self.attachments.has_files() { "" } else { draft.trim() };
         let editing = self.queue_edit.is_some();
         let active_turn = self.has_active_turn();
+        let can_interrupt = self.can_interrupt();
         let idle_for_resume = !active_turn && self.queue_held && self.questions.is_empty()
             && (self.waiting_messages().next().is_some() || self.handoff_after_turn.is_some());
         let answering = self.questions.front().is_some_and(|q| q.takes_own_answer) || self.async_answer_id().is_some();
@@ -1398,12 +1402,14 @@ impl ThreadView {
                 .on_click(cx.listener(|v, _: &ClickEvent, window, cx| v.finish_queue_edit(false, window, cx)))
                 .into_any_element());
             ActionKind::Save
-        } else if answering {
+        } else if answering && has_message {
             ActionKind::Answer
         } else if !has_message && self.interrupting {
             ActionKind::Stopping
-        } else if !has_message && active_turn {
+        } else if !has_message && can_interrupt {
             ActionKind::Interrupt
+        } else if answering {
+            ActionKind::Answer
         } else if !has_message && idle_for_resume {
             ActionKind::Resume
         } else if self.can_steer(steering_text, follow_up) {
@@ -1427,10 +1433,14 @@ impl ThreadView {
             has_message && self.questions.is_empty()
         } else if self.async_answer_blocked() {
             false
+        } else if answering && has_message {
+            true
+        } else if !has_message && can_interrupt {
+            !self.interrupting
         } else if answering {
-            has_message
+            false
         } else {
-            has_message || (active_turn && !self.interrupting) || idle_for_resume
+            has_message || idle_for_resume
         };
         let send = if enabled {
             let (bg, fg, hover, border) = match action {
@@ -1444,7 +1454,7 @@ impl ThreadView {
                 .on_click(cx.listener(|v, ev: &ClickEvent, window, cx| {
                     if v.queue_edit.is_some() || v.can_submit_draft(cx) {
                         v.submit_with(ev.modifiers().secondary(), window, cx);
-                    } else if v.has_active_turn() {
+                    } else if v.can_interrupt() {
                         v.interrupt(cx);
                     } else if v.queue_held && v.questions.is_empty() {
                         v.resume_queue(cx);

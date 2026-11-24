@@ -336,7 +336,7 @@ pub fn write_global(path: &std::path::Path, trimmed: &[Trim], limits: &Limits, a
 /// Write `limits` into Claude Code's own `settings.json`, and take out what m4code wrote there before and no longer
 /// wants, which includes the trims earlier versions wrote there for every Claude Code session.
 pub fn write_global_limits(limits: &Limits, applied: &[String]) -> std::io::Result<Vec<String>> {
-    let home = crate::claude::claude_home().ok_or_else(|| std::io::Error::other("Claude Code's folder was not found"))?;
+    let home = super::claude_home().ok_or_else(|| std::io::Error::other("Claude Code's folder was not found"))?;
     write_global(&home.join("settings.json"), &[], limits, applied)
 }
 

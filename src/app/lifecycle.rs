@@ -1,7 +1,8 @@
 //! Ending and starting m4code: the quit question, remembering what was open, and bringing it back.
 
 use super::*;
-use crate::claude::{mcp, usage};
+use crate::harness::claude::{trim, usage};
+use crate::mcp;
 use crate::store::WindowGeom;
 use gpui::{Bounds, WindowBounds, point, px, size};
 
@@ -18,7 +19,7 @@ pub fn tidy_leftovers() {
     datadir::prune(names, 7 * 86_400);
     datadir::prune(attached, 7 * 86_400);
     datadir::prune(mcp_configs, 7 * 86_400);
-    datadir::prune(crate::claude::trim::settings_dir(), 7 * 86_400);
+    datadir::prune(trim::settings_dir(), 7 * 86_400);
     // Nothing writes titles any more; the old files go.
     datadir::prune(titles, 7 * 86_400);
     datadir::prune(usage::snapshot_dir(), 30 * 86_400);
@@ -76,7 +77,7 @@ impl Workspace {
         // Moving a window raises no render, so its last position is read here, before the layout is saved.
         self.remember_window(window);
         let working = self.live.iter().filter(|l| {
-            l.view.is_running(cx) && l.view.is_working(cx) && self.store.session(&l.id).is_some_and(|r| r.kind == SessionKind::Claude)
+            l.view.is_running(cx) && l.view.is_working(cx) && self.store.session(&l.id).is_some_and(|r| r.kind == SessionKind::Agent)
         });
         let working = working.count();
         let unsaved = self.unsaved(None);
@@ -109,7 +110,7 @@ impl Workspace {
 
     /// The sessions that are open now, in order.
     fn open_ids(&self, cx: &App) -> Vec<Id> {
-        self.live.iter().filter(|l| self.store.session(&l.id).is_some_and(|r| r.kind == SessionKind::Claude) && self.is_running(&l.id, cx)).map(|l| l.id.clone()).collect()
+        self.live.iter().filter(|l| self.store.session(&l.id).is_some_and(|r| r.kind == SessionKind::Agent) && self.is_running(&l.id, cx)).map(|l| l.id.clone()).collect()
     }
 
     /// Remember what is open, so the next start brings it back (also while running, in case m4code does not get to
@@ -133,7 +134,7 @@ impl Workspace {
         let shown = self.selected.clone();
         let mut back = vec![];
         for id in saved {
-            if self.store.session(&id).is_some_and(|s| s.kind == SessionKind::Claude && !s.hidden) {
+            if self.store.session(&id).is_some_and(|s| s.kind == SessionKind::Agent && !s.hidden) {
                 self.bring_back(&id, window, cx);
                 back.push(id);
             }

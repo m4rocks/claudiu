@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::claude::subagents::{Agent, CustomSubagents};
+use crate::harness::subagents::{Agent, CustomSubagents};
 use crate::harness::Harness;
 use crate::platform::{is_same_or_under, link_dir, remove_dir_link};
 

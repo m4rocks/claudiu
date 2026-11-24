@@ -55,6 +55,8 @@ pub const BUSY: u32 = 0xc8c8c8;
 /// Backgrounds of added and removed lines in a diff.
 pub const DIFF_ADDED_BG: u32 = 0x16301e;
 pub const DIFF_REMOVED_BG: u32 = 0x3a1a1d;
+/// Claude Code's usage bars, its signature terracotta orange.
+pub const CLAUDE: u32 = 0xd97757;
 /// Codex's usage bars, so they read apart from Claude's at a glance. The terminal palette's blue.
 pub const CODEX: u32 = 0x61afef;
 /// Antigravity's usage bars, apart from Claude's and Codex's. The terminal palette's magenta.

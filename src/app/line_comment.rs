@@ -55,7 +55,7 @@ impl Workspace {
             return;
         }
         if send {
-            self.send_to_claude(&id, &message, window, cx);
+            self.send_to_agent(&id, &message, window, cx);
             return;
         }
         let Some(view) = self.live_view(&id).and_then(|v| v.thread()).cloned() else {

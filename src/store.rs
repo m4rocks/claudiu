@@ -1,5 +1,5 @@
 //! m4code's own persisted state (projects, session history, cached usage, layout).
-//! Independent of GPUI. Claude Code's data is only ever *read* (see `claude/`) and merged in here.
+//! Independent of GPUI. Harness data is only ever *read* (see `harness/`) and merged in here.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -24,25 +24,13 @@ pub fn new_id() -> Id {
 }
 
 mod sessions;
-pub use sessions::{SessionKind, ExternalState, Attached, ClaudeMeta, ProviderSession, SessionRecord, Project};
-mod accounts;
-pub use accounts::{RateLimit, AccountUsage, Account, MAIN_ACCOUNT};
+pub use sessions::{SessionKind, ExternalState, Attached, AgentMeta, ProviderSession, SessionRecord, Project};
+mod limits;
+pub use limits::{RateLimit, UsageLimits};
 mod settings;
 pub use settings::{FollowUp, SideCard, WindowGeom, Layout, Settings, TextGenerationModel};
 mod data;
-pub use data::{Data};
-
-#[derive(Default, Serialize, Deserialize)]
-struct AccountsFile {
-    #[serde(default)]
-    accounts: Vec<Account>,
-    #[serde(default)]
-    active: Option<Id>,
-}
-
-fn accounts_path(state: &Path) -> PathBuf {
-    state.with_file_name("accounts.json")
-}
+pub use data::Data;
 
 pub struct Store {
     path: PathBuf,
@@ -175,38 +163,17 @@ impl Store {
                 }
             }
         }
-        // Terminal (shell) sessions are never kept across runs; Claude sessions stay as resumable history.
+        // Terminal (shell) sessions are never kept across runs; agent sessions stay as resumable history.
         data.sessions.retain(|s| s.kind != SessionKind::Shell);
-        if let Ok(text) = fs::read_to_string(accounts_path(&path)) {
-            match serde_json::from_str::<AccountsFile>(&text) {
-                Ok(f) => (data.accounts, data.active_account) = (f.accounts, f.active),
-                Err(_) => {
-                    let _ = fs::rename(accounts_path(&path), accounts_path(&path).with_extension("json.corrupt"));
-                }
-            }
-        }
-        if !data.accounts.iter().any(|a| a.id == MAIN_ACCOUNT) {
-            let usage = std::mem::take(&mut data.account);
-            data.accounts.insert(0, Account { id: MAIN_ACCOUNT.into(), usage, ..Default::default() });
+        // One-time read fallback: previous multi-account builds moved Claude usage out of state.json into accounts.json.
+        if data.claude_usage.five_hour.is_none()
+            && data.claude_usage.seven_day.is_none()
+            && let Ok(text) = fs::read_to_string(path.with_file_name("accounts.json"))
+            && let Some(usage) = legacy_accounts_usage(&text)
+        {
+            data.claude_usage = usage;
         }
         Self { path, data, dirty: false, writer: Writer::start() }
-    }
-
-    pub fn account(&self, id: &str) -> Option<&Account> {
-        self.data.accounts.iter().find(|a| a.id == id)
-    }
-
-    /// The account new sessions use; falls back to the main one if the chosen alt was removed.
-    pub fn active_account(&self) -> Option<&Account> {
-        self.data.active_account.as_deref().and_then(|id| self.account(id)).or_else(|| self.account(MAIN_ACCOUNT))
-    }
-
-    /// The account a session starts under: its own while that account exists, else the active one.
-    pub fn session_account(&self, session_id: &str) -> Option<&Account> {
-        self.session(session_id)
-            .and_then(|r| r.claude.as_ref()?.account.as_deref())
-            .and_then(|id| self.account(id))
-            .or_else(|| self.active_account())
     }
 
     pub fn mark_dirty(&mut self) {
@@ -234,9 +201,8 @@ impl Store {
     }
 
     fn hand_over(&mut self) {
-        let accounts = AccountsFile { accounts: self.data.accounts.clone(), active: self.data.active_account.clone() };
-        let (Ok(accounts), Ok(state)) = (serde_json::to_string_pretty(&accounts), serde_json::to_string_pretty(&self.data)) else { return };
-        let files = vec![(accounts_path(&self.path), accounts), (self.path.clone(), state)];
+        let Ok(state) = serde_json::to_string_pretty(&self.data) else { return };
+        let files = vec![(self.path.clone(), state)];
         self.dirty = self.writer.jobs.send(Job::Write(files)).is_err();
     }
 
@@ -371,6 +337,31 @@ pub fn keep_picked<T>(models: Vec<T>, picked: &[String], id: impl Fn(&T) -> &str
         return models;
     }
     models.into_iter().filter(|m| picked.iter().any(|p| p == id(m))).collect()
+}
+
+/// Read Claude usage from a legacy `accounts.json` (preferring the active account, else `"main"`).
+fn legacy_accounts_usage(text: &str) -> Option<UsageLimits> {
+    #[derive(Deserialize)]
+    struct LegacyAccount {
+        id: String,
+        #[serde(default)]
+        usage: UsageLimits,
+    }
+    #[derive(Deserialize)]
+    struct LegacyAccountsFile {
+        #[serde(default)]
+        accounts: Vec<LegacyAccount>,
+        #[serde(default)]
+        active: Option<String>,
+    }
+    let file: LegacyAccountsFile = serde_json::from_str(text).ok()?;
+    let picked = file
+        .active
+        .as_deref()
+        .and_then(|id| file.accounts.iter().find(|a| a.id == id))
+        .or_else(|| file.accounts.iter().find(|a| a.id == "main"))
+        .or_else(|| file.accounts.first())?;
+    (picked.usage.five_hour.is_some() || picked.usage.seven_day.is_some()).then(|| picked.usage.clone())
 }
 
 #[cfg(test)]

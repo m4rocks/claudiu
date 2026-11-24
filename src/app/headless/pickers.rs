@@ -37,11 +37,11 @@ fn dropdowns_switch_on_one_click_and_load_all_harness_models() {
         ws.store.data.settings.enabled_harnesses = Some(vec![Harness::Claude, Harness::Codex]);
         ws.model_lookups.list = |harness, _cwd, _env| match harness {
             Harness::Claude => Ok(crate::harness::HarnessCatalog {
-                models: vec![crate::claude::subagents::AgentModel { id: "claude-opus-4-6".into(), name: "Opus 4.6".into() }],
+                models: vec![crate::harness::subagents::AgentModel { id: "claude-opus-4-6".into(), name: "Opus 4.6".into() }],
                 modes: vec![("default".into(), "Ask Before Editing".into()), ("bypassPermissions".into(), "Full Access".into())],
             }),
             Harness::Codex => Ok(crate::harness::HarnessCatalog {
-                models: vec![crate::claude::subagents::AgentModel { id: "gpt-5.4".into(), name: "GPT-5.4".into() }],
+                models: vec![crate::harness::subagents::AgentModel { id: "gpt-5.4".into(), name: "GPT-5.4".into() }],
                 modes: vec![("ask".into(), "Ask".into()), ("fullAccess".into(), "Full Access".into())],
             }),
             _ => Ok(Default::default()),
@@ -248,8 +248,8 @@ fn text_generation_picker_saves_a_model_independently_of_new_sessions() {
         ws.update(app, |ws, cx| {
             let settings = &mut ws.store.data.settings;
             settings.enabled_harnesses = Some(vec![Harness::Claude, Harness::Codex]);
-            settings.set_harness_models(Harness::Claude, vec![crate::claude::subagents::AgentModel { id: "full".into(), name: "Full".into() }]);
-            settings.set_harness_models(Harness::Codex, vec![crate::claude::subagents::AgentModel { id: "light".into(), name: "Light".into() }]);
+            settings.set_harness_models(Harness::Claude, vec![crate::harness::subagents::AgentModel { id: "full".into(), name: "Full".into() }]);
+            settings.set_harness_models(Harness::Codex, vec![crate::harness::subagents::AgentModel { id: "light".into(), name: "Light".into() }]);
             ws.model_lookups.list = |_, _, _| Err("Catalog preset by test.".into());
             let previous = settings.default_model();
             ws.act(Act::OpenSettings, window, cx);

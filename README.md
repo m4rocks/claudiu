@@ -12,7 +12,7 @@ Every session runs in m4code's native chat view over the [Agent Client Protocol]
 
 | Agent | Requirements | Notes |
 | --- | --- | --- |
-| **Claude Code** | `claude` CLI, Node, npm | Runs through the [Claude Agent SDK](https://code.claude.com/docs/en/agent-sdk/overview) (installed into m4code's data folder on first run) using whatever sign-in your `claude` has (subscription, API key, Bedrock, or Vertex). Disables `claude.ai`-only tools (scheduled tasks, push notifications, connectors) for m4code sessions only. Supports multiple accounts sharing one config and a Claude in Chrome toggle. |
+| **Claude Code** | `claude` CLI, Node, npm | Runs through the [Claude Agent SDK](https://code.claude.com/docs/en/agent-sdk/overview) (installed into m4code's data folder on first run) using whatever sign-in your `claude` has (subscription, API key, Bedrock, or Vertex). Disables `claude.ai`-only tools (scheduled tasks, push notifications, connectors) for m4code sessions only. Includes a Claude in Chrome toggle. |
 | **Codex** | Node, `codex login` | Runs through its ACP adapter from npm (downloaded on first run). |
 | **OpenCode** | `opencode` on `PATH` | Uses the providers configured in OpenCode. |
 | **Google Antigravity** | `agy` CLI, signed in | Opt-in for Claude Code's native subagent integration; excluded from shared MCP subagent tools for now. |
@@ -32,7 +32,7 @@ Every session runs in m4code's native chat view over the [Agent Client Protocol]
   - Press `Cmd/Ctrl+Enter` (or `Cmd/Ctrl`-click Send) to swap Steer and Queue for a single message.
 - **Questions and background shells**: Answer agent questions with the keyboard or mouse, or type your own answer for Claude Code. Codex can ask questions while working without blocking chat. Claude Code background shells appear above the composer with Output and Stop controls.
 - **Chat navigation**: Use the scrollbar or mouse wheel to scroll the chat. Scrolling up pauses follow mode. Use **Jump to latest** to catch up. Search the conversation with **Find in session** under Actions or `Cmd/Ctrl+F`. Consecutive read-only tools are grouped into expandable exploration summaries.
-- **Context compaction**: Schedules compaction at the next idle boundary once reported context reaches 90%, using the adapter's native compact command while keeping the provider session. Native automatic compaction is disabled for Claude Code and OpenCode; Codex retains a native fallback noted in the status panel.
+- **Context compaction**: Configurable in **Settings → General** (enable/disable and context threshold %, default 90%) and per session in the right sidebar. Schedules compaction at the next idle boundary once reported context reaches the configured threshold, using the adapter's native compact command while keeping the provider session. Native automatic compaction is disabled for Claude Code and OpenCode; Codex retains a native fallback noted in the status panel.
 - **Keyboard shortcuts**: Supports familiar Claude Code shortcuts (`Esc` to stop, `Esc` twice to edit your last message, `Shift+Tab` for permission mode, `Up` for message history, `Shift+Enter` for a new line). **Settings → Keyboard** lists every shortcut.
 
 ### Workspace, Git, and editor
@@ -49,7 +49,7 @@ Every session runs in m4code's native chat view over the [Agent Client Protocol]
 
 ### Cross-agent subagents
 
-- **Shared MCP subagent tools**: Claude Code, Codex, and OpenCode sessions share `spawn_subagent`, `list_subagents`, `send_subagent_message`, `wait_subagent`, and `stop_subagent`. Children run in the parent's working folder without stealing focus, appear in the right sidebar, and fold their report back into the parent chat. Follow-ups reuse the child session, stopping a parent stops its children, and a read-only parent cannot grant edits.
+- **Shared MCP subagent tools**: Sessions across all harnesses share `spawn_subagent`, `list_subagents`, `send_subagent_message`, `wait_subagent`, and `stop_subagent` (targeting Claude Code, Codex, or OpenCode subagents). Children run in the parent's working folder without stealing focus, appear in the right sidebar, and fold their report back into the parent chat. Follow-ups reuse the child session, stopping a parent stops its children, and a read-only parent cannot grant edits.
 - **Claude Code native subagents**: Claude Code can also start Codex, OpenCode, and (opt-in) Antigravity subagents directly. Each streams its work in its own task view with configurable effort (`max` maps to Codex's `xhigh`; Antigravity caps at the model's highest thinking level) and supports live or queued follow-ups.
 - **Edit permissions**: With **Allow edits** enabled, a subagent acts without Claude Code's permission rules. Read-only Antigravity runs in an isolated folder under m4code's data directory with a hook that permits only reading and searching (your personal Antigravity rules, skills, and MCP servers do not load there).
 

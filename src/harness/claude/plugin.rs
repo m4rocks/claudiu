@@ -5,9 +5,9 @@ use std::path::{Path, PathBuf};
 
 /// The mod's files: path inside the mod folder, and contents.
 const FILES: [(&str, &str); 3] = [
-    (".claude-plugin/plugin.json", include_str!("../../mod/.claude-plugin/plugin.json")),
-    ("hooks/hooks.json", include_str!("../../mod/hooks/hooks.json")),
-    ("hooks/register.js", include_str!("../../mod/hooks/register.js")),
+    (".claude-plugin/plugin.json", include_str!("../../../mod/.claude-plugin/plugin.json")),
+    ("hooks/hooks.json", include_str!("../../../mod/hooks/hooks.json")),
+    ("hooks/register.js", include_str!("../../../mod/hooks/register.js")),
 ];
 
 /// The mod that answers the MCP server's tools in-process (see `mod/`), written to the data dir and loaded per

@@ -47,11 +47,6 @@ pub enum ThreadPicker {
     Permission,
 }
 
-/// A session being moved while its harness restarts: what the waiting screen says.
-pub struct Handover {
-    pub message: String,
-}
-
 /// A background task (such as a running child subagent) displayed in the main chat view.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BackgroundTask {
@@ -64,6 +59,57 @@ struct ProviderShell {
     id: String,
     label: String,
     stopping: bool,
+}
+
+/// A background shell/command task reported in tool output (e.g. Antigravity's `run_command` async tasks).
+struct BackgroundToolTask {
+    id: String,
+    label: String,
+    turn_seq: u64,
+}
+
+const BG_TASK_PREFIX: &str = "Tool is running as a background task with task id:";
+
+fn tool_output_texts(call: &crate::harness::thread::ToolCall) -> Vec<&str> {
+    let mut texts = Vec::new();
+    if let Some(out) = call.details.output.as_deref() {
+        texts.push(out);
+    }
+    if let Some(out) = call.details.stdout.as_deref() {
+        texts.push(out);
+    }
+    for content in &call.content {
+        if let crate::harness::thread::ToolContent::Text(text) = content {
+            texts.push(text.as_str());
+        }
+    }
+    texts
+}
+
+fn background_task_from_tool(call: &crate::harness::thread::ToolCall) -> Option<(String, String)> {
+    let task_id = tool_output_texts(call).into_iter().find_map(|text| {
+        let rest = text.split_once(BG_TASK_PREFIX)?.1.trim_start();
+        let id = rest.split_whitespace().next()?.trim_matches(|c: char| matches!(c, '"' | '\'' | ',' | '.'));
+        (!id.is_empty()).then(|| id.to_string())
+    })?;
+    let label = call
+        .details
+        .command
+        .as_deref()
+        .or(Some(call.title.as_str()))
+        .and_then(|s| s.lines().find(|l| !l.trim().is_empty()))
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "Background task".into());
+    Some((task_id, label))
+}
+
+fn text_retires_background_task(text: &str, task_id: &str) -> bool {
+    if !text.contains(task_id) {
+        return false;
+    }
+    let lower = text.to_ascii_lowercase();
+    lower.contains("finished") || lower.contains("canceled") || lower.contains("cancelled") || lower.contains("killed") || lower.contains("exited")
 }
 
 struct ShellOutput {
@@ -276,6 +322,8 @@ pub struct ThreadView {
     /// Running child subagents / workspace background tasks attached to this session.
     pub background: Vec<BackgroundTask>,
     provider_shells: Vec<ProviderShell>,
+    background_tasks: Vec<BackgroundToolTask>,
+    turn_seq: u64,
     shell_output: Option<ShellOutput>,
     /// Model from another harness staged for dynamic handoff on the next message.
     pub pending_model: Option<CatalogModel>,
@@ -367,8 +415,6 @@ pub struct ThreadView {
     last_escape: Option<Instant>,
     /// Why the harness stopped, when it said.
     error: Option<String>,
-    /// Shown instead of the conversation while the session moves (a hand-off).
-    pub handover: Option<Handover>,
     /// True while showing locally cached entries for a `Reopen::Load` harness before its live replay arrives.
     cached_replay: bool,
     /// This view took over a conversation from another harness (an in-place hand-off), and shows it while it starts.
@@ -472,6 +518,8 @@ impl ThreadView {
             git: None,
             background: vec![],
             provider_shells: vec![],
+            background_tasks: vec![],
+            turn_seq: 0,
             shell_output: None,
             pending_model: None,
             handoff_after_turn: None,
@@ -534,7 +582,6 @@ impl ThreadView {
             effort_dragging: Rc::new(Cell::new(false)),
             last_escape: None,
             error: None,
-            handover: None,
             cached_replay,
             took_over,
             cards: HashMap::new(),
@@ -659,8 +706,6 @@ impl ThreadView {
             }
         }
         self.report_chosen(cx);
-        // A move (a worktree switch, a hand-off) is over once the session is open where it went.
-        self.handover = None;
         self.remeasure(0);
         cx.notify();
         true
@@ -703,6 +748,9 @@ impl ThreadView {
                 }
                 if self.phase == Phase::Ready && !self.cached_replay && is_conversation_update(&update) {
                     self.last_update = Some(Instant::now());
+                    if let Some(text) = update.pointer("/content/text").and_then(Value::as_str) {
+                        self.retire_finished_background_tasks(text);
+                    }
                 }
                 let title = self.thread.title.clone();
                 let prev_ctx = self.thread.context;
@@ -715,6 +763,16 @@ impl ThreadView {
                 if let Some(at) = at {
                     if let Some(Entry::Tool(call)) = self.thread.entries.get(at) {
                         self.tool_images.get_mut().retain(|(id, _), _| *id != call.id);
+                        let started = background_task_from_tool(call);
+                        let texts: Vec<String> = tool_output_texts(call).into_iter().map(str::to_string).collect();
+                        for text in &texts {
+                            self.retire_finished_background_tasks(text);
+                        }
+                        if let Some((task_id, label)) = started
+                            && !self.background_tasks.iter().any(|t| t.id == task_id)
+                        {
+                            self.background_tasks.push(BackgroundToolTask { id: task_id, label, turn_seq: self.turn_seq });
+                        }
                     }
                     if self.phase == Phase::Ready && !self.cached_replay && is_conversation_update(&update) {
                         if matches!(self.thread.entries.get(at), Some(Entry::Thought(_))) {
@@ -759,15 +817,15 @@ impl ThreadView {
                 let title = params.pointer("/toolCall/title").and_then(Value::as_str).or(shown).unwrap_or_default();
                 // A shell command or an edit is never one of m4code's tools, whatever its title says.
                 let kind = params.pointer("/toolCall/kind").and_then(Value::as_str).unwrap_or_default();
-                if !matches!(kind, "execute" | "edit" | "delete" | "move") && crate::claude::mcp::is_own_tool(title) {
+                if !matches!(kind, "execute" | "edit" | "delete" | "move") && crate::mcp::is_own_tool(title) {
                     if let Some(connection) = &self.connection {
-                        connection.respond(id, json!({"outcome": crate::claude::acp::permission(&params["options"], true)}));
+                        connection.respond(id, json!({"outcome": crate::harness::runner::permission(&params["options"], true)}));
                     }
                     return;
                 }
                 if let Some(edits) = self.subagent_edits && acp::is_tool_permission(&params) {
                     if let Some(connection) = &self.connection {
-                        connection.respond(id, json!({"outcome": crate::claude::acp::permission(&params["options"], edits)}));
+                        connection.respond(id, json!({"outcome": crate::harness::runner::permission(&params["options"], edits)}));
                     }
                     return;
                 }
@@ -853,7 +911,7 @@ impl ThreadView {
             return;
         }
         self.phase = Phase::Ended;
-        self.handover = None;
+        self.background_tasks.clear();
         self.preserve_handoff_message();
         self.cancel_questions();
         self.asks = Default::default();
@@ -866,6 +924,13 @@ impl ThreadView {
         self.connection = None;
         cx.emit(ThreadEvent::Exited(if self.error.is_some() { Some(1) } else { Some(0) }));
         cx.notify();
+    }
+
+    fn retire_finished_background_tasks(&mut self, text: &str) {
+        if self.background_tasks.is_empty() {
+            return;
+        }
+        self.background_tasks.retain(|task| !text_retires_background_task(text, &task.id));
     }
 
     fn background_shell_action(&mut self, task_id: &str, stop: bool, cx: &mut Context<Self>) {
@@ -1322,6 +1387,8 @@ impl ThreadView {
         self.working = false;
         self.interrupting = false;
         self.last_update = None;
+        self.background_tasks.retain(|task| task.turn_seq >= self.turn_seq);
+        self.turn_seq += 1;
         self.finish_open_thoughts();
         if let Ok(r) = &result
             && let Some(turn) = self.thread.record_usage(&r["usage"])
@@ -1469,8 +1536,11 @@ impl ThreadView {
             return;
         }
         self.cancel_questions();
+        self.last_update = None;
         if !self.interrupting && let (Some(c), Some(s)) = (&self.connection, &self.session_id) {
-            self.interrupting = true;
+            if self.working {
+                self.interrupting = true;
+            }
             c.notify("session/cancel", json!({"sessionId": s}));
         }
         cx.notify();
@@ -1480,7 +1550,7 @@ impl ThreadView {
     /// whose native question tool isn't bridged over ACP).
     pub fn ask_bridge_question(&mut self, req_id: String, title: String, options: Vec<QuestionOption>, cx: &mut Context<Self>) {
         if self.interrupting || self.restarting_for_steer {
-            crate::claude::bridge::respond(&req_id, false, "The turn was interrupted.");
+            crate::mcp::bridge::respond(&req_id, false, "The turn was interrupted.");
             return;
         }
         self.questions.push_back(Question { id: Uuid::new_v4(), reply: QuestionReply::Bridge(req_id), title, options, highlight: 0, takes_own_answer: true });
@@ -1490,7 +1560,7 @@ impl ThreadView {
     fn cancel_questions(&mut self) {
         for question in self.questions.drain(..) {
             match question.reply {
-                QuestionReply::Bridge(id) => crate::claude::bridge::respond(&id, false, "The user dismissed the question."),
+                QuestionReply::Bridge(id) => crate::mcp::bridge::respond(&id, false, "The user dismissed the question."),
                 QuestionReply::Acp(id) => {
                     if let Some(c) = &self.connection {
                         c.respond(id, acp::permission_outcome(None));
@@ -1552,8 +1622,8 @@ impl ThreadView {
                 }
             }
             QuestionReply::Bridge(req_id) => match chosen {
-                Some(opt) => crate::claude::bridge::respond(&req_id, true, &opt.name),
-                None => crate::claude::bridge::respond(&req_id, false, "The user dismissed the question."),
+                Some(opt) => crate::mcp::bridge::respond(&req_id, true, &opt.name),
+                None => crate::mcp::bridge::respond(&req_id, false, "The user dismissed the question."),
             },
         }
         self.send_next(cx);
@@ -1570,7 +1640,7 @@ impl ThreadView {
                     c.respond(id, acp::own_answer(text));
                 }
             }
-            QuestionReply::Bridge(req_id) => crate::claude::bridge::respond(&req_id, true, text),
+            QuestionReply::Bridge(req_id) => crate::mcp::bridge::respond(&req_id, true, text),
             // Never marked as taking the user's own words (`takes_own_answer`).
             QuestionReply::Elicitation { .. } => {}
         }
@@ -1757,7 +1827,7 @@ impl ThreadView {
         let draft = self.composer.read(cx).value().to_string();
         let state = keys::State {
             picker_open: self.picker.is_some(),
-            working: self.has_active_turn(),
+            working: self.can_interrupt(),
             question: self.questions.front().map_or(0, |q| q.options.len()),
             draft_empty: !self.can_submit_draft(cx) || self.async_answer_blocked(),
             in_history: self.history_at.is_some(),
@@ -1936,7 +2006,7 @@ impl ThreadView {
                 return (values, labels, ix, Some(opt.id.clone()));
             }
         }
-        let values: Vec<String> = crate::claude::defaults::Effort::ALL.iter().map(|e| e.name().to_string()).collect();
+        let values: Vec<String> = crate::harness::defaults::Effort::ALL.iter().map(|e| e.name().to_string()).collect();
         let labels: Vec<String> = vec!["Low".into(), "Med".into(), "High".into(), "XHigh".into(), "Max".into()];
         let ix = self
             .pending_effort
@@ -2163,17 +2233,27 @@ impl ThreadView {
         cx.notify();
     }
 
-    pub fn compaction_status(&self) -> &'static str {
-        let Some(command) = self.harness.adapter().compact_command else { return "Unsupported by this adapter" };
+    pub fn set_compaction_threshold(&mut self, threshold_percent: u64, cx: &mut Context<Self>) {
+        self.compaction.threshold_percent = crate::harness::compaction::clamp_threshold(threshold_percent);
+        if let Some((used, size)) = self.thread.context {
+            self.compaction.observe(used, size);
+        }
+        self.send_next(cx);
+        cx.notify();
+    }
+
+    pub fn compaction_status(&self) -> String {
+        let Some(command) = self.harness.adapter().compact_command else { return "Unsupported by this adapter".into() };
         if !self.thread.commands.iter().any(|c| c.name == command) {
-            return "Compact command unavailable";
+            return "Compact command unavailable".into();
         }
+        let threshold = crate::harness::compaction::clamp_threshold(self.compaction.threshold_percent);
         if !self.compaction.native_controlled {
-            return if self.compaction.enabled { "90%; native fallback remains" } else { "Off; native fallback remains" };
+            return if self.compaction.enabled { format!("{threshold}%; native fallback remains") } else { "Off; native fallback remains".into() };
         }
-        if !self.compaction.enabled { return "Off"; }
-        if self.thread.context.is_none() { return "Waiting for context usage"; }
-        "90% between turns"
+        if !self.compaction.enabled { return "Off".into(); }
+        if self.thread.context.is_none() { return "Waiting for context usage".into(); }
+        format!("{threshold}% between turns")
     }
 
     pub fn stop(&mut self) {
@@ -2198,18 +2278,25 @@ impl ThreadView {
         self.working || (self.phase == Phase::Starting && self.queue.iter().any(|item| item.startup))
     }
 
+    /// Whether the user can interrupt the agent right now: an active turn, an optimistic startup prompt, or a live
+    /// continuation streaming updates after a turn ended.
+    pub(super) fn can_interrupt(&self) -> bool {
+        self.is_working()
+    }
+
     pub fn is_working(&self) -> bool {
         self.has_active_turn()
             || (self.phase == Phase::Starting && !self.queue.is_empty())
             || (self.phase == Phase::Ready
                 && !self.cached_replay
-                && self.last_update.is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(4)))
+                && self.last_update.is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(15)))
     }
 
     /// Work the agent left running when its turn ended: a background shell, a subagent, or a tool call still out.
     /// The agent usually wakes again when it finishes, so its turn ending isn't the session being done.
     pub fn has_background_work(&self) -> bool {
         !self.provider_shells.is_empty()
+            || !self.background_tasks.is_empty()
             || !self.background.is_empty()
             || self.thread.entries.iter().any(|e| matches!(e, Entry::Tool(call) if call.status == ToolStatus::Running))
     }
@@ -2230,12 +2317,12 @@ impl ThreadView {
 
     /// Only cross-harness hand-offs announce themselves; ordinary session startup stays invisible to the user.
     pub fn starting_label(&self) -> Option<String> {
-        (self.phase == Phase::Starting && self.handover.is_none() && self.took_over)
+        (self.phase == Phase::Starting && self.took_over)
             .then(|| format!("Handing over to {}…", self.harness.name()))
     }
 
     pub fn is_loading(&self) -> bool {
-        self.phase == Phase::Starting || self.handover.is_some()
+        self.phase == Phase::Starting
     }
 
     pub fn start_error(&self) -> Option<String> {
@@ -3143,6 +3230,58 @@ mod tests {
             assert!(!v.has_active_turn());
             assert!(v.queue_held);
             assert_eq!(v.waiting_messages().map(|(_, t)| t).collect::<Vec<_>>(), ["first prompt"]);
+        });
+    }
+
+    #[gpui::test]
+    fn post_turn_continuation_remains_interruptible_without_getting_stuck(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_kit::init);
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = cx.add_window_view(|window, cx| super::ThreadView::new(test_start(dir.path().into(), Harness::Claude), window, cx));
+        view.update(cx, |v, cx| {
+            v.phase = super::Phase::Ready;
+            v.working = false;
+            assert!(!v.can_interrupt());
+            v.on_event(super::Event::Update(serde_json::json!({
+                "sessionUpdate": "agent_message_chunk",
+                "content": { "type": "text", "text": "continuing after background work" }
+            })), cx);
+            assert!(v.can_interrupt(), "streaming updates after a turn ended must stay interruptible");
+            v.interrupt(cx);
+            assert!(!v.can_interrupt());
+            assert!(!v.interrupting, "interrupting a continuation without an open turn must not stick on Stopping");
+        });
+    }
+
+    #[gpui::test]
+    fn antigravity_background_tasks_are_tracked_until_finished_or_next_turn_ends(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_kit::init);
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = cx.add_window_view(|window, cx| super::ThreadView::new(test_start(dir.path().into(), Harness::Antigravity), window, cx));
+        view.update(cx, |v, cx| {
+            v.phase = super::Phase::Ready;
+            v.on_event(super::Event::Update(serde_json::json!({
+                "sessionUpdate": "tool_call",
+                "toolCallId": "cmd-1",
+                "title": "Run clippy",
+                "kind": "execute",
+                "status": "completed",
+                "rawInput": { "command": "cargo clippy --locked" },
+                "rawOutput": "Tool is running as a background task with task id: conv/task-42\nTask logs are available at: ..."
+            })), cx);
+            assert_eq!(v.background_tasks.len(), 1);
+            assert_eq!(v.background_tasks[0].id, "conv/task-42");
+            assert_eq!(v.background_tasks[0].label, "cargo clippy --locked");
+            assert!(v.has_background_work());
+            // Ending the turn that spawned the task keeps it visible while waiting for it to finish.
+            v.turn_ended(Ok(serde_json::json!({"stopReason": "end_turn"})), cx);
+            assert_eq!(v.background_tasks.len(), 1);
+            // A completion notification retires it immediately.
+            v.on_event(super::Event::Update(serde_json::json!({
+                "sessionUpdate": "user_message_chunk",
+                "content": { "type": "text", "text": "Task id \"conv/task-42\" finished with result: Command exited with code 0." }
+            })), cx);
+            assert!(v.background_tasks.is_empty());
         });
     }
 

@@ -8,8 +8,8 @@ use gpui::{
 use gpui_kit::component::input::{Input, InputState};
 
 use crate::app::{Act, Lookup, Modal, Workspace};
-use crate::claude::subagents::AgentModel;
 use crate::harness::Harness;
+use crate::harness::subagents::AgentModel;
 use crate::panels::logos;
 use crate::panels::theme::{self, hsla};
 use crate::panels::widgets::{button, button_disabled, section_label};
@@ -315,7 +315,7 @@ impl Workspace {
             .flex_col()
             .gap(px(12.0))
             .child(settings_group("CONNECTED HARNESSES", None, rows))
-            .child(faint("Open any harness to configure its tools, accounts, or subagent delegation."))
+            .child(faint("Open any harness to configure its tools or subagent delegation."))
     }
 
     fn subagent_controls(&self, harness: Harness, cx: &mut Context<Self>) -> Div {
@@ -456,59 +456,6 @@ impl Workspace {
                         cx,
                     ));
 
-                // Claude Code accounts (moved out of the sidebar footer).
-                let active_id = self.store.active_account().map(|a| a.id.clone());
-                let mut accounts_box = div().flex().flex_col().gap(px(6.0)).child(div().mt(px(4.0)).child(section_label("ACCOUNTS")));
-                for (i, acct) in self.store.data.accounts.iter().enumerate() {
-                    let id = acct.id.clone();
-                    let active = active_id.as_deref() == Some(acct.id.as_str());
-                    let sign_id = id.clone();
-                    let remove_id = id.clone();
-                    let mut row = div()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .gap(px(8.0))
-                        .px(px(10.0))
-                        .py(px(6.0))
-                        .rounded(px(6.0))
-                        .bg(hsla(theme::SURFACE_ELEVATED))
-                        .border_1()
-                        .border_color(hsla(if active { theme::ACCENT } else { theme::PANEL_BORDER }))
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(6.0))
-                                .min_w_0()
-                                .flex_1()
-                                .child(div().text_size(scaled(12.5)).text_color(hsla(theme::TEXT)).child(acct.name()))
-                                .child(faint(if acct.is_main() { "Main" } else { "Alt" })),
-                        );
-                    let mut btns = div().flex().gap(px(6.0)).flex_none();
-                    if active {
-                        btns = btns.child(button_disabled(format!("acct-use-{i}"), "Active"));
-                    } else {
-                        btns = btns.child(button(format!("acct-use-{i}"), "Use", false).on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
-                            ws.act(Act::SwitchAccount(id.clone()), window, cx)
-                        })));
-                    }
-                    if !acct.is_main() {
-                        btns = btns
-                            .child(button(format!("acct-signin-{i}"), "Sign in", false).on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
-                                ws.act(Act::SignIn(sign_id.clone()), window, cx)
-                            })))
-                            .child(button(format!("acct-rm-{i}"), "Remove", false).on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
-                                ws.act(Act::RemoveAccount(remove_id.clone()), window, cx)
-                            })));
-                    }
-                    row = row.child(btns);
-                    accounts_box = accounts_box.child(row);
-                }
-                accounts_box = accounts_box.child(div().flex().child(button("acct-add", "Add account…", false).on_click(cx.listener(|ws, _: &ClickEvent, window, cx| {
-                    ws.act(Act::AddAccount, window, cx)
-                }))));
-                col = col.child(accounts_box);
                 col = col.child(self.model_list(Harness::Claude, search, cx));
 
                 // m4code trims the extras itself (trim::FLUFF), per session; what's left here are the user's own settings.
@@ -680,7 +627,7 @@ mod tests {
     fn harness_subtitles_use_the_same_subagent_status_for_every_provider() {
         let form = crate::app::HarnessesForm {
             enabled: Harness::ALL.to_vec(),
-            agents: crate::claude::subagents::AgentMap::from_fn(|_| crate::app::AgentForm { on: true, edits: true, models: vec![] }),
+            agents: crate::harness::subagents::AgentMap::from_fn(|_| crate::app::AgentForm { on: true, edits: true, models: vec![] }),
             claude_models: vec![], claude_subagents: Default::default(), picking: None,
         };
         for harness in [Harness::Claude, Harness::Codex, Harness::OpenCode] {
@@ -690,7 +637,7 @@ mod tests {
     #[test]
     fn every_model_starts_ticked_and_the_last_one_stays() {
         use super::{is_ticked, tick};
-        let catalog: Vec<_> = ["a", "b", "c"].iter().map(|id| crate::claude::subagents::AgentModel { id: id.to_string(), name: id.to_string() }).collect();
+        let catalog: Vec<_> = ["a", "b", "c"].iter().map(|id| crate::harness::subagents::AgentModel { id: id.to_string(), name: id.to_string() }).collect();
         let mut ticked = vec![];
         assert!(catalog.iter().all(|m| is_ticked(&ticked, &m.id)), "a harness nobody set up has every model ticked");
         tick(&mut ticked, &catalog, "b");

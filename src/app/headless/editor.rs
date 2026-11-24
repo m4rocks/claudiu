@@ -123,7 +123,7 @@ fn line_comment_into_the_message_box() {
             draw(cx);
         }
     };
-    act(&mut cx, &|ws, w, cx| ws.new_claude(root.clone(), w, cx));
+    act(&mut cx, &|ws, w, cx| ws.new_session(root.clone(), w, cx));
     let id = ws.read_with(&cx, |ws, _| ws.active.clone().unwrap());
     let draft = |ws: &Workspace, app: &App| ws.live_view(&id).unwrap().thread().unwrap().read(app).draft(app);
     wait(&mut cx, "the session to open", &|ws, app| !ws.live_view(&id).unwrap().is_loading(app));
@@ -210,7 +210,7 @@ fn file_operations_in_the_tree() {
     };
     let shown = |ws: &Workspace, id: &Id| ws.panes[id].shown().map(|t| t.path.clone());
 
-    act(&mut cx, &|ws, w, cx| ws.new_claude(root.clone(), w, cx));
+    act(&mut cx, &|ws, w, cx| ws.new_session(root.clone(), w, cx));
     let id = ws.read_with(&cx, |ws, _| ws.active.clone().unwrap());
     wait(&mut cx, "the session running", &|ws, app| ws.is_running(&id, app));
     act(&mut cx, &|ws, w, cx| ws.toggle_editor(w, cx));
@@ -304,7 +304,7 @@ fn line_actions_on_their_keys() {
             draw(cx);
         }
     };
-    act(&mut cx, &|ws, w, cx| ws.new_claude(root.clone(), w, cx));
+    act(&mut cx, &|ws, w, cx| ws.new_session(root.clone(), w, cx));
     let id = ws.read_with(&cx, |ws, _| ws.active.clone().unwrap());
     wait(&mut cx, "the session running", &|ws, app| ws.is_running(&id, app));
     act(&mut cx, &|ws, w, cx| ws.toggle_editor(w, cx));
@@ -414,7 +414,7 @@ fn double_click_in_the_editor() {
             draw(cx);
         }
     };
-    act(&mut cx, &|ws, w, cx| ws.new_claude(root.clone(), w, cx));
+    act(&mut cx, &|ws, w, cx| ws.new_session(root.clone(), w, cx));
     let id = ws.read_with(&cx, |ws, _| ws.active.clone().unwrap());
     wait(&mut cx, "the session running", &|ws, app| ws.is_running(&id, app));
     act(&mut cx, &|ws, w, cx| ws.toggle_editor(w, cx));

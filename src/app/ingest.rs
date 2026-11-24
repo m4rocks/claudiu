@@ -3,9 +3,9 @@
 //! off the UI thread; applying them is a handful of small, separately testable steps.
 
 use super::*;
-use crate::claude::subagents::Agent;
-use crate::claude::limits::Pool;
-use crate::claude::usage::Snapshot;
+use crate::harness::claude::usage::Snapshot;
+use crate::harness::limits::Pool;
+use crate::harness::subagents::Agent;
 use crate::store::RateLimit;
 
 impl Workspace {
@@ -54,13 +54,12 @@ impl Workspace {
         }
     }
 
-    /// One mod report: the account's limits, and the session's own figures and settings.
+    /// One mod report: Claude's limits, and the session's own figures and settings.
     fn apply_snapshot(&mut self, snap: &Snapshot, cx: &mut Context<Self>) -> bool {
-        let account = snap.account.as_deref().unwrap_or(MAIN_ACCOUNT);
-        let mut changed = self.merge_account(account, snap.five_hour.clone(), snap.seven_day.clone());
-        let id = self.store.data.sessions.iter().find(|s| s.claude_id() == Some(snap.session_id.as_str())).map(|s| s.id.clone());
+        let mut changed = self.merge_claude_usage(snap.five_hour.clone(), snap.seven_day.clone());
+        let id = self.store.data.sessions.iter().find(|s| s.provider_session_id() == Some(snap.session_id.as_str())).map(|s| s.id.clone());
         if let Some(id) = id {
-            if let Some(meta) = self.store.session_mut(&id).and_then(|s| s.claude.as_mut()) {
+            if let Some(meta) = self.store.session_mut(&id).and_then(|s| s.agent.as_mut()) {
                 changed |= apply_to_meta(meta, snap);
             }
             if let Some(native) = snap.auto_compact
@@ -79,11 +78,10 @@ impl Workspace {
 
     /// Keep the newest reading per window. Returns whether anything changed (the same snapshot is re-read
     /// every tick, so an unconditional save would rewrite state.json every few seconds).
-    pub(super) fn merge_account(&mut self, account: &str, five: Option<RateLimit>, seven: Option<RateLimit>) -> bool {
-        // A removed account's leftover snapshots are ignored.
-        let Some(acct) = self.store.data.accounts.iter_mut().find(|a| a.id == account).map(|a| &mut a.usage) else { return false };
+    pub(super) fn merge_claude_usage(&mut self, five: Option<RateLimit>, seven: Option<RateLimit>) -> bool {
+        let usage = &mut self.store.data.claude_usage;
         let mut changed = false;
-        for (slot, new) in [(&mut acct.five_hour, five), (&mut acct.seven_day, seven)] {
+        for (slot, new) in [(&mut usage.five_hour, five), (&mut usage.seven_day, seven)] {
             if let Some(new) = new
                 && slot.as_ref().is_none_or(|cur| new.seen_at >= cur.seen_at && *cur != new)
             {
@@ -99,7 +97,7 @@ impl Workspace {
 }
 
 /// Copy a snapshot's figures onto the session's record; true when anything differed.
-fn apply_to_meta(meta: &mut ClaudeMeta, snap: &Snapshot) -> bool {
+fn apply_to_meta(meta: &mut AgentMeta, snap: &Snapshot) -> bool {
     let mut changed = false;
     if snap.context_fraction.is_some() && (meta.context_fraction != snap.context_fraction || meta.context_window != snap.context_window) {
         meta.context_fraction = snap.context_fraction;
@@ -155,7 +153,7 @@ mod tests {
 
     #[test]
     fn a_snapshot_updates_the_record_once_and_a_missing_figure_keeps_the_old_one() {
-        let mut meta = ClaudeMeta::default();
+        let mut meta = AgentMeta::default();
         let first = snap(r#"{"session_id":"s","five_hour":null,"seven_day":null,"context_fraction":0.5,"context_tokens":500,"context_window":1000,"model":"opus","captured_at":1,"auto_compact":true,"advisor":"sonnet"}"#);
         assert!(apply_to_meta(&mut meta, &first));
         assert!(!apply_to_meta(&mut meta, &first), "the same report again changes nothing");
@@ -171,7 +169,7 @@ mod tests {
 
     #[test]
     fn background_compaction_is_offered_only_while_the_mod_reports_it() {
-        let mut meta = ClaudeMeta::default();
+        let mut meta = AgentMeta::default();
         let offered = snap(r#"{"session_id":"s","five_hour":null,"seven_day":null,"context_fraction":null,"context_tokens":null,"context_window":null,"model":null,"captured_at":1,"precompute_compact":true}"#);
         assert!(apply_to_meta(&mut meta, &offered));
         assert_eq!(meta.precompute_compact, Some(true));

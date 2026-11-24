@@ -128,13 +128,7 @@ impl Workspace {
         let Some(exe) = self.claude_exe.clone() else {
             return Err("Could not find the `claude` CLI on PATH.".into());
         };
-        let mut env = harness::claude::environment(&exe);
-        env.push(("CLAUDE_CODE_AUTO_CONNECT_IDE".into(), "false".into()));
-        env.push(("CLAUDE_CODE_IDE_SKIP_AUTO_INSTALL".into(), "1".into()));
-        if let Some(acct) = self.store.active_account() {
-            env.extend(Self::account_env(acct));
-        }
-        Ok(env)
+        Ok(harness::claude::probe_env(&exe))
     }
 
     /// Refreshes model catalogs in the background for every enabled harness (Claude Code, Codex, OpenCode,

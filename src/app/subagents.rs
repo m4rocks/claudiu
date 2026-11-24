@@ -1,5 +1,5 @@
 use super::*;
-use crate::claude::bridge::{self, Request};
+use crate::mcp::bridge::{self, Request};
 use crate::harness::thread::Entry;
 use serde_json::{Value, json};
 
@@ -88,7 +88,7 @@ impl Workspace {
     /// The subagents `parent` started, oldest first, as `(id, title)`.
     pub fn subagents_of(&self, parent: &str) -> Vec<(Id, String)> {
         let mut children: Vec<&SessionRecord> =
-            self.store.data.sessions.iter().filter(|rec| rec.claude.as_ref().is_some_and(|m| m.parent_session.as_deref() == Some(parent))).collect();
+            self.store.data.sessions.iter().filter(|rec| rec.agent.as_ref().is_some_and(|m| m.parent_session.as_deref() == Some(parent))).collect();
         children.sort_by_key(|rec| rec.created_at);
         children.into_iter().map(|rec| (rec.id.clone(), rec.display_title().to_string())).collect()
     }
@@ -96,7 +96,7 @@ impl Workspace {
     fn owned_subagent(&self, req: &Request) -> Result<SessionRecord, String> {
         let id = req.args["id"].as_str().ok_or("Give the subagent id.")?;
         self.store.session(id)
-            .filter(|rec| rec.claude.as_ref().is_some_and(|m| m.parent_session.as_deref() == Some(requester(req))))
+            .filter(|rec| rec.agent.as_ref().is_some_and(|m| m.parent_session.as_deref() == Some(requester(req))))
             .cloned()
             .ok_or_else(|| "This subagent does not belong to the requesting session.".into())
     }
@@ -139,7 +139,7 @@ impl Workspace {
     /// current turn. A parent blocked in wait_subagent for this child gets it from the wait instead.
     pub(super) fn report_to_parent(&mut self, id: &str, outcome: &str, cx: &mut Context<Self>) {
         let Some(record) = self.store.session(id) else { return };
-        let Some(meta) = record.claude.as_ref() else { return };
+        let Some(meta) = record.agent.as_ref() else { return };
         let Some(parent) = meta.parent_session.clone() else { return };
         if self.pending_subagent_waits.iter().any(|wait| wait.request.args["id"].as_str() == Some(id)) {
             return;
@@ -183,9 +183,6 @@ impl Workspace {
 
     pub(super) fn run_subagent_request(&mut self, req: &Request, window: &mut Window, cx: &mut Context<Self>) -> Result<String, String> {
         let parent = self.store.session(requester(req)).cloned().ok_or("The requesting session no longer exists.")?;
-        if parent.claude.as_ref().is_some_and(|m| m.harness == Harness::Antigravity) {
-            return Err("Shared subagents are not enabled for Antigravity yet.".into());
-        }
         match req.tool.as_str() {
             "spawn_subagent" => {
                 if !self.is_running(&parent.id, cx) {
@@ -204,7 +201,7 @@ impl Workspace {
                     matches!(view.read(cx).thread.mode.as_deref(), Some("plan" | "read_only" | "readOnly" | "read-only"))
                 });
                 let edits = !parent_read_only && access.edits
-                    && parent.claude.as_ref().is_none_or(|m| m.parent_session.is_none() || m.subagent_edits);
+                    && parent.agent.as_ref().is_none_or(|m| m.parent_session.is_none() || m.subagent_edits);
                 let prompt = message(req)?;
                 let prefix = format!("{}:", harness.key());
                 let offered = settings.aggregated_models();
@@ -223,11 +220,10 @@ impl Workspace {
                     return Err("Choose a model listed by list_models for this harness.".into());
                 }
                 let id = new_id();
-                let meta = ClaudeMeta {
+                let meta = AgentMeta {
                     harness, parent_session: Some(parent.id.clone()), subagent_edits: edits,
                     chosen_model: model.map(String::from),
                     chosen_effort: req.args["effort"].as_str().map(String::from),
-                    account: parent.claude.as_ref().and_then(|m| m.account.clone()),
                     ..Default::default()
                 };
                 let mut start = self.thread_start(&id, &parent.cwd, &meta, None, Some(prompt), Starter::User, cx).ok_or("The subagent could not start.")?;
@@ -238,17 +234,17 @@ impl Workspace {
                     }
                 }
                 let record = SessionRecord {
-                    id: id.clone(), kind: SessionKind::Claude, title: format!("{} subagent", harness.name()),
+                    id: id.clone(), kind: SessionKind::Agent, title: format!("{} subagent", harness.name()),
                     custom_title: None, auto_title: None, project_id: parent.project_id,
                     cwd: parent.cwd, created_at: now(), last_active: now(), exit_code: None,
-                    hidden: false, claude: Some(meta),
+                    hidden: false, agent: Some(meta),
                 };
                 self.start_thread_with_focus(record, start, true, false, window, cx);
                 self.subagent_status(&Request { args: json!({"id": id}), ..req.clone() }, cx).map(|status| status.to_string())
             }
             "list_subagents" => {
                 let children = self.store.data.sessions.iter()
-                    .filter(|rec| rec.claude.as_ref().is_some_and(|m| m.parent_session.as_deref() == Some(parent.id.as_str())))
+                    .filter(|rec| rec.agent.as_ref().is_some_and(|m| m.parent_session.as_deref() == Some(parent.id.as_str())))
                     .map(|rec| self.subagent_status(&Request { args: json!({"id": rec.id}), ..req.clone() }, cx))
                     .collect::<Result<Vec<_>, _>>()?;
                 Ok(json!(children).to_string())
@@ -260,7 +256,7 @@ impl Workspace {
                 if let Some(view) = self.live_view(&record.id).and_then(|v| v.thread()).cloned() {
                     view.update(cx, |v, cx| v.send(prompt, window, cx));
                 } else {
-                    let meta = record.claude.as_ref().ok_or("The subagent has no session metadata.")?;
+                    let meta = record.agent.as_ref().ok_or("The subagent has no session metadata.")?;
                     let start = self.thread_start(&record.id, &record.cwd, meta, None, Some(prompt), Starter::User, cx).ok_or("The subagent could not resume.")?;
                     self.start_thread_with_focus(record, start, false, false, window, cx);
                 }

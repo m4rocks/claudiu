@@ -1,7 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 
 test('reports context, limits, auto-compact and advisor; rewrites only on change', async ($, on) => {
-  mock.env(on, { M4CODE_USAGE_DIR: 'usage', M4CODE_ACCOUNT: 'work' })
+  mock.env(on, { M4CODE_USAGE_DIR: 'usage' })
   let advisor: string | undefined = 'opus'
   const writes: { path: string; snap: any }[] = []
   on('fs.write', (_$, e) => {
@@ -23,7 +23,7 @@ test('reports context, limits, auto-compact and advisor; rewrites only on change
   await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
   expect(writes.length).toBe(1)
   expect(writes[0]!.path).toMatch(/usage[\\/]abc_123\.json$/) // the session id cannot escape the directory
-  expect(writes[0]!.snap).toMatchObject({ session_id: 'abc/123', model: 'claude-haiku-5-5', account: 'work', auto_compact: true, advisor: 'opus', advisor_active: 'opus', compact_at: 167_000, context_fraction: null })
+  expect(writes[0]!.snap).toMatchObject({ session_id: 'abc/123', model: 'claude-haiku-5-5', auto_compact: true, advisor: 'opus', advisor_active: 'opus', compact_at: 167_000, context_fraction: null })
   expect(writes[0]!.snap.precompute_compact).toBe(null) // Claude Code does not offer the switch here
 
   const measure = {

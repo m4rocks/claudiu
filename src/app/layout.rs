@@ -6,7 +6,7 @@ impl Workspace {
     /// Show or hide the shell under a Claude session. It starts on first use, in the session's folder, and lives and
     /// dies with the session.
     pub fn toggle_shell(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let rec = self.store.session(id).filter(|r| r.kind == SessionKind::Claude).cloned();
+        let rec = self.store.session(id).filter(|r| r.kind == SessionKind::Agent).cloned();
         let Some(rec) = rec.filter(|_| self.is_running(id, cx)) else {
             self.toast("Open a session to use its shell.", cx);
             return;

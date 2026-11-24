@@ -1,5 +1,6 @@
-//! The editor's right-click requests to Claude: explain, fix or test the selected lines, or fix the problem a language
-//! server reports on the clicked line. Each one sends the reference and the request to Claude as the next message (`send_to_claude`).
+//! The editor's right-click requests to the active agent: explain, fix or test the selected lines, or fix the problem
+//! a language server reports on the clicked line. Each one sends the reference and the request as the next message
+//! (`send_to_agent`).
 
 use std::path::Path;
 
@@ -15,7 +16,7 @@ pub enum Ask {
 }
 
 impl Workspace {
-    pub fn ask_claude(&mut self, ask: Ask, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn ask_agent(&mut self, ask: Ask, window: &mut Window, cx: &mut Context<Self>) {
         let Some(id) = self.editor_owner() else { return };
         let text = match ask {
             Ask::Problem => self.problem_at_cursor(&id, cx).map(|(reference, message)| request(ask, &reference, Some(&message))),
@@ -27,24 +28,24 @@ impl Workspace {
             }
             return;
         };
-        self.send_to_claude(&id, &text, window, cx);
+        self.send_to_agent(&id, &text, window, cx);
     }
 
-    /// The shown session when it is a running Claude session: where a request from anywhere in the app goes, rather than
+    /// The shown session when it is a running agent session: where a request from anywhere in the app goes, rather than
     /// into a session of its own.
-    pub(super) fn running_claude(&self, cx: &App) -> Option<Id> {
-        self.active_id().filter(|id| self.is_running(id, cx) && self.store.session(id).is_some_and(|r| r.kind == SessionKind::Claude)).cloned()
+    pub(super) fn running_agent(&self, cx: &App) -> Option<Id> {
+        self.active_id().filter(|id| self.is_running(id, cx) && self.store.session(id).is_some_and(|r| r.kind == SessionKind::Agent)).cloned()
     }
 
-    /// `running_claude`, when it works in `folder` (or inside it, or around it). A request about another repository,
+    /// `running_agent`, when it works in `folder` (or inside it, or around it). A request about another repository,
     /// or another worktree of this one, must not land in a session that would act on the wrong files.
-    pub(super) fn running_claude_in(&self, folder: &Path, cx: &App) -> Option<Id> {
-        self.running_claude(cx).filter(|id| self.store.session(id).is_some_and(|r| works_in(&r.cwd, folder)))
+    pub(super) fn running_agent_in(&self, folder: &Path, cx: &App) -> Option<Id> {
+        self.running_agent(cx).filter(|id| self.store.session(id).is_some_and(|r| works_in(&r.cwd, folder)))
     }
 
     /// Send `text` to the session `id` as the user's next message, then move the keyboard to it. A session mid-turn
     /// queues it for after the turn; a half-written message in its composer is left alone.
-    pub(super) fn send_to_claude(&mut self, id: &Id, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn send_to_agent(&mut self, id: &Id, text: &str, window: &mut Window, cx: &mut Context<Self>) {
         if matches!(self.main, Main::Home) && self.editor_owner().as_ref() == Some(id) {
             self.add_home_comment(text, window, cx);
             self.act(Act::HomeLaunch, window, cx);

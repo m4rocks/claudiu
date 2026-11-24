@@ -8,7 +8,7 @@ use super::*;
 
 #[test]
 fn the_picker_lists_only_the_ticked_models_once_any_are_ticked() {
-    use crate::claude::subagents::{Agent, AgentModel};
+    use crate::harness::subagents::{Agent, AgentModel};
     use crate::harness::Harness;
     let model = |id: &str| AgentModel { id: id.into(), name: id.to_uppercase() };
     let mut settings = Settings { enabled_harnesses: Some(vec![Harness::Claude, Harness::Codex]), ..Default::default() };
@@ -50,12 +50,12 @@ fn project(id: &str, path: &str) -> Project {
 
 #[test]
 fn the_last_antigravity_reading_is_there_after_a_restart() {
-    use crate::claude::limits::Pool;
+    use crate::harness::limits::Pool;
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("state.json");
     let mut s = Store::load(path.clone());
     let limit = RateLimit { utilization: Some(0.5), resets_at: Some(200), seen_at: 100 };
-    s.data.subagent_limits.insert("antigravity".into(), vec![Pool { name: "Gemini Models".into(), usage: AccountUsage { five_hour: None, seven_day: Some(limit) } }]);
+    s.data.subagent_limits.insert("antigravity".into(), vec![Pool { name: "Gemini Models".into(), usage: UsageLimits { five_hour: None, seven_day: Some(limit) } }]);
     s.save();
     assert_eq!(Store::load(path).data.subagent_limits, s.data.subagent_limits);
     // A state.json from before the field loads with no reading.
@@ -94,7 +94,7 @@ fn store_with(projects: Vec<Project>, sessions: Vec<(&str, &str, Option<&str>)>)
         .into_iter()
         .map(|(id, cwd, project)| SessionRecord {
             id: id.into(),
-            kind: SessionKind::Claude,
+            kind: SessionKind::Agent,
             title: id.into(),
             custom_title: None,
             auto_title: None,
@@ -104,7 +104,7 @@ fn store_with(projects: Vec<Project>, sessions: Vec<(&str, &str, Option<&str>)>)
             last_active: 1,
             exit_code: None,
             hidden: false,
-            claude: None,
+            agent: None,
         })
         .collect();
     (s, dir)
@@ -166,7 +166,7 @@ fn adding_a_project_adopts_existing_unmapped_sessions() {
     fs::create_dir_all(&proj_dir).unwrap();
     store.add_session(SessionRecord {
         id: "s1".into(),
-        kind: SessionKind::Claude,
+        kind: SessionKind::Agent,
         cwd: proj_dir.join("sub"),
         project_id: None,
         title: "T".into(),
@@ -176,7 +176,7 @@ fn adding_a_project_adopts_existing_unmapped_sessions() {
         last_active: 1,
         hidden: false,
         exit_code: None,
-        claude: None,
+        agent: None,
     });
     assert!(store.data.sessions[0].project_id.is_none());
     let id = store.add_project(&proj_dir);
@@ -189,7 +189,7 @@ fn shell_sessions_are_not_restored_from_disk() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("s.json");
     let mut a = Store::load(path.clone());
-    for (id, kind) in [("sh", SessionKind::Shell), ("cl", SessionKind::Claude)] {
+    for (id, kind) in [("sh", SessionKind::Shell), ("cl", SessionKind::Agent)] {
         a.data.sessions.push(SessionRecord {
             id: id.into(),
             kind,
@@ -202,7 +202,7 @@ fn shell_sessions_are_not_restored_from_disk() {
             last_active: 1,
             exit_code: None,
             hidden: false,
-            claude: None,
+            agent: None,
         });
     }
     a.save();
@@ -212,47 +212,27 @@ fn shell_sessions_are_not_restored_from_disk() {
 }
 
 #[test]
-fn usage_from_before_accounts_moves_into_the_main_account() {
+fn legacy_account_usage_loads_into_claude_usage() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("s.json");
     let old = r#"{"version":1,"projects":[],"sessions":[],"account":{"five_hour":{"utilization":0.5,"resets_at":null,"seen_at":3}},
         "layout":{"selected_session":null,"sidebar_visible":true,"other_collapsed":false},"settings":{"claude_path":null,"update_url":null}}"#;
     fs::write(&path, old).unwrap();
     let mut s = Store::load(path.clone());
-    assert_eq!(s.active_account().unwrap().usage.five_hour.as_ref().unwrap().utilization, Some(0.5));
+    assert_eq!(s.data.claude_usage.five_hour.as_ref().unwrap().utilization, Some(0.5));
     s.save();
     assert!(fs::read_to_string(&path).unwrap().contains("\"account\""), "older versions require the field");
-    assert_eq!(Store::load(path).data.accounts.len(), 1, "migrates once");
+    assert_eq!(Store::load(path).data.claude_usage.five_hour.as_ref().unwrap().utilization, Some(0.5));
 }
 
 #[test]
-fn a_session_starts_under_its_own_account_while_that_exists() {
+fn legacy_accounts_file_usage_is_imported_when_state_usage_is_empty() {
     let tmp = tempfile::tempdir().unwrap();
-    let mut s = Store::load(tmp.path().join("s.json"));
-    s.data.accounts.push(Account { id: "alt".into(), ..Default::default() });
-    s.data.active_account = Some("alt".into());
-    let session = |id: &str, account: Option<&str>| SessionRecord {
-        id: id.into(),
-        kind: SessionKind::Claude,
-        title: "Claude".into(),
-        custom_title: None,
-        auto_title: None,
-        cwd: PathBuf::from("/w"),
-        project_id: None,
-        created_at: 1,
-        last_active: 1,
-        exit_code: None,
-        hidden: false,
-        claude: Some(ClaudeMeta { session_id: id.into(), account: account.map(Into::into), ..Default::default() }),
-    };
-    s.add_session(session("main-owned", Some(MAIN_ACCOUNT)));
-    s.add_session(session("never-started", None));
-    s.add_session(session("removed-owner", Some("gone")));
-    let account = |s: &Store, id: &str| s.session_account(id).map(|a| a.id.clone());
-    assert_eq!(account(&s, "main-owned").as_deref(), Some(MAIN_ACCOUNT), "not the active alt");
-    assert_eq!(account(&s, "never-started").as_deref(), Some("alt"));
-    assert_eq!(account(&s, "removed-owner").as_deref(), Some("alt"));
-    assert_eq!(account(&s, "not-yet-stored").as_deref(), Some("alt"), "a new session");
+    let path = tmp.path().join("state.json");
+    let accounts = r#"{"active":"main","accounts":[{"id":"main","usage":{"five_hour":{"utilization":0.42,"resets_at":null,"seen_at":9}}}]}"#;
+    fs::write(tmp.path().join("accounts.json"), accounts).unwrap();
+    let s = Store::load(path);
+    assert_eq!(s.data.claude_usage.five_hour.as_ref().unwrap().utilization, Some(0.42));
 }
 
 #[test]
@@ -268,7 +248,6 @@ fn save_load_roundtrip_and_corrupt_file_is_kept() {
     fs::write(&path, "{ not json").unwrap();
     let c = Store::load(path.clone());
     assert!(c.data.projects.is_empty());
-    assert_eq!(c.active_account().map(|a| a.id.as_str()), Some(MAIN_ACCOUNT), "main account always exists");
     assert!(path.with_extension("json.corrupt").exists(), "corrupt state is preserved, not destroyed");
 }
 
@@ -314,7 +293,7 @@ fn a_window_is_restored_only_where_a_display_still_shows_it() {
 
 #[test]
 fn default_model_resolves_across_enabled_harnesses_and_falls_back_when_disabled() {
-    use crate::claude::subagents::{Agent, AgentModel};
+    use crate::harness::subagents::{Agent, AgentModel};
     use crate::harness::{CatalogModel, Harness};
 
     let mut settings = Settings {
@@ -376,6 +355,6 @@ fn migrate_data_dir_keeps_existing_m4code_state() {
 #[test]
 fn settings_deserializes_legacy_claudiu_tools_off() {
     let s: Settings = serde_json::from_str(r#"{"claudiu_tools_off":["visual"]}"#).unwrap();
-    assert_eq!(s.m4code_tools_off, vec![crate::claude::mcp::Feature::Visual]);
+    assert_eq!(s.m4code_tools_off, vec![crate::mcp::Feature::Visual]);
 }
 

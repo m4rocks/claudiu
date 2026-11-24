@@ -10,7 +10,7 @@ const LAST_ENTRIES: usize = 400;
 
 pub struct Pending {
     source: Live,
-    pub(super) meta: ClaudeMeta,
+    pub(super) meta: AgentMeta,
     draft: Option<String>,
 }
 
@@ -28,13 +28,13 @@ impl Workspace {
             return;
         }
         let Some(mut rec) = self.store.session(id).cloned() else { return };
-        if to == Harness::Antigravity && rec.claude.as_ref().is_some_and(|m| m.parent_session.is_some()) {
+        if to == Harness::Antigravity && rec.agent.as_ref().is_some_and(|m| m.parent_session.is_some()) {
             self.toast("Shared Antigravity subagents are not enabled yet.", cx);
             return;
         }
         let cwd = rec.cwd.clone();
         let draft = (!by_agent).then(|| message.clone());
-        let mut meta = rec.claude.clone().unwrap_or_default();
+        let mut meta = rec.agent.clone().unwrap_or_default();
         let target = meta.provider_sessions.get(to.key()).cloned();
         let (from_name, transcript, mut prior_entries, count) = {
             let t = thread.read(cx);
@@ -43,7 +43,7 @@ impl Workspace {
         if !meta.session_id.is_empty() {
             meta.provider_sessions.insert(meta.harness.key().into(), crate::store::ProviderSession {
                 session_id: meta.session_id.clone(), model: meta.chosen_model.clone(), effort: meta.chosen_effort.clone(),
-                account: meta.account.clone(), after_entry: count,
+                after_entry: count,
             });
         }
         let target_label = model.as_deref().filter(|m| !m.is_empty()).unwrap_or_else(|| to.name());
@@ -64,7 +64,6 @@ impl Workspace {
         meta.session_id = target.as_ref().map_or_else(String::new, |s| s.session_id.clone());
         meta.chosen_model = model.clone().or_else(|| target.as_ref().and_then(|s| s.model.clone()));
         meta.chosen_effort = effort.clone().or_else(|| target.as_ref().and_then(|s| s.effort.clone()));
-        meta.account = target.and_then(|s| s.account);
         meta.transcript = None;
         meta.external = ExternalState::Unknown;
         meta.context_tokens = None;
@@ -73,8 +72,7 @@ impl Workspace {
         meta.cache_ttl = None;
         meta.model = None;
         meta.managed_compaction = true;
-        meta.auto_compact = Some(meta.auto_compact.unwrap_or(true));
-        rec.claude = Some(meta.clone());
+        rec.agent = Some(meta.clone());
         let Some(mut start) = self.thread_start(&rec.id, &cwd, &meta, rec.chosen_title().map(String::from), Some(prompt), Starter::User, cx) else {
             if let Some(draft) = draft {
                 thread.update(cx, |v, cx| v.paste_text(&draft, window, cx));
@@ -103,16 +101,15 @@ impl Workspace {
     pub(super) fn commit_handoff(&mut self, id: &str, session_id: &str, cx: &mut Context<Self>) {
         let Some(mut pending) = self.pending_handoffs.remove(id) else { return };
         pending.meta.session_id = session_id.to_string();
-        if let Some(live) = self.live.iter().find(|live| live.id == id) {
-            pending.meta.account = Some(live.account.clone());
-            if let Some(view) = live.view.thread() {
-                let view = view.read(cx);
-                if let Some(model) = view.thread.option("model") { pending.meta.chosen_model = Some(model.current.clone()); }
-                if let Some(effort) = view.thread.option("thought_level") { pending.meta.chosen_effort = Some(effort.current.clone()); }
-            }
+        if let Some(live) = self.live.iter().find(|live| live.id == id)
+            && let Some(view) = live.view.thread()
+        {
+            let view = view.read(cx);
+            if let Some(model) = view.thread.option("model") { pending.meta.chosen_model = Some(model.current.clone()); }
+            if let Some(effort) = view.thread.option("thought_level") { pending.meta.chosen_effort = Some(effort.current.clone()); }
         }
         if let Some(record) = self.store.session_mut(id) {
-            record.claude = Some(pending.meta);
+            record.agent = Some(pending.meta);
         }
         if let Some(source) = pending.source.view.thread() {
             source.update(cx, |view, _| view.relinquish_record());
@@ -162,7 +159,7 @@ impl Workspace {
         }
         crate::harness::thread::save_entries(id, &[]);
         crate::thread::clear_turn_reviews(id, cx.background_executor());
-        if let Some(meta) = self.store.session_mut(id).and_then(|r| r.claude.as_mut()) {
+        if let Some(meta) = self.store.session_mut(id).and_then(|r| r.agent.as_mut()) {
             meta.session_id.clear();
             meta.provider_sessions.clear();
             meta.transcript = None;
@@ -184,7 +181,7 @@ impl Workspace {
     /// seeded with the compacted context.
     pub(super) fn compact_session(&mut self, id: &str, transcript: String, instructions: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(rec) = self.store.session(id).cloned() else { return };
-        let meta = rec.claude.clone().unwrap_or_default();
+        let meta = rec.agent.clone().unwrap_or_default();
         let gen_model = self.store.data.settings.text_generation_model.clone().unwrap_or_else(|| {
             crate::store::TextGenerationModel {
                 harness: meta.harness,
@@ -224,7 +221,7 @@ impl Workspace {
         let Some(thread) = self.live_view(id).and_then(|v| v.thread()).cloned() else { return };
         let mut prior_entries = thread.read(cx).thread.entries.clone();
         prior_entries.push(Entry::Notice { text: "Context compacted.".into(), error: false });
-        let mut meta = rec.claude.clone().unwrap_or_default();
+        let mut meta = rec.agent.clone().unwrap_or_default();
         meta.session_id.clear();
         meta.provider_sessions.clear();
         meta.transcript = None;
@@ -232,8 +229,8 @@ impl Workspace {
         meta.context_fraction = None;
         meta.context_window = None;
         meta.cache_ttl = None;
-        rec.claude = Some(meta.clone());
-        if let Some(m) = self.store.session_mut(id).and_then(|r| r.claude.as_mut()) {
+        rec.agent = Some(meta.clone());
+        if let Some(m) = self.store.session_mut(id).and_then(|r| r.agent.as_mut()) {
             *m = meta.clone();
             self.store.mark_dirty();
         }

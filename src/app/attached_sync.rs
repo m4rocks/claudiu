@@ -47,7 +47,7 @@ impl Workspace {
             .sessions
             .iter()
             .filter_map(|s| {
-                let items: Vec<_> = s.claude.as_ref()?.attached.iter().map(|a| (a.repo.clone(), a.pull, a.number)).collect();
+                let items: Vec<_> = s.agent.as_ref()?.attached.iter().map(|a| (a.repo.clone(), a.pull, a.number)).collect();
                 // A session whose folder is gone cannot be asked about (and would never be answered). Checked last:
                 // it asks the disk, from the UI thread, and most sessions have nothing attached.
                 (!items.is_empty() && s.cwd.is_dir()).then(|| (s.id.clone(), s.cwd.clone(), items))
@@ -79,7 +79,7 @@ impl Workspace {
     /// Whether some attached item of a session with a folder has no answer from GitHub yet.
     fn unanswered_items(&self) -> bool {
         let sessions = self.store.data.sessions.iter().filter(|s| s.cwd.is_dir());
-        sessions.filter_map(|s| s.claude.as_ref()).flat_map(|m| &m.attached).any(|a| a.state.is_none())
+        sessions.filter_map(|s| s.agent.as_ref()).flat_map(|m| &m.attached).any(|a| a.state.is_none())
     }
 }
 

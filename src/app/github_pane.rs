@@ -109,9 +109,9 @@ impl Workspace {
         let Some(cwd) = self.gh_pane(pane).map(|p| p.cwd.clone()) else { return };
         match ev {
             GhEvent::Toast(text) | GhEvent::Error(text) => self.toast(text.clone(), cx),
-            GhEvent::AskClaude(prompt) => match self.running_claude_in(&cwd, cx) {
-                Some(id) => self.send_to_claude(&id, prompt, window, cx),
-                None => self.new_claude_with(cwd, Some(prompt.clone()), vec![], Starter::User, window, cx),
+            GhEvent::AskClaude(prompt) => match self.running_agent_in(&cwd, cx) {
+                Some(id) => self.send_to_agent(&id, prompt, window, cx),
+                None => self.new_session_default(cwd, Some(prompt.clone()), vec![], Starter::User, window, cx),
             },
             GhEvent::Checkout(number) => {
                 let Some(exe) = crate::github::cli::locate() else { return };
@@ -143,7 +143,7 @@ impl Workspace {
             last_active: now(),
             exit_code: None,
             hidden: false,
-            claude: None,
+            agent: None,
         };
         self.start(record, spec, true, window, cx);
     }

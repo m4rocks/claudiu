@@ -1,12 +1,12 @@
 #![cfg_attr(all(not(debug_assertions), target_os = "windows"), windows_subsystem = "windows")]
 
 mod app;
-mod claude;
 mod datadir;
 mod files;
 mod git;
 mod harness;
 mod lsp;
+mod mcp;
 mod github;
 mod panels;
 mod platform;
@@ -57,7 +57,7 @@ impl gpui::AssetSource for Assets {
 use app::{HideApp, HideOthers, Quit, ShowAllApps, Workspace};
 #[cfg(target_os = "macos")]
 use app::{
-    CloseSession, FocusSearch, ImportProject, NewClaude, NextSession, OpenGithub, OpenSettings, PrevSession, SwapFocus, ToggleEditor, ToggleRight,
+    CloseSession, FocusSearch, ImportProject, NewSession, NextSession, OpenGithub, OpenSettings, PrevSession, SwapFocus, ToggleEditor, ToggleRight,
     ToggleShell, ToggleSidebar,
 };
 
@@ -80,7 +80,7 @@ fn menu_bar() -> Vec<gpui::Menu> {
             MenuItem::action("Quit m4code", Quit),
         ]),
         Menu::new("File").items([
-            MenuItem::action("New Session", NewClaude),
+            MenuItem::action("New Session", NewSession),
             MenuItem::action("Show or Hide Shell", ToggleShell),
             MenuItem::action("Editor Mode", ToggleEditor),
             MenuItem::action("GitHub Issues & Pull Requests", OpenGithub),
@@ -104,7 +104,7 @@ fn menu_bar() -> Vec<gpui::Menu> {
             MenuItem::action("Next Session", NextSession),
             MenuItem::action("Previous Session", PrevSession),
             MenuItem::separator(),
-            MenuItem::action("Switch Focus Between Claude and Shell", SwapFocus),
+            MenuItem::action("Switch Focus Between Chat and Shell", SwapFocus),
         ]),
     ]
 }
@@ -172,13 +172,13 @@ fn open_main_window(initial: Vec<std::path::PathBuf>, cx: &mut App) -> MainWindo
 }
 
 fn main() {
-    // Hidden helper mode: the MCP server that lets Claude name its own tab (see claude/mcp.rs).
-    if std::env::args().nth(1).as_deref() == Some(claude::mcp::FLAG) {
-        std::process::exit(claude::mcp::run());
+    // Hidden helper mode: m4code's built-in MCP server (see mcp/mod.rs).
+    if std::env::args().nth(1).as_deref() == Some(mcp::FLAG) {
+        std::process::exit(mcp::run());
     }
-    // Hidden helper mode: runs one task in Codex for a custom subagent (see claude/acp.rs).
-    if std::env::args().nth(1).as_deref() == Some(claude::acp::FLAG) {
-        std::process::exit(claude::acp::run());
+    // Hidden helper mode: runs one subagent task over ACP (see harness/runner.rs).
+    if std::env::args().nth(1).as_deref() == Some(harness::runner::FLAG) {
+        std::process::exit(harness::runner::run());
     }
     install_crash_log();
     #[cfg(windows)]

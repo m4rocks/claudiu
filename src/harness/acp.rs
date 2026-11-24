@@ -1,6 +1,6 @@
 //! A long-lived Agent Client Protocol connection to a harness: newline-delimited JSON-RPC over the agent's stdio.
 //! Requests return futures; what the agent sends unasked arrives as `Event`s. No GPUI here; `thread_view` drives it.
-//! `claude::acp` is a different, one-shot client: Claude Code's subagents run through it.
+//! `harness::runner` is a different, one-shot client: custom subagents run through it.
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, BufReader, Read, Write};

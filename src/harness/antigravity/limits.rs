@@ -13,8 +13,8 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
-use crate::store::{AccountUsage, RateLimit};
-use super::limits::Pool;
+use crate::store::{RateLimit, UsageLimits};
+use crate::harness::limits::Pool;
 
 /// How often the sidebar asks again while Antigravity subagents are on.
 pub const REFRESH_EVERY: Duration = Duration::from_secs(300);
@@ -93,12 +93,12 @@ pub fn parse(json: &str, seen_at: i64) -> Option<Vec<Pool>> {
         .as_array()?
         .iter()
         .filter_map(|group| {
-            let mut usage = AccountUsage::default();
+            let mut usage = UsageLimits::default();
             for bucket in group["buckets"].as_array().into_iter().flatten() {
                 let limit = RateLimit {
                     // An unknown fraction stays unknown rather than reading as empty or full.
                     utilization: bucket["remaining_fraction"].as_f64().filter(|f| (0.0..=1.0).contains(f)).map(|f| (1.0 - f) as f32),
-                    resets_at: bucket["reset_time"].as_str().and_then(super::parse_rfc3339),
+                    resets_at: bucket["reset_time"].as_str().and_then(crate::harness::limits::parse_rfc3339),
                     seen_at,
                 };
                 match bucket["window"].as_str() {
@@ -153,7 +153,7 @@ mod tests {
         let pools = parse(READING, 100).unwrap();
         assert_eq!(pools.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), ["Gemini Models", "Claude and GPT models"]);
         let gemini = &pools[0].usage;
-        assert_eq!(gemini.five_hour, Some(RateLimit { utilization: Some(0.5), resets_at: super::super::parse_rfc3339("2026-11-19T11:49:30Z"), seen_at: 100 }));
+        assert_eq!(gemini.five_hour, Some(RateLimit { utilization: Some(0.5), resets_at: crate::harness::limits::parse_rfc3339("2026-11-19T11:49:30Z"), seen_at: 100 }));
         assert_eq!(gemini.seven_day.as_ref().unwrap().utilization, Some(0.25));
         assert_eq!(pools[1].usage.five_hour.as_ref().unwrap().utilization, Some(0.0));
         let weekly_only = parse(r#"{"command":{"name":"usage","data":{"groups":[{"name":"Weekly Only","buckets":[{"window":"weekly","remaining_fraction":1,"reset_time":"2026-11-26T06:55:31Z"}]}]}}}"#, 100).unwrap();

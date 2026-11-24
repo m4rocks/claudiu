@@ -1,6 +1,6 @@
 //! OpenCode, which speaks ACP itself (`opencode acp`), on the providers the user set up in OpenCode.
 
-use crate::claude::subagents::Agent;
+use super::subagents::Agent;
 
 use super::{Adapter, Reopen};
 use serde_json::{Map, Value, json};

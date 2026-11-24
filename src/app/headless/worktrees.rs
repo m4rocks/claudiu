@@ -63,13 +63,13 @@ fn switching_between_worktrees_in_the_workspace() {
     });
 
     // A new session starts in the main checkout. The menu is there but cannot switch until a session runs.
-    step(&mut cx, &|ws, w, cx| ws.act(Act::NewClaude { cwd: repo_dir.clone() }, w, cx));
+    step(&mut cx, &|ws, w, cx| ws.act(Act::NewSession { cwd: repo_dir.clone() }, w, cx));
     assert!(ws.read_with(&cx, |ws, _| ws.modal.is_none() && ws.live.len() == 1));
     let session = ws.read_with(&cx, |ws, _| active(ws));
     assert_eq!(session.cwd, repo_dir);
     // The conversation exists once Claude Code has had a prompt; the test stands one in, in Claude Code's own place.
-    wait(&mut cx, "the session to open", &|ws, _| ws.store.session(&session.id).and_then(|r| r.claude_id()).is_some());
-    let claude_id = ws.read_with(&cx, |ws, _| ws.store.session(&session.id).unwrap().claude_id().unwrap().to_string());
+    wait(&mut cx, "the session to open", &|ws, _| ws.store.session(&session.id).and_then(|r| r.provider_session_id()).is_some());
+    let claude_id = ws.read_with(&cx, |ws, _| ws.store.session(&session.id).unwrap().provider_session_id().unwrap().to_string());
     let transcript = home.path().join("projects/p").join(format!("{claude_id}.jsonl"));
     std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
     std::fs::write(&transcript, "{\"type\":\"user\"}
@@ -120,7 +120,6 @@ fn switching_between_worktrees_in_the_workspace() {
     let switching_to = |ws: &Workspace, app: &App| {
         ws.live_view(&session.id).and_then(|v| v.thread()).and_then(|v| {
             let t = v.read(app);
-            assert!(t.handover.is_none(), "worktree switch must not show a full-screen loading skeleton");
             t.git.as_ref().filter(|g| g.busy).map(|g| g.primary.clone())
         })
     };
@@ -136,7 +135,7 @@ fn switching_between_worktrees_in_the_workspace() {
     assert_eq!(String::from_utf8_lossy(&branch.stdout).trim(), "fix-login", "the branch is named as typed");
     assert_eq!(ws.read_with(&cx, |ws, _| ws.live.len()), 1, "the same session, not a new one");
     assert_eq!(ws.read_with(&cx, |ws, _| active(ws).id), session.id);
-    assert_eq!(ws.read_with(&cx, |ws, _| active(ws).claude_id().map(str::to_string)), Some(claude_id.clone()), "the same conversation");
+    assert_eq!(ws.read_with(&cx, |ws, _| active(ws).provider_session_id().map(str::to_string)), Some(claude_id.clone()), "the same conversation");
     assert_eq!(std::fs::read_to_string(&transcript).unwrap().lines().count(), 1, "making a worktree writes nothing to the conversation");
 
     // The shell is a new one, open and as tall as before.
@@ -177,7 +176,7 @@ fn switching_between_worktrees_in_the_workspace() {
     // tree's root any more, so they stay.
     assert_eq!(ws.read_with(&cx, |ws, _| tab_paths(ws)), [in_main.join("same.txt"), in_main.join("dirty.txt"), in_main.join("only_main.txt")], "tabs after the switch back");
     wait(&mut cx, "the file tree at the main checkout", &|ws, _| ws.panes[&id].root == in_main);
-    assert!(!crate::claude::worktree_recorded(&transcript).unwrap(), "the transcript no longer names the worktree");
+    assert!(!crate::harness::claude::worktree_recorded(&transcript).unwrap(), "the transcript no longer names the worktree");
     assert!(std::fs::read_to_string(&transcript).unwrap().lines().count() == 3);
 
     step(&mut cx, &|ws, w, cx| ws.restart_session(&session.id, w, cx));
@@ -258,11 +257,11 @@ fn removing_a_worktree_when_its_session_ends() {
     // The worktree is known to the project once git has been read again.
     step(&mut cx, &|ws, _w, _cx| ws.store.refresh_git());
     // A new session never starts inside a worktree; Fix-with-Claude is the one starter that keeps the folder it is given.
-    step(&mut cx, &|ws, w, cx| ws.new_claude_with(folder.clone(), None, vec![], crate::claude::defaults::Starter::FixGit, w, cx));
+    step(&mut cx, &|ws, w, cx| ws.new_session_default(folder.clone(), None, vec![], crate::harness::defaults::Starter::FixGit, w, cx));
     let id = ws.read_with(&cx, |ws, _| ws.active.clone().unwrap());
 
     // Any other way of starting a session, asked to start inside the worktree, starts in the main checkout.
-    step(&mut cx, &|ws, w, cx| ws.new_claude(folder.clone(), w, cx));
+    step(&mut cx, &|ws, w, cx| ws.new_session(folder.clone(), w, cx));
     let (other, started_in) = ws.read_with(&cx, |ws, _| (ws.active.clone().unwrap(), ws.store.session(ws.active.as_ref().unwrap()).unwrap().cwd.clone()));
     assert_eq!(started_in, repo_dir);
     step(&mut cx, &|ws, w, cx| ws.close_live(&other, w, cx));

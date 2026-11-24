@@ -2,7 +2,9 @@ use super::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SessionKind {
-    Claude,
+    /// Serialized as `"Claude"` for backwards compatibility with existing `state.json` files.
+    #[serde(rename = "Claude", alias = "Agent")]
+    Agent,
     Shell,
 }
 
@@ -45,7 +47,7 @@ impl Attached {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct ClaudeMeta {
+pub struct AgentMeta {
     /// The harness's id for the session; empty until a new session's harness names it.
     pub session_id: String,
     /// The harness the session runs in. Sessions from before there was a choice ran in Claude Code.
@@ -96,10 +98,6 @@ pub struct ClaudeMeta {
     /// Claude in Chrome: the session is (re)started with `--chrome`. m4code's own choice, so it survives restarts.
     #[serde(default)]
     pub chrome: bool,
-    /// The account this conversation runs under. It starts there again after closing it or restarting m4code, until a
-    /// hand-off moves it. `None` until m4code first starts it.
-    #[serde(default)]
-    pub account: Option<Id>,
     /// The advisor declared for the current conversation. A model change is saved in `advisor` at once but only
     /// becomes `advisor_active` on `/clear` or `/compact`; turning the advisor off/on changes it immediately.
     #[serde(default)]
@@ -123,7 +121,6 @@ pub struct ProviderSession {
     pub session_id: String,
     pub model: Option<String>,
     pub effort: Option<String>,
-    pub account: Option<Id>,
     pub after_entry: usize,
 }
 
@@ -149,28 +146,29 @@ pub struct SessionRecord {
     /// Removed from m4code's index. The underlying Claude transcript is untouched.
     #[serde(default)]
     pub hidden: bool,
-    #[serde(default)]
-    pub claude: Option<ClaudeMeta>,
+    /// Serialized as `"claude"` for backwards compatibility with existing `state.json` files.
+    #[serde(default, rename = "claude", alias = "agent")]
+    pub agent: Option<AgentMeta>,
 }
 
 impl SessionRecord {
     /// A session another session started with `spawn_subagent`. It lives in its parent's right sidebar, not in the lists.
     pub fn is_subagent(&self) -> bool {
-        self.claude.as_ref().is_some_and(|m| m.parent_session.is_some())
+        self.agent.as_ref().is_some_and(|m| m.parent_session.is_some())
     }
 
     pub fn display_title(&self) -> &str {
         self.chosen_title().unwrap_or(&self.title)
     }
 
-    /// The name given in m4code (manual rename, else Claude's own MCP title); what Claude Code is told to use.
+    /// The name given in m4code (manual rename, else the agent's own MCP title).
     pub fn chosen_title(&self) -> Option<&str> {
         [&self.custom_title, &self.auto_title].into_iter().flatten().map(|t| t.trim()).find(|t| !t.is_empty())
     }
 
     /// The harness's id for the session, once it has one.
-    pub fn claude_id(&self) -> Option<&str> {
-        self.claude.as_ref().map(|c| c.session_id.as_str()).filter(|id| !id.is_empty())
+    pub fn provider_session_id(&self) -> Option<&str> {
+        self.agent.as_ref().map(|c| c.session_id.as_str()).filter(|id| !id.is_empty())
     }
 }
 

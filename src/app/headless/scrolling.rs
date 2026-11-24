@@ -58,7 +58,7 @@ fn git_change_marks_are_painted() {
         draw(cx);
     };
     draw(&mut cx);
-    step(&mut cx, &|ws, w, cx| ws.new_claude(cwd.clone(), w, cx));
+    step(&mut cx, &|ws, w, cx| ws.new_session(cwd.clone(), w, cx));
     let id = ws.read_with(&cx, |ws, _| ws.active.clone().unwrap());
     step(&mut cx, &|ws, w, cx| ws.toggle_editor(w, cx));
     step(&mut cx, &|ws, w, cx| ws.open_file(&id, file.clone(), None, w, cx));
@@ -127,7 +127,7 @@ fn git_change_marks_follow_scrolling() {
         draw(cx);
     };
     draw(&mut cx);
-    step(&mut cx, &|ws, w, cx| ws.new_claude(cwd.clone(), w, cx));
+    step(&mut cx, &|ws, w, cx| ws.new_session(cwd.clone(), w, cx));
     let id = ws.read_with(&cx, |ws, _| ws.active.clone().unwrap());
     step(&mut cx, &|ws, w, cx| ws.toggle_editor(w, cx));
     step(&mut cx, &|ws, w, cx| ws.open_file(&id, file.clone(), Some(119), w, cx));
@@ -196,7 +196,7 @@ fn the_editors_text_eases_to_a_wheel_notch() {
         draw(cx);
     };
     draw(&mut cx);
-    step(&mut cx, &|ws, w, cx| ws.new_claude(cwd.clone(), w, cx));
+    step(&mut cx, &|ws, w, cx| ws.new_session(cwd.clone(), w, cx));
     let id = ws.read_with(&cx, |ws, _| ws.active.clone().unwrap());
     step(&mut cx, &|ws, w, cx| ws.toggle_editor(w, cx));
     step(&mut cx, &|ws, w, cx| ws.open_file(&id, file.clone(), None, w, cx));
@@ -251,7 +251,7 @@ fn the_session_list_draws_rows_where_scrolling_brings_them() {
             for i in 0..300 {
                 ws.store.data.sessions.push(crate::store::SessionRecord {
                     id: format!("s{i:03}"),
-                    kind: SessionKind::Claude,
+                    kind: SessionKind::Agent,
                     title: format!("Session {i}"),
                     custom_title: None,
                     auto_title: None,
@@ -261,7 +261,7 @@ fn the_session_list_draws_rows_where_scrolling_brings_them() {
                     last_active: 4_000_000_000 - i,
                     exit_code: None,
                     hidden: false,
-                    claude: None,
+                    agent: None,
                 });
             }
             ws.store.data.layout.recent_open = true;

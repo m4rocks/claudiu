@@ -7,7 +7,7 @@ use gpui::{
     px,
 };
 
-use crate::claude::defaults::Effort;
+use crate::harness::defaults::Effort;
 use crate::harness::permission::Permission;
 use crate::app::{
     Act, GitPickerTarget, Modal, ProjectPickerMode, SkillScope, Workspace, WorkspacePicker,

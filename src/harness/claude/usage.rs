@@ -11,8 +11,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::store::RateLimit;
 
-/// Env var naming the m4code account a Claude session was launched with, so its limits go to that account.
-pub const ACCOUNT_ENV: &str = "M4CODE_ACCOUNT";
 /// Env var holding the directory the mod writes its snapshot into.
 pub const USAGE_DIR_ENV: &str = "M4CODE_USAGE_DIR";
 
@@ -58,9 +56,6 @@ pub struct Snapshot {
     pub context_window: Option<u64>,
     pub model: Option<String>,
     pub captured_at: i64,
-    /// m4code account the session ran under (`ACCOUNT_ENV`); `None` is the main account.
-    #[serde(default)]
-    pub account: Option<String>,
     /// The `/config` auto-compact switch.
     #[serde(default)]
     pub auto_compact: Option<bool>,
@@ -99,7 +94,7 @@ mod tests {
 
     // Shape the mod writes (see `mod/hooks/register.js`, `report`).
     const FROM_MOD: &str = r#"{
-      "session_id": "abc-123", "model": "claude-opus-5-5", "captured_at": 1000, "account": "work",
+      "session_id": "abc-123", "model": "claude-opus-5-5", "captured_at": 1000,
       "context_fraction": 0.028, "context_tokens": 28062, "context_window": 1000000,
       "five_hour": {"utilization": 0.67, "resets_at": 1792659600, "seen_at": 1000},
       "seven_day": {"utilization": 0.22, "resets_at": 1793167200, "seen_at": 1000},
@@ -129,7 +124,7 @@ mod tests {
         let got = read_snapshots(tmp.path());
         assert_eq!(got.len(), 1);
         let s = &got[0];
-        assert_eq!((s.session_id.as_str(), s.account.as_deref()), ("abc-123", Some("work")));
+        assert_eq!(s.session_id.as_str(), "abc-123");
         assert_eq!(s.five_hour.as_ref().unwrap().utilization, Some(0.67));
         assert_eq!(s.seven_day.as_ref().unwrap().resets_at, Some(1793167200));
         assert_eq!((s.context_tokens, s.context_window), (Some(28062), Some(1_000_000)));

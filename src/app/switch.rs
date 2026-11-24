@@ -69,9 +69,9 @@ impl Workspace {
     /// Switch session `id` (shown or not) into `folder`.
     pub(super) fn switch_session(&mut self, id: Id, folder: PathBuf, base: Base, asked: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(rec) = self.store.session(&id).cloned() else { return };
-        let Some(meta) = rec.claude.as_ref() else { return };
+        let Some(meta) = rec.agent.as_ref() else { return };
         let harness = meta.harness;
-        let session_id = rec.claude_id().map(str::to_string);
+        let session_id = rec.provider_session_id().map(str::to_string);
         let Some(git) = rec.project_id.as_ref().and_then(|p| self.store.project(p)).and_then(|p| p.git.clone()) else { return };
         let Some(view) = self.live_view(&id).filter(|v| v.is_running(cx)).cloned() else {
             self.toast("Resume the session to switch.", cx);
@@ -121,9 +121,9 @@ impl Workspace {
     /// Prepare the target folder and move the session into it, preserving its conversation.
     fn perform_switch(&mut self, id: Id, folder: PathBuf, base: Base, transcript: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(rec) = self.store.session(&id) else { return };
-        let Some(meta) = rec.claude.as_ref() else { return };
+        let Some(meta) = rec.agent.as_ref() else { return };
         let harness = meta.harness;
-        let session_id = rec.claude_id().map(str::to_string);
+        let session_id = rec.provider_session_id().map(str::to_string);
         let Some(git) = rec.project_id.as_ref().and_then(|p| self.store.project(p)).and_then(|p| p.git.clone()) else { return };
         let main = git.main_checkout().to_path_buf();
         let has_transcript = transcript.is_some();
@@ -161,7 +161,7 @@ impl Workspace {
         if !prior_entries.is_empty() {
             crate::harness::thread::save_entries(id, &prior_entries);
         }
-        let has_session_id = self.store.session(id).and_then(|r| r.claude_id()).is_some();
+        let has_session_id = self.store.session(id).and_then(|r| r.provider_session_id()).is_some();
         let fresh = prior_entries.is_empty() && (if harness == Harness::Claude { !has_transcript } else { !has_session_id });
 
         let was_shown = self.active_id().is_some_and(|a| a == id);

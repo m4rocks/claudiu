@@ -7,7 +7,7 @@ impl Workspace {
     /// Show two sessions together: each lists the other. True when something changed (false when either does not
     /// exist or they were linked already).
     pub fn link(&mut self, a: &str, b: &str) -> bool {
-        let exists = |ws: &Self, id: &str| ws.store.session(id).is_some_and(|s| s.claude.is_some());
+        let exists = |ws: &Self, id: &str| ws.store.session(id).is_some_and(|s| s.agent.is_some());
         if a == b || !exists(self, a) || !exists(self, b) {
             return false;
         }
@@ -18,11 +18,11 @@ impl Workspace {
 
     /// Run `f` on the attached items of a session; true when it changed anything.
     pub(super) fn edit_attached(&mut self, id: &str, f: impl FnOnce(&mut Vec<Attached>) -> bool) -> bool {
-        self.store.session_mut(id).and_then(|s| s.claude.as_mut()).is_some_and(|meta| f(&mut meta.attached))
+        self.store.session_mut(id).and_then(|s| s.agent.as_mut()).is_some_and(|meta| f(&mut meta.attached))
     }
 
     pub fn attached_of(&self, id: &str) -> Vec<Attached> {
-        self.store.session(id).and_then(|s| s.claude.as_ref()).map(|m| m.attached.clone()).unwrap_or_default()
+        self.store.session(id).and_then(|s| s.agent.as_ref()).map(|m| m.attached.clone()).unwrap_or_default()
     }
 
     /// Take an attached item away from a session.
@@ -35,8 +35,8 @@ impl Workspace {
     }
 
     /// What a session asked for through its MCP tools (`stem` is its record id as a file name).
-    pub(super) fn apply_attachment(&mut self, stem: &str, item: crate::claude::mcp::Attachment) -> bool {
-        use crate::claude::mcp::Attachment::*;
+    pub(super) fn apply_attachment(&mut self, stem: &str, item: crate::mcp::Attachment) -> bool {
+        use crate::mcp::Attachment::*;
         let me = self.store.data.sessions.iter().map(|s| &s.id).find(|id| datadir::safe_file_stem(id) == stem).cloned();
         let Some(me) = me else { return false };
         match item {
@@ -62,12 +62,12 @@ impl Workspace {
 
     /// Run `f` on the link list of a session; true when it changed anything.
     fn edit_links(&mut self, id: &str, f: impl FnOnce(&mut Vec<Id>) -> bool) -> bool {
-        self.store.session_mut(id).and_then(|s| s.claude.as_mut()).is_some_and(|meta| f(&mut meta.linked))
+        self.store.session_mut(id).and_then(|s| s.agent.as_mut()).is_some_and(|meta| f(&mut meta.linked))
     }
 
     /// The sessions linked with `id`, as `(id, title)`; a linked one that has gone is left out.
     pub fn links_of(&self, id: &str) -> Vec<(Id, String)> {
-        let ids = self.store.session(id).and_then(|s| s.claude.as_ref()).map(|m| m.linked.clone()).unwrap_or_default();
+        let ids = self.store.session(id).and_then(|s| s.agent.as_ref()).map(|m| m.linked.clone()).unwrap_or_default();
         ids.into_iter().filter_map(|o| Some((o.clone(), self.store.session(&o)?.display_title().to_string()))).collect()
     }
 }

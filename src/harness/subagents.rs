@@ -4,7 +4,7 @@
 //! m4code lists the agent types in `M4CODE_SUBAGENTS`, and the mod registers them, so Claude Code names them
 //! `m4code:<type>`. Interactive Claude Code ignores `claude --agents` (only `-p` reads it), so the mod is the one way
 //! to define them per session. The mod answers each turn of those agents through the `m4code --acp` helper
-//! (`claude/acp.rs`).
+//! (`harness/runner.rs`).
 
 use std::time::Duration;
 
@@ -69,11 +69,11 @@ pub struct Provider {
     /// A risk the settings page shows before the agent is switched on, such as a sign-in its maker's terms forbid here.
     pub warning: Option<&'static str>,
     /// Arguments after `args` for one task's server, made ready here.
-    pub task_args: fn(&super::acp::Request) -> Result<Vec<String>, String>,
+    pub task_args: fn(&super::runner::Request) -> Result<Vec<String>, String>,
     /// The environment the server starts with, for agents that take the model, effort and edits that way.
-    pub environment: fn(&super::acp::Request) -> Vec<(&'static str, String)>,
+    pub environment: fn(&super::runner::Request) -> Vec<(&'static str, String)>,
     /// ACP config options (`session/set_config_option`) set before the task, for agents that take them that way.
-    pub config_options: fn(&super::acp::Request) -> Vec<(&'static str, String)>,
+    pub config_options: fn(&super::runner::Request) -> Vec<(&'static str, String)>,
     /// Whether messages Claude sends mid-task go through this helper even when the agent can't steer: they then follow
     /// up in the same session. Otherwise Claude Code queues them itself.
     pub inbox_without_steering: bool,
@@ -88,7 +88,7 @@ pub struct Provider {
 
 const CODEX: Provider = Provider {
     limits: Some(Limits { read: || {
-        let usage = super::codex_limits::codex_home().and_then(|home| super::codex_limits::read(&home)).ok_or("Codex has no limits reading yet")?;
+        let usage = super::codex::limits::codex_home().and_then(|home| super::codex::limits::read(&home)).ok_or("Codex has no limits reading yet")?;
         Ok(vec![Pool { name: "Codex".into(), usage }])
     }, every: Duration::from_secs(3) }),
     color: theme::CODEX,
@@ -105,9 +105,9 @@ const CODEX: Provider = Provider {
     missing: "npx was not found on PATH. Codex subagents need Node.js.",
     sign_in: "Codex isn't signed in. Run `codex login`, then try again.",
     warning: None,
-    task_args: super::acp::no_args,
-    environment: super::acp::codex_env,
-    config_options: super::acp::no_options,
+    task_args: super::runner::no_args,
+    environment: super::runner::codex_env,
+    config_options: super::runner::no_options,
     inbox_without_steering: true,
     steering_prompt_required: true,
     deferred_tool_target: false,
@@ -129,9 +129,9 @@ const OPENCODE: Provider = Provider {
     missing: "opencode was not found on PATH. OpenCode subagents need OpenCode installed.",
     sign_in: "OpenCode isn't signed in. Run `opencode auth login`, then try again.",
     warning: None,
-    task_args: super::acp::no_args,
-    environment: super::acp::opencode_env,
-    config_options: super::acp::no_options,
+    task_args: super::runner::no_args,
+    environment: super::runner::opencode_env,
+    config_options: super::runner::no_options,
     inbox_without_steering: false,
     steering_prompt_required: false,
     deferred_tool_target: true,
@@ -140,9 +140,9 @@ const OPENCODE: Provider = Provider {
 
 const ANTIGRAVITY: Provider = Provider {
     limits: Some(Limits { read: || {
-        let agy = super::acp::locate(Agent::Antigravity).ok_or("agy was not found")?;
-        super::antigravity_limits::read(&agy, &crate::datadir::data_dir())
-    }, every: super::antigravity_limits::REFRESH_EVERY }),
+        let agy = super::runner::locate(Agent::Antigravity).ok_or("agy was not found")?;
+        super::antigravity::limits::read(&agy, &crate::datadir::data_dir())
+    }, every: super::antigravity::limits::REFRESH_EVERY }),
     color: theme::ANTIGRAVITY,
     marks: logos::antigravity_marks,
     name: "Antigravity",
@@ -158,9 +158,9 @@ const ANTIGRAVITY: Provider = Provider {
     // Google's FAQ names Claude Code among the third-party software barred from Antigravity logins, under Section 6 of
     // the Antigravity Additional Terms (https://antigravity.google/docs/faq, https://antigravity.google/terms).
     warning: Some("Google's Antigravity terms forbid using another company's agent, such as Claude Code, with a personal Google sign-in. That covers the Free, AI Plus, Pro and Ultra plans. Google can suspend or terminate the Antigravity and Gemini CLI accounts of anyone who does. Switch this on at your own risk."),
-    task_args: super::acp::antigravity_args,
-    environment: super::acp::no_env,
-    config_options: super::acp::antigravity_options,
+    task_args: super::runner::antigravity_args,
+    environment: super::runner::no_env,
+    config_options: super::runner::antigravity_options,
     inbox_without_steering: false,
     steering_prompt_required: false,
     deferred_tool_target: false,

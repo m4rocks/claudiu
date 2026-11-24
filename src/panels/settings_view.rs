@@ -7,7 +7,7 @@ use gpui::{
     px,
 };
 
-use crate::claude::mcp::Feature;
+use crate::mcp::Feature;
 use crate::harness::permission::Permission;
 use crate::app::{
     Act, Modal,
@@ -32,10 +32,10 @@ pub(super) fn render_settings_card(
     cx: &mut Context<Workspace>,
 ) -> gpui::Stateful<gpui::Div> {
     let (page, worktrees, scroll) = (ws.settings_page, &ws.worktrees_page, &ws.settings_scroll);
-    let Some(Modal::Settings { shell, default_model, text_generation_model, effort, permission, updates, scale, follow_up, m4code_off, skill_search, list_focus, renaming, .. }) = &ws.modal else {
+    let Some(Modal::Settings { shell, default_model, text_generation_model, effort, permission, updates, scale, follow_up, auto_compact, auto_compact_threshold, m4code_off, skill_search, list_focus, renaming, .. }) = &ws.modal else {
         return div().id("modal-card");
     };
-    let (updates, scale, follow_up) = (*updates, *scale, *follow_up);
+    let (updates, scale, follow_up, auto_compact, auto_compact_threshold) = (*updates, *scale, *follow_up, *auto_compact, *auto_compact_threshold);
     let scaled = crate::panels::scale::px;
     let faint = |text: String| div().text_size(scaled(11.5)).text_color(hsla(theme::TEXT_FAINT)).child(text);
 
@@ -71,6 +71,50 @@ pub(super) fn render_settings_card(
                 )
                 .into_any_element(),
             );
+            session_rows.push(
+                div()
+                    .id("settings-auto-compact")
+                    .px(px(14.0))
+                    .py(px(11.0))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(12.0))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(hsla(theme::SURFACE_HOVER)))
+                    .child(row_labels("Auto-compact", Some("Automatically compact conversation context between turns")))
+                    .child(toggle_switch(auto_compact))
+                    .on_click(cx.listener(|ws, _: &ClickEvent, _, cx| {
+                        if let Some(Modal::Settings { auto_compact, .. }) = ws.modal.as_mut() {
+                            *auto_compact = !*auto_compact;
+                        }
+                        cx.notify();
+                    }))
+                    .into_any_element(),
+            );
+            if auto_compact {
+                session_rows.push(
+                    row_shell(
+                        "Auto-compact threshold",
+                        Some("Context usage percentage that triggers automatic compaction"),
+                        div()
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .gap(px(4.0))
+                            .p(px(2.0))
+                            .rounded(px(6.0))
+                            .bg(hsla(theme::PANEL_BG))
+                            .border_1()
+                            .border_color(hsla(theme::PANEL_BORDER))
+                            .child(compaction_step("compact-threshold-down", "−", -(crate::harness::compaction::THRESHOLD_STEP as i64), cx))
+                            .child(div().w(px(42.0)).flex().justify_center().text_size(scaled(12.0)).text_color(hsla(theme::TEXT)).child(format!("{auto_compact_threshold}%")))
+                            .child(compaction_step("compact-threshold-up", "+", crate::harness::compaction::THRESHOLD_STEP as i64, cx))
+                            .into_any_element(),
+                    )
+                    .into_any_element(),
+                );
+            }
             if *permission == Some(Permission::FullAccess) {
                 session_rows.push(
                     div()
@@ -622,6 +666,29 @@ fn scale_step(id: &'static str, label: &'static str, by: i32, cx: &mut Context<W
             if let Some(Modal::Settings { scale, .. }) = ws.modal.as_mut() {
                 *scale = (*scale as i32 + by).clamp(crate::panels::scale::MIN as i32, crate::panels::scale::MAX as i32) as u32;
                 crate::panels::scale::set(*scale);
+            }
+            cx.notify();
+        }))
+}
+
+/// A − / + button in the Settings modal that moves the auto-compact threshold by `by` percent.
+fn compaction_step(id: &'static str, label: &'static str, by: i64, cx: &mut Context<Workspace>) -> impl IntoElement {
+    div()
+        .id(id)
+        .w(px(22.0))
+        .h(px(22.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(4.0))
+        .text_color(hsla(theme::TEXT_DIM))
+        .cursor_pointer()
+        .hover(|s| s.bg(hsla(theme::SURFACE_HOVER)).text_color(hsla(theme::TEXT)))
+        .child(label)
+        .on_click(cx.listener(move |ws, _: &ClickEvent, _w, cx| {
+            if let Some(Modal::Settings { auto_compact_threshold, .. }) = ws.modal.as_mut() {
+                let next = (*auto_compact_threshold as i64 + by).max(0) as u64;
+                *auto_compact_threshold = crate::harness::compaction::clamp_threshold(next);
             }
             cx.notify();
         }))

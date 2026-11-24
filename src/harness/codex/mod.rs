@@ -1,7 +1,9 @@
 //! OpenAI Codex, through Zed's `codex-acp`, the same server Codex subagents use. It builds on Codex's own Rust core
 //! rather than the `codex` binary, but reads the user's `~/.codex` config and `codex login`.
 
-use crate::claude::subagents::Agent;
+pub mod limits;
+
+use super::subagents::Agent;
 
 use super::{Adapter, Reopen};
 use serde_json::Value;

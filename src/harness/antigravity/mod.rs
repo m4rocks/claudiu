@@ -1,7 +1,10 @@
 //! Google Antigravity, which speaks ACP itself (`agy acp`). It resumes a session without replaying it, as T3 Code
 //! found, so an old Antigravity conversation opens empty and carries on from where it was.
 
-use crate::claude::subagents::Agent;
+pub mod limits;
+pub mod read_only;
+
+use super::subagents::Agent;
 
 use super::{Adapter, Reopen};
 

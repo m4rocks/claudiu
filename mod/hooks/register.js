@@ -150,7 +150,6 @@ async function report($, fresh = false, override = {}) {
       context_tokens: ctx?.tokens ?? null,
       context_window: ctx?.window ?? null,
       model: (await $.session.model().catch(() => null)) ?? null,
-      account: (await $.env.get('M4CODE_ACCOUNT')) ?? null,
       auto_compact: autoCompact,
       precompute_compact: precomputeCompact,
       compact_at: await threshold($, fresh),

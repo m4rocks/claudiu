@@ -43,7 +43,7 @@ impl Workspace {
     /// The project menu's "Pick up a session here…": list the default agent's sessions in `cwd` in a menu at `at`.
     pub(super) fn list_sessions(&mut self, cwd: PathBuf, at: gpui::Point<gpui::Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         let harness = self.store.data.settings.harness;
-        let meta = ClaudeMeta { harness, ..Default::default() };
+        let meta = AgentMeta { harness, ..Default::default() };
         // The same program and environment a new session gets, so Claude Code lists the active account's sessions.
         let Some(start) = self.thread_start(&new_id(), &cwd, &meta, None, None, Starter::User, cx) else { return };
         self.toast(format!("Looking for {} sessions…", harness.name()), cx);
@@ -83,13 +83,13 @@ impl Workspace {
 
     /// Open a listed session here: the record m4code already has for it, or a new one.
     pub(super) fn pick_up(&mut self, harness: Harness, cwd: PathBuf, session_id: String, title: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
-        let known = self.store.data.sessions.iter().find(|s| s.claude.as_ref().is_some_and(|m| m.harness == harness) && s.claude_id() == Some(session_id.as_str())).map(|s| s.id.clone());
+        let known = self.store.data.sessions.iter().find(|s| s.agent.as_ref().is_some_and(|m| m.harness == harness) && s.provider_session_id() == Some(session_id.as_str())).map(|s| s.id.clone());
         let id = match known {
             Some(id) => id,
             None => {
                 let record = SessionRecord {
                     id: new_id(),
-                    kind: SessionKind::Claude,
+                    kind: SessionKind::Agent,
                     title: title.unwrap_or_else(|| format!("{} session", harness.name())),
                     custom_title: None,
                     auto_title: None,
@@ -99,7 +99,7 @@ impl Workspace {
                     last_active: now(),
                     exit_code: None,
                     hidden: false,
-                    claude: Some(ClaudeMeta { session_id, harness, chrome: self.store.data.settings.chrome_default, ..Default::default() }),
+                    agent: Some(AgentMeta { session_id, harness, chrome: self.store.data.settings.chrome_default, ..Default::default() }),
                 };
                 let id = record.id.clone();
                 self.store.data.sessions.push(record);

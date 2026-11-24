@@ -6,7 +6,7 @@ use super::*;
 /// Every user-triggerable operation, so buttons, menus and shortcuts share one code path.
 #[derive(Clone, Debug)]
 pub enum Act {
-    NewClaude {
+    NewSession {
         cwd: PathBuf,
     },
     /// Make a worktree named `name` (random when blank) straight from the Branch & Worktree dialog: chosen for the
@@ -119,18 +119,6 @@ pub enum Act {
     ConfirmInstallUpdate,
     Dismiss,
     InstallUpdate,
-    /// New sessions start with this account; running ones keep theirs.
-    SwitchAccount(Id),
-    /// The shown session runs under another account: restart it under the active one (asks first, see `handoff.rs`).
-    Handoff,
-    ConfirmHandoff(Id),
-    /// Shows the sharing warning, then `ConfirmAddAccount`.
-    AddAccount,
-    ConfirmAddAccount,
-    /// Run `claude auth login` for an alt account in a terminal tab.
-    SignIn(Id),
-    RemoveAccount(Id),
-    ConfirmRemoveAccount(Id),
     /// Editor mode's file tree: ask for a file name (new or renamed), ask before deleting, delete.
     AskFileName(Id, NameFor),
     AskDelete(Id, PathBuf),
@@ -159,7 +147,7 @@ impl Workspace {
             self.focus_under_picker(window, cx);
         }
         match act {
-            Act::NewClaude { cwd } => self.new_claude(cwd, window, cx),
+            Act::NewSession { cwd } => self.new_session(cwd, window, cx),
             Act::QuickWorktree { main_checkout, name, base, for_home } => match worktrees::new_worktree_act(&main_checkout, &name, base, for_home) {
                 Ok(act) => {
                     self.picker = None;
@@ -315,8 +303,8 @@ impl Workspace {
             }
             Act::FixGitWithClaude(cwd) => {
                 let prompt = "m4code's Pull or Commit & Push just failed in this repository because of a merge conflict, a diverged branch or a rejected push. Run git status, fix it (resolve conflicts keeping the intent of both sides, finish the merge or rebase, then push if the push was rejected). Ask me whenever a conflict is ambiguous or you are unsure which side to keep.";
-                match self.running_claude_in(&cwd, cx) {
-                    Some(id) => self.send_to_claude(&id, prompt, window, cx),
+                match self.running_agent_in(&cwd, cx) {
+                    Some(id) => self.send_to_agent(&id, prompt, window, cx),
                     None => {
                         // No session to ask: a short-lived one on medium effort (mid-sized Claude model when on Claude).
                         let mut options = vec![("thought_level", "medium".to_string())];
@@ -324,7 +312,7 @@ impl Workspace {
                             options.push(("model", "claude-sonnet-5-5".to_string()));
                         }
                         let before = self.selected.clone();
-                        self.new_claude_with(cwd, Some(prompt.to_string()), options, Starter::FixGit, window, cx);
+                        self.new_session_default(cwd, Some(prompt.to_string()), options, Starter::FixGit, window, cx);
                         if self.selected != before
                             && let Some(id) = self.selected.clone() {
                                 self.ephemeral.insert(id);
@@ -342,6 +330,8 @@ impl Workspace {
                 let updates = s.update_url.as_deref() != Some("");
                 let chrome = s.chrome_default;
                 let s_follow_up = s.follow_up;
+                let auto_compact = s.auto_compact;
+                let auto_compact_threshold = crate::harness::compaction::clamp_threshold(s.auto_compact_threshold);
                 let default_model = s.default_model();
                 let text_generation_model = s.text_generation_model.clone();
                 let claude_hint = self.claude_exe.as_ref().map_or("not found".to_string(), |p| p.to_string_lossy().into_owned());
@@ -353,15 +343,15 @@ impl Workspace {
                 let list_focus = cx.focus_handle();
                 window.focus(&list_focus, cx);
                 let custom = &self.store.data.settings.custom_subagents;
-                let form = |c: &claude::subagents::AgentChoice| AgentForm { on: c.on, models: c.models.clone(), edits: c.edits };
+                let form = |c: &harness::subagents::AgentChoice| AgentForm { on: c.on, models: c.models.clone(), edits: c.edits };
                 let subagents = Box::new(HarnessesForm {
                     enabled: self.store.data.settings.enabled_harnesses_list(),
-                    agents: claude::subagents::AgentMap::from_fn(|agent| form(custom.get(agent))),
+                    agents: harness::subagents::AgentMap::from_fn(|agent| form(custom.get(agent))),
                     claude_models: self.store.data.settings.claude_picked.clone(),
                     claude_subagents: self.store.data.settings.claude_subagents,
                     picking: None,
                 });
-                self.modal = Some(Modal::Settings { shell, claude, default_model, text_generation_model, effort: defaults.effort.unwrap_or_default(), permission: defaults.permission_mode, updates, chrome, scale: crate::panels::scale::percent(), follow_up: s_follow_up, m4code_off: self.store.data.settings.m4code_tools_off.clone(), skills_field, skill_search, costly: claude::costly::scan(), list_focus, renaming: None, subagents });
+                self.modal = Some(Modal::Settings { shell, claude, default_model, text_generation_model, effort: defaults.effort.unwrap_or_default(), permission: defaults.permission_mode, updates, chrome, scale: crate::panels::scale::percent(), follow_up: s_follow_up, auto_compact, auto_compact_threshold, m4code_off: self.store.data.settings.m4code_tools_off.clone(), skills_field, skill_search, costly: claude::costly::scan(), list_focus, renaming: None, subagents });
                 // After the modal exists: a page that loads something reads the dialog's fields.
                 self.set_settings_page(self.settings_page, cx);
             }
@@ -449,7 +439,7 @@ impl Workspace {
             Act::MoveProject(id, up) => self.store.move_project(&id, up),
             Act::SetAutoCompact(id, on) => {
                 // Provider usage reports describe the native switch, not m4code's policy.
-                if let Some(meta) = self.store.session_mut(&id).and_then(|s| s.claude.as_mut()) {
+                if let Some(meta) = self.store.session_mut(&id).and_then(|s| s.agent.as_mut()) {
                     meta.auto_compact = Some(on);
                 }
                 self.store.mark_dirty();
@@ -459,7 +449,7 @@ impl Workspace {
                 }
             }
             Act::SetPrecomputeCompact(id, on) => {
-                if let Some(meta) = self.store.session_mut(&id).and_then(|s| s.claude.as_mut()) {
+                if let Some(meta) = self.store.session_mut(&id).and_then(|s| s.agent.as_mut()) {
                     meta.precompute_compact = Some(on);
                 }
                 self.store.mark_dirty();
@@ -514,82 +504,9 @@ impl Workspace {
                 self.modal = None;
                 crate::updater::install(self, cx);
             }
-            Act::SwitchAccount(id) => {
-                self.store.data.active_account = Some(id);
-                self.store.mark_dirty();
-                self.refresh_accounts(cx);
-                self.model_lookups.get_mut(Harness::Claude).fetched = false;
-                if !cfg!(test) {
-                    self.load_enabled_models(cx);
-                }
-                self.toast("Switched. New and resumed sessions use this account; running sessions keep theirs.", cx);
-            }
-            Act::Handoff => self.ask_handoff(window, cx),
-            Act::ConfirmHandoff(id) => {
-                self.modal = None;
-                self.start_handoff(&id, window, cx);
-            }
-            Act::AddAccount => {
-                self.modal = Some(Modal::Confirm {
-                    title: "Add an account?".into(),
-                    body: "Only sign in to accounts you own. Sharing or pooling logins, or using several accounts to get around \
-                           usage limits, can break Anthropic's terms.\n\n\
-                           The new account uses your main Claude Code setup. Settings, CLAUDE.md, keybindings, MCP servers and project trust \\
-                           are kept the same in every account, both ways: a change made here (like /model) also changes ~/.claude and \\
-                           your other accounts, and the other way round. Agents, skills, plugins and session history are shared with \\
-                           ~/.claude. Only the login is separate. m4code creates this account's folder."
-                        .into(),
-                    confirm: "Add and sign in".into(),
-                    danger: false,
-                    act: Act::ConfirmAddAccount,
-                });
-                window.focus(&self.modal_focus, cx);
-            }
-            Act::ConfirmAddAccount => {
-                self.modal = None;
-                match claude::claude_home().ok_or_else(|| std::io::Error::other("Claude Code's folder was not found")).and_then(|h| accounts::create(&h)) {
-                    Ok(dir) => {
-                        let id = new_id();
-                        self.store.data.accounts.push(Account { id: id.clone(), dir: Some(dir), ..Default::default() });
-                        self.store.data.active_account = Some(id.clone());
-                        self.store.mark_dirty();
-                        self.sign_in(&id, window, cx);
-                    }
-                    Err(e) => self.toast(format!("Could not create the account folder: {e}"), cx),
-                }
-            }
-            Act::SignIn(id) => self.sign_in(&id, window, cx),
-            Act::RemoveAccount(id) => {
-                let name = self.store.account(&id).and_then(|a| a.email.clone()).unwrap_or_else(|| "this account".into());
-                self.modal = Some(Modal::Confirm {
-                    title: format!("Remove {name}?"),
-                    body: "Deletes this account's login from m4code. Shared settings and session history stay in your main \
-                           ~/.claude. End its running sessions first."
-                        .into(),
-                    confirm: "Remove".into(),
-                    danger: true,
-                    act: Act::ConfirmRemoveAccount(id),
-                });
-                window.focus(&self.modal_focus, cx);
-            }
             Act::AskFileName(id, purpose) => self.ask_file_name(id, purpose, window, cx),
             Act::AskDelete(id, path) => self.ask_delete(id, path, window, cx),
             Act::ConfirmDelete(id, path) => self.delete_path(id, path, cx),
-            Act::ConfirmRemoveAccount(id) => {
-                self.modal = None;
-                if let Some(dir) = self.store.account(&id).and_then(|a| a.dir.clone()) {
-                    match accounts::remove(&dir) {
-                        Ok(()) => {
-                            self.store.data.accounts.retain(|a| a.id != id);
-                            if self.store.data.active_account.as_deref() == Some(id.as_str()) {
-                                self.store.data.active_account = None;
-                            }
-                            self.store.mark_dirty();
-                        }
-                        Err(e) => self.toast(format!("Could not remove the account: {e}"), cx),
-                    }
-                }
-            }
         }
         self.store.save_if_dirty();
         cx.notify();
