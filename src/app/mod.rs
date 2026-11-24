@@ -895,7 +895,11 @@ impl Workspace {
         self.question_popover = None;
         self.question_popover_hovered = false;
         if self.activity.get(id) == Some(&Activity::Waiting) && !thread.read(cx).is_waiting() {
-            self.activity.insert(id.to_string(), Activity::Working);
+            if thread.read(cx).is_working() {
+                self.activity.insert(id.to_string(), Activity::Working);
+            } else {
+                self.activity.remove(id);
+            }
         }
         cx.notify();
     }

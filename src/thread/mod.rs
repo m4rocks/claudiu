@@ -1677,14 +1677,21 @@ impl ThreadView {
     }
 
     pub(crate) fn answer_question(&mut self, id: Uuid, choice: Option<usize>, cx: &mut Context<Self>) -> bool {
-        if self.questions.front().is_none_or(|question| question.id != id) {
-            return false;
+        if self.questions.front().is_some_and(|question| question.id == id) {
+            match choice {
+                Some(ix) => self.answer(Some(ix), cx),
+                None => self.decline(cx),
+            }
+            return true;
         }
-        match choice {
-            Some(ix) => self.answer(Some(ix), cx),
-            None => self.decline(cx),
+        if self.async_ask().is_some_and(|ask| ask.id == id) {
+            match choice {
+                Some(ix) => self.choose_async_ask(id, ix, cx),
+                None => self.answer_async_ask(id, None, cx),
+            }
+            return true;
         }
-        true
+        false
     }
 
     /// Answer the open permission/ask question with option `index` (from 0), or turn it down.
@@ -2443,18 +2450,39 @@ impl ThreadView {
             || self.thread.entries.iter().any(|e| matches!(e, Entry::Tool(call) if call.status == ToolStatus::Running))
     }
 
-    /// Waiting for the user to answer a permission or ask question.
+    /// Waiting for the user to answer a permission or ask question (including async Codex asks).
     pub fn is_waiting(&self) -> bool {
-        !self.questions.is_empty()
+        !self.questions.is_empty() || !self.asks.is_empty()
     }
 
     /// Snapshot of the pending question, if any, so the sidebar popover can render and answer it.
     pub fn pending_question(&self) -> Option<PendingQuestion> {
-        self.questions.front().map(|q| PendingQuestion { id: q.id, title: q.title.clone(), options: q.options.clone() })
+        self.questions
+            .front()
+            .map(|q| PendingQuestion { id: q.id, title: q.title.clone(), options: q.options.clone() })
+            .or_else(|| {
+                let ask = self.async_ask()?;
+                let options = ask
+                    .question
+                    .options
+                    .iter()
+                    .enumerate()
+                    .map(|(i, name)| QuestionOption {
+                        id: format!("async-{i}"),
+                        name: name.clone(),
+                        description: None,
+                        kind: "allow_once".into(),
+                    })
+                    .collect();
+                Some(PendingQuestion { id: ask.id, title: ask.question.title.clone(), options })
+            })
     }
 
     pub fn pending_question_title(&self) -> Option<String> {
-        self.questions.front().map(|q| q.title.clone())
+        self.questions
+            .front()
+            .map(|q| q.title.clone())
+            .or_else(|| self.async_ask().map(|ask| ask.question.title.clone()))
     }
 
     /// Only cross-harness hand-offs announce themselves; ordinary session startup stays invisible to the user.
@@ -2701,7 +2729,9 @@ mod tests {
                 v.on_event(event, cx);
             }
             assert!(matches!(&v.thread.entries[..], [Entry::Agent(text)] if text == "I have a follow-up."));
-            assert!(!v.is_waiting());
+            assert!(v.questions.is_empty());
+            assert!(v.is_waiting());
+            assert_eq!(v.pending_question_title().as_deref(), Some("Choose a branch."));
             v.agent_meta = json!({"steering":{"supported":true}});
             assert!(v.can_steer("Ordinary message", crate::store::FollowUp::Steer));
             assert!(v.async_answer_id().is_none());

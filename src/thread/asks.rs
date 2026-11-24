@@ -28,6 +28,10 @@ struct MessageChunk {
 }
 
 impl AsyncAsks {
+    pub(super) fn is_empty(&self) -> bool {
+        self.pending.is_empty()
+    }
+
     pub(super) fn composing_answer(&self) -> bool {
         self.typing.is_some()
     }

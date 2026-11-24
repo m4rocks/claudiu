@@ -25,6 +25,26 @@ enum AttentionEvent {
 /// a moment later (a queued follow-up, a steer, a background task reporting back), which isn't worth an alert.
 const SETTLE: Duration = Duration::from_secs(6);
 
+/// Holds a freshly-idle session in `Working` for `SETTLE` before letting it finish, without erasing `idle_since`
+/// during the hold. Clears `idle_since` once the hold expires, or if the session resumes working, waits on a question,
+/// or wasn't `Working`.
+fn settle_working(
+    working: bool,
+    waiting: bool,
+    before: Option<Activity>,
+    idle_since: &mut Option<std::time::Instant>,
+    now: std::time::Instant,
+) -> bool {
+    if !working && !waiting && before == Some(Activity::Working) {
+        let since = *idle_since.get_or_insert(now);
+        if now.saturating_duration_since(since) < SETTLE {
+            return true;
+        }
+    }
+    *idle_since = None;
+    working
+}
+
 /// Whether a transition should alert the user (with a system notification when the window is in the background, or an
 /// in-app toast when another session is shown). A turn that ended with work still running in the background
 /// (`pending`) gets its check mark quietly: the agent will usually pick the work up again and finish later.
@@ -150,18 +170,20 @@ impl Workspace {
     /// Code, no registry file) fall back to the terminal-output heuristic.
     fn update_activity(&mut self, window: &mut Window, cx: &mut Context<Self>, statuses: &HashMap<String, String>) {
         let window_active = window.is_window_active();
+        let editing = self.editing();
         let shown = self.active_id().cloned();
         let mut next: HashMap<Id, Activity> = HashMap::new();
         let mut system_notices: Vec<(String, String)> = vec![];
         let mut toast_notice = None;
+        let now_instant = std::time::Instant::now();
         for l in &self.live {
             let Some(rec) = self.store.session(&l.id) else { continue };
             if rec.kind == SessionKind::Shell || !l.view.is_running(cx) {
                 continue;
             }
-            let viewing = window_active && shown.as_deref() == Some(l.id.as_str());
+            let viewing = window_active && !editing && shown.as_deref() == Some(l.id.as_str());
             // A thread knows from ACP itself: a turn is out, or a permission/ask question is open.
-            let (mut working, waiting, question_title, pending) = match &l.view {
+            let (working, waiting, question_title, pending) = match &l.view {
                 SessionView::Thread(v) => {
                     v.update(cx, |thread, cx| thread.set_viewing(viewing, cx));
                     let t = v.read(cx);
@@ -173,12 +195,11 @@ impl Workspace {
                 }
             };
             let before = self.activity.get(&l.id).copied();
-            if !working && !waiting && before == Some(Activity::Working) {
-                let since = *self.idle_since.entry(l.id.clone()).or_insert_with(std::time::Instant::now);
-                working = since.elapsed() < SETTLE;
-            }
-            if working || waiting || before != Some(Activity::Working) {
-                self.idle_since.remove(&l.id);
+            let mut idle_since = self.idle_since.get(&l.id).copied();
+            let working = settle_working(working, waiting, before, &mut idle_since, now_instant);
+            match idle_since {
+                Some(since) => { self.idle_since.insert(l.id.clone(), since); }
+                None => { self.idle_since.remove(&l.id); }
             }
             let now = next_activity(working, waiting, before, viewing);
             if before == Some(Activity::Working) && now != Some(Activity::Working)
@@ -204,6 +225,7 @@ impl Workspace {
                 next.insert(l.id.clone(), now);
             }
         }
+        self.idle_since.retain(|id, _| next.get(id) == Some(&Activity::Working));
         if next != self.activity {
             self.activity = next;
             cx.notify();
@@ -309,7 +331,42 @@ fn spin_visible(working: bool, active: bool, sidebar: bool, editing: bool) -> bo
 
 #[cfg(test)]
 mod tests {
-    use super::{Activity, AttentionEvent, Harness, attention_event, next_activity, notice_body, spin_visible};
+    use std::time::{Duration, Instant};
+
+    use super::{Activity, AttentionEvent, Harness, SETTLE, attention_event, next_activity, notice_body, settle_working, spin_visible};
+
+    #[test]
+    fn settle_holds_working_until_elapsed_then_finishes() {
+        let t0 = Instant::now();
+        let mut idle_since = None;
+        // First idle poll starts the settle window and holds Working.
+        assert!(settle_working(false, false, Some(Activity::Working), &mut idle_since, t0));
+        assert_eq!(idle_since, Some(t0));
+        // Still within the window: timestamp is preserved and Working is held.
+        assert!(settle_working(false, false, Some(Activity::Working), &mut idle_since, t0 + Duration::from_secs(3)));
+        assert_eq!(idle_since, Some(t0));
+        // Once SETTLE elapses, Working releases and idle_since clears.
+        assert!(!settle_working(false, false, Some(Activity::Working), &mut idle_since, t0 + SETTLE));
+        assert_eq!(idle_since, None);
+    }
+
+    #[test]
+    fn settle_resets_when_work_resumes_or_a_question_arrives() {
+        let t0 = Instant::now();
+        let mut idle_since = None;
+        assert!(settle_working(false, false, Some(Activity::Working), &mut idle_since, t0));
+        assert_eq!(idle_since, Some(t0));
+        // Work resumes mid-settle -> timer clears.
+        assert!(settle_working(true, false, Some(Activity::Working), &mut idle_since, t0 + Duration::from_secs(2)));
+        assert_eq!(idle_since, None);
+        // Idle again -> starts a fresh settle window from t0 + 3s.
+        let t1 = t0 + Duration::from_secs(3);
+        assert!(settle_working(false, false, Some(Activity::Working), &mut idle_since, t1));
+        assert_eq!(idle_since, Some(t1));
+        // Question arrives -> stops settling immediately.
+        assert!(!settle_working(false, true, Some(Activity::Working), &mut idle_since, t1 + Duration::from_secs(1)));
+        assert_eq!(idle_since, None);
+    }
 
     #[test]
     fn a_notification_says_a_background_session_finished_or_asks() {
