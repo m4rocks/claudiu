@@ -624,10 +624,7 @@ impl ThreadView {
 
     /// Tool call row built on `Trace` + `CodeBlock`: kind icon, status badge, file location chips, and collapsible output.
     fn render_tool(&self, ix: usize, call: &ToolCall, cx: &mut Context<Self>) -> AnyElement {
-        let inline_card = self
-            .inline_visuals
-            .then(|| self.cards.get(&call.id).map(|c| c.content.as_str()).or(call.details.visual.as_deref()))
-            .flatten();
+        let inline_card = self.inline_visuals.then(|| self.cards.get(&call.id).map(|c| c.content.as_str())).flatten();
         let has_card = inline_card.is_some();
         let shell = call.kind == "execute";
         let details = &call.details;
@@ -828,7 +825,7 @@ impl ThreadView {
     /// report. A call with an inline card stays on its own, so the card is never hidden.
     pub(super) fn run_kind(&self, ix: usize) -> Option<RunKind> {
         let entry = self.thread.entries.get(ix)?;
-        let has_card = matches!(entry, Entry::Tool(call) if self.inline_visuals && (self.cards.contains_key(&call.id) || call.details.visual.is_some()));
+        let has_card = matches!(entry, Entry::Tool(call) if self.inline_visuals && self.cards.contains_key(&call.id));
         timeline::run_kind(entry, has_card)
     }
 

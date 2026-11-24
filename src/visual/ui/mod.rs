@@ -16,41 +16,6 @@ const NODE: &str = "m4code-ui";
 
 const UI_TAGS: [&str; 4] = ["button", "chart", "details", "tabs"];
 
-/// The description of the `show_visual` tool. Keep it in step with `parse::default_css` and the properties
-/// `Css::set` understands.
-pub const PROMPT: &str = r#"Draws Markdown as a card inside the terminal, under this call. Use it for the part of a reply that is clearer drawn than typed: a table, comparison, flow, architecture, before/after, status board, timeline, chart or mock-up. A card shows that part, not the whole answer; the rest of the reply stays typed text. Each call adds a new card. The user sees the drawing and not the markup, so say the key facts in your reply without repeating the card's content.
-
-`content` is ordinary Markdown (headings, lists, tables, code, links, emphasis). Where a drawing helps, put it in a fenced block with the info string `ui`; Markdown and `ui` blocks mix freely, with prose before and after and several blocks per call. The block holds HTML with inline CSS, and m4code draws it in the app's own dark style. There are no scripts; the interactive tags are listed below.
-
-````
-```ui
-<card>
-  <div style="display:flex; justify-content:space-between; align-items:center">
-    <h3>Build</h3><badge style="color:var(--ok)">passing</badge>
-  </div>
-  <progress value="78"></progress>
-</card>
-```
-````
-
-Tags: any HTML you like (div, span, p, h1-h6, ul/ol/li, table/thead/tbody/tr/th/td, pre, code, a, strong, em, hr, br, svg). Unknown tags are plain blocks. Extra shortcuts with the app's look built in: `<card>`, `<badge>`, `<callout>`, `<progress value=".." max="100">`, `<row>` (flex row), `<col>` (flex column), `<grid cols="3">`. Their style can be overridden with `style`.
-
-Interactive tags, which go inside a `ui` block like everything else on this list:
-- `<button send="Run the tests">Run tests</button>`: a click sends its `send` text as the user's next message, once, and the button shows that text. It does nothing else, so use it to offer next steps or choices.
-- `<details open><summary>Title</summary>...</details>`: a section that opens and closes; leave out `open` to start closed. Use it to keep long detail out of the way.
-- `<tabs><tab title="One">...</tab><tab title="Two">...</tab></tabs>`: one tab shown at a time.
-
-Charts from data, instead of plotting SVG by hand, also inside a `ui` block: `<chart type="bar" labels="a,b,c" values="3,5,2"></chart>`, or `type="line"`. For several series, replace `values` with `<series name="p95" values="3,5,2"/>` children (`color` is optional). `width` and, for line charts, `height` are optional.
-
-Layout is flexbox: a block stacks its children vertically; `display:flex` lays them in a row (use `flex-direction:column` for a column) and `display:grid` with `grid-template-columns` (equal-width columns) or `<grid cols>` makes a grid. Supported CSS in `style="..."`: display, flex-direction, flex-wrap, flex, gap, align-items, justify-content, align-self, width, height, min/max-width, min/max-height (px, %, rem), padding, margin, background (a colour; gradients are ignored), color, border and border-left/right/top/bottom, border-radius, opacity, overflow:hidden, font-size, font-weight, font-style, font-family:monospace, text-align, line-height, text-decoration, white-space, grid-column:span N. There are no classes, `<style>`, scripts, hover states, shadows, or external images. Inline spans can change colour, weight and background but not size; put font-size on a block.
-
-Colours: prefer the theme tokens so everything matches the app: var(--text), var(--dim), var(--faint), var(--accent) (white), var(--ok), var(--warn), var(--danger), var(--info), var(--bg), var(--surface), var(--raised), var(--border). Hex and rgb()/rgba() work too (`#ffffff33` is accent at 20%). The background is dark (`#121212`), so never use black text or white backgrounds.
-
-Drawings: an inline `<svg>` with a viewBox (and width/height) renders shapes, paths, text, and gradients. `var(--accent)` and `currentColor` work inside it. Use SVG for diagrams, flows and icons. Give it explicit sizes and legible text (at least 11px).
-
-Be as creative as the content deserves; this is a general canvas, not a fixed set of widgets. Keep one block focused on one thing, and keep it under about 60 elements.
-"#;
-
 /// What the user has done in a session's cards: buttons sent, sections opened, tabs chosen. Kept for the life of the
 /// terminal, because scrolling a card off screen must not reset it; a restart does.
 #[derive(Clone, Default)]
@@ -135,11 +100,6 @@ pub fn markdown(id: String, text: &str, scope: Scope) -> TextView {
             Some(tree) => render::render(tree, &scope, window, cx),
             None => gpui::IntoElement::into_any_element(gpui::div()),
         })
-}
-
-/// What the model reads about `show_visual`.
-pub fn tool_description() -> String {
-    PROMPT.trim().to_string()
 }
 
 #[cfg(test)]

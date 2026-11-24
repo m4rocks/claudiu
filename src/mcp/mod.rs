@@ -36,7 +36,7 @@ impl Feature {
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Visual => "Inline cards",
+            Self::Visual => "Inline UI",
             Self::Github => "GitHub sidebar",
             Self::Sessions => "Other sessions",
             Self::Model => "Model switch",
@@ -45,7 +45,7 @@ impl Feature {
 
     pub fn description(self) -> &'static str {
         match self {
-            Self::Visual => "Render charts, diagrams, and interactive inline UI natively in chat across all harnesses",
+            Self::Visual => "Render ```ui blocks natively as interactive cards, charts, and diagrams in chat",
             Self::Github => "Attach GitHub issues and pull requests to the right sidebar",
             Self::Sessions => "Link and coordinate with other running m4code sessions",
             Self::Model => "Let the agent switch its own model or effort mid-conversation",
@@ -82,7 +82,6 @@ pub fn tools_off(features: &[Feature], extra_off: &[&'static str]) -> Vec<&'stat
 /// The feature a tool belongs to.
 fn feature_of(tool: &str) -> Option<&'static str> {
     match tool {
-        "show_visual" => Some("visual"),
         "attach_github" | "detach_github" => Some("github"),
         "link_session" | "unlink_session" => Some("sessions"),
         "set_model" | "list_models" => Some("model"),
@@ -97,7 +96,7 @@ fn is_off(off: &[&str], tool: &str) -> bool {
 }
 
 /// Tools the model uses to tell m4code something about itself; none of them reads or starts another session.
-const OWN_TOOLS: [&str; 5] = ["attach_github", "detach_github", "link_session", "unlink_session", "show_visual"];
+const OWN_TOOLS: [&str; 4] = ["attach_github", "detach_github", "link_session", "unlink_session"];
 
 /// Tools that change this session's model; m4code answers them (`app/cross.rs`), whatever the harness.
 const MODEL_TOOLS: [&str; 2] = ["list_models", "set_model"];
@@ -146,18 +145,16 @@ const LINK_INSTRUCTIONS: &str = " m4code shows related sessions together. When t
 m4code session (the user says so, or you recognise it), find it with search_sessions and call link_session once per pair; \
 call unlink_session when a link no longer fits. Both are silent.";
 
-/// What makes the model call `show_visual` or emit inline ` ```ui ` generative UI blocks natively in chat.
-const VISUAL_INSTRUCTIONS: &str = " Visual: m4code natively renders interactive UI cards, charts, SVG diagrams, \
-tables, tabs, progress bars, and action buttons inside chat. You can either call show_visual (silent, needs no approval) OR \
-write a closed ```ui fenced block directly in your reply — m4code renders ```ui blocks natively inline with no preview button. \
-Inside ```ui blocks use m4code's dark-theme HTML/CSS dialect (<card>, <badge>, <callout>, <progress value=\"..\">, <row>, <col>, \
+/// What teaches the model to emit native inline ` ```ui ` generative UI blocks directly in chat.
+const VISUAL_INSTRUCTIONS: &str = " Visual: m4code natively renders closed ```ui fenced blocks directly inside chat as \
+interactive dark-theme UI cards, charts, SVG diagrams, tables, tabs, progress bars, and action buttons (no tool call or preview button needed). \
+Inside ```ui blocks use HTML with inline CSS and m4code shortcuts: <card>, <badge>, <callout>, <progress value=\"..\">, <row>, <col>, \
 <grid cols=\"3\">, <tabs>, <details>, <button send=\"..\">, <chart type=\"bar|line\" labels=\"..\" values=\"..\">, \
-or inline <svg> with theme tokens var(--text), var(--dim), var(--accent), var(--ok), var(--warn), var(--danger), var(--info), \
-var(--surface), var(--border)). Use inline UI for the part of a reply that is clearer drawn than typed; keep normal prose and code in text.";
+or inline <svg viewBox=\"...\" width=\"...\" height=\"...\"> with theme tokens var(--text), var(--dim), var(--faint), var(--accent), \
+var(--ok), var(--warn), var(--danger), var(--info), var(--bg), var(--surface), var(--raised), var(--border) (dark background, no scripts or <style> tags). \
+Use ```ui for the part of a reply that is clearer drawn than typed; keep normal prose and code in text.";
 
 const ARTIFACT_INSTRUCTIONS: &str = " Artifacts are for pages to share.";
-
-const VISUAL_LOADING: &str = " Load it first with ToolSearch (select:mcp__m4code__show_visual) if needed.";
 
 /// What makes the model call `attach_github`.
 const GITHUB_INSTRUCTIONS: &str = " GitHub: call attach_github (silent, free) for each issue or pull request you work on, \
@@ -195,7 +192,6 @@ fn instructions(off: &[&str]) -> String {
         if on("artifacts") {
             text += ARTIFACT_INSTRUCTIONS;
         }
-        text += VISUAL_LOADING;
     }
     if on("sessions") {
         text += BRIDGE_INSTRUCTIONS;
@@ -251,14 +247,6 @@ fn serve(input: impl BufRead, mut out: impl Write, record: &str, data: &Path, of
                 Some("detach_github") => detach_github(&msg["params"], record, &attach_dir(data)),
                 Some("link_session") => link_session(&msg["params"], record, &attach_dir(data), "link"),
                 Some("unlink_session") => link_session(&msg["params"], record, &attach_dir(data), "unlink"),
-                Some("show_visual") => {
-                    let content = msg["params"]["arguments"]["content"].as_str().unwrap_or_default();
-                    if content.trim().is_empty() {
-                        reply("content is required", true)
-                    } else {
-                        reply("Shown.", false)
-                    }
-                }
                 Some(tool) if INTERACTIVE_TOOLS.contains(&tool) || BRIDGE_TOOLS.contains(&tool) || MODEL_TOOLS.contains(&tool) || SUBAGENT_TOOLS.contains(&tool) => match ask(tool, &msg["params"]["arguments"]) {
                     Ok(text) => reply(&text, false),
                     Err(text) => reply(&text, true),
@@ -329,20 +317,7 @@ fn own_tools() -> Vec<Value> {
         tool
     };
     let (attach, detach, link, unlink) = (upfront(attach), upfront(detach), upfront(link), upfront(unlink));
-    // Not loaded upfront: its description teaches the whole dialect, so the model loads it when it wants a visual.
-    let visual = json!({
-        "name": "show_visual",
-        "description": crate::visual::ui::tool_description(),
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "title": { "type": "string", "description": "A short heading for this visual (2-6 words)" },
-                "content": { "type": "string", "description": "Markdown, with fenced `ui` blocks for drawings" },
-            },
-            "required": ["content"],
-        },
-    });
-    vec![attach, detach, link, unlink, visual]
+    vec![attach, detach, link, unlink]
 }
 
 /// `list_models` and `set_model`: the session's model, on its own harness or another one.
@@ -630,17 +605,16 @@ mod tests {
         let names: Vec<_> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert_eq!(
             names,
-            ["attach_github", "detach_github", "link_session", "unlink_session", "show_visual", "list_models", "set_model", "ask_user", "list_code_sessions", "read_code_session", "search_sessions", "search_projects", "start_code_session", "switch_worktree", "spawn_subagent", "list_subagents", "send_subagent_message", "wait_subagent", "stop_subagent"]
+            ["attach_github", "detach_github", "link_session", "unlink_session", "list_models", "set_model", "ask_user", "list_code_sessions", "read_code_session", "search_sessions", "search_projects", "start_code_session", "switch_worktree", "spawn_subagent", "list_subagents", "send_subagent_message", "wait_subagent", "stop_subagent"]
         );
         let upfront: Vec<_> = tools.iter().filter(|t| t["_meta"]["anthropic/alwaysLoad"] == true).map(|t| t["name"].as_str().unwrap()).collect();
-        assert_eq!(upfront, ["attach_github", "detach_github", "link_session", "unlink_session", "ask_user"], "show_visual and the session-reaching tools stay deferred");
+        assert_eq!(upfront, ["attach_github", "detach_github", "link_session", "unlink_session", "ask_user"], "the session-reaching tools stay deferred");
         assert_eq!(r[1]["result"]["content"][0]["text"], "read_code_session \"x\"");
         assert_eq!(r[1]["result"]["isError"], false);
         assert_eq!(r[2]["result"]["content"][0]["text"], "The user declined.");
         assert_eq!(r[2]["result"]["isError"], true);
         assert_eq!(allowed_tools(&[]).len(), BRIDGE_TOOLS.len() + SUBAGENT_TOOLS.len() + OWN_TOOLS.len() + MODEL_TOOLS.len() + INTERACTIVE_TOOLS.len());
         assert!(allowed_tools(&[]).contains(&"mcp__m4code__set_model".to_string()), "switching models asks nothing either");
-        assert!(allowed_tools(&[]).contains(&"mcp__m4code__show_visual".to_string()));
     }
 
     #[test]
@@ -657,20 +631,10 @@ mod tests {
     }
 
     #[test]
-    fn show_visual_teaches_the_dialect_and_errors_when_the_mod_did_not_answer() {
-        let tmp = tempfile::tempdir().unwrap();
-        let r = talk(
-            &[
-                json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}),
-                json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"show_visual","arguments":{"content":"# Hi"}}}),
-            ],
-            "s",
-            tmp.path(),
-        );
-        let tool = r[0]["result"]["tools"].as_array().unwrap().iter().find(|t| t["name"] == "show_visual").unwrap().clone();
-        assert!(tool["description"].as_str().unwrap().contains("```ui"), "the dialect is in the description");
-        assert_eq!(tool["inputSchema"]["required"][0], "content");
-        assert_eq!(r[1]["result"]["isError"], false);
+    fn inline_ui_instructions_teach_the_ui_fence_without_a_separate_tool() {
+        let (names, text) = offer(&[]);
+        assert!(!names.contains(&"show_visual".to_string()));
+        assert!(text.contains("```ui"), "the dialect is in the instructions");
     }
 
     #[test]
@@ -801,7 +765,7 @@ mod tests {
     #[test]
     fn with_nothing_off_the_server_offers_every_tool_and_all_the_text() {
         let (names, text) = offer(&[]);
-        assert_eq!(names.len(), 19);
+        assert_eq!(names.len(), 18);
         for part in [INTRO, GITHUB_INSTRUCTIONS, LINK_INSTRUCTIONS, VISUAL_INSTRUCTIONS, BRIDGE_INSTRUCTIONS] {
             assert!(text.contains(part));
         }
@@ -811,22 +775,22 @@ mod tests {
     #[test]
     fn each_feature_takes_its_tools_and_its_text_away() {
         let (names, text) = offer(&["visual"]);
-        assert!(!names.contains(&"show_visual".to_string()) && names.len() == 18);
-        assert!(!text.contains("Visual:") && !text.contains("show_visual"));
+        assert_eq!(names.len(), 18);
+        assert!(!text.contains("Visual:") && !text.contains("```ui"));
 
         let (names, text) = offer(&["github"]);
-        assert!(!names.iter().any(|n| n.ends_with("_github")) && names.len() == 17);
+        assert!(!names.iter().any(|n| n.ends_with("_github")) && names.len() == 16);
         assert!(!text.contains("attach_github"));
 
         let (names, text) = offer(&["sessions"]);
         for gone in ["link_session", "unlink_session", "list_code_sessions", "read_code_session", "search_sessions", "search_projects", "start_code_session", "switch_worktree", "spawn_subagent", "list_subagents", "send_subagent_message", "wait_subagent", "stop_subagent"] {
             assert!(!names.contains(&gone.to_string()), "{gone}");
         }
-        assert_eq!(names.len(), 6);
+        assert_eq!(names.len(), 5);
         assert!(!text.contains("link_session") && !text.contains("start_code_session"));
 
         let (names, text) = offer(&["model"]);
-        assert!(!names.contains(&"set_model".to_string()) && !names.contains(&"list_models".to_string()) && names.len() == 17);
+        assert!(!names.contains(&"set_model".to_string()) && !names.contains(&"list_models".to_string()) && names.len() == 16);
         assert!(!text.contains("set_model") && !text.contains("list_models") && !text.contains("Never switch models"));
     }
 
@@ -850,8 +814,8 @@ mod tests {
 
     #[test]
     fn allowed_tools_leaves_out_the_tools_of_features_that_are_off() {
-        assert_eq!(allowed_tools(&["github", "sessions"]), ["mcp__m4code__show_visual", "mcp__m4code__list_models", "mcp__m4code__set_model", "mcp__m4code__ask_user"]);
-        assert_eq!(allowed_tools(&["github", "sessions", "model"]), ["mcp__m4code__show_visual", "mcp__m4code__ask_user"]);
+        assert_eq!(allowed_tools(&["github", "sessions"]), ["mcp__m4code__list_models", "mcp__m4code__set_model", "mcp__m4code__ask_user"]);
+        assert_eq!(allowed_tools(&["github", "sessions", "model"]), ["mcp__m4code__ask_user"]);
     }
 
     #[test]

@@ -77,7 +77,6 @@ pub struct ToolDetails {
     pub server: Option<String>,
     pub request: Option<String>,
     pub response: Option<String>,
-    pub visual: Option<String>,
 }
 
 impl ToolDetails {
@@ -559,11 +558,6 @@ fn merge_tool(call: &mut ToolCall, update: &Value) {
         }
     }
     call.details.apply(&call.kind, update);
-    if is_show_visual_title(&call.title)
-        && let Some(content) = update.pointer("/rawInput/content").and_then(Value::as_str).filter(|s| !s.trim().is_empty())
-    {
-        call.details.visual = Some(content.to_string());
-    }
     if let Some(agent_type) = subagent_type(update) {
         call.subagent = Some(agent_type);
     }
@@ -577,14 +571,6 @@ fn is_codex_resume_model_warning(chunk: &str) -> bool {
     trimmed.starts_with("Warning: This session was recorded with model ")
         && trimmed.contains(" but is resuming with ")
         && trimmed.contains("Consider switching back to ")
-}
-
-fn is_show_visual_title(title: &str) -> bool {
-    let t = title.trim();
-    t == "show_visual"
-        || ["mcp__m4code__", "m4code: ", "m4code_", "m4code.", "m4code/", "m4code__"]
-            .iter()
-            .any(|prefix| t.strip_prefix(prefix) == Some("show_visual"))
 }
 
 fn subagent_type(update: &Value) -> Option<String> {
