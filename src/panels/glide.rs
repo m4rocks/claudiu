@@ -170,7 +170,7 @@ impl SmoothList {
                     }
                     // When the list isn't tall enough to scroll, leave tail-following alone so scrolling up
                     // cannot detach it and flash "Jump to latest".
-                    if list.max_offset_for_scrollbar().y <= px(1.0) {
+                    if list.is_scrolled_to_end().is_none() && list.max_offset_for_scrollbar().y <= px(1.0) {
                         glide.cancel();
                         return;
                     }

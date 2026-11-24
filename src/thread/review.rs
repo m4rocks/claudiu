@@ -111,6 +111,7 @@ pub struct Review {
     error: Option<String>,
     /// Flattened rows rendered lazily by the virtual list so huge diffs stay fast.
     rows: Vec<ReviewRow>,
+    rows_generation: u64,
     list: ListState,
     glide: crate::panels::glide::SmoothList,
 }
@@ -132,6 +133,7 @@ impl Review {
             commenting: None,
             error: None,
             rows: Vec::new(),
+            rows_generation: 0,
             list: ListState::new(0, ListAlignment::Top, px(600.0)),
             glide: Default::default(),
         }
@@ -179,6 +181,7 @@ impl Review {
             }
         }
         let scroll = self.list.logical_scroll_top();
+        self.rows_generation += 1;
         self.rows = rows;
         self.list.reset(self.rows.len());
         if scroll.item_ix < self.rows.len() {
@@ -611,6 +614,11 @@ impl ThreadView {
             ReviewRow::HunkHeader { file_ix, hunk_ix, kept } => {
                 let Some(hunk) = review.hunk(*file_ix, *hunk_ix) else { return div().into_any_element() };
                 let (file_ix, hunk_ix) = (*file_ix, *hunk_ix);
+                let (review_id, generation) = (review.id, review.rows_generation);
+                let current_hunk = move |view: &Self| {
+                    let review = view.review.as_ref().filter(|r| r.id == review_id && r.rows_generation == generation)?;
+                    review.hunk(file_ix, hunk_ix).cloned()
+                };
                 let border_color = hsla(if *kept { theme::OK } else { theme::PANEL_BORDER });
                 let header = div()
                     .mt(px(if hunk_ix == 0 { 0.0 } else { 6.0 }))
@@ -636,8 +644,8 @@ impl ThreadView {
                             } else {
                                 button(SharedString::from(format!("review-keep-{file_ix}-{hunk_ix}")), "Keep", false)
                                     .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| {
-                                        if let Some(hunk) = v.review.as_ref().and_then(|r| r.hunk(file_ix, hunk_ix)) {
-                                            v.keep_hunk(hunk.patch.clone(), cx);
+                                        if let Some(hunk) = current_hunk(v) {
+                                            v.keep_hunk(hunk.patch, cx);
                                         }
                                     }))
                                     .into_any_element()
@@ -645,8 +653,8 @@ impl ThreadView {
                             .child(
                                 button(SharedString::from(format!("review-revert-{file_ix}-{hunk_ix}")), "Revert", false)
                                     .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| {
-                                        if let Some(hunk) = v.review.as_ref().and_then(|r| r.hunk(file_ix, hunk_ix)) {
-                                            v.revert_hunk(hunk.clone(), cx);
+                                        if let Some(hunk) = current_hunk(v) {
+                                            v.revert_hunk(hunk, cx);
                                         }
                                     })),
                             )

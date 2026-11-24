@@ -2429,8 +2429,7 @@ impl ThreadView {
 
     pub(super) fn show_jump_to_latest(&self) -> bool {
         !self.list.is_following_tail()
-            && self.list.max_offset_for_scrollbar().y > px(1.0)
-            && self.list.is_scrolled_to_end() != Some(true)
+            && !self.list.is_scrolled_to_end().unwrap_or_else(|| self.list.max_offset_for_scrollbar().y <= px(1.0))
     }
 
     fn open_location(&mut self, path: PathBuf, line: Option<u32>, cx: &mut Context<Self>) {
