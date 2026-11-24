@@ -2,16 +2,41 @@
 //! settings), and the links and GitHub items sessions asked for. Reading the files is
 //! off the UI thread; applying them is a handful of small, separately testable steps.
 
+use std::time::{Duration, Instant};
+
 use super::*;
 use crate::harness::claude::usage::Snapshot;
-use crate::harness::limits::Pool;
-use crate::harness::subagents::Agent;
-use crate::store::RateLimit;
+use crate::harness::limits::{Pool, has_expired_window, merge_pools, merge_usage};
+use crate::store::{RateLimit, UsageLimits};
+
+/// Retry delay after a failed usage-limits probe, matching t3code's 30s recovery backoff.
+const FAILED_RETRY_DELAY: Duration = Duration::from_secs(30);
+/// Minimum gap between automatic probes triggered by a window crossing its `resets_at` boundary.
+const RESET_RETRY_DELAY: Duration = Duration::from_secs(30);
+/// Fast local check cadence for Codex rollout logs (zero network / zero subprocesses).
+const CODEX_LOG_POLL: Duration = Duration::from_secs(3);
+
+/// Per-harness background probe state for usage limits.
+#[derive(Clone, Debug, Default)]
+pub struct LimitsState {
+    /// True while a background probe is in flight.
+    pub loading: bool,
+    /// When the last probe started.
+    pub last_asked: Option<Instant>,
+    /// Error message from the most recent failed probe (cleared on success or live update).
+    pub error: Option<String>,
+    /// Earliest instant the next retry may run after a failure.
+    pub retry_after: Option<Instant>,
+    /// A refresh was requested while a probe was already in flight; run once more when it finishes.
+    pub queued: bool,
+}
 
 impl Workspace {
-    /// Costs no tokens. The mod's files are tiny, and Codex's logs are read again only after Codex writes to them.
+    /// Costs no tokens. The mod's files are tiny, Codex's logs are read again only after Codex writes to them,
+    /// and active probes run on their own 5-minute cadence (plus startup, reset crossing, turn end, and manual click).
     pub(super) fn ingest_usage(&mut self, cx: &mut Context<Self>) {
-        self.ingest_subagent_limits(cx);
+        self.ingest_limits(cx);
+        self.ingest_codex_logs(cx);
         self.in_background(
             || (usage::read_snapshots(&usage::snapshot_dir()), mcp::read_attached()),
             |ws, (snaps, items), cx| {
@@ -25,32 +50,209 @@ impl Workspace {
         );
     }
 
-    /// Each enabled harness with a limits adapter refreshes on its own cadence. Failed reads keep the saved reading.
-    fn ingest_subagent_limits(&mut self, cx: &mut Context<Self>) {
-        for agent in Agent::ALL {
-            let provider = agent.provider();
-            let Some(limits) = &provider.limits else { continue };
-            let harness = match agent {
-                Agent::Codex => Harness::Codex,
-                Agent::OpenCode => Harness::OpenCode,
-                Agent::Antigravity => Harness::Antigravity,
-            };
-            let active = self.store.data.settings.harness_enabled(harness) || self.store.data.settings.custom_subagents.get(agent).on;
-            if !active || self.limits_asked.get(agent).is_some_and(|at| at.elapsed() < limits.every) {
+    /// Whether `harness` is enabled either as a main harness or as a custom subagent.
+    fn limits_harness_active(&self, harness: Harness) -> bool {
+        self.store.data.settings.harness_enabled(harness)
+            || harness.agent().is_some_and(|a| self.store.data.settings.custom_subagents.get(a).on)
+    }
+
+    /// Whether any stored window for `harness` has crossed its `resets_at` boundary.
+    fn harness_has_expired_window(&self, harness: Harness, now: i64) -> bool {
+        match harness {
+            Harness::Claude => has_expired_window(&self.store.data.claude_usage, now),
+            Harness::Codex | Harness::Antigravity => {
+                let Some(key) = harness.agent().map(|a| a.provider().key) else { return false };
+                self.store
+                    .data
+                    .subagent_limits
+                    .get(key)
+                    .is_some_and(|pools| pools.iter().any(|p| has_expired_window(&p.usage, now)))
+            }
+            Harness::OpenCode => false,
+        }
+    }
+
+    /// Active zero-token probes for Claude, Codex, and Antigravity.
+    fn ingest_limits(&mut self, cx: &mut Context<Self>) {
+        let now_instant = Instant::now();
+        let now_unix = crate::store::now();
+        for harness in [Harness::Claude, Harness::Codex, Harness::Antigravity] {
+            if !self.limits_harness_active(harness) {
                 continue;
             }
-            // Set before asking, so a slow answer isn't asked for twice.
-            *self.limits_asked.get_mut(agent) = Some(std::time::Instant::now());
-            self.in_background(limits.read, move |ws, read, _| ws.apply_subagent_limits(provider.key, read), cx);
+            let every = match harness {
+                Harness::Claude => crate::harness::claude::limits::REFRESH_EVERY,
+                Harness::Codex | Harness::Antigravity => {
+                    let Some(limits) = harness.agent().and_then(|a| a.provider().limits.as_ref()) else { continue };
+                    limits.every
+                }
+                Harness::OpenCode => continue,
+            };
+            let state = self.limits_state.get(harness);
+            if state.loading {
+                continue;
+            }
+            let expired = self.harness_has_expired_window(harness, now_unix);
+            let due = state.queued
+                || state.last_asked.is_none()
+                || state.last_asked.is_some_and(|at| now_instant.saturating_duration_since(at) >= every)
+                || (state.error.is_some() && state.retry_after.is_some_and(|at| now_instant >= at))
+                || (expired && state.last_asked.is_some_and(|at| now_instant.saturating_duration_since(at) >= RESET_RETRY_DELAY));
+            if due {
+                self.spawn_limits_probe(harness, cx);
+            }
+        }
+    }
+
+    /// Fast zero-cost local watcher for Codex rollout logs so mid-turn updates appear within seconds.
+    fn ingest_codex_logs(&mut self, cx: &mut Context<Self>) {
+        if !self.limits_harness_active(Harness::Codex) {
+            return;
+        }
+        if self.codex_logs_asked.is_some_and(|at| at.elapsed() < CODEX_LOG_POLL) {
+            return;
+        }
+        self.codex_logs_asked = Some(Instant::now());
+        self.in_background(
+            || crate::harness::codex::limits::codex_home().and_then(|home| crate::harness::codex::limits::read(&home)),
+            |ws, usage, cx| {
+                if let Some(usage) = usage {
+                    ws.apply_live_limits(Harness::Codex, usage, cx);
+                }
+            },
+            cx,
+        );
+    }
+
+    fn spawn_limits_probe(&mut self, harness: Harness, cx: &mut Context<Self>) {
+        let state = self.limits_state.get_mut(harness);
+        state.loading = true;
+        state.queued = false;
+        state.last_asked = Some(Instant::now());
+        state.retry_after = None;
+        cx.notify();
+
+        match harness {
+            Harness::Claude => {
+                let Some(claude_exe) = self.claude_exe.clone() else {
+                    self.finish_limits_probe(Harness::Claude, Err("Could not find the `claude` CLI on PATH.".into()), cx);
+                    return;
+                };
+                self.in_background(
+                    move || {
+                        let usage = crate::harness::claude::limits::read(&claude_exe)?;
+                        Ok(vec![Pool { name: "Claude".into(), usage }])
+                    },
+                    |ws, read, cx| ws.finish_limits_probe(Harness::Claude, read, cx),
+                    cx,
+                );
+            }
+            Harness::Codex | Harness::Antigravity => {
+                let Some(agent) = harness.agent() else { return };
+                let Some(limits) = &agent.provider().limits else { return };
+                self.in_background(
+                    limits.read,
+                    move |ws, read, cx| ws.finish_limits_probe(harness, read, cx),
+                    cx,
+                );
+            }
+            Harness::OpenCode => {}
+        }
+    }
+
+    fn finish_limits_probe(&mut self, harness: Harness, read: Result<Vec<Pool>, String>, cx: &mut Context<Self>) {
+        let state = self.limits_state.get_mut(harness);
+        state.loading = false;
+        let run_again = state.queued;
+        state.queued = false;
+        match read {
+            Ok(pools) => {
+                state.error = None;
+                state.retry_after = None;
+                match harness {
+                    Harness::Claude => {
+                        if let Some(pool) = pools.into_iter().next() {
+                            self.merge_claude_usage(pool.usage.five_hour, pool.usage.seven_day);
+                        }
+                    }
+                    Harness::Codex | Harness::Antigravity => {
+                        if let Some(key) = harness.agent().map(|a| a.provider().key) {
+                            self.apply_subagent_limits(key, Ok(pools));
+                        }
+                    }
+                    Harness::OpenCode => {}
+                }
+            }
+            Err(err) => {
+                state.error = Some(err);
+                state.retry_after = Some(Instant::now() + FAILED_RETRY_DELAY);
+            }
+        }
+        cx.notify();
+        if run_again && self.limits_harness_active(harness) {
+            self.spawn_limits_probe(harness, cx);
+        }
+    }
+
+    /// Merge live streamed limits (e.g. from `bridge/claude.mjs` or Codex rollout logs) immediately.
+    pub(crate) fn apply_live_limits(&mut self, harness: Harness, usage: UsageLimits, cx: &mut Context<Self>) {
+        let changed = match harness {
+            Harness::Claude => self.merge_claude_usage(usage.five_hour, usage.seven_day),
+            Harness::Codex => {
+                let current = self.store.data.subagent_limits.get("codex").cloned().unwrap_or_default();
+                let merged = merge_pools(&current, vec![Pool { name: "Codex".into(), usage }]);
+                if merged != current {
+                    self.store.data.subagent_limits.insert("codex".into(), merged);
+                    self.store.mark_dirty();
+                    true
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        };
+        if changed {
+            let state = self.limits_state.get_mut(harness);
+            state.error = None;
+            state.retry_after = None;
+            cx.notify();
+        }
+    }
+
+    /// Request a fresh usage-limits probe for `harness` (e.g. after a turn finishes).
+    pub(crate) fn request_limits_refresh(&mut self, harness: Harness, cx: &mut Context<Self>) {
+        if !matches!(harness, Harness::Claude | Harness::Codex | Harness::Antigravity) || !self.limits_harness_active(harness) {
+            return;
+        }
+        if self.limits_state.get(harness).loading {
+            self.limits_state.get_mut(harness).queued = true;
+            return;
+        }
+        self.spawn_limits_probe(harness, cx);
+    }
+
+    /// Manual refresh triggered from the sidebar usage footer.
+    pub(crate) fn refresh_all_limits(&mut self, cx: &mut Context<Self>) {
+        for harness in [Harness::Claude, Harness::Codex, Harness::Antigravity] {
+            if !self.limits_harness_active(harness) {
+                continue;
+            }
+            if self.limits_state.get(harness).loading {
+                self.limits_state.get_mut(harness).queued = true;
+            } else {
+                self.spawn_limits_probe(harness, cx);
+            }
         }
     }
 
     pub(super) fn apply_subagent_limits(&mut self, key: &str, read: Result<Vec<Pool>, String>) {
-        if let Ok(pools) = read
-            && self.store.data.subagent_limits.get(key) != Some(&pools)
-        {
-            self.store.data.subagent_limits.insert(key.into(), pools);
-            self.store.mark_dirty();
+        if let Ok(pools) = read {
+            let current = self.store.data.subagent_limits.get(key).cloned().unwrap_or_default();
+            let merged = merge_pools(&current, pools);
+            if merged != current {
+                self.store.data.subagent_limits.insert(key.into(), merged);
+                self.store.mark_dirty();
+            }
         }
     }
 
@@ -81,16 +283,8 @@ impl Workspace {
     /// Keep the newest reading per window. Returns whether anything changed (the same snapshot is re-read
     /// every tick, so an unconditional save would rewrite state.json every few seconds).
     pub(super) fn merge_claude_usage(&mut self, five: Option<RateLimit>, seven: Option<RateLimit>) -> bool {
-        let usage = &mut self.store.data.claude_usage;
-        let mut changed = false;
-        for (slot, new) in [(&mut usage.five_hour, five), (&mut usage.seven_day, seven)] {
-            if let Some(new) = new
-                && slot.as_ref().is_none_or(|cur| new.seen_at >= cur.seen_at && *cur != new)
-            {
-                *slot = Some(new);
-                changed = true;
-            }
-        }
+        let incoming = UsageLimits { five_hour: five, seven_day: seven };
+        let changed = merge_usage(&mut self.store.data.claude_usage, &incoming);
         if changed {
             self.store.mark_dirty();
         }

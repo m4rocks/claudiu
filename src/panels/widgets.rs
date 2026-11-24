@@ -41,9 +41,18 @@ pub fn section_label(text: impl Into<SharedString>) -> Div {
 /// From here up, a meter's bar turns to the warning color.
 pub const METER_WARN_AT: f32 = 0.7;
 
-/// Compact usage track, with the used fraction behind the percentage and reset countdown.
-pub fn limit_bar(id: impl Into<ElementId>, fraction: Option<f32>, left: String, right: String, tone: Option<Hsla>) -> Stateful<Div> {
-    let color = match fraction {
+/// Compact usage track, with `fill` behind the percentage and reset countdown.
+/// `severity` is always the *used* fraction (0..=1) so warn/danger colors trigger near exhaustion even in "Left" mode.
+pub fn limit_bar(
+    id: impl Into<ElementId>,
+    fill: Option<f32>,
+    severity: Option<f32>,
+    left: String,
+    right: String,
+    tone: Option<Hsla>,
+    stale: bool,
+) -> Stateful<Div> {
+    let color = match severity {
         Some(f) if f >= 0.9 => hsla(theme::DANGER),
         Some(f) if f >= METER_WARN_AT => hsla(theme::WARN),
         _ => tone.unwrap_or_else(|| hsla(theme::ACCENT)),
@@ -51,8 +60,16 @@ pub fn limit_bar(id: impl Into<ElementId>, fraction: Option<f32>, left: String, 
     let height = crate::panels::scale::px(16.0);
     let radius = crate::panels::scale::px(3.0);
     // Faint enough that the text drawn over it stays readable.
-    let fill = div().absolute().top_0().left_0().h(height).w(gpui::relative(fraction.unwrap_or(0.0).clamp(0.0, 1.0))).rounded(radius).bg(color.opacity(0.32));
-    let percent_color = if fraction.is_some() { theme::TEXT } else { theme::TEXT_FAINT };
+    let fill_opacity = if stale { 0.18 } else { 0.32 };
+    let fill_bar = div()
+        .absolute()
+        .top_0()
+        .left_0()
+        .h(height)
+        .w(gpui::relative(fill.unwrap_or(0.0).clamp(0.0, 1.0)))
+        .rounded(radius)
+        .bg(color.opacity(fill_opacity));
+    let percent_color = if fill.is_some() && !stale { theme::TEXT } else { theme::TEXT_FAINT };
     let texts = div()
         .absolute()
         .top_0()
@@ -72,10 +89,10 @@ pub fn limit_bar(id: impl Into<ElementId>, fraction: Option<f32>, left: String, 
                 .text_ellipsis()
                 .whitespace_nowrap()
                 .text_size(crate::panels::scale::px(10.0))
-                .text_color(hsla(theme::TEXT_DIM))
+                .text_color(hsla(if stale { theme::TEXT_FAINT } else { theme::TEXT_DIM }))
                 .child(right),
         );
-    div().id(id.into()).relative().h(height).w_full().rounded(radius).overflow_hidden().bg(hsla(theme::ROW_HOVER)).child(fill).child(texts)
+    div().id(id.into()).relative().h(height).w_full().rounded(radius).overflow_hidden().bg(hsla(theme::ROW_HOVER)).child(fill_bar).child(texts)
 }
 
 /// Progress bar. `fraction == None` renders the neutral "unavailable" state.

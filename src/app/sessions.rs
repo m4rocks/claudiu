@@ -456,6 +456,9 @@ impl Workspace {
                     cx.notify();
                 }
             }
+            ThreadEvent::UsageLimits(harness, limits) => {
+                ws.apply_live_limits(*harness, limits.clone(), cx);
+            }
             ThreadEvent::OpenGitPicker(at) => {
                 let (project, cwd) = (ws.store.session(&sub_id).and_then(|r| r.project_id.clone()), ws.store.session(&sub_id).map(|r| r.cwd.clone()));
                 if let (Some(project), Some(cwd)) = (project, cwd) {
@@ -464,7 +467,12 @@ impl Workspace {
             }
             ThreadEvent::OpenPath(path, line) => ws.open_from_terminal(&sub_id, path, *line, window, cx),
             ThreadEvent::AbortChildren => ws.end_child_sessions(&sub_id, window, cx),
-            ThreadEvent::Idle(outcome) => ws.report_to_parent(&sub_id, outcome, cx),
+            ThreadEvent::Idle(outcome) => {
+                if let Some(harness) = ws.store.session(&sub_id).and_then(|r| r.agent.as_ref()).map(|m| m.harness) {
+                    ws.request_limits_refresh(harness, cx);
+                }
+                ws.report_to_parent(&sub_id, outcome, cx);
+            }
             ThreadEvent::Select(child) => ws.act(Act::Select(child.clone()), window, cx),
             ThreadEvent::Handoff { to, model, message, effort, by_agent } => ws.dynamic_handoff(&sub_id, *to, model.clone(), message.clone(), *by_agent, effort.clone(), window, cx),
             ThreadEvent::NewSession(prompt) => {

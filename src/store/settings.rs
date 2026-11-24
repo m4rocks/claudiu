@@ -171,6 +171,9 @@ pub struct Settings {
     /// Context usage percentage at which automatic compaction runs (50..=95, default 90).
     #[serde(default = "default_auto_compact_threshold")]
     pub auto_compact_threshold: u64,
+    /// Whether usage limit bars display percentage used or percentage left (Settings → General).
+    #[serde(default)]
+    pub usage_display: UsageDisplay,
 }
 
 impl Default for Settings {
@@ -199,8 +202,18 @@ impl Default for Settings {
             follow_up: Default::default(),
             auto_compact: default_auto_compact(),
             auto_compact_threshold: default_auto_compact_threshold(),
+            usage_display: Default::default(),
         }
     }
+}
+
+/// Whether sidebar usage limit bars display percentage used or percentage remaining.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageDisplay {
+    #[default]
+    Used,
+    Left,
 }
 
 /// What a message sent while the agent works does. Cmd/Ctrl+Enter does the other one for a single message.

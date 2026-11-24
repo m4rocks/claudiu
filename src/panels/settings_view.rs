@@ -32,10 +32,10 @@ pub(super) fn render_settings_card(
     cx: &mut Context<Workspace>,
 ) -> gpui::Stateful<gpui::Div> {
     let (page, worktrees, scroll) = (ws.settings_page, &ws.worktrees_page, &ws.settings_scroll);
-    let Some(Modal::Settings { shell, default_model, text_generation_model, effort, permission, updates, scale, follow_up, auto_compact, auto_compact_threshold, m4code_off, skill_search, skill_filter, list_focus, renaming, .. }) = &ws.modal else {
+    let Some(Modal::Settings { shell, default_model, text_generation_model, effort, permission, updates, scale, follow_up, auto_compact, auto_compact_threshold, usage_display, m4code_off, skill_search, skill_filter, list_focus, renaming, .. }) = &ws.modal else {
         return div().id("modal-card");
     };
-    let (updates, scale, follow_up, auto_compact, auto_compact_threshold) = (*updates, *scale, *follow_up, *auto_compact, *auto_compact_threshold);
+    let (updates, scale, follow_up, auto_compact, auto_compact_threshold, usage_display) = (*updates, *scale, *follow_up, *auto_compact, *auto_compact_threshold, *usage_display);
     let scaled = crate::panels::scale::px;
     let faint = |text: String| div().text_size(scaled(11.5)).text_color(hsla(theme::TEXT_FAINT)).child(text);
 
@@ -145,6 +145,18 @@ pub(super) fn render_settings_card(
                         .child(scale_step("scale-down", "−", -(crate::panels::scale::STEP as i32), cx))
                         .child(div().w(px(42.0)).flex().justify_center().text_size(scaled(12.0)).text_color(hsla(theme::TEXT)).child(format!("{scale}%")))
                         .child(scale_step("scale-up", "+", crate::panels::scale::STEP as i32, cx))
+                        .into_any_element(),
+                )
+                .into_any_element(),
+                row_shell(
+                    "Usage limits",
+                    Some("Show sidebar usage limit bars as percentage used or remaining"),
+                    div()
+                        .flex_none()
+                        .flex()
+                        .gap(px(4.0))
+                        .child(usage_display_button(crate::store::UsageDisplay::Used, "Used", usage_display, cx))
+                        .child(usage_display_button(crate::store::UsageDisplay::Left, "Left", usage_display, cx))
                         .into_any_element(),
                 )
                 .into_any_element(),
@@ -407,6 +419,16 @@ fn follow_up_button(choice: crate::store::FollowUp, label: &'static str, current
     button(format!("settings-follow-up-{label}"), label, choice == current).on_click(cx.listener(move |ws, _: &ClickEvent, _, cx| {
         if let Some(Modal::Settings { follow_up, .. }) = ws.modal.as_mut() {
             *follow_up = choice;
+        }
+        cx.notify();
+    }))
+}
+
+/// One side of the Used / Left usage limits display switch.
+fn usage_display_button(choice: crate::store::UsageDisplay, label: &'static str, current: crate::store::UsageDisplay, cx: &mut Context<Workspace>) -> impl IntoElement {
+    button(format!("settings-usage-display-{label}"), label, choice == current).on_click(cx.listener(move |ws, _: &ClickEvent, _, cx| {
+        if let Some(Modal::Settings { usage_display, .. }) = ws.modal.as_mut() {
+            *usage_display = choice;
         }
         cx.notify();
     }))

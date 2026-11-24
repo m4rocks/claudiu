@@ -19,6 +19,102 @@ console.info = console.error;
 const send = (message) => process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", ...message })}\n`);
 const update = (sessionId, body) => send({ method: "session/update", params: { sessionId, update: body } });
 
+function parseEpochSeconds(value) {
+  if (typeof value === "number" && Number.isFinite(value) && value > 0) return Math.floor(value);
+  if (typeof value === "string" && value) {
+    const ms = Date.parse(value);
+    if (Number.isFinite(ms) && ms > 0) return Math.floor(ms / 1000);
+  }
+  return null;
+}
+
+function clampFraction(value) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return null;
+  return Math.max(0, Math.min(1, value));
+}
+
+/** Normalize the SDK's `get_usage` response (utilization is 0..100, resets_at is RFC3339). */
+function usageFromControlResponse(response, seenAt = Math.floor(Date.now() / 1000)) {
+  if (!response?.rate_limits_available || !response.rate_limits) return null;
+  const pick = (w) => {
+    if (!w || typeof w.utilization !== "number" || !Number.isFinite(w.utilization)) return null;
+    return {
+      utilization: clampFraction(w.utilization / 100),
+      resets_at: parseEpochSeconds(w.resets_at),
+      seen_at: seenAt,
+    };
+  };
+  const five_hour = pick(response.rate_limits.five_hour);
+  const seven_day = pick(response.rate_limits.seven_day);
+  if (!five_hour && !seven_day) return null;
+  return { five_hour, seven_day };
+}
+
+/** Normalize a streamed `rate_limit_event` (utilization is 0..1, resetsAt is epoch seconds). */
+function usageFromRateLimitEvent(info, seenAt = Math.floor(Date.now() / 1000)) {
+  if (!info || typeof info.utilization !== "number" || !Number.isFinite(info.utilization)) return null;
+  const entry = {
+    utilization: clampFraction(info.utilization),
+    resets_at: parseEpochSeconds(info.resetsAt),
+    seen_at: seenAt,
+  };
+  if (info.rateLimitType === "five_hour") return { five_hour: entry, seven_day: null };
+  if (info.rateLimitType === "seven_day") return { five_hour: null, seven_day: entry };
+  return null;
+}
+
+function queryUsage(q) {
+  const fn = q?.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET;
+  if (typeof fn !== "function") return Promise.resolve(null);
+  return fn.call(q, { skipBehaviors: true }).catch(() => null);
+}
+
+/** Standalone zero-token usage probe (`node claude.mjs --probe-usage`), matching t3code's probe. */
+async function runUsageProbe() {
+  const abort = new AbortController();
+  const timer = setTimeout(() => abort.abort(), 25_000);
+  timer.unref?.();
+  const waitAbort = () => new Promise((resolve) => {
+    if (abort.signal.aborted) return resolve();
+    abort.signal.addEventListener("abort", resolve, { once: true });
+  });
+  let q;
+  try {
+    q = query({
+      prompt: (async function* () {
+        await waitAbort();
+      })(),
+      options: {
+        persistSession: false,
+        pathToClaudeCodeExecutable: process.env.CLAUDE_CODE_EXECUTABLE || undefined,
+        settingSources: ["user", "project", "local"],
+        abortController: abort,
+        stderr: () => {},
+      },
+    });
+    await q.initializationResult();
+    const res = await queryUsage(q);
+    const limits = usageFromControlResponse(res);
+    process.stdout.write(`${JSON.stringify({
+      available: Boolean(res?.rate_limits_available),
+      five_hour: limits?.five_hour ?? null,
+      seven_day: limits?.seven_day ?? null,
+    })}\n`);
+  } catch (error) {
+    process.stderr.write(`${error?.message ?? String(error)}\n`);
+    process.exitCode = 1;
+  } finally {
+    clearTimeout(timer);
+    if (!abort.signal.aborted) abort.abort();
+    try { q?.close?.(); } catch {}
+    process.exit(process.exitCode ?? 0);
+  }
+}
+
+if (process.argv.includes("--probe-usage")) {
+  await runUsageProbe();
+}
+
 // Requests to m4code (permission questions) and their answers.
 let nextRequest = 1;
 const answers = new Map();
@@ -311,11 +407,15 @@ async function finishTurn(session, result) {
       turn.resolve({ stopReason: stopReason(session, result), ...(usage ? { usage } : {}) });
     }
   }
-  // The context size is only shown, so the turn ends without waiting for it.
+  // The context size and usage limits are only shown, so the turn ends without waiting for them.
   session.query
     .getContextUsage()
     .then((usage) => update(session.id, { sessionUpdate: "usage_update", used: usage.totalTokens, size: usage.maxTokens }))
     .catch(() => {});
+  queryUsage(session.query).then((res) => {
+    const limits = usageFromControlResponse(res);
+    if (limits) update(session.id, { sessionUpdate: "_m4code/usage_limits", limits });
+  });
 }
 
 /** Claude Code says it took a steer off its queue without reading it (the states t3code treats the same way). */
@@ -368,6 +468,11 @@ async function pump(session) {
           session.query.interrupt().catch(() => {});
         }
         if (!session.dropping.size) session.dropsDone?.();
+        continue;
+      }
+      if (m.type === "rate_limit_event") {
+        const limits = usageFromRateLimitEvent(m.rate_limit_info);
+        if (limits) update(session.id, { sessionUpdate: "_m4code/usage_limits", limits });
         continue;
       }
       // Not in the SDK's types yet; t3code reads it the same way.
@@ -456,6 +561,10 @@ async function open(params, resume) {
   session.models = realModels.length ? realModels : rawModels;
   if (!session.models.some((m) => m.value === session.model) && session.models.length) session.model = session.models[0].value;
   update(id, { sessionUpdate: "available_commands_update", availableCommands: (init.commands ?? []).map((c) => ({ name: c.name, description: c.description, input: c.argumentHint ? { hint: c.argumentHint } : null })) });
+  queryUsage(session.query).then((res) => {
+    const limits = usageFromControlResponse(res);
+    if (limits) update(id, { sessionUpdate: "_m4code/usage_limits", limits });
+  });
   pump(session);
   return session;
 }

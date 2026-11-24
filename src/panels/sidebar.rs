@@ -857,76 +857,143 @@ impl Workspace {
     }
 
     /// Connected harnesses' usage limits. Hidden when no connected harness has a limits adapter.
-    fn render_footer(&self, _cx: &mut Context<Self>) -> Option<Div> {
+    fn render_footer(&self, cx: &mut Context<Self>) -> Option<Div> {
         use crate::harness::Harness;
+        use crate::store::UsageDisplay;
+        /// Readings older than this are dimmed to signal staleness.
+        const STALE_AFTER_SECS: i64 = 15 * 60;
+
         let t = now();
         let settings = &self.store.data.settings;
+        let display = settings.usage_display;
         let usage = &self.store.data.claude_usage;
 
         // A reset time stays true however old the reading is, so it shows whenever it is still ahead, including for a
         // reading saved before launch. Without one, the reading's age says how far to trust it.
-        let limit = |id: String, l: &Option<crate::store::RateLimit>, calm: u32| -> Stateful<Div> {
-            let (fraction, right) = match l {
-                Some(l) => match l.resets_at {
-                    Some(reset) if reset > t => (l.utilization, countdown(reset - t)),
-                    Some(_) => (None, "—".into()),
-                    None => (l.utilization, format!("{} ago", ago(l.seen_at, t))),
-                },
-                None => (None, "—".into()),
+        let limit = |id: String, l: &Option<crate::store::RateLimit>, calm: u32, loading: bool| -> Stateful<Div> {
+            let (used, right, stale) = match l {
+                Some(l) => {
+                    let old = t.saturating_sub(l.seen_at) > STALE_AFTER_SECS;
+                    match l.resets_at {
+                        Some(reset) if reset > t => (l.utilization, countdown(reset - t), old),
+                        Some(_) => (None, if loading { "…".into() } else { "—".into() }, true),
+                        None => (l.utilization, format!("{} ago", ago(l.seen_at, t)), old),
+                    }
+                }
+                None => (None, if loading { "…".into() } else { "—".into() }, false),
             };
-            let left = fraction.map(|f| format!("{:.0}%", (f * 100.0).round())).unwrap_or_else(|| "—".into());
-            limit_bar(id, fraction, left, right, Some(hsla(calm))).flex_1().min_w_0()
+            let fill = used.map(|f| match display {
+                UsageDisplay::Used => f,
+                UsageDisplay::Left => (1.0 - f).clamp(0.0, 1.0),
+            });
+            let left = fill.map(|f| format!("{:.0}%", (f * 100.0).round())).unwrap_or_else(|| "—".into());
+            limit_bar(id, fill, used, left, right, Some(hsla(calm)), stale).flex_1().min_w_0()
         };
-        // Fits the widest marks: two logos, or a logo and a two-letter name.
+        // Fits the widest marks: two logos, or a logo and a two-letter name, plus an optional error dot.
         let label_w = crate::panels::scale::px(30.0);
         let gap = crate::panels::scale::px(6.0);
-        let source_row = |marks: &[&'static logos::Logo], name: Option<String>, color: u32, five: AnyElement, seven: AnyElement| -> Div {
-            let mut who = div().flex().flex_none().items_center().gap(crate::panels::scale::px(4.0)).w(label_w).overflow_hidden();
+        let source_row = |marks: &[&'static logos::Logo], name: Option<String>, color: u32, errored: bool, five: AnyElement, seven: AnyElement| -> Div {
+            let mut who = div().flex().flex_none().items_center().gap(crate::panels::scale::px(3.0)).w(label_w).overflow_hidden();
             for logo in marks {
                 who = who.child(logos::draw(logo, 12.0, hsla(color)));
             }
             if let Some(name) = name {
                 who = who.child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(crate::panels::scale::px(10.5)).text_color(hsla(color)).child(name));
             }
+            if errored {
+                who = who.child(div().flex_none().size(px(5.0)).rounded_full().bg(hsla(theme::WARN)));
+            }
             div().flex().items_center().gap(gap).child(who).child(five).child(seven)
         };
         let divider = || div().h(px(1.0)).w_full().my(px(2.0)).bg(hsla(theme::BORDER));
+        let any_loading = [Harness::Claude, Harness::Codex, Harness::Antigravity]
+            .into_iter()
+            .any(|h| self.limits_state.get(h).loading);
+        let refresh_btn = div()
+            .id("limits-refresh")
+            .flex_none()
+            .w(label_w)
+            .flex()
+            .items_center()
+            .cursor_pointer()
+            .rounded(px(3.0))
+            .text_color(hsla(if any_loading { theme::TEXT_DIM } else { theme::TEXT_FAINT }))
+            .hover(|s| s.text_color(hsla(theme::TEXT)))
+            .child(icon(
+                if any_loading { IconName::LoaderCircle } else { IconName::RefreshCw },
+                11.0,
+            ))
+            .on_click(cx.listener(|ws, _: &ClickEvent, _, cx| ws.refresh_all_limits(cx)));
+        let (h5, h7) = match display {
+            UsageDisplay::Used => ("5 HOUR", "7 DAY"),
+            UsageDisplay::Left => ("5H LEFT", "7D LEFT"),
+        };
         let headers = div()
             .flex()
+            .items_center()
             .gap(gap)
-            .child(div().flex_none().w(label_w))
-            .child(section_label("5 HOUR").flex_1().min_w_0())
-            .child(section_label("7 DAY").flex_1().min_w_0());
+            .child(refresh_btn)
+            .child(section_label(h5).flex_1().min_w_0())
+            .child(section_label(h7).flex_1().min_w_0());
 
         let mut rows: Vec<Div> = Vec::new();
         if settings.harness_enabled(Harness::Claude) {
+            let state = self.limits_state.get(Harness::Claude);
             rows.push(source_row(
                 &[&logos::CLAUDE],
                 None,
                 theme::CLAUDE,
-                limit("meter-5h".into(), &usage.five_hour, theme::CLAUDE).into_any_element(),
-                limit("meter-7d".into(), &usage.seven_day, theme::CLAUDE).into_any_element(),
+                state.error.is_some(),
+                limit("meter-5h".into(), &usage.five_hour, theme::CLAUDE, state.loading).into_any_element(),
+                limit("meter-7d".into(), &usage.seven_day, theme::CLAUDE, state.loading).into_any_element(),
             ));
         }
         let subagents = &settings.custom_subagents;
         for agent in crate::harness::subagents::Agent::ALL {
             let harness = Harness::from_agent(agent);
             let provider = agent.provider();
-            if !(settings.harness_enabled(harness) || subagents.get(agent).on) {
+            if provider.limits.is_none() || !(settings.harness_enabled(harness) || subagents.get(agent).on) {
                 continue;
             }
-            let Some(pools) = self.store.data.subagent_limits.get(provider.key).filter(|pools| !pools.is_empty()) else { continue };
-            if !rows.is_empty() {
-                rows.push(divider());
-            }
-            for (i, pool) in pools.iter().enumerate() {
-                let source = format!("{}-{i}", provider.key);
-                let cell = |window: &str, l: &Option<crate::store::RateLimit>| match l {
-                    Some(_) => limit(format!("meter-{source}-{window}"), l, provider.color).into_any_element(),
-                    None => div().flex_1().min_w_0().h(crate::panels::scale::px(16.0)).into_any_element(),
-                };
-                let (marks, name) = (provider.marks)(&pool.name);
-                rows.push(source_row(marks, name, provider.color, cell("5h", &pool.usage.five_hour), cell("7d", &pool.usage.seven_day)));
+            let state = self.limits_state.get(harness);
+            let pools = self.store.data.subagent_limits.get(provider.key).filter(|pools| !pools.is_empty());
+            match pools {
+                Some(pools) => {
+                    if !rows.is_empty() {
+                        rows.push(divider());
+                    }
+                    for (i, pool) in pools.iter().enumerate() {
+                        let source = format!("{}-{i}", provider.key);
+                        let cell = |window: &str, l: &Option<crate::store::RateLimit>| match l {
+                            Some(_) => limit(format!("meter-{source}-{window}"), l, provider.color, state.loading).into_any_element(),
+                            None => div().flex_1().min_w_0().h(crate::panels::scale::px(16.0)).into_any_element(),
+                        };
+                        let (marks, name) = (provider.marks)(&pool.name);
+                        rows.push(source_row(
+                            marks,
+                            name,
+                            provider.color,
+                            i == 0 && state.error.is_some(),
+                            cell("5h", &pool.usage.five_hour),
+                            cell("7d", &pool.usage.seven_day),
+                        ));
+                    }
+                }
+                None if state.loading || state.error.is_some() => {
+                    if !rows.is_empty() {
+                        rows.push(divider());
+                    }
+                    let (marks, name) = (provider.marks)(provider.name);
+                    rows.push(source_row(
+                        marks,
+                        name,
+                        provider.color,
+                        state.error.is_some(),
+                        limit(format!("meter-{}-5h", provider.key), &None, provider.color, state.loading).into_any_element(),
+                        limit(format!("meter-{}-7d", provider.key), &None, provider.color, state.loading).into_any_element(),
+                    ));
+                }
+                None => {}
             }
         }
         if rows.is_empty() {

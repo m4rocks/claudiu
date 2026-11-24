@@ -28,7 +28,7 @@ pub use sessions::{SessionKind, ExternalState, Attached, AgentMeta, ProviderSess
 mod limits;
 pub use limits::{RateLimit, UsageLimits};
 mod settings;
-pub use settings::{FollowUp, SideCard, WindowGeom, Layout, Settings, TextGenerationModel};
+pub use settings::{FollowUp, SideCard, UsageDisplay, WindowGeom, Layout, Settings, TextGenerationModel};
 mod data;
 pub use data::Data;
 

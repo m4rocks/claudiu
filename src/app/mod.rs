@@ -194,6 +194,7 @@ pub enum Modal {
         follow_up: crate::store::FollowUp,
         auto_compact: bool,
         auto_compact_threshold: u64,
+        usage_display: crate::store::UsageDisplay,
         /// m4code tools turned off (m4code tools page).
         m4code_off: Vec<crate::mcp::Feature>,
         /// Skills to turn off, separated by commas (Claude Code tools page).
@@ -586,8 +587,10 @@ pub struct Workspace {
     closed: Vec<Id>,
     /// Whether the Custom subagents page is asking each agent for its models. Not saved to disk.
     pub model_lookups: settings::ModelLookups,
-    /// When each provider's limits were last asked for; failed reads wait for its next refresh too.
-    pub limits_asked: crate::harness::subagents::AgentMap<Option<std::time::Instant>>,
+    /// Per-harness usage limits probe state (in-flight flag, last error, backoff, queued refresh).
+    pub limits_state: crate::harness::HarnessMap<ingest::LimitsState>,
+    /// Last time Codex's fast local rollout-log watcher ran.
+    pub codex_logs_asked: Option<std::time::Instant>,
     pub editors: Vec<(Editor, bool)>,
     pub window_title: String,
     /// The session being dragged in the sidebar (lifted in place while its ghost follows the cursor).
@@ -740,7 +743,8 @@ impl Workspace {
             ephemeral: HashSet::new(),
             closed: vec![],
             model_lookups: Default::default(),
-            limits_asked: Default::default(),
+            limits_state: Default::default(),
+            codex_logs_asked: None,
             editors: Editor::ALL
                 .iter()
                 .map(|e| (*e, e.locate().is_some()))

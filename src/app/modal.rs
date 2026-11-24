@@ -115,6 +115,7 @@ impl Workspace {
             follow_up,
             auto_compact,
             auto_compact_threshold,
+            usage_display,
             m4code_off,
             skills_field,
             renaming,
@@ -159,6 +160,7 @@ impl Workspace {
         let auto_compact_threshold_changed = s.auto_compact_threshold != auto_compact_threshold;
         s.auto_compact = auto_compact;
         s.auto_compact_threshold = auto_compact_threshold;
+        s.usage_display = usage_display;
         s.text_generation_model = text_generation_model;
 
         let enabled = if subagents.enabled.is_empty() { vec![default_model.harness] } else { subagents.enabled.clone() };

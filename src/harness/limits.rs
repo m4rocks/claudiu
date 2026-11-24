@@ -13,6 +13,44 @@ pub struct Pool {
     pub usage: UsageLimits,
 }
 
+/// Merge `incoming` into `current` per window, never letting an older reading overwrite a newer one.
+/// Returns `true` when any window changed.
+pub fn merge_usage(current: &mut UsageLimits, incoming: &UsageLimits) -> bool {
+    let mut changed = false;
+    for (slot, next) in [(&mut current.five_hour, &incoming.five_hour), (&mut current.seven_day, &incoming.seven_day)] {
+        if let Some(next) = next
+            && slot.as_ref().is_none_or(|cur| next.seen_at >= cur.seen_at && cur != next)
+        {
+            *slot = Some(next.clone());
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// Merge incoming pools with previously stored pools so a slower in-flight probe cannot clobber a newer live reading.
+pub fn merge_pools(current: &[Pool], incoming: Vec<Pool>) -> Vec<Pool> {
+    incoming
+        .into_iter()
+        .map(|mut pool| {
+            if let Some(prev) = current.iter().find(|p| p.name == pool.name) {
+                let mut merged = prev.usage.clone();
+                merge_usage(&mut merged, &pool.usage);
+                pool.usage = merged;
+            }
+            pool
+        })
+        .collect()
+}
+
+/// Whether any window in `usage` has crossed its `resets_at` boundary since it was observed.
+pub fn has_expired_window(usage: &UsageLimits, now: i64) -> bool {
+    [usage.five_hour.as_ref(), usage.seven_day.as_ref()]
+        .into_iter()
+        .flatten()
+        .any(|w| w.resets_at.is_some_and(|reset| reset <= now && w.seen_at < reset))
+}
+
 const HEAD_BYTES: u64 = 128 * 1024;
 const TAIL_BYTES: u64 = 768 * 1024;
 
@@ -54,5 +92,23 @@ mod tests {
         assert_eq!(parse_rfc3339("1970-01-01T00:00:00Z"), Some(0));
         assert_eq!(parse_rfc3339("2026-10-05T14:10:53.395Z"), Some(1791209453));
         assert_eq!(parse_rfc3339("nope"), None);
+    }
+
+    #[test]
+    fn merge_usage_keeps_newer_readings_and_detects_expired_windows() {
+        use crate::store::RateLimit;
+        let mut cur = UsageLimits {
+            five_hour: Some(RateLimit { utilization: Some(0.4), resets_at: Some(500), seen_at: 200 }),
+            seven_day: None,
+        };
+        let older = UsageLimits {
+            five_hour: Some(RateLimit { utilization: Some(0.1), resets_at: Some(500), seen_at: 100 }),
+            seven_day: Some(RateLimit { utilization: Some(0.2), resets_at: Some(900), seen_at: 100 }),
+        };
+        assert!(merge_usage(&mut cur, &older));
+        assert_eq!(cur.five_hour.as_ref().unwrap().utilization, Some(0.4), "older probe must not overwrite newer live reading");
+        assert_eq!(cur.seven_day.as_ref().unwrap().utilization, Some(0.2), "missing window is still filled");
+        assert!(!has_expired_window(&cur, 499));
+        assert!(has_expired_window(&cur, 500));
     }
 }

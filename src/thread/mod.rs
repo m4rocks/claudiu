@@ -150,6 +150,8 @@ pub enum ThreadEvent {
     Context(u64, u64),
     /// The harness reported per-turn token and prompt-cache usage.
     Usage(crate::harness::thread::TurnUsage),
+    /// The harness reported live account rate limits (5h / 7d windows).
+    UsageLimits(Harness, crate::store::UsageLimits),
     /// A file a tool acted on was clicked: its path and line (1-based).
     OpenPath(String, Option<usize>),
     /// The user picked a model served by another harness and sent a message: dynamically hand off this chat.
@@ -787,6 +789,12 @@ impl ThreadView {
             Event::Update(update) => {
                 if update["sessionUpdate"] == "_m4code/session_ended" {
                     self.ended(update["error"].as_str().map(String::from), cx);
+                    return;
+                }
+                if update["sessionUpdate"] == "_m4code/usage_limits" {
+                    if let Some(limits) = crate::harness::claude::limits::parse_value(&update["limits"], crate::store::now()) {
+                        cx.emit(ThreadEvent::UsageLimits(self.harness, limits));
+                    }
                     return;
                 }
                 if update["sessionUpdate"] == "_m4code/background_shells" {

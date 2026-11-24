@@ -88,9 +88,9 @@ pub struct Provider {
 
 const CODEX: Provider = Provider {
     limits: Some(Limits { read: || {
-        let usage = super::codex::limits::codex_home().and_then(|home| super::codex::limits::read(&home)).ok_or("Codex has no limits reading yet")?;
+        let usage = super::codex::limits::probe()?;
         Ok(vec![Pool { name: "Codex".into(), usage }])
-    }, every: Duration::from_secs(3) }),
+    }, every: super::codex::limits::REFRESH_EVERY }),
     color: theme::CODEX,
     marks: logos::codex_marks,
     name: "Codex",

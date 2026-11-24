@@ -7,6 +7,7 @@
 //! checks, and transcript worktree inspection) lives inside this module, keeping the rest of m4code harness-agnostic.
 
 pub mod costly;
+pub mod limits;
 pub mod plugin;
 pub mod trim;
 pub mod usage;

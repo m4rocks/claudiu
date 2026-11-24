@@ -3,14 +3,21 @@
 //! reading. Read-only, no network, no tokens. The log format is Codex's own and undocumented, so anything that doesn't
 //! parse is skipped and the sidebar keeps its last reading.
 
-use std::path::{Path, PathBuf};
 use std::collections::HashMap;
-use std::sync::{LazyLock, Mutex};
-use std::time::SystemTime;
+use std::io::{BufRead, BufReader, Write};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::{LazyLock, Mutex, mpsc};
+use std::time::{Duration, Instant, SystemTime};
 
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::store::{RateLimit, UsageLimits};
+
+/// Periodic active probe cadence for `codex app-server` (`account/rateLimits/read`).
+pub const REFRESH_EVERY: Duration = Duration::from_secs(300);
+/// Timeout for a `codex app-server` probe.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Codex files a log under the day its session started, so a session still running from yesterday writes into
 /// yesterday's folder. Looking at the last few days finds it.
@@ -41,6 +48,124 @@ pub fn codex_home() -> Option<PathBuf> {
         Some(dir) if !dir.is_empty() => Some(PathBuf::from(dir)),
         _ => crate::platform::home_dir().map(|h| h.join(".codex")),
     }
+}
+
+/// Actively query Codex's current rate limits via `codex app-server` (`account/rateLimits/read`),
+/// falling back to local rollout logs if `codex` isn't installed or the RPC fails.
+pub fn probe() -> Result<UsageLimits, String> {
+    match probe_app_server() {
+        Ok(usage) => Ok(usage),
+        Err(err) => {
+            if let Some(usage) = codex_home().and_then(|home| read(&home)) {
+                return Ok(usage);
+            }
+            Err(err)
+        }
+    }
+}
+
+fn probe_app_server() -> Result<UsageLimits, String> {
+    let codex = crate::harness::find("codex").ok_or_else(|| "codex CLI was not found on PATH".to_string())?;
+    let mut cmd = Command::new(&codex);
+    cmd.args(["app-server"])
+        .current_dir(crate::datadir::data_dir())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    crate::platform::no_window(&mut cmd);
+    crate::platform::with_login_path(&mut cmd);
+
+    let mut child = cmd.spawn().map_err(|e| format!("codex app-server could not start ({e})"))?;
+    let mut stdin = child.stdin.take().ok_or("codex app-server had no stdin")?;
+    let stdout = child.stdout.take().ok_or("codex app-server had no stdout")?;
+
+    let (tx, rx) = mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        let reader = BufReader::new(stdout);
+        for line in reader.lines().map_while(Result::ok) {
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+
+    let deadline = Instant::now() + PROBE_TIMEOUT;
+    let send_msg = |stdin: &mut std::process::ChildStdin, msg: &Value| -> Result<(), String> {
+        writeln!(stdin, "{msg}").and_then(|_| stdin.flush()).map_err(|e| format!("codex app-server write failed ({e})"))
+    };
+    let wait_response = |id: i64| -> Result<Value, String> {
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err("codex app-server timed out".into());
+            }
+            let line = rx.recv_timeout(remaining).map_err(|_| "codex app-server did not answer".to_string())?;
+            let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
+            if v.get("id").and_then(Value::as_i64) == Some(id) {
+                if let Some(err) = v.get("error") {
+                    let msg = err.get("message").and_then(Value::as_str).unwrap_or("JSON-RPC error");
+                    return Err(format!("codex rate limits read failed: {msg}"));
+                }
+                return Ok(v.get("result").cloned().unwrap_or(Value::Null));
+            }
+        }
+    };
+
+    let result = (|| {
+        send_msg(
+            &mut stdin,
+            &json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": { "clientInfo": { "name": "m4code", "version": env!("CARGO_PKG_VERSION") } }
+            }),
+        )?;
+        let _ = wait_response(1)?;
+        send_msg(&mut stdin, &json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }))?;
+        send_msg(&mut stdin, &json!({ "jsonrpc": "2.0", "id": 2, "method": "account/rateLimits/read", "params": null }))?;
+        let resp = wait_response(2)?;
+        let now = time::OffsetDateTime::now_utc().unix_timestamp();
+        parse_rpc_response(&resp, now).ok_or_else(|| "Codex returned no usage limits".into())
+    })();
+
+    drop(stdin);
+    let _ = child.kill();
+    let _ = child.wait();
+    result
+}
+
+/// Parse the `result` object from `account/rateLimits/read`.
+pub fn parse_rpc_response(result: &Value, seen_at: i64) -> Option<UsageLimits> {
+    let snapshot = result
+        .get("rateLimits")
+        .filter(|v| v.is_object())
+        .or_else(|| result.pointer("/rateLimitsByLimitId/codex").filter(|v| v.is_object()))?;
+    parse_rpc_snapshot(snapshot, seen_at)
+}
+
+fn parse_rpc_snapshot(snapshot: &Value, seen_at: i64) -> Option<UsageLimits> {
+    if snapshot.get("limitId").and_then(Value::as_str).is_some_and(|id| id != "codex") {
+        return None;
+    }
+    let mut usage = UsageLimits::default();
+    let positions = [("primary", 300i64), ("secondary", 10080i64)];
+    for (key, fallback_mins) in positions {
+        let Some(window) = snapshot.get(key).filter(|v| v.is_object()) else { continue };
+        let Some(used_pct) = window.get("usedPercent").and_then(Value::as_f64).filter(|p| p.is_finite()) else { continue };
+        let minutes = window.get("windowDurationMins").and_then(Value::as_i64).unwrap_or(fallback_mins);
+        let limit = RateLimit {
+            utilization: Some((used_pct / 100.0).clamp(0.0, 1.0) as f32),
+            resets_at: window.get("resetsAt").and_then(Value::as_i64).filter(|&t| t > 0),
+            seen_at,
+        };
+        match minutes {
+            300 => usage.five_hour = Some(limit),
+            10080 => usage.seven_day = Some(limit),
+            _ => {}
+        }
+    }
+    (usage.five_hour.is_some() || usage.seven_day.is_some()).then_some(usage)
 }
 
 /// The newest limits Codex logged, or `None` when there are none to read.
@@ -241,5 +366,23 @@ mod tests {
         let hour_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
         std::fs::File::options().write(true).open(&newer).unwrap().set_modified(hour_ago).unwrap();
         assert_eq!(read(home.path()).unwrap().five_hour.unwrap().utilization, Some(0.5));
+    }
+
+    #[test]
+    fn parses_app_server_rate_limits_response() {
+        let resp: Value = serde_json::from_str(r#"{
+            "rateLimits": {
+                "limitId": "codex",
+                "planType": "plus",
+                "primary": { "usedPercent": 31.0, "windowDurationMins": 300, "resetsAt": 1795000000 },
+                "secondary": { "usedPercent": 14.0, "windowDurationMins": 10080, "resetsAt": 1795500000 }
+            }
+        }"#).unwrap();
+        let usage = parse_rpc_response(&resp, 1000).unwrap();
+        assert_eq!(usage.five_hour, Some(RateLimit { utilization: Some(0.31), resets_at: Some(1795000000), seen_at: 1000 }));
+        assert_eq!(usage.seven_day, Some(RateLimit { utilization: Some(0.14), resets_at: Some(1795500000), seen_at: 1000 }));
+
+        let other: Value = serde_json::from_str(r#"{"rateLimits":{"limitId":"codex_other","primary":{"usedPercent":50}}}"#).unwrap();
+        assert_eq!(parse_rpc_response(&other, 1000), None);
     }
 }

@@ -6,15 +6,20 @@
 //! Antigravity splits its models into groups ("Gemini Models", "Claude and GPT models"), each with its own limits, so a
 //! reading is one `Pool` per group.
 
+use std::collections::HashMap;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
 use crate::store::{RateLimit, UsageLimits};
 use crate::harness::limits::Pool;
+
+/// Cache `agy --version` per executable path so periodic `/usage` polls don't spawn an extra process.
+static VERSION_OK: LazyLock<Mutex<HashMap<PathBuf, Result<(), String>>>> = LazyLock::new(Default::default);
 
 /// How often the sidebar asks again while Antigravity subagents are on.
 pub const REFRESH_EVERY: Duration = Duration::from_secs(300);
@@ -29,9 +34,20 @@ const FIRST_WITH_USAGE: (u32, u32, u32) = (1, 1, 11);
 /// Runs `agy` for its limits, once its version shows it answers `/usage` itself. An error says why there is no
 /// reading.
 pub fn read(agy: &Path, cwd: &Path) -> Result<Vec<Pool>, String> {
-    let version = output(agy, &["--version"], cwd)?;
-    if !version_has_usage(&version) {
-        return Err(format!("agy {} is older than {}.{}.{}, which first answers /usage without the model", version.trim(), FIRST_WITH_USAGE.0, FIRST_WITH_USAGE.1, FIRST_WITH_USAGE.2));
+    let cached = VERSION_OK.lock().unwrap_or_else(|e| e.into_inner()).get(agy).cloned();
+    match cached {
+        Some(Ok(())) => {}
+        Some(Err(err)) => return Err(err),
+        None => {
+            let version = output(agy, &["--version"], cwd)?;
+            let check = if version_has_usage(&version) {
+                Ok(())
+            } else {
+                Err(format!("agy {} is older than {}.{}.{}, which first answers /usage without the model", version.trim(), FIRST_WITH_USAGE.0, FIRST_WITH_USAGE.1, FIRST_WITH_USAGE.2))
+            };
+            VERSION_OK.lock().unwrap_or_else(|e| e.into_inner()).insert(agy.to_path_buf(), check.clone());
+            check?;
+        }
     }
     let out = output(agy, &["-p", "/usage", "--output-format", "json"], cwd)?;
     parse(&out, time::OffsetDateTime::now_utc().unix_timestamp()).ok_or_else(|| "agy's /usage gave no limits".into())
