@@ -42,7 +42,7 @@ When upgrading from a version with multiple Claude accounts, resumed sessions us
 - **Comments**: Select text in chat and use the comment icon or press Cmd/Ctrl+Shift+M to add context to your next message. The same icon opens comments on lines in Review changes and in the editor.
 
 - **Branches and worktrees**: Create a branch or spin up a new worktree (from `main` or the current checkout) in one click from the branch chip, inspect external worktrees, or move a session between worktrees.
-- **Change review and snapshots**: Review a file-changing turn from its prompt to see the changes captured when that turn ended. **Restore Checkpoint** rolls the files back when the checkout still matches, and **Fork Thread** copies the conversation through that turn into a new session. The composer?s **Review changes** button compares the working tree to the latest snapshot and supports hunk actions and line comments.
+- **Change review and snapshots**: The composer's **Review changes** button compares the working tree to the latest snapshot and supports hunk actions and line comments.
 - **Built-in editor (`Ctrl+Shift+E`)**: File tree, tabs, syntax highlighting, Git gutter marks, and LSP diagnostics, hover, completions, and go-to-definition using language servers already on your `PATH`. Works in active sessions and on Home, keeping each project's tabs and unsaved edits. Click the comment button beside hovered or selected lines to add `@path#L12-30: comment` to the composer.
 - **Shell panel (`Ctrl+J` / `Ctrl+\``)**: A real PTY shell in the session's folder. Agents never run in a PTY and m4code never types into the shell.
 - **Sessions, sidebars, and cards**:

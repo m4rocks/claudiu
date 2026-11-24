@@ -179,6 +179,7 @@ impl ThreadView {
         true
     }
 
+    #[cfg(test)]
     pub(crate) fn open_turn_review(&mut self, id: Uuid, cx: &mut Context<Self>) {
         if !self.turn_reviews.iter().any(|turn| turn.id == id) {
             return;

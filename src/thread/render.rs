@@ -413,19 +413,6 @@ impl ThreadView {
                 // `items_start` sizes children to their content, so a long list row would lay out on one line and run
                 // past the bubble; capping the text at the bubble's width makes it wrap.
                 .child(div().max_w_full().min_w_0().child(chat_markdown(&mut self.markdown, ix, &keep_line_breaks(text), cx)))
-                .children(self.turn_reviews.iter().filter(|turn| turn.row == ix && turn.text == *text).map(|turn| {
-                    let id = turn.id;
-                    let count = turn.file_count;
-                    let label = if turn.checkpoint { "Checkpoint" } else { "Captured changes" };
-                    let files = if count == 1 { "1 file".into() } else { format!("{count} files") };
-                    crate::panels::widgets::focusable(SharedString::from(format!("review-turn-{id}")))
-                        .px(px(9.0)).py(px(5.0)).gap(px(7.0)).rounded(px(6.0))
-                        .bg(hsla(theme::SURFACE_ELEVATED)).border_color(hsla(theme::PANEL_BORDER))
-                        .hover(|style| style.bg(hsla(theme::SURFACE_HOVER)))
-                        .child(icon(IconName::GitCommitHorizontal, 14.0))
-                        .child(format!("{label} · {files}"))
-                        .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| v.open_turn_review(id, cx)))
-                }))
                 .into_any_element(),
             Entry::Agent(text) => {
                 let citations = elements::inline_citations_row(ix, elements::extract_citations(text));
