@@ -188,7 +188,7 @@ fn run_task(request: &Request, emit: &mut impl FnMut(Event)) -> Result<String, S
 pub(super) fn codex_env(request: &Request) -> Vec<(&'static str, String)> {
     let mut env = vec![("INITIAL_AGENT_MODE", (if request.edits { "workspace-write" } else { "read-only" }).to_string())];
     if let Some(config) = codex_config(request.model.as_deref(), request.effort.as_deref()) {
-        env.push(("CODEX_CONFIG", config.to_string()));
+        env.push((super::codex::CONFIG_ENV, config.to_string()));
     }
     env
 }

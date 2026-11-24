@@ -265,8 +265,6 @@ pub(super) fn slash_command_spans(draft: &str) -> Vec<(std::ops::Range<usize>, &
     out
 }
 
-type InitialOption = (&'static str, String, String);
-
 pub(crate) struct ComposerState {
     text: String,
     attachments: crate::panels::attachments::Attachments,
@@ -446,7 +444,6 @@ pub struct ThreadView {
     queue_held: bool,
     queue_edit: Option<queue::Edit>,
     preparing: Option<Queued>,
-    restarting_for_steer: bool,
     interrupting: bool,
     queue_save_error: bool,
     questions: VecDeque<Question>,
@@ -664,7 +661,6 @@ impl ThreadView {
             queue_held,
             queue_edit: None,
             preparing: None,
-            restarting_for_steer: false,
             interrupting: false,
             queue_save_error: false,
             questions: VecDeque::new(),
@@ -779,36 +775,44 @@ impl ThreadView {
                 break (connection, incoming, opened);
             };
             let _ = this.update(cx, |v, _| v.antigravity_full_access = full_access);
-            let Some((sid, mut initial_options)) = this.update(cx, |v, cx| v.opened(opened, &start, cx)).ok().flatten() else {
+            let Some(sid) = this.update(cx, |v, cx| v.opened(opened, &start, cx)).ok().flatten() else {
                 return;
             };
-            // Drain any stale session/new or session/load notifications (such as default config_option_update)
-            // BEFORE applying the requested model/effort so they cannot overwrite our selection.
-            while let Ok(event) = incoming.try_recv() {
-                if this.update(cx, |v, cx| v.on_event(event, cx)).is_err() {
-                    return;
-                }
-            }
-            // Apply model before thought_level because switching models can change available effort options.
-            initial_options.sort_by_key(|(cat, _, _)| if *cat == "model" { 0 } else { 1 });
-            for (category, config_id, value) in initial_options {
-                if let Ok(result) = connection
-                    .request("session/set_config_option", json!({"sessionId": &sid, "configId": &config_id, "value": &value}))
-                    .await
-                {
-                    let _ = this.update(cx, |v, cx| {
-                        v.thread.apply_session(&result);
-                        // If the harness returned an empty/unchanged payload, keep the requested value visible.
-                        if let Some(opt) = v.thread.config.iter_mut().find(|o| o.category == category)
-                            && opt.current != value
-                            && opt.choices.iter().any(|(c, _)| c == &value)
-                        {
-                            opt.current = value.clone();
+            let mut options = start.options.iter().collect::<Vec<_>>();
+            // A model change can replace the effort option and its available values.
+            options.sort_by_key(|(category, _)| *category != "model");
+            for (category, value) in options {
+                let Ok(config_id) = this.update(cx, |v, cx| {
+                    while let Ok(event) = incoming.try_recv() {
+                        v.on_event(event, cx);
+                    }
+                    v.initial_config_id(category, value, cx)
+                }) else { return };
+                let Some(config_id) = config_id else { continue };
+                let response = connection
+                    .request("session/set_config_option", json!({"sessionId": &sid, "configId": &config_id, "value": value}))
+                    .await;
+                let Ok(()) = this.update(cx, |v, cx| {
+                    while let Ok(event) = incoming.try_recv() {
+                        v.on_event(event, cx);
+                    }
+                    match response {
+                        Ok(result) => {
+                            v.thread.apply_session(&result);
+                            if result.get("configOptions").is_none()
+                                && let Some(option) = v.thread.config.iter_mut().find(|o| o.id == config_id)
+                            {
+                                option.current.clone_from(value);
+                            }
+                            v.report_chosen(cx);
+                            if v.thread.option(category).is_none_or(|option| option.current != *value) {
+                                v.config_error(category, value, "The adapter kept a different value.", cx);
+                            }
                         }
-                        v.report_chosen(cx);
-                        cx.notify();
-                    });
-                }
+                        Err(why) => v.config_error(category, value, &why, cx),
+                    }
+                    cx.notify();
+                }) else { return };
             }
             let _ = this.update(cx, |v, cx| {
                 v.initial_model = None;
@@ -831,28 +835,36 @@ impl ThreadView {
                     let config = v.thread.option("mode").map(|opt| opt.id.clone());
                     (chosen, mode, config, v.thread.mode.clone(), !v.thread.modes.is_empty())
                 }) else { return };
-                let applied = match mode {
-                    Some(mode) if current.as_deref() == Some(mode) => Ok(None),
-                    Some(mode) => request_mode(&connection, &sid, mode, config.as_deref()).await.map(Some),
+                let response = match mode {
+                    Some(mode) if current.as_deref() == Some(mode) => Ok(Value::Null),
+                    Some(mode) => request_mode(&connection, &sid, mode, config.as_deref()).await,
                     None => Err(format!("{} couldn't apply {} permissions.", harness.name(), wanted.label())),
                 };
-                match applied {
-                    Ok(result) => {
-                        while let Ok(event) = incoming.try_recv() {
-                            if this.update(cx, |v, cx| v.on_event(event, cx)).is_err() { return; }
-                        }
-                        let _ = this.update(cx, |v, _| {
-                            if let Some(result) = result { v.thread.apply_session(&result); }
-                            v.thread.mode = mode.map(String::from);
-                            v.auto_fallback = wanted == Permission::Auto && chosen == Some(Permission::FullAccess);
+                let Ok(applied) = this.update(cx, |v, cx| {
+                    while let Ok(event) = incoming.try_recv() {
+                        v.on_event(event, cx);
+                    }
+                    response.and_then(|result| {
+                        let mut reported = Thread::default();
+                        reported.apply_session(&result);
+                        let confirmed = reported.mode.as_deref().or_else(|| {
+                            (v.thread.mode != current).then_some(v.thread.mode.as_deref()).flatten()
                         });
-                    }
-                    Err(why) if reported_modes || start.starter == Starter::Handoff || start.starter == Starter::OtherSession || full_access => {
-                        connection.terminate();
-                        let _ = this.update(cx, |v, cx| v.ended(Some(why), cx));
-                        return;
-                    }
-                    Err(_) => {}
+                        if wanted == Permission::ReadOnly && confirmed.is_some() && confirmed != mode {
+                            return Err(format!("{} did not confirm Read-only permissions.", harness.name()));
+                        }
+                        v.thread.apply_session(&result);
+                        v.thread.mode = mode.map(String::from);
+                        v.auto_fallback = wanted == Permission::Auto && chosen == Some(Permission::FullAccess);
+                        Ok(())
+                    })
+                }) else { return };
+                if let Err(why) = applied
+                    && (wanted == Permission::ReadOnly || reported_modes || matches!(start.starter, Starter::Handoff | Starter::OtherSession) || full_access)
+                {
+                    connection.terminate();
+                    let _ = this.update(cx, |v, cx| v.ended(Some(why), cx));
+                    return;
                 }
             }
             let ready = this.update(cx, |v, cx| {
@@ -877,9 +889,8 @@ impl ThreadView {
         .detach();
     }
 
-    /// The session is open, or failed to open. Returns the session id and any initial config options to apply before
-    /// the first prompt runs.
-    fn opened(&mut self, opened: Result<Opened, String>, start: &Start, cx: &mut Context<Self>) -> Option<(String, Vec<InitialOption>)> {
+    /// The session is open, or failed to open. Returns the session ID on success.
+    fn opened(&mut self, opened: Result<Opened, String>, start: &Start, cx: &mut Context<Self>) -> Option<String> {
         let Opened { session_id, result, capabilities, agent_meta, replayed } = match opened {
             Ok(o) => o,
             Err(why) => {
@@ -905,24 +916,47 @@ impl ThreadView {
             self.session_id = Some(session_id.clone());
             cx.emit(ThreadEvent::SessionId(session_id.clone()));
         }
-        let mut initial_options = Vec::new();
-        for (category, value) in &start.options {
-            if let Some(option) = self.thread.option(category).filter(|o| o.current != *value && o.choices.iter().any(|(v, _)| v == value)) {
-                initial_options.push((*category, option.id.clone(), value.clone()));
-            }
-        }
-        if initial_options.is_empty() {
-            self.initial_model = None;
-        }
         self.report_chosen(cx);
         self.remeasure(0);
         cx.notify();
-        Some((session_id, initial_options))
+        Some(session_id)
+    }
+
+    fn initial_config_id(&mut self, category: &str, value: &str, cx: &mut Context<Self>) -> Option<String> {
+        if self.phase != Phase::Starting {
+            return None;
+        }
+        match self.thread.option(category) {
+            Some(option) if option.current == value => None,
+            Some(option) if option.choices.iter().any(|(choice, _)| choice == value) => Some(option.id.clone()),
+            None if category == "thought_level" && value == defaults::Effort::default().name() => None,
+            _ => {
+                self.config_error(category, value, "The adapter did not offer this value.", cx);
+                None
+            }
+        }
+    }
+
+    fn config_error(&mut self, category: &str, value: &str, why: &str, cx: &mut Context<Self>) {
+        let label = if category == "thought_level" { "effort" } else { category };
+        let at = self.thread.notice(format!("Could not set {label} to {value}. {why}"), true);
+        self.remeasure(at);
+        cx.notify();
     }
 
     fn on_event(&mut self, event: Event, cx: &mut Context<Self>) {
+        if event.session_id().is_some_and(|id| Some(id) != self.session_id.as_deref()) {
+            if let Some(connection) = &self.connection {
+                match event {
+                    Event::Permission { id, .. } => connection.respond(id, acp::permission_outcome(None)),
+                    Event::Elicitation { id, .. } => connection.respond(id, acp::elicitation_cancel()),
+                    _ => {}
+                }
+            }
+            return;
+        }
         match event {
-            Event::Update(update) => {
+            Event::Update { update, .. } => {
                 if update["sessionUpdate"] == "_m4code/session_ended" {
                     self.ended(update["error"].as_str().map(String::from), cx);
                     return;
@@ -1032,7 +1066,7 @@ impl ThreadView {
                 self.report_chosen(cx);
             }
             Event::Permission { id, params } => {
-                if self.interrupting || self.restarting_for_steer {
+                if self.interrupting {
                     if let Some(connection) = &self.connection {
                         connection.respond(id, acp::permission_outcome(None));
                     }
@@ -1083,7 +1117,7 @@ impl ThreadView {
                 });
             }
             Event::Elicitation { id, params } => {
-                if self.interrupting || self.restarting_for_steer {
+                if self.interrupting {
                     if let Some(connection) = &self.connection {
                         connection.respond(id, acp::elicitation_cancel());
                     }
@@ -1386,6 +1420,7 @@ impl ThreadView {
     /// steered into a turn would replace the agent's task; so does a message while the context is compacted.
     fn can_steer(&self, text: &str, follow_up: crate::store::FollowUp) -> bool {
         follow_up == crate::store::FollowUp::Steer
+            && (self.harness.adapter().steers || self.native_steering())
             && self.working
             && !self.queue_held
             && self.preparing.is_none()
@@ -1406,7 +1441,7 @@ impl ThreadView {
         self.harness == Harness::Codex && self.native_steering()
     }
 
-    fn steer(&mut self, mut item: Queued, cx: &mut Context<Self>) {
+    fn steer(&mut self, item: Queued, cx: &mut Context<Self>) {
         let (Some(connection), Some(session)) = (self.connection.clone(), self.session_id.clone()) else {
             self.queue.push_back(item);
             self.queue_changed();
@@ -1414,18 +1449,6 @@ impl ThreadView {
             return;
         };
         let native = self.native_steering();
-        if !self.harness.adapter().steers && !native {
-            let at = self.queue.iter().take_while(|q| q.ahead).count();
-            item.ahead = true;
-            self.queue.insert(at, item);
-            self.queue_changed();
-            if !std::mem::replace(&mut self.restarting_for_steer, true) {
-                connection.notify("session/cancel", json!({"sessionId": session}));
-                self.cancel_questions();
-            }
-            cx.notify();
-            return;
-        }
         let id = item.id;
         let text = item.text.clone();
         self.steering.push_back(item);
@@ -1563,8 +1586,7 @@ impl ThreadView {
             && matches!(self.thread.entries.last(), Some(Entry::Notice { text, error: false }) if text == FORK_SEED))
             .then(|| self.thread.transcript(400));
         let mut shown_row = if next.shown {
-            self.thread.entries.len().checked_sub(1)
-                .filter(|&row| matches!(&self.thread.entries[row], Entry::User(text) if text == &next.text))
+            self.thread.entries.iter().rposition(|entry| matches!(entry, Entry::User(text) if text == &next.text))
         } else {
             None
         };
@@ -1699,8 +1721,7 @@ impl ThreadView {
             let at = self.thread.notice(text, error);
             self.remeasure(at);
         }
-        let restarting = std::mem::take(&mut self.restarting_for_steer);
-        if outcome == "failed" || (outcome == "interrupted" && !restarting) {
+        if matches!(outcome, "failed" | "interrupted") {
             self.queue_held = true;
         }
         if self.harness.adapter().steers {
@@ -1764,7 +1785,6 @@ impl ThreadView {
 
     fn interrupt(&mut self, cx: &mut Context<Self>) {
         self.queue_held = true;
-        self.restarting_for_steer = false;
         if !self.interrupting {
             cx.emit(ThreadEvent::AbortChildren);
         }
@@ -1846,7 +1866,7 @@ impl ThreadView {
     /// Show a multiple-choice question from m4code's MCP `ask_user` tool (works on every harness, including ones
     /// whose native question tool isn't bridged over ACP).
     pub fn ask_bridge_question(&mut self, req_id: String, title: String, options: Vec<QuestionOption>, multi_select: bool, cx: &mut Context<Self>) {
-        if self.interrupting || self.restarting_for_steer {
+        if self.interrupting {
             crate::mcp::bridge::respond(&req_id, false, "The turn was interrupted.");
             return;
         }
@@ -3067,6 +3087,10 @@ mod tests {
     use super::with_comment;
     use crate::harness::{Harness, thread::Entry};
 
+    fn update_event(update: serde_json::Value) -> super::Event {
+        super::Event::Update { session_id: None, update }
+    }
+
     fn test_start(cwd: std::path::PathBuf, harness: Harness) -> super::Start {
         super::Start {
             record_id: String::new(), harness, all_models: vec![], picked: vec![], cwd,
@@ -3168,6 +3192,7 @@ mod tests {
         let _connection = Connection::connect(std::io::Cursor::new(wire), Vec::<u8>::new(), None::<std::io::Empty>, tx);
         cx.update(|window, app| view.update(app, |v, cx| {
             v.phase = Phase::Ready;
+            v.session_id = Some("codex-session".into());
             v.working = true;
             while let Some(event) = futures::executor::block_on(events.next()) {
                 if matches!(event, Event::Exited(_)) { break; }
@@ -3227,7 +3252,7 @@ mod tests {
             v.agent_meta = json!({"steering":{"supported":true}});
             v.phase = Phase::Ready;
             v.working = true;
-            v.on_event(Event::Update(json!({
+            v.on_event(update_event(json!({
                 "sessionUpdate":"agent_message_chunk","messageId":"async-question-item",
                 "content":{"type":"text","text":"There are two things I could investigate."}
             })), cx);
@@ -3953,7 +3978,6 @@ mod tests {
 
     #[gpui::test]
     fn a_steer_joins_the_chat_where_the_agent_reads_it_not_where_it_was_sent(cx: &mut gpui::TestAppContext) {
-        use crate::harness::acp::Event;
         use crate::store::FollowUp;
         use serde_json::json;
         cx.update(gpui_kit::init);
@@ -3990,15 +4014,15 @@ mod tests {
             v.phase = super::Phase::Ready;
             v.working = true;
             v.thread.entries.clear();
-            v.on_event(Event::Update(chunk("agent_message_chunk", "Hello wor")), cx);
+            v.on_event(update_event(chunk("agent_message_chunk", "Hello wor")), cx);
             v.send_as("stop".into(), FollowUp::Steer, cx);
             assert_eq!(v.unread_steers().collect::<Vec<_>>(), ["stop"], "waits above the message box");
             // What the agent was still writing when the steer went out.
-            v.on_event(Event::Update(chunk("agent_message_chunk", "ld.")), cx);
+            v.on_event(update_event(chunk("agent_message_chunk", "ld.")), cx);
             let mut read = chunk("user_message_chunk", "stop");
             read["_meta"] = json!({"m4code": {"steer": v.steering.front().unwrap().id.to_string()}});
-            v.on_event(Event::Update(read), cx);
-            v.on_event(Event::Update(chunk("agent_message_chunk", "Stopping.")), cx);
+            v.on_event(update_event(read), cx);
+            v.on_event(update_event(chunk("agent_message_chunk", "Stopping.")), cx);
             assert_eq!(v.thread.entries, [Entry::Agent("Hello world.".into()), Entry::User("stop".into()), Entry::Agent("Stopping.".into())]);
             assert_eq!(v.unread_steers().count(), 0);
             // Two steers read one after the other stay two messages.
@@ -4007,7 +4031,7 @@ mod tests {
             for text in ["do X", "do Y"] {
                 let mut read = chunk("user_message_chunk", text);
                 read["_meta"] = json!({"m4code": {"steer": v.steering.front().unwrap().id.to_string()}});
-                v.on_event(Event::Update(read), cx);
+                v.on_event(update_event(read), cx);
             }
             assert_eq!(v.thread.entries[3..], [Entry::User("do X".into()), Entry::User("do Y".into())]);
             v.send_as("older".into(), FollowUp::Queue, cx);
@@ -4021,47 +4045,32 @@ mod tests {
     }
 
     #[gpui::test]
-    fn steers_an_agent_restarts_for_go_in_the_order_sent_before_the_queue(cx: &mut gpui::TestAppContext) {
+    fn steer_without_live_support_queues_in_order_and_leaves_the_turn_running(cx: &mut gpui::TestAppContext) {
         use crate::store::FollowUp;
         cx.update(gpui_kit::init);
         let dir = tempfile::tempdir().unwrap();
-        let start = super::Start {
-            record_id: String::new(),
-            harness: Harness::Codex,
-            all_models: vec![],
-            picked: vec![],
-            cwd: dir.path().to_path_buf(),
-            env: vec![],
-            mcp_servers: vec![],
-            meta: serde_json::Value::Null,
-            session_id: None,
-            permission: None, starter: crate::harness::defaults::Starter::User,
-            options: vec![],
-            prompt: None,
-            prior_entries: vec![], inline_visuals: true,
-            server: Some(("definitely-not-a-real-program-m4code".into(), vec![])),
-        };
-        let (view, cx) = cx.add_window_view(|window, cx| super::ThreadView::new(start, window, cx));
-        // Kept open for the rest of the run, as in `a_steer_joins_the_chat_where_the_agent_reads_it_not_where_it_was_sent`.
-        let (from_agent, to_client) = std::io::pipe().unwrap();
-        let (from_client, to_agent) = std::io::pipe().unwrap();
-        std::mem::forget((to_client, from_client));
-        let (tx, _events) = futures::channel::mpsc::unbounded();
-        let connection = crate::harness::acp::Connection::connect(from_agent, to_agent, None::<std::io::PipeReader>, tx);
-        view.update(cx, |v, cx| {
-            v.connection = Some(std::rc::Rc::new(connection));
-            v.session_id = Some("s1".into());
-            v.phase = super::Phase::Ready;
-            v.working = true;
-            v.queue.clear();
-            v.send_as("queued".into(), FollowUp::Queue, cx);
-            v.send_as("first".into(), FollowUp::Steer, cx);
-            v.send_as("second".into(), FollowUp::Steer, cx);
-            let order: Vec<&str> = v.queue.iter().map(|q| q.text.as_str()).collect();
-            assert_eq!(order, ["first", "second", "queued"]);
-            assert!(v.restarting_for_steer);
-            assert!(v.steering.is_empty());
-        });
+        for harness in [Harness::Codex, Harness::OpenCode, Harness::Antigravity] {
+            let (view, cx) = cx.add_window_view(|window, cx| super::ThreadView::new(test_start(dir.path().into(), harness), window, cx));
+            let (from_agent, to_client) = std::io::pipe().unwrap();
+            let (from_client, to_agent) = std::io::pipe().unwrap();
+            let (tx, _events) = futures::channel::mpsc::unbounded();
+            let connection = super::Connection::connect(from_agent, to_agent, None::<std::io::PipeReader>, tx);
+            view.update(cx, |v, cx| {
+                v.connection = Some(std::rc::Rc::new(connection));
+                v.session_id = Some("s1".into());
+                v.phase = super::Phase::Ready;
+                v.working = true;
+                assert!(!v.can_steer("first", FollowUp::Steer));
+                v.send_as("queued".into(), FollowUp::Queue, cx);
+                v.send_as("first".into(), FollowUp::Steer, cx);
+                v.send_as("second".into(), FollowUp::Steer, cx);
+                let order: Vec<&str> = v.waiting_messages().map(|(_, text)| text).collect();
+                assert_eq!(order, ["queued", "first", "second"]);
+                assert!(v.working);
+                assert!(v.steering.is_empty());
+            });
+            drop((to_client, from_client));
+        }
     }
 
     #[gpui::test]
@@ -4137,7 +4146,7 @@ mod tests {
             v.phase = super::Phase::Ready;
             v.working = false;
             assert!(!v.can_interrupt());
-            v.on_event(super::Event::Update(serde_json::json!({
+            v.on_event(update_event(serde_json::json!({
                 "sessionUpdate": "agent_message_chunk",
                 "content": { "type": "text", "text": "continuing after background work" }
             })), cx);
@@ -4155,7 +4164,7 @@ mod tests {
         let (view, cx) = cx.add_window_view(|window, cx| super::ThreadView::new(test_start(dir.path().into(), Harness::OpenCode), window, cx));
         view.update(cx, |v, cx| {
             v.phase = super::Phase::Ready;
-            v.on_event(super::Event::Update(serde_json::json!({
+            v.on_event(update_event(serde_json::json!({
                 "sessionUpdate": "tool_call",
                 "toolCallId": "shell",
                 "kind": "execute",
@@ -4184,10 +4193,10 @@ mod tests {
                 "rawInput": { "command": "cargo clippy --locked" },
                 "rawOutput": "Tool is running as a background task with task id: conv/task-42\nTask logs are available at: ..."
             });
-            v.on_event(super::Event::Update(start.clone()), cx);
+            v.on_event(update_event(start.clone()), cx);
             assert!(v.background_tasks.is_empty(), "replay does not create live tasks");
             v.phase = super::Phase::Ready;
-            v.on_event(super::Event::Update(start), cx);
+            v.on_event(update_event(start), cx);
             assert_eq!(v.background_tasks.len(), 1);
             assert_eq!(v.background_tasks[0].id, "conv/task-42");
             assert_eq!(v.background_tasks[0].label, "cargo clippy --locked");
@@ -4198,12 +4207,12 @@ mod tests {
             v.turn_ended(Ok(serde_json::json!({"stopReason": "end_turn"})), cx);
             assert!(v.has_background_work(), "a later turn can end while the command is still running");
             // A completion notification retires it immediately.
-            v.on_event(super::Event::Update(serde_json::json!({
+            v.on_event(update_event(serde_json::json!({
                 "sessionUpdate": "user_message_chunk",
                 "content": { "type": "text", "text": "Task id \"conv/task-42\" finished with result: Command exited with code 0." }
             })), cx);
             assert!(v.background_tasks.is_empty());
-            v.on_event(super::Event::Update(serde_json::json!({
+            v.on_event(update_event(serde_json::json!({
                 "sessionUpdate": "tool_call_update",
                 "toolCallId": "cmd-1",
                 "content": [{ "type": "content", "content": { "type": "text", "text": "Late output" } }]
@@ -4211,7 +4220,7 @@ mod tests {
             assert!(v.background_tasks.is_empty(), "late output must not resurrect a finished task");
 
             // A server restart notice or empty manage_task(list) response clears all tracked tasks.
-            v.on_event(super::Event::Update(serde_json::json!({
+            v.on_event(update_event(serde_json::json!({
                 "sessionUpdate": "tool_call",
                 "toolCallId": "cmd-2",
                 "title": "Run tests",
@@ -4221,7 +4230,7 @@ mod tests {
                 "rawOutput": "Tool is running as a background task with task id: conv/task-99"
             })), cx);
             assert_eq!(v.background_tasks.len(), 1);
-            v.on_event(super::Event::Update(serde_json::json!({
+            v.on_event(update_event(serde_json::json!({
                 "sessionUpdate": "tool_call",
                 "toolCallId": "list-1",
                 "title": "Manage task",
@@ -4265,7 +4274,7 @@ mod tests {
         let (view, cx) = cx.add_window_view(|window, cx| super::ThreadView::new(test_start(dir.path().into(), Harness::Antigravity), window, cx));
         view.update(cx, |v, cx| {
             v.phase = super::Phase::Ready;
-            v.on_event(super::Event::Update(serde_json::json!({
+            v.on_event(update_event(serde_json::json!({
                 "sessionUpdate": "tool_call",
                 "toolCallId": "grep-1",
                 "kind": "execute",
@@ -4289,9 +4298,10 @@ mod tests {
         let (from_client, to_agent) = std::io::pipe().unwrap();
         std::mem::forget((to_client, from_client));
         let (tx, _events) = futures::channel::mpsc::unbounded();
-        let connection = crate::harness::acp::Connection::connect(from_agent, to_agent, None::<std::io::PipeReader>, tx);
+        let connection = crate::harness::acp::Connection::connect(from_agent, to_agent, None::<std::io::PipeReader>, tx.clone());
         view.update(cx, |v, cx| {
             v.connection = Some(std::rc::Rc::new(connection));
+            v.events = Some(tx);
             v.session_id = Some("s1".into());
             v.phase = super::Phase::Ready;
             v.send_as("instant message".into(), FollowUp::Queue, cx);
@@ -4380,7 +4390,7 @@ mod tests {
             assert!(v.active_question().is_none());
 
             // Background task parses log_path and opens log tail into shell_output.
-            v.on_event(Event::Update(json!({
+            v.on_event(update_event(json!({
                 "sessionUpdate": "tool_call",
                 "toolCallId": "bg-1",
                 "title": "Run build",

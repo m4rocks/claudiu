@@ -170,6 +170,9 @@ impl Workspace {
                 resume_options(meta),
             ),
         };
+        if meta.read_only_pending {
+            permission = Some(Permission::ReadOnly);
+        }
         let mut env = vec![];
         let mut session_meta = serde_json::json!({});
         if meta.harness == Harness::Claude {
@@ -187,7 +190,18 @@ impl Workspace {
             if !off.is_empty() {
                 server_env.push((mcp::TOOLS_OFF_ENV, off.join(",")));
             }
-            mcp_servers.push(harness::stdio_server("m4code", &exe, &[mcp::FLAG], &server_env));
+            if meta.harness == Harness::Codex {
+                let inherited = std::env::var(harness::codex::CONFIG_ENV).ok();
+                match harness::codex::m4code_mcp_config(inherited.as_deref(), &exe, &server_env) {
+                    Ok(config) => env.push((harness::codex::CONFIG_ENV.into(), config)),
+                    Err(error) => {
+                        self.toast(error, cx);
+                        return None;
+                    }
+                }
+            } else {
+                mcp_servers.push(harness::stdio_server("m4code", &exe, &[mcp::FLAG], &server_env));
+            }
         }
         if meta.parent_session.is_some() {
             permission = None;
@@ -370,8 +384,12 @@ impl Workspace {
             meta.managed_compaction = true;
         }
         self.prepare_live(record, is_new);
+        let switching_harness = self.pending_handoffs.contains_key(&id);
         if let Some(meta) = self.store.session_mut(&id).and_then(|r| r.agent.as_mut()) {
             meta.managed_compaction = true;
+            if !switching_harness {
+                meta.read_only_pending = start.permission == Some(Permission::ReadOnly);
+            }
             self.store.mark_dirty();
         }
         let view = cx.new(|cx| ThreadView::new(start, window, cx));
@@ -396,8 +414,9 @@ impl Workspace {
                 ws.commit_handoff(&sub_id, session, cx);
                 let full_access = view.read(cx).antigravity_full_access();
                 if let Some(meta) = ws.store.session_mut(&sub_id).and_then(|r| r.agent.as_mut())
-                    && meta.antigravity_full_access != full_access
+                    && (meta.read_only_pending || meta.antigravity_full_access != full_access)
                 {
+                    meta.read_only_pending = false;
                     meta.antigravity_full_access = full_access;
                     ws.store.mark_dirty();
                 }

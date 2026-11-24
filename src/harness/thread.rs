@@ -64,6 +64,13 @@ pub struct ToolCall {
     pub details: Box<ToolDetails>,
 }
 
+impl ToolCall {
+    /// Text content is the fallback when the adapter supplies no structured output.
+    pub fn shows_text_content(&self) -> bool {
+        self.details.stdout.is_none() && self.details.stderr.is_none() && self.details.output.is_none()
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ToolDetails {
@@ -80,6 +87,12 @@ pub struct ToolDetails {
 }
 
 impl ToolDetails {
+    pub fn labeled_output(&self) -> impl Iterator<Item = (&'static str, &str)> {
+        [("stdout", &self.stdout), ("stderr", &self.stderr), ("Output", &self.output),
+            ("Request", &self.request), ("Response", &self.response)]
+            .into_iter().filter_map(|(label, text)| text.as_deref().map(|text| (label, text)))
+    }
+
     fn is_empty(&self) -> bool {
         self == &Self::default()
     }
@@ -626,6 +639,16 @@ pub fn save_entries(record_id: &str, entries: &[Entry]) {
     }
 }
 
+pub fn clear_entries(record_id: &str) -> std::io::Result<()> {
+    if record_id.is_empty() {
+        return Ok(());
+    }
+    match std::fs::remove_file(entries_path(record_id)) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        result => result,
+    }
+}
+
 pub fn load_entries(record_id: &str) -> Vec<Entry> {
     if record_id.is_empty() {
         return Vec::new();
@@ -841,6 +864,9 @@ mod tests {
         ];
         save_entries("test-roundtrip-session", &entries);
         assert_eq!(load_entries("test-roundtrip-session"), entries);
+        clear_entries("test-roundtrip-session").unwrap();
+        assert!(load_entries("test-roundtrip-session").is_empty());
+        clear_entries("test-roundtrip-session").unwrap();
     }
 
     #[test]

@@ -23,9 +23,12 @@ fn matching_rows(entries: &[Entry], query: &str) -> Vec<usize> {
         let matches = match entry {
             Entry::User(text) => parse_subagent_report(text).map_or_else(|| contains(text), |report| contains(report.body) || contains(report.title)),
             Entry::Agent(text) | Entry::Thought(text) | Entry::Notice { text, .. } => contains(text),
-            Entry::Tool(tool) => contains(&tool.title) || tool.content.iter().any(|part| {
-                matches!(part, ToolContent::Text(text) if contains(text))
-            }),
+            Entry::Tool(tool) => contains(&tool.title)
+                || tool.details.command.as_deref().is_some_and(contains)
+                || tool.details.labeled_output().any(|(_, text)| contains(text))
+                || (tool.shows_text_content() && tool.content.iter().any(|part| {
+                    matches!(part, ToolContent::Text(text) if contains(text))
+                })),
         };
         matches.then_some(row)
     }).collect()
@@ -54,7 +57,7 @@ impl ThreadView {
                     find.query = input.read(cx).value().trim().to_lowercase();
                     find.matches.clear();
                 }
-                v.refresh_find(0);
+                v.remeasure(0);
                 v.reveal_find(cx);
             }
         });
@@ -88,6 +91,7 @@ impl ThreadView {
 
     fn close_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.find = None;
+        self.remeasure(0);
         self.focus_composer(window, cx);
         cx.notify();
     }
@@ -119,8 +123,8 @@ impl ThreadView {
         cx.notify();
     }
 
-    pub(super) fn find_highlights(&self, row: usize) -> bool {
-        self.find.as_ref().is_some_and(|find| find.matches.binary_search(&row).is_ok())
+    pub(super) fn find_query_for_row(&self, row: usize) -> Option<&str> {
+        self.find.as_ref().filter(|find| find.matches.binary_search(&row).is_ok()).map(|find| find.query.as_str())
     }
 
     pub(super) fn render_find(&self, cx: &mut Context<Self>) -> Option<Div> {
@@ -148,6 +152,35 @@ impl ThreadView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn search_matches_structured_tool_output_and_visible_text_fallback() {
+        use crate::harness::thread::{ToolCall, ToolDetails};
+
+        let shell = Entry::Tool(ToolCall {
+            details: Box::new(ToolDetails {
+                command: Some("cargo test".into()),
+                stderr: Some("Build FAILED".into()),
+                ..Default::default()
+            }),
+            content: vec![ToolContent::Text("duplicate fallback".into())],
+            ..Default::default()
+        });
+        let mcp = Entry::Tool(ToolCall {
+            details: Box::new(ToolDetails {
+                request: Some("needle".into()),
+                response: Some("also FAILED".into()),
+                ..Default::default()
+            }),
+            content: vec![ToolContent::Text("visible fallback".into())],
+            ..Default::default()
+        });
+        let entries = [shell, mcp];
+        assert_eq!(matching_rows(&entries, "failed"), [0, 1]);
+        assert_eq!(matching_rows(&entries, "cargo test"), [0]);
+        assert_eq!(matching_rows(&entries, "needle"), [1]);
+        assert_eq!(matching_rows(&entries, "fallback"), [1]);
+    }
 
     #[test]
     fn search_matches_text_and_tool_results_case_insensitively() {

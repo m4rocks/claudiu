@@ -55,6 +55,9 @@ pub struct AgentMeta {
     pub harness: crate::harness::Harness,
     #[serde(default)]
     pub antigravity_full_access: bool,
+    /// Retry Read-only startup if the adapter stopped before confirming the mode.
+    #[serde(default)]
+    pub read_only_pending: bool,
     #[serde(default)]
     pub parent_session: Option<Id>,
     #[serde(default)]

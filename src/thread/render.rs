@@ -619,7 +619,7 @@ impl ThreadView {
             .flex()
             .justify_center()
             .child(div().w_full().max_w(px(COLUMN_MAX_W))
-                .when(self.find_highlights(ix), |row| row.rounded(px(5.0)).bg(hsla(theme::SURFACE_ELEVATED)))
+                .when(self.find_query_for_row(ix).is_some(), |row| row.rounded(px(5.0)).bg(hsla(theme::SURFACE_ELEVATED)))
                 .child(body))
             .into_any_element()
     }
@@ -664,8 +664,7 @@ impl ThreadView {
         let shell = call.kind == "execute";
         let details = &call.details;
         let has_details = call.content.iter().any(|item| !matches!(item, ToolContent::Diff { .. }))
-            || details.command.is_some() || details.stdout.is_some() || details.stderr.is_some()
-            || details.output.is_some() || details.request.is_some() || details.response.is_some();
+            || details.command.is_some() || details.labeled_output().next().is_some();
         let expanded = (self.detail && !self.collapsed_shell_calls.contains(&call.id))
             || self.expanded_tools.contains(&call.id);
         let toggle_id = call.id.clone();
@@ -735,25 +734,19 @@ impl ThreadView {
         if (expanded && has_details) || has_card {
             let mut body = div().py(px(4.0)).flex().flex_col().gap(px(6.0));
             if expanded {
+                let query = self.find_query_for_row(ix);
                 if let Some(command) = &details.command {
                     let command_for_shell = command.clone();
-                    body = body.child(elements::tool_output_block(command, FOLDED_LINES, self.detail))
+                    body = body.child(elements::tool_output_block(None, command, FOLDED_LINES, self.detail, query))
                         .child(button(SharedString::from(format!("tool-shell-{ix}")), "Copy and open shell", false)
                             .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| cx.emit(ThreadEvent::OpenToolShell(command_for_shell.clone())))));
                 }
-                for (name, text) in [("stdout", &details.stdout), ("stderr", &details.stderr),
-                    ("Output", &details.output), ("Request", &details.request), ("Response", &details.response)]
-                {
-                    if let Some(text) = text {
-                        let lines: Vec<_> = text.lines().collect();
-                        let count = if self.detail { lines.len() } else { lines.len().min(FOLDED_LINES) };
-                        let recent = lines.len().saturating_sub(count);
-                        body = body.child(elements::code_block(Some(name.into()), &lines[recent..], count, None));
-                    }
+                for (label, text) in details.labeled_output() {
+                    body = body.child(elements::tool_output_block(Some(label), text, FOLDED_LINES, self.detail, query));
                 }
                 body = body.children(call.content.iter().enumerate().filter_map(|(index, content)| match content {
-                    ToolContent::Text(text) if !text.is_empty() && details.stdout.is_none() && details.stderr.is_none() && details.output.is_none() =>
-                        Some(elements::tool_output_block(text, FOLDED_LINES, self.detail)),
+                    ToolContent::Text(text) if !text.is_empty() && call.shows_text_content() =>
+                        Some(elements::tool_output_block(None, text, FOLDED_LINES, self.detail, query)),
                     ToolContent::Image { mime, data } => self.render_tool_image(ix, (&call.id, index), (mime, data), cx),
                     _ => None,
                 }));

@@ -25,8 +25,8 @@ pub struct Launch {
 /// What the agent sends without being asked.
 #[derive(Debug)]
 pub enum Event {
-    /// A `session/update`'s `update` object.
-    Update(Value),
+    /// A `session/update` notification and the session it belongs to.
+    Update { session_id: Option<String>, update: Value },
     /// `session/request_permission`: answer it with `Connection::respond` and the request's id.
     Permission { id: Value, params: Value },
     /// `elicitation/create` or `session/elicitation`: structured user-input question from the agent.
@@ -36,6 +36,16 @@ pub enum Event {
     /// A `session/prompt`'s reply. The thread queues it itself once the reply arrives, which is after the reader
     /// queued every update the agent sent before replying, so a turn never ends ahead of its last words.
     TurnEnded(Result<Value, String>),
+}
+
+impl Event {
+    pub fn session_id(&self) -> Option<&str> {
+        match self {
+            Self::Update { session_id, .. } => session_id.as_deref(),
+            Self::Permission { params, .. } | Self::Elicitation { params, .. } => params["sessionId"].as_str(),
+            Self::Exited(_) | Self::TurnEnded(_) => None,
+        }
+    }
 }
 
 type Pending = Arc<Mutex<HashMap<i64, oneshot::Sender<Result<Value, String>>>>>;
@@ -396,7 +406,11 @@ fn handle(message: Value, pending: &Pending, outgoing: &mpsc::Sender<Option<Valu
             let _ = outgoing.send(Some(json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32601, "message": "method not found"}})));
         }
         (Some("session/update"), None) => {
-            let _ = events.unbounded_send(Event::Update(message["params"]["update"].clone()));
+            let params = &message["params"];
+            let _ = events.unbounded_send(Event::Update {
+                session_id: params["sessionId"].as_str().map(String::from),
+                update: params["update"].clone(),
+            });
         }
         _ => {}
     }
@@ -487,7 +501,8 @@ mod tests {
             let session = agent.request("session/new", json!({"cwd": "/w", "mcpServers": []})).await.unwrap();
             assert_eq!(session["sessionId"], "s1");
             let turn = agent.request("session/prompt", json!({"sessionId": "s1", "prompt": []}));
-            let Some(Event::Update(update)) = events.next().await else { panic!("no update") };
+            let Some(Event::Update { session_id, update }) = events.next().await else { panic!("no update") };
+            assert_eq!(session_id.as_deref(), Some("s1"));
             assert_eq!(update["content"]["text"], "hi");
             let Some(Event::Permission { id, .. }) = events.next().await else { panic!("no permission request") };
             agent.respond(id, permission_outcome(Some("allow")));

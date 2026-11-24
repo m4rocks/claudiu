@@ -6,7 +6,26 @@ pub mod limits;
 use super::subagents::Agent;
 
 use super::{Adapter, Reopen};
-use serde_json::Value;
+use serde_json::{Map, Value, json};
+
+pub(crate) const CONFIG_ENV: &str = "CODEX_CONFIG";
+
+pub(crate) fn m4code_mcp_config(inherited: Option<&str>, command: &std::path::Path, env: &[(&str, String)]) -> Result<String, String> {
+    let mut config: Map<String, Value> = match inherited.filter(|text| !text.is_empty()) {
+        Some(text) => serde_json::from_str(text).map_err(|_| format!("{CONFIG_ENV} must be a JSON object."))?,
+        None => Map::new(),
+    };
+    let servers = config.entry("mcp_servers").or_insert_with(|| json!({}));
+    let servers = servers.as_object_mut().ok_or_else(|| format!("{CONFIG_ENV} mcp_servers must be a JSON object."))?;
+    // Codex can build the first turn's tool list before optional MCP servers finish starting.
+    servers.insert("m4code".into(), json!({
+        "command": command,
+        "args": [crate::mcp::FLAG],
+        "env": env.iter().map(|(name, value)| (name.to_string(), json!(value))).collect::<Map<_, _>>(),
+        "required": true,
+    }));
+    Ok(Value::Object(config).to_string())
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct AsyncOption {
@@ -98,3 +117,31 @@ pub const ADAPTER: Adapter = Adapter {
     default_models: || super::default_model_entry(super::Harness::Codex),
     steers: false,
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn m4code_mcp_is_required_and_preserves_other_codex_config() {
+        let config = m4code_mcp_config(
+            Some(r#"{"model":"gpt-6","mcp_servers":{"other":{"command":"other"},"m4code":{"enabled":false}}}"#),
+            Path::new("/apps/m4code"),
+            &[("M4CODE_RECORD", "session-1".into()), ("M4CODE_TOOLS_OFF", "ask_user".into())],
+        ).unwrap();
+        let config: Value = serde_json::from_str(&config).unwrap();
+        assert_eq!(config, json!({
+            "model": "gpt-6",
+            "mcp_servers": {
+                "other": {"command": "other"},
+                "m4code": {
+                    "command": "/apps/m4code",
+                    "args": ["--mcp-title"],
+                    "env": {"M4CODE_RECORD": "session-1", "M4CODE_TOOLS_OFF": "ask_user"},
+                    "required": true
+                }
+            }
+        }));
+    }
+}

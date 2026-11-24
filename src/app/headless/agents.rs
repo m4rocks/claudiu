@@ -1301,3 +1301,105 @@ fn a_session_opens_another_with_its_model_and_effort_without_asking() {
         cx.update_window(window, |_, window, app| ws.update(app, |ws, cx| ws.end_live(&id, window, cx))).unwrap();
     }
 }
+
+#[test]
+fn foreground_adapters_apply_startup_options_and_isolate_session_updates() {
+    use crate::harness::defaults::Starter;
+    use crate::harness::thread::Entry;
+
+    for harness in Harness::ALL {
+        for mode_reply in ["omitted", "rejected", "applied"] {
+            let work = tempfile::tempdir().unwrap();
+            let mut server = fake_agent(work.path());
+            server.1.push(Permission::ReadOnly.native(harness).unwrap().into());
+            server.1.push(mode_reply.into());
+            let script = PathBuf::from(&server.1[0]);
+            let contents = std::fs::read_to_string(&script).unwrap()
+                .replace("for line in sys.stdin:", r#"
+read_only, mode_reply = sys.argv[1:3]
+model, effort = "small", "low"
+current_mode = "default"
+def modes():
+    return {"currentModeId": current_mode, "availableModes": [{"id": read_only, "name": "Read-only"}]}
+def config():
+    available_effort = ["low"] if model == "small" else ["medium", "high"]
+    return [
+        {"category": "model", "id": "model", "currentValue": model, "options": [{"value": v, "name": v} for v in ["small", "large"]]},
+        {"category": "thought_level", "id": model + "-effort", "currentValue": effort, "options": [{"value": v, "name": v} for v in available_effort]},
+    ]
+for line in sys.stdin:"#)
+                .replace(r#"        send({"jsonrpc": "2.0", "id": i, "result": {"sessionId": "fake-session"}})"#, r#"
+        result = {"sessionId": "fake-session", "configOptions": config()}
+        if mode_reply != "omitted":
+            result["modes"] = modes()
+        send({"jsonrpc": "2.0", "id": i, "result": result})
+    elif method == "session/set_config_option":
+        key, value = m["params"]["configId"], m["params"]["value"]
+        if key == "model":
+            model, effort = value, "medium"
+        else:
+            assert key == "large-effort" and value == "high"
+            effort = value
+        send({"jsonrpc": "2.0", "id": i, "result": {"configOptions": config()}})
+    elif method == "session/set_mode":
+        assert m["params"]["modeId"] == read_only
+        if mode_reply == "applied":
+            current_mode = read_only
+        send({"jsonrpc": "2.0", "id": i, "result": {"modes": modes()}})"#)
+                .replace(r#"        text = m["params"]["prompt"][0]["text"]"#, r#"        text = m["params"]["prompt"][0]["text"]
+        send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "child-session", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "child reply"}}}})
+        send({"jsonrpc": "2.0", "method": "session/request_permission", "id": "child-ask", "params": {"sessionId": "child-session", "toolCall": {"title": "Child tool"}, "options": [{"optionId": "allow", "name": "Allow", "kind": "allow_once"}]}})
+        response = json.loads(next(sys.stdin))
+        assert response["id"] == "child-ask" and response["result"]["outcome"]["outcome"] == "cancelled"
+        assert model == "large" and effort == "high" and current_mode == read_only"#);
+            std::fs::write(&script, contents).unwrap();
+            let mut app = TestAppContext::single();
+            app.update(gpui_kit::init);
+            let (view, cx) = app.add_window_view(|window, cx| {
+                crate::thread::ThreadView::new(crate::thread::Start {
+                    record_id: String::new(),
+                    harness,
+                    all_models: Vec::new(),
+                    picked: Vec::new(),
+                    server: Some(server),
+                    cwd: work.path().into(),
+                    env: Vec::new(),
+                    session_id: None,
+                    meta: serde_json::Value::Null,
+                    mcp_servers: Vec::new(),
+                    permission: Some(Permission::ReadOnly),
+                    starter: Starter::User,
+                    options: vec![("thought_level", "high".into()), ("model", "large".into())],
+                    prompt: Some("Review the project".into()),
+                    prior_entries: Vec::new(),
+                    inline_visuals: false,
+                }, window, cx)
+            });
+            let until = std::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                cx.run_until_parked();
+                let settled = cx.update(|_, app| {
+                    let view = view.read(app);
+                    !view.is_loading() && !view.is_working()
+                });
+                if settled { break; }
+                assert!(std::time::Instant::now() < until, "{} did not settle with mode reply {mode_reply}", harness.name());
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            cx.update(|_, app| {
+                let view = view.read(app);
+                if mode_reply == "applied" {
+                    assert_eq!(view.start_error(), None);
+                    assert_eq!(view.permission(), Some(Permission::ReadOnly));
+                    assert_eq!(view.thread.option("thought_level").unwrap().current, "high");
+                    assert!(!view.is_waiting());
+                    assert_eq!(view.thread.entries, [Entry::User("Review the project".into()), Entry::Agent("ok".into())]);
+                    assert!(work.path().join("fake_agent.py.prompts").exists());
+                } else {
+                    assert!(view.start_error().is_some_and(|error| error.contains("Read-only")));
+                    assert!(!work.path().join("fake_agent.py.prompts").exists());
+                }
+            });
+        }
+    }
+}
