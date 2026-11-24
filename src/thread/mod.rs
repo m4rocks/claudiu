@@ -23,7 +23,7 @@ use std::rc::Rc;
 use std::time::Instant;
 
 use futures::StreamExt;
-use gpui::{App, AppContext, Bounds, Context, Entity, EventEmitter, FocusHandle, Focusable, FollowMode, KeystrokeEvent, ListAlignment, ListState, Pixels, Subscription, Window, px};
+use gpui::{App, AppContext, Bounds, Context, Entity, EventEmitter, FocusHandle, Focusable, FollowMode, KeystrokeEvent, ListAlignment, ListState, Pixels, Point, Subscription, Window, px};
 use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -65,7 +65,6 @@ struct ProviderShell {
 struct BackgroundToolTask {
     id: String,
     label: String,
-    turn_seq: u64,
 }
 
 const BG_TASK_PREFIX: &str = "Tool is running as a background task with task id:";
@@ -105,11 +104,12 @@ fn background_task_from_tool(call: &crate::harness::thread::ToolCall) -> Option<
 }
 
 fn text_retires_background_task(text: &str, task_id: &str) -> bool {
-    if !text.contains(task_id) {
-        return false;
-    }
-    let lower = text.to_ascii_lowercase();
-    lower.contains("finished") || lower.contains("canceled") || lower.contains("cancelled") || lower.contains("killed") || lower.contains("exited")
+    text.lines().any(|line| {
+        let Some((_, rest)) = line.split_once(task_id) else { return false };
+        let status = rest.trim_start_matches(['"', '\'', ')', ']', ':', ' ']).to_ascii_lowercase();
+        ["finished", "canceled", "cancelled", "killed", "exited"].iter()
+            .any(|word| status.strip_prefix(word).is_some_and(|tail| tail.is_empty() || tail.starts_with([' ', '.', ':'])))
+    })
 }
 
 struct ShellOutput {
@@ -310,6 +310,12 @@ enum Phase {
     Ended,
 }
 
+struct SelectionComment {
+    quote: String,
+    input: Entity<InputState>,
+    _subscription: Subscription,
+}
+
 pub struct ThreadView {
     record_id: String,
     pub harness: Harness,
@@ -323,7 +329,9 @@ pub struct ThreadView {
     pub background: Vec<BackgroundTask>,
     provider_shells: Vec<ProviderShell>,
     background_tasks: Vec<BackgroundToolTask>,
-    turn_seq: u64,
+    seen_background_tasks: HashSet<String>,
+    comment_anchor: Option<(Point<Pixels>, String)>,
+    selection_comment: Option<SelectionComment>,
     shell_output: Option<ShellOutput>,
     /// Model from another harness staged for dynamic handoff on the next message.
     pub pending_model: Option<CatalogModel>,
@@ -519,7 +527,9 @@ impl ThreadView {
             background: vec![],
             provider_shells: vec![],
             background_tasks: vec![],
-            turn_seq: 0,
+            seen_background_tasks: HashSet::new(),
+            comment_anchor: None,
+            selection_comment: None,
             shell_output: None,
             pending_model: None,
             handoff_after_turn: None,
@@ -650,6 +660,7 @@ impl ThreadView {
                 if v.phase != Phase::Starting { return false; }
                 v.phase = Phase::Ready;
                 v.cached_replay = false;
+                v.settle_opencode_shells();
                 cx.emit(ThreadEvent::Ready(v.session_id.clone().unwrap_or_default()));
                 v.send_next(cx);
                 cx.notify();
@@ -748,9 +759,6 @@ impl ThreadView {
                 }
                 if self.phase == Phase::Ready && !self.cached_replay && is_conversation_update(&update) {
                     self.last_update = Some(Instant::now());
-                    if let Some(text) = update.pointer("/content/text").and_then(Value::as_str) {
-                        self.retire_finished_background_tasks(text);
-                    }
                 }
                 let title = self.thread.title.clone();
                 let prev_ctx = self.thread.context;
@@ -761,17 +769,27 @@ impl ThreadView {
                     self.thread.apply(&update)
                 };
                 if let Some(at) = at {
+                    if !self.background_tasks.is_empty() && update["sessionUpdate"] == "user_message_chunk"
+                        && let Some(Entry::User(text)) = self.thread.entries.get(at)
+                    {
+                        let text = text.clone();
+                        self.retire_finished_background_tasks(&text);
+                    }
                     if let Some(Entry::Tool(call)) = self.thread.entries.get(at) {
                         self.tool_images.get_mut().retain(|(id, _), _| *id != call.id);
-                        let started = background_task_from_tool(call);
-                        let texts: Vec<String> = tool_output_texts(call).into_iter().map(str::to_string).collect();
-                        for text in &texts {
-                            self.retire_finished_background_tasks(text);
-                        }
-                        if let Some((task_id, label)) = started
-                            && !self.background_tasks.iter().any(|t| t.id == task_id)
+                        if self.harness == Harness::Antigravity && self.phase == Phase::Ready && !self.cached_replay
+                            && (update.get("rawOutput").is_some() || update.get("content").is_some())
                         {
-                            self.background_tasks.push(BackgroundToolTask { id: task_id, label, turn_seq: self.turn_seq });
+                            let started = (call.kind == "execute").then(|| background_task_from_tool(call)).flatten();
+                            let texts: Vec<String> = tool_output_texts(call).into_iter().map(str::to_string).collect();
+                            if let Some((task_id, label)) = started
+                                && self.seen_background_tasks.insert(task_id.clone())
+                            {
+                                self.background_tasks.push(BackgroundToolTask { id: task_id, label });
+                            }
+                            for text in &texts {
+                                self.retire_finished_background_tasks(text);
+                            }
                         }
                     }
                     if self.phase == Phase::Ready && !self.cached_replay && is_conversation_update(&update) {
@@ -911,6 +929,7 @@ impl ThreadView {
             return;
         }
         self.phase = Phase::Ended;
+        self.settle_opencode_shells();
         self.background_tasks.clear();
         self.preserve_handoff_message();
         self.cancel_questions();
@@ -1383,12 +1402,34 @@ impl ThreadView {
         }
     }
 
+    // OpenCode's shell calls belong to the prompt. A missing final tool update leaves no exit status.
+    fn settle_opencode_shells(&mut self) {
+        if self.harness != Harness::OpenCode {
+            return;
+        }
+        let mut first_changed = None;
+        for (row, entry) in self.thread.entries.iter_mut().enumerate() {
+            if let Entry::Tool(call) = entry
+                && call.kind == "execute" && call.status == ToolStatus::Running
+            {
+                call.status = match call.details.exit_code {
+                    Some(0) => ToolStatus::Done,
+                    Some(_) => ToolStatus::Failed,
+                    None => ToolStatus::Ended,
+                };
+                first_changed.get_or_insert(row);
+            }
+        }
+        if let Some(row) = first_changed {
+            self.remeasure(row);
+        }
+    }
+
     fn turn_ended(&mut self, result: Result<Value, String>, cx: &mut Context<Self>) {
+        self.settle_opencode_shells();
         self.working = false;
         self.interrupting = false;
         self.last_update = None;
-        self.background_tasks.retain(|task| task.turn_seq >= self.turn_seq);
-        self.turn_seq += 1;
         self.finish_open_thoughts();
         if let Ok(r) = &result
             && let Some(turn) = self.thread.record_usage(&r["usage"])
@@ -2121,11 +2162,6 @@ impl ThreadView {
         self.composer.update(cx, |c, cx| c.set_decorations(decorations, cx));
     }
 
-    /// True when any rendered markdown entry currently holds a non-empty text selection.
-    pub(super) fn has_chat_selection(&self, cx: &App) -> bool {
-        self.markdown.values().any(|s| !s.read(cx).selected_text().is_empty())
-    }
-
     pub(crate) fn set_viewing(&mut self, viewing: bool, cx: &mut Context<Self>) {
         if viewing == self.viewing {
             return;
@@ -2134,18 +2170,46 @@ impl ThreadView {
         cx.notify();
     }
 
-    pub(super) fn quote_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn selected_quote(&self, cx: &App) -> String {
         let mut selected = self.markdown.iter().filter_map(|(row, state)| {
             let text = state.read(cx).selected_text();
             (!text.trim().is_empty()).then_some((*row, text))
         }).collect::<Vec<_>>();
         selected.sort_by_key(|(row, _)| *row);
-        let quoted = selected.into_iter().map(|(_, text)| text.lines()
+        selected.into_iter().map(|(_, text)| text.lines()
             .map(|line| format!("> {line}")).collect::<Vec<_>>().join("\n"))
-            .collect::<Vec<_>>().join("\n>\n");
-        if !quoted.is_empty() {
-            self.paste_text(&format!("{quoted}\n\n"), window, cx);
-        }
+            .collect::<Vec<_>>().join("\n>\n")
+    }
+
+    fn start_selection_comment(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((_, quote)) = self.comment_anchor.as_mut() else { return };
+        let quote = std::mem::take(quote);
+        let input = crate::panels::comment_box::comment_input("the selection", window, cx);
+        let subscription = cx.subscribe_in(&input, window, |v, input, event, window, cx| {
+            if let InputEvent::PressEnter { secondary, .. } = event {
+                let text = input.read(cx).value().to_string();
+                if text.trim().is_empty() {
+                    return;
+                }
+                if let Some(comment) = v.selection_comment.take() {
+                    let message = format!("{}\n\n{}", comment.quote, text.trim());
+                    v.dismiss_selection_comment(window, cx);
+                    if *secondary {
+                        v.send(message, window, cx);
+                    } else {
+                        v.add_comment(&message, window, cx);
+                    }
+                }
+            }
+        });
+        self.selection_comment = Some(SelectionComment { quote, input, _subscription: subscription });
+        gpui_kit::base::TextSelection::clear(window, cx);
+        cx.notify();
+    }
+
+    fn dismiss_selection_comment(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.selection_comment = None;
+        self.comment_anchor = None;
         self.focus_composer(window, cx);
         cx.notify();
     }
@@ -2227,13 +2291,8 @@ impl ThreadView {
         self.phase != Phase::Ended
     }
 
-    pub fn set_auto_compact(&mut self, enabled: bool, cx: &mut Context<Self>) {
+    pub fn set_compaction_policy(&mut self, enabled: bool, threshold_percent: u64, cx: &mut Context<Self>) {
         self.compaction.enabled = enabled;
-        self.send_next(cx);
-        cx.notify();
-    }
-
-    pub fn set_compaction_threshold(&mut self, threshold_percent: u64, cx: &mut Context<Self>) {
         self.compaction.threshold_percent = crate::harness::compaction::clamp_threshold(threshold_percent);
         if let Some((used, size)) = self.thread.context {
             self.compaction.observe(used, size);
@@ -2634,6 +2693,49 @@ mod tests {
         assert_eq!(steer["method"], "_session/steering");
         assert_eq!(steer["params"]["sessionId"], "codex-session");
         assert_eq!(steer["params"]["prompt"][0]["text"], "> Which test?\n\nThe unit test.");
+    }
+
+    #[cfg(debug_assertions)]
+    #[gpui::test]
+    fn selected_chat_text_can_be_commented_on_from_the_conversation(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext;
+
+        cx.update(gpui_kit::init);
+        let dir = tempfile::tempdir().unwrap();
+        let mut start = test_start(dir.path().into(), Harness::Claude);
+        start.prior_entries = vec![Entry::Agent("A line of conversation text".into())];
+        let mut thread = None;
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| super::ThreadView::new(start, window, cx));
+            thread = Some(view.clone());
+            gpui_kit::base::Root::new(view, window, cx)
+        });
+        let view = thread.unwrap();
+        cx.update(|window, app| window.draw(app).clear(app));
+        assert!(cx.debug_bounds("comment-on-selection").is_none());
+        let text = view.read_with(cx, |v, app| v.markdown[&0].read(app).painted_text_bounds()[0]);
+        let start = gpui::point(text.left() + gpui::px(1.0), text.center().y);
+        let end = gpui::point(text.right() - gpui::px(1.0), text.center().y);
+        let modifiers = gpui::Modifiers::default();
+        cx.simulate_mouse_down(start, gpui::MouseButton::Left, modifiers);
+        cx.simulate_mouse_move(end, gpui::MouseButton::Left, modifiers);
+        cx.update(|window, app| window.draw(app).clear(app));
+        cx.simulate_mouse_up(end, gpui::MouseButton::Left, modifiers);
+        cx.update(|window, app| window.draw(app).clear(app));
+        let comment = cx.debug_bounds("comment-on-selection").expect("selection shows the comment button");
+        cx.simulate_click(comment.center(), modifiers);
+        cx.update(|window, app| {
+            view.update(app, |v, cx| {
+                let comment = v.selection_comment.as_ref().expect("comment input opened");
+                comment.input.update(cx, |input, cx| input.set_value("Can you clarify?", window, cx));
+            });
+            window.draw(app).clear(app);
+        });
+        cx.simulate_keystrokes("enter");
+        view.read_with(cx, |v, app| {
+            assert!(v.selection_comment.is_none());
+            assert_eq!(v.draft(app), "> A line of conversation text\n\nCan you clarify?");
+        });
     }
 
     #[gpui::test]
@@ -3254,13 +3356,33 @@ mod tests {
     }
 
     #[gpui::test]
-    fn antigravity_background_tasks_are_tracked_until_finished_or_next_turn_ends(cx: &mut gpui::TestAppContext) {
+    fn opencode_shells_without_a_final_status_stop_showing_as_running(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_kit::init);
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = cx.add_window_view(|window, cx| super::ThreadView::new(test_start(dir.path().into(), Harness::OpenCode), window, cx));
+        view.update(cx, |v, cx| {
+            v.phase = super::Phase::Ready;
+            v.on_event(super::Event::Update(serde_json::json!({
+                "sessionUpdate": "tool_call",
+                "toolCallId": "shell",
+                "kind": "execute",
+                "status": "in_progress",
+                "rawInput": { "command": "cargo check" }
+            })), cx);
+            assert!(v.has_background_work());
+            v.turn_ended(Ok(serde_json::json!({"stopReason": "end_turn"})), cx);
+            assert!(!v.has_background_work());
+            assert_eq!(v.thread.tool("shell").unwrap().status, super::ToolStatus::Ended);
+        });
+    }
+
+    #[gpui::test]
+    fn antigravity_background_tasks_ignore_replay_and_survive_turns_until_finished(cx: &mut gpui::TestAppContext) {
         cx.update(gpui_kit::init);
         let dir = tempfile::tempdir().unwrap();
         let (view, cx) = cx.add_window_view(|window, cx| super::ThreadView::new(test_start(dir.path().into(), Harness::Antigravity), window, cx));
         view.update(cx, |v, cx| {
-            v.phase = super::Phase::Ready;
-            v.on_event(super::Event::Update(serde_json::json!({
+            let start = serde_json::json!({
                 "sessionUpdate": "tool_call",
                 "toolCallId": "cmd-1",
                 "title": "Run clippy",
@@ -3268,7 +3390,11 @@ mod tests {
                 "status": "completed",
                 "rawInput": { "command": "cargo clippy --locked" },
                 "rawOutput": "Tool is running as a background task with task id: conv/task-42\nTask logs are available at: ..."
-            })), cx);
+            });
+            v.on_event(super::Event::Update(start.clone()), cx);
+            assert!(v.background_tasks.is_empty(), "replay does not create live tasks");
+            v.phase = super::Phase::Ready;
+            v.on_event(super::Event::Update(start), cx);
             assert_eq!(v.background_tasks.len(), 1);
             assert_eq!(v.background_tasks[0].id, "conv/task-42");
             assert_eq!(v.background_tasks[0].label, "cargo clippy --locked");
@@ -3276,12 +3402,20 @@ mod tests {
             // Ending the turn that spawned the task keeps it visible while waiting for it to finish.
             v.turn_ended(Ok(serde_json::json!({"stopReason": "end_turn"})), cx);
             assert_eq!(v.background_tasks.len(), 1);
+            v.turn_ended(Ok(serde_json::json!({"stopReason": "end_turn"})), cx);
+            assert!(v.has_background_work(), "a later turn can end while the command is still running");
             // A completion notification retires it immediately.
             v.on_event(super::Event::Update(serde_json::json!({
                 "sessionUpdate": "user_message_chunk",
                 "content": { "type": "text", "text": "Task id \"conv/task-42\" finished with result: Command exited with code 0." }
             })), cx);
             assert!(v.background_tasks.is_empty());
+            v.on_event(super::Event::Update(serde_json::json!({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "cmd-1",
+                "content": [{ "type": "content", "content": { "type": "text", "text": "Late output" } }]
+            })), cx);
+            assert!(v.background_tasks.is_empty(), "late output must not resurrect a finished task");
         });
     }
 

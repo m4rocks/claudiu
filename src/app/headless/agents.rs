@@ -465,7 +465,7 @@ fn compaction_respects_toggle_does_not_loop_on_failure_and_rearms() {
 
     // Turning auto-compact off stops /compact even when context reaches 85%.
     step(&mut cx, &|ws, window, cx| {
-        ws.act(Act::SetAutoCompact(id.clone(), false), window, cx);
+        ws.act(Act::SetAutoCompact(id.clone(), Some(false)), window, cx);
         let view = ws.live_view(&id).unwrap().thread().unwrap().clone();
         view.update(cx, |v, cx| v.send("fill context".into(), window, cx));
     });
@@ -480,7 +480,7 @@ fn compaction_respects_toggle_does_not_loop_on_failure_and_rearms() {
     assert_eq!(turns(), ["fill context"], "disabled auto-compact must not trigger /compact");
 
     // Turning auto-compact back on triggers /compact; the first attempt fails and must not loop.
-    step(&mut cx, &|ws, window, cx| ws.act(Act::SetAutoCompact(id.clone(), true), window, cx));
+    step(&mut cx, &|ws, window, cx| ws.act(Act::SetAutoCompact(id.clone(), Some(true)), window, cx));
     wait_idle(&mut cx, &|v| v.thread.entries.iter().any(|e| matches!(e, crate::harness::thread::Entry::Notice { text, error: true } if text == "Context compaction did not finish.")));
     assert_eq!(turns(), ["fill context", "/compact"], "failed compaction must not loop");
 

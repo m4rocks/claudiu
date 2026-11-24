@@ -165,13 +165,21 @@ impl Store {
         }
         // Terminal (shell) sessions are never kept across runs; agent sessions stay as resumable history.
         data.sessions.retain(|s| s.kind != SessionKind::Shell);
-        // One-time read fallback: previous multi-account builds moved Claude usage out of state.json into accounts.json.
-        if data.claude_usage.five_hour.is_none()
-            && data.claude_usage.seven_day.is_none()
-            && let Ok(text) = fs::read_to_string(path.with_file_name("accounts.json"))
-            && let Some(usage) = legacy_accounts_usage(&text)
-        {
-            data.claude_usage = usage;
+        if data.version < 2 {
+            for meta in data.sessions.iter_mut().filter_map(|session| session.agent.as_mut()) {
+                if meta.managed_compaction {
+                    // Older builds persisted the default as true. Only false reliably expresses an override.
+                    if meta.auto_compact == Some(false) && meta.auto_compact_override.is_none() {
+                        meta.auto_compact_override = Some(false);
+                    }
+                    meta.auto_compact = None;
+                }
+            }
+            if let Ok(text) = fs::read_to_string(path.with_file_name("accounts.json")) {
+                // A cached reading from a previous build may belong to a different login.
+                data.claude_usage = legacy_main_usage(&text).unwrap_or_default();
+            }
+            data.version = 2;
         }
         Self { path, data, dirty: false, writer: Writer::start() }
     }
@@ -339,8 +347,8 @@ pub fn keep_picked<T>(models: Vec<T>, picked: &[String], id: impl Fn(&T) -> &str
     models.into_iter().filter(|m| picked.iter().any(|p| p == id(m))).collect()
 }
 
-/// Read Claude usage from a legacy `accounts.json` (preferring the active account, else `"main"`).
-fn legacy_accounts_usage(text: &str) -> Option<UsageLimits> {
+/// The main account used the configured CLI login. Alternate account readings are no longer applicable.
+fn legacy_main_usage(text: &str) -> Option<UsageLimits> {
     #[derive(Deserialize)]
     struct LegacyAccount {
         id: String,
@@ -351,17 +359,9 @@ fn legacy_accounts_usage(text: &str) -> Option<UsageLimits> {
     struct LegacyAccountsFile {
         #[serde(default)]
         accounts: Vec<LegacyAccount>,
-        #[serde(default)]
-        active: Option<String>,
     }
-    let file: LegacyAccountsFile = serde_json::from_str(text).ok()?;
-    let picked = file
-        .active
-        .as_deref()
-        .and_then(|id| file.accounts.iter().find(|a| a.id == id))
-        .or_else(|| file.accounts.iter().find(|a| a.id == "main"))
-        .or_else(|| file.accounts.first())?;
-    (picked.usage.five_hour.is_some() || picked.usage.seven_day.is_some()).then(|| picked.usage.clone())
+    serde_json::from_str::<LegacyAccountsFile>(text).ok()?.accounts.into_iter()
+        .find(|account| account.id == "main").map(|account| account.usage)
 }
 
 #[cfg(test)]

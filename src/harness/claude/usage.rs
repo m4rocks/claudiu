@@ -84,7 +84,13 @@ pub fn read_snapshots(dir: &Path) -> Vec<Snapshot> {
     entries
         .flatten()
         .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("json"))
-        .filter_map(|e| serde_json::from_str::<Snapshot>(&std::fs::read_to_string(e.path()).ok()?).ok())
+        .filter_map(|e| {
+            let report: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(e.path()).ok()?).ok()?;
+            if report["account"].as_str().is_some_and(|account| account != "main") {
+                return None;
+            }
+            serde_json::from_value(report).ok()
+        })
         .collect()
 }
 
@@ -121,6 +127,9 @@ mod tests {
         std::fs::write(tmp.path().join("abc-123.json"), FROM_MOD).unwrap();
         std::fs::write(tmp.path().join("garbage.json"), "{{{").unwrap();
         std::fs::write(tmp.path().join("note.txt"), FROM_MOD).unwrap();
+        let mut old: serde_json::Value = serde_json::from_str(FROM_MOD).unwrap();
+        old["account"] = serde_json::json!("alt");
+        std::fs::write(tmp.path().join("old-alt.json"), old.to_string()).unwrap();
         let got = read_snapshots(tmp.path());
         assert_eq!(got.len(), 1);
         let s = &got[0];

@@ -17,6 +17,8 @@ Every session runs in m4code's native chat view over the [Agent Client Protocol]
 | **OpenCode** | `opencode` on `PATH` | Uses the providers configured in OpenCode. |
 | **Google Antigravity** | `agy` CLI, signed in | Opt-in for Claude Code's native subagent integration; excluded from shared MCP subagent tools for now. |
 
+When upgrading from a version with multiple Claude accounts, resumed sessions use the login configured for the Claude CLI.
+
 > **Antigravity terms note**: Google's [Antigravity terms](https://antigravity.google/terms) and [FAQ](https://antigravity.google/docs/faq) forbid using another company's agent (such as Claude Code) with a personal Google sign-in (Free, AI Plus, Pro, or Ultra), and Google can suspend or terminate accounts that do. Turn Antigravity subagents on at your own risk.
 
 ## Features
@@ -32,10 +34,12 @@ Every session runs in m4code's native chat view over the [Agent Client Protocol]
   - Press `Cmd/Ctrl+Enter` (or `Cmd/Ctrl`-click Send) to swap Steer and Queue for a single message.
 - **Questions and background shells**: Answer agent questions with the keyboard or mouse, or type your own answer for Claude Code. Codex can ask questions while working without blocking chat. Claude Code background shells appear above the composer with Output and Stop controls.
 - **Chat navigation**: Use the scrollbar or mouse wheel to scroll the chat. Scrolling up pauses follow mode. Use **Jump to latest** to catch up. Search the conversation with **Find in session** under Actions or `Cmd/Ctrl+F`. Consecutive read-only tools are grouped into expandable exploration summaries.
-- **Context compaction**: Configurable in **Settings → General** (enable/disable and context threshold %, default 90%) and per session in the right sidebar. Schedules compaction at the next idle boundary once reported context reaches the configured threshold, using the adapter's native compact command while keeping the provider session. Native automatic compaction is disabled for Claude Code and OpenCode; Codex retains a native fallback noted in the status panel.
+- **Context compaction**: Set the default and context threshold in **Settings → General**. In the right sidebar, choose On, Off, or Use global setting for the current session. Schedules compaction at the next idle boundary once reported context reaches the configured threshold, using the adapter's native compact command while keeping the provider session. Native automatic compaction is disabled for Claude Code and OpenCode; Codex retains a native fallback noted in the status panel.
 - **Keyboard shortcuts**: Supports familiar Claude Code shortcuts (`Esc` to stop, `Esc` twice to edit your last message, `Shift+Tab` for permission mode, `Up` for message history, `Shift+Enter` for a new line). **Settings → Keyboard** lists every shortcut.
 
 ### Workspace, Git, and editor
+
+- **Comments**: Select text in chat and use the comment icon to add context to your next message. The same icon opens comments on lines in Review changes and in the editor.
 
 - **Branches and worktrees**: Create a branch or spin up a new worktree (from `main` or the current checkout) in one click from the branch chip, inspect external worktrees, or move a session between worktrees.
 - **Change review and snapshots**: Review a file-changing turn from its prompt to see the changes captured when that turn ended. **Restore Checkpoint** rolls the files back when the checkout still matches, and **Fork Thread** copies the conversation through that turn into a new session. The composer?s **Review changes** button compares the working tree to the latest snapshot and supports hunk actions and line comments.
@@ -55,7 +59,7 @@ Every session runs in m4code's native chat view over the [Agent Client Protocol]
 
 ### Skills
 
-**Settings → Skills** browses `skills.sh`, installs single `SKILL.md` packages or entire GitHub repositories (grouped by repository, with single-skill, per-repo, and Update All controls), and symlinks enabled skills globally or per project into each active harness. When scoped to a project, it also lists skills shipped in the repository (such as `.claude/skills`) read-only.
+**Settings → Skills** lets you filter installed skills, browse or search `skills.sh`, installs single `SKILL.md` packages or entire GitHub repositories (grouped by repository, with single-skill, per-repo, and Update All controls), and symlinks enabled skills globally or per project into each active harness. When scoped to a project, it also lists skills shipped in the repository (such as `.claude/skills`) read-only.
 
 ## What it touches
 

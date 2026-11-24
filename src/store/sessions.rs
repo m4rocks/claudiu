@@ -86,6 +86,9 @@ pub struct AgentMeta {
     /// The `/config` auto-compact switch, the `advisorModel` setting and the last slash command, as the mod reports them.
     #[serde(default)]
     pub auto_compact: Option<bool>,
+    /// An explicit m4code policy override. None follows Settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_compact_override: Option<bool>,
     #[serde(default)]
     pub advisor: Option<String>,
     /// Background compaction ("Precompute compaction" in `/config`); `None` while Claude Code does not offer it.

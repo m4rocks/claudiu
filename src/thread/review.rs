@@ -5,7 +5,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use gpui::{Subscription, ClickEvent, Context, Div, Entity, FontWeight, InteractiveElement, IntoElement, KeyDownEvent, ParentElement, SharedString, StatefulInteractiveElement, Styled, Window, div, prelude::FluentBuilder, px};
+use gpui::{Subscription, ClickEvent, Context, Div, Entity, FontWeight, InteractiveElement, IntoElement, KeyDownEvent, ParentElement, SharedString, Styled, Window, div, prelude::FluentBuilder, px};
 use gpui_kit::component::input::{InputEvent, InputState};
 
 use serde::{Deserialize, Serialize};
@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 use super::{ThreadEvent, ThreadView};
 use crate::git::snapshot::{self, FileChange, Hunk};
-use crate::panels::comment_box::{comment_box, comment_input};
+use crate::panels::comment_box::{COMMENT_SIZE, comment_box, comment_input, comment_trigger};
 use crate::panels::scale;
 use crate::panels::theme::{self, hsla};
 use crate::panels::widgets::{button, spinner};
@@ -354,7 +354,7 @@ impl ThreadView {
 
     fn can_restore(&self, turn: &TurnReview) -> bool {
         turn.checkpoint && turn.cwd == self.cwd && !self.is_working()
-            && self.provider_shells.is_empty() && self.background.is_empty()
+            && !self.has_background_work()
     }
 
     fn restore_turn(&mut self, id: Uuid, cx: &mut Context<Self>) {
@@ -478,28 +478,39 @@ impl ThreadView {
                 _ => (theme::PANEL_BG, theme::TEXT_DIM),
             };
             let number = line.new_line.map_or(String::new(), |n| n.to_string());
-            let mut row = div()
+            let comment = review.snapshot.is_some().then(|| {
+                if let Some(n) = line.new_line {
+                    let path = path.to_path_buf();
+                    comment_trigger(format!("review-comment-{f}-{h}-{l}"))
+                        .opacity(0.65)
+                        .group_hover("review-diff-line", |style| style.opacity(1.0))
+                        .focus_visible(|style| style.opacity(1.0))
+                        .on_click(cx.listener(move |v, _: &ClickEvent, window, cx| v.start_comment(path.clone(), n, window, cx)))
+                        .into_any_element()
+                } else {
+                    div().size(px(COMMENT_SIZE)).into_any_element()
+                }
+            });
+            let row = div()
                 .id(SharedString::from(format!("review-line-{f}-{h}-{l}")))
+                .group("review-diff-line")
                 .flex()
                 .bg(hsla(bg))
                 .text_color(hsla(fg))
                 .whitespace_nowrap()
+                .items_center()
+                .children(comment)
                 .child(div().w(px(44.0)).flex_none().pr(px(8.0)).text_right().text_color(hsla(theme::TEXT_FAINT)).child(number))
                 .child(div().child(format!("{} {}", line.origin, line.text)));
-            // Comments are on lines of the file as it is now, so a removed line takes none.
-            if review.snapshot.is_some() && let Some(n) = line.new_line {
-                let path = path.to_path_buf();
-                row = row.cursor_pointer().hover(|s| s.bg(hsla(theme::ROW_HOVER))).on_click(cx.listener(move |v, _: &ClickEvent, window, cx| v.start_comment(path.clone(), n, window, cx)));
-            }
             block = block.child(row);
             if review.snapshot.is_some() && let Some(n) = line.new_line {
                 for c in review.comments.iter().filter(|c| c.path == path && c.line == n) {
-                    block = block.child(div().ml(px(44.0)).px(px(8.0)).py(px(3.0)).text_color(hsla(theme::ACCENT)).child(c.text.clone()));
+                    block = block.child(div().ml(px(44.0 + COMMENT_SIZE)).px(px(8.0)).py(px(3.0)).text_color(hsla(theme::ACCENT)).child(c.text.clone()));
                 }
                 if let Some((_, input, _)) = review.commenting.as_ref().filter(|(c, _, _)| c.path == path && c.line == n) {
                     block = block.child(
                         div()
-                            .ml(px(44.0))
+                            .ml(px(44.0 + COMMENT_SIZE))
                             .p(px(4.0))
                             .on_key_down(cx.listener(|v, ev: &KeyDownEvent, window, cx| {
                                 if ev.keystroke.key == "escape" {

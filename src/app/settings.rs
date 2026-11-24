@@ -256,11 +256,14 @@ impl Workspace {
             cx.notify();
             return;
         }
-        let Some(Modal::Settings { shell, skill_search, list_focus, renaming, .. }) = &self.modal else { return };
+        let Some(Modal::Settings { shell, skill_search, skill_filter, list_focus, renaming, .. }) = &self.modal else { return };
         let list_focus = list_focus.clone();
         let fields = match self.settings_page {
             SettingsPage::General => vec![shell.clone()],
-            SettingsPage::Skills if self.skills_page.tab == SkillsTab::Browse => vec![skill_search.clone()],
+            SettingsPage::Skills => vec![match self.skills_page.tab {
+                SkillsTab::Installed => skill_filter.clone(),
+                SkillsTab::Browse => skill_search.clone(),
+            }],
             SettingsPage::Projects => renaming.iter().map(|(_, name)| name.clone()).collect(),
             _ => Vec::new(),
         };

@@ -16,7 +16,7 @@ use crate::files::Change;
 use crate::app::{Act, Ask, AskExplain, AskFix, AskFixProblem, AskTests, EditorCommand, EditorPane, MenuItem, GoBack, GoForward, GoToLine, QuickOpen, SaveFile, Tab, Workspace, CloseTab, LineComment};
 use crate::panels::glide::Follow;
 use crate::panels::theme::{self, hsla};
-use crate::panels::comment_box::comment_box;
+use crate::panels::comment_box::{COMMENT_ICON, COMMENT_ICON_SIZE, COMMENT_SIZE, comment_box};
 use crate::panels::widgets::{button, dropdown_card, icon};
 use crate::platform::path_key;
 
@@ -254,7 +254,6 @@ fn render_comment(comment: &LineComment, cx: &mut Context<Workspace>) -> AnyElem
 /// mouse when nothing is selected. Painted over the editor like `change_marks`, since the editor has no gutter of its
 /// own to put an element in.
 fn comment_button(buffer: gpui::Entity<EditorState>, hovered: std::rc::Rc<std::cell::Cell<Option<usize>>>, ws: gpui::WeakEntity<Workspace>) -> impl IntoElement {
-    const SIZE: f32 = 16.0;
     gpui::canvas(
         |_, _, _| (),
         move |viewport, _, window, cx| {
@@ -276,18 +275,21 @@ fn comment_button(buffer: gpui::Entity<EditorState>, hovered: std::rc::Rc<std::c
             let Some(line) = line.filter(|l| visible.contains(l) && *l < text.lines_len()) else { return };
             let start = text.line_start_offset(line);
             let Some(row) = editor.range_to_bounds(&(start..start)) else { return };
-            let top = row.origin.y + (row.size.height - px(SIZE)) / 2.0;
-            let button = gpui::Bounds::new(gpui::point(area.origin.x + px(6.0), top), gpui::size(px(SIZE), px(SIZE)));
+            let top = row.origin.y + (row.size.height - px(COMMENT_SIZE)) / 2.0;
+            let button = gpui::Bounds::new(gpui::point(area.origin.x + px(6.0), top), gpui::size(px(COMMENT_SIZE), px(COMMENT_SIZE)));
             if !viewport.intersects(&button) {
                 return;
             }
             let over = button.contains(&window.mouse_position());
             window.with_content_mask(Some(gpui::ContentMask { bounds: viewport }), |window| {
-                let bg = if over { theme::TEXT_FAINT } else { theme::FOCUS_BORDER };
+                let bg = if over { theme::CONTROL_HOVER } else { theme::SURFACE_ELEVATED };
                 window.paint_quad(gpui::fill(button, hsla(bg)).corner_radii(px(4.0)));
-                let c = button.center();
-                window.paint_quad(gpui::fill(gpui::Bounds::new(gpui::point(c.x - px(4.0), c.y - px(0.75)), gpui::size(px(8.0), px(1.5))), hsla(theme::TEXT)));
-                window.paint_quad(gpui::fill(gpui::Bounds::new(gpui::point(c.x - px(0.75), c.y - px(4.0)), gpui::size(px(1.5), px(8.0))), hsla(theme::TEXT)));
+                let inset = px((COMMENT_SIZE - COMMENT_ICON_SIZE) / 2.0);
+                let icon_bounds = gpui::Bounds::new(
+                    button.origin + gpui::point(inset, inset),
+                    gpui::size(px(COMMENT_ICON_SIZE), px(COMMENT_ICON_SIZE)),
+                );
+                let _ = window.paint_svg(icon_bounds, COMMENT_ICON.path(), None, gpui::TransformationMatrix::default(), hsla(theme::TEXT), cx);
             });
             let ws = ws.clone();
             window.on_mouse_event(move |ev: &MouseDownEvent, phase, window, cx| {

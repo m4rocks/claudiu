@@ -50,7 +50,17 @@ fn skills_page_installs_toggles_syncs_and_removes() {
     }
 
     let home_path = home.path().to_path_buf();
+    fn fake_search(query: &str) -> Result<Vec<CatalogEntry>, String> {
+        assert_eq!(query, "demo");
+        fake_popular()
+    }
+
     ws.update(&mut cx, |ws, _| {
+        ws.skills_page.fetch_search = fake_search;
+        ws.store.data.settings.enabled_harnesses = Some(vec![Harness::Claude]);
+        for agent in crate::harness::subagents::Agent::ALL {
+            ws.store.data.settings.custom_subagents.get_mut(agent).on = false;
+        }
         ws.skills_page.home_override = Some(home_path.clone());
         ws.skills_page.fetch_popular = fake_popular;
         ws.skills_page.install_pkg = fake_install;
@@ -132,5 +142,19 @@ fn skills_page_installs_toggles_syncs_and_removes() {
             && std::fs::symlink_metadata(project_skills_dir(Harness::Claude, &proj_path).join("demo-skill")).is_err()
             && !data.path().join("skills").join("demo-skill").exists()
     });
+
+    cx.update_window(window, |_, window, app| ws.update(app, |ws, cx| {
+        ws.act(Act::SetSkillsTab(SkillsTab::Browse), window, cx);
+        let Some(Modal::Settings { skill_search, .. }) = &ws.modal else { panic!("settings should be open") };
+        skill_search.update(cx, |input, cx| input.set_value("demo", window, cx));
+        ws.act(Act::SearchSkills, window, cx);
+    })).unwrap();
+    wait(&mut cx, "catalog search", &|ws| ws.skills_page.results.as_ref().is_some_and(|rows| rows.len() == 1));
+    cx.update_window(window, |_, window, app| ws.update(app, |ws, cx| {
+        ws.act(Act::Dismiss, window, cx);
+        ws.act(Act::OpenSettings, window, cx);
+        let Some(Modal::Settings { skill_search, .. }) = &ws.modal else { panic!("settings should reopen") };
+        assert_eq!(skill_search.read(cx).value().as_ref(), "demo");
+    })).unwrap();
 }
 

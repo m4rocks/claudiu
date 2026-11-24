@@ -117,7 +117,7 @@ impl Workspace {
             project: Some(project_chip.into_any_element()),
             git: git_chip,
             extra_chips: vec![],
-            extra_actions: vec![attachments::button(&self.home.prompt, |ws: &mut Self| &mut ws.home.attachments, cx).into_any_element()],
+            extra_actions: vec![attachments::button(&self.home.prompt, |ws: &mut Self| &mut ws.home.attachments, true, cx).into_any_element()],
             send: start_btn,
         })
         .max_w(px(680.0))

@@ -475,17 +475,22 @@ impl Workspace {
 
         // The figures come from the snapshot the session's mod reports.
         let meta = shown.rec.as_ref().filter(|r| r.kind == SessionKind::Agent).and_then(|r| r.agent.as_ref());
-        let (compact, precompute) = meta.map_or((None, None), |m| (m.auto_compact, m.precompute_compact));
+        let (compact, precompute) = meta.map_or((None, None), |m| (m.auto_compact_override, m.precompute_compact));
         let live = id.and_then(|id| self.live_view(id)).and_then(|view| view.thread());
         let effective_compact = live
             .map(|view| view.read(cx).compaction.enabled)
             .or_else(|| meta.map(|_| compact.unwrap_or(self.store.data.settings.auto_compact)));
-        let compact_text = live.map_or_else(|| effective_compact.map_or("—", |v| if v { "On" } else { "Off" }).to_string(), |view| view.read(cx).compaction_status());
+        let mut compact_text = live.map_or_else(|| effective_compact.map_or("—", |v| if v { "On" } else { "Off" }).to_string(), |view| view.read(cx).compaction_status());
+        if compact.is_none() && effective_compact.is_some()
+            && live.is_none_or(|view| view.read(cx).harness.adapter().compact_command.is_some())
+        {
+            compact_text.push_str(" (global)");
+        }
         let settable = id.filter(|_| meta.is_some() && running).cloned();
 
         let compact_settable = settable.clone().filter(|_| live.is_some_and(|view| view.read(cx).harness.adapter().compact_command.is_some()));
         let compact_row = match compact_settable {
-            Some(sid) => pick_row(cx, "set-auto-compact", "Auto-compact", compact_text, move || auto_compact_menu(&sid, effective_compact)).into_any_element(),
+            Some(sid) => pick_row(cx, "set-auto-compact", "Auto-compact", compact_text, move || auto_compact_menu(&sid, compact)).into_any_element(),
             None => kv("Auto-compact", compact_text).into_any_element(),
         };
         // Only while Claude Code offers the setting; without its feature flag the setting does nothing.
@@ -508,7 +513,7 @@ impl Workspace {
 }
 
 fn auto_compact_menu(sid: &Id, current: Option<bool>) -> Vec<MenuItem> {
-    [(true, "On"), (false, "Off")].into_iter().map(|(on, name)| MenuItem::new(format!("{}{name}", tick(current == Some(on))), Act::SetAutoCompact(sid.clone(), on))).collect()
+    [(None, "Use global setting"), (Some(true), "On"), (Some(false), "Off")].into_iter().map(|(on, name)| MenuItem::new(format!("{}{name}", tick(current == on)), Act::SetAutoCompact(sid.clone(), on))).collect()
 }
 
 fn precompute_compact_menu(sid: &Id, current: bool) -> Vec<MenuItem> {
@@ -769,8 +774,8 @@ mod tests {
     #[test]
     fn the_setting_menus_tick_the_current_value() {
         let sid = "s".to_string();
-        assert_eq!(labels(&auto_compact_menu(&sid, Some(false))), ["    On", "✓  Off"]);
-        assert_eq!(labels(&auto_compact_menu(&sid, None)), ["    On", "    Off"]);
+        assert_eq!(labels(&auto_compact_menu(&sid, Some(false))), ["    Use global setting", "    On", "✓  Off"]);
+        assert_eq!(labels(&auto_compact_menu(&sid, None)), ["✓  Use global setting", "    On", "    Off"]);
         assert_eq!(labels(&precompute_compact_menu(&sid, true)), ["✓  On", "    Off"]);
     }
 }

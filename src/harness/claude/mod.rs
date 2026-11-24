@@ -125,7 +125,7 @@ pub fn prepare_session(
     session_id: Option<&str>,
     name: Option<String>,
     chrome: bool,
-    tools_off: &[&str],
+    tools_off: &mut Vec<&'static str>,
     settings: &crate::store::Settings,
 ) -> (Vec<(String, String)>, Value) {
     let mut env = probe_env(claude_exe);
@@ -145,6 +145,8 @@ pub fn prepare_session(
             env.push((super::subagents::ENV.into(), subagents));
             env.push((super::subagents::EXE_ENV.into(), exe.to_string_lossy().into_owned()));
         }
+    } else if !tools_off.contains(&"visual") {
+        tools_off.push("visual");
     }
     let mut extra = vec![];
     if let Some(name) = name {

@@ -86,7 +86,7 @@ pub enum Act {
     /// Generate a new title from the session’s first user message.
     RegenTitle(Id),
     /// Change a setting of a running session through its mod (see `usage::send_ctl`).
-    SetAutoCompact(Id, bool),
+    SetAutoCompact(Id, Option<bool>),
     SetPrecomputeCompact(Id, bool),
     /// Filter the sidebar list to a project (`None`: all).
     FilterProject(Option<Id>),
@@ -339,7 +339,14 @@ impl Workspace {
                 let claude = self.modal_input(&claude_t, &claude_hint, window, cx);
                 let shell = self.modal_input(&shell_t, &platform::default_shell(None).0, window, cx);
                 let skills_field = self.modal_input(&self.store.data.settings.limits.text(), "none, e.g. dataviz, claude-api", window, cx);
-                let skill_search = self.modal_input_then("", "Search skills.sh or enter owner/repo", |ws, _, cx| ws.search_skills(cx), window, cx);
+                let skill_filter = cx.new(|cx| InputState::new(window, cx).placeholder("Filter installed skills"));
+                cx.subscribe(&skill_filter, |_, _, ev: &InputEvent, cx| {
+                    if matches!(ev, InputEvent::Change) {
+                        cx.notify();
+                    }
+                }).detach();
+                let query = self.skills_page.search_query.clone().unwrap_or_default();
+                let skill_search = self.modal_input_then(&query, "Search skills.sh or enter owner/repo", |ws, _, cx| ws.search_skills(cx), window, cx);
                 let list_focus = cx.focus_handle();
                 window.focus(&list_focus, cx);
                 let custom = &self.store.data.settings.custom_subagents;
@@ -351,7 +358,7 @@ impl Workspace {
                     claude_subagents: self.store.data.settings.claude_subagents,
                     picking: None,
                 });
-                self.modal = Some(Modal::Settings { shell, claude, default_model, text_generation_model, effort: defaults.effort.unwrap_or_default(), permission: defaults.permission_mode, updates, chrome, scale: crate::panels::scale::percent(), follow_up: s_follow_up, auto_compact, auto_compact_threshold, m4code_off: self.store.data.settings.m4code_tools_off.clone(), skills_field, skill_search, costly: claude::costly::scan(), list_focus, renaming: None, subagents });
+                self.modal = Some(Modal::Settings { shell, claude, default_model, text_generation_model, effort: defaults.effort.unwrap_or_default(), permission: defaults.permission_mode, updates, chrome, scale: crate::panels::scale::percent(), follow_up: s_follow_up, auto_compact, auto_compact_threshold, m4code_off: self.store.data.settings.m4code_tools_off.clone(), skills_field, skill_search, skill_filter, costly: claude::costly::scan(), list_focus, renaming: None, subagents });
                 // After the modal exists: a page that loads something reads the dialog's fields.
                 self.set_settings_page(self.settings_page, cx);
             }
@@ -440,12 +447,13 @@ impl Workspace {
             Act::SetAutoCompact(id, on) => {
                 // Provider usage reports describe the native switch, not m4code's policy.
                 if let Some(meta) = self.store.session_mut(&id).and_then(|s| s.agent.as_mut()) {
-                    meta.auto_compact = Some(on);
+                    meta.auto_compact_override = on;
                 }
                 self.store.mark_dirty();
                 cx.notify();
                 if let Some(view) = self.live_view(&id).and_then(|v| v.thread()).cloned() {
-                    view.update(cx, |v, cx| v.set_auto_compact(on, cx));
+                    let enabled = on.unwrap_or(self.store.data.settings.auto_compact);
+                    view.update(cx, |v, cx| v.set_compaction_policy(enabled, v.compaction.threshold_percent, cx));
                 }
             }
             Act::SetPrecomputeCompact(id, on) => {

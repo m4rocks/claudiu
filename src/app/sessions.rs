@@ -128,18 +128,16 @@ impl Workspace {
         let settings = &self.store.data.settings;
         let extra_off = if meta.harness == Harness::Claude { claude::trimmed_mcp_tools() } else { vec![] };
         let mut off = mcp::tools_off(&settings.m4code_tools_off, &extra_off);
+        if meta.harness != Harness::Claude {
+            if !off.contains(&"visual") {
+                off.push("visual");
+            }
+            off.push("artifacts");
+        }
         // Harnesses with native ACP question support (Claude via AskUserQuestion, Codex/Antigravity via ACP form
         // elicitation) use their own ask tool; OpenCode's ACP lacks question bridging so it gets m4code's `ask_user`.
         if meta.harness != Harness::OpenCode {
             off.push("ask_user");
-        }
-        let mut mcp_servers = vec![];
-        if let Ok(exe) = crate::platform::own_exe() {
-            let mut env = vec![(mcp::RECORD_ENV, record_id.to_string())];
-            if !off.is_empty() {
-                env.push((mcp::TOOLS_OFF_ENV, off.join(",")));
-            }
-            mcp_servers.push(harness::stdio_server("m4code", &exe, &[mcp::FLAG], &env));
         }
         let (mut mode, options) = match session_id {
             None => {
@@ -164,9 +162,17 @@ impl Workspace {
                 self.show_toast("Could not find the `claude` CLI. Install Claude Code, or set its path in Settings.".into(), Some(("Check setup".into(), Act::OpenSetup)), cx);
                 return None;
             };
-            let (claude_env, claude_meta) = claude::prepare_session(&exe, record_id, session_id.as_deref(), name, meta.chrome, &off, settings);
+            let (claude_env, claude_meta) = claude::prepare_session(&exe, record_id, session_id.as_deref(), name, meta.chrome, &mut off, settings);
             env.extend(claude_env);
             session_meta = claude_meta;
+        }
+        let mut mcp_servers = vec![];
+        if let Ok(exe) = crate::platform::own_exe() {
+            let mut server_env = vec![(mcp::RECORD_ENV, record_id.to_string())];
+            if !off.is_empty() {
+                server_env.push((mcp::TOOLS_OFF_ENV, off.join(",")));
+            }
+            mcp_servers.push(harness::stdio_server("m4code", &exe, &[mcp::FLAG], &server_env));
         }
         if meta.parent_session.is_some() {
             mode = None;
@@ -334,7 +340,7 @@ impl Workspace {
         let name = record.chosen_title().map(String::from);
         let subagent_edits = record.agent.as_ref().filter(|m| m.parent_session.is_some()).map(|m| m.subagent_edits);
         let canonical_history = record.agent.as_ref().is_some_and(|m| !m.provider_sessions.is_empty());
-        let auto_compact = record.agent.as_ref().and_then(|m| m.auto_compact).unwrap_or(self.store.data.settings.auto_compact);
+        let auto_compact = record.agent.as_ref().and_then(|m| m.auto_compact_override).unwrap_or(self.store.data.settings.auto_compact);
         let auto_compact_threshold = crate::harness::compaction::clamp_threshold(self.store.data.settings.auto_compact_threshold);
         let native_controlled = start.harness == Harness::OpenCode;
         if let Some(meta) = record.agent.as_mut() {

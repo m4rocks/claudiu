@@ -48,7 +48,7 @@ impl SubagentState {
         match status {
             ToolStatus::Pending | ToolStatus::Running if parent_working => Self::Running,
             // A step the parent's interrupted turn left behind is not running any more.
-            ToolStatus::Pending | ToolStatus::Running => Self::Stopped,
+            ToolStatus::Pending | ToolStatus::Running | ToolStatus::Ended => Self::Stopped,
             ToolStatus::Done => Self::Completed,
             ToolStatus::Failed => Self::Failed,
         }

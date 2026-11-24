@@ -34,7 +34,7 @@ pub enum TraceStatus {
 impl From<ToolStatus> for TraceStatus {
     fn from(status: ToolStatus) -> Self {
         match status {
-            ToolStatus::Pending => Self::Pending,
+            ToolStatus::Pending | ToolStatus::Ended => Self::Pending,
             ToolStatus::Running => Self::Running,
             ToolStatus::Done => Self::Done,
             ToolStatus::Failed => Self::Error,
@@ -328,7 +328,7 @@ pub fn tool_header(
         ToolStatus::Running => spinner(SharedString::from(format!("tool-spin-{ix}")), 12.0).into_any_element(),
         ToolStatus::Failed => icon(IconName::CircleX, 12.5).text_color(hsla(theme::DANGER)).into_any_element(),
         ToolStatus::Pending => icon(IconName::CircleDotDashed, 12.5).text_color(hsla(theme::TEXT_FAINT)).into_any_element(),
-        ToolStatus::Done => icon(tool_kind_icon(&call.kind), 12.5)
+        ToolStatus::Done | ToolStatus::Ended => icon(tool_kind_icon(&call.kind), 12.5)
             .text_color(hsla(if expanded { theme::TEXT_DIM } else { theme::TEXT_FAINT }))
             .into_any_element(),
     };
@@ -336,6 +336,7 @@ pub fn tool_header(
     match call.status {
         ToolStatus::Running => chips.push(trace_badge("Running", theme::BUSY, theme::SURFACE_ELEVATED, theme::PANEL_BORDER)),
         ToolStatus::Failed => chips.push(trace_badge("Error", theme::DANGER, 0x251417, 0x55242a)),
+        ToolStatus::Ended => chips.push(trace_badge("Ended", theme::TEXT_DIM, theme::SURFACE_ELEVATED, theme::PANEL_BORDER)),
         _ => {}
     }
     chips.extend(location_chips);

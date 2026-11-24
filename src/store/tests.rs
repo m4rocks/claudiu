@@ -229,10 +229,41 @@ fn legacy_account_usage_loads_into_claude_usage() {
 fn legacy_accounts_file_usage_is_imported_when_state_usage_is_empty() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("state.json");
-    let accounts = r#"{"active":"main","accounts":[{"id":"main","usage":{"five_hour":{"utilization":0.42,"resets_at":null,"seen_at":9}}}]}"#;
+    let accounts = r#"{"active":"alt","accounts":[{"id":"alt","usage":{"five_hour":{"utilization":1.0,"resets_at":null,"seen_at":10}}},{"id":"main","usage":{"five_hour":{"utilization":0.42,"resets_at":null,"seen_at":9}}}]}"#;
     fs::write(tmp.path().join("accounts.json"), accounts).unwrap();
     let s = Store::load(path);
     assert_eq!(s.data.claude_usage.five_hour.as_ref().unwrap().utilization, Some(0.42));
+}
+
+#[test]
+fn legacy_default_compaction_inherits_and_explicit_off_survives() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("state.json");
+    let mut data = Store::load(path.clone()).data;
+    data.version = 1;
+    for (id, auto_compact) in [("enabled", true), ("disabled", false)] {
+        data.sessions.push(SessionRecord {
+            id: id.into(),
+            kind: SessionKind::Agent,
+            title: id.into(),
+            custom_title: None,
+            auto_title: None,
+            cwd: tmp.path().into(),
+            project_id: None,
+            created_at: 1,
+            last_active: 1,
+            exit_code: None,
+            hidden: false,
+            agent: Some(AgentMeta { managed_compaction: true, auto_compact: Some(auto_compact), ..Default::default() }),
+        });
+    }
+    fs::write(&path, serde_json::to_vec(&data).unwrap()).unwrap();
+    let mut store = Store::load(path.clone());
+    assert_eq!(store.session("enabled").unwrap().agent.as_ref().unwrap().auto_compact_override, None);
+    assert_eq!(store.session("disabled").unwrap().agent.as_ref().unwrap().auto_compact_override, Some(false));
+    store.session_mut("disabled").unwrap().agent.as_mut().unwrap().auto_compact_override = None;
+    store.save();
+    assert_eq!(Store::load(path).session("disabled").unwrap().agent.as_ref().unwrap().auto_compact_override, None);
 }
 
 #[test]

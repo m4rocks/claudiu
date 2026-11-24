@@ -57,7 +57,9 @@ impl Workspace {
     /// One mod report: Claude's limits, and the session's own figures and settings.
     fn apply_snapshot(&mut self, snap: &Snapshot, cx: &mut Context<Self>) -> bool {
         let mut changed = self.merge_claude_usage(snap.five_hour.clone(), snap.seven_day.clone());
-        let id = self.store.data.sessions.iter().find(|s| s.provider_session_id() == Some(snap.session_id.as_str())).map(|s| s.id.clone());
+        let id = self.store.data.sessions.iter().find(|s| {
+            s.agent.as_ref().is_some_and(|meta| meta.harness == Harness::Claude && meta.session_id == snap.session_id)
+        }).map(|s| s.id.clone());
         if let Some(id) = id {
             if let Some(meta) = self.store.session_mut(&id).and_then(|s| s.agent.as_mut()) {
                 changed |= apply_to_meta(meta, snap);

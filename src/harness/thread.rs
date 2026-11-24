@@ -24,6 +24,7 @@ pub enum ToolStatus {
     Running,
     Done,
     Failed,
+    Ended,
 }
 
 impl ToolStatus {

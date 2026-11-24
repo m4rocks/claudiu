@@ -32,7 +32,7 @@ pub(super) fn render_settings_card(
     cx: &mut Context<Workspace>,
 ) -> gpui::Stateful<gpui::Div> {
     let (page, worktrees, scroll) = (ws.settings_page, &ws.worktrees_page, &ws.settings_scroll);
-    let Some(Modal::Settings { shell, default_model, text_generation_model, effort, permission, updates, scale, follow_up, auto_compact, auto_compact_threshold, m4code_off, skill_search, list_focus, renaming, .. }) = &ws.modal else {
+    let Some(Modal::Settings { shell, default_model, text_generation_model, effort, permission, updates, scale, follow_up, auto_compact, auto_compact_threshold, m4code_off, skill_search, skill_filter, list_focus, renaming, .. }) = &ws.modal else {
         return div().id("modal-card");
     };
     let (updates, scale, follow_up, auto_compact, auto_compact_threshold) = (*updates, *scale, *follow_up, *auto_compact, *auto_compact_threshold);
@@ -209,7 +209,7 @@ pub(super) fn render_settings_card(
                 .into_any_element()
         }
         SettingsPage::Harnesses => ws.harnesses_page(cx).into_any_element(),
-        SettingsPage::Skills => ws.skills_page(skill_search, cx).into_any_element(),
+        SettingsPage::Skills => ws.skills_page(skill_filter, skill_search, cx).into_any_element(),
         SettingsPage::M4codeTools => {
             let rows: Vec<AnyElement> = Feature::ALL
                 .into_iter()

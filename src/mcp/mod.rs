@@ -1,7 +1,7 @@
 //! m4code's built-in MCP server (`m4code --mcp-title`), wired into every harness session over stdio.
 //!
-//! Provides cross-harness tools for inline visual cards (`show_visual`), GitHub sidebar attachment, session linking,
-//! model switching (`list_models` / `set_model`), cross-agent subagents, and interactive questions (`ask_user`).
+//! Provides shared tools for GitHub attachment, session linking, model switching, subagents, and questions.
+//! Claude Code also gets inline visual cards through the m4code plugin.
 
 pub mod bridge;
 
@@ -45,7 +45,7 @@ impl Feature {
 
     pub fn description(self) -> &'static str {
         match self {
-            Self::Visual => "Render charts, diagrams, and interactive UI cards inline in chat",
+            Self::Visual => "Render charts, diagrams, and interactive UI cards in Claude Code chat",
             Self::Github => "Attach GitHub issues and pull requests to the right sidebar",
             Self::Sessions => "Link and coordinate with other running m4code sessions",
             Self::Model => "Let the agent switch its own model or effort mid-conversation",

@@ -200,6 +200,7 @@ pub enum Modal {
         skills_field: Entity<InputState>,
         /// Search box on the Skills page (Browse skills.sh).
         skill_search: Entity<InputState>,
+        skill_filter: Entity<InputState>,
         /// Settings found at open time that make Claude Code cost more (Claude Code tools page).
         costly: Vec<crate::harness::claude::costly::Finding>,
         /// Focus of the category list, which has the keyboard when the dialog opens.

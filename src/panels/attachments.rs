@@ -281,6 +281,7 @@ impl Attachments {
 pub fn button<V: 'static>(
     textarea: &Entity<TextareaState>,
     select: fn(&mut V) -> &mut Attachments,
+    enabled: bool,
     cx: &mut Context<V>,
 ) -> Button {
     let textarea = textarea.downgrade();
@@ -288,9 +289,9 @@ pub fn button<V: 'static>(
         .accessibility_label("Attach files")
         .size(px(26.0))
         .rounded(px(5.0))
-        .text_color(hsla(theme::TEXT_DIM))
-        .hover(|s| s.text_color(hsla(theme::TEXT)))
-        .cursor_pointer()
+        .disabled(!enabled)
+        .text_color(hsla(if enabled { theme::TEXT_DIM } else { theme::TEXT_FAINT }))
+        .when(enabled, |b| b.hover(|s| s.text_color(hsla(theme::TEXT))).cursor_pointer())
         .child(gpui::svg().path(PAPERCLIP).size(px(16.0)))
         .on_click(cx.listener(move |_, _: &ClickEvent, window, cx| {
             let textarea = textarea.clone();

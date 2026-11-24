@@ -7,7 +7,7 @@ use base64::Engine;
 
 use gpui::{
     AnyElement, ClickEvent, Context, Div, Focusable, FontWeight, InteractiveElement, IntoElement, MouseButton, MouseDownEvent, ParentElement, Render, SharedString,
-    StatefulInteractiveElement, Styled, StyledImage, Window, div, linear_color_stop, linear_gradient, list, prelude::FluentBuilder, px,
+    StatefulInteractiveElement, Styled, StyledImage, Window, anchored, deferred, div, linear_color_stop, linear_gradient, list, prelude::FluentBuilder, px,
 };
 use gpui_kit::assets::IconName;
 use gpui_kit::component::input::{Paste, Textarea};
@@ -20,7 +20,7 @@ use crate::harness::CatalogModel;
 use crate::harness::permission::Permission;
 use super::timeline::{self, RunKind};
 use crate::harness::thread::{Entry, SubagentReport, ToolCall, ToolContent, ToolStatus, parse_subagent_report};
-use crate::panels::{attachments, composer, logos, picker, scale};
+use crate::panels::{attachments, comment_box, composer, logos, picker, scale};
 use crate::panels::theme::{self, hsla};
 use crate::panels::widgets::{EffortPick, Trigger, button, button_colored, button_disabled, button_disabled_leading, effort_slider, icon, icon_button, key_badge, spinner};
 use crate::visual::ui::Scope;
@@ -43,7 +43,7 @@ impl Render for ThreadView {
             .on_mouse_down(
                 gpui::MouseButton::Left,
                 cx.listener(|v, _: &gpui::MouseDownEvent, window, cx| {
-                    if v.picker != Some(ThreadPicker::Model) && v.review.is_none() && v.screenshot.is_none() && v.find.is_none() {
+                    if v.picker != Some(ThreadPicker::Model) && v.review.is_none() && v.screenshot.is_none() && v.find.is_none() && v.selection_comment.is_none() {
                         v.focus_composer(window, cx);
                     }
                 }),
@@ -62,12 +62,28 @@ impl Render for ThreadView {
             .relative()
             .flex_1()
             .min_h_0()
+            .on_mouse_down(MouseButton::Left, cx.listener(|v, _: &MouseDownEvent, _, cx| {
+                if v.selection_comment.is_none() && v.comment_anchor.take().is_some() {
+                    cx.notify();
+                }
+            }))
+            .on_scroll_wheel(cx.listener(|v, _: &gpui::ScrollWheelEvent, _, cx| {
+                if v.selection_comment.is_none() && v.comment_anchor.take().is_some() {
+                    cx.notify();
+                }
+            }))
             .on_mouse_up(
                 MouseButton::Left,
-                cx.listener(|v, _: &gpui::MouseUpEvent, window, cx| {
+                cx.listener(|v, event: &gpui::MouseUpEvent, window, cx| {
+                    if v.selection_comment.is_none() {
+                        let quote = v.selected_quote(cx);
+                        v.comment_anchor = (!quote.is_empty()).then(|| (
+                            event.position + gpui::point(px(8.0), px(8.0)), quote,
+                        ));
+                    }
                     if v.picker != Some(ThreadPicker::Model)
                         && v.review.is_none() && v.find.is_none()
-                        && !v.has_chat_selection(cx)
+                        && v.selection_comment.is_none() && v.comment_anchor.is_none()
                     {
                         v.focus_composer(window, cx);
                     }
@@ -99,8 +115,42 @@ impl Render for ThreadView {
         root.children(self.render_find(cx))
             .child(conversation)
             .child(bottom_dock)
+            .children(self.render_selection_comment(cx))
             .children(self.render_picker_overlay(window, cx))
             .children(self.render_screenshot(cx))
+    }
+}
+
+impl ThreadView {
+    fn render_selection_comment(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (at, _) = self.comment_anchor.as_ref()?;
+        let content = if let Some(comment) = &self.selection_comment {
+            div().id("selection-comment-input").w(px(320.0)).occlude()
+                .on_key_down(cx.listener(|v, ev: &gpui::KeyDownEvent, window, cx| {
+                    if ev.keystroke.key == "escape" {
+                        v.dismiss_selection_comment(window, cx);
+                        cx.stop_propagation();
+                    }
+                }))
+                .on_mouse_down_out(cx.listener(|v, _: &MouseDownEvent, _, cx| {
+                    if v.selection_comment.as_ref().is_some_and(|comment| comment.input.read(cx).value().trim().is_empty()) {
+                        v.selection_comment = None;
+                        v.comment_anchor = None;
+                        cx.notify();
+                    }
+                }))
+                .child(comment_box::comment_box(&comment.input, "adds it to your message", "sends it"))
+                .into_any_element()
+        } else {
+            div().occlude().child(
+                comment_box::comment_trigger("comment-on-selection")
+                    .debug_selector(|| "comment-on-selection".into())
+                    .on_click(cx.listener(|v, _: &ClickEvent, window, cx| v.start_selection_comment(window, cx))),
+            )
+            .into_any_element()
+        };
+        Some(deferred(anchored().position(*at).snap_to_window_with_margin(px(8.0)).child(content))
+            .with_priority(20).into_any_element())
     }
 }
 
@@ -1361,21 +1411,13 @@ impl ThreadView {
         });
 
         let extra_chips: Vec<AnyElement> = vec![];
-        let mut extra_actions: Vec<AnyElement> = vec![];
-        if self.has_chat_selection(cx) {
-            extra_actions.push(button("thread-quote-selection", "Quote selection", false)
-                .on_click(cx.listener(|v, _: &ClickEvent, window, cx| v.quote_selection(window, cx))).into_any_element());
-        }
-        if self.attachments_enabled() {
-            extra_actions.push(attachments::button(&self.composer, |v: &mut Self| &mut v.attachments, cx).into_any_element());
-        }
-        // Outside a git repository there are no snapshots, and so no review at all.
-        if !self.snapshots.is_empty() {
-            let can_review = self.can_review();
-            let review = composer::review_button("thread-review-open", can_review)
-                .when(can_review, |b| b.on_click(cx.listener(|v, _: &ClickEvent, _, cx| v.open_review(cx))));
-            extra_actions.push(review.into_any_element());
-        }
+        let can_review = self.can_review();
+        let extra_actions = vec![
+            attachments::button(&self.composer, |v: &mut Self| &mut v.attachments, self.attachments_enabled(), cx).into_any_element(),
+            composer::review_button("thread-review-open", can_review)
+                .when(can_review, |b| b.on_click(cx.listener(|v, _: &ClickEvent, _, cx| v.open_review(cx))))
+                .into_any_element(),
+        ];
         let draft = self.composer.read(cx).value();
         let has_message = self.can_submit_draft(cx);
         let steering_text = if self.attachments.has_files() { "" } else { draft.trim() };
@@ -1398,9 +1440,6 @@ impl ThreadView {
             Send,
         }
         let action = if editing {
-            extra_actions.push(button("thread-cancel-edit", "Cancel", false)
-                .on_click(cx.listener(|v, _: &ClickEvent, window, cx| v.finish_queue_edit(false, window, cx)))
-                .into_any_element());
             ActionKind::Save
         } else if answering && has_message {
             ActionKind::Answer

@@ -29,9 +29,10 @@ pub struct SkillsPage {
     pub scope: SkillScope,
     /// Popular skills from `skills.sh`; `None` until first load completes.
     pub popular: Option<Vec<CatalogEntry>>,
-    /// Active search query and its results from `skills.sh` or GitHub.
-    pub results: Option<(String, Vec<CatalogEntry>)>,
+    pub search_query: Option<String>,
+    pub results: Option<Vec<CatalogEntry>>,
     pub loading: bool,
+    catalog_request: u64,
     pub error: Option<String>,
     /// Keys currently being downloaded: `source/skill_id` for installs, `repo:<source>` for whole repositories and
     /// `update:<name>` for updates.
@@ -57,8 +58,10 @@ impl Default for SkillsPage {
             tab: SkillsTab::default(),
             scope: SkillScope::default(),
             popular: None,
+            search_query: None,
             results: None,
             loading: false,
+            catalog_request: 0,
             error: None,
             installing: HashSet::new(),
             repo_skills: None,
@@ -92,17 +95,22 @@ impl Workspace {
         active_harnesses(&enabled, self.store.data.settings.harness, &self.store.data.settings.custom_subagents, &home, extra)
     }
 
-    /// Fetch the popular `skills.sh` catalog once when the Skills page opens.
+    /// Fetch the popular `skills.sh` catalog when Browse first opens.
     pub(crate) fn load_skills_catalog(&mut self, cx: &mut Context<Self>) {
-        if self.skills_page.popular.is_some() || self.skills_page.loading {
+        if self.skills_page.popular.is_some() || self.skills_page.loading || self.skills_page.search_query.is_some() {
             return;
         }
         self.skills_page.loading = true;
         self.skills_page.error = None;
+        self.skills_page.catalog_request += 1;
+        let request = self.skills_page.catalog_request;
         let fetch = self.skills_page.fetch_popular;
         self.in_background(
             fetch,
-            |ws, result, _| {
+            move |ws, result, _| {
+                if ws.skills_page.catalog_request != request {
+                    return;
+                }
                 ws.skills_page.loading = false;
                 match result {
                     Ok(entries) => {
@@ -123,26 +131,28 @@ impl Workspace {
             _ => return,
         };
         if query.is_empty() {
-            self.skills_page.results = None;
-            self.skills_page.error = None;
-            if self.skills_page.popular.is_none() {
-                self.load_skills_catalog(cx);
-            }
-            cx.notify();
+            self.show_popular_skills(cx);
             return;
         }
         self.skills_page.tab = SkillsTab::Browse;
         self.skills_page.loading = true;
+        self.skills_page.results = None;
         self.skills_page.error = None;
+        self.skills_page.search_query = Some(query.clone());
+        self.skills_page.catalog_request += 1;
+        let request = self.skills_page.catalog_request;
+        cx.notify();
         let fetch = self.skills_page.fetch_search;
-        let q = query.clone();
         self.in_background(
-            move || fetch(&q),
+            move || fetch(&query),
             move |ws, result, _| {
+                if ws.skills_page.catalog_request != request {
+                    return;
+                }
                 ws.skills_page.loading = false;
                 match result {
                     Ok(entries) => {
-                        ws.skills_page.results = Some((query, entries));
+                        ws.skills_page.results = Some(entries);
                         ws.skills_page.error = None;
                     }
                     Err(why) => ws.skills_page.error = Some(why),
@@ -150,6 +160,16 @@ impl Workspace {
             },
             cx,
         );
+    }
+
+    pub(crate) fn show_popular_skills(&mut self, cx: &mut Context<Self>) {
+        self.skills_page.catalog_request += 1;
+        self.skills_page.loading = false;
+        self.skills_page.search_query = None;
+        self.skills_page.results = None;
+        self.skills_page.error = None;
+        self.load_skills_catalog(cx);
+        cx.notify();
     }
 
     /// Download `entry` into m4code's skills store, enable it in the currently selected scope, and sync symlinks.

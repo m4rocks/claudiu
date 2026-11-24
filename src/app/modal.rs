@@ -226,15 +226,13 @@ impl Workspace {
         self.push_models_to_threads(cx);
         let effort_id = effort.name().to_string();
         for live in &self.live {
-            let inherits_auto_compact = self.store.session(&live.id).and_then(|r| r.agent.as_ref()).is_none_or(|m| m.auto_compact.is_none());
+            let inherits_auto_compact = self.store.session(&live.id).and_then(|r| r.agent.as_ref()).is_none_or(|m| m.auto_compact_override.is_none());
             if let Some(thread) = live.view.thread() {
                 thread.update(cx, |t, cx| {
                     t.follow_up = follow_up;
-                    if auto_compact_changed && inherits_auto_compact {
-                        t.set_auto_compact(auto_compact, cx);
-                    }
-                    if auto_compact_threshold_changed {
-                        t.set_compaction_threshold(auto_compact_threshold, cx);
+                    if (auto_compact_changed && inherits_auto_compact) || auto_compact_threshold_changed {
+                        let enabled = if inherits_auto_compact { auto_compact } else { t.compaction.enabled };
+                        t.set_compaction_policy(enabled, auto_compact_threshold, cx);
                     }
                     if default_model_changed && t.harness == chosen.harness && !chosen.id.is_empty() {
                         t.pick_model(chosen.clone(), cx);
