@@ -188,10 +188,7 @@ impl Workspace {
                 if !self.is_running(&parent.id, cx) {
                     return Err("The parent session is no longer running.".into());
                 }
-                let harness: Harness = serde_json::from_value(req.args["harness"].clone()).map_err(|_| "Choose claude, codex or opencode.")?;
-                if harness == Harness::Antigravity {
-                    return Err("Shared Antigravity subagents are not enabled yet.".into());
-                }
+                let harness: Harness = serde_json::from_value(req.args["harness"].clone()).map_err(|_| "Choose claude, codex, opencode or antigravity.")?;
                 let settings = &self.store.data.settings;
                 let access = settings.subagent_access(harness);
                 if !settings.harness_enabled(harness) || !access.on {

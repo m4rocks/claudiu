@@ -214,11 +214,11 @@ pub enum ElicitationKind {
 }
 
 impl ElicitationKind {
-    pub fn to_json_value(self, selected: &str) -> Value {
+    pub fn to_json_values(self, selected: &[&str]) -> Value {
         match self {
-            Self::Choice => Value::String(selected.to_string()),
-            Self::MultiChoice => json!([selected]),
-            Self::Boolean => Value::Bool(selected == "true"),
+            Self::Choice => Value::String(selected.first().copied().unwrap_or_default().to_string()),
+            Self::MultiChoice => json!(selected),
+            Self::Boolean => Value::Bool(selected.first().copied() == Some("true")),
         }
     }
 }
@@ -338,8 +338,24 @@ pub fn takes_own_answer(params: &Value) -> bool {
     params["_meta"]["m4code"]["freeText"].as_bool() == Some(true)
 }
 
+pub fn is_multi_select(params: &Value) -> bool {
+    params["_meta"]["m4code"]["multiSelect"].as_bool() == Some(true)
+}
+
 pub fn own_answer(text: &str) -> Value {
     json!({ "outcome": { "outcome": "selected", "optionId": "other" }, "_meta": { "m4code": { "text": text } } })
+}
+
+pub fn multi_answer(option_ids: &[String], text: Option<&str>) -> Value {
+    let mut meta = serde_json::Map::new();
+    meta.insert("optionIds".into(), json!(option_ids));
+    if let Some(t) = text.map(str::trim).filter(|s| !s.is_empty()) {
+        meta.insert("text".into(), json!(t));
+    }
+    json!({
+        "outcome": { "outcome": "selected", "optionId": option_ids.first().map(String::as_str).unwrap_or("other") },
+        "_meta": { "m4code": meta },
+    })
 }
 
 pub fn is_tool_permission(params: &Value) -> bool {
@@ -515,10 +531,10 @@ mod tests {
             ]
         );
         let mut content = serde_json::Map::new();
-        content.insert("db".into(), ElicitationKind::Choice.to_json_value("pg"));
-        content.insert("confirm".into(), ElicitationKind::Boolean.to_json_value("true"));
-        content.insert("tags".into(), ElicitationKind::MultiChoice.to_json_value("fast"));
-        assert_eq!(elicitation_accept(content), json!({"action": "accept", "content": {"db": "pg", "confirm": true, "tags": ["fast"]}}));
+        content.insert("db".into(), ElicitationKind::Choice.to_json_values(&["pg"]));
+        content.insert("confirm".into(), ElicitationKind::Boolean.to_json_values(&["true"]));
+        content.insert("tags".into(), ElicitationKind::MultiChoice.to_json_values(&["fast", "safe"]));
+        assert_eq!(elicitation_accept(content), json!({"action": "accept", "content": {"db": "pg", "confirm": true, "tags": ["fast", "safe"]}}));
         assert_eq!(elicitation_cancel(), json!({"action": "cancel"}));
         assert_eq!(elicitation_decline(), json!({"action": "decline"}));
     }
@@ -527,7 +543,13 @@ mod tests {
     fn only_a_marked_question_takes_the_users_own_words() {
         assert!(takes_own_answer(&json!({"_meta": {"m4code": {"freeText": true}}, "options": []})));
         assert!(!takes_own_answer(&json!({"options": []})), "a plain ACP permission question");
+        assert!(is_multi_select(&json!({"_meta": {"m4code": {"multiSelect": true}}, "options": []})));
+        assert!(!is_multi_select(&json!({"options": []})));
         assert_eq!(own_answer("blue")["_meta"]["m4code"]["text"], "blue");
         assert_eq!(own_answer("blue")["outcome"]["outcome"], "selected");
+        let multi = multi_answer(&["0".into(), "2".into()], Some("extra"));
+        assert_eq!(multi["outcome"]["outcome"], "selected");
+        assert_eq!(multi["_meta"]["m4code"]["optionIds"], json!(["0", "2"]));
+        assert_eq!(multi["_meta"]["m4code"]["text"], "extra");
     }
 }

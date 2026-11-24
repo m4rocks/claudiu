@@ -630,7 +630,7 @@ mod tests {
             agents: crate::harness::subagents::AgentMap::from_fn(|_| crate::app::AgentForm { on: true, edits: true, models: vec![] }),
             claude_models: vec![], claude_subagents: Default::default(), picking: None,
         };
-        for harness in [Harness::Claude, Harness::Codex, Harness::OpenCode] {
+        for harness in Harness::ALL {
             assert_eq!(harness_status(harness, true, &form, &Lookup::default(), 2).0, "Enabled · 2 models · subagents on · edits allowed");
         }
     }

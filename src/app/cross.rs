@@ -155,8 +155,9 @@ impl Workspace {
         if options.is_empty() {
             return Err("Give at least one option with a non-empty `label`.".into());
         }
+        let multi_select = req.args["multi_select"].as_bool().unwrap_or(false);
         let req_id = req.id.clone();
-        thread.update(cx, |v, cx| v.ask_bridge_question(req_id, title, options, cx));
+        thread.update(cx, |v, cx| v.ask_bridge_question(req_id, title, options, multi_select, cx));
         Ok(())
     }
 

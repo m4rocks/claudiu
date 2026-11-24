@@ -1,25 +1,17 @@
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 
-use gpui::{Context, Window};
+use gpui::Context;
 use serde_json::Value;
 use uuid::Uuid;
 
-use super::{Entry, Queued, ThreadView};
+use super::{Entry, Question, QuestionOption, QuestionReply, Queued, ThreadView};
 use crate::harness::codex::{self, AsyncQuestion};
 use crate::store::FollowUp;
 
 #[derive(Default)]
 pub(super) struct AsyncAsks {
-    pending: VecDeque<AsyncAsk>,
-    typing: Option<Uuid>,
+    pending: VecDeque<Question>,
     last_message: Option<MessageChunk>,
-}
-
-pub(super) struct AsyncAsk {
-    pub id: Uuid,
-    pub question: AsyncQuestion,
-    remaining: std::vec::IntoIter<AsyncQuestion>,
-    replies: Vec<String>,
 }
 
 struct MessageChunk {
@@ -32,8 +24,20 @@ impl AsyncAsks {
         self.pending.is_empty()
     }
 
-    pub(super) fn composing_answer(&self) -> bool {
-        self.typing.is_some()
+    pub(super) fn len(&self) -> usize {
+        self.pending.len()
+    }
+
+    pub(super) fn front(&self) -> Option<&Question> {
+        self.pending.front()
+    }
+
+    pub(super) fn front_mut(&mut self) -> Option<&mut Question> {
+        self.pending.front_mut()
+    }
+
+    pub(super) fn pop_front(&mut self) -> Option<Question> {
+        self.pending.pop_front()
     }
 
     pub(super) fn record_message_chunk(&mut self, entry: usize, update: &Value) {
@@ -50,6 +54,30 @@ impl AsyncAsks {
 
     pub(super) fn turn_ended(&mut self) {
         self.last_message = None;
+    }
+}
+
+fn question_from_async(question: AsyncQuestion, remaining: VecDeque<AsyncQuestion>, replies: Vec<String>) -> Question {
+    let options = question
+        .options
+        .into_iter()
+        .enumerate()
+        .map(|(i, opt)| QuestionOption {
+            id: format!("async-{i}"),
+            name: opt.label,
+            description: opt.description,
+            kind: "allow_once".into(),
+        })
+        .collect();
+    Question {
+        id: Uuid::new_v4(),
+        reply: QuestionReply::AsyncAsk { remaining, replies },
+        title: question.title,
+        options,
+        highlight: 0,
+        multi_select: question.multi_select,
+        selected: BTreeSet::new(),
+        takes_own_answer: true,
     }
 }
 
@@ -72,61 +100,29 @@ impl ThreadView {
             self.agent_cache.remove(&chunk.entry);
             self.remeasure(chunk.entry);
         }
-        let mut remaining = questions.into_iter();
-        if let Some(question) = remaining.next() {
-            self.asks.pending.push_back(AsyncAsk {
-                id: Uuid::new_v4(), question, remaining, replies: Vec::new(),
-            });
+        let mut remaining: VecDeque<_> = questions.into();
+        if let Some(first) = remaining.pop_front() {
+            self.asks.pending.push_back(question_from_async(first, remaining, Vec::new()));
             cx.notify();
         }
     }
 
-    pub(super) fn async_ask(&self) -> Option<&AsyncAsk> {
-        if !self.questions.is_empty() {
-            return None;
-        }
-        self.asks.pending.front()
-    }
-
-    pub(super) fn async_answer_id(&self) -> Option<Uuid> {
-        self.asks.typing.filter(|&id| self.async_ask().is_some_and(|ask| ask.id == id))
-    }
-
-    pub(super) fn async_answer_blocked(&self) -> bool {
-        self.asks.composing_answer() && !self.questions.is_empty()
-    }
-
-    pub(super) fn toggle_async_answer(&mut self, id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
-        if self.async_ask().is_some_and(|ask| ask.id == id) {
-            self.asks.typing = (self.asks.typing != Some(id)).then_some(id);
-            self.focus_composer(window, cx);
-            cx.notify();
-        }
-    }
-
-    pub(super) fn choose_async_ask(&mut self, id: Uuid, option: usize, cx: &mut Context<Self>) {
-        let answer = self.async_ask().filter(|ask| ask.id == id).and_then(|ask| ask.question.options.get(option)).cloned();
+    pub(super) fn finish_async_ask(
+        &mut self,
+        title: String,
+        mut remaining: VecDeque<AsyncQuestion>,
+        mut replies: Vec<String>,
+        answer: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(answer) = answer {
-            self.answer_async_ask(id, Some(answer), cx);
+            let quoted = title.lines().map(|line| format!("> {line}")).collect::<Vec<_>>().join("\n");
+            replies.push(format!("{quoted}\n\n{answer}"));
         }
-    }
-
-    pub(super) fn answer_async_ask(&mut self, id: Uuid, answer: Option<String>, cx: &mut Context<Self>) {
-        if self.async_ask().is_none_or(|ask| ask.id != id) {
-            return;
-        }
-        let mut ask = self.asks.pending.pop_front().unwrap();
-        self.asks.typing = None;
-        if let Some(answer) = answer {
-            let quoted = ask.question.title.lines().map(|line| format!("> {line}")).collect::<Vec<_>>().join("\n");
-            ask.replies.push(format!("{quoted}\n\n{answer}"));
-        }
-        if let Some(question) = ask.remaining.next() {
-            ask.id = Uuid::new_v4();
-            ask.question = question;
-            self.asks.pending.push_front(ask);
-        } else if !ask.replies.is_empty() {
-            let mut item = Queued::new(ask.replies.join("\n\n"), true);
+        if let Some(next) = remaining.pop_front() {
+            self.asks.pending.push_front(question_from_async(next, remaining, replies));
+        } else if !replies.is_empty() {
+            let mut item = Queued::new(replies.join("\n\n"), true);
             item.ahead = true;
             if self.native_codex_steering() && self.can_steer(&item.text, FollowUp::Steer) {
                 self.steer(item, cx);
@@ -137,6 +133,5 @@ impl ThreadView {
                 self.send_next(cx);
             }
         }
-        cx.notify();
     }
 }

@@ -4,7 +4,7 @@
 use gpui::{
     AnyElement, ClickEvent, Context, FontWeight, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
     ParentElement, StatefulInteractiveElement, Styled, Window, anchored, deferred, div,
-    px, rgba,
+    prelude::FluentBuilder, px, rgba,
 };
 
 use crate::app::{
@@ -14,7 +14,7 @@ use gpui_kit::component::input::Input;
 use crate::panels::theme::{self, hsla};
 use gpui_kit::assets::IconName;
 use crate::panels::widgets::{
-    button, danger_button, dialog_card, dropdown_card, fade_in, icon, icon_button,
+    button, button_colored, button_disabled_leading, danger_button, dialog_card, dropdown_card, fade_in, icon, icon_button,
 };
 use crate::panels::picker;
 use crate::panels::settings_view::render_settings_card;
@@ -230,9 +230,12 @@ impl Workspace {
         let top = f32::from(pop.row_bounds.top()).clamp(12.0, (f32::from(viewport.height) - est_h - 12.0).max(12.0));
         let scaled = crate::panels::scale::px;
 
+        let multi = question.multi_select;
+        let selected_count = question.selected.len();
         let mut options = div().flex().flex_col().gap(px(5.0)).w_full();
         for (i, opt) in question.options.iter().enumerate() {
-            let primary = opt.kind == "allow_once" && i == 0;
+            let checked = multi && question.selected.contains(&i);
+            let primary = (!multi && opt.kind == "allow_once" && i == 0) || checked;
             let answer_id = id.clone();
             let row = div()
                 .id(gpui::SharedString::from(format!("sidebar-q-opt-{question_id}-{i}")))
@@ -246,18 +249,47 @@ impl Workspace {
                 .hover(|s| s.bg(hsla(theme::SURFACE_HOVER)))
                 .cursor_pointer()
                 .flex()
-                .flex_col()
-                .gap(px(2.0))
-                .child(div().text_size(scaled(12.0)).font_weight(FontWeight::MEDIUM).text_color(hsla(theme::TEXT)).child(opt.name.clone()))
-                .children(opt.description.clone().map(|desc| div().text_size(scaled(11.0)).text_color(hsla(theme::TEXT_DIM)).child(desc)))
+                .items_start()
+                .gap(px(8.0))
+                .when(multi, |row| {
+                    row.child(
+                        div()
+                            .mt(px(2.0))
+                            .flex_none()
+                            .size(px(14.0))
+                            .rounded(px(3.5))
+                            .border_1()
+                            .border_color(hsla(if checked { theme::ACCENT } else { theme::PANEL_BORDER }))
+                            .bg(hsla(if checked { theme::ACCENT } else { theme::PANEL_BG }))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .when(checked, |box_el| box_el.child(icon(IconName::Check, 10.0).text_color(hsla(theme::PANEL_BG)))),
+                    )
+                })
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.0))
+                        .child(div().text_size(scaled(12.0)).font_weight(FontWeight::MEDIUM).text_color(hsla(theme::TEXT)).child(opt.name.clone()))
+                        .children(opt.description.clone().map(|desc| div().text_size(scaled(11.0)).text_color(hsla(theme::TEXT_DIM)).child(desc))),
+                )
                 .on_click(cx.listener(move |ws, _: &ClickEvent, _w, cx| {
                     cx.stop_propagation();
-                    ws.answer_session_question(&answer_id, question_id, Some(i), cx);
+                    if multi {
+                        ws.toggle_session_question_option(&answer_id, question_id, i, cx);
+                    } else {
+                        ws.answer_session_question(&answer_id, question_id, Some(i), cx);
+                    }
                 }));
             options = options.child(row);
         }
 
         let decline_id = id.clone();
+        let submit_id = id.clone();
         let open_id = id.clone();
         let ws_weak = cx.entity().downgrade();
         let card = div()
@@ -319,12 +351,46 @@ impl Workspace {
                         })),
                     )
                     .child(
-                        button("sidebar-q-open", "Open session", false).h(px(24.0)).on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
-                            cx.stop_propagation();
-                            ws.question_popover = None;
-                            ws.question_popover_hovered = false;
-                            ws.act(Act::Select(open_id.clone()), window, cx);
-                        })),
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            .when(multi, |d| {
+                                let label = if selected_count > 0 { format!("Submit ({selected_count})") } else { "Submit".into() };
+                                let btn = if selected_count > 0 {
+                                    button_colored(
+                                        "sidebar-q-submit",
+                                        Some(IconName::Check),
+                                        &label,
+                                        hsla(theme::ACCENT),
+                                        hsla(theme::PANEL_BG),
+                                        hsla(0xdcdcdc),
+                                        None,
+                                        true,
+                                    )
+                                    .on_click(cx.listener(move |ws, _: &ClickEvent, _w, cx| {
+                                        cx.stop_propagation();
+                                        ws.submit_session_question(&submit_id, question_id, cx);
+                                    }))
+                                    .h(px(24.0))
+                                    .px(px(8.0))
+                                    .into_any_element()
+                                } else {
+                                    button_disabled_leading("sidebar-q-submit", Some(IconName::Check), &label)
+                                        .h(px(24.0))
+                                        .px(px(8.0))
+                                        .into_any_element()
+                                };
+                                d.child(btn)
+                            })
+                            .child(
+                                button("sidebar-q-open", "Open session", false).h(px(24.0)).on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
+                                    cx.stop_propagation();
+                                    ws.question_popover = None;
+                                    ws.question_popover_hovered = false;
+                                    ws.act(Act::Select(open_id.clone()), window, cx);
+                                })),
+                            ),
                     ),
             );
 

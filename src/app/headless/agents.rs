@@ -208,14 +208,9 @@ fn compaction_preserves_the_session_and_never_becomes_a_user_message() {
             let users: Vec<_> = view.thread.entries.iter().filter_map(|entry| match entry { Entry::User(text) => Some(text.as_str()), _ => None }).collect();
             assert_eq!(users, ["fill context"]);
             let turns: Vec<Value> = std::fs::read_to_string(work.path().join("fake_agent.py.turns")).unwrap().lines().map(|line| serde_json::from_str(line).unwrap()).collect();
-            if harness == Harness::Codex {
-                assert_eq!(turns.iter().map(|turn| turn["prompt"].as_str().unwrap()).collect::<Vec<_>>(), ["fill context", "/compact"]);
-                assert_eq!(turns[0]["pid"], turns[1]["pid"], "compaction must keep the provider process");
-                assert_eq!(view.thread.context, Some((200, 1000)));
-            } else {
-                assert_eq!(turns.len(), 1, "unsupported providers must not receive invented commands");
-                assert_eq!(view.compaction_status(false), "Unsupported");
-            }
+            assert_eq!(turns.iter().map(|turn| turn["prompt"].as_str().unwrap()).collect::<Vec<_>>(), ["fill context", "/compact"]);
+            assert_eq!(turns[0]["pid"], turns[1]["pid"], "compaction must keep the provider process");
+            assert_eq!(view.thread.context, Some((200, 1000)));
         });
         cx.update_window(window, |_, window, app| ws.update(app, |ws, cx| ws.end_live(&id, window, cx))).unwrap();
     }
