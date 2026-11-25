@@ -41,33 +41,56 @@ jobs:
           name: releases-win
           path: dist/releases
 
-  macos:
-    # One universal (arm64 + x86_64) build, ad-hoc signed (--signAppIdentity -): Gatekeeper still warns until a
-    # Developer ID identity is added (vpk --signAppIdentity / --notaryProfile).
+  macos-build:
+    strategy:
+      matrix:
+        target: [aarch64-apple-darwin, x86_64-apple-darwin]
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-apple-darwin,x86_64-apple-darwin
+          targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Metal toolchain (GPUI compiles shaders; newer Xcodes ship it as a download)
+        run: xcrun -f metal >/dev/null 2>&1 || xcodebuild -downloadComponent MetalToolchain
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/m4code
+          if-no-files-found: error
+
+  macos:
+    # The universal binary is ad-hoc signed. Gatekeeper still warns until a Developer ID identity is added.
+    needs: macos-build
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: binary-*-apple-darwin
+          path: dist/binaries
+      - name: Assemble universal binary
+        run: |
+          mkdir -p dist/publish
+          lipo -create -output dist/publish/m4code \
+            dist/binaries/binary-aarch64-apple-darwin/m4code \
+            dist/binaries/binary-x86_64-apple-darwin/m4code
+          lipo dist/publish/m4code -verify_arch arm64 x86_64
+          chmod +x dist/publish/m4code
+          codesign --force --sign - dist/publish/m4code   # lipo invalidates the per-arch signatures
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 8.x
       - name: Install Velopack CLI
         run: dotnet tool install -g vpk
-      - name: Metal toolchain (GPUI compiles shaders; newer Xcodes ship it as a download)
-        run: xcrun -f metal >/dev/null 2>&1 || xcodebuild -downloadComponent MetalToolchain
       - name: Version from tag
         id: ver
         run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-      - name: Build (universal)
-        run: |
-          cargo build --release --locked --target aarch64-apple-darwin
-          cargo build --release --locked --target x86_64-apple-darwin
-          mkdir -p dist/publish
-          lipo -create -output dist/publish/m4code target/aarch64-apple-darwin/release/m4code target/x86_64-apple-darwin/release/m4code
-          codesign --force --sign - dist/publish/m4code   # lipo invalidates the per-arch signatures
       - name: Icon
         run: scripts/make-icns.sh dist/m4code.icns
       - name: Fetch previous release (for delta updates)
@@ -119,6 +142,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
+        with:
+          pattern: releases-*
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 8.x

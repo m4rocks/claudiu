@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 jobs:
   test:
@@ -24,13 +25,18 @@ jobs:
       - name: System libraries (Linux; GPUI's X11, Wayland and font backends)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libfontconfig-dev libwayland-dev libx11-xcb-dev libxcb1-dev libxkbcommon-x11-dev libvulkan1 zlib1g-dev
-      - name: Build
+      - name: Build debug executable
+        if: github.event_name == 'workflow_dispatch'
         run: cargo build --locked
       - name: Install just
         uses: taiki-e/install-action@just
       - name: Lint
         run: just lint
+      - name: Rust tests
+        run: just test-app
+      - name: Bridge tests
+        run: just test-bridge
       - name: Install Claude Code CLI (for the mod tests)
         run: npm install -g @anthropic-ai/claude-code@2.1.309
-      - name: Tests (app unit tests, then mod tests)
-        run: just test
+      - name: Mod tests
+        run: just test-mod
