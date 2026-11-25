@@ -20,6 +20,7 @@ pub fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("secondary-shift-o", ImportProject, None),
         KeyBinding::new("secondary-shift-g", OpenGithub, None),
         KeyBinding::new("secondary-,", OpenSettings, None),
+        KeyBinding::new("secondary-k", OpenPalette, None),
         KeyBinding::new("secondary-shift-]", SwapFocus, None),
         KeyBinding::new("secondary-shift-e", ToggleEditor, None),
         // Only over the editor pane: elsewhere Ctrl+P belongs to the agent.
@@ -64,6 +65,7 @@ pub fn shortcuts() -> Vec<Shortcut> {
     let mut rows = vec![
         row("General", &["secondary-shift-n"], "New session"),
         row("General", &["secondary-,"], "Settings"),
+        row("General", &["secondary-k"], "Command palette"),
         row("General", &["ctrl-pageup", "ctrl-pagedown"], "Switch Skills tabs in Settings"),
         row("General", &["secondary-shift-o"], "Add a project"),
         row("General", &["secondary-shift-f"], "Find sessions"),

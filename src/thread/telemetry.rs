@@ -1,7 +1,7 @@
-use gpui::{Div, ParentElement, Styled, div, px};
+use gpui::{ClickEvent, Context, Div, ParentElement, Styled, div, px};
 
-use super::ThreadView;
-use crate::panels::{scale, theme::{self, hsla}, widgets::countdown};
+use super::{ThreadEvent, ThreadView};
+use crate::panels::{scale, theme::{self, hsla}, widgets::{button, countdown}};
 use crate::store::UsageLimits;
 
 pub(crate) fn exhausted_usage(usage: &UsageLimits, now: i64) -> Option<String> {
@@ -13,7 +13,7 @@ pub(crate) fn exhausted_usage(usage: &UsageLimits, now: i64) -> Option<String> {
 }
 
 impl ThreadView {
-    pub(super) fn render_session_notices(&self) -> Option<Div> {
+    pub(super) fn render_session_notices(&self, cx: &mut Context<Self>) -> Option<Div> {
         let usage_limit = self.usage_limit.as_ref();
         let error = self.error.as_ref();
         if usage_limit.is_none() && error.is_none() {
@@ -22,7 +22,23 @@ impl ThreadView {
         let mut contents = div().w_full().max_w(px(840.0)).px(px(8.0)).py(px(4.0))
             .flex().flex_col().gap(px(4.0)).text_size(scale::px(12.0));
         if let Some(label) = usage_limit {
-            contents = contents.child(div().text_color(hsla(theme::WARN)).child(label.clone()));
+            let mut row = div().flex().items_center().flex_wrap().gap(px(8.0))
+                .child(div().text_color(hsla(theme::WARN)).child(label.clone()));
+            if let Some(target) = self.fallback_model.clone() {
+                let btn_label = format!("Continue in {}", target.name);
+                row = row.child(
+                    button("usage-limit-handoff", btn_label, true).on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
+                        cx.emit(ThreadEvent::Handoff {
+                            to: target.harness,
+                            model: (!target.id.is_empty()).then_some(target.id.clone()),
+                            message: String::new(),
+                            effort: None,
+                            by_agent: false,
+                        });
+                    })),
+                );
+            }
+            contents = contents.child(row);
         }
         if let Some(error) = error {
             contents = contents.child(div().text_color(hsla(theme::DANGER)).child(format!("{}: {error}", self.harness.name())));

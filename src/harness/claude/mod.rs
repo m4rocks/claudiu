@@ -62,7 +62,7 @@ pub const ADAPTER: Adapter = Adapter {
     probe_env: |exe| exe.map(probe_env).ok_or_else(|| "Could not find the Claude Code CLI.".into()),
     config_root: |home| home.join(".claude"),
     project_skills: ".claude/skills",
-    hidden_commands: &["autocompact", "usage"],
+    hidden_commands: &["autocompact", "usage", "resume", "model", "permissions", "login", "logout"],
     protocol: super::ProtocolHooks {
         usage_limits: limits::parse_value,
         ..super::ProtocolHooks::DEFAULT

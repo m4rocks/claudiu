@@ -153,7 +153,7 @@ m4code does NOT support Mermaid (```mermaid), PlantUML, or similar diagram fence
 Whenever the user asks for a chart, graph, diagram, flowchart, architecture view, timeline, comparison, or dashboard (or whenever a visual is clearer than prose), \
 always render it with a closed ```ui block: use <chart type=\"bar|line\" labels=\"..\" values=\"..\"> (or <series name=\"..\" values=\"..\"/> children) for data charts/graphs, \
 inline <svg viewBox=\"...\" width=\"...\" height=\"...\"> for flowcharts, architecture diagrams, and graphs, \
-and HTML with inline CSS and m4code shortcuts (<card>, <badge>, <callout>, <progress value=\"..\">, <row>, <col>, <grid cols=\"3\">, <tabs>, <details>, <button send=\"..\">) \
+and HTML with inline CSS and m4code shortcuts (<card>, <badge>, <callout>, <progress value=\"..\">, <row>, <col>, <grid cols=\"3\">, <tabs>, <details>, <check label=\"..\" checked>, <button send=\"..\">, <button submit=\"..\">, <button open=\"path#L10-L20\">) \
 with theme tokens var(--text), var(--dim), var(--faint), var(--accent), var(--ok), var(--warn), var(--danger), var(--info), var(--bg), var(--surface), var(--raised), var(--border) \
 (dark background, no scripts or <style> tags). Keep normal prose and code in text.";
 
@@ -163,7 +163,9 @@ as its description says; detach_github takes one off again.";
 
 /// The opening of the instructions; each feature's text follows it. The user names the session, so there is nothing
 /// about the title here.
-const INTRO: &str = "You are running inside m4code, a desktop app that runs this coding-agent session.";
+const INTRO: &str = "You are running inside m4code, a desktop app that hosts this coding-agent session. \
+Treat m4code as your environment: link workspace files in Markdown as `[name](relative/path#L10-L20)` so the user can jump straight to them in the editor, \
+prefer m4code's MCP tools over any provider-native swarm, workflow, or question tools, and never tell the user to run harness-specific CLI flags or slash commands such as `/swarm`, `/teamwork`, `/resume`, or `/login`.";
 
 /// Confirmation instructions shared by every provider before switching models.
 fn model_instructions() -> String {

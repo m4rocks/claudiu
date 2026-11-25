@@ -391,6 +391,8 @@ pub fn sync_dir(store_root: &Path, target_dir: &Path, enabled: &[String]) -> io:
 }
 
 /// Sync global and per-project skills into every active harness (and prune stale m4code links from inactive ones).
+/// Repo skills placed in the shared `.agents/skills` folder are also projected into other active harnesses' project
+/// skill folders so every model sees the same project skills without duplicating files.
 /// Returns human-readable error strings for any directories that failed to sync.
 pub fn sync_all(store_root: &Path, home: &Path, active: &[Harness], config: &SkillsConfig, projects: &[(String, PathBuf)]) -> Vec<String> {
     let mut errors = Vec::new();
@@ -406,11 +408,35 @@ pub fn sync_all(store_root: &Path, home: &Path, active: &[Harness], config: &Ski
             continue;
         }
         let project_wanted = config.project_enabled.get(project_id).map_or(&[][..], Vec::as_slice);
+        let shared_root = project_path.join(".agents/skills");
+        let shared_repo_skills: Vec<String> = if shared_root.is_dir() {
+            fs::read_dir(&shared_root)
+                .ok()
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter_map(|entry| {
+                    let path = entry.path();
+                    if is_managed_link(&path, store_root) || !path.join("SKILL.md").is_file() {
+                        return None;
+                    }
+                    entry.file_name().to_str().filter(|n| valid_skill_name(n)).map(str::to_string)
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         for harness in Harness::registered() {
             let dir = project_skills_dir(harness, project_path);
             let wanted = if active.contains(&harness) { project_wanted } else { &[] };
             if let Err(e) = sync_dir(store_root, &dir, wanted) {
                 errors.push(format!("{} skills in {}: {e}", harness.name(), project_path.display()));
+            }
+            if dir != shared_root {
+                let shared_wanted = if active.contains(&harness) { shared_repo_skills.as_slice() } else { &[] };
+                if let Err(e) = sync_dir(&shared_root, &dir, shared_wanted) {
+                    errors.push(format!("{} shared repo skills in {}: {e}", harness.name(), project_path.display()));
+                }
             }
         }
     }
@@ -418,22 +444,34 @@ pub fn sync_all(store_root: &Path, home: &Path, active: &[Harness], config: &Ski
 }
 
 /// Skills the repository at `project` ships in any harness's project skills folder. m4code's own symlinks into
-/// `store_root` are left out, because those are installed skills already listed elsewhere.
+/// `store_root` or `.agents/skills` are left out so each skill appears once.
 pub fn repo_skills(store_root: &Path, project: &Path) -> Vec<RepoSkill> {
+    let shared_root = project.join(".agents/skills");
     let mut found = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut dirs: Vec<PathBuf> = vec![shared_root.clone()];
     for harness in Harness::registered() {
         let dir = project_skills_dir(harness, project);
+        if !dirs.contains(&dir) {
+            dirs.push(dir);
+        }
+    }
+    for dir in dirs {
         let Ok(entries) = fs::read_dir(&dir) else { continue };
         let folder = dir.strip_prefix(project).unwrap_or(&dir).to_path_buf();
         for entry in entries.flatten() {
             let path = entry.path();
-            if is_managed_link(&path, store_root) {
+            if is_managed_link(&path, store_root) || (dir != shared_root && is_managed_link(&path, &shared_root)) {
                 continue;
             }
             let Ok(skill_md) = fs::read_to_string(path.join("SKILL.md")) else { continue };
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !seen.insert(name.clone()) {
+                continue;
+            }
             let (_, description) = parse_frontmatter(&skill_md);
             found.push(RepoSkill {
-                name: entry.file_name().to_string_lossy().into_owned(),
+                name,
                 description: description.unwrap_or_default(),
                 folder: folder.clone(),
             });

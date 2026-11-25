@@ -184,6 +184,7 @@ impl Workspace {
                     }
                     Harness::OpenCode => {}
                 }
+                self.notify_threads_usage(harness, cx);
             }
             Err(err) => {
                 state.error = Some(err);
@@ -217,7 +218,70 @@ impl Workspace {
             let state = self.limits_state.get_mut(harness);
             state.error = None;
             state.retry_after = None;
+            self.notify_threads_usage(harness, cx);
             cx.notify();
+        }
+    }
+
+    /// The stored usage limits for `harness`, if any.
+    pub(crate) fn usage_for_harness(&self, harness: Harness) -> Option<UsageLimits> {
+        match harness {
+            Harness::Claude => Some(self.store.data.claude_usage.clone()),
+            Harness::Codex | Harness::Antigravity => {
+                let key = harness.agent()?.provider().key;
+                self.store.data.subagent_limits.get(key)?.first().map(|p| p.usage.clone())
+            }
+            Harness::OpenCode => None,
+        }
+    }
+
+    /// Pick the best available fallback model from another enabled harness that is not at its usage limit.
+    pub(crate) fn best_fallback_model(&self, excluded: Harness) -> Option<crate::harness::CatalogModel> {
+        let now = crate::store::now();
+        let enabled = self.store.data.settings.enabled_harnesses_list();
+        let mut candidates: Vec<(f32, Harness)> = enabled
+            .into_iter()
+            .filter(|&h| h != excluded && h.is_registered())
+            .filter_map(|h| {
+                let util = self
+                    .usage_for_harness(h)
+                    .and_then(|u| {
+                        [u.five_hour.as_ref(), u.seven_day.as_ref()]
+                            .into_iter()
+                            .flatten()
+                            .filter(|l| l.resets_at.is_none_or(|r| r > now))
+                            .filter_map(|l| l.utilization)
+                            .reduce(f32::max)
+                    })
+                    .unwrap_or(0.0);
+                (util < 0.95).then_some((util, h))
+            })
+            .collect();
+        candidates.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let (_, harness) = candidates.into_iter().next()?;
+        let all = self.store.data.settings.aggregated_models();
+        all.into_iter().find(|m| m.harness == harness).or_else(|| {
+            Some(crate::harness::CatalogModel { harness, id: String::new(), name: harness.name().into() })
+        })
+    }
+
+    /// Push fresh usage readings into every running thread on `harness` so runway nudges and auto-handoff fire live.
+    pub(crate) fn notify_threads_usage(&mut self, harness: Harness, cx: &mut Context<Self>) {
+        let Some(usage) = self.usage_for_harness(harness) else { return };
+        let auto_handoff = self.store.data.settings.auto_handoff_on_limit;
+        let fallback = self.best_fallback_model(harness);
+        let threads: Vec<_> = self
+            .live
+            .iter()
+            .filter_map(|l| l.view.thread().cloned())
+            .filter(|t| t.read(cx).harness == harness)
+            .collect();
+        for thread in threads {
+            let fallback = fallback.clone();
+            thread.update(cx, |t, cx| {
+                t.fallback_model = fallback;
+                t.observe_usage_limits(&usage, auto_handoff, cx);
+            });
         }
     }
 
@@ -261,6 +325,9 @@ impl Workspace {
     /// One mod report: Claude's limits, and the session's own figures and settings.
     fn apply_snapshot(&mut self, snap: &Snapshot, cx: &mut Context<Self>) -> bool {
         let mut changed = self.merge_claude_usage(snap.five_hour.clone(), snap.seven_day.clone());
+        if changed {
+            self.notify_threads_usage(Harness::Claude, cx);
+        }
         let id = self.store.data.sessions.iter().find(|s| {
             s.agent.as_ref().is_some_and(|meta| meta.harness == Harness::Claude && meta.session_id == snap.session_id)
         }).map(|s| s.id.clone());

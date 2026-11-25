@@ -148,7 +148,7 @@ pub const ADAPTER: Adapter = Adapter {
     probe_env: super::no_probe_env,
     config_root: |home| home.join(".codex"),
     project_skills: ".codex/skills",
-    hidden_commands: &["approvals", "logout"],
+    hidden_commands: &["approvals", "logout", "resume", "fork", "mcp", "model", "permissions"],
     worktree: super::WorktreeHooks::DEFAULT,
     protocol: super::ProtocolHooks {
         async_ask: Some(decode_async_ask),

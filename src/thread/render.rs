@@ -128,7 +128,7 @@ impl Render for ThreadView {
             .flex_none()
             .flex()
             .flex_col()
-            .children(self.render_session_notices())
+            .children(self.render_session_notices(cx))
             .children(self.render_plan())
             .children(self.render_background(window, cx))
             .child(self.render_composer(window, cx));
@@ -331,8 +331,8 @@ fn chat_links(view: TextView, row: usize, cx: &mut Context<ThreadView>) -> TextV
             && matches!(url.scheme(), "http" | "https") && url.has_host()
         {
             app.open_url(url.as_str());
-        } else if let Some((path, line)) = timeline::file_link(target) {
-            let _ = thread.update(app, |view, cx| view.open_location_at(row, path, line, cx));
+        } else if let Some((path, line, end_line)) = timeline::file_link(target) {
+            let _ = thread.update(app, |view, cx| view.open_location_range_at(row, path, line, end_line, cx));
         }
     })
 }
@@ -940,14 +940,14 @@ impl ThreadView {
     /// Compact bar above the composer showing anything currently running in the background for this session
     /// (running child subagents, or tool calls still in progress outside an active turn).
     fn render_background(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<Div> {
-        let bg_tools: Vec<String> = if self.working {
+        let bg_tools: Vec<(String, String)> = if self.working {
             vec![]
         } else {
             self.thread
                 .entries
                 .iter()
                 .filter_map(|e| match e {
-                    Entry::Tool(call) if call.status == ToolStatus::Running => Some(title(call)),
+                    Entry::Tool(call) if call.status == ToolStatus::Running => Some((call.id.clone(), title(call))),
                     _ => None,
                 })
                 .collect()
@@ -1010,7 +1010,8 @@ impl ThreadView {
                     }),
             );
         }
-        for (i, name) in bg_tools.into_iter().enumerate() {
+        for (i, (call_id, name)) in bg_tools.into_iter().enumerate() {
+            let out_id = call_id.clone();
             pills = pills.child(
                 div()
                     .flex()
@@ -1025,7 +1026,15 @@ impl ThreadView {
                     .text_size(scale::px(11.5))
                     .text_color(hsla(theme::TEXT_DIM))
                     .child(spinner(format!("thread-bg-tool-{i}"), 10.0))
-                    .child(div().max_w(px(220.0)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(name)),
+                    .child(div().max_w(px(220.0)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(name))
+                    .child(
+                        button(SharedString::from(format!("bg-tool-output-{i}")), "Output", false)
+                            .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| v.open_tool_output(&out_id, cx))),
+                    )
+                    .child(
+                        button(SharedString::from(format!("bg-tool-stop-{i}")), "Stop", false)
+                            .on_click(cx.listener(|v, _: &ClickEvent, _, cx| v.interrupt(cx))),
+                    ),
             );
         }
         for shell in &self.provider_shells {

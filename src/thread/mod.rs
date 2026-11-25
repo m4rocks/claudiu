@@ -36,7 +36,7 @@ use crate::harness::defaults::{self, Starter};
 use crate::harness::thread::{Entry, Thread, ToolStatus};
 use crate::harness::permission::{self, Permission};
 use crate::harness::{BackgroundTask as ProviderTask, CatalogModel, Harness, Reopen};
-use crate::visual::ui::{CardUi, SendText};
+use crate::visual::ui::{CardUi, OpenFile, SendText};
 
 /// Which compact composer popover is open.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -130,8 +130,8 @@ pub enum ThreadEvent {
     Usage(crate::harness::thread::TurnUsage),
     /// The harness reported live account rate limits (5h / 7d windows).
     UsageLimits(Harness, crate::store::UsageLimits),
-    /// A file a tool acted on was clicked: its path and line (1-based).
-    OpenPath(String, Option<usize>),
+    /// A file a tool acted on or a markdown/UI link was clicked: its path, 1-based start line, and optional 1-based end line.
+    OpenPath(String, Option<usize>, Option<usize>),
     ReconnectPermission(Permission),
     PermissionPreference(Permission),
     /// The user picked a model served by another harness and sent a message: dynamically hand off this chat.
@@ -413,6 +413,9 @@ pub struct ThreadView {
     tool_images: std::cell::RefCell<HashMap<(String, usize), std::sync::Arc<gpui::Image>>>,
     find: Option<find::Find>,
     pub(crate) usage_limit: Option<String>,
+    pub(crate) fallback_model: Option<CatalogModel>,
+    pub(crate) auto_handoff_on_limit: bool,
+    runway: crate::harness::limits::RunwayTracker,
     /// How many rows the list has measured.
     rows: usize,
     /// Ctrl+O: every tool's output in full.
@@ -529,6 +532,9 @@ impl ThreadView {
                 ui.update(cx, |ui, cx| ui.mark_sent(&ev.key, cx));
                 v.send(ev.text.clone(), window, cx);
             }),
+            cx.subscribe_in(&card_ui, window, |v: &mut Self, _, ev: &OpenFile, _, cx| {
+                v.open_location_range_at(v.thread.entries.len(), PathBuf::from(&ev.path), ev.line, ev.end_line, cx);
+            }),
         ];
         // Before the composer's own bindings, which would take Escape, Up, Down and Shift+Tab.
         subscriptions.push(cx.intercept_keystrokes(move |ev: &KeystrokeEvent, window, cx| {
@@ -631,6 +637,9 @@ impl ThreadView {
             tool_images: Default::default(),
             find: None,
             usage_limit: None,
+            fallback_model: None,
+            auto_handoff_on_limit: true,
+            runway: Default::default(),
             rows,
             detail: false,
             subagent_edits: None,
@@ -1222,6 +1231,46 @@ impl ThreadView {
         }
     }
 
+    fn open_tool_output(&mut self, call_id: &str, cx: &mut Context<Self>) {
+        let Some(Entry::Tool(call)) = self.thread.entries.iter().find(|e| matches!(e, Entry::Tool(c) if c.id == call_id)) else {
+            return;
+        };
+        let mut parts: Vec<&str> = Vec::new();
+        if let Some(out) = call.details.output.as_deref().filter(|s| !s.trim().is_empty()) {
+            parts.push(out);
+        }
+        if let Some(out) = call.details.stdout.as_deref().filter(|s| !s.trim().is_empty()) {
+            parts.push(out);
+        }
+        if let Some(out) = call.details.stderr.as_deref().filter(|s| !s.trim().is_empty()) {
+            parts.push(out);
+        }
+        for content in &call.content {
+            if let crate::harness::thread::ToolContent::Text(t) = content
+                && !t.trim().is_empty()
+            {
+                parts.push(t.as_str());
+            }
+        }
+        let text = if parts.is_empty() {
+            "Running in background — output will appear here when available.".into()
+        } else {
+            let joined = parts.join("\n");
+            const LIMIT: usize = 16 * 1024;
+            if joined.len() > LIMIT {
+                let mut start = joined.len() - LIMIT;
+                while !joined.is_char_boundary(start) {
+                    start += 1;
+                }
+                joined[start..].to_string()
+            } else {
+                joined
+            }
+        };
+        self.shell_output = Some(ShellOutput { task_id: call_id.to_string(), text, loading: false });
+        cx.notify();
+    }
+
     fn open_background_task_output(&mut self, task_id: &str, cx: &mut Context<Self>) {
         let Some(path) = self.background_tasks.iter().find(|t| t.id == task_id).and_then(|t| t.log_path.clone()) else {
             return;
@@ -1726,9 +1775,24 @@ impl ThreadView {
             Ok(_) if notice.is_none() => "completed",
             _ => "failed",
         };
-        if let Some((text, error)) = notice {
-            let at = self.thread.notice(text, error);
+        if let Some((text, error)) = &notice {
+            let at = self.thread.notice(text.clone(), *error);
             self.remeasure(at);
+        }
+        let hit_limit_reply = notice.as_ref().is_some_and(|(t, _)| crate::harness::limits::looks_like_usage_limit_error(t))
+            || matches!(self.thread.entries.last(), Some(Entry::Agent(text)) if crate::harness::limits::looks_like_usage_limit_error(text));
+        if hit_limit_reply && self.auto_handoff_on_limit && self.phase == Phase::Ready
+            && let Some(target) = self.fallback_model.clone()
+        {
+            let at = self.thread.notice(format!("Usage limit reached on {} — handing off to {}…", self.harness.name(), target.name), false);
+            self.remeasure(at);
+            cx.emit(ThreadEvent::Handoff {
+                to: target.harness,
+                model: (!target.id.is_empty()).then_some(target.id),
+                message: String::new(),
+                effort: None,
+                by_agent: true,
+            });
         }
         if matches!(outcome, "failed" | "interrupted") {
             self.queue_held = true;
@@ -2873,6 +2937,10 @@ impl ThreadView {
     }
 
     fn open_location_at(&mut self, row: usize, path: PathBuf, line: Option<u32>, cx: &mut Context<Self>) {
+        self.open_location_range_at(row, path, line, None, cx);
+    }
+
+    fn open_location_range_at(&mut self, row: usize, path: PathBuf, line: Option<u32>, end_line: Option<u32>, cx: &mut Context<Self>) {
         let normalized = path
             .to_str()
             .filter(|s| s.starts_with("file:"))
@@ -2884,13 +2952,54 @@ impl ThreadView {
         } else {
             timeline::workspace_at(&self.thread.entries, row, &self.cwd).join(normalized)
         };
-        cx.emit(ThreadEvent::OpenPath(path.to_string_lossy().into_owned(), line.map(|l| l as usize)));
+        cx.emit(ThreadEvent::OpenPath(path.to_string_lossy().into_owned(), line.map(|l| l as usize), end_line.map(|l| l as usize)));
     }
 
     // What the workspace asks of a session view, as it asks a terminal.
 
     pub fn is_running(&self) -> bool {
         self.phase != Phase::Ended
+    }
+
+    pub fn observe_usage_limits(&mut self, usage: &crate::store::UsageLimits, auto_handoff: bool, cx: &mut Context<Self>) {
+        self.auto_handoff_on_limit = auto_handoff;
+        if self.phase != Phase::Ready {
+            return;
+        }
+        let now = crate::store::now();
+        let cumulative_tokens = self.thread.cache_usage.input_tokens
+            .saturating_add(self.thread.cache_usage.output_tokens)
+            .max(self.thread.context.map(|(used, _)| used).unwrap_or(0));
+        if self.is_working()
+            && let Some(nudge) = self.runway.observe(usage, cumulative_tokens, auto_handoff, now)
+        {
+            let at = self.thread.notice(
+                format!("Approaching {} usage limit ({}%) — notified the model.", nudge.window_label, nudge.percent_used),
+                false,
+            );
+            self.remeasure(at);
+            self.send_as(nudge.message, crate::store::FollowUp::Steer, cx);
+            cx.notify();
+        }
+        if auto_handoff
+            && self.is_working()
+            && self.runway.take_exhausted_handoff(usage, now)
+            && let Some(target) = self.fallback_model.clone()
+        {
+            let at = self.thread.notice(
+                format!("Usage limit reached on {} — handing off to {}…", self.harness.name(), target.name),
+                false,
+            );
+            self.remeasure(at);
+            cx.emit(ThreadEvent::Handoff {
+                to: target.harness,
+                model: (!target.id.is_empty()).then_some(target.id),
+                message: String::new(),
+                effort: None,
+                by_agent: true,
+            });
+            cx.notify();
+        }
     }
 
     pub fn set_compaction_policy(&mut self, enabled: bool, threshold_percent: u64, cx: &mut Context<Self>) {
@@ -3771,7 +3880,7 @@ mod tests {
         let opened = Rc::new(RefCell::new(None));
         let capture = opened.clone();
         let _sub = cx.update(|_, app| app.subscribe(&view, move |_, event, _| {
-            if let super::ThreadEvent::OpenPath(path, line) = event {
+            if let super::ThreadEvent::OpenPath(path, line, _) = event {
                 capture.replace(Some((std::path::PathBuf::from(path), *line)));
             }
         }));

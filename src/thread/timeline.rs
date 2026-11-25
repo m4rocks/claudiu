@@ -54,12 +54,24 @@ pub(super) fn workspace_at<'a>(entries: &'a [Entry], row: usize, current: &'a st
     }).unwrap_or(current)
 }
 
-pub(super) fn file_link(target: &str) -> Option<(PathBuf, Option<u32>)> {
-    let (path, line) = target.rsplit_once("#L").map_or((target, None), |(path, line)| {
-        (path, line.split('-').next().and_then(|value| value.parse::<u32>().ok()).filter(|value| *value > 0))
-    });
+pub(super) fn file_link(target: &str) -> Option<(PathBuf, Option<u32>, Option<u32>)> {
+    let parse_lines = |spec: &str| -> (Option<u32>, Option<u32>) {
+        let mut parts = spec.split('-');
+        let start = parts.next().and_then(|v| v.strip_prefix('L').unwrap_or(v).parse::<u32>().ok()).filter(|v| *v > 0);
+        let end = parts
+            .next()
+            .and_then(|v| v.strip_prefix('L').unwrap_or(v).parse::<u32>().ok())
+            .filter(|v| start.is_some_and(|s| *v >= s));
+        (start, end)
+    };
+    let (path, line, end_line) = if let Some((path, spec)) = target.rsplit_once("#L") {
+        let (start, end) = parse_lines(spec);
+        (path, start, end)
+    } else {
+        (target, None, None)
+    };
     if path.starts_with("file:") {
-        return url::Url::parse(path).ok()?.to_file_path().ok().map(|path| (path, line));
+        return url::Url::parse(path).ok()?.to_file_path().ok().map(|path| (path, line, end_line));
     }
     let parsed = PathBuf::from(path);
     if path.is_empty() || path.starts_with("//") || path.starts_with('#') || path.chars().any(char::is_control)
@@ -67,7 +79,7 @@ pub(super) fn file_link(target: &str) -> Option<(PathBuf, Option<u32>)> {
     {
         return None;
     }
-    Some((parsed, line))
+    Some((parsed, line, end_line))
 }
 
 #[cfg(test)]
@@ -90,8 +102,10 @@ mod tests {
     }
 
     #[test]
-    fn markdown_file_links_keep_the_start_of_a_line_range() {
-        assert_eq!(file_link("src/main.rs#L42-L48"), Some((PathBuf::from("src/main.rs"), Some(42))));
+    fn markdown_file_links_keep_the_start_and_end_of_a_line_range() {
+        assert_eq!(file_link("src/main.rs#L42-L48"), Some((PathBuf::from("src/main.rs"), Some(42), Some(48))));
+        assert_eq!(file_link("src/main.rs#L42-48"), Some((PathBuf::from("src/main.rs"), Some(42), Some(48))));
+        assert_eq!(file_link("src/main.rs#L42"), Some((PathBuf::from("src/main.rs"), Some(42), None)));
         assert!(file_link("javascript:example").is_none());
     }
 

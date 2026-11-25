@@ -54,6 +54,7 @@ pub use line_actions::{EditLines, line_action_bindings};
 mod links;
 mod modal;
 mod navigation;
+pub mod palette;
 pub mod picker;
 mod pickup;
 mod repo;
@@ -100,6 +101,7 @@ actions!(
         HideOthers,
         ShowAllApps,
         OpenSettings,
+        OpenPalette,
         ToggleEditor,
         QuickOpen,
         SaveFile,
@@ -194,6 +196,7 @@ pub enum Modal {
         auto_compact: bool,
         auto_compact_threshold: u64,
         usage_display: crate::store::UsageDisplay,
+        auto_handoff_on_limit: bool,
         /// m4code tools turned off (m4code tools page).
         m4code_off: Vec<crate::mcp::Feature>,
         /// Skills to turn off, separated by commas (Claude Code tools page).
@@ -558,6 +561,7 @@ pub struct Workspace {
     pub selected: Option<Id>,
     pub search: String,
     pub search_input: Entity<InputState>,
+    pub palette: Option<palette::CommandPalette>,
     pub root_focus: FocusHandle,
     /// Up/Down/Enter in the open workspace dropdown (`panels::picker::Choices`).
     pub picker_nav: crate::panels::picker::Nav,
@@ -732,6 +736,7 @@ impl Workspace {
             selected: store.data.layout.selected_session.clone(),
             search: String::new(),
             search_input,
+            palette: None,
             root_focus: cx.focus_handle(),
             picker_nav: crate::panels::picker::Nav::new(cx),
             menu_nav: crate::panels::picker::Nav::new(cx),

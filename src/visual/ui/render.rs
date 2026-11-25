@@ -9,7 +9,7 @@ use gpui::{
 use gpui_kit::base::SelectableText;
 
 use super::parse::{Ax, Color, Css, Dir, Display, El, Len, Node, Svg, TextAlign, Tree, token};
-use super::{CardUi, Scope, SendText};
+use super::{CardUi, OpenFile, Scope, SendText};
 use crate::panels::theme;
 
 /// The longest message the mod sends for a button (`PROMPT_MAX` in `mod/hooks/register.js`).
@@ -19,6 +19,19 @@ fn hsla(c: Color) -> Hsla {
     let mut h = theme::hsla(c.0);
     h.a = c.1;
     h
+}
+
+fn parse_open_target(target: &str) -> (String, Option<u32>, Option<u32>) {
+    if let Some((path, spec)) = target.rsplit_once("#L") {
+        let mut parts = spec.split('-');
+        let start = parts.next().and_then(|v| v.strip_prefix('L').unwrap_or(v).parse::<u32>().ok()).filter(|v| *v > 0);
+        let end = parts
+            .next()
+            .and_then(|v| v.strip_prefix('L').unwrap_or(v).parse::<u32>().ok())
+            .filter(|v| start.is_some_and(|s| *v >= s));
+        return (path.to_string(), start, end);
+    }
+    (target.to_string(), None, None)
 }
 
 fn tok(name: &str) -> Hsla {
@@ -93,11 +106,12 @@ struct R {
     scope: Scope,
     /// What the user has clicked so far, as of this frame.
     state: CardUi,
+    checks: Vec<(String, String, bool)>,
 }
 
 pub fn render(tree: &Tree, scope: &Scope, window: &mut Window, cx: &mut App) -> AnyElement {
     let state = scope.ui.read(cx).clone();
-    let mut r = R { font: window.text_style().font(), uid: tree.uid, links: 0, texts: 0, screen_scale: window.scale_factor(), scope: scope.clone(), state };
+    let mut r = R { font: window.text_style().font(), uid: tree.uid, links: 0, texts: 0, screen_scale: window.scale_factor(), scope: scope.clone(), state, checks: Vec::new() };
     let kids = r.children(&tree.nodes, false, &Ctx::root());
     div().flex().flex_col().gap(px(8.0)).my(px(4.0)).children(kids).into_any_element()
 }
@@ -136,6 +150,7 @@ impl R {
         let flex = matches!(css.display, Some(Display::Flex | Display::Grid));
         let kids = match e.tag.as_str() {
             "button" => return Some(self.button(e, &ctx)),
+            "check" | "checkbox" => return Some(self.check(e, &ctx)),
             "details" => return Some(self.details(e, &ctx)),
             "tabs" => return Some(self.tabs(e, &ctx)),
             "progress" => {
@@ -155,10 +170,92 @@ impl R {
         format!("{}/{}/{}", self.scope.call, self.uid, e.seq)
     }
 
-    /// Sends its `send` text as the user's next message, once. That text is always on show, so a label can't hide
-    /// what a click does. A button with nothing valid to send is drawn inert.
+    /// Interactive checkbox/chip inside a `ui` block, collected by `<button submit="..">`.
+    fn check(&mut self, e: &El, ctx: &Ctx) -> AnyElement {
+        let key = self.key(e);
+        let default = e.attr("checked").is_some();
+        let label = e
+            .attr("label")
+            .or_else(|| e.attr("name"))
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| "Option".into());
+        self.checks.push((key.clone(), label.clone(), default));
+        let checked = self.state.is_checked(&key, default);
+        let ui = self.scope.ui.clone();
+        let toggle_key = key.clone();
+        let toggle_label = label.clone();
+        let mark = if checked { "☑" } else { "☐" };
+        let kids = if e.children.is_empty() {
+            vec![div().text_size(crate::panels::scale::px(12.5)).text_color(hsla(ctx.color)).child(label).into_any_element()]
+        } else {
+            self.children(&e.children, false, ctx)
+        };
+        boxed(&e.css)
+            .id(ElementId::Name(key.into()))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(6.0))
+            .px(px(8.0))
+            .py(px(4.0))
+            .rounded(px(6.0))
+            .border_1()
+            .border_color(tok(if checked { "accent" } else { "border" }))
+            .bg(tok(if checked { "raised" } else { "surface" }))
+            .cursor_pointer()
+            .child(div().text_color(tok(if checked { "accent" } else { "dim" })).child(mark))
+            .children(kids)
+            .on_click(move |_, _, cx| {
+                ui.update(cx, |ui, cx| ui.set_checked(&toggle_key, toggle_label.clone(), !checked, cx));
+            })
+            .into_any_element()
+    }
+
+    /// Sends its `send` text as the user's next message, submits checked `<check>` items with `submit`,
+    /// or opens a workspace file/range with `open="path#L10-L20"`.
     fn button(&mut self, e: &El, ctx: &Ctx) -> AnyElement {
         let kids = self.children(&e.children, false, ctx);
+        if let Some(target) = e.attr("open").map(str::trim).filter(|s| !s.is_empty() && s.chars().count() <= SEND_MAX) {
+            let key = self.key(e);
+            let (path, line, end_line) = parse_open_target(target);
+            let hint = div().text_size(crate::panels::scale::px(11.5)).text_color(tok("dim")).child(target.to_string());
+            let ui = self.scope.ui.clone();
+            return boxed(&e.css)
+                .id(ElementId::Name(key.into()))
+                .children(kids)
+                .child(hint)
+                .cursor_pointer()
+                .hover(|s| s.border_color(tok("accent")))
+                .on_click(move |_, _, cx| {
+                    ui.update(cx, |_, cx| cx.emit(OpenFile { path: path.clone(), line, end_line }));
+                })
+                .into_any_element();
+        }
+        if let Some(prefix) = e.attr("submit").map(str::trim).filter(|s| !s.is_empty() && s.chars().count() <= SEND_MAX).map(str::to_string) {
+            let key = self.key(e);
+            let sent = self.state.is_sent(&key);
+            let block_prefix = format!("{}/{}/", self.scope.call, self.uid);
+            let selected = self.state.checked_labels(&block_prefix, &self.checks);
+            let summary = if selected.is_empty() {
+                format!("{prefix} (none)")
+            } else {
+                format!("{prefix} {}", selected.join(", "))
+            };
+            let hint = if sent { format!("Sent: {summary}") } else { summary.clone() };
+            let hint = div().text_size(crate::panels::scale::px(11.5)).text_color(tok("dim")).child(hint);
+            let body = boxed(&e.css).id(ElementId::Name(key.clone().into())).children(kids).child(hint);
+            if sent {
+                return body.opacity(0.6).into_any_element();
+            }
+            let ui = self.scope.ui.clone();
+            return body
+                .cursor_pointer()
+                .hover(|s| s.border_color(tok("accent")))
+                .on_click(move |_, _, cx| ui.update(cx, |_, cx| cx.emit(SendText { key: key.clone(), text: summary.clone() })))
+                .into_any_element();
+        }
         let send = e.attr("send").map(str::trim).filter(|s| !s.is_empty() && s.chars().count() <= SEND_MAX).map(str::to_string);
         let Some(text) = send else { return boxed(&e.css).opacity(0.5).children(kids).into_any_element() };
         let key = self.key(e);

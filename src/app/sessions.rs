@@ -484,7 +484,7 @@ impl Workspace {
                         ws.open_git_picker(project, cwd, crate::app::GitPickerTarget::Session, *at, window, cx);
                     }
                 }
-                ThreadEvent::OpenPath(path, line) => ws.open_from_terminal(&sub_id, path, *line, window, cx),
+                ThreadEvent::OpenPath(path, line, end_line) => ws.open_from_terminal_range(&sub_id, path, *line, *end_line, window, cx),
                 ThreadEvent::AbortChildren => ws.end_child_sessions(&sub_id, window, cx),
                 ThreadEvent::Idle(outcome) => {
                     if let Some(harness) = ws.store.session(&sub_id).and_then(|r| r.agent.as_ref()).map(|m| m.harness) {

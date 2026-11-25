@@ -174,6 +174,9 @@ pub struct Settings {
     /// Whether usage limit bars display percentage used or percentage left (Settings → General).
     #[serde(default)]
     pub usage_display: UsageDisplay,
+    /// Whether m4code automatically hands off a working session to another available model when its usage limit is hit.
+    #[serde(default = "default_auto_compact")]
+    pub auto_handoff_on_limit: bool,
 }
 
 impl Default for Settings {
@@ -203,6 +206,7 @@ impl Default for Settings {
             auto_compact: default_auto_compact(),
             auto_compact_threshold: default_auto_compact_threshold(),
             usage_display: Default::default(),
+            auto_handoff_on_limit: true,
         }
     }
 }

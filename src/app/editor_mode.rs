@@ -188,6 +188,10 @@ impl Workspace {
     /// A path the user Ctrl+clicked in the session's terminal: open it in editor mode, at its line (1-based) when one was
     /// given. Text that only looks like a path, naming no file, does nothing.
     pub fn open_from_terminal(&mut self, id: &Id, path: &str, line: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_from_terminal_range(id, path, line, None, window, cx);
+    }
+
+    pub fn open_from_terminal_range(&mut self, id: &Id, path: &str, line: Option<usize>, end_line: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(cwd) = self.store.session(id).map(|s| s.cwd.clone()) else { return };
         let Some(file) = dunce::canonicalize(cwd.join(path)).ok().filter(|f| f.is_file()) else { return };
         if self.active_id() != Some(id) {
@@ -199,7 +203,7 @@ impl Workspace {
         if self.shown_pane(cx).is_none() {
             return;
         }
-        self.open_file(id, file, line.map(|l| l.saturating_sub(1)), window, cx);
+        self.open_file_range(id, file, line.map(|l| l.saturating_sub(1)), end_line.map(|l| l.saturating_sub(1)), window, cx);
     }
 
     /// Editor mode is on and has a session to show; the home page keeps its sidebars.
@@ -436,22 +440,28 @@ impl Workspace {
 
     /// Show `path` in the session's editor at `line` (0-based), as a jump that Back returns from.
     pub fn open_file(&mut self, id: &Id, path: PathBuf, line: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_file_range(id, path, line, None, window, cx);
+    }
+
+    /// Show `path` in the session's editor at `line..=end_line` (0-based), selecting the full range when `end_line` is set.
+    pub fn open_file_range(&mut self, id: &Id, path: PathBuf, line: Option<usize>, end_line: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
         self.remember_place(id, &path, line, cx);
         self.note_recent(id, &path);
-        self.show_file(id, path, line, window, cx);
+        self.show_file_range(id, path, line, end_line, window, cx);
     }
 
     /// Show `path` in the session's editor: its tab when it is open, otherwise a new tab once the file is read off the UI
     /// thread. `line` (0-based) puts the cursor there.
     pub(super) fn show_file(&mut self, id: &Id, path: PathBuf, line: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_file_range(id, path, line, None, window, cx);
+    }
+
+    fn show_file_range(&mut self, id: &Id, path: PathBuf, line: Option<usize>, end_line: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(pane) = self.panes.get_mut(id) else { return };
         if let Some(ix) = pane.tabs.iter().position(|t| t.path == path) {
             pane.active = Some(ix);
             let buffer = pane.tabs[ix].buffer.clone();
-            buffer.update(cx, |b, cx| match line {
-                Some(line) => b.set_cursor_position(Position::new(line as u32, 0), window, cx),
-                None => b.focus(window, cx),
-            });
+            buffer.update(cx, |b, cx| apply_line_jump(b, line, end_line, window, cx));
             cx.notify();
             return;
         }
@@ -474,7 +484,7 @@ impl Workspace {
                         buffer.update(cx, |b, cx| {
                             b.set_tab_size(tab_size(&f), cx);
                             b.set_value(text, window, cx);
-                            b.set_cursor_position(Position::new(line.unwrap_or(0) as u32, 0), window, cx);
+                            apply_line_jump(b, line, end_line, window, cx);
                         });
                         // `set_value` (opening, reloading) sends no Change, so only the user's edits mark the tab.
                         sub = Some(cx.subscribe(&buffer, |ws: &mut Workspace, buffer, ev: &InputEvent, cx| {
@@ -642,6 +652,35 @@ fn tree_items(nodes: &[Node], expanded: &HashSet<String>) -> Vec<TreeItem> {
 }
 
 /// The tab shown after tab `closed` goes, given the one shown before and how many are left: the same file when another
+fn apply_line_jump(buffer: &mut EditorState, line: Option<usize>, end_line: Option<usize>, window: &mut Window, cx: &mut Context<EditorState>) {
+    let Some(start) = line else {
+        buffer.focus(window, cx);
+        return;
+    };
+    buffer.set_cursor_position(Position::new(start as u32, 0), window, cx);
+    if let Some(end) = end_line.filter(|&end| end >= start) {
+        let text = buffer.value();
+        let mut byte_start = None;
+        let mut byte_end = text.len();
+        let mut offset = 0usize;
+        for (ix, seg) in text.split_inclusive('\n').enumerate() {
+            if ix == start {
+                byte_start = Some(offset);
+            }
+            offset += seg.len();
+            if ix == end {
+                byte_end = offset.saturating_sub(usize::from(seg.ends_with('\n')));
+                break;
+            }
+        }
+        if let Some(byte_start) = byte_start
+            && byte_start < byte_end
+        {
+            buffer.set_selected_range(byte_start..byte_end, cx);
+        }
+    }
+}
+
 /// tab closed, otherwise the tab that took the closed one's place, or the new last one.
 fn active_after_close(active: Option<usize>, closed: usize, left: usize) -> Option<usize> {
     let a = active?;

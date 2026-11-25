@@ -32,10 +32,10 @@ pub(super) fn render_settings_card(
     cx: &mut Context<Workspace>,
 ) -> gpui::Stateful<gpui::Div> {
     let (page, worktrees, scroll) = (ws.settings_page, &ws.worktrees_page, &ws.settings_scroll);
-    let Some(Modal::Settings { shell, default_model, text_generation_model, effort, permission, updates, scale, follow_up, auto_compact, auto_compact_threshold, usage_display, m4code_off, skill_search, skill_filter, list_focus, renaming, .. }) = &ws.modal else {
+    let Some(Modal::Settings { shell, default_model, text_generation_model, effort, permission, updates, scale, follow_up, auto_compact, auto_compact_threshold, usage_display, auto_handoff_on_limit, m4code_off, skill_search, skill_filter, list_focus, renaming, .. }) = &ws.modal else {
         return div().id("modal-card");
     };
-    let (updates, scale, follow_up, auto_compact, auto_compact_threshold, usage_display) = (*updates, *scale, *follow_up, *auto_compact, *auto_compact_threshold, *usage_display);
+    let (updates, scale, follow_up, auto_compact, auto_compact_threshold, usage_display, auto_handoff_on_limit) = (*updates, *scale, *follow_up, *auto_compact, *auto_compact_threshold, *usage_display, *auto_handoff_on_limit);
     let scaled = crate::panels::scale::px;
     let faint = |text: String| div().text_size(scaled(11.5)).text_color(hsla(theme::TEXT_FAINT)).child(text);
 
@@ -159,6 +159,28 @@ pub(super) fn render_settings_card(
                         .gap(px(4.0))
                         .child(usage_display_button(crate::store::UsageDisplay::Used, "Used", usage_display, cx))
                         .child(usage_display_button(crate::store::UsageDisplay::Left, "Left", usage_display, cx))
+                        .into_any_element(),
+                )
+                .into_any_element(),
+                row_shell(
+                    "Auto-handoff on usage limit",
+                    Some("Warn a working model at 90% and hand off to another enabled model if it hits 100%"),
+                    div()
+                        .flex_none()
+                        .flex()
+                        .gap(px(4.0))
+                        .child(button("settings-auto-handoff-on", "On", auto_handoff_on_limit).on_click(cx.listener(|ws, _: &ClickEvent, _, cx| {
+                            if let Some(Modal::Settings { auto_handoff_on_limit, .. }) = ws.modal.as_mut() {
+                                *auto_handoff_on_limit = true;
+                            }
+                            cx.notify();
+                        })))
+                        .child(button("settings-auto-handoff-off", "Off", !auto_handoff_on_limit).on_click(cx.listener(|ws, _: &ClickEvent, _, cx| {
+                            if let Some(Modal::Settings { auto_handoff_on_limit, .. }) = ws.modal.as_mut() {
+                                *auto_handoff_on_limit = false;
+                            }
+                            cx.notify();
+                        })))
                         .into_any_element(),
                 )
                 .into_any_element(),

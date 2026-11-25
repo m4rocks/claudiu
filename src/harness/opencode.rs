@@ -54,7 +54,7 @@ pub const ADAPTER: Adapter = Adapter {
     probe_env: super::no_probe_env,
     config_root,
     project_skills: ".opencode/skills",
-    hidden_commands: &[],
+    hidden_commands: &["models", "connect", "share", "unshare", "sessions"],
     worktree: super::WorktreeHooks::DEFAULT,
     protocol: super::ProtocolHooks::DEFAULT,
 };

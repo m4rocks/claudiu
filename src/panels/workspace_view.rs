@@ -9,7 +9,7 @@ use gpui::{
 
 use crate::harness::defaults::Effort;
 use crate::app::{
-    Act, CloseSession, FocusSearch, GitOp, GitPickerTarget, ImportProject, Main, NewSession, NextSession, OpenGithub, OpenSettings, PrevSession, SessionView, ShellDrag, SwapFocus, ToggleEditor, ToggleRight, ToggleShell, ToggleSidebar, Workspace, WorkspacePicker, SHELL_HEIGHT,
+    Act, CloseSession, FocusSearch, GitOp, GitPickerTarget, ImportProject, Main, NewSession, NextSession, OpenGithub, OpenPalette, OpenSettings, PrevSession, SessionView, ShellDrag, SwapFocus, ToggleEditor, ToggleRight, ToggleShell, ToggleSidebar, Workspace, WorkspacePicker, SHELL_HEIGHT,
 };
 use gpui_kit::component::TitleBar;
 use crate::panels::theme::{self, hsla};
@@ -175,17 +175,23 @@ impl Workspace {
                 })
             })
             .collect();
-        let usage_limit = match thread.read(cx).harness {
-            crate::harness::Harness::Claude => crate::thread::exhausted_usage(&self.store.data.claude_usage, crate::store::now()),
-            crate::harness::Harness::Codex => self.store.data.subagent_limits.get("codex")
-                .and_then(|pools| pools.iter().find_map(|pool| crate::thread::exhausted_usage(&pool.usage, crate::store::now()))),
-            _ => None,
-        };
-        if thread.read(cx).git != chip || thread.read(cx).background != background || thread.read(cx).usage_limit != usage_limit {
+        let harness = thread.read(cx).harness;
+        let usage_limit = self.usage_for_harness(harness)
+            .and_then(|u| crate::thread::exhausted_usage(&u, crate::store::now()));
+        let fallback_model = self.best_fallback_model(harness);
+        let auto_handoff = self.store.data.settings.auto_handoff_on_limit;
+        if thread.read(cx).git != chip
+            || thread.read(cx).background != background
+            || thread.read(cx).usage_limit != usage_limit
+            || thread.read(cx).fallback_model != fallback_model
+            || thread.read(cx).auto_handoff_on_limit != auto_handoff
+        {
             thread.update(cx, |t, cx| {
                 t.git = chip;
                 t.background = background;
                 t.usage_limit = usage_limit;
+                t.fallback_model = fallback_model;
+                t.auto_handoff_on_limit = auto_handoff;
                 cx.notify();
             });
         }
@@ -524,6 +530,7 @@ impl Render for Workspace {
                 }
             }))
             .on_action(cx.listener(|ws, _: &OpenSettings, window, cx| ws.act(Act::OpenSettings, window, cx)))
+            .on_action(cx.listener(|ws, _: &OpenPalette, window, cx| ws.open_palette(window, cx)))
             .on_action(cx.listener(|ws, _: &SwapFocus, window, cx| ws.swap_focus(window, cx)))
             .on_action(cx.listener(|ws, _: &ToggleEditor, window, cx| {
                 if ws.editor_owner().is_some() {
@@ -616,6 +623,7 @@ impl Render for Workspace {
             )
             .children(menu)
             .children(modal)
+            .children(self.render_palette(cx))
             .children(picker_dialog)
             .children(agent_dialog)
             .children(question_popover)

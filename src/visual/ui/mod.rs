@@ -14,13 +14,14 @@ use parse::Tree;
 
 const NODE: &str = "m4code-ui";
 
-/// What the user has done in a session's cards: buttons sent, sections opened, tabs chosen. Kept for the life of the
-/// terminal, because scrolling a card off screen must not reset it; a restart does.
+/// What the user has done in a session's cards: buttons sent, sections opened, tabs chosen, checkboxes toggled.
+/// Kept for the life of the terminal, because scrolling a card off screen must not reset it; a restart does.
 #[derive(Clone, Default)]
 pub struct CardUi {
     sent: HashSet<String>,
     open: HashMap<String, bool>,
     tabs: HashMap<String, usize>,
+    checks: HashMap<String, (String, bool)>,
 }
 
 /// A button was clicked: `text` should go out as the user's next message.
@@ -29,7 +30,15 @@ pub struct SendText {
     pub text: String,
 }
 
+/// A button with `open="path#L10-L20"` was clicked: open that workspace file/range in the editor.
+pub struct OpenFile {
+    pub path: String,
+    pub line: Option<u32>,
+    pub end_line: Option<u32>,
+}
+
 impl EventEmitter<SendText> for CardUi {}
+impl EventEmitter<OpenFile> for CardUi {}
 
 impl CardUi {
     fn is_sent(&self, key: &str) -> bool {
@@ -57,6 +66,25 @@ impl CardUi {
     fn set_tab(&mut self, key: &str, tab: usize, cx: &mut Context<Self>) {
         self.tabs.insert(key.to_string(), tab);
         cx.notify();
+    }
+
+    fn is_checked(&self, key: &str, default: bool) -> bool {
+        self.checks.get(key).map_or(default, |(_, v)| *v)
+    }
+
+    fn set_checked(&mut self, key: &str, label: String, checked: bool, cx: &mut Context<Self>) {
+        self.checks.insert(key.to_string(), (label, checked));
+        cx.notify();
+    }
+
+    fn checked_labels(&self, block_prefix: &str, defaults: &[(String, String, bool)]) -> Vec<String> {
+        let mut out = Vec::new();
+        for (key, label, default) in defaults {
+            if key.starts_with(block_prefix) && self.is_checked(key, *default) {
+                out.push(label.clone());
+            }
+        }
+        out
     }
 }
 

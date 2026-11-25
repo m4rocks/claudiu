@@ -13,6 +13,7 @@ mod home;
 pub mod inspector;
 pub mod logos;
 mod overlays;
+mod palette;
 pub mod picker;
 pub mod scale;
 pub mod settings_pages;

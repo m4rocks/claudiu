@@ -41,7 +41,7 @@ pub const ADAPTER: Adapter = Adapter {
     probe_env: super::no_probe_env,
     config_root: |home| home.join(".gemini").join("config"),
     project_skills: ".agents/skills",
-    hidden_commands: &["swarm"],
+    hidden_commands: &["swarm", "teamwork", "grill-me", "browser", "goal", "schedule", "learn", "boost"],
     worktree: super::WorktreeHooks::DEFAULT,
     protocol: super::ProtocolHooks {
         background: Some(super::BackgroundHooks { from_update: background_update, finished: task_finished, live_execute_tools: true }),
