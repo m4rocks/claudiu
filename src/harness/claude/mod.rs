@@ -46,7 +46,54 @@ pub const ADAPTER: Adapter = Adapter {
     compact_command: Some("compact"),
     default_models: super::CatalogModel::default_claude_models,
     steers: true,
+    prepare: prepare_launch,
+    configure_mcp: super::stdio_mcp,
+    launch_args: super::no_launch_args,
+    modes: [Some("plan"), Some("auto"), Some("bypassPermissions")],
+    mode_aliases: &[
+        ("default", super::Permission::Auto),
+        ("acceptEdits", super::Permission::Auto),
+        ("dontAsk", super::Permission::Auto),
+    ],
+    full_access_relaunch: false,
+    native_compaction_managed: false,
+    fallback_question: false,
+    discover,
+    probe_env: |exe| exe.map(probe_env).ok_or_else(|| "Could not find the Claude Code CLI.".into()),
+    config_root: |home| home.join(".claude"),
+    project_skills: ".claude/skills",
+    hidden_commands: &["autocompact", "usage"],
+    worktree: super::WorktreeHooks {
+        inspect: inspect_session_worktree,
+        prepare: clear_worktree_if_recorded,
+        has_history: |_, transcript| transcript,
+    },
 };
+
+fn prepare_launch(input: &super::SessionInput<'_>, plan: &mut super::SessionPlan) -> Result<(), String> {
+    let exe = input.executable_override.ok_or("Could not find the Claude Code CLI. Install it or set its path in Settings.")?;
+    plan.off.extend(trimmed_mcp_tools());
+    (plan.env, plan.meta) = prepare_session(exe, input.record, input.session_id, input.name.clone(), input.chrome, &mut plan.off, input.settings);
+    if let Some(edits) = input.child_edits {
+        plan.meta["claudeCode"]["options"]["permissionMode"] = json!(if edits { "acceptEdits" } else { "plan" });
+    }
+    Ok(())
+}
+
+fn inspect_session_worktree(id: &str) -> (Option<bool>, Option<PathBuf>) {
+    let home = claude_home();
+    let idle = home.as_deref().and_then(|home| {
+        session_statuses(home, &mut Default::default()).get(id).map(|status| status == "idle")
+    });
+    (idle, home.and_then(|home| find_transcript(&home, id)))
+}
+
+pub(crate) fn clear_worktree_if_recorded(transcript: &Path, id: &str) -> Result<(), String> {
+    if worktree_recorded(transcript).map_err(|e| format!("could not read the conversation: {e}"))? {
+        clear_recorded_worktree(transcript, id).map_err(|e| format!("could not update the conversation: {e}"))?;
+    }
+    Ok(())
+}
 
 /// Sessions starting together must not install the SDK into the same folder at once.
 static INSTALLING: Mutex<()> = Mutex::new(());
@@ -146,8 +193,6 @@ pub fn prepare_session(
             env.push((super::subagents::ENV.into(), subagents));
             env.push((super::subagents::EXE_ENV.into(), exe.to_string_lossy().into_owned()));
         }
-    } else if !tools_off.contains(&"visual") {
-        tools_off.push("visual");
     }
     let mut extra = vec![];
     if let Some(name) = name {
@@ -156,7 +201,9 @@ pub fn prepare_session(
     if chrome {
         extra.push(("chrome", None));
     }
-    let session_meta = claude_meta(plugin_dir.as_deref(), &crate::mcp::allowed_tools(tools_off), &extra, Some(trim::session_settings()));
+    let mut allowed = crate::mcp::allowed_tools(tools_off);
+    allowed.push("mcp__m4code__workspace_context".into());
+    let session_meta = claude_meta(plugin_dir.as_deref(), &allowed, &extra, Some(trim::session_settings()));
     (env, session_meta)
 }
 

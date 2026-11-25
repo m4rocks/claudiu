@@ -101,7 +101,7 @@ pub enum Act {
     NewBranch(PathBuf),
     CreateBranch(PathBuf, String),
     /// New Claude session (Sonnet 5.5, medium effort) that resolves a failed pull / push in this repository.
-    FixGitWithClaude(PathBuf),
+    FixGitWithAgent(PathBuf),
     AddProject(PathBuf),
     RemoveProject(Id),
     /// Undo a removal: the project, back where it was in the list.
@@ -303,16 +303,12 @@ impl Workspace {
             Act::ConfirmDeleteBranch(cwd, name) => {
                 self.run_git(GitOp::Branch, move || Ok(crate::git::commit::delete_branch(&cwd, &name)?), cx)
             }
-            Act::FixGitWithClaude(cwd) => {
+            Act::FixGitWithAgent(cwd) => {
                 let prompt = "m4code's Pull or Commit & Push just failed in this repository because of a merge conflict, a diverged branch or a rejected push. Run git status, fix it (resolve conflicts keeping the intent of both sides, finish the merge or rebase, then push if the push was rejected). Ask me whenever a conflict is ambiguous or you are unsure which side to keep.";
                 match self.running_agent_in(&cwd, cx) {
                     Some(id) => self.send_to_agent(&id, prompt, window, cx),
                     None => {
-                        // No session to ask: a short-lived one on medium effort (mid-sized Claude model when on Claude).
-                        let mut options = vec![("thought_level", "medium".to_string())];
-                        if self.store.data.settings.harness == Harness::Claude {
-                            options.push(("model", "claude-sonnet-5-5".to_string()));
-                        }
+                        let options = vec![("thought_level", "medium".to_string())];
                         let before = self.selected.clone();
                         self.new_session_default(cwd, Some(prompt.to_string()), options, Starter::FixGit, window, cx);
                         if self.selected != before

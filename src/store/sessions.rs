@@ -58,6 +58,9 @@ pub struct AgentMeta {
     /// Retry Read-only startup if the adapter stopped before confirming the mode.
     #[serde(default)]
     pub read_only_pending: bool,
+    /// Last permission chosen in m4code. Reapply it before any prompt on a replacement connection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission: Option<crate::harness::permission::Permission>,
     #[serde(default)]
     pub parent_session: Option<Id>,
     #[serde(default)]

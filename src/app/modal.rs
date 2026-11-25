@@ -218,7 +218,7 @@ impl Workspace {
 
         crate::panels::scale::set(scale);
         self.shell = platform::default_shell(s.shell.as_deref());
-        self.claude_exe = claude::discover(s.claude_path.as_deref());
+        self.claude_exe = (Harness::Claude.adapter().discover)(s.claude_path.as_deref());
         self.store.mark_dirty();
         if default_model_changed {
             self.home.model = None;

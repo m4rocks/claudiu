@@ -4,6 +4,15 @@ use super::subagents::Agent;
 
 use super::{Adapter, Reopen};
 use serde_json::{Map, Value, json};
+use std::path::{Path, PathBuf};
+
+fn config_root(home: &Path) -> PathBuf {
+    #[cfg(unix)]
+    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()) {
+        return PathBuf::from(xdg).join("opencode");
+    }
+    home.join(".config").join("opencode")
+}
 
 pub fn managed_compaction_config(inherited: Option<&str>, session: Option<&str>) -> Result<String, String> {
     let parse = |text: Option<&str>| -> Result<Map<String, Value>, String> {
@@ -32,7 +41,30 @@ pub const ADAPTER: Adapter = Adapter {
     compact_command: Some("compact"),
     default_models: || super::default_model_entry(super::Harness::OpenCode),
     steers: false,
+    prepare: prepare_launch,
+    configure_mcp: super::stdio_mcp,
+    launch_args: super::no_launch_args,
+    modes: [Some("plan"), None, Some("build")],
+    mode_aliases: &[],
+    full_access_relaunch: false,
+    native_compaction_managed: true,
+    fallback_question: true,
+    discover: |_| crate::platform::find_executable("opencode"),
+    probe_env: super::no_probe_env,
+    config_root,
+    project_skills: ".opencode/skills",
+    hidden_commands: &[],
+    worktree: super::WorktreeHooks::DEFAULT,
 };
+
+fn prepare_launch(input: &super::SessionInput<'_>, plan: &mut super::SessionPlan) -> Result<(), String> {
+    let inherited = std::env::var("OPENCODE_CONFIG_CONTENT").ok();
+    let child = input.child_edits.map(|edits| super::child_request(Agent::OpenCode, input, edits));
+    let env = child.as_ref().map(super::runner::opencode_env).unwrap_or_default();
+    let local = env.iter().find(|(key, _)| *key == "OPENCODE_CONFIG_CONTENT").map(|(_, value)| value.as_str());
+    plan.set_env("OPENCODE_CONFIG_CONTENT", managed_compaction_config(inherited.as_deref(), local)?);
+    Ok(())
+}
 
 #[cfg(test)]
 mod tests {

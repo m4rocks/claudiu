@@ -8,6 +8,7 @@ use gpui::{
     Bounds, ClickEvent, EventEmitter, InteractiveElement, IntoElement, ParentElement, Render, SharedString, Styled, TitlebarOptions,
     WindowBounds, WindowOptions, div, px, size,
 };
+use gpui::prelude::FluentBuilder;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::input::Input;
 
@@ -60,30 +61,13 @@ pub fn parse_path(text: &str) -> Result<Option<PathBuf>, String> {
 }
 
 struct Checked {
-    claude: Option<PathBuf>,
-    codex: bool,
-    opencode: bool,
-    antigravity: bool,
+    harnesses: Vec<(Harness, Option<PathBuf>)>,
     gh: AuthState,
 }
 
 impl Checked {
-    fn enabled_harnesses(&self) -> Vec<crate::harness::Harness> {
-        use crate::harness::Harness;
-        let mut out = Vec::new();
-        if self.claude.is_some() {
-            out.push(Harness::Claude);
-        }
-        if self.codex {
-            out.push(Harness::Codex);
-        }
-        if self.opencode {
-            out.push(Harness::OpenCode);
-        }
-        if self.antigravity {
-            out.push(Harness::Antigravity);
-        }
-        out
+    fn enabled_harnesses(&self) -> Vec<Harness> {
+        self.harnesses.iter().filter_map(|(h, executable)| executable.as_ref().map(|_| *h)).collect()
     }
 }
 
@@ -151,10 +135,7 @@ impl SetupView {
                 .spawn(async move {
                     reload_path();
                     Checked {
-                        claude: claude::discover(configured.as_deref()),
-                        codex: platform::find_executable("codex-acp").is_some() || platform::find_executable("codex").is_some(),
-                        opencode: platform::find_executable("opencode").is_some(),
-                        antigravity: platform::find_executable("agy").is_some(),
+                        harnesses: Harness::registered().map(|h| (h, (h.adapter().discover)(configured.as_deref()))).collect(),
                         gh: crate::github::cli::check_auth(),
                     }
                 })
@@ -257,13 +238,10 @@ impl SetupView {
         match &self.checked {
             None => body = body.child(checking_line("setup-claude-spin")),
             Some(found) => {
-                let rows = [
-                    ("Claude Code", found.claude.is_some(), found.claude.as_ref().map(|p| format!("Found at {}", p.display()))),
-                    ("Antigravity", found.antigravity, found.antigravity.then(|| "Found (agy)".into())),
-                    ("Codex", found.codex, found.codex.then(|| "Found".into())),
-                    ("OpenCode", found.opencode, found.opencode.then(|| "Found".into())),
-                ];
-                for (name, ok, detail) in rows {
+                for (harness, executable) in &found.harnesses {
+                    let name = harness.name();
+                    let ok = executable.is_some();
+                    let detail = executable.as_ref().map(|path| format!("Found at {}", path.display()));
                     body = body.child(status_line(
                         if ok { IconName::CircleCheck } else { IconName::CircleSlash },
                         if ok { theme::OK } else { theme::TEXT_FAINT },
@@ -276,11 +254,11 @@ impl SetupView {
                 if found.enabled_harnesses().is_empty() {
                     body = body
                         .child(status_line(IconName::CircleX, theme::DANGER, "No coding agent found on PATH. Install at least one to start sessions."))
-                        .child(div().flex().child(Self::open_page("setup-get-claude", "Get Claude Code", CLAUDE_INSTALL_PAGE, cx)));
+                        .when(Harness::Claude.is_registered(), |body| body.child(div().flex().child(Self::open_page("setup-get-claude", "Get Claude Code", CLAUDE_INSTALL_PAGE, cx))));
                 }
             }
         }
-        body.child(
+        body.when(Harness::Claude.is_registered(), |body| body.child(
             div()
                 .flex()
                 .flex_col()
@@ -288,7 +266,7 @@ impl SetupView {
                 .child(section_label("CUSTOM CLAUDE PATH (OPTIONAL)"))
                 .child(Input::new(&self.path_input))
                 .children(self.path_error.clone().map(|message| div().text_size(crate::panels::scale::px(12.0)).text_color(hsla(theme::DANGER)).child(message))),
-        )
+        ))
     }
 
     fn gh_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -409,7 +387,7 @@ impl Workspace {
     /// launch the save also creates the state file and enables whichever harnesses were found.
     pub fn apply_setup(&mut self, claude_path: Option<PathBuf>, enabled: Vec<crate::harness::Harness>, cx: &mut Context<Self>) {
         self.store.data.settings.claude_path = claude_path;
-        self.claude_exe = claude::discover(self.store.data.settings.claude_path.as_deref());
+        self.claude_exe = (Harness::Claude.adapter().discover)(self.store.data.settings.claude_path.as_deref());
         if self.store.data.settings.enabled_harnesses.is_none() && !enabled.is_empty() {
             self.store.data.settings.harness = enabled[0];
             self.store.data.settings.enabled_harnesses = Some(enabled);
@@ -460,7 +438,7 @@ mod tests {
 
         view.read_with(&cx, |view, _| {
             let found = view.checked.as_ref().expect("the check has finished");
-            assert_eq!(found.claude, Some(file.clone()), "a path that exists is the claude found");
+            assert!(found.harnesses.contains(&(Harness::Claude, Some(file.clone()))), "a path that exists is the claude found");
             assert!(view.can_continue());
         });
         for _ in 0..2 {
@@ -508,7 +486,7 @@ mod tests {
                 .update(|app| gpui_kit::open_window(Default::default(), app, |window, app| app.new(|cx| SetupView::with_reload(mode, None, || {}, window, cx))))
                 .unwrap();
             view.update(&mut cx, |view, _| {
-                view.checked = Some(Checked { claude: None, codex: false, opencode: false, antigravity: false, gh: AuthState::Missing });
+                view.checked = Some(Checked { harnesses: Vec::new(), gh: AuthState::Missing });
                 assert_eq!(view.can_continue(), expected);
             });
         }

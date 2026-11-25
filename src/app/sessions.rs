@@ -54,7 +54,7 @@ impl Workspace {
     /// A new session in the default harness, sent `prompt` once it is ready. `options` (by category, such as
     /// `model`) win over the new-session defaults.
     pub(super) fn new_session_default(&mut self, cwd: PathBuf, prompt: Option<String>, options: Vec<(&'static str, String)>, by: Starter, window: &mut Window, cx: &mut Context<Self>) {
-        let harness = self.store.data.settings.harness;
+        let harness = self.store.data.settings.default_model().harness;
         self.new_session_with(harness, cwd, prompt, options, by, window, cx);
     }
 
@@ -103,7 +103,7 @@ impl Workspace {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn new_session_with(&mut self, harness: Harness, cwd: PathBuf, prompt: Option<String>, options: Vec<(&'static str, String)>, by: Starter, window: &mut Window, cx: &mut Context<Self>) {
         // A new session starts in the main checkout, not in a linked worktree. Fix-with-Claude works where the failure was.
-        let cwd = if by == Starter::FixGit { cwd } else { self.outside_linked_worktree(cwd) };
+        let cwd = if matches!(by, Starter::FixGit | Starter::OtherSession) { cwd } else { self.outside_linked_worktree(cwd) };
         let record_id = new_id();
         let meta = AgentMeta {
             chrome: self.store.data.settings.chrome_default,
@@ -139,15 +139,13 @@ impl Workspace {
     pub(super) fn thread_start(&mut self, record_id: &str, cwd: &std::path::Path, meta: &AgentMeta, name: Option<String>, prompt: Option<String>, by: Starter, cx: &mut Context<Self>) -> Option<crate::thread::Start> {
         let session_id = Some(meta.session_id.clone()).filter(|id| !id.is_empty());
         let settings = &self.store.data.settings;
-        let extra_off = if meta.harness == Harness::Claude { claude::trimmed_mcp_tools() } else { vec![] };
-        let mut off = mcp::tools_off(&settings.m4code_tools_off, &extra_off);
-        if meta.harness != Harness::Claude {
-            off.push("artifacts");
-        }
-        // Harnesses with native ACP question support (Claude via AskUserQuestion, Codex/Antigravity via ACP form
-        // elicitation) use their own ask tool; OpenCode's ACP lacks question bridging so it gets m4code's `ask_user`.
-        if meta.harness != Harness::OpenCode {
-            off.push("ask_user");
+        let adapter = meta.harness.adapter();
+        let mut plan = harness::SessionPlan {
+            off: mcp::tools_off(&settings.m4code_tools_off, &[]),
+            ..Default::default()
+        };
+        if !adapter.fallback_question {
+            plan.off.push("ask_user");
         }
         let (mut permission, options) = match session_id {
             None => {
@@ -159,77 +157,46 @@ impl Workspace {
                 if meta.harness != settings.harness {
                     defaults.model = None;
                 }
-                let plan_trimmed = claude::trim::FLUFF.contains(&claude::trim::Trim::PlanMode);
-                let permission = defaults.permission_mode.filter(|p| {
-                    *p != Permission::ReadOnly || (by != Starter::FixGit && !(plan_trimmed && meta.harness == Harness::Claude))
-                });
+                let permission = meta.permission.or(defaults.permission_mode)
+                    .filter(|p| *p != Permission::ReadOnly || by != Starter::FixGit);
                 (permission, harness::defaults::config_options(&defaults))
             }
             Some(_) => (
-                (meta.harness == Harness::Antigravity && meta.antigravity_full_access).then_some(Permission::FullAccess),
+                meta.permission.or_else(|| (adapter.full_access_relaunch && meta.antigravity_full_access).then_some(Permission::FullAccess)),
                 resume_options(meta),
             ),
         };
         if meta.read_only_pending {
             permission = Some(Permission::ReadOnly);
         }
-        let mut env = vec![];
-        let mut session_meta = serde_json::json!({});
-        if meta.harness == Harness::Claude {
-            let Some(exe) = self.claude_exe.clone() else {
-                self.show_toast("Could not find the `claude` CLI. Install Claude Code, or set its path in Settings.".into(), Some(("Check setup".into(), Act::OpenSetup)), cx);
-                return None;
-            };
-            let (claude_env, claude_meta) = claude::prepare_session(&exe, record_id, session_id.as_deref(), name, meta.chrome, &mut off, settings);
-            env.extend(claude_env);
-            session_meta = claude_meta;
-        }
-        let mut mcp_servers = vec![];
-        if let Ok(exe) = crate::platform::own_exe() {
-            let mut server_env = vec![(mcp::RECORD_ENV, record_id.to_string())];
-            if !off.is_empty() {
-                server_env.push((mcp::TOOLS_OFF_ENV, off.join(",")));
-            }
-            if meta.harness == Harness::Codex {
-                let inherited = std::env::var(harness::codex::CONFIG_ENV).ok();
-                match harness::codex::m4code_mcp_config(inherited.as_deref(), &exe, &server_env) {
-                    Ok(config) => env.push((harness::codex::CONFIG_ENV.into(), config)),
-                    Err(error) => {
-                        self.toast(error, cx);
-                        return None;
-                    }
-                }
-            } else {
-                mcp_servers.push(harness::stdio_server("m4code", &exe, &[mcp::FLAG], &server_env));
-            }
-        }
-        if meta.parent_session.is_some() {
+        let child_edits = meta.parent_session.as_ref().map(|_| meta.subagent_edits);
+        if child_edits.is_some() {
             permission = None;
-            if let Some(agent) = meta.harness.agent() {
-                let request = harness::runner::Request {
-                    agent, model: None, effort: None, edits: meta.subagent_edits,
-                    cwd: cwd.to_path_buf(), prompt: String::new(), live_messages: false,
-                };
-                env.extend((agent.provider().environment)(&request).into_iter().map(|(key, value)| (key.to_string(), value)));
-            } else {
-                let permission = if meta.subagent_edits { "acceptEdits" } else { "plan" };
-                session_meta["claudeCode"]["options"]["permissionMode"] = serde_json::json!(permission);
-            }
         }
-        if meta.harness == Harness::OpenCode {
-            let inherited = std::env::var("OPENCODE_CONFIG_CONTENT").ok();
-            let session = env.iter().rev().find(|(key, _)| key == "OPENCODE_CONFIG_CONTENT").map(|(_, value)| value.as_str());
-            match harness::opencode::managed_compaction_config(inherited.as_deref(), session) {
-                Ok(config) => {
-                    env.retain(|(key, _)| key != "OPENCODE_CONFIG_CONTENT");
-                    env.push(("OPENCODE_CONFIG_CONTENT".into(), config));
-                }
-                Err(error) => {
-                    self.toast(error, cx);
-                    return None;
-                }
-            }
+        let input = harness::SessionInput {
+            record: record_id,
+            cwd,
+            session_id: session_id.as_deref(),
+            name,
+            child_edits,
+            settings,
+            executable_override: self.claude_exe.as_deref(),
+            chrome: meta.chrome,
+        };
+        if let Err(error) = (adapter.prepare)(&input, &mut plan) {
+            self.show_toast(error, Some(("Check setup".into(), Act::OpenSetup)), cx);
+            return None;
         }
+        let targets: Vec<_> = settings.enabled_harnesses_list().into_iter()
+            .filter(|h| settings.subagent_access(*h).on).map(Harness::key).collect();
+        let project = self.store.project_for_cwd(cwd).and_then(|id| self.store.project(&id)).map(|p| p.path.as_path());
+        let tools = match mcp::session::SessionTools::new(record_id, cwd, project, &plan.off, &targets) {
+            Ok(tools) => tools,
+            Err(error) => {
+                self.toast(error, cx);
+                return None;
+            }
+        };
         self.sync_skills(Some(meta.harness), cx);
         let all_models = self.store.data.settings.aggregated_models();
         let picked = self.store.data.settings.picked_models(meta.harness).to_vec();
@@ -242,10 +209,12 @@ impl Workspace {
             picked,
             server: self.acp_server.clone(),
             cwd: cwd.to_path_buf(),
-            env,
+            env: plan.env,
+            launch_args: plan.args,
             session_id,
-            meta: session_meta,
-            mcp_servers,
+            meta: plan.meta,
+            mcp_servers: plan.mcp_servers,
+            mcp_tools: Some(tools),
             permission,
             starter: by,
             options,
@@ -379,7 +348,7 @@ impl Workspace {
         let canonical_history = record.agent.as_ref().is_some_and(|m| !m.provider_sessions.is_empty());
         let auto_compact = record.agent.as_ref().and_then(|m| m.auto_compact_override).unwrap_or(self.store.data.settings.auto_compact);
         let auto_compact_threshold = crate::harness::compaction::clamp_threshold(self.store.data.settings.auto_compact_threshold);
-        let native_controlled = start.harness == Harness::OpenCode;
+        let native_controlled = start.harness.adapter().native_compaction_managed;
         if let Some(meta) = record.agent.as_mut() {
             meta.managed_compaction = true;
         }
@@ -393,6 +362,9 @@ impl Workspace {
             self.store.mark_dirty();
         }
         let view = cx.new(|cx| ThreadView::new(start, window, cx));
+        if switching_harness {
+            view.update(cx, |v, cx| v.hold_workspace_switch(true, cx));
+        }
         if subagent_edits.is_some() {
             view.update(cx, |v, cx| v.composer.update(cx, |c, cx| c.set_placeholder("Message this subagent…", window, cx)));
         }
@@ -406,134 +378,143 @@ impl Workspace {
             v.compaction.native_controlled = native_controlled;
         });
         let sub_id = id.clone();
-        let sub = cx.subscribe_in(&view, window, move |ws: &mut Workspace, view, ev: &ThreadEvent, window, cx| match ev {
-            ThreadEvent::Ready(session) => {
-                if ws.switching_worktree.remove(&sub_id).is_some() {
-                    cx.notify();
-                }
-                ws.commit_handoff(&sub_id, session, cx);
-                let full_access = view.read(cx).antigravity_full_access();
-                if let Some(meta) = ws.store.session_mut(&sub_id).and_then(|r| r.agent.as_mut())
-                    && (meta.read_only_pending || meta.antigravity_full_access != full_access)
-                {
-                    meta.read_only_pending = false;
-                    meta.antigravity_full_access = full_access;
-                    ws.store.mark_dirty();
-                }
+        let sub = cx.subscribe_in(&view, window, move |ws: &mut Workspace, view, ev: &ThreadEvent, window, cx| {
+            if ws.live_view(&sub_id).and_then(|v| v.thread()) != Some(view) {
+                return;
             }
-            ThreadEvent::Exited(code) => {
-                if ws.switching_worktree.remove(&sub_id).is_some() {
-                    cx.notify();
-                }
-                if !ws.rollback_handoff(&sub_id, window, cx) {
-                    ws.on_exit(&sub_id, *code, window, cx);
-                }
-            }
-            ThreadEvent::Chosen(model, effort) => {
-                if ws.pending_handoffs.contains_key(&sub_id) { return; }
-                if let Some(meta) = ws.store.session_mut(&sub_id).and_then(|r| r.agent.as_mut())
-                    && (&meta.chosen_model, &meta.chosen_effort) != (model, effort)
-                {
-                    meta.chosen_model = model.clone();
-                    meta.chosen_effort = effort.clone();
-                    ws.store.mark_dirty();
-                }
-            }
-            ThreadEvent::SessionId(session) => {
-                if ws.pending_handoffs.contains_key(&sub_id) { return; }
-                if let Some(meta) = ws.store.session_mut(&sub_id).and_then(|r| r.agent.as_mut()) {
-                    meta.session_id = session.clone();
-                    ws.store.mark_dirty();
-                }
-            }
-            ThreadEvent::Title(title) => {
-                if ws.pending_handoffs.contains_key(&sub_id) { return; }
-                if let Some(rec) = ws.store.session_mut(&sub_id) {
-                    rec.title = title.clone();
-                    ws.store.mark_dirty();
-                    cx.notify();
-                }
-            }
-            ThreadEvent::Models(harness, choices) => {
-                let catalog: Vec<crate::harness::subagents::AgentModel> = choices
-                    .iter()
-                    .map(|(id, name)| crate::harness::subagents::AgentModel { id: id.clone(), name: name.clone() })
-                    .collect();
-                if !catalog.is_empty() {
-                    let lookup = ws.model_lookups.get_mut(*harness);
-                    lookup.fetched = true;
-                    lookup.error = None;
-                    if ws.store.data.settings.set_harness_models(*harness, catalog) {
+            match ev {
+                ThreadEvent::Ready(session) => {
+                    ws.commit_handoff(&sub_id, session, window, cx);
+                    let full_access = view.read(cx).antigravity_full_access();
+                    if let Some(meta) = ws.store.session_mut(&sub_id).and_then(|r| r.agent.as_mut())
+                        && (meta.read_only_pending || meta.antigravity_full_access != full_access)
+                    {
+                        meta.read_only_pending = false;
+                        meta.antigravity_full_access = full_access;
                         ws.store.mark_dirty();
-                        ws.push_models_to_threads(cx);
                     }
                 }
-            }
-            ThreadEvent::Modes(harness, modes) => {
-                if ws.store.data.settings.set_harness_modes(*harness, modes.clone()) {
-                    ws.store.mark_dirty();
-                    cx.notify();
-                }
-            }
-            ThreadEvent::Context(used, size) => {
-                if ws.pending_handoffs.contains_key(&sub_id) { return; }
-                if let Some(meta) = ws.store.session_mut(&sub_id).and_then(|r| r.agent.as_mut()) {
-                    meta.context_tokens = Some(*used);
-                    if *size > 0 {
-                        meta.context_window = Some(*size);
-                        meta.context_fraction = Some((*used as f64 / *size as f64).min(1.0) as f32);
+                ThreadEvent::Exited(code) => {
+                    if ws.switching_worktree.remove(&sub_id).is_some() {
+                        cx.notify();
                     }
-                    cx.notify();
+                    if !ws.rollback_handoff(&sub_id, window, cx) {
+                        ws.on_exit(&sub_id, *code, window, cx);
+                    }
                 }
-            }
-            ThreadEvent::Usage(turn) => {
-                if ws.pending_handoffs.contains_key(&sub_id) { return; }
-                if let Some(meta) = ws.store.session_mut(&sub_id).and_then(|r| r.agent.as_mut()) {
-                    meta.cache_usage.record(*turn);
-                    ws.store.mark_dirty();
-                    cx.notify();
+                ThreadEvent::PermissionChanged(permission) => {
+                    if ws.pending_handoffs.contains_key(&sub_id) { return; }
+                    if let Some(meta) = ws.store.session_mut(&sub_id).and_then(|r| r.agent.as_mut()) {
+                        meta.permission = Some(*permission);
+                        ws.store.mark_dirty();
+                    }
                 }
-            }
-            ThreadEvent::UsageLimits(harness, limits) => {
-                ws.apply_live_limits(*harness, limits.clone(), cx);
-            }
-            ThreadEvent::OpenGitPicker(at) => {
-                let (project, cwd) = (ws.store.session(&sub_id).and_then(|r| r.project_id.clone()), ws.store.session(&sub_id).map(|r| r.cwd.clone()));
-                if let (Some(project), Some(cwd)) = (project, cwd) {
-                    ws.open_git_picker(project, cwd, crate::app::GitPickerTarget::Session, *at, window, cx);
+                ThreadEvent::Chosen(model, effort) => {
+                    if ws.pending_handoffs.contains_key(&sub_id) { return; }
+                    if let Some(meta) = ws.store.session_mut(&sub_id).and_then(|r| r.agent.as_mut())
+                        && (&meta.chosen_model, &meta.chosen_effort) != (model, effort)
+                    {
+                        meta.chosen_model = model.clone();
+                        meta.chosen_effort = effort.clone();
+                        ws.store.mark_dirty();
+                    }
                 }
-            }
-            ThreadEvent::OpenPath(path, line) => ws.open_from_terminal(&sub_id, path, *line, window, cx),
-            ThreadEvent::AbortChildren => ws.end_child_sessions(&sub_id, window, cx),
-            ThreadEvent::Idle(outcome) => {
-                if let Some(harness) = ws.store.session(&sub_id).and_then(|r| r.agent.as_ref()).map(|m| m.harness) {
-                    ws.request_limits_refresh(harness, cx);
+                ThreadEvent::SessionId(session) => {
+                    if ws.pending_handoffs.contains_key(&sub_id) { return; }
+                    if let Some(meta) = ws.store.session_mut(&sub_id).and_then(|r| r.agent.as_mut()) {
+                        meta.session_id = session.clone();
+                        ws.store.mark_dirty();
+                    }
                 }
-                ws.report_to_parent(&sub_id, outcome, cx);
-            }
-            ThreadEvent::Select(child) => ws.act(Act::Select(child.clone()), window, cx),
-            ThreadEvent::Handoff { to, model, message, effort, by_agent } => ws.dynamic_handoff(&sub_id, *to, model.clone(), message.clone(), *by_agent, effort.clone(), window, cx),
-            ThreadEvent::ReconnectPermission(permission) => ws.reconnect_antigravity_permission(&sub_id, *permission, window, cx),
-            ThreadEvent::NewSession(prompt) => {
-                let (harness, cwd) = ws
-                    .store
-                    .session(&sub_id)
-                    .map(|r| (r.agent.as_ref().map_or(ws.store.data.settings.harness, |m| m.harness), r.cwd.clone()))
-                    .unwrap_or_else(|| (ws.store.data.settings.harness, ws.new_session_cwd()));
-                ws.new_session_with(harness, cwd, prompt.clone(), vec![], Starter::User, window, cx);
-            }
-            ThreadEvent::OpenToolShell(command) => {
-                cx.write_to_clipboard(gpui::ClipboardItem::new_string(command.clone()));
-                if ws.shells.get(&sub_id).is_some_and(|panel| panel.open) {
-                    ws.focus_shell(window, cx);
-                } else {
-                    ws.toggle_shell(&sub_id, window, cx);
+                ThreadEvent::Title(title) => {
+                    if ws.pending_handoffs.contains_key(&sub_id) { return; }
+                    if let Some(rec) = ws.store.session_mut(&sub_id) {
+                        rec.title = title.clone();
+                        ws.store.mark_dirty();
+                        cx.notify();
+                    }
                 }
-                ws.toast("Command copied. Paste it in the shell to run it.", cx);
+                ThreadEvent::Models(harness, choices) => {
+                    let catalog: Vec<crate::harness::subagents::AgentModel> = choices
+                        .iter()
+                        .map(|(id, name)| crate::harness::subagents::AgentModel { id: id.clone(), name: name.clone() })
+                        .collect();
+                    if !catalog.is_empty() {
+                        let lookup = ws.model_lookups.get_mut(*harness);
+                        lookup.fetched = true;
+                        lookup.error = None;
+                        if ws.store.data.settings.set_harness_models(*harness, catalog) {
+                            ws.store.mark_dirty();
+                            ws.push_models_to_threads(cx);
+                        }
+                    }
+                }
+                ThreadEvent::Modes(harness, modes) => {
+                    if ws.store.data.settings.set_harness_modes(*harness, modes.clone()) {
+                        ws.store.mark_dirty();
+                        cx.notify();
+                    }
+                }
+                ThreadEvent::Context(used, size) => {
+                    if ws.pending_handoffs.contains_key(&sub_id) { return; }
+                    if let Some(meta) = ws.store.session_mut(&sub_id).and_then(|r| r.agent.as_mut()) {
+                        meta.context_tokens = Some(*used);
+                        if *size > 0 {
+                            meta.context_window = Some(*size);
+                            meta.context_fraction = Some((*used as f64 / *size as f64).min(1.0) as f32);
+                        }
+                        cx.notify();
+                    }
+                }
+                ThreadEvent::Usage(turn) => {
+                    if ws.pending_handoffs.contains_key(&sub_id) { return; }
+                    if let Some(meta) = ws.store.session_mut(&sub_id).and_then(|r| r.agent.as_mut()) {
+                        meta.cache_usage.record(*turn);
+                        ws.store.mark_dirty();
+                        cx.notify();
+                    }
+                }
+                ThreadEvent::UsageLimits(harness, limits) => {
+                    ws.apply_live_limits(*harness, limits.clone(), cx);
+                }
+                ThreadEvent::OpenGitPicker(at) => {
+                    let (project, cwd) = (ws.store.session(&sub_id).and_then(|r| r.project_id.clone()), ws.store.session(&sub_id).map(|r| r.cwd.clone()));
+                    if let (Some(project), Some(cwd)) = (project, cwd) {
+                        ws.open_git_picker(project, cwd, crate::app::GitPickerTarget::Session, *at, window, cx);
+                    }
+                }
+                ThreadEvent::OpenPath(path, line) => ws.open_from_terminal(&sub_id, path, *line, window, cx),
+                ThreadEvent::AbortChildren => ws.end_child_sessions(&sub_id, window, cx),
+                ThreadEvent::Idle(outcome) => {
+                    if let Some(harness) = ws.store.session(&sub_id).and_then(|r| r.agent.as_ref()).map(|m| m.harness) {
+                        ws.request_limits_refresh(harness, cx);
+                    }
+                    ws.report_to_parent(&sub_id, outcome, cx);
+                }
+                ThreadEvent::Select(child) => ws.act(Act::Select(child.clone()), window, cx),
+                ThreadEvent::Handoff { to, model, message, effort, by_agent } => ws.dynamic_handoff(&sub_id, *to, model.clone(), message.clone(), *by_agent, effort.clone(), window, cx),
+                ThreadEvent::ReconnectPermission(permission) => ws.reconnect_antigravity_permission(&sub_id, *permission, window, cx),
+                ThreadEvent::NewSession(prompt) => {
+                    let (harness, cwd) = ws
+                        .store
+                        .session(&sub_id)
+                        .map(|r| (r.agent.as_ref().map_or(ws.store.data.settings.harness, |m| m.harness), r.cwd.clone()))
+                        .unwrap_or_else(|| (ws.store.data.settings.harness, ws.new_session_cwd()));
+                    ws.new_session_with(harness, cwd, prompt.clone(), vec![], Starter::User, window, cx);
+                }
+                ThreadEvent::OpenToolShell(command) => {
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(command.clone()));
+                    if ws.shells.get(&sub_id).is_some_and(|panel| panel.open) {
+                        ws.focus_shell(window, cx);
+                    } else {
+                        ws.toggle_shell(&sub_id, window, cx);
+                    }
+                    ws.toast("Command copied. Paste it in the shell to run it.", cx);
+                }
+                ThreadEvent::Fork(end) => ws.fork_thread(&sub_id, *end, window, cx),
+                ThreadEvent::ClearSession => ws.clear_session(&sub_id, window, cx),
+                ThreadEvent::Compact { transcript, instructions } => ws.compact_session(&sub_id, transcript.clone(), instructions.clone(), window, cx),
             }
-            ThreadEvent::Fork(end) => ws.fork_thread(&sub_id, *end, window, cx),
-            ThreadEvent::ClearSession => ws.clear_session(&sub_id, window, cx),
-            ThreadEvent::Compact { transcript, instructions } => ws.compact_session(&sub_id, transcript.clone(), instructions.clone(), window, cx),
         });
         self.adopt_live(id, SessionView::Thread(view), sub, name, foreground, window, cx);
     }
@@ -752,6 +733,7 @@ impl Workspace {
     }
 
     pub(super) fn end_live(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.switching_worktree.remove(id);
         self.cancel_pending_handoff(id, cx);
         self.end_child_sessions(id, window, cx);
         let was_active = self.active_id().is_some_and(|a| a == id);

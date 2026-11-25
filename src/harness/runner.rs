@@ -175,13 +175,24 @@ impl Drop for Inbox {
 }
 
 fn run_task(request: &Request, emit: &mut impl FnMut(Event)) -> Result<String, String> {
+    let harness = super::Harness::from_agent(request.agent);
+    if !harness.is_registered() {
+        return Err(format!("{} is unavailable in this build.", harness.name()));
+    }
     let provider = request.agent.provider();
     let args = (provider.task_args)(request)?;
-    let env = (provider.environment)(request);
+    let mut plan = super::SessionPlan::default();
+    plan.env.extend((provider.environment)(request).into_iter().map(|(key, value)| (key.into(), value)));
+    // This child cannot represent itself as its parent's desktop thread. Give it the shared
+    // workspace tool independently of tools that require a registered m4code thread.
+    let tools = crate::mcp::session::SessionTools::new("", &request.cwd, None, &["github", "sessions", "model", "ask_user", "visual"], &[])?;
+    let adapter = harness.adapter();
+    (adapter.configure_mcp)(&tools, &mut plan)?;
+    let env = plan.env.iter().map(|(key, value)| (key.as_str(), value.clone())).collect::<Vec<_>>();
     let connection = Connection::start(request.agent, &request.cwd, &args, &env)?;
     let id = Uuid::new_v4();
     let inbox = request.live_messages.then(|| Inbox { id, path: inbox_path(id), seen: 0 });
-    let result = converse(connection.from_agent, connection.to_agent, request, inbox, emit);
+    let result = conversation::converse_with_tools(connection.from_agent, connection.to_agent, request, inbox, emit, plan.mcp_servers, &tools.ready);
     connection.process.finish(result)
 }
 
@@ -402,7 +413,11 @@ fn initialize() -> Value {
 }
 
 fn new_session(cwd: &Path) -> Value {
-    json!({ "jsonrpc": "2.0", "id": 1, "method": "session/new", "params": { "cwd": cwd, "mcpServers": [] } })
+    session_with_servers(cwd, &[])
+}
+
+fn session_with_servers(cwd: &Path, mcp_servers: &[Value]) -> Value {
+    json!({ "jsonrpc": "2.0", "id": 1, "method": "session/new", "params": { "cwd": cwd, "mcpServers": mcp_servers } })
 }
 
 fn new_model_probe_session(harness: crate::harness::Harness, cwd: &Path) -> Value {
@@ -497,6 +512,7 @@ fn list_models(agent: Agent, from_agent: impl BufRead, to_agent: impl Write, cwd
 }
 
 mod conversation;
+#[cfg(test)]
 use conversation::converse;
 #[cfg(test)]
 use conversation::converse_waiting;

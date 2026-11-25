@@ -180,14 +180,15 @@ fn compaction_preserves_the_session_and_never_becomes_a_user_message() {
             gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, app);
         });
         let (window, ws) = cx.update(|app| gpui_kit::open_window(Default::default(), app, |window, app| app.new(|cx| Workspace::new(window, vec![], cx)))).unwrap();
+        let state = tempfile::tempdir().unwrap();
         cx.update_window(window, |_, window, app| ws.update(app, |ws, cx| {
+            ws.store = crate::store::Store::load(state.path().join("state.json"));
             ws.acp_server = Some(fake_agent(work.path()));
             ws.new_session_from_home(harness, None, work.path().to_path_buf(), Some("fill context".into()), None, None, window, cx);
         })).unwrap();
         let id = ws.read_with(&cx, |ws, _| ws.active_id().unwrap().clone());
         let until = std::time::Instant::now() + Duration::from_secs(10);
         loop {
-            cx.update_window(window, |_, window, app| window.draw(app).clear(app)).unwrap();
             cx.run_until_parked();
             let done = ws.read_with(&cx, |ws, app| {
                 let view = ws.live_view(&id).unwrap().thread().unwrap().read(app);
@@ -201,7 +202,7 @@ fn compaction_preserves_the_session_and_never_becomes_a_user_message() {
                         harness.name(), view.thread.context, view.is_loading(), view.is_working(), view.start_error());
                 });
             }
-            std::thread::sleep(Duration::from_millis(10));
+            std::thread::yield_now();
         }
         ws.read_with(&cx, |ws, app| {
             let view = ws.live_view(&id).unwrap().thread().unwrap().read(app);
@@ -713,7 +714,7 @@ fn shared_subagents_keep_their_parent_focus_permissions_and_conversation() {
                 assert!(!ws.store.session(reply["id"].as_str().unwrap()).unwrap().agent.as_ref().unwrap().subagent_edits, "Claude must respect its saved edit switch");
                 ws.store.data.settings.claude_subagents.edits = true;
             }
-            ws.live_view(&parent).unwrap().thread().unwrap().update(cx, |view, _| view.thread.mode = Some("plan".into()));
+            ws.live_view(&parent).unwrap().thread().unwrap().update(cx, |view, _| view.thread.mode = Permission::ReadOnly.native(harness).map(String::from));
             let restricted: Value = serde_json::from_str(&ws.run_request(&request("spawn_subagent", json!({"harness":harness,"prompt":"read only"})), window, cx).unwrap()).unwrap();
             let restricted = ws.store.session(restricted["id"].as_str().unwrap()).unwrap().clone();
             assert!(!restricted.agent.as_ref().unwrap().subagent_edits, "a read-only parent cannot grant edits");
@@ -1366,7 +1367,7 @@ for line in sys.stdin:"#)
                     env: Vec::new(),
                     session_id: None,
                     meta: serde_json::Value::Null,
-                    mcp_servers: Vec::new(),
+                    mcp_servers: Vec::new(), mcp_tools: None, launch_args: vec![],
                     permission: Some(Permission::ReadOnly),
                     starter: Starter::User,
                     options: vec![("thought_level", "high".into()), ("model", "large".into())],

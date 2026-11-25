@@ -35,8 +35,10 @@ impl Workspace {
     /// Costs no tokens. The mod's files are tiny, Codex's logs are read again only after Codex writes to them,
     /// and active probes run on their own 5-minute cadence (plus startup, reset crossing, turn end, and manual click).
     pub(super) fn ingest_usage(&mut self, cx: &mut Context<Self>) {
-        self.ingest_limits(cx);
-        self.ingest_codex_logs(cx);
+        if !cfg!(test) {
+            self.ingest_limits(cx);
+            self.ingest_codex_logs(cx);
+        }
         self.in_background(
             || (usage::read_snapshots(&usage::snapshot_dir()), mcp::read_attached()),
             |ws, (snaps, items), cx| {
@@ -52,8 +54,8 @@ impl Workspace {
 
     /// Whether `harness` is enabled either as a main harness or as a custom subagent.
     fn limits_harness_active(&self, harness: Harness) -> bool {
-        self.store.data.settings.harness_enabled(harness)
-            || harness.agent().is_some_and(|a| self.store.data.settings.custom_subagents.get(a).on)
+        harness.is_registered() && (self.store.data.settings.harness_enabled(harness)
+            || harness.agent().is_some_and(|a| self.store.data.settings.custom_subagents.get(a).on))
     }
 
     /// Whether any stored window for `harness` has crossed its `resets_at` boundary.

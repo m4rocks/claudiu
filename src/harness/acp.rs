@@ -50,6 +50,17 @@ impl Event {
 
 type Pending = Arc<Mutex<HashMap<i64, oneshot::Sender<Result<Value, String>>>>>;
 
+struct RequestGuard {
+    id: i64,
+    pending: Pending,
+}
+
+impl Drop for RequestGuard {
+    fn drop(&mut self) {
+        self.pending.lock().unwrap().remove(&self.id);
+    }
+}
+
 /// A running harness. Dropping it ends the process.
 pub struct Connection {
     outgoing: mpsc::Sender<Option<Value>>,
@@ -140,7 +151,11 @@ impl Connection {
             pending.insert(id, tx);
             let _ = self.outgoing.send(Some(json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params})));
         }
-        async move { rx.await.unwrap_or_else(|_| Err("the agent stopped".into())) }
+        let guard = RequestGuard { id, pending: self.pending.clone() };
+        async move {
+            let _guard = guard;
+            rx.await.unwrap_or_else(|_| Err("the agent stopped".into()))
+        }
     }
 
     pub fn notify(&self, method: &str, params: Value) {

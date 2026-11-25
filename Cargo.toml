@@ -7,6 +7,11 @@ repository = "https://github.com/m4rocks/m4code"
 publish = false
 
 [features]
+default = ["adapter-claude", "adapter-codex", "adapter-opencode", "adapter-antigravity"]
+adapter-claude = []
+adapter-codex = []
+adapter-opencode = []
+adapter-antigravity = []
 screenshots = ["dep:gpui-wgpu", "dep:gpui-macos"]
 
 [dependencies]

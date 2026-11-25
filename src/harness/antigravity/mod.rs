@@ -17,5 +17,25 @@ pub const ADAPTER: Adapter = Adapter {
     compact_command: Some("compact"),
     default_models: || super::default_model_entry(super::Harness::Antigravity),
     steers: false,
-    // agy has no documented way to resume a session by id from its command line.
+    prepare: |input, plan| {
+        if let Some(edits) = input.child_edits {
+            plan.args = super::runner::antigravity_args(&super::child_request(Agent::Antigravity, input, edits))?;
+        }
+        Ok(())
+    },
+    configure_mcp: super::stdio_mcp,
+    launch_args: |_, full_access| {
+        if full_access { vec!["--dangerously-skip-permissions".into()] } else { Vec::new() }
+    },
+    modes: [Some("plan"), Some("auto"), Some("default")],
+    mode_aliases: &[("default", super::Permission::Auto), ("accept-edits", super::Permission::Auto)],
+    full_access_relaunch: true,
+    native_compaction_managed: false,
+    fallback_question: false,
+    discover: |_| crate::platform::find_executable("agy"),
+    probe_env: super::no_probe_env,
+    config_root: |home| home.join(".gemini").join("config"),
+    project_skills: ".agents/skills",
+    hidden_commands: &["swarm"],
+    worktree: super::WorktreeHooks::DEFAULT,
 };

@@ -147,7 +147,8 @@ impl Workspace {
                 let (statuses, requests, back) = cx
                     .background_executor()
                     .spawn(async move {
-                        let statuses = claude::claude_home().map(|h| claude::session_statuses(&h, &mut seen)).unwrap_or_default();
+                        let statuses = Harness::Claude.is_registered().then(claude::claude_home).flatten()
+                            .map(|h| claude::session_statuses(&h, &mut seen)).unwrap_or_default();
                         (statuses, crate::mcp::bridge::take_requests(), seen)
                     })
                     .await;

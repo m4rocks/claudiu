@@ -188,14 +188,15 @@ impl Workspace {
                 if !self.is_running(&parent.id, cx) {
                     return Err("The parent session is no longer running.".into());
                 }
-                let harness: Harness = serde_json::from_value(req.args["harness"].clone()).map_err(|_| "Choose claude, codex, opencode or antigravity.")?;
+                let harness = req.args["harness"].as_str().and_then(|key| Harness::registered().find(|h| h.key() == key))
+                    .ok_or("Choose a registered subagent adapter.")?;
                 let settings = &self.store.data.settings;
                 let access = settings.subagent_access(harness);
                 if !settings.harness_enabled(harness) || !access.on {
                     return Err(format!("{} subagents are disabled in Settings.", harness.name()));
                 }
                 let parent_read_only = self.live_view(&parent.id).and_then(|view| view.thread()).is_some_and(|view| {
-                    matches!(view.read(cx).thread.mode.as_deref(), Some("plan" | "read_only" | "readOnly" | "read-only"))
+                    view.read(cx).permission() == Some(crate::harness::permission::Permission::ReadOnly)
                 });
                 let edits = !parent_read_only && access.edits
                     && parent.agent.as_ref().is_none_or(|m| m.parent_session.is_none() || m.subagent_edits);

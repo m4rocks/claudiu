@@ -25,6 +25,7 @@ pub fn tidy_leftovers() {
     datadir::prune(usage::snapshot_dir(), 30 * 86_400);
     datadir::prune(usage::ctl_dir(), 7 * 86_400);
     datadir::prune(crate::visual::dir(), 7 * 86_400);
+    datadir::prune(data.join("mcp-ready"), 86_400);
     datadir::prune(data.join("screens"), 30 * 86_400);
     datadir::prune(data.join("pasted"), 7 * 86_400);
     datadir::prune(data.join("github-cache"), 30 * 86_400);
@@ -134,7 +135,9 @@ impl Workspace {
         let shown = self.selected.clone();
         let mut back = vec![];
         for id in saved {
-            if self.store.session(&id).is_some_and(|s| s.kind == SessionKind::Agent && !s.hidden) {
+            if self.store.session(&id).is_some_and(|s| {
+                !s.hidden && s.agent.as_ref().is_some_and(|meta| meta.harness.is_registered())
+            }) {
                 self.bring_back(&id, window, cx);
                 back.push(id);
             }

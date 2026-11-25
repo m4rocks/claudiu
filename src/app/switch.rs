@@ -11,6 +11,7 @@
 use std::path::Path;
 
 use super::*;
+use super::agent_handoff::{Pending, Replacement};
 use crate::git::worktree::{self, Base};
 
 const BUSY: &str = "Wait until the session finishes, then switch.";
@@ -23,37 +24,18 @@ struct Checked {
 }
 
 /// Check uncommitted files and, for Claude Code sessions, Claude's registry status and transcript path.
-fn inspect(harness: Harness, session_id: Option<&str>, folder: &Path, quiet: bool) -> Checked {
+fn inspect(harness: Harness, session_id: Option<&str>, folder: &Path) -> Checked {
     let uncommitted = worktree::uncommitted(folder).unwrap_or(0);
-    if harness == Harness::Claude
-        && let Some(claude_id) = session_id
-    {
-        let home = claude::claude_home();
-        let statuses = home.as_deref().map(|h| claude::session_statuses(h, &mut Default::default())).unwrap_or_default();
-        return Checked {
-            idle: statuses.get(claude_id).map_or(quiet, |s| s == "idle"),
-            uncommitted,
-            transcript: home.and_then(|h| claude::find_transcript(&h, claude_id)),
-        };
-    }
-    Checked { idle: quiet, uncommitted, transcript: None }
+    let (idle, transcript) = session_id.map(|id| (harness.adapter().worktree.inspect)(id)).unwrap_or_default();
+    Checked { idle: idle.unwrap_or(true), uncommitted, transcript }
 }
 
-/// Ready the target before the session moves: make the worktree when it is new, and for Claude Code clear any
-/// worktree recorded in its transcript so resume starts in the target folder. Blocking.
-fn prepare(main_checkout: &Path, folder: &Path, base: Base, transcript: Option<&Path>, session_id: Option<&str>) -> Result<(), String> {
+fn prepare(harness: Harness, main_checkout: &Path, folder: &Path, base: Base, transcript: Option<&Path>, session_id: Option<&str>) -> Result<(), String> {
     if !folder.exists() {
         worktree::add(main_checkout, folder, base).map_err(|e| format!("could not make the worktree: {}", e.trim()))?;
     }
-    if let (Some(t), Some(claude_id)) = (transcript, session_id) {
-        clear_worktree_record(t, claude_id)?;
-    }
-    Ok(())
-}
-
-fn clear_worktree_record(transcript: &Path, claude_id: &str) -> Result<(), String> {
-    if claude::worktree_recorded(transcript).map_err(|e| format!("could not read the conversation: {e}"))? {
-        claude::clear_recorded_worktree(transcript, claude_id).map_err(|e| format!("could not update the conversation: {e}"))?;
+    if let (Some(transcript), Some(id)) = (transcript, session_id) {
+        (harness.adapter().worktree.prepare)(transcript, id)?;
     }
     Ok(())
 }
@@ -77,18 +59,21 @@ impl Workspace {
             self.toast("Resume the session to switch.", cx);
             return;
         };
-        if self.switching_worktree.contains_key(&id) || view.is_loading(cx) {
+        let Some(thread) = view.thread().cloned() else { return };
+        if self.switching_worktree.contains_key(&id) || self.pending_handoffs.contains_key(&id)
+            || !thread.read(cx).can_move_workspace()
+        {
             self.toast(BUSY, cx);
             return;
         }
-        let quiet = !view.is_working(cx);
+        thread.update(cx, |t, cx| t.hold_workspace_switch(true, cx));
         let from = git.folder_of(&rec.cwd).unwrap_or(&rec.cwd).to_path_buf();
         // Show the spinner in the branch switcher button while checking git and preparing the worktree.
         self.switching_worktree.insert(id.clone(), folder.clone());
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
             let looked = from.clone();
-            let checked = cx.background_executor().spawn(async move { inspect(harness, session_id.as_deref(), &looked, quiet) }).await;
+            let checked = cx.background_executor().spawn(async move { inspect(harness, session_id.as_deref(), &looked) }).await;
             let _ = this.update_in(cx, |ws, window, cx| ws.after_inspection(id, folder, base, from, asked, checked, window, cx));
         })
         .detach();
@@ -96,13 +81,16 @@ impl Workspace {
 
     #[allow(clippy::too_many_arguments)]
     fn after_inspection(&mut self, id: Id, folder: PathBuf, base: Base, from: PathBuf, asked: bool, checked: Checked, window: &mut Window, cx: &mut Context<Self>) {
+        if self.switching_worktree.get(&id) != Some(&folder) {
+            return;
+        }
         if !checked.idle {
-            self.switching_worktree.remove(&id);
+            self.release_worktree_switch(&id, cx);
             self.toast(BUSY, cx);
             return;
         }
         if checked.uncommitted > 0 && !asked {
-            self.switching_worktree.remove(&id);
+            self.release_worktree_switch(&id, cx);
             let files = if checked.uncommitted == 1 { "1 uncommitted file stays".to_string() } else { format!("{} uncommitted files stay", checked.uncommitted) };
             let name = from.file_name().map_or_else(|| from.to_string_lossy().into_owned(), |n| n.to_string_lossy().into_owned());
             self.modal = Some(Modal::Confirm {
@@ -120,23 +108,30 @@ impl Workspace {
 
     /// Prepare the target folder and move the session into it, preserving its conversation.
     fn perform_switch(&mut self, id: Id, folder: PathBuf, base: Base, transcript: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(rec) = self.store.session(&id) else { return };
-        let Some(meta) = rec.agent.as_ref() else { return };
+        let Some(rec) = self.store.session(&id) else {
+            self.release_worktree_switch(&id, cx);
+            return;
+        };
+        let context = rec.agent.as_ref().zip(rec.project_id.as_ref().and_then(|p| self.store.project(p)).and_then(|p| p.git.as_ref()));
+        let Some((meta, git)) = context else {
+            self.release_worktree_switch(&id, cx);
+            return;
+        };
         let harness = meta.harness;
         let session_id = rec.provider_session_id().map(str::to_string);
-        let Some(git) = rec.project_id.as_ref().and_then(|p| self.store.project(p)).and_then(|p| p.git.clone()) else { return };
         let main = git.main_checkout().to_path_buf();
         let has_transcript = transcript.is_some();
         cx.spawn_in(window, async move |this, cx| {
             let (target, main_checkout) = (folder.clone(), main.clone());
             let ready = cx
                 .background_executor()
-                .spawn(async move { prepare(&main_checkout, &target, base, transcript.as_deref(), session_id.as_deref()) })
+                .spawn(async move { prepare(harness, &main_checkout, &target, base, transcript.as_deref(), session_id.as_deref()) })
                 .await;
             let _ = this.update_in(cx, |ws, window, cx| match ready {
                 Ok(()) => ws.move_into(&id, harness, folder, has_transcript, window, cx),
                 Err(why) => {
-                    ws.switching_worktree.remove(&id);
+                    if ws.switching_worktree.get(&id) != Some(&folder) { return; }
+                    ws.release_worktree_switch(&id, cx);
                     ws.toast(format!("Couldn't switch: {why}."), cx);
                     cx.notify();
                 }
@@ -145,46 +140,81 @@ impl Workspace {
         .detach();
     }
 
-    /// The old process ends and a new one resumes the conversation in `folder`, keeping the visible thread entries so
-    /// the conversation never disappears mid-switch.
+    fn release_worktree_switch(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.switching_worktree.remove(id);
+        if let Some(thread) = self.live_view(id).and_then(|v| v.thread()) {
+            thread.update(cx, |t, cx| t.hold_workspace_switch(false, cx));
+        }
+        cx.notify();
+    }
+
     fn move_into(&mut self, id: &str, harness: Harness, folder: PathBuf, has_transcript: bool, window: &mut Window, cx: &mut Context<Self>) {
-        // Closed while the target was readied.
-        if !self.is_running(id, cx) {
-            self.switching_worktree.remove(id);
+        if self.switching_worktree.get(id) != Some(&folder) {
             return;
         }
-        let source = self.live_view(id).and_then(|v| v.thread()).map(|t| t.read(cx));
-        let prior_entries = source.map(|t| t.thread.entries.clone()).unwrap_or_default();
-        let permission = source.and_then(|t| t.permission_for_relaunch());
-        let composer = source.map(|t| t.composer_state(cx));
-        if !prior_entries.is_empty() {
-            crate::harness::thread::save_entries(id, &prior_entries);
+        let Some(source) = self.live_view(id).and_then(|v| v.thread()).cloned() else {
+            self.release_worktree_switch(id, cx);
+            return;
+        };
+        if !source.read(cx).can_move_workspace() {
+            self.release_worktree_switch(id, cx);
+            self.toast(BUSY, cx);
+            return;
         }
-        let has_session_id = self.store.session(id).and_then(|r| r.provider_session_id()).is_some();
-        let fresh = prior_entries.is_empty() && (if harness == Harness::Claude { !has_transcript } else { !has_session_id });
-
-        let was_shown = self.active_id().is_some_and(|a| a == id);
-        let shell = self.shells.remove(id).map(|p| (p.open, p.height));
-        self.repoint_tabs(id, &folder, window, cx);
-        if let Some(r) = self.store.session_mut(id) {
-            r.cwd = folder;
+        let Some(mut rec) = self.store.session(id).cloned() else {
+            self.release_worktree_switch(id, cx);
+            return;
+        };
+        let Some(mut meta) = rec.agent.clone() else {
+            self.release_worktree_switch(id, cx);
+            return;
+        };
+        let thread = source.read(cx);
+        let prior_entries = thread.thread.entries.clone();
+        let permission = thread.permission_for_relaunch();
+        let composer = thread.composer_state(cx);
+        let provider_id = (!meta.session_id.is_empty()).then_some(meta.session_id.as_str());
+        let has_history = (harness.adapter().worktree.has_history)(provider_id, has_transcript);
+        if prior_entries.is_empty() && !has_history {
+            meta.session_id.clear();
         }
-        // Replacing the view ends the old process while carrying over the live conversation entries.
-        if fresh {
-            self.relaunch_empty(id, permission, window, cx);
-        } else {
-            self.relaunch_with_entries(id, prior_entries, permission, window, cx);
+        let Some(mut start) = self.thread_start(id, &folder, &meta, rec.chosen_title().map(String::from), None, Starter::User, cx) else {
+            self.release_worktree_switch(id, cx);
+            return;
+        };
+        start.prior_entries = prior_entries;
+        start.permission = permission.or(start.permission);
+        rec.cwd = folder.clone();
+        rec.agent = Some(meta.clone());
+        let Some(index) = self.live.iter().position(|l| l.id == id) else {
+            self.release_worktree_switch(id, cx);
+            return;
+        };
+        let foreground = self.active_id().is_some_and(|a| a == id);
+        let source = self.live.remove(index);
+        self.pending_handoffs.insert(id.into(), Pending { source, meta, draft: None, kind: Replacement::Worktree(folder) });
+        let shell = self.shells.remove(id);
+        self.start_thread_with_focus(rec, start, false, foreground, window, cx);
+        if let Some(shell) = shell {
+            self.shells.insert(id.into(), shell);
         }
-        if let Some(composer) = composer
-            && let Some(thread) = self.live_view(id).and_then(|v| v.thread()).cloned()
-        {
+        if let Some(thread) = self.live_view(id).and_then(|v| v.thread()) {
             thread.update(cx, |t, cx| t.restore_composer(composer, window, cx));
         }
+    }
+
+    pub(super) fn finish_worktree_switch(&mut self, id: &str, folder: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let shell = self.shells.remove(id).map(|p| (p.open, p.height));
+        self.repoint_tabs(id, &folder, window, cx);
+        if let Some(rec) = self.store.session_mut(id) {
+            rec.cwd = folder;
+        }
         self.restore_shell(id, shell, window, cx);
-        if was_shown {
+        self.release_worktree_switch(id, cx);
+        self.store.refresh_git();
+        if self.active_id().is_some_and(|a| a == id) {
             self.show_session(id, window, cx);
         }
-        self.store.refresh_git();
     }
 
     /// A shell in the session's folder where there was one, open and as tall as before.
@@ -233,13 +263,13 @@ mod tests {
         let path = dir.path().join("s.jsonl");
         std::fs::write(&path, r#"{"type":"worktree-state","worktreeSession":{"worktreeName":"t"},"sessionId":"s"}"#.to_string() + "\n").unwrap();
         // A worktree Claude Code recorded: the line is appended.
-        clear_worktree_record(&path, "s").unwrap();
+        crate::harness::claude::clear_worktree_if_recorded(&path, "s").unwrap();
         assert!(!claude::worktree_recorded(&path).unwrap());
         // Nothing recorded, nothing appended.
         let before = std::fs::read_to_string(&path).unwrap();
-        clear_worktree_record(&path, "s").unwrap();
+        crate::harness::claude::clear_worktree_if_recorded(&path, "s").unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
         // A missing transcript is an error the user is told about.
-        assert!(clear_worktree_record(&dir.path().join("gone.jsonl"), "s").is_err());
+        assert!(crate::harness::claude::clear_worktree_if_recorded(&dir.path().join("gone.jsonl"), "s").is_err());
     }
 }

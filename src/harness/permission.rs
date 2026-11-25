@@ -35,29 +35,20 @@ impl Permission {
     }
 
     pub fn native(self, harness: Harness) -> Option<&'static str> {
-        match (harness, self) {
-            (Harness::Claude | Harness::Antigravity | Harness::OpenCode, Self::ReadOnly) => Some("plan"),
-            (Harness::Codex, Self::ReadOnly) => Some("read-only"),
-            (Harness::Claude | Harness::Antigravity, Self::Auto) => Some("auto"),
-            (Harness::Codex, Self::Auto) => Some("agent"),
-            (Harness::Claude, Self::FullAccess) => Some("bypassPermissions"),
-            (Harness::Codex, Self::FullAccess) => Some("agent-full-access"),
-            (Harness::OpenCode, Self::FullAccess) => Some("build"),
-            // The bypass comes from the launch flag. Default leaves the agent out of Plan mode.
-            (Harness::Antigravity, Self::FullAccess) => Some("default"),
-            (Harness::OpenCode, Self::Auto) => None,
-        }
+        harness.adapter().modes[match self {
+            Self::ReadOnly => 0,
+            Self::Auto => 1,
+            Self::FullAccess => 2,
+        }]
     }
 
     /// Existing sessions can be in an adapter's older approval policy.
     pub fn of(harness: Harness, id: &str) -> Option<Self> {
-        match (harness, id) {
-            (Harness::Claude, "default" | "acceptEdits" | "dontAsk")
-            | (Harness::Antigravity, "default" | "accept-edits")
-            | (Harness::Codex, "workspace-write") => Some(Self::Auto),
-            (_, "read_only" | "readOnly") => Some(Self::ReadOnly),
-            _ => Self::ALL.into_iter().find(|p| p.native(harness) == Some(id)),
+        if matches!(id, "read_only" | "readOnly") {
+            return Some(Self::ReadOnly);
         }
+        harness.adapter().mode_aliases.iter().find(|(native, _)| *native == id).map(|(_, mode)| *mode)
+            .or_else(|| Self::ALL.into_iter().find(|p| p.native(harness) == Some(id)))
     }
 
     pub fn resolve(self, offered: &[Self]) -> Option<Self> {

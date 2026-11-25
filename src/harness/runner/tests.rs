@@ -587,7 +587,7 @@ fn running_out_of_tokens_still_reports_the_last_message() {
 
 #[test]
 fn read_only_opencode_denies_all_but_reading_even_in_its_build_agent() {
-    let read_only = json!({ "*": "deny", "read": "allow", "glob": "allow", "grep": "allow", "list": "allow" });
+    let read_only = json!({ "*": "deny", "read": "allow", "glob": "allow", "grep": "allow", "list": "allow", "m4code_workspace_context": "allow" });
     assert_eq!(
         opencode_config(Some("openai/gpt-6.1-sol"), false),
         json!({ "model": "openai/gpt-6.1-sol", "default_agent": "build", "permission": read_only, "agent": { "build": { "permission": read_only } } })

@@ -122,25 +122,17 @@ impl Workspace {
 
     /// Environment passed to `harness`'s ACP server when probing its available models.
     pub(super) fn harness_model_env(&self, harness: Harness) -> Result<Vec<(String, String)>, String> {
-        if harness != Harness::Claude {
-            return Ok(vec![]);
-        }
-        let Some(exe) = self.claude_exe.clone() else {
-            return Err("Could not find the `claude` CLI on PATH.".into());
-        };
-        Ok(harness::claude::probe_env(&exe))
+        (harness.adapter().probe_env)(self.claude_exe.as_deref())
     }
 
     /// Refreshes model catalogs in the background for every enabled harness (Claude Code, Codex, OpenCode,
     /// Antigravity) and any enabled subagent that hasn't loaded yet in this run.
     pub(crate) fn load_enabled_models(&mut self, cx: &mut Context<Self>) {
         let enabled = self.store.data.settings.enabled_harnesses_list();
-        let wanted: Vec<Harness> = Harness::ALL
-            .into_iter()
+        let wanted: Vec<Harness> = Harness::registered()
             .filter(|&h| {
-                let subagent_on = h.agent().is_some_and(|a| self.store.data.settings.custom_subagents.get(a).on);
                 let lookup = self.model_lookups.get(h);
-                (enabled.contains(&h) || subagent_on) && !lookup.loading && !lookup.fetched
+                enabled.contains(&h) && !lookup.loading && !lookup.fetched
             })
             .collect();
         self.fetch_harness_models(wanted, cx);
@@ -153,12 +145,10 @@ impl Workspace {
             return;
         }
         let Some(Modal::Settings { subagents, .. }) = &self.modal else { return };
-        let wanted: Vec<Harness> = Harness::ALL
-            .into_iter()
+        let wanted: Vec<Harness> = Harness::registered()
             .filter(|&h| {
-                let subagent_on = h.agent().is_some_and(|a| subagents.get(a).on);
                 let lookup = self.model_lookups.get(h);
-                (subagents.enabled.contains(&h) || subagent_on) && !lookup.loading && (!lookup.fetched || lookup.error.is_some())
+                subagents.enabled.contains(&h) && !lookup.loading && (!lookup.fetched || lookup.error.is_some())
             })
             .collect();
         self.fetch_harness_models(wanted, cx);

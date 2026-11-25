@@ -116,7 +116,43 @@ pub const ADAPTER: Adapter = Adapter {
     compact_command: Some("compact"),
     default_models: || super::default_model_entry(super::Harness::Codex),
     steers: false,
+    prepare: |input, plan| {
+        if let Some(edits) = input.child_edits {
+            let request = super::child_request(Agent::Codex, input, edits);
+            plan.env.extend(super::runner::codex_env(&request).into_iter().map(|(key, value)| (key.into(), value)));
+        }
+        Ok(())
+    },
+    configure_mcp,
+    launch_args: |model, _| model.map_or_else(Vec::new, |model| vec!["-c".into(), format!("model={model:?}")]),
+    modes: [Some("read-only"), Some("agent"), Some("agent-full-access")],
+    mode_aliases: &[("workspace-write", super::Permission::Auto)],
+    full_access_relaunch: false,
+    native_compaction_managed: false,
+    fallback_question: false,
+    discover: |_| crate::platform::find_executable("codex-acp").or_else(|| crate::platform::find_executable("codex")),
+    probe_env: super::no_probe_env,
+    config_root: |home| home.join(".codex"),
+    project_skills: ".codex/skills",
+    hidden_commands: &["approvals", "logout"],
+    worktree: super::WorktreeHooks::DEFAULT,
 };
+
+fn configure_mcp(tools: &crate::mcp::session::SessionTools, plan: &mut super::SessionPlan) -> Result<(), String> {
+    let inherited = std::env::var(CONFIG_ENV).ok();
+    let local = plan.env.iter().find(|(key, _)| key == CONFIG_ENV).map(|(_, value)| value.as_str());
+    let mut config: Map<String, Value> = match inherited.filter(|text| !text.is_empty()) {
+        Some(text) => serde_json::from_str(&text).map_err(|_| format!("{CONFIG_ENV} must be a JSON object."))?,
+        None => Map::new(),
+    };
+    if let Some(local) = local {
+        let local: Map<String, Value> = serde_json::from_str(local).map_err(|_| format!("{CONFIG_ENV} must be a JSON object."))?;
+        config.extend(local);
+    }
+    let config = m4code_mcp_config(Some(&Value::Object(config).to_string()), &tools.executable, &tools.env)?;
+    plan.set_env(CONFIG_ENV, config);
+    Ok(())
+}
 
 #[cfg(test)]
 mod tests {

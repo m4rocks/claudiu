@@ -224,7 +224,7 @@ impl Workspace {
     pub(crate) fn harnesses_page(&self, cx: &mut Context<Self>) -> Div {
         let Some(Modal::Settings { subagents, .. }) = &self.modal else { return div() };
         let mut rows: Vec<AnyElement> = Vec::new();
-        for harness in Harness::ALL {
+        for harness in Harness::registered() {
             let enabled = subagents.enabled.contains(&harness);
             let agent = harness.agent();
             let lookup = self.model_lookups.get(harness);
@@ -630,7 +630,7 @@ mod tests {
             agents: crate::harness::subagents::AgentMap::from_fn(|_| crate::app::AgentForm { on: true, edits: true, models: vec![] }),
             claude_models: vec![], claude_subagents: Default::default(), picking: None,
         };
-        for harness in Harness::ALL {
+        for harness in Harness::registered() {
             assert_eq!(harness_status(harness, true, &form, &Lookup::default(), 2).0, "Enabled · 2 models · subagents on · edits allowed");
         }
     }

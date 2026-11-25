@@ -9,10 +9,16 @@ use crate::harness::thread::Entry;
 const LAST_ENTRIES: usize = 400;
 
 pub struct Pending {
-    source: Live,
+    pub(super) source: Live,
     pub(super) meta: AgentMeta,
-    draft: Option<String>,
-    reconnect: bool,
+    pub(super) draft: Option<String>,
+    pub(super) kind: Replacement,
+}
+
+pub(super) enum Replacement {
+    Handoff,
+    Permission,
+    Worktree(PathBuf),
 }
 
 impl Workspace {
@@ -31,8 +37,11 @@ impl Workspace {
             return;
         }
         let Some(mut rec) = self.store.session(id).cloned() else { return };
-        if to == Harness::Antigravity && rec.agent.as_ref().is_some_and(|m| m.parent_session.is_some()) {
-            self.toast("Shared Antigravity subagents are not enabled yet.", cx);
+        if !self.store.data.settings.harness_enabled(to) {
+            if !by_agent {
+                thread.update(cx, |v, cx| v.paste_text(&message, window, cx));
+            }
+            self.toast(format!("{} is unavailable for this session.", to.name()), cx);
             return;
         }
         let cwd = rec.cwd.clone();
@@ -96,8 +105,9 @@ impl Workspace {
         }
         let Some(index) = self.live.iter().position(|live| live.id == id) else { return };
         let composer = thread.read(cx).composer_state(cx);
+        thread.update(cx, |v, cx| v.hold_workspace_switch(true, cx));
         let source = self.live.remove(index);
-        self.pending_handoffs.insert(id.into(), Pending { source, meta, draft, reconnect: false });
+        self.pending_handoffs.insert(id.into(), Pending { source, meta, draft, kind: Replacement::Handoff });
         let shell = self.shells.remove(id);
         self.start_thread(rec, start, false, window, cx);
         if let Some(shell) = shell {
@@ -122,8 +132,9 @@ impl Workspace {
         start.permission = Some(permission);
         start.prior_entries = source.read(cx).thread.entries.clone();
 
+        source.update(cx, |v, cx| v.hold_workspace_switch(true, cx));
         let previous = self.live.remove(index);
-        self.pending_handoffs.insert(id.into(), Pending { source: previous, meta, draft: None, reconnect: true });
+        self.pending_handoffs.insert(id.into(), Pending { source: previous, meta, draft: None, kind: Replacement::Permission });
         let shell = self.shells.remove(id);
         let foreground = self.active_id().is_some_and(|active| active == id);
         self.start_thread_with_focus(rec, start, false, foreground, window, cx);
@@ -136,7 +147,7 @@ impl Workspace {
         }
     }
 
-    pub(super) fn commit_handoff(&mut self, id: &str, session_id: &str, cx: &mut Context<Self>) {
+    pub(super) fn commit_handoff(&mut self, id: &str, session_id: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(mut pending) = self.pending_handoffs.remove(id) else { return };
         pending.meta.session_id = session_id.to_string();
         if let Some(live) = self.live.iter().find(|live| live.id == id)
@@ -151,6 +162,11 @@ impl Workspace {
         }
         if let Some(source) = pending.source.view.thread() {
             source.update(cx, |view, _| view.relinquish_record());
+        }
+        if let Replacement::Worktree(folder) = pending.kind {
+            self.finish_worktree_switch(id, folder, window, cx);
+        } else if let Some(thread) = self.live_view(id).and_then(|v| v.thread()) {
+            thread.update(cx, |v, cx| v.hold_workspace_switch(false, cx));
         }
         self.store.mark_dirty();
         cx.notify();
@@ -174,10 +190,16 @@ impl Workspace {
                 if let Some(draft) = pending.draft {
                     view.paste_text(&draft, window, cx);
                 }
+                view.hold_workspace_switch(false, cx);
             });
         }
         self.live.push(pending.source);
-        let action = if pending.reconnect { "Permission change" } else { "Handoff" };
+        self.switching_worktree.remove(id);
+        let action = match pending.kind {
+            Replacement::Handoff => "Handoff",
+            Replacement::Permission => "Permission change",
+            Replacement::Worktree(_) => "Worktree switch",
+        };
         self.toast(format!("{action} failed. The original session is still open. {error}"), cx);
         if self.active_id().is_some_and(|active| active == id) {
             self.focus_active(window, cx);

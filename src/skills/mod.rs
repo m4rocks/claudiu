@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::harness::subagents::{Agent, CustomSubagents};
+use crate::harness::subagents::CustomSubagents;
 use crate::harness::Harness;
 use crate::platform::{is_same_or_under, link_dir, remove_dir_link};
 
@@ -283,22 +283,9 @@ fn unquote_yaml(raw: &str) -> &str {
     }
 }
 
-fn opencode_config_root(home: &Path) -> PathBuf {
-    #[cfg(unix)]
-    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()) {
-        return PathBuf::from(xdg).join("opencode");
-    }
-    home.join(".config").join("opencode")
-}
-
 /// Config directory whose presence indicates the harness is set up on this machine.
 pub fn harness_config_root(harness: Harness, home: &Path) -> PathBuf {
-    match harness {
-        Harness::Claude => home.join(".claude"),
-        Harness::Codex => home.join(".codex"),
-        Harness::OpenCode => opencode_config_root(home),
-        Harness::Antigravity => home.join(".gemini").join("config"),
-    }
+    (harness.adapter().config_root)(home)
 }
 
 /// Global skills directory that `harness` reads automatically.
@@ -308,19 +295,13 @@ pub fn global_skills_dir(harness: Harness, home: &Path) -> PathBuf {
 
 /// Per-project skills directory that `harness` reads automatically.
 pub fn project_skills_dir(harness: Harness, project: &Path) -> PathBuf {
-    match harness {
-        Harness::Claude => project.join(".claude").join("skills"),
-        Harness::Codex => project.join(".codex").join("skills"),
-        Harness::OpenCode => project.join(".opencode").join("skills"),
-        Harness::Antigravity => project.join(".agents").join("skills"),
-    }
+    project.join(harness.adapter().project_skills)
 }
 
 /// Harnesses that should receive synced skills: every harness enabled in Settings → Harnesses, any harness turned on
 /// as a subagent, any harness explicitly requested, and any harness whose config folder already exists on disk.
 pub fn active_harnesses(enabled: &[Harness], default: Harness, subagents: &CustomSubagents, home: &Path, extra: Option<Harness>) -> Vec<Harness> {
-    Harness::ALL
-        .into_iter()
+    Harness::registered()
         .filter(|&h| {
             enabled.contains(&h)
                 || h == default
@@ -332,13 +313,7 @@ pub fn active_harnesses(enabled: &[Harness], default: Harness, subagents: &Custo
 }
 
 fn subagent_enabled(harness: Harness, subagents: &CustomSubagents) -> bool {
-    let agent = match harness {
-        Harness::Claude => return false,
-        Harness::Codex => Agent::Codex,
-        Harness::OpenCode => Agent::OpenCode,
-        Harness::Antigravity => Agent::Antigravity,
-    };
-    subagents.get(agent).on
+    harness.agent().is_some_and(|agent| subagents.get(agent).on)
 }
 
 /// Whether `link` is a symlink/junction created by m4code that points inside `store_root`.
@@ -419,7 +394,7 @@ pub fn sync_dir(store_root: &Path, target_dir: &Path, enabled: &[String]) -> io:
 /// Returns human-readable error strings for any directories that failed to sync.
 pub fn sync_all(store_root: &Path, home: &Path, active: &[Harness], config: &SkillsConfig, projects: &[(String, PathBuf)]) -> Vec<String> {
     let mut errors = Vec::new();
-    for harness in Harness::ALL {
+    for harness in Harness::registered() {
         let dir = global_skills_dir(harness, home);
         let wanted = if active.contains(&harness) { config.global_enabled.as_slice() } else { &[] };
         if let Err(e) = sync_dir(store_root, &dir, wanted) {
@@ -431,7 +406,7 @@ pub fn sync_all(store_root: &Path, home: &Path, active: &[Harness], config: &Ski
             continue;
         }
         let project_wanted = config.project_enabled.get(project_id).map_or(&[][..], Vec::as_slice);
-        for harness in Harness::ALL {
+        for harness in Harness::registered() {
             let dir = project_skills_dir(harness, project_path);
             let wanted = if active.contains(&harness) { project_wanted } else { &[] };
             if let Err(e) = sync_dir(store_root, &dir, wanted) {
@@ -446,7 +421,7 @@ pub fn sync_all(store_root: &Path, home: &Path, active: &[Harness], config: &Ski
 /// `store_root` are left out, because those are installed skills already listed elsewhere.
 pub fn repo_skills(store_root: &Path, project: &Path) -> Vec<RepoSkill> {
     let mut found = Vec::new();
-    for harness in Harness::ALL {
+    for harness in Harness::registered() {
         let dir = project_skills_dir(harness, project);
         let Ok(entries) = fs::read_dir(&dir) else { continue };
         let folder = dir.strip_prefix(project).unwrap_or(&dir).to_path_buf();
@@ -473,14 +448,14 @@ pub fn uninstall(store_root: &Path, home: &Path, name: &str, projects: &[PathBuf
     if !valid_skill_name(name) {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid skill name"));
     }
-    for harness in Harness::ALL {
+    for harness in Harness::registered() {
         let link = global_skills_dir(harness, home).join(name);
         if is_managed_link(&link, store_root) {
             let _ = remove_dir_link(&link);
         }
     }
     for project in projects {
-        for harness in Harness::ALL {
+        for harness in Harness::registered() {
             let link = project_skills_dir(harness, project).join(name);
             if is_managed_link(&link, store_root) {
                 let _ = remove_dir_link(&link);

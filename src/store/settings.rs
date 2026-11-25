@@ -312,7 +312,7 @@ impl Settings {
     pub fn aggregated_models_for(&self, enabled: &[crate::harness::Harness]) -> Vec<crate::harness::CatalogModel> {
         use crate::harness::{CatalogModel, Harness};
         let mut out = Vec::new();
-        for harness in Harness::ALL.into_iter().filter(|h| enabled.contains(h)) {
+        for harness in Harness::registered().filter(|h| enabled.contains(h)) {
             let catalog = self.harness_models(harness);
             if catalog.is_empty() {
                 out.extend(keep_picked((harness.adapter().default_models)(), self.picked_models(harness), |model| &model.id));
@@ -362,10 +362,11 @@ impl Settings {
     /// have been explicitly stored yet.
     pub fn enabled_harnesses_list(&self) -> Vec<crate::harness::Harness> {
         use crate::harness::Harness;
-        if let Some(list) = &self.enabled_harnesses {
-            return Harness::ALL.into_iter().filter(|h| list.contains(h)).collect();
-        }
-        Harness::ALL.to_vec()
+        let registered: Vec<_> = Harness::registered().collect();
+        self.enabled_harnesses.as_ref().map_or_else(|| registered.clone(), |list| {
+            let enabled: Vec<_> = registered.iter().copied().filter(|h| list.contains(h)).collect();
+            if enabled.is_empty() { registered.clone() } else { enabled }
+        })
     }
 
     pub fn harness_enabled(&self, harness: crate::harness::Harness) -> bool {

@@ -4,6 +4,7 @@
 //! Claude Code also gets inline visual cards through the m4code plugin.
 
 pub mod bridge;
+pub mod session;
 
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
@@ -121,7 +122,7 @@ pub fn allowed_tools(off: &[&str]) -> Vec<String> {
 /// command or a file path can contain the same words.
 pub fn is_own_tool(title: &str) -> bool {
     let title = title.trim();
-    OWN_TOOLS.iter().chain(&MODEL_TOOLS).chain(&INTERACTIVE_TOOLS).chain(&BRIDGE_TOOLS).chain(&SUBAGENT_TOOLS).any(|tool| {
+    OWN_TOOLS.iter().chain(&MODEL_TOOLS).chain(&INTERACTIVE_TOOLS).chain(&BRIDGE_TOOLS).chain(&SUBAGENT_TOOLS).chain(&["workspace_context"]).any(|tool| {
         ["mcp__m4code__", "m4code: ", "m4code_", "m4code.", "m4code/", "m4code__"].iter().any(|prefix| title.strip_prefix(prefix) == Some(tool))
     })
 }
@@ -134,7 +135,7 @@ a model and an effort; name a model or effort only when the user did. \
 switch_worktree moves this session into another git worktree of its project; call it only when the user asks for a worktree, and \
 end your turn after it.";
 
-const SUBAGENT_INSTRUCTIONS: &str = " Subagents run through m4code across Claude Code, Codex and OpenCode. \
+const SUBAGENT_INSTRUCTIONS: &str = " Subagents run through m4code on enabled adapters. \
 Use spawn_subagent to delegate a task to another harness, list_subagents to inspect children, \
 send_subagent_message for a follow-up and stop_subagent to cancel. spawn_subagent returns at once; when a child's turn \
 ends, m4code sends you its report as a message starting with [m4code subagent report], so don't poll. Call \
@@ -224,13 +225,41 @@ pub fn run() -> i32 {
     let from = format!("code:{record}");
     let off_env = std::env::var(TOOLS_OFF_ENV).unwrap_or_default();
     let off: Vec<&str> = off_env.split(',').map(str::trim).filter(|n| !n.is_empty()).collect();
-    serve(std::io::stdin().lock(), std::io::stdout().lock(), &record, &crate::datadir::data_dir(), &off, |tool, args| bridge::ask(&from, tool, args));
+    let data = crate::datadir::data_dir();
+    let launch = LaunchContext {
+        workspace: std::env::var(session::WORKSPACE_ENV).ok().and_then(|text| serde_json::from_str(&text).ok()),
+        targets: std::env::var(session::TARGETS_ENV).ok().map(|list| list.split(',').filter(|id| !id.is_empty()).map(String::from).collect()),
+        ready: std::env::var(session::READY_ENV).ok().and_then(|token| token.parse().ok()).map(|token| session::ready_path(&data, token)),
+    };
+    serve(std::io::stdin().lock(), std::io::stdout().lock(), &record, &data, &off, launch, |tool, args| bridge::ask(&from, tool, args));
     0
 }
 
 /// `off` names what this session leaves out (see `tools_off`): those tools are neither listed nor callable and their
 /// instruction text is dropped. `ask` carries a cross-session request to m4code and waits for the user's answer.
-fn serve(input: impl BufRead, mut out: impl Write, record: &str, data: &Path, off: &[&str], ask: impl Fn(&str, &Value) -> Result<String, String>) {
+#[derive(Default)]
+struct LaunchContext {
+    workspace: Option<Value>,
+    targets: Option<Vec<String>>,
+    ready: Option<PathBuf>,
+}
+
+fn serve(input: impl BufRead, mut out: impl Write, record: &str, data: &Path, off: &[&str], mut launch: LaunchContext, ask: impl Fn(&str, &Value) -> Result<String, String>) {
+    let targets = launch.targets.take().unwrap_or_else(|| crate::harness::Harness::registered().map(|h| h.key().into()).collect());
+    let mut instructions = instructions(off);
+    if let Some(workspace) = &launch.workspace {
+        instructions.push_str(&format!(" Your workspace at session start is {workspace}. Use workspace_context to check its current branch and worktree."));
+    }
+    let available = |tool: &str| !is_off(off, tool) && (tool != "spawn_subagent" || !targets.is_empty());
+    let mut tools = own_tools().into_iter().chain(model_tools()).chain(interactive_tools()).chain(bridge_tools())
+        .chain(subagent_tools(&targets)).filter(|t| available(t["name"].as_str().unwrap_or_default())).collect::<Vec<_>>();
+    if launch.workspace.is_some() {
+        tools.push(json!({
+            "name": "workspace_context",
+            "description": "Return the current m4code working directory, project root, worktree and branch for this session.",
+            "inputSchema": {"type": "object", "properties": {}}
+        }));
+    }
     for line in input.lines().map_while(Result::ok) {
         let Ok(msg) = serde_json::from_str::<Value>(&line) else { continue };
         // Notifications (no id) and responses (no method) need no answer.
@@ -240,11 +269,22 @@ fn serve(input: impl BufRead, mut out: impl Write, record: &str, data: &Path, of
                 "protocolVersion": msg["params"]["protocolVersion"].as_str().unwrap_or("2025-06-18"),
                 "capabilities": { "tools": {} },
                 "serverInfo": { "name": "m4code", "version": env!("CARGO_PKG_VERSION") },
-                "instructions": instructions(off),
+                "instructions": instructions,
             })),
             "ping" => Ok(json!({})),
-            "tools/list" => Ok(json!({ "tools": own_tools().into_iter().chain(model_tools()).chain(interactive_tools()).chain(bridge_tools()).chain(subagent_tools()).filter(|t| !is_off(off, t["name"].as_str().unwrap_or_default())).collect::<Vec<_>>() })),
-            "tools/call" => Ok(match msg["params"]["name"].as_str().filter(|tool| !is_off(off, tool)) {
+            "tools/list" => Ok(json!({ "tools": tools })),
+            "tools/call" => Ok(match msg["params"]["name"].as_str().filter(|tool| available(tool)) {
+                Some("workspace_context") if launch.workspace.is_some() => {
+                    let context = launch.workspace.as_ref().unwrap();
+                    let project = context["project_root"].as_str().map(Path::new);
+                    match context["working_directory"].as_str() {
+                        Some(cwd) => reply(&session::workspace(Path::new(cwd), project).to_string(), false),
+                        None => reply("The workspace has no working directory.", true),
+                    }
+                }
+                Some("spawn_subagent") if !msg["params"]["arguments"]["harness"].as_str().is_some_and(|h| targets.iter().any(|target| target == h)) => {
+                    reply("Choose an enabled subagent adapter from the tool schema.", true)
+                }
                 Some("attach_github") => attach_github(&msg["params"], record, &attach_dir(data)),
                 Some("detach_github") => detach_github(&msg["params"], record, &attach_dir(data)),
                 Some("link_session") => link_session(&msg["params"], record, &attach_dir(data), "link"),
@@ -261,8 +301,14 @@ fn serve(input: impl BufRead, mut out: impl Write, record: &str, data: &Path, of
             Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
             Err(error) => json!({ "jsonrpc": "2.0", "id": id, "error": error }),
         };
-        let _ = writeln!(out, "{body}");
-        let _ = out.flush();
+        if writeln!(out, "{body}").and_then(|_| out.flush()).is_err() {
+            break;
+        }
+        if method == "tools/list"
+            && let Some(path) = launch.ready.take()
+        {
+            let _ = crate::datadir::write_atomic(&path, "");
+        }
     }
 }
 
@@ -270,7 +316,7 @@ fn serve(input: impl BufRead, mut out: impl Write, record: &str, data: &Path, of
 fn own_tools() -> Vec<Value> {
     let link = json!({
         "name": "link_session",
-        "description": "Link this session to another one, so m4code shows them together in the sidebar. Use it when this work continues, builds on or was prompted by another Claude Code session. Find the id with search_sessions. Silent; once per pair.",
+        "description": "Link this session to another one, so m4code shows them together in the sidebar. Use it when this work continues, builds on or was prompted by another m4code session. Find the id with search_sessions. Silent; once per pair.",
         "inputSchema": {
             "type": "object",
             "properties": { "id": { "type": "string", "description": "The id of the other session, from search_sessions" } },
@@ -327,7 +373,7 @@ fn model_tools() -> Vec<Value> {
     vec![
         json!({
             "name": "list_models",
-            "description": "List the models this session can switch to with set_model, across every coding agent the user enabled in m4code (Claude Code, Codex, OpenCode, Antigravity). One per line, as harness:model-id, then its name; the current one is marked.",
+            "description": "List the models this session can switch to with set_model, across every coding agent the user enabled in m4code. One per line, as harness:model-id, then its name; the current one is marked.",
             "inputSchema": { "type": "object", "properties": {} },
         }),
         json!({
@@ -347,7 +393,7 @@ fn model_tools() -> Vec<Value> {
     ]
 }
 
-fn subagent_tools() -> Vec<Value> {
+fn subagent_tools(targets: &[String]) -> Vec<Value> {
     let tool = |name, description, properties, required| json!({
         "name": name, "description": description,
         "inputSchema": {"type": "object", "properties": properties, "required": required},
@@ -355,7 +401,7 @@ fn subagent_tools() -> Vec<Value> {
     let id = json!({"type": "string", "description": "The subagent id returned by spawn_subagent"});
     let prompt = json!({"type": "string", "description": "The task or follow-up, at most 20,000 characters"});
     vec![
-        tool("spawn_subagent", "Start a background subagent in this session's working folder. Returns at once; its report arrives as a message in this chat when its turn ends. Follow the user's and project's delegation rules. The child uses the configured edit permissions; read-only parents cannot grant edits. Use list_models for model ids.", json!({"harness": {"type": "string", "enum": ["claude", "codex", "opencode", "antigravity"]}, "model": {"type": "string"}, "effort": {"type": "string", "enum": ["low", "medium", "high", "xhigh", "max"]}, "prompt": prompt}), json!(["harness", "prompt"])),
+        tool("spawn_subagent", "Start a background subagent in this session's working folder. Returns at once; its report arrives as a message in this chat when its turn ends. Follow the user's and project's delegation rules. The child uses the configured edit permissions; read-only parents cannot grant edits. Use list_models for model ids.", json!({"harness": {"type": "string", "enum": targets}, "model": {"type": "string"}, "effort": {"type": "string", "enum": ["low", "medium", "high", "xhigh", "max"]}, "prompt": prompt}), json!(["harness", "prompt"])),
         tool("list_subagents", "List this session's children, their states and latest reports.", json!({}), json!([])),
         tool("send_subagent_message", "Queue a follow-up in the same child session, resuming it if stopped. Messages during a turn run after that turn. Its report arrives as a message when it is done.", json!({"id": id, "prompt": prompt}), json!(["id", "prompt"])),
         tool("wait_subagent", "Block this turn until a child's turn finishes and return its latest report; a report the wait returns does not also arrive as a message. Only needed when you can't go on without it. Returns early for a user question. A timeout returns its current state without stopping it.", json!({"id": id, "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 240}}), json!(["id"])),
@@ -585,7 +631,7 @@ mod tests {
     fn talk_off(requests: &[Value], session: &str, dir: &Path, off: &[&str], ask: impl Fn(&str, &Value) -> Result<String, String>) -> Vec<Value> {
         let input: String = requests.iter().map(|r| format!("{r}\n")).collect();
         let mut out = Vec::new();
-        serve(input.as_bytes(), &mut out, session, dir, off, ask);
+        serve(input.as_bytes(), &mut out, session, dir, off, LaunchContext::default(), ask);
         String::from_utf8(out).unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect()
     }
 
@@ -634,6 +680,36 @@ mod tests {
         ] {
             assert!(!is_own_tool(title), "{title}");
         }
+    }
+
+    #[test]
+    fn a_launch_exposes_its_workspace_and_only_registered_subagent_targets() {
+        let data = tempfile::tempdir().unwrap();
+        let ready = data.path().join("ready");
+        let workspace = session::workspace(data.path(), None);
+        let context = LaunchContext {
+            workspace: Some(workspace.clone()),
+            targets: Some(vec!["codex".into()]),
+            ready: Some(ready.clone()),
+        };
+        let input = [
+            json!({"jsonrpc":"2.0","id":1,"method":"initialize"}),
+            json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}),
+            json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"workspace_context"}}),
+            json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"spawn_subagent","arguments":{"harness":"claude"}}}),
+        ].map(|message| message.to_string()).join("
+");
+        let mut out = Vec::new();
+        serve(input.as_bytes(), &mut out, "record", data.path(), &[], context, |_, _| panic!("disabled target reached the app"));
+        let out = String::from_utf8(out).unwrap();
+        let replies: Vec<Value> = out.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+        let tools = replies[1]["result"]["tools"].as_array().unwrap();
+        let schema = tools.iter().find(|tool| tool["name"] == "spawn_subagent").unwrap();
+        assert_eq!(schema["inputSchema"]["properties"]["harness"]["enum"], json!(["codex"]));
+        let workspace_reply: Value = serde_json::from_str(replies[2]["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(workspace_reply, workspace);
+        assert_eq!(replies[3]["result"]["isError"], true);
+        assert!(ready.is_file());
     }
 
     #[test]

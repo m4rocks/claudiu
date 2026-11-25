@@ -66,7 +66,11 @@ impl Workspace {
         let id = req.from.split_once(':').map_or(req.from.as_str(), |(_, id)| id);
         if let Some(name) = req.args["folder"].as_str().map(str::trim).filter(|n| !n.is_empty()) {
             let by_name = self.store.data.projects.iter().find(|p| p.name.eq_ignore_ascii_case(name));
-            let path = PathBuf::from(name);
+            let mut path = PathBuf::from(name);
+            if path.is_relative() && let Some(record) = self.store.session(id) {
+                path = record.cwd.join(path);
+            }
+            let path = dunce::canonicalize(&path).unwrap_or(path);
             return match (by_name, path.is_dir()) {
                 (Some(p), _) => Ok(Some(p.path.clone())),
                 (None, true) => Ok(Some(path)),
@@ -207,7 +211,9 @@ impl Workspace {
         let now = crate::store::now();
         let pending = std::mem::take(&mut self.pending_switches);
         for p in pending {
-            let claude_id = self.store.session(&p.id).and_then(|r| r.provider_session_id());
+            let claude_id = self.store.session(&p.id)
+                .filter(|r| r.agent.as_ref().is_some_and(|meta| meta.harness == Harness::Claude))
+                .and_then(|r| r.provider_session_id());
             // Without a registry entry (older Claude Code) the terminal's own activity decides, as in `switch::inspect`.
             let idle = match claude_id.and_then(|c| statuses.get(c)) {
                 Some(status) => status == "idle",
@@ -294,7 +300,7 @@ impl Workspace {
             }
             "start_code_session" => {
                 let cwd = folder.ok_or("No folder.")?;
-                let harness = req.args["harness"].as_str().and_then(|key| crate::harness::Harness::ALL.into_iter().find(|h| h.key() == key)).unwrap_or(self.store.data.settings.harness);
+                let harness = req.args["harness"].as_str().and_then(|key| crate::harness::Harness::registered().find(|h| h.key() == key)).unwrap_or_else(|| self.store.data.settings.default_model().harness);
                 // The model may pick the model and effort; the permission mode stays the user's default for new
                 // sessions (`Starter::OtherSession` never starts with full access).
                 let mut options = vec![];
@@ -310,7 +316,7 @@ impl Workspace {
                     Some(id) => {
                         // A session started from another one is linked with it from the start.
                         self.link(requester_id, &id);
-                        Ok(format!("Opened a {} session (id {id}) in {}. It is running in the user's sidebar.", harness.name(), cwd.to_string_lossy()))
+                        Ok(format!("Starting a {} session (id {id}) in {}.", harness.name(), cwd.to_string_lossy()))
                     }
                     None => Err(format!("The {} session could not be started.", harness.name())),
                 }
@@ -328,7 +334,7 @@ impl Workspace {
             }
             "set_model" => {
                 let thread = self.requester_thread(req)?;
-                let model = req.args["harness"].as_str().and_then(|key| crate::harness::Harness::ALL.into_iter().find(|h| h.key() == key)).map(|harness| CatalogModel {
+                let model = req.args["harness"].as_str().and_then(|key| crate::harness::Harness::registered().find(|h| h.key() == key)).map(|harness| CatalogModel {
                     harness,
                     id: req.args["model_id"].as_str().unwrap_or_default().to_string(),
                     name: req.args["name"].as_str().unwrap_or_default().to_string(),

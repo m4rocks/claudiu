@@ -39,7 +39,7 @@ pub(super) fn codex_config(model: Option<&str>, effort: Option<&str>) -> Option<
 /// The tools OpenCode may use read-only: reading and searching files. Everything else, the shell included, is denied,
 /// since OpenCode has no sandbox that would let a command run without changing anything.
 fn opencode_read_only() -> Value {
-    json!({ "*": "deny", "read": "allow", "glob": "allow", "grep": "allow", "list": "allow" })
+    json!({ "*": "deny", "read": "allow", "glob": "allow", "grep": "allow", "list": "allow", "m4code_workspace_context": "allow" })
 }
 
 /// The config OpenCode gets on top of the user's own. Read-only pins the `build` agent and denies under it too,

@@ -666,7 +666,7 @@ impl Workspace {
     ) -> Self {
         let store = Store::load(Store::default_path());
         crate::panels::scale::set(store.data.settings.scale.unwrap_or(100));
-        let claude_exe = claude::discover(store.data.settings.claude_path.as_deref());
+        let claude_exe = (Harness::Claude.adapter().discover)(store.data.settings.claude_path.as_deref());
         let search_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Search sessions and projects").clean_on_escape());
         cx.subscribe_in(&search_input, window, |ws: &mut Self, input, ev: &InputEvent, window, cx| {
@@ -825,7 +825,9 @@ impl Workspace {
         ws.sync_skills(None, cx);
         if !cfg!(test) {
             ws.load_enabled_models(cx);
-            ws.take_back_global_trims();
+            if Harness::Claude.is_registered() {
+                ws.take_back_global_trims();
+            }
         }
         cx.observe_window_activation(window, |_, _, cx| cx.notify()).detach();
         ws.check_updates(cx);

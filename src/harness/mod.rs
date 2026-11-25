@@ -22,6 +22,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use self::subagents::{Agent, AgentModel};
+use self::permission::Permission;
+use crate::mcp::session::SessionTools;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -48,6 +50,7 @@ impl Default for SubagentAccess {
 
 /// An ACP server's program and its arguments.
 pub type Server = (PathBuf, Vec<String>);
+pub type Environment = Vec<(String, String)>;
 
 /// One selectable model from an enabled harness, aggregated into a single model picker across the app.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -84,7 +87,107 @@ pub struct Adapter {
     pub steers: bool,
     /// Fallback model entries shown before the adapter's ACP server reports its live catalog.
     pub default_models: fn() -> Vec<CatalogModel>,
+    pub prepare: fn(&SessionInput<'_>, &mut SessionPlan) -> Result<(), String>,
+    pub configure_mcp: fn(&SessionTools, &mut SessionPlan) -> Result<(), String>,
+    pub launch_args: fn(Option<&str>, bool) -> Vec<String>,
+    pub modes: [Option<&'static str>; 3],
+    pub mode_aliases: &'static [(&'static str, Permission)],
+    pub full_access_relaunch: bool,
+    pub native_compaction_managed: bool,
+    pub fallback_question: bool,
+    pub discover: fn(Option<&Path>) -> Option<PathBuf>,
+    pub probe_env: fn(Option<&Path>) -> Result<Environment, String>,
+    pub config_root: fn(&Path) -> PathBuf,
+    pub project_skills: &'static str,
+    pub hidden_commands: &'static [&'static str],
+    pub worktree: WorktreeHooks,
 }
+
+pub struct SessionInput<'a> {
+    pub record: &'a str,
+    pub cwd: &'a Path,
+    pub session_id: Option<&'a str>,
+    pub name: Option<String>,
+    pub child_edits: Option<bool>,
+    pub settings: &'a crate::store::Settings,
+    pub executable_override: Option<&'a Path>,
+    pub chrome: bool,
+}
+
+#[derive(Default)]
+pub struct SessionPlan {
+    pub env: Vec<(String, String)>,
+    pub args: Vec<String>,
+    pub meta: Value,
+    pub mcp_servers: Vec<Value>,
+    pub off: Vec<&'static str>,
+}
+
+impl SessionPlan {
+    pub fn set_env(&mut self, key: &str, value: String) {
+        self.env.retain(|(name, _)| name != key);
+        self.env.push((key.into(), value));
+    }
+}
+
+pub struct WorktreeHooks {
+    pub inspect: fn(&str) -> (Option<bool>, Option<PathBuf>),
+    pub prepare: fn(&Path, &str) -> Result<(), String>,
+    pub has_history: fn(Option<&str>, bool) -> bool,
+}
+
+impl WorktreeHooks {
+    const DEFAULT: Self = Self {
+        inspect: |_| (None, None),
+        prepare: |_, _| Ok(()),
+        has_history: |id, _| id.is_some(),
+    };
+}
+
+fn stdio_mcp(tools: &SessionTools, plan: &mut SessionPlan) -> Result<(), String> {
+    plan.mcp_servers.push(tools.stdio());
+    Ok(())
+}
+
+fn no_probe_env(_: Option<&Path>) -> Result<Vec<(String, String)>, String> {
+    Ok(Vec::new())
+}
+
+fn no_launch_args(_: Option<&str>, _: bool) -> Vec<String> {
+    Vec::new()
+}
+
+fn child_request(agent: Agent, input: &SessionInput<'_>, edits: bool) -> runner::Request {
+    runner::Request {
+        agent, model: None, effort: None, edits, cwd: input.cwd.to_path_buf(),
+        prompt: String::new(), live_messages: false,
+    }
+}
+
+static UNAVAILABLE_ADAPTER: Adapter = Adapter {
+    name: "Unavailable adapter",
+    server_name: "unavailable",
+    server: || Err("This adapter is unavailable in this build.".into()),
+    reopen: Reopen::Load,
+    delete_model_session: false,
+    compact_command: None,
+    steers: false,
+    default_models: Vec::new,
+    prepare: |_, _| Err("This adapter is unavailable in this build.".into()),
+    configure_mcp: stdio_mcp,
+    launch_args: no_launch_args,
+    modes: [None; 3],
+    mode_aliases: &[],
+    full_access_relaunch: false,
+    native_compaction_managed: false,
+    fallback_question: false,
+    discover: |_| None,
+    probe_env: no_probe_env,
+    config_root: Path::to_path_buf,
+    project_skills: "",
+    hidden_commands: &[],
+    worktree: WorktreeHooks::DEFAULT,
+};
 
 /// Default single placeholder model for an adapter before its ACP server reports a live catalog.
 pub(crate) fn default_model_entry(harness: Harness) -> Vec<CatalogModel> {
@@ -146,17 +249,36 @@ pub enum Reopen {
 impl Harness {
     pub const ALL: [Harness; 4] = [Self::Claude, Self::Codex, Self::OpenCode, Self::Antigravity];
 
+    const REGISTRY: &'static [(Self, &'static Adapter)] = &[
+        #[cfg(feature = "adapter-claude")]
+        (Self::Claude, &claude::ADAPTER),
+        #[cfg(feature = "adapter-codex")]
+        (Self::Codex, &codex::ADAPTER),
+        #[cfg(feature = "adapter-opencode")]
+        (Self::OpenCode, &opencode::ADAPTER),
+        #[cfg(feature = "adapter-antigravity")]
+        (Self::Antigravity, &antigravity::ADAPTER),
+    ];
+
+    pub fn is_registered(self) -> bool {
+        Self::registered().any(|h| h == self)
+    }
+
+    pub fn registered() -> impl Iterator<Item = Self> {
+        Self::REGISTRY.iter().map(|(id, _)| *id)
+    }
+
     pub fn adapter(self) -> &'static Adapter {
-        match self {
-            Self::Claude => &claude::ADAPTER,
-            Self::Codex => &codex::ADAPTER,
-            Self::OpenCode => &opencode::ADAPTER,
-            Self::Antigravity => &antigravity::ADAPTER,
-        }
+        Self::REGISTRY.iter().find(|(id, _)| *id == self)
+            .map_or(&UNAVAILABLE_ADAPTER, |(_, adapter)| *adapter)
     }
 
     pub fn name(self) -> &'static str {
-        self.adapter().name
+        if self.is_registered() {
+            self.adapter().name
+        } else {
+            self.key()
+        }
     }
 
     /// The harness's short lowercase key, as saved settings and the `set_model` tool spell it.
@@ -173,11 +295,7 @@ impl Harness {
     /// Provider-specific entries below are terminal controls or settings already managed by the app.
     pub fn hides_command(self, name: &str) -> bool {
         matches!(name, "rename" | "model" | "effort" | "permissions" | "resume" | "status" | "quit" | "exit")
-            || match self {
-                Self::Claude => matches!(name, "autocompact" | "usage"),
-                Self::Codex => matches!(name, "approvals" | "logout"),
-                Self::OpenCode | Self::Antigravity => false,
-            }
+            || self.adapter().hidden_commands.contains(&name)
     }
 
     pub fn from_agent(agent: Agent) -> Self {

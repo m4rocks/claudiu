@@ -1,12 +1,22 @@
 use super::*;
 
 /// Sends a task and its live messages in one ACP session, streaming updates as they arrive.
+#[cfg(test)]
 pub(super) fn converse(from_agent: impl BufRead + Send + 'static, to_agent: impl Write, request: &Request, inbox: Option<Inbox>, emit: &mut impl FnMut(Event)) -> Result<String, String> {
     converse_waiting(from_agent, to_agent, request, inbox, emit, BACKGROUND_WAIT)
 }
 
-/// `converse` with a choice of how long to wait for a command the agent moved to the background, so a test needn't wait 30 minutes.
-pub(super) fn converse_waiting(from_agent: impl BufRead + Send + 'static, mut to_agent: impl Write, request: &Request, mut inbox: Option<Inbox>, emit: &mut impl FnMut(Event), background_wait: Duration) -> Result<String, String> {
+#[cfg(test)]
+pub(super) fn converse_waiting(from_agent: impl BufRead + Send + 'static, to_agent: impl Write, request: &Request, inbox: Option<Inbox>, emit: &mut impl FnMut(Event), background_wait: Duration) -> Result<String, String> {
+    run(from_agent, to_agent, request, inbox, emit, background_wait, None)
+}
+
+pub(super) fn converse_with_tools(from_agent: impl BufRead + Send + 'static, to_agent: impl Write, request: &Request, inbox: Option<Inbox>, emit: &mut impl FnMut(Event), servers: Vec<Value>, proof: &crate::mcp::session::Ready) -> Result<String, String> {
+    run(from_agent, to_agent, request, inbox, emit, BACKGROUND_WAIT, Some((servers, proof)))
+}
+
+fn run(from_agent: impl BufRead + Send + 'static, mut to_agent: impl Write, request: &Request, mut inbox: Option<Inbox>, emit: &mut impl FnMut(Event),
+       background_wait: Duration, mcp: Option<(Vec<Value>, &crate::mcp::session::Ready)>) -> Result<String, String> {
     let agent = request.agent;
     let name = agent.name();
     // ACP can go quiet during a long tool call. Reading stdout on its own thread lets the inbox still wake us.
@@ -58,9 +68,14 @@ pub(super) fn converse_waiting(from_agent: impl BufRead + Send + 'static, mut to
         Some(error) => Err(error_reason(agent, error)),
         None => Ok(msg["result"].clone()),
     };
+    let startup_deadline = Instant::now() + MODELS_TIMEOUT;
     let answer = |to_agent: &mut dyn Write, id: i64, messages: &mut Messages, emit: &mut dyn FnMut(Event)| -> Result<Value, String> {
         loop {
-            if let Some(msg) = read(to_agent, None, messages, emit, None)?
+            let remaining = startup_deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(format!("{name} did not finish starting within {} seconds.", MODELS_TIMEOUT.as_secs()));
+            }
+            if let Some(msg) = read(to_agent, None, messages, emit, Some(remaining))?
                 && msg["id"] == id
             {
                 return result(msg);
@@ -75,10 +90,11 @@ pub(super) fn converse_waiting(from_agent: impl BufRead + Send + 'static, mut to
         inbox = None; // Claude Code keeps its usual queued delivery on older OpenCode versions.
     }
 
-    send(&mut to_agent, new_session(&request.cwd))?;
+    let servers = mcp.as_ref().map_or(&[][..], |(servers, _)| servers.as_slice());
+    send(&mut to_agent, session_with_servers(&request.cwd, servers))?;
     let session = answer(&mut to_agent, 1, &mut messages, emit)?;
     let session_id = session["sessionId"].as_str().ok_or(format!("{} opened no session", server(agent)))?.to_string();
-    emit(Event::Progress { text: "Session ready. Sending the task.".into() });
+
 
     let prompt = |id, texts: Vec<String>| {
         let blocks: Vec<_> = texts.into_iter().map(|text| json!({ "type": "text", "text": text })).collect();
@@ -96,6 +112,16 @@ pub(super) fn converse_waiting(from_agent: impl BufRead + Send + 'static, mut to
         }
         next_id += 1;
     }
+    if let Some((_, proof)) = mcp {
+        let until = Instant::now() + crate::mcp::session::TIMEOUT;
+        while !proof.observed() {
+            if Instant::now() >= until {
+                return Err(format!("{name} did not discover m4code's MCP tools."));
+            }
+            let _ = read(&mut to_agent, Some(&session_id), &mut messages, emit, Some(Duration::from_millis(50)))?;
+        }
+    }
+    emit(Event::Progress { text: "Session ready. Sending the task.".into() });
     let mut prompt_id = next_id;
     next_id += 1;
     send(&mut to_agent, prompt(prompt_id, vec![request.prompt.clone()]))?;

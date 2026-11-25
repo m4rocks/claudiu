@@ -34,6 +34,9 @@ const READ_TOOLS: &[&str] = &[
     "web_search",
     "read_url",
     "read_url_content",
+    "mcp__m4code__workspace_context",
+    "mcp_m4code_workspace_context",
+    "m4code_workspace_context",
 ];
 
 /// ASCII only: the script's fallback echoes it through cmd, whose code page could garble anything else into JSON agy

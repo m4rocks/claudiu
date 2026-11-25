@@ -21,7 +21,7 @@ use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use futures::StreamExt;
 use gpui::{App, AppContext, Bounds, Context, Entity, EventEmitter, FocusHandle, Focusable, FollowMode, KeystrokeEvent, ListAlignment, ListState, Pixels, Point, Subscription, Window, px};
@@ -183,6 +183,7 @@ pub enum ThreadEvent {
     /// A file a tool acted on was clicked: its path and line (1-based).
     OpenPath(String, Option<usize>),
     ReconnectPermission(Permission),
+    PermissionChanged(Permission),
     /// The user picked a model served by another harness and sent a message: dynamically hand off this chat.
     /// `by_agent` when the agent asked for it (set_model): its `message` is then the agent's, not the user's.
     Handoff { to: Harness, model: Option<String>, message: String, effort: Option<String>, by_agent: bool },
@@ -297,6 +298,8 @@ pub struct Start {
     /// `_meta` for `session/new` and `session/load`.
     pub meta: Value,
     pub mcp_servers: Vec<Value>,
+    pub mcp_tools: Option<crate::mcp::session::SessionTools>,
+    pub launch_args: Vec<String>,
     pub permission: Option<Permission>,
     pub starter: Starter,
     /// Options to apply before the first prompt (`model`, `thought_level`).
@@ -442,6 +445,8 @@ pub struct ThreadView {
     /// Messages typed during a turn, sent one at a time after it.
     queue: VecDeque<Queued>,
     queue_held: bool,
+    workspace_switching: bool,
+    permission_changing: bool,
     queue_edit: Option<queue::Edit>,
     preparing: Option<Queued>,
     interrupting: bool,
@@ -659,6 +664,8 @@ impl ThreadView {
             last_update: None,
             queue,
             queue_held,
+            workspace_switching: false,
+            permission_changing: false,
             queue_edit: None,
             preparing: None,
             interrupting: false,
@@ -736,15 +743,27 @@ impl ThreadView {
         view
     }
 
-    fn start(&mut self, start: Start, cx: &mut Context<Self>) {
+    fn start(&mut self, mut start: Start, cx: &mut Context<Self>) {
         let harness = start.harness;
         cx.spawn(async move |this, cx| {
-            let mut full_access = harness == Harness::Antigravity
+            let mut full_access = harness.adapter().full_access_relaunch
                 && start.permission == Some(Permission::FullAccess)
                 && start.starter != Starter::OtherSession;
             let (connection, mut incoming, opened) = loop {
                 let (events, incoming) = futures::channel::mpsc::unbounded();
-                let launched = launch_session(&start, full_access, events.clone(), cx).await;
+                let mut plan = crate::harness::SessionPlan {
+                    env: start.env.clone(),
+                    args: start.launch_args.clone(),
+                    mcp_servers: start.mcp_servers.clone(),
+                    ..Default::default()
+                };
+                if let Some(tools) = &start.mcp_tools
+                    && let Err(error) = (harness.adapter().configure_mcp)(tools, &mut plan)
+                {
+                    let _ = this.update(cx, |v, cx| v.ended(Some(error), cx));
+                    return;
+                }
+                let launched = startup_deadline("launch", launch_session(&start, &plan, full_access, events.clone(), cx), cx).await;
                 let connection = match launched {
                     Ok(c) => Rc::new(c),
                     Err(why) => {
@@ -758,8 +777,8 @@ impl ThreadView {
                 }).is_err() {
                     return;
                 }
-                let opened = open(&connection, harness, &start).await;
-                if harness == Harness::Antigravity && !full_access && start.permission == Some(Permission::Auto)
+                let opened = startup_deadline("opening the session", open(&connection, harness, &start, &plan.mcp_servers), cx).await;
+                if harness.adapter().full_access_relaunch && !full_access && start.permission == Some(Permission::Auto)
                     && start.starter != Starter::OtherSession && let Ok(session) = &opened
                 {
                     let mut thread = Thread::default();
@@ -768,6 +787,9 @@ impl ThreadView {
                         && Permission::FullAccess.listed(harness, &thread.modes).is_some()
                     {
                         connection.terminate();
+                        if let Some(tools) = &mut start.mcp_tools {
+                            tools.renew();
+                        }
                         full_access = true;
                         continue;
                     }
@@ -789,9 +811,11 @@ impl ThreadView {
                     v.initial_config_id(category, value, cx)
                 }) else { return };
                 let Some(config_id) = config_id else { continue };
-                let response = connection
-                    .request("session/set_config_option", json!({"sessionId": &sid, "configId": &config_id, "value": value}))
-                    .await;
+                let response = startup_deadline(
+                    "applying session options",
+                    connection.request("session/set_config_option", json!({"sessionId": &sid, "configId": &config_id, "value": value})),
+                    cx,
+                ).await;
                 let Ok(()) = this.update(cx, |v, cx| {
                     while let Ok(event) = incoming.try_recv() {
                         v.on_event(event, cx);
@@ -837,7 +861,7 @@ impl ThreadView {
                 }) else { return };
                 let response = match mode {
                     Some(mode) if current.as_deref() == Some(mode) => Ok(Value::Null),
-                    Some(mode) => request_mode(&connection, &sid, mode, config.as_deref()).await,
+                    Some(mode) => startup_deadline("applying permissions", request_mode(&connection, &sid, mode, config.as_deref()), cx).await,
                     None => Err(format!("{} couldn't apply {} permissions.", harness.name(), wanted.label())),
                 };
                 let Ok(applied) = this.update(cx, |v, cx| {
@@ -850,8 +874,10 @@ impl ThreadView {
                         let confirmed = reported.mode.as_deref().or_else(|| {
                             (v.thread.mode != current).then_some(v.thread.mode.as_deref()).flatten()
                         });
-                        if wanted == Permission::ReadOnly && confirmed.is_some() && confirmed != mode {
-                            return Err(format!("{} did not confirm Read-only permissions.", harness.name()));
+                        if confirmed.is_some() && confirmed != mode
+                            || confirmed.is_none() && config.is_some() && current.as_deref() != mode
+                        {
+                            return Err(format!("{} did not confirm {} permissions.", harness.name(), wanted.label()));
                         }
                         v.thread.apply_session(&result);
                         v.thread.mode = mode.map(String::from);
@@ -867,6 +893,19 @@ impl ThreadView {
                     return;
                 }
             }
+            if let Some(tools) = start.mcp_tools.take().filter(|_| start.server.is_none()) {
+                let result = wait_for_mcp(&tools.ready, cx).await;
+                if let Err(why) = result {
+                    connection.terminate();
+                    let _ = this.update(cx, |v, cx| v.ended(Some(why), cx));
+                    return;
+                }
+                while let Ok(event) = incoming.try_recv() {
+                    if this.update(cx, |v, cx| v.on_event(event, cx)).is_err() {
+                        return;
+                    }
+                }
+            }
             let ready = this.update(cx, |v, cx| {
                 if v.phase != Phase::Starting { return false; }
                 v.phase = Phase::Ready;
@@ -874,6 +913,11 @@ impl ThreadView {
                 v.cached_replay = false;
                 v.settle_running_tools();
                 cx.emit(ThreadEvent::Ready(v.session_id.clone().unwrap_or_default()));
+                if let Some(wanted) = start.permission
+                    && v.handoff_permission() == Some(wanted)
+                {
+                    cx.emit(ThreadEvent::PermissionChanged(wanted));
+                }
                 v.send_next(cx);
                 cx.notify();
                 true
@@ -1305,6 +1349,9 @@ impl ThreadView {
     /// Send what is typed; `the_other_way` (Cmd/Ctrl+Enter) queues it when the setting steers, and steers when it
     /// queues.
     fn submit_with(&mut self, the_other_way: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.workspace_switching {
+            return;
+        }
         if self.queue_edit.is_some() {
             self.finish_queue_edit(true, window, cx);
             return;
@@ -1423,6 +1470,8 @@ impl ThreadView {
             && (self.harness.adapter().steers || self.native_steering())
             && self.working
             && !self.queue_held
+            && !self.workspace_switching
+            && !self.permission_changing
             && self.preparing.is_none()
             && self.handoff_after_turn.is_none()
             && self.questions.is_empty()
@@ -1433,7 +1482,7 @@ impl ThreadView {
     }
 
     fn native_steering(&self) -> bool {
-        self.harness != Harness::Claude
+        !self.harness.adapter().steers
             && self.agent_meta.pointer("/steering/supported").and_then(Value::as_bool) == Some(true)
     }
 
@@ -1564,7 +1613,9 @@ impl ThreadView {
     }
 
     fn send_next(&mut self, cx: &mut Context<Self>) {
-        if self.working || self.phase != Phase::Ready || !self.steering.is_empty() || !self.questions.is_empty() || self.restoring_checkpoint() {
+        if self.working || self.phase != Phase::Ready || self.workspace_switching || self.permission_changing
+            || !self.steering.is_empty() || !self.questions.is_empty() || self.restoring_checkpoint()
+        {
             return;
         }
         let (Some(connection), Some(session), Some(events)) = (self.connection.clone(), self.session_id.clone(), self.events.clone()) else { return };
@@ -2152,6 +2203,19 @@ impl ThreadView {
         cx.notify();
     }
 
+    pub(crate) fn hold_workspace_switch(&mut self, holding: bool, cx: &mut Context<Self>) {
+        self.workspace_switching = holding;
+        if !holding {
+            self.send_next(cx);
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn can_move_workspace(&self) -> bool {
+        self.phase == Phase::Ready && !self.has_active_turn() && !self.is_waiting() && !self.has_background_work()
+            && !self.permission_changing
+    }
+
     pub(crate) fn permission_for_relaunch(&self) -> Option<Permission> {
         let permission = self.permission()?;
         if self.antigravity_full_access || permission.native(self.harness) == self.thread.mode.as_deref() {
@@ -2172,11 +2236,15 @@ impl ThreadView {
     }
 
     pub(crate) fn set_permission(&mut self, wanted: Permission, cx: &mut Context<Self>) {
-        if self.phase != Phase::Ready || self.subagent_edits.is_some() { return; }
+        if self.phase != Phase::Ready || self.subagent_edits.is_some()
+            || self.workspace_switching || self.permission_changing
+        {
+            return;
+        }
         let Some(permission) = wanted.resolve(&self.permissions()) else { return };
         let Some(mode) = permission.listed(self.harness, &self.thread.modes) else { return };
         let (Some(connection), Some(session)) = (self.connection.clone(), self.session_id.clone()) else { return };
-        if self.harness == Harness::Antigravity && self.antigravity_full_access != (permission == Permission::FullAccess) {
+        if self.harness.adapter().full_access_relaunch && self.antigravity_full_access != (permission == Permission::FullAccess) {
             if self.working || self.compaction.running || self.is_waiting() || self.has_background_work() {
                 self.permission_error("Wait for Antigravity to finish its current work before reconnecting.".into(), cx);
             } else {
@@ -2187,20 +2255,41 @@ impl ThreadView {
         let auto_fallback = wanted == Permission::Auto && permission == Permission::FullAccess;
         if self.thread.mode.as_deref() == Some(mode) {
             self.auto_fallback = auto_fallback;
+            cx.emit(ThreadEvent::PermissionChanged(wanted));
             return;
         }
+        let current = self.thread.mode.clone();
         let config = self.thread.option("mode").map(|opt| opt.id.clone());
         let reply = request_mode(&connection, &session, mode, config.as_deref());
+        self.permission_changing = true;
+        cx.notify();
         cx.spawn(async move |this, cx| {
-            let result = reply.await;
-            let _ = this.update(cx, |v, cx| match result {
-                Ok(result) => {
-                    v.thread.apply_session(&result);
-                    v.thread.mode = Some(mode.into());
-                    v.auto_fallback = auto_fallback;
-                    cx.notify();
+            let result = startup_deadline("changing permissions", reply, cx).await;
+            let _ = this.update(cx, |v, cx| {
+                v.permission_changing = false;
+                match result {
+                    Ok(result) => {
+                        let mut reported = Thread::default();
+                        reported.apply_session(&result);
+                        let confirmed = reported.mode.or_else(|| (v.thread.mode != current).then(|| v.thread.mode.clone()).flatten());
+                        v.thread.apply_session(&result);
+                        if confirmed.as_deref().is_some_and(|id| id != mode) || (confirmed.is_none() && config.is_some()) {
+                            v.thread.mode = confirmed.or(current);
+                            v.queue_held = true;
+                            v.permission_error(format!("{} did not confirm {} permissions.", v.harness.name(), wanted.label()), cx);
+                        } else {
+                            v.thread.mode = Some(mode.into());
+                            v.auto_fallback = auto_fallback;
+                            cx.emit(ThreadEvent::PermissionChanged(wanted));
+                            v.send_next(cx);
+                        }
+                    }
+                    Err(why) => {
+                        v.queue_held = true;
+                        v.permission_error(why, cx);
+                    }
                 }
-                Err(why) => v.permission_error(why, cx),
+                cx.notify();
             });
         }).detach();
     }
@@ -2996,28 +3085,41 @@ struct Opened {
     replayed: bool,
 }
 
-async fn launch_session(start: &Start, full_access: bool, events: futures::channel::mpsc::UnboundedSender<Event>, cx: &gpui::AsyncApp) -> Result<Connection, String> {
+async fn wait_for_mcp(proof: &crate::mcp::session::Ready, cx: &gpui::AsyncApp) -> Result<(), String> {
+    let until = Instant::now() + crate::mcp::session::TIMEOUT;
+    while !proof.observed() {
+        if Instant::now() >= until {
+            return Err("The adapter did not discover m4code's MCP tools before the startup deadline.".into());
+        }
+        cx.background_executor().timer(Duration::from_millis(50)).await;
+    }
+    Ok(())
+}
+
+async fn startup_deadline<T>(step: &str, request: impl Future<Output = Result<T, String>>, cx: &gpui::AsyncApp) -> Result<T, String> {
+    use futures::future::{Either, select};
+    let timer = cx.background_executor().timer(Duration::from_secs(60));
+    match select(std::pin::pin!(request), std::pin::pin!(timer)).await {
+        Either::Left((result, _)) => result,
+        Either::Right(_) => Err(format!("Timed out while {step}.")),
+    }
+}
+
+async fn launch_session(start: &Start, plan: &crate::harness::SessionPlan, full_access: bool, events: futures::channel::mpsc::UnboundedSender<Event>, cx: &gpui::AsyncApp) -> Result<Connection, String> {
     let cwd = start.cwd.clone();
-    let env = start.env.clone();
+    let env = plan.env.clone();
     let server = start.server.clone();
     let harness = start.harness;
-    let codex_model = (harness == Harness::Codex)
-        .then(|| start.options.iter().find(|(k, _)| *k == "model").map(|(_, v)| v.clone()))
-        .flatten()
-        .filter(|m| !m.is_empty());
+    let model = start.options.iter().find(|(k, _)| *k == "model").map(|(_, v)| v.as_str()).filter(|m| !m.is_empty());
+    let mut launch_args = plan.args.clone();
+    launch_args.extend((harness.adapter().launch_args)(model, full_access));
     // Finding the server can read PATH through the login shell.
     cx.background_executor().spawn(async move {
         let (program, mut args) = match server {
             Some(s) => s,
             None => (harness.adapter().server)()?,
         };
-        if let Some(model) = codex_model {
-            args.push("-c".into());
-            args.push(format!("model={model:?}"));
-        }
-        if full_access {
-            args.push("--dangerously-skip-permissions".into());
-        }
+        args.extend(launch_args);
         Connection::start(&Launch { program, args, cwd, env }, events)
     }).await
 }
@@ -3031,14 +3133,28 @@ fn request_mode(connection: &Connection, session: &str, mode: &str, config: Opti
     connection.request(method, params)
 }
 
-async fn open(c: &Connection, harness: Harness, start: &Start) -> Result<Opened, String> {
+fn check_workspace(expected: &std::path::Path, result: &Value) -> Result<(), String> {
+    let Some(cwd) = result["cwd"].as_str().or_else(|| result.pointer("/_meta/m4code/cwd").and_then(Value::as_str)) else {
+        return Ok(());
+    };
+    let actual = std::path::Path::new(cwd);
+    let expected = dunce::canonicalize(expected).unwrap_or_else(|_| expected.to_path_buf());
+    let actual = dunce::canonicalize(actual).unwrap_or_else(|_| actual.to_path_buf());
+    if crate::platform::path_key(&expected) != crate::platform::path_key(&actual) {
+        return Err(format!("The adapter opened {} instead of {}.", actual.display(), expected.display()));
+    }
+    Ok(())
+}
+
+async fn open(c: &Connection, harness: Harness, start: &Start, mcp_servers: &[Value]) -> Result<Opened, String> {
     let initialized = c.request("initialize", acp::initialize_params()).await.map_err(|e| format!("{} didn't start: {e}", harness.name()))?;
     let capabilities = initialized["agentCapabilities"].clone();
     let agent_meta = initialized["_meta"].clone();
-    let mut params = json!({"cwd": start.cwd, "mcpServers": start.mcp_servers, "_meta": start.meta});
+    let mut params = json!({"cwd": start.cwd, "mcpServers": mcp_servers, "_meta": start.meta});
     match &start.session_id {
         None => {
             let result = c.request("session/new", params).await.map_err(|e| format!("{} couldn't start a session: {e}", harness.name()))?;
+            check_workspace(&start.cwd, &result)?;
             let id = result["sessionId"].as_str().ok_or("the agent named no session")?.to_string();
             Ok(Opened { session_id: id, result, capabilities, agent_meta, replayed: false })
         }
@@ -3050,6 +3166,7 @@ async fn open(c: &Connection, harness: Harness, start: &Start) -> Result<Opened,
                 Reopen::Resume => "session/resume",
             };
             let result = c.request(method, params).await.map_err(|e| format!("{} couldn't open the session: {e}", harness.name()))?;
+            check_workspace(&start.cwd, &result)?;
             Ok(Opened { session_id: id.clone(), result, capabilities, agent_meta, replayed: reopen == Reopen::Load })
         }
     }
@@ -3097,7 +3214,7 @@ mod tests {
     fn test_start(cwd: std::path::PathBuf, harness: Harness) -> super::Start {
         super::Start {
             record_id: String::new(), harness, all_models: vec![], picked: vec![], cwd,
-            env: vec![], mcp_servers: vec![], meta: serde_json::Value::Null, session_id: None, permission: None, starter: crate::harness::defaults::Starter::User,
+            env: vec![], mcp_servers: vec![], mcp_tools: None, launch_args: vec![], meta: serde_json::Value::Null, session_id: None, permission: None, starter: crate::harness::defaults::Starter::User,
             options: vec![], prompt: None, prior_entries: vec![], inline_visuals: true,
             server: Some(("definitely-not-a-real-program-m4code".into(), vec![])),
         }
@@ -3840,7 +3957,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let start = super::Start {
             record_id: String::new(), harness: Harness::Claude, all_models: vec![], picked: vec![], cwd: dir.path().to_path_buf(),
-            env: vec![], mcp_servers: vec![], meta: serde_json::Value::Null, session_id: None, permission: None, starter: crate::harness::defaults::Starter::User, options: vec![],
+            env: vec![], mcp_servers: vec![], mcp_tools: None, launch_args: vec![], meta: serde_json::Value::Null, session_id: None, permission: None, starter: crate::harness::defaults::Starter::User, options: vec![],
             prompt: None, prior_entries: vec![], inline_visuals: true, server: Some(("definitely-not-a-real-program-m4code".into(), vec![])),
         };
         let (view, cx) = cx.add_window_view(|window, cx| super::ThreadView::new(start, window, cx));
@@ -3859,7 +3976,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let start = super::Start {
             record_id: String::new(), harness: Harness::Claude, all_models: vec![], picked: vec![], cwd: dir.path().to_path_buf(),
-            env: vec![], mcp_servers: vec![], meta: serde_json::Value::Null, session_id: None, permission: None, starter: crate::harness::defaults::Starter::User, options: vec![],
+            env: vec![], mcp_servers: vec![], mcp_tools: None, launch_args: vec![], meta: serde_json::Value::Null, session_id: None, permission: None, starter: crate::harness::defaults::Starter::User, options: vec![],
             prompt: None, prior_entries: vec![], inline_visuals: true, server: Some(("definitely-not-a-real-program-m4code".into(), vec![])),
         };
         let (view, cx) = cx.add_window_view(|window, cx| super::ThreadView::new(start, window, cx));
@@ -3886,7 +4003,7 @@ mod tests {
             picked: vec![],
             cwd: dir.path().to_path_buf(),
             env: vec![],
-            mcp_servers: vec![],
+            mcp_servers: vec![], mcp_tools: None, launch_args: vec![],
             meta: serde_json::Value::Null,
             session_id: None,
             permission: None, starter: crate::harness::defaults::Starter::User,
@@ -3935,7 +4052,7 @@ mod tests {
             picked: vec![],
             cwd: dir.path().to_path_buf(),
             env: vec![],
-            mcp_servers: vec![],
+            mcp_servers: vec![], mcp_tools: None, launch_args: vec![],
             meta: serde_json::Value::Null,
             session_id: None,
             permission: None, starter: crate::harness::defaults::Starter::User,
@@ -3977,7 +4094,7 @@ mod tests {
             picked: vec![],
             cwd: dir.path().to_path_buf(),
             env: vec![],
-            mcp_servers: vec![],
+            mcp_servers: vec![], mcp_tools: None, launch_args: vec![],
             meta: serde_json::Value::Null,
             session_id: None,
             permission: None, starter: crate::harness::defaults::Starter::User,
@@ -4011,7 +4128,7 @@ mod tests {
             picked: vec![],
             cwd: dir.path().to_path_buf(),
             env: vec![],
-            mcp_servers: vec![],
+            mcp_servers: vec![], mcp_tools: None, launch_args: vec![],
             meta: serde_json::Value::Null,
             session_id: None,
             permission: None, starter: crate::harness::defaults::Starter::User,
@@ -4106,7 +4223,7 @@ mod tests {
             picked: vec![],
             cwd: dir.path().to_path_buf(),
             env: vec![],
-            mcp_servers: vec![],
+            mcp_servers: vec![], mcp_tools: None, launch_args: vec![],
             meta: serde_json::Value::Null,
             session_id: None,
             permission: None, starter: crate::harness::defaults::Starter::User,
