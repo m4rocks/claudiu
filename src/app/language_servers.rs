@@ -48,6 +48,7 @@ impl Workspace {
 
     fn start_server(&mut self, id: &Id, kind: &'static lsp::Kind, cx: &mut Context<Self>) {
         let Some(root) = self.editor_cwd(id) else { return };
+        let generation = self.panes.get(id).map_or(0, |p| p.server_gen);
         let (events, mut incoming) = futures::channel::mpsc::unbounded();
         let id = id.clone();
         cx.spawn(async move |this, cx| {
@@ -60,6 +61,9 @@ impl Workspace {
                 .await;
             let ready = this.update(cx, |ws, cx| {
                 let Some(pane) = ws.panes.get_mut(&id) else { return false };
+                if pane.server_gen != generation {
+                    return false;
+                }
                 let state = match started {
                     Ok(server) => ServerState::Ready(Rc::new(server)),
                     Err(None) => ServerState::Missing,
@@ -81,7 +85,7 @@ impl Workspace {
                 return;
             }
             while let Some(event) = incoming.next().await {
-                if this.update(cx, |ws, cx| ws.on_server_event(&id, kind.program, event, cx)).is_err() {
+                if this.update(cx, |ws, cx| ws.on_server_event(&id, generation, kind.program, event, cx)).is_err() {
                     break;
                 }
             }
@@ -89,8 +93,11 @@ impl Workspace {
         .detach();
     }
 
-    fn on_server_event(&mut self, id: &Id, program: &'static str, event: Event, cx: &mut Context<Self>) {
+    fn on_server_event(&mut self, id: &Id, generation: u64, program: &'static str, event: Event, cx: &mut Context<Self>) {
         let Some(pane) = self.panes.get_mut(id) else { return };
+        if pane.server_gen != generation {
+            return;
+        }
         match event {
             Event::Diagnostics(path, diagnostics) => {
                 let key = path_key(&path);

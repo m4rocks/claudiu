@@ -98,11 +98,29 @@ impl Workspace {
                 if let Some(id) = self.active_id().cloned()
                     && let Some(thread) = self.live_view(&id).and_then(SessionView::thread).cloned()
                 {
-                    let cur = thread.read(cx).harness;
+                    let (cur, active_turn, blocked) = {
+                        let t = thread.read(cx);
+                        (t.harness, t.has_active_turn(), t.is_read_only_unconfirmed() || t.is_workspace_switching())
+                    };
+                    if blocked {
+                        return;
+                    }
                     if cur == harness {
                         if let Some(opt_id) = thread.read(cx).thread.option("model").map(|o| o.id.clone()) {
                             thread.update(cx, |t, cx| t.set_option(opt_id, model_id, cx));
                         }
+                    } else if active_turn {
+                        let name = self
+                            .store
+                            .data
+                            .settings
+                            .aggregated_models()
+                            .into_iter()
+                            .find(|m| m.harness == harness && m.id == model_id)
+                            .map_or_else(|| harness.name().to_string(), |m| m.name);
+                        thread.update(cx, |t, cx| {
+                            t.schedule_handoff(crate::harness::CatalogModel { harness, id: model_id, name }, false, cx);
+                        });
                     } else {
                         self.dynamic_handoff(&id, harness, (!model_id.is_empty()).then_some(model_id), String::new(), false, None, window, cx);
                     }
@@ -132,6 +150,10 @@ impl Workspace {
                 if let Some(id) = self.active_id().cloned()
                     && let Some(thread) = self.live_view(&id).and_then(SessionView::thread).cloned()
                 {
+                    if thread.read(cx).has_active_turn() || thread.read(cx).is_read_only_unconfirmed() || thread.read(cx).is_workspace_switching() {
+                        self.toast("Wait for the current turn to finish before compacting.", cx);
+                        return;
+                    }
                     let transcript = thread.read(cx).thread.transcript(40);
                     self.compact_session(&id, transcript, None, window, cx);
                 }

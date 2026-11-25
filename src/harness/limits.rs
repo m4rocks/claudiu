@@ -241,13 +241,19 @@ fn format_token_count(n: u64) -> String {
     }
 }
 
-/// Whether an agent reply or error text indicates the provider's usage/rate limit was hit.
+/// Whether a provider error message (or short standalone provider error reply) indicates the usage/rate limit was hit.
 pub fn looks_like_usage_limit_error(text: &str) -> bool {
-    let lower = text.to_ascii_lowercase();
-    lower.contains("hit your usage limit")
-        || lower.contains("usage limit reached")
-        || lower.contains("rate limit exceeded")
-        || lower.contains("rate_limit_error")
+    let trimmed = text.trim();
+    if trimmed.is_empty() || trimmed.len() > 320 {
+        return false;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    lower.starts_with("you've hit your usage limit")
+        || lower.starts_with("you\u{2019}ve hit your usage limit")
+        || lower.starts_with("usage limit reached")
+        || lower.starts_with("rate limit exceeded")
+        || lower.starts_with("rate_limit_error")
+        || lower.contains("429 too many requests")
 }
 
 #[cfg(test)]
@@ -311,5 +317,6 @@ mod tests {
         assert!(looks_like_usage_limit_error("You've hit your usage limit."));
         assert!(looks_like_usage_limit_error("rate_limit_error: 429"));
         assert!(!looks_like_usage_limit_error("Build succeeded."));
+        assert!(!looks_like_usage_limit_error("To handle HTTP errors, retry when the API returns `rate limit exceeded` with backoff."));
     }
 }

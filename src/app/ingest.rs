@@ -223,15 +223,44 @@ impl Workspace {
         }
     }
 
-    /// The stored usage limits for `harness`, if any.
-    pub(crate) fn usage_for_harness(&self, harness: Harness) -> Option<UsageLimits> {
+    /// The stored usage limits for `harness` (and optional `model_id` for multi-pool providers like Antigravity).
+    pub(crate) fn usage_for_harness_model(&self, harness: Harness, model_id: Option<&str>) -> Option<UsageLimits> {
         match harness {
             Harness::Claude => Some(self.store.data.claude_usage.clone()),
-            Harness::Codex | Harness::Antigravity => {
-                let key = harness.agent()?.provider().key;
-                self.store.data.subagent_limits.get(key)?.first().map(|p| p.usage.clone())
+            Harness::Codex => self.store.data.subagent_limits.get("codex")?.first().map(|p| p.usage.clone()),
+            Harness::Antigravity => {
+                let pools = self.store.data.subagent_limits.get("antigravity")?;
+                if let Some(model) = model_id.map(str::to_ascii_lowercase) {
+                    let wants_claude = model.contains("claude") || model.contains("gpt") || model.contains("opus") || model.contains("sonnet");
+                    if let Some(pool) = pools.iter().find(|p| {
+                        let name = p.name.to_ascii_lowercase();
+                        if wants_claude {
+                            name.contains("claude") || name.contains("gpt")
+                        } else {
+                            name.contains("gemini")
+                        }
+                    }) {
+                        return Some(pool.usage.clone());
+                    }
+                }
+                pools.first().map(|p| p.usage.clone())
             }
             Harness::OpenCode => None,
+        }
+    }
+
+    fn harness_probably_available(&self, harness: Harness) -> bool {
+        if !harness.is_registered() {
+            return false;
+        }
+        match harness {
+            Harness::Claude => self.claude_exe.is_some(),
+            Harness::Codex | Harness::OpenCode | Harness::Antigravity => {
+                // Available if we have a cached model catalog or usage reading for it, or its CLI is on PATH.
+                let has_models = self.store.data.settings.aggregated_models().iter().any(|m| m.harness == harness && !m.id.is_empty());
+                let has_limits = harness.agent().is_some_and(|a| self.store.data.subagent_limits.contains_key(a.provider().key));
+                has_models || has_limits
+            }
         }
     }
 
@@ -239,12 +268,16 @@ impl Workspace {
     pub(crate) fn best_fallback_model(&self, excluded: Harness) -> Option<crate::harness::CatalogModel> {
         let now = crate::store::now();
         let enabled = self.store.data.settings.enabled_harnesses_list();
-        let mut candidates: Vec<(f32, Harness)> = enabled
+        let all = self.store.data.settings.aggregated_models();
+        let mut candidates: Vec<(f32, crate::harness::CatalogModel)> = enabled
             .into_iter()
-            .filter(|&h| h != excluded && h.is_registered())
+            .filter(|&h| h != excluded && self.harness_probably_available(h))
             .filter_map(|h| {
+                let model = all.iter().find(|m| m.harness == h).cloned().unwrap_or_else(|| {
+                    crate::harness::CatalogModel { harness: h, id: String::new(), name: h.name().into() }
+                });
                 let util = self
-                    .usage_for_harness(h)
+                    .usage_for_harness_model(h, (!model.id.is_empty()).then_some(model.id.as_str()))
                     .and_then(|u| {
                         [u.five_hour.as_ref(), u.seven_day.as_ref()]
                             .into_iter()
@@ -254,20 +287,15 @@ impl Workspace {
                             .reduce(f32::max)
                     })
                     .unwrap_or(0.0);
-                (util < 0.95).then_some((util, h))
+                (util < 0.95).then_some((util, model))
             })
             .collect();
         candidates.sort_by(|a, b| a.0.total_cmp(&b.0));
-        let (_, harness) = candidates.into_iter().next()?;
-        let all = self.store.data.settings.aggregated_models();
-        all.into_iter().find(|m| m.harness == harness).or_else(|| {
-            Some(crate::harness::CatalogModel { harness, id: String::new(), name: harness.name().into() })
-        })
+        candidates.into_iter().next().map(|(_, model)| model)
     }
 
     /// Push fresh usage readings into every running thread on `harness` so runway nudges and auto-handoff fire live.
     pub(crate) fn notify_threads_usage(&mut self, harness: Harness, cx: &mut Context<Self>) {
-        let Some(usage) = self.usage_for_harness(harness) else { return };
         let auto_handoff = self.store.data.settings.auto_handoff_on_limit;
         let fallback = self.best_fallback_model(harness);
         let threads: Vec<_> = self
@@ -277,6 +305,8 @@ impl Workspace {
             .filter(|t| t.read(cx).harness == harness)
             .collect();
         for thread in threads {
+            let model_id = thread.read(cx).thread.option("model").map(|o| o.current.clone());
+            let Some(usage) = self.usage_for_harness_model(harness, model_id.as_deref()) else { continue };
             let fallback = fallback.clone();
             thread.update(cx, |t, cx| {
                 t.fallback_model = fallback;

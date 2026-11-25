@@ -390,9 +390,80 @@ pub fn sync_dir(store_root: &Path, target_dir: &Path, enabled: &[String]) -> io:
     }
 }
 
+/// Track shared `.agents/skills` symlinks that m4code itself created so we never prune repo-owned symlinks.
+fn shared_links_manifest(store_root: &Path) -> PathBuf {
+    store_root.join(".shared-links.json")
+}
+
+fn load_shared_links(store_root: &Path) -> std::collections::HashSet<PathBuf> {
+    fs::read_to_string(shared_links_manifest(store_root))
+        .ok()
+        .and_then(|s| serde_json::from_str::<Vec<PathBuf>>(&s).ok())
+        .map(|v| v.into_iter().collect())
+        .unwrap_or_default()
+}
+
+fn save_shared_links(store_root: &Path, links: &std::collections::HashSet<PathBuf>) {
+    let mut sorted: Vec<&PathBuf> = links.iter().collect();
+    sorted.sort();
+    if let Ok(text) = serde_json::to_string(&sorted) {
+        let _ = crate::datadir::write_atomic(&shared_links_manifest(store_root), &text);
+    }
+}
+
+fn sync_shared_dir(shared_root: &Path, target_dir: &Path, wanted: &[String], managed: &mut std::collections::HashSet<PathBuf>) -> io::Result<()> {
+    let mut last_err = None;
+    if target_dir.is_dir() {
+        for entry in fs::read_dir(target_dir)?.flatten() {
+            let path = entry.path();
+            if !managed.contains(&path) {
+                continue;
+            }
+            let name = entry.file_name();
+            let keep = name.to_str().is_some_and(|n| {
+                wanted.iter().any(|e| e == n) && shared_root.join(n).join("SKILL.md").is_file()
+            });
+            if !keep {
+                if let Err(e) = remove_dir_link(&path) {
+                    last_err = Some(e);
+                } else {
+                    managed.remove(&path);
+                }
+            }
+        }
+    }
+    for name in wanted {
+        if !valid_skill_name(name) {
+            continue;
+        }
+        let src = shared_root.join(name);
+        if !src.join("SKILL.md").is_file() {
+            continue;
+        }
+        if let Err(e) = fs::create_dir_all(target_dir) {
+            last_err = Some(e);
+            continue;
+        }
+        let dst = target_dir.join(name);
+        if fs::symlink_metadata(&dst).is_ok() {
+            continue;
+        }
+        match link_dir(&src, &dst) {
+            Ok(()) => {
+                managed.insert(dst);
+            }
+            Err(e) => last_err = Some(e),
+        }
+    }
+    match last_err {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
+}
+
 /// Sync global and per-project skills into every active harness (and prune stale m4code links from inactive ones).
 /// Repo skills placed in the shared `.agents/skills` folder are also projected into other active harnesses' project
-/// skill folders so every model sees the same project skills without duplicating files.
+/// skill folders so every model sees the same project skills without duplicating files or pruning repo-owned symlinks.
 /// Returns human-readable error strings for any directories that failed to sync.
 pub fn sync_all(store_root: &Path, home: &Path, active: &[Harness], config: &SkillsConfig, projects: &[(String, PathBuf)]) -> Vec<String> {
     let mut errors = Vec::new();
@@ -403,6 +474,8 @@ pub fn sync_all(store_root: &Path, home: &Path, active: &[Harness], config: &Ski
             errors.push(format!("{} global skills: {e}", harness.name()));
         }
     }
+    let mut managed_shared = load_shared_links(store_root);
+    let initial_shared = managed_shared.clone();
     for (project_id, project_path) in projects {
         if !project_path.is_dir() {
             continue;
@@ -434,11 +507,14 @@ pub fn sync_all(store_root: &Path, home: &Path, active: &[Harness], config: &Ski
             }
             if dir != shared_root {
                 let shared_wanted = if active.contains(&harness) { shared_repo_skills.as_slice() } else { &[] };
-                if let Err(e) = sync_dir(&shared_root, &dir, shared_wanted) {
+                if let Err(e) = sync_shared_dir(&shared_root, &dir, shared_wanted, &mut managed_shared) {
                     errors.push(format!("{} shared repo skills in {}: {e}", harness.name(), project_path.display()));
                 }
             }
         }
+    }
+    if managed_shared != initial_shared {
+        save_shared_links(store_root, &managed_shared);
     }
     errors
 }

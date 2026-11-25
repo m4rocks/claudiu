@@ -459,7 +459,7 @@ impl ThreadView {
                 let citations = elements::inline_citations_row(ix, cached.citations.clone());
                 let mut view = chat_markdown(&mut self.markdown, ix, text, cx);
                 if self.inline_visuals {
-                    view = crate::visual::ui::transcript(view, Scope { call: format!("entry-{ix}"), ui: self.card_ui.clone() });
+                    view = crate::visual::ui::transcript(view, Scope { call: format!("entry-{ix}"), row: Some(ix), ui: self.card_ui.clone() });
                 }
                 div().px(px(2.0)).flex().flex_col().gap(px(6.0)).child(view).children(citations).into_any_element()
             }
@@ -1032,8 +1032,11 @@ impl ThreadView {
                             .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| v.open_tool_output(&out_id, cx))),
                     )
                     .child(
-                        button(SharedString::from(format!("bg-tool-stop-{i}")), "Stop", false)
-                            .on_click(cx.listener(|v, _: &ClickEvent, _, cx| v.interrupt(cx))),
+                        button(SharedString::from(format!("bg-tool-stop-{i}")), "Interrupt", false)
+                            .on_click(cx.listener(|v, _: &ClickEvent, _, cx| {
+                                v.settle_running_tools();
+                                v.interrupt(cx);
+                            })),
                     ),
             );
         }

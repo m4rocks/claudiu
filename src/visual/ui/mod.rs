@@ -35,6 +35,7 @@ pub struct OpenFile {
     pub path: String,
     pub line: Option<u32>,
     pub end_line: Option<u32>,
+    pub row: Option<usize>,
 }
 
 impl EventEmitter<SendText> for CardUi {}
@@ -92,6 +93,7 @@ impl CardUi {
 #[derive(Clone)]
 pub struct Scope {
     pub call: String,
+    pub row: Option<usize>,
     pub ui: Entity<CardUi>,
 }
 
@@ -101,7 +103,7 @@ pub(crate) fn transcript(view: TextView, scope: Scope) -> TextView {
         .block_parser(transcript_block)
         .block_renderer(NODE, move |node, window, cx| {
             let Some((offset, tree)) = node.data::<(usize, Tree)>() else { return gpui::IntoElement::into_any_element(gpui::div()); };
-            let block = Scope { call: format!("{}-{offset}", scope.call), ui: scope.ui.clone() };
+            let block = Scope { call: format!("{}-{offset}", scope.call), row: scope.row, ui: scope.ui.clone() };
             render::render(tree, &block, window, cx)
         });
     view.markdown_extensions(extensions)
@@ -156,7 +158,7 @@ mod tests {
     struct Sample(String, Entity<super::CardUi>);
     impl Render for Sample {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            let scope = super::Scope { call: "c".into(), ui: self.1.clone() };
+            let scope = super::Scope { call: "c".into(), row: None, ui: self.1.clone() };
             div().w(gpui::px(600.0)).child(super::transcript(crate::github::ui::markdown("t".into(), &self.0), scope))
         }
     }

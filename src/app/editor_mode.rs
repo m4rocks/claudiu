@@ -62,6 +62,8 @@ pub struct EditorPane {
     pub comment: Option<super::LineComment>,
     /// Language servers by program name; dropping the pane (the session ended) stops them.
     pub servers: HashMap<&'static str, super::language_servers::ServerState>,
+    /// Bumped when switching worktrees so stale LSP startup/exit events from the old checkout are ignored.
+    pub server_gen: u64,
     /// Tells the pane when its folder changes on disk (see `watch_folder`); while there is none, every tick lists
     /// the folder again.
     pub watcher: Option<notify::RecommendedWatcher>,
@@ -249,6 +251,7 @@ impl Workspace {
                 picker: None,
                 comment: None,
                 servers: HashMap::new(),
+            server_gen: 0,
                 watcher: None,
                 git_dir: None,
                 nested_git_dirs: vec![],
@@ -335,7 +338,7 @@ impl Workspace {
 
     /// Watch the session's folder, so the tree and its change marks follow the disk as soon as it changes rather than
     /// on the next tick, and an unchanged folder is never walked again.
-    fn watch_folder(&mut self, id: &Id, cx: &mut Context<Self>) {
+    pub(super) fn watch_folder(&mut self, id: &Id, cx: &mut Context<Self>) {
         let Some(root) = self.editor_cwd(id) else { return };
         let (tx, mut rx) = futures::channel::mpsc::unbounded::<Vec<PathBuf>>();
         let id = id.clone();

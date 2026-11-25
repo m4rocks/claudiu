@@ -111,9 +111,31 @@ struct R {
 
 pub fn render(tree: &Tree, scope: &Scope, window: &mut Window, cx: &mut App) -> AnyElement {
     let state = scope.ui.read(cx).clone();
-    let mut r = R { font: window.text_style().font(), uid: tree.uid, links: 0, texts: 0, screen_scale: window.scale_factor(), scope: scope.clone(), state, checks: Vec::new() };
+    let mut checks = Vec::new();
+    collect_checks(&tree.nodes, &scope.call, tree.uid, &mut checks);
+    let mut r = R { font: window.text_style().font(), uid: tree.uid, links: 0, texts: 0, screen_scale: window.scale_factor(), scope: scope.clone(), state, checks };
     let kids = r.children(&tree.nodes, false, &Ctx::root());
     div().flex().flex_col().gap(px(8.0)).my(px(4.0)).children(kids).into_any_element()
+}
+
+fn collect_checks(nodes: &[Node], call: &str, uid: u64, out: &mut Vec<(String, String, bool)>) {
+    for node in nodes {
+        if let Node::El(e) = node {
+            if matches!(e.tag.as_str(), "check" | "checkbox") {
+                let key = format!("{call}/{uid}/{}", e.seq);
+                let default = e.attr("checked").is_some();
+                let label = e
+                    .attr("label")
+                    .or_else(|| e.attr("name"))
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| "Option".into());
+                out.push((key, label, default));
+            }
+            collect_checks(&e.children, call, uid, out);
+        }
+    }
 }
 
 impl R {
@@ -181,7 +203,6 @@ impl R {
             .filter(|s| !s.is_empty())
             .map(str::to_string)
             .unwrap_or_else(|| "Option".into());
-        self.checks.push((key.clone(), label.clone(), default));
         let checked = self.state.is_checked(&key, default);
         let ui = self.scope.ui.clone();
         let toggle_key = key.clone();
@@ -228,8 +249,11 @@ impl R {
                 .child(hint)
                 .cursor_pointer()
                 .hover(|s| s.border_color(tok("accent")))
-                .on_click(move |_, _, cx| {
-                    ui.update(cx, |_, cx| cx.emit(OpenFile { path: path.clone(), line, end_line }));
+                .on_click({
+                    let row = self.scope.row;
+                    move |_, _, cx| {
+                        ui.update(cx, |_, cx| cx.emit(OpenFile { path: path.clone(), line, end_line, row }));
+                    }
                 })
                 .into_any_element();
         }

@@ -50,7 +50,7 @@ impl Workspace {
         let target = meta.provider_sessions.get(to.key()).cloned();
         let (from_name, transcript, mut prior_entries, count, permission) = {
             let t = thread.read(cx);
-            (t.harness.name(), t.thread.transcript_after(target.as_ref().map_or(0, |s| s.after_entry), LAST_ENTRIES), t.thread.entries.clone(), t.thread.entries.len(), t.handoff_permission())
+            (t.harness.name(), t.thread.transcript_after(target.as_ref().map_or(0, |s| s.after_entry), LAST_ENTRIES), t.thread.entries.clone(), t.thread.entries.len(), t.permission_for_relaunch())
         };
         if !meta.session_id.is_empty() {
             meta.provider_sessions.insert(meta.harness.key().into(), crate::store::ProviderSession {
@@ -250,7 +250,21 @@ impl Workspace {
     /// generation (falling back to a condensed tail of the transcript if unavailable) and restart the session in place
     /// seeded with the compacted context.
     pub(super) fn compact_session(&mut self, id: &str, transcript: String, instructions: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(rec) = self.store.session(id).cloned() else { return };
+        if self.compacting.contains(id) || self.pending_handoffs.contains_key(id) || self.switching_worktree.contains_key(id) {
+            return;
+        }
+        let Some(thread) = self.live_view(id).and_then(|v| v.thread()).cloned() else { return };
+        if thread.read(cx).has_active_turn() {
+            self.toast("Wait for the current turn to finish before compacting.", cx);
+            return;
+        }
+        let source_entity = thread.entity_id();
+        let entry_count = thread.read(cx).thread.entries.len();
+        self.compacting.insert(id.to_string());
+        let Some(rec) = self.store.session(id).cloned() else {
+            self.compacting.remove(id);
+            return;
+        };
         let meta = rec.agent.clone().unwrap_or_default();
         let gen_model = self.store.data.settings.text_generation_model.clone().unwrap_or_else(|| {
             crate::store::TextGenerationModel {
@@ -280,18 +294,22 @@ impl Workspace {
                 fallback
             };
             let _ = this.update_in(cx, |ws, window, cx| {
-                ws.finish_compact_session(&session_id, summary, window, cx);
+                ws.compacting.remove(&session_id);
+                ws.finish_compact_session(&session_id, source_entity, entry_count, summary, window, cx);
             });
         })
         .detach();
     }
 
-    fn finish_compact_session(&mut self, id: &str, summary: String, window: &mut Window, cx: &mut Context<Self>) {
+    fn finish_compact_session(&mut self, id: &str, source_entity: gpui::EntityId, entry_count: usize, summary: String, window: &mut Window, cx: &mut Context<Self>) {
         if self.pending_handoffs.contains_key(id) || self.switching_worktree.contains_key(id) {
             return;
         }
         let Some(mut rec) = self.store.session(id).cloned() else { return };
         let Some(thread) = self.live_view(id).and_then(|v| v.thread()).cloned() else { return };
+        if thread.entity_id() != source_entity || thread.read(cx).thread.entries.len() != entry_count || thread.read(cx).has_active_turn() {
+            return;
+        }
         let (mut prior_entries, permission) = {
             let t = thread.read(cx);
             (t.thread.entries.clone(), t.permission_for_relaunch())

@@ -21,7 +21,14 @@ impl Workspace {
                     .child("No matching commands, sessions, or files."),
             );
         } else {
-            for (row_ix, &item_ix) in palette.filtered.iter().take(12).enumerate() {
+            let total = palette.filtered.len();
+            let visible = 12usize;
+            let start = if total <= visible {
+                0
+            } else {
+                palette.selected.saturating_sub(visible - 1).min(total - visible)
+            };
+            for (row_ix, &item_ix) in palette.filtered.iter().enumerate().skip(start).take(visible) {
                 let item = &palette.items[item_ix];
                 let active = row_ix == palette.selected;
                 list = list.child(

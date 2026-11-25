@@ -413,13 +413,14 @@ impl Workspace {
     pub(crate) fn sync_skills(&mut self, extra_harness: Option<Harness>, cx: &mut Context<Self>) {
         let Some(home) = self.skills_home() else { return };
         let config = self.store.data.settings.skills.clone();
-        // Skip spawning background work when no skills are installed and no toggles exist.
-        if config.installed.is_empty() && config.global_enabled.is_empty() && config.project_enabled.is_empty() {
+        let projects: Vec<(String, PathBuf)> = self.store.data.projects.iter().map(|p| (p.id.clone(), p.path.clone())).collect();
+        let has_shared = projects.iter().any(|(_, p)| p.join(".agents/skills").is_dir());
+        // Skip spawning background work when no skills are installed, no toggles exist, and no shared repo skills exist.
+        if config.installed.is_empty() && config.global_enabled.is_empty() && config.project_enabled.is_empty() && !has_shared {
             return;
         }
         let active = self.active_skill_harnesses(extra_harness);
         let root = skills_root();
-        let projects: Vec<(String, PathBuf)> = self.store.data.projects.iter().map(|p| (p.id.clone(), p.path.clone())).collect();
         let ticket = self.skills_page.sync_serial.fetch_add(1, Ordering::SeqCst) + 1;
         let serial = self.skills_page.sync_serial.clone();
         let lock = self.skills_page.sync_lock.clone();

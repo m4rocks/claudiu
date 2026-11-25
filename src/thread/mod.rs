@@ -529,11 +529,14 @@ impl ThreadView {
                 }
             }),
             cx.subscribe_in(&card_ui, window, |v: &mut Self, ui, ev: &SendText, window, cx| {
+                if v.workspace_switching || v.read_only_unconfirmed {
+                    return;
+                }
                 ui.update(cx, |ui, cx| ui.mark_sent(&ev.key, cx));
                 v.send(ev.text.clone(), window, cx);
             }),
             cx.subscribe_in(&card_ui, window, |v: &mut Self, _, ev: &OpenFile, _, cx| {
-                v.open_location_range_at(v.thread.entries.len(), PathBuf::from(&ev.path), ev.line, ev.end_line, cx);
+                v.open_location_range_at(ev.row.unwrap_or(v.thread.entries.len()), PathBuf::from(&ev.path), ev.line, ev.end_line, cx);
             }),
         ];
         // Before the composer's own bindings, which would take Escape, Up, Down and Shift+Tab.
@@ -1033,7 +1036,8 @@ impl ThreadView {
                         self.retire_finished_background_tasks(&text);
                     }
                     if let Some(Entry::Tool(call)) = self.thread.entries.get(at) {
-                        self.tool_images.get_mut().retain(|(id, _), _| *id != call.id);
+                        let call_id = call.id.clone();
+                        self.tool_images.get_mut().retain(|(id, _), _| *id != call_id);
                         if self.phase == Phase::Ready && !self.cached_replay
                             && let Some(hooks) = &protocol.background
                         {
@@ -1046,6 +1050,9 @@ impl ThreadView {
                             for text in background.output {
                                 self.retire_finished_background_tasks(&text);
                             }
+                        }
+                        if self.shell_output.as_ref().is_some_and(|out| out.task_id == call_id) {
+                            self.open_tool_output(&call_id, cx);
                         }
                     }
                     if self.phase == Phase::Ready && !self.cached_replay && is_conversation_update(&update) {
@@ -2961,9 +2968,34 @@ impl ThreadView {
         self.phase != Phase::Ended
     }
 
+    /// Send an internal runway notice without consuming any user-staged model switch.
+    fn nudge_model(&mut self, text: String, cx: &mut Context<Self>) {
+        if self.workspace_switching || self.read_only_unconfirmed {
+            return;
+        }
+        if self.can_steer(&text, crate::store::FollowUp::Steer) {
+            self.steer(Queued::new(text, false), cx);
+        } else {
+            self.deliver(text, cx);
+        }
+    }
+
+    pub(crate) fn schedule_handoff(&mut self, target: CatalogModel, by_agent: bool, cx: &mut Context<Self>) {
+        self.handoff_after_turn = Some((target, None, String::new(), by_agent));
+        cx.notify();
+    }
+
+    pub(crate) fn is_read_only_unconfirmed(&self) -> bool {
+        self.read_only_unconfirmed
+    }
+
+    pub(crate) fn is_workspace_switching(&self) -> bool {
+        self.workspace_switching
+    }
+
     pub fn observe_usage_limits(&mut self, usage: &crate::store::UsageLimits, auto_handoff: bool, cx: &mut Context<Self>) {
         self.auto_handoff_on_limit = auto_handoff;
-        if self.phase != Phase::Ready {
+        if self.phase != Phase::Ready || self.workspace_switching || self.read_only_unconfirmed {
             return;
         }
         let now = crate::store::now();
@@ -2978,26 +3010,29 @@ impl ThreadView {
                 false,
             );
             self.remeasure(at);
-            self.send_as(nudge.message, crate::store::FollowUp::Steer, cx);
+            self.nudge_model(nudge.message, cx);
             cx.notify();
         }
         if auto_handoff
-            && self.is_working()
-            && self.runway.take_exhausted_handoff(usage, now)
             && let Some(target) = self.fallback_model.clone()
+            && self.runway.take_exhausted_handoff(usage, now)
         {
             let at = self.thread.notice(
                 format!("Usage limit reached on {} — handing off to {}…", self.harness.name(), target.name),
                 false,
             );
             self.remeasure(at);
-            cx.emit(ThreadEvent::Handoff {
-                to: target.harness,
-                model: (!target.id.is_empty()).then_some(target.id),
-                message: String::new(),
-                effort: None,
-                by_agent: true,
-            });
+            if self.has_active_turn() {
+                self.schedule_handoff(target, true, cx);
+            } else {
+                cx.emit(ThreadEvent::Handoff {
+                    to: target.harness,
+                    model: (!target.id.is_empty()).then_some(target.id),
+                    message: String::new(),
+                    effort: None,
+                    by_agent: true,
+                });
+            }
             cx.notify();
         }
     }

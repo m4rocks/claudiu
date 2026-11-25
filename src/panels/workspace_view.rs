@@ -175,8 +175,11 @@ impl Workspace {
                 })
             })
             .collect();
-        let harness = thread.read(cx).harness;
-        let usage_limit = self.usage_for_harness(harness)
+        let (harness, model_id) = {
+            let t = thread.read(cx);
+            (t.harness, t.thread.option("model").map(|o| o.current.clone()))
+        };
+        let usage_limit = self.usage_for_harness_model(harness, model_id.as_deref())
             .and_then(|u| crate::thread::exhausted_usage(&u, crate::store::now()));
         let fallback_model = self.best_fallback_model(harness);
         let auto_handoff = self.store.data.settings.auto_handoff_on_limit;

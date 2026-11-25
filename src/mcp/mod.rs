@@ -259,7 +259,14 @@ fn serve_with_cancel(
     concurrent: bool,
     ask: impl Fn(&str, &Value, &std::sync::atomic::AtomicBool) -> Result<String, String> + Sync,
 ) {
-    use std::sync::{Mutex, atomic::{AtomicBool, Ordering}};
+    use std::sync::{Mutex, atomic::{AtomicBool, AtomicUsize, Ordering}};
+    const MAX_IN_FLIGHT: usize = 8;
+    struct InFlight<'a>(&'a AtomicUsize);
+    impl Drop for InFlight<'_> {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
     let targets = launch.targets.take().unwrap_or_else(|| crate::harness::Harness::registered().map(|h| h.key().into()).collect());
     let mut instructions = instructions(off);
     if let Some(workspace) = &launch.workspace {
@@ -277,12 +284,14 @@ fn serve_with_cancel(
     }
     let out = Mutex::new(out);
     let cancelled = AtomicBool::new(false);
+    let in_flight = AtomicUsize::new(0);
     let send = |body: Value| -> bool {
         let mut guard = out.lock().unwrap_or_else(|e| e.into_inner());
         writeln!(*guard, "{body}").and_then(|_| guard.flush()).is_ok()
     };
     let ask = &ask;
     let cancelled_ref = &cancelled;
+    let in_flight_ref = &in_flight;
     let send_ref = &send;
     std::thread::scope(|scope| {
         for line in input.lines().map_while(Result::ok) {
@@ -297,13 +306,31 @@ fn serve_with_cancel(
                 let tool = tool.to_string();
                 let args = msg["params"]["arguments"].clone();
                 if concurrent {
-                    scope.spawn(move || {
+                    let prev = in_flight_ref.fetch_add(1, Ordering::Relaxed);
+                    if prev >= MAX_IN_FLIGHT {
+                        in_flight_ref.fetch_sub(1, Ordering::Relaxed);
+                        let busy = reply("Too many concurrent m4code tool requests in flight; wait for one to finish.", true);
+                        if !send_ref(json!({ "jsonrpc": "2.0", "id": id, "result": busy })) {
+                            break;
+                        }
+                        continue;
+                    }
+                    let req_id = id.clone();
+                    let spawned = std::thread::Builder::new().spawn_scoped(scope, move || {
+                        let _guard = InFlight(in_flight_ref);
                         let result = match ask(&tool, &args, cancelled_ref) {
                             Ok(text) => reply(&text, false),
                             Err(text) => reply(&text, true),
                         };
-                        let _ = send_ref(json!({ "jsonrpc": "2.0", "id": id, "result": result }));
+                        let _ = send_ref(json!({ "jsonrpc": "2.0", "id": req_id, "result": result }));
                     });
+                    if spawned.is_err() {
+                        in_flight_ref.fetch_sub(1, Ordering::Relaxed);
+                        let err = reply("Could not start worker for m4code tool request.", true);
+                        if !send_ref(json!({ "jsonrpc": "2.0", "id": id, "result": err })) {
+                            break;
+                        }
+                    }
                 } else {
                     let result = match ask(&tool, &args, cancelled_ref) {
                         Ok(text) => reply(&text, false),

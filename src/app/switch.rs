@@ -241,6 +241,7 @@ impl Workspace {
         pane.watcher = None;
         pane.stale = true;
         pane.servers.clear();
+        pane.server_gen = pane.server_gen.wrapping_add(1);
         let (mut moved, mut stayed) = (vec![], 0);
         for tab in &mut pane.tabs {
             let there = tab.path.strip_prefix(&old_root).ok().map(|rel| folder.join(rel)).filter(|p| p.is_file());
@@ -261,6 +262,7 @@ impl Workspace {
             self.reload_tab(&id.to_string(), path.clone(), window, cx);
             self.attach_server(&id.to_string(), &path, cx);
         }
+        self.watch_folder(&id.to_string(), cx);
         if stayed > 0 {
             let files = if stayed == 1 { "1 open file stays".to_string() } else { format!("{stayed} open files stay") };
             self.toast(format!("{files} on its old path: it has unsaved edits, or the new folder lacks it."), cx);
