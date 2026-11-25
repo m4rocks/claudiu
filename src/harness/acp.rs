@@ -25,8 +25,8 @@ pub struct Launch {
 /// What the agent sends without being asked.
 #[derive(Debug)]
 pub enum Event {
-    /// A `session/update`'s `update` object.
-    Update(Value),
+    /// A `session/update` notification and the session it belongs to.
+    Update { session_id: Option<String>, update: Value },
     /// `session/request_permission`: answer it with `Connection::respond` and the request's id.
     Permission { id: Value, params: Value },
     /// `elicitation/create` or `session/elicitation`: structured user-input question from the agent.
@@ -36,6 +36,16 @@ pub enum Event {
     /// A `session/prompt`'s reply. The thread queues it itself once the reply arrives, which is after the reader
     /// queued every update the agent sent before replying, so a turn never ends ahead of its last words.
     TurnEnded(Result<Value, String>),
+}
+
+impl Event {
+    pub fn session_id(&self) -> Option<&str> {
+        match self {
+            Self::Update { session_id, .. } => session_id.as_deref(),
+            Self::Permission { params, .. } | Self::Elicitation { params, .. } => params["sessionId"].as_str(),
+            Self::Exited(_) | Self::TurnEnded(_) => None,
+        }
+    }
 }
 
 type Pending = Arc<Mutex<HashMap<i64, oneshot::Sender<Result<Value, String>>>>>;
@@ -214,11 +224,11 @@ pub enum ElicitationKind {
 }
 
 impl ElicitationKind {
-    pub fn to_json_value(self, selected: &str) -> Value {
+    pub fn to_json_values(self, selected: &[&str]) -> Value {
         match self {
-            Self::Choice => Value::String(selected.to_string()),
-            Self::MultiChoice => json!([selected]),
-            Self::Boolean => Value::Bool(selected == "true"),
+            Self::Choice => Value::String(selected.first().copied().unwrap_or_default().to_string()),
+            Self::MultiChoice => json!(selected),
+            Self::Boolean => Value::Bool(selected.first().copied() == Some("true")),
         }
     }
 }
@@ -338,8 +348,24 @@ pub fn takes_own_answer(params: &Value) -> bool {
     params["_meta"]["m4code"]["freeText"].as_bool() == Some(true)
 }
 
+pub fn is_multi_select(params: &Value) -> bool {
+    params["_meta"]["m4code"]["multiSelect"].as_bool() == Some(true)
+}
+
 pub fn own_answer(text: &str) -> Value {
     json!({ "outcome": { "outcome": "selected", "optionId": "other" }, "_meta": { "m4code": { "text": text } } })
+}
+
+pub fn multi_answer(option_ids: &[String], text: Option<&str>) -> Value {
+    let mut meta = serde_json::Map::new();
+    meta.insert("optionIds".into(), json!(option_ids));
+    if let Some(t) = text.map(str::trim).filter(|s| !s.is_empty()) {
+        meta.insert("text".into(), json!(t));
+    }
+    json!({
+        "outcome": { "outcome": "selected", "optionId": option_ids.first().map(String::as_str).unwrap_or("other") },
+        "_meta": { "m4code": meta },
+    })
 }
 
 pub fn is_tool_permission(params: &Value) -> bool {
@@ -380,7 +406,11 @@ fn handle(message: Value, pending: &Pending, outgoing: &mpsc::Sender<Option<Valu
             let _ = outgoing.send(Some(json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32601, "message": "method not found"}})));
         }
         (Some("session/update"), None) => {
-            let _ = events.unbounded_send(Event::Update(message["params"]["update"].clone()));
+            let params = &message["params"];
+            let _ = events.unbounded_send(Event::Update {
+                session_id: params["sessionId"].as_str().map(String::from),
+                update: params["update"].clone(),
+            });
         }
         _ => {}
     }
@@ -471,7 +501,8 @@ mod tests {
             let session = agent.request("session/new", json!({"cwd": "/w", "mcpServers": []})).await.unwrap();
             assert_eq!(session["sessionId"], "s1");
             let turn = agent.request("session/prompt", json!({"sessionId": "s1", "prompt": []}));
-            let Some(Event::Update(update)) = events.next().await else { panic!("no update") };
+            let Some(Event::Update { session_id, update }) = events.next().await else { panic!("no update") };
+            assert_eq!(session_id.as_deref(), Some("s1"));
             assert_eq!(update["content"]["text"], "hi");
             let Some(Event::Permission { id, .. }) = events.next().await else { panic!("no permission request") };
             agent.respond(id, permission_outcome(Some("allow")));
@@ -515,10 +546,10 @@ mod tests {
             ]
         );
         let mut content = serde_json::Map::new();
-        content.insert("db".into(), ElicitationKind::Choice.to_json_value("pg"));
-        content.insert("confirm".into(), ElicitationKind::Boolean.to_json_value("true"));
-        content.insert("tags".into(), ElicitationKind::MultiChoice.to_json_value("fast"));
-        assert_eq!(elicitation_accept(content), json!({"action": "accept", "content": {"db": "pg", "confirm": true, "tags": ["fast"]}}));
+        content.insert("db".into(), ElicitationKind::Choice.to_json_values(&["pg"]));
+        content.insert("confirm".into(), ElicitationKind::Boolean.to_json_values(&["true"]));
+        content.insert("tags".into(), ElicitationKind::MultiChoice.to_json_values(&["fast", "safe"]));
+        assert_eq!(elicitation_accept(content), json!({"action": "accept", "content": {"db": "pg", "confirm": true, "tags": ["fast", "safe"]}}));
         assert_eq!(elicitation_cancel(), json!({"action": "cancel"}));
         assert_eq!(elicitation_decline(), json!({"action": "decline"}));
     }
@@ -527,7 +558,13 @@ mod tests {
     fn only_a_marked_question_takes_the_users_own_words() {
         assert!(takes_own_answer(&json!({"_meta": {"m4code": {"freeText": true}}, "options": []})));
         assert!(!takes_own_answer(&json!({"options": []})), "a plain ACP permission question");
+        assert!(is_multi_select(&json!({"_meta": {"m4code": {"multiSelect": true}}, "options": []})));
+        assert!(!is_multi_select(&json!({"options": []})));
         assert_eq!(own_answer("blue")["_meta"]["m4code"]["text"], "blue");
         assert_eq!(own_answer("blue")["outcome"]["outcome"], "selected");
+        let multi = multi_answer(&["0".into(), "2".into()], Some("extra"));
+        assert_eq!(multi["outcome"]["outcome"], "selected");
+        assert_eq!(multi["_meta"]["m4code"]["optionIds"], json!(["0", "2"]));
+        assert_eq!(multi["_meta"]["m4code"]["text"], "extra");
     }
 }

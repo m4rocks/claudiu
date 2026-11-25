@@ -359,11 +359,28 @@ pub fn tool_header(
 }
 
 /// Render a tool's text output inside a native `CodeBlock`.
-pub fn tool_output_block(text: &str, folded_lines: usize, full: bool) -> AnyElement {
-    let text = text.trim_matches('\n').trim_start_matches("```console\n").trim_end_matches("```").trim_end();
+pub fn tool_output_block(label: Option<&str>, text: &str, folded_lines: usize, full: bool, query: Option<&str>) -> AnyElement {
+    let text = if label.is_none() {
+        text.trim_matches('\n').trim_start_matches("```console\n").trim_end_matches("```").trim_end()
+    } else {
+        text
+    };
     let lines: Vec<&str> = text.lines().collect();
     let shown = if full { lines.len() } else { lines.len().min(folded_lines) };
-    code_block(None, &lines, shown, None)
+    let last_start = lines.len() - shown;
+    let default_start = if label.is_some() { last_start } else { 0 };
+    let match_line = query.filter(|_| !full).and_then(|query| lines.iter().position(|line| line.to_lowercase().contains(query)));
+    let start = match match_line {
+        Some(line) if !(default_start..default_start + shown).contains(&line) => line.min(last_start),
+        _ => default_start,
+    };
+    let snippet = if label.is_some() || start > 0 { &lines[start..start + shown] } else { &lines };
+    let title = if start != default_start {
+        Some(format!("{} from line {}", label.unwrap_or("Output"), start + 1))
+    } else {
+        label.map(str::to_owned)
+    };
+    code_block(title, snippet, shown, None)
 }
 
 // ---------------------------------------------------------------------------

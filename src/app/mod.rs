@@ -869,12 +869,16 @@ impl Workspace {
         self.store.data.settings.default_model()
     }
 
-    /// The mode the home composer starts a session in: the one picked there or the default, stepped down to what
-    /// the selected harness offers (`Permission::or_safer`), else its safest mode.
+    pub fn home_permission_preference(&self) -> Option<Permission> {
+        self.home.permission_mode.or(self.store.data.settings.new_session.permission_mode)
+    }
+
     pub fn home_selected_permission(&self) -> Option<Permission> {
         let offered = self.store.data.settings.permissions_for(self.home_selected_model().harness);
-        let wanted = self.home.permission_mode.or(self.store.data.settings.new_session.permission_mode);
-        wanted.and_then(|p| p.or_safer(&offered)).or_else(|| offered.first().copied())
+        match self.home_permission_preference() {
+            Some(preference) => preference.resolve(&offered),
+            None => offered.first().copied(),
+        }
     }
 
     /// Close the sidebar question popover after a brief grace period so the pointer can cross from the row into it.
@@ -898,6 +902,32 @@ impl Workspace {
             });
         })
         .detach();
+    }
+
+    /// Toggle a checkbox option on a session's pending multi-select question without closing the popover.
+    pub fn toggle_session_question_option(&mut self, id: &str, question: uuid::Uuid, option: usize, cx: &mut Context<Self>) {
+        let Some(thread) = self.live_view(id).and_then(|v| v.thread()).cloned() else { return };
+        if thread.update(cx, |v, cx| v.toggle_question_option(question, option, cx)) {
+            cx.notify();
+        }
+    }
+
+    /// Submit all checked options on a session's pending multi-select question from the sidebar popover.
+    pub fn submit_session_question(&mut self, id: &str, question: uuid::Uuid, cx: &mut Context<Self>) {
+        let Some(thread) = self.live_view(id).and_then(|v| v.thread()).cloned() else { return };
+        if !thread.update(cx, |v, cx| v.submit_multi_question(question, cx)) {
+            return;
+        }
+        self.question_popover = None;
+        self.question_popover_hovered = false;
+        if self.activity.get(id) == Some(&Activity::Waiting) && !thread.read(cx).is_waiting() {
+            if thread.read(cx).is_working() {
+                self.activity.insert(id.to_string(), Activity::Working);
+            } else {
+                self.activity.remove(id);
+            }
+        }
+        cx.notify();
     }
 
     /// Answer (or decline when `choice` is `None`) a session's pending question directly from the sidebar popover

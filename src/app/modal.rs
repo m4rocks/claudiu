@@ -254,9 +254,9 @@ impl Workspace {
                         }
                     }
                     if permission_changed
-                        && let Some(id) = permission.and_then(|p| p.or_safer(&crate::harness::permission::offered(t.harness, &t.thread.modes)).and_then(|p| p.native(t.harness)))
+                        && let Some(mode) = permission
                     {
-                        t.set_mode(id.to_string(), cx);
+                        t.set_permission(mode, cx);
                     }
                     if scale_changed {
                         t.remeasure(0);

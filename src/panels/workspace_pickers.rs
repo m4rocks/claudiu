@@ -504,47 +504,40 @@ impl Workspace {
                 }
                 ("settings-effort-dialog", "EFFORT", list.into_any_element(), Some(choices))
             }
-            WorkspacePicker::HomePermission => {
-                let current = self.home_selected_permission();
-                let offered = self.store.data.settings.permissions_for(self.home_selected_model().harness);
+            WorkspacePicker::HomePermission | WorkspacePicker::SettingsPermission => {
+                let (current, harness, list_id, dialog_id, row_id, action) = match &active.kind {
+                    WorkspacePicker::HomePermission => (
+                        self.home_selected_permission(), self.home_selected_model().harness,
+                        "home-perm-list", "home-perm-dialog", "home-perm", Act::HomeSelectPermission as fn(Permission) -> Act,
+                    ),
+                    _ => {
+                        let Some(Modal::Settings { permission, default_model, .. }) = &self.modal else { return None };
+                        (*permission, default_model.harness, "settings-perm-list", "settings-perm-dialog", "settings-perm", Act::PickPermission as fn(Permission) -> Act)
+                    }
+                };
+                let offered = self.store.data.settings.permissions_for(harness);
                 let mut choices = picker::Choices::new(&self.picker_nav, "");
-                let mut list = choices.list("home-perm-list", window).max_h(px(340.0));
-                for (i, mode) in offered.into_iter().enumerate() {
-                    let selected = current == Some(mode);
+                let mut list = choices.list(list_id, window).max_h(px(340.0));
+                for (i, mode) in Permission::ALL.into_iter().enumerate() {
+                    let selected = current.and_then(|p| p.resolve(&offered)) == Some(mode);
+                    let available = offered.contains(&mode);
                     let lead = icon(IconName::Lock, 12.0).text_color(if selected { accent } else { hsla(theme::TEXT_FAINT) }).into_any_element();
                     let row = picker::row(
-                        gpui::SharedString::from(format!("home-perm-{i}")),
+                        gpui::SharedString::from(format!("{row_id}-{i}")),
                         Some(lead),
                         mode.label(),
-                        Some(mode.description().to_string()),
+                        Some(mode.detail(available)),
                         None,
                         selected,
-                        false,
+                        !available,
                     );
-                    list = list.child(choices.add(row, move |ws, window, cx| ws.act(Act::HomeSelectPermission(mode), window, cx), cx));
+                    list = if available {
+                        list.child(choices.add(row, move |ws, window, cx| ws.act(action(mode), window, cx), cx))
+                    } else {
+                        list.child(row)
+                    };
                 }
-                ("home-perm-dialog", "PERMISSION MODE", list.into_any_element(), Some(choices))
-            }
-            WorkspacePicker::SettingsPermission => {
-                let Some(Modal::Settings { permission, .. }) = &self.modal else { return None };
-                let current = *permission;
-                let mut choices = picker::Choices::new(&self.picker_nav, "");
-                let mut list = choices.list("settings-perm-list", window).max_h(px(340.0));
-                for (i, mode) in Permission::ALL.into_iter().enumerate() {
-                    let selected = current == Some(mode);
-                    let lead = icon(IconName::Lock, 12.0).text_color(if selected { accent } else { hsla(theme::TEXT_FAINT) }).into_any_element();
-                    let row = picker::row(
-                            gpui::SharedString::from(format!("settings-perm-{i}")),
-                            Some(lead),
-                            mode.label(),
-                            Some(mode.description().into()),
-                            None,
-                            selected,
-                            false,
-                        );
-                    list = list.child(choices.add(row, move |ws, window, cx| ws.act(Act::PickPermission(mode), window, cx), cx));
-                }
-                ("settings-perm-dialog", "PERMISSION MODE", list.into_any_element(), Some(choices))
+                (dialog_id, "PERMISSION MODE", list.into_any_element(), Some(choices))
             }
             WorkspacePicker::SkillsScope { search } => {
                 let query = search.read(cx).value().to_lowercase();

@@ -21,8 +21,10 @@ pub enum Key {
     /// Up and Down through a question's options, with nothing typed.
     OptionUp,
     OptionDown,
-    /// Enter on a question with nothing typed: pick the highlighted option.
+    /// Enter on a question with nothing typed: pick the highlighted option (or submit multi-select).
     ChooseHighlighted,
+    /// Space on a multi-select question with nothing typed: toggle the highlighted option.
+    ToggleHighlighted,
     /// Escape twice with nothing typed: bring the last message back to edit.
     EditLast,
     /// Escape twice, or Ctrl+C, with text typed: clear it.
@@ -52,8 +54,12 @@ pub enum Key {
 pub struct State {
     pub picker_open: bool,
     pub working: bool,
-    /// How many options the open permission question has; 0 when none is open.
+    /// How many options the open permission/ask question has; 0 when none is open (or free-text only).
     pub question: usize,
+    /// True whenever any permission/ask question is open (including free-text-only questions with 0 options).
+    pub question_open: bool,
+    /// True when the open question allows selecting multiple options.
+    pub question_multi: bool,
     pub draft_empty: bool,
     /// The composer shows a message from the history rather than a new one.
     pub in_history: bool,
@@ -70,7 +76,7 @@ pub fn key(keystroke: &Keystroke, s: State) -> Option<Key> {
     let plain = !m.control && !m.alt && !m.platform && !m.shift && !m.function;
     match keystroke.key.as_str() {
         "escape" if plain && s.picker_open => Some(Key::ClosePicker),
-        "escape" if plain && s.question > 0 => Some(Key::Decline),
+        "escape" if plain && (s.question_open || s.question > 0) => Some(Key::Decline),
         "escape" if plain && s.working => Some(Key::Interrupt),
         "escape" if plain && s.escape_just_pressed => Some(if s.draft_empty { Key::EditLast } else { Key::Clear }),
         "c" if m.control && !m.platform && !m.alt && !m.shift && s.working => Some(Key::Interrupt),
@@ -82,6 +88,7 @@ pub fn key(keystroke: &Keystroke, s: State) -> Option<Key> {
         "enter" if plain && s.commands > 0 => Some(Key::RunCommand),
         "up" if plain && !s.picker_open && s.question > 0 && s.draft_empty => Some(Key::OptionUp),
         "down" if plain && !s.picker_open && s.question > 0 && s.draft_empty => Some(Key::OptionDown),
+        "space" if plain && !s.picker_open && s.question_multi && s.question > 0 && s.draft_empty => Some(Key::ToggleHighlighted),
         "enter" if plain && !s.picker_open && s.question > 0 && s.draft_empty => Some(Key::ChooseHighlighted),
         "up" if plain && !s.picker_open && (s.draft_empty || s.in_history) => Some(Key::Older),
         "down" if plain && !s.picker_open && s.in_history => Some(Key::Newer),
@@ -143,6 +150,17 @@ mod tests {
         assert_eq!(press("enter", typing), None, "the message box sends the typed answer");
         assert_eq!(press("up", typing), None);
         assert_eq!(press("shift-enter", asking), None, "a new line");
+    }
+
+    #[test]
+    fn multi_select_takes_space_and_zero_option_question_takes_escape() {
+        let multi = State { question: 3, question_open: true, question_multi: true, ..idle() };
+        assert_eq!(press("space", multi), Some(Key::ToggleHighlighted));
+        assert_eq!(press("space", State { question_multi: false, ..multi }), None, "single-select leaves space to the composer");
+        assert_eq!(press("space", State { draft_empty: false, ..multi }), None, "typing in the composer keeps spaces");
+        let free_text = State { question: 0, question_open: true, ..idle() };
+        assert_eq!(press("escape", free_text), Some(Key::Decline));
+        assert_eq!(press("enter", free_text), None);
     }
 
     #[test]

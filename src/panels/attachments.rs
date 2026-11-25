@@ -17,12 +17,13 @@ use gpui_kit::{
 use crate::panels::theme::{self, hsla};
 use crate::panels::widgets::{focusable, icon, icon_button};
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Attachments {
     files: Vec<Attachment>,
     error: Option<String>,
 }
 
+#[derive(Clone)]
 struct Attachment {
     path: PathBuf,
     pasted: Option<Arc<Image>>,

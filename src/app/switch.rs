@@ -153,11 +153,10 @@ impl Workspace {
             self.switching_worktree.remove(id);
             return;
         }
-        let prior_entries = self
-            .live_view(id)
-            .and_then(|v| v.thread())
-            .map(|t| t.read(cx).thread.entries.clone())
-            .unwrap_or_default();
+        let source = self.live_view(id).and_then(|v| v.thread()).map(|t| t.read(cx));
+        let prior_entries = source.map(|t| t.thread.entries.clone()).unwrap_or_default();
+        let permission = source.and_then(|t| t.permission_for_relaunch());
+        let composer = source.map(|t| t.composer_state(cx));
         if !prior_entries.is_empty() {
             crate::harness::thread::save_entries(id, &prior_entries);
         }
@@ -172,9 +171,14 @@ impl Workspace {
         }
         // Replacing the view ends the old process while carrying over the live conversation entries.
         if fresh {
-            self.relaunch_empty(id, window, cx);
+            self.relaunch_empty(id, permission, window, cx);
         } else {
-            self.relaunch_with_entries(id, prior_entries, window, cx);
+            self.relaunch_with_entries(id, prior_entries, permission, window, cx);
+        }
+        if let Some(composer) = composer
+            && let Some(thread) = self.live_view(id).and_then(|v| v.thread()).cloned()
+        {
+            thread.update(cx, |t, cx| t.restore_composer(composer, window, cx));
         }
         self.restore_shell(id, shell, window, cx);
         if was_shown {

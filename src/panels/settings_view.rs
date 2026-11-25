@@ -51,7 +51,9 @@ pub(super) fn render_settings_card(
             });
             let effort_open = matches!(ws.picker_kind(), Some(WorkspacePicker::SettingsEffort));
             let perm_open = matches!(ws.picker_kind(), Some(WorkspacePicker::SettingsPermission));
-            let perm_display = permission.map_or("Harness default", |p| p.label()).to_string();
+            let offered = ws.store.data.settings.permissions_for(default_model.harness);
+            let effective_permission = permission.and_then(|p| p.resolve(&offered));
+            let perm_display = effective_permission.map_or("Harness default", Permission::label).to_string();
             let mut session_rows: Vec<AnyElement> = vec![
                 default_model_row(default_model, model_open, cx).into_any_element(),
                 settings_picker_row("settings-effort", ("Effort", "Reasoning depth for new sessions"), effort.label().to_string(), effort_open, |ws, at, window, cx| ws.open_settings_effort_picker(at, window, cx), cx).into_any_element(),
@@ -115,7 +117,7 @@ pub(super) fn render_settings_card(
                     .into_any_element(),
                 );
             }
-            if *permission == Some(Permission::FullAccess) {
+            if effective_permission == Some(Permission::FullAccess) {
                 session_rows.push(
                     div()
                         .px(px(14.0))
@@ -123,7 +125,7 @@ pub(super) fn render_settings_card(
                         .bg(hsla(0x191512))
                         .text_size(scaled(11.5))
                         .text_color(hsla(theme::WARN))
-                        .child("Every new session will run commands and edit files without asking.")
+                        .child("Full Access allows commands and edits without asking.")
                         .into_any_element(),
                 );
             }

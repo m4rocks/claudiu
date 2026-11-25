@@ -65,7 +65,7 @@ async fn run(
                 }
                 // ACP delivers the final text chunks before resolving the prompt.
                 while let Ok(event) = incoming.try_recv() {
-                    collect(connection, event, &mut text)?;
+                    collect(connection, id, event, &mut text)?;
                 }
                 if model.harness.adapter().delete_model_session {
                     let _ = connection.request("session/delete", json!({"sessionId": id})).await;
@@ -73,7 +73,7 @@ async fn run(
                 return Ok(text);
             }
             event = incoming.next().fuse() => {
-                collect(connection, event.ok_or("The agent stopped responding.")?, &mut text)?;
+                collect(connection, id, event.ok_or("The agent stopped responding.")?, &mut text)?;
             }
         }
     }
@@ -140,9 +140,10 @@ async fn select_model(connection: &Connection, id: &str, session: &Value, model:
     Ok(())
 }
 
-fn collect(connection: &Connection, event: Event, text: &mut String) -> Result<(), String> {
+fn collect(connection: &Connection, session_id: &str, event: Event, text: &mut String) -> Result<(), String> {
+    let belongs_here = event.session_id().is_none_or(|id| id == session_id);
     match event {
-        Event::Update(update) => match update["sessionUpdate"].as_str() {
+        Event::Update { update, .. } if belongs_here => match update["sessionUpdate"].as_str() {
             Some("agent_message_chunk") => {
                 if let Some(chunk) = update.pointer("/content/text").and_then(Value::as_str) {
                     text.push_str(chunk);
@@ -153,14 +154,18 @@ fn collect(connection: &Connection, event: Event, text: &mut String) -> Result<(
         },
         Event::Permission { id, .. } => {
             connection.respond(id, acp::permission_outcome(None));
-            return Err("The model requested tool permission while generating text.".into());
+            if belongs_here {
+                return Err("The model requested tool permission while generating text.".into());
+            }
         }
         Event::Elicitation { id, .. } => {
             connection.respond(id, acp::elicitation_decline());
-            return Err("The model asked a question while generating text.".into());
+            if belongs_here {
+                return Err("The model asked a question while generating text.".into());
+            }
         }
         Event::Exited(why) => return Err(if why.is_empty() { "The agent stopped responding.".into() } else { why }),
-        Event::TurnEnded(_) => {}
+        Event::TurnEnded(_) | Event::Update { .. } => {}
     }
     Ok(())
 }

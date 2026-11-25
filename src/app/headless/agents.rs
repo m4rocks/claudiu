@@ -16,7 +16,35 @@ fn handoffs_reuse_provider_sessions_and_restore_the_source_after_failure() {
         "elif method == \"session/load\":\n        cwd = m[\"params\"][\"cwd\"]",
         "elif method == \"session/load\":\n        cwd = m[\"params\"][\"cwd\"]\n        send({\"jsonrpc\": \"2.0\", \"method\": \"session/update\", \"params\": {\"sessionId\": m[\"params\"][\"sessionId\"], \"update\": {\"sessionUpdate\": \"user_message_chunk\", \"content\": {\"type\": \"text\", \"text\": \"native replay\"}}}})",
     );
-    std::fs::write(script, contents).unwrap();
+    let contents = contents
+        .replace("for line in sys.stdin:", r#"adapter = sys.argv[1]
+modes = {
+    "claude": ["default", "plan", "auto", "bypassPermissions"],
+    "opencode": ["plan", "build"],
+    "antigravity": ["default", "plan", "auto"],
+}[adapter]
+mode = modes[0]
+def session_modes():
+    return {"currentModeId": mode, "availableModes": [{"id": name, "name": name} for name in modes]}
+for line in sys.stdin:"#)
+        .replace(r#""result": {"sessionId": "fake-session"}"#, r#""result": {"sessionId": "fake-session", "modes": session_modes()}"#)
+        .replace(r#"    elif method == "session/load":"#, r#"    elif method in ["session/load", "session/resume"]:"#)
+        .replace(r#"        send({"jsonrpc": "2.0", "id": i, "result": {}})
+    else:"#,
+r#"        send({"jsonrpc": "2.0", "id": i, "result": {"modes": session_modes()}})
+    elif method == "session/set_mode":
+        mode = m["params"]["modeId"]
+        send({"jsonrpc": "2.0", "id": i, "result": {}})
+    else:"#)
+        .replace(r#"        text = m["params"]["prompt"][0]["text"]"#, r#"        text = m["params"]["prompt"][0]["text"]
+        with open(__file__ + ".permissions", "a", newline="\n") as log:
+            log.write(f"{adapter}:{mode}:{'--dangerously-skip-permissions' in sys.argv}\n")"#);
+    std::fs::write(&script, contents).unwrap();
+    let server_for = |adapter: &str| {
+        let mut server = server.clone();
+        server.1.push(adapter.into());
+        server
+    };
     let mut cx = TestAppContext::single();
     cx.update(|app| {
         gpui_kit::init(app);
@@ -28,9 +56,9 @@ fn handoffs_reuse_provider_sessions_and_restore_the_source_after_failure() {
         cx.run_until_parked();
     };
     step(&mut cx, &|ws, window, cx| {
-        ws.acp_server = Some(server.clone());
+        ws.acp_server = Some(server_for("claude"));
         ws.claude_exe = Some("unused-by-the-fake-agent".into());
-        ws.new_session_from_home(Harness::Claude, None, work.path().to_path_buf(), Some("initial task".into()), None, None, window, cx);
+        ws.new_session_from_home(Harness::Claude, None, work.path().to_path_buf(), Some("initial task".into()), None, Some(Permission::Auto), window, cx);
     });
     let id = ws.read_with(&cx, |ws, _| ws.active_id().unwrap().clone());
     let wait = |cx: &mut TestAppContext, harness| {
@@ -48,10 +76,45 @@ fn handoffs_reuse_provider_sessions_and_restore_the_source_after_failure() {
         }
     };
     wait(&mut cx, Harness::Claude);
-    for (harness, message) in [(Harness::Codex, "continue on B"), (Harness::Claude, "continue on A")] {
-        step(&mut cx, &|ws, window, cx| ws.dynamic_handoff(&id, harness, None, message.into(), false, None, window, cx));
+    for (harness, message, expected) in [
+        (Harness::OpenCode, "continue on B", Permission::FullAccess),
+        (Harness::Claude, "continue on A", Permission::Auto),
+    ] {
+        step(&mut cx, &|ws, window, cx| {
+            ws.acp_server = Some(server_for(harness.key()));
+            ws.dynamic_handoff(&id, harness, None, message.into(), false, None, window, cx);
+        });
+        cx.update_window(window, |_, window, app| window.draw(app).clear(app)).unwrap();
+        let mut visual = VisualTestContext::from_window(window, &cx);
+        assert!(visual.debug_bounds("thread-mode").is_some(), "the permission chip stays visible through the handoff");
         wait(&mut cx, harness);
+        ws.read_with(&cx, |ws, app| {
+            let view = ws.live_view(&id).unwrap().thread().unwrap().read(app);
+            assert_eq!(view.permission(), Some(expected));
+        });
+        if harness == Harness::OpenCode {
+            cx.update_window(window, |_, window, app| window.draw(app).clear(app)).unwrap();
+            let mut visual = VisualTestContext::from_window(window, &cx);
+            let chip = visual.debug_bounds("thread-mode").unwrap().center();
+            visual.simulate_event(gpui::MouseDownEvent { position: chip, modifiers: Default::default(), button: gpui::MouseButton::Left, click_count: 1, first_mouse: false });
+            visual.simulate_event(gpui::MouseUpEvent { position: chip, modifiers: Default::default(), button: gpui::MouseButton::Left, click_count: 1 });
+            cx.update_window(window, |_, window, app| window.draw(app).clear(app)).unwrap();
+            assert!(visual.debug_bounds("perm-mode-0").is_some());
+            let auto = visual.debug_bounds("perm-mode-1").expect("Auto is visible even on OpenCode").center();
+            assert!(visual.debug_bounds("perm-mode-2").is_some());
+            visual.simulate_event(gpui::MouseDownEvent { position: auto, modifiers: Default::default(), button: gpui::MouseButton::Left, click_count: 1, first_mouse: false });
+            visual.simulate_event(gpui::MouseUpEvent { position: auto, modifiers: Default::default(), button: gpui::MouseButton::Left, click_count: 1 });
+            ws.read_with(&cx, |ws, app| {
+                let view = ws.live_view(&id).unwrap().thread().unwrap().read(app);
+                assert_eq!(view.picker, Some(crate::thread::ThreadPicker::Permission), "disabled Auto cannot be selected");
+            });
+        }
     }
+    assert_eq!(
+        std::fs::read_to_string(work.path().join("fake_agent.py.permissions")).unwrap(),
+        "claude:auto:False\nopencode:build:False\nclaude:auto:False\n",
+        "the destination must apply the permission before each prompt, including after a resume"
+    );
     ws.read_with(&cx, |ws, app| {
         let meta = ws.store.session(&id).unwrap().agent.as_ref().unwrap();
         assert_eq!(meta.provider_sessions.len(), 2);
@@ -67,7 +130,7 @@ fn handoffs_reuse_provider_sessions_and_restore_the_source_after_failure() {
     });
     step(&mut cx, &|ws, window, cx| {
         ws.acp_server = Some(failed_server.clone());
-        ws.dynamic_handoff(&id, Harness::OpenCode, None, "keep this draft".into(), false, None, window, cx);
+        ws.dynamic_handoff(&id, Harness::Codex, None, "keep this draft".into(), false, None, window, cx);
     });
     wait(&mut cx, Harness::Claude);
     ws.read_with(&cx, |ws, app| {
@@ -77,6 +140,30 @@ fn handoffs_reuse_provider_sessions_and_restore_the_source_after_failure() {
         assert!(view.is_running());
         assert!(ws.toast.as_ref().unwrap().text.contains("handshake failed"));
     });
+    step(&mut cx, &|ws, window, cx| {
+        ws.acp_server = Some(server_for("antigravity"));
+        ws.dynamic_handoff(&id, Harness::Antigravity, None, "continue on C".into(), false, None, window, cx);
+    });
+    wait(&mut cx, Harness::Antigravity);
+    for permission in [Permission::FullAccess, Permission::ReadOnly] {
+        step(&mut cx, &|ws, _, cx| {
+            let view = ws.live_view(&id).unwrap().thread().unwrap().clone();
+            view.update(cx, |view, cx| view.set_permission(permission, cx));
+        });
+        wait(&mut cx, Harness::Antigravity);
+        step(&mut cx, &|ws, window, cx| {
+            let meta = ws.store.session(&id).unwrap().agent.as_ref().unwrap();
+            assert_eq!(meta.session_id, "fake-session");
+            assert_eq!(meta.antigravity_full_access, permission == Permission::FullAccess);
+            let view = ws.live_view(&id).unwrap().thread().unwrap().clone();
+            assert_eq!(view.read(cx).permission(), Some(permission));
+            assert_eq!(view.read(cx).draft(cx), "keep this draft");
+            view.update(cx, |view, cx| view.send("check permission".into(), window, cx));
+        });
+        wait(&mut cx, Harness::Antigravity);
+    }
+    let permissions = std::fs::read_to_string(work.path().join("fake_agent.py.permissions")).unwrap();
+    assert!(permissions.ends_with("antigravity:auto:False\nantigravity:default:True\nantigravity:plan:False\n"));
     step(&mut cx, &|ws, window, cx| ws.end_live(&id, window, cx));
 }
 
@@ -121,14 +208,9 @@ fn compaction_preserves_the_session_and_never_becomes_a_user_message() {
             let users: Vec<_> = view.thread.entries.iter().filter_map(|entry| match entry { Entry::User(text) => Some(text.as_str()), _ => None }).collect();
             assert_eq!(users, ["fill context"]);
             let turns: Vec<Value> = std::fs::read_to_string(work.path().join("fake_agent.py.turns")).unwrap().lines().map(|line| serde_json::from_str(line).unwrap()).collect();
-            if harness == Harness::Codex {
-                assert_eq!(turns.iter().map(|turn| turn["prompt"].as_str().unwrap()).collect::<Vec<_>>(), ["fill context", "/compact"]);
-                assert_eq!(turns[0]["pid"], turns[1]["pid"], "compaction must keep the provider process");
-                assert_eq!(view.thread.context, Some((200, 1000)));
-            } else {
-                assert_eq!(turns.len(), 1, "unsupported providers must not receive invented commands");
-                assert_eq!(view.compaction_status(false), "Unsupported");
-            }
+            assert_eq!(turns.iter().map(|turn| turn["prompt"].as_str().unwrap()).collect::<Vec<_>>(), ["fill context", "/compact"]);
+            assert_eq!(turns[0]["pid"], turns[1]["pid"], "compaction must keep the provider process");
+            assert_eq!(view.thread.context, Some((200, 1000)));
         });
         cx.update_window(window, |_, window, app| ws.update(app, |ws, cx| ws.end_live(&id, window, cx))).unwrap();
     }
@@ -1217,5 +1299,107 @@ fn a_session_opens_another_with_its_model_and_effort_without_asking() {
     });
     for id in [child, parent] {
         cx.update_window(window, |_, window, app| ws.update(app, |ws, cx| ws.end_live(&id, window, cx))).unwrap();
+    }
+}
+
+#[test]
+fn foreground_adapters_apply_startup_options_and_isolate_session_updates() {
+    use crate::harness::defaults::Starter;
+    use crate::harness::thread::Entry;
+
+    for harness in Harness::ALL {
+        for mode_reply in ["omitted", "rejected", "applied"] {
+            let work = tempfile::tempdir().unwrap();
+            let mut server = fake_agent(work.path());
+            server.1.push(Permission::ReadOnly.native(harness).unwrap().into());
+            server.1.push(mode_reply.into());
+            let script = PathBuf::from(&server.1[0]);
+            let contents = std::fs::read_to_string(&script).unwrap()
+                .replace("for line in sys.stdin:", r#"
+read_only, mode_reply = sys.argv[1:3]
+model, effort = "small", "low"
+current_mode = "default"
+def modes():
+    return {"currentModeId": current_mode, "availableModes": [{"id": read_only, "name": "Read-only"}]}
+def config():
+    available_effort = ["low"] if model == "small" else ["medium", "high"]
+    return [
+        {"category": "model", "id": "model", "currentValue": model, "options": [{"value": v, "name": v} for v in ["small", "large"]]},
+        {"category": "thought_level", "id": model + "-effort", "currentValue": effort, "options": [{"value": v, "name": v} for v in available_effort]},
+    ]
+for line in sys.stdin:"#)
+                .replace(r#"        send({"jsonrpc": "2.0", "id": i, "result": {"sessionId": "fake-session"}})"#, r#"
+        result = {"sessionId": "fake-session", "configOptions": config()}
+        if mode_reply != "omitted":
+            result["modes"] = modes()
+        send({"jsonrpc": "2.0", "id": i, "result": result})
+    elif method == "session/set_config_option":
+        key, value = m["params"]["configId"], m["params"]["value"]
+        if key == "model":
+            model, effort = value, "medium"
+        else:
+            assert key == "large-effort" and value == "high"
+            effort = value
+        send({"jsonrpc": "2.0", "id": i, "result": {"configOptions": config()}})
+    elif method == "session/set_mode":
+        assert m["params"]["modeId"] == read_only
+        if mode_reply == "applied":
+            current_mode = read_only
+        send({"jsonrpc": "2.0", "id": i, "result": {"modes": modes()}})"#)
+                .replace(r#"        text = m["params"]["prompt"][0]["text"]"#, r#"        text = m["params"]["prompt"][0]["text"]
+        send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "child-session", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "child reply"}}}})
+        send({"jsonrpc": "2.0", "method": "session/request_permission", "id": "child-ask", "params": {"sessionId": "child-session", "toolCall": {"title": "Child tool"}, "options": [{"optionId": "allow", "name": "Allow", "kind": "allow_once"}]}})
+        response = json.loads(next(sys.stdin))
+        assert response["id"] == "child-ask" and response["result"]["outcome"]["outcome"] == "cancelled"
+        assert model == "large" and effort == "high" and current_mode == read_only"#);
+            std::fs::write(&script, contents).unwrap();
+            let mut app = TestAppContext::single();
+            app.update(gpui_kit::init);
+            let (view, cx) = app.add_window_view(|window, cx| {
+                crate::thread::ThreadView::new(crate::thread::Start {
+                    record_id: String::new(),
+                    harness,
+                    all_models: Vec::new(),
+                    picked: Vec::new(),
+                    server: Some(server),
+                    cwd: work.path().into(),
+                    env: Vec::new(),
+                    session_id: None,
+                    meta: serde_json::Value::Null,
+                    mcp_servers: Vec::new(),
+                    permission: Some(Permission::ReadOnly),
+                    starter: Starter::User,
+                    options: vec![("thought_level", "high".into()), ("model", "large".into())],
+                    prompt: Some("Review the project".into()),
+                    prior_entries: Vec::new(),
+                    inline_visuals: false,
+                }, window, cx)
+            });
+            let until = std::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                cx.run_until_parked();
+                let settled = cx.update(|_, app| {
+                    let view = view.read(app);
+                    !view.is_loading() && !view.is_working()
+                });
+                if settled { break; }
+                assert!(std::time::Instant::now() < until, "{} did not settle with mode reply {mode_reply}", harness.name());
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            cx.update(|_, app| {
+                let view = view.read(app);
+                if mode_reply == "applied" {
+                    assert_eq!(view.start_error(), None);
+                    assert_eq!(view.permission(), Some(Permission::ReadOnly));
+                    assert_eq!(view.thread.option("thought_level").unwrap().current, "high");
+                    assert!(!view.is_waiting());
+                    assert_eq!(view.thread.entries, [Entry::User("Review the project".into()), Entry::Agent("ok".into())]);
+                    assert!(work.path().join("fake_agent.py.prompts").exists());
+                } else {
+                    assert!(view.start_error().is_some_and(|error| error.contains("Read-only")));
+                    assert!(!work.path().join("fake_agent.py.prompts").exists());
+                }
+            });
+        }
     }
 }

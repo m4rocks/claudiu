@@ -115,7 +115,14 @@ fn switching_between_worktrees_in_the_workspace() {
     let quick = |name: &str| Act::QuickWorktree { main_checkout: repo_dir.clone(), name: name.into(), base: crate::git::worktree::Base::Current, for_home: false };
     step(&mut cx, &|ws, w, cx| ws.act(quick("bad name"), w, cx));
     assert!(ws.read_with(&cx, |ws, _| !ws.switching_worktree.contains_key(&session.id)), "a bad name is refused");
-    step(&mut cx, &|ws, w, cx| ws.act(quick("fix-login"), w, cx));
+    step(&mut cx, &|ws, w, cx| {
+        let thread = ws.live_view(&id).unwrap().thread().unwrap().clone();
+        thread.update(cx, |thread, cx| {
+            thread.paste_text("draft for the worktree", w, cx);
+            thread.attach_paths(&[repo_dir.join("same.txt")], w, cx);
+        });
+        ws.act(quick("fix-login"), w, cx);
+    });
     let worktree = crate::git::worktree::folder(&repo_dir, "fix-login");
     let switching_to = |ws: &Workspace, app: &App| {
         ws.live_view(&session.id).and_then(|v| v.thread()).and_then(|v| {
@@ -130,7 +137,12 @@ fn switching_between_worktrees_in_the_workspace() {
         let moved = ws.store.session(&session.id).is_some_and(|r| r.cwd == folder);
         moved && !loading
     };
-    wait(&mut cx, "the switch", &|ws, app| moved_to(&worktree, ws, app));
+    wait(&mut cx, "the switch", &|ws, app| {
+        let view = ws.live_view(&id).unwrap().thread().unwrap().read(app);
+        assert_eq!(view.draft(app), "draft for the worktree", "the draft stays through the restart");
+        assert!(view.composer_state(app).has_attachments(), "the attachment stays through the restart");
+        moved_to(&worktree, ws, app)
+    });
     let branch = std::process::Command::new("git").args(["branch", "--show-current"]).current_dir(&worktree).output().unwrap();
     assert_eq!(String::from_utf8_lossy(&branch.stdout).trim(), "fix-login", "the branch is named as typed");
     assert_eq!(ws.read_with(&cx, |ws, _| ws.live.len()), 1, "the same session, not a new one");

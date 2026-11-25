@@ -355,7 +355,7 @@ fn subagent_tools() -> Vec<Value> {
     let id = json!({"type": "string", "description": "The subagent id returned by spawn_subagent"});
     let prompt = json!({"type": "string", "description": "The task or follow-up, at most 20,000 characters"});
     vec![
-        tool("spawn_subagent", "Start a background subagent in this session's working folder. Returns at once; its report arrives as a message in this chat when its turn ends. Follow the user's and project's delegation rules. The child uses the configured edit permissions; read-only parents cannot grant edits. Use list_models for model ids. Antigravity is not supported yet.", json!({"harness": {"type": "string", "enum": ["claude", "codex", "opencode"]}, "model": {"type": "string"}, "effort": {"type": "string", "enum": ["low", "medium", "high", "xhigh", "max"]}, "prompt": prompt}), json!(["harness", "prompt"])),
+        tool("spawn_subagent", "Start a background subagent in this session's working folder. Returns at once; its report arrives as a message in this chat when its turn ends. Follow the user's and project's delegation rules. The child uses the configured edit permissions; read-only parents cannot grant edits. Use list_models for model ids.", json!({"harness": {"type": "string", "enum": ["claude", "codex", "opencode", "antigravity"]}, "model": {"type": "string"}, "effort": {"type": "string", "enum": ["low", "medium", "high", "xhigh", "max"]}, "prompt": prompt}), json!(["harness", "prompt"])),
         tool("list_subagents", "List this session's children, their states and latest reports.", json!({}), json!([])),
         tool("send_subagent_message", "Queue a follow-up in the same child session, resuming it if stopped. Messages during a turn run after that turn. Its report arrives as a message when it is done.", json!({"id": id, "prompt": prompt}), json!(["id", "prompt"])),
         tool("wait_subagent", "Block this turn until a child's turn finishes and return its latest report; a report the wait returns does not also arrive as a message. Only needed when you can't go on without it. Returns early for a user question. A timeout returns its current state without stopping it.", json!({"id": id, "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 240}}), json!(["id"])),
@@ -424,6 +424,10 @@ fn interactive_tools() -> Vec<Value> {
                         },
                         "required": ["label"]
                     }
+                },
+                "multi_select": {
+                    "type": "boolean",
+                    "description": "Allow the user to select multiple options with checkboxes (default false)"
                 }
             },
             "required": ["question", "options"]

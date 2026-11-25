@@ -319,27 +319,40 @@ async function permission(session, name, input, options) {
 }
 
 /**
- * Claude's questions to the user, one at a time, each with its options. A multiple-choice question takes one answer.
- * ACP has no free-text answer, so `_meta.m4code.freeText` tells m4code the user may type their own instead, and
- * m4code sends those words back in the answer's `_meta.m4code.text`.
+ * Claude's questions to the user, one at a time, each with its options. ACP has no free-text or multi-select answer,
+ * so `_meta.m4code` advertises `freeText` and `multiSelect`, and m4code sends back `_meta.m4code.text` and/or
+ * `_meta.m4code.optionIds`.
  */
 async function askQuestions(session, input, options) {
   const answers = {};
   for (const q of input?.questions ?? []) {
+    const multiSelect = Boolean(q.multiSelect);
+    const meta = { freeText: true, ...(multiSelect ? { multiSelect: true } : {}) };
+    const choices = q.options.map((o, i) => ({
+      optionId: String(i),
+      name: o.label,
+      ...(o.description ? { description: o.description } : {}),
+      kind: "allow_once",
+    }));
     const answer = await ask("session/request_permission", {
-      _meta: { m4code: { freeText: true } },
+      _meta: { m4code: meta },
       sessionId: session.id,
       toolCall: { toolCallId: `${options.toolUseID}-${q.question}`, title: q.question, kind: "other", status: "pending" },
-      options: [
-        ...q.options.map((o, i) => ({ optionId: String(i), name: o.label, ...(o.description ? { description: o.description } : {}), kind: "allow_once" })),
-        { optionId: "skip", name: "Skip", kind: "reject_once" },
-      ],
+      options: choices,
     });
     const chosen = answer?.outcome?.outcome === "selected" ? answer.outcome.optionId : null;
     if (chosen === null) return { behavior: "deny", message: "The user dismissed the question.", interrupt: true };
-    const own = answer?._meta?.m4code?.text;
-    if (typeof own === "string" && own.trim()) answers[q.question] = own.trim();
-    else if (chosen !== "skip" && q.options[Number(chosen)]) answers[q.question] = q.options[Number(chosen)].label;
+    const own = typeof answer?._meta?.m4code?.text === "string" ? answer._meta.m4code.text.trim() : "";
+    const selectedIds = answer?._meta?.m4code?.optionIds;
+    if (Array.isArray(selectedIds)) {
+      const parts = selectedIds.map((id) => q.options[Number(id)]?.label).filter(Boolean);
+      if (own) parts.push(own);
+      if (parts.length) answers[q.question] = parts.join(", ");
+    } else if (own) {
+      answers[q.question] = own;
+    } else if (chosen !== "skip" && q.options[Number(chosen)]) {
+      answers[q.question] = q.options[Number(chosen)].label;
+    }
   }
   return { behavior: "allow", updatedInput: { ...input, answers } };
 }
@@ -530,7 +543,7 @@ async function pump(session) {
 async function open(params, resume) {
   const id = resume ?? randomUUID();
   const extra = params._meta?.claudeCode?.options ?? {};
-  const session = { id, cwd: params.cwd, inbox: new Inbox(), tools: new Map(), streamed: new Set(), shells: new BackgroundShells(), turn: null, cancelled: false, interrupted: null, dropping: new Set(), dropInterrupted: false, dropsDone: null, mode: "default", model: "", effort: "medium", models: [] };
+  const session = { id, cwd: params.cwd, inbox: new Inbox(), tools: new Map(), streamed: new Set(), shells: new BackgroundShells(), turn: null, cancelled: false, interrupted: null, dropping: new Set(), dropInterrupted: false, dropsDone: null, mode: extra.permissionMode ?? "default", model: "", effort: "medium", models: [] };
   session.query = query({
     prompt: session.inbox,
     options: {

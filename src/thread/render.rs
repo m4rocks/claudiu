@@ -619,7 +619,7 @@ impl ThreadView {
             .flex()
             .justify_center()
             .child(div().w_full().max_w(px(COLUMN_MAX_W))
-                .when(self.find_highlights(ix), |row| row.rounded(px(5.0)).bg(hsla(theme::SURFACE_ELEVATED)))
+                .when(self.find_query_for_row(ix).is_some(), |row| row.rounded(px(5.0)).bg(hsla(theme::SURFACE_ELEVATED)))
                 .child(body))
             .into_any_element()
     }
@@ -664,8 +664,7 @@ impl ThreadView {
         let shell = call.kind == "execute";
         let details = &call.details;
         let has_details = call.content.iter().any(|item| !matches!(item, ToolContent::Diff { .. }))
-            || details.command.is_some() || details.stdout.is_some() || details.stderr.is_some()
-            || details.output.is_some() || details.request.is_some() || details.response.is_some();
+            || details.command.is_some() || details.labeled_output().next().is_some();
         let expanded = (self.detail && !self.collapsed_shell_calls.contains(&call.id))
             || self.expanded_tools.contains(&call.id);
         let toggle_id = call.id.clone();
@@ -735,25 +734,19 @@ impl ThreadView {
         if (expanded && has_details) || has_card {
             let mut body = div().py(px(4.0)).flex().flex_col().gap(px(6.0));
             if expanded {
+                let query = self.find_query_for_row(ix);
                 if let Some(command) = &details.command {
                     let command_for_shell = command.clone();
-                    body = body.child(elements::tool_output_block(command, FOLDED_LINES, self.detail))
+                    body = body.child(elements::tool_output_block(None, command, FOLDED_LINES, self.detail, query))
                         .child(button(SharedString::from(format!("tool-shell-{ix}")), "Copy and open shell", false)
                             .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| cx.emit(ThreadEvent::OpenToolShell(command_for_shell.clone())))));
                 }
-                for (name, text) in [("stdout", &details.stdout), ("stderr", &details.stderr),
-                    ("Output", &details.output), ("Request", &details.request), ("Response", &details.response)]
-                {
-                    if let Some(text) = text {
-                        let lines: Vec<_> = text.lines().collect();
-                        let count = if self.detail { lines.len() } else { lines.len().min(FOLDED_LINES) };
-                        let recent = lines.len().saturating_sub(count);
-                        body = body.child(elements::code_block(Some(name.into()), &lines[recent..], count, None));
-                    }
+                for (label, text) in details.labeled_output() {
+                    body = body.child(elements::tool_output_block(Some(label), text, FOLDED_LINES, self.detail, query));
                 }
                 body = body.children(call.content.iter().enumerate().filter_map(|(index, content)| match content {
-                    ToolContent::Text(text) if !text.is_empty() && details.stdout.is_none() && details.stderr.is_none() && details.output.is_none() =>
-                        Some(elements::tool_output_block(text, FOLDED_LINES, self.detail)),
+                    ToolContent::Text(text) if !text.is_empty() && call.shows_text_content() =>
+                        Some(elements::tool_output_block(None, text, FOLDED_LINES, self.detail, query)),
                     ToolContent::Image { mime, data } => self.render_tool_image(ix, (&call.id, index), (mime, data), cx),
                     _ => None,
                 }));
@@ -1031,6 +1024,8 @@ impl ThreadView {
             );
         }
         for (i, task) in self.background_tasks.iter().enumerate() {
+            let task_id = task.id.clone();
+            let has_log = task.log_path.is_some();
             pills = pills.child(
                 div()
                     .flex()
@@ -1045,7 +1040,13 @@ impl ThreadView {
                     .text_size(scale::px(11.5))
                     .text_color(hsla(theme::TEXT_DIM))
                     .child(spinner(format!("thread-bg-async-task-{i}"), 10.0))
-                    .child(div().max_w(px(220.0)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(task.label.clone())),
+                    .child(div().max_w(px(220.0)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(task.label.clone()))
+                    .when(has_log, |pill| {
+                        pill.child(
+                            button(SharedString::from(format!("bg-task-output-{i}")), "Output", false)
+                                .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| v.open_background_task_output(&task_id, cx))),
+                        )
+                    }),
             );
         }
         for (i, name) in bg_tools.into_iter().enumerate() {
@@ -1071,10 +1072,20 @@ impl ThreadView {
             let stop_id = shell.id.clone();
             let stopping = shell.stopping;
             pills = pills.child(
-                div().flex().items_center().gap(px(6.0)).p(px(3.0))
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(5.0))
+                    .px(px(7.0))
+                    .py(px(2.0))
+                    .rounded(px(5.0))
+                    .bg(hsla(theme::PANEL_BG))
+                    .border_1()
+                    .border_color(hsla(theme::PANEL_BORDER))
+                    .text_size(scale::px(11.5))
+                    .text_color(hsla(theme::TEXT_DIM))
                     .child(spinner(format!("provider-shell-{}", shell.id), 10.0))
-                    .child(div().max_w(px(220.0)).overflow_hidden().text_ellipsis().whitespace_nowrap()
-                        .text_size(scale::px(11.5)).child(shell.label.clone()))
+                    .child(div().max_w(px(220.0)).overflow_hidden().text_ellipsis().whitespace_nowrap().child(shell.label.clone()))
                     .child(button(SharedString::from(format!("shell-output-{}", shell.id)), "Output", false)
                         .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| v.background_shell_action(&read_id, false, cx))))
                     .child(if stopping {
@@ -1114,20 +1125,23 @@ impl ThreadView {
     }
 
     fn render_question(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<Div> {
-        let q = self.questions.front()?;
+        let q = self.active_question()?;
         let question_id = q.id;
+        let multi = q.multi_select;
+        let selected_count = q.selected.len();
         let mut options = div().flex().flex_col().gap(px(6.0)).w_full();
         for (i, opt) in q.options.iter().enumerate() {
             let lit = i == q.highlight;
+            let checked = multi && q.selected.contains(&i);
             let row = div()
                 .id(SharedString::from(format!("thread-perm-{question_id}-{i}")))
                 .w_full()
                 .px(px(10.0))
                 .py(px(8.0))
                 .rounded(px(7.0))
-                .bg(hsla(if lit { theme::ROW_ACTIVE } else { theme::PANEL_BG }))
+                .bg(hsla(if lit || checked { theme::ROW_ACTIVE } else { theme::PANEL_BG }))
                 .border_1()
-                .border_color(hsla(if lit { theme::FOCUS_BORDER } else { theme::PANEL_BORDER }))
+                .border_color(hsla(if lit || checked { theme::FOCUS_BORDER } else { theme::PANEL_BORDER }))
                 .cursor_pointer()
                 .on_hover(cx.listener(move |v, hovered: &bool, _, cx| {
                     if *hovered {
@@ -1137,6 +1151,22 @@ impl ThreadView {
                 .flex()
                 .items_start()
                 .gap(px(10.0))
+                .when(multi, |row| {
+                    row.child(
+                        div()
+                            .mt(px(2.0))
+                            .flex_none()
+                            .size(px(15.0))
+                            .rounded(px(4.0))
+                            .border_1()
+                            .border_color(hsla(if checked { theme::ACCENT } else { theme::PANEL_BORDER }))
+                            .bg(hsla(if checked { theme::ACCENT } else { theme::PANEL_BG }))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .when(checked, |box_el| box_el.child(icon(IconName::Check, 11.0).text_color(hsla(theme::PANEL_BG)))),
+                    )
+                })
                 .child(div().pt(px(1.0)).child(key_badge(format!("{}", i + 1))))
                 .child(
                     div()
@@ -1159,9 +1189,94 @@ impl ThreadView {
                                 .child(desc)
                         })),
                 )
-                .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| { v.answer_question(question_id, Some(i), cx); }));
+                .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| {
+                    if multi {
+                        v.toggle_question_option(question_id, i, cx);
+                    } else {
+                        v.answer_question(question_id, Some(i), cx);
+                    }
+                }));
             options = options.child(row);
         }
+        let pending_count = self.pending_question_count();
+        let footer = if multi {
+            let submit_label = if selected_count > 0 { format!("Submit ({selected_count})") } else { "Submit".into() };
+            let submit_btn = if selected_count > 0 {
+                button_colored(
+                    "thread-question-submit",
+                    Some(IconName::Check),
+                    &submit_label,
+                    hsla(theme::ACCENT),
+                    hsla(theme::PANEL_BG),
+                    hsla(0xdcdcdc),
+                    None,
+                    true,
+                )
+                .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| {
+                    v.submit_multi_question(question_id, cx);
+                }))
+                .h(px(24.0))
+                .px(px(10.0))
+                .into_any_element()
+            } else {
+                button_disabled_leading("thread-question-submit", Some(IconName::Check), &submit_label)
+                    .h(px(24.0))
+                    .px(px(10.0))
+                    .into_any_element()
+            };
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap(px(8.0))
+                .child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .gap(px(6.0))
+                        .items_center()
+                        .text_color(hsla(theme::TEXT_FAINT))
+                        .text_size(scale::px(11.5))
+                        .child(key_badge("↑↓"))
+                        .child(key_badge("Space"))
+                        .child("or")
+                        .child(key_badge("1-9"))
+                        .child("to toggle")
+                        .child(key_badge("Enter"))
+                        .child("to submit")
+                        .child(key_badge("Esc"))
+                        .child("to decline")
+                        .when(q.takes_own_answer, |d| d.child("· or type below")),
+                )
+                .child(submit_btn)
+        } else if q.options.is_empty() {
+            div()
+                .flex()
+                .flex_wrap()
+                .gap(px(6.0))
+                .items_center()
+                .text_color(hsla(theme::TEXT_FAINT))
+                .text_size(scale::px(11.5))
+                .child(key_badge("Esc"))
+                .child("to dismiss")
+                .child("· type your answer below")
+        } else {
+            div()
+                .flex()
+                .flex_wrap()
+                .gap(px(6.0))
+                .items_center()
+                .text_color(hsla(theme::TEXT_FAINT))
+                .text_size(scale::px(11.5))
+                .child(key_badge("↑↓"))
+                .child(key_badge("Enter"))
+                .child("or")
+                .child(key_badge("1-9"))
+                .child("to choose")
+                .child(key_badge("Esc"))
+                .child("to decline")
+                .when(q.takes_own_answer, |d| d.child("· or type your own answer below"))
+        };
         // Inside the message box, above where you type: a long list of options scrolls on its own.
         Some(
             div()
@@ -1175,59 +1290,19 @@ impl ThreadView {
                 .flex_col()
                 .gap(px(8.0))
                 .child(div().font_weight(FontWeight::SEMIBOLD).child(q.title.clone()))
-                .when(self.questions.len() > 1, |card| card.child(div().text_size(scale::px(11.5)).text_color(hsla(theme::TEXT_DIM)).child(format!("{} more requests", self.questions.len() - 1))))
-                .child(self.question_scroll.wire(div().id("thread-question-options").max_h(px(240.0)), window).child(options))
-                .child(
-                    div()
-                        .flex()
-                        .flex_wrap()
-                        .gap(px(6.0))
-                        .items_center()
-                        .text_color(hsla(theme::TEXT_FAINT))
-                        .text_size(scale::px(11.5))
-                        .child(key_badge("↑↓"))
-                        .child(key_badge("Enter"))
-                        .child("or")
-                        .child(key_badge("1-9"))
-                        .child("to choose")
-                        .child(key_badge("Esc"))
-                        .child("to decline")
-                        .when(q.takes_own_answer, |d| d.child("· or type your own answer below")),
-                ),
+                .when(pending_count > 1, |card| {
+                    card.child(
+                        div()
+                            .text_size(scale::px(11.5))
+                            .text_color(hsla(theme::TEXT_DIM))
+                            .child(format!("{} more requests", pending_count - 1)),
+                    )
+                })
+                .when(!q.options.is_empty(), |card| {
+                    card.child(self.question_scroll.wire(div().id("thread-question-options").max_h(px(240.0)), window).child(options))
+                })
+                .child(footer),
         )
-    }
-
-    fn render_async_ask(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<Div> {
-        let ask = self.async_ask()?;
-        let id = ask.id;
-        let typing = self.async_answer_id().is_some();
-        let options = self.question_scroll.wire(
-            div().id("thread-async-ask-options").max_h(px(240.0)), window,
-        )
-            .flex()
-            .flex_col()
-            .items_start()
-            .gap(px(6.0))
-            .children(ask.question.options.iter().enumerate().map(|(index, label)| {
-                button(SharedString::from(format!("thread-async-ask-{id}-{index}")), label.clone(), false)
-                    .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| v.choose_async_ask(id, index, cx)))
-            }));
-        Some(div()
-            .w_full()
-            .px(px(12.0))
-            .py(px(8.0))
-            .border_b_1()
-            .border_color(hsla(theme::BORDER))
-            .flex()
-            .flex_col()
-            .gap(px(8.0))
-            .child(div().font_weight(FontWeight::SEMIBOLD).child(ask.question.title.clone()))
-            .when(!ask.question.options.is_empty(), |card| card.child(options))
-            .child(div().flex().gap(px(6.0))
-                .child(button("thread-async-ask-type", if typing { "Cancel answer" } else { "Type an answer" }, false)
-                    .on_click(cx.listener(move |v, _: &ClickEvent, window, cx| v.toggle_async_answer(id, window, cx))))
-                .child(button("thread-async-ask-dismiss", "Dismiss", false)
-                    .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| v.answer_async_ask(id, None, cx))))))
     }
 
     /// Universal floating picker dialog over the chat view: unified model + draggable effort picker, or permission mode selector.
@@ -1319,25 +1394,23 @@ impl ThreadView {
             ThreadPicker::Permission => {
                 let mut rows = self.permission_scroll.wire(div().id("picker-perm-list").max_h(px(340.0)), window).flex().flex_col().gap(px(2.0));
                 let offered = self.permissions();
-                if offered.is_empty() {
-                    rows = rows.child(picker::empty_note("No permission modes available."));
-                } else {
-                    let hi = self.mode_highlight.min(offered.len() - 1);
-                    for (i, (mode, id)) in offered.into_iter().enumerate() {
-                        let current = self.thread.mode.as_deref() == Some(id);
-                        let focused = i == hi;
-                        let lead = icon(IconName::Lock, 12.0).text_color(hsla(if current { theme::TEXT } else { theme::TEXT_FAINT })).into_any_element();
-                        rows = rows.child(
-                            picker::row(SharedString::from(format!("perm-mode-{i}")), Some(lead), mode.label(), Some(mode.description().into()), None, current, false)
-                                .when(focused && !current, |d| d.bg(hsla(theme::SURFACE_HOVER)))
-                                .border_1()
-                                .border_color(if focused { hsla(theme::FOCUS_BORDER) } else { gpui::transparent_black() })
-                                .on_click(cx.listener(move |v, _: &ClickEvent, window, cx| {
-                                    v.set_mode(id.to_string(), cx);
-                                    v.close_picker(window, cx);
-                                })),
-                        );
+                for (i, mode) in Permission::ALL.into_iter().enumerate() {
+                    let available = offered.contains(&mode);
+                    let current = self.permission() == Some(mode);
+                    let focused = available && i == self.mode_highlight;
+                    let lead = icon(IconName::Lock, 12.0).text_color(hsla(if current { theme::TEXT } else { theme::TEXT_FAINT })).into_any_element();
+                    let mut row = picker::row(SharedString::from(format!("perm-mode-{i}")), Some(lead), mode.label(), Some(mode.detail(available)), None, current, !available)
+                        .debug_selector(move || format!("perm-mode-{i}"))
+                        .when(focused && !current, |d| d.bg(hsla(theme::SURFACE_HOVER)))
+                        .border_1()
+                        .border_color(if focused { hsla(theme::FOCUS_BORDER) } else { gpui::transparent_black() });
+                    if available {
+                        row = row.on_click(cx.listener(move |v, _: &ClickEvent, window, cx| {
+                            v.set_permission(mode, cx);
+                            v.close_picker(window, cx);
+                        }));
                     }
+                    rows = rows.child(row);
                 }
                 ("thread-permission-dialog", "PERMISSION MODE", rows.into_any_element())
             }
@@ -1571,22 +1644,19 @@ impl ThreadView {
             }))
             .into_any_element();
 
-        // Permission mode: one of the four, or the harness's own name for a mode outside them.
-        let permission = self.thread.mode.as_deref().map(|mode_id| {
-            let label = match Permission::of(self.harness, mode_id) {
-                Some(mode) => mode.label().to_string(),
-                None => picker::format_mode_name(mode_id, self.thread.modes.iter().find(|(id, _)| id == mode_id).map_or(mode_id, |(_, name)| name)),
-            };
-            composer::permission_chip("thread-mode", self.picker == Some(ThreadPicker::Permission), label)
-                .dropdown_above(cx, |v, at, window, cx| {
-                    v.picker = Some(ThreadPicker::Permission);
-                    v.picker_at = at;
-                    v.mode_highlight = v.permissions().iter().position(|(_, id)| v.thread.mode.as_deref() == Some(*id)).unwrap_or(0);
-                    v.focus_composer(window, cx);
-                    cx.notify();
-                })
-                .into_any_element()
-        });
+        let label = self.initial_permission.or_else(|| self.permission()).map_or("Harness default", Permission::label);
+        let permission = Some(composer::permission_chip("thread-mode", self.picker == Some(ThreadPicker::Permission), label)
+            .debug_selector(|| "thread-mode".into())
+            .dropdown_above(cx, |v, at, window, cx| {
+                v.picker = Some(ThreadPicker::Permission);
+                v.picker_at = at;
+                let offered = v.permissions();
+                let current = v.permission().filter(|p| offered.contains(p)).or_else(|| offered.first().copied());
+                v.mode_highlight = Permission::ALL.iter().position(|p| Some(*p) == current).unwrap_or(0);
+                v.focus_composer(window, cx);
+                cx.notify();
+            })
+            .into_any_element());
 
         let git = self.git.as_ref().map(|git| {
             let tail = git.busy.then(|| spinner("thread-git-busy", 11.0).into_any_element());
@@ -1613,7 +1683,7 @@ impl ThreadView {
         let can_interrupt = self.can_interrupt();
         let idle_for_resume = !active_turn && self.queue_held && self.questions.is_empty()
             && (self.waiting_messages().next().is_some() || self.handoff_after_turn.is_some());
-        let answering = self.questions.front().is_some_and(|q| q.takes_own_answer) || self.async_answer_id().is_some();
+        let answering = self.active_question().is_some_and(|q| q.takes_own_answer);
         let follow_up = if alternate { self.follow_up.other() } else { self.follow_up };
         #[derive(Clone, Copy)]
         enum ActionKind {
@@ -1657,8 +1727,6 @@ impl ThreadView {
         };
         let enabled = if editing {
             has_message && self.questions.is_empty()
-        } else if self.async_answer_blocked() {
-            false
         } else if answering && has_message {
             true
         } else if !has_message && can_interrupt {
@@ -1691,8 +1759,8 @@ impl ThreadView {
         }.h(px(26.0)).px(px(12.0)).into_any_element();
 
         composer::Composer {
-            lit: focused || !self.questions.is_empty(),
-            top: self.render_question(window, cx).or_else(|| self.render_async_ask(window, cx)).map(IntoElement::into_any_element),
+            lit: focused || self.active_question().is_some(),
+            top: self.render_question(window, cx).map(IntoElement::into_any_element),
             input,
             model,
             permission,
