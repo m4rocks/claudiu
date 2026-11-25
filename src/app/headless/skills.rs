@@ -6,13 +6,11 @@ fn skills_page_installs_toggles_syncs_and_removes() {
     use crate::skills::registry::CatalogEntry;
     use crate::skills::{InstalledSkill, global_skills_dir, project_skills_dir};
 
-    let data = tempfile::tempdir().unwrap();
+    let data = crate::datadir::own_folder();
     let home = tempfile::tempdir().unwrap();
     let proj_dir = tempfile::tempdir().unwrap();
     // Create Antigravity's config dir so both Claude (default) and Antigravity count as active harnesses.
     std::fs::create_dir_all(home.path().join(".gemini").join("config")).unwrap();
-    // SAFETY: test-isolated data dir.
-    unsafe { std::env::set_var("M4CODE_DATA_DIR", data.path()) };
 
     let own = proj_dir.path().join(".claude").join("skills").join("own-skill");
     std::fs::create_dir_all(&own).unwrap();

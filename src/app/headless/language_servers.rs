@@ -1,21 +1,16 @@
 use super::*;
 
 /// Editor mode with a real rust-analyzer: diagnostics arrive, hover, go-to-definition and completion answer, and a language whose
-/// server isn't installed says so. Uses `rust-analyzer` from `M4CODE_TEST_RUST_ANALYZER_DIR` (prepended to PATH),
-/// else PATH. `cargo test -- --ignored language_servers`.
+/// server isn't installed says so. Uses `rust-analyzer` from `M4CODE_TEST_RUST_ANALYZER_DIR` (looked in before
+/// PATH), else PATH. `cargo test -- --ignored language_servers`.
 fn language_servers_with_rust_analyzer() {
     use std::cell::RefCell;
     use std::rc::Rc;
-    let data = tempfile::tempdir().unwrap();
-    // SAFETY: set before any other thread reads the environment; this test owns the process.
-    unsafe {
-        std::env::set_var("M4CODE_DATA_DIR", data.path());
-        if let Some(dir) = std::env::var_os("M4CODE_TEST_RUST_ANALYZER_DIR") {
-            let mut paths = vec![PathBuf::from(dir)];
-            paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()));
-            std::env::set_var("PATH", std::env::join_paths(paths).unwrap());
-        }
-    }
+    let data = crate::datadir::own_folder();
+    let _data = match std::env::var_os("M4CODE_TEST_RUST_ANALYZER_DIR") {
+        Some(dir) => data.with_programs_from(dir.into()),
+        None => data,
+    };
     let work = tempfile::tempdir().unwrap();
     let root = dunce::canonicalize(work.path()).unwrap();
     std::fs::create_dir_all(root.join("src")).unwrap();

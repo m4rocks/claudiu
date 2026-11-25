@@ -6,11 +6,9 @@ fn dropdowns_switch_on_one_click_and_load_all_harness_models() {
     use gpui::px;
     use std::time::Instant;
 
-    let data = tempfile::tempdir().unwrap();
+    let _data = crate::datadir::own_folder();
     let proj_dir = tempfile::tempdir().unwrap();
     git2::Repository::init(proj_dir.path()).unwrap();
-    // SAFETY: test-isolated data dir.
-    unsafe { std::env::set_var("M4CODE_DATA_DIR", data.path()) };
 
     let mut cx = TestAppContext::single();
     cx.update(|app| {
@@ -122,10 +120,8 @@ fn dropdowns_switch_on_one_click_and_load_all_harness_models() {
 #[ignore = "drives the workspace"]
 /// Up, Down and Enter move through a dropdown's rows and choose one while the keyboard is in its search box.
 fn dropdowns_answer_the_arrow_keys() {
-    let data = tempfile::tempdir().unwrap();
+    let _data = crate::datadir::own_folder();
     let (one, two) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-    // SAFETY: test-isolated data dir.
-    unsafe { std::env::set_var("M4CODE_DATA_DIR", data.path()) };
     let mut cx = TestAppContext::single();
     cx.update(|app| {
         gpui_kit::init(app);
@@ -162,9 +158,7 @@ fn keyboard_workspace(cx: &mut TestAppContext) -> (gpui::AnyWindowHandle, Entity
 #[ignore = "drives the workspace"]
 /// A dropdown with no search box takes the keyboard itself, and hands it back to Settings when it closes.
 fn dropdowns_without_a_search_box_answer_the_arrow_keys() {
-    let data = tempfile::tempdir().unwrap();
-    // SAFETY: test-isolated data dir.
-    unsafe { std::env::set_var("M4CODE_DATA_DIR", data.path()) };
+    let _data = crate::datadir::own_folder();
     let mut cx = TestAppContext::single();
     let (window, ws) = keyboard_workspace(&mut cx);
     cx.update_window(window, |_, window, app| {
@@ -191,9 +185,7 @@ fn dropdowns_without_a_search_box_answer_the_arrow_keys() {
 #[ignore = "drives the workspace"]
 /// Up and Down skip a menu's greyed-out rows, Enter runs the highlighted one, and Esc gives the keyboard back.
 fn context_menus_answer_the_keyboard() {
-    let data = tempfile::tempdir().unwrap();
-    // SAFETY: test-isolated data dir.
-    unsafe { std::env::set_var("M4CODE_DATA_DIR", data.path()) };
+    let _data = crate::datadir::own_folder();
     let mut cx = TestAppContext::single();
     let (window, ws) = keyboard_workspace(&mut cx);
     let open = |cx: &mut TestAppContext| {
@@ -235,8 +227,7 @@ fn context_menus_answer_the_keyboard() {
 #[test]
 #[ignore = "drives the workspace"]
 fn text_generation_picker_saves_a_model_independently_of_new_sessions() {
-    let data = tempfile::tempdir().unwrap();
-    unsafe { std::env::set_var("M4CODE_DATA_DIR", data.path()) };
+    let _data = crate::datadir::own_folder();
     let mut cx = TestAppContext::single();
     cx.update(gpui_kit::init);
     let (window, ws) = cx.update(|app| gpui_kit::open_window(Default::default(), app, |window, app| {

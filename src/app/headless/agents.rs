@@ -766,8 +766,7 @@ fn home_does_not_launch_without_a_message() {
 #[test]
 #[ignore]
 fn a_missing_claude_offers_the_setup_window() {
-    let data = tempfile::tempdir().unwrap();
-    unsafe { std::env::set_var("M4CODE_DATA_DIR", data.path()) };
+    let _data = crate::datadir::own_folder();
     let work = tempfile::tempdir().unwrap();
     let mut cx = TestAppContext::single();
     cx.update(|app| {
@@ -797,8 +796,8 @@ fn a_missing_claude_offers_the_setup_window() {
 /// exit is a toast, and the worktree stays: Claude Code already asked on `/exit`, and the X is the path that offers.
 #[test]
 fn a_process_that_ends_closes_the_session_and_leaves_its_worktree() {
-    // Not `#[ignore]`d, so it runs beside the unit tests: it takes the run's one data folder rather than setting
-    // `M4CODE_DATA_DIR` to its own, which would move theirs while they read it (#149). Its repository is new, so
+    // Not `#[ignore]`d, so it runs beside the unit tests: it takes the run's one data folder, as `datadir::own_folder`
+    // would move theirs while they read it (#149). Its repository is new, so
     // its worktree folder and project are its own there.
     crate::datadir::use_throwaway_folders();
     let work = tempfile::tempdir().unwrap();
@@ -934,9 +933,7 @@ fn a_process_that_ends_closes_the_session_and_leaves_its_worktree() {
 #[test]
 #[ignore = "drives the workspace with a stand-in agent"]
 fn reviewing_what_a_turn_changed() {
-    let data = tempfile::tempdir().unwrap();
-    // SAFETY: set before any other thread reads the environment; this test owns the process.
-    unsafe { std::env::set_var("M4CODE_DATA_DIR", data.path()) };
+    let _data = crate::datadir::own_folder();
     let work = tempfile::tempdir().unwrap();
     let cwd = dunce::canonicalize(work.path()).unwrap().join("proj");
     std::fs::create_dir_all(&cwd).unwrap();
@@ -1025,9 +1022,7 @@ fn reviewing_what_a_turn_changed() {
 #[test]
 #[ignore = "drives the workspace with a stand-in agent"]
 fn picking_up_a_session_started_elsewhere() {
-    let data = tempfile::tempdir().unwrap();
-    // SAFETY: set before any other thread reads the environment; this test owns the process.
-    unsafe { std::env::set_var("M4CODE_DATA_DIR", data.path()) };
+    let _data = crate::datadir::own_folder();
     let work = tempfile::tempdir().unwrap();
     let cwd = dunce::canonicalize(work.path()).unwrap();
     let agent = fake_agent(work.path());
@@ -1074,9 +1069,7 @@ fn picking_up_a_session_started_elsewhere() {
 #[test]
 #[ignore = "drives the workspace with a stand-in agent"]
 fn handing_a_session_to_another_agent() {
-    let data = tempfile::tempdir().unwrap();
-    // SAFETY: set before any other thread reads the environment; this test owns the process.
-    unsafe { std::env::set_var("M4CODE_DATA_DIR", data.path()) };
+    let _data = crate::datadir::own_folder();
     let work = tempfile::tempdir().unwrap();
     let cwd = dunce::canonicalize(work.path()).unwrap();
     let agent = fake_agent(work.path());
@@ -1180,9 +1173,7 @@ fn an_opencode_session_answers_in_its_thread() {
 
 fn a_session_answers_in_its_thread(harness: crate::harness::Harness) {
     use crate::harness::thread::Entry;
-    let data = tempfile::tempdir().unwrap();
-    // SAFETY: set before any other thread reads the environment; this test owns the process.
-    unsafe { std::env::set_var("M4CODE_DATA_DIR", data.path()) };
+    let _data = crate::datadir::own_folder();
     let work = tempfile::tempdir().unwrap();
     let mut cx = TestAppContext::single();
     cx.update(|app| {

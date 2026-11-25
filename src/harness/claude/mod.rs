@@ -266,6 +266,10 @@ pub fn command(exe: &Path) -> std::process::Command {
 
 /// Claude Code's data directory (`CLAUDE_CONFIG_DIR` is the documented override).
 pub fn claude_home() -> Option<PathBuf> {
+    #[cfg(test)]
+    if let Some(dir) = crate::datadir::overrides().claude {
+        return Some(dir);
+    }
     std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from).or_else(|| home_dir().map(|h| h.join(".claude")))
 }
 

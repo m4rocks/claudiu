@@ -342,4 +342,20 @@ mod source_tests {
         walk(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut bad);
         assert!(bad.is_empty(), "NUL byte in {bad:?}; write '\0' instead");
     }
+
+    /// The unit tests share one environment for the whole run (`M4CODE_DATA_DIR` and the rest), and a headless test
+    /// that changes it moves theirs while they read it (#149). Headless tests take `datadir::own_folder` or
+    /// `datadir::use_throwaway_folders`.
+    #[test]
+    fn headless_tests_leave_the_environment_alone() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/app/headless");
+        let needle = "env::set_var(";
+        let bad: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| std::fs::read_to_string(p).unwrap().contains(needle))
+            .collect();
+        assert!(bad.is_empty(), "{bad:?} change the environment; use datadir::own_folder instead");
+    }
 }

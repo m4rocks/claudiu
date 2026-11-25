@@ -79,6 +79,10 @@ pub fn home_dir() -> Option<PathBuf> {
 /// PATH lookup (honors PATHEXT on Windows). On macOS and Linux a miss also looks in the login shell's PATH, which
 /// the first miss waits for if the startup read hasn't finished, so call it off the UI thread.
 pub fn find_executable(name: &str) -> Option<PathBuf> {
+    #[cfg(test)]
+    if let Some(found) = crate::datadir::overrides().programs.and_then(|dir| which::which_in(name, Some(dir), ".").ok()) {
+        return Some(found);
+    }
     let found = which::which(name).ok();
     #[cfg(unix)]
     let found = {

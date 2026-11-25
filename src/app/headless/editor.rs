@@ -108,9 +108,7 @@ fn home_editor_follows_the_project_without_starting_a_session() {
 /// box, on a line of its own after what is typed there. Moving the keyboard to the chat adds nothing by itself. Runs the
 /// real `claude` in this repository on a file under `target`. `cargo test -- --ignored line_comment`.
 fn line_comment_into_the_message_box() {
-    let data = tempfile::tempdir().unwrap();
-    // SAFETY: set before any other thread reads the environment; this test owns the process.
-    unsafe { std::env::set_var("M4CODE_DATA_DIR", data.path()) };
+    let _data = crate::datadir::own_folder();
     let root = dunce::canonicalize(env!("CARGO_MANIFEST_DIR")).unwrap();
     let work = tempfile::tempdir_in(root.join("target")).unwrap();
     let code = work.path().join("code.rs");
@@ -186,9 +184,7 @@ fn line_comment() {
 /// trust question, which is enough for the editor.
 /// `cargo test -- --ignored file_operations`.
 fn file_operations_in_the_tree() {
-    let data = tempfile::tempdir().unwrap();
-    // SAFETY: set before any other thread reads the environment; this test owns the process.
-    unsafe { std::env::set_var("M4CODE_DATA_DIR", data.path()) };
+    let _data = crate::datadir::own_folder();
     let work = tempfile::tempdir().unwrap();
     let root = dunce::canonicalize(work.path()).unwrap();
     std::fs::write(root.join("code.rs"), "fn a() {}
@@ -290,9 +286,7 @@ fn file_operations() {
 /// keep working on a selection; Ctrl+W closes tabs. Runs the real `claude` in a new temporary folder, like `file_operations`.
 /// `cargo test -- --ignored line_actions`.
 fn line_actions_on_their_keys() {
-    let data = tempfile::tempdir().unwrap();
-    // SAFETY: set before any other thread reads the environment; this test owns the process.
-    unsafe { std::env::set_var("M4CODE_DATA_DIR", data.path()) };
+    let _data = crate::datadir::own_folder();
     let work = tempfile::tempdir().unwrap();
     let root = dunce::canonicalize(work.path()).unwrap();
     std::fs::write(root.join("lines.txt"), "one\ntwo\nthree\nfour\n").unwrap();
@@ -401,9 +395,7 @@ fn line_actions() {
 /// Double-clicking a word in the editor selects it. Runs the real `claude` in a new temporary folder, like
 /// `file_operations`. `cargo test -- --ignored double_click`.
 fn double_click_in_the_editor() {
-    let data = tempfile::tempdir().unwrap();
-    // SAFETY: set before any other thread reads the environment; this test owns the process.
-    unsafe { std::env::set_var("M4CODE_DATA_DIR", data.path()) };
+    let _data = crate::datadir::own_folder();
     let work = tempfile::tempdir().unwrap();
     let root = dunce::canonicalize(work.path()).unwrap();
     std::fs::write(root.join("words.txt"), "hello brave world\nsecond line\n").unwrap();

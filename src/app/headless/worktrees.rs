@@ -3,13 +3,8 @@ use super::*;
 /// The worktree dialog and the switch of a session between worktrees, with a stand-in for `claude`, so what Claude Code
 /// does in the new folder is not checked.
 fn switching_between_worktrees_in_the_workspace() {
-    let data = tempfile::tempdir().unwrap();
-    // SAFETY: set before any other thread reads the environment; this test owns the process.
-    unsafe { std::env::set_var("M4CODE_DATA_DIR", data.path()) };
-    // Claude Code's data directory, where the conversation of a session is looked for.
-    let home = tempfile::tempdir().unwrap();
-    // SAFETY: as above.
-    unsafe { std::env::set_var("CLAUDE_CONFIG_DIR", home.path()) };
+    // Claude Code's data directory is where the conversation of a session is looked for.
+    let data = crate::datadir::own_folder().with_claude_home();
     let work = tempfile::tempdir().unwrap();
     let repo_dir = dunce::canonicalize(work.path()).unwrap().join("proj");
     let repo = git2::Repository::init(&repo_dir).unwrap();
@@ -70,7 +65,7 @@ fn switching_between_worktrees_in_the_workspace() {
     // The conversation exists once Claude Code has had a prompt; the test stands one in, in Claude Code's own place.
     wait(&mut cx, "the session to open", &|ws, _| ws.store.session(&session.id).and_then(|r| r.provider_session_id()).is_some());
     let claude_id = ws.read_with(&cx, |ws, _| ws.store.session(&session.id).unwrap().provider_session_id().unwrap().to_string());
-    let transcript = home.path().join("projects/p").join(format!("{claude_id}.jsonl"));
+    let transcript = data.claude_home().join("projects/p").join(format!("{claude_id}.jsonl"));
     std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
     std::fs::write(&transcript, "{\"type\":\"user\"}
 ").unwrap();
@@ -225,9 +220,7 @@ fn switching_between_worktrees() {
 /// A running session refuses the removal of its worktree. Ending it offers the removal, and confirming removes the folder
 /// (with an agent running in it until the session ends, which on Windows holds the folder until the process is gone).
 fn removing_a_worktree_when_its_session_ends() {
-    let data = tempfile::tempdir().unwrap();
-    // SAFETY: set before any other thread reads the environment; this test owns the process.
-    unsafe { std::env::set_var("M4CODE_DATA_DIR", data.path()) };
+    let _data = crate::datadir::own_folder();
     let work = tempfile::tempdir().unwrap();
     let repo_dir = dunce::canonicalize(work.path()).unwrap().join("proj");
     let git = |args: &[&str]| std::process::Command::new("git").args(args).current_dir(&repo_dir).output().unwrap();

@@ -25,6 +25,83 @@ pub fn use_throwaway_folders() -> (PathBuf, PathBuf) {
     (dunce::canonicalize(data.path()).unwrap(), dunce::canonicalize(claude.path()).unwrap())
 }
 
+/// The folders an [`own_folder`] guard holds: m4code's data folder, and optionally Claude Code's and a folder whose
+/// programs `platform::find_executable` finds first. Each wins over its environment variable while the guard lives.
+#[cfg(test)]
+#[derive(Clone, Default)]
+pub(crate) struct Overrides {
+    pub data: Option<PathBuf>,
+    pub claude: Option<PathBuf>,
+    pub programs: Option<PathBuf>,
+}
+
+#[cfg(test)]
+static OVERRIDES: std::sync::RwLock<Overrides> = std::sync::RwLock::new(Overrides { data: None, claude: None, programs: None });
+
+#[cfg(test)]
+pub(crate) fn overrides() -> Overrides {
+    OVERRIDES.read().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+#[cfg(test)]
+fn set_overrides(change: impl FnOnce(&mut Overrides)) {
+    change(&mut OVERRIDES.write().unwrap_or_else(|e| e.into_inner()));
+}
+
+/// A data folder of a test's own, for headless tests that need a fresh `state.json`. It never changes
+/// `M4CODE_DATA_DIR`, which the unit tests share (#149), nor any other environment variable, but every lookup in this
+/// process uses it while the guard lives. So it only runs in a binary started with `--ignored`, where no unit test runs
+/// beside it, and two such tests take turns.
+#[cfg(test)]
+pub fn own_folder() -> OwnFolder {
+    static TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let ignored_only = std::env::args().any(|a| a == "--ignored");
+    assert!(ignored_only, "a test with its own data folder runs only with `cargo test -- --ignored`, apart from the unit tests");
+    let turn = TURN.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = tempfile::tempdir().unwrap();
+    set_overrides(|o| *o = Overrides { data: Some(dir.path().to_path_buf()), ..Default::default() });
+    OwnFolder { dir, claude: None, _turn: turn }
+}
+
+#[cfg(test)]
+pub struct OwnFolder {
+    dir: tempfile::TempDir,
+    claude: Option<tempfile::TempDir>,
+    _turn: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl OwnFolder {
+    pub fn path(&self) -> &Path {
+        self.dir.path()
+    }
+
+    /// Gives Claude Code's data folder, as m4code reads it, a fresh one of its own too.
+    pub fn with_claude_home(mut self) -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        set_overrides(|o| o.claude = Some(dir.path().to_path_buf()));
+        self.claude = Some(dir);
+        self
+    }
+
+    pub fn claude_home(&self) -> &Path {
+        self.claude.as_ref().expect("with_claude_home").path()
+    }
+
+    /// Finds programs in `dir` before the PATH.
+    pub fn with_programs_from(self, dir: PathBuf) -> Self {
+        set_overrides(|o| o.programs = Some(dir));
+        self
+    }
+}
+
+#[cfg(test)]
+impl Drop for OwnFolder {
+    fn drop(&mut self) {
+        set_overrides(|o| *o = Overrides::default());
+    }
+}
+
 pub fn safe_file_stem(id: &str) -> String {
     id.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect()
 }

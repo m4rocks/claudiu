@@ -4,8 +4,7 @@ use gpui::px;
 #[test]
 #[ignore]
 fn empty_card_fills_the_right_sidebar() {
-    let data = tempfile::tempdir().unwrap();
-    unsafe { std::env::set_var("M4CODE_DATA_DIR", data.path()) };
+    let _data = crate::datadir::own_folder();
     let mut cx = TestAppContext::single();
     cx.update(gpui_kit::init);
     let (window, ws) = cx.update(|app| gpui_kit::open_window(Default::default(), app, |window, app| app.new(|cx| Workspace::new(window, vec![], cx)))).unwrap();
@@ -25,8 +24,7 @@ fn empty_card_fills_the_right_sidebar() {
 #[test]
 #[ignore]
 fn git_change_marks_are_painted() {
-    let data = tempfile::tempdir().unwrap();
-    unsafe { std::env::set_var("M4CODE_DATA_DIR", data.path()) };
+    let _data = crate::datadir::own_folder();
     let work = tempfile::tempdir().unwrap();
     let cwd = dunce::canonicalize(work.path()).unwrap();
     let repo = git2::Repository::init(&cwd).unwrap();
@@ -83,8 +81,7 @@ fn git_change_marks_are_painted() {
 #[test]
 #[ignore]
 fn git_change_marks_follow_scrolling() {
-    let data = tempfile::tempdir().unwrap();
-    unsafe { std::env::set_var("M4CODE_DATA_DIR", data.path()) };
+    let _data = crate::datadir::own_folder();
     let work = tempfile::tempdir().unwrap();
     let cwd = dunce::canonicalize(work.path()).unwrap();
     let repo = git2::Repository::init(&cwd).unwrap();
@@ -152,8 +149,7 @@ fn git_change_marks_follow_scrolling() {
 #[test]
 #[ignore]
 fn the_editors_text_eases_to_a_wheel_notch() {
-    let data = tempfile::tempdir().unwrap();
-    unsafe { std::env::set_var("M4CODE_DATA_DIR", data.path()) };
+    let _data = crate::datadir::own_folder();
     let work = tempfile::tempdir().unwrap();
     let cwd = dunce::canonicalize(work.path()).unwrap();
     let repo = git2::Repository::init(&cwd).unwrap();
@@ -232,8 +228,7 @@ fn the_editors_text_eases_to_a_wheel_notch() {
 #[test]
 #[ignore]
 fn the_session_list_draws_rows_where_scrolling_brings_them() {
-    let data = tempfile::tempdir().unwrap();
-    unsafe { std::env::set_var("M4CODE_DATA_DIR", data.path()) };
+    let _data = crate::datadir::own_folder();
     let mut cx = TestAppContext::single();
     cx.update(|app| {
         gpui_kit::init(app);

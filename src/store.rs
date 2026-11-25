@@ -115,6 +115,10 @@ fn migrate_data_dir(dir: &Path, old_dirs: &[PathBuf]) {
 impl Store {
     /// Platform app-data location, e.g. `%LOCALAPPDATA%\m4rocks\m4code\data\state.json` (`m4code Dev` in a debug build).
     pub fn default_path() -> PathBuf {
+        #[cfg(test)]
+        if let Some(dir) = crate::datadir::overrides().data {
+            return dir.join("state.json");
+        }
         // Tests (and anyone running a second copy) can keep their state away from the real one.
         if let Some(dir) = std::env::var_os("M4CODE_DATA_DIR") {
             return PathBuf::from(dir).join("state.json");
