@@ -267,10 +267,40 @@ pub fn command(exe: &Path) -> std::process::Command {
 /// Claude Code's data directory (`CLAUDE_CONFIG_DIR` is the documented override).
 pub fn claude_home() -> Option<PathBuf> {
     #[cfg(test)]
-    if let Some(dir) = crate::datadir::overrides().claude {
+    if let Some(dir) = OWN_CLAUDE_HOME.read().unwrap_or_else(|e| e.into_inner()).clone() {
         return Some(dir);
     }
     std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from).or_else(|| home_dir().map(|h| h.join(".claude")))
+}
+
+#[cfg(test)]
+static OWN_CLAUDE_HOME: std::sync::RwLock<Option<PathBuf>> = std::sync::RwLock::new(None);
+
+/// A fresh Claude Code data folder that `claude_home` returns while the guard lives, without changing
+/// `CLAUDE_CONFIG_DIR`, which the unit tests share (#149). It changes what the whole process reads, so it needs the
+/// test's own data folder, which keeps it apart from the unit tests and from other such tests.
+#[cfg(test)]
+pub fn own_claude_home(_data: &crate::datadir::OwnFolder) -> OwnClaudeHome {
+    let dir = tempfile::tempdir().unwrap();
+    *OWN_CLAUDE_HOME.write().unwrap_or_else(|e| e.into_inner()) = Some(dir.path().to_path_buf());
+    OwnClaudeHome(dir)
+}
+
+#[cfg(test)]
+pub struct OwnClaudeHome(tempfile::TempDir);
+
+#[cfg(test)]
+impl OwnClaudeHome {
+    pub fn path(&self) -> &Path {
+        self.0.path()
+    }
+}
+
+#[cfg(test)]
+impl Drop for OwnClaudeHome {
+    fn drop(&mut self) {
+        *OWN_CLAUDE_HOME.write().unwrap_or_else(|e| e.into_inner()) = None;
+    }
 }
 
 /// One registry file as last read: its modified time and size, and what it said (session id, `updatedAt`, status).

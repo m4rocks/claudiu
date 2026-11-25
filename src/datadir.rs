@@ -25,18 +25,18 @@ pub fn use_throwaway_folders() -> (PathBuf, PathBuf) {
     (dunce::canonicalize(data.path()).unwrap(), dunce::canonicalize(claude.path()).unwrap())
 }
 
-/// The folders an [`own_folder`] guard holds: m4code's data folder, and optionally Claude Code's and a folder whose
-/// programs `platform::find_executable` finds first. Each wins over its environment variable while the guard lives.
+/// The folders an [`own_folder`] guard holds: m4code's data folder, and optionally a folder whose programs
+/// `platform::find_executable` finds first. Each wins over its environment variable while the guard lives. An adapter
+/// that reads a folder of its own takes the guard to override it, as `harness::claude::own_claude_home` does.
 #[cfg(test)]
 #[derive(Clone, Default)]
 pub(crate) struct Overrides {
     pub data: Option<PathBuf>,
-    pub claude: Option<PathBuf>,
     pub programs: Option<PathBuf>,
 }
 
 #[cfg(test)]
-static OVERRIDES: std::sync::RwLock<Overrides> = std::sync::RwLock::new(Overrides { data: None, claude: None, programs: None });
+static OVERRIDES: std::sync::RwLock<Overrides> = std::sync::RwLock::new(Overrides { data: None, programs: None });
 
 #[cfg(test)]
 pub(crate) fn overrides() -> Overrides {
@@ -60,13 +60,12 @@ pub fn own_folder() -> OwnFolder {
     let turn = TURN.lock().unwrap_or_else(|e| e.into_inner());
     let dir = tempfile::tempdir().unwrap();
     set_overrides(|o| *o = Overrides { data: Some(dir.path().to_path_buf()), ..Default::default() });
-    OwnFolder { dir, claude: None, _turn: turn }
+    OwnFolder { dir, _turn: turn }
 }
 
 #[cfg(test)]
 pub struct OwnFolder {
     dir: tempfile::TempDir,
-    claude: Option<tempfile::TempDir>,
     _turn: std::sync::MutexGuard<'static, ()>,
 }
 
@@ -74,18 +73,6 @@ pub struct OwnFolder {
 impl OwnFolder {
     pub fn path(&self) -> &Path {
         self.dir.path()
-    }
-
-    /// Gives Claude Code's data folder, as m4code reads it, a fresh one of its own too.
-    pub fn with_claude_home(mut self) -> Self {
-        let dir = tempfile::tempdir().unwrap();
-        set_overrides(|o| o.claude = Some(dir.path().to_path_buf()));
-        self.claude = Some(dir);
-        self
-    }
-
-    pub fn claude_home(&self) -> &Path {
-        self.claude.as_ref().expect("with_claude_home").path()
     }
 
     /// Finds programs in `dir` before the PATH.

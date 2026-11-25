@@ -123,6 +123,49 @@ fn run() {
     step(&mut cx, &|ws, w, cx| ws.act(Act::Select(id.clone()), w, cx));
 }
 
+#[test]
+#[ignore = "drives the workspace"]
+fn github_ask_agent_uses_the_welcome_model_for_a_new_session() {
+    let _data = crate::datadir::own_folder();
+    let work = tempfile::tempdir().unwrap();
+    let cwd = work.path().to_path_buf();
+    let mut cx = TestAppContext::single();
+    cx.update(gpui_kit::init);
+    let (window, ws) = cx.update(|app| gpui_kit::open_window(Default::default(), app,
+        |window, app| app.new(|cx| Workspace::new(window, vec![], cx)))).unwrap();
+
+    cx.update_window(window, |_, window, app| {
+        ws.update(app, |ws, cx| {
+            ws.acp_server = Some(fake_agent(&cwd));
+            let settings = &mut ws.store.data.settings;
+            settings.enabled_harnesses = Some(vec![Harness::OpenCode, Harness::Codex]);
+            settings.harness = Harness::OpenCode;
+            settings.new_session.model = Some("provider/default".into());
+            settings.set_harness_models(Harness::OpenCode, vec![crate::harness::subagents::AgentModel {
+                id: "provider/default".into(), name: "Default".into(),
+            }]);
+            settings.set_harness_models(Harness::Codex, vec![crate::harness::subagents::AgentModel {
+                id: "chosen".into(), name: "Chosen".into(),
+            }]);
+            ws.act(Act::HomeSelectModel(crate::harness::CatalogModel {
+                harness: Harness::Codex, id: "chosen".into(), name: "Chosen".into(),
+            }), window, cx);
+            ws.open_github(cwd.clone(), window, cx);
+            ws.gh[0].view.clone().update(cx, |_, cx| {
+                cx.emit(crate::github::view::GhEvent::AskClaude("explain issue 1".into()));
+            });
+        });
+    }).unwrap();
+
+    ws.read_with(&cx, |ws, _| {
+        let session = ws.active_id().and_then(|id| ws.store.session(id)).expect("Ask Agent opens a session");
+        let agent = session.agent.as_ref().unwrap();
+        assert_eq!(agent.harness, Harness::Codex);
+        assert_eq!(agent.chosen_model.as_deref(), Some("chosen"));
+        assert_eq!(session.cwd, cwd);
+    });
+}
+
 /// Sessions, the shell panel and the GitHub view, with the real `claude` and shell but no model calls.
 fn sessions_and_shell() {
     let _data = crate::datadir::own_folder();

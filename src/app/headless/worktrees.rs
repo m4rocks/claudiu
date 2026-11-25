@@ -3,8 +3,9 @@ use super::*;
 /// The worktree dialog and the switch of a session between worktrees, with a stand-in for `claude`, so what Claude Code
 /// does in the new folder is not checked.
 fn switching_between_worktrees_in_the_workspace() {
-    // Claude Code's data directory is where the conversation of a session is looked for.
-    let data = crate::datadir::own_folder().with_claude_home();
+    let data = crate::datadir::own_folder();
+    // Claude Code's data directory, where the conversation of a session is looked for.
+    let claude_home = crate::harness::claude::own_claude_home(&data);
     let work = tempfile::tempdir().unwrap();
     let repo_dir = dunce::canonicalize(work.path()).unwrap().join("proj");
     let repo = git2::Repository::init(&repo_dir).unwrap();
@@ -65,7 +66,7 @@ fn switching_between_worktrees_in_the_workspace() {
     // The conversation exists once Claude Code has had a prompt; the test stands one in, in Claude Code's own place.
     wait(&mut cx, "the session to open", &|ws, _| ws.store.session(&session.id).and_then(|r| r.provider_session_id()).is_some());
     let claude_id = ws.read_with(&cx, |ws, _| ws.store.session(&session.id).unwrap().provider_session_id().unwrap().to_string());
-    let transcript = data.claude_home().join("projects/p").join(format!("{claude_id}.jsonl"));
+    let transcript = claude_home.path().join("projects/p").join(format!("{claude_id}.jsonl"));
     std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
     std::fs::write(&transcript, "{\"type\":\"user\"}
 ").unwrap();
