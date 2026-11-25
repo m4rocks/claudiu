@@ -111,7 +111,11 @@ impl Workspace {
             GhEvent::Toast(text) | GhEvent::Error(text) => self.toast(text.clone(), cx),
             GhEvent::AskClaude(prompt) => match self.running_agent_in(&cwd, cx) {
                 Some(id) => self.send_to_agent(&id, prompt, window, cx),
-                None => self.new_session_default(cwd, Some(prompt.clone()), vec![], Starter::User, window, cx),
+                None => {
+                    let chosen = self.home_selected_model();
+                    let options = (!chosen.id.is_empty()).then_some(("model", chosen.id)).into_iter().collect();
+                    self.new_session_with(chosen.harness, cwd, Some(prompt.clone()), options, Starter::User, None, window, cx);
+                }
             },
             GhEvent::Checkout(number) => {
                 let Some(exe) = crate::github::cli::locate() else { return };
