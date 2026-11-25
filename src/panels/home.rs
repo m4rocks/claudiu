@@ -117,11 +117,10 @@ impl Workspace {
             project: Some(project_chip.into_any_element()),
             git: git_chip,
             extra_chips: vec![],
-            extra_actions: vec![attachments::button(&self.home.prompt, |ws: &mut Self| &mut ws.home.attachments, true, cx).into_any_element()],
+            extra_actions: vec![attachments::button(&self.home.prompt, |ws: &mut Self| &mut ws.home.attachments, cx).into_any_element()],
             send: start_btn,
-        })
-        .max_w(px(680.0))
-        .on_drop(cx.listener(|ws, paths: &gpui::ExternalPaths, window, cx| {
+        }).max_w(px(680.0));
+        let composer = attachments::drop_target(composer, cx.listener(|ws, paths: &gpui::ExternalPaths, window, cx| {
             ws.home.attachments.add_paths(paths.paths());
             ws.home.prompt.update(cx, |p, cx| p.focus(window, cx));
             cx.notify();

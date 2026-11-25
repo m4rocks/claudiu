@@ -33,7 +33,7 @@ gpui_kit::assets::icon_assets!(
     [
         WindowMinimize, WindowMaximize, WindowRestore, WindowClose, Archive, ArchiveRestore, ArrowDownToLine, ArrowLeft, ArrowUp, Brackets, Check, ChevronDown, ChevronRight, ChevronUp,
         CircleCheck, CircleDot, CircleDotDashed, CircleQuestionMark, CircleSlash, CircleSmall, CircleX, Clipboard, Clock, Copy, CornerDownRight, Ellipsis, Eye, ExternalLink, File, FileDiff, FileText, Folder, FolderGit2, FolderOpen, GitBranch, Link, GitCommitHorizontal, GitMerge, GitPullRequest,
-        GitPullRequestClosed, GitPullRequestDraft, HeartPlus, Keyboard, ListPlus, LoaderCircle, Lock, MessageSquare, FileCode, PanelBottom, PanelLeft, PanelRight, Pencil, Play, Plus, RefreshCw, Search,
+        GitPullRequestClosed, GitPullRequestDraft, HeartPlus, Keyboard, ListPlus, LoaderCircle, Lock, MessageSquare, FileCode, PanelBottom, PanelLeft, PanelRight, Paperclip, Pencil, Play, Plus, RefreshCw, Search,
         Settings, Square, Terminal, X
     ]
 );
@@ -43,7 +43,7 @@ struct Assets;
 
 impl gpui::AssetSource for Assets {
     fn load(&self, path: &str) -> gpui::Result<Option<std::borrow::Cow<'static, [u8]>>> {
-        match panels::logos::load(path).or_else(|| panels::attachments::asset(path)) {
+        match panels::logos::load(path) {
             Some(svg) => Ok(Some(std::borrow::Cow::Borrowed(svg))),
             None => AppIcons.load(path),
         }

@@ -2951,6 +2951,9 @@ impl ThreadView {
     }
 
     pub fn attach_paths(&mut self, paths: &[PathBuf], window: &mut Window, cx: &mut Context<Self>) {
+        if !self.attachments_enabled() {
+            return;
+        }
         self.attachments.add_paths(paths);
         self.focus_composer(window, cx);
         cx.notify();
@@ -3101,15 +3104,18 @@ mod tests {
     }
 
     #[gpui::test]
-    fn composer_pastes_files_and_images_and_queues_an_attachment_only_message(cx: &mut gpui::TestAppContext) {
-        use gpui::{ClipboardEntry, ClipboardItem, ExternalPaths, Image, ImageFormat};
-        use gpui_kit::component::input::Paste;
+    fn composer_accepts_picked_dropped_and_pasted_files(cx: &mut gpui::TestAppContext) {
+        use gpui::{ClipboardEntry, ClipboardItem, ExternalPaths, FileDropEvent, Image, ImageFormat};
 
         let (data, _) = crate::datadir::use_throwaway_folders();
         cx.update(gpui_kit::init);
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("task notes.txt");
         std::fs::write(&path, "notes").unwrap();
+        let dropped_path = dir.path().join("drop.txt");
+        std::fs::write(&dropped_path, "dropped").unwrap();
+        let picked_path = dir.path().join("picked.txt");
+        std::fs::write(&picked_path, "picked").unwrap();
         let (view, cx) = cx.add_window_view(|window, cx| {
             super::ThreadView::new(test_start(dir.path().into(), Harness::Codex), window, cx)
         });
@@ -3118,7 +3124,7 @@ mod tests {
                 view.update(app, |v, cx| v.focus_composer(window, cx));
                 app.write_to_clipboard(item);
             });
-            cx.dispatch_action(Paste);
+            cx.simulate_keystrokes(if cfg!(target_os = "macos") { "cmd-v" } else { "ctrl-v" });
         };
 
         paste(cx, ClipboardItem::new_string("ordinary text".into()));
@@ -3128,9 +3134,25 @@ mod tests {
             v.set_draft("", window, cx);
         }));
 
+        let button = cx.debug_bounds("composer-attach").unwrap().center();
+        cx.simulate_click(button, Default::default());
+        assert!(cx.did_prompt_for_paths());
+        cx.simulate_path_prompt_response(|options| {
+            assert!(options.files && options.multiple && !options.directories);
+            Some(vec![picked_path.clone()])
+        });
+        cx.run_until_parked();
+
         paste(cx, ClipboardItem { entries: vec![
             ClipboardEntry::ExternalPaths(ExternalPaths([path.clone()].into_iter().collect())),
         ] });
+        let position = cx.debug_bounds("composer-file-drop").unwrap().center();
+        cx.simulate_event(FileDropEvent::Entered {
+            position,
+            paths: ExternalPaths([dropped_path.clone()].into_iter().collect()),
+        });
+        cx.simulate_event(FileDropEvent::Submit { position });
+        cx.simulate_event(FileDropEvent::Ended);
         let image = Image::from_bytes(ImageFormat::Png, include_bytes!("../../assets/m4code.png").to_vec());
         paste(cx, ClipboardItem::new_image(&image));
         cx.update(|_, app| view.update(app, |v, cx| {
@@ -3145,12 +3167,12 @@ mod tests {
             let paths = message.lines().skip(1).map(|line| {
                 serde_json::from_str::<std::path::PathBuf>(line.strip_prefix("- ").unwrap()).unwrap()
             }).collect::<Vec<_>>();
-            assert_eq!(paths.len(), 2);
-            assert_eq!(paths[0], path);
+            assert_eq!(paths.len(), 4);
+            assert_eq!(&paths[..3], &[picked_path, path, dropped_path]);
             // Temp folders can be reached by more than one name (8.3 names on Windows, `/private` on macOS).
             let canonical = |p: &std::path::Path| std::fs::canonicalize(p).unwrap();
-            assert_eq!(canonical(paths[1].parent().unwrap()), canonical(&data.join("attachments")));
-            assert_eq!(std::fs::read(&paths[1]).unwrap(), image.bytes);
+            assert_eq!(canonical(paths[3].parent().unwrap()), canonical(&data.join("attachments")));
+            assert_eq!(std::fs::read(&paths[3]).unwrap(), image.bytes);
         }));
     }
 
