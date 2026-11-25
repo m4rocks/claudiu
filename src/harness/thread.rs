@@ -15,6 +15,8 @@ pub enum Entry {
     Tool(ToolCall),
     /// Something m4code says about the session itself: a cancelled turn, a failed prompt.
     Notice { text: String, error: bool },
+    /// Marks that the preceding entries were written in another checkout.
+    WorkspaceBoundary(PathBuf),
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -311,9 +313,6 @@ impl Thread {
             }
             "agent_message_chunk" => {
                 let chunk = text();
-                if is_codex_resume_model_warning(chunk) {
-                    return None;
-                }
                 return self.append(chunk, Entry::Agent, |e| match e {
                     Entry::Agent(t) => Some(t),
                     _ => None,
@@ -474,7 +473,7 @@ impl Thread {
                 Entry::User(t) => Some(format!("User: {t}")),
                 Entry::Agent(t) => Some(format!("Agent: {t}")),
                 Entry::Tool(call) => Some(format!("[{}: {}]", call.kind, call.title)),
-                Entry::Thought(_) | Entry::Notice { .. } => None,
+                Entry::Thought(_) | Entry::Notice { .. } | Entry::WorkspaceBoundary(_) => None,
             })
             .collect::<Vec<_>>()
             .join("\n\n")
@@ -579,13 +578,6 @@ fn merge_tool(call: &mut ToolCall, update: &Value) {
 /// The agent type a tool call starts, when it starts one of the harness's own subagents: Claude Code's Agent tool and
 /// OpenCode's task tool name it in `subagent_type`. Claude Code leaves it out for its general-purpose agent; m4code's
 /// bridge gives only that tool the `think` kind together with a description and a prompt.
-fn is_codex_resume_model_warning(chunk: &str) -> bool {
-    let trimmed = chunk.trim();
-    trimmed.starts_with("Warning: This session was recorded with model ")
-        && trimmed.contains(" but is resuming with ")
-        && trimmed.contains("Consider switching back to ")
-}
-
 fn subagent_type(update: &Value) -> Option<String> {
     let input = &update["rawInput"];
     if let Some(agent_type) = input["subagent_type"].as_str().filter(|t| !t.is_empty()) {

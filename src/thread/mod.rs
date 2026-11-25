@@ -32,12 +32,10 @@ use uuid::Uuid;
 use self::queue::Queued;
 
 use crate::harness::acp::{self, Connection, Event, Launch};
-use crate::harness::codex;
 use crate::harness::defaults::{self, Starter};
 use crate::harness::thread::{Entry, Thread, ToolStatus};
 use crate::harness::permission::{self, Permission};
-use crate::harness::{CatalogModel, Harness, Reopen};
-use crate::visual::Card;
+use crate::harness::{BackgroundTask as ProviderTask, CatalogModel, Harness, Reopen};
 use crate::visual::ui::{CardUi, SendText};
 
 /// Which compact composer popover is open.
@@ -63,63 +61,19 @@ struct ProviderShell {
     stopping: bool,
 }
 
-/// A background shell/command task reported in tool output (e.g. Antigravity's `run_command` async tasks).
-struct BackgroundToolTask {
-    id: String,
-    label: String,
-    log_path: Option<PathBuf>,
-}
-
-const BG_TASK_PREFIX: &str = "Tool is running as a background task with task id:";
-const BG_TASK_LOG_PREFIX: &str = "Task logs are available at:";
-
-fn tool_output_texts(call: &crate::harness::thread::ToolCall) -> Vec<&str> {
-    let mut texts = Vec::new();
-    if let Some(out) = call.details.output.as_deref() {
-        texts.push(out);
-    }
-    if let Some(out) = call.details.stdout.as_deref() {
-        texts.push(out);
-    }
-    for content in &call.content {
-        if let crate::harness::thread::ToolContent::Text(text) = content {
-            texts.push(text.as_str());
-        }
-    }
-    texts
-}
-
-fn background_task_from_tool(call: &crate::harness::thread::ToolCall) -> Option<(String, String, Option<PathBuf>)> {
-    let texts = tool_output_texts(call);
-    let task_id = texts.iter().find_map(|text| {
-        let rest = text.split_once(BG_TASK_PREFIX)?.1.trim_start();
-        let id = rest.split_whitespace().next()?.trim_matches(|c: char| matches!(c, '"' | '\'' | ',' | '.'));
-        (!id.is_empty()).then(|| id.to_string())
-    })?;
-    let log_path = texts.iter().find_map(|text| {
-        let rest = text.split_once(BG_TASK_LOG_PREFIX)?.1.trim_start();
-        let raw = rest.lines().next()?.trim();
-        let path = raw.strip_prefix("file://").unwrap_or(raw);
-        (!path.is_empty()).then(|| PathBuf::from(path))
-    });
-    let label = call
-        .details
-        .command
-        .as_deref()
-        .or(Some(call.title.as_str()))
-        .and_then(|s| s.lines().find(|l| !l.trim().is_empty()))
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "Background task".into());
-    Some((task_id, label, log_path))
-}
-
 fn settle_running_tools(entries: &mut [Entry]) -> Option<usize> {
+    settle_running_tools_filtered(entries, false)
+}
+
+fn settle_running_tools_filtered(entries: &mut [Entry], keep_live_execute: bool) -> Option<usize> {
     let mut first_changed = None;
     for (row, entry) in entries.iter_mut().enumerate() {
         if let Entry::Tool(call) = entry
             && matches!(call.status, ToolStatus::Running | ToolStatus::Pending)
         {
+            if keep_live_execute && call.kind == "execute" && call.status == ToolStatus::Running && call.details.exit_code.is_none() {
+                continue;
+            }
             call.status = match call.details.exit_code {
                 Some(0) => ToolStatus::Done,
                 Some(_) => ToolStatus::Failed,
@@ -129,15 +83,6 @@ fn settle_running_tools(entries: &mut [Entry]) -> Option<usize> {
         }
     }
     first_changed
-}
-
-fn text_retires_background_task(text: &str, task_id: &str) -> bool {
-    text.lines().any(|line| {
-        let Some((_, rest)) = line.split_once(task_id) else { return false };
-        let status = rest.trim_start_matches(['"', '\'', ')', ']', ':', ' ']).to_ascii_lowercase();
-        ["finished", "canceled", "cancelled", "killed", "exited"].iter()
-            .any(|word| status.strip_prefix(word).is_some_and(|tail| tail.is_empty() || tail.starts_with([' ', '.', ':'])))
-    })
 }
 
 struct ShellOutput {
@@ -160,6 +105,11 @@ pub struct GitChip {
 }
 
 pub(crate) const FORK_SEED: &str = "Forked thread. Send a message to continue.";
+pub(crate) const WORKTREE_SEED: &str = "Moved to a new checkout. The next message continues this conversation.";
+
+fn needs_history_seed(entry: &Entry) -> bool {
+    matches!(entry, Entry::Notice { text, error: false } if matches!(text.as_str(), FORK_SEED | WORKTREE_SEED))
+}
 
 pub enum ThreadEvent {
     Ready(String),
@@ -183,7 +133,7 @@ pub enum ThreadEvent {
     /// A file a tool acted on was clicked: its path and line (1-based).
     OpenPath(String, Option<usize>),
     ReconnectPermission(Permission),
-    PermissionChanged(Permission),
+    PermissionPreference(Permission),
     /// The user picked a model served by another harness and sent a message: dynamically hand off this chat.
     /// `by_agent` when the agent asked for it (set_model): its `message` is then the agent's, not the user's.
     Handoff { to: Harness, model: Option<String>, message: String, effort: Option<String>, by_agent: bool },
@@ -308,7 +258,7 @@ pub struct Start {
     pub prompt: Option<String>,
     /// Entries carried over visually from a previous harness during an in-chat handoff.
     pub prior_entries: Vec<Entry>,
-    /// Whether native inline generative UI (` ```ui ` blocks and `show_visual` cards) is enabled.
+    /// Whether inline UI blocks are enabled.
     pub inline_visuals: bool,
 }
 
@@ -342,7 +292,7 @@ enum QuestionReply {
     },
     Bridge(String),
     AsyncAsk {
-        remaining: VecDeque<crate::harness::codex::AsyncQuestion>,
+        remaining: VecDeque<crate::harness::AsyncQuestion>,
         replies: Vec<String>,
     },
 }
@@ -384,16 +334,12 @@ struct ChatMenu {
 
 struct AgentCache {
     text_len: usize,
-    inline_visuals: bool,
     citations: Vec<elements::Citation>,
-    segments: Vec<timeline::InlineSegment>,
 }
 
 #[derive(Default)]
 struct RunCache {
     entries: usize,
-    cards: usize,
-    inline_visuals: bool,
     ranges: Vec<Option<std::ops::Range<usize>>>,
 }
 
@@ -409,7 +355,7 @@ pub struct ThreadView {
     /// Running child subagents / workspace background tasks attached to this session.
     pub background: Vec<BackgroundTask>,
     provider_shells: Vec<ProviderShell>,
-    background_tasks: Vec<BackgroundToolTask>,
+    background_tasks: Vec<ProviderTask>,
     seen_background_tasks: HashSet<String>,
     comment_anchor: Option<(Point<Pixels>, String)>,
     selection_comment: Option<SelectionComment>,
@@ -421,7 +367,7 @@ pub struct ThreadView {
     initial_model: Option<String>,
     /// Right-click context menu snapshot in the chat view.
     chat_menu: Option<ChatMenu>,
-    /// Whether native inline generative UI (` ```ui ` blocks and `show_visual` cards) is enabled.
+    /// Whether inline UI blocks are enabled.
     pub inline_visuals: bool,
     /// A hand-off the agent asked for with `set_model` and the user approved: the model, its effort and the first
     /// message for the new agent. It runs as soon as the turn that asked ends.
@@ -447,6 +393,7 @@ pub struct ThreadView {
     queue_held: bool,
     workspace_switching: bool,
     permission_changing: bool,
+    read_only_unconfirmed: bool,
     queue_edit: Option<queue::Edit>,
     preparing: Option<Queued>,
     interrupting: bool,
@@ -527,7 +474,6 @@ pub struct ThreadView {
     cached_replay: bool,
     /// This view took over a conversation from another harness (an in-place hand-off), and shows it while it starts.
     took_over: bool,
-    cards: HashMap<String, Card>,
     card_ui: Entity<CardUi>,
     /// The working tree as it was before each message, oldest first (`git/snapshot.rs`). Empty outside a git
     /// repository.
@@ -617,7 +563,7 @@ impl ThreadView {
         let took_over = start.session_id.is_none() && !start.prior_entries.is_empty();
         let turn_reviews = if start.prior_entries.is_empty() { Vec::new() } else { review::load_turn_reviews(&start.record_id) };
         let canonical_history = !turn_reviews.is_empty()
-            || start.prior_entries.iter().any(|entry| matches!(entry, Entry::Notice { text, error: false } if text == FORK_SEED));
+            || start.prior_entries.iter().any(|entry| needs_history_seed(entry) || matches!(entry, Entry::WorkspaceBoundary(_)));
         let this = cx.entity().downgrade();
         list.set_scroll_handler(move |_, _, cx| {
             // GPUI still holds the list state while it calls its scroll handler.
@@ -666,6 +612,7 @@ impl ThreadView {
             queue_held,
             workspace_switching: false,
             permission_changing: false,
+            read_only_unconfirmed: false,
             queue_edit: None,
             preparing: None,
             interrupting: false,
@@ -721,7 +668,6 @@ impl ThreadView {
             error: None,
             cached_replay,
             took_over,
-            cards: HashMap::new(),
             card_ui,
             snapshots: Vec::new(),
             turn_reviews,
@@ -746,6 +692,19 @@ impl ThreadView {
     fn start(&mut self, mut start: Start, cx: &mut Context<Self>) {
         let harness = start.harness;
         cx.spawn(async move |this, cx| {
+            if let Some(mut tools) = start.mcp_tools.take() {
+                let task = cx.background_executor().spawn(async move {
+                    tools.load_workspace();
+                    Ok(tools)
+                });
+                match startup_deadline("reading the workspace", task, cx).await {
+                    Ok(tools) => start.mcp_tools = Some(tools),
+                    Err(error) => {
+                        let _ = this.update(cx, |v, cx| v.ended(Some(error), cx));
+                        return;
+                    }
+                }
+            }
             let mut full_access = harness.adapter().full_access_relaunch
                 && start.permission == Some(Permission::FullAccess)
                 && start.starter != Starter::OtherSession;
@@ -893,8 +852,8 @@ impl ThreadView {
                     return;
                 }
             }
-            if let Some(tools) = start.mcp_tools.take().filter(|_| start.server.is_none()) {
-                let result = wait_for_mcp(&tools.ready, cx).await;
+            if let Some(tools) = start.mcp_tools.take().filter(|t| start.server.is_none() && t.can_signal_ready()) {
+                let result = wait_for_mcp(&tools.ready).await;
                 if let Err(why) = result {
                     connection.terminate();
                     let _ = this.update(cx, |v, cx| v.ended(Some(why), cx));
@@ -916,7 +875,7 @@ impl ThreadView {
                 if let Some(wanted) = start.permission
                     && v.handoff_permission() == Some(wanted)
                 {
-                    cx.emit(ThreadEvent::PermissionChanged(wanted));
+                    cx.emit(ThreadEvent::PermissionPreference(wanted));
                 }
                 v.send_next(cx);
                 cx.notify();
@@ -1001,12 +960,16 @@ impl ThreadView {
         }
         match event {
             Event::Update { update, .. } => {
+                let protocol = &self.harness.adapter().protocol;
+                if (protocol.ignore_update)(&update) {
+                    return;
+                }
                 if update["sessionUpdate"] == "_m4code/session_ended" {
                     self.ended(update["error"].as_str().map(String::from), cx);
                     return;
                 }
                 if update["sessionUpdate"] == "_m4code/usage_limits" {
-                    if let Some(limits) = crate::harness::claude::limits::parse_value(&update["limits"], crate::store::now()) {
+                    if let Some(limits) = (protocol.usage_limits)(&update["limits"], crate::store::now()) {
                         cx.emit(ThreadEvent::UsageLimits(self.harness, limits));
                     }
                     return;
@@ -1062,21 +1025,17 @@ impl ThreadView {
                     }
                     if let Some(Entry::Tool(call)) = self.thread.entries.get(at) {
                         self.tool_images.get_mut().retain(|(id, _), _| *id != call.id);
-                        if self.harness == Harness::Antigravity && self.phase == Phase::Ready && !self.cached_replay
-                            && (update.get("rawOutput").is_some() || update.get("content").is_some())
+                        if self.phase == Phase::Ready && !self.cached_replay
+                            && let Some(hooks) = &protocol.background
                         {
-                            let started = (call.kind == "execute").then(|| background_task_from_tool(call)).flatten();
-                            let mut texts: Vec<String> = tool_output_texts(call).into_iter().map(str::to_string).collect();
-                            if let Some(raw) = update.get("rawOutput").and_then(Value::as_str) {
-                                texts.push(raw.to_string());
-                            }
-                            if let Some((task_id, label, log_path)) = started
-                                && self.seen_background_tasks.insert(task_id.clone())
+                            let background = (hooks.from_update)(call, &update);
+                            if let Some(task) = background.started
+                                && self.seen_background_tasks.insert(task.id.clone())
                             {
-                                self.background_tasks.push(BackgroundToolTask { id: task_id, label, log_path });
+                                self.background_tasks.push(task);
                             }
-                            for text in &texts {
-                                self.retire_finished_background_tasks(text);
+                            for text in background.output {
+                                self.retire_finished_background_tasks(&text);
                             }
                         }
                     }
@@ -1087,7 +1046,7 @@ impl ThreadView {
                             self.finish_open_thoughts();
                         }
                     }
-                    if self.harness == Harness::Codex && is_conversation_update(&update) {
+                    if protocol.async_ask.is_some() && is_conversation_update(&update) {
                         self.asks.record_message_chunk(at, &update);
                     }
                     self.sync_markdown(at, cx);
@@ -1167,13 +1126,14 @@ impl ThreadView {
                     }
                     return;
                 }
-                if self.harness == Harness::Codex && let Some(questions) = codex::async_questions(&params) {
+                if let Some(decode) = self.harness.adapter().protocol.async_ask
+                    && let Some(ask) = decode(&params) {
                     // The adapter can only steer an answer into the original turn. Own the reply here so it can
                     // reach Codex as a follow-up even after that turn ends.
                     if let Some(connection) = &self.connection {
                         connection.respond(id, acp::elicitation_decline());
                     }
-                    self.show_async_ask(questions, cx);
+                    self.show_async_ask(ask, cx);
                     return;
                 }
                 let mut fields: VecDeque<acp::ElicitationField> = acp::parse_elicitation(&params).into();
@@ -1250,12 +1210,8 @@ impl ThreadView {
         if self.background_tasks.is_empty() {
             return;
         }
-        if text.contains("No background tasks are currently running")
-            || text.contains("All your subagents and background tasks have been stopped")
-        {
-            self.background_tasks.clear();
-        } else {
-            self.background_tasks.retain(|task| !text_retires_background_task(text, &task.id));
+        if let Some(hooks) = &self.harness.adapter().protocol.background {
+            self.background_tasks.retain(|task| !(hooks.finished)(text, &task.id));
         }
         if self.shell_output.as_ref().is_some_and(|out| {
             !self.provider_shells.iter().any(|s| s.id == out.task_id)
@@ -1349,7 +1305,7 @@ impl ThreadView {
     /// Send what is typed; `the_other_way` (Cmd/Ctrl+Enter) queues it when the setting steers, and steers when it
     /// queues.
     fn submit_with(&mut self, the_other_way: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if self.workspace_switching {
+        if self.workspace_switching || self.read_only_unconfirmed {
             return;
         }
         if self.queue_edit.is_some() {
@@ -1472,6 +1428,7 @@ impl ThreadView {
             && !self.queue_held
             && !self.workspace_switching
             && !self.permission_changing
+            && !self.read_only_unconfirmed
             && self.preparing.is_none()
             && self.handoff_after_turn.is_none()
             && self.questions.is_empty()
@@ -1484,10 +1441,6 @@ impl ThreadView {
     fn native_steering(&self) -> bool {
         !self.harness.adapter().steers
             && self.agent_meta.pointer("/steering/supported").and_then(Value::as_bool) == Some(true)
-    }
-
-    fn native_codex_steering(&self) -> bool {
-        self.harness == Harness::Codex && self.native_steering()
     }
 
     fn steer(&mut self, item: Queued, cx: &mut Context<Self>) {
@@ -1613,7 +1566,7 @@ impl ThreadView {
     }
 
     fn send_next(&mut self, cx: &mut Context<Self>) {
-        if self.working || self.phase != Phase::Ready || self.workspace_switching || self.permission_changing
+        if self.working || self.phase != Phase::Ready || self.workspace_switching || self.permission_changing || self.read_only_unconfirmed
             || !self.steering.is_empty() || !self.questions.is_empty() || self.restoring_checkpoint()
         {
             return;
@@ -1634,7 +1587,7 @@ impl ThreadView {
         let id = next.id;
         let compact = next.compact;
         let seed_history = (!compact
-            && matches!(self.thread.entries.last(), Some(Entry::Notice { text, error: false }) if text == FORK_SEED))
+            && self.thread.entries.last().is_some_and(needs_history_seed))
             .then(|| self.thread.transcript(400));
         let mut shown_row = if next.shown {
             self.thread.entries.iter().rposition(|entry| matches!(entry, Entry::User(text) if text == &next.text))
@@ -1729,7 +1682,11 @@ impl ThreadView {
     }
 
     fn turn_ended(&mut self, result: Result<Value, String>, cx: &mut Context<Self>) {
-        self.settle_running_tools();
+        let keep_live_execute = result.as_ref().is_ok_and(|r| r["stopReason"] != "cancelled")
+            && self.harness.adapter().protocol.background.as_ref().is_some_and(|b| b.live_execute_tools);
+        if let Some(row) = settle_running_tools_filtered(&mut self.thread.entries, keep_live_execute) {
+            self.remeasure(row);
+        }
         self.working = false;
         self.interrupting = false;
         self.last_update = None;
@@ -2217,6 +2174,9 @@ impl ThreadView {
     }
 
     pub(crate) fn permission_for_relaunch(&self) -> Option<Permission> {
+        if self.read_only_unconfirmed {
+            return Some(Permission::ReadOnly);
+        }
         let permission = self.permission()?;
         if self.antigravity_full_access || permission.native(self.harness) == self.thread.mode.as_deref() {
             self.handoff_permission()
@@ -2241,27 +2201,31 @@ impl ThreadView {
         {
             return;
         }
+        if self.has_active_turn() || self.is_waiting() || self.has_background_work() {
+            self.permission_error("Wait for the current work to finish before changing permissions.".into(), cx);
+            return;
+        }
         let Some(permission) = wanted.resolve(&self.permissions()) else { return };
         let Some(mode) = permission.listed(self.harness, &self.thread.modes) else { return };
         let (Some(connection), Some(session)) = (self.connection.clone(), self.session_id.clone()) else { return };
         if self.harness.adapter().full_access_relaunch && self.antigravity_full_access != (permission == Permission::FullAccess) {
-            if self.working || self.compaction.running || self.is_waiting() || self.has_background_work() {
-                self.permission_error("Wait for Antigravity to finish its current work before reconnecting.".into(), cx);
-            } else {
-                cx.emit(ThreadEvent::ReconnectPermission(wanted));
-            }
+            self.require_read_only(wanted, cx);
+            cx.emit(ThreadEvent::ReconnectPermission(wanted));
             return;
         }
         let auto_fallback = wanted == Permission::Auto && permission == Permission::FullAccess;
         if self.thread.mode.as_deref() == Some(mode) {
             self.auto_fallback = auto_fallback;
-            cx.emit(ThreadEvent::PermissionChanged(wanted));
+            self.read_only_unconfirmed = false;
+            cx.emit(ThreadEvent::PermissionPreference(wanted));
+            self.send_next(cx);
             return;
         }
         let current = self.thread.mode.clone();
         let config = self.thread.option("mode").map(|opt| opt.id.clone());
         let reply = request_mode(&connection, &session, mode, config.as_deref());
         self.permission_changing = true;
+        self.require_read_only(wanted, cx);
         cx.notify();
         cx.spawn(async move |this, cx| {
             let result = startup_deadline("changing permissions", reply, cx).await;
@@ -2280,7 +2244,8 @@ impl ThreadView {
                         } else {
                             v.thread.mode = Some(mode.into());
                             v.auto_fallback = auto_fallback;
-                            cx.emit(ThreadEvent::PermissionChanged(wanted));
+                            v.read_only_unconfirmed = false;
+                            cx.emit(ThreadEvent::PermissionPreference(wanted));
                             v.send_next(cx);
                         }
                     }
@@ -2292,6 +2257,13 @@ impl ThreadView {
                 cx.notify();
             });
         }).detach();
+    }
+
+    fn require_read_only(&mut self, wanted: Permission, cx: &mut Context<Self>) {
+        if wanted == Permission::ReadOnly {
+            self.read_only_unconfirmed = true;
+            cx.emit(ThreadEvent::PermissionPreference(wanted));
+        }
     }
 
     pub(crate) fn set_option(&mut self, id: String, value: String, cx: &mut Context<Self>) {
@@ -2856,7 +2828,7 @@ impl ThreadView {
         self.sync_command_highlights(cx);
     }
 
-    fn persist_entries(&self) {
+    pub(crate) fn persist_entries(&self) {
         crate::harness::thread::save_entries(&self.record_id, &self.thread.entries);
     }
 
@@ -2898,14 +2870,18 @@ impl ThreadView {
             && !self.list.is_scrolled_to_end().unwrap_or_else(|| self.list.max_offset_for_scrollbar().y <= px(1.0))
     }
 
-    fn open_location(&mut self, path: PathBuf, line: Option<u32>, cx: &mut Context<Self>) {
+    fn open_location_at(&mut self, row: usize, path: PathBuf, line: Option<u32>, cx: &mut Context<Self>) {
         let normalized = path
             .to_str()
             .filter(|s| s.starts_with("file:"))
             .and_then(|s| url::Url::parse(s).ok())
             .and_then(|u| u.to_file_path().ok())
             .unwrap_or(path);
-        let path = if normalized.is_absolute() { normalized } else { self.cwd.join(normalized) };
+        let path = if normalized.is_absolute() {
+            normalized
+        } else {
+            timeline::workspace_at(&self.thread.entries, row, &self.cwd).join(normalized)
+        };
         cx.emit(ThreadEvent::OpenPath(path.to_string_lossy().into_owned(), line.map(|l| l as usize)));
     }
 
@@ -3035,6 +3011,9 @@ impl ThreadView {
     }
 
     fn can_submit_draft(&self, cx: &App) -> bool {
+        if self.workspace_switching || self.read_only_unconfirmed {
+            return false;
+        }
         crate::panels::composer::can_send(self.composer.read(cx).value().as_ref())
             || (self.attachments_enabled() && self.attachments.has_files())
     }
@@ -3059,20 +3038,7 @@ impl ThreadView {
         self.composer.read(cx).value().to_string()
     }
 
-    #[cfg(test)]
-    pub fn has_card(&self, call: &str) -> bool {
-        self.cards.contains_key(call)
-    }
 
-    /// A `show_visual` card, drawn under the tool call that made it.
-    pub fn set_card(&mut self, card: Card, cx: &mut Context<Self>) {
-        let at = self.thread.entries.iter().position(|e| matches!(e, crate::harness::thread::Entry::Tool(t) if t.id == card.call));
-        self.cards.insert(card.call.clone(), card);
-        if let Some(at) = at {
-            self.remeasure(at);
-        }
-        cx.notify();
-    }
 }
 
 /// `initialize`, then open the session: a new one, or the stored one the way its harness reopens. The session's
@@ -3085,15 +3051,27 @@ struct Opened {
     replayed: bool,
 }
 
-async fn wait_for_mcp(proof: &crate::mcp::session::Ready, cx: &gpui::AsyncApp) -> Result<(), String> {
-    let until = Instant::now() + crate::mcp::session::TIMEOUT;
-    while !proof.observed() {
-        if Instant::now() >= until {
-            return Err("The adapter did not discover m4code's MCP tools before the startup deadline.".into());
-        }
-        cx.background_executor().timer(Duration::from_millis(50)).await;
+async fn wait_for_mcp(proof: &crate::mcp::session::Ready) -> Result<(), String> {
+    if proof.observed() {
+        return Ok(());
     }
-    Ok(())
+    let path = proof.path().to_path_buf();
+    let (tx, rx) = futures::channel::oneshot::channel();
+    std::thread::spawn(move || {
+        let until = Instant::now() + crate::mcp::session::TIMEOUT;
+        while !path.is_file() {
+            if tx.is_canceled() {
+                return;
+            }
+            if Instant::now() >= until {
+                let _ = tx.send(Err("The adapter did not discover m4code's MCP tools before the startup deadline.".into()));
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let _ = tx.send(Ok(()));
+    });
+    rx.await.unwrap_or_else(|_| Err("The adapter did not discover m4code's MCP tools before the startup deadline.".into()))
 }
 
 async fn startup_deadline<T>(step: &str, request: impl Future<Output = Result<T, String>>, cx: &gpui::AsyncApp) -> Result<T, String> {
@@ -3917,6 +3895,22 @@ mod tests {
     }
 
     #[gpui::test]
+    fn unconfirmed_read_only_keeps_the_draft_when_send_is_pressed(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_kit::init);
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = cx.add_window_view(|window, cx| super::ThreadView::new(test_start(dir.path().into(), Harness::Codex), window, cx));
+        cx.update(|window, app| view.update(app, |view, cx| {
+            view.phase = super::Phase::Ready;
+            view.require_read_only(super::Permission::ReadOnly, cx);
+            view.set_draft("inspect permissions", window, cx);
+            view.submit(window, cx);
+            assert_eq!(view.draft(cx), "inspect permissions");
+            assert_eq!(view.waiting_messages().count(), 0);
+            assert_eq!(view.permission_for_relaunch(), Some(super::Permission::ReadOnly));
+        }));
+    }
+
+    #[gpui::test]
     fn codex_uses_the_advertised_steering_extension_without_cancelling(cx: &mut gpui::TestAppContext) {
         use std::io::{BufRead, BufReader};
         use serde_json::{Value, json};
@@ -4407,7 +4401,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn antigravity_tool_without_final_status_settles_when_turn_ends(cx: &mut gpui::TestAppContext) {
+    fn antigravity_execute_tool_stays_live_across_turn_end_while_other_tools_settle(cx: &mut gpui::TestAppContext) {
         cx.update(gpui_kit::init);
         let dir = tempfile::tempdir().unwrap();
         let (view, cx) = cx.add_window_view(|window, cx| super::ThreadView::new(test_start(dir.path().into(), Harness::Antigravity), window, cx));
@@ -4415,15 +4409,30 @@ mod tests {
             v.phase = super::Phase::Ready;
             v.on_event(update_event(serde_json::json!({
                 "sessionUpdate": "tool_call",
-                "toolCallId": "grep-1",
+                "toolCallId": "read-1",
+                "kind": "read",
+                "status": "in_progress"
+            })), cx);
+            v.on_event(update_event(serde_json::json!({
+                "sessionUpdate": "tool_call",
+                "toolCallId": "cmd-1",
                 "kind": "execute",
                 "status": "in_progress",
-                "rawInput": { "command": "grep -rn foo src/" }
+                "rawInput": { "command": "cargo test --locked" }
             })), cx);
             assert!(v.has_background_work());
             v.turn_ended(Ok(serde_json::json!({"stopReason": "end_turn"})), cx);
+            assert_eq!(v.thread.tool("read-1").unwrap().status, super::ToolStatus::Ended);
+            assert_eq!(v.thread.tool("cmd-1").unwrap().status, super::ToolStatus::Running);
+            assert!(v.has_background_work(), "backgrounded execute tool stays visible across turns");
+            v.on_event(update_event(serde_json::json!({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "cmd-1",
+                "status": "completed",
+                "content": [{ "type": "content", "content": { "type": "text", "text": "Command exited with code 0." } }]
+            })), cx);
+            assert_eq!(v.thread.tool("cmd-1").unwrap().status, super::ToolStatus::Done);
             assert!(!v.has_background_work());
-            assert_eq!(v.thread.tool("grep-1").unwrap().status, super::ToolStatus::Ended);
         });
     }
 

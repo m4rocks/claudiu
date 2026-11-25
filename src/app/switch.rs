@@ -3,10 +3,7 @@
 //! place in the sidebar, and visible conversation) stays intact, with its folder updated to the target's. A new
 //! worktree is made with git first (`worktree::add`).
 //!
-//! For Claude Code, a session that Claude Code itself put in a worktree (`claude --worktree`) has that worktree
-//! recorded in its transcript, and Claude Code restores it on every resume, which wins over the folder `claude` is
-//! started in. So before such a session moves, m4code appends the line that Claude Code's own ExitWorktree writes
-//! (see `claude::clear_recorded_worktree`).
+//! Providers that bind their session to a checkout receive a new native session seeded from the saved conversation.
 
 use std::path::Path;
 
@@ -30,14 +27,11 @@ fn inspect(harness: Harness, session_id: Option<&str>, folder: &Path) -> Checked
     Checked { idle: idle.unwrap_or(true), uncommitted, transcript }
 }
 
-fn prepare(harness: Harness, main_checkout: &Path, folder: &Path, base: Base, transcript: Option<&Path>, session_id: Option<&str>) -> Result<(), String> {
+fn prepare(harness: Harness, main_checkout: &Path, folder: &Path, base: Base, transcript: Option<&Path>) -> Result<bool, String> {
     if !folder.exists() {
         worktree::add(main_checkout, folder, base).map_err(|e| format!("could not make the worktree: {}", e.trim()))?;
     }
-    if let (Some(transcript), Some(id)) = (transcript, session_id) {
-        (harness.adapter().worktree.prepare)(transcript, id)?;
-    }
-    Ok(())
+    transcript.map_or(Ok(true), harness.adapter().worktree.can_resume)
 }
 
 impl Workspace {
@@ -118,17 +112,16 @@ impl Workspace {
             return;
         };
         let harness = meta.harness;
-        let session_id = rec.provider_session_id().map(str::to_string);
         let main = git.main_checkout().to_path_buf();
         let has_transcript = transcript.is_some();
         cx.spawn_in(window, async move |this, cx| {
             let (target, main_checkout) = (folder.clone(), main.clone());
             let ready = cx
                 .background_executor()
-                .spawn(async move { prepare(harness, &main_checkout, &target, base, transcript.as_deref(), session_id.as_deref()) })
+                .spawn(async move { prepare(harness, &main_checkout, &target, base, transcript.as_deref()) })
                 .await;
             let _ = this.update_in(cx, |ws, window, cx| match ready {
-                Ok(()) => ws.move_into(&id, harness, folder, has_transcript, window, cx),
+                Ok(can_resume) => ws.move_into(&id, folder, has_transcript, can_resume, window, cx),
                 Err(why) => {
                     if ws.switching_worktree.get(&id) != Some(&folder) { return; }
                     ws.release_worktree_switch(&id, cx);
@@ -148,7 +141,7 @@ impl Workspace {
         cx.notify();
     }
 
-    fn move_into(&mut self, id: &str, harness: Harness, folder: PathBuf, has_transcript: bool, window: &mut Window, cx: &mut Context<Self>) {
+    fn move_into(&mut self, id: &str, folder: PathBuf, has_transcript: bool, can_resume: bool, window: &mut Window, cx: &mut Context<Self>) {
         if self.switching_worktree.get(id) != Some(&folder) {
             return;
         }
@@ -170,13 +163,22 @@ impl Workspace {
             return;
         };
         let thread = source.read(cx);
-        let prior_entries = thread.thread.entries.clone();
+        let mut prior_entries = thread.thread.entries.clone();
         let permission = thread.permission_for_relaunch();
         let composer = thread.composer_state(cx);
         let provider_id = (!meta.session_id.is_empty()).then_some(meta.session_id.as_str());
-        let has_history = (harness.adapter().worktree.has_history)(provider_id, has_transcript);
-        if prior_entries.is_empty() && !has_history {
+        let has_history = (meta.harness.adapter().worktree.has_history)(provider_id, has_transcript);
+        if !can_resume || (prior_entries.is_empty() && !has_history) {
             meta.session_id.clear();
+        }
+        if !prior_entries.is_empty() {
+            prior_entries.push(crate::harness::thread::Entry::WorkspaceBoundary(rec.cwd.clone()));
+        }
+        if !can_resume && !prior_entries.is_empty() {
+            prior_entries.push(crate::harness::thread::Entry::Notice {
+                text: crate::thread::WORKTREE_SEED.into(),
+                error: false,
+            });
         }
         let Some(mut start) = self.thread_start(id, &folder, &meta, rec.chosen_title().map(String::from), None, Starter::User, cx) else {
             self.release_worktree_switch(id, cx);
@@ -210,6 +212,9 @@ impl Workspace {
             rec.cwd = folder;
         }
         self.restore_shell(id, shell, window, cx);
+        if let Some(thread) = self.live_view(id).and_then(SessionView::thread) {
+            thread.read(cx).persist_entries();
+        }
         self.release_worktree_switch(id, cx);
         self.store.refresh_git();
         if self.active_id().is_some_and(|a| a == id) {
@@ -236,7 +241,7 @@ impl Workspace {
         for tab in &mut pane.tabs {
             let there = tab.path.strip_prefix(&pane.root).ok().map(|rel| folder.join(rel)).filter(|p| p.is_file());
             match there {
-                Some(path) if !tab.dirty => {
+                Some(path) if !tab.dirty && !tab.saving => {
                     let old = std::mem::replace(&mut tab.path, path.clone());
                     moved.push((old, path));
                 }
@@ -258,18 +263,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn clearing_appends_one_line_only_while_a_worktree_is_recorded() {
+    fn worktree_bound_transcripts_are_left_intact() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("s.jsonl");
-        std::fs::write(&path, r#"{"type":"worktree-state","worktreeSession":{"worktreeName":"t"},"sessionId":"s"}"#.to_string() + "\n").unwrap();
-        // A worktree Claude Code recorded: the line is appended.
-        crate::harness::claude::clear_worktree_if_recorded(&path, "s").unwrap();
-        assert!(!claude::worktree_recorded(&path).unwrap());
-        // Nothing recorded, nothing appended.
-        let before = std::fs::read_to_string(&path).unwrap();
-        crate::harness::claude::clear_worktree_if_recorded(&path, "s").unwrap();
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
-        // A missing transcript is an error the user is told about.
-        assert!(crate::harness::claude::clear_worktree_if_recorded(&dir.path().join("gone.jsonl"), "s").is_err());
+        let path = dir.path().join("session.jsonl");
+        let transcript = r#"{"type":"worktree-state","worktreeSession":{"worktreeName":"before"},"sessionId":"s"}"#;
+        std::fs::write(&path, transcript).unwrap();
+        let can_resume = Harness::Claude.adapter().worktree.can_resume;
+        assert!(!can_resume(&path).unwrap());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), transcript);
+        assert!(can_resume(&dir.path().join("absent.jsonl")).is_err());
     }
 }

@@ -10,9 +10,6 @@
 //   reference into Claude's input box; that is not done here.)
 // - Usage and status: reports context, the 5-hour and 7-day limits, auto-compact, background compaction and advisor to
 //   `M4CODE_USAGE_DIR/<claude session id>.json`, after each request, command and setting change. No tokens are spent.
-// - Cards: answers `show_visual` in-process and, while the model is still writing the call, streams its Markdown to
-//   `M4CODE_VISUAL_PREFIX<call>.json`. Under each call it reserves rows, each with a link naming the call, and m4code
-//   paints the live card over them. m4code's measured height comes back in `M4CODE_VISUAL_PREFIX<call>.rows`.
 // - One-shot completions: runs requests from `M4CODE_ASK_FILE` (commit messages, session titles) with
 //   `$.model.complete`, on this session's own client, so m4code needs no `claude -p`.
 // - Custom subagents: registers the provider agent types `M4CODE_SUBAGENTS` lists. Claude never runs for
@@ -21,11 +18,9 @@
 
 // ---- Constants ----------------------------------------------------------------------------------------------------
 
-const CARD_ROWS = 6 // reserved for a card until m4code has measured it
 const PROMPT_MAX = 20000 // characters of a message m4code asks the session to send (the editor's Ask Claude)
 const INBOX_TEXT_MAX = 20000 // UTF-16 units, matching the ACP helper
 const ASK_MODELS = ['haiku', 'sonnet', 'opus']
-const VISUAL_TOOL = 'mcp__m4code__show_visual'
 const HANDBACK_TOOL = 'SubagentHandback'
 const STEPS_LISTED = 30 // steps a custom subagent's report lists; the rest are only counted
 const STEP_CHARS = 120 // characters of each listed step, enough for a command or a path
@@ -43,15 +38,10 @@ let pendingAdvisor = null // an advisor change Claude Code refused (see setAdvis
 let askPoll // watches M4CODE_ASK_FILE
 let askSeen = null // id of the last request looked at
 let asking = false // a completion is running; a poll that finds another request waits for it
-const cardRows = new Map() // show_visual call id -> rows reserved for its card
 const AGENT_PREFIX = 'm4code:' // what Claude Code puts before an agent type this plugin registers
 const customTypes = new Map() // agent type name -> { agent, model, edits, name } of each custom agent type m4code defined
 const customRuns = new Map() // agent id -> { type, prompt, effort, turnId, report, steps } of each custom subagent started
 const agentCalls = new Map() // Agent call id -> { type, description, effort } of each running call that asked for an effort
-const published = new Set() // call ids whose card file this process wrote from the transcript
-let rowsPoll // watches the heights m4code measures
-let visualChain = Promise.resolve() // visual writes in order, without holding up the stream
-let lastVisual = null // id of the show_visual call being written, or last written
 
 // ---- Usage report -------------------------------------------------------------------------------------------------
 
@@ -224,44 +214,6 @@ async function setAdvisor($, value, override) {
     return
   }
   override.advisor = advisorAlias(value)
-}
-
-// ---- Visual panel -------------------------------------------------------------------------------------------------
-
-// The text of a string property in JSON that may still be being written. It can end anywhere, even inside an escape.
-function partialString(json, key) {
-  const m = new RegExp('"' + key + '"\\s*:\\s*"').exec(json)
-  if (!m) return null
-  const ESCAPES = { n: '\n', t: '\t', r: '\r', b: '\b', f: '\f' }
-  let out = ''
-  let i = m.index + m[0].length
-  while (i < json.length) {
-    const ch = json[i]
-    if (ch === '"') break
-    if (ch !== '\\') {
-      out += ch
-      i += 1
-      continue
-    }
-    const n = json[i + 1]
-    if (n === undefined) break
-    if (n === 'u') {
-      const hex = json.slice(i + 2, i + 6)
-      if (!/^[0-9a-fA-F]{4}$/.test(hex)) break
-      out += String.fromCharCode(parseInt(hex, 16))
-      i += 6
-    } else {
-      out += ESCAPES[n] ?? n
-      i += 2
-    }
-  }
-  return out
-}
-
-// Queues a write of a card's file. Writes run one after another, and a failed one is dropped.
-function writeVisual($, prefix, call, content) {
-  const body = JSON.stringify({ call, content: String(content ?? '').slice(0, 200_000) })
-  visualChain = visualChain.then(() => $.fs.write(`${prefix}${call}.json`, body)).catch(() => {})
 }
 
 // ---- One-shot completions -----------------------------------------------------------------------------------------
@@ -624,80 +576,10 @@ async function noteCompaction($) {
   await report($, true)
 }
 
-// The model's show_visual call streams to its card while it is written. The call's arguments arrive as pieces of JSON;
-// the Markdown read out of them so far goes to the file a few times a second at most. The tool.call hook writes the
-// finished card.
-async function onShowVisual($, e) {
-  const prefix = await $.env.get('M4CODE_VISUAL_PREFIX')
-  if (!prefix) {
-    return { result: "Visuals aren't available in this session (m4code's mod has no file for them).", isError: true }
-  }
-  if (typeof e.content !== 'string' || !e.content.trim()) return { result: 'content must be non-empty Markdown.', isError: true }
-  writeVisual($, prefix, e.tool_use_id ?? lastVisual ?? 'v' + Date.now(), e.content)
-  return { result: "Shown inline in the terminal. Say the key facts in a short reply; don't repeat the content." }
-}
-
-// Streams a show_visual call to its card while the model writes it. A custom subagent's steps are answered by customStep; other subagents' steps are left alone.
 async function* onTurnStep($, e, next) {
   const run = e.agentId ? await customRun($, e.agentId) : undefined
   if (run) return yield* customStep($, e, next, run)
-  const prefix = e.agentId ? null : await $.env.get('M4CODE_VISUAL_PREFIX')
-  if (!prefix) return yield* next(e)
-
-  const open = new Map() // block index -> the show_visual call being written there
-  for await (const c of next(e)) {
-    if (c.kind === 'tool' && c.name === VISUAL_TOOL) {
-      open.set(c.index, { id: c.id, json: '', at: 0 })
-      lastVisual = c.id
-    } else if (c.kind === 'input' && open.has(c.index)) {
-      const v = open.get(c.index)
-      v.json += c.json
-      if (Date.now() - v.at >= 150) {
-        v.at = Date.now()
-        writeVisual($, prefix, v.id, partialString(v.json, 'content'))
-      }
-    }
-    yield c
-  }
-}
-
-// Draws a show_visual call as its title and the rows its card covers. Each row's link names the call and the row, which
-// is how m4code finds them on screen, and the rows scroll and clip with the transcript. Drawing a call from an earlier
-// process writes its card again from the transcript: that is what brings cards back after a restart.
-async function onVisualRow($, e, next) {
-  if (e.props.tool !== VISUAL_TOOL || e.props.isErrored) return next(e)
-  const { Box, Link, Text } = $.ui.resolve(e)
-  const id = e.props.tool_use_id
-  if (!cardRows.has(id)) cardRows.set(id, CARD_ROWS)
-  if (!e.props.isRunning && !published.has(id) && e.props.input?.content) {
-    published.add(id)
-    const prefix = await $.env.get('M4CODE_VISUAL_PREFIX')
-    if (prefix) writeVisual($, prefix, id, e.props.input.content)
-  }
-  const links = Array.from({ length: cardRows.get(id) }, (_, i) =>
-    h(Link, { key: String(i), href: `m4code://visual/${id}/${i}` }, ' '.repeat(16)))
-  return h(Box, { flexDirection: 'column' }, h(Text, { dimColor: true }, String(e.props.input?.title ?? 'Visual')), ...links)
-}
-
-// Claude Code folds MCP calls into one count line, which would hide a card's rows.
-function onVisualGroup($, e, next) {
-  if (!e.props.calls.some(c => c.tool === VISUAL_TOOL)) return next(e)
-  return next({ ...e, props: { ...e.props, isExpanded: true } })
-}
-
-// Reserves the rows m4code measured for each card drawn in this process.
-async function readCardRows($) {
-  const prefix = await $.env.get('M4CODE_VISUAL_PREFIX')
-  if (!prefix) return
-  let changed = false
-  for (const [id, rows] of [...cardRows]) {
-    const measured = parseInt(await $.fs.read(`${prefix}${id}.rows`).catch(() => ''), 10)
-    if (measured > 0 && measured !== rows) {
-      cardRows.set(id, measured)
-      changed = true
-    }
-  }
-  if (changed) $.ui.invalidate('ui.render')
+  yield* next(e)
 }
 
 async function onSessionStart($, e, next) {
@@ -712,8 +594,6 @@ async function onSessionStart($, e, next) {
   ctlPoll = $.clock.every(1000, () => applyCtl($))
   askPoll?.cancel()
   askPoll = $.clock.every(500, () => answerAsk($))
-  rowsPoll?.cancel()
-  rowsPoll = $.clock.every(200, () => readCardRows($))
   await watchSessionName($)
   await registerSubagents($)
   return r
@@ -724,9 +604,6 @@ export function register(on) {
   on('command.run', onCommandRun)
   on('config.set', onConfigSet)
   on('session.compact', onSessionCompact)
-  on('tool.call', { tool: VISUAL_TOOL }, onShowVisual)
-  on('ui.render', { component: 'ToolUse' }, onVisualRow)
-  on('ui.render', { component: 'ToolGroup' }, onVisualGroup)
   on('turn.step', onTurnStep)
   on('tool.call', { tool: 'Agent' }, onAgentCall)
   on('agent.spawn', onAgentSpawn)

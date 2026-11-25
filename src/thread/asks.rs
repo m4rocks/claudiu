@@ -5,7 +5,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use super::{Entry, Question, QuestionOption, QuestionReply, Queued, ThreadView};
-use crate::harness::codex::{self, AsyncQuestion};
+use crate::harness::{AsyncAsk, AsyncQuestion};
 use crate::store::FollowUp;
 
 #[derive(Default)]
@@ -82,11 +82,11 @@ fn question_from_async(question: AsyncQuestion, remaining: VecDeque<AsyncQuestio
 }
 
 impl ThreadView {
-    pub(super) fn show_async_ask(&mut self, questions: Vec<AsyncQuestion>, cx: &mut Context<Self>) {
+    pub(super) fn show_async_ask(&mut self, ask: AsyncAsk, cx: &mut Context<Self>) {
         // codex-acp 2.6 sends the form without the originating message ID. Fold only a complete matching
         // chunk at the end of the transcript so display changes in the adapter cannot hide other messages.
         if let Some(chunk) = self.asks.last_message.take()
-            && chunk.text == codex::async_question_text(&questions)
+            && chunk.text == ask.echoed_text
             && chunk.entry + 1 == self.thread.entries.len()
             && let Some(Entry::Agent(text)) = self.thread.entries.last_mut()
             && text.ends_with(&chunk.text)
@@ -100,7 +100,7 @@ impl ThreadView {
             self.agent_cache.remove(&chunk.entry);
             self.remeasure(chunk.entry);
         }
-        let mut remaining: VecDeque<_> = questions.into();
+        let mut remaining: VecDeque<_> = ask.questions.into();
         if let Some(first) = remaining.pop_front() {
             self.asks.pending.push_back(question_from_async(first, remaining, Vec::new()));
             cx.notify();
@@ -124,7 +124,7 @@ impl ThreadView {
         } else if !replies.is_empty() {
             let mut item = Queued::new(replies.join("\n\n"), true);
             item.ahead = true;
-            if self.native_codex_steering() && self.can_steer(&item.text, FollowUp::Steer) {
+            if self.native_steering() && self.can_steer(&item.text, FollowUp::Steer) {
                 self.steer(item, cx);
             } else {
                 let at = self.queue.iter().take_while(|entry| entry.ahead).count();

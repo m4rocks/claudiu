@@ -324,15 +324,22 @@ pub(super) fn markdown_of(cache: &mut HashMap<usize, Entity<TextViewState>>, ix:
     crate::github::ui::styled_markdown(TextView::new(&state))
 }
 
-fn chat_markdown(cache: &mut HashMap<usize, Entity<TextViewState>>, ix: usize, text: &str, cx: &mut Context<ThreadView>) -> TextView {
+fn chat_links(view: TextView, row: usize, cx: &mut Context<ThreadView>) -> TextView {
     let thread = cx.entity().downgrade();
-    markdown_of(cache, ix, text, cx).on_link_click(move |target, _, _, app| {
-        if target.starts_with("https://") || target.starts_with("http://") {
-            app.open_url(target);
+    view.on_link_click(move |target, _, _, app| {
+        if let Ok(url) = url::Url::parse(target)
+            && matches!(url.scheme(), "http" | "https") && url.has_host()
+        {
+            app.open_url(url.as_str());
         } else if let Some((path, line)) = timeline::file_link(target) {
-            let _ = thread.update(app, |view, cx| view.open_location(path, line, cx));
+            let _ = thread.update(app, |view, cx| view.open_location_at(row, path, line, cx));
         }
     })
+}
+
+fn chat_markdown(cache: &mut HashMap<usize, Entity<TextViewState>>, ix: usize, text: &str, cx: &mut Context<ThreadView>) -> TextView {
+    let view = markdown_of(cache, ix, text, cx);
+    chat_links(view, ix, cx)
 }
 
 /// A line that opens or closes a fenced code block: its marker character and how many of it there are.
@@ -420,14 +427,7 @@ impl ThreadView {
                 let md_view = if self.user_md_len.get(&ix) == Some(&text.len())
                     && let Some(state) = self.markdown.get(&ix)
                 {
-                    let thread = cx.entity().downgrade();
-                    crate::github::ui::styled_markdown(TextView::new(state)).on_link_click(move |target, _, _, app| {
-                        if target.starts_with("https://") || target.starts_with("http://") {
-                            app.open_url(target);
-                        } else if let Some((path, line)) = timeline::file_link(target) {
-                            let _ = thread.update(app, |view, cx| view.open_location(path, line, cx));
-                        }
-                    })
+                    chat_links(crate::github::ui::styled_markdown(TextView::new(state)), ix, cx)
                 } else {
                     self.user_md_len.insert(ix, text.len());
                     let formatted = keep_line_breaks(text);
@@ -448,48 +448,22 @@ impl ThreadView {
                     .into_any_element()
             }
             Entry::Agent(text) => {
-                let inline_visuals = self.inline_visuals;
-                let cached = match self.agent_cache.get(&ix) {
-                    Some(c) if c.text_len == text.len() && c.inline_visuals == inline_visuals => c,
-                    _ => {
-                        let citations = elements::extract_citations(text);
-                        let segments = if inline_visuals {
-                            timeline::split_inline_ui(text)
-                        } else {
-                            vec![timeline::InlineSegment::Markdown(text.clone())]
-                        };
-                        self.agent_cache.insert(ix, super::AgentCache {
-                            text_len: text.len(),
-                            inline_visuals,
-                            citations,
-                            segments,
-                        });
-                        &self.agent_cache[&ix]
-                    }
-                };
-                let citations = elements::inline_citations_row(ix, cached.citations.clone());
-                let has_inline_ui = cached.segments.iter().any(|s| matches!(s, timeline::InlineSegment::Ui(_)));
-                let mut col = div().px(px(2.0)).flex().flex_col().gap(px(6.0));
-                if !has_inline_ui {
-                    col = col.child(chat_markdown(&mut self.markdown, ix, text, cx));
-                } else {
-                    let segments = cached.segments.clone();
-                    for (seg_ix, seg) in segments.into_iter().enumerate() {
-                        match seg {
-                            timeline::InlineSegment::Markdown(md) if !md.trim().is_empty() => {
-                                let key = ix.wrapping_mul(10_000).wrapping_add(seg_ix + 1);
-                                col = col.child(chat_markdown(&mut self.markdown, key, &md, cx));
-                            }
-                            timeline::InlineSegment::Ui(ui_md) => {
-                                let call = format!("inline-ui-{ix}-{seg_ix}");
-                                col = col.child(crate::visual::ui::markdown(call.clone(), &ui_md, Scope { call, ui: self.card_ui.clone() }));
-                            }
-                            _ => {}
-                        }
-                    }
+                let cached = self.agent_cache.entry(ix).or_insert_with(|| super::AgentCache {
+                    text_len: text.len(),
+                    citations: elements::extract_citations(text),
+                });
+                if cached.text_len != text.len() {
+                    cached.text_len = text.len();
+                    cached.citations = elements::extract_citations(text);
                 }
-                col.children(citations).into_any_element()
+                let citations = elements::inline_citations_row(ix, cached.citations.clone());
+                let mut view = chat_markdown(&mut self.markdown, ix, text, cx);
+                if self.inline_visuals {
+                    view = crate::visual::ui::transcript(view, Scope { call: format!("entry-{ix}"), ui: self.card_ui.clone() });
+                }
+                div().px(px(2.0)).flex().flex_col().gap(px(6.0)).child(view).children(citations).into_any_element()
             }
+            Entry::WorkspaceBoundary(_) => return div().into_any_element(),
             Entry::Thought(text) => {
                 let run = self.tool_run(ix);
                 match &run {
@@ -659,8 +633,6 @@ impl ThreadView {
 
     /// Tool call row built on `Trace` + `CodeBlock`: kind icon, status badge, file location chips, and collapsible output.
     fn render_tool(&self, ix: usize, call: &ToolCall, cx: &mut Context<Self>) -> AnyElement {
-        let inline_card = self.inline_visuals.then(|| self.cards.get(&call.id).map(|c| c.content.as_str())).flatten();
-        let has_card = inline_card.is_some();
         let shell = call.kind == "execute";
         let details = &call.details;
         let has_details = call.content.iter().any(|item| !matches!(item, ToolContent::Diff { .. }))
@@ -672,7 +644,7 @@ impl ThreadView {
         let mut location_chips = Vec::new();
         for (n, (path, line)) in call.locations.iter().enumerate().take(2) {
             let (path, line) = (path.clone(), *line);
-            let label = relative_to_cwd(&self.cwd, &path);
+            let label = relative_to_cwd(timeline::workspace_at(&self.thread.entries, ix, &self.cwd), &path);
             let end_line = (n == 0).then_some(details.end_line).flatten();
             location_chips.push(
                 div()
@@ -700,7 +672,7 @@ impl ThreadView {
                     })
                     .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| {
                         cx.stop_propagation();
-                        v.open_location(path.clone(), line, cx);
+                        v.open_location_at(ix, path.clone(), line, cx);
                     }))
                     .into_any_element(),
             );
@@ -731,7 +703,7 @@ impl ThreadView {
         }
 
         let mut block = div().flex().flex_col().child(header);
-        if (expanded && has_details) || has_card {
+        if expanded && has_details {
             let mut body = div().py(px(4.0)).flex().flex_col().gap(px(6.0));
             if expanded {
                 let query = self.find_query_for_row(ix);
@@ -750,10 +722,6 @@ impl ThreadView {
                     ToolContent::Image { mime, data } => self.render_tool_image(ix, (&call.id, index), (mime, data), cx),
                     _ => None,
                 }));
-            }
-            if let Some(content) = inline_card {
-                let scope = Scope { call: call.id.clone(), ui: self.card_ui.clone() };
-                body = body.child(div().mt(px(2.0)).child(crate::visual::ui::markdown(format!("thread-card-{}", call.id), content, scope)));
             }
             block = block.child(elements::trace_content(body.into_any_element()));
         }
@@ -849,12 +817,8 @@ impl ThreadView {
         cx.notify();
     }
 
-    /// Per entry: whether it is a step that folds into a run with its neighbours: a thought, a tool call or a subagent's
-    /// report. A call with an inline card stays on its own, so the card is never hidden.
     pub(super) fn run_kind(&self, ix: usize) -> Option<RunKind> {
-        let entry = self.thread.entries.get(ix)?;
-        let has_card = matches!(entry, Entry::Tool(call) if self.inline_visuals && self.cards.contains_key(&call.id));
-        timeline::run_kind(entry, has_card)
+        timeline::run_kind(self.thread.entries.get(ix)?)
     }
 
     pub(super) fn group_start_before(&self, ix: usize) -> usize {
@@ -863,9 +827,8 @@ impl ThreadView {
 
     fn tool_run(&self, ix: usize) -> Option<std::ops::Range<usize>> {
         let len = self.thread.entries.len();
-        let cards_len = self.cards.len();
         let mut cache = self.run_cache.borrow_mut();
-        if cache.entries != len || cache.cards != cards_len || cache.inline_visuals != self.inline_visuals || cache.ranges.len() != len {
+        if cache.entries != len || cache.ranges.len() != len {
             let mut ranges = vec![None; len];
             let mut start = 0;
             while start < len {
@@ -882,7 +845,7 @@ impl ThreadView {
                     start += 1;
                 }
             }
-            *cache = super::RunCache { entries: len, cards: cards_len, inline_visuals: self.inline_visuals, ranges };
+            *cache = super::RunCache { entries: len, ranges };
         }
         cache.ranges.get(ix).cloned().flatten()
     }

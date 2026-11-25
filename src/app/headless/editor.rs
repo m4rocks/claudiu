@@ -31,8 +31,27 @@ fn home_editor_saves_files_and_adds_comments_without_a_session() {
         assert!(std::time::Instant::now() < until, "the project file never opened");
         std::thread::yield_now();
     }
+    std::fs::write(&file, "updated on disk\n").unwrap();
     step(&mut cx, &|ws, window, cx| {
         let id = ws.editor_owner().unwrap();
+        ws.reload_tab(&id, file.clone(), window, cx);
+        ws.panes[&id].shown().unwrap().buffer.clone().update(cx, |buffer, cx| buffer.set_value("typed during reload\n", window, cx));
+    });
+    let until = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        cx.run_until_parked();
+        if ws.read_with(&cx, |ws, app| {
+            let tab = ws.panes[&ws.editor_owner().unwrap()].shown().unwrap();
+            if tab.conflict.is_none() { return false; }
+            assert_eq!(tab.buffer.read(app).value(), "typed during reload\n");
+            true
+        }) { break; }
+        assert!(std::time::Instant::now() < until, "the reload must surface a conflict");
+        std::thread::yield_now();
+    }
+    step(&mut cx, &|ws, window, cx| {
+        let id = ws.editor_owner().unwrap();
+        ws.keep_mine(&id, &file, cx);
         ws.panes[&id].shown().unwrap().buffer.clone().update(cx, |buffer, cx| buffer.set_value("changed\n", window, cx));
         ws.save_shown(cx);
         ws.home.prompt.update(cx, |prompt, cx| prompt.set_value("review this", window, cx));

@@ -55,6 +55,7 @@ pub const ADAPTER: Adapter = Adapter {
     project_skills: ".opencode/skills",
     hidden_commands: &[],
     worktree: super::WorktreeHooks::DEFAULT,
+    protocol: super::ProtocolHooks::DEFAULT,
 };
 
 fn prepare_launch(input: &super::SessionInput<'_>, plan: &mut super::SessionPlan) -> Result<(), String> {

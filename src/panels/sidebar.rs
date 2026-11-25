@@ -952,7 +952,7 @@ impl Workspace {
         for agent in crate::harness::subagents::Agent::ALL {
             let harness = Harness::from_agent(agent);
             let provider = agent.provider();
-            if provider.limits.is_none() || !(settings.harness_enabled(harness) || subagents.get(agent).on) {
+            if !harness.is_registered() || provider.limits.is_none() || !(settings.harness_enabled(harness) || subagents.get(agent).on) {
                 continue;
             }
             let state = self.limits_state.get(harness);

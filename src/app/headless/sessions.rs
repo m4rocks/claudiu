@@ -330,15 +330,6 @@ fn sessions_and_shell() {
         assert_eq!(ws.left_width(700.0), SIDEBAR_MIN, "keeps room for the session in a small window");
         ws.left_drag = None;
     });
-    // A card reaches the terminal of its session, and a card for a session that is not running is dropped.
-    let shown = ws.read_with(&cx, |ws, _| ws.active.clone().unwrap());
-    let stem = datadir::safe_file_stem(&shown);
-    let card = |call: &str| crate::visual::Card { call: call.into(), content: "# Hi".into() };
-    step(&mut cx, &|ws, _w, cx| ws.apply_visuals(vec![(stem.clone(), card("c1")), ("no-such-session".into(), card("c2"))], cx));
-    assert!(ws.read_with(&cx, |ws, cx| {
-        let view = ws.live_view(&shown).unwrap().thread().unwrap().read(cx);
-        view.has_card("c1") && !view.has_card("c2")
-    }));
     step(&mut cx, &|ws, w, cx| ws.open_github(cwd.clone(), w, cx));
     assert!(ws.read_with(&cx, |ws, _| ws.gh.len() == 1 && ws.right_gh.is_some()), "github shown in the right sidebar");
     assert_eq!(ws.read_with(&cx, |ws, _| ws.right_width(1600.0)), RIGHT_GH_W, "GitHub keeps its own width");

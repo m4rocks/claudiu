@@ -1,7 +1,7 @@
 //! m4code's built-in MCP server (`m4code --mcp-title`), wired into every harness session over stdio.
 //!
 //! Provides shared tools for GitHub attachment, session linking, model switching, subagents, and questions.
-//! Claude Code also gets inline visual cards through the m4code plugin.
+//! Session-specific instructions describe the workspace and the app's inline UI.
 
 pub mod bridge;
 pub mod session;
@@ -157,8 +157,6 @@ and HTML with inline CSS and m4code shortcuts (<card>, <badge>, <callout>, <prog
 with theme tokens var(--text), var(--dim), var(--faint), var(--accent), var(--ok), var(--warn), var(--danger), var(--info), var(--bg), var(--surface), var(--raised), var(--border) \
 (dark background, no scripts or <style> tags). Keep normal prose and code in text.";
 
-const ARTIFACT_INSTRUCTIONS: &str = " Artifacts are for pages to share.";
-
 /// What makes the model call `attach_github`.
 const GITHUB_INSTRUCTIONS: &str = " GitHub: call attach_github (silent, free) for each issue or pull request you work on, \
 as its description says; detach_github takes one off again.";
@@ -192,9 +190,6 @@ fn instructions(off: &[&str]) -> String {
     }
     if on("visual") {
         text += VISUAL_INSTRUCTIONS;
-        if on("artifacts") {
-            text += ARTIFACT_INSTRUCTIONS;
-        }
     }
     if on("sessions") {
         text += BRIDGE_INSTRUCTIONS;
@@ -851,7 +846,7 @@ mod tests {
         for part in [INTRO, GITHUB_INSTRUCTIONS, LINK_INSTRUCTIONS, VISUAL_INSTRUCTIONS, BRIDGE_INSTRUCTIONS] {
             assert!(text.contains(part));
         }
-        assert!(text.contains("ask the user which model") && text.contains("Artifacts are for pages to share."));
+        assert!(text.contains("ask the user which model"));
     }
 
     #[test]

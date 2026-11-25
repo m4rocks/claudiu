@@ -67,7 +67,6 @@ mod settings;
 mod setup;
 mod skills;
 mod titles;
-mod visuals;
 mod switch;
 mod worktrees;
 
@@ -818,7 +817,6 @@ impl Workspace {
         })
         .detach();
         ws.start_ticker(cx);
-        ws.start_visual_poll(cx);
         ws.start_fetch_loop(cx);
         ws.start_git_watch(cx);
         ws.start_activity_poll(window, cx);

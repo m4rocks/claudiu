@@ -55,7 +55,7 @@ impl Workspace {
     /// `model`) win over the new-session defaults.
     pub(super) fn new_session_default(&mut self, cwd: PathBuf, prompt: Option<String>, options: Vec<(&'static str, String)>, by: Starter, window: &mut Window, cx: &mut Context<Self>) {
         let harness = self.store.data.settings.default_model().harness;
-        self.new_session_with(harness, cwd, prompt, options, by, window, cx);
+        self.new_session_with(harness, cwd, prompt, options, by, None, window, cx);
     }
 
     /// A new session in `harness` directly inside `cwd` (preserving a chosen worktree) with optional model, effort and permission mode overrides.
@@ -101,7 +101,7 @@ impl Workspace {
 
     /// A new session in `harness`, as `new_session_default`.
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn new_session_with(&mut self, harness: Harness, cwd: PathBuf, prompt: Option<String>, options: Vec<(&'static str, String)>, by: Starter, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn new_session_with(&mut self, harness: Harness, cwd: PathBuf, prompt: Option<String>, options: Vec<(&'static str, String)>, by: Starter, permission: Option<Permission>, window: &mut Window, cx: &mut Context<Self>) {
         // A new session starts in the main checkout, not in a linked worktree. Fix-with-Claude works where the failure was.
         let cwd = if matches!(by, Starter::FixGit | Starter::OtherSession) { cwd } else { self.outside_linked_worktree(cwd) };
         let record_id = new_id();
@@ -113,6 +113,7 @@ impl Workspace {
             ..Default::default()
         };
         let Some(mut start) = self.thread_start(&record_id, &cwd, &meta, None, prompt, by, cx) else { return };
+        start.permission = permission.or(start.permission);
         start.options.retain(|(category, _)| options.iter().all(|(c, _)| c != category));
         start.options.extend(options);
         let record = SessionRecord {
@@ -402,7 +403,7 @@ impl Workspace {
                         ws.on_exit(&sub_id, *code, window, cx);
                     }
                 }
-                ThreadEvent::PermissionChanged(permission) => {
+                ThreadEvent::PermissionPreference(permission) => {
                     if ws.pending_handoffs.contains_key(&sub_id) { return; }
                     if let Some(meta) = ws.store.session_mut(&sub_id).and_then(|r| r.agent.as_mut()) {
                         meta.permission = Some(*permission);
@@ -500,7 +501,7 @@ impl Workspace {
                         .session(&sub_id)
                         .map(|r| (r.agent.as_ref().map_or(ws.store.data.settings.harness, |m| m.harness), r.cwd.clone()))
                         .unwrap_or_else(|| (ws.store.data.settings.harness, ws.new_session_cwd()));
-                    ws.new_session_with(harness, cwd, prompt.clone(), vec![], Starter::User, window, cx);
+                    ws.new_session_with(harness, cwd, prompt.clone(), vec![], Starter::User, None, window, cx);
                 }
                 ThreadEvent::OpenToolShell(command) => {
                     cx.write_to_clipboard(gpui::ClipboardItem::new_string(command.clone()));

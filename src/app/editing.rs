@@ -21,15 +21,16 @@ impl Workspace {
     pub fn save_shown(&mut self, cx: &mut Context<Self>) {
         let Some(id) = self.editor_owner() else { return };
         let Some(pane) = self.panes.get_mut(&id) else { return };
-        let Some(tab) = pane.active.and_then(|ix| pane.tabs.get_mut(ix)).filter(|t| t.note.is_none()) else { return };
+        let Some(tab) = pane.active.and_then(|ix| pane.tabs.get_mut(ix)).filter(|t| t.note.is_none() && !t.saving) else { return };
         tab.saving = true;
+        let buffer = tab.buffer.entity_id();
         let (path, format, expected) = (tab.path.clone(), tab.format.clone(), tab.stamp);
         let text = tab.buffer.read(cx).value().to_string();
         cx.spawn(async move |this, cx| {
             let (write, written) = (path.clone(), text.clone());
             let saved = cx.background_executor().spawn(async move { files::save(&write, &written, format, expected) }).await;
             let _ = this.update(cx, |ws, cx| {
-                let mut tab = ws.panes.get_mut(&id).and_then(|p| p.tabs.iter_mut().find(|t| t.path == path));
+                let mut tab = ws.panes.get_mut(&id).and_then(|p| p.tabs.iter_mut().find(|t| t.path == path && t.buffer.entity_id() == buffer));
                 if let Some(tab) = tab.as_deref_mut() {
                     tab.saving = false;
                 }
@@ -104,12 +105,24 @@ impl Workspace {
 
     /// Read the tab's file again, dropping unsaved edits; the cursor stays on its line.
     pub fn reload_tab(&mut self, id: &Id, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab) = self.panes.get(id).and_then(|p| p.tabs.iter().find(|t| t.path == path && !t.saving)) else { return };
+        let buffer = tab.buffer.entity_id();
+        let stamp_at_start = tab.stamp;
+        let text_at_start = tab.buffer.read(cx).value().to_string();
         let id = id.clone();
         cx.spawn_in(window, async move |this, cx| {
             let read = path.clone();
             let (contents, now) = cx.background_executor().spawn(async move { (files::read(&read), files::stamp(&read)) }).await;
             let _ = this.update_in(cx, |ws, window, cx| {
-                let Some(tab) = ws.panes.get_mut(&id).and_then(|p| p.tabs.iter_mut().find(|t| t.path == path)) else { return };
+                let Some(tab) = ws.panes.get_mut(&id).and_then(|p| p.tabs.iter_mut().find(|t| t.path == path && t.buffer.entity_id() == buffer)) else { return };
+                if tab.saving || tab.stamp != stamp_at_start {
+                    return;
+                }
+                if tab.buffer.read(cx).value() != text_at_start.as_str() {
+                    tab.conflict = Some(if now.is_some() { Conflict::Changed } else { Conflict::Deleted });
+                    cx.notify();
+                    return;
+                }
                 match contents {
                     Ok(Contents::Text { text, format, stamp }) => {
                         tab.buffer.update(cx, |b, cx| {

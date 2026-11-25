@@ -310,8 +310,10 @@ impl Workspace {
                 if let Some(effort) = req.args["effort"].as_str().filter(|e| !e.is_empty()) {
                     options.push(("thought_level", effort.to_string()));
                 }
+                let permission = self.requester_thread(req).ok().and_then(|thread| thread.read(cx).permission_for_relaunch())
+                    .filter(|permission| *permission == crate::harness::permission::Permission::ReadOnly);
                 let before = self.selected.clone();
-                self.new_session_with(harness, cwd.clone(), prompt, options, Starter::OtherSession, window, cx);
+                self.new_session_with(harness, cwd.clone(), prompt, options, Starter::OtherSession, permission, window, cx);
                 match self.selected.clone().filter(|s| Some(s) != before.as_ref()) {
                     Some(id) => {
                         // A session started from another one is linked with it from the start.

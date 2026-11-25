@@ -4,10 +4,15 @@
 pub mod limits;
 pub mod read_only;
 
+#[cfg(feature = "adapter-antigravity")]
 use super::subagents::Agent;
 
+#[cfg(feature = "adapter-antigravity")]
 use super::{Adapter, Reopen};
+#[cfg(feature = "adapter-antigravity")]
+use self::background::{background_update, task_finished};
 
+#[cfg(feature = "adapter-antigravity")]
 pub const ADAPTER: Adapter = Adapter {
     name: "Antigravity",
     server_name: "agy",
@@ -38,4 +43,86 @@ pub const ADAPTER: Adapter = Adapter {
     project_skills: ".agents/skills",
     hidden_commands: &["swarm"],
     worktree: super::WorktreeHooks::DEFAULT,
+    protocol: super::ProtocolHooks {
+        background: Some(super::BackgroundHooks { from_update: background_update, finished: task_finished, live_execute_tools: true }),
+        ..super::ProtocolHooks::DEFAULT
+    },
 };
+
+#[cfg(feature = "adapter-antigravity")]
+mod background {
+    use super::super::{BackgroundTask, BackgroundUpdate};
+    use serde_json::Value;
+    use std::path::PathBuf;
+    const BG_TASK_PREFIX: &str = "Tool is running as a background task with task id:";
+    const BG_TASK_LOG_PREFIX: &str = "Task logs are available at:";
+
+    fn tool_output_texts(call: &super::super::thread::ToolCall) -> Vec<&str> {
+        let mut texts = Vec::new();
+        if let Some(out) = call.details.output.as_deref() {
+            texts.push(out);
+        }
+        if let Some(out) = call.details.stdout.as_deref() {
+            texts.push(out);
+        }
+        for content in &call.content {
+            if let super::super::thread::ToolContent::Text(text) = content {
+                texts.push(text.as_str());
+            }
+        }
+        texts
+    }
+
+    fn background_task_from_tool(call: &super::super::thread::ToolCall) -> Option<BackgroundTask> {
+        let texts = tool_output_texts(call);
+        let task_id = texts.iter().find_map(|text| {
+            let rest = text.split_once(BG_TASK_PREFIX)?.1.trim_start();
+            let id = rest.split_whitespace().next()?.trim_matches(|c: char| matches!(c, '"' | '\'' | ',' | '.'));
+            (!id.is_empty()).then(|| id.to_string())
+        })?;
+        let log_path = texts.iter().find_map(|text| {
+            let rest = text.split_once(BG_TASK_LOG_PREFIX)?.1.trim_start();
+            let raw = rest.lines().next()?.trim();
+            let path = raw.strip_prefix("file://").unwrap_or(raw);
+            (!path.is_empty()).then(|| PathBuf::from(path))
+        });
+        let label = call
+            .details
+            .command
+            .as_deref()
+            .or(Some(call.title.as_str()))
+            .and_then(|s| s.lines().find(|l| !l.trim().is_empty()))
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "Background task".into());
+        Some(BackgroundTask { id: task_id, label, log_path })
+    }
+
+
+    pub(super) fn background_update(call: &super::super::thread::ToolCall, update: &Value) -> BackgroundUpdate {
+        if update.get("rawOutput").is_none() && update.get("content").is_none() {
+            return BackgroundUpdate::default();
+        }
+        let started = (call.kind == "execute").then(|| background_task_from_tool(call)).flatten();
+        let mut output = tool_output_texts(call).into_iter().map(str::to_string).collect::<Vec<_>>();
+        if let Some(raw) = update.get("rawOutput").and_then(Value::as_str) {
+            output.push(raw.to_string());
+        }
+        BackgroundUpdate { started, output }
+    }
+
+    pub(super) fn task_finished(text: &str, task_id: &str) -> bool {
+        if text.contains("No background tasks are currently running")
+            || text.contains("All your subagents and background tasks have been stopped")
+        {
+            return true;
+        }
+        text.lines().any(|line| {
+            let Some((_, rest)) = line.split_once(task_id) else { return false };
+            let status = rest.trim_start_matches(['"', '\'', ')', ']', ':', ' ']).to_ascii_lowercase();
+            ["finished", "canceled", "cancelled", "killed", "exited"].iter()
+                .any(|word| status.strip_prefix(word).is_some_and(|tail| tail.is_empty() || tail.starts_with([' ', '.', ':'])))
+        })
+    }
+
+}

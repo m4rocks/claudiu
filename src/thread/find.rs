@@ -21,6 +21,7 @@ fn matching_rows(entries: &[Entry], query: &str) -> Vec<usize> {
     let contains = |text: &str| text.to_lowercase().contains(query);
     entries.iter().enumerate().filter_map(|(row, entry)| {
         let matches = match entry {
+            Entry::WorkspaceBoundary(_) => false,
             Entry::User(text) => parse_subagent_report(text).map_or_else(|| contains(text), |report| contains(report.body) || contains(report.title)),
             Entry::Agent(text) | Entry::Thought(text) | Entry::Notice { text, .. } => contains(text),
             Entry::Tool(tool) => contains(&tool.title)

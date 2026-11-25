@@ -185,7 +185,8 @@ fn run_task(request: &Request, emit: &mut impl FnMut(Event)) -> Result<String, S
     plan.env.extend((provider.environment)(request).into_iter().map(|(key, value)| (key.into(), value)));
     // This child cannot represent itself as its parent's desktop thread. Give it the shared
     // workspace tool independently of tools that require a registered m4code thread.
-    let tools = crate::mcp::session::SessionTools::new("", &request.cwd, None, &["github", "sessions", "model", "ask_user", "visual"], &[])?;
+    let mut tools = crate::mcp::session::SessionTools::new("", &request.cwd, None, &["github", "sessions", "model", "ask_user", "visual"], &[])?;
+    tools.load_workspace();
     let adapter = harness.adapter();
     (adapter.configure_mcp)(&tools, &mut plan)?;
     let env = plan.env.iter().map(|(key, value)| (key.as_str(), value.clone())).collect::<Vec<_>>();
@@ -354,10 +355,9 @@ pub fn locate(agent: Agent) -> Option<PathBuf> {
 
 impl Connection {
     fn start(agent: Agent, cwd: &Path, task_args: &[String], env: &[(&str, String)]) -> Result<Connection, String> {
-        let provider = agent.provider();
-        let program = locate(agent).ok_or_else(|| provider.missing.to_string())?;
+        let (program, args) = (super::Harness::from_agent(agent).adapter().server)()?;
         let mut command = Command::new(program);
-        command.args(provider.args).args(task_args).current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        command.args(args).args(task_args).current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
         crate::platform::no_window(&mut command);
         crate::platform::with_login_path(&mut command);
         for (key, value) in env {

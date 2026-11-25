@@ -9,6 +9,7 @@ pub mod codex;
 pub mod compaction;
 pub mod defaults;
 pub mod limits;
+#[cfg(feature = "adapter-opencode")]
 pub mod opencode;
 pub mod permission;
 pub mod runner;
@@ -101,6 +102,7 @@ pub struct Adapter {
     pub project_skills: &'static str,
     pub hidden_commands: &'static [&'static str],
     pub worktree: WorktreeHooks,
+    pub protocol: ProtocolHooks,
 }
 
 pub struct SessionInput<'a> {
@@ -130,16 +132,67 @@ impl SessionPlan {
     }
 }
 
+pub struct AsyncOption {
+    pub label: String,
+    pub description: Option<String>,
+}
+
+pub struct AsyncQuestion {
+    pub title: String,
+    pub options: Vec<AsyncOption>,
+    pub multi_select: bool,
+}
+
+pub struct AsyncAsk {
+    pub questions: Vec<AsyncQuestion>,
+    pub echoed_text: String,
+}
+
+pub struct BackgroundTask {
+    pub id: String,
+    pub label: String,
+    pub log_path: Option<PathBuf>,
+}
+
+pub struct BackgroundHooks {
+    pub from_update: fn(&thread::ToolCall, &Value) -> BackgroundUpdate,
+    pub finished: fn(&str, &str) -> bool,
+    /// When true, `execute` tools left `Running` at `turn_ended` stay live until their completion update arrives.
+    pub live_execute_tools: bool,
+}
+
+#[derive(Default)]
+pub struct BackgroundUpdate {
+    pub started: Option<BackgroundTask>,
+    pub output: Vec<String>,
+}
+
+pub struct ProtocolHooks {
+    pub async_ask: Option<fn(&Value) -> Option<AsyncAsk>>,
+    pub background: Option<BackgroundHooks>,
+    pub usage_limits: fn(&Value, i64) -> Option<crate::store::UsageLimits>,
+    pub ignore_update: fn(&Value) -> bool,
+}
+
+impl ProtocolHooks {
+    const DEFAULT: Self = Self {
+        async_ask: None,
+        background: None,
+        usage_limits: |_, _| None,
+        ignore_update: |_| false,
+    };
+}
+
 pub struct WorktreeHooks {
     pub inspect: fn(&str) -> (Option<bool>, Option<PathBuf>),
-    pub prepare: fn(&Path, &str) -> Result<(), String>,
+    pub can_resume: fn(&Path) -> Result<bool, String>,
     pub has_history: fn(Option<&str>, bool) -> bool,
 }
 
 impl WorktreeHooks {
     const DEFAULT: Self = Self {
         inspect: |_| (None, None),
-        prepare: |_, _| Ok(()),
+        can_resume: |_| Ok(true),
         has_history: |id, _| id.is_some(),
     };
 }
@@ -187,6 +240,7 @@ static UNAVAILABLE_ADAPTER: Adapter = Adapter {
     project_skills: "",
     hidden_commands: &[],
     worktree: WorktreeHooks::DEFAULT,
+    protocol: ProtocolHooks::DEFAULT,
 };
 
 /// Default single placeholder model for an adapter before its ACP server reports a live catalog.

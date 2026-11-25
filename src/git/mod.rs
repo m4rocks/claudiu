@@ -82,6 +82,15 @@ fn head_name(repo: &Repository) -> Option<String> {
     }
 }
 
+/// The active checkout, primary project root, and HEAD, without opening sibling worktrees.
+pub(crate) fn workspace_details(path: &Path) -> Option<(PathBuf, PathBuf, Option<String>)> {
+    let repo = Repository::discover(path).ok()?;
+    let checkout = normalize(repo.workdir()?);
+    let main = repo.is_worktree().then(|| Repository::open(repo.commondir()).ok()).flatten();
+    let project = main.as_ref().and_then(Repository::workdir).map_or_else(|| checkout.clone(), normalize);
+    Some((checkout, project, head_name(&repo)))
+}
+
 /// Find the repository containing `path`, if any.
 pub fn detect(path: &Path) -> Option<GitInfo> {
     let repo = Repository::discover(path).ok()?;

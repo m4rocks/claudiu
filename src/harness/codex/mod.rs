@@ -27,18 +27,7 @@ pub(crate) fn m4code_mcp_config(inherited: Option<&str>, command: &std::path::Pa
     Ok(Value::Object(config).to_string())
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct AsyncOption {
-    pub label: String,
-    pub description: Option<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct AsyncQuestion {
-    pub title: String,
-    pub options: Vec<AsyncOption>,
-    pub multi_select: bool,
-}
+use super::{AsyncAsk, AsyncOption, AsyncQuestion};
 
 fn parse_async_titled_options(entries: &[Value], has_note: bool) -> Vec<AsyncOption> {
     entries
@@ -69,7 +58,7 @@ fn parse_async_enum_options(entries: &[Value], names: Option<&Vec<Value>>) -> Ve
         .collect()
 }
 
-pub(crate) fn async_questions(params: &Value) -> Option<Vec<AsyncQuestion>> {
+fn async_questions(params: &Value) -> Option<Vec<AsyncQuestion>> {
     if params["mode"] != "form" || params.pointer("/_meta/codex/delivery").and_then(Value::as_str) != Some("async") {
         return None;
     }
@@ -100,17 +89,39 @@ pub(crate) fn async_questions(params: &Value) -> Option<Vec<AsyncQuestion>> {
     (!questions.is_empty()).then_some(questions)
 }
 
-pub(crate) fn async_question_text(questions: &[AsyncQuestion]) -> String {
+fn async_question_text(questions: &[AsyncQuestion]) -> String {
     questions.iter().map(|question| {
         std::iter::once(question.title.clone()).chain(question.options.iter().map(|option| format!("- {}", option.label)))
             .collect::<Vec<_>>().join("\n")
     }).collect::<Vec<_>>().join("\n\n")
 }
 
+fn decode_async_ask(params: &Value) -> Option<AsyncAsk> {
+    let questions = async_questions(params)?;
+    let echoed_text = async_question_text(&questions);
+    Some(AsyncAsk { questions, echoed_text })
+}
+
+fn ignore_update(update: &Value) -> bool {
+    if update["sessionUpdate"] != "agent_message_chunk" {
+        return false;
+    }
+    let text = update.pointer("/content/text").and_then(Value::as_str).unwrap_or_default().trim();
+    text.starts_with("Warning: This session was recorded with model ")
+        && text.contains(" but is resuming with ")
+        && text.contains("Consider switching back to ")
+}
+
 pub const ADAPTER: Adapter = Adapter {
     name: "Codex",
     server_name: "codex-acp",
-    server: || super::subagent_server(Agent::Codex),
+    server: || {
+        if let Some(program) = crate::platform::find_executable("codex-acp") {
+            Ok((program, Vec::new()))
+        } else {
+            super::subagent_server(Agent::Codex)
+        }
+    },
     reopen: Reopen::Load,
     delete_model_session: false,
     compact_command: Some("compact"),
@@ -130,12 +141,20 @@ pub const ADAPTER: Adapter = Adapter {
     full_access_relaunch: false,
     native_compaction_managed: false,
     fallback_question: false,
-    discover: |_| crate::platform::find_executable("codex-acp").or_else(|| crate::platform::find_executable("codex")),
+    discover: |_| crate::platform::find_executable("codex-acp").or_else(|| {
+        let codex = crate::platform::find_executable("codex")?;
+        crate::platform::find_executable("npx").map(|_| codex)
+    }),
     probe_env: super::no_probe_env,
     config_root: |home| home.join(".codex"),
     project_skills: ".codex/skills",
     hidden_commands: &["approvals", "logout"],
     worktree: super::WorktreeHooks::DEFAULT,
+    protocol: super::ProtocolHooks {
+        async_ask: Some(decode_async_ask),
+        ignore_update,
+        ..super::ProtocolHooks::DEFAULT
+    },
 };
 
 fn configure_mcp(tools: &crate::mcp::session::SessionTools, plan: &mut super::SessionPlan) -> Result<(), String> {

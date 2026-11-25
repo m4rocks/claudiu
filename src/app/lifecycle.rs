@@ -24,7 +24,7 @@ pub fn tidy_leftovers() {
     datadir::prune(titles, 7 * 86_400);
     datadir::prune(usage::snapshot_dir(), 30 * 86_400);
     datadir::prune(usage::ctl_dir(), 7 * 86_400);
-    datadir::prune(crate::visual::dir(), 7 * 86_400);
+    datadir::prune(data.join("visual"), 7 * 86_400);
     datadir::prune(data.join("mcp-ready"), 86_400);
     datadir::prune(data.join("screens"), 30 * 86_400);
     datadir::prune(data.join("pasted"), 7 * 86_400);

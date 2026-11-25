@@ -63,9 +63,14 @@ pub const ADAPTER: Adapter = Adapter {
     config_root: |home| home.join(".claude"),
     project_skills: ".claude/skills",
     hidden_commands: &["autocompact", "usage"],
+    protocol: super::ProtocolHooks {
+        usage_limits: limits::parse_value,
+        ..super::ProtocolHooks::DEFAULT
+    },
     worktree: super::WorktreeHooks {
         inspect: inspect_session_worktree,
-        prepare: clear_worktree_if_recorded,
+        can_resume: |transcript| worktree_recorded(transcript).map(|recorded| !recorded)
+            .map_err(|e| format!("could not read the conversation: {e}")),
         has_history: |_, transcript| transcript,
     },
 };
@@ -86,13 +91,6 @@ fn inspect_session_worktree(id: &str) -> (Option<bool>, Option<PathBuf>) {
         session_statuses(home, &mut Default::default()).get(id).map(|status| status == "idle")
     });
     (idle, home.and_then(|home| find_transcript(&home, id)))
-}
-
-pub(crate) fn clear_worktree_if_recorded(transcript: &Path, id: &str) -> Result<(), String> {
-    if worktree_recorded(transcript).map_err(|e| format!("could not read the conversation: {e}"))? {
-        clear_recorded_worktree(transcript, id).map_err(|e| format!("could not update the conversation: {e}"))?;
-    }
-    Ok(())
 }
 
 /// Sessions starting together must not install the SDK into the same folder at once.
@@ -185,7 +183,6 @@ pub fn prepare_session(
         }
         env.push((usage::USAGE_DIR_ENV.into(), usage::snapshot_dir().to_string_lossy().into_owned()));
         env.push((usage::CTL_ENV.into(), usage::ctl_file(record_id).to_string_lossy().into_owned()));
-        env.push((crate::visual::VISUAL_ENV.into(), crate::visual::prefix(record_id).to_string_lossy().into_owned()));
         // The mod registers the agent types and answers their turns, so they go only where it loads.
         if let Some(subagents) = settings.custom_subagents.env_for(&settings.enabled_harnesses_list())
             && let Ok(exe) = crate::platform::own_exe()
@@ -355,25 +352,6 @@ fn worktree_state(line: &str) -> Option<bool> {
     (v["type"] == "worktree-state").then(|| !v["worktreeSession"].is_null())
 }
 
-/// Append the line Claude Code's own ExitWorktree writes, so that a resume starts in the folder `claude` is launched
-/// from. Only appends, and only while no process of the session runs. Blocking.
-pub fn clear_recorded_worktree(transcript: &Path, session_id: &str) -> std::io::Result<()> {
-    use std::io::Write;
-    let mut file = fs::OpenOptions::new().read(true).append(true).open(transcript)?;
-    let mut line = String::new();
-    if file.metadata()?.len() > 0 {
-        file.seek(SeekFrom::End(-1))?;
-        let mut last = [0u8];
-        file.read_exact(&mut last)?;
-        if last[0] != b'\n' {
-            line.push('\n');
-        }
-    }
-    line.push_str(&serde_json::json!({"type": "worktree-state", "worktreeSession": null, "sessionId": session_id}).to_string());
-    line.push('\n');
-    file.write_all(line.as_bytes())
-}
-
 pub fn context_limit(window: Option<u64>, compact_at: Option<u64>, auto_compact: Option<bool>) -> Option<u64> {
     compact_at.filter(|&t| t > 0 && auto_compact != Some(false)).or(window).filter(|&w| w > 0)
 }
@@ -422,18 +400,16 @@ mod tests {
     }
 
     #[test]
-    fn the_last_worktree_state_line_decides_and_clearing_appends_one() {
+    fn the_last_worktree_state_line_decides() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("s.jsonl");
         let entered = r#"{"type":"worktree-state","worktreeSession":{"worktreeName":"t1"},"sessionId":"s"}"#;
         fs::write(&path, format!("{{\"type\":\"user\"}}\n{entered}\n{{\"type\":\"assistant\"}}")).unwrap();
         assert!(worktree_recorded(&path).unwrap());
 
-        clear_recorded_worktree(&path, "s").unwrap();
-        assert!(!worktree_recorded(&path).unwrap(), "the appended null line is the last one");
-        let text = fs::read_to_string(&path).unwrap();
-        assert!(text.starts_with(&format!("{{\"type\":\"user\"}}\n{entered}\n{{\"type\":\"assistant\"}}\n")), "a missing final newline is added and nothing else changes");
-        assert!(text.lines().last().unwrap().contains("\"worktreeSession\":null"));
+        let exited = r#"{"type":"worktree-state","worktreeSession":null,"sessionId":"s"}"#;
+        fs::write(&path, format!("{entered}\n{exited}\n")).unwrap();
+        assert!(!worktree_recorded(&path).unwrap());
 
         fs::write(&path, format!("{entered}\n{{\"type\":\"user\"}}\n")).unwrap();
         assert!(worktree_recorded(&path).unwrap());

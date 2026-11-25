@@ -1,6 +1,6 @@
 //! Generative UI in a card: Markdown that may contain fenced blocks with the info string `ui`, written as HTML with
 //! inline CSS, drawn natively in m4code's theme instead of shown as code (`parse` reads it, `render` draws it). The
-//! model is taught the dialect by `PROMPT`, which is the description of the `show_visual` tool.
+//! model receives this dialect through m4code's MCP instructions.
 
 mod parse;
 mod render;
@@ -8,13 +8,11 @@ mod render;
 use std::collections::{HashMap, HashSet};
 
 use gpui::{Context, Entity, EventEmitter};
-use gpui_kit::component::text::{MarkdownNode, MarkdownParseContext, TextView, markdown_ast};
+use gpui_kit::component::text::{MarkdownExtensions, MarkdownNode, MarkdownParseContext, TextView, markdown_ast};
 
 use parse::Tree;
 
 const NODE: &str = "m4code-ui";
-
-const UI_TAGS: [&str; 4] = ["button", "chart", "details", "tabs"];
 
 /// What the user has done in a session's cards: buttons sent, sections opened, tabs chosen. Kept for the life of the
 /// terminal, because scrolling a card off screen must not reset it; a restart does.
@@ -69,37 +67,46 @@ pub struct Scope {
     pub ui: Entity<CardUi>,
 }
 
-/// `ui` fences, and the tags that mean nothing outside one. The model writes those straight into the Markdown too,
-/// where a one-line `<chart>` is a paragraph and one with children an HTML block. A blank line ends either, so a bare
-/// tag with blank lines inside it is only drawn up to the first of them.
-fn ui_block(node: &markdown_ast::Node, cx: &MarkdownParseContext) -> Option<MarkdownNode> {
-    match node {
-        markdown_ast::Node::Code(c) if c.lang.as_deref() == Some("ui") => Some(ui_node(&c.value)),
-        markdown_ast::Node::Html(_) | markdown_ast::Node::Paragraph(_) => cx.node_source(node).filter(|s| starts_with_ui_tag(s)).map(ui_node),
-        _ => None,
+/// The chat keeps one Markdown document so references and layout span interactive blocks.
+pub(crate) fn transcript(view: TextView, scope: Scope) -> TextView {
+    let extensions = MarkdownExtensions::default().parser_revision(1)
+        .block_parser(transcript_block)
+        .block_renderer(NODE, move |node, window, cx| {
+            let Some((offset, tree)) = node.data::<(usize, Tree)>() else { return gpui::IntoElement::into_any_element(gpui::div()); };
+            let block = Scope { call: format!("{}-{offset}", scope.call), ui: scope.ui.clone() };
+            render::render(tree, &block, window, cx)
+        });
+    view.markdown_extensions(extensions)
+}
+
+fn transcript_block(node: &markdown_ast::Node, cx: &MarkdownParseContext<'_>) -> Option<MarkdownNode> {
+    let markdown_ast::Node::Code(code) = node else { return None };
+    if !code.lang.as_deref().is_some_and(|lang| lang.eq_ignore_ascii_case("ui"))
+        || code.value.len() > 128 * 1024
+    {
+        return None;
     }
+    let source = cx.node_source(node)?;
+    if !closed_fence(source) {
+        return None;
+    }
+    let start = code.position.as_ref()?.start.offset;
+    let prefix = cx.source().get(..start)?.rsplit('\n').next()?;
+    if prefix.len() > 3 || prefix.bytes().any(|ch| ch != b' ') {
+        return None;
+    }
+    Some(MarkdownNode::new(NODE, (cx.offset() + start, parse::parse_tree(&code.value)))
+        .text(code.value.clone()).markdown(source.to_string()))
 }
 
-fn starts_with_ui_tag(source: &str) -> bool {
-    let Some(rest) = source.strip_prefix('<') else { return false };
-    let name: String = rest.chars().take_while(char::is_ascii_alphanumeric).collect();
-    UI_TAGS.contains(&name.to_ascii_lowercase().as_str())
-}
-
-fn ui_node(source: &str) -> MarkdownNode {
-    MarkdownNode::new(NODE, parse::parse_tree(source)).text(source.to_string()).markdown(format!("```ui
-{source}
-```"))
-}
-
-/// A card's markdown view: the shared one, plus `ui` blocks. (GitHub text does not get them.)
-pub fn markdown(id: String, text: &str, scope: Scope) -> TextView {
-    crate::github::ui::markdown(id, text)
-        .markdown_block_parser(ui_block)
-        .markdown_block_renderer(NODE, move |node, window, cx| match node.data::<Tree>() {
-            Some(tree) => render::render(tree, &scope, window, cx),
-            None => gpui::IntoElement::into_any_element(gpui::div()),
-        })
+fn closed_fence(source: &str) -> bool {
+    let Some((opening, body)) = source.split_once('\n') else { return false };
+    let Some(marker @ ('`' | '~')) = opening.chars().next() else { return false };
+    let count = opening.chars().take_while(|c| *c == marker).count();
+    let last_line = body.lines().last().unwrap_or_default().trim_end();
+    let closing = last_line.trim_start_matches(' ');
+    count >= 3 && last_line.len() - closing.len() <= 3 && closing.len() >= count
+        && closing.chars().all(|c| c == marker)
 }
 
 #[cfg(test)]
@@ -111,11 +118,18 @@ mod tests {
 
     const SAMPLE: &str = "Intro **bold**\n\n```ui\n<card><div style=\"display:flex;justify-content:space-between\"><h3>Build</h3><badge style=\"color:var(--ok)\">passing</badge></div><progress value=\"78\"></progress><ul><li>one<li>two with <a href=\"https://x.dev\">link</a></ul><grid cols=\"2\"><div style=\"grid-column:span 2\">wide</div><div>a</div><div>b</div></grid><table><tr><th>h<th>i<tr><td>1<td>2</table><svg viewBox=\"0 0 100 40\" width=\"200\"><rect width=\"60\" height=\"10\" fill=\"var(--accent)\"/><text x=\"2\" y=\"30\" fill=\"currentColor\">hi</text></svg><pre>code\n  here</pre></card>\n```\n\nAfter";
 
+    #[test]
+    fn streamed_fences_only_render_after_the_closing_marker() {
+        assert!(!super::closed_fence("```ui\n<button>Running</button>"));
+        assert!(!super::closed_fence("````ui\n<p>Example</p>\n```"));
+        assert!(super::closed_fence("~~~ui\n<p>Done</p>\n~~~~"));
+    }
+
     struct Sample(String, Entity<super::CardUi>);
     impl Render for Sample {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             let scope = super::Scope { call: "c".into(), ui: self.1.clone() };
-            div().w(gpui::px(600.0)).child(super::markdown("t".into(), &self.0, scope))
+            div().w(gpui::px(600.0)).child(super::transcript(crate::github::ui::markdown("t".into(), &self.0), scope))
         }
     }
 
@@ -156,8 +170,8 @@ mod tests {
         draw();
         ui.update(&mut cx, |ui, cx| {
             ui.mark_sent("anything", cx);
-            ui.set_open("c/0/1", true, cx);
-            ui.set_tab("c/0/2", 7, cx);
+            ui.set_open("c-0/0/1", true, cx);
+            ui.set_tab("c-0/0/2", 7, cx);
         });
         cx.update_window(window, |_, window, app| window.draw(app).clear(app)).unwrap();
     }
@@ -168,8 +182,8 @@ mod tests {
         impl Render for Recorder {
             fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
                 let count = self.1.clone();
-                let view = crate::github::ui::markdown("t".into(), self.0).markdown_block_parser(super::ui_block).markdown_block_renderer(super::NODE, move |node, _, _| {
-                    let tree = node.data::<super::Tree>().expect("a ui block carries its tree");
+                let view = crate::github::ui::markdown("t".into(), self.0).markdown_block_parser(super::transcript_block).markdown_block_renderer(super::NODE, move |node, _, _| {
+                    let (_, tree) = node.data::<(usize, super::Tree)>().expect("a UI block carries its tree");
                     *count.lock().unwrap() += tree.nodes.iter().filter(|n| matches!(n, super::parse::Node::Svg(Some(_)))).count();
                     div().into_any_element()
                 });
@@ -194,28 +208,13 @@ mod tests {
     }
 
     #[test]
-    fn charts_draw_when_written_straight_into_the_markdown() {
-        // What the model wrote in the card that showed no charts: a one-line chart is a paragraph to Markdown, and one
-        // with children is an HTML block.
-        let content = "**Trucks**
-
-<chart type=\"bar\" labels=\"S1,S2\" values=\"3,5\"></chart>
-
-**Loans**
-
-<chart type=\"line\" labels=\"S1,S2\" height=\"160\">
-<series name=\"accepted\" values=\"2,4\"/>
-<series name=\"rejected\" values=\"1,1\"/>
-</chart>
-";
-        assert_eq!(charts_drawn(content), 2);
-        assert_eq!(charts_drawn("```ui
-<chart values=\"1,2\"></chart>
-```"), 1, "and in a fence, as taught");
-        assert_eq!(charts_drawn("- <chart values=\"1,2\"></chart>"), 1, "and in a list");
-        assert_eq!(charts_drawn("a <chart values=\"1,2\"></chart>
-
-<chartist values=\"1\"></chartist>"), 0, "only a whole block counts");
+    fn only_closed_top_level_ui_fences_render_interactive_content() {
+        let closed = "```ui\n<chart values=\"1,2\"></chart>\n```";
+        let unclosed = "```ui\n<chart values=\"1,2\"></chart>";
+        let indented = "    ```ui\n    <chart values=\"1,2\"></chart>\n    ```";
+        assert_eq!(charts_drawn(closed), 1);
+        assert_eq!(charts_drawn(unclosed), 0);
+        assert_eq!(charts_drawn(indented), 0);
     }
 
     #[test]
