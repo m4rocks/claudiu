@@ -262,7 +262,16 @@ fn comment_button(buffer: gpui::Entity<EditorState>, hovered: std::rc::Rc<std::c
             let (Some(area), Some(visible)) = (editor.text_bounds(), editor.visible_row_range()) else { return None };
             let text = editor.text();
             let range = editor.selected_range();
-            let line = if range.is_empty() { prepaint_hovered.get() } else { Some(text.offset_to_point(range.start).row) };
+            let line = if range.is_empty() {
+                let mouse = window.mouse_position();
+                viewport.contains(&mouse).then(|| gutter_line_at(editor, area, mouse)).flatten()
+                    .or_else(|| {
+                        let cached = prepaint_hovered.get()?;
+                        gutter_contains(editor, area, cached, mouse).then_some(cached)
+                    })
+            } else {
+                Some(text.offset_to_point(range.start).row)
+            };
             let line = line.filter(|l| visible.contains(l) && *l < text.lines_len())?;
             let start = text.line_start_offset(line);
             let row = editor.range_to_bounds(&(start..start))?;
@@ -280,7 +289,11 @@ fn comment_button(buffer: gpui::Entity<EditorState>, hovered: std::rc::Rc<std::c
                 if phase != gpui::DispatchPhase::Bubble {
                     return;
                 }
-                let line = viewport.contains(&ev.position).then(|| line_at(move_buffer.read(cx), ev.position.y)).flatten();
+                let editor = move_buffer.read(cx);
+                let line = viewport
+                    .contains(&ev.position)
+                    .then(|| editor.text_bounds().and_then(|area| gutter_line_at(editor, area, ev.position)))
+                    .flatten();
                 if move_hovered.replace(line) != line {
                     cx.notify(view);
                 }
@@ -314,6 +327,24 @@ fn comment_button(buffer: gpui::Entity<EditorState>, hovered: std::rc::Rc<std::c
     .top_0()
     .left_0()
     .size_full()
+}
+
+/// Whether `pos` lies inside the line-number gutter of `line`.
+fn gutter_contains(editor: &EditorState, area: gpui::Bounds<gpui::Pixels>, line: usize, pos: gpui::Point<gpui::Pixels>) -> bool {
+    let text = editor.text();
+    if line >= text.lines_len() {
+        return false;
+    }
+    let start = text.line_start_offset(line);
+    let Some(row) = editor.range_to_bounds(&(start..start)) else { return false };
+    let gutter_right = row.origin.x.max(area.origin.x + px(COMMENT_SIZE + 12.0));
+    pos.x >= area.origin.x && pos.x < gutter_right && pos.y >= row.origin.y && pos.y < row.origin.y + row.size.height
+}
+
+/// The line whose gutter contains `pos`, among those on screen.
+fn gutter_line_at(editor: &EditorState, area: gpui::Bounds<gpui::Pixels>, pos: gpui::Point<gpui::Pixels>) -> Option<usize> {
+    let line = line_at(editor, pos.y)?;
+    gutter_contains(editor, area, line, pos).then_some(line)
 }
 
 /// The line drawn at height `y` in the window, among those on screen.
