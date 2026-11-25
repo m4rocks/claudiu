@@ -206,7 +206,17 @@ pub(super) fn codex_env(request: &Request) -> Vec<(&'static str, String)> {
 }
 
 pub(super) fn opencode_env(request: &Request) -> Vec<(&'static str, String)> {
-    vec![("OPENCODE_CONFIG_CONTENT", opencode_config(request.model.as_deref(), request.edits).to_string())]
+    let mut config = std::env::var("OPENCODE_CONFIG_CONTENT")
+        .ok()
+        .filter(|text| !text.trim().is_empty())
+        .and_then(|text| serde_json::from_str::<serde_json::Map<String, Value>>(&text).ok())
+        .unwrap_or_default();
+    if let Some(overrides) = opencode_config(request.model.as_deref(), request.edits).as_object() {
+        for (k, v) in overrides {
+            config.insert(k.clone(), v.clone());
+        }
+    }
+    vec![("OPENCODE_CONFIG_CONTENT", Value::Object(config).to_string())]
 }
 
 pub(super) fn no_args(_: &Request) -> Result<Vec<String>, String> {
@@ -295,8 +305,7 @@ pub(crate) fn probe_server(
         let _ = tx.send(list_catalog_for(harness, BufReader::new(from_agent), to_agent, &folder));
     });
     let result = rx.recv_timeout(MODELS_TIMEOUT).unwrap_or_else(|_| Err(format!("{name} didn't answer within {} seconds", MODELS_TIMEOUT.as_secs())));
-    let _ = child.kill();
-    let _ = child.wait();
+    kill_process_tree(&mut child);
     let early_exit = exited_harness(harness);
     match result {
         Err(reason) if reason == early_exit => {
@@ -389,8 +398,7 @@ impl Process {
     /// Ends the agent once the conversation is over (its stdin is already closed) and returns `result`, with
     /// stderr's last lines added when the agent exited early.
     fn finish<T>(mut self, result: Result<T, String>) -> Result<T, String> {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        kill_process_tree(&mut self.child);
         // Only an early exit needs stderr's last lines. Waiting for stderr to close otherwise could hold up the answer
         // while something the agent started still has it open.
         let exited = exited(self.agent);
@@ -402,6 +410,18 @@ impl Process {
             other => other,
         }
     }
+}
+
+fn kill_process_tree(child: &mut Child) {
+    #[cfg(windows)]
+    {
+        let mut kill_tree = Command::new("taskkill");
+        kill_tree.args(["/F", "/T", "/PID", &child.id().to_string()]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        crate::platform::no_window(&mut kill_tree);
+        let _ = kill_tree.status();
+    }
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 fn initialize() -> Value {

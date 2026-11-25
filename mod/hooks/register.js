@@ -429,7 +429,10 @@ async function* customStep($, e, next, run) {
     run.turnId = e.turnId
     run.handedBack = 0
     run.steps = []
-    const { agent, model, edits, name } = customTypes.get(run.type)
+    const { agent, model, edits: configuredEdits, name } = customTypes.get(run.type)
+    const rows = await $.config.list().catch(() => [])
+    const mode = rows.find(r => r.key === 'permissionMode')?.value
+    const edits = configuredEdits && mode !== 'plan'
     yield { kind: 'text', index: 0, text: `${name} on ${model}, ${edits ? 'edits allowed' : 'read-only'}\n\n` }
     run.report = null
     let previousKind
@@ -579,7 +582,7 @@ async function noteCompaction($) {
 async function* onTurnStep($, e, next) {
   const run = e.agentId ? await customRun($, e.agentId) : undefined
   if (run) return yield* customStep($, e, next, run)
-  yield* next(e)
+  return yield* next(e)
 }
 
 async function onSessionStart($, e, next) {

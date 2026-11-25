@@ -30,11 +30,12 @@ impl Workspace {
             let (write, written) = (path.clone(), text.clone());
             let saved = cx.background_executor().spawn(async move { files::save(&write, &written, format, expected) }).await;
             let _ = this.update(cx, |ws, cx| {
-                let mut tab = ws.panes.get_mut(&id).and_then(|p| p.tabs.iter_mut().find(|t| t.path == path && t.buffer.entity_id() == buffer));
+                let mut tab = ws.panes.get_mut(&id).and_then(|p| p.tabs.iter_mut().find(|t| t.buffer.entity_id() == buffer));
                 if let Some(tab) = tab.as_deref_mut() {
                     tab.saving = false;
                 }
-                match (saved, tab) {
+                let same_path = tab.as_deref().is_some_and(|t| t.path == path);
+                match (saved, tab.filter(|_| same_path)) {
                     (Ok(stamp), Some(tab)) => {
                         tab.stamp = Some(stamp);
                         // Typing while the file was written leaves edits the file doesn't have yet.

@@ -273,12 +273,24 @@ impl R {
         if !ctx.pre {
             while out.text.ends_with([' ', '\n']) {
                 out.text.pop();
-                if let Some(last) = out.runs.last_mut() {
-                    last.len -= 1;
+                while let Some(last) = out.runs.last_mut() {
+                    if last.len > 0 {
+                        last.len -= 1;
+                        if last.len == 0 {
+                            out.runs.pop();
+                        }
+                        break;
+                    }
+                    out.runs.pop();
                 }
             }
         }
         out.runs.retain(|r| r.len > 0);
+        let len = out.text.len();
+        out.links.retain_mut(|(range, _)| {
+            range.end = range.end.min(len);
+            range.start < range.end
+        });
         if out.text.is_empty() {
             return None;
         }
@@ -290,7 +302,7 @@ impl R {
         let styled = StyledText::new(out.text).with_runs(out.runs);
         self.links += 1;
         let (ranges, urls): (Vec<_>, Vec<_>) = out.links.into_iter().unzip();
-        let id = ("ui-link", (self.uid as usize).wrapping_add(self.links));
+        let id = ElementId::Name(format!("ui-link/{}/{}/{}", self.scope.call, self.uid, self.links).into());
         Some(div().child(InteractiveText::new(id, styled).on_click(ranges, move |i, _, cx| cx.open_url(&urls[i]))).into_any_element())
     }
 

@@ -16,7 +16,8 @@ fn config_root(home: &Path) -> PathBuf {
 
 pub fn managed_compaction_config(inherited: Option<&str>, session: Option<&str>) -> Result<String, String> {
     let parse = |text: Option<&str>| -> Result<Map<String, Value>, String> {
-        serde_json::from_str(text.unwrap_or("{}")).map_err(|e| format!("OpenCode inline config must be a JSON object: {e}"))
+        let text = text.filter(|t| !t.trim().is_empty()).unwrap_or("{}");
+        serde_json::from_str(text).map_err(|e| format!("OpenCode inline config must be a JSON object: {e}"))
     };
     let mut config = parse(inherited)?;
     config.extend(parse(session)?);

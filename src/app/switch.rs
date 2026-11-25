@@ -207,10 +207,10 @@ impl Workspace {
 
     pub(super) fn finish_worktree_switch(&mut self, id: &str, folder: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         let shell = self.shells.remove(id).map(|p| (p.open, p.height));
-        self.repoint_tabs(id, &folder, window, cx);
         if let Some(rec) = self.store.session_mut(id) {
-            rec.cwd = folder;
+            rec.cwd = folder.clone();
         }
+        self.repoint_tabs(id, &folder, window, cx);
         self.restore_shell(id, shell, window, cx);
         if let Some(thread) = self.live_view(id).and_then(SessionView::thread) {
             thread.read(cx).persist_entries();
@@ -237,19 +237,29 @@ impl Workspace {
     fn repoint_tabs(&mut self, id: &str, folder: &Path, window: &mut Window, cx: &mut Context<Self>) {
         let Some(pane) = self.panes.get_mut(id).filter(|p| folder.is_dir() && !p.root.as_os_str().is_empty()) else { return };
         let folder = dunce::canonicalize(folder).unwrap_or_else(|_| folder.to_path_buf());
+        let old_root = std::mem::replace(&mut pane.root, folder.clone());
+        pane.watcher = None;
+        pane.stale = true;
+        pane.servers.clear();
         let (mut moved, mut stayed) = (vec![], 0);
         for tab in &mut pane.tabs {
-            let there = tab.path.strip_prefix(&pane.root).ok().map(|rel| folder.join(rel)).filter(|p| p.is_file());
+            let there = tab.path.strip_prefix(&old_root).ok().map(|rel| folder.join(rel)).filter(|p| p.is_file());
             match there {
                 Some(path) if !tab.dirty && !tab.saving => {
-                    let old = std::mem::replace(&mut tab.path, path.clone());
-                    moved.push((old, path));
+                    Self::tell_server_closed(tab);
+                    (tab.path, tab.server, tab.version) = (path.clone(), None, 0);
+                    moved.push(path);
                 }
-                _ => stayed += 1,
+                _ => {
+                    Self::tell_server_closed(tab);
+                    (tab.server, tab.version) = (None, 0);
+                    stayed += 1;
+                }
             }
         }
-        for (_, path) in moved {
-            self.reload_tab(&id.to_string(), path, window, cx);
+        for path in moved {
+            self.reload_tab(&id.to_string(), path.clone(), window, cx);
+            self.attach_server(&id.to_string(), &path, cx);
         }
         if stayed > 0 {
             let files = if stayed == 1 { "1 open file stays".to_string() } else { format!("{stayed} open files stay") };

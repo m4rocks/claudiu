@@ -376,7 +376,13 @@ impl CustomSubagents {
     }
 
     /// What the mod reads from `M4CODE_SUBAGENTS`, each type as the mod registers it; `None` when no type is on.
+    #[cfg(test)]
     pub fn env_for(&self, enabled: &[crate::harness::Harness]) -> Option<String> {
+        self.env_for_edits(enabled, true)
+    }
+
+    /// Same as `env_for`, clamping `edits` to `false` when `allow_edits` is `false`.
+    pub fn env_for_edits(&self, enabled: &[crate::harness::Harness], allow_edits: bool) -> Option<String> {
         let types: Vec<_> = self.types().into_iter().filter(|(agent, _)| enabled.contains(&crate::harness::Harness::from_agent(*agent))).collect();
         if types.is_empty() {
             return None;
@@ -387,7 +393,7 @@ impl CustomSubagents {
                 .iter()
                 .map(|t| json!({ "name": t.name, "model": t.model, "description": agent.description(&t.model), "prompt": agent.stub_prompt() }))
                 .collect();
-            env.insert(agent.key().into(), json!({ "edits": self.get(agent).edits, "name": agent.name(), "types": types }));
+            env.insert(agent.key().into(), json!({ "edits": allow_edits && self.get(agent).edits, "name": agent.name(), "types": types }));
         }
         Some(Value::Object(env).to_string())
     }

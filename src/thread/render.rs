@@ -234,7 +234,7 @@ impl ThreadView {
             }))
             .child(menu_item("chat-ctx-paste", IconName::Clipboard, "Paste", true).on_click(cx.listener(|v, _: &ClickEvent, window, cx| {
                 v.chat_menu = None;
-                if !v.attachments.paste(cx)
+                if !(v.attachments_enabled() && v.attachments.paste(cx))
                     && let Some(text) = cx.read_from_clipboard().and_then(|item| item.text())
                 {
                     v.paste_text(&text, window, cx);
@@ -556,9 +556,8 @@ impl ThreadView {
             }));
         let mut block = div().flex().flex_col().child(header);
         if expanded {
-            block = block.child(
-                elements::trace_content(crate::github::ui::markdown(format!("thread-md-{ix}"), report.body).into_any_element()),
-            );
+            let view = chat_links(crate::github::ui::markdown(format!("thread-md-{ix}"), report.body), ix, cx);
+            block = block.child(elements::trace_content(view.into_any_element()));
         }
         block.into_any_element()
     }
@@ -633,7 +632,6 @@ impl ThreadView {
 
     /// Tool call row built on `Trace` + `CodeBlock`: kind icon, status badge, file location chips, and collapsible output.
     fn render_tool(&self, ix: usize, call: &ToolCall, cx: &mut Context<Self>) -> AnyElement {
-        let shell = call.kind == "execute";
         let details = &call.details;
         let has_details = call.content.iter().any(|item| !matches!(item, ToolContent::Diff { .. }))
             || details.command.is_some() || details.labeled_output().next().is_some();
@@ -689,7 +687,7 @@ impl ThreadView {
         let mut header = elements::tool_header(ix, call, title_in_cwd(call, &self.cwd), location_chips, has_details, expanded);
         if has_details {
             header = header.on_click(cx.listener(move |v, _: &ClickEvent, _, cx| {
-                if shell && v.detail {
+                if v.detail {
                     if !v.collapsed_shell_calls.remove(&toggle_id) {
                         v.expanded_tools.remove(&toggle_id);
                         v.collapsed_shell_calls.insert(toggle_id.clone());
@@ -1526,7 +1524,7 @@ impl ThreadView {
         let waiting_empty = waiting.is_empty();
         let rows = waiting.into_iter().map(|(id, text)| {
             let editing = self.queue_edit.as_ref().is_some_and(|edit| edit.id == id);
-            let can_act = !editing && !self.interrupting && self.questions.is_empty();
+            let can_act = !editing && !self.interrupting && !self.is_waiting();
             div()
                 .id(SharedString::from(format!("queue-item-{id}")))
                 .rounded(px(6.0))
@@ -1644,7 +1642,7 @@ impl ThreadView {
         let editing = self.queue_edit.is_some();
         let active_turn = self.has_active_turn();
         let can_interrupt = self.can_interrupt();
-        let idle_for_resume = !active_turn && self.queue_held && self.questions.is_empty()
+        let idle_for_resume = !active_turn && self.queue_held && !self.is_waiting()
             && (self.waiting_messages().next().is_some() || self.handoff_after_turn.is_some());
         let answering = self.active_question().is_some_and(|q| q.takes_own_answer);
         let follow_up = if alternate { self.follow_up.other() } else { self.follow_up };
@@ -1689,7 +1687,7 @@ impl ThreadView {
             ActionKind::Send => ("Send", IconName::ArrowUp),
         };
         let enabled = if editing {
-            has_message && self.questions.is_empty()
+            has_message && !self.is_waiting()
         } else if answering && has_message {
             true
         } else if !has_message && can_interrupt {
@@ -1713,7 +1711,7 @@ impl ThreadView {
                         v.submit_with(ev.modifiers().secondary(), window, cx);
                     } else if v.can_interrupt() {
                         v.interrupt(cx);
-                    } else if v.queue_held && v.questions.is_empty() {
+                    } else if v.queue_held && !v.is_waiting() {
                         v.resume_queue(cx);
                     }
                 }))

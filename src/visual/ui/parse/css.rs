@@ -165,7 +165,13 @@ pub fn color(v: &str) -> Option<Color> {
         let n: Vec<f32> = inner
             .split(|c: char| c == ',' || c == '/' || c.is_whitespace())
             .filter(|s| !s.is_empty())
-            .map(|s| s.strip_suffix('%').map_or_else(|| s.parse().ok(), |p| p.parse::<f32>().ok().map(|x| x / 100.0)))
+            .enumerate()
+            .map(|(i, s)| {
+                s.strip_suffix('%').map_or_else(
+                    || s.parse().ok(),
+                    |p| p.parse::<f32>().ok().map(|x| if i < 3 { (x * 2.55).round() } else { x / 100.0 }),
+                )
+            })
             .collect::<Option<_>>()?;
         if n.len() < 3 {
             return None;

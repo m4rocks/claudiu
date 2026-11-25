@@ -37,11 +37,18 @@ fn stem(id: &str) -> String {
 }
 
 /// Helper side: file a request and block until m4code answers (or `PATIENCE` runs out).
+#[cfg(test)]
 pub fn ask(from: &str, tool: &str, args: &Value) -> Result<String, String> {
-    ask_in(&crate::datadir::data_dir(), from, tool, args)
+    ask_in(&crate::datadir::data_dir(), from, tool, args, None)
 }
 
-fn ask_in(base: &Path, from: &str, tool: &str, args: &Value) -> Result<String, String> {
+/// Like `ask`, exiting promptly and cleaning up the request file if `cancelled` becomes `true`.
+pub fn ask_cancellable(from: &str, tool: &str, args: &Value, cancelled: &std::sync::atomic::AtomicBool) -> Result<String, String> {
+    ask_in(&crate::datadir::data_dir(), from, tool, args, Some(cancelled))
+}
+
+fn ask_in(base: &Path, from: &str, tool: &str, args: &Value, cancelled: Option<&std::sync::atomic::AtomicBool>) -> Result<String, String> {
+    use std::sync::atomic::Ordering;
     let id = crate::store::new_id();
     let req = Request { id: id.clone(), from: from.into(), tool: tool.into(), args: args.clone(), deadline: crate::store::now() + PATIENCE.as_secs() as i64 };
     let (req_path, res_path) = (dir(base, "req").join(format!("{}.json", stem(&id))), dir(base, "res").join(format!("{}.json", stem(&id))));
@@ -49,6 +56,10 @@ fn ask_in(base: &Path, from: &str, tool: &str, args: &Value) -> Result<String, S
     crate::datadir::write_atomic(&req_path, &body).map_err(|e| format!("could not reach m4code: {e}"))?;
     let start = Instant::now();
     while start.elapsed() < PATIENCE {
+        if cancelled.is_some_and(|c| c.load(Ordering::Relaxed)) {
+            let _ = std::fs::remove_file(&req_path);
+            return Err("m4code closed the session.".into());
+        }
         std::thread::sleep(Duration::from_millis(200));
         if let Ok(text) = std::fs::read_to_string(&res_path) {
             let _ = std::fs::remove_file(&res_path);
@@ -111,7 +122,7 @@ mod tests {
         let base = tmp.path().to_path_buf();
         let asker = {
             let base = base.clone();
-            std::thread::spawn(move || ask_in(&base, "code:c1", "list_code_sessions", &serde_json::json!({})))
+            std::thread::spawn(move || ask_in(&base, "code:c1", "list_code_sessions", &serde_json::json!({}), None))
         };
         let mut taken = vec![];
         for _ in 0..50 {
@@ -129,7 +140,7 @@ mod tests {
 
         let asker = {
             let base = base.clone();
-            std::thread::spawn(move || ask_in(&base, "code:s1", "read_code_session", &serde_json::json!({"id": "x"})))
+            std::thread::spawn(move || ask_in(&base, "code:s1", "read_code_session", &serde_json::json!({"id": "x"}), None))
         };
         let req = loop {
             if let Some(r) = take_requests_in(&base).pop() {

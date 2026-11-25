@@ -1079,9 +1079,10 @@ impl ThreadView {
                 // request may leave the title out and name a call the chat already shows.
                 let call = params.pointer("/toolCall/toolCallId").and_then(Value::as_str).and_then(|call| self.thread.tool_at(call));
                 let shown = call.and_then(|at| match &self.thread.entries[at] { Entry::Tool(call) => Some(call.title.as_str()), _ => None });
+                let shown_kind = call.and_then(|at| match &self.thread.entries[at] { Entry::Tool(call) => Some(call.kind.as_str()), _ => None });
                 let title = params.pointer("/toolCall/title").and_then(Value::as_str).or(shown).unwrap_or_default();
                 // A shell command or an edit is never one of m4code's tools, whatever its title says.
-                let kind = params.pointer("/toolCall/kind").and_then(Value::as_str).unwrap_or_default();
+                let kind = params.pointer("/toolCall/kind").and_then(Value::as_str).or(shown_kind).unwrap_or_default();
                 if !matches!(kind, "execute" | "edit" | "delete" | "move") && crate::mcp::is_own_tool(title) {
                     if let Some(connection) = &self.connection {
                         connection.respond(id, json!({"outcome": crate::harness::runner::permission(&params["options"], true)}));
@@ -1314,7 +1315,7 @@ impl ThreadView {
         }
         let text = self.composer.read(cx).value().trim().to_string();
         if !self.can_submit_draft(cx) {
-            if self.queue_held && !self.working && self.questions.is_empty() {
+            if self.queue_held && !self.working && !self.is_waiting() {
                 self.resume_queue(cx);
             }
             return;
@@ -1567,7 +1568,7 @@ impl ThreadView {
 
     fn send_next(&mut self, cx: &mut Context<Self>) {
         if self.working || self.phase != Phase::Ready || self.workspace_switching || self.permission_changing || self.read_only_unconfirmed
-            || !self.steering.is_empty() || !self.questions.is_empty() || self.restoring_checkpoint()
+            || !self.steering.is_empty() || self.is_waiting() || self.restoring_checkpoint()
         {
             return;
         }
@@ -2431,7 +2432,7 @@ impl ThreadView {
             commands: self.matching_commands(cx).len(),
         };
         let is_escape = ev.keystroke.key == "escape";
-        if is_escape && self.queue_edit.is_some() && self.questions.is_empty() && self.picker.is_none() {
+        if is_escape && self.queue_edit.is_some() && !self.is_waiting() && self.picker.is_none() {
             self.finish_queue_edit(false, window, cx);
             cx.stop_propagation();
             return;
@@ -2850,6 +2851,7 @@ impl ThreadView {
 
     /// Measure entry `from` and every one after it again; the list keeps its place above them.
     pub(crate) fn remeasure(&mut self, from: usize) {
+        self.run_cache.get_mut().ranges.clear();
         let rows = self.thread.entries.len();
         let from = self.group_start_before(from).min(from).min(self.rows).min(rows);
         let shared = self.rows.min(rows);

@@ -108,7 +108,7 @@ impl ThreadView {
     }
 
     pub(super) fn move_queued(&mut self, id: Uuid, earlier: bool, cx: &mut Context<Self>) {
-        if self.queue_edit.is_some() || self.interrupting || !self.questions.is_empty() {
+        if self.queue_edit.is_some() || self.interrupting || self.is_waiting() {
             return;
         }
         let Some((from, to)) = self.adjacent_queued(id, earlier) else { return };
@@ -128,7 +128,7 @@ impl ThreadView {
     }
 
     pub(super) fn edit_queued(&mut self, id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.questions.is_empty() || self.queue_edit.is_some() {
+        if self.is_waiting() || self.queue_edit.is_some() {
             return;
         }
         if let Some(item) = self.queue.iter().find(|item| item.by_user && item.id == id) {
@@ -142,7 +142,7 @@ impl ThreadView {
 
     pub(super) fn finish_queue_edit(&mut self, save: bool, window: &mut Window, cx: &mut Context<Self>) {
         let text = self.draft(cx);
-        if save && (!crate::panels::composer::can_send(&text) || !self.questions.is_empty()) {
+        if save && (!crate::panels::composer::can_send(&text) || self.is_waiting()) {
             return;
         }
         let Some(edit) = self.queue_edit.take() else { return };
@@ -158,7 +158,7 @@ impl ThreadView {
     }
 
     pub(super) fn send_queued_now(&mut self, id: Uuid, cx: &mut Context<Self>) {
-        if self.interrupting || !self.questions.is_empty() || self.queue_edit.as_ref().is_some_and(|edit| edit.id == id) {
+        if self.interrupting || self.is_waiting() || self.queue_edit.as_ref().is_some_and(|edit| edit.id == id) {
             return;
         }
         let Some(mut item) = self.unqueue(id, cx) else { return };

@@ -215,10 +215,13 @@ impl Workspace {
                 .filter(|r| r.agent.as_ref().is_some_and(|meta| meta.harness == Harness::Claude))
                 .and_then(|r| r.provider_session_id());
             // Without a registry entry (older Claude Code) the terminal's own activity decides, as in `switch::inspect`.
-            let idle = match claude_id.and_then(|c| statuses.get(c)) {
-                Some(status) => status == "idle",
-                None => self.live_view(&p.id).is_some_and(|v| !v.is_working(cx)),
-            };
+            let idle = !self.switching_worktree.contains_key(&p.id)
+                && !self.pending_handoffs.contains_key(&p.id)
+                && self.live_view(&p.id).and_then(|v| v.thread()).is_none_or(|t| t.read(cx).can_move_workspace())
+                && match claude_id.and_then(|c| statuses.get(c)) {
+                    Some(status) => status == "idle",
+                    None => self.live_view(&p.id).is_some_and(|v| !v.is_working(cx)),
+                };
             if now - p.asked > SWITCH_PATIENCE_SECS {
                 self.toast("The worktree switch was dropped: the session's turn did not end.", cx);
             } else if !self.is_running(&p.id, cx) {

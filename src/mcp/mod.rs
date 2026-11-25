@@ -226,7 +226,9 @@ pub fn run() -> i32 {
         targets: std::env::var(session::TARGETS_ENV).ok().map(|list| list.split(',').filter(|id| !id.is_empty()).map(String::from).collect()),
         ready: std::env::var(session::READY_ENV).ok().and_then(|token| token.parse().ok()).map(|token| session::ready_path(&data, token)),
     };
-    serve(std::io::stdin().lock(), std::io::stdout().lock(), &record, &data, &off, launch, |tool, args| bridge::ask(&from, tool, args));
+    serve_with_cancel(std::io::stdin().lock(), std::io::stdout(), &record, &data, &off, launch, true, |tool, args, cancelled| {
+        bridge::ask_cancellable(&from, tool, args, cancelled)
+    });
     0
 }
 
@@ -239,7 +241,23 @@ struct LaunchContext {
     ready: Option<PathBuf>,
 }
 
-fn serve(input: impl BufRead, mut out: impl Write, record: &str, data: &Path, off: &[&str], mut launch: LaunchContext, ask: impl Fn(&str, &Value) -> Result<String, String>) {
+#[cfg(test)]
+fn serve(input: impl BufRead, out: impl Write + Send, record: &str, data: &Path, off: &[&str], launch: LaunchContext, ask: impl Fn(&str, &Value) -> Result<String, String> + Sync) {
+    serve_with_cancel(input, out, record, data, off, launch, false, |tool, args, _| ask(tool, args));
+}
+
+#[allow(clippy::too_many_arguments)]
+fn serve_with_cancel(
+    input: impl BufRead,
+    out: impl Write + Send,
+    record: &str,
+    data: &Path,
+    off: &[&str],
+    mut launch: LaunchContext,
+    concurrent: bool,
+    ask: impl Fn(&str, &Value, &std::sync::atomic::AtomicBool) -> Result<String, String> + Sync,
+) {
+    use std::sync::{Mutex, atomic::{AtomicBool, Ordering}};
     let targets = launch.targets.take().unwrap_or_else(|| crate::harness::Harness::registered().map(|h| h.key().into()).collect());
     let mut instructions = instructions(off);
     if let Some(workspace) = &launch.workspace {
@@ -255,56 +273,88 @@ fn serve(input: impl BufRead, mut out: impl Write, record: &str, data: &Path, of
             "inputSchema": {"type": "object", "properties": {}}
         }));
     }
-    for line in input.lines().map_while(Result::ok) {
-        let Ok(msg) = serde_json::from_str::<Value>(&line) else { continue };
-        // Notifications (no id) and responses (no method) need no answer.
-        let (Some(id), Some(method)) = (msg.get("id"), msg.get("method").and_then(Value::as_str)) else { continue };
-        let reply = match method {
-            "initialize" => Ok(json!({
-                "protocolVersion": msg["params"]["protocolVersion"].as_str().unwrap_or("2025-06-18"),
-                "capabilities": { "tools": {} },
-                "serverInfo": { "name": "m4code", "version": env!("CARGO_PKG_VERSION") },
-                "instructions": instructions,
-            })),
-            "ping" => Ok(json!({})),
-            "tools/list" => Ok(json!({ "tools": tools })),
-            "tools/call" => Ok(match msg["params"]["name"].as_str().filter(|tool| available(tool)) {
-                Some("workspace_context") if launch.workspace.is_some() => {
-                    let context = launch.workspace.as_ref().unwrap();
-                    let project = context["project_root"].as_str().map(Path::new);
-                    match context["working_directory"].as_str() {
-                        Some(cwd) => reply(&session::workspace(Path::new(cwd), project).to_string(), false),
-                        None => reply("The workspace has no working directory.", true),
+    let out = Mutex::new(out);
+    let cancelled = AtomicBool::new(false);
+    let send = |body: Value| -> bool {
+        let mut guard = out.lock().unwrap_or_else(|e| e.into_inner());
+        writeln!(*guard, "{body}").and_then(|_| guard.flush()).is_ok()
+    };
+    let ask = &ask;
+    let cancelled_ref = &cancelled;
+    let send_ref = &send;
+    std::thread::scope(|scope| {
+        for line in input.lines().map_while(Result::ok) {
+            let Ok(msg) = serde_json::from_str::<Value>(&line) else { continue };
+            // Notifications (no id) and responses (no method) need no answer.
+            let (Some(id), Some(method)) = (msg.get("id").cloned(), msg.get("method").and_then(Value::as_str)) else { continue };
+            if method == "tools/call"
+                && let Some(tool) = msg["params"]["name"].as_str().filter(|tool| available(tool))
+                && (INTERACTIVE_TOOLS.contains(&tool) || BRIDGE_TOOLS.contains(&tool) || MODEL_TOOLS.contains(&tool) || SUBAGENT_TOOLS.contains(&tool))
+                && !(tool == "spawn_subagent" && !msg["params"]["arguments"]["harness"].as_str().is_some_and(|h| targets.iter().any(|target| target == h)))
+            {
+                let tool = tool.to_string();
+                let args = msg["params"]["arguments"].clone();
+                if concurrent {
+                    scope.spawn(move || {
+                        let result = match ask(&tool, &args, cancelled_ref) {
+                            Ok(text) => reply(&text, false),
+                            Err(text) => reply(&text, true),
+                        };
+                        let _ = send_ref(json!({ "jsonrpc": "2.0", "id": id, "result": result }));
+                    });
+                } else {
+                    let result = match ask(&tool, &args, cancelled_ref) {
+                        Ok(text) => reply(&text, false),
+                        Err(text) => reply(&text, true),
+                    };
+                    if !send_ref(json!({ "jsonrpc": "2.0", "id": id, "result": result })) {
+                        break;
                     }
                 }
-                Some("spawn_subagent") if !msg["params"]["arguments"]["harness"].as_str().is_some_and(|h| targets.iter().any(|target| target == h)) => {
-                    reply("Choose an enabled subagent adapter from the tool schema.", true)
-                }
-                Some("attach_github") => attach_github(&msg["params"], record, &attach_dir(data)),
-                Some("detach_github") => detach_github(&msg["params"], record, &attach_dir(data)),
-                Some("link_session") => link_session(&msg["params"], record, &attach_dir(data), "link"),
-                Some("unlink_session") => link_session(&msg["params"], record, &attach_dir(data), "unlink"),
-                Some(tool) if INTERACTIVE_TOOLS.contains(&tool) || BRIDGE_TOOLS.contains(&tool) || MODEL_TOOLS.contains(&tool) || SUBAGENT_TOOLS.contains(&tool) => match ask(tool, &msg["params"]["arguments"]) {
-                    Ok(text) => reply(&text, false),
-                    Err(text) => reply(&text, true),
-                },
-                _ => reply("unknown tool", true),
-            }),
-            _ => Err(json!({ "code": -32601, "message": "method not found" })),
-        };
-        let body = match reply {
-            Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
-            Err(error) => json!({ "jsonrpc": "2.0", "id": id, "error": error }),
-        };
-        if writeln!(out, "{body}").and_then(|_| out.flush()).is_err() {
-            break;
+                continue;
+            }
+            let result = match method {
+                "initialize" => Ok(json!({
+                    "protocolVersion": msg["params"]["protocolVersion"].as_str().unwrap_or("2025-06-18"),
+                    "capabilities": { "tools": {} },
+                    "serverInfo": { "name": "m4code", "version": env!("CARGO_PKG_VERSION") },
+                    "instructions": instructions,
+                })),
+                "ping" => Ok(json!({})),
+                "tools/list" => Ok(json!({ "tools": tools })),
+                "tools/call" => Ok(match msg["params"]["name"].as_str().filter(|tool| available(tool)) {
+                    Some("workspace_context") if launch.workspace.is_some() => {
+                        let context = launch.workspace.as_ref().unwrap();
+                        let project = context["project_root"].as_str().map(Path::new);
+                        match context["working_directory"].as_str() {
+                            Some(cwd) => reply(&session::workspace(Path::new(cwd), project).to_string(), false),
+                            None => reply("The workspace has no working directory.", true),
+                        }
+                    }
+                    Some("spawn_subagent") => reply("Choose an enabled subagent adapter from the tool schema.", true),
+                    Some("attach_github") => attach_github(&msg["params"], record, &attach_dir(data)),
+                    Some("detach_github") => detach_github(&msg["params"], record, &attach_dir(data)),
+                    Some("link_session") => link_session(&msg["params"], record, &attach_dir(data), "link"),
+                    Some("unlink_session") => link_session(&msg["params"], record, &attach_dir(data), "unlink"),
+                    _ => reply("unknown tool", true),
+                }),
+                _ => Err(json!({ "code": -32601, "message": "method not found" })),
+            };
+            let body = match result {
+                Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
+                Err(error) => json!({ "jsonrpc": "2.0", "id": id, "error": error }),
+            };
+            if !send_ref(body) {
+                break;
+            }
+            if method == "tools/list"
+                && let Some(path) = launch.ready.take()
+            {
+                let _ = crate::datadir::write_atomic(&path, "");
+            }
         }
-        if method == "tools/list"
-            && let Some(path) = launch.ready.take()
-        {
-            let _ = crate::datadir::write_atomic(&path, "");
-        }
-    }
+        cancelled_ref.store(true, Ordering::Relaxed);
+    });
 }
 
 /// The tools that tell m4code something about the session.
@@ -623,14 +673,14 @@ pub fn cleanup_dirs() -> [PathBuf; 4] {
 mod tests {
     use super::*;
 
-    fn talk_off(requests: &[Value], session: &str, dir: &Path, off: &[&str], ask: impl Fn(&str, &Value) -> Result<String, String>) -> Vec<Value> {
+    fn talk_off(requests: &[Value], session: &str, dir: &Path, off: &[&str], ask: impl Fn(&str, &Value) -> Result<String, String> + Sync) -> Vec<Value> {
         let input: String = requests.iter().map(|r| format!("{r}\n")).collect();
         let mut out = Vec::new();
         serve(input.as_bytes(), &mut out, session, dir, off, LaunchContext::default(), ask);
         String::from_utf8(out).unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect()
     }
 
-    fn talk_with(requests: &[Value], session: &str, dir: &Path, ask: impl Fn(&str, &Value) -> Result<String, String>) -> Vec<Value> {
+    fn talk_with(requests: &[Value], session: &str, dir: &Path, ask: impl Fn(&str, &Value) -> Result<String, String> + Sync) -> Vec<Value> {
         talk_off(requests, session, dir, &[], ask)
     }
 

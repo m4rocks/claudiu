@@ -108,8 +108,9 @@ impl Workspace {
         thread.update(cx, |v, cx| v.hold_workspace_switch(true, cx));
         let source = self.live.remove(index);
         self.pending_handoffs.insert(id.into(), Pending { source, meta, draft, kind: Replacement::Handoff });
+        let foreground = !by_agent || self.active_id().is_some_and(|a| a == id);
         let shell = self.shells.remove(id);
-        self.start_thread(rec, start, false, window, cx);
+        self.start_thread_with_focus(rec, start, false, foreground, window, cx);
         if let Some(shell) = shell {
             self.shells.insert(id.into(), shell);
         }
@@ -286,9 +287,15 @@ impl Workspace {
     }
 
     fn finish_compact_session(&mut self, id: &str, summary: String, window: &mut Window, cx: &mut Context<Self>) {
+        if self.pending_handoffs.contains_key(id) || self.switching_worktree.contains_key(id) {
+            return;
+        }
         let Some(mut rec) = self.store.session(id).cloned() else { return };
         let Some(thread) = self.live_view(id).and_then(|v| v.thread()).cloned() else { return };
-        let mut prior_entries = thread.read(cx).thread.entries.clone();
+        let (mut prior_entries, permission) = {
+            let t = thread.read(cx);
+            (t.thread.entries.clone(), t.permission_for_relaunch())
+        };
         prior_entries.push(Entry::Notice { text: "Context compacted.".into(), error: false });
         let mut meta = rec.agent.clone().unwrap_or_default();
         meta.session_id.clear();
@@ -299,10 +306,6 @@ impl Workspace {
         meta.context_window = None;
         meta.cache_ttl = None;
         rec.agent = Some(meta.clone());
-        if let Some(m) = self.store.session_mut(id).and_then(|r| r.agent.as_mut()) {
-            *m = meta.clone();
-            self.store.mark_dirty();
-        }
         let cwd = self.resume_cwd(&rec, cx);
         let prompt = format!(
             "The previous conversation context was compacted into the summary below. \
@@ -312,9 +315,18 @@ impl Workspace {
         let Some(mut start) = self.thread_start(&rec.id, &cwd, &meta, rec.chosen_title().map(String::from), Some(prompt), Starter::User, cx) else {
             return;
         };
+        if meta.parent_session.is_none() && permission.is_some() {
+            start.permission = permission;
+        }
         start.prior_entries = prior_entries;
+        if let Some(m) = self.store.session_mut(id).and_then(|r| r.agent.as_mut()) {
+            *m = meta;
+            self.store.mark_dirty();
+        }
+        let foreground = self.active_id().is_some_and(|a| a == id);
+        thread.update(cx, |v, _| v.relinquish_record());
         let shell = self.shells.remove(id);
-        self.start_thread(rec, start, false, window, cx);
+        self.start_thread_with_focus(rec, start, false, foreground, window, cx);
         if let Some(shell) = shell {
             self.shells.insert(id.into(), shell);
         }

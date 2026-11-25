@@ -78,7 +78,8 @@ pub const ADAPTER: Adapter = Adapter {
 fn prepare_launch(input: &super::SessionInput<'_>, plan: &mut super::SessionPlan) -> Result<(), String> {
     let exe = input.executable_override.ok_or("Could not find the Claude Code CLI. Install it or set its path in Settings.")?;
     plan.off.extend(trimmed_mcp_tools());
-    (plan.env, plan.meta) = prepare_session(exe, input.record, input.session_id, input.name.clone(), input.chrome, &mut plan.off, input.settings);
+    let allow_subagent_edits = input.child_edits != Some(false);
+    (plan.env, plan.meta) = prepare_session(exe, input.record, input.session_id, input.name.clone(), input.chrome, allow_subagent_edits, &mut plan.off, input.settings);
     if let Some(edits) = input.child_edits {
         plan.meta["claudeCode"]["options"]["permissionMode"] = json!(if edits { "acceptEdits" } else { "plan" });
     }
@@ -99,8 +100,8 @@ static INSTALLING: Mutex<()> = Mutex::new(());
 /// The bridge, written to the data dir with the SDK installed beside it: `node claude.mjs`.
 fn server(data: &Path) -> Result<Server, String> {
     let node = super::find("node").ok_or("Node.js was not found on PATH. Claude Code sessions need it for the Claude Agent SDK.")?;
-    let dir = plugin::install_into(data, "claude-bridge", &FILES).map_err(|e| format!("Couldn't write the Claude Code bridge: {e}"))?;
     let _one_at_a_time = INSTALLING.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = plugin::install_into(data, "claude-bridge", &FILES).map_err(|e| format!("Couldn't write the Claude Code bridge: {e}"))?;
     if !dir.join(SDK).is_file() {
         install_sdk(&dir)?;
     }
@@ -171,6 +172,7 @@ pub fn prepare_session(
     session_id: Option<&str>,
     name: Option<String>,
     chrome: bool,
+    allow_subagent_edits: bool,
     tools_off: &mut Vec<&'static str>,
     settings: &crate::store::Settings,
 ) -> (Vec<(String, String)>, Value) {
@@ -184,7 +186,7 @@ pub fn prepare_session(
         env.push((usage::USAGE_DIR_ENV.into(), usage::snapshot_dir().to_string_lossy().into_owned()));
         env.push((usage::CTL_ENV.into(), usage::ctl_file(record_id).to_string_lossy().into_owned()));
         // The mod registers the agent types and answers their turns, so they go only where it loads.
-        if let Some(subagents) = settings.custom_subagents.env_for(&settings.enabled_harnesses_list())
+        if let Some(subagents) = settings.custom_subagents.env_for_edits(&settings.enabled_harnesses_list(), allow_subagent_edits)
             && let Ok(exe) = crate::platform::own_exe()
         {
             env.push((super::subagents::ENV.into(), subagents));

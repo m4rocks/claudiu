@@ -150,7 +150,7 @@ pub fn trace_badge(label: impl Into<SharedString>, color: u32, bg: u32, border: 
 }
 
 /// Native `CodeBlock` primitive for tool outputs and structured text.
-pub fn code_block(header: Option<String>, lines: &[&str], shown: usize, border_color: Option<u32>) -> AnyElement {
+pub fn code_block(header: Option<String>, lines: &[&str], shown: usize, total: usize, border_color: Option<u32>) -> AnyElement {
     let mut block = div()
         .font_family(crate::platform::monospace_font())
         .text_size(scale::px(12.0))
@@ -180,13 +180,13 @@ pub fn code_block(header: Option<String>, lines: &[&str], shown: usize, border_c
     for line in &lines[..shown] {
         body = body.child(div().whitespace_nowrap().overflow_hidden().text_ellipsis().child((*line).to_string()));
     }
-    if shown < lines.len() {
+    if shown < total {
         body = body.child(
             div()
                 .pt(px(2.0))
                 .text_size(scale::px(11.0))
                 .text_color(hsla(theme::TEXT_FAINT))
-                .child(format!("… {} more lines (Ctrl+O)", lines.len() - shown)),
+                .child(format!("… {} more lines (Ctrl+O)", total - shown)),
         );
     }
     block.child(body).into_any_element()
@@ -380,7 +380,7 @@ pub fn tool_output_block(label: Option<&str>, text: &str, folded_lines: usize, f
     } else {
         label.map(str::to_owned)
     };
-    code_block(title, snippet, shown, None)
+    code_block(title, snippet, shown, lines.len(), None)
 }
 
 // ---------------------------------------------------------------------------

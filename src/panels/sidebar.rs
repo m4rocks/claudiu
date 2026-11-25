@@ -877,7 +877,13 @@ impl Workspace {
                     match l.resets_at {
                         Some(reset) if reset > t => (l.utilization, countdown(reset - t), old),
                         Some(_) => (None, if loading { "…".into() } else { "—".into() }, true),
-                        None => (l.utilization, format!("{} ago", ago(l.seen_at, t)), old),
+                        None => {
+                            let age = match ago(l.seen_at, t).as_str() {
+                                "now" => "just now".into(),
+                                other => format!("{other} ago"),
+                            };
+                            (l.utilization, age, old)
+                        }
                     }
                 }
                 None => (None, if loading { "…".into() } else { "—".into() }, false),

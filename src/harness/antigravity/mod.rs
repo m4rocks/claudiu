@@ -37,7 +37,7 @@ pub const ADAPTER: Adapter = Adapter {
     full_access_relaunch: true,
     native_compaction_managed: false,
     fallback_question: false,
-    discover: |_| crate::platform::find_executable("agy"),
+    discover: |_| super::runner::locate(Agent::Antigravity),
     probe_env: super::no_probe_env,
     config_root: |home| home.join(".gemini").join("config"),
     project_skills: ".agents/skills",
