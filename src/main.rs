@@ -11,6 +11,8 @@ mod github;
 mod panels;
 mod platform;
 mod priority;
+#[cfg(all(test, feature = "screenshots"))]
+mod screenshots;
 mod skills;
 mod store;
 mod terminal;
@@ -171,6 +173,21 @@ fn open_main_window(initial: Vec<std::path::PathBuf>, cx: &mut App) -> MainWindo
     (window, workspace)
 }
 
+fn init_ui(cx: &mut App) {
+    gpui_kit::init(cx);
+    app::register_languages();
+    gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, cx);
+    gpui_kit::component::Theme::update(cx, |theme| {
+        theme.colors.selection = panels::theme::hsla(panels::theme::ACCENT).opacity(0.24);
+    });
+    cx.bind_keys(app::keymap::bindings());
+    // The text-input library binds these globally. A focused terminal must receive them as plain keys.
+    cx.bind_keys(
+        ["tab", "shift-tab", "ctrl-a", "ctrl-c", "ctrl-x", "ctrl-y", "ctrl-z", "ctrl-v"]
+            .map(|k| KeyBinding::new(k, gpui::NoAction, Some("Terminal"))),
+    );
+}
+
 fn main() {
     // Hidden helper mode: m4code's built-in MCP server (see mcp/mod.rs).
     if std::env::args().nth(1).as_deref() == Some(mcp::FLAG) {
@@ -207,19 +224,7 @@ fn main() {
     platform::read_login_path_in_background();
 
     gpui_kit::application().with_assets(Assets).run(move |cx: &mut App| {
-        gpui_kit::init(cx);
-        app::register_languages();
-        gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, cx);
-        gpui_kit::component::Theme::update(cx, |theme| {
-            theme.colors.selection = panels::theme::hsla(panels::theme::ACCENT).opacity(0.24);
-        });
-        cx.bind_keys(app::keymap::bindings());
-        // The text-input library binds these globally (focus traversal, copy, select all, ...). A focused
-        // terminal must receive them as plain keys, so unbind them inside the Terminal context.
-        cx.bind_keys(
-            ["tab", "shift-tab", "ctrl-a", "ctrl-c", "ctrl-x", "ctrl-y", "ctrl-z", "ctrl-v"]
-                .map(|k| KeyBinding::new(k, gpui::NoAction, Some("Terminal"))),
-        );
+        init_ui(cx);
 
         // The main window, once there is one. Cmd+Q / the Quit menu item go through the same confirmation as closing it.
         let main: Rc<RefCell<Option<MainWindow>>> = Rc::default();

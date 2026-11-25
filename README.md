@@ -77,6 +77,7 @@ Prerequisites: stable Rust, Visual Studio Build Tools on Windows (or the system 
 just run    # run the app
 just test   # app, bridge, and mod tests
 just ci     # build, tests, and web build
+just screenshot home  # render the workspace to target/screenshots/home.png
 ```
 
 Repository layout:

@@ -19,6 +19,10 @@ run:
 test-app:
     cargo test --locked
 
+# Render Home or Settings to target/screenshots/<scenario>.png without opening a desktop window.
+screenshot $M4CODE_SCREENSHOT_SCENARIO="home":
+    cargo test --locked --features screenshots --bin m4code screenshots::capture -- --exact --ignored --test-threads=1 --nocapture
+
 # Check lints without changing files.
 lint:
     cargo clippy --locked --all-targets -- -D warnings
