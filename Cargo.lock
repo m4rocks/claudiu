@@ -3981,6 +3981,8 @@ dependencies = [
  "git2",
  "gpui-kit",
  "gpui-pre",
+ "gpui-pre-macos",
+ "gpui-pre-wgpu",
  "image",
  "junction",
  "libc",

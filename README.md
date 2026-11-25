@@ -26,7 +26,7 @@ When upgrading from a version with multiple Claude accounts, resumed sessions us
 ### Chat and model handoff
 
 - **Unified composer**: Home and chat share the same composer with chips for model (across all enabled harnesses), project, effort level, permission mode (including Claude Code Auto mode when offered), and branch or worktree. Press `Alt+P` (`Option+P` on macOS) in a chat to search models or adjust effort.
-- **File attachments**: Drop files into the composer, choose them with the paperclip, or paste files or an image from the clipboard. Image previews and removable file chips appear above your text in the same composer. Agents receive local file paths, and pasted images are saved in the app data folder when sent.
+- **File attachments**: Drop files into the composer, select them with the paperclip next to Send, or copy files in your file manager and paste them into the composer. Pasted images and image files show previews alongside removable file chips above the text field. Agents receive local file paths, and pasted images are saved in the app data folder when sent.
 - **In-place harness handoff**: Picking a model on another harness hands off the conversation on your next message, or when you ask an agent to switch via `set_model`. Returning to a previous harness resumes its saved provider session and sends only the intervening conversation. A failed handoff restores the original session and unsent draft.
 - **Steer or queue while working**: **Settings → General** chooses what happens when you send a message mid-turn:
   - **Queue** (default): waits for the turn to finish. Edit, reorder, remove, or send queued messages from above the composer. Interrupting or restarting holds the queue until you resume.
@@ -76,6 +76,7 @@ Prerequisites: stable Rust, Visual Studio Build Tools on Windows (or the system 
 just run    # run the app
 just test   # app, bridge, and mod tests
 just ci     # build, tests, and web build
+just screenshot home  # render the workspace to target/screenshots/home.png
 ```
 
 Repository layout:

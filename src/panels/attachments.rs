@@ -3,8 +3,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use gpui::{
-    App, ClickEvent, ClipboardEntry, Context, Div, Entity, Image, InteractiveElement, IntoElement,
-    ParentElement, PathPromptOptions, StatefulInteractiveElement, Styled, StyledImage, div, img,
+    App, ClickEvent, ClipboardEntry, Context, Div, Entity, ExternalPaths, Image, InputEvent,
+    InteractiveElement, IntoElement, ParentElement, PathPromptOptions, StatefulInteractiveElement,
+    Styled, StyledImage, Window, div, img,
     prelude::FluentBuilder, px,
 };
 use gpui_kit::{
@@ -15,12 +16,6 @@ use gpui_kit::{
 
 use crate::panels::theme::{self, hsla};
 use crate::panels::widgets::{focusable, icon, icon_button};
-
-const PAPERCLIP: &str = "icons/composer-paperclip.svg";
-
-pub fn asset(path: &str) -> Option<&'static [u8]> {
-    (path == PAPERCLIP).then_some(include_bytes!("../../assets/composer-paperclip.svg"))
-}
 
 #[derive(Default)]
 pub struct Attachments {
@@ -253,46 +248,67 @@ impl Attachments {
                     )
             })
             .collect::<Vec<_>>();
-        Some(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(5.0))
-                .pb(px(8.0))
-                .child(
+        Some(div()
+            .flex()
+            .flex_col()
+            .gap(px(5.0))
+            .pb(px(8.0))
+            .when(!cards.is_empty(), |d| {
+                d.child(
                     div()
                         .id("composer-attachments")
                         .max_h(px(108.0))
                         .overflow_y_scroll()
                         .child(div().flex().flex_wrap().gap(px(6.0)).children(cards)),
                 )
-                .when_some(self.error.clone(), |d, error| {
-                    d.child(
-                        div()
-                            .text_size(px(12.0))
-                            .text_color(hsla(theme::DANGER))
-                            .child(error),
-                    )
-                }),
-        )
+            })
+            .when_some(self.error.clone(), |d, error| {
+                d.child(
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(hsla(theme::DANGER))
+                        .child(error),
+                )
+            }))
     }
+}
+
+pub fn drop_target(
+    frame: Div,
+    drop: impl Fn(&ExternalPaths, &mut Window, &mut App) + 'static,
+) -> Div {
+    frame
+        .debug_selector(|| "composer-file-drop".into())
+        .on_drag_move::<ExternalPaths>(|drag, window, cx| {
+            // GPUI converts native file drags to mouse events after updating input modality.
+            // Restore mouse hit testing if the previous interaction was a keystroke.
+            if window.last_input_was_keyboard() && drag.bounds.contains(&drag.event.position) {
+                let event = drag.event.clone();
+                window.defer(cx, move |window, cx| {
+                    window.dispatch_event(event.to_platform_input(), cx);
+                });
+            }
+        })
+        .drag_over::<ExternalPaths>(|style, _, _, _| style.border_color(hsla(theme::FOCUS_BORDER)))
+        .on_drop(drop)
 }
 
 pub fn button<V: 'static>(
     textarea: &Entity<TextareaState>,
     select: fn(&mut V) -> &mut Attachments,
-    enabled: bool,
     cx: &mut Context<V>,
 ) -> Button {
     let textarea = textarea.downgrade();
     focusable("composer-attach")
         .accessibility_label("Attach files")
         .size(px(26.0))
+        .flex_none()
         .rounded(px(5.0))
-        .disabled(!enabled)
-        .text_color(hsla(if enabled { theme::TEXT_DIM } else { theme::TEXT_FAINT }))
-        .when(enabled, |b| b.hover(|s| s.text_color(hsla(theme::TEXT))).cursor_pointer())
-        .child(gpui::svg().path(PAPERCLIP).size(px(16.0)))
+        .text_color(hsla(theme::TEXT_DIM))
+        .hover(|s| s.text_color(hsla(theme::TEXT)))
+        .cursor_pointer()
+        .debug_selector(|| "composer-attach".into())
+        .child(icon(IconName::Paperclip, 16.0))
         .on_click(cx.listener(move |_, _: &ClickEvent, window, cx| {
             let textarea = textarea.clone();
             let picker = cx.prompt_for_paths(PathPromptOptions {

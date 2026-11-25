@@ -1447,7 +1447,12 @@ impl ThreadView {
                 .on_mouse_down(MouseButton::Left, cx.listener(|v, _, window, cx| v.focus_composer(window, cx)))
                 .child(Textarea::new(&self.composer).appearance(false)))
             .into_any_element();
-        let dock = composer::render(self.composer_parts(focused, input, window.modifiers().secondary(), window, cx));
+        let dock = composer::render(self.composer_parts(focused, input, window.modifiers().secondary(), window, cx))
+            .when(self.attachments_enabled(), |d| {
+                attachments::drop_target(d, cx.listener(|v, paths: &gpui::ExternalPaths, window, cx| {
+                    v.attach_paths(paths.paths(), window, cx);
+                }))
+            });
 
         div()
             .flex_none()
@@ -1592,12 +1597,14 @@ impl ThreadView {
 
         let extra_chips: Vec<AnyElement> = vec![];
         let can_review = self.can_review();
-        let extra_actions = vec![
-            attachments::button(&self.composer, |v: &mut Self| &mut v.attachments, self.attachments_enabled(), cx).into_any_element(),
+        let mut extra_actions = vec![
             composer::review_button("thread-review-open", can_review)
                 .when(can_review, |b| b.on_click(cx.listener(|v, _: &ClickEvent, _, cx| v.open_review(cx))))
                 .into_any_element(),
         ];
+        if self.attachments_enabled() {
+            extra_actions.push(attachments::button(&self.composer, |v: &mut Self| &mut v.attachments, cx).into_any_element());
+        }
         let draft = self.composer.read(cx).value();
         let has_message = self.can_submit_draft(cx);
         let steering_text = if self.attachments.has_files() { "" } else { draft.trim() };

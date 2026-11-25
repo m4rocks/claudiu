@@ -26,6 +26,12 @@ m4code is a native desktop app, written in Rust with GPUI, that runs coding-agen
 - `just test-app`: Rust tests. The headless tests are `#[ignore]`d; run them with `cargo test -- --ignored --test-threads=1 app::headless`.
 - `just test`: app, bridge and mod tests. The mod tests need the `claude` CLI on PATH.
 
+## Visual testing
+
+- Run `just screenshot home` or `just screenshot settings` after a UI change. Open `target/screenshots/<scenario>.png` with an image viewer and inspect the affected view. `just screenshot` defaults to `home`.
+- The runner in `src/screenshots.rs` renders the real workspace on GPUI's test platform with temporary app data and live harness and update checks disabled. The Settings scenario opens the dialog using the normal shortcut. Add a scenario there when testing another view or interaction.
+- The renderer needs a usable Vulkan or OpenGL adapter on Windows and Linux, or a Metal device on macOS. The PNG contains the GPUI window content at its test scale. Host fonts and native window decorations can differ from a desktop capture.
+
 ## Things to know
 
 - Debug builds use their own data folder, so they can run next to an installed release. Only one instance runs per data folder.
