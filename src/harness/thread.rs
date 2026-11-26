@@ -109,7 +109,8 @@ impl ToolDetails {
             }
         };
         if kind == "execute" {
-            set_text(&mut self.command, &raw["command"]);
+            let cmd = if raw["command"].is_string() { &raw["command"] } else { &raw["cmd"] };
+            set_text(&mut self.command, cmd);
             set_text(&mut self.stdout, &out["stdout"]);
             set_text(&mut self.stderr, &out["stderr"]);
             let terminal = &update["_meta"]["terminal_output_delta"];

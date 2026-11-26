@@ -164,7 +164,58 @@ pub struct BackgroundHooks {
 #[derive(Default)]
 pub struct BackgroundUpdate {
     pub started: Option<BackgroundTask>,
+    /// Task ids explicitly retired by this tool call (e.g. Codex `write_stdin` reporting exit for `rawInput.session_id`).
+    pub finished: Vec<String>,
     pub output: Vec<String>,
+}
+
+/// Collect plain-text output surfaces from a tool call (`details.output`, `stdout`, `stderr`, and text content).
+pub(crate) fn tool_output_texts(call: &thread::ToolCall) -> Vec<&str> {
+    let mut texts = Vec::new();
+    if let Some(out) = call.details.output.as_deref() {
+        texts.push(out);
+    }
+    if let Some(out) = call.details.stdout.as_deref() {
+        texts.push(out);
+    }
+    if let Some(out) = call.details.stderr.as_deref() {
+        texts.push(out);
+    }
+    for content in &call.content {
+        if let thread::ToolContent::Text(text) = content {
+            texts.push(text.as_str());
+        }
+    }
+    texts
+}
+
+/// Human-readable single-line label for a background task started by `call`.
+pub(crate) fn background_task_label(call: &thread::ToolCall) -> String {
+    call.details
+        .command
+        .as_deref()
+        .or(Some(call.title.as_str()))
+        .and_then(|s| s.lines().find(|l| !l.trim().is_empty()))
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "Background task".into())
+}
+
+/// Output text snapshots from `call` and `update["rawOutput"]`, used to detect background task completion notices.
+pub(crate) fn background_output_texts(call: &thread::ToolCall, update: &Value) -> Vec<String> {
+    let mut output = tool_output_texts(call).into_iter().map(str::to_string).collect::<Vec<_>>();
+    if let Some(raw) = update.get("rawOutput") {
+        if let Some(text) = raw.as_str() {
+            output.push(text.to_string());
+        } else {
+            for key in ["formatted_output", "output", "stdout", "stderr"] {
+                if let Some(text) = raw.get(key).and_then(Value::as_str) {
+                    output.push(text.to_string());
+                }
+            }
+        }
+    }
+    output
 }
 
 pub struct ProtocolHooks {

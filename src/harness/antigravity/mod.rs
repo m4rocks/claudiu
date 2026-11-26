@@ -51,27 +51,11 @@ pub const ADAPTER: Adapter = Adapter {
 
 #[cfg(feature = "adapter-antigravity")]
 mod background {
-    use super::super::{BackgroundTask, BackgroundUpdate};
+    use super::super::{BackgroundTask, BackgroundUpdate, background_output_texts, background_task_label, tool_output_texts};
     use serde_json::Value;
     use std::path::PathBuf;
     const BG_TASK_PREFIX: &str = "Tool is running as a background task with task id:";
     const BG_TASK_LOG_PREFIX: &str = "Task logs are available at:";
-
-    fn tool_output_texts(call: &super::super::thread::ToolCall) -> Vec<&str> {
-        let mut texts = Vec::new();
-        if let Some(out) = call.details.output.as_deref() {
-            texts.push(out);
-        }
-        if let Some(out) = call.details.stdout.as_deref() {
-            texts.push(out);
-        }
-        for content in &call.content {
-            if let super::super::thread::ToolContent::Text(text) = content {
-                texts.push(text.as_str());
-            }
-        }
-        texts
-    }
 
     fn background_task_from_tool(call: &super::super::thread::ToolCall) -> Option<BackgroundTask> {
         let texts = tool_output_texts(call);
@@ -86,29 +70,17 @@ mod background {
             let path = raw.strip_prefix("file://").unwrap_or(raw);
             (!path.is_empty()).then(|| PathBuf::from(path))
         });
-        let label = call
-            .details
-            .command
-            .as_deref()
-            .or(Some(call.title.as_str()))
-            .and_then(|s| s.lines().find(|l| !l.trim().is_empty()))
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "Background task".into());
+        let label = background_task_label(call);
         Some(BackgroundTask { id: task_id, label, log_path })
     }
-
 
     pub(super) fn background_update(call: &super::super::thread::ToolCall, update: &Value) -> BackgroundUpdate {
         if update.get("rawOutput").is_none() && update.get("content").is_none() {
             return BackgroundUpdate::default();
         }
         let started = (call.kind == "execute").then(|| background_task_from_tool(call)).flatten();
-        let mut output = tool_output_texts(call).into_iter().map(str::to_string).collect::<Vec<_>>();
-        if let Some(raw) = update.get("rawOutput").and_then(Value::as_str) {
-            output.push(raw.to_string());
-        }
-        BackgroundUpdate { started, output }
+        let output = background_output_texts(call, update);
+        BackgroundUpdate { started, finished: Vec::new(), output }
     }
 
     pub(super) fn task_finished(text: &str, task_id: &str) -> bool {
