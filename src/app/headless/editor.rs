@@ -27,7 +27,7 @@ fn home_editor_saves_files_and_adds_comments_without_a_session() {
     let until = std::time::Instant::now() + Duration::from_secs(10);
     loop {
         cx.run_until_parked();
-        if ws.read_with(&cx, |ws, _| ws.editor_owner().and_then(|id| ws.panes.get(&id)).is_some_and(|pane| pane.root == root && pane.shown().is_some())) { break; }
+        if ws.read_with(&cx, |ws, _| ws.editor_owner().and_then(|id| ws.panes.get(&id)).is_some_and(|pane| pane.root == root && pane.shown().is_some_and(|t| !t.loading))) { break; }
         assert!(std::time::Instant::now() < until, "the project file never opened");
         std::thread::yield_now();
     }
@@ -147,7 +147,7 @@ fn line_comment_into_the_message_box() {
     act(&mut cx, &|ws, w, cx| ws.toggle_editor(w, cx));
     wait(&mut cx, "the editor pane", &|ws, _| ws.panes.contains_key(&id));
     act(&mut cx, &|ws, w, cx| ws.open_file(&id, dunce::canonicalize(&code).unwrap(), None, w, cx));
-    wait(&mut cx, "opening the file", &|ws, _| ws.panes[&id].shown().is_some());
+    wait(&mut cx, "opening the file", &|ws, _| ws.panes[&id].shown().is_some_and(|t| !t.loading));
     let buffer = ws.read_with(&cx, |ws, _| ws.panes[&id].shown().unwrap().buffer.clone());
     act(&mut cx, &|_, w, cx| buffer.update(cx, |b, cx| {
         b.focus(w, cx);
@@ -323,7 +323,7 @@ fn line_actions_on_their_keys() {
     act(&mut cx, &|ws, w, cx| ws.toggle_editor(w, cx));
     wait(&mut cx, "the editor pane", &|ws, _| ws.panes.contains_key(&id));
     act(&mut cx, &|ws, w, cx| ws.open_file(&id, root.join("lines.txt"), None, w, cx));
-    wait(&mut cx, "the file open", &|ws, _| ws.panes[&id].shown().is_some());
+    wait(&mut cx, "the file open", &|ws, _| ws.panes[&id].shown().is_some_and(|t| !t.loading));
     let buffer = ws.read_with(&cx, |ws, _| ws.panes[&id].shown().unwrap().buffer.clone());
     act(&mut cx, &|_, w, cx| buffer.update(cx, |b, cx| {
         b.focus(w, cx);
@@ -431,7 +431,7 @@ fn double_click_in_the_editor() {
     act(&mut cx, &|ws, w, cx| ws.toggle_editor(w, cx));
     wait(&mut cx, "the editor pane", &|ws, _| ws.panes.contains_key(&id));
     act(&mut cx, &|ws, w, cx| ws.open_file(&id, root.join("words.txt"), None, w, cx));
-    wait(&mut cx, "the file open", &|ws, _| ws.panes[&id].shown().is_some());
+    wait(&mut cx, "the file open", &|ws, _| ws.panes[&id].shown().is_some_and(|t| !t.loading));
     let buffer = ws.read_with(&cx, |ws, _| ws.panes[&id].shown().unwrap().buffer.clone());
     act(&mut cx, &|ws, w, cx| { let f = ws.panes[&id].focus.clone(); w.focus(&f, cx); });
     draw(&mut cx);
@@ -584,4 +584,52 @@ fn double_click() {
         std::thread::sleep(Duration::from_millis(100));
     }
     t.join().unwrap();
+}
+
+#[test]
+fn loading_tabs_appear_immediately_and_old_reads_do_not_change_the_selection() {
+    let _dirs = crate::datadir::use_throwaway_folders();
+    let work = tempfile::tempdir().unwrap();
+    let root = dunce::canonicalize(work.path()).unwrap();
+    let first = root.join("first.txt");
+    let second = root.join("second.txt");
+    std::fs::write(&first, "first\nsecond line\n").unwrap();
+    std::fs::write(&second, "second file\n").unwrap();
+    let mut cx = TestAppContext::single();
+    cx.update(|app| { gpui_kit::init(app); crate::panels::theme::install(app); });
+    let (window, ws) = cx.update(|app| gpui_kit::open_window(Default::default(), app, |window, app| app.new(|cx| Workspace::new(window, vec![root.clone()], cx)))).unwrap();
+    cx.update_window(window, |_, window, app| ws.update(app, |ws, cx| {
+        let project = ws.store.data.projects.iter().find(|p| p.path == root).unwrap().id.clone();
+        ws.act(Act::HomeSelectProject(project), window, cx);
+        ws.toggle_editor(window, cx);
+        let id = ws.shown_pane(cx).unwrap().0;
+        ws.open_file(&id, first.clone(), Some(0), window, cx);
+        assert!(ws.panes[&id].shown().unwrap().loading);
+        let old = ws.panes[&id].shown().unwrap().buffer.clone();
+        ws.close_tab(&id, 0, cx);
+        ws.open_file(&id, first.clone(), Some(1), window, cx);
+        assert_ne!(ws.panes[&id].shown().unwrap().buffer, old);
+        ws.open_file(&id, second.clone(), None, window, cx);
+        assert_eq!(ws.panes[&id].shown().unwrap().path, second);
+        assert!(ws.panes[&id].shown().unwrap().loading);
+        // Moving focus away while either file is loading must survive both completions.
+        window.focus(&ws.panes[&id].focus, cx);
+    })).unwrap();
+    let until = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        cx.run_until_parked();
+        if ws.read_with(&cx, |ws, app| {
+            let pane = &ws.panes[&ws.editor_owner().unwrap()];
+            if pane.tabs.iter().any(|t| t.loading) { return false; }
+            assert_eq!(pane.tabs.len(), 2);
+            assert_eq!(pane.shown().unwrap().path, second);
+            assert_eq!(pane.shown().unwrap().buffer.read(app).value(), "second file\n");
+            assert_eq!(pane.tabs[0].buffer.read(app).cursor_position().line, 1);
+            true
+        }) { break; }
+        assert!(std::time::Instant::now() < until, "file reads did not settle");
+        std::thread::yield_now();
+    }
+    let focused = ws.read_with(&cx, |ws, _| ws.panes[&ws.editor_owner().unwrap()].focus.clone());
+    assert!(cx.update_window(window, |_, window, _| focused.is_focused(window)).unwrap(), "background file reads must preserve the user's focus");
 }

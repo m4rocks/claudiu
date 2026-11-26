@@ -197,6 +197,7 @@ impl GithubView {
     }
 
     pub fn load_list(&mut self, kind: Kind, append: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.busy.is_some() { return; }
         let Some(repo) = self.repo.clone() else { return };
         let i = idx(kind);
         let after = if append { self.lists[i].next.clone() } else { None };
@@ -311,6 +312,7 @@ impl GithubView {
     }
 
     pub(super) fn fetch_detail(&mut self, after: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        if self.busy.is_some() { return; }
         let Some(d) = self.detail.as_ref() else { return };
         let (kind, number) = (d.kind, d.number);
         let Some(repo) = self.repo.clone() else { return };
@@ -414,6 +416,28 @@ impl GithubView {
     }
 
     /// Run a change on GitHub, then reload the list and the open item. `ok` runs first on success (clear a box, etc.).
+    pub(super) fn begin_optimistic(&mut self) {
+        if self.busy.is_some() || self.optimistic.is_some() { return; }
+        if let Some(d) = &self.detail && let Some(detail) = &d.data {
+            self.optimistic = Some(Optimistic { kind: d.kind, number: d.number, detail: detail.clone(), editing: self.editing.clone() });
+            // Do not let a fetch started before the mutation replace its optimistic state.
+            self.detail_seq += 1;
+            for seq in &mut self.list_seq { *seq += 1; }
+            for list in &mut self.lists { list.loading = false; }
+            if let Some(d) = &mut self.detail { d.loading = false; d.more_loading = false; }
+        }
+    }
+
+    pub(super) fn rollback_optimistic(&mut self, snapshot: Optimistic) {
+        if let Some(item) = self.lists[idx(snapshot.kind)].items.iter_mut().find(|i| i.number == snapshot.number) {
+            *item = snapshot.detail.item.clone();
+        }
+        if let Some(d) = self.detail.as_mut().filter(|d| d.kind == snapshot.kind && d.number == snapshot.number) {
+            d.data = Some(snapshot.detail);
+            self.editing = snapshot.editing;
+        }
+    }
+
     pub(super) fn mutate(
         &mut self,
         what: &str,
@@ -425,6 +449,9 @@ impl GithubView {
         if self.busy.is_some() {
             return;
         }
+        if self.gh.is_none() || self.repo.is_none() { return; }
+        self.begin_optimistic();
+        let snapshot = self.optimistic.take();
         self.busy = Some(what.to_string());
         cx.notify();
         self.spawn(
@@ -438,10 +465,14 @@ impl GithubView {
                 v.busy = None;
                 match result {
                     Ok(()) => {
-                        ok(v, window, cx);
+                        if snapshot.as_ref().is_none_or(|s| v.detail.as_ref().is_some_and(|d| d.kind == s.kind && d.number == s.number)) {
+                            ok(v, window, cx);
+                        }
                         v.reload_all(window, cx);
                     }
                     Err(e) => {
+                        if let Some(snapshot) = snapshot { v.rollback_optimistic(snapshot); }
+                        if e.kind == ErrKind::SignedOut { v.phase = Phase::SignedOut; }
                         let hint = if e.msg.contains("Resource not accessible") { " (the token cannot do this here)" } else { "" };
                         v.toast(format!("{}{hint}", e.msg), true, cx);
                         v.reload_all(window, cx);

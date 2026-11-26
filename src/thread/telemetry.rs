@@ -16,7 +16,7 @@ impl ThreadView {
     pub(super) fn render_session_notices(&self, cx: &mut Context<Self>) -> Option<Div> {
         let usage_limit = self.usage_limit.as_ref();
         let error = self.error.as_ref();
-        if usage_limit.is_none() && error.is_none() {
+        if usage_limit.is_none() && error.is_none() && self.pending_options.is_empty() && !self.stalled {
             return None;
         }
         let mut contents = div().w_full().max_w(px(840.0)).px(px(8.0)).py(px(4.0))
@@ -40,8 +40,23 @@ impl ThreadView {
             }
             contents = contents.child(row);
         }
+        if self.stalled {
+            contents = contents.child(div().flex().flex_wrap().items_center().gap(px(8.0))
+                .child(div().text_color(theme().warning).child(if self.interrupting { "The agent has not confirmed the stop request." } else { "No updates from the agent for three minutes. It may still be working." }))
+                .child(btn::text("stalled-stop", "Stop", false).on_click(cx.listener(|v, _: &ClickEvent, _, cx| v.interrupt(cx))))
+                .child(btn::text("stalled-reconnect", "Reconnect", false).on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(ThreadEvent::Retry)))));
+        }
+        if !self.pending_options.is_empty() {
+            contents = contents.child(div().text_color(theme().muted_foreground).child("Applying session options…"));
+        }
         if let Some(error) = error {
-            contents = contents.child(div().text_color(theme().destructive).child(format!("{}: {error}", self.harness.name())));
+            let mut row = div().flex().flex_wrap().items_center().gap(px(8.0))
+                .child(div().min_w_0().text_color(theme().destructive).child(format!("{}: {error}", self.harness.name())));
+            if self.authentication_required {
+                row = row.child(btn::text("session-sign-in", "Sign in", true).on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(ThreadEvent::SignIn))));
+            }
+            row = row.child(btn::text("session-retry", "Retry session", false).on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(ThreadEvent::Retry))));
+            contents = contents.child(row);
         }
         Some(div().w_full().px(px(22.0)).flex().justify_center().child(contents))
     }

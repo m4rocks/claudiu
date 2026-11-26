@@ -274,7 +274,7 @@ fn removing_a_worktree_when_its_session_ends() {
     };
     ws.update(&mut cx, |ws, _| ws.acp_server = Some(fake_agent(work.path())));
     // The worktree is known to the project once git has been read again.
-    step(&mut cx, &|ws, _w, _cx| ws.store.refresh_git());
+    step(&mut cx, &|ws, _w, cx| ws.refresh_git_async(cx));
     // A new session never starts inside a worktree; Fix-with-Claude is the one starter that keeps the folder it is given.
     step(&mut cx, &|ws, w, cx| ws.new_session_default(folder.clone(), None, vec![], crate::harness::defaults::Starter::FixGit, w, cx));
     let id = ws.read_with(&cx, |ws, _| ws.active.clone().unwrap());

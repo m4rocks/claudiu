@@ -375,7 +375,7 @@ impl GithubView {
                     .child(icon_action("gh-refresh", if loading { IconName::LoaderCircle } else { IconName::RefreshCw }, "Refresh").on_click(go(cx, GhAct::Refresh)))
                     .child(icon_action("gh-web", IconName::ExternalLink, "Open on GitHub").mr(px(4.0)).on_click(go(cx, GhAct::OpenWeb(url))))
                     .child(
-                        btn::text("gh-new", if new_kind == Kind::Issue { "New issue" } else { "New pull request" }, true)
+                        btn::button("gh-new", Some(IconName::Plus), "New", Variant::Default, Size::Sm)
                             .on_click(go(cx, GhAct::New(new_kind))),
                     ),
             )
@@ -576,7 +576,7 @@ impl GithubView {
                             .items_center()
                             .gap(px(6.0))
                             .min_w_0()
-                            .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().font_weight(FontWeight::MEDIUM).child(it.title.clone()))
+                            .child(div().flex_1().min_w_0().overflow_hidden().whitespace_normal().font_weight(FontWeight::MEDIUM).child(it.title.clone()))
                             .when(it.draft, |d| d.child(badge::badge("Draft", badge::Variant::Outline))),
                     )
                     .child(sub),

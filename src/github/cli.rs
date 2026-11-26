@@ -228,7 +228,7 @@ impl Gh {
         if status == 401 {
             self.forget_token();
             // A read falls back to `gh`, which asks again; a write is never sent twice, so it reports the failure.
-            return if safe { None } else { Some(Err(Error::other("GitHub rejected the saved sign-in; nothing was changed."))) };
+            return if safe { None } else { Some(Err(Error { kind: ErrKind::SignedOut, msg: "GitHub rejected the saved sign-in; nothing was changed.".into() })) };
         }
         let text = match response.body_mut().read_to_string() {
             Ok(t) => t,
@@ -251,7 +251,7 @@ impl Gh {
         };
         let mut v: Value = serde_json::from_str(&text).map_err(|e| Error::other(format!("unexpected answer from gh: {e}")))?;
         if let Some(m) = graphql_errors(&text).filter(|m| !m.is_empty()) {
-            return Err(Error::other(m));
+            return Err(Error { kind: classify(&m), msg: m });
         }
         Ok(v["data"].take())
     }
@@ -417,7 +417,7 @@ pub const MILESTONES_QUERY: &str = "query($owner:String!,$name:String!){reposito
 
 // ----------------------------------------------------------------------------------------------------- mutations
 
-pub const M_COMMENT: &str = "mutation($id:ID!,$body:String!){addComment(input:{subjectId:$id,body:$body}){clientMutationId}}";
+pub const M_COMMENT: &str = "mutation($id:ID!,$body:String!){addComment(input:{subjectId:$id,body:$body}){commentEdge{node{id body createdAt author{login}}}}}";
 pub const M_EDIT_COMMENT: &str = "mutation($id:ID!,$body:String!){updateIssueComment(input:{id:$id,body:$body}){clientMutationId}}";
 pub const M_DELETE_COMMENT: &str = "mutation($id:ID!){deleteIssueComment(input:{id:$id}){clientMutationId}}";
 pub const M_CLOSE_ISSUE: &str = "mutation($id:ID!,$reason:IssueClosedStateReason){closeIssue(input:{issueId:$id,stateReason:$reason}){clientMutationId}}";

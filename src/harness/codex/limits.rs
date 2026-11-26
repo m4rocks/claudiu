@@ -56,6 +56,7 @@ pub fn probe() -> Result<UsageLimits, String> {
     match probe_app_server() {
         Ok(usage) => Ok(usage),
         Err(err) => {
+            if crate::harness::acp::looks_like_auth_error(&err) { return Err(err); }
             if let Some(usage) = codex_home().and_then(|home| read(&home)) {
                 return Ok(usage);
             }

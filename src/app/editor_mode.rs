@@ -87,6 +87,8 @@ pub struct EditorPane {
 pub struct Tab {
     pub path: PathBuf,
     pub buffer: Entity<EditorState>,
+    pub loading: bool,
+    pub pending_line: (Option<usize>, Option<usize>),
     /// Why the file's text isn't shown (too large, not text, unreadable); the buffer stays empty then.
     pub note: Option<String>,
     /// How the file differs from the buffer (line ends, tab indents), which saving puts back (see `files::read`).
@@ -453,8 +455,7 @@ impl Workspace {
         self.show_file_range(id, path, line, end_line, window, cx);
     }
 
-    /// Show `path` in the session's editor: its tab when it is open, otherwise a new tab once the file is read off the UI
-    /// thread. `line` (0-based) puts the cursor there.
+    /// Select the tab immediately, reading new files in the background. `line` is zero-based.
     pub(super) fn show_file(&mut self, id: &Id, path: PathBuf, line: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
         self.show_file_range(id, path, line, None, window, cx);
     }
@@ -463,32 +464,42 @@ impl Workspace {
         let Some(pane) = self.panes.get_mut(id) else { return };
         if let Some(ix) = pane.tabs.iter().position(|t| t.path == path) {
             pane.active = Some(ix);
-            let buffer = pane.tabs[ix].buffer.clone();
-            buffer.update(cx, |b, cx| apply_line_jump(b, line, end_line, window, cx));
+            let tab = &mut pane.tabs[ix];
+            tab.pending_line = (line, end_line);
+            if !tab.loading {
+                tab.buffer.update(cx, |b, cx| apply_line_jump(b, line, end_line, window, cx));
+            }
             cx.notify();
             return;
         }
+        let language = files::language(&path);
+        let buffer = cx.new(|cx| {
+            let state = EditorState::new(window, cx);
+            match language { Some(language) => state.language(language), None => state }
+        });
+        pane.tabs.push(Tab { path: path.clone(), buffer: buffer.clone(), loading: true, pending_line: (line, end_line), note: Some("Loading…".into()), format: Default::default(), stamp: None, dirty: false, marks: Default::default(), follow: Default::default(), hovered_line: Default::default(), saving: false, conflict: None, language: None, version: 0, server: None, _sub: None });
+        pane.active = Some(pane.tabs.len() - 1);
+        buffer.update(cx, |b, cx| b.focus(window, cx));
+        cx.notify();
         let id = id.clone();
         let read = path.clone();
         cx.spawn_in(window, async move |this, cx| {
             let contents = cx.background_executor().spawn(async move { files::read(&read) }).await;
             let _ = this.update_in(cx, |ws, window, cx| {
-                let language = files::language(&path);
-                let buffer = cx.new(|cx| {
-                    let state = EditorState::new(window, cx);
-                    match language {
-                        Some(language) => state.language(language),
-                        None => state,
-                    }
-                });
+                // Closing/reopening a tab or switching worktrees invalidates the old read.
+                let Some(tab) = ws.panes.get(&id).and_then(|p| p.tabs.iter().find(|t| t.path == path && t.buffer == buffer && t.loading)) else { return };
+                let (line, end_line) = tab.pending_line;
                 let (mut format, mut stamp, mut sub) = (files::Format::default(), None, None);
                 let note = match contents {
                     Ok(Contents::Text { text, format: f, stamp: s }) => {
+                        let focused = window.focused(cx);
                         buffer.update(cx, |b, cx| {
                             b.set_tab_size(tab_size(&f), cx);
                             b.set_value(text, window, cx);
                             apply_line_jump(b, line, end_line, window, cx);
                         });
+                        // Cursor jumps focus the buffer internally. Preserve whatever the user focused during I/O.
+                        match focused { Some(focused) => window.focus(&focused, cx), None => window.blur(cx) }
                         // `set_value` (opening, reloading) sends no Change, so only the user's edits mark the tab.
                         sub = Some(cx.subscribe(&buffer, |ws: &mut Workspace, buffer, ev: &InputEvent, cx| {
                             if !matches!(ev, InputEvent::Change) {
@@ -516,20 +527,16 @@ impl Workspace {
                     Err(e) => Some(format!("Could not read this file: {e}")),
                 };
                 let Some(pane) = ws.panes.get_mut(&id) else { return };
-                // A second click while the file was being read: keep the tab that is already there.
-                let opened = pane.tabs.iter().position(|t| t.path == path);
-                let ix = opened.unwrap_or_else(|| {
-                    let language = language.filter(|_| note.is_none());
-                    pane.tabs.push(Tab { path: path.clone(), buffer, note, format, stamp, dirty: false, marks: Default::default(), follow: Default::default(), hovered_line: Default::default(), saving: false, conflict: None, language, version: 0, server: None, _sub: sub });
-                    pane.tabs.len() - 1
-                });
-                pane.active = Some(ix);
-                let shown = pane.tabs[ix].buffer.clone();
-                shown.update(cx, |b, cx| b.focus(window, cx));
-                if opened.is_none() {
-                    ws.attach_server(&id, &path, cx);
-                    ws.refresh_marks(cx);
-                }
+                let Some(ix) = pane.tabs.iter().position(|t| t.path == path && t.buffer == buffer) else { return };
+                let tab = &mut pane.tabs[ix];
+                tab.loading = false;
+                tab.language = language.filter(|_| note.is_none());
+                tab.note = note;
+                tab.format = format;
+                tab.stamp = stamp;
+                tab._sub = sub;
+                ws.attach_server(&id, &path, cx);
+                ws.refresh_marks(cx);
                 cx.notify();
             });
         })

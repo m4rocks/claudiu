@@ -168,6 +168,10 @@ impl Workspace {
             .data
             .sessions
             .retain(|s| s.kind != SessionKind::Shell && !ephemeral.contains(&s.id));
+        for live in &self.live {
+            if let Some(thread) = live.view.thread() { thread.read(cx).persist_entries(); }
+        }
+        crate::harness::thread::flush_entries();
         self.store.save();
     }
 }

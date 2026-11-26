@@ -3,6 +3,39 @@
 use super::*;
 
 impl Workspace {
+    pub(super) fn refresh_git_async(&mut self, cx: &mut Context<Self>) {
+        self.refresh_git_at(None, cx);
+    }
+
+    /// Polls skip repositories already being read. An explicit action supersedes an older read of its checkout.
+    pub(super) fn refresh_git_at(&mut self, affected: Option<&std::path::Path>, cx: &mut Context<Self>) {
+        let paths: Vec<_> = self.store.data.projects.iter()
+            .filter(|p| affected.is_none_or(|cwd| crate::platform::is_same_or_under(cwd, &p.path) || p.git.as_ref().is_some_and(|git| git.folder_of(cwd).is_some())))
+            .filter(|p| affected.is_some() || !self.git_refreshes.contains_key(&p.path))
+            .map(|p| p.path.clone()).collect();
+        if paths.is_empty() { return; }
+        self.git_refresh_seq += 1;
+        let seq = self.git_refresh_seq;
+        for path in &paths { self.git_refreshes.insert(path.clone(), seq); }
+        cx.spawn(async move |this, cx| {
+            let infos = cx.background_executor().spawn(async move {
+                paths.into_iter().map(|path| { let info = crate::git::detect(&path); (path, info) }).collect::<Vec<_>>()
+            }).await;
+            let _ = this.update(cx, |ws, cx| {
+                let mut changed = false;
+                for (path, info) in infos {
+                    if ws.git_refreshes.get(&path) != Some(&seq) { continue; }
+                    ws.git_refreshes.remove(&path);
+                    if let Some(project) = ws.store.data.projects.iter_mut().find(|p| p.path == path) && project.git != info {
+                        project.git = info;
+                        changed = true;
+                    }
+                }
+                if changed { ws.store.mark_dirty(); ws.store.save_if_dirty(); cx.notify(); }
+            });
+        }).detach();
+    }
+
     /// Git actions (see `git/commit.rs`): one at a time, off the UI thread, reported through a toast.
     pub(super) fn run_git(
         &mut self,
@@ -14,13 +47,14 @@ impl Workspace {
             return;
         }
         self.git_busy = Some(op);
+        let affected = self.active_cwd();
         cx.notify();
         cx.spawn(async move |this, cx| {
             let result = cx.background_executor().spawn(async move { job() }).await;
             let _ = this.update(cx, |ws, cx| {
                 ws.git_busy = None;
                 // The branch shown in the top bar follows a pull, switch or new branch.
-                ws.store.refresh_git();
+                ws.refresh_git_at(Some(&affected), cx);
                 ws.store.save_if_dirty();
                 ws.refresh_pending(cx);
                 // The Worktrees page of Settings lists what a removal just deleted.
@@ -54,6 +88,7 @@ impl Workspace {
             let pending = cx.background_executor().spawn(async move { crate::git::commit::pending(&dir) }).await;
             let _ = this.update(cx, |ws, cx| {
                 // The shown session may have changed meanwhile; its own read replaces this one.
+                if ws.active_cwd() != cwd { return; }
                 let now = pending.ok().map(|p| (cwd, p));
                 if ws.pending != now {
                     ws.pending = now;
@@ -85,27 +120,7 @@ impl Workspace {
         cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(Duration::from_secs(3)).await;
-                let Ok(paths) = this.update(cx, |ws, _| ws.store.data.projects.iter().map(|p| p.path.clone()).collect::<Vec<_>>())
-                else {
-                    break;
-                };
-                let infos = cx
-                    .background_executor()
-                    .spawn(async move { paths.into_iter().map(|p| { let g = crate::git::detect(&p); (p, g) }).collect::<Vec<_>>() })
-                    .await;
-                let _ = this.update(cx, |ws, cx| {
-                    let mut changed = false;
-                    for (path, git) in infos {
-                        if let Some(p) = ws.store.data.projects.iter_mut().find(|p| p.path == path && p.git != git) {
-                            p.git = git;
-                            changed = true;
-                        }
-                    }
-                    if changed {
-                        ws.store.mark_dirty();
-                        cx.notify();
-                    }
-                });
+                if this.update(cx, |ws, cx| ws.refresh_git_async(cx)).is_err() { break; }
             }
         })
         .detach();

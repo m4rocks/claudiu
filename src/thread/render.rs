@@ -291,7 +291,7 @@ pub(super) fn ensure_markdown_state(
                     && view.markdown.get(&ix).is_some_and(|cached| cached.entity_id() == state.entity_id())
                 {
                     seen = current;
-                    view.remeasure(ix);
+                    view.schedule_remeasure(ix, cx);
                     cx.notify();
                 }
             })
@@ -386,7 +386,7 @@ impl ThreadView {
             }
         }
         if let Some(model) = self.thread.option("model") {
-            if let Some((_, name)) = model.choices.iter().find(|(v, _)| *v == model.current && v != "default") {
+            if let Some((_, name)) = model.choices.iter().find(|(v, _)| v == self.option_value(model) && v != "default") {
                 return name.clone();
             }
             if let Some((_, name)) = model.choices.iter().find(|(v, _)| v != "default").or_else(|| model.choices.first()) {
@@ -553,7 +553,7 @@ impl ThreadView {
     }
 
     /// The row after the last entry: handoff, compaction or working status with the turn's timer while it runs,
-    /// then "Worked for …" until the next turn starts. Its spinner lines up with the step rows above it.
+    /// then "Worked for …" until the next turn starts.
     fn render_turn_status(&self) -> AnyElement {
         let elapsed = self.turn_started.map(|t| t.elapsed());
         let (label, stoppable) = match self.starting_label() {
@@ -883,8 +883,12 @@ impl ThreadView {
         let len = self.thread.entries.len();
         let mut cache = self.run_cache.borrow_mut();
         if cache.entries != len || cache.ranges.len() != len {
-            let mut ranges = vec![None; len];
-            let mut start = 0;
+            let mut ranges = std::mem::take(&mut cache.ranges);
+            let mut start = ranges.len().min(len);
+            let mut kinds = std::mem::take(&mut cache.kinds);
+            kinds.truncate(start);
+            kinds.extend(self.thread.entries.iter().skip(start).map(timeline::run_kind));
+            ranges.resize(len, None);
             while start < len {
                 if self.run_kind(start).is_some() {
                     let mut end = start + 1;
@@ -899,7 +903,7 @@ impl ThreadView {
                     start += 1;
                 }
             }
-            *cache = super::RunCache { entries: len, ranges };
+            *cache = super::RunCache { entries: len, ranges, kinds };
         }
         cache.ranges.get(ix).cloned().flatten()
     }
@@ -1341,7 +1345,7 @@ impl ThreadView {
 
         let (id, title, body, choices) = match active {
             ThreadPicker::Model => {
-                let current_id = self.thread.option("model").map(|m| m.current.as_str());
+                let current_id = self.thread.option("model").map(|m| self.option_value(m));
                 let models = self.filtered_models(cx);
                 let query = self.model_search.read(cx).value().to_lowercase();
                 let mut choices = command::Choices::new(&self.picker_nav, &query);

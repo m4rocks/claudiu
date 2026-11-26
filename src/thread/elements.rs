@@ -140,7 +140,6 @@ pub fn turn_working_line(label: String, elapsed: Option<Duration>, stop: Option<
         .gap(px(7.0))
         .text_size(scale::px(12.0))
         .line_height(relative(1.4))
-        .child(div().flex_none().w(px(14.0)).flex().items_center().justify_center().child(spinner("thread-activity", 12.0)))
         .child(div().text_color(theme().muted_foreground).child(label))
         .children(elapsed.map(|d| div().text_color(theme().subtle_foreground).child(format_duration(d))))
         .children(stop.map(|stop| div().ml(px(4.0)).child(stop)))

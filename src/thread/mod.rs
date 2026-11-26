@@ -112,10 +112,12 @@ fn needs_history_seed(entry: &Entry) -> bool {
 }
 
 pub enum ThreadEvent {
+    SignIn,
+    Retry,
     Ready(String),
     /// The branch chip was clicked: open the Branch & Worktree dialog there.
     OpenGitPicker(crate::panels::widgets::Dropdown),
-    /// The harness stopped; the session's view closes.
+    /// The harness stopped; failed sessions retain their conversation and recovery controls.
     Exited(Option<i32>),
     /// The agent named the session: a new one learns its id this way.
     SessionId(String),
@@ -345,6 +347,7 @@ struct AgentCache {
 struct RunCache {
     entries: usize,
     ranges: Vec<Option<std::ops::Range<usize>>>,
+    kinds: Vec<Option<timeline::RunKind>>,
 }
 
 pub struct ThreadView {
@@ -430,6 +433,12 @@ pub struct ThreadView {
     runway: crate::harness::limits::RunwayTracker,
     /// How many rows the list has measured.
     rows: usize,
+    pending_remeasure: Option<usize>,
+    authentication_required: bool,
+    stalled: bool,
+    option_seq: u64,
+    pending_options: HashMap<String, (u64, String)>,
+    options_in_flight: HashSet<String>,
     /// Ctrl+O: every tool's output in full.
     pub detail: bool,
     pub(crate) subagent_edits: Option<bool>,
@@ -444,7 +453,7 @@ pub struct ThreadView {
     /// never re-scan markdown text.
     user_md_len: HashMap<usize, usize>,
     agent_cache: HashMap<usize, AgentCache>,
-    /// Cached `tool_run` ranges keyed by `(entries.len(), cards.len())` for O(1) lookup during scroll.
+    /// Cached tool groups, preserving their prefix and retaining text-only updates without a rebuild.
     run_cache: std::cell::RefCell<RunCache>,
     jump_visible: Cell<bool>,
     /// Messages steered into the running turn that the agent hasn't read yet, oldest first. They join the
@@ -554,7 +563,10 @@ impl ThreadView {
         for item in &mut queue {
             item.order = queue::next_order();
             item.ahead = false;
-            item.shown &= matches!(start.prior_entries.last(), Some(Entry::User(text)) if text == &item.text);
+            // A resumed transcript is loaded asynchronously; validate its shown flag once that read finishes.
+            if start.session_id.is_none() || !start.prior_entries.is_empty() {
+                item.shown &= matches!(start.prior_entries.last(), Some(Entry::User(text)) if text == &item.text);
+            }
         }
         let queue_held = !queue.is_empty();
         if let Some(prompt) = start.prompt.clone() {
@@ -574,7 +586,7 @@ impl ThreadView {
             && !start.prior_entries.is_empty()
             && start.harness.adapter().reopen == Reopen::Load;
         let took_over = start.session_id.is_none() && !start.prior_entries.is_empty();
-        let turn_reviews = if start.prior_entries.is_empty() { Vec::new() } else { review::load_turn_reviews(&start.record_id) };
+        let turn_reviews = Vec::new();
         let canonical_history = !turn_reviews.is_empty()
             || start.prior_entries.iter().any(|entry| needs_history_seed(entry) || matches!(entry, Entry::WorkspaceBoundary(_)));
         let this = cx.entity().downgrade();
@@ -652,6 +664,12 @@ impl ThreadView {
             auto_handoff_on_limit: true,
             runway: Default::default(),
             rows,
+            pending_remeasure: None,
+            authentication_required: false,
+            stalled: false,
+            option_seq: 0,
+            pending_options: HashMap::new(),
+            options_in_flight: HashSet::new(),
             detail: false,
             subagent_edits: None,
             initial_permission: start.permission,
@@ -709,6 +727,26 @@ impl ThreadView {
     fn start(&mut self, mut start: Start, cx: &mut Context<Self>) {
         let harness = start.harness;
         cx.spawn(async move |this, cx| {
+            let record = start.record_id.clone();
+            let restore = start.session_id.is_some() && start.prior_entries.is_empty();
+            let (entries, reviews) = cx.background_executor().spawn(async move {
+                let entries = if restore { crate::harness::thread::load_entries(&record) } else { Vec::new() };
+                (entries, review::load_turn_reviews(&record))
+            }).await;
+            if this.update(cx, |v, cx| {
+                if restore {
+                    v.thread.entries = entries;
+                    settle_running_tools(&mut v.thread.entries);
+                    v.cached_replay = !v.thread.entries.is_empty() && harness.adapter().reopen == Reopen::Load;
+                    for item in &mut v.queue {
+                        item.shown &= matches!(v.thread.entries.last(), Some(Entry::User(text)) if text == &item.text);
+                    }
+                }
+                v.turn_reviews = reviews;
+                v.canonical_history |= !v.turn_reviews.is_empty() || v.thread.entries.iter().any(|e| needs_history_seed(e) || matches!(e, Entry::WorkspaceBoundary(_)));
+                v.remeasure(0);
+                cx.notify();
+            }).is_err() { return; }
             if let Some(mut tools) = start.mcp_tools.take() {
                 let task = cx.background_executor().spawn(async move {
                     tools.load_workspace();
@@ -773,7 +811,7 @@ impl ThreadView {
                 break (connection, incoming, opened);
             };
             let _ = this.update(cx, |v, _| v.antigravity_full_access = full_access);
-            let Some(sid) = this.update(cx, |v, cx| v.opened(opened, &start, cx)).ok().flatten() else {
+            let Some(sid) = this.update(cx, |v, cx| v.opened(opened, cx)).ok().flatten() else {
                 return;
             };
             let mut options = start.options.iter().collect::<Vec<_>>();
@@ -910,7 +948,7 @@ impl ThreadView {
     }
 
     /// The session is open, or failed to open. Returns the session ID on success.
-    fn opened(&mut self, opened: Result<Opened, String>, start: &Start, cx: &mut Context<Self>) -> Option<String> {
+    fn opened(&mut self, opened: Result<Opened, String>, cx: &mut Context<Self>) -> Option<String> {
         let Opened { session_id, result, capabilities, agent_meta, replayed } = match opened {
             Ok(o) => o,
             Err(why) => {
@@ -920,7 +958,7 @@ impl ThreadView {
         };
         self.capabilities = capabilities;
         self.agent_meta = agent_meta;
-        self.cached_replay = replayed && !start.prior_entries.is_empty();
+        self.cached_replay = replayed && !self.thread.entries.is_empty();
         self.thread.apply_session(&result);
         if let Some(model_opt) = self.thread.option("model")
             && !model_opt.choices.is_empty()
@@ -1031,6 +1069,7 @@ impl ThreadView {
                     && (self.working || !is_tool_terminal)
                 {
                     self.last_update = Some(Instant::now());
+                    self.stalled = false;
                 }
                 let title = self.thread.title.clone();
                 let prev_ctx = self.thread.context;
@@ -1081,7 +1120,7 @@ impl ThreadView {
                         self.asks.record_message_chunk(at, &update);
                     }
                     self.sync_markdown(at, cx);
-                    self.remeasure(at);
+                    self.schedule_remeasure(at, cx);
                 }
                 if was_live_bg && !self.has_live_background_tasks() && !self.working {
                     self.last_update = None;
@@ -1209,6 +1248,22 @@ impl ThreadView {
                     connection.respond(id, acp::elicitation_decline());
                 }
             }
+            Event::RequestFailed(error) => {
+                if error.authentication_required() { self.needs_login(cx); }
+            }
+            Event::Authentication(status) => {
+                if status["authenticated"] == false || matches!(status["status"].as_str(), Some("unauthenticated" | "signed_out" | "expired")) {
+                    self.needs_login(cx);
+                } else if status["authenticated"] == true || status["status"] == "authenticated" {
+                    self.authentication_required = false;
+                    self.error = None;
+                }
+            }
+            Event::ProcessExited { code, message } => {
+                let error = (code != Some(0)).then(|| format!("Agent exited ({}). {}", code.map_or_else(|| "terminated by a signal".into(), |code| format!("exit code {code}")), message));
+                self.ended_with_code(error, code.or(Some(1)), cx);
+                return;
+            }
             Event::Exited(words) => {
                 let words = (!words.is_empty()).then_some(words);
                 self.ended(words, cx);
@@ -1223,8 +1278,20 @@ impl ThreadView {
         cx.notify();
     }
 
-    /// The harness stopped. Asked to or not, the view closes; `why` is shown as the failure.
+    fn needs_login(&mut self, cx: &mut Context<Self>) {
+        self.authentication_required = true;
+        self.queue_held = true;
+        self.error = Some(acp::login_hint(self.harness).into());
+        cx.notify();
+    }
+
+    /// The harness stopped. Report the failure while keeping the conversation available for recovery.
     fn ended(&mut self, why: Option<String>, cx: &mut Context<Self>) {
+        let code = Some(if why.is_some() { 1 } else { 0 });
+        self.ended_with_code(why, code, cx);
+    }
+
+    fn ended_with_code(&mut self, why: Option<String>, code: Option<i32>, cx: &mut Context<Self>) {
         if self.phase == Phase::Ended {
             return;
         }
@@ -1236,14 +1303,15 @@ impl ThreadView {
         self.preserve_handoff_message();
         self.cancel_questions();
         self.asks = Default::default();
-        self.error = why;
+        if why.as_deref().is_some_and(acp::looks_like_auth_error) { self.authentication_required = true; }
+        self.error = if self.authentication_required { Some(acp::login_hint(self.harness).into()) } else { why };
         if let Some(item) = self.preparing.take() {
             self.queue.push_front(item);
         }
         let ids = self.steering.iter().map(|item| item.id).collect::<Vec<_>>();
         self.requeue_steers(ids);
         self.connection = None;
-        cx.emit(ThreadEvent::Exited(if self.error.is_some() { Some(1) } else { Some(0) }));
+        cx.emit(ThreadEvent::Exited(code));
         cx.notify();
     }
 
@@ -1347,7 +1415,7 @@ impl ThreadView {
         let action = if stop { "stop" } else { "output" };
         let reply = connection.request("_m4code/background_shell", json!({"sessionId": session, "taskId": task_id, "action": action}));
         cx.spawn(async move |this, cx| {
-            let result = reply.await;
+            let result = startup_deadline("reading background shell output", reply, cx).await;
             let _ = this.update(cx, |v, cx| {
                 if stop {
                     if let Err(why) = result && let Some(shell) = v.provider_shells.iter_mut().find(|shell| shell.id == task_id) {
@@ -1560,7 +1628,7 @@ impl ThreadView {
             connection.request("_m4code/steer", json!({"sessionId": session, "text": text, "id": id.to_string()}))
         };
         cx.spawn(async move |this, cx| {
-            let result = reply.await;
+            let result = startup_deadline("steering the session", reply, cx).await;
             let _ = this.update(cx, |v, cx| {
                 if native && result.as_ref().is_ok_and(|r| r["outcome"] == "injected") {
                     if let Some(at) = v.accept_steer(id) {
@@ -1662,7 +1730,7 @@ impl ThreadView {
     }
 
     fn send_next(&mut self, cx: &mut Context<Self>) {
-        if self.working || self.phase != Phase::Ready || self.workspace_switching || self.permission_changing || self.read_only_unconfirmed
+        if self.authentication_required || self.working || self.phase != Phase::Ready || self.workspace_switching || self.permission_changing || self.read_only_unconfirmed
             || !self.steering.is_empty() || self.is_waiting() || self.restoring_checkpoint()
         {
             return;
@@ -1704,6 +1772,20 @@ impl ThreadView {
         self.preparing = Some(next);
         self.working = true;
         self.turn_seq = self.turn_seq.wrapping_add(1);
+        self.stalled = false;
+        let turn = self.turn_seq;
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_secs(30)).await;
+                if !this.update(cx, |v, cx| {
+                    if v.turn_seq != turn || !v.working || v.phase == Phase::Ended { return false; }
+                    let quiet = v.last_update.or(v.turn_started).is_some_and(|at| at.elapsed() >= Duration::from_secs(180));
+                    let stalled = quiet && v.questions.is_empty() && v.asks.front().is_none();
+                    if stalled != v.stalled { v.stalled = stalled; cx.notify(); }
+                    true
+                }).unwrap_or(false) { break; }
+            }
+        }).detach();
         self.pending_idle = None;
         self.turn_started = Some(Instant::now());
         self.last_turn = None;
@@ -1791,6 +1873,7 @@ impl ThreadView {
             self.remeasure(row);
         }
         self.working = false;
+        self.stalled = false;
         self.last_turn = self.turn_started.take().map(|t| t.elapsed());
         self.interrupting = false;
         self.last_update = None;
@@ -1977,6 +2060,16 @@ impl ThreadView {
                 self.interrupting = true;
             }
             c.notify("session/cancel", json!({"sessionId": s}));
+            let turn = self.turn_seq;
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(Duration::from_secs(10)).await;
+                let _ = this.update(cx, |v, cx| {
+                    if v.turn_seq == turn && v.interrupting {
+                        v.stalled = true;
+                        cx.notify();
+                    }
+                });
+            }).detach();
         }
         cx.notify();
     }
@@ -2399,18 +2492,59 @@ impl ThreadView {
     }
 
     pub(crate) fn set_option(&mut self, id: String, value: String, cx: &mut Context<Self>) {
-        let (Some(c), Some(s)) = (self.connection.clone(), self.session_id.clone()) else { return };
+        if self.connection.is_none() || self.session_id.is_none() { return; }
+        self.option_seq += 1;
+        self.pending_options.insert(id.clone(), (self.option_seq, value));
+        self.send_option(id, cx);
+        cx.notify();
+    }
+
+    fn send_option(&mut self, id: String, cx: &mut Context<Self>) {
+        if self.options_in_flight.contains(&id) { return; }
+        let (Some(c), Some(s), Some((seq, value))) = (self.connection.clone(), self.session_id.clone(), self.pending_options.get(&id).cloned()) else { return };
+        self.options_in_flight.insert(id.clone());
+        let previous = self.thread.config.iter().find(|o| o.id == id).map(|o| o.current.clone());
         let reply = c.request("session/set_config_option", json!({"sessionId": s, "configId": id, "value": value}));
         cx.spawn(async move |this, cx| {
-            if let Ok(result) = reply.await {
-                let _ = this.update(cx, |v, cx| {
-                    v.thread.apply_session(&result);
-                    v.report_chosen(cx);
-                    cx.notify();
-                });
-            }
-        })
-        .detach();
+            let result = startup_deadline("changing the session option", reply, cx).await;
+            let _ = this.update(cx, |v, cx| {
+                v.options_in_flight.remove(&id);
+                let latest = v.pending_options.get(&id).is_some_and(|(latest, _)| *latest == seq);
+                match result {
+                    Ok(result) => {
+                        v.thread.apply_session(&result);
+                        if result.get("configOptions").is_none()
+                            && let Some(option) = v.thread.config.iter_mut().find(|o| o.id == id)
+                            && previous.as_ref() == Some(&option.current)
+                        { option.current.clone_from(&value); }
+                        if latest {
+                            v.pending_options.remove(&id);
+                            if v.thread.config.iter().find(|o| o.id == id).is_some_and(|o| o.current != value) {
+                                let row = v.thread.notice("The agent kept a different session option value.", true);
+                                v.remeasure(row);
+                            }
+                        }
+                        v.report_chosen(cx);
+                    }
+                    Err(error) => {
+                        if error.starts_with("Timed out") {
+                            v.pending_options.remove(&id);
+                            v.queue_held = true;
+                            v.error = Some("The agent did not confirm the option change. Retry the session to confirm its state.".into());
+                        } else if latest { v.pending_options.remove(&id); }
+                        if acp::looks_like_auth_error(&error) { v.needs_login(cx); }
+                        let row = v.thread.notice(format!("Could not change the session option: {error}"), true);
+                        v.remeasure(row);
+                    }
+                }
+                if !latest && !v.authentication_required { v.send_option(id, cx); }
+                cx.notify();
+            });
+        }).detach();
+    }
+
+    pub(super) fn option_value<'a>(&'a self, option: &'a crate::harness::thread::ConfigOption) -> &'a str {
+        self.pending_options.get(&option.id).map_or(option.current.as_str(), |(_, value)| value.as_str())
     }
 
     fn intercept(&mut self, ev: &KeystrokeEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -2652,7 +2786,7 @@ impl ThreadView {
                 s.set_value("", window, cx);
                 s.focus(window, cx);
             });
-            let current_id = self.thread.option("model").map(|m| m.current.as_str());
+            let current_id = self.thread.option("model").map(|m| self.option_value(m));
             let models = self.unified_models();
             let current = models
                 .iter()
@@ -2689,7 +2823,7 @@ impl ThreadView {
                 let labels: Vec<String> = non_default.iter().map(|(_, n)| short_effort_label(n)).collect();
                 let ix = values
                     .iter()
-                    .position(|v| v == &opt.current)
+                    .position(|v| v == self.option_value(opt))
                     .or_else(|| values.iter().position(|v| v.eq_ignore_ascii_case("medium")))
                     .unwrap_or(1.min(values.len() - 1));
                 return (values, labels, ix, Some(opt.id.clone()));
@@ -2917,9 +3051,34 @@ impl ThreadView {
         }
     }
 
+    /// Streaming and background parsing can invalidate the same row repeatedly within a frame.
+    pub(super) fn schedule_remeasure(&mut self, from: usize, cx: &mut Context<Self>) {
+        self.invalidate_groups(from);
+        if let Some(pending) = &mut self.pending_remeasure { *pending = (*pending).min(from); return; }
+        self.pending_remeasure = Some(from);
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_millis(16)).await;
+            let _ = this.update(cx, |v, cx| {
+                if let Some(from) = v.pending_remeasure.take() { v.remeasure(from); cx.notify(); }
+            });
+        }).detach();
+    }
+
+    fn invalidate_groups(&mut self, from: usize) {
+        let rows = self.thread.entries.len();
+        let cache = self.run_cache.get_mut();
+        // Text/status updates do not change grouping. Keep the prefix for structural changes.
+        if from == 0 || cache.entries != rows || cache.kinds.get(from).copied() != self.thread.entries.get(from).map(timeline::run_kind) {
+            let start = cache.ranges.get(from.saturating_sub(1)).and_then(|r| r.as_ref()).map_or(from, |r| r.start);
+            cache.ranges.truncate(start);
+            cache.kinds.truncate(start);
+            cache.entries = rows;
+        }
+    }
+
     /// Measure entry `from` and every one after it again; the list keeps its place above them.
     pub(crate) fn remeasure(&mut self, from: usize) {
-        self.run_cache.get_mut().ranges.clear();
+        self.invalidate_groups(from);
         let rows = self.thread.entries.len();
         let from = self.group_start_before(from).min(from).min(self.rows).min(rows);
         let shared = self.rows.min(rows);
@@ -3328,6 +3487,11 @@ fn str_of(value: &Value, key: &str) -> String {
 
 #[cfg(all(test, feature = "screenshots"))]
 impl ThreadView {
+    pub(crate) fn screenshot_login_failure(&mut self, cx: &mut Context<Self>) {
+        self.working = false;
+        self.needs_login(cx);
+    }
+
     /// The ACP fixture is connected; stage a busy conversation without invoking a model.
     pub(crate) fn screenshot_activity(&mut self, compact: bool, scrolled: bool, cx: &mut Context<Self>) {
         assert!(self.phase == Phase::Ready, "the offline ACP fixture must be connected");
@@ -3373,6 +3537,36 @@ mod tests {
             options: vec![], prompt: None, prior_entries: vec![], inline_visuals: true,
             server: Some(("definitely-not-a-real-program-m4code".into(), vec![])),
         }
+    }
+
+    #[gpui::test]
+    fn text_streaming_retains_group_cache_and_structural_changes_merge_runs(cx: &mut gpui::TestAppContext) {
+        crate::datadir::use_throwaway_folders();
+        cx.update(gpui_kit::init);
+        let dir = tempfile::tempdir().unwrap();
+        let mut start = test_start(dir.path().into(), Harness::Claude);
+        start.prior_entries = (0..2000).flat_map(|_| [Entry::Thought("thinking".into()), Entry::Agent("text".into())]).collect();
+        let (view, cx) = cx.add_window_view(|window, cx| super::ThreadView::new(start, window, cx));
+        view.update(cx, |v, cx| {
+            v.remeasure(0);
+            assert_eq!(v.group_start_before(4000), 4000);
+            let before = v.run_cache.borrow().ranges.as_ptr();
+            for _ in 0..100 {
+                if let Entry::Agent(text) = &mut v.thread.entries[3999] { text.push('x'); }
+                v.remeasure(3999);
+            }
+            assert_eq!(v.run_cache.borrow().ranges.as_ptr(), before, "text chunks must keep the grouping allocation");
+            v.thread.entries[3999] = Entry::Thought("more thinking".into());
+            v.remeasure(3999);
+            assert_eq!(v.group_start_before(4000), 3998);
+            v.thread.entries = vec![Entry::Thought("thinking".into()), Entry::Agent("text".into()), Entry::Agent("text".into())];
+            v.remeasure(0);
+            assert_eq!(v.group_start_before(3), 3);
+            v.schedule_remeasure(1, cx);
+            v.thread.entries[2] = Entry::Thought("new group".into());
+            v.schedule_remeasure(2, cx);
+            assert_eq!(v.group_start_before(3), 2, "coalescing must retain structural changes after an earlier text update");
+        });
     }
 
     #[gpui::test]

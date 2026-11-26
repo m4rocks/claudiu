@@ -1,4 +1,6 @@
-use anyhow::{Context as _, Result, ensure};
+use anyhow::{Result, ensure};
+#[cfg(not(target_os = "macos"))]
+use anyhow::Context as _;
 use gpui::{HeadlessAppContext, Keystroke, PlatformHeadlessRenderer};
 use gpui_wgpu::CosmicTextSystem;
 use std::{path::Path, sync::Arc};
@@ -21,9 +23,9 @@ fn renderer() -> Result<Option<Box<dyn PlatformHeadlessRenderer>>> {
 #[ignore = "requires an offscreen GPU renderer; run with just screenshot"]
 fn capture() -> Result<()> {
     let scenario = std::env::var("M4CODE_SCREENSHOT_SCENARIO").unwrap_or_else(|_| "home".into());
-    let session_scenario = matches!(scenario.as_str(), "session" | "session-no-compact" | "session-scrolled" | "toast" | "review" | "review-hover");
+    let session_scenario = matches!(scenario.as_str(), "session" | "session-auth" | "session-no-compact" | "session-scrolled" | "toast" | "review" | "review-hover");
     let shortcut = match scenario.as_str() {
-        "home" | "dashboards-disabled" | "picker" | "context-menu" | "github" | "github-wide" | "editor" | "session" | "session-no-compact" | "session-scrolled" | "toast" | "harnesses" | "review" | "review-hover" => None,
+        "home" | "dashboards-disabled" | "picker" | "context-menu" | "github" | "github-wide" | "github-issues" | "editor" | "session" | "session-auth" | "session-no-compact" | "session-scrolled" | "toast" | "harnesses" | "review" | "review-hover" => None,
         "settings" => Some(Keystroke::parse("secondary-,").expect("Settings shortcut")),
         _ => anyhow::bail!("unknown screenshot scenario {scenario:?}; use home, dashboards-disabled, settings, picker, context-menu, github, github-wide, editor, session, session-no-compact, session-scrolled, toast, harnesses, review or review-hover"),
     };
@@ -41,13 +43,13 @@ fn capture() -> Result<()> {
     // Keep the fixture offline and independent of installed CLIs, usage counters, and live model catalogs.
     settings.update_url = Some(String::new());
     settings.enabled_harnesses = Some(Vec::new());
-    if scenario == "dashboards-disabled" {
+    if matches!(scenario.as_str(), "dashboards-disabled" | "session-auth") {
         settings.enabled_harnesses = Some(vec![crate::harness::Harness::Claude]);
     }
     settings.auto_compact_threshold = 75;
     settings.auto_compact = scenario != "session-no-compact";
     settings.custom_subagents = crate::harness::subagents::CustomSubagents(Default::default());
-    if matches!(scenario.as_str(), "github" | "github-wide") {
+    if matches!(scenario.as_str(), "github" | "github-wide" | "github-issues") {
         // Request a wide pane; github-wide also widens the window to leave it enough room.
         store.data.layout.right_gh_w = Some(900.0);
     }
@@ -108,15 +110,25 @@ fn capture() -> Result<()> {
         })?;
         cx.run_until_parked();
     }
-    if matches!(scenario.as_str(), "github" | "github-wide") {
+    if matches!(scenario.as_str(), "github" | "github-wide" | "github-issues") {
         let root = fixture.path().to_path_buf();
         cx.update_window(window, |_, window, app| workspace.update(app, |ws, cx| ws.open_github(root, window, cx)))?;
         cx.run_until_parked();
         cx.update_window(window, |_, _, app| {
             let view = workspace.read(app).right_gh.as_ref().and_then(|id| workspace.read(app).gh_pane(id)).map(|p| p.view.clone());
-            if let Some(view) = view {
+            let view = view.expect("GitHub screenshot pane must be open");
+            {
                 view.update(app, |v, cx| {
                     github_sample(v);
+                    if scenario == "github-issues" {
+                        v.kind = crate::github::model::Kind::Issue;
+                        v.lists[0].items = v.lists[1].items.clone();
+                        for item in &mut v.lists[0].items { item.kind = crate::github::model::Kind::Issue; }
+                        if let Some(detail) = &mut v.detail {
+                            detail.kind = crate::github::model::Kind::Issue;
+                            if let Some(data) = &mut detail.data { data.item.kind = crate::github::model::Kind::Issue; data.pr = None; }
+                        }
+                    }
                     cx.notify();
                 });
             }
@@ -141,6 +153,13 @@ fn capture() -> Result<()> {
         cx.update_window(window, |_, _, app| workspace.update(app, |ws, cx| {
             if let Some(view) = ws.active_id().and_then(|id| ws.live_view(id)).and_then(|v| v.thread()).cloned() {
                 view.update(cx, |v, cx| v.screenshot_activity(scenario != "session-no-compact", scenario == "session-scrolled", cx));
+                if scenario == "session-auth" {
+                    view.update(cx, |v, cx| v.screenshot_login_failure(cx));
+                    let state = ws.limits_state.get_mut(crate::harness::Harness::Claude);
+                    state.authentication_required = true;
+                    state.error = Some("Usage is stale. Sign in to refresh it.".into());
+                    cx.notify();
+                }
                 if matches!(scenario.as_str(), "review" | "review-hover") {
                     view.update(cx, |v, cx| v.screenshot_review(cx));
                 }
@@ -174,7 +193,7 @@ fn capture() -> Result<()> {
             cx.run_until_parked();
             let open = cx.update_window(window, |_, _, app| {
                 let ws = workspace.read(app);
-                ws.editor_owner().and_then(|id| ws.panes.get(&id)).is_some_and(|pane| pane.shown().is_some())
+                ws.editor_owner().and_then(|id| ws.panes.get(&id)).is_some_and(|pane| pane.shown().is_some_and(|tab| !tab.loading))
             })?;
             if open {
                 break;
@@ -272,7 +291,7 @@ fn github_sample(v: &mut crate::github::view::GithubView) {
         base: "main".into(),
     };
     let items = vec![
-        item(482, "Show a breadcrumb over the editor", State::Open, false, "ana", 3, vec![label("ui", "1d76db"), label("editor", "5319e7")], Some("SUCCESS"), Some("APPROVED"), 4),
+        item(482, "Keep long issue and pull request titles within the panel while the editor, conversation and repository controls remain accessible", State::Open, false, "ana", 3, vec![label("ui", "1d76db"), label("editor", "5319e7")], Some("SUCCESS"), Some("APPROVED"), 4),
         item(479, "Fix the flip-flop between working and done", State::Open, false, "codex-bot", 9, vec![label("bug", "d73a4a")], Some("FAILURE"), Some("CHANGES_REQUESTED"), 7),
         item(476, "Theme tokens for every color", State::Open, true, "mario", 26, vec![label("theme", "0e8a16")], Some("PENDING"), None, 1),
         item(471, "Kit buttons in Settings", State::Merged, false, "ana", 50, vec![], Some("SUCCESS"), Some("APPROVED"), 2),

@@ -127,7 +127,7 @@ impl Workspace {
                 ws.git_busy = None;
                 ws.home.creating = None;
                 let launch = std::mem::take(&mut ws.home.launch_when_created);
-                ws.store.refresh_git();
+                ws.refresh_git_at(Some(&folder), cx);
                 ws.store.save_if_dirty();
                 match result {
                     Ok(()) => {

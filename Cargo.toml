@@ -1,6 +1,6 @@
 [package]
 name = "m4code"
-version = "0.11.0"
+version = "0.11.1"
 edition = "2024"
 description = "A native desktop workspace for coding agents: Claude Code, Codex, OpenCode and Antigravity sessions, projects and history"
 repository = "https://github.com/m4rocks/m4code"

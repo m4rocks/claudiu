@@ -21,6 +21,7 @@ const CODEX_LOG_POLL: Duration = Duration::from_secs(3);
 pub struct LimitsState {
     /// True while a background probe is in flight.
     pub loading: bool,
+    pub authentication_required: bool,
     /// When the last probe started.
     pub last_asked: Option<Instant>,
     /// Error message from the most recent failed probe (cleared on success or live update).
@@ -91,7 +92,7 @@ impl Workspace {
                 Harness::OpenCode => continue,
             };
             let state = self.limits_state.get(harness);
-            if state.loading {
+            if state.loading || state.authentication_required {
                 continue;
             }
             let expired = self.harness_has_expired_window(harness, now_unix);
@@ -170,6 +171,7 @@ impl Workspace {
         match read {
             Ok(pools) => {
                 state.error = None;
+                state.authentication_required = false;
                 state.retry_after = None;
                 match harness {
                     Harness::Claude => {
@@ -187,12 +189,13 @@ impl Workspace {
                 self.notify_threads_usage(harness, cx);
             }
             Err(err) => {
-                state.error = Some(err);
-                state.retry_after = Some(Instant::now() + FAILED_RETRY_DELAY);
+                state.authentication_required = crate::harness::acp::looks_like_auth_error(&err);
+                state.error = Some(if state.authentication_required { format!("Usage is stale. {}", crate::harness::acp::login_hint(harness)) } else { err });
+                state.retry_after = (!state.authentication_required).then(|| Instant::now() + FAILED_RETRY_DELAY);
             }
         }
         cx.notify();
-        if run_again && self.limits_harness_active(harness) {
+        if run_again && !self.limits_state.get(harness).authentication_required && self.limits_harness_active(harness) {
             self.spawn_limits_probe(harness, cx);
         }
     }
@@ -217,6 +220,7 @@ impl Workspace {
         if changed {
             let state = self.limits_state.get_mut(harness);
             state.error = None;
+            state.authentication_required = false;
             state.retry_after = None;
             self.notify_threads_usage(harness, cx);
             cx.notify();
@@ -334,6 +338,7 @@ impl Workspace {
 
     /// Request a fresh usage-limits probe for `harness` (e.g. after a turn finishes).
     pub(crate) fn request_limits_refresh(&mut self, harness: Harness, cx: &mut Context<Self>) {
+        if self.limits_state.get(harness).authentication_required { return; }
         if !matches!(harness, Harness::Claude | Harness::Codex) || !self.limits_harness_active(harness) {
             return;
         }
@@ -346,6 +351,9 @@ impl Workspace {
 
     /// Manual refresh triggered from the sidebar usage footer.
     pub(crate) fn refresh_all_limits(&mut self, cx: &mut Context<Self>) {
+        for harness in [Harness::Claude, Harness::Codex, Harness::Antigravity] {
+            self.limits_state.get_mut(harness).authentication_required = false;
+        }
         for harness in [Harness::Claude, Harness::Codex] {
             if !self.limits_harness_active(harness) {
                 continue;

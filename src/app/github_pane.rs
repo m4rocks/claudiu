@@ -130,6 +130,33 @@ impl Workspace {
         }
     }
 
+    pub(crate) fn sign_in_to_harness(&mut self, harness: Harness, window: &mut Window, cx: &mut Context<Self>) {
+        let (program, args): (&str, &[&str]) = match harness {
+            Harness::Claude => ("claude", &["auth", "login"]),
+            Harness::Codex => ("codex", &["login"]),
+            Harness::OpenCode => ("opencode", &["auth", "login"]),
+            Harness::Antigravity => ("agy", &[]),
+        };
+        let configured = (harness == Harness::Claude).then(|| self.claude_exe.clone()).flatten();
+        cx.spawn_in(window, async move |this, cx| {
+            let executable = cx.background_executor().spawn(async move { configured.or_else(|| crate::harness::find(program)) }).await;
+            let _ = this.update_in(cx, |ws, window, cx| {
+                let Some(executable) = executable else {
+                    ws.show_toast(format!("{program} was not found. Install its CLI to sign in."), Some(("Check setup".into(), Act::OpenSetup)), cx);
+                    return;
+                };
+                let home = platform::home_dir().unwrap_or_else(|| PathBuf::from("."));
+                let spec = SpawnSpec { program: executable.to_string_lossy().into_owned(), args: args.iter().map(|arg| (*arg).into()).collect(), cwd: Some(home.clone()), ..Default::default() };
+                let record = SessionRecord {
+                    id: new_id(), kind: SessionKind::Shell, title: format!("{} sign in", harness.name()),
+                    custom_title: None, auto_title: None, project_id: None, cwd: home,
+                    created_at: now(), last_active: now(), exit_code: None, hidden: false, agent: None,
+                };
+                ws.start(record, spec, true, window, cx);
+            });
+        }).detach();
+    }
+
     /// `gh auth login` in a terminal tab.
     pub(super) fn sign_in_to_github(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(exe) = crate::github::cli::locate() else { return };

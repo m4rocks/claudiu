@@ -44,7 +44,7 @@ impl GithubView {
                         .gap(px(8.0))
                         .text_size(crate::panels::scale::px(18.0))
                         .font_weight(FontWeight::SEMIBOLD)
-                        .child(it.title.clone())
+                        .child(div().flex_1().min_w_0().overflow_hidden().whitespace_normal().child(it.title.clone()))
                         .child(div().text_color(theme().subtle_foreground).font_weight(FontWeight::NORMAL).child(format!("#{}", it.number))),
                 )
                 .when(d.can_update || d.mine, |r| r.child(icon_action("gh-edit-title", IconName::Pencil, "Edit title").on_click(go(cx, GhAct::EditStart(Edit::Title)))))
@@ -325,17 +325,18 @@ impl GithubView {
         for (n, e) in d.timeline.iter().enumerate() {
             match e {
                 Entry::Comment(c) => {
+                    let pending = c.id.starts_with("pending-");
                     let menu = PopKind::Comment(c.id.clone(), c.can_edit, c.can_delete, format!("{}#issuecomment-{}", it.url, c.id));
                     col = col.child(self.card(
                         &c.id,
                         &c.author,
                         &c.assoc,
-                        "commented",
+                        if pending && c.assoc == "Sending…" { "sending" } else { "commented" },
                         c.created,
                         c.edited,
                         &c.body,
-                        Some((&c.id, &c.reactions)),
-                        Some(menu),
+                        (!pending).then_some((&c.id, &c.reactions)),
+                        (!pending).then_some(menu),
                         c.can_edit.then(|| Edit::Comment(c.id.clone())),
                         t,
                         cx,

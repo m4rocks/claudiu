@@ -327,6 +327,18 @@ fn restart_reuses_provider_session_respects_capabilities_and_records_cache_usage
         assert!(prompts.contains("loaded fake-session"));
     });
 
+    // Reopening without a live view loads history asynchronously and must still suppress duplicate replay.
+    step(&mut cx, &|ws, window, cx| {
+        ws.end_live(&id, window, cx);
+        ws.show_session(&id, window, cx);
+    });
+    wait_ready(&mut cx, true);
+    ws.read_with(&cx, |ws, app| {
+        let view = ws.live_view(&id).unwrap().thread().unwrap().read(app);
+        let users: Vec<_> = view.thread.entries.iter().filter_map(|e| match e { Entry::User(t) => Some(t.as_str()), _ => None }).collect();
+        assert_eq!(users, ["first turn"], "asynchronously restored history must not duplicate provider replay");
+    });
+
     // After a handoff, restarting keeps m4code's canonical history instead of letting provider replay clobber it.
     step(&mut cx, &|ws, window, cx| ws.dynamic_handoff(&id, Harness::Codex, None, "second turn".into(), false, None, window, cx));
     wait_ready(&mut cx, true);
@@ -360,10 +372,10 @@ fn restart_reuses_provider_session_respects_capabilities_and_records_cache_usage
     let until = std::time::Instant::now() + Duration::from_secs(10);
     loop {
         cx.run_until_parked();
-        if ws.read_with(&cx, |ws, _| ws.live_view(&id).is_none()) {
+        if ws.read_with(&cx, |ws, app| ws.live_view(&id).is_some_and(|view| !view.is_running(app) && view.start_error(app).is_some())) {
             break;
         }
-        assert!(std::time::Instant::now() < until, "unsupported reopen should end the replacement");
+        assert!(std::time::Instant::now() < until, "unsupported reopen should retain an ended view with recovery controls");
         std::thread::yield_now();
     }
     ws.read_with(&cx, |ws, _| {
@@ -1393,4 +1405,105 @@ for line in sys.stdin:"#)
             });
         }
     }
+}
+
+#[test]
+fn expired_login_retains_the_session_and_retries_without_repeating_the_prompt() {
+    let _dirs = crate::datadir::use_throwaway_folders();
+    let work = tempfile::tempdir().unwrap();
+    let server = fake_agent(work.path());
+    let script = PathBuf::from(&server.1[0]);
+    let healthy = std::fs::read_to_string(&script).unwrap();
+    let expired = healthy.replace(r#""result": {"sessionId": "fake-session"}"#, r#""error": {"code": -32000, "message": "Credentials unavailable", "data": {"provider": "codex"}}"#);
+    assert_ne!(expired, healthy);
+    std::fs::write(&script, expired).unwrap();
+    let mut cx = TestAppContext::single();
+    cx.update(|app| { gpui_kit::init(app); crate::panels::theme::install(app); });
+    let (window, ws) = cx.update(|app| gpui_kit::open_window(Default::default(), app, |window, app| app.new(|cx| Workspace::new(window, vec![], cx)))).unwrap();
+    cx.update_window(window, |_, window, app| ws.update(app, |ws, cx| {
+        ws.acp_server = Some(server.clone());
+        ws.new_session_from_home(Harness::Codex, None, work.path().into(), Some("Keep this task".into()), None, None, window, cx);
+    })).unwrap();
+    let id = ws.read_with(&cx, |ws, _| ws.active_id().unwrap().clone());
+    let until = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        cx.run_until_parked();
+        if ws.read_with(&cx, |ws, app| ws.live_view(&id).is_some_and(|view| !view.is_running(app) && view.start_error(app).is_some_and(|error| error.contains("codex login")))) { break; }
+        assert!(std::time::Instant::now() < until, "login failure never surfaced");
+        std::thread::yield_now();
+    }
+    assert!(crate::thread::has_saved_queue(&id), "the initial task must remain queued");
+    std::fs::write(&script, healthy).unwrap();
+    cx.update_window(window, |_, window, app| ws.update(app, |ws, cx| ws.resume(&id, window, cx))).unwrap();
+    let until = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        cx.run_until_parked();
+        if ws.read_with(&cx, |ws, app| ws.live_view(&id).is_some_and(|view| view.is_running(app) && !view.thread().unwrap().read(app).is_loading())) { break; }
+        assert!(std::time::Instant::now() < until, "retry never connected");
+        std::thread::yield_now();
+    }
+    let prompts = work.path().join("fake_agent.py.prompts");
+    assert!(!prompts.exists(), "reconnecting must leave the queue held instead of repeating work");
+    assert!(crate::thread::has_saved_queue(&id));
+}
+
+#[test]
+fn option_changes_coalesce_and_rejections_restore_the_confirmed_model() {
+    let _dirs = crate::datadir::use_throwaway_folders();
+    let work = tempfile::tempdir().unwrap();
+    let server = fake_agent(work.path());
+    let script = PathBuf::from(&server.1[0]);
+    let source = std::fs::read_to_string(&script).unwrap()
+        .replace("for line in sys.stdin:", r#"import time
+def options(model):
+    return [{"id": "model", "name": "Model", "category": "model", "type": "select", "currentValue": model, "options": [{"value": v, "name": v} for v in ["a", "b", "c", "bad"]]}]
+for line in sys.stdin:"#)
+        .replace(r#""result": {"sessionId": "fake-session"}"#, r#""result": {"sessionId": "fake-session", "configOptions": options("a")}"#)
+        .replace(r#"    elif method == "session/list":"#, r#"    elif method == "session/set_config_option":
+        value = m["params"]["value"]
+        with open(__file__ + ".options", "a") as log:
+            log.write(value + "\n")
+        time.sleep(0.02)
+        if value == "bad":
+            send({"jsonrpc": "2.0", "id": i, "error": {"code": -32602, "message": "model unavailable"}})
+        else:
+            send({"jsonrpc": "2.0", "id": i, "result": {"configOptions": options(value)}})
+    elif method == "session/list":"#);
+    std::fs::write(&script, source).unwrap();
+    let mut cx = TestAppContext::single();
+    cx.update(|app| { gpui_kit::init(app); crate::panels::theme::install(app); });
+    let (window, ws) = cx.update(|app| gpui_kit::open_window(Default::default(), app, |window, app| app.new(|cx| Workspace::new(window, vec![], cx)))).unwrap();
+    cx.update_window(window, |_, window, app| ws.update(app, |ws, cx| {
+        ws.acp_server = Some(server.clone());
+        ws.new_session_from_home(Harness::Codex, None, work.path().into(), None, None, None, window, cx);
+    })).unwrap();
+    let id = ws.read_with(&cx, |ws, _| ws.active_id().unwrap().clone());
+    let until = std::time::Instant::now() + Duration::from_secs(10);
+    let thread = loop {
+        cx.run_until_parked();
+        let thread = ws.read_with(&cx, |ws, _| ws.live_view(&id).and_then(SessionView::thread).cloned()).unwrap();
+        if thread.read_with(&cx, |v, _| !v.is_loading()) { break thread; }
+        assert!(std::time::Instant::now() < until, "adapter did not start");
+        std::thread::yield_now();
+    };
+    thread.update(&mut cx, |v, cx| {
+        for value in ["b", "skipped", "c"] { v.set_option("model".into(), value.into(), cx); }
+    });
+    let until = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        cx.run_until_parked();
+        if thread.read_with(&cx, |v, _| v.thread.option("model").is_some_and(|o| o.current == "c")) { break; }
+        assert!(std::time::Instant::now() < until, "latest selection was not confirmed");
+        std::thread::yield_now();
+    }
+    assert_eq!(std::fs::read_to_string(work.path().join("fake_agent.py.options")).unwrap(), "b\nc\n");
+    thread.update(&mut cx, |v, cx| v.set_option("model".into(), "bad".into(), cx));
+    let until = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        cx.run_until_parked();
+        if thread.read_with(&cx, |v, _| v.thread.entries.iter().any(|e| matches!(e, crate::harness::thread::Entry::Notice { text, error: true } if text.contains("model unavailable")))) { break; }
+        assert!(std::time::Instant::now() < until, "rejection was not surfaced");
+        std::thread::yield_now();
+    }
+    assert_eq!(thread.read_with(&cx, |v, _| v.thread.option("model").unwrap().current.clone()), "c");
 }

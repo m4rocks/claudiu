@@ -179,10 +179,17 @@ pub struct ListModel {
     scale: u32,
 }
 
-/// The session list as its own view, so gpui reuses its last drawing on frames that don't change it: terminal output,
-/// editor scrolling and the right panel's animations redraw the window, and rebuilding every row for each of those
-/// frames was most of their cost. It draws the workspace's `ListModel` and nothing else of its state, so comparing
-/// the model tells when the drawing is out of date.
+#[derive(PartialEq)]
+struct RecentKey { revision: u64, len: usize, query: String, filter: Option<Id>, running: Vec<Id>, open: bool }
+
+/// Filtered session indices, sorted only when Recent is open. Row models are built only for visible entries.
+#[derive(Default)]
+pub struct RecentCache {
+    key: Option<RecentKey>,
+    rows: std::sync::Arc<Vec<usize>>,
+}
+
+/// The running list has its own cached view so spinner frames do not rebuild the workspace.
 pub struct SessionList {
     ws: WeakEntity<Workspace>,
 }
@@ -580,32 +587,27 @@ impl Workspace {
 
     /// The Claude Code sessions that aren't running, newest first, narrowed like the running ones. Archived ones only
     /// show up in a search.
-    fn recent_rows(&self, cx: &gpui::App) -> Vec<Row> {
+    fn recent_rows(&mut self, cx: &gpui::App) -> std::sync::Arc<Vec<usize>> {
         let q = self.search.trim().to_lowercase();
         let filter = self.project_filter().map(|p| p.id.clone());
         let running = self.running_ids(cx);
-        let mut recent: Vec<&SessionRecord> = self
-            .store
-            .data
-            .sessions
-            .iter()
-            .filter(|s| s.kind == SessionKind::Agent && (!q.is_empty() || !s.hidden) && !running.contains(&s.id) && self.listed(&q, filter.as_ref(), s))
-            .collect();
-        recent.sort_by_key(|r| std::cmp::Reverse(r.last_active));
-        recent
-            .into_iter()
-            .map(|rec| {
-                let mut row = self.row_for(rec, false, true);
-                row.scope = "rec";
-                row
-            })
-            .collect()
+        let open = !q.is_empty() || self.store.data.layout.recent_open;
+        let key = RecentKey { revision: self.store.revision(), len: self.store.data.sessions.len(), query: q.clone(), filter: filter.clone(), running: running.clone(), open };
+        if self.recent_cache.key.as_ref() != Some(&key) {
+            let running: std::collections::HashSet<_> = running.iter().collect();
+            let mut rows: Vec<_> = self.store.data.sessions.iter().enumerate()
+                .filter(|(_, s)| s.kind == SessionKind::Agent && (!q.is_empty() || !s.hidden) && !running.contains(&s.id) && self.listed(&q, filter.as_ref(), s))
+                .map(|(ix, _)| ix).collect();
+            if open { rows.sort_by_key(|&ix| std::cmp::Reverse(self.store.data.sessions[ix].last_active)); }
+            self.recent_cache = RecentCache { key: Some(key), rows: std::sync::Arc::new(rows) };
+        }
+        self.recent_cache.rows.clone()
     }
 
     /// RECENT at the bottom of the sidebar: a header that opens a list of the sessions that aren't running. The list
     /// takes at most `RECENT_SHARE` of the window and scrolls. A search opens it, so what matches shows. Hidden when
     /// there are no such sessions and nothing is searched.
-    fn recent_section(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<Div> {
+    fn recent_section(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<Div> {
         let rows = self.recent_rows(cx);
         let searching = !self.search.trim().is_empty();
         if rows.is_empty() && !searching && self.project_filter().is_none() {
@@ -632,10 +634,19 @@ impl Workspace {
             if rows.is_empty() {
                 list = list.child(self.list_item(Item::Note("No sessions match"), me, cx));
             }
-            for r in rows {
-                list = list.child(self.session_row(r, false, me, cx));
-            }
             let max = (f32::from(window.viewport_size().height) * RECENT_SHARE).max(ROW_H * 4.0);
+            let pitch = ROW_H + LIST_GAP;
+            let total = (rows.len() as f32 * pitch - LIST_GAP).max(0.0);
+            let top = (-f32::from(self.recent_scroll.handle().offset().y)).min((total - max).max(0.0));
+            let first = ((top - OVERSCAN).max(0.0) / pitch).floor() as usize;
+            let end = (((top + max + OVERSCAN) / pitch).ceil() as usize).min(rows.len());
+            let mut stack = div().relative().w_full().h(px(total));
+            for pos in first..end {
+                let mut row = self.row_for(&self.store.data.sessions[rows[pos]], false, true);
+                row.scope = "rec";
+                stack = stack.child(div().absolute().top(px(pos as f32 * pitch)).left_0().right_0().child(self.session_row(row, false, me, cx)));
+            }
+            list = list.child(stack);
             section = section.child(self.recent_scroll.wire(div().id("recent-scroll").w_full().max_h(px(max)), window).child(list));
         }
         Some(section)
@@ -1012,6 +1023,14 @@ impl Workspace {
                     ));
                 }
                 None => {}
+            }
+        }
+        for harness in [Harness::Claude, Harness::Codex, Harness::Antigravity] {
+            if settings.harness_enabled(harness) && self.limits_state.get(harness).authentication_required {
+                rows.push(div().flex().flex_wrap().items_center().gap(px(6.0))
+                    .child(div().text_size(crate::panels::scale::px(11.0)).text_color(theme().warning).child(format!("{} usage is stale.", harness.name())))
+                    .child(crate::panels::ui::button::text(format!("usage-sign-in-{}", harness.key()), "Sign in", false)
+                        .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.sign_in_to_harness(harness, window, cx)))));
             }
         }
         if rows.is_empty() {

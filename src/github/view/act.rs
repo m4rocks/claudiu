@@ -272,32 +272,65 @@ impl GithubView {
     }
 
     pub(super) fn comment(&mut self, close: Option<bool>, window: &mut Window, cx: &mut Context<Self>) {
+        if self.busy.is_some() || self.gh.is_none() { return; }
         let body = self.composer.read(cx).value().trim().to_string();
         let (Some(id), Some(d)) = (self.current_id(), self.detail.as_ref()) else { return };
-        let pull = d.kind == Kind::Pull;
-        if body.is_empty() && close.is_none() {
-            return;
+        if body.is_empty() && close.is_none() { return; }
+        let (kind, number) = (d.kind, d.number);
+        let pending_id = format!("pending-{}", uuid::Uuid::new_v4());
+        self.begin_optimistic();
+        let snapshot = self.optimistic.take();
+        if !body.is_empty() {
+            let author = self.info.as_ref().map_or_else(String::new, |info| info.viewer.clone());
+            if let Some(d) = self.detail.as_mut().and_then(|d| d.data.as_mut()) {
+                d.timeline.push(Entry::Comment(Comment {
+                    id: pending_id.clone(), author, assoc: "Sending…".into(), body: body.clone(), created: crate::store::now(),
+                    edited: false, can_edit: false, can_delete: false, reactions: Vec::new(),
+                }));
+            }
         }
-        let what = if close.is_some() { "Saving…" } else { "Commenting…" };
-        self.mutate(
-            what,
-            window,
-            cx,
-            move |gh, _| {
-                if !body.is_empty() {
-                    gh.graphql(cli::M_COMMENT, json!({"id": id, "body": body}))?;
+        self.busy = Some("Saving…".into());
+        cx.notify();
+        let sent_body = body.clone();
+        self.spawn(window, cx, move |gh, _| {
+            comment_operations(&id, &body, close, kind, |query, vars| gh.graphql(query, vars))
+        }, move |v, (posted, result), window, cx| {
+            v.busy = None;
+            let same = v.detail.as_ref().is_some_and(|d| d.kind == kind && d.number == number);
+            if let Some(posted) = &posted {
+                if same {
+                    if let Some(d) = v.detail.as_mut().and_then(|d| d.data.as_mut()) {
+                        for entry in &mut d.timeline {
+                            if let Entry::Comment(comment) = entry && comment.id == pending_id {
+                                comment.id = posted["id"].as_str().unwrap_or(&pending_id).to_string();
+                                comment.assoc.clear();
+                                comment.can_edit = posted["id"].is_string();
+                                comment.can_delete = comment.can_edit;
+                            }
+                        }
+                        d.item.comments += 1;
+                    }
+                    // Never erase a new draft typed while the request was in flight.
+                    if v.composer.read(cx).value().trim() == sent_body {
+                        v.composer.update(cx, |s, cx| s.set_value("", window, cx));
+                    }
                 }
-                match (close, pull) {
-                    (Some(true), true) => gh.graphql(cli::M_CLOSE_PR, json!({"id": id}))?,
-                    (Some(true), false) => gh.graphql(cli::M_CLOSE_ISSUE, json!({"id": id, "reason": "COMPLETED"}))?,
-                    (Some(false), true) => gh.graphql(cli::M_REOPEN_PR, json!({"id": id}))?,
-                    (Some(false), false) => gh.graphql(cli::M_REOPEN_ISSUE, json!({"id": id}))?,
-                    (None, _) => Value::Null,
-                };
-                Ok(())
-            },
-            |v, window, cx| v.composer.update(cx, |s, cx| s.set_value("", window, cx)),
-        );
+            } else if result.is_err() && let Some(snapshot) = snapshot {
+                v.rollback_optimistic(snapshot);
+            }
+            match result {
+                Ok(_) => {
+                    if same && let Some(close) = close { v.show_state(if close { State::Closed } else { State::Open }, cx); v.optimistic = None; }
+                }
+                Err(error) => {
+                    if error.kind == ErrKind::SignedOut { v.phase = Phase::SignedOut; }
+                    let prefix = if posted.is_some() { "Comment posted, but changing the item state failed. Retry close/reopen separately: " } else { "" };
+                    v.toast(format!("{prefix}{}", error.msg), true, cx);
+                }
+            }
+            v.reload_all(window, cx);
+            cx.notify();
+        });
     }
 
     pub(super) fn toggle_label(&mut self, label: Label, window: &mut Window, cx: &mut Context<Self>) {
@@ -321,6 +354,7 @@ impl GithubView {
         if self.busy.is_some() {
             return;
         }
+        self.begin_optimistic();
         let Some(d) = self.detail.as_mut() else { return };
         if let Some(data) = d.data.as_mut() {
             f(&mut data.item);
@@ -346,6 +380,7 @@ impl GithubView {
         let (Some(id), Some(d)) = (self.current_id(), self.detail_data()) else { return };
         let has = d.item.assignees.iter().any(|u| u.login == user.login);
         let q = if has { cli::M_REMOVE_ASSIGNEE } else { cli::M_ADD_ASSIGNEE };
+        self.edit_item(cx, |i| if has { i.assignees.retain(|u| u.login != user.login) } else { i.assignees.push(user.clone()) });
         self.mutate("Saving…", window, cx, move |gh, _| gh.graphql(q, json!({"id": id, "ids": [user.id]})).map(|_| ()), |_, _, _| {});
     }
 
@@ -377,19 +412,30 @@ impl GithubView {
     pub(super) fn save_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let (Some(target), Some(id), Some(d)) = (self.editing.clone(), self.current_id(), self.detail.as_ref()) else { return };
         let pull = d.kind == Kind::Pull;
+        if self.busy.is_some() { return; }
         let (title, body) = (self.edit_title.read(cx).value().trim().to_string(), self.edit_body.read(cx).value().to_string());
         let edit = |kind_pull: bool| if kind_pull { cli::M_EDIT_PR } else { cli::M_EDIT_ISSUE };
         match target {
             Edit::Title if title.is_empty() => (),
             Edit::Title => {
+                self.edit_item(cx, |i| i.title = title.clone());
+                self.editing = None;
                 let q = edit(pull);
                 self.mutate("Saving…", window, cx, move |gh, _| gh.graphql(q, json!({"id": id, "title": title})).map(|_| ()), |v, _, _| v.editing = None);
             }
             Edit::Body => {
+                self.begin_optimistic();
+                if let Some(d) = self.detail.as_mut().and_then(|d| d.data.as_mut()) { d.body = body.clone(); }
+                self.editing = None;
                 let q = edit(pull);
                 self.mutate("Saving…", window, cx, move |gh, _| gh.graphql(q, json!({"id": id, "body": body})).map(|_| ()), |v, _, _| v.editing = None);
             }
             Edit::Comment(cid) => {
+                self.begin_optimistic();
+                if let Some(d) = self.detail.as_mut().and_then(|d| d.data.as_mut()) {
+                    for entry in &mut d.timeline { if let Entry::Comment(c) = entry && c.id == cid { c.body = body.clone(); } }
+                }
+                self.editing = None;
                 self.mutate("Saving…", window, cx, move |gh, _| gh.graphql(cli::M_EDIT_COMMENT, json!({"id": cid, "body": body})).map(|_| ()), |v, _, _| v.editing = None);
             }
         }
@@ -442,5 +488,61 @@ impl GithubView {
                 cx.notify();
             },
         );
+    }
+}
+
+/// Keep the two writes separate: once posting succeeds, a failed state change must never resend the body.
+fn comment_operations(
+    id: &str, body: &str, close: Option<bool>, kind: Kind,
+    mut call: impl FnMut(&str, Value) -> Result<Value, cli::Error>,
+) -> (Option<Value>, Result<(), cli::Error>) {
+    let posted = if body.is_empty() { None } else {
+        match call(cli::M_COMMENT, json!({"id": id, "body": body})) {
+            Ok(data) => Some(data["addComment"]["commentEdge"]["node"].clone()),
+            Err(error) => return (None, Err(error)),
+        }
+    };
+    let query = match (close, kind) {
+        (Some(true), Kind::Pull) => Some(cli::M_CLOSE_PR),
+        (Some(true), Kind::Issue) => Some(cli::M_CLOSE_ISSUE),
+        (Some(false), Kind::Pull) => Some(cli::M_REOPEN_PR),
+        (Some(false), Kind::Issue) => Some(cli::M_REOPEN_ISSUE),
+        (None, _) => None,
+    };
+    let result = query.map_or(Ok(()), |query| call(query, if close == Some(true) && kind == Kind::Issue { json!({"id": id, "reason": "COMPLETED"}) } else { json!({"id": id}) }).map(|_| ()));
+    (posted, result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_partial_comment_and_close_failure_keeps_the_posted_comment() {
+        let mut calls = Vec::new();
+        let (posted, result) = comment_operations("issue", "My comment", Some(true), Kind::Issue, |query, _| {
+            calls.push(query.to_string());
+            if query == cli::M_COMMENT { Ok(json!({"addComment": {"commentEdge": {"node": {"id": "posted"}}}})) }
+            else { Err(cli::Error { kind: cli::ErrKind::Other, msg: "offline".into() }) }
+        });
+        assert_eq!(posted.unwrap()["id"], "posted");
+        assert!(result.is_err());
+        assert_eq!(calls.len(), 2);
+        let mut retries = Vec::new();
+        let (posted, result) = comment_operations("issue", "", Some(true), Kind::Issue, |query, _| { retries.push(query.to_string()); Ok(Value::Null) });
+        assert!(posted.is_none() && result.is_ok());
+        assert_eq!(retries, [cli::M_CLOSE_ISSUE]);
+    }
+
+    #[test]
+    fn a_failed_comment_does_not_close_the_item() {
+        let mut calls = 0;
+        let (posted, result) = comment_operations("issue", "My comment", Some(true), Kind::Issue, |query, _| {
+            calls += 1;
+            assert_eq!(query, cli::M_COMMENT);
+            Err(cli::Error { kind: cli::ErrKind::SignedOut, msg: "sign in".into() })
+        });
+        assert_eq!(calls, 1);
+        assert!(posted.is_none() && result.is_err());
     }
 }

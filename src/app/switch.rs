@@ -216,7 +216,7 @@ impl Workspace {
             thread.read(cx).persist_entries();
         }
         self.release_worktree_switch(id, cx);
-        self.store.refresh_git();
+        self.refresh_git_at(Some(&folder), cx);
         if self.active_id().is_some_and(|a| a == id) {
             self.show_session(id, window, cx);
         }

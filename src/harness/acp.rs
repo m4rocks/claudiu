@@ -22,9 +22,39 @@ pub struct Launch {
     pub env: Vec<(String, String)>,
 }
 
+/// Preserve ACP error metadata for recovery instead of inferring everything from prose.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RpcError {
+    pub code: Option<i64>,
+    pub message: String,
+    pub data: Value,
+}
+
+impl RpcError {
+    pub fn authentication_required(&self) -> bool {
+        self.code == Some(-32000) || looks_like_auth_error(&self.message)
+    }
+}
+
+pub fn looks_like_auth_error(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    ["authentication required", "authentication_error", "invalid api key", "run /login", "not logged in", "not logged into", "not authenticated", "not signed in", "isn't signed in", "please log in", "please login", "please sign in", "token expired", "token has expired", "expired token", "invalid_grant", "refresh token", "unauthorized", "http 401", "status 401"].iter().any(|part| message.contains(part))
+}
+
+pub fn login_hint(harness: super::Harness) -> &'static str {
+    match harness {
+        super::Harness::Claude => "Sign in with `claude auth login`, then retry the session.",
+        super::Harness::Codex => "Sign in with `codex login`, then retry the session.",
+        super::Harness::OpenCode => "Sign in with `opencode auth login`, then retry the session.",
+        super::Harness::Antigravity => "Run `agy` and sign in, then retry the session.",
+    }
+}
+
 /// What the agent sends without being asked.
 #[derive(Debug)]
 pub enum Event {
+    RequestFailed(RpcError),
+    Authentication(Value),
     /// A `session/update` notification and the session it belongs to.
     Update { session_id: Option<String>, update: Value },
     /// `session/request_permission`: answer it with `Connection::respond` and the request's id.
@@ -33,6 +63,7 @@ pub enum Event {
     Elicitation { id: Value, params: Value },
     /// The agent stopped; the text is its last words on stderr, if any.
     Exited(String),
+    ProcessExited { code: Option<i32>, message: String },
     /// A `session/prompt`'s reply. The thread queues it itself once the reply arrives, which is after the reader
     /// queued every update the agent sent before replying, so a turn never ends ahead of its last words.
     TurnEnded(Result<Value, String>),
@@ -43,7 +74,7 @@ impl Event {
         match self {
             Self::Update { session_id, .. } => session_id.as_deref(),
             Self::Permission { params, .. } | Self::Elicitation { params, .. } => params["sessionId"].as_str(),
-            Self::Exited(_) | Self::TurnEnded(_) => None,
+            Self::Exited(_) | Self::ProcessExited { .. } | Self::TurnEnded(_) | Self::RequestFailed(_) | Self::Authentication(_) => None,
         }
     }
 }
@@ -66,7 +97,7 @@ pub struct Connection {
     outgoing: mpsc::Sender<Option<Value>>,
     pending: Pending,
     next_id: AtomicI64,
-    child: Mutex<Option<Child>>,
+    child: Arc<Mutex<Option<Child>>>,
     closed: Arc<AtomicBool>,
 }
 
@@ -86,24 +117,35 @@ impl Connection {
             let _ = child.kill();
             return Err(format!("{name} could not start (no pipes)"));
         };
-        let mut connection = Self::connect(stdout, stdin, Some(stderr), events);
-        connection.child = Mutex::new(Some(child));
+        let connection = Self::connect(stdout, stdin, Some(stderr), events);
+        *connection.child.lock().unwrap() = Some(child);
         Ok(connection)
     }
 
     /// Talk to an agent over `reader` and `writer` (its stdout and stdin).
     pub fn connect(reader: impl Read + Send + 'static, writer: impl Write + Send + 'static, stderr: Option<impl Read + Send + 'static>, events: async_mpsc::UnboundedSender<Event>) -> Connection {
         let (outgoing, queue) = mpsc::channel::<Option<Value>>();
-        std::thread::spawn(move || {
-            let mut writer = writer;
-            while let Ok(Some(message)) = queue.recv() {
-                let Ok(mut line) = serde_json::to_vec(&message) else { continue };
-                line.push(b'\n');
-                if writer.write_all(&line).and_then(|_| writer.flush()).is_err() {
-                    break;
+        let pending: Pending = Default::default();
+        let closed = Arc::new(AtomicBool::new(false));
+        let child: Arc<Mutex<Option<Child>>> = Default::default();
+        {
+            let (pending, closed, events) = (pending.clone(), closed.clone(), events.clone());
+            std::thread::spawn(move || {
+                let mut writer = writer;
+                while let Ok(Some(message)) = queue.recv() {
+                    let Ok(mut line) = serde_json::to_vec(&message) else { continue };
+                    line.push(b'\n');
+                    if let Err(error) = writer.write_all(&line).and_then(|_| writer.flush()) {
+                        if !closed.swap(true, Ordering::AcqRel) {
+                            let why = format!("The connection to the agent failed: {error}");
+                            for (_, reply) in pending.lock().unwrap().drain() { let _ = reply.send(Err(why.clone())); }
+                            let _ = events.unbounded_send(Event::Exited(why));
+                        }
+                        break;
+                    }
                 }
-            }
-        });
+            });
+        }
         // Kept only to explain an exit; never logged.
         let last_words = Arc::new(Mutex::new(VecDeque::<String>::new()));
         if let Some(stderr) = stderr {
@@ -118,9 +160,8 @@ impl Connection {
                 }
             });
         }
-        let pending: Pending = Default::default();
-        let closed = Arc::new(AtomicBool::new(false));
         {
+            let child = child.clone();
             let (pending, outgoing) = (pending.clone(), outgoing.clone());
             let closed = closed.clone();
             std::thread::spawn(move || {
@@ -130,15 +171,24 @@ impl Connection {
                         handle(message, &pending, &outgoing, &events);
                     }
                 }
-                closed.store(true, Ordering::Release);
+                let requested = closed.swap(true, Ordering::AcqRel);
                 pending.lock().unwrap().clear();
                 // Give stderr a moment to deliver the reason before reporting it.
                 std::thread::sleep(Duration::from_millis(200));
                 let words = last_words.lock().unwrap().iter().map(|l| l.trim()).filter(|l| !l.is_empty()).collect::<Vec<_>>().join("\n");
-                let _ = events.unbounded_send(Event::Exited(words));
+                if !requested {
+                    let status = child.lock().unwrap().as_mut().and_then(|child| child.try_wait().ok().flatten());
+                    match status {
+                        Some(status) => { let _ = events.unbounded_send(Event::ProcessExited { code: status.code(), message: words }); }
+                        None => {
+                            let reason = if words.is_empty() { "The agent connection closed unexpectedly. Retry the session to reconnect.".into() } else { words };
+                            let _ = events.unbounded_send(Event::Exited(reason));
+                        }
+                    }
+                }
             });
         }
-        Connection { outgoing, pending, next_id: AtomicI64::new(1), child: Mutex::new(None), closed }
+        Connection { outgoing, pending, next_id: AtomicI64::new(1), child, closed }
     }
 
     pub fn request(&self, method: &str, params: Value) -> impl Future<Output = Result<Value, String>> + use<> {
@@ -149,7 +199,10 @@ impl Connection {
             let _ = tx.send(Err("the agent stopped".into()));
         } else {
             pending.insert(id, tx);
-            let _ = self.outgoing.send(Some(json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params})));
+            if self.outgoing.send(Some(json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}))).is_err() {
+                self.closed.store(true, Ordering::Release);
+                pending.clear();
+            }
         }
         let guard = RequestGuard { id, pending: self.pending.clone() };
         async move {
@@ -404,7 +457,12 @@ fn handle(message: Value, pending: &Pending, outgoing: &mpsc::Sender<Option<Valu
         (None, Some(id)) => {
             let Some(tx) = id.as_i64().and_then(|id| pending.lock().unwrap().remove(&id)) else { return };
             let reply = match message.get("error") {
-                Some(e) => Err(e.get("message").and_then(Value::as_str).unwrap_or("error").to_string()),
+                Some(e) => {
+                    let error = RpcError { code: e["code"].as_i64(), message: e["message"].as_str().unwrap_or("error").into(), data: e["data"].clone() };
+                    let message = if error.authentication_required() { format!("Authentication required: {}", error.message) } else { error.message.clone() };
+                    let _ = events.unbounded_send(Event::RequestFailed(error));
+                    Err(message)
+                },
                 None => Ok(message.get("result").cloned().unwrap_or(Value::Null)),
             };
             let _ = tx.send(reply);
@@ -420,6 +478,7 @@ fn handle(message: Value, pending: &Pending, outgoing: &mpsc::Sender<Option<Valu
         (Some(_), Some(id)) => {
             let _ = outgoing.send(Some(json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32601, "message": "method not found"}})));
         }
+        (Some("auth/status_update"), None) => { let _ = events.unbounded_send(Event::Authentication(message["params"].clone())); }
         (Some("session/update"), None) => {
             let params = &message["params"];
             let _ = events.unbounded_send(Event::Update {
@@ -434,6 +493,51 @@ fn handle(message: Value, pending: &Pending, outgoing: &mpsc::Sender<Option<Valu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn silent_process_exits_keep_the_actual_exit_status() {
+        let dir = tempfile::tempdir().unwrap();
+        let (program, args) = if cfg!(windows) {
+            (PathBuf::from("cmd.exe"), vec!["/C".into(), "exit 7".into()])
+        } else { (PathBuf::from("/bin/sh"), vec!["-c".into(), "exit 7".into()]) };
+        let (events, mut incoming) = async_mpsc::unbounded();
+        let _connection = Connection::start(&Launch { program, args, cwd: dir.path().into(), ..Default::default() }, events).unwrap();
+        assert!(matches!(futures::executor::block_on(incoming.next()), Some(Event::ProcessExited { code: Some(7), .. })));
+    }
+
+    #[test]
+    fn broken_stdin_resolves_requests_even_while_stdout_is_open() {
+        struct Broken;
+        impl Write for Broken {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> { Err(std::io::ErrorKind::BrokenPipe.into()) }
+            fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+        }
+        let (reader, _stdout_stays_open) = std::io::pipe().unwrap();
+        let (events, mut incoming) = async_mpsc::unbounded();
+        let connection = Connection::connect(reader, Broken, None::<std::io::Empty>, events);
+        let result = futures::executor::block_on(connection.request("initialize", json!({})));
+        assert!(result.unwrap_err().contains("connection"));
+        assert!(connection.pending.lock().unwrap().is_empty());
+        assert!(matches!(futures::executor::block_on(incoming.next()), Some(Event::Exited(message)) if message.contains("connection")));
+        assert!(futures::executor::block_on(connection.request("after-failure", json!({}))).is_err());
+    }
+
+    #[test]
+    fn rpc_errors_keep_authentication_codes_and_data() {
+        let pending: Pending = Default::default();
+        let (tx, rx) = oneshot::channel();
+        pending.lock().unwrap().insert(7, tx);
+        let (outgoing, _queue) = mpsc::channel();
+        let (events, mut incoming) = async_mpsc::unbounded();
+        handle(json!({"id": 7, "error": {"code": -32000, "message": "Credentials unavailable", "data": {"provider": "codex"}}}), &pending, &outgoing, &events);
+        assert!(futures::executor::block_on(rx).unwrap().unwrap_err().starts_with("Authentication required:"));
+        let Some(Event::RequestFailed(error)) = futures::executor::block_on(incoming.next()) else { panic!("missing structured error") };
+        assert!(error.authentication_required());
+        assert_eq!(error.data["provider"], "codex");
+        assert!(!looks_like_auth_error("The model exceeded its token limit"));
+        assert!(!looks_like_auth_error("HTTP 403: repository access denied"));
+        assert!(looks_like_auth_error("Your refresh token has expired"));
+    }
 
     #[test]
     fn child_edit_permission_does_not_answer_user_questions() {
@@ -513,6 +617,7 @@ mod tests {
         let agent = Connection::connect(from_agent, to_agent, None::<std::io::PipeReader>, tx);
         futures::executor::block_on(async {
             agent.request("initialize", initialize_params()).await.unwrap();
+            assert!(matches!(events.next().await, Some(Event::Authentication(_))));
             let session = agent.request("session/new", json!({"cwd": "/w", "mcpServers": []})).await.unwrap();
             assert_eq!(session["sessionId"], "s1");
             let turn = agent.request("session/prompt", json!({"sessionId": "s1", "prompt": []}));

@@ -36,6 +36,7 @@ pub struct Store {
     path: PathBuf,
     pub data: Data,
     dirty: bool,
+    revision: u64,
     writer: Writer,
 }
 
@@ -48,7 +49,7 @@ struct Writer {
 }
 
 enum Job {
-    Write(Vec<(PathBuf, String)>),
+    Write(PathBuf, Box<Data>),
     /// Answered once every write handed over before it has been made.
     Flush(std::sync::mpsc::Sender<()>),
 }
@@ -61,24 +62,26 @@ impl Writer {
         // It ends once the store is dropped and what was handed over is written.
         std::thread::spawn(move || {
             let mut on_disk: std::collections::HashMap<PathBuf, String> = Default::default();
-            for job in queue {
+            let mut next = None;
+            loop {
+                let job = match next.take().or_else(|| queue.recv().ok()) { Some(job) => job, None => break };
                 match job {
-                    Job::Write(files) => {
-                        for (path, text) in files {
-                            if on_disk.get(&path) == Some(&text) {
-                                continue;
-                            }
-                            if write_atomic(&path, &text) {
-                                on_disk.insert(path, text);
-                            } else {
-                                on_disk.remove(&path);
-                                failing.store(true, std::sync::atomic::Ordering::SeqCst);
+                    Job::Write(mut path, mut data) => {
+                        // Coalesce a short burst; a flush is an ordering barrier.
+                        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(40);
+                        while std::time::Instant::now() < deadline && let Ok(job) = queue.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())) {
+                            match job {
+                                Job::Write(p, d) => { path = p; data = d; }
+                                flush => { next = Some(flush); break; }
                             }
                         }
+                        if let Ok(text) = serde_json::to_string(&data) {
+                            if on_disk.get(&path) == Some(&text) { continue; }
+                            if write_atomic(&path, &text) { on_disk.insert(path, text); }
+                            else { on_disk.remove(&path); failing.store(true, std::sync::atomic::Ordering::SeqCst); }
+                        } else { failing.store(true, std::sync::atomic::Ordering::SeqCst); }
                     }
-                    Job::Flush(done) => {
-                        let _ = done.send(());
-                    }
+                    Job::Flush(done) => { let _ = done.send(()); }
                 }
             }
         });
@@ -185,18 +188,21 @@ impl Store {
             }
             data.version = 2;
         }
-        Self { path, data, dirty: false, writer: Writer::start() }
+        Self { path, data, dirty: false, revision: 0, writer: Writer::start() }
     }
 
     pub fn mark_dirty(&mut self) {
         self.dirty = true;
+        self.revision = self.revision.wrapping_add(1);
     }
+
+    pub fn revision(&self) -> u64 { self.revision }
 
     /// Hands the data to the background writer when it changed since the last save (or that save failed); the call
     /// returns before anything reaches the disk.
     pub fn save_if_dirty(&mut self) {
         if self.writer.failed.swap(false, std::sync::atomic::Ordering::SeqCst) {
-            self.dirty = true;
+            self.mark_dirty();
         }
         if self.dirty {
             self.hand_over();
@@ -208,14 +214,12 @@ impl Store {
         self.hand_over();
         let (done, wait) = std::sync::mpsc::channel();
         if self.writer.jobs.send(Job::Flush(done)).is_err() || wait.recv().is_err() || self.writer.failed.swap(false, std::sync::atomic::Ordering::SeqCst) {
-            self.dirty = true;
+            self.mark_dirty();
         }
     }
 
     fn hand_over(&mut self) {
-        let Ok(state) = serde_json::to_string_pretty(&self.data) else { return };
-        let files = vec![(self.path.clone(), state)];
-        self.dirty = self.writer.jobs.send(Job::Write(files)).is_err();
+        self.dirty = self.writer.jobs.send(Job::Write(self.path.clone(), Box::new(self.data.clone()))).is_err();
     }
 
     pub fn project(&self, id: &str) -> Option<&Project> {
@@ -227,7 +231,7 @@ impl Store {
     }
 
     pub fn session_mut(&mut self, id: &str) -> Option<&mut SessionRecord> {
-        self.dirty = true;
+        self.mark_dirty();
         self.data.sessions.iter_mut().find(|s| s.id == id)
     }
 
@@ -248,7 +252,7 @@ impl Store {
         let id = project.id.clone();
         self.data.projects.push(project);
         self.remap_sessions();
-        self.dirty = true;
+        self.mark_dirty();
         id
     }
 
@@ -259,7 +263,7 @@ impl Store {
         for s in self.data.sessions.iter_mut().filter(|s| s.project_id.as_deref() == Some(id)) {
             s.project_id = None;
         }
-        self.dirty = true;
+        self.mark_dirty();
         Some((at, project))
     }
 
@@ -271,7 +275,7 @@ impl Store {
         }
         self.data.projects.insert(at.min(self.data.projects.len()), project);
         self.remap_sessions();
-        self.dirty = true;
+        self.mark_dirty();
     }
 
     /// The name the sidebar shows for a project; an empty one goes back to its folder's name.
@@ -279,7 +283,7 @@ impl Store {
         let Some(p) = self.data.projects.iter_mut().find(|p| p.id == id) else { return };
         let name = name.trim();
         p.name = if name.is_empty() { folder_name(&p.path) } else { name.to_string() };
-        self.dirty = true;
+        self.mark_dirty();
     }
 
     /// Move a project one place up or down the list; the first and last stay where they are.
@@ -288,15 +292,8 @@ impl Store {
         let to = if up { at.checked_sub(1) } else { Some(at + 1).filter(|&to| to < self.data.projects.len()) };
         if let Some(to) = to {
             self.data.projects.swap(at, to);
-            self.dirty = true;
+            self.mark_dirty();
         }
-    }
-
-    pub fn refresh_git(&mut self) {
-        for p in &mut self.data.projects {
-            p.git = crate::git::detect(&p.path);
-        }
-        self.dirty = true;
     }
 
     pub fn project_for_cwd(&self, cwd: &Path) -> Option<Id> {
@@ -314,7 +311,7 @@ impl Store {
 
     pub fn add_session(&mut self, record: SessionRecord) {
         self.data.sessions.push(record);
-        self.dirty = true;
+        self.mark_dirty();
     }
 }
 

@@ -653,6 +653,9 @@ pub struct Workspace {
     /// Smooth wheel scrolling of the left list and the right menu.
     pub sidebar_scroll: crate::panels::glide::Smooth,
     pub recent_scroll: crate::panels::glide::Smooth,
+    git_refresh_seq: u64,
+    git_refreshes: HashMap<PathBuf, u64>,
+    pub recent_cache: crate::panels::sidebar::RecentCache,
     pub sidebar_question_scroll: crate::panels::glide::Smooth,
     pub menu_scroll: crate::panels::glide::Smooth,
     pub restored: bool,
@@ -801,6 +804,9 @@ impl Workspace {
             remembered: vec![],
             sidebar_scroll: Default::default(),
             recent_scroll: Default::default(),
+            recent_cache: Default::default(),
+            git_refresh_seq: 0,
+            git_refreshes: Default::default(),
             sidebar_question_scroll: Default::default(),
             menu_scroll: Default::default(),
             restored: false,
@@ -825,7 +831,7 @@ impl Workspace {
         for path in initial_projects {
             ws.store.add_project(&path);
         }
-        ws.store.refresh_git();
+        ws.refresh_git_async(cx);
         cx.background_executor().spawn(async { lifecycle::tidy_leftovers() }).detach();
         ws.ingest_usage(cx);
         // After the first frame: starting every saved session is the slow part of coming back.

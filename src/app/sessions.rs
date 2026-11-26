@@ -201,7 +201,7 @@ impl Workspace {
         self.sync_skills(Some(meta.harness), cx);
         let all_models = self.store.data.settings.aggregated_models();
         let picked = self.store.data.settings.picked_models(meta.harness).to_vec();
-        let prior_entries = if session_id.is_some() { crate::harness::thread::load_entries(record_id) } else { vec![] };
+        let prior_entries = vec![];
         let inline_visuals = !self.store.data.settings.m4code_tools_off.contains(&mcp::Feature::Visual);
         Some(crate::thread::Start {
             record_id: record_id.to_string(),
@@ -393,6 +393,19 @@ impl Workspace {
                         meta.read_only_pending = false;
                         meta.antigravity_full_access = full_access;
                         ws.store.mark_dirty();
+                    }
+                }
+                ThreadEvent::SignIn => {
+                    if let Some(harness) = ws.store.session(&sub_id).and_then(|r| r.agent.as_ref()).map(|a| a.harness) {
+                        ws.sign_in_to_harness(harness, window, cx);
+                    }
+                }
+                ThreadEvent::Retry => {
+                    ws.refresh_all_limits(cx);
+                    let draft = ws.live_view(&sub_id).and_then(SessionView::thread).map(|t| t.read(cx).composer.read(cx).value().to_string());
+                    ws.relaunch(&sub_id, window, cx);
+                    if let Some(draft) = draft && let Some(thread) = ws.live_view(&sub_id).and_then(SessionView::thread) {
+                        thread.update(cx, |v, cx| v.paste_text(&draft, window, cx));
                     }
                 }
                 ThreadEvent::Exited(code) => {
@@ -610,7 +623,7 @@ impl Workspace {
     /// Exited terminals are only kept while shown; a shell panel goes with its session, except the welcome screen's.
     fn prune_live(&mut self, cx: &App) {
         let active = &self.active;
-        self.live.retain(|l| active.as_ref() == Some(&l.id) || l.view.is_running(cx));
+        self.live.retain(|l| active.as_ref() == Some(&l.id) || l.view.is_running(cx) || l.view.thread().is_some_and(|t| t.read(cx).start_error().is_some()));
         let live = &self.live;
         self.shells.retain(|id, _| id == HOME_SHELL || live.iter().any(|l| &l.id == id));
     }
@@ -650,15 +663,18 @@ impl Workspace {
         self.recent.push(id.clone());
     }
 
-    /// The process ended by itself. Close the session the way the X does, so the terminal does not stay up behind a
-    /// "Session ended" bar. A non-zero exit is a toast, because that output goes away with the view; a clean exit
-    /// says nothing. This does not offer to remove a worktree: `/exit` already asked inside Claude Code, and the X
-    /// (`close_live`) is the path that kills the process before that prompt.
+    /// Clean exits close the session. Failed harnesses keep their conversation, queued messages and recovery
+    /// controls; shell failures still close with a toast. Worktree removal belongs to the explicit close action.
     fn on_exit(&mut self, id: &str, code: Option<i32>, window: &mut Window, cx: &mut Context<Self>) {
         let start_error = self.live_view(id).and_then(|v| v.start_error(cx));
         let title = self.store.session(id).map(|r| r.display_title().to_string()).unwrap_or_else(|| "Session".into());
         if let Some(rec) = self.store.session_mut(id) {
             rec.exit_code = Some(code.unwrap_or(0));
+        }
+        if let Some(err) = start_error.as_ref() && self.live_view(id).and_then(SessionView::thread).is_some() {
+            self.activity.insert(id.to_string(), Activity::Attention);
+            self.toast(format!("{title}: {err}"), cx);
+            return;
         }
         self.end_live(id, window, cx);
         if let Some(err) = start_error {
@@ -840,8 +856,7 @@ fn resume_options(meta: &AgentMeta) -> Vec<(&'static str, String)> {
 /// Whether Claude Code has a conversation for the session: one it listed on a scan, or a transcript on disk. A
 /// session nobody has written to has none, and `claude --resume` ends at once on it.
 fn has_conversation(record_id: &str, meta: &AgentMeta) -> bool {
-    crate::harness::thread::load_entries(record_id).iter().any(|entry| matches!(entry,
-        crate::harness::thread::Entry::User(_) | crate::harness::thread::Entry::Agent(_) | crate::harness::thread::Entry::Tool(_)))
+    crate::harness::thread::has_saved_conversation(record_id)
         || meta.external != ExternalState::Unknown
         || meta.transcript.is_some()
         || claude::claude_home().and_then(|h| claude::find_transcript(&h, &meta.session_id)).is_some()

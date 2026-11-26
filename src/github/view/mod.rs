@@ -219,6 +219,13 @@ pub enum GhAct {
     Escape,
 }
 
+struct Optimistic {
+    kind: Kind,
+    number: u32,
+    detail: Detail,
+    editing: Option<Edit>,
+}
+
 pub struct GithubView {
     pub cwd: PathBuf,
     pub project: String,
@@ -249,6 +256,7 @@ pub struct GithubView {
     pub options: Options,
     pub merge_method: &'static str,
     pub busy: Option<String>,
+    optimistic: Option<Optimistic>,
     /// Width of the pane in pixels, set by the workspace each frame; decides side-by-side or stacked.
     pub width: f32,
     pub focus: FocusHandle,
@@ -325,6 +333,7 @@ impl GithubView {
             options: Options::default(),
             merge_method: "MERGE",
             busy: None,
+            optimistic: None,
             width: 900.0,
             focus,
             list_seq: [0; 2],
@@ -398,5 +407,49 @@ mod tests {
         let p = claude_prompt("review", &item);
         assert!(p.contains("#42") && p.contains("gh pr diff 42") && p.len() < 500);
         assert!(claude_prompt("work", &item).contains("pull request #42"));
+    }
+}
+
+#[cfg(test)]
+mod optimistic_tests {
+    use super::*;
+
+    #[gpui::test]
+    fn optimistic_edits_roll_back_locally_and_do_not_replace_a_new_selection(cx: &mut gpui::TestAppContext) {
+        crate::datadir::use_throwaway_folders();
+        cx.update(gpui_kit::init);
+        let (view, cx) = cx.add_window_view(|window, cx| GithubView::new(PathBuf::new(), "test".into(), None, None, window, cx));
+        view.update(cx, |v, cx| {
+            let original = parse_detail(&json!({"repository": {"issueOrPullRequest": {
+                "__typename": "Issue", "id": "issue-id", "number": 1, "state": "OPEN", "title": "Original", "body": "Original body"
+            }}})).unwrap();
+            let mut detail = DetailState::new(Kind::Issue, 1);
+            detail.data = Some(original.clone());
+            v.detail = Some(detail);
+            v.lists[0].items = vec![original.item.clone()];
+            v.editing = Some(Edit::Title);
+            v.edit_item(cx, |item| item.title = "Pending".into());
+            assert_eq!(v.detail_data().unwrap().item.title, "Pending");
+            assert_eq!(v.lists[0].items[0].title, "Pending");
+            v.editing = None;
+            let snapshot = v.optimistic.take().unwrap();
+            v.rollback_optimistic(snapshot);
+            assert_eq!(v.detail_data().unwrap().item.title, "Original");
+            assert_eq!(v.lists[0].items[0].title, "Original");
+            assert_eq!(v.editing, Some(Edit::Title));
+            v.edit_item(cx, |item| item.title = "Another edit".into());
+            let snapshot = v.optimistic.take().unwrap();
+            let mut other = DetailState::new(Kind::Issue, 2);
+            let mut other_data = original;
+            other_data.item.number = 2;
+            other_data.item.title = "Other selection".into();
+            other.data = Some(other_data);
+            v.detail = Some(other);
+            v.editing = Some(Edit::Body);
+            v.rollback_optimistic(snapshot);
+            assert_eq!(v.detail_data().unwrap().item.title, "Other selection");
+            assert_eq!(v.editing, Some(Edit::Body));
+            assert_eq!(v.lists[0].items[0].title, "Original");
+        });
     }
 }

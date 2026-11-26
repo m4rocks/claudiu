@@ -271,8 +271,14 @@ fn format_tokens(n: u64) -> String {
     }
 }
 
+#[derive(Clone, Debug, Default)]
+struct ToolIndex(std::cell::RefCell<(usize, std::collections::HashMap<String, usize>)>);
+// Derived state must not affect conversation equality.
+impl PartialEq for ToolIndex { fn eq(&self, _: &Self) -> bool { true } }
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Thread {
+    tool_index: ToolIndex,
     pub entries: Vec<Entry>,
     /// The agent's latest plan; each update replaces the whole list.
     pub plan: Vec<PlanItem>,
@@ -439,7 +445,18 @@ impl Thread {
     }
 
     pub fn tool_at(&self, id: &str) -> Option<usize> {
-        self.entries.iter().position(|e| matches!(e, Entry::Tool(call) if call.id == id))
+        let mut cache = self.tool_index.0.borrow_mut();
+        if cache.0 > self.entries.len() { cache.0 = 0; cache.1.clear(); }
+        for (at, entry) in self.entries.iter().enumerate().skip(cache.0) {
+            if let Entry::Tool(call) = entry { cache.1.insert(call.id.clone(), at); }
+        }
+        cache.0 = self.entries.len();
+        if let Some(&at) = cache.1.get(id)
+            && matches!(self.entries.get(at), Some(Entry::Tool(call)) if call.id == id) { return Some(at); }
+        // History can be replaced directly; repair a stale or missing index on demand.
+        let at = self.entries.iter().position(|e| matches!(e, Entry::Tool(call) if call.id == id));
+        if let Some(at) = at { cache.1.insert(id.to_string(), at); }
+        at
     }
 
     fn update_tool(&mut self, id: &str, update: &Value) -> Option<usize> {
@@ -663,34 +680,8 @@ fn entries_path(record_id: &str) -> PathBuf {
     crate::datadir::data_dir().join("threads").join(format!("{}.json", crate::datadir::safe_file_stem(record_id)))
 }
 
-pub fn save_entries(record_id: &str, entries: &[Entry]) {
-    if record_id.is_empty() || entries.is_empty() {
-        return;
-    }
-    if let Ok(json) = serde_json::to_string(entries) {
-        let _ = crate::datadir::write_atomic(&entries_path(record_id), &json);
-    }
-}
-
-pub fn clear_entries(record_id: &str) -> std::io::Result<()> {
-    if record_id.is_empty() {
-        return Ok(());
-    }
-    match std::fs::remove_file(entries_path(record_id)) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        result => result,
-    }
-}
-
-pub fn load_entries(record_id: &str) -> Vec<Entry> {
-    if record_id.is_empty() {
-        return Vec::new();
-    }
-    std::fs::read_to_string(entries_path(record_id))
-        .ok()
-        .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or_default()
-}
+mod persistence;
+pub use persistence::{save_entries, clear_entries, load_entries, flush_entries, has_saved_conversation};
 
 #[cfg(test)]
 mod tests {
@@ -707,6 +698,21 @@ mod tests {
 
     fn chunk(kind: &str, text: &str) -> Value {
         json!({"sessionUpdate": kind, "content": {"type": "text", "text": text}})
+    }
+
+    #[test]
+    fn tool_index_follows_append_truncation_and_replaced_history() {
+        let tool = |id: &str| Entry::Tool(ToolCall { id: id.into(), ..Default::default() });
+        let mut thread = Thread { entries: vec![Entry::User("hello".into()), tool("a")], ..Default::default() };
+        assert_eq!(thread.tool_at("a"), Some(1));
+        thread.entries.push(tool("b"));
+        assert_eq!(thread.tool_at("b"), Some(2));
+        thread.entries = vec![tool("b"), tool("c"), tool("a")];
+        assert_eq!(thread.tool_at("a"), Some(2));
+        assert_eq!(thread.tool_at("c"), Some(1));
+        thread.entries.truncate(1);
+        assert_eq!(thread.tool_at("a"), None);
+        assert_eq!(thread.tool_at("b"), Some(0));
     }
 
     #[test]

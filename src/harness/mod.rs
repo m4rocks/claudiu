@@ -429,7 +429,7 @@ fn subagent_server(agent: Agent) -> Result<Server, String> {
 }
 
 /// `name` on the PATH; a desktop launch's PATH may lack what only the login shell's startup files add.
-fn find(name: &str) -> Option<PathBuf> {
+pub(crate) fn find(name: &str) -> Option<PathBuf> {
     crate::platform::find_executable(name).or_else(|| {
         crate::platform::reload_path();
         crate::platform::find_executable(name)

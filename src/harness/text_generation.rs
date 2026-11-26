@@ -164,8 +164,9 @@ fn collect(connection: &Connection, session_id: &str, event: Event, text: &mut S
                 return Err("The model asked a question while generating text.".into());
             }
         }
+        Event::ProcessExited { code, message } => return Err(format!("The agent exited ({code:?}): {message}")),
         Event::Exited(why) => return Err(if why.is_empty() { "The agent stopped responding.".into() } else { why }),
-        Event::TurnEnded(_) | Event::Update { .. } => {}
+        Event::TurnEnded(_) | Event::Update { .. } | Event::Authentication(_) | Event::RequestFailed(_) => {}
     }
     Ok(())
 }
