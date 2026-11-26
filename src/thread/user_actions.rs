@@ -332,7 +332,7 @@ impl ThreadView {
         };
         actions.push(UserAction {
             id: SharedString::from(format!("user-retry-higher-{row}")),
-            icon: IconName::RefreshCw,
+            icon: IconName::Brain,
             tooltip: SharedString::from(tooltip),
             on_click: enabled.then(|| {
                 Box::new(move |v: &mut ThreadView, window: &mut Window, cx: &mut Context<ThreadView>| {
@@ -495,6 +495,7 @@ impl ThreadView {
         if sent_ts.is_none() && actions.is_empty() {
             return None;
         }
+        let has_actions = !actions.is_empty();
         let timestamp = sent_ts.and_then(|ts| {
             let short = format_sent_time(ts)?;
             let full = format_sent_full(ts).unwrap_or_else(|| short.clone());
@@ -551,10 +552,10 @@ impl ThreadView {
                 .px(px(4.0))
                 .flex()
                 .items_center()
-                .justify_between()
+                .justify_end()
                 .gap(px(8.0))
-                .child(div().flex().items_center().children(timestamp))
-                .child(div().flex().items_center().gap(px(4.0)).children(buttons))
+                .children(has_actions.then(|| div().flex().items_center().gap(px(4.0)).children(buttons)))
+                .children(timestamp)
                 .into_any_element(),
         )
     }
