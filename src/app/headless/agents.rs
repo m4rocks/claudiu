@@ -1168,6 +1168,10 @@ fn a_codex_session_answers_in_its_thread() {
 #[test]
 #[ignore = "runs the real OpenCode"]
 fn an_opencode_session_answers_in_its_thread() {
+    if crate::platform::find_executable("opencode").is_none() {
+        eprintln!("SKIP: OpenCode integration requires the opencode CLI on PATH");
+        return;
+    }
     a_session_answers_in_its_thread(crate::harness::Harness::OpenCode);
 }
 

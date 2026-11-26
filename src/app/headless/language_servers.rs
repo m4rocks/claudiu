@@ -11,6 +11,13 @@ fn language_servers_with_rust_analyzer() {
         Some(dir) => data.with_programs_from(dir.into()),
         None => data,
     };
+    let available = crate::platform::find_executable("rust-analyzer")
+        .and_then(|path| std::process::Command::new(path).arg("--version").output().ok())
+        .is_some_and(|output| output.status.success());
+    if !available {
+        eprintln!("SKIP: language_servers requires a working rust-analyzer; install the rustup component or set M4CODE_TEST_RUST_ANALYZER_DIR");
+        return;
+    }
     let work = tempfile::tempdir().unwrap();
     let root = dunce::canonicalize(work.path()).unwrap();
     std::fs::create_dir_all(root.join("src")).unwrap();

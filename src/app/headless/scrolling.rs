@@ -264,12 +264,14 @@ fn the_session_list_draws_rows_where_scrolling_brings_them() {
         })
     });
     draw(&mut cx);
-    let at = gpui::point(gpui::px(120.0), gpui::px(400.0));
+    let bounds = ws.read_with(&cx, |ws, _| ws.recent_scroll.handle().bounds());
+    assert!(bounds.size.height > gpui::px(0.0), "the recent list is visible");
+    let at = bounds.center();
     // The pointer may sit in the gap between two rows, so a second spot a little lower is tried. It moves a pixel
     // sideways too: a row drawn under a still pointer learns it is hovered from the next move.
     let row_under_pointer = |cx: &mut TestAppContext| {
         let mut key = None;
-        for (x, y) in [(121.0, 400.0), (120.0, 400.0), (121.0, 406.0), (120.0, 406.0)] {
+        for (x, y) in [(f32::from(at.x) + 1.0, f32::from(at.y)), (f32::from(at.x), f32::from(at.y)), (f32::from(at.x) + 1.0, f32::from(at.y) + 6.0), (f32::from(at.x), f32::from(at.y) + 6.0)] {
             if key.is_some() {
                 break;
             }

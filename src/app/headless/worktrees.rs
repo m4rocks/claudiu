@@ -170,6 +170,12 @@ fn switching_between_worktrees_in_the_workspace() {
 {\"type\":\"worktree-state\",\"worktreeSession\":{\"worktreeName\":\"fix-login\"},\"sessionId\":\"x\"}
 ").unwrap();
     wait(&mut cx, "the first screen again", &|ws, app| ws.live.iter().all(|l| !l.view.is_loading(app) && !l.view.is_working(app)));
+    step(&mut cx, &|ws, _, cx| {
+        let thread = ws.live_view(&id).unwrap().thread().unwrap().clone();
+        thread.update(cx, |thread, _| {
+            thread.thread.entries.push(crate::harness::thread::Entry::Agent("Existing conversation in the worktree".into()));
+        });
+    });
     step(&mut cx, &|ws, w, cx| ws.act(Act::SwitchWorktree { folder: repo_dir.clone(), base: Default::default() }, w, cx));
     // The work file stays in the worktree the session leaves, so it asks first.
     wait(&mut cx, "the question", &|ws, _| matches!(&ws.modal, Some(Modal::Confirm { body, .. }) if body.contains("1 uncommitted file stays")));
@@ -184,8 +190,15 @@ fn switching_between_worktrees_in_the_workspace() {
     // tree's root any more, so they stay.
     assert_eq!(ws.read_with(&cx, |ws, _| tab_paths(ws)), [in_main.join("same.txt"), in_main.join("dirty.txt"), in_main.join("only_main.txt")], "tabs after the switch back");
     wait(&mut cx, "the file tree at the main checkout", &|ws, _| ws.panes[&id].root == in_main);
-    assert!(!crate::harness::claude::worktree_recorded(&transcript).unwrap(), "the transcript no longer names the worktree");
-    assert!(std::fs::read_to_string(&transcript).unwrap().lines().count() == 3);
+    // A checkout-bound native session is replaced and seeded; its original transcript is retained.
+    assert!(crate::harness::claude::worktree_recorded(&transcript).unwrap(), "the source transcript keeps its worktree state");
+    assert_eq!(std::fs::read_to_string(&transcript).unwrap().lines().count(), 2, "switching does not rewrite the provider transcript");
+    assert!(ws.read_with(&cx, |ws, app| {
+        ws.live_view(&id).and_then(|view| view.thread()).is_some_and(|thread| {
+            thread.read(app).thread.entries.iter().any(|entry| matches!(entry,
+                crate::harness::thread::Entry::Notice { text, .. } if text == crate::thread::WORKTREE_SEED))
+        })
+    }), "the replacement explains that it was seeded from the original conversation");
 
     step(&mut cx, &|ws, w, cx| ws.restart_session(&session.id, w, cx));
     wait(&mut cx, "the restart", &|ws, app| ws.live_view(&session.id).is_some_and(|v| !v.is_loading(app)));
