@@ -152,10 +152,155 @@ pub const ADAPTER: Adapter = Adapter {
     worktree: super::WorktreeHooks::DEFAULT,
     protocol: super::ProtocolHooks {
         async_ask: Some(decode_async_ask),
+        background: Some(super::BackgroundHooks {
+            from_update: background::background_update,
+            finished: background::task_finished,
+            live_execute_tools: true,
+        }),
         ignore_update,
         ..super::ProtocolHooks::DEFAULT
     },
 };
+
+/// How Codex (`codex-acp`) reports background work over ACP:
+/// 1. In-flight shell executions (`ExecCommandBegin` / `ExecCommandOutputDelta` / `ExecCommandEnd`) arrive as
+///    `tool_call` (`kind: "execute"`, `status: "in_progress"`), streaming `tool_call_update` (`_meta.terminal_output_delta`
+///    or `content`/`rawOutput`), and a final `tool_call_update` (`status: "completed" | "failed"`, `rawOutput.exit_code`
+///    / `exitCode`). When a command outlives the turn, `session/prompt` returns `end_turn` while the tool is still
+///    `in_progress`; `live_execute_tools: true` keeps it live until its completion update arrives.
+/// 2. Unified-exec background terminals (`exec_command` / `write_stdin`) complete the initial `exec_command` tool call
+///    with output like `"Process running with session ID <id>"` (or structured `rawOutput.session_id` / `process_id`).
+///    Later `write_stdin` calls pass `rawInput.session_id` (integer or string) and report exit with
+///    `"Process exited with code <N>"` (or a completion notice naming the session id).
+mod background {
+    use super::super::{BackgroundTask, BackgroundUpdate, background_output_texts, background_task_label, tool_output_texts};
+    use serde_json::Value;
+
+    const RUNNING_PREFIXES: &[&str] = &[
+        "process running with session id",
+        "background terminal running with session id",
+    ];
+
+    const EXIT_MARKERS: &[&str] = &[
+        "process exited with code",
+        "process exited",
+        "stdin is closed",
+        "no such session",
+        "session not found",
+        "process terminated",
+        "process killed",
+    ];
+
+    const FINISHED_WORDS: &[&str] = &[
+        "exited",
+        "finished",
+        "completed",
+        "terminated",
+        "killed",
+        "canceled",
+        "cancelled",
+        "stopped",
+    ];
+
+    fn json_id(value: &Value) -> Option<String> {
+        if let Some(s) = value.as_str().map(str::trim).filter(|s| !s.is_empty()) {
+            Some(s.to_string())
+        } else if let Some(n) = value.as_i64() {
+            Some(n.to_string())
+        } else {
+            value.as_u64().map(|n| n.to_string())
+        }
+    }
+
+    fn extract_running_session_id(text: &str) -> Option<String> {
+        let lower = text.to_ascii_lowercase();
+        for prefix in RUNNING_PREFIXES {
+            if let Some(pos) = lower.find(prefix) {
+                let rest = text[pos + prefix.len()..].trim_start_matches([':', ' ', '\t']);
+                let id = rest.split_whitespace().next()?.trim_matches(|c: char| matches!(c, '"' | '\'' | ',' | '.' | ')' | ']'));
+                if !id.is_empty() {
+                    return Some(id.to_string());
+                }
+            }
+        }
+        None
+    }
+
+    fn text_indicates_exit(text: &str) -> bool {
+        let lower = text.to_ascii_lowercase();
+        EXIT_MARKERS.iter().any(|marker| lower.contains(marker))
+    }
+
+    fn contains_task_id_token(line: &str, task_id: &str) -> Option<usize> {
+        let mut start = 0;
+        while let Some(rel) = line[start..].find(task_id) {
+            let at = start + rel;
+            let end = at + task_id.len();
+            let before_ok = line[..at].chars().next_back().is_none_or(|c| !c.is_ascii_alphanumeric() && c != '_' && c != '-');
+            let after_ok = line[end..].chars().next().is_none_or(|c| !c.is_ascii_alphanumeric() && c != '_' && c != '-');
+            if before_ok && after_ok {
+                return Some(end);
+            }
+            start = end;
+        }
+        None
+    }
+
+    fn background_task_from_tool(call: &super::super::thread::ToolCall, update: &Value) -> Option<BackgroundTask> {
+        let texts = tool_output_texts(call);
+        let raw_out = update.get("rawOutput");
+        let task_id = texts
+            .iter()
+            .find_map(|text| extract_running_session_id(text))
+            .or_else(|| raw_out.and_then(Value::as_str).and_then(extract_running_session_id))
+            .or_else(|| {
+                let raw = raw_out?.as_object()?;
+                let has_exit = raw.get("exit_code").is_some_and(|v| !v.is_null())
+                    || raw.get("exitCode").is_some_and(|v| !v.is_null());
+                if has_exit || texts.iter().any(|t| text_indicates_exit(t)) {
+                    return None;
+                }
+                raw.get("session_id").or_else(|| raw.get("process_id")).and_then(json_id)
+            })?;
+        Some(BackgroundTask { id: task_id, label: background_task_label(call), log_path: None })
+    }
+
+    pub(super) fn background_update(call: &super::super::thread::ToolCall, update: &Value) -> BackgroundUpdate {
+        if update.get("rawOutput").is_none() && update.get("content").is_none() {
+            return BackgroundUpdate::default();
+        }
+        let output = background_output_texts(call, update);
+        let started = (call.kind == "execute").then(|| background_task_from_tool(call, update)).flatten();
+        let mut finished = Vec::new();
+        if let Some(input_id) = update
+            .pointer("/rawInput/session_id")
+            .or_else(|| update.pointer("/rawInput/process_id"))
+            .and_then(json_id)
+            && (call.details.exit_code.is_some() || output.iter().any(|t| text_indicates_exit(t)))
+        {
+            finished.push(input_id);
+        }
+        BackgroundUpdate { started, finished, output }
+    }
+
+    pub(super) fn task_finished(text: &str, task_id: &str) -> bool {
+        let lower = text.to_ascii_lowercase();
+        if lower.contains("no running processes")
+            || lower.contains("no background terminals")
+            || lower.contains("no background tasks are currently running")
+            || (lower.contains("all background") && lower.contains("stopped"))
+        {
+            return true;
+        }
+        text.lines().any(|line| {
+            let Some(end) = contains_task_id_token(line, task_id) else { return false };
+            let rest = line[end..].trim_start_matches(['"', '\'', ')', ']', ':', ' ']).to_ascii_lowercase();
+            FINISHED_WORDS.iter().any(|word| {
+                rest.strip_prefix(word).is_some_and(|tail| tail.is_empty() || tail.starts_with([' ', '.', ':', ',']))
+            }) || EXIT_MARKERS.iter().any(|marker| rest.contains(marker))
+        })
+    }
+}
 
 fn configure_mcp(tools: &crate::mcp::session::SessionTools, plan: &mut super::SessionPlan) -> Result<(), String> {
     let inherited = std::env::var(CONFIG_ENV).ok();
@@ -198,5 +343,54 @@ mod tests {
                 }
             }
         }));
+    }
+
+    #[test]
+    fn codex_background_hooks_parse_unified_exec_start_and_finish() {
+        use crate::harness::thread::{ToolCall, ToolDetails};
+
+        let mut call = ToolCall {
+            id: "exec-1".into(),
+            title: "Run tests".into(),
+            kind: "execute".into(),
+            details: Box::new(ToolDetails {
+                command: Some("cargo test --locked".into()),
+                output: Some("Wall time: 10.0s\nProcess running with session ID 42\nOutput:\nrunning...".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let update = json!({
+            "sessionUpdate": "tool_call",
+            "toolCallId": "exec-1",
+            "kind": "execute",
+            "status": "completed",
+            "rawInput": { "cmd": "cargo test --locked" },
+            "rawOutput": "Wall time: 10.0s\nProcess running with session ID 42\nOutput:\nrunning..."
+        });
+        let bg = background::background_update(&call, &update);
+        let started = bg.started.expect("unified_exec session should be detected");
+        assert_eq!(started.id, "42");
+        assert_eq!(started.label, "cargo test --locked");
+        assert!(bg.finished.is_empty());
+
+        // Polling via write_stdin that reports exit retires the session by rawInput.session_id.
+        call.details.output = Some("Process exited with code 0\nOutput:\nall passed".into());
+        let exit_update = json!({
+            "sessionUpdate": "tool_call",
+            "toolCallId": "stdin-1",
+            "kind": "execute",
+            "status": "completed",
+            "rawInput": { "session_id": 42, "chars": "" },
+            "rawOutput": "Process exited with code 0\nOutput:\nall passed"
+        });
+        let bg = background::background_update(&call, &exit_update);
+        assert!(bg.started.is_none());
+        assert_eq!(bg.finished, vec!["42".to_string()]);
+
+        // Line-based completion matching respects token boundaries and global clear phrases.
+        assert!(background::task_finished("Session 42 exited with code 0.", "42"));
+        assert!(!background::task_finished("Session 420 exited with code 0.", "42"));
+        assert!(background::task_finished("No background terminals are running.", "42"));
     }
 }
