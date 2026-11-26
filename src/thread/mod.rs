@@ -13,11 +13,13 @@ mod timeline;
 mod find;
 mod telemetry;
 pub(crate) use telemetry::exhausted_usage;
+mod user_actions;
+pub(crate) use user_actions::clear_timestamps;
 
 pub use render::short_effort_label;
 
 use std::cell::Cell;
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -512,6 +514,18 @@ pub struct ThreadView {
     pub(super) changed: Option<bool>,
     /// The review of what changed since the last message, while it is open.
     review: Option<review::Review>,
+    /// Number of background `capture_turn_review` tasks still running.
+    capturing_reviews: usize,
+    /// Unix timestamps (seconds) keyed by 0-based visible user-message ordinal.
+    user_timestamps: BTreeMap<usize, i64>,
+    /// True once persisted timestamps have finished loading from disk.
+    timestamps_loaded: bool,
+    /// Confirmation dialog state when retrying a turn that will restore checkpoint files.
+    retry_confirm: Option<user_actions::RetryConfirm>,
+    /// True while restoring checkpoint files before retrying a turn.
+    retrying_turn: bool,
+    /// Retry waiting for `thought_level` option confirmation before dispatching.
+    pending_retry: Option<user_actions::PendingRetry>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -569,12 +583,15 @@ impl ThreadView {
             }
         }
         let queue_held = !queue.is_empty();
+        let mut user_timestamps = BTreeMap::new();
         if let Some(prompt) = start.prompt.clone() {
             // Show a new session's first message immediately instead of a blank screen while the agent starts.
             // A resumed session replays history during startup, so keep its prompt queued until open finishes.
             let shown = start.session_id.is_none();
-            if shown {
-                thread.sent(prompt.clone());
+            if shown && let Some(at) = thread.sent(prompt.clone())
+                && let Some(ordinal) = user_actions::visible_user_ordinal(&thread.entries, at)
+            {
+                user_timestamps.insert(ordinal, user_actions::now_unix_secs());
             }
             queue.push_front(Queued { startup: true, shown, ..Queued::new(prompt, start.prior_entries.is_empty()) });
         }
@@ -715,6 +732,12 @@ impl ThreadView {
             shell_output_scroll: Default::default(),
             changed: None,
             review: None,
+            capturing_reviews: 0,
+            user_timestamps,
+            timestamps_loaded: false,
+            retry_confirm: None,
+            retrying_turn: false,
+            pending_retry: None,
             _subscriptions: subscriptions,
         };
         if start.prompt.is_some() {
@@ -729,9 +752,9 @@ impl ThreadView {
         cx.spawn(async move |this, cx| {
             let record = start.record_id.clone();
             let restore = start.session_id.is_some() && start.prior_entries.is_empty();
-            let (entries, reviews) = cx.background_executor().spawn(async move {
+            let (entries, reviews, timestamps) = cx.background_executor().spawn(async move {
                 let entries = if restore { crate::harness::thread::load_entries(&record) } else { Vec::new() };
-                (entries, review::load_turn_reviews(&record))
+                (entries, review::load_turn_reviews(&record), user_actions::load_timestamps(&record))
             }).await;
             if this.update(cx, |v, cx| {
                 if restore {
@@ -743,6 +766,18 @@ impl ThreadView {
                     }
                 }
                 v.turn_reviews = reviews;
+                let had_new = !v.user_timestamps.is_empty();
+                for (ordinal, ts) in timestamps {
+                    v.user_timestamps.entry(ordinal).or_insert(ts);
+                }
+                v.timestamps_loaded = true;
+                if had_new {
+                    let record = v.record_id.clone();
+                    let snapshot = v.user_timestamps.clone();
+                    cx.background_executor().spawn(async move {
+                        user_actions::save_timestamps(&record, &snapshot);
+                    }).detach();
+                }
                 v.canonical_history |= !v.turn_reviews.is_empty() || v.thread.entries.iter().any(|e| needs_history_seed(e) || matches!(e, Entry::WorkspaceBoundary(_)));
                 v.remeasure(0);
                 cx.notify();
@@ -1075,7 +1110,7 @@ impl ThreadView {
                 let prev_ctx = self.thread.context;
                 // A steer arrives whole, and is a message of its own even right after another one.
                 let at = if let Some(id) = update.pointer("/_meta/m4code/steer").and_then(Value::as_str).and_then(|id| id.parse().ok()) {
-                    self.accept_steer(id)
+                    self.accept_steer(id, cx)
                 } else {
                     self.thread.apply(&update)
                 };
@@ -1631,7 +1666,7 @@ impl ThreadView {
             let result = startup_deadline("steering the session", reply, cx).await;
             let _ = this.update(cx, |v, cx| {
                 if native && result.as_ref().is_ok_and(|r| r["outcome"] == "injected") {
-                    if let Some(at) = v.accept_steer(id) {
+                    if let Some(at) = v.accept_steer(id, cx) {
                         v.remeasure(at);
                         v.persist_entries();
                     }
@@ -1646,14 +1681,16 @@ impl ThreadView {
         cx.notify();
     }
 
-    fn accept_steer(&mut self, id: Uuid) -> Option<usize> {
+    fn accept_steer(&mut self, id: Uuid, cx: &mut Context<Self>) -> Option<usize> {
         let at = self.steering.iter().position(|item| item.id == id)?;
         let item = self.steering.remove(at)?;
         self.queue_changed();
         if item.hidden {
             return None;
         }
-        self.thread.sent(item.text)
+        let row = self.thread.sent(item.text)?;
+        self.record_user_timestamp(row, cx);
+        Some(row)
     }
 
     fn requeue_steers(&mut self, ids: impl IntoIterator<Item = Uuid>) {
@@ -1711,6 +1748,7 @@ impl ThreadView {
             item.startup = true;
             if let Some(at) = self.thread.sent(item.text.clone()) {
                 item.shown = true;
+                self.record_user_timestamp(at, cx);
                 self.sync_markdown(at, cx);
                 self.remeasure(at);
                 self.persist_entries();
@@ -1731,7 +1769,7 @@ impl ThreadView {
 
     fn send_next(&mut self, cx: &mut Context<Self>) {
         if self.authentication_required || self.working || self.phase != Phase::Ready || self.workspace_switching || self.permission_changing || self.read_only_unconfirmed
-            || !self.steering.is_empty() || self.is_waiting() || self.restoring_checkpoint()
+            || !self.steering.is_empty() || self.is_waiting() || self.restoring_checkpoint() || self.retrying_turn || !self.options_in_flight.is_empty()
         {
             return;
         }
@@ -1761,6 +1799,7 @@ impl ThreadView {
         if !next.shown && !compact && let Some(at) = self.thread.sent(next.text.clone()) {
             next.shown = true;
             shown_row = Some(at);
+            self.record_user_timestamp(at, cx);
             self.cached_replay = false;
             self.sync_markdown(at, cx);
             self.remeasure(at);
@@ -1811,6 +1850,7 @@ impl ThreadView {
                     None => next.text.clone(),
                 };
                 if !next.shown && !next.compact && let Some(at) = v.thread.sent(next.text.clone()) {
+                    v.record_user_timestamp(at, cx);
                     v.sync_markdown(at, cx);
                     v.remeasure(at);
                 }
@@ -2538,6 +2578,13 @@ impl ThreadView {
                     }
                 }
                 if !latest && !v.authentication_required { v.send_option(id, cx); }
+                if v.options_in_flight.is_empty() {
+                    if v.pending_retry.is_some() {
+                        v.complete_pending_retry(cx);
+                    } else if !v.queue.is_empty() {
+                        v.send_next(cx);
+                    }
+                }
                 cx.notify();
             });
         }).detach();
@@ -4015,6 +4062,198 @@ mod tests {
         cx.update(|window, app| window.draw(app).clear(app));
         assert!(cx.debug_bounds("restore-cancel").is_none());
         assert!(cx.debug_bounds("review-restore").is_some());
+    }
+
+    fn live_thought_option(current: &str) -> crate::harness::thread::ConfigOption {
+        crate::harness::thread::ConfigOption {
+            id: "effort".into(),
+            name: "Effort".into(),
+            category: "thought_level".into(),
+            current: current.into(),
+            choices: vec![
+                ("low".into(), "Low".into()),
+                ("medium".into(), "Medium".into()),
+                ("high".into(), "High".into()),
+                ("max".into(), "Max".into()),
+            ],
+        }
+    }
+
+    #[gpui::test]
+    fn user_actions_retry_tooltip_states_and_live_retry(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext;
+        cx.update(gpui_kit::init);
+        let _dirs = crate::datadir::use_throwaway_folders();
+        let dir = tempfile::tempdir().unwrap();
+        let mut start = test_start(dir.path().into(), Harness::Claude);
+        start.prior_entries = vec![Entry::User("Refactor the parser".into()), Entry::Agent("Done.".into())];
+        let mut thread = None;
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| super::ThreadView::new(start, window, cx));
+            thread = Some(view.clone());
+            gpui_kit::base::Root::new(view, window, cx)
+        });
+        let view = thread.unwrap();
+
+        // Without a live `thought_level` option -> retry button is hidden (cannot apply higher thinking).
+        view.update(cx, |v, _| {
+            v.phase = super::Phase::Ready;
+            assert!(v.user_actions_for(0).is_empty());
+        });
+
+        // With live `thought_level` at Medium -> retry offers High thinking without checkpoint.
+        view.update(cx, |v, _| {
+            v.thread.config = vec![live_thought_option("medium")];
+            let actions = v.user_actions_for(0);
+            assert_eq!(actions.len(), 1);
+            assert!(actions[0].on_click.is_some());
+            assert_eq!(actions[0].tooltip.as_ref(), "Retry with High thinking");
+        });
+
+        // With a pending cross-harness model switch -> disabled so retry won't trigger a handoff.
+        view.update(cx, |v, _| {
+            v.pending_model = Some(super::CatalogModel { harness: Harness::Codex, id: "gpt".into(), name: "GPT".into() });
+            let actions = v.user_actions_for(0);
+            assert!(actions[0].on_click.is_none());
+            assert_eq!(actions[0].tooltip.as_ref(), "Clear the pending model switch before retrying");
+            v.pending_model = None;
+        });
+
+        // With a checkpoint on turn 0 -> tooltip mentions restoring checkpoint, and clicking opens confirm dialog.
+        view.update(cx, |v, _| {
+            v.turn_reviews.push(super::review::TurnReview {
+                id: uuid::Uuid::new_v4(),
+                row: 0,
+                end: 2,
+                text: "Refactor the parser".into(),
+                before: "abc".into(),
+                cwd: dir.path().into(),
+                file_count: 1,
+                checkpoint: true,
+            });
+            let actions = v.user_actions_for(0);
+            assert_eq!(actions[0].tooltip.as_ref(), "Restore checkpoint & retry with High thinking");
+        });
+        cx.update(|window, app| {
+            view.update(app, |v, cx| v.request_retry_turn(0, window, cx));
+        });
+        view.read_with(cx, |v, _| {
+            assert!(v.retry_confirm.is_some(), "turns with checkpoints should ask before restoring");
+        });
+        cx.update(|window, app| {
+            view.update(app, |v, cx| v.cancel_retry_turn(window, cx));
+        });
+        view.read_with(cx, |v, _| assert!(v.retry_confirm.is_none()));
+
+        // Already at Max -> stays visible but disabled with explanatory tooltip.
+        view.update(cx, |v, _| {
+            v.thread.config = vec![live_thought_option("max")];
+            let actions = v.user_actions_for(0);
+            assert_eq!(actions.len(), 1);
+            assert!(actions[0].on_click.is_none());
+            assert_eq!(actions[0].tooltip.as_ref(), "Already at max thinking");
+        });
+
+        // Rejected option change cancels the pending retry instead of sending at the old level.
+        view.update(cx, |v, cx| {
+            v.thread.config = vec![live_thought_option("medium")];
+            v.pending_retry = Some(super::user_actions::PendingRetry {
+                option_id: "effort".into(),
+                expected_effort: "high".into(),
+                prompt: "Refactor the parser".into(),
+            });
+            v.complete_pending_retry(cx);
+            assert!(v.pending_retry.is_none());
+            assert!(v.queue.is_empty(), "rejected effort change must not send retry");
+            assert!(matches!(v.thread.entries.last(), Some(Entry::Notice { error: true, .. })));
+        });
+
+        // Without a checkpoint -> retries immediately in-place, bumping effort and pushing to the front of the queue.
+        view.update(cx, |v, _| {
+            v.turn_reviews.clear();
+            v.thread.config = vec![live_thought_option("medium")];
+            v.queue.push_back(super::Queued::new("Later message".into(), true));
+        });
+        cx.update(|window, app| {
+            view.update(app, |v, cx| v.request_retry_turn(0, window, cx));
+        });
+        view.read_with(cx, |v, _| {
+            assert!(v.retry_confirm.is_none());
+            assert_eq!(v.pending_effort.as_deref(), Some("high"));
+            assert_eq!(v.queue.front().map(|q| q.text.as_str()), Some("Refactor the parser"));
+        });
+    }
+
+    #[gpui::test]
+    fn user_actions_confirm_retry_restores_git_checkpoint_and_bumps_effort(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext;
+        cx.update(gpui_kit::init);
+        let _dirs = crate::datadir::use_throwaway_folders();
+        let dir = tempfile::tempdir().unwrap();
+        for args in [
+            &["init", "-q", "-b", "main"][..],
+            &["config", "user.email", "t@t"],
+            &["config", "user.name", "t"],
+            &["config", "core.autocrlf", "false"],
+        ] {
+            assert!(std::process::Command::new("git").args(args).current_dir(dir.path()).status().unwrap().success());
+        }
+        let file = dir.path().join("hello.txt");
+        std::fs::write(&file, "before\n").unwrap();
+        assert!(std::process::Command::new("git").args(["add", "."]).current_dir(dir.path()).status().unwrap().success());
+        assert!(std::process::Command::new("git").args(["commit", "-q", "-m", "init"]).current_dir(dir.path()).status().unwrap().success());
+
+        let record_id = crate::store::new_id();
+        let before = crate::git::snapshot::take(dir.path(), &record_id).unwrap();
+        std::fs::write(&file, "after\n").unwrap();
+        let patch = crate::git::snapshot::capture(dir.path(), &before).unwrap();
+        let turn_id = uuid::Uuid::new_v4();
+        super::review::write_turn_patch(&record_id, turn_id, &patch).unwrap();
+        crate::git::snapshot::keep_checkpoint(dir.path(), &record_id, turn_id, &before).unwrap();
+
+        let mut start = test_start(dir.path().into(), Harness::Claude);
+        start.record_id = record_id;
+        start.prior_entries = vec![Entry::User("Update hello.txt".into()), Entry::Agent("Updated.".into())];
+        let mut thread = None;
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| super::ThreadView::new(start, window, cx));
+            thread = Some(view.clone());
+            gpui_kit::base::Root::new(view, window, cx)
+        });
+        let view = thread.unwrap();
+        view.update(cx, |v, _| {
+            v.phase = super::Phase::Ready;
+            v.thread.config = vec![live_thought_option("medium")];
+            v.turn_reviews.push(super::review::TurnReview {
+                id: turn_id,
+                row: 0,
+                end: 2,
+                text: "Update hello.txt".into(),
+                before,
+                cwd: dir.path().into(),
+                file_count: 1,
+                checkpoint: true,
+            });
+        });
+
+        cx.update(|window, app| {
+            view.update(app, |v, cx| v.request_retry_turn(0, window, cx));
+        });
+        view.read_with(cx, |v, _| assert!(v.retry_confirm.is_some()));
+
+        cx.update(|window, app| {
+            view.update(app, |v, cx| v.confirm_retry_turn(window, cx));
+        });
+        cx.run_until_parked();
+
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "before\n", "file should be restored to checkpoint");
+        view.read_with(cx, |v, _| {
+            assert_eq!(v.pending_effort.as_deref(), Some("high"));
+            assert!(v.turn_reviews.is_empty(), "restored turn review should be pruned");
+            let queued = v.queue.front().map(|q| q.text.as_str()).unwrap_or_default();
+            assert!(queued.contains("Update hello.txt"), "queued retry should contain the original prompt");
+            assert!(queued.contains("restored the files"), "queued retry should note that files were restored");
+        });
     }
 
     #[gpui::test]

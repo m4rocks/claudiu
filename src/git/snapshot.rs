@@ -217,6 +217,11 @@ pub fn revert(cwd: &Path, hunk: &Hunk) -> Result<(), String> {
     git_with(&root(cwd)?, &["apply", "--reverse", "--whitespace=nowarn", "-"], Some(&hunk.patch), &[]).map(|_| ())
 }
 
+/// Re-apply a previously reversed turn patch forward (used to roll back a partial multi-turn restore).
+pub fn apply_forward(cwd: &Path, patch: &str) -> Result<(), String> {
+    git_with(&root(cwd)?, &["apply", "--whitespace=nowarn", "-"], Some(patch), &[]).map(|_| ())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -48,7 +48,7 @@ impl Render for ThreadView {
             .on_mouse_down(
                 gpui::MouseButton::Left,
                 cx.listener(|v, _: &gpui::MouseDownEvent, window, cx| {
-                    if v.picker != Some(ThreadPicker::Model) && v.review.is_none() && v.screenshot.is_none() && v.find.is_none() && v.selection_comment.is_none() {
+                    if v.picker != Some(ThreadPicker::Model) && v.review.is_none() && v.retry_confirm.is_none() && v.screenshot.is_none() && v.find.is_none() && v.selection_comment.is_none() {
                         v.focus_composer(window, cx);
                     }
                 }),
@@ -107,7 +107,7 @@ impl Render for ThreadView {
                         v.comment_anchor = (!quote.is_empty()).then_some((anchor, quote));
                     }
                     if v.picker != Some(ThreadPicker::Model)
-                        && v.review.is_none() && v.find.is_none()
+                        && v.review.is_none() && v.retry_confirm.is_none() && v.find.is_none()
                         && v.selection_comment.is_none() && v.comment_anchor.is_none()
                     {
                         v.focus_composer(window, cx);
@@ -146,6 +146,7 @@ impl Render for ThreadView {
             .children(self.render_selection_comment(cx))
             .children(self.render_chat_menu(window, cx))
             .children(self.render_picker_overlay(window, cx))
+            .children(self.render_retry_confirm(cx))
             .children(self.render_screenshot(cx))
     }
 }
@@ -423,7 +424,7 @@ impl ThreadView {
                     let formatted = keep_line_breaks(text);
                     chat_markdown(&mut self.markdown, ix, &formatted, cx)
                 };
-                div()
+                let bubble = div()
                     .w_full()
                     .flex()
                     .flex_col()
@@ -434,7 +435,14 @@ impl ThreadView {
                     .bg(theme().row_active)
                     .border_1()
                     .border_color(theme().panel_border)
-                    .child(div().w_full().min_w_0().child(md_view))
+                    .child(div().w_full().min_w_0().child(md_view));
+                div()
+                    .w_full()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.0))
+                    .child(bubble)
+                    .children(self.render_user_footer(ix, cx))
                     .into_any_element()
             }
             Entry::Agent(text) => {

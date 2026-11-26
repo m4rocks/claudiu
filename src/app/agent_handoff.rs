@@ -229,6 +229,7 @@ impl Workspace {
             thread.update(cx, |view, _| view.relinquish_record());
         }
         crate::thread::clear_turn_reviews(id, cx.background_executor());
+        crate::thread::clear_timestamps(id);
         if let Some(meta) = self.store.session_mut(id).and_then(|r| r.agent.as_mut()) {
             meta.session_id.clear();
             meta.provider_sessions.clear();
