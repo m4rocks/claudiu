@@ -15,6 +15,7 @@ use crate::app::{
 };
 use gpui_kit::component::input::Input;
 use crate::panels::logos;
+use crate::panels::ui::toggle_group::toggle_group;
 use crate::panels::theme::{self, hsla};
 use crate::updater::Status;
 use gpui_kit::assets::IconName;
@@ -63,13 +64,18 @@ pub(super) fn render_settings_card(
                 row_shell(
                     "Messages sent while the agent works",
                     Some("Steer reaches the agent in its turn; Queue waits for it to end. Cmd/Ctrl+Enter does the other."),
-                    div()
-                        .flex_none()
-                        .flex()
-                        .gap(px(4.0))
-                        .child(follow_up_button(crate::store::FollowUp::Queue, "Queue", follow_up, cx))
-                        .child(follow_up_button(crate::store::FollowUp::Steer, "Steer", follow_up, cx))
-                        .into_any_element(),
+                    toggle_group(
+                        "settings-follow-up",
+                        &[(crate::store::FollowUp::Queue, "Queue"), (crate::store::FollowUp::Steer, "Steer")],
+                        follow_up,
+                        |ws, choice, _, _| {
+                            if let Some(Modal::Settings { follow_up, .. }) = ws.modal.as_mut() {
+                                *follow_up = choice;
+                            }
+                        },
+                        cx,
+                    )
+                    .into_any_element(),
                 )
                 .into_any_element(),
             );
@@ -153,35 +159,35 @@ pub(super) fn render_settings_card(
                 row_shell(
                     "Usage limits",
                     Some("Show sidebar usage limit bars as percentage used or remaining"),
-                    div()
-                        .flex_none()
-                        .flex()
-                        .gap(px(4.0))
-                        .child(usage_display_button(crate::store::UsageDisplay::Used, "Used", usage_display, cx))
-                        .child(usage_display_button(crate::store::UsageDisplay::Left, "Left", usage_display, cx))
-                        .into_any_element(),
+                    toggle_group(
+                        "settings-usage-display",
+                        &[(crate::store::UsageDisplay::Used, "Used"), (crate::store::UsageDisplay::Left, "Left")],
+                        usage_display,
+                        |ws, choice, _, _| {
+                            if let Some(Modal::Settings { usage_display, .. }) = ws.modal.as_mut() {
+                                *usage_display = choice;
+                            }
+                        },
+                        cx,
+                    )
+                    .into_any_element(),
                 )
                 .into_any_element(),
                 row_shell(
                     "Auto-handoff on usage limit",
                     Some("Warn a working model at 90% and hand off to another enabled model if it hits 100%"),
-                    div()
-                        .flex_none()
-                        .flex()
-                        .gap(px(4.0))
-                        .child(button("settings-auto-handoff-on", "On", auto_handoff_on_limit).on_click(cx.listener(|ws, _: &ClickEvent, _, cx| {
+                    toggle_group(
+                        "settings-auto-handoff",
+                        &[(true, "On"), (false, "Off")],
+                        auto_handoff_on_limit,
+                        |ws, on, _, _| {
                             if let Some(Modal::Settings { auto_handoff_on_limit, .. }) = ws.modal.as_mut() {
-                                *auto_handoff_on_limit = true;
+                                *auto_handoff_on_limit = on;
                             }
-                            cx.notify();
-                        })))
-                        .child(button("settings-auto-handoff-off", "Off", !auto_handoff_on_limit).on_click(cx.listener(|ws, _: &ClickEvent, _, cx| {
-                            if let Some(Modal::Settings { auto_handoff_on_limit, .. }) = ws.modal.as_mut() {
-                                *auto_handoff_on_limit = false;
-                            }
-                            cx.notify();
-                        })))
-                        .into_any_element(),
+                        },
+                        cx,
+                    )
+                    .into_any_element(),
                 )
                 .into_any_element(),
                 row_shell(
@@ -438,25 +444,6 @@ fn row_labels(title: &str, subtitle: Option<&str>) -> gpui::Div {
         .children(subtitle.map(|s| div().text_size(scaled(11.5)).text_color(hsla(theme::TEXT_FAINT)).child(s.to_string())))
 }
 
-/// One side of the Queue / Steer switch; the chosen one is drawn as the primary button.
-fn follow_up_button(choice: crate::store::FollowUp, label: &'static str, current: crate::store::FollowUp, cx: &mut Context<Workspace>) -> impl IntoElement {
-    button(format!("settings-follow-up-{label}"), label, choice == current).on_click(cx.listener(move |ws, _: &ClickEvent, _, cx| {
-        if let Some(Modal::Settings { follow_up, .. }) = ws.modal.as_mut() {
-            *follow_up = choice;
-        }
-        cx.notify();
-    }))
-}
-
-/// One side of the Used / Left usage limits display switch.
-fn usage_display_button(choice: crate::store::UsageDisplay, label: &'static str, current: crate::store::UsageDisplay, cx: &mut Context<Workspace>) -> impl IntoElement {
-    button(format!("settings-usage-display-{label}"), label, choice == current).on_click(cx.listener(move |ws, _: &ClickEvent, _, cx| {
-        if let Some(Modal::Settings { usage_display, .. }) = ws.modal.as_mut() {
-            *usage_display = choice;
-        }
-        cx.notify();
-    }))
-}
 
 fn row_shell(title: &str, subtitle: Option<&str>, trailing: AnyElement) -> gpui::Div {
     div()
