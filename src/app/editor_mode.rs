@@ -69,6 +69,8 @@ pub struct EditorPane {
     pub watcher: Option<notify::RecommendedWatcher>,
     /// The repository's own folder, whose index and HEAD say when git's view of the files moved (a commit, a checkout).
     pub git_dir: Option<PathBuf>,
+    /// The shared `.git` folder (for linked worktrees, where `refs` and `worktrees` live).
+    pub common_git_dir: Option<PathBuf>,
     /// The same for the repositories nested in the folder, as the last listing found them.
     pub nested_git_dirs: Vec<PathBuf>,
     /// The folders the tree lists; a change anywhere else (an ignored build folder) changes nothing it shows.
@@ -256,6 +258,7 @@ impl Workspace {
             server_gen: 0,
                 watcher: None,
                 git_dir: None,
+                common_git_dir: None,
                 nested_git_dirs: vec![],
                 folders: HashSet::new(),
                 stale: false,
@@ -362,18 +365,38 @@ impl Workspace {
                     })
                     .ok()?;
                     watcher.watch(&root, notify::RecursiveMode::Recursive).ok()?;
-                    // A session started below the repository's top doesn't contain `.git`, so it is watched on its own.
-                    let git_dir = git2::Repository::discover(&root).ok().and_then(|r| dunce::canonicalize(r.path()).ok());
+                    // A session started below the repository's top (or in a linked worktree) doesn't contain `.git` or
+                    // the shared `refs`/`worktrees` folders, so watch them directly.
+                    let (git_dir, common_git_dir) = git2::Repository::discover(&root)
+                        .ok()
+                        .map(|r| (dunce::canonicalize(r.path()).ok(), dunce::canonicalize(r.commondir()).ok()))
+                        .unwrap_or((None, None));
                     if let Some(dir) = git_dir.as_ref().filter(|d| !d.starts_with(&root)) {
                         let _ = watcher.watch(dir, notify::RecursiveMode::NonRecursive);
-                        let _ = watcher.watch(&dir.join("refs"), notify::RecursiveMode::Recursive);
                     }
-                    Some((watcher, git_dir))
+                    if let Some(common) = common_git_dir.as_ref() {
+                        if !common.starts_with(&root) {
+                            let _ = watcher.watch(common, notify::RecursiveMode::NonRecursive);
+                            let _ = watcher.watch(&common.join("refs"), notify::RecursiveMode::Recursive);
+                        }
+                        let worktrees = common.join("worktrees");
+                        if worktrees.is_dir() && !worktrees.starts_with(&root) {
+                            let _ = watcher.watch(&worktrees, notify::RecursiveMode::Recursive);
+                        }
+                    }
+                    Some((watcher, git_dir, common_git_dir))
                 })
                 .await;
-            let Some((watcher, git_dir)) = started else { return };
+            let Some((watcher, git_dir, common_git_dir)) = started else { return };
             // The first listing ran while the watch was starting, so what changed in between is caught by one more.
-            let kept = this.update(cx, |ws, _| ws.panes.get_mut(&id).map(|p| (p.watcher, p.git_dir, p.stale) = (Some(watcher), git_dir, true)));
+            let kept = this.update(cx, |ws, _| {
+                ws.panes.get_mut(&id).map(|p| {
+                    p.watcher = Some(watcher);
+                    p.git_dir = git_dir;
+                    p.common_git_dir = common_git_dir;
+                    p.stale = true;
+                })
+            });
             if !matches!(kept, Ok(Some(()))) {
                 return;
             }
@@ -396,14 +419,20 @@ impl Workspace {
         let shown = self.editor_owner().as_ref() == Some(id);
         let Some(pane) = self.panes.get_mut(id) else { return };
         // No paths: the watcher lost track (its buffer overflowed) and anything may have changed.
-        let git_dirs: Vec<&Path> = pane.git_dir.iter().chain(&pane.nested_git_dirs).map(PathBuf::as_path).collect();
-        if !paths.is_empty() && !paths.iter().any(|p| change_matters(&pane.root, &git_dirs, &pane.folders, pane.truncated, p)) {
+        let git_dirs: Vec<&Path> = pane.git_dir.iter().chain(&pane.common_git_dir).chain(&pane.nested_git_dirs).map(PathBuf::as_path).collect();
+        let refresh_git = paths.iter().any(|p| git_worktree_or_head_changed(&git_dirs, p));
+        let root_for_git = refresh_git.then(|| pane.root.clone());
+        let matters = paths.is_empty() || paths.iter().any(|p| change_matters(&pane.root, &git_dirs, &pane.folders, pane.truncated, p));
+        if matters {
+            pane.stale = true;
+        }
+        if let Some(root) = root_for_git {
+            self.refresh_git_at(Some(&root), cx);
+        }
+        if !matters || !shown {
             return;
         }
-        pane.stale = true;
-        if !shown {
-            return;
-        }
+        let Some(pane) = self.panes.get_mut(id) else { return };
         // Listed a moment ago: listed again once `RELIST_GAP` has passed, with whatever else changed by then.
         let wait = pane.listed_at.map_or(Duration::ZERO, |t| RELIST_GAP.saturating_sub(t.elapsed()));
         if wait.is_zero() {
@@ -613,6 +642,17 @@ fn folders_of(nodes: &[Node]) -> HashSet<PathBuf> {
         }
     }
     folders
+}
+
+/// Whether a change inside a git metadata dir affects worktree membership or branch HEADs (triggers an immediate
+/// `refresh_git_at` without waiting for the 3-second poll).
+fn git_worktree_or_head_changed(git_dirs: &[&Path], path: &Path) -> bool {
+    let Some(git) = git_dirs.iter().find(|g| path.starts_with(g)) else { return false };
+    let parent = path.parent();
+    let named = |names: &[&str]| path.file_name().is_some_and(|n| names.iter().any(|m| n == *m));
+    (parent == Some(git) && named(&["HEAD", "packed-refs", "worktrees"]))
+        || path.starts_with(git.join("refs"))
+        || path.starts_with(git.join("worktrees"))
 }
 
 /// Whether a change at `path` can change what a pane listing `root` shows: something in a folder the tree lists, or

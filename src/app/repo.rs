@@ -32,8 +32,45 @@ impl Workspace {
                     }
                 }
                 if changed { ws.store.mark_dirty(); ws.store.save_if_dirty(); cx.notify(); }
+                ws.recover_deleted_worktrees(cx);
             });
         }).detach();
+    }
+
+    /// If a live session's linked worktree was deleted externally (by a model or terminal), queue a real switch back
+    /// to the main checkout so the agent process isn't left running in a missing folder.
+    fn recover_deleted_worktrees(&mut self, cx: &mut Context<Self>) {
+        let mut to_recover: Vec<(Id, PathBuf, String)> = vec![];
+        for live in &self.live {
+            if self.switching_worktree.contains_key(&live.id)
+                || self.pending_handoffs.contains_key(&live.id)
+                || self.pending_switches.iter().any(|p| p.id == live.id)
+                || !live.view.is_running(cx)
+            {
+                continue;
+            }
+            let Some(rec) = self.store.session(&live.id).filter(|r| r.kind == SessionKind::Agent) else { continue };
+            let Some(git) = rec.project_id.as_ref().and_then(|p| self.store.project(p)).and_then(|p| p.git.as_ref()) else { continue };
+            let main = git.main_checkout();
+            if crate::platform::path_key(&rec.cwd) == crate::platform::path_key(main) || !main.is_dir() {
+                continue;
+            }
+            let missing_dir = !rec.cwd.is_dir();
+            let unregistered_wt = !crate::platform::is_same_or_under(&rec.cwd, main) && git.folder_of(&rec.cwd).is_none();
+            if missing_dir || unregistered_wt {
+                let name = rec.cwd.file_name().map_or_else(|| "worktree".to_string(), |n| n.to_string_lossy().into_owned());
+                to_recover.push((live.id.clone(), main.to_path_buf(), name));
+            }
+        }
+        for (id, main, name) in to_recover {
+            self.pending_switches.push(super::cross::PendingSwitch {
+                id,
+                folder: main,
+                base: crate::git::worktree::Base::Main,
+                asked: crate::store::now(),
+            });
+            self.toast(format!("Worktree {name} was removed — returning to main checkout."), cx);
+        }
     }
 
     /// Git actions (see `git/commit.rs`): one at a time, off the UI thread, reported through a toast.

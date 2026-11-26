@@ -268,6 +268,118 @@ impl Workspace {
             self.toast(format!("{files} on its old path: it has unsaved edits, or the new folder lacks it."), cx);
         }
     }
+
+    /// Follow a native cwd switch (`EnterWorktree` / `ExitWorktree`) at turn end without restarting the agent process.
+    fn follow_native_worktree(&mut self, id: &str, folder: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        if !folder.is_dir() {
+            return;
+        }
+        let Some(rec) = self.store.session(id) else { return };
+        if crate::platform::path_key(&rec.cwd) == crate::platform::path_key(&folder) {
+            return;
+        }
+        let is_main = rec
+            .project_id
+            .as_ref()
+            .and_then(|p| self.store.project(p))
+            .and_then(|p| p.git.as_ref())
+            .is_some_and(|git| git.is_main(&folder));
+        let shell = self.shells.remove(id).map(|p| (p.open, p.height));
+        if let Some(rec) = self.store.session_mut(id) {
+            rec.cwd = folder.clone();
+        }
+        self.store.mark_dirty();
+        self.store.save_if_dirty();
+        if let Some(thread) = self.live_view(id).and_then(SessionView::thread).cloned() {
+            thread.update(cx, |t, cx| t.follow_workspace(folder.clone(), cx));
+        }
+        self.repoint_tabs(id, &folder, window, cx);
+        self.restore_shell(id, shell, window, cx);
+        self.refresh_git_at(Some(&folder), cx);
+        if self.active_id().is_some_and(|a| a == id) {
+            self.show_session(id, window, cx);
+        }
+        let notice = if is_main {
+            "Returned to main checkout.".to_string()
+        } else {
+            let name = folder.file_name().map_or_else(|| "worktree".to_string(), |n| n.to_string_lossy().into_owned());
+            format!("Followed agent into worktree {name}.")
+        };
+        self.toast(notice, cx);
+    }
+
+    /// At turn end, follow Claude Code's native `EnterWorktree`/`ExitWorktree` or surface an actionable toast when
+    /// the agent edited files in another worktree of the same repository (without mutating `rec.cwd`).
+    pub(super) fn check_turn_worktree_activity(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(thread) = self.live_view(id).and_then(SessionView::thread).cloned() else { return };
+        let (native_changed, edited_paths) = thread.update(cx, |t, _| {
+            (t.take_native_worktree_changed(), t.take_turn_edited_paths())
+        });
+        if self.switching_worktree.contains_key(id)
+            || self.pending_handoffs.contains_key(id)
+            || self.pending_switches.iter().any(|p| p.id == id)
+        {
+            return;
+        }
+        let Some(rec) = self.store.session(id).cloned() else { return };
+        let Some(git) = rec.project_id.as_ref().and_then(|p| self.store.project(p)).and_then(|p| p.git.clone()) else { return };
+
+        if native_changed && rec.agent.as_ref().is_some_and(|m| m.harness == Harness::Claude) {
+            let Some(session_id) = rec.provider_session_id().map(str::to_string) else { return };
+            let main = git.main_checkout().to_path_buf();
+            let id = id.to_string();
+            cx.spawn_in(window, async move |this, cx| {
+                let target = cx
+                    .background_executor()
+                    .spawn(async move {
+                        let home = crate::harness::claude::claude_home()?;
+                        let transcript = crate::harness::claude::find_transcript(&home, &session_id)?;
+                        match crate::harness::claude::worktree_session_state(&transcript).ok()?? {
+                            crate::harness::claude::WorktreeState::Entered(Some(path)) if path.is_dir() => Some(path),
+                            crate::harness::claude::WorktreeState::Exited if main.is_dir() => Some(main),
+                            _ => None,
+                        }
+                    })
+                    .await;
+                if let Some(folder) = target {
+                    let _ = this.update_in(cx, |ws, window, cx| ws.follow_native_worktree(&id, folder, window, cx));
+                }
+            })
+            .detach();
+            return;
+        }
+
+        if let Some((other, count)) = other_worktree_edit_target(&git, &rec.cwd, &edited_paths) {
+            let label = worktree::label(&git, &other).unwrap_or_else(|| {
+                other.file_name().map_or_else(|| "worktree".to_string(), |n| n.to_string_lossy().into_owned())
+            });
+            let files = if count == 1 { "1 file".to_string() } else { format!("{count} files") };
+            self.show_toast(
+                format!("Agent edited {files} in {label}."),
+                Some(("Switch".into(), Act::SwitchSessionWorktree { id: id.to_string(), folder: other, base: Base::Main })),
+                cx,
+            );
+        }
+    }
+}
+
+/// If the turn's edited files landed in another linked worktree of `git` than `cwd`, return the worktree with the most
+/// edited files and its count. Never matches the current worktree or files outside the repository.
+fn other_worktree_edit_target(git: &crate::git::GitInfo, cwd: &Path, edited_paths: &[PathBuf]) -> Option<(PathBuf, usize)> {
+    let here = git.folder_of(cwd).map(crate::platform::path_key);
+    let mut counts: HashMap<String, (PathBuf, usize)> = HashMap::new();
+    for path in edited_paths {
+        if !path.is_absolute() {
+            continue;
+        }
+        let Some(folder) = git.folder_of(path) else { continue };
+        let key = crate::platform::path_key(folder);
+        if here.as_deref() == Some(key.as_str()) {
+            continue;
+        }
+        counts.entry(key).and_modify(|(_, n)| *n += 1).or_insert_with(|| (folder.to_path_buf(), 1));
+    }
+    counts.into_values().max_by_key(|(_, n)| *n)
 }
 
 #[cfg(test)]
@@ -284,5 +396,26 @@ mod tests {
         assert!(!can_resume(&path).unwrap());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), transcript);
         assert!(can_resume(&dir.path().join("absent.jsonl")).is_err());
+    }
+
+    #[test]
+    fn other_worktree_edit_target_picks_another_worktree_with_most_edits() {
+        let git = crate::git::GitInfo {
+            root: "/repo".into(),
+            main: "/repo".into(),
+            worktrees: vec!["/wt/alpha".into(), "/wt/beta".into()],
+            ..Default::default()
+        };
+        let cwd = Path::new("/repo");
+        // Edits in current worktree or outside repo produce nothing.
+        assert_eq!(other_worktree_edit_target(&git, cwd, &["/repo/a.rs".into(), "/other/b.rs".into()]), None);
+        // Edits in another worktree pick the one with the most files.
+        let edited = vec![
+            "/repo/a.rs".into(),
+            "/wt/alpha/one.rs".into(),
+            "/wt/beta/one.rs".into(),
+            "/wt/beta/two.rs".into(),
+        ];
+        assert_eq!(other_worktree_edit_target(&git, cwd, &edited), Some((PathBuf::from("/wt/beta"), 2)));
     }
 }

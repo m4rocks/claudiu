@@ -397,6 +397,10 @@ pub struct ThreadView {
     turn_seq: u64,
     /// Turn outcome waiting for live background tasks to finish before emitting `ThreadEvent::Idle`.
     pending_idle: Option<&'static str>,
+    /// True when the agent completed a native worktree tool (`EnterWorktree` / `ExitWorktree`) during the current turn.
+    native_worktree_changed: bool,
+    /// Absolute file paths edited by this session's own tools (not subagents) during the current turn.
+    turn_edited_paths: Vec<PathBuf>,
     /// When the running turn's prompt went out, for the timer on the chat's working row.
     turn_started: Option<Instant>,
     /// How long the last finished turn took, shown as "Worked for …" under it until the next one starts.
@@ -634,6 +638,8 @@ impl ThreadView {
             working: false,
             turn_seq: 0,
             pending_idle: None,
+            native_worktree_changed: false,
+            turn_edited_paths: vec![],
             turn_started: None,
             last_turn: None,
             last_update: None,
@@ -1089,20 +1095,40 @@ impl ThreadView {
                     if let Some(Entry::Tool(call)) = self.thread.entries.get(at) {
                         let call_id = call.id.clone();
                         self.tool_images.get_mut().retain(|(id, _), _| *id != call_id);
-                        if self.phase == Phase::Ready && !self.cached_replay
-                            && let Some(hooks) = &protocol.background
-                        {
-                            let background = (hooks.from_update)(call, &update);
-                            if let Some(task) = background.started
-                                && self.seen_background_tasks.insert(task.id.clone())
+                        if self.phase == Phase::Ready && !self.cached_replay {
+                            if call.status == ToolStatus::Done
+                                && (call.title.starts_with("EnterWorktree") || call.title.starts_with("ExitWorktree"))
                             {
-                                self.background_tasks.push(task);
+                                self.native_worktree_changed = true;
                             }
-                            for id in &background.finished {
-                                self.retire_background_task(id);
+                            if call.kind == "edit" && call.subagent.is_none() {
+                                for (path, _) in &call.locations {
+                                    if path.is_absolute() && !self.turn_edited_paths.contains(path) {
+                                        self.turn_edited_paths.push(path.clone());
+                                    }
+                                }
+                                for item in &call.content {
+                                    if let crate::harness::thread::ToolContent::Diff { path, .. } = item
+                                        && path.is_absolute()
+                                        && !self.turn_edited_paths.contains(path)
+                                    {
+                                        self.turn_edited_paths.push(path.clone());
+                                    }
+                                }
                             }
-                            for text in background.output {
-                                self.retire_finished_background_tasks(&text);
+                            if let Some(hooks) = &protocol.background {
+                                let background = (hooks.from_update)(call, &update);
+                                if let Some(task) = background.started
+                                    && self.seen_background_tasks.insert(task.id.clone())
+                                {
+                                    self.background_tasks.push(task);
+                                }
+                                for id in &background.finished {
+                                    self.retire_background_task(id);
+                                }
+                                for text in background.output {
+                                    self.retire_finished_background_tasks(&text);
+                                }
                             }
                         }
                         if self.shell_output.as_ref().is_some_and(|out| out.task_id == call_id) {
@@ -1957,6 +1983,32 @@ impl ThreadView {
             cx.emit(ThreadEvent::Idle(outcome));
         } else if !self.working {
             self.pending_idle = None;
+        }
+        cx.notify();
+    }
+
+    /// Whether the agent ran `EnterWorktree` or `ExitWorktree` during the turn that just ended.
+    pub fn take_native_worktree_changed(&mut self) -> bool {
+        std::mem::take(&mut self.native_worktree_changed)
+    }
+
+    /// Absolute file paths edited by this session's own tools during the turn that just ended.
+    pub fn take_turn_edited_paths(&mut self) -> Vec<PathBuf> {
+        std::mem::take(&mut self.turn_edited_paths)
+    }
+
+    /// Update the thread's checkout path after a native cwd change (`EnterWorktree` / `ExitWorktree`) at turn end,
+    /// recording a `WorkspaceBoundary` so earlier relative paths still resolve against the old tree.
+    pub fn follow_workspace(&mut self, folder: PathBuf, cx: &mut Context<Self>) {
+        if crate::platform::path_key(&self.cwd) == crate::platform::path_key(&folder) {
+            return;
+        }
+        let old = std::mem::replace(&mut self.cwd, folder);
+        if !self.thread.entries.is_empty() {
+            let at = self.thread.entries.len();
+            self.thread.entries.push(Entry::WorkspaceBoundary(old));
+            self.remeasure(at);
+            self.persist_entries();
         }
         cx.notify();
     }
@@ -3052,8 +3104,19 @@ impl ThreadView {
     }
 
     /// Streaming and background parsing can invalidate the same row repeatedly within a frame.
+    /// Structural changes (added/removed rows or changed tool-run grouping) remeasure immediately
+    /// so `ListState` stays in sync with `entries` and the trailing turn-status row never flashes away.
     pub(super) fn schedule_remeasure(&mut self, from: usize, cx: &mut Context<Self>) {
+        let structural = self.thread.entries.len() != self.rows
+            || self.run_cache.get_mut().kinds.get(from).is_some_and(|cached| {
+                Some(*cached) != self.thread.entries.get(from).map(timeline::run_kind)
+            });
         self.invalidate_groups(from);
+        if structural {
+            let from = self.pending_remeasure.take().map_or(from, |pending| pending.min(from));
+            self.remeasure(from);
+            return;
+        }
         if let Some(pending) = &mut self.pending_remeasure { *pending = (*pending).min(from); return; }
         self.pending_remeasure = Some(from);
         cx.spawn(async move |this, cx| {
@@ -3567,6 +3630,50 @@ mod tests {
             v.thread.entries[2] = Entry::Thought("new group".into());
             v.schedule_remeasure(2, cx);
             assert_eq!(v.group_start_before(3), 2, "coalescing must retain structural changes after an earlier text update");
+        });
+    }
+
+    #[gpui::test]
+    fn new_tool_call_keeps_list_and_turn_status_row_in_sync(cx: &mut gpui::TestAppContext) {
+        crate::datadir::use_throwaway_folders();
+        cx.update(gpui_kit::init);
+        let dir = tempfile::tempdir().unwrap();
+        let mut start = test_start(dir.path().into(), Harness::Claude);
+        start.prior_entries = vec![
+            Entry::User("investigate".into()),
+            Entry::Tool(crate::harness::thread::ToolCall { id: "t1".into(), kind: "read".into(), title: "read a.rs".into(), ..Default::default() }),
+        ];
+        let (view, cx) = cx.add_window_view(|window, cx| super::ThreadView::new(start, window, cx));
+        view.update(cx, |v, cx| {
+            v.working = true;
+            v.on_event(update_event(serde_json::json!({
+                "sessionUpdate": "tool_call",
+                "toolCallId": "t2",
+                "title": "read b.rs",
+                "kind": "read",
+                "status": "in_progress",
+            })), cx);
+            assert_eq!(v.thread.entries.len(), 3);
+            assert_eq!(v.rows, 3, "appending a tool call must update rows immediately");
+            assert_eq!(
+                v.list.item_count(),
+                v.thread.entries.len() + 1,
+                "list must keep the trailing turn-status row immediately so it never flashes away"
+            );
+            assert!(v.pending_remeasure.is_none());
+
+            // Streaming into an existing message row still coalesces behind the timer.
+            v.on_event(update_event(serde_json::json!({
+                "sessionUpdate": "agent_message_chunk",
+                "content": { "type": "text", "text": "hello" },
+            })), cx);
+            assert_eq!(v.list.item_count(), v.thread.entries.len() + 1);
+            assert!(v.pending_remeasure.is_none());
+            v.on_event(update_event(serde_json::json!({
+                "sessionUpdate": "agent_message_chunk",
+                "content": { "type": "text", "text": " world" },
+            })), cx);
+            assert_eq!(v.pending_remeasure, Some(3), "in-place streaming chunks should still coalesce");
         });
     }
 

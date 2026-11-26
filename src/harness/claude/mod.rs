@@ -355,9 +355,23 @@ pub fn find_transcript(home: &Path, session_id: &str) -> Option<PathBuf> {
     fs::read_dir(home.join("projects")).ok()?.flatten().map(|d| d.path().join(&name)).find(|p| p.is_file())
 }
 
+/// What Claude Code's last `worktree-state` transcript line records.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WorktreeState {
+    /// Session entered a worktree (with its `worktreePath` when recorded).
+    Entered(Option<PathBuf>),
+    /// Session exited its worktree (`worktreeSession: null`).
+    Exited,
+}
+
 /// Whether the transcript's last `worktree-state` line names a worktree. Claude Code writes the line whenever a session
 /// enters or leaves one and restores it on every resume, which wins over the folder `claude` is started in.
 pub fn worktree_recorded(transcript: &Path) -> std::io::Result<bool> {
+    Ok(matches!(worktree_session_state(transcript)?, Some(WorktreeState::Entered(_))))
+}
+
+/// The last `worktree-state` entry written to a Claude Code transcript, if any.
+pub fn worktree_session_state(transcript: &Path) -> std::io::Result<Option<WorktreeState>> {
     const CHUNK: u64 = 1 << 20;
     let mut file = File::open(transcript)?;
     let mut start = file.metadata()?.len();
@@ -373,19 +387,30 @@ pub fn worktree_recorded(transcript: &Path) -> std::io::Result<bool> {
         let text = String::from_utf8_lossy(&tail);
         // Unless the whole file is in view, the first line may be cut in half.
         let whole = if start == 0 { &text[..] } else { text.split_once('\n').map_or("", |(_, rest)| rest) };
-        if let Some(recorded) = whole.lines().rev().find_map(worktree_state) {
-            return Ok(recorded);
+        if let Some(state) = whole.lines().rev().find_map(worktree_state) {
+            return Ok(Some(state));
         }
     }
-    Ok(false)
+    Ok(None)
 }
 
-fn worktree_state(line: &str) -> Option<bool> {
+fn worktree_state(line: &str) -> Option<WorktreeState> {
     if !line.contains("\"worktree-state\"") {
         return None;
     }
     let v: Value = serde_json::from_str(line).ok()?;
-    (v["type"] == "worktree-state").then(|| !v["worktreeSession"].is_null())
+    if v["type"] != "worktree-state" {
+        return None;
+    }
+    if v["worktreeSession"].is_null() {
+        Some(WorktreeState::Exited)
+    } else {
+        let path = v["worktreeSession"]["worktreePath"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from);
+        Some(WorktreeState::Entered(path))
+    }
 }
 
 pub fn context_limit(window: Option<u64>, compact_at: Option<u64>, auto_compact: Option<bool>) -> Option<u64> {
@@ -439,13 +464,15 @@ mod tests {
     fn the_last_worktree_state_line_decides() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("s.jsonl");
-        let entered = r#"{"type":"worktree-state","worktreeSession":{"worktreeName":"t1"},"sessionId":"s"}"#;
+        let entered = r#"{"type":"worktree-state","worktreeSession":{"worktreeName":"t1","worktreePath":"/wt/t1"},"sessionId":"s"}"#;
         fs::write(&path, format!("{{\"type\":\"user\"}}\n{entered}\n{{\"type\":\"assistant\"}}")).unwrap();
         assert!(worktree_recorded(&path).unwrap());
+        assert_eq!(worktree_session_state(&path).unwrap(), Some(WorktreeState::Entered(Some(PathBuf::from("/wt/t1")))));
 
         let exited = r#"{"type":"worktree-state","worktreeSession":null,"sessionId":"s"}"#;
         fs::write(&path, format!("{entered}\n{exited}\n")).unwrap();
         assert!(!worktree_recorded(&path).unwrap());
+        assert_eq!(worktree_session_state(&path).unwrap(), Some(WorktreeState::Exited));
 
         fs::write(&path, format!("{entered}\n{{\"type\":\"user\"}}\n")).unwrap();
         assert!(worktree_recorded(&path).unwrap());

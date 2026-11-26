@@ -509,6 +509,7 @@ impl Workspace {
                     if let Some(harness) = ws.store.session(&sub_id).and_then(|r| r.agent.as_ref()).map(|m| m.harness) {
                         ws.request_limits_refresh(harness, cx);
                     }
+                    ws.check_turn_worktree_activity(&sub_id, window, cx);
                     ws.report_to_parent(&sub_id, outcome, cx);
                     // The row's check mark and the notification follow the turn's end, not the next poll.
                     ws.update_activity(window, cx);

@@ -600,7 +600,11 @@ function isLocalCommandMessage(m) {
 }
 
 async function replay(session) {
-  const messages = await getSessionMessages(session.id, { dir: session.cwd });
+  let messages = await getSessionMessages(session.id, { dir: session.cwd });
+  if (!messages.length) {
+    // A session that moved via EnterWorktree may store its transcript under the original checkout's project dir.
+    messages = await getSessionMessages(session.id);
+  }
   for (const m of messages) {
     if ((m.type !== "user" && m.type !== "assistant") || isCompactSummary(m) || isLocalCommandMessage(m)) continue;
     // A tool's result arrives as a user message; it is not something the user said.

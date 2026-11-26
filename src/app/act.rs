@@ -22,6 +22,12 @@ pub enum Act {
         folder: PathBuf,
         base: Base,
     },
+    /// Move a specific session into a working tree (used by actionable toasts so switching tabs first still targets it).
+    SwitchSessionWorktree {
+        id: Id,
+        folder: PathBuf,
+        base: Base,
+    },
     /// `SwitchWorktree`, after the user agreed to leave uncommitted files behind.
     ConfirmSwitch {
         id: Id,
@@ -158,6 +164,7 @@ impl Workspace {
             },
             Act::CreateHomeWorktree { main_checkout, folder, base } => self.create_home_worktree(main_checkout, folder, base, window, cx),
             Act::SwitchWorktree { folder, base } => self.switch_shown(folder, base, false, window, cx),
+            Act::SwitchSessionWorktree { id, folder, base } => self.switch_session(id, folder, base, false, window, cx),
             Act::ConfirmSwitch { id, folder, base } => {
                 self.modal = None;
                 self.switch_session(id, folder, base, true, window, cx)

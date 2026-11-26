@@ -12,6 +12,9 @@ use crate::platform::path_key;
 
 /// The folder in m4code's data folder that holds one folder of worktrees per repository.
 const STORE: &str = "worktrees";
+/// Marker file placed inside git's per-worktree admin dir (`<common>/worktrees/<id>/m4code-created`) when m4code
+/// creates a worktree. Git removes the admin dir on `worktree remove` / `prune`, so provenance cleans itself up.
+const CREATED_MARKER: &str = "m4code-created";
 
 /// What a new worktree's branch starts from.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -103,10 +106,24 @@ pub fn folders(git: &GitInfo) -> Vec<&Path> {
     std::iter::once(main).chain(others).collect()
 }
 
-/// Only the folders m4code made are removed from m4code: a worktree made anywhere else, `claude --worktree`'s in
-/// `.claude/worktrees` included, is the user's own.
-pub fn removable(main_checkout: &Path, folder: &Path) -> bool {
+/// Whether `folder` lives in m4code's own data-folder store for `main_checkout`.
+pub fn in_store(main_checkout: &Path, folder: &Path) -> bool {
     folder.parent().is_some_and(|parent| path_key(parent) == path_key(&repo_folder(main_checkout)))
+}
+
+/// Whether m4code created `folder` (either marked in its git admin dir or stored in m4code's data folder).
+/// Used to gate automatic merged-branch deletion and end-of-session removal prompts.
+pub fn created_by_m4code(main_checkout: &Path, folder: &Path) -> bool {
+    if path_key(folder) == path_key(main_checkout) {
+        return false;
+    }
+    if in_store(main_checkout, folder) {
+        return true;
+    }
+    Repository::open(folder)
+        .ok()
+        .filter(Repository::is_worktree)
+        .is_some_and(|r| r.path().join(CREATED_MARKER).is_file())
 }
 
 /// A worktree folder in m4code's data folder, found by looking at the disk.
@@ -125,7 +142,7 @@ pub fn stored() -> Vec<Stored> {
     let mut found: Vec<Stored> = subfolders(&store())
         .iter()
         .flat_map(|repo| subfolders(repo))
-        .map(|folder| Stored { main_checkout: main_checkout_of(&folder).filter(|main| removable(main, &folder)), folder })
+        .map(|folder| Stored { main_checkout: main_checkout_of(&folder).filter(|main| in_store(main, &folder)), folder })
         .collect();
     found.sort_by_key(|s| path_key(&s.folder));
     found
@@ -225,6 +242,11 @@ pub fn add(main_checkout: &Path, folder: &Path, base: Base) -> Result<(), String
         _ => "HEAD".into(),
     };
     git(main_checkout, &["worktree", "add", "--no-track", "-b", &name, "--", &path, &start], None)?;
+    if let Ok(repo) = Repository::open(folder)
+        && repo.is_worktree()
+    {
+        let _ = std::fs::write(repo.path().join(CREATED_MARKER), "");
+    }
     Ok(())
 }
 
@@ -242,17 +264,22 @@ pub fn leftovers(folder: &Path) -> Result<Leftovers, String> {
     Ok(Leftovers { files, unpushed })
 }
 
-/// Remove the worktree, and its branch when that is fully merged. `discard` lets git delete changed and new files.
-/// A Claude session that was just ended, and the programs it started, get `grace` to exit before they count as still
-/// running. Returns a line for a toast. Blocking.
+/// Remove a linked worktree, and its branch when m4code created it and the branch is fully merged. `discard` lets git
+/// delete changed and new files. A Claude session that was just ended, and the programs it started, get `grace` to exit
+/// before they count as still running. Returns a line for a toast. Blocking.
 pub fn remove(main_checkout: &Path, folder: &Path, discard: bool, grace: std::time::Duration) -> Result<String, String> {
-    if !removable(main_checkout, folder) {
-        return Err(format!("{} is not in m4code's worktrees folder, so m4code leaves it alone.", folder.display()));
+    if path_key(folder) == path_key(main_checkout) {
+        return Err("Cannot remove the main checkout.".into());
+    }
+    let listing = git(main_checkout, &["worktree", "list", "--porcelain"], None)?;
+    if block_of(&listing, folder).is_none() {
+        return Err(format!("{} is not a linked worktree of this repository.", folder.display()));
     }
     let deadline = std::time::Instant::now() + grace;
     let name = folder.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+    let owned = created_by_m4code(main_checkout, folder);
+    let default_branch = origin_default_branch(main_checkout).ok().and_then(|b| b.strip_prefix("origin/").map(str::to_string));
     let branch = git(folder, &["branch", "--show-current"], None).ok().map(|b| b.trim().to_string()).filter(|b| !b.is_empty());
-    let listing = git(main_checkout, &["worktree", "list", "--porcelain"], None)?;
     // A session that was ended leaves its lock behind. A lock set by anything else stays, and git then refuses.
     if let Some(reason) = lock_reason(&listing, folder).filter(|r| r.starts_with("claude session")) {
         if lock_pid(&reason).is_none_or(|pid| still_running(pid, grace)) {
@@ -263,10 +290,13 @@ pub fn remove(main_checkout: &Path, folder: &Path, discard: bool, grace: std::ti
     let folder_in_use = delete_worktree(main_checkout, folder, discard, deadline)?;
     let mut message = match branch {
         None => format!("Removed worktree {name}."),
-        Some(branch) => match git(main_checkout, &["branch", "-d", "--", &branch], None) {
-            Ok(_) => format!("Removed worktree {name} and its merged branch {branch}."),
-            Err(_) => format!("Removed worktree {name}. The branch {branch} is kept: it has commits that are not merged."),
-        },
+        Some(branch) if owned && default_branch.as_deref() != Some(branch.as_str()) => {
+            match git(main_checkout, &["branch", "-d", "--", &branch], None) {
+                Ok(_) => format!("Removed worktree {name} and its merged branch {branch}."),
+                Err(_) => format!("Removed worktree {name}. The branch {branch} is kept: it has commits that are not merged."),
+            }
+        }
+        Some(branch) => format!("Removed worktree {name}. The branch {branch} is kept."),
     };
     if folder_in_use {
         message.push_str(" Its folder is still in use by a program, such as a terminal or a tool Claude started. Delete it once that ends.");
@@ -444,17 +474,17 @@ mod tests {
     }
 
     #[test]
-    fn only_claudes_worktree_folders_are_removable() {
+    fn only_m4codes_worktree_folders_are_in_store() {
         use_throwaway_data_folder();
         let main = Path::new("/p");
         let ours = folder(main, "fix");
-        assert!(removable(main, &ours));
-        assert!(!removable(main, Path::new("/p")), "the main checkout");
-        assert!(!removable(main, Path::new("/p-feature")), "a worktree made elsewhere");
-        assert!(!removable(main, Path::new("/p/.claude/worktrees/fix")), "one made by claude --worktree");
-        assert!(!removable(main, &ours.join("src")), "a folder inside one");
-        assert!(!removable(main, ours.parent().unwrap()));
-        assert!(!removable(Path::new("/q"), &ours), "another repository's");
+        assert!(in_store(main, &ours));
+        assert!(!in_store(main, Path::new("/p")), "the main checkout");
+        assert!(!in_store(main, Path::new("/p-feature")), "a worktree made elsewhere");
+        assert!(!in_store(main, Path::new("/p/.claude/worktrees/fix")), "one made by claude --worktree");
+        assert!(!in_store(main, &ours.join("src")), "a folder inside one");
+        assert!(!in_store(main, ours.parent().unwrap()));
+        assert!(!in_store(Path::new("/q"), &ours), "another repository's");
     }
 
     #[test]
@@ -615,11 +645,32 @@ mod tests {
     }
 
     #[test]
-    fn only_claudes_folders_are_ever_removed() {
+    fn main_checkout_and_unlisted_folders_are_never_removed_and_external_worktrees_keep_their_branch() {
         let tmp = tempfile::tempdir().unwrap();
         let (main, _) = repo_with_worktree(tmp.path());
-        assert!(remove(&main, &main, true, NO_WAIT).unwrap_err().contains("not in m4code's worktrees folder"));
+        assert!(remove(&main, &main, true, NO_WAIT).unwrap_err().contains("main checkout"));
         assert!(main.exists());
+
+        let not_wt = tmp.path().join("random-dir");
+        std::fs::create_dir_all(&not_wt).unwrap();
+        assert!(remove(&main, &not_wt, true, NO_WAIT).unwrap_err().contains("not a linked worktree"));
+        assert!(not_wt.exists());
+
+        // An external worktree created outside m4code's store is removable, and keeps its merged branch.
+        let external = dunce::canonicalize(tmp.path()).unwrap().join("ext-wt");
+        git(&main, &["worktree", "add", "-q", "-b", "ext-branch", &external.to_string_lossy()], None).unwrap();
+        assert!(!created_by_m4code(&main, &external));
+        let message = remove(&main, &external, false, NO_WAIT).unwrap();
+        assert!(message.contains("branch ext-branch is kept"), "{message}");
+        assert!(!external.exists());
+        assert!(git(&main, &["rev-parse", "--verify", "-q", "ext-branch"], None).is_ok(), "external branch is kept");
+
+        // A worktree created by `add` writes the provenance marker.
+        let made = folder(&main, "marked");
+        add(&main, &made, Base::Current).unwrap();
+        assert!(created_by_m4code(&main, &made));
+        let repo = Repository::open(&made).unwrap();
+        assert!(repo.path().join(CREATED_MARKER).is_file());
     }
 
     #[test]

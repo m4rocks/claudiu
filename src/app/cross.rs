@@ -14,11 +14,11 @@ const MAX_PROMPT: usize = 2000;
 /// A worktree switch a session asked for, waiting for the turn in which it asked to end: the switch restarts the
 /// process that made the call.
 pub struct PendingSwitch {
-    id: Id,
-    folder: PathBuf,
-    base: crate::git::worktree::Base,
+    pub(super) id: Id,
+    pub(super) folder: PathBuf,
+    pub(super) base: crate::git::worktree::Base,
     /// Unix seconds when the session asked for it.
-    asked: i64,
+    pub(super) asked: i64,
 }
 
 /// How long a switch waits for the turn to end before it is given up.

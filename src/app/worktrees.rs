@@ -161,7 +161,7 @@ impl Workspace {
                 let label = worktree::label(&git, folder).unwrap_or_default();
                 let running = self.live.iter().any(|l| self.store.session(&l.id).is_some_and(|s| same_folder(&git, &s.cwd, folder)));
                 let current = here.as_deref() == Some(path_key(folder).as_str());
-                let remove = worktree::removable(git.main_checkout(), folder).then(|| Act::RemoveWorktree {
+                let remove = (!git.is_main(folder)).then(|| Act::RemoveWorktree {
                     main_checkout: git.main_checkout().to_path_buf(),
                     folder: folder.to_path_buf(),
                 });
@@ -246,7 +246,7 @@ impl Workspace {
                             } else {
                                 folder.file_name().unwrap_or_default().to_string_lossy().into_owned()
                             };
-                            let remove = (!missing && worktree::removable(&picker.main_checkout, &folder)).then(|| Act::RemoveWorktree { main_checkout: picker.main_checkout.clone(), folder: folder.clone() });
+                            let remove = (!missing && path_key(&folder) != path_key(&picker.main_checkout)).then(|| Act::RemoveWorktree { main_checkout: picker.main_checkout.clone(), folder: folder.clone() });
                             picker.worktrees.push(GitPickerWorktree {
                                 label,
                                 current: path_key(&cwd) == path_key(&folder),
@@ -288,11 +288,15 @@ impl Workspace {
         }
         let name = folder.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         cx.spawn(async move |this, cx| {
-            let dir = folder.clone();
-            let found = cx.background_executor().spawn(async move { worktree::leftovers(&dir) }).await;
+            let (main, dir) = (main_checkout.clone(), folder.clone());
+            let found = cx.background_executor().spawn(async move {
+                let left = worktree::leftovers(&dir)?;
+                let owned = worktree::created_by_m4code(&main, &dir);
+                Ok::<_, String>((left, owned))
+            }).await;
             let _ = this.update(cx, |ws, cx| match found {
-                Ok(left) => {
-                    let (title, body, confirm, danger) = removal_question(&name, left);
+                Ok((left, owned)) => {
+                    let (title, body, confirm, danger) = removal_question(&name, &folder, owned, left);
                     let act = Act::ConfirmRemoveWorktree { main_checkout, folder: folder.clone(), discard: left.files > 0 };
                     ws.show_removal_question(folder, title, body, confirm, danger, act);
                     cx.notify();
@@ -326,7 +330,7 @@ impl Workspace {
     /// other session is still in it.
     pub(super) fn offer_worktree_removal(&mut self, cwd: &Path, project: Option<&str>, cx: &mut Context<Self>) {
         let Some(git) = project.and_then(|id| self.store.project(id)).and_then(|p| p.git.clone()) else { return };
-        let Some(folder) = git.folder_of(cwd).filter(|f| worktree::removable(git.main_checkout(), f) && f.is_dir()) else { return };
+        let Some(folder) = git.folder_of(cwd).filter(|f| worktree::created_by_m4code(git.main_checkout(), f) && f.is_dir()) else { return };
         if self.running_in(folder).is_none() {
             self.ask_remove_worktree(git.main_checkout().to_path_buf(), folder.to_path_buf(), cx);
         }
@@ -334,10 +338,13 @@ impl Workspace {
 }
 
 /// The dialog's title, text, button and whether the button is red. Only changed and new files are thrown away: commits no
-/// remote has stay on the branch, which is kept when it is not merged.
-fn removal_question(name: &str, left: worktree::Leftovers) -> (String, String, String, bool) {
+/// remote has stay on the branch, which is kept when it is not merged or when m4code did not create the worktree.
+fn removal_question(name: &str, folder: &Path, owned: bool, left: worktree::Leftovers) -> (String, String, String, bool) {
     let plural = |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
     let mut lines = vec![];
+    if !owned {
+        lines.push(format!("Folder: {}. Its branch will be kept.", folder.display()));
+    }
     if left.files > 0 {
         lines.push(format!("{} will be deleted.", plural(left.files, "uncommitted file", "uncommitted files")));
     }
@@ -363,7 +370,7 @@ mod tests {
 
     #[test]
     fn the_removal_dialog_says_what_is_deleted_and_only_turns_red_for_files() {
-        let ask = |files, unpushed| removal_question("fix", worktree::Leftovers { files, unpushed });
+        let ask = |files, unpushed| removal_question("fix", Path::new("/wt/fix"), true, worktree::Leftovers { files, unpushed });
         let (title, body, button, red) = ask(0, 0);
         assert_eq!((title.as_str(), button.as_str(), red), ("Remove worktree fix?", "Remove", false));
         assert!(body.contains("no uncommitted files"), "{body}");
@@ -374,5 +381,8 @@ mod tests {
 
         let (_, body, _, red) = ask(0, 3);
         assert!(body.contains("3 commits that no remote branch has stay") && !red, "{body}");
+
+        let (_, ext_body, _, _) = removal_question("ext", Path::new("/ext/wt"), false, worktree::Leftovers::default());
+        assert!(ext_body.contains("/ext/wt") && ext_body.contains("branch will be kept"), "{ext_body}");
     }
 }
