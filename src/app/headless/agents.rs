@@ -62,7 +62,8 @@ r#"        send({"jsonrpc": "2.0", "id": i, "result": {"modes": session_modes()}
     });
     let id = ws.read_with(&cx, |ws, _| ws.active_id().unwrap().clone());
     let wait = |cx: &mut TestAppContext, harness| {
-        let until = std::time::Instant::now() + Duration::from_secs(10);
+        // Shared Windows runners can take longer to start each Python adapter while the suite runs in parallel.
+        let until = std::time::Instant::now() + Duration::from_secs(30);
         loop {
             cx.run_until_parked();
             if ws.read_with(cx, |ws, app| {
@@ -71,7 +72,15 @@ r#"        send({"jsonrpc": "2.0", "id": i, "result": {"modes": session_modes()}
                     view.harness == harness && !view.is_loading() && !view.is_working() && view.thread.entries.iter().any(|e| matches!(e, Entry::Agent(text) if text == "ok"))
                 })
             }) { break; }
-            assert!(std::time::Instant::now() < until, "the handoff never settled");
+            if std::time::Instant::now() >= until {
+                ws.read_with(cx, |ws, app| {
+                    let view = ws.live_view(&id).and_then(SessionView::thread).map(|view| view.read(app));
+                    panic!("handoff to {harness:?} never settled: pending={}, view={:?}, toast={:?}",
+                        ws.pending_handoffs.contains_key(&id),
+                        view.map(|view| (view.harness, view.is_loading(), view.is_working(), view.start_error(), &view.thread.entries)),
+                        ws.toast.as_ref().map(|toast| &toast.text));
+                });
+            }
             std::thread::yield_now();
         }
     };
@@ -1461,7 +1470,7 @@ for line in sys.stdin:"#)
         .replace(r#""result": {"sessionId": "fake-session"}"#, r#""result": {"sessionId": "fake-session", "configOptions": options("a")}"#)
         .replace(r#"    elif method == "session/list":"#, r#"    elif method == "session/set_config_option":
         value = m["params"]["value"]
-        with open(__file__ + ".options", "a") as log:
+        with open(__file__ + ".options", "a", newline="\n") as log:
             log.write(value + "\n")
         time.sleep(0.02)
         if value == "bad":
