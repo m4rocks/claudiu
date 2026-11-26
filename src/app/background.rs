@@ -59,6 +59,27 @@ fn attention_event(before: Option<Activity>, now: Option<Activity>, viewing: boo
     }
 }
 
+/// Deduplicate `AttentionEvent::Finished` per `turn_seq` so late updates after a turn ends never spam extra "done"
+/// notifications for the same turn.
+fn dedupe_attention(
+    event: Option<AttentionEvent>,
+    turn_seq: Option<u64>,
+    notified_turn: &mut Option<u64>,
+) -> Option<AttentionEvent> {
+    match event {
+        Some(AttentionEvent::Finished) => {
+            if let Some(seq) = turn_seq {
+                if *notified_turn == Some(seq) {
+                    return None;
+                }
+                *notified_turn = Some(seq);
+            }
+            Some(AttentionEvent::Finished)
+        }
+        other => other,
+    }
+}
+
 fn notice_body(event: AttentionEvent, harness: Harness, question: Option<&str>) -> String {
     let who = harness.name();
     match event {
@@ -188,15 +209,15 @@ impl Workspace {
             }
             let viewing = window_active && !editing && shown.as_deref() == Some(l.id.as_str());
             // A thread knows from ACP itself: a turn is out, or a permission/ask question is open.
-            let (working, waiting, question_title, pending) = match &l.view {
+            let (working, waiting, question_title, pending, turn_seq) = match &l.view {
                 SessionView::Thread(v) => {
                     v.update(cx, |thread, cx| thread.set_viewing(viewing, cx));
                     let t = v.read(cx);
-                    (t.is_working(), t.is_waiting(), t.pending_question_title(), t.has_background_work())
+                    (t.is_working(), t.is_waiting(), t.pending_question_title(), t.has_background_work(), Some(t.turn_seq()))
                 }
                 SessionView::Terminal(v) => {
                     let status = rec.provider_session_id().and_then(|cid| statuses.get(cid));
-                    (status.map_or_else(|| v.read(cx).is_working(), |s| s == "busy"), status.is_some_and(|s| s == "waiting"), None, false)
+                    (status.map_or_else(|| v.read(cx).is_working(), |s| s == "busy"), status.is_some_and(|s| s == "waiting"), None, false, None)
                 }
             };
             let before = self.activity.get(&l.id).copied();
@@ -217,7 +238,8 @@ impl Workspace {
             {
                 v.update(cx, |_, cx| cx.notify());
             }
-            if let Some(ev) = attention_event(before, now, viewing, pending) {
+            let mut notified = self.notified_turn.get(&l.id).copied();
+            if let Some(ev) = dedupe_attention(attention_event(before, now, viewing, pending), turn_seq, &mut notified) {
                 let title = rec.display_title().to_string();
                 let harness = rec.agent.as_ref().map_or(self.store.data.settings.harness, |m| m.harness);
                 let body = notice_body(ev, harness, question_title.as_deref());
@@ -230,6 +252,9 @@ impl Workspace {
                 } else {
                     system_notices.push((title, body));
                 }
+            }
+            if let Some(seq) = notified {
+                self.notified_turn.insert(l.id.clone(), seq);
             }
             if let Some(now) = now {
                 next.insert(l.id.clone(), now);
@@ -344,7 +369,7 @@ fn spin_visible(working: bool, active: bool, sidebar: bool, editing: bool) -> bo
 mod tests {
     use std::time::{Duration, Instant};
 
-    use super::{Activity, AttentionEvent, Harness, SETTLE, attention_event, next_activity, notice_body, settle_working, spin_visible};
+    use super::{Activity, AttentionEvent, Harness, SETTLE, attention_event, dedupe_attention, next_activity, notice_body, settle_working, spin_visible};
 
     #[test]
     fn settle_holds_working_until_elapsed_then_finishes() {
@@ -438,5 +463,44 @@ mod tests {
     fn an_idle_session_nobody_is_owed_news_from_shows_nothing() {
         assert_eq!(next_activity(false, false, None, false), None);
         assert_eq!(next_activity(false, false, Some(Activity::Waiting), false), None);
+    }
+
+    #[test]
+    fn done_notification_fires_once_per_turn_across_background_updates_and_late_flips() {
+        let mut activity = None;
+        let mut notified_turn = None;
+        let mut fired = Vec::new();
+        let mut step = |working: bool, pending: bool, turn_seq: u64| {
+            let next = next_activity(working, false, activity, false);
+            if let Some(ev) = dedupe_attention(attention_event(activity, next, false, pending), Some(turn_seq), &mut notified_turn) {
+                fired.push((turn_seq, ev));
+            }
+            activity = next;
+        };
+
+        // Turn 1: starts working, turn ends while background task runs, task updates, then task completes.
+        step(true, false, 1);
+        assert_eq!(activity, Some(Activity::Working));
+        step(true, true, 1);
+        assert_eq!(activity, Some(Activity::Working));
+        step(true, true, 1);
+        assert_eq!(activity, Some(Activity::Working));
+        assert!(fired.is_empty(), "no done notification while background task is running");
+
+        step(false, false, 1);
+        assert_eq!(activity, Some(Activity::Attention));
+        assert_eq!(fired, vec![(1, AttentionEvent::Finished)]);
+
+        // A late stray update briefly flips back to Working and then idle on the same turn_seq: no second notice.
+        step(true, false, 1);
+        assert_eq!(activity, Some(Activity::Working));
+        step(false, false, 1);
+        assert_eq!(activity, Some(Activity::Attention));
+        assert_eq!(fired, vec![(1, AttentionEvent::Finished)], "one turn must send at most one done notification");
+
+        // Turn 2 starts and finishes cleanly: fires its own single notification.
+        step(true, false, 2);
+        step(false, false, 2);
+        assert_eq!(fired, vec![(1, AttentionEvent::Finished), (2, AttentionEvent::Finished)]);
     }
 }

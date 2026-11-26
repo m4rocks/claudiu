@@ -569,6 +569,7 @@ impl Workspace {
         record.last_active = now();
         // Dropping a running view ends its process.
         self.live.retain(|l| l.id != id);
+        self.notified_turn.remove(&id);
         self.purge_dead_shells();
         if is_new {
             self.store.add_session(record);
@@ -750,6 +751,7 @@ impl Workspace {
             thread.update(cx, |view, _| view.stop());
         }
         self.live.retain(|l| l.id != id); // dropping the view drops the Terminal, which closes the PTY
+        self.notified_turn.remove(id);
         self.shells.remove(id);
         self.panes.remove(id);
         self.recent.retain(|r| r != id);

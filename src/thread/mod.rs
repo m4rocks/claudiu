@@ -388,6 +388,10 @@ pub struct ThreadView {
     phase: Phase,
     /// A prompt is out and the turn hasn't ended.
     working: bool,
+    /// Monotonically incremented each time a real turn starts; used to send at most one done notification per turn.
+    turn_seq: u64,
+    /// Turn outcome waiting for live background tasks to finish before emitting `ThreadEvent::Idle`.
+    pending_idle: Option<&'static str>,
     /// When the running turn's prompt went out, for the timer on the chat's working row.
     turn_started: Option<Instant>,
     /// How long the last finished turn took, shown as "Worked for …" under it until the next one starts.
@@ -624,6 +628,8 @@ impl ThreadView {
             thread,
             phase: Phase::Starting,
             working: false,
+            turn_seq: 0,
+            pending_idle: None,
             turn_started: None,
             last_turn: None,
             last_update: None,
@@ -1027,7 +1033,12 @@ impl ThreadView {
                     self.collapsed_thoughts.clear();
                     self.remeasure(0);
                 }
-                if self.phase == Phase::Ready && !self.cached_replay && is_conversation_update(&update) {
+                let was_live_bg = self.has_live_background_tasks();
+                let is_tool_terminal = update["sessionUpdate"] == "tool_call_update"
+                    && matches!(update["status"].as_str(), Some("completed" | "failed"));
+                if self.phase == Phase::Ready && !self.cached_replay && is_conversation_update(&update)
+                    && (self.working || !is_tool_terminal)
+                {
                     self.last_update = Some(Instant::now());
                 }
                 let title = self.thread.title.clone();
@@ -1057,6 +1068,9 @@ impl ThreadView {
                             {
                                 self.background_tasks.push(task);
                             }
+                            for id in &background.finished {
+                                self.retire_background_task(id);
+                            }
                             for text in background.output {
                                 self.retire_finished_background_tasks(&text);
                             }
@@ -1077,6 +1091,14 @@ impl ThreadView {
                     }
                     self.sync_markdown(at, cx);
                     self.remeasure(at);
+                }
+                if was_live_bg && !self.has_live_background_tasks() && !self.working {
+                    self.last_update = None;
+                    if let Some(outcome) = self.pending_idle.take()
+                        && (self.queue.is_empty() || self.queue_held)
+                    {
+                        cx.emit(ThreadEvent::Idle(outcome));
+                    }
                 }
                 if update.pointer("/_meta/m4code/backgroundShell").and_then(Value::as_bool) == Some(true) {
                     self.persist_entries();
@@ -1218,6 +1240,7 @@ impl ThreadView {
         self.phase = Phase::Ended;
         self.settle_running_tools();
         self.background_tasks.clear();
+        self.pending_idle = None;
         self.shell_output = None;
         self.preserve_handoff_message();
         self.cancel_questions();
@@ -1233,6 +1256,14 @@ impl ThreadView {
         cx.notify();
     }
 
+    fn retire_background_task(&mut self, task_id: &str) {
+        if self.background_tasks.is_empty() {
+            return;
+        }
+        self.background_tasks.retain(|task| task.id != task_id);
+        self.prune_closed_shell_output();
+    }
+
     fn retire_finished_background_tasks(&mut self, text: &str) {
         if self.background_tasks.is_empty() {
             return;
@@ -1240,6 +1271,10 @@ impl ThreadView {
         if let Some(hooks) = &self.harness.adapter().protocol.background {
             self.background_tasks.retain(|task| !(hooks.finished)(text, &task.id));
         }
+        self.prune_closed_shell_output();
+    }
+
+    fn prune_closed_shell_output(&mut self) {
         if self.shell_output.as_ref().is_some_and(|out| {
             !self.provider_shells.iter().any(|s| s.id == out.task_id)
                 && !self.background_tasks.iter().any(|t| t.id == out.task_id)
@@ -1674,6 +1709,8 @@ impl ThreadView {
         }
         self.preparing = Some(next);
         self.working = true;
+        self.turn_seq = self.turn_seq.wrapping_add(1);
+        self.pending_idle = None;
         self.turn_started = Some(Instant::now());
         self.last_turn = None;
         self.changed = None;
@@ -1834,9 +1871,15 @@ impl ThreadView {
         // Decided before `send_next`, which may start an automatic compaction: the turn's work is done all the same,
         // and its report is the reply above, not what the compaction says.
         let idle = (self.queue.is_empty() || self.queue_held) && !compacted;
+        let waiting_on_background = idle && self.has_live_background_tasks();
         self.send_next(cx);
-        if idle {
+        if waiting_on_background && !self.working {
+            self.pending_idle = Some(outcome);
+        } else if idle && !waiting_on_background {
+            self.pending_idle = None;
             cx.emit(ThreadEvent::Idle(outcome));
+        } else if !self.working {
+            self.pending_idle = None;
         }
         cx.notify();
     }
@@ -1929,6 +1972,12 @@ impl ThreadView {
         }
         self.cancel_questions();
         self.last_update = None;
+        self.pending_idle = None;
+        if !self.working && self.has_live_background_tasks() {
+            self.settle_running_tools();
+            self.background_tasks.clear();
+            self.prune_closed_shell_output();
+        }
         if !self.interrupting && let (Some(c), Some(s)) = (&self.connection, &self.session_id) {
             if self.working {
                 self.interrupting = true;
@@ -3106,21 +3155,31 @@ impl ThreadView {
         self.is_working()
     }
 
+    pub fn turn_seq(&self) -> u64 {
+        self.turn_seq
+    }
+
     pub fn is_working(&self) -> bool {
         self.has_active_turn()
             || (self.phase == Phase::Starting && !self.queue.is_empty())
             || (self.phase == Phase::Ready
                 && !self.cached_replay
-                && self.last_update.is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(15)))
+                && (self.has_live_background_tasks()
+                    || self.last_update.is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(15))))
+    }
+
+    /// Provider background tasks or live running tool calls still in flight across turns.
+    pub(crate) fn has_live_background_tasks(&self) -> bool {
+        !self.background_tasks.is_empty()
+            || self.thread.entries.iter().any(|e| matches!(e, Entry::Tool(call) if call.status == ToolStatus::Running))
     }
 
     /// Work the agent left running when its turn ended: a background shell, a subagent, or a tool call still out.
     /// The agent usually wakes again when it finishes, so its turn ending isn't the session being done.
     pub fn has_background_work(&self) -> bool {
         !self.provider_shells.is_empty()
-            || !self.background_tasks.is_empty()
             || !self.background.is_empty()
-            || self.thread.entries.iter().any(|e| matches!(e, Entry::Tool(call) if call.status == ToolStatus::Running))
+            || self.has_live_background_tasks()
     }
 
     /// Waiting for the user to answer a permission or ask question (including async Codex asks).
@@ -4774,5 +4833,171 @@ mod tests {
     fn slash_command_spans_finds_all_command_tokens_and_skips_paths() {
         let spans = super::slash_command_spans("please /compact and /clear src/main.rs https://a.b/c");
         assert_eq!(spans, vec![(7..15, "compact"), (20..26, "clear")]);
+    }
+
+    #[gpui::test]
+    fn codex_background_execute_tool_stays_working_until_completion_and_emits_idle_once(cx: &mut gpui::TestAppContext) {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        cx.update(gpui_kit::init);
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = cx.add_window_view(|window, cx| super::ThreadView::new(test_start(dir.path().into(), Harness::Codex), window, cx));
+        let idles = Rc::new(RefCell::new(Vec::<&'static str>::new()));
+        let sink = idles.clone();
+        let _sub = cx.update(|_, app| app.subscribe(&view, move |_, ev: &super::ThreadEvent, _| {
+            if let super::ThreadEvent::Idle(outcome) = ev {
+                sink.borrow_mut().push(outcome);
+            }
+        }));
+
+        view.update(cx, |v, cx| {
+            v.phase = super::Phase::Ready;
+            v.working = true;
+            v.turn_seq = 1;
+            v.on_event(update_event(serde_json::json!({
+                "sessionUpdate": "tool_call",
+                "toolCallId": "read-1",
+                "kind": "read",
+                "status": "in_progress"
+            })), cx);
+            v.on_event(update_event(serde_json::json!({
+                "sessionUpdate": "tool_call",
+                "toolCallId": "exec-1",
+                "title": "Run workspace tests",
+                "kind": "execute",
+                "status": "in_progress",
+                "rawInput": { "command": "cargo test --workspace" }
+            })), cx);
+            assert!(v.is_working());
+            assert!(v.has_background_work());
+
+            // Turn ends while the background shell is still running: read settles, execute stays live and working.
+            v.turn_ended(Ok(serde_json::json!({"stopReason": "end_turn"})), cx);
+            assert_eq!(v.thread.tool("read-1").unwrap().status, super::ToolStatus::Ended);
+            assert_eq!(v.thread.tool("exec-1").unwrap().status, super::ToolStatus::Running);
+            assert!(v.has_background_work());
+            assert!(v.is_working(), "Codex must stay working while a background execute tool is still running");
+            assert!(idles.borrow().is_empty(), "turn_ended with a live background tool must not emit Idle yet");
+
+            // Streaming progress updates keep the session working with no idle transitions.
+            for chunk in ["compiling...\n", "running 120 tests...\n"] {
+                v.on_event(update_event(serde_json::json!({
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": "exec-1",
+                    "_meta": { "terminal_output_delta": { "data": chunk, "stream": "stdout" } }
+                })), cx);
+                assert!(v.is_working());
+                assert!(v.has_background_work());
+                assert!(idles.borrow().is_empty());
+            }
+
+            // Completion finishes the background task, ends working immediately, and emits Idle exactly once.
+            v.on_event(update_event(serde_json::json!({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "exec-1",
+                "status": "completed",
+                "rawOutput": { "exit_code": 0, "stdout": "compiling...\nrunning 120 tests...\nok\n" }
+            })), cx);
+            assert_eq!(v.thread.tool("exec-1").unwrap().status, super::ToolStatus::Done);
+            assert!(!v.has_background_work());
+            assert!(!v.is_working(), "completing the last background task ends working immediately");
+            assert_eq!(*idles.borrow(), vec!["completed"]);
+
+            // A late terminal update must not flip back to working or emit Idle again.
+            v.on_event(update_event(serde_json::json!({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "exec-1",
+                "status": "completed",
+                "content": [{ "type": "content", "content": { "type": "text", "text": "late flush" } }]
+            })), cx);
+            assert!(!v.is_working());
+            assert_eq!(*idles.borrow(), vec!["completed"]);
+        });
+    }
+
+    #[gpui::test]
+    fn codex_unified_exec_background_session_tracks_through_turn_end_and_write_stdin_exit(cx: &mut gpui::TestAppContext) {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        cx.update(gpui_kit::init);
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = cx.add_window_view(|window, cx| super::ThreadView::new(test_start(dir.path().into(), Harness::Codex), window, cx));
+        let idles = Rc::new(RefCell::new(Vec::<&'static str>::new()));
+        let sink = idles.clone();
+        let _sub = cx.update(|_, app| app.subscribe(&view, move |_, ev: &super::ThreadEvent, _| {
+            if let super::ThreadEvent::Idle(outcome) = ev {
+                sink.borrow_mut().push(outcome);
+            }
+        }));
+
+        view.update(cx, |v, cx| {
+            let start_bg = serde_json::json!({
+                "sessionUpdate": "tool_call",
+                "toolCallId": "exec-77",
+                "title": "Run dev server",
+                "kind": "execute",
+                "status": "completed",
+                "rawInput": { "cmd": "npm run dev" },
+                "rawOutput": "Wall time: 5.0s\nProcess running with session ID 77\nOutput:\nstarting..."
+            });
+            // Replay before Phase::Ready must not create live background tasks.
+            v.on_event(update_event(start_bg.clone()), cx);
+            assert!(v.background_tasks.is_empty());
+
+            v.phase = super::Phase::Ready;
+            v.working = true;
+            v.turn_seq = 1;
+            v.on_event(update_event(start_bg), cx);
+            assert_eq!(v.background_tasks.len(), 1);
+            assert_eq!(v.background_tasks[0].id, "77");
+            assert_eq!(v.background_tasks[0].label, "npm run dev");
+
+            // Turn ends while unified_exec session 77 is still running.
+            v.turn_ended(Ok(serde_json::json!({"stopReason": "end_turn"})), cx);
+            assert!(v.has_background_work());
+            assert!(v.is_working());
+            assert!(idles.borrow().is_empty());
+
+            // Poll update while still running does not duplicate or finish the task.
+            v.on_event(update_event(serde_json::json!({
+                "sessionUpdate": "tool_call",
+                "toolCallId": "stdin-poll",
+                "title": "write_stdin",
+                "kind": "execute",
+                "status": "completed",
+                "rawInput": { "session_id": 77, "chars": "" },
+                "rawOutput": "Process running with session ID 77\nOutput:\nlistening on 3000"
+            })), cx);
+            assert_eq!(v.background_tasks.len(), 1);
+            assert!(v.is_working());
+            assert!(idles.borrow().is_empty());
+
+            // Exit update retires session 77, drops working, and emits Idle once.
+            v.on_event(update_event(serde_json::json!({
+                "sessionUpdate": "tool_call",
+                "toolCallId": "stdin-exit",
+                "title": "write_stdin",
+                "kind": "execute",
+                "status": "completed",
+                "rawInput": { "session_id": 77, "chars": "" },
+                "rawOutput": "Process exited with code 0\nOutput:\nstopped"
+            })), cx);
+            assert!(v.background_tasks.is_empty());
+            assert!(!v.has_background_work());
+            assert!(!v.is_working());
+            assert_eq!(*idles.borrow(), vec!["completed"]);
+
+            // Late update for the same session id must not resurrect it.
+            v.on_event(update_event(serde_json::json!({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "exec-77",
+                "rawOutput": "Process running with session ID 77"
+            })), cx);
+            assert!(v.background_tasks.is_empty());
+            assert!(!v.is_working());
+            assert_eq!(*idles.borrow(), vec!["completed"]);
+        });
     }
 }
