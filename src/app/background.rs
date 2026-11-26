@@ -470,37 +470,42 @@ mod tests {
         let mut activity = None;
         let mut notified_turn = None;
         let mut fired = Vec::new();
-        let mut step = |working: bool, pending: bool, turn_seq: u64| {
-            let next = next_activity(working, false, activity, false);
-            if let Some(ev) = dedupe_attention(attention_event(activity, next, false, pending), Some(turn_seq), &mut notified_turn) {
+        let step = |activity: &mut Option<Activity>, notified_turn: &mut Option<u64>, fired: &mut Vec<(u64, AttentionEvent)>, working: bool, pending: bool, turn_seq: u64| {
+            let next = next_activity(working, false, *activity, false);
+            if let Some(ev) = dedupe_attention(attention_event(*activity, next, false, pending), Some(turn_seq), notified_turn) {
                 fired.push((turn_seq, ev));
             }
-            activity = next;
+            *activity = next;
         };
+        macro_rules! step {
+            ($working:expr, $pending:expr, $turn:expr) => {
+                step(&mut activity, &mut notified_turn, &mut fired, $working, $pending, $turn)
+            };
+        }
 
         // Turn 1: starts working, turn ends while background task runs, task updates, then task completes.
-        step(true, false, 1);
+        step!(true, false, 1);
         assert_eq!(activity, Some(Activity::Working));
-        step(true, true, 1);
+        step!(true, true, 1);
         assert_eq!(activity, Some(Activity::Working));
-        step(true, true, 1);
+        step!(true, true, 1);
         assert_eq!(activity, Some(Activity::Working));
         assert!(fired.is_empty(), "no done notification while background task is running");
 
-        step(false, false, 1);
+        step!(false, false, 1);
         assert_eq!(activity, Some(Activity::Attention));
         assert_eq!(fired, vec![(1, AttentionEvent::Finished)]);
 
         // A late stray update briefly flips back to Working and then idle on the same turn_seq: no second notice.
-        step(true, false, 1);
+        step!(true, false, 1);
         assert_eq!(activity, Some(Activity::Working));
-        step(false, false, 1);
+        step!(false, false, 1);
         assert_eq!(activity, Some(Activity::Attention));
         assert_eq!(fired, vec![(1, AttentionEvent::Finished)], "one turn must send at most one done notification");
 
         // Turn 2 starts and finishes cleanly: fires its own single notification.
-        step(true, false, 2);
-        step(false, false, 2);
+        step!(true, false, 2);
+        step!(false, false, 2);
         assert_eq!(fired, vec![(1, AttentionEvent::Finished), (2, AttentionEvent::Finished)]);
     }
 }
