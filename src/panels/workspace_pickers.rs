@@ -140,7 +140,7 @@ impl Workspace {
                     ProjectPickerMode::SidebarFilter => self.project_filter().map(|p| p.id.clone()),
                 };
                 let mut choices = command::Choices::new(&self.picker_nav, &query);
-                let mut list = choices.list("project-picker-list", window).max_h(px(260.0));
+                let mut list = choices.list("project-picker-list", window).flex_1().min_h_0().max_h(px(260.0));
                 let mut shown = 0usize;
                 if mode == ProjectPickerMode::SidebarFilter && matches("all projects") {
                     let selected = current_id.is_none();
@@ -170,6 +170,8 @@ impl Workspace {
                 let add_btn = picker::action_pill("project-picker-add", "+ Add project", |ws, window, cx| ws.act(Act::ImportProject, window, cx), cx).into_any_element();
                 let title = "PROJECT";
                 let body = div()
+                    .flex_1()
+                    .min_h_0()
                     .flex()
                     .flex_col()
                     .gap(px(8.0))
@@ -388,16 +390,18 @@ impl Workspace {
                 // One scrolling list, so Up and Down move through worktrees and branches alike.
                 let list = choices
                     .list("git-picker-list", window)
+                    .flex_1()
+                    .min_h_0()
                     .max_h(px(320.0))
                     .child(new_wt_row)
-                    .child(div().pt(px(6.0)).child(picker::section_header("WORKTREES", None)))
-                    .when(!can_switch, |d| d.child(div().text_size(scaled(11.0)).text_color(theme().subtle_foreground).child("Resume the session to switch worktrees.")))
+                    .child(div().flex_none().pt(px(6.0)).child(picker::section_header("WORKTREES", None)))
+                    .when(!can_switch, |d| d.child(div().flex_none().text_size(scaled(11.0)).text_color(theme().subtle_foreground).child("Resume the session to switch worktrees.")))
                     .children(wt_list)
-                    .child(div().py(px(4.0)).child(picker::divider()))
+                    .child(div().flex_none().py(px(4.0)).child(picker::divider()))
                     .child(picker::section_header("BRANCHES", Some(new_branch_btn)))
                     .children(create_branch_row)
                     .children(br_list);
-                let body = div().flex().flex_col().gap(px(8.0)).child(picker::search_input(&gp.search)).child(list);
+                let body = div().flex_1().min_h_0().flex().flex_col().gap(px(8.0)).child(picker::search_input(&gp.search)).child(list);
                 ("git-picker-dialog", "BRANCH & WORKTREE", body.into_any_element(), Some(choices))
             }
             WorkspacePicker::SettingsModel { search, target } => {
@@ -413,7 +417,7 @@ impl Workspace {
                     all.insert(0, current.clone());
                 }
                 let mut choices = command::Choices::new(&self.picker_nav, &query);
-                let mut list = choices.list("settings-model-list", window).role(gpui::Role::ListBox).aria_label("Models").max_h(px(260.0));
+                let mut list = choices.list("settings-model-list", window).role(gpui::Role::ListBox).aria_label("Models").flex_1().min_h_0().max_h(px(260.0));
                 let mut shown = 0usize;
                 match target {
                     crate::app::SettingsModelTarget::TextGeneration if words.iter().all(|word| "local summary".contains(word)) => {
@@ -481,6 +485,8 @@ impl Workspace {
                 }
                 let loading = self.model_lookups.any_loading(&subagents.enabled);
                 let body = div()
+                    .flex_1()
+                    .min_h_0()
                     .flex()
                     .flex_col()
                     .gap(px(8.0))
@@ -531,7 +537,7 @@ impl Workspace {
                 };
                 let offered = self.store.data.settings.permissions_for(harness);
                 let mut choices = command::Choices::new(&self.picker_nav, "");
-                let mut list = choices.list(list_id, window).max_h(px(340.0));
+                let mut list = choices.list(list_id, window).flex_1().min_h_0().max_h(px(340.0));
                 for (i, mode) in Permission::ALL.into_iter().enumerate() {
                     let selected = current.and_then(|p| p.resolve(&offered)) == Some(mode);
                     let available = offered.contains(&mode);
@@ -562,7 +568,7 @@ impl Workspace {
                 };
                 let current = self.effective_skill_scope();
                 let mut choices = command::Choices::new(&self.picker_nav, &query);
-                let mut list = choices.list("skills-scope-list", window).role(gpui::Role::ListBox).aria_label("Skill scopes").max_h(px(250.0));
+                let mut list = choices.list("skills-scope-list", window).role(gpui::Role::ListBox).aria_label("Skill scopes").flex_1().min_h_0().max_h(px(250.0));
                 let mut shown = 0usize;
                 if matches("global all workspaces") {
                     let selected = current == SkillScope::Global;
@@ -590,8 +596,8 @@ impl Workspace {
                 }
                 let field = gpui_kit::component::input::Input::new(search)
                     .h(px(30.0)).appearance(false).aria_label("Find a project or choose Global");
-                let body = div().flex().flex_col().gap(px(5.0))
-                    .child(div().flex().items_center().gap(px(7.0)).px(px(8.0)).rounded(px(6.0))
+                let body = div().flex_1().min_h_0().flex().flex_col().gap(px(5.0))
+                    .child(div().flex_none().flex().items_center().gap(px(7.0)).px(px(8.0)).rounded(px(6.0))
                         .bg(theme().background).border_1().border_color(theme().panel_border)
                         .child(icon(IconName::Search, 14.0).text_color(theme().muted_foreground))
                         .child(div().flex_1().min_w_0().child(field)))
@@ -622,6 +628,6 @@ impl Workspace {
             }
         };
 
-        Some(picker::dropdown_overlay((id, title), at, priority, body, choices, |ws: &mut Self, window, cx| ws.dismiss_picker(window, cx), window, cx))
+        Some(picker::dropdown_overlay((id, title), at, priority, body, choices, crate::panels::ui::popover::ArrowNav::Enabled, |ws: &mut Self, window, cx| ws.dismiss_picker(window, cx), window, cx))
     }
 }

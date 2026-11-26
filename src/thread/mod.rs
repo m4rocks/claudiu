@@ -157,6 +157,10 @@ pub enum ThreadEvent {
     ClearSession,
     /// Built-in `/compact [instructions]` fallback when the harness doesn't provide native compaction.
     Compact { transcript: String, instructions: Option<String> },
+    /// The underlying harness session moved into `folder` in place without recreating the `ThreadView`.
+    WorktreeSwitched { folder: PathBuf, session_id: String },
+    /// Switching the underlying harness session to `folder` failed; the original harness session is still active.
+    WorktreeSwitchFailed { folder: PathBuf, error: String },
 }
 
 /// Built-in slash commands always offered by m4code regardless of harness.
@@ -386,6 +390,8 @@ pub struct ThreadView {
     model_search: Entity<InputState>,
     cwd: PathBuf,
     connection: Option<Rc<Connection>>,
+    /// Monotonically incremented whenever `connection` is replaced in place (e.g. worktree switch), so stale event loops exit cleanly.
+    connection_gen: u64,
     /// The sending end of the channel the agent's events arrive on, for `Event::TurnEnded`.
     events: Option<futures::channel::mpsc::UnboundedSender<Event>>,
     session_id: Option<String>,
@@ -631,6 +637,7 @@ impl ThreadView {
             model_search,
             cwd: start.cwd.clone(),
             connection: None,
+            connection_gen: 0,
             events: None,
             session_id: start.session_id.clone(),
             thread,
@@ -943,9 +950,267 @@ impl ThreadView {
                 true
             }).unwrap_or(false);
             if !ready { return; }
+            let conn_gen = this.update(cx, |v, _| v.connection_gen).unwrap_or(0);
             drop(connection);
             while let Some(event) = incoming.next().await {
-                if this.update(cx, |v, cx| v.on_event(event, cx)).is_err() {
+                let keep = this
+                    .update(cx, |v, cx| {
+                        if v.connection_gen != conn_gen {
+                            return false;
+                        }
+                        v.on_event(event, cx);
+                        true
+                    })
+                    .unwrap_or(false);
+                if !keep {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Replace only the underlying harness session in `folder`, keeping this `ThreadView`, its composer state,
+    /// cursor position, scroll state, and sidebar slot intact. If launching the new harness session fails, the
+    /// existing connection stays active and `ThreadEvent::WorktreeSwitchFailed` is emitted.
+    pub(crate) fn switch_worktree_session(&mut self, mut start: Start, folder: PathBuf, seeded_notice: bool, cx: &mut Context<Self>) {
+        let harness = start.harness;
+        cx.spawn(async move |this, cx| {
+            let fail = |this: &gpui::WeakEntity<Self>, folder: PathBuf, error: String, cx: &mut gpui::AsyncApp| {
+                let _ = this.update(cx, |v, cx| {
+                    v.hold_workspace_switch(false, cx);
+                    cx.emit(ThreadEvent::WorktreeSwitchFailed { folder, error });
+                });
+            };
+            if let Some(mut tools) = start.mcp_tools.take() {
+                let task = cx.background_executor().spawn(async move {
+                    tools.load_workspace();
+                    Ok(tools)
+                });
+                match startup_deadline("reading the workspace", task, cx).await {
+                    Ok(tools) => start.mcp_tools = Some(tools),
+                    Err(error) => {
+                        fail(&this, folder, error, cx);
+                        return;
+                    }
+                }
+            }
+            let mut full_access = harness.adapter().full_access_relaunch
+                && start.permission == Some(Permission::FullAccess)
+                && start.starter != Starter::OtherSession;
+            let (connection, events, mut incoming, opened) = loop {
+                let (events, incoming) = futures::channel::mpsc::unbounded();
+                let mut plan = crate::harness::SessionPlan {
+                    env: start.env.clone(),
+                    args: start.launch_args.clone(),
+                    mcp_servers: start.mcp_servers.clone(),
+                    ..Default::default()
+                };
+                if let Some(tools) = &start.mcp_tools
+                    && let Err(error) = (harness.adapter().configure_mcp)(tools, &mut plan)
+                {
+                    fail(&this, folder, error, cx);
+                    return;
+                }
+                let launched = startup_deadline("launch", launch_session(&start, &plan, full_access, events.clone(), cx), cx).await;
+                let connection = match launched {
+                    Ok(c) => Rc::new(c),
+                    Err(why) => {
+                        fail(&this, folder, why, cx);
+                        return;
+                    }
+                };
+                let opened = startup_deadline("opening the session", open(&connection, harness, &start, &plan.mcp_servers), cx).await;
+                if harness.adapter().full_access_relaunch
+                    && !full_access
+                    && start.permission == Some(Permission::Auto)
+                    && start.starter != Starter::OtherSession
+                    && let Ok(session) = &opened
+                {
+                    let mut probe = Thread::default();
+                    probe.apply_session(&session.result);
+                    if Permission::Auto.listed(harness, &probe.modes).is_none()
+                        && Permission::FullAccess.listed(harness, &probe.modes).is_some()
+                    {
+                        connection.terminate();
+                        if let Some(tools) = &mut start.mcp_tools {
+                            tools.renew();
+                        }
+                        full_access = true;
+                        continue;
+                    }
+                }
+                match opened {
+                    Ok(opened) => break (connection, events, incoming, opened),
+                    Err(why) => {
+                        connection.terminate();
+                        fail(&this, folder, why, cx);
+                        return;
+                    }
+                }
+            };
+            let sid = opened.session_id.clone();
+            let mut probe = Thread::default();
+            probe.apply_session(&opened.result);
+            let mut config_errors: Vec<(&'static str, String, String)> = Vec::new();
+            let mut options = start.options.iter().collect::<Vec<_>>();
+            options.sort_by_key(|(category, _)| *category != "model");
+            for (category, value) in options {
+                let config_id = match probe.option(category) {
+                    Some(option) if option.current == *value => None,
+                    Some(option) if option.choices.iter().any(|(choice, _)| choice == value) => Some(option.id.clone()),
+                    None if *category == "thought_level" && *value == defaults::Effort::default().name() => None,
+                    _ => {
+                        config_errors.push((*category, value.clone(), "The adapter did not offer this value.".into()));
+                        None
+                    }
+                };
+                let Some(config_id) = config_id else { continue };
+                let response = startup_deadline(
+                    "applying session options",
+                    connection.request("session/set_config_option", json!({"sessionId": &sid, "configId": &config_id, "value": value})),
+                    cx,
+                )
+                .await;
+                match response {
+                    Ok(result) => {
+                        probe.apply_session(&result);
+                        if result.get("configOptions").is_none()
+                            && let Some(option) = probe.config.iter_mut().find(|o| o.id == config_id)
+                        {
+                            option.current.clone_from(value);
+                        }
+                        if probe.option(category).is_none_or(|option| option.current != *value) {
+                            config_errors.push((*category, value.clone(), "The adapter kept a different value.".into()));
+                        }
+                    }
+                    Err(why) => config_errors.push((*category, value.clone(), why)),
+                }
+            }
+            let mut auto_fallback = false;
+            if let Some(wanted) = start.permission {
+                let is_subagent = this.update(cx, |v, _| v.subagent_edits.is_some()).unwrap_or(false);
+                let offered = if is_subagent { Vec::new() } else { permission::offered(harness, &probe.modes) };
+                let chosen = if full_access {
+                    Some(Permission::FullAccess)
+                } else {
+                    defaults::initial_permission(wanted, &offered, start.starter)
+                };
+                let mode = chosen.and_then(|p| p.listed(harness, &probe.modes));
+                let config = probe.option("mode").map(|opt| opt.id.clone());
+                let current = probe.mode.clone();
+                let reported_modes = !probe.modes.is_empty();
+                let response = match mode {
+                    Some(mode) if current.as_deref() == Some(mode) => Ok(Value::Null),
+                    Some(mode) => startup_deadline("applying permissions", request_mode(&connection, &sid, mode, config.as_deref()), cx).await,
+                    None => Err(format!("{} couldn't apply {} permissions.", harness.name(), wanted.label())),
+                };
+                let applied = response.and_then(|result| {
+                    let mut reported = Thread::default();
+                    reported.apply_session(&result);
+                    let confirmed = reported.mode.as_deref();
+                    if confirmed.is_some() && confirmed != mode
+                        || confirmed.is_none() && config.is_some() && current.as_deref() != mode
+                    {
+                        return Err(format!("{} did not confirm {} permissions.", harness.name(), wanted.label()));
+                    }
+                    probe.apply_session(&result);
+                    probe.mode = mode.map(String::from);
+                    auto_fallback = wanted == Permission::Auto && chosen == Some(Permission::FullAccess);
+                    Ok(())
+                });
+                if let Err(why) = applied
+                    && (wanted == Permission::ReadOnly || reported_modes || matches!(start.starter, Starter::Handoff | Starter::OtherSession) || full_access)
+                {
+                    connection.terminate();
+                    fail(&this, folder, why, cx);
+                    return;
+                }
+            }
+            if let Some(tools) = start.mcp_tools.take().filter(|t| start.server.is_none() && t.can_signal_ready())
+                && let Err(why) = wait_for_mcp(&tools.ready).await
+            {
+                connection.terminate();
+                fail(&this, folder, why, cx);
+                return;
+            }
+            let conn_gen = this
+                .update(cx, |v, cx| {
+                    if v.phase != Phase::Ready {
+                        connection.terminate();
+                        return None;
+                    }
+                    v.connection_gen = v.connection_gen.wrapping_add(1);
+                    let conn_gen = v.connection_gen;
+                    let old_connection = v.connection.replace(connection.clone());
+                    v.events = Some(events);
+                    if let Some(old) = old_connection {
+                        old.terminate();
+                    }
+                    let old_cwd = std::mem::replace(&mut v.cwd, folder.clone());
+                    if !v.thread.entries.is_empty() {
+                        let at = v.thread.entries.len();
+                        v.thread.entries.push(Entry::WorkspaceBoundary(old_cwd));
+                        if seeded_notice {
+                            v.thread.entries.push(Entry::Notice { text: WORKTREE_SEED.into(), error: false });
+                        }
+                        v.canonical_history = true;
+                        v.remeasure(at);
+                    }
+                    v.capabilities = opened.capabilities;
+                    v.agent_meta = opened.agent_meta;
+                    v.antigravity_full_access = full_access;
+                    v.auto_fallback = auto_fallback;
+                    v.session_id = Some(sid.clone());
+                    v.thread.modes = probe.modes;
+                    v.thread.mode = probe.mode;
+                    v.thread.config = probe.config;
+                    v.thread.commands = probe.commands;
+                    v.initial_permission = None;
+                    for (cat, val, why) in config_errors {
+                        v.config_error(cat, &val, &why, cx);
+                    }
+                    if let Some(model_opt) = v.thread.option("model")
+                        && !model_opt.choices.is_empty()
+                    {
+                        let real: Vec<(String, String)> = model_opt.choices.iter().filter(|(id, _)| id != "default").cloned().collect();
+                        let choices = if real.is_empty() { model_opt.choices.clone() } else { real };
+                        cx.emit(ThreadEvent::Models(v.harness, choices));
+                    }
+                    if !v.thread.modes.is_empty() {
+                        cx.emit(ThreadEvent::Modes(v.harness, v.thread.modes.clone()));
+                    }
+                    v.report_chosen(cx);
+                    if let Some(wanted) = start.permission
+                        && v.handoff_permission() == Some(wanted)
+                    {
+                        cx.emit(ThreadEvent::PermissionPreference(wanted));
+                    }
+                    v.cached_replay = opened.replayed && !v.thread.entries.is_empty();
+                    while let Ok(event) = incoming.try_recv() {
+                        v.on_event(event, cx);
+                    }
+                    v.cached_replay = false;
+                    v.persist_entries();
+                    cx.emit(ThreadEvent::WorktreeSwitched { folder: folder.clone(), session_id: sid });
+                    cx.notify();
+                    Some(conn_gen)
+                })
+                .ok()
+                .flatten();
+            let Some(conn_gen) = conn_gen else { return };
+            drop(connection);
+            while let Some(event) = incoming.next().await {
+                let keep = this
+                    .update(cx, |v, cx| {
+                        if v.connection_gen != conn_gen {
+                            return false;
+                        }
+                        v.on_event(event, cx);
+                        true
+                    })
+                    .unwrap_or(false);
+                if !keep {
                     break;
                 }
             }

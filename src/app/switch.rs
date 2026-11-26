@@ -8,7 +8,6 @@
 use std::path::Path;
 
 use super::*;
-use super::agent_handoff::{Pending, Replacement};
 use crate::git::worktree::{self, Base};
 
 const BUSY: &str = "Wait until the session finishes, then switch.";
@@ -141,7 +140,7 @@ impl Workspace {
         cx.notify();
     }
 
-    fn move_into(&mut self, id: &str, folder: PathBuf, has_transcript: bool, can_resume: bool, window: &mut Window, cx: &mut Context<Self>) {
+    fn move_into(&mut self, id: &str, folder: PathBuf, has_transcript: bool, can_resume: bool, _window: &mut Window, cx: &mut Context<Self>) {
         if self.switching_worktree.get(id) != Some(&folder) {
             return;
         }
@@ -154,7 +153,7 @@ impl Workspace {
             self.toast(BUSY, cx);
             return;
         }
-        let Some(mut rec) = self.store.session(id).cloned() else {
+        let Some(rec) = self.store.session(id).cloned() else {
             self.release_worktree_switch(id, cx);
             return;
         };
@@ -162,63 +161,64 @@ impl Workspace {
             self.release_worktree_switch(id, cx);
             return;
         };
-        let thread = source.read(cx);
-        let mut prior_entries = thread.thread.entries.clone();
-        let permission = thread.permission_for_relaunch();
-        let composer = thread.composer_state(cx);
+        let (has_entries, permission) = {
+            let thread = source.read(cx);
+            (!thread.thread.entries.is_empty(), thread.permission_for_relaunch())
+        };
         let provider_id = (!meta.session_id.is_empty()).then_some(meta.session_id.as_str());
         let has_history = (meta.harness.adapter().worktree.has_history)(provider_id, has_transcript);
-        if !can_resume || (prior_entries.is_empty() && !has_history) {
+        if !can_resume || (!has_entries && !has_history) {
             meta.session_id.clear();
         }
-        if !prior_entries.is_empty() {
-            prior_entries.push(crate::harness::thread::Entry::WorkspaceBoundary(rec.cwd.clone()));
-        }
-        if !can_resume && !prior_entries.is_empty() {
-            prior_entries.push(crate::harness::thread::Entry::Notice {
-                text: crate::thread::WORKTREE_SEED.into(),
-                error: false,
-            });
-        }
+        let seeded_notice = !can_resume && has_entries;
         let Some(mut start) = self.thread_start(id, &folder, &meta, rec.chosen_title().map(String::from), None, Starter::User, cx) else {
             self.release_worktree_switch(id, cx);
             return;
         };
-        start.prior_entries = prior_entries;
         start.permission = permission.or(start.permission);
-        rec.cwd = folder.clone();
-        rec.agent = Some(meta.clone());
-        let Some(index) = self.live.iter().position(|l| l.id == id) else {
-            self.release_worktree_switch(id, cx);
-            return;
-        };
-        let foreground = self.active_id().is_some_and(|a| a == id);
-        let source = self.live.remove(index);
-        self.pending_handoffs.insert(id.into(), Pending { source, meta, draft: None, kind: Replacement::Worktree(folder) });
-        let shell = self.shells.remove(id);
-        self.start_thread_with_focus(rec, start, false, foreground, window, cx);
-        if let Some(shell) = shell {
-            self.shells.insert(id.into(), shell);
-        }
-        if let Some(thread) = self.live_view(id).and_then(|v| v.thread()) {
-            thread.update(cx, |t, cx| t.restore_composer(composer, window, cx));
-        }
+        source.update(cx, |t, cx| t.switch_worktree_session(start, folder, seeded_notice, cx));
     }
 
-    pub(super) fn finish_worktree_switch(&mut self, id: &str, folder: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn finish_worktree_switch(&mut self, id: &str, folder: PathBuf, session_id: String, window: &mut Window, cx: &mut Context<Self>) {
         let shell = self.shells.remove(id).map(|p| (p.open, p.height));
+        let (chosen_model, chosen_effort, full_access) = self
+            .live_view(id)
+            .and_then(SessionView::thread)
+            .map(|view| {
+                let v = view.read(cx);
+                (
+                    v.thread.option("model").map(|o| o.current.clone()),
+                    v.thread.option("thought_level").map(|o| o.current.clone()),
+                    v.antigravity_full_access(),
+                )
+            })
+            .unwrap_or((None, None, false));
         if let Some(rec) = self.store.session_mut(id) {
             rec.cwd = folder.clone();
+            if let Some(meta) = rec.agent.as_mut() {
+                meta.session_id = session_id;
+                if let Some(m) = chosen_model { meta.chosen_model = Some(m); }
+                if let Some(e) = chosen_effort { meta.chosen_effort = Some(e); }
+                meta.read_only_pending = false;
+                meta.antigravity_full_access = full_access;
+            }
         }
+        self.store.mark_dirty();
         self.repoint_tabs(id, &folder, window, cx);
         self.restore_shell(id, shell, window, cx);
-        if let Some(thread) = self.live_view(id).and_then(SessionView::thread) {
-            thread.read(cx).persist_entries();
-        }
         self.release_worktree_switch(id, cx);
         self.refresh_git_at(Some(&folder), cx);
         if self.active_id().is_some_and(|a| a == id) {
-            self.show_session(id, window, cx);
+            self.sync_github(window, cx);
+        }
+        cx.notify();
+    }
+
+    pub(super) fn fail_worktree_switch(&mut self, id: &str, folder: &Path, error: &str, cx: &mut Context<Self>) {
+        if self.switching_worktree.get(id).map(PathBuf::as_path) == Some(folder) {
+            self.switching_worktree.remove(id);
+            self.toast(format!("Worktree switch failed. The original session is still open. {error}"), cx);
+            cx.notify();
         }
     }
 

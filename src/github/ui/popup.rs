@@ -261,6 +261,7 @@ impl GithubView {
             5,
             body.into_any_element(),
             Some(choices),
+            crate::panels::ui::popover::ArrowNav::Enabled,
             |v, window, cx| v.act(GhAct::ClosePopup, window, cx),
             window,
             cx,

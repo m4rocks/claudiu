@@ -18,7 +18,6 @@ pub struct Pending {
 pub(super) enum Replacement {
     Handoff,
     Permission,
-    Worktree(PathBuf),
 }
 
 impl Workspace {
@@ -148,7 +147,7 @@ impl Workspace {
         }
     }
 
-    pub(super) fn commit_handoff(&mut self, id: &str, session_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn commit_handoff(&mut self, id: &str, session_id: &str, _window: &mut Window, cx: &mut Context<Self>) {
         let Some(mut pending) = self.pending_handoffs.remove(id) else { return };
         pending.meta.session_id = session_id.to_string();
         if let Some(live) = self.live.iter().find(|live| live.id == id)
@@ -164,9 +163,7 @@ impl Workspace {
         if let Some(source) = pending.source.view.thread() {
             source.update(cx, |view, _| view.relinquish_record());
         }
-        if let Replacement::Worktree(folder) = pending.kind {
-            self.finish_worktree_switch(id, folder, window, cx);
-        } else if let Some(thread) = self.live_view(id).and_then(|v| v.thread()) {
+        if let Some(thread) = self.live_view(id).and_then(|v| v.thread()) {
             thread.update(cx, |v, cx| v.hold_workspace_switch(false, cx));
         }
         self.store.mark_dirty();
@@ -199,7 +196,6 @@ impl Workspace {
         let action = match pending.kind {
             Replacement::Handoff => "Handoff",
             Replacement::Permission => "Permission change",
-            Replacement::Worktree(_) => "Worktree switch",
         };
         self.toast(format!("{action} failed. The original session is still open. {error}"), cx);
         if self.active_id().is_some_and(|active| active == id) {

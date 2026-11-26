@@ -537,6 +537,8 @@ impl Workspace {
                 ThreadEvent::Fork(end) => ws.fork_thread(&sub_id, *end, window, cx),
                 ThreadEvent::ClearSession => ws.clear_session(&sub_id, window, cx),
                 ThreadEvent::Compact { transcript, instructions } => ws.compact_session(&sub_id, transcript.clone(), instructions.clone(), window, cx),
+                ThreadEvent::WorktreeSwitched { folder, session_id } => ws.finish_worktree_switch(&sub_id, folder.clone(), session_id.clone(), window, cx),
+                ThreadEvent::WorktreeSwitchFailed { folder, error } => ws.fail_worktree_switch(&sub_id, folder, error, cx),
             }
         });
         self.adopt_live(id, SessionView::Thread(view), sub, name, foreground, window, cx);

@@ -469,7 +469,7 @@ pub(super) fn render_settings_card(
         )
         .child(footer);
 
-    popover::dialog("modal-card")
+    popover::dialog("modal-card", popover::ArrowNav::Enabled)
         .track_focus(&ws.modal_focus)
         .w(scaled(880.0).min(viewport.width - px(48.0)))
         .h(scaled(620.0).min(viewport.height - px(48.0)))

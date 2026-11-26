@@ -111,6 +111,7 @@ fn switching_between_worktrees_in_the_workspace() {
     let quick = |name: &str| Act::QuickWorktree { main_checkout: repo_dir.clone(), name: name.into(), base: crate::git::worktree::Base::Current, for_home: false };
     step(&mut cx, &|ws, w, cx| ws.act(quick("bad name"), w, cx));
     assert!(ws.read_with(&cx, |ws, _| !ws.switching_worktree.contains_key(&session.id)), "a bad name is refused");
+    let thread_before = ws.read_with(&cx, |ws, _| ws.live_view(&id).unwrap().thread().unwrap().entity_id());
     step(&mut cx, &|ws, w, cx| {
         let thread = ws.live_view(&id).unwrap().thread().unwrap().clone();
         thread.update(cx, |thread, cx| {
@@ -119,6 +120,10 @@ fn switching_between_worktrees_in_the_workspace() {
         });
         ws.act(quick("fix-login"), w, cx);
     });
+    let cursor_before = ws.read_with(&cx, |ws, app| {
+        ws.live_view(&id).unwrap().thread().unwrap().read(app).composer.read(app).selected_range().end
+    });
+    assert_eq!(cursor_before, "draft for the worktree".len());
     let worktree = crate::git::worktree::folder(&repo_dir, "fix-login");
     let switching_to = |ws: &Workspace, app: &App| {
         ws.live_view(&session.id).and_then(|v| v.thread()).and_then(|v| {
@@ -134,8 +139,11 @@ fn switching_between_worktrees_in_the_workspace() {
         moved && !loading
     };
     wait(&mut cx, "the switch", &|ws, app| {
-        let view = ws.live_view(&id).unwrap().thread().unwrap().read(app);
+        let thread = ws.live_view(&id).unwrap().thread().unwrap();
+        assert_eq!(thread.entity_id(), thread_before, "the ThreadView stays intact across the worktree switch");
+        let view = thread.read(app);
         assert_eq!(view.draft(app), "draft for the worktree", "the draft stays through the restart");
+        assert_eq!(view.composer.read(app).selected_range().end, cursor_before, "the cursor stays where the user was typing");
         assert!(view.composer_state(app).has_attachments(), "the attachment stays through the restart");
         moved_to(&worktree, ws, app)
     });

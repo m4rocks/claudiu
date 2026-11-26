@@ -48,7 +48,15 @@ impl Render for ThreadView {
             .on_mouse_down(
                 gpui::MouseButton::Left,
                 cx.listener(|v, _: &gpui::MouseDownEvent, window, cx| {
-                    if v.picker != Some(ThreadPicker::Model) && v.review.is_none() && v.screenshot.is_none() && v.find.is_none() && v.selection_comment.is_none() {
+                    if v.picker.is_none() && v.review.is_none() && v.screenshot.is_none() && v.find.is_none() && v.selection_comment.is_none() {
+                        v.focus_composer(window, cx);
+                    }
+                }),
+            )
+            .on_mouse_up(
+                gpui::MouseButton::Left,
+                cx.listener(|v, _: &gpui::MouseUpEvent, window, cx| {
+                    if v.picker.is_none() && v.review.is_none() && v.screenshot.is_none() && v.find.is_none() && v.selection_comment.is_none() && v.comment_anchor.is_none() {
                         v.focus_composer(window, cx);
                     }
                 }),
@@ -1222,12 +1230,13 @@ impl ThreadView {
                                 .child(desc)
                         })),
                 )
-                .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| {
+                .on_click(cx.listener(move |v, _: &ClickEvent, window, cx| {
                     if multi {
                         v.toggle_question_option(question_id, i, cx);
                     } else {
                         v.answer_question(question_id, Some(i), cx);
                     }
+                    v.focus_composer(window, cx);
                 }));
             options = options.child(row);
         }
@@ -1245,8 +1254,9 @@ impl ThreadView {
                     None,
                     true,
                 )
-                .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| {
+                .on_click(cx.listener(move |v, _: &ClickEvent, window, cx| {
                     v.submit_multi_question(question_id, cx);
+                    v.focus_composer(window, cx);
                 }))
                 .h(px(24.0))
                 .px(px(10.0))
@@ -1454,6 +1464,7 @@ impl ThreadView {
             22,
             body,
             Some(choices),
+            ui::popover::ArrowNav::Enabled,
             |v: &mut Self, window, cx| v.close_picker(window, cx),
             window,
             cx,
@@ -1529,8 +1540,9 @@ impl ThreadView {
                             .text_color(theme().muted_foreground)
                             .hover(|s| s.text_color(theme().foreground))
                             .child(icon(IconName::X, 12.0))
-                            .on_click(cx.listener(|v, _: &ClickEvent, _, cx| {
+                            .on_click(cx.listener(|v, _: &ClickEvent, window, cx| {
                                 v.pending_model = None;
+                                v.focus_composer(window, cx);
                                 cx.notify();
                             })),
                     ),
@@ -1539,6 +1551,10 @@ impl ThreadView {
 
         let focused = self.composer.focus_handle(cx).is_focused(window);
         let input = composer::input_area()
+            .on_mouse_down(MouseButton::Left, cx.listener(|v, _, window, cx| {
+                v.focus_composer(window, cx);
+                cx.stop_propagation();
+            }))
             .capture_action(cx.listener(|v, _: &Paste, _, cx| {
                 if v.attachments_enabled() && v.attachments.paste(cx) {
                     cx.stop_propagation();
@@ -1549,7 +1565,10 @@ impl ThreadView {
                 d.children(self.attachments.render(|v: &mut Self| &mut v.attachments, cx))
             })
             .child(div()
-                .on_mouse_down(MouseButton::Left, cx.listener(|v, _, window, cx| v.focus_composer(window, cx)))
+                .on_mouse_down(MouseButton::Left, cx.listener(|v, _, window, cx| {
+                    v.focus_composer(window, cx);
+                    cx.stop_propagation();
+                }))
                 .child(Textarea::new(&self.composer).appearance(false)))
             .into_any_element();
         let dock = composer::render(self.composer_parts(focused, input, window.modifiers().secondary(), window, cx))
@@ -1568,6 +1587,12 @@ impl ThreadView {
             .flex()
             .justify_center()
             .id("thread-composer-dock")
+            .on_mouse_down(MouseButton::Left, cx.listener(|v, _, window, cx| {
+                if v.picker.is_none() && v.review.is_none() && v.screenshot.is_none() && v.find.is_none() && v.selection_comment.is_none() {
+                    v.focus_composer(window, cx);
+                    cx.stop_propagation();
+                }
+            }))
             .on_modifiers_changed(cx.listener(|_, _: &gpui::ModifiersChangedEvent, _, cx| cx.notify()))
             .child(inner.children(self.render_waiting(window, cx)).child(dock))
     }

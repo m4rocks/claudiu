@@ -94,7 +94,7 @@ impl Workspace {
                     false,
                 ),
             };
-            popover::dialog("modal-card")
+            popover::dialog("modal-card", popover::ArrowNav::Disabled)
                 .track_focus(&self.modal_focus)
                 .w(px(440.0))
                 .p(px(22.0))
@@ -195,7 +195,6 @@ impl Workspace {
         let mut options = div().flex().flex_col().gap(px(5.0)).w_full();
         for (i, opt) in question.options.iter().enumerate() {
             let checked = multi && question.selected.contains(&i);
-            let primary = (!multi && opt.kind == "allow_once" && i == 0) || checked;
             let answer_id = id.clone();
             let row = div()
                 .id(gpui::SharedString::from(format!("sidebar-q-opt-{question_id}-{i}")))
@@ -203,9 +202,9 @@ impl Workspace {
                 .px(px(10.0))
                 .py(px(7.0))
                 .rounded(px(6.0))
-                .bg(if primary { theme().row_active } else { theme().background })
+                .bg(if checked { theme().row_active } else { theme().background })
                 .border_1()
-                .border_color(if primary { theme().ring } else { theme().panel_border })
+                .border_color(if checked { theme().ring } else { theme().panel_border })
                 .hover(|s| s.bg(theme().accent))
                 .cursor_pointer()
                 .flex()
@@ -239,15 +238,10 @@ impl Workspace {
         let submit_id = id.clone();
         let open_id = id.clone();
         let ws_weak = cx.entity().downgrade();
-        let card = div()
-            .id("sidebar-question-popover")
-            .occlude()
-            .cursor_default()
+        let card = popover::content("sidebar-question-popover", popover::ArrowNav::Disabled)
             .w(px(pop_w))
             .p(px(12.0))
-            .rounded(px(10.0))
             .bg(theme().card)
-            .border_1()
             .border_color(theme().ring)
             .flex()
             .flex_col()

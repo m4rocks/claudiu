@@ -283,3 +283,39 @@ fn text_generation_picker_saves_a_model_independently_of_new_sessions() {
     close_settings(&mut cx);
     assert!(ws.read_with(&cx, |ws, _| ws.store.data.settings.text_generation_model.is_none()));
 }
+
+#[test]
+#[ignore = "drives the workspace"]
+/// Command-K only lists active (running) sessions, not closed/recent ones.
+fn command_palette_lists_only_active_sessions() {
+    let _data = crate::datadir::own_folder();
+    let dir = tempfile::tempdir().unwrap();
+    let mut cx = TestAppContext::single();
+    let (window, ws) = keyboard_workspace(&mut cx);
+    let closed_id = "closed-session-id".to_string();
+    cx.update_window(window, |_, window, app| {
+        ws.update(app, |ws, cx| {
+            ws.store.data.sessions.push(crate::store::SessionRecord {
+                id: closed_id.clone(),
+                title: "Closed Session".into(),
+                custom_title: None,
+                auto_title: None,
+                cwd: dir.path().to_path_buf(),
+                project_id: None,
+                kind: crate::store::SessionKind::Agent,
+                agent: Some(crate::store::AgentMeta { harness: Harness::Claude, ..Default::default() }),
+                created_at: 1,
+                last_active: 1,
+                exit_code: None,
+                hidden: false,
+            });
+            ws.open_palette(window, cx);
+        });
+    })
+    .unwrap();
+    ws.read_with(&cx, |ws, _| {
+        let p = ws.palette.as_ref().expect("palette is open");
+        let session_titles: Vec<&str> = p.items.iter().filter(|i| i.badge == "Session").map(|i| i.title.as_str()).collect();
+        assert!(!session_titles.contains(&"Closed Session"), "closed sessions must not appear in Command-K: {session_titles:?}");
+    });
+}

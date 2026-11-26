@@ -29,6 +29,7 @@ pub fn dropdown_overlay<V: 'static>(
     priority: usize,
     body: AnyElement,
     choices: Option<Choices<V>>,
+    arrow_nav: popover::ArrowNav,
     on_close: impl Fn(&mut V, &mut Window, &mut Context<V>) + 'static,
     window: &Window,
     cx: &mut Context<V>,
@@ -77,6 +78,7 @@ pub fn dropdown_overlay<V: 'static>(
     }
 
     let header = div()
+        .flex_none()
         .px(px(2.0))
         .flex()
         .items_center()
@@ -93,7 +95,7 @@ pub fn dropdown_overlay<V: 'static>(
         );
 
     let hit = at.hit;
-    let card = popover::content(id)
+    let card = popover::content(id, arrow_nav)
         .w(px(WIDTH).max(at.min_w))
         .when_some(max_card_h, |d, h| d.max_h(h).overflow_hidden())
         .p(px(11.0))
@@ -111,7 +113,8 @@ pub fn dropdown_overlay<V: 'static>(
             }
             cx.notify();
         }));
-    let card = keyboard(card, choices, move |v, window, cx| close_key(v, window, cx), cx)
+    let nav_choices = if arrow_nav.is_enabled() { choices } else { None };
+    let card = keyboard(card, nav_choices, move |v, window, cx| close_key(v, window, cx), cx)
         .child(header)
         .child(body);
 
@@ -150,17 +153,18 @@ pub fn keyboard<V: 'static>(
 
 /// Uniform search input at the top of a filterable picker dialog.
 pub fn search_input(input: &gpui::Entity<InputState>) -> impl IntoElement {
-    Input::new(input).h(px(28.0)).text_size(scale::px(12.0))
+    div().flex_none().child(Input::new(input).h(px(28.0)).text_size(scale::px(12.0)))
 }
 
 /// Horizontal divider between sections inside a picker dialog.
 pub fn divider() -> Div {
-    div().h(px(1.0)).w_full().bg(theme().border)
+    div().flex_none().h(px(1.0)).w_full().bg(theme().border)
 }
 
 /// Sub-section header inside a multi-section picker dialog (e.g. WORKTREES / BRANCHES).
 pub fn section_header(title: impl Into<SharedString>, trailing: Option<AnyElement>) -> Div {
     div()
+        .flex_none()
         .flex()
         .items_center()
         .justify_between()

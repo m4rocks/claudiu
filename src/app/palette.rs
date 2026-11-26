@@ -241,13 +241,15 @@ impl Workspace {
             action: PaletteAction::RunAct(Box::new(Act::ImportProject)),
         });
 
-        // Sessions
-        for rec in &self.store.data.sessions {
-            let running = self.is_running(&rec.id, cx);
+        // Active (running) sessions only
+        for live in &self.live {
+            if !live.view.is_running(cx) {
+                continue;
+            }
+            let Some(rec) = self.store.session(&live.id) else { continue };
             let subtitle = format!(
-                "{}{}",
+                "{} · running",
                 rec.agent.as_ref().map_or("Shell", |m| m.harness.name()),
-                if running { " · running" } else { " · recent" }
             );
             items.push(PaletteItem {
                 badge: "Session",
