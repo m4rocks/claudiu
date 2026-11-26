@@ -15,7 +15,11 @@ use crate::panels::theme::{self, theme};
 use gpui_kit::assets::IconName;
 use crate::panels::status_icon::{SessionDot, StatusIcon};
 use crate::panels::logos;
-use crate::panels::widgets::{Trigger, ago, countdown, focusable, icon, icon_button, limit_bar, section_label};
+use crate::panels::widgets::{Trigger, ago, countdown, icon};
+use crate::panels::ui::button::focusable;
+use crate::panels::ui::button::icon_button;
+use crate::panels::ui::label::section_label;
+use crate::panels::ui::progress::limit_bar;
 
 pub const SIDEBAR_W: f32 = 284.0;
 pub const SIDEBAR_MIN: f32 = 220.0;
@@ -283,7 +287,7 @@ impl Workspace {
 
     fn session_menu(&self, rec: &SessionRecord, running: bool) -> Vec<MenuItem> {
         let mut items = vec![];
-        let item = |label: &str, act: Act, danger: bool, sep: bool| MenuItem { label: label.into(), hint: None, detail: None, act, danger, disabled: false, separator_before: sep, remove: None, icon: None };
+        let item = |label: &str, act: Act, danger: bool, sep: bool| MenuItem { label: label.into(), hint: None, detail: None, act, danger, disabled: false, separator_before: sep, remove: None, icon: None, checked: false };
         if running {
             items.push(item("Switch to session", Act::Select(rec.id.clone()), false, false));
         } else if rec.kind == SessionKind::Agent {
@@ -311,7 +315,7 @@ impl Workspace {
     }
 
     fn project_menu(&self, p: &Project) -> Vec<MenuItem> {
-        let item = |label: String, act: Act, danger: bool, sep: bool| MenuItem { label, hint: None, detail: None, act, danger, disabled: false, separator_before: sep, remove: None, icon: None };
+        let item = |label: String, act: Act, danger: bool, sep: bool| MenuItem { label, hint: None, detail: None, act, danger, disabled: false, separator_before: sep, remove: None, icon: None, checked: false };
         let mut items = vec![
             item("New session here".into(), Act::NewSession { cwd: p.path.clone() }, false, false),
             item("Pick up a session here…".into(), Act::ListSessions { cwd: p.path.clone() }, false, false),

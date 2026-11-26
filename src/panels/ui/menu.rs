@@ -29,6 +29,7 @@ pub struct Entry<V> {
     trailing: Option<AnyElement>,
     destructive: bool,
     disabled: bool,
+    checked: bool,
     separator_before: bool,
     on_select: Select<V>,
 }
@@ -44,6 +45,7 @@ impl<V: 'static> Entry<V> {
             trailing: None,
             destructive: false,
             disabled: false,
+            checked: false,
             separator_before: false,
             on_select: Rc::new(on_select),
         }
@@ -88,6 +90,12 @@ impl<V: 'static> Entry<V> {
     /// Greyed out; the keyboard skips it and a click does nothing.
     pub fn disabled(mut self, on: bool) -> Self {
         self.disabled = on;
+        self
+    }
+
+    /// A check at the end, for the current value of what the menu sets.
+    pub fn checked(mut self, on: bool) -> Self {
+        self.checked = on;
         self
     }
 
@@ -151,7 +159,7 @@ pub fn menu<V: 'static>(
             theme().foreground
         };
         let icon_color = if e.destructive && !e.disabled { color } else { theme().subtle_foreground };
-        let row = command::item(row_id.clone())
+        let row = command::current(command::item(row_id.clone()), e.checked)
             .group(row_id)
             .debug_selector(move || selector.to_string())
             .text_color(color)
@@ -167,7 +175,8 @@ pub fn menu<V: 'static>(
                     .children(e.detail.map(|d| div().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(scale::px(11.0)).text_color(theme().subtle_foreground).child(d))),
             )
             .children(e.shortcut.map(|s| div().flex_none().pl(px(12.0)).text_size(scale::px(11.0)).text_color(theme().subtle_foreground).child(s)))
-            .children(e.trailing);
+            .children(e.trailing)
+            .when(e.checked, |d| d.child(icon(IconName::Check, 12.0).text_color(theme().foreground)));
         card = card.child(if e.disabled {
             row.into_any_element()
         } else {

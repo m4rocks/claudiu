@@ -7,14 +7,11 @@ use crate::panels::scale;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Variant {
-    /// Light fill, for the one thing to notice.
-    Default,
     /// Dark fill.
     #[default]
     Secondary,
     /// Just an outline.
     Outline,
-    Destructive,
 }
 
 pub fn badge(label: impl Into<SharedString>, variant: Variant) -> Div {
@@ -32,10 +29,30 @@ pub fn badge(label: impl Into<SharedString>, variant: Variant) -> Div {
         .text_size(scale::px(11.0))
         .font_weight(FontWeight::MEDIUM);
     let styled = match variant {
-        Variant::Default => base.bg(theme().primary).text_color(theme().primary_foreground),
         Variant::Secondary => base.bg(theme().secondary).text_color(theme().foreground),
         Variant::Outline => base.border_color(theme().panel_border).text_color(theme().foreground),
-        Variant::Destructive => base.bg(theme().destructive.opacity(0.6)).text_color(theme().foreground),
     };
     styled.child(label.into())
+}
+
+/// A state pill in its own `color` (open, merged, failing, draft): a tinted fill, a border and text in that color,
+/// with `glyph` first.
+pub fn status(glyph: Option<gpui_kit::assets::IconName>, label: impl Into<SharedString>, color: gpui::Hsla) -> Div {
+    div()
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap(px(4.0))
+        .h(px(22.0))
+        .px(px(8.0))
+        .rounded_full()
+        .border_1()
+        .border_color(color.opacity(0.45))
+        .bg(color.opacity(0.14))
+        .text_color(color)
+        .whitespace_nowrap()
+        .text_size(scale::px(11.5))
+        .font_weight(FontWeight::MEDIUM)
+        .children(glyph.map(|g| crate::panels::widgets::icon(g, 13.0)))
+        .child(label.into())
 }

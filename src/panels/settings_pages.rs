@@ -3,7 +3,7 @@
 
 use gpui::{
     AnyElement, ClickEvent, Context, Div, FontWeight, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, ParentElement, SharedString,
-    StatefulInteractiveElement, Styled, Window, deferred, div, prelude::FluentBuilder, px,
+    StatefulInteractiveElement, Styled, Window, deferred, div, px,
 };
 use gpui_kit::component::input::{Input, InputState};
 
@@ -12,7 +12,9 @@ use crate::harness::Harness;
 use crate::harness::subagents::AgentModel;
 use crate::panels::logos;
 use crate::panels::theme::theme;
-use crate::panels::widgets::{button, button_disabled, section_label};
+use crate::panels::ui::switch::switch;
+use crate::panels::ui::button as btn;
+use crate::panels::ui::label::section_label;
 
 fn faint(text: impl Into<SharedString>) -> Div {
     div().text_size(crate::panels::scale::px(11.0)).text_color(theme().subtle_foreground).child(text.into())
@@ -20,21 +22,6 @@ fn faint(text: impl Into<SharedString>) -> Div {
 
 fn warn(text: impl Into<SharedString>) -> Div {
     div().text_size(crate::panels::scale::px(11.0)).text_color(theme().warning).child(text.into())
-}
-
-/// Compact pill toggle switch shared across all Settings pages and harness popups.
-pub fn toggle_switch(on: bool) -> Div {
-    div()
-        .flex_none()
-        .w(px(32.0))
-        .h(px(18.0))
-        .p(px(2.0))
-        .rounded(px(999.0))
-        .bg(if on { theme().primary } else { theme().input })
-        .flex()
-        .items_center()
-        .when(on, |d| d.justify_end())
-        .child(div().w(px(14.0)).h(px(14.0)).rounded(px(999.0)).bg(if on { theme().primary_foreground } else { theme().knob }))
 }
 
 /// A labelled Settings section: uppercase header (with an optional trailing control) over a single rounded card whose
@@ -47,15 +34,7 @@ pub fn settings_group(title: impl Into<SharedString>, trailing: Option<AnyElemen
         .gap(px(8.0))
         .child(section_label(title))
         .children(trailing);
-    let mut card = div()
-        .flex()
-        .flex_col()
-        .w_full()
-        .rounded(px(8.0))
-        .bg(theme().card)
-        .border_1()
-        .border_color(theme().panel_border)
-        .overflow_hidden();
+    let mut card = crate::panels::ui::card::outlined(theme().panel_border).w_full();
     for (i, row) in rows.into_iter().enumerate() {
         if i > 0 {
             card = card.child(crate::panels::ui::separator::horizontal());
@@ -100,7 +79,7 @@ pub fn switch_row(
                 .child(label.into())
                 .children(tag.map(|tag| div().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().text_size(crate::panels::scale::px(11.0)).text_color(theme().subtle_foreground).child(tag))),
         )
-        .child(toggle_switch(on))
+        .child(switch(on))
         .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
             flip(ws, window, cx);
             cx.notify();
@@ -288,7 +267,7 @@ impl Workspace {
                 .flex()
                 .items_center()
                 .cursor_pointer()
-                .child(toggle_switch(enabled))
+                .child(switch(enabled))
                 .on_click(cx.listener(move |ws, _: &ClickEvent, _w, cx| {
                     flip_harness_enabled(ws, harness, cx);
                     cx.notify();
@@ -498,7 +477,7 @@ impl Workspace {
                 }
             }))
             .child(self.harness_dialog_scroll.wire(div().id("agent-dialog-body").flex_1().min_h_0(), window).flex().flex_col().gap(px(12.0)).child(body))
-            .child(div().flex().justify_end().child(button("agent-dialog-done", "Done", true).on_click(cx.listener(|ws, _: &ClickEvent, window, cx| {
+            .child(div().flex().justify_end().child(btn::text("agent-dialog-done", "Done", true).on_click(cx.listener(|ws, _: &ClickEvent, window, cx| {
                 ws.close_harness_dialog(window, cx);
                 cx.notify();
             }))));
@@ -530,7 +509,7 @@ impl Workspace {
     /// add to. Changes apply at once; a removal can be undone from its toast.
     pub(crate) fn projects_section(&self, renaming: Option<&(crate::store::Id, gpui::Entity<InputState>)>, cx: &mut Context<Self>) -> Div {
         let projects = &self.store.data.projects;
-        let add = button("project-add", "Add project…", false)
+        let add = btn::text("project-add", "Add project…", false)
             .on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::ImportProject, window, cx)))
             .into_any_element();
         if projects.is_empty() {
@@ -556,15 +535,15 @@ impl Workspace {
             let mut buttons = div().flex().flex_none().gap(px(5.0));
             buttons = if editing.is_some() {
                 buttons
-                    .child(pressed(button(format!("project-cancel-{i}"), "Cancel", false), Act::CancelProjectRename, cx))
-                    .child(pressed(button(format!("project-save-{i}"), "Save", true), Act::SaveProjectName, cx))
+                    .child(pressed(btn::text(format!("project-cancel-{i}"), "Cancel", false), Act::CancelProjectRename, cx))
+                    .child(pressed(btn::text(format!("project-save-{i}"), "Save", true), Act::SaveProjectName, cx))
             } else {
-                buttons.child(pressed(button(format!("project-rename-{i}"), "Rename", false), Act::RenameProject(id.clone()), cx))
+                buttons.child(pressed(btn::text(format!("project-rename-{i}"), "Rename", false), Act::RenameProject(id.clone()), cx))
             };
             buttons = buttons
-                .child(if i == 0 { button_disabled(format!("project-up-{i}"), "Up") } else { pressed(button(format!("project-up-{i}"), "Up", false), Act::MoveProject(id.clone(), true), cx) })
-                .child(if i == last { button_disabled(format!("project-down-{i}"), "Down") } else { pressed(button(format!("project-down-{i}"), "Down", false), Act::MoveProject(id.clone(), false), cx) })
-                .child(pressed(button(format!("project-remove-{i}"), "Remove", false), Act::RemoveProject(id), cx));
+                .child(if i == 0 { btn::disabled(format!("project-up-{i}"), "Up") } else { pressed(btn::text(format!("project-up-{i}"), "Up", false), Act::MoveProject(id.clone(), true), cx) })
+                .child(if i == last { btn::disabled(format!("project-down-{i}"), "Down") } else { pressed(btn::text(format!("project-down-{i}"), "Down", false), Act::MoveProject(id.clone(), false), cx) })
+                .child(pressed(btn::text(format!("project-remove-{i}"), "Remove", false), Act::RemoveProject(id), cx));
             rows.push(
                 div()
                     .flex()

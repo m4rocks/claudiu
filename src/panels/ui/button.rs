@@ -1,4 +1,4 @@
-//! Buttons after shadcn's Button: six variants and four sizes, a focus-visible ring, and a dimmed disabled state.
+//! Buttons after shadcn's Button: five variants and three sizes, a focus-visible ring, and a dimmed disabled state.
 //! The result is gpui-base's `Button`, which owns Tab focus and Enter/Space activation; attach `.on_click`.
 
 use gpui::{FontWeight, prelude::FluentBuilder, InteractiveElement, ParentElement, SharedString, Styled, px};
@@ -22,8 +22,6 @@ pub enum Variant {
     Ghost,
     /// Something that destroys work.
     Destructive,
-    /// Text that underlines under the pointer.
-    Link,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -33,8 +31,6 @@ pub enum Size {
     /// 26px, the app's usual button.
     #[default]
     Sm,
-    /// 32px.
-    Default,
     /// 22px square, for an icon alone.
     Icon,
 }
@@ -45,7 +41,6 @@ pub fn button(id: impl Into<SharedString>, glyph: Option<IconName>, label: impl 
     let (height, pad, text, glyph_size) = match size {
         Size::Xs => (22.0, 8.0, 11.5, 12.0),
         Size::Sm => (26.0, 10.0, 12.0, 13.0),
-        Size::Default => (32.0, 14.0, 12.5, 14.0),
         Size::Icon => (22.0, 0.0, 12.0, 14.0),
     };
     let base = Button::new(id.into())
@@ -67,7 +62,88 @@ pub fn button(id: impl Into<SharedString>, glyph: Option<IconName>, label: impl 
         Variant::Outline => base.border_color(theme().panel_border).text_color(theme().foreground).hover(|s| s.bg(theme().secondary_hover)),
         Variant::Ghost => base.text_color(theme().foreground).hover(|s| s.bg(theme().secondary_hover)),
         Variant::Destructive => base.bg(theme().destructive.opacity(0.6)).text_color(theme().foreground).hover(|s| s.bg(theme().destructive.opacity(0.75))),
-        Variant::Link => base.text_color(theme().foreground).hover(|s| s.underline()),
     };
     styled.children(glyph.map(|g| icon(g, glyph_size))).when(!label.is_empty(), |b| b.child(label))
+}
+
+/// The bare focusable button under every kit button: Tab reaches it, Enter or Space presses it, and the keyboard's
+/// focus shows as a ring.
+pub fn focusable(id: impl Into<gpui::ElementId>) -> Button {
+    Button::new(id).border_1().border_color(gpui::transparent_black()).focus_visible(|s| s.border_color(theme().primary))
+}
+
+/// The app's usual text button: [`Variant::Default`] when `primary`, else [`Variant::Secondary`].
+pub fn text(id: impl Into<SharedString>, label: impl Into<SharedString>, primary: bool) -> Button {
+    button(id, None, label, if primary { Variant::Default } else { Variant::Secondary }, Size::Sm)
+}
+
+/// [`text`] with `glyph` before the label.
+pub fn leading(id: impl Into<SharedString>, glyph: IconName, label: impl Into<SharedString>, primary: bool) -> Button {
+    button(id, Some(glyph), label, if primary { Variant::Default } else { Variant::Secondary }, Size::Sm)
+}
+
+/// A button that can't be pressed right now: dimmed, with no hover; attach no click handler.
+pub fn disabled(id: impl Into<SharedString>, label: impl Into<SharedString>) -> Button {
+    disabled_leading(id, None, label)
+}
+
+/// [`disabled`] with `glyph` before the label.
+pub fn disabled_leading(id: impl Into<SharedString>, glyph: Option<IconName>, label: impl Into<SharedString>) -> Button {
+    button(id, glyph, label, Variant::Secondary, Size::Sm).disabled(true)
+}
+
+/// Something that destroys work (end a session, quit).
+pub fn destructive(id: impl Into<SharedString>, label: impl Into<SharedString>) -> Button {
+    button(id, None, label, Variant::Destructive, Size::Sm)
+}
+
+/// An icon alone on a ghost button, muted until the pointer is on it.
+pub fn icon_button(id: impl Into<SharedString>, glyph: IconName) -> Button {
+    focusable(id.into())
+        .size(px(22.0))
+        .rounded(px(5.0))
+        .text_color(theme().muted_foreground)
+        .cursor_pointer()
+        .hover(|s| s.bg(theme().secondary_hover).text_color(theme().foreground))
+        .child(icon(glyph, 14.0))
+}
+
+/// [`icon_button`] dimmed, with no hover; attach no click handler.
+pub fn icon_button_disabled(id: impl Into<SharedString>, glyph: IconName) -> Button {
+    Button::new(id.into())
+        .disabled(true)
+        .size(px(22.0))
+        .rounded(px(5.0))
+        .text_color(theme().subtle_foreground)
+        .cursor_default()
+        .child(icon(glyph, 14.0))
+}
+
+/// A button in colors of its own, for the few that carry a state's color (Send, Stop, Jump to latest).
+#[allow(clippy::too_many_arguments)]
+pub fn colored(
+    id: impl Into<SharedString>,
+    glyph: Option<IconName>,
+    label: impl Into<SharedString>,
+    bg: gpui::Hsla,
+    fg: gpui::Hsla,
+    hover: gpui::Hsla,
+    border: Option<gpui::Hsla>,
+    bold: bool,
+) -> Button {
+    let label = label.into();
+    focusable(id.into())
+        .px(px(10.0))
+        .h(px(26.0))
+        .gap(px(5.0))
+        .rounded(px(6.0))
+        .bg(bg)
+        .border_color(border.unwrap_or_else(gpui::transparent_black))
+        .text_color(fg)
+        .text_size(scale::px(12.0))
+        .font_weight(if bold { FontWeight::SEMIBOLD } else { FontWeight::NORMAL })
+        .cursor_pointer()
+        .hover(move |s| s.bg(hover))
+        .children(glyph.map(|g| icon(g, 13.0)))
+        .when(!label.is_empty(), |b| b.child(label))
 }

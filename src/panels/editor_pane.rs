@@ -17,8 +17,11 @@ use crate::app::{Act, Ask, AskExplain, AskFix, AskFixProblem, AskTests, EditorCo
 use crate::panels::glide::Follow;
 use crate::panels::theme::{self, theme};
 use crate::panels::comment_box::{COMMENT_ICON, COMMENT_ICON_SIZE, COMMENT_SIZE, comment_box};
-use crate::panels::widgets::{button, dropdown_card, icon};
+use crate::panels::widgets::icon;
 use crate::platform::path_key;
+use crate::panels::ui::button as btn;
+use crate::panels::ui::tooltip::tooltip;
+use crate::panels::ui::{alert, breadcrumb::breadcrumb, command, empty, label::section_label, popover};
 
 const TREE_W: f32 = 240.0;
 
@@ -33,6 +36,24 @@ impl Workspace {
         let changed = pane.changed.clone();
         let empty_folders = pane.empty_folders.clone();
         let tree_id = id.clone();
+        let shown_file = pane.shown().map(|t| path_key(&t.path));
+        let folder_name = pane.root.file_name().map_or_else(|| pane.root.to_string_lossy().into_owned(), |n| n.to_string_lossy().into_owned());
+        let crumbs = pane.shown().map(|t| {
+            let rel = relative(&t.path, &pane.root);
+            let mut parts: Vec<String> = vec![folder_name.clone()];
+            parts.extend(rel.split(['/', '\\']).filter(|p| !p.is_empty()).map(str::to_string));
+            div()
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .h(px(28.0))
+                .px(px(12.0))
+                .border_b_1()
+                .border_color(theme().border)
+                .child(breadcrumb(parts))
+                .when(t.dirty, |d| d.child(div().flex_none().text_size(crate::panels::scale::px(11.0)).text_color(theme().muted_foreground).child("Unsaved")))
+        });
         let files = tree(&pane.tree, move |_ix, entry, _selected, _w, _cx| {
             let path = std::path::PathBuf::from(entry.item().id.as_ref());
             let folder = entry.is_folder() || empty_folders.contains(entry.item().id.as_ref());
@@ -67,7 +88,9 @@ impl Workspace {
                 .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(entry.item().label.clone()))
                 .children(badge.map(|b| div().flex_none().text_size(crate::panels::scale::px(if folder { 8.0 } else { 11.0 })).child(b)));
             let (menu_ws, menu_id, menu_path) = (ws.clone(), tree_id.clone(), path.clone());
-            let item = ListItem::new(entry.item().id.clone()).py(px(2.0)).child(row).on_mouse_down(MouseButton::Right, move |ev, window, cx| {
+            let current = !folder && shown_file.as_deref() == Some(path_key(&path).as_str());
+            let row = row.when(current, |r| r.font_weight(gpui::FontWeight::MEDIUM));
+            let item = ListItem::new(entry.item().id.clone()).py(px(2.0)).mx(px(4.0)).rounded(px(5.0)).when(current, |i| i.bg(theme().row_active)).child(row).on_mouse_down(MouseButton::Right, move |ev, window, cx| {
                 cx.stop_propagation(); // the tree's own menu is for the session folder
                 let _ = menu_ws.update(cx, |ws, cx| {
                     let items = ws.file_menu(&menu_id, Some(&menu_path), folder);
@@ -91,7 +114,7 @@ impl Workspace {
                 .child("Too many files to list them all here.")
         });
         let body: AnyElement = match pane.shown() {
-            Some(Tab { note: Some(note), .. }) => centered(note.clone()),
+            Some(Tab { note: Some(note), .. }) => centered(IconName::File, note.clone()),
             Some(tab) => div()
                 .size_full()
                 .flex()
@@ -123,10 +146,11 @@ impl Workspace {
                         .border_color(theme().border)
                         .text_size(crate::panels::scale::px(11.0))
                         .text_color(theme().subtle_foreground)
+                        .child(icon(IconName::Brackets, 12.0))
                         .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(s))
                 }))
                 .into_any_element(),
-            None => centered("Pick a file on the left, or press Ctrl+P.".into()),
+            None => centered(IconName::FileCode, "Pick a file on the left, or press Ctrl+P.".into()),
         };
         let picker = pane.picker.as_ref().map(|p| render_picker(p, &pane.root, cx));
         let comment = pane.comment.as_ref().map(|c| render_comment(c, cx));
@@ -163,7 +187,8 @@ impl Workspace {
                         .flex_none()
                         .w(px(TREE_W))
                         .h_full()
-                        .py(px(6.0))
+                        .pb(px(6.0))
+                        .bg(theme().sidebar)
                         .border_r_1()
                         .border_color(theme().border)
                         // Rows don't take the keyboard themselves; the pane does, so its shortcuts work from here.
@@ -179,6 +204,22 @@ impl Workspace {
                                 ws.open_menu(ev.position, items, window, cx);
                             }
                         }))
+                        .child(
+                            div()
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .h(px(30.0))
+                                .pl(px(12.0))
+                                .pr(px(4.0))
+                                .child(section_label(folder_name.to_uppercase()).overflow_hidden().whitespace_nowrap().text_ellipsis())
+                                .child(
+                                    btn::icon_button("tree-quick-open", IconName::Search)
+                                        .tooltip(tooltip(format!("Go to file ({})", crate::panels::widgets::shortcut("P"))))
+                                        .on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.open_picker(PickerKind::Files, window, cx))),
+                                ),
+                        )
                         .child(pane.tree_scroll.watch(div().id("file-tree").flex_1().min_h_0(), window).child(files))
                         .children(truncated),
                 )
@@ -190,6 +231,7 @@ impl Workspace {
                         .min_w_0()
                         .h_full()
                         .child(tabs)
+                        .children(crumbs)
                         .child(div().flex_1().min_h_0().child(body)),
                 )
                 .children(picker)
@@ -440,35 +482,51 @@ fn render_tabs(id: &crate::store::Id, pane: &EditorPane, window: &mut gpui::Wind
         let name = tab.path.file_name().map_or_else(|| tab.path.to_string_lossy(), |n| n.to_string_lossy()).to_string();
         let rel = relative(&tab.path, &pane.root);
         let (show, close, middle) = (id.clone(), id.clone(), id.clone());
+        let glyph = file_icon(&tab.path);
         div()
             .id(SharedString::from(format!("tab-{i}")))
             .group(SharedString::from(format!("tab-{i}")))
+            .relative()
             .flex()
             .flex_none()
             .items_center()
             .gap(px(6.0))
             .h_full()
-            .pl(px(12.0))
+            .pl(px(10.0))
             .pr(px(6.0))
             .border_r_1()
             .border_color(theme().border)
             .text_size(crate::panels::scale::px(12.0))
             .text_color(if shown { theme().foreground } else { theme().muted_foreground })
-            .when(shown, |d| d.bg(theme().row_active))
+            // The shown tab takes the editor's own background and covers the rule under the row, so it reads as
+            // part of the page below; a line along its top marks it too.
+            .when(shown, |d| {
+                d.bg(theme().background)
+                    .mb(px(-1.0))
+                    .child(div().absolute().top_0().left_0().right_0().h(px(2.0)).bg(theme().primary))
+            })
+            .when(!shown, |d| d.hover(|s| s.bg(theme().row_hover).text_color(theme().foreground)))
             .cursor_pointer()
-            .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(rel.clone()).build(window, cx))
+            .tooltip(tooltip(rel))
+            .child(icon(glyph, 13.0).text_color(if shown { theme().muted_foreground } else { theme().subtle_foreground }))
             .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.show_tab(&show, i, window, cx)))
             .on_mouse_up(MouseButton::Middle, cx.listener(move |ws, _: &gpui::MouseUpEvent, window, cx| ws.request_close_tab(&middle, i, window, cx)))
             .child(name)
-            .when(tab.dirty, |d| d.child(div().text_color(theme().primary).child("●")))
+            .when(tab.dirty, |d| d.child(div().size(px(6.0)).rounded_full().bg(theme().primary)))
             .child(
                 div()
                     .id(SharedString::from(format!("tab-close-{i}")))
-                    .rounded(px(3.0))
-                    .hover(|s| s.bg(theme().secondary_hover))
+                    .size(px(18.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(4.0))
+                    .text_color(theme().muted_foreground)
+                    .hover(|s| s.bg(theme().secondary_hover).text_color(theme().foreground))
                     .invisible()
                     .when(shown, |d| d.visible())
                     .group_hover(SharedString::from(format!("tab-{i}")), |s| s.visible())
+                    .tooltip(tooltip(format!("Close ({})", crate::panels::widgets::shortcut("W"))))
                     .child(icon(IconName::X, 12.0))
                     .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
                         cx.stop_propagation();
@@ -479,8 +537,9 @@ fn render_tabs(id: &crate::store::Id, pane: &EditorPane, window: &mut gpui::Wind
     pane.tabs_scroll
         .wire(div().id("tabs"), window)
         .flex_none()
-        .h(px(30.0))
+        .h(px(34.0))
         .flex()
+        .bg(theme().inset)
         .border_b_1()
         .border_color(theme().border)
         .children(tabs)
@@ -494,30 +553,19 @@ fn render_conflict(id: &crate::store::Id, path: &std::path::Path, conflict: Conf
         Conflict::Deleted => "This file was deleted on disk.",
     };
     let (reload_id, reload_path, keep_id, keep_path) = (id.clone(), path.to_path_buf(), id.clone(), path.to_path_buf());
-    div()
+    alert::banner(alert::Tone::Warning, text)
         .flex_none()
-        .flex()
-        .items_center()
-        .justify_between()
-        .gap(px(8.0))
-        .px(px(12.0))
-        .py(px(6.0))
-        .bg(theme().notice)
-        .border_b_1()
-        .border_color(theme().notice_border)
-        .text_size(crate::panels::scale::px(12.0))
-        .text_color(theme().warning)
-        .child(text)
         .child(
             div()
                 .flex()
+                .flex_none()
                 .gap(px(6.0))
                 .when(conflict == Conflict::Changed, |d| {
-                    d.child(button("conflict-reload", "Reload", false).on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
+                    d.child(btn::text("conflict-reload", "Reload", false).on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
                         ws.reload_tab(&reload_id, reload_path.clone(), window, cx)
                     })))
                 })
-                .child(button("conflict-keep", "Keep mine", true).on_click(cx.listener(move |ws, _: &ClickEvent, _w, cx| ws.keep_mine(&keep_id, &keep_path, cx)))),
+                .child(btn::text("conflict-keep", "Keep mine", true).on_click(cx.listener(move |ws, _: &ClickEvent, _w, cx| ws.keep_mine(&keep_id, &keep_path, cx)))),
         )
         .into_any_element()
 }
@@ -530,20 +578,22 @@ fn render_picker(p: &Picker, root: &std::path::Path, cx: &mut Context<Workspace>
             PickerKind::Files => (hit.text.clone(), None),
             PickerKind::Text => (format!("{}:{}", relative(&hit.path, root), hit.line + 1), Some(hit.text.clone())),
         };
-        div()
-            .id(SharedString::from(format!("picked-{i}")))
-            .flex()
-            .flex_col()
-            .px(px(10.0))
-            .py(px(4.0))
-            .rounded(px(5.0))
+        let glyph = file_icon(&hit.path);
+        command::highlighted(command::item(SharedString::from(format!("picked-{i}"))), i == p.selected)
             .cursor_pointer()
-            .when(i == p.selected, |d| d.bg(theme().row_active))
-            .hover(|s| s.bg(theme().row_hover))
-            .child(div().text_size(crate::panels::scale::px(12.5)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(label))
-            .children(detail.map(|d| {
-                div().text_size(crate::panels::scale::px(11.5)).text_color(theme().muted_foreground).overflow_hidden().whitespace_nowrap().text_ellipsis().child(d)
-            }))
+            .when(i != p.selected, |d| d.hover(|s| s.bg(theme().row_hover)))
+            .child(icon(glyph, 13.0).text_color(theme().subtle_foreground))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().child(label))
+                    .children(detail.map(|d| {
+                        div().text_size(crate::panels::scale::px(11.5)).text_color(theme().muted_foreground).overflow_hidden().whitespace_nowrap().text_ellipsis().child(d)
+                    })),
+            )
             .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
                 ws.pick(i, cx);
                 ws.choose_picked(window, cx);
@@ -561,8 +611,9 @@ fn render_picker(p: &Picker, root: &std::path::Path, cx: &mut Context<Workspace>
             }
             cx.stop_propagation();
         }))
-        .child(Input::new(&p.input))
-        .child(div().flex().flex_col().children(rows));
+        .child(Input::new(&p.input).prefix(div().text_color(theme().subtle_foreground).child(icon(IconName::Search, 14.0))))
+        .child(div().flex().flex_col().gap(px(2.0)).children(rows))
+        .when(p.hits.is_empty(), |d| d.child(div().px(px(8.0)).py(px(6.0)).text_size(crate::panels::scale::px(12.0)).text_color(theme().subtle_foreground).child("No matches")));
     floating("picker", list, |ws, window, cx| ws.close_picker(window, cx), cx)
 }
 
@@ -581,7 +632,7 @@ fn floating(
         .flex()
         .justify_center()
         .child(
-            dropdown_card(id)
+            popover::content(id)
                 .w(px(560.0))
                 .max_w_full()
                 .p(px(6.0))
@@ -608,17 +659,8 @@ fn file_icon(path: &std::path::Path) -> IconName {
     }
 }
 
-fn centered(text: String) -> AnyElement {
-    div()
-        .size_full()
-        .flex()
-        .items_center()
-        .justify_center()
-        .px(px(24.0))
-        .text_size(crate::panels::scale::px(12.5))
-        .text_color(theme().subtle_foreground)
-        .child(text)
-        .into_any_element()
+fn centered(glyph: IconName, text: String) -> AnyElement {
+    div().size_full().flex().items_center().justify_center().px(px(24.0)).child(empty::empty_panel(glyph, text)).into_any_element()
 }
 
 #[cfg(test)]

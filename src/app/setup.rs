@@ -14,7 +14,10 @@ use gpui_kit::component::input::Input;
 
 use crate::github::cli::AuthState;
 use crate::panels::theme::theme;
-use crate::panels::widgets::{brand_mark, button, button_disabled, icon, section_label, spinner};
+use crate::panels::widgets::{brand_mark, icon};
+use crate::panels::ui::button as btn;
+use crate::panels::ui::label::section_label;
+use crate::panels::ui::spinner::spinner;
 
 const CLAUDE_INSTALL_PAGE: &str = "https://code.agent.com/docs/en/setup";
 const GH_INSTALL_PAGE: &str = "https://cli.github.com";
@@ -230,7 +233,7 @@ fn tool_title(name: &'static str, tag: &'static str) -> gpui::Div {
 
 impl SetupView {
     fn open_page(id: &'static str, label: &'static str, url: &'static str, cx: &mut Context<Self>) -> impl IntoElement {
-        button(id, label, true).on_click(cx.listener(move |_, _: &ClickEvent, _, cx| cx.open_url(url)))
+        btn::text(id, label, true).on_click(cx.listener(move |_, _: &ClickEvent, _, cx| cx.open_url(url)))
     }
 
     fn claude_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -279,12 +282,12 @@ impl SetupView {
             ),
             Some(AuthState::SignedOut) => {
                 let sign_in = match self.mode {
-                    Mode::Reopened => button("setup-gh-sign-in", "Sign in with gh", true).on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(SetupEvent::SignIn))).into_any_element(),
+                    Mode::Reopened => btn::text("setup-gh-sign-in", "Sign in with gh", true).on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(SetupEvent::SignIn))).into_any_element(),
                     Mode::FirstLaunch => div()
                         .flex()
                         .items_center()
                         .gap(px(10.0))
-                        .child(button_disabled("setup-gh-sign-in", "Sign in with gh"))
+                        .child(btn::disabled("setup-gh-sign-in", "Sign in with gh"))
                         .child(faint("Sign in from the GitHub pane after you continue."))
                         .into_any_element(),
                 };
@@ -302,11 +305,11 @@ impl SetupView {
 impl Render for SetupView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let primary = if self.mode == Mode::Reopened {
-            button("setup-done", "Close", true).on_click(cx.listener(|view, _: &ClickEvent, window, cx| view.close(window, cx)))
+            btn::text("setup-done", "Close", true).on_click(cx.listener(|view, _: &ClickEvent, window, cx| view.close(window, cx)))
         } else if self.can_continue() {
-            button("setup-done", "Continue", true).on_click(cx.listener(|view, _: &ClickEvent, _, cx| view.finish(cx)))
+            btn::text("setup-done", "Continue", true).on_click(cx.listener(|view, _: &ClickEvent, _, cx| view.finish(cx)))
         } else {
-            button_disabled("setup-done", "Continue")
+            btn::disabled("setup-done", "Continue")
         };
         div()
             .size_full()
@@ -346,7 +349,7 @@ impl Render for SetupView {
                     .flex()
                     .justify_end()
                     .gap(px(8.0))
-                    .child(button("setup-check", "Check again", false).on_click(cx.listener(|view, _: &ClickEvent, _, cx| view.check_again(cx))))
+                    .child(btn::text("setup-check", "Check again", false).on_click(cx.listener(|view, _: &ClickEvent, _, cx| view.check_again(cx))))
                     .child(primary),
             )
     }

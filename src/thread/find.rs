@@ -4,7 +4,7 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use super::ThreadView;
 use crate::harness::thread::{Entry, ToolContent, parse_subagent_report};
 use crate::panels::theme::theme;
-use crate::panels::widgets::{button, button_disabled};
+use crate::panels::ui::button as btn;
 
 pub(super) struct Find {
     input: gpui::Entity<InputState>,
@@ -134,9 +134,9 @@ impl ThreadView {
         let label = if count == 0 { "0 matches".to_string() } else { format!("{} of {count}", find.selected + 1) };
         let arrows = [(true, "Previous"), (false, "Next")].into_iter().map(|(previous, label)| {
             if count == 0 {
-                button_disabled(label, label)
+                btn::disabled(label, label)
             } else {
-                button(label, label, false).on_click(cx.listener(move |v, _: &ClickEvent, _, cx| v.step_find(previous, cx)))
+                btn::text(label, label, false).on_click(cx.listener(move |v, _: &ClickEvent, _, cx| v.step_find(previous, cx)))
             }
         });
         Some(div().flex().items_center().gap(px(6.0)).p(px(8.0))
@@ -144,7 +144,7 @@ impl ThreadView {
             .child(div().flex_1().child(Input::new(&find.input)))
             .child(div().text_color(theme().muted_foreground).child(label))
             .children(arrows)
-            .child(button("thread-find-close", "Close", false)
+            .child(btn::text("thread-find-close", "Close", false)
                 .on_click(cx.listener(|v, _: &ClickEvent, window, cx| v.close_find(window, cx)))))
     }
 }

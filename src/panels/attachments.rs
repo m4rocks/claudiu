@@ -11,11 +11,13 @@ use gpui::{
 use gpui_kit::{
     assets::IconName,
     base::Button,
-    component::{input::TextareaState, tooltip::Tooltip},
+    component::input::TextareaState,
 };
 
 use crate::panels::theme::theme;
-use crate::panels::widgets::{focusable, icon, icon_button};
+use crate::panels::widgets::{icon};
+use crate::panels::ui::button::focusable;
+use crate::panels::ui::button::icon_button;
 
 #[derive(Clone, Default)]
 pub struct Attachments {
@@ -235,7 +237,7 @@ impl Attachments {
                     .bg(theme().background)
                     .text_size(px(12.0))
                     .text_color(theme().muted_foreground)
-                    .tooltip(move |window, cx| Tooltip::new(name.clone()).build(window, cx))
+                    .tooltip(crate::panels::ui::tooltip::tooltip(name.clone()))
                     .child(content)
                     .child(
                         icon_button("remove", IconName::X)

@@ -6,21 +6,30 @@
 //! - [`command`]: the list inside a picker or menu (shadcn Command / Combobox). Keyboard highlight and pointer hover
 //!   are one state; the current value keeps its own check and outline while another row is highlighted.
 //! - [`menu`]: context and dropdown menus (shadcn ContextMenu / DropdownMenu) on the same list.
-//! - [`toggle_group`]: a segmented control for a two- or three-way choice (shadcn ToggleGroup / Tabs).
-//! - [`button`], [`badge`], [`kbd`], [`separator`]: the small pieces.
+//! - [`toggle_group`] and [`tabs`]: segmented controls and tab rows (shadcn ToggleGroup / Tabs).
+//! - [`card`], [`popover`], [`alert`], [`empty`], [`skeleton`]: surfaces and states (Card, Popover/Dialog, Alert,
+//!   Empty, Skeleton).
+//! - [`button`], [`badge`], [`kbd`], [`separator`], [`switch`], [`checkbox`], [`label`], [`progress`], [`spinner`], [`avatar`],
+//!   [`breadcrumb`], [`tooltip`]: the small pieces.
 
-#[allow(dead_code)] // Not used yet; the next migration (widgets::button and key_badge) adopts it.
-pub mod badge;
-#[allow(dead_code)] // Not used yet; the next migration (widgets::button and key_badge) adopts it.
-pub mod button;
-pub mod command;
-#[allow(dead_code)] // Not used yet; the next migration (widgets::button and key_badge) adopts it.
-pub mod kbd;
-pub mod menu;
-#[allow(dead_code)] // Not used yet; the next migration (widgets::button and key_badge) adopts it.
-pub mod separator;
-pub mod toggle_group;
-
+pub mod alert;
 pub mod avatar;
+pub mod badge;
+pub mod breadcrumb;
+pub mod button;
+pub mod card;
+pub mod checkbox;
+pub mod command;
 pub mod empty;
+pub mod kbd;
+pub mod label;
+pub mod menu;
+pub mod popover;
+pub mod progress;
+pub mod separator;
 pub mod skeleton;
+pub mod spinner;
+pub mod switch;
+pub mod tabs;
+pub mod toggle_group;
+pub mod tooltip;

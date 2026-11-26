@@ -13,11 +13,12 @@ use crate::app::{
 use gpui_kit::component::input::Input;
 use crate::panels::theme::theme;
 use gpui_kit::assets::IconName;
-use crate::panels::widgets::{
-    button, button_colored, button_disabled_leading, danger_button, dialog_card, dropdown_card, fade_in, icon, icon_button,
-};
+use crate::panels::widgets::fade_in;
 use crate::panels::ui;
 use crate::panels::settings_view::render_settings_card;
+use crate::panels::ui::button as btn;
+use crate::panels::ui::button::icon_button;
+use crate::panels::ui::popover;
 
 impl Workspace {
     /// The open context or dropdown menu, on the kit's `menu`.
@@ -48,6 +49,7 @@ impl Workspace {
                     .destructive(item.danger)
                     .disabled(item.disabled)
                     .separator_before(item.separator_before)
+                    .checked(item.checked)
             })
             .collect();
         let card = ui::menu::menu("menu", px(232.0).max(menu.min_w), &self.menu_nav, entries, |ws, window, cx| ws.close_menu(window, cx), window, cx);
@@ -92,7 +94,7 @@ impl Workspace {
                     false,
                 ),
             };
-            dialog_card("modal-card")
+            popover::dialog("modal-card")
                 .track_focus(&self.modal_focus)
                 .w(px(440.0))
                 .p(px(22.0))
@@ -115,9 +117,9 @@ impl Workspace {
                         .justify_end()
                         .gap(px(8.0))
                         .mt(px(4.0))
-                        .child(button("modal-cancel", "Cancel", false).on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::Dismiss, window, cx))))
+                        .child(btn::text("modal-cancel", "Cancel", false).on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::Dismiss, window, cx))))
                         .child({
-                            let b = if danger { danger_button("modal-ok", confirm_label) } else { button("modal-ok", confirm_label, true) };
+                            let b = if danger { btn::destructive("modal-ok", confirm_label) } else { btn::text("modal-ok", confirm_label, true) };
                             b.on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.submit_modal(window, cx)))
                         }),
                 )
@@ -146,7 +148,7 @@ impl Workspace {
     pub(super) fn render_toast(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let t = self.toast.as_ref()?;
         let action = t.action.clone().map(|(label, act)| {
-            div().mt(px(8.0)).flex().child(button("toast-action", label, true).on_click(cx.listener(
+            div().mt(px(8.0)).flex().child(btn::text("toast-action", label, true).on_click(cx.listener(
                 move |ws, _: &ClickEvent, window, cx| {
                     ws.toast = None;
                     ws.act(act.clone(), window, cx);
@@ -157,7 +159,7 @@ impl Workspace {
             deferred(
                 div().absolute().bottom(px(18.0)).right(px(18.0)).child(
                     fade_in(
-                    dropdown_card("toast")
+                    popover::content("toast")
                         .max_w(px(420.0))
                         .px(px(14.0))
                         .py(px(10.0))
@@ -215,20 +217,7 @@ impl Workspace {
                 .items_start()
                 .gap(px(8.0))
                 .when(multi, |row| {
-                    row.child(
-                        div()
-                            .mt(px(2.0))
-                            .flex_none()
-                            .size(px(14.0))
-                            .rounded(px(3.5))
-                            .border_1()
-                            .border_color(if checked { theme().primary } else { theme().panel_border })
-                            .bg(if checked { theme().primary } else { theme().background })
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .when(checked, |box_el| box_el.child(icon(IconName::Check, 10.0).text_color(theme().background))),
-                    )
+                    row.child(ui::checkbox::checkbox(checked).mt(px(2.0)))
                 })
                 .child(
                     div()
@@ -308,7 +297,7 @@ impl Workspace {
                     .border_t_1()
                     .border_color(theme().border)
                     .child(
-                        button("sidebar-q-decline", "Decline", false).h(px(24.0)).on_click(cx.listener(move |ws, _: &ClickEvent, _w, cx| {
+                        btn::text("sidebar-q-decline", "Decline", false).h(px(24.0)).on_click(cx.listener(move |ws, _: &ClickEvent, _w, cx| {
                             cx.stop_propagation();
                             ws.answer_session_question(&decline_id, question_id, None, cx);
                         })),
@@ -321,7 +310,7 @@ impl Workspace {
                             .when(multi, |d| {
                                 let label = if selected_count > 0 { format!("Submit ({selected_count})") } else { "Submit".into() };
                                 let btn = if selected_count > 0 {
-                                    button_colored(
+                                    btn::colored(
                                         "sidebar-q-submit",
                                         Some(IconName::Check),
                                         &label,
@@ -339,7 +328,7 @@ impl Workspace {
                                     .px(px(8.0))
                                     .into_any_element()
                                 } else {
-                                    button_disabled_leading("sidebar-q-submit", Some(IconName::Check), &label)
+                                    btn::disabled_leading("sidebar-q-submit", Some(IconName::Check), &label)
                                         .h(px(24.0))
                                         .px(px(8.0))
                                         .into_any_element()
@@ -347,7 +336,7 @@ impl Workspace {
                                 d.child(btn)
                             })
                             .child(
-                                button("sidebar-q-open", "Open session", false).h(px(24.0)).on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
+                                btn::text("sidebar-q-open", "Open session", false).h(px(24.0)).on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
                                     cx.stop_propagation();
                                     ws.question_popover = None;
                                     ws.question_popover_hovered = false;

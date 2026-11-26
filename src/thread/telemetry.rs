@@ -1,7 +1,7 @@
 use gpui::{ClickEvent, Context, Div, ParentElement, Styled, div, px};
 
 use super::{ThreadEvent, ThreadView};
-use crate::panels::{scale, theme::theme, widgets::{button, countdown}};
+use crate::panels::{scale, theme::theme, ui::button as btn, widgets::countdown};
 use crate::store::UsageLimits;
 
 pub(crate) fn exhausted_usage(usage: &UsageLimits, now: i64) -> Option<String> {
@@ -27,7 +27,7 @@ impl ThreadView {
             if let Some(target) = self.fallback_model.clone() {
                 let btn_label = format!("Continue in {}", target.name);
                 row = row.child(
-                    button("usage-limit-handoff", btn_label, true).on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
+                    btn::text("usage-limit-handoff", btn_label, true).on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
                         cx.emit(ThreadEvent::Handoff {
                             to: target.harness,
                             model: (!target.id.is_empty()).then_some(target.id.clone()),

@@ -1,15 +1,14 @@
-//! Small stateless UI pieces shared by sidebar / main view / modals.
+//! Helpers the kit (`panels::ui`) builds on and that are not components themselves: the icon, the brand mark, the
+//! effort slider, time and path formatting, easing, and anchoring menus to their triggers.
 
 use std::cell::Cell;
 use std::rc::Rc;
-use std::time::Duration;
 
 use gpui::{
-    Anchor as Corner, Animation, AnimationElement, AnimationExt, Bounds, Canvas, ClickEvent, Context, Div, ElementId, FontWeight, Hsla, InteractiveElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, SharedString,
-    Stateful, StatefulInteractiveElement, Styled, Window, canvas, div, point, px,
+    Anchor as Corner, Bounds, Canvas, ClickEvent, Context, Div, FontWeight, Hsla, InteractiveElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, SharedString,
+    StatefulInteractiveElement, Styled, Window, canvas, div, point, px,
 };
 use gpui_kit::assets::IconName;
-use gpui_kit::base::Button;
 use gpui_kit::component::Icon;
 
 use crate::panels::theme::theme;
@@ -30,208 +29,6 @@ pub fn brand_mark(size: f32) -> Div {
         .child(crate::panels::logos::draw(&crate::panels::logos::M4CODE, size, theme().primary))
 }
 
-pub fn section_label(text: impl Into<SharedString>) -> Div {
-    div()
-        .text_size(crate::panels::scale::px(10.5))
-        .font_weight(FontWeight::SEMIBOLD)
-        .text_color(theme().subtle_foreground)
-        .child(text.into())
-}
-
-/// From here up, a meter's bar turns to the warning color.
-pub const METER_WARN_AT: f32 = 0.7;
-
-/// Compact usage track, with `fill` behind the percentage and reset countdown.
-/// `severity` is always the *used* fraction (0..=1) so warn/danger colors trigger near exhaustion even in "Left" mode.
-pub fn limit_bar(
-    id: impl Into<ElementId>,
-    fill: Option<f32>,
-    severity: Option<f32>,
-    left: String,
-    right: String,
-    tone: Option<Hsla>,
-    stale: bool,
-) -> Stateful<Div> {
-    let color = match severity {
-        Some(f) if f >= 0.9 => theme().destructive,
-        Some(f) if f >= METER_WARN_AT => theme().warning,
-        _ => tone.unwrap_or_else(|| theme().primary),
-    };
-    let height = crate::panels::scale::px(16.0);
-    let radius = crate::panels::scale::px(3.0);
-    // Faint enough that the text drawn over it stays readable.
-    let fill_opacity = if stale { 0.18 } else { 0.32 };
-    let fill_bar = div()
-        .absolute()
-        .top_0()
-        .left_0()
-        .h(height)
-        .w(gpui::relative(fill.unwrap_or(0.0).clamp(0.0, 1.0)))
-        .rounded(radius)
-        .bg(color.opacity(fill_opacity));
-    let percent_color = if fill.is_some() && !stale { theme().foreground } else { theme().subtle_foreground };
-    let texts = div()
-        .absolute()
-        .top_0()
-        .left_0()
-        .size_full()
-        .px(crate::panels::scale::px(5.0))
-        .flex()
-        .items_center()
-        .justify_between()
-        .gap(crate::panels::scale::px(4.0))
-        .text_size(crate::panels::scale::px(10.5))
-        .child(div().flex_none().text_color(percent_color).child(left))
-        .child(
-            div()
-                .min_w_0()
-                .overflow_hidden()
-                .text_ellipsis()
-                .whitespace_nowrap()
-                .text_size(crate::panels::scale::px(10.0))
-                .text_color(if stale { theme().subtle_foreground } else { theme().muted_foreground })
-                .child(right),
-        );
-    div().id(id.into()).relative().h(height).w_full().rounded(radius).overflow_hidden().bg(theme().row_hover).child(fill_bar).child(texts)
-}
-
-/// Progress bar. `fraction == None` renders the neutral "unavailable" state.
-pub fn meter(label: &str, fraction: Option<f32>, caption: String, tone: Option<Hsla>) -> Div {
-    let track = theme().row_hover;
-    let color = tone.unwrap_or_else(|| match fraction {
-        Some(f) if f >= 0.9 => theme().destructive,
-        Some(f) if f >= METER_WARN_AT => theme().warning,
-        _ => theme().primary,
-    });
-    let pct = fraction
-        .map(|f| format!("{:.0}%", (f * 100.0).round()))
-        .unwrap_or_else(|| "—".into());
-    div()
-        .flex()
-        .flex_col()
-        .gap(px(4.0))
-        .child(
-            div()
-                .flex()
-                .justify_between()
-                .items_baseline()
-                .child(section_label(label.to_string()))
-                .child(
-                    div()
-                        .text_size(crate::panels::scale::px(11.5))
-                        .text_color(if fraction.is_some() {
-                            theme().foreground
-                        } else {
-                            theme().subtle_foreground
-                        })
-                        .child(pct),
-                ),
-        )
-        .child(
-            div()
-                .h(px(5.0))
-                .w_full()
-                .rounded(px(3.0))
-                .bg(track)
-                .child(match fraction {
-                    Some(f) => div()
-                        .h_full()
-                        .w(gpui::relative(f.clamp(0.0, 1.0)))
-                        .rounded(px(3.0))
-                        .bg(color),
-                    None => div().h_full(),
-                }),
-        )
-        .child(
-            div()
-                .text_size(crate::panels::scale::px(10.5))
-                .text_color(theme().subtle_foreground)
-                .child(caption),
-        )
-}
-
-/// An accessible, Tab-focusable button primitive with a visible keyboard focus ring (`focus_visible`) and native
-/// Enter/Space activation.
-pub fn focusable(id: impl Into<ElementId>) -> Button {
-    Button::new(id)
-        .border_1()
-        .border_color(gpui::transparent_black())
-        .focus_visible(|s| s.border_color(theme().primary))
-}
-
-#[allow(clippy::too_many_arguments)]
-pub fn button_colored(
-    id: impl Into<SharedString>,
-    glyph: Option<IconName>,
-    label: impl Into<SharedString>,
-    bg: Hsla,
-    fg: Hsla,
-    hover: Hsla,
-    border: Option<Hsla>,
-    bold: bool,
-) -> Button {
-    let label = label.into();
-    let mut btn = focusable(id.into())
-        .px(px(10.0))
-        .h(px(26.0))
-        .gap(px(5.0))
-        .rounded(px(6.0))
-        .bg(bg)
-        .border_color(border.unwrap_or_else(gpui::transparent_black))
-        .text_color(fg)
-        .text_size(crate::panels::scale::px(12.0))
-        .font_weight(if bold {
-            FontWeight::SEMIBOLD
-        } else {
-            FontWeight::NORMAL
-        })
-        .cursor_pointer()
-        .hover(move |s| s.bg(hover));
-    if let Some(name) = glyph {
-        btn = btn.child(icon(name, 13.0));
-    }
-    if !label.is_empty() {
-        btn = btn.child(label);
-    }
-    btn
-}
-
-pub fn dialog_card(id: impl Into<gpui::ElementId>) -> Stateful<Div> {
-    div().id(id).occlude().rounded(px(12.0)).bg(theme().background).border_1().border_color(theme().panel_border).shadow_lg()
-}
-
-pub fn dropdown_card(id: impl Into<gpui::ElementId>) -> Stateful<Div> {
-    div().id(id).occlude().cursor_default().rounded(px(10.0)).bg(theme().card).border_1().border_color(theme().panel_border).shadow_lg()
-}
-
-/// Compact text button. Caller attaches `.on_click`.
-pub fn button(
-    id: impl Into<SharedString>,
-    label: impl Into<SharedString>,
-    primary: bool,
-) -> Button {
-    crate::panels::ui::button::button(id, None, label, if primary { crate::panels::ui::button::Variant::Default } else { crate::panels::ui::button::Variant::Secondary }, crate::panels::ui::button::Size::Sm)
-}
-
-/// A button with a leading icon.
-pub fn button_leading(id: impl Into<SharedString>, name: IconName, label: impl Into<SharedString>, primary: bool) -> Button {
-    crate::panels::ui::button::button(id, Some(name), label, if primary { crate::panels::ui::button::Variant::Default } else { crate::panels::ui::button::Variant::Secondary }, crate::panels::ui::button::Size::Sm)
-}
-
-/// A button that can't be pressed right now: dimmed, no hover, no click handler attached by the caller.
-pub fn button_disabled(id: impl Into<SharedString>, label: impl Into<SharedString>) -> Button {
-    button_disabled_leading(id, None, label)
-}
-
-/// A disabled button with an optional leading icon.
-pub fn button_disabled_leading(id: impl Into<SharedString>, glyph: Option<IconName>, label: impl Into<SharedString>) -> Button {
-    crate::panels::ui::button::button(id, glyph, label, crate::panels::ui::button::Variant::Secondary, crate::panels::ui::button::Size::Sm).disabled(true)
-}
-
-/// Destructive action (end session, quit).
-pub fn danger_button(id: impl Into<SharedString>, label: impl Into<SharedString>) -> Button {
-    crate::panels::ui::button::button(id, None, label, crate::panels::ui::button::Variant::Destructive, crate::panels::ui::button::Size::Sm)
-}
 
 /// A Lucide icon, `size` px square, in the text color it is drawn under.
 pub fn icon(name: IconName, size: f32) -> Icon {
@@ -397,36 +194,6 @@ pub fn subagent_state_icon(state: crate::app::SubagentState, size: f32) -> Icon 
     icon(name, size).text_color(color)
 }
 
-/// The "working" icon: Lucide's loader, turning.
-pub fn spinner(id: impl Into<ElementId>, size: f32) -> AnimationElement<Icon> {
-    icon(IconName::LoaderCircle, size).with_animation(
-        id,
-        Animation::new(Duration::from_millis(1000)).repeat(),
-        |i, t| i.rotate(gpui::radians(t * std::f32::consts::TAU)),
-    )
-}
-
-pub fn icon_button(id: impl Into<SharedString>, glyph: IconName) -> Button {
-    focusable(id.into())
-        .size(px(22.0))
-        .rounded(px(5.0))
-        .text_color(theme().muted_foreground)
-        .cursor_pointer()
-        .hover(|s| s.bg(theme().secondary_hover).text_color(theme().foreground))
-        .child(icon(glyph, 14.0))
-}
-
-/// A dimmed icon button with no hover or click handler.
-pub fn icon_button_disabled(id: impl Into<SharedString>, glyph: IconName) -> Button {
-    Button::new(id.into())
-        .disabled(true)
-        .size(px(22.0))
-        .rounded(px(5.0))
-        .text_color(theme().subtle_foreground)
-        .cursor_default()
-        .child(icon(glyph, 14.0))
-}
-
 /// A Ctrl shortcut (Cmd on macOS) as the keyboard shows it: `shortcut("Shift+N")` is `Ctrl+Shift+N`, or `⌘⇧N` on macOS.
 pub fn shortcut(keys: &str) -> String {
     shortcut_for(cfg!(target_os = "macos"), keys)
@@ -434,16 +201,6 @@ pub fn shortcut(keys: &str) -> String {
 
 fn shortcut_for(macos: bool, keys: &str) -> String {
     if macos { format!("⌘{}", keys.replace("Shift+", "⇧")) } else { format!("Ctrl+{keys}") }
-}
-
-/// A small keycap pill drawn as-is (e.g. "Esc", "1-9").
-pub fn key_badge(label: impl Into<SharedString>) -> Div {
-    crate::panels::ui::kbd::kbd(label)
-}
-
-/// The marker in front of menu entries, so the current one shows.
-pub fn tick(current: bool) -> &'static str {
-    if current { "✓  " } else { "    " }
 }
 
 /// Relative time like "now", "5m", "3h", "2d", "6w".
@@ -722,4 +479,3 @@ pub trait Trigger: InteractiveElement + ParentElement + Styled + Sized {
 
 impl<T: InteractiveElement + ParentElement + Styled> Trigger for T {}
 
-pub use crate::panels::ui::{avatar::avatar, empty::empty_panel, skeleton::skeleton_rows};

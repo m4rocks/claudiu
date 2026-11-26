@@ -125,7 +125,7 @@ pub struct ShowSession(pub usize);
 impl MenuItem {
     /// A plain entry: not dangerous, enabled, no hint, no separator above.
     pub fn new(label: impl Into<String>, act: Act) -> Self {
-        Self { label: label.into(), hint: None, detail: None, act, danger: false, disabled: false, separator_before: false, remove: None, icon: None }
+        Self { label: label.into(), hint: None, detail: None, act, danger: false, disabled: false, separator_before: false, remove: None, icon: None, checked: false }
     }
 }
 
@@ -142,6 +142,8 @@ pub struct MenuItem {
     pub separator_before: bool,
     /// Shows an x on the row while the pointer is over it; clicking it runs this instead of `act`.
     pub remove: Option<Act>,
+    /// Ends in a check: the current value of the setting the menu sets.
+    pub checked: bool,
     /// Drawn before the hint.
     pub icon: Option<gpui_kit::assets::IconName>,
 }

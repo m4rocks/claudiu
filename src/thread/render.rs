@@ -23,8 +23,12 @@ use crate::harness::thread::{Entry, SubagentReport, ToolCall, ToolContent, ToolS
 use crate::panels::{attachments, comment_box, composer, logos, picker, scale};
 use crate::panels::ui::{self, command};
 use crate::panels::theme::theme;
-use crate::panels::widgets::{EffortPick, Trigger, button, button_colored, button_disabled, button_disabled_leading, effort_slider, icon, icon_button, key_badge, spinner};
+use crate::panels::widgets::{EffortPick, Trigger, effort_slider, icon};
 use crate::visual::ui::Scope;
+use crate::panels::ui::button as btn;
+use crate::panels::ui::button::icon_button;
+use crate::panels::ui::kbd::kbd;
+use crate::panels::ui::spinner::spinner;
 
 /// Lines of a tool's output shown while it is folded (Ctrl+O shows all).
 const FOLDED_LINES: usize = 6;
@@ -119,7 +123,7 @@ impl Render for ThreadView {
         self.jump_visible.set(show_jump);
         let conversation = conversation.when(show_jump, |view| {
             view.child(div().absolute().bottom(px(22.0)).right(px(24.0)).child(
-                button_colored("jump-to-latest", Some(IconName::ArrowDownToLine), "Jump to latest", theme().primary, theme().background, theme().primary_hover, None, true).debug_selector(|| "jump-to-latest".into()).on_click(cx.listener(|v, _: &ClickEvent, _, cx| {
+                btn::colored("jump-to-latest", Some(IconName::ArrowDownToLine), "Jump to latest", theme().primary, theme().background, theme().primary_hover, None, true).debug_selector(|| "jump-to-latest".into()).on_click(cx.listener(|v, _: &ClickEvent, _, cx| {
                     v.chat_glide.cancel();
                     v.list.set_follow_mode(gpui::FollowMode::Tail);
                     v.jump_visible.set(false);
@@ -561,7 +565,7 @@ impl ThreadView {
                 return self.wrap_turn_status(elements::turn_done_line(took));
             }
         };
-        let stop = stoppable.then(|| div().flex().gap(px(4.0)).items_center().child(key_badge("Esc"))
+        let stop = stoppable.then(|| div().flex().gap(px(4.0)).items_center().child(kbd("Esc"))
             .child(div().text_size(scale::px(11.5)).text_color(theme().subtle_foreground).child("to stop")).into_any_element());
         self.wrap_turn_status(elements::turn_working_line(label, elapsed, stop))
     }
@@ -699,7 +703,7 @@ impl ThreadView {
                 if let Some(command) = &details.command {
                     let command_for_shell = command.clone();
                     body = body.child(elements::tool_output_block(None, command, FOLDED_LINES, self.detail, query))
-                        .child(button(SharedString::from(format!("tool-shell-{ix}")), "Copy and open shell", false)
+                        .child(btn::text(SharedString::from(format!("tool-shell-{ix}")), "Copy and open shell", false)
                             .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| cx.emit(ThreadEvent::OpenToolShell(command_for_shell.clone())))));
                 }
                 for (label, text) in details.labeled_output() {
@@ -1056,7 +1060,7 @@ impl ThreadView {
                     .child(div().max_w(px(220.0)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(task.label.clone()))
                     .when(has_log, |pill| {
                         pill.child(
-                            button(SharedString::from(format!("bg-task-output-{i}")), "Output", false)
+                            btn::text(SharedString::from(format!("bg-task-output-{i}")), "Output", false)
                                 .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| v.open_background_task_output(&task_id, cx))),
                         )
                     }),
@@ -1080,11 +1084,11 @@ impl ThreadView {
                     .child(spinner(format!("thread-bg-tool-{i}"), 10.0))
                     .child(div().max_w(px(220.0)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(name))
                     .child(
-                        button(SharedString::from(format!("bg-tool-output-{i}")), "Output", false)
+                        btn::text(SharedString::from(format!("bg-tool-output-{i}")), "Output", false)
                             .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| v.open_tool_output(&out_id, cx))),
                     )
                     .child(
-                        button(SharedString::from(format!("bg-tool-stop-{i}")), "Interrupt", false)
+                        btn::text(SharedString::from(format!("bg-tool-stop-{i}")), "Interrupt", false)
                             .on_click(cx.listener(|v, _: &ClickEvent, _, cx| {
                                 v.settle_running_tools();
                                 v.interrupt(cx);
@@ -1111,12 +1115,12 @@ impl ThreadView {
                     .text_color(theme().muted_foreground)
                     .child(spinner(format!("provider-shell-{}", shell.id), 10.0))
                     .child(div().max_w(px(220.0)).overflow_hidden().text_ellipsis().whitespace_nowrap().child(shell.label.clone()))
-                    .child(button(SharedString::from(format!("shell-output-{}", shell.id)), "Output", false)
+                    .child(btn::text(SharedString::from(format!("shell-output-{}", shell.id)), "Output", false)
                         .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| v.background_shell_action(&read_id, false, cx))))
                     .child(if stopping {
-                        button_disabled(SharedString::from(format!("shell-stop-{}", shell.id)), "Stopping…")
+                        btn::disabled(SharedString::from(format!("shell-stop-{}", shell.id)), "Stopping…")
                     } else {
-                        button(SharedString::from(format!("shell-stop-{}", shell.id)), "Stop", false)
+                        btn::text(SharedString::from(format!("shell-stop-{}", shell.id)), "Stop", false)
                             .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| v.background_shell_action(&stop_id, true, cx)))
                     }),
             );
@@ -1139,7 +1143,7 @@ impl ThreadView {
             self.shell_output_scroll.wire(div().id("thread-shell-output").w_full().max_h(px(180.0)), window)
                 .rounded(px(6.0)).bg(theme().card).p(px(8.0))
                 .child(div().flex().justify_end()
-                    .child(button("thread-shell-output-close", "Close output", false).on_click(cx.listener(|v, _: &ClickEvent, _, cx| {
+                    .child(btn::text("thread-shell-output-close", "Close output", false).on_click(cx.listener(|v, _: &ClickEvent, _, cx| {
                         v.shell_output = None;
                         cx.notify();
                     }))))
@@ -1192,7 +1196,7 @@ impl ThreadView {
                             .when(checked, |box_el| box_el.child(icon(IconName::Check, 11.0).text_color(theme().background))),
                     )
                 })
-                .child(div().pt(px(1.0)).child(key_badge(format!("{}", i + 1))))
+                .child(div().pt(px(1.0)).child(kbd(format!("{}", i + 1))))
                 .child(
                     div()
                         .flex_1()
@@ -1227,7 +1231,7 @@ impl ThreadView {
         let footer = if multi {
             let submit_label = if selected_count > 0 { format!("Submit ({selected_count})") } else { "Submit".into() };
             let submit_btn = if selected_count > 0 {
-                button_colored(
+                btn::colored(
                     "thread-question-submit",
                     Some(IconName::Check),
                     &submit_label,
@@ -1244,7 +1248,7 @@ impl ThreadView {
                 .px(px(10.0))
                 .into_any_element()
             } else {
-                button_disabled_leading("thread-question-submit", Some(IconName::Check), &submit_label)
+                btn::disabled_leading("thread-question-submit", Some(IconName::Check), &submit_label)
                     .h(px(24.0))
                     .px(px(10.0))
                     .into_any_element()
@@ -1262,14 +1266,14 @@ impl ThreadView {
                         .items_center()
                         .text_color(theme().subtle_foreground)
                         .text_size(scale::px(11.5))
-                        .child(key_badge("↑↓"))
-                        .child(key_badge("Space"))
+                        .child(kbd("↑↓"))
+                        .child(kbd("Space"))
                         .child("or")
-                        .child(key_badge("1-9"))
+                        .child(kbd("1-9"))
                         .child("to toggle")
-                        .child(key_badge("Enter"))
+                        .child(kbd("Enter"))
                         .child("to submit")
-                        .child(key_badge("Esc"))
+                        .child(kbd("Esc"))
                         .child("to decline")
                         .when(q.takes_own_answer, |d| d.child("· or type below")),
                 )
@@ -1282,7 +1286,7 @@ impl ThreadView {
                 .items_center()
                 .text_color(theme().subtle_foreground)
                 .text_size(scale::px(11.5))
-                .child(key_badge("Esc"))
+                .child(kbd("Esc"))
                 .child("to dismiss")
                 .child("· type your answer below")
         } else {
@@ -1293,12 +1297,12 @@ impl ThreadView {
                 .items_center()
                 .text_color(theme().subtle_foreground)
                 .text_size(scale::px(11.5))
-                .child(key_badge("↑↓"))
-                .child(key_badge("Enter"))
+                .child(kbd("↑↓"))
+                .child(kbd("Enter"))
                 .child("or")
-                .child(key_badge("1-9"))
+                .child(kbd("1-9"))
                 .child("to choose")
-                .child(key_badge("Esc"))
+                .child(kbd("Esc"))
                 .child("to decline")
                 .when(q.takes_own_answer, |d| d.child("· or type your own answer below"))
         };
@@ -1367,7 +1371,7 @@ impl ThreadView {
                     list = list.child(div().flex_none().flex().flex_col().children(heading).child(row));
                 }
                 if models.is_empty() {
-                    list = list.child(crate::panels::widgets::empty_panel(IconName::Search, "No matching models"));
+                    list = list.child(crate::panels::ui::empty::empty_panel(IconName::Search, "No matching models"));
                 }
 
                 let (effort_values, effort_labels, current_effort_ix, option_id) = self.effort_choices();
@@ -1602,23 +1606,23 @@ impl ThreadView {
                 .child(icon(IconName::Clock, 12.0).text_color(theme().subtle_foreground))
                 .child(div().flex_1().min_w_0().overflow_hidden().text_size(scale::px(12.5)).text_color(theme().muted_foreground).child(text.to_string()))
                 .when(can_act, |row| {
-                    row.child(button(SharedString::from(format!("queued-send-{id}")), "Send now", false)
+                    row.child(btn::text(SharedString::from(format!("queued-send-{id}")), "Send now", false)
                         .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| v.send_queued_now(id, cx))))
                     .when(self.queue_edit.is_none(), |row| row.child(
                         icon_button(SharedString::from(format!("queued-edit-{id}")), IconName::Pencil)
                             .accessibility_label("Edit queued message")
-                            .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new("Edit queued message").build(window, cx))
+                            .tooltip(crate::panels::ui::tooltip::tooltip("Edit queued message"))
                             .on_click(cx.listener(move |v, _: &ClickEvent, window, cx| v.edit_queued(id, window, cx))),
                     ))
                     .children([(true, "Move up"), (false, "Move down")].into_iter().filter_map(|(earlier, label)| {
                         self.adjacent_queued(id, earlier)?;
-                        Some(button(SharedString::from(format!("queued-move-{id}-{earlier}")), label, false)
+                        Some(btn::text(SharedString::from(format!("queued-move-{id}-{earlier}")), label, false)
                             .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| v.move_queued(id, earlier, cx))))
                     }))
                     .child(
                         icon_button(SharedString::from(format!("queued-remove-{id}")), IconName::X)
                             .accessibility_label("Remove queued message")
-                            .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new("Remove queued message").build(window, cx))
+                            .tooltip(crate::panels::ui::tooltip::tooltip("Remove queued message"))
                             .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| {
                                 if v.unqueue(id, cx).is_some() {
                                     v.queue_changed();
@@ -1769,7 +1773,7 @@ impl ThreadView {
                 ActionKind::Resume => (theme().success, theme().success_foreground, theme().success_hover, None),
                 ActionKind::Save | ActionKind::Answer | ActionKind::Send | ActionKind::Stopping => (theme().primary, theme().background, theme().primary_hover, None),
             };
-            button_colored("thread-send", Some(glyph), label, bg, fg, hover, border, true)
+            btn::colored("thread-send", Some(glyph), label, bg, fg, hover, border, true)
                 .on_click(cx.listener(|v, ev: &ClickEvent, window, cx| {
                     if v.queue_edit.is_some() || v.can_submit_draft(cx) {
                         v.submit_with(ev.modifiers().secondary(), window, cx);
@@ -1780,7 +1784,7 @@ impl ThreadView {
                     }
                 }))
         } else {
-            button_disabled_leading("thread-send", Some(glyph), label)
+            btn::disabled_leading("thread-send", Some(glyph), label)
         }.h(px(26.0)).px(px(12.0)).into_any_element();
 
         composer::Composer {

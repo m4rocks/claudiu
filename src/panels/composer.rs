@@ -9,7 +9,9 @@ use gpui_kit::component::input::InputEvent;
 use crate::harness::Harness;
 use crate::panels::{logos, scale};
 use crate::panels::theme::theme;
-use crate::panels::widgets::{Anchor, button_colored, button_disabled_leading, button_leading, focusable, icon};
+use crate::panels::widgets::{Anchor, icon};
+use crate::panels::ui::button as btn;
+use crate::panels::ui::button::focusable;
 
 pub fn can_send(text: &str) -> bool {
     !text.trim().is_empty()
@@ -24,9 +26,9 @@ pub fn sends(event: &InputEvent) -> bool {
 pub fn send_button(id: impl Into<SharedString>, enabled: bool) -> Button {
     let id = id.into();
     let button = if enabled {
-        button_leading(id, IconName::ArrowUp, "Send", true)
+        btn::leading(id, IconName::ArrowUp, "Send", true)
     } else {
-        button_disabled_leading(id, Some(IconName::ArrowUp), "Send")
+        btn::disabled_leading(id, Some(IconName::ArrowUp), "Send")
     };
     button.h(px(26.0)).px(px(12.0))
 }
@@ -36,7 +38,7 @@ pub fn send_button(id: impl Into<SharedString>, enabled: bool) -> Button {
 pub fn review_button(id: impl Into<SharedString>, enabled: bool) -> Button {
     let id = id.into();
     let button = if enabled {
-        button_colored(
+        btn::colored(
             id,
             Some(IconName::FileDiff),
             "Review changes",
@@ -48,7 +50,7 @@ pub fn review_button(id: impl Into<SharedString>, enabled: bool) -> Button {
         )
         .font_weight(FontWeight::MEDIUM)
     } else {
-        button_disabled_leading(id, Some(IconName::FileDiff), "Review changes")
+        btn::disabled_leading(id, Some(IconName::FileDiff), "Review changes")
             .bg(theme().background)
             .opacity(0.42)
     };

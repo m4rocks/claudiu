@@ -14,9 +14,8 @@ use crate::harness::permission::Permission;
 use crate::panels::{attachments, composer};
 use crate::panels::theme::theme;
 use gpui_kit::assets::IconName;
-use crate::panels::widgets::{
-    Trigger, icon, spinner,
-};
+use crate::panels::widgets::{Trigger, icon};
+use crate::panels::ui::spinner::spinner;
 
 impl Workspace {
     pub(super) fn render_home(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {

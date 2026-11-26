@@ -11,8 +11,8 @@ impl GithubView {
                 .flex()
                 .items_start()
                 .gap(px(10.0))
-                .child(div().w(px(16.0)).flex_none().text_color(color).child(icon(glyph, 16.0)))
-                .child(div().flex().flex_col().child(div().font_weight(FontWeight::MEDIUM).child(title)).children(sub.map(faint)))
+                .child(div().size(px(28.0)).flex_none().flex().items_center().justify_center().rounded_full().bg(color.opacity(0.14)).text_color(color).child(icon(glyph, 15.0)))
+                .child(div().flex().flex_col().gap(px(1.0)).min_h(px(28.0)).justify_center().child(div().font_weight(FontWeight::MEDIUM).child(title)).children(sub.map(faint)))
         };
         let mut rows = div().flex().flex_col().gap(px(10.0));
         let mut actions = div().flex().flex_wrap().items_center().gap(px(8.0));
@@ -26,12 +26,12 @@ impl GithubView {
                 rows = rows.child(line(IconName::GitMerge, theme().state_merged, "Pull request merged".into(), pr.merged_by.clone().map(|b| format!("Merged by {b}"))));
                 let branch_gone = d.timeline.iter().any(|e| matches!(e, Entry::Event(ev) if ev.what.starts_with("deleted the")));
                 if !pr.cross_repo && !branch_gone && !it.head.is_empty() && info.can_write() && !info.delete_branch_on_merge {
-                    actions = actions.child(button("gh-del-branch", format!("Delete {}", it.head), false).on_click(go(cx, GhAct::DeleteBranch)));
+                    actions = actions.child(btn::text("gh-del-branch", format!("Delete {}", it.head), false).on_click(go(cx, GhAct::DeleteBranch)));
                 }
             }
             State::Closed => {
                 rows = rows.child(line(IconName::GitPullRequestClosed, theme().state_closed, "This pull request is closed".into(), None));
-                actions = actions.child(button("gh-reopen-pr", "Reopen pull request", false).on_click(go(cx, GhAct::ReopenItem)));
+                actions = actions.child(btn::text("gh-reopen-pr", "Reopen pull request", false).on_click(go(cx, GhAct::ReopenItem)));
             }
             State::Open => {
                 // reviews
@@ -59,12 +59,16 @@ impl GithubView {
                         r = r.child(
                             div()
                                 .id(SharedString::from(format!("gh-check-{}", ck.name)))
-                                .ml(px(26.0))
+                                .ml(px(38.0))
                                 .flex()
+                                .items_center()
                                 .gap(px(6.0))
+                                .rounded(px(4.0))
+                                .px(px(4.0))
+
                                 .cursor_pointer()
                                 .text_size(crate::panels::scale::px(12.0))
-                                .hover(|s| s.text_color(theme().foreground))
+                                .hover(|s| s.bg(theme().row_hover).text_color(theme().foreground))
                                 .text_color(theme().muted_foreground)
                                 .child(div().text_color(check_color(&ck.result)).child(icon(check_icon(check_color(&ck.result)), 13.0)))
                                 .child(ck.name.clone())
@@ -78,16 +82,16 @@ impl GithubView {
                     rows = rows.child(line(IconName::CircleX, theme().state_closed, "This branch has conflicts".into(), Some("Resolve them before merging (ask an agent, or check the branch out).".into())));
                 } else if pr.merge_state == "BEHIND" && info.can_write() {
                     rows = rows.child(line(IconName::CircleDot, theme().state_pending, "This branch is out of date with the base branch".into(), None));
-                    actions = actions.child(button("gh-update-branch", "Update branch", false).on_click(go(cx, GhAct::UpdateBranch)));
+                    actions = actions.child(btn::text("gh-update-branch", "Update branch", false).on_click(go(cx, GhAct::UpdateBranch)));
                 }
                 if let Some((who, method)) = &pr.auto_merge {
                     rows = rows.child(line(IconName::Clock, theme().state_merged, format!("Auto-merge enabled by {who}"), Some(format!("Will merge automatically ({}) once requirements pass.", method.to_lowercase()))));
-                    actions = actions.child(button("gh-auto-off", "Disable auto-merge", false).on_click(go(cx, GhAct::AutoMerge(false))));
+                    actions = actions.child(btn::text("gh-auto-off", "Disable auto-merge", false).on_click(go(cx, GhAct::AutoMerge(false))));
                 }
                 if it.draft {
                     rows = rows.child(line(IconName::GitPullRequestDraft, theme().state_neutral, "This pull request is still a work in progress".into(), Some("Draft pull requests cannot be merged.".into())));
                     if info.can_write() || d.mine {
-                        actions = actions.child(button("gh-ready", "Ready for review", true).on_click(go(cx, GhAct::Ready)));
+                        actions = actions.child(btn::text("gh-ready", "Ready for review", true).on_click(go(cx, GhAct::Ready)));
                     }
                 } else if info.can_write() && pr.mergeable != "CONFLICTING" {
                     let allowed: Vec<(&'static str, &str)> = [("MERGE", "Create a merge commit", info.allow_merge), ("SQUASH", "Squash and merge", info.allow_squash), ("REBASE", "Rebase and merge", info.allow_rebase)]
@@ -107,12 +111,12 @@ impl GithubView {
                             label.to_string()
                         };
                         if blocked && !pr.can_admin_merge {
-                            actions = actions.child(button_disabled("gh-merge-disabled", "Merging is blocked"));
+                            actions = actions.child(btn::disabled("gh-merge-disabled", "Merging is blocked"));
                             if info.allow_auto_merge && pr.can_auto_merge && pr.auto_merge.is_none() {
-                                actions = actions.child(button("gh-auto-on", "Enable auto-merge", false).on_click(go(cx, GhAct::AutoMerge(true))));
+                                actions = actions.child(btn::text("gh-auto-on", "Enable auto-merge", false).on_click(go(cx, GhAct::AutoMerge(true))));
                             }
                         } else {
-                            let main = if blocked || unstable { danger_button("gh-merge", btn_label) } else { button("gh-merge", btn_label, true) };
+                            let main = if blocked || unstable { btn::destructive("gh-merge", btn_label) } else { btn::text("gh-merge", btn_label, true) };
                             actions = actions.child(
                                 div()
                                     .flex()
@@ -131,17 +135,7 @@ impl GithubView {
                 }
             }
         }
-        div()
-            .rounded(px(8.0))
-            .border_1()
-            .border_color(outline)
-            .bg(theme().inset)
-            .p(px(14.0))
-            .flex()
-            .flex_col()
-            .gap(px(12.0))
-            .child(rows)
-            .child(actions)
+        card::outlined(outline).child(card::content().gap(px(14.0)).p(px(14.0)).child(rows).child(actions))
     }
 
     // ------------------------------------------------------------------------------------------------ composer
@@ -152,35 +146,32 @@ impl GithubView {
         let can_triage = self.info.as_ref().is_some_and(|i| i.can_triage());
         let can_close = can_triage || d.mine;
         if d.locked && !can_triage {
-            return div().p(px(12.0)).child(faint("This conversation is locked."));
+            return alert::alert(alert::Tone::Default, Some("Conversation locked".into()), "Only collaborators can comment on this conversation.");
         }
         let mut buttons = div().flex().flex_wrap().justify_end().gap(px(6.0));
         if it.kind == Kind::Pull && open && !d.mine {
             buttons = buttons
-                .child(button("gh-approve", "Approve", false).on_click(go(cx, GhAct::Review("APPROVE"))))
-                .child(button("gh-changes", "Request changes", false).on_click(go(cx, GhAct::Review("REQUEST_CHANGES"))));
+                .child(btn::button("gh-approve", Some(IconName::CircleCheck), "Approve", Variant::Outline, Size::Sm).on_click(go(cx, GhAct::Review("APPROVE"))))
+                .child(btn::button("gh-changes", Some(IconName::CircleX), "Request changes", Variant::Outline, Size::Sm).on_click(go(cx, GhAct::Review("REQUEST_CHANGES"))));
         }
         if can_close && it.state != State::Merged {
             if open {
                 if it.kind == Kind::Issue {
                     buttons = buttons
-                        .child(button("gh-close", "Close issue", false).on_click(go(cx, GhAct::Comment(Some(true)))))
-                        .child(icon_button("gh-close-reason", IconName::ChevronDown).popup(cx, PopKind::CloseReason));
+                        .child(btn::text("gh-close", "Close issue", false).on_click(go(cx, GhAct::Comment(Some(true)))))
+                        .child(icon_action("gh-close-reason", IconName::ChevronDown, "Close as…").popup(cx, PopKind::CloseReason));
                 } else {
-                    buttons = buttons.child(button("gh-close", "Close pull request", false).on_click(go(cx, GhAct::Comment(Some(true)))));
+                    buttons = buttons.child(btn::text("gh-close", "Close pull request", false).on_click(go(cx, GhAct::Comment(Some(true)))));
                 }
             } else if it.kind == Kind::Issue {
-                buttons = buttons.child(button("gh-reopen", "Reopen issue", false).on_click(go(cx, GhAct::Comment(Some(false)))));
+                buttons = buttons.child(btn::text("gh-reopen", "Reopen issue", false).on_click(go(cx, GhAct::Comment(Some(false)))));
             }
         }
-        buttons = buttons.child(button("gh-comment", "Comment", true).on_click(go(cx, GhAct::Comment(None))));
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(8.0))
-            .child(section_label("ADD A COMMENT"))
-            .child(Textarea::new(&self.composer))
-            .child(buttons)
+        buttons = buttons.child(btn::text("gh-comment", "Comment", true).on_click(go(cx, GhAct::Comment(None))));
+        card::card()
+            .child(card::header().child(icon(IconName::MessageSquare, 13.0)).child(div().font_weight(FontWeight::MEDIUM).child("Add a comment")))
+            .child(card::content().child(Textarea::new(&self.composer)))
+            .child(card::footer().child(buttons))
     }
 
     // ------------------------------------------------------------------------------------------------- files
@@ -198,12 +189,19 @@ impl GithubView {
                 people = people.child(dim(u.login.clone()));
             }
             meta = meta
-                .child(div().flex().items_center().gap(px(10.0)).child(div().w(px(84.0)).child(section_label("LABELS"))).child(labels).child(button("gh-new-labels", "＋ Add", false).popup(cx, PopKind::Labels)))
-                .child(div().flex().items_center().gap(px(10.0)).child(div().w(px(84.0)).child(section_label("ASSIGNEES"))).child(people).child(button("gh-new-assignees", "＋ Add", false).popup(cx, PopKind::Assignees)));
+                .child(div().flex().items_center().gap(px(10.0)).child(div().w(px(84.0)).child(section_label("LABELS"))).child(labels).child(btn::button("gh-new-labels", Some(IconName::Plus), "Add", Variant::Outline, Size::Xs).popup(cx, PopKind::Labels)))
+                .child(div().flex().items_center().gap(px(10.0)).child(div().w(px(84.0)).child(section_label("ASSIGNEES"))).child(people).child(btn::button("gh-new-assignees", Some(IconName::Plus), "Add", Variant::Outline, Size::Xs).popup(cx, PopKind::Assignees)));
         }
         let field = |name: &str, el: AnyElement| div().flex().flex_col().gap(px(4.0)).child(section_label(name.to_string())).child(el);
-        let mut form = div().flex().flex_col().gap(px(12.0)).p(px(16.0));
-        form = form.child(div().text_size(crate::panels::scale::px(16.0)).font_weight(FontWeight::SEMIBOLD).child(if kind == Kind::Issue { "New issue" } else { "New pull request" }));
+        let mut form = div().flex().flex_col().gap(px(14.0)).p(px(16.0));
+        form = form.child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(2.0))
+                .child(div().text_size(crate::panels::scale::px(16.0)).font_weight(FontWeight::SEMIBOLD).child(if kind == Kind::Issue { "New issue" } else { "New pull request" }))
+                .child(dim(if kind == Kind::Issue { "Describe the problem or the idea. Markdown works." } else { "Pick the branch with your changes and the one it merges into." })),
+        );
         if kind == Kind::Pull {
             form = form.child(
                 div()
@@ -222,14 +220,14 @@ impl GithubView {
                     .flex()
                     .justify_end()
                     .gap(px(8.0))
-                    .child(button("gh-new-cancel", "Cancel", false).on_click(go(cx, GhAct::Back)))
-                    .child(button("gh-new-submit", if kind == Kind::Issue { "Create issue" } else { "Create pull request" }, true).on_click(go(cx, GhAct::SubmitNew))),
+                    .child(btn::text("gh-new-cancel", "Cancel", false).on_click(go(cx, GhAct::Back)))
+                    .child(btn::text("gh-new-submit", if kind == Kind::Issue { "Create issue" } else { "Create pull request" }, true).on_click(go(cx, GhAct::SubmitNew))),
             );
         div()
             .size_full()
             .flex()
             .flex_col()
-            .when(stacked, |d| d.child(div().px(px(12.0)).pt(px(8.0)).child(button_leading("gh-back", IconName::ArrowLeft, "Back to list", false).on_click(go(cx, GhAct::Back)))))
+            .when(stacked, |d| d.child(super::detail::back_button(cx)))
             .child(self.scrolls[2].wire(div().id("gh-new-scroll").flex_1().min_h_0(), window).child(form))
     }
 

@@ -23,8 +23,11 @@ use crate::store::{Attached, Id, Project, SessionKind, SessionRecord};
 use crate::panels::theme::{self, theme};
 use crate::app::SubagentState;
 use crate::panels::logos;
-use crate::panels::widgets::{icon, icon_button, meter, section_label, subagent_state_icon, tick};
+use crate::panels::widgets::{icon, subagent_state_icon};
 use gpui_kit::assets::IconName;
+use crate::panels::ui::button::icon_button;
+use crate::panels::ui::label::section_label;
+use crate::panels::ui::progress::meter;
 
 /// What the top bar and the right sidebar describe: the shown session and the folder and project it is in.
 pub struct Shown {
@@ -540,6 +543,15 @@ impl Workspace {
         {
             compact_text.push_str(" (global)");
         }
+        // Where auto-compaction starts, marked on the meter while it would run.
+        let compact_at = match live {
+            Some(view) => {
+                let v = view.read(cx);
+                (v.compaction.enabled && !matches!(compact_text.as_str(), "Unsupported" | "Unavailable")).then(|| crate::harness::compaction::clamp_threshold(v.compaction.threshold_percent))
+            }
+            None => effective_compact.filter(|on| *on).map(|_| crate::harness::compaction::clamp_threshold(self.store.data.settings.auto_compact_threshold)),
+        };
+        let mark = compact_at.map(|at| (at as f32 / 100.0, format!("compacts at {at}%")));
         let settable = id.filter(|_| meta.is_some() && running).cloned();
 
         let compact_settable = settable.clone().filter(|_| live.is_some_and(|view| view.read(cx).harness.adapter().compact_command.is_some()));
@@ -561,17 +573,17 @@ impl Workspace {
             .flex_col()
             .gap(px(10.0))
             .px(px(8.0))
-            .child(meter("CONTEXT", ctx_fraction, ctx_caption, None))
+            .child(meter("CONTEXT", ctx_fraction, ctx_caption, None, mark))
             .child(div().flex().flex_col().gap(px(2.0)).children(cache_row).child(compact_row).children(precompute_row))
     }
 }
 
 fn auto_compact_menu(sid: &Id, current: Option<bool>) -> Vec<MenuItem> {
-    [(None, "Use global setting"), (Some(true), "On"), (Some(false), "Off")].into_iter().map(|(on, name)| MenuItem::new(format!("{}{name}", tick(current == on)), Act::SetAutoCompact(sid.clone(), on))).collect()
+    [(None, "Use global setting"), (Some(true), "On"), (Some(false), "Off")].into_iter().map(|(on, name)| MenuItem { checked: current == on, ..MenuItem::new(name, Act::SetAutoCompact(sid.clone(), on)) }).collect()
 }
 
 fn precompute_compact_menu(sid: &Id, current: bool) -> Vec<MenuItem> {
-    [(true, "On"), (false, "Off")].into_iter().map(|(on, name)| MenuItem::new(format!("{}{name}", tick(current == on)), Act::SetPrecomputeCompact(sid.clone(), on))).collect()
+    [(true, "On"), (false, "Off")].into_iter().map(|(on, name)| MenuItem { checked: current == on, ..MenuItem::new(name, Act::SetPrecomputeCompact(sid.clone(), on)) }).collect()
 }
 
 /// One subagent in the sidebar: a session m4code started (`spawn_subagent`), or one of the harness's own, which lives
@@ -679,7 +691,7 @@ fn lead_row(id: impl Into<SharedString>, lead: AnyElement, label: impl IntoEleme
 }
 
 fn row(id: impl Into<SharedString>, glyph: IconName, label: impl IntoElement) -> gpui_kit::base::Button {
-    crate::panels::widgets::focusable(id.into())
+    crate::panels::ui::button::focusable(id.into())
         .h(px(26.0))
         .px(px(8.0))
         .justify_start()
@@ -757,7 +769,7 @@ fn removable_row(
 
 /// A setting row that opens a menu (built when it is clicked): the value with a chevron, lit on hover.
 fn pick_row(cx: &mut Context<Workspace>, id: &'static str, label: &str, value: String, menu: impl Fn() -> Vec<MenuItem> + 'static) -> gpui_kit::base::Button {
-    crate::panels::widgets::focusable(id)
+    crate::panels::ui::button::focusable(id)
         .justify_between()
         .gap(px(10.0))
         // Text lines up with the rows above; the hover background reaches out past it.
@@ -809,8 +821,8 @@ mod tests {
     fn both_row_kinds_can_be_built() {
         row("a", IconName::Terminal, "A");
         dim_row("b", IconName::Terminal, "B");
-        crate::panels::widgets::icon_button("c", IconName::FileCode);
-        crate::panels::widgets::icon_button_disabled("d", IconName::FileCode);
+        crate::panels::ui::button::icon_button("c", IconName::FileCode);
+        crate::panels::ui::button::icon_button_disabled("d", IconName::FileCode);
     }
 
     #[test]
@@ -821,15 +833,15 @@ mod tests {
         assert!((0..=1000).all(|i| (0.45 - 1e-5..=1.0 + 1e-5).contains(&pending_opacity(i as f32 / 1000.0))));
     }
 
-    fn labels(items: &[MenuItem]) -> Vec<&str> {
-        items.iter().map(|i| i.label.as_str()).collect()
+    fn labels(items: &[MenuItem]) -> Vec<(&str, bool)> {
+        items.iter().map(|i| (i.label.as_str(), i.checked)).collect()
     }
 
     #[test]
     fn the_setting_menus_tick_the_current_value() {
         let sid = "s".to_string();
-        assert_eq!(labels(&auto_compact_menu(&sid, Some(false))), ["    Use global setting", "    On", "✓  Off"]);
-        assert_eq!(labels(&auto_compact_menu(&sid, None)), ["✓  Use global setting", "    On", "    Off"]);
-        assert_eq!(labels(&precompute_compact_menu(&sid, true)), ["✓  On", "    Off"]);
+        assert_eq!(labels(&auto_compact_menu(&sid, Some(false))), [("Use global setting", false), ("On", false), ("Off", true)]);
+        assert_eq!(labels(&auto_compact_menu(&sid, None)), [("Use global setting", true), ("On", false), ("Off", false)]);
+        assert_eq!(labels(&precompute_compact_menu(&sid, true)), [("On", true), ("Off", false)]);
     }
 }

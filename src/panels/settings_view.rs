@@ -19,10 +19,13 @@ use crate::panels::ui::toggle_group::toggle_group;
 use crate::panels::theme::theme;
 use crate::updater::Status;
 use gpui_kit::assets::IconName;
-use crate::panels::settings_pages::{flip, settings_group, toggle_switch};
-use crate::panels::widgets::{
-    Anchor, Dropdown, button, button_disabled, danger_button, dialog_card, icon, key_badge, section_label,
-};
+use crate::panels::settings_pages::{flip, settings_group};
+use crate::panels::ui::switch::switch;
+use crate::panels::widgets::{Anchor, Dropdown, icon};
+use crate::panels::ui::button as btn;
+use crate::panels::ui::kbd::kbd;
+use crate::panels::ui::label::section_label;
+use crate::panels::ui::popover;
 
 /// Split-pane Settings window: left navigation rail with icons + version footer, right scrollable page with grouped
 /// section cards and a dedicated Save/Cancel action bar.
@@ -110,7 +113,7 @@ pub(super) fn render_settings_card(
                     .cursor_pointer()
                     .hover(|s| s.bg(theme().accent))
                     .child(row_labels("Auto-compact", Some("Keep long conversations trim by compacting context between turns")))
-                    .child(toggle_switch(auto_compact))
+                    .child(switch(auto_compact))
                     .on_click(cx.listener(|ws, _: &ClickEvent, _, cx| {
                         if let Some(Modal::Settings { auto_compact, .. }) = ws.modal.as_mut() {
                             *auto_compact = !*auto_compact;
@@ -215,9 +218,9 @@ pub(super) fn render_settings_card(
             ];
 
             let check_btn = if ws.update.status == Status::Checking {
-                button_disabled("settings-check-updates", "Checking…").into_any_element()
+                btn::disabled("settings-check-updates", "Checking…").into_any_element()
             } else {
-                button("settings-check-updates", "Check now", false)
+                btn::text("settings-check-updates", "Check now", false)
                     .on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::CheckForUpdates, window, cx)))
                     .into_any_element()
             };
@@ -239,7 +242,7 @@ pub(super) fn render_settings_card(
                         .items_center()
                         .gap(px(10.0))
                         .child(div().on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).child(check_btn))
-                        .child(toggle_switch(updates)),
+                        .child(switch(updates)),
                 )
                 .on_click(cx.listener(|ws, _: &ClickEvent, _, cx| {
                     if let Some(Modal::Settings { updates, .. }) = ws.modal.as_mut() {
@@ -259,7 +262,7 @@ pub(super) fn render_settings_card(
                 row_shell(
                     "Environment setup",
                     Some("Check your installed CLIs, Node.js, and agent bridges"),
-                    button("settings-check-setup", "Check setup", false)
+                    btn::text("settings-check-setup", "Check setup", false)
                         .on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::OpenSetup, window, cx)))
                         .into_any_element(),
                 )
@@ -295,7 +298,7 @@ pub(super) fn render_settings_card(
                         .cursor_pointer()
                         .hover(|s| s.bg(theme().accent))
                         .child(row_labels(feature.label(), Some(feature.description())))
-                        .child(toggle_switch(on))
+                        .child(switch(on))
                         .on_click(cx.listener(move |ws, _: &ClickEvent, _, cx| {
                             if let Some(Modal::Settings { m4code_off, .. }) = ws.modal.as_mut() {
                                 flip(m4code_off, feature);
@@ -412,7 +415,7 @@ pub(super) fn render_settings_card(
                 .gap(px(6.0))
                 .text_size(scaled(11.0))
                 .text_color(theme().subtle_foreground)
-                .child(key_badge("Esc"))
+                .child(kbd("Esc"))
                 .child("close"),
         )
         .child(
@@ -443,7 +446,7 @@ pub(super) fn render_settings_card(
         )
         .child(footer);
 
-    dialog_card("modal-card")
+    popover::dialog("modal-card")
         .track_focus(&ws.modal_focus)
         .w(scaled(880.0).min(viewport.width - px(48.0)))
         .h(scaled(620.0).min(viewport.height - px(48.0)))
@@ -489,7 +492,7 @@ fn keyboard_page() -> gpui::Div {
     let rows = crate::app::keymap::shortcuts();
     let mut groups: Vec<(&str, Vec<AnyElement>)> = vec![];
     for row in rows {
-        let line = row_shell(row.what, None, key_badge(crate::app::keymap::label(&row.keys)).into_any_element()).into_any_element();
+        let line = row_shell(row.what, None, kbd(crate::app::keymap::label(&row.keys)).into_any_element()).into_any_element();
         match groups.last_mut() {
             Some((group, lines)) if *group == row.group => lines.push(line),
             _ => groups.push((row.group, vec![line])),
@@ -578,8 +581,8 @@ fn worktrees_section(page: &crate::app::WorktreesPage, cx: &mut Context<Workspac
                             .flex()
                             .flex_none()
                             .gap(px(6.0))
-                            .child(button(format!("worktree-reveal-{i}"), reveal, false).on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::Reveal(revealed.clone()), window, cx))))
-                            .child(button(format!("worktree-remove-{i}"), "Remove", false).on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(ask.clone(), window, cx)))),
+                            .child(btn::text(format!("worktree-reveal-{i}"), reveal, false).on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::Reveal(revealed.clone()), window, cx))))
+                            .child(btn::text(format!("worktree-remove-{i}"), "Remove", false).on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(ask.clone(), window, cx)))),
                     ),
             );
         rows.push(
@@ -587,12 +590,12 @@ fn worktrees_section(page: &crate::app::WorktreesPage, cx: &mut Context<Workspac
                 None => row,
                 Some(asked) => {
                     let act = asked.act.clone();
-                    let confirm = if asked.danger { danger_button(format!("worktree-confirm-{i}"), asked.confirm.clone()) } else { button(format!("worktree-confirm-{i}"), asked.confirm.clone(), true) };
+                    let confirm = if asked.danger { btn::destructive(format!("worktree-confirm-{i}"), asked.confirm.clone()) } else { btn::text(format!("worktree-confirm-{i}"), asked.confirm.clone(), true) };
                     row.child(faint(asked.body.clone())).child(
                         div()
                             .flex()
                             .gap(px(6.0))
-                            .child(button(format!("worktree-cancel-{i}"), "Cancel", false).on_click(cx.listener(|ws, _: &ClickEvent, _window, cx| {
+                            .child(btn::text(format!("worktree-cancel-{i}"), "Cancel", false).on_click(cx.listener(|ws, _: &ClickEvent, _window, cx| {
                                 ws.worktrees_page.asking = None;
                                 cx.notify();
                             })))

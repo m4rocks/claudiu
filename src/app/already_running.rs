@@ -3,7 +3,7 @@
 use gpui::{App, AppContext, Bounds, ClickEvent, Context, IntoElement, ParentElement, Render, Styled, TitlebarOptions, Window, WindowBounds, WindowOptions, div, px, size};
 
 use crate::panels::theme::theme;
-use crate::panels::widgets::button;
+use crate::panels::ui::button as btn;
 
 struct AlreadyRunning;
 
@@ -19,7 +19,7 @@ impl Render for AlreadyRunning {
             .child(div().text_size(px(15.0)).text_color(theme().foreground).child("m4code is already running"))
             .child(div().text_size(px(13.0)).text_color(theme().muted_foreground).child("Another m4code window uses the same data folder. Switch to it instead."))
             .child(div().flex_1())
-            .child(div().flex().justify_end().child(button("already-running-ok", "OK", true).on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.quit()))))
+            .child(div().flex().justify_end().child(btn::text("already-running-ok", "OK", true).on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.quit()))))
     }
 }
 

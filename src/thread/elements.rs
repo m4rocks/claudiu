@@ -20,7 +20,9 @@ use gpui_kit::base::Button;
 use crate::harness::thread::{ToolCall, ToolStatus};
 use crate::panels::scale;
 use crate::panels::theme::theme;
-use crate::panels::widgets::{focusable, icon, spinner};
+use crate::panels::widgets::{icon};
+use crate::panels::ui::button::focusable;
+use crate::panels::ui::spinner::spinner;
 
 /// Execution status of a trace step (matches shadcn `TraceLine` status variants).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

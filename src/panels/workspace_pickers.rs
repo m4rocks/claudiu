@@ -16,9 +16,9 @@ use crate::panels::{logos, picker};
 use crate::panels::ui::command;
 use crate::panels::theme::theme;
 use gpui_kit::assets::IconName;
-use crate::panels::widgets::{
-    effort_slider, icon, icon_button, short_path, spinner,
-};
+use crate::panels::widgets::{effort_slider, icon, short_path};
+use crate::panels::ui::button::icon_button;
+use crate::panels::ui::spinner::spinner;
 
 impl Workspace {
     /// Universal anchored dropdown picker (based on the Model Picker) used for model, project, branch & worktree,
@@ -586,7 +586,7 @@ impl Workspace {
                     shown += 1;
                 }
                 if shown == 0 {
-                    list = list.child(crate::panels::widgets::empty_panel(IconName::Search, "No matching projects"));
+                    list = list.child(crate::panels::ui::empty::empty_panel(IconName::Search, "No matching projects"));
                 }
                 let field = gpui_kit::component::input::Input::new(search)
                     .h(px(30.0)).appearance(false).aria_label("Find a project or choose Global");

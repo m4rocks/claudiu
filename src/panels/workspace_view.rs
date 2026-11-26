@@ -15,9 +15,10 @@ use gpui_kit::component::TitleBar;
 use crate::panels::theme::{self, theme};
 use crate::updater::Status;
 use gpui_kit::assets::IconName;
-use crate::panels::widgets::{
-    button, fade_in, icon_button, icon_button_disabled, short_path,
-};
+use crate::panels::widgets::{fade_in, short_path};
+use crate::panels::ui::button as btn;
+use crate::panels::ui::button::icon_button;
+use crate::panels::ui::button::icon_button_disabled;
 
 impl Workspace {
     // ------------------------------------------------------------------ top bar
@@ -115,7 +116,7 @@ impl Workspace {
                 .border_color(theme().notice_border)
                 .child(div().text_size(crate::panels::scale::px(12.0)).text_color(theme().primary).child(text))
                 .when_some(action, |d, (label, act)| {
-                    d.child(button("update-action", label, true).h(px(22.0)).on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
+                    d.child(btn::text("update-action", label, true).h(px(22.0)).on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
                         ws.act(act.clone(), window, cx)
                     })))
                 })
