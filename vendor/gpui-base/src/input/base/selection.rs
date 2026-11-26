@@ -39,6 +39,7 @@ impl<M: InputModeKind> InputBaseState<M> {
         self.selections.remove_all_but_active();
         self.set_selection(range.start, range.end);
         self.selected_word_range = Some(*self.active_selection());
+        self.selected_line_range = None;
         cx.notify()
     }
 
@@ -59,6 +60,21 @@ impl<M: InputModeKind> InputBaseState<M> {
         }
     }
 
+    /// Where the end of a drag that began with a triple click lands: on the edge of the line under the pointer, so the
+    /// selection grows by whole lines. Inside the line first selected the offset stays as it is.
+    ///
+    /// The offset is the UTF-8 offset.
+    pub(super) fn snap_to_line_edge(&self, offset: usize, selected_line: &CursorSelection) -> usize {
+        let line = TextSelector::line_range(&self.text, offset);
+        if offset < selected_line.start {
+            line.start
+        } else if offset >= selected_line.end {
+            line.end
+        } else {
+            offset
+        }
+    }
+
     /// Select the line at the given offset on triple-click.
     ///
     /// The offset is the UTF-8 offset.
@@ -68,6 +84,7 @@ impl<M: InputModeKind> InputBaseState<M> {
         self.selections.remove_all_but_active();
         self.set_selection(range.start, range.end);
         self.selected_word_range = None;
+        self.selected_line_range = Some(*self.active_selection());
         cx.notify()
     }
 }

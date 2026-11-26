@@ -364,6 +364,9 @@ pub struct TextSelectionRun {
     layout: TextLayout,
     /// The run's window-coordinate paint bounds.
     bounds: Bounds<Pixels>,
+    /// Optional full-row bounds for mixed inline-flow lines (e.g. inline code or
+    /// inline objects), so triple-click and triple-click-drag select the whole row.
+    line_bounds: Option<Bounds<Pixels>>,
 }
 
 impl TextSelectionRun {
@@ -374,12 +377,19 @@ impl TextSelectionRun {
             text: text.into(),
             layout,
             bounds,
+            line_bounds: None,
         }
     }
 
     /// Sets the run's logical order within the participant.
     pub const fn with_document_order(mut self, document_order: u64) -> Self {
         self.document_order = document_order;
+        self
+    }
+
+    /// Sets the full visual row bounds for mixed inline-flow lines.
+    pub(crate) const fn with_line_bounds(mut self, line_bounds: Option<Bounds<Pixels>>) -> Self {
+        self.line_bounds = line_bounds;
         self
     }
 
@@ -532,16 +542,46 @@ pub(crate) fn text_rows_extent(text_layout: &TextLayout, line_height: Pixels) ->
     (top, last_row_top + line_height)
 }
 
+#[cfg(test)]
 fn points_for_multi_click(
     runs: &[TextSelectionRun],
     position: Point<Pixels>,
     click_count: usize,
 ) -> Option<(Point<Pixels>, Point<Pixels>)> {
+    let (start, end, _) = multi_click_span(runs, position, click_count, false)?;
+    Some((start, end))
+}
+
+fn multi_click_span(
+    runs: &[TextSelectionRun],
+    position: Point<Pixels>,
+    click_count: usize,
+    allow_nearest: bool,
+) -> Option<(Point<Pixels>, Point<Pixels>, Pixels)> {
     let run = runs.iter().find(|run| run.bounds.contains(&position))?;
-    if run.text.len() != run.layout.len() {
+    if click_count >= 3
+        && let Some(line) = run.line_bounds
+    {
+        let mid_y = line.center().y;
+        return Some((
+            point(line.left(), mid_y),
+            point(line.right(), mid_y),
+            line.size.height,
+        ));
+    }
+    if run.text.len() != run.layout.len() || run.text.is_empty() {
         return None;
     }
-    let offset = run.layout.index_for_position(position).ok()?;
+    let raw_offset = match run.layout.index_for_position(position) {
+        Ok(offset) => offset,
+        Err(offset) if allow_nearest => offset,
+        Err(_) => return None,
+    };
+    let offset = if raw_offset >= run.text.len() {
+        run.text.char_indices().next_back()?.0
+    } else {
+        raw_offset
+    };
     let range = match click_count {
         2 => word_range_at(&run.text, offset)?,
         3.. => line_range_at(&run.text, offset),
@@ -553,6 +593,7 @@ fn points_for_multi_click(
     Some((
         run.layout.position_for_index(range.start)?,
         run.layout.position_for_index(range.end)?,
+        run.layout.line_height(),
     ))
 }
 
@@ -1103,7 +1144,7 @@ struct WindowSelectionState {
     cursor: Option<SelectionEndpoint>,
     pending_extension_anchor: Option<SelectionEndpoint>,
     drag_granularity: usize,
-    multi_click_origin: Option<(SelectionEndpoint, SelectionEndpoint)>,
+    multi_click_origin: Option<(SelectionEndpoint, SelectionEndpoint, Pixels)>,
     is_selecting: bool,
     did_hit_text: bool,
     frame_generation: u64,
@@ -1823,8 +1864,8 @@ impl WindowSelectionState {
         else {
             return;
         };
-        let points = points_for_multi_click(&participant.read(cx).runs, position, click_count);
-        let Some((anchor, cursor)) = points else {
+        let points = multi_click_span(&participant.read(cx).runs, position, click_count, false);
+        let Some((anchor, cursor, line_height)) = points else {
             return;
         };
         let Some(registration) = self.participants.get(&participant.entity_id()) else {
@@ -1851,7 +1892,7 @@ impl WindowSelectionState {
         self.anchor = Some(start_ep.clone());
         self.cursor = Some(end_ep.clone());
         self.drag_granularity = click_count.clamp(2, 3);
-        self.multi_click_origin = Some((start_ep, end_ep));
+        self.multi_click_origin = Some((start_ep, end_ep, line_height));
         self.did_hit_text = true;
         self.is_selecting = true;
         participant.update(cx, |state, cx| state.focus(window, cx));
@@ -1922,17 +1963,18 @@ impl WindowSelectionState {
         let endpoint = self.endpoint(position, window, cx);
         self.did_hit_text |= endpoint.inside_text;
         if self.drag_granularity >= 2
-            && let Some((orig_start, orig_end)) = self.multi_click_origin.clone()
+            && let Some((orig_start, orig_end, orig_line_height)) = self.multi_click_origin.clone()
         {
             let snapped = endpoint
                 .participant
                 .as_ref()
                 .and_then(|p| p.upgrade())
                 .and_then(|participant| {
-                    let (a, b) = points_for_multi_click(
+                    let (a, b, _) = multi_click_span(
                         &participant.read(cx).runs,
                         position,
                         self.drag_granularity,
+                        true,
                     )?;
                     let reg = self.participants.get(&participant.entity_id())?;
                     let resolver = participant.read(cx).content_key_resolver.clone();
@@ -1949,12 +1991,37 @@ impl WindowSelectionState {
                     };
                     Some((make(a), make(b)))
                 });
+            let was_snapped = snapped.is_some();
             let (cur_start, cur_end) = snapped.unwrap_or_else(|| (endpoint.clone(), endpoint.clone()));
-            let orig_pos = orig_start.resolve(&self.participants);
-            let cur_pos = cur_start.resolve(&self.participants);
-            let backward = match (orig_pos, cur_pos) {
-                (Some(o), Some(c)) => c.y < o.y || (c.y == o.y && c.x < o.x),
-                _ => false,
+            let orig_order = orig_start
+                .entity_id()
+                .and_then(|id| self.participants.get(&id))
+                .map(|reg| reg.registration.document_order);
+            let cur_order = cur_start
+                .entity_id()
+                .and_then(|id| self.participants.get(&id))
+                .map(|reg| reg.registration.document_order);
+            let backward = match (orig_order, cur_order) {
+                (Some(oo), Some(co)) if oo != co => co < oo,
+                _ => {
+                    let orig_pos = orig_start.resolve(&self.participants);
+                    let cur_pos = cur_start.resolve(&self.participants);
+                    match (orig_pos, cur_pos) {
+                        (Some(o), Some(c)) => {
+                            let same_row = if was_snapped {
+                                (c.y - o.y).abs() < orig_line_height.half()
+                            } else {
+                                c.y >= o.y && c.y < o.y + orig_line_height
+                            };
+                            if same_row {
+                                c.x < o.x
+                            } else {
+                                c.y < o.y
+                            }
+                        }
+                        _ => false,
+                    }
+                }
             };
             if backward {
                 self.anchor = Some(orig_end);
@@ -2952,6 +3019,10 @@ fn paint_text_selection(state: &Entity<WindowSelectionState>, window: &mut Windo
             WindowSelectionState::resolve_content_keys(&state, cx);
         }
     });
+}
+
+pub(crate) fn has_window_selection(window: &Window, cx: &App) -> bool {
+    WindowSelectionState::existing(window, cx).is_some()
 }
 
 fn live_text_selection_state(

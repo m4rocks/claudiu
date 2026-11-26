@@ -103,11 +103,13 @@ opt-level = 2
 # drop this once gpui-kit releases the fix and has an action to open the completion menu by hand. The patch adds
 # `TriggerCompletion` (Ctrl+Space) and has a menu opened that way follow its word as it grows
 # (`handle_completion_trigger` in src/input/editor/lsp/completions.rs). It also makes `has_multiple_cursors`, `select_range`
-# and `replace_range` public, which the line actions (src/app/line_actions.rs) edit through, and makes a drag that began
-# with a double click select whole words (`snap_to_word_edge` in src/input/base/selection.rs). `SelectableText::runs` lets
-# a card's text keep its styling while selectable. `code_background` (src/text/inline_flow.rs) covers inline code's
-# whole glyph box rather than its capital height, so descenders stay inside it.
-# The selection layer (src/text_selection.rs) ends mouse drags when motion arrives without the left button.
+# and replace_range public, which the line actions (src/app/line_actions.rs) edit through, and makes a drag that began
+# with a double or triple click select whole words/lines (`snap_to_word_edge` and `snap_to_line_edge` in
+# src/input/base/selection.rs). `SelectableText::runs` lets a card's text keep its styling while selectable.
+# `code_background` (src/text/inline_flow.rs) covers inline code's whole glyph box rather than its capital height, so
+# descenders stay inside it. The selection layer (src/text_selection.rs, src/text/inline.rs) ends mouse drags when
+# motion arrives without the left button, and owns multi-click drags in TextView so double/triple-click-drag extends by
+# word or line.
 [patch.crates-io]
 gpui-base = { path = "vendor/gpui-base" }
 

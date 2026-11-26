@@ -393,6 +393,8 @@ pub struct InputBaseState<M: InputModeKind> {
     pub(super) selections: Selections,
     /// Range for save the selected word, use to keep word range when drag move.
     pub(super) selected_word_range: Option<CursorSelection>,
+    /// Range for the triple-clicked line, so dragging extends by whole lines.
+    pub(super) selected_line_range: Option<CursorSelection>,
     /// The marked range is the temporary insert text on IME typing.
     pub(super) ime_marked_range: Option<CursorSelection>,
     pub(super) last_layout: Option<LastLayout>,
@@ -740,6 +742,7 @@ impl<M: InputModeKind> InputBaseState<M> {
             pressed_token: None,
             selections: Selections::default(),
             selected_word_range: None,
+            selected_line_range: None,
             ime_marked_range: None,
             input_bounds: Bounds::default(),
             selecting: false,
@@ -2391,6 +2394,8 @@ impl<M: InputModeKind> InputBaseState<M> {
         if event.modifiers.shift {
             self.select_to_with_affinity(offset, line_end_affinity, cx);
         } else {
+            self.selected_word_range = None;
+            self.selected_line_range = None;
             self.move_to_with_affinity(offset, None, line_end_affinity, cx)
         }
     }
@@ -2411,6 +2416,7 @@ impl<M: InputModeKind> InputBaseState<M> {
         }
         self.selecting = false;
         self.selected_word_range = None;
+        self.selected_line_range = None;
         self.column_select_start = None;
         self.auto_scroll.stop();
     }
@@ -3081,6 +3087,7 @@ impl<M: InputModeKind> InputBaseState<M> {
         self.move_to(start, None, cx);
         self.active_selection_mut().reversed = false;
         self.selected_word_range = None;
+        self.selected_line_range = None;
         self.select_to(end, cx);
     }
 
@@ -3262,12 +3269,15 @@ impl<M: InputModeKind> InputBaseState<M> {
 
         self.cursor_line_end_affinity = line_end_affinity;
         let offset = self.cursor_boundary(offset, Bias::Left);
-        let word_range = self.selected_word_range;
-        let offset = match &word_range {
-            Some(word) => self.snap_to_word_edge(offset, word),
-            None => offset,
+        let sticky_range = self.selected_line_range.or(self.selected_word_range);
+        let offset = if let Some(line) = &self.selected_line_range {
+            self.snap_to_line_edge(offset, line)
+        } else if let Some(word) = &self.selected_word_range {
+            self.snap_to_word_edge(offset, word)
+        } else {
+            offset
         };
-        Self::extend_selection(self.active_selection_mut(), offset, word_range);
+        Self::extend_selection(self.active_selection_mut(), offset, sticky_range);
         let range = self.normalize_token_range(self.selected_range());
         self.set_selection(range.start, range.end);
 

@@ -1013,11 +1013,14 @@ impl Element for Inline {
                     state.selection_adapter.register_inline(text_bounds);
                     state
                         .selection_adapter
-                        .register_text_run(crate::TextSelectionRun::new(
-                            self.text.clone(),
-                            text_layout.clone(),
-                            hitbox.bounds,
-                        ));
+                        .register_text_run(
+                            crate::TextSelectionRun::new(
+                                self.text.clone(),
+                                text_layout.clone(),
+                                hitbox.bounds,
+                            )
+                            .with_line_bounds(self.selection_bounds),
+                        );
                 });
             }
 
@@ -1036,6 +1039,22 @@ impl Element for Inline {
                         return;
                     }
 
+                    // A finger selects read-only text with a long press only;
+                    // a double tap selects nothing here, neither the mouse's
+                    // plain word nor the window layer's touch selection. The
+                    // handles and the menu on a double tap belong to `Input`.
+                    if event.click_count == 2 && GlobalState::is_touch_press(cx) {
+                        GlobalState::suppress_text_selection(cx);
+                        return;
+                    }
+
+                    // When a window TextSelectionLayer is active, let it own
+                    // multi-click selection so double-click-drag and
+                    // triple-click-drag extend by word/line across runs and views.
+                    if crate::text_selection::has_window_selection(window, cx) {
+                        return;
+                    }
+
                     if event.click_count == 3
                         && let Some(line_bounds) = line_bounds
                     {
@@ -1046,15 +1065,6 @@ impl Element for Inline {
                             });
                         }
                         cx.notify(current_view);
-                        return;
-                    }
-
-                    // A finger selects read-only text with a long press only;
-                    // a double tap selects nothing here, neither the mouse's
-                    // plain word nor the window layer's touch selection. The
-                    // handles and the menu on a double tap belong to `Input`.
-                    if event.click_count == 2 && GlobalState::is_touch_press(cx) {
-                        GlobalState::suppress_text_selection(cx);
                         return;
                     }
 
