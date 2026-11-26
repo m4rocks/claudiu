@@ -22,9 +22,9 @@ fn renderer() -> Result<Option<Box<dyn PlatformHeadlessRenderer>>> {
 fn capture() -> Result<()> {
     let scenario = std::env::var("M4CODE_SCREENSHOT_SCENARIO").unwrap_or_else(|_| "home".into());
     let shortcut = match scenario.as_str() {
-        "home" | "picker" | "context-menu" => None,
+        "home" | "picker" | "context-menu" | "github" | "editor" => None,
         "settings" => Some(Keystroke::parse("secondary-,").expect("Settings shortcut")),
-        _ => anyhow::bail!("unknown screenshot scenario {scenario:?}; use home, settings, picker or context-menu"),
+        _ => anyhow::bail!("unknown screenshot scenario {scenario:?}; use home, settings, picker, context-menu, github or editor"),
     };
 
     let fixture = tempfile::tempdir()?;
@@ -41,6 +41,10 @@ fn capture() -> Result<()> {
     settings.update_url = Some(String::new());
     settings.enabled_harnesses = Some(Vec::new());
     settings.custom_subagents = crate::harness::subagents::CustomSubagents(Default::default());
+    if scenario == "github" {
+        // Wide enough for the list and the detail side by side.
+        store.data.layout.right_gh_w = Some(900.0);
+    }
     crate::datadir::write_atomic(&path, &serde_json::to_string(&store.data)?)?;
 
     let font = if cfg!(windows) {
@@ -55,9 +59,14 @@ fn capture() -> Result<()> {
         Arc::new(crate::Assets),
         renderer,
     );
+    let project = fixture.path().join("demo");
+    if scenario == "editor" {
+        sample_project(&project)?;
+    }
+    let projects = if scenario == "editor" { vec![dunce::canonicalize(&project)?] } else { Vec::new() };
     let (window, workspace) = cx.update(|app| {
         crate::init_ui(app);
-        crate::open_main_window(Vec::new(), app)
+        crate::open_main_window(projects.clone(), app)
     });
     cx.run_until_parked();
     if let Some(shortcut) = shortcut {
@@ -84,6 +93,48 @@ fn capture() -> Result<()> {
         })?;
         cx.run_until_parked();
     }
+    if scenario == "github" {
+        let root = fixture.path().to_path_buf();
+        cx.update_window(window.into(), |_, window, app| workspace.update(app, |ws, cx| ws.open_github(root, window, cx)))?;
+        cx.run_until_parked();
+        cx.update_window(window.into(), |_, _, app| {
+            let view = workspace.read(app).right_gh.as_ref().and_then(|id| workspace.read(app).gh_pane(id)).map(|p| p.view.clone());
+            if let Some(view) = view {
+                view.update(app, |v, cx| {
+                    github_sample(v);
+                    cx.notify();
+                });
+            }
+        })?;
+        cx.run_until_parked();
+    }
+    if scenario == "editor" {
+        let file = dunce::canonicalize(&project)?.join("src").join("main.rs");
+        cx.update_window(window.into(), |_, window, app| {
+            workspace.update(app, |ws, cx| {
+                if let Some(id) = ws.store.data.projects.first().map(|p| p.id.clone()) {
+                    ws.act(crate::app::Act::HomeSelectProject(id), window, cx);
+                }
+                ws.toggle_editor(window, cx);
+                if let Some(id) = ws.shown_pane(cx).map(|(id, _)| id) {
+                    ws.open_file(&id, file.clone(), None, window, cx);
+                }
+            })
+        })?;
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            cx.run_until_parked();
+            let open = cx.update_window(window.into(), |_, _, app| {
+                let ws = workspace.read(app);
+                ws.editor_owner().and_then(|id| ws.panes.get(&id)).is_some_and(|pane| pane.shown().is_some())
+            })?;
+            if open {
+                break;
+            }
+            ensure!(std::time::Instant::now() < until, "the sample file never opened");
+            std::thread::yield_now();
+        }
+    }
     cx.update_window(window.into(), |_, window, app| window.draw(app).clear(app))?;
     // Opening overlays starts their fade on the first draw. Capture their settled state.
     std::thread::sleep(std::time::Duration::from_millis(250));
@@ -108,4 +159,114 @@ fn capture() -> Result<()> {
         frame.height()
     );
     Ok(())
+}
+
+/// A small Rust project for the editor scenario.
+fn sample_project(root: &Path) -> Result<()> {
+    std::fs::create_dir_all(root.join("src"))?;
+    std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nedition = \"2024\"\n")?;
+    std::fs::write(root.join("README.md"), "# demo\n\nA tiny greeter.\n")?;
+    std::fs::write(root.join("src").join("lib.rs"), "pub fn greet(name: &str) -> String {\n    format!(\"Hello, {name}!\")\n}\n")?;
+    std::fs::write(
+        root.join("src").join("main.rs"),
+        "//! Prints a greeting for each name on the command line.\n\nuse demo::greet;\n\nfn main() {\n    let names: Vec<String> = std::env::args().skip(1).collect();\n    if names.is_empty() {\n        println!(\"{}\", greet(\"world\"));\n        return;\n    }\n    for name in &names {\n        println!(\"{}\", greet(name));\n    }\n}\n",
+    )?;
+    Ok(())
+}
+
+/// The GitHub pane with a repository, a list of pull requests and one of them open, all made up.
+fn github_sample(v: &mut crate::github::view::GithubView) {
+    use crate::github::model::*;
+    use crate::github::view::{DetailState, DetailTab, Phase};
+    let now = crate::store::now();
+    // Label colors are GitHub data, given as GitHub sends them.
+    let label = |name: &str, color: &str| Label { id: name.into(), name: name.into(), color: u32::from_str_radix(color, 16).unwrap_or_default() };
+    let user = |login: &str| User { id: login.into(), login: login.into() };
+    #[allow(clippy::too_many_arguments)]
+    let item = |number: u32, title: &str, state: State, draft: bool, author: &str, ago_h: i64, labels: Vec<Label>, checks: Option<&str>, review: Option<&str>, comments: u32| Item {
+        kind: Kind::Pull,
+        id: format!("PR_{number}"),
+        number,
+        title: title.into(),
+        state,
+        not_planned: false,
+        draft,
+        url: format!("https://github.com/m4rocks/demo/pull/{number}"),
+        author: author.into(),
+        created: now - ago_h * 3600,
+        updated: now - ago_h * 1800,
+        comments,
+        labels,
+        assignees: vec![user(author)],
+        milestone: None,
+        review: review.map(Into::into),
+        checks: checks.map(Into::into),
+        head: format!("feature-{number}"),
+        base: "main".into(),
+    };
+    let items = vec![
+        item(482, "Show a breadcrumb over the editor", State::Open, false, "ana", 3, vec![label("ui", "1d76db"), label("editor", "5319e7")], Some("SUCCESS"), Some("APPROVED"), 4),
+        item(479, "Fix the flip-flop between working and done", State::Open, false, "codex-bot", 9, vec![label("bug", "d73a4a")], Some("FAILURE"), Some("CHANGES_REQUESTED"), 7),
+        item(476, "Theme tokens for every color", State::Open, true, "mario", 26, vec![label("theme", "0e8a16")], Some("PENDING"), None, 1),
+        item(471, "Kit buttons in Settings", State::Merged, false, "ana", 50, vec![], Some("SUCCESS"), Some("APPROVED"), 2),
+        item(468, "Drop the legacy color aliases", State::Closed, false, "mario", 80, vec![label("cleanup", "fbca04")], None, None, 0),
+    ];
+    v.phase = Phase::Ready;
+    v.repo = Some(crate::github::cli::RepoRef { owner: "m4rocks".into(), name: "demo".into(), url: "https://github.com/m4rocks/demo".into(), host: None });
+    v.info = Some(RepoInfo { viewer: "mario".into(), permission: "ADMIN".into(), issues_enabled: true, allow_merge: true, allow_squash: true, default_branch: "main".into(), ..Default::default() });
+    v.kind = Kind::Pull;
+    v.queries[1] = "is:open".into();
+    let list = &mut v.lists[1];
+    (list.total, list.open, list.closed, list.loaded, list.loading) = (items.len(), 3, 2, true, false);
+    list.items = items.clone();
+    let issues = &mut v.lists[0];
+    (issues.total, issues.open, issues.closed, issues.loaded, issues.loading) = (0, 12, 40, true, false);
+
+    let pr = Pr {
+        mergeable: "MERGEABLE".into(),
+        merge_state: "CLEAN".into(),
+        head_repo: "m4rocks/demo".into(),
+        additions: 86,
+        deletions: 12,
+        files: 3,
+        commits: 2,
+        reviews: vec![("mario".into(), "APPROVED".into())],
+        requested: vec!["sol".into()],
+        checks: vec![
+            Check { name: "lint".into(), result: "SUCCESS".into(), url: String::new() },
+            Check { name: "test (windows)".into(), result: "SUCCESS".into(), url: String::new() },
+        ],
+        ..Default::default()
+    };
+    let detail = Detail {
+        item: items[0].clone(),
+        body: "The editor now shows where the open file sits in the project.\n\n- One segment per folder\n- The file name in the foreground\n\nCloses #470.".into(),
+        assoc: "MEMBER".into(),
+        edited: false,
+        locked: false,
+        mine: false,
+        can_update: true,
+        reactions: vec![Reaction { content: "THUMBS_UP".into(), count: 3, mine: true }, Reaction { content: "ROCKET".into(), count: 1, mine: false }],
+        timeline: vec![
+            Entry::Commit(CommitEntry { short: "a1c4e84".into(), headline: "Add the breadcrumb component".into(), author: "ana".into(), created: now - 3 * 3600 }),
+            Entry::Event(Event { actor: "ana".into(), what: "added the label".into(), label: Some(label("ui", "1d76db")), created: now - 3 * 3600 }),
+            Entry::Comment(Comment {
+                id: "c1".into(),
+                author: "mario".into(),
+                assoc: "OWNER".into(),
+                body: "Looks good. Could the last segment stay bold?".into(),
+                created: now - 2 * 3600,
+                edited: false,
+                can_edit: false,
+                can_delete: false,
+                reactions: vec![],
+            }),
+            Entry::Review(Review { author: "mario".into(), state: "APPROVED".into(), body: "Ship it.".into(), created: now - 3600, comments: vec![] }),
+        ],
+        next: None,
+        pr: Some(pr),
+    };
+    let mut state = DetailState::new(Kind::Pull, 482);
+    (state.data, state.loading, state.tab) = (Some(detail), false, DetailTab::Conversation);
+    v.detail = Some(state);
 }
