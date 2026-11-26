@@ -1906,6 +1906,95 @@ mod tests {
         assert_eq!(cx.update(selected), text);
     }
 
+    #[gpui::test]
+    fn conversation_double_click_and_triple_click_drag_extend_by_word_and_line(cx: &mut gpui::TestAppContext) {
+        use gpui::{AppContext, Entity, InteractiveElement, IntoElement, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Render, Styled, Window, div, point, px};
+        use gpui_kit::base::{TextSelection, TextSelectionLayer};
+        use gpui_kit::component::text::{TextView, TextViewState};
+
+        struct Conversation {
+            para: Entity<TextViewState>,
+            code: Entity<TextViewState>,
+        }
+        impl Render for Conversation {
+            fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+                div()
+                    .w(px(500.0))
+                    .text_size(px(16.0))
+                    .child(TextSelectionLayer)
+                    .child(div().debug_selector(|| "para".into()).child(crate::github::ui::styled_markdown(TextView::new(&self.para))))
+                    .child(div().debug_selector(|| "code".into()).child(crate::github::ui::styled_markdown(TextView::new(&self.code))))
+            }
+        }
+
+        cx.update(gpui_kit::init);
+        let (_, cx) = cx.add_window_view(|_, cx| Conversation {
+            para: cx.new(|cx| TextViewState::markdown("hello brave world", cx)),
+            code: cx.new(|cx| TextViewState::markdown("```rust\nlet alpha = 1;\nlet beta = 2;\nlet gamma = 3;\n```", cx)),
+        });
+        cx.run_until_parked();
+        let draw = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, app| window.draw(app).clear(app));
+            cx.run_until_parked();
+        };
+        draw(cx);
+
+        let selected = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, app| TextSelection::selected_text(window, app))
+        };
+        let none = Modifiers::default();
+
+        let para = cx.debug_bounds("para").expect("paragraph bounds");
+        let y_para = para.center().y;
+        // "hello brave world" at 16px (~9px/char); pick points well inside "hello", "brave", and "world".
+        let pt_hello = point(para.left() + px(15.0), y_para);
+        let pt_brave = point(para.left() + px(70.0), y_para);
+        let pt_world = point(para.left() + px(120.0), y_para);
+
+        // Exact Windows double-click-and-drag sequence:
+        // 1) Click 1 down + up, 2) 1px micro-move without button pressed,
+        // 3) Click 2 down (held), 4) drag forward across frames, 5) drag backward past origin, 6) release.
+        cx.simulate_event(MouseDownEvent { position: pt_brave, modifiers: none, button: MouseButton::Left, click_count: 1, first_mouse: false });
+        cx.simulate_event(MouseUpEvent { position: pt_brave, modifiers: none, button: MouseButton::Left, click_count: 1 });
+        cx.simulate_event(MouseMoveEvent { position: pt_brave + point(px(1.0), px(0.0)), modifiers: none, pressed_button: None });
+        cx.simulate_event(MouseDownEvent { position: pt_brave, modifiers: none, button: MouseButton::Left, click_count: 2, first_mouse: false });
+        draw(cx);
+        assert_eq!(selected(cx).trim(), "brave", "double-click selects the word under the pointer");
+
+        cx.simulate_event(MouseMoveEvent { position: pt_world, modifiers: none, pressed_button: Some(MouseButton::Left) });
+        draw(cx);
+        assert_eq!(selected(cx).trim(), "brave world", "dragging forward after double-click extends by whole words");
+
+        cx.simulate_event(MouseMoveEvent { position: pt_hello, modifiers: none, pressed_button: Some(MouseButton::Left) });
+        draw(cx);
+        assert_eq!(selected(cx).trim(), "hello brave", "dragging backward past origin extends by whole words and keeps origin");
+
+        cx.simulate_event(MouseUpEvent { position: pt_hello, modifiers: none, button: MouseButton::Left, click_count: 2 });
+        draw(cx);
+        assert_eq!(selected(cx).trim(), "hello brave", "releasing keeps the extended word selection");
+
+        // Triple-click-and-drag in the fenced code block extends by whole lines.
+        let code = cx.debug_bounds("code").expect("code block bounds");
+        let code_x = code.left() + px(40.0);
+        let code_line_1 = point(code_x, code.top() + code.size.height * 0.25);
+        let code_line_2 = point(code_x, code.top() + code.size.height * 0.55);
+        for click_count in [1, 2] {
+            cx.simulate_event(MouseDownEvent { position: code_line_1, modifiers: none, button: MouseButton::Left, click_count, first_mouse: false });
+            cx.simulate_event(MouseUpEvent { position: code_line_1, modifiers: none, button: MouseButton::Left, click_count });
+        }
+        cx.simulate_event(MouseDownEvent { position: code_line_1, modifiers: none, button: MouseButton::Left, click_count: 3, first_mouse: false });
+        draw(cx);
+        assert_eq!(selected(cx).trim(), "let alpha = 1;", "triple-click selects the code line");
+
+        cx.simulate_event(MouseMoveEvent { position: code_line_2, modifiers: none, pressed_button: Some(MouseButton::Left) });
+        draw(cx);
+        assert_eq!(selected(cx).trim(), "let alpha = 1;\nlet beta = 2;", "triple-click-drag extends by whole lines");
+
+        cx.simulate_event(MouseUpEvent { position: code_line_2, modifiers: none, button: MouseButton::Left, click_count: 3 });
+        draw(cx);
+        assert_eq!(selected(cx).trim(), "let alpha = 1;\nlet beta = 2;", "releasing keeps the extended line selection");
+    }
+
     #[test]
     fn a_users_lines_stay_lines_but_code_and_paragraphs_do_not_change() {
         assert_eq!(keep_line_breaks("one\ntwo\nthree"), "one  \ntwo  \nthree");

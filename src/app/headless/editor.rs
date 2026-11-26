@@ -398,7 +398,7 @@ fn double_click_in_the_editor() {
     let _data = crate::datadir::own_folder();
     let work = tempfile::tempdir().unwrap();
     let root = dunce::canonicalize(work.path()).unwrap();
-    std::fs::write(root.join("words.txt"), "hello brave world\nsecond line\n").unwrap();
+    std::fs::write(root.join("words.txt"), "hello brave world\nsecond line\nthird line\n").unwrap();
 
     let mut cx = TestAppContext::single();
     cx.update(|app| {
@@ -460,15 +460,118 @@ fn double_click_in_the_editor() {
     assert_eq!(buffer.read_with(&visual, |b, _| b.selected_range()), 6..11, "the word under the pointer");
 
     // Holding the second press and dragging selects whole words, forwards and backwards.
+    // Simulate the exact Windows sequence: click 1 down/up, 1px micro-move, click 2 down, drag across frames, up.
     let centre = |cx: &VisualTestContext, offset: usize| buffer.read_with(cx, |b, _| b.range_to_bounds(&(offset..offset + 1))).unwrap().center();
-    for (from, to, selected) in [(8, 14, 6..17), (14, 2, 0..17)] {
-        let (start, end) = (centre(&visual, from), centre(&visual, to));
-        visual.simulate_event(gpui::MouseDownEvent { position: start, modifiers: none, button: gpui::MouseButton::Left, click_count: 2, first_mouse: false });
-        visual.simulate_event(gpui::MouseMoveEvent { position: end, modifiers: none, pressed_button: Some(gpui::MouseButton::Left) });
-        visual.simulate_event(gpui::MouseUpEvent { position: end, modifiers: none, button: gpui::MouseButton::Left, click_count: 2 });
-        assert_eq!(buffer.read_with(&visual, |b, _| b.selected_range()), selected, "double-click on offset {from}, drag to {to}");
+    let redraw = |visual: &mut gpui::VisualTestContext| {
+        visual.update(|window, app| window.draw(app).clear(app));
+        visual.run_until_parked();
+    };
+    let (pt_hello, pt_brave, pt_world) = (centre(&visual, 2), centre(&visual, 8), centre(&visual, 14));
+    visual.simulate_event(gpui::MouseDownEvent { position: pt_brave, modifiers: none, button: gpui::MouseButton::Left, click_count: 1, first_mouse: false });
+    visual.simulate_event(gpui::MouseUpEvent { position: pt_brave, modifiers: none, button: gpui::MouseButton::Left, click_count: 1 });
+    visual.simulate_event(gpui::MouseMoveEvent { position: pt_brave + gpui::point(gpui::px(1.0), gpui::px(0.0)), modifiers: none, pressed_button: None });
+    visual.simulate_event(gpui::MouseDownEvent { position: pt_brave, modifiers: none, button: gpui::MouseButton::Left, click_count: 2, first_mouse: false });
+    redraw(&mut visual);
+    assert_eq!(buffer.read_with(&visual, |b, _| b.selected_range()), 6..11, "second press selects the word");
+    visual.simulate_event(gpui::MouseMoveEvent { position: pt_world, modifiers: none, pressed_button: Some(gpui::MouseButton::Left) });
+    redraw(&mut visual);
+    assert_eq!(buffer.read_with(&visual, |b, _| b.selected_range()), 6..17, "dragging forward extends by whole words");
+    visual.simulate_event(gpui::MouseMoveEvent { position: pt_hello, modifiers: none, pressed_button: Some(gpui::MouseButton::Left) });
+    redraw(&mut visual);
+    assert_eq!(buffer.read_with(&visual, |b, _| b.selected_range()), 0..11, "dragging backward past origin extends by whole words and keeps origin");
+    visual.simulate_event(gpui::MouseUpEvent { position: pt_hello, modifiers: none, button: gpui::MouseButton::Left, click_count: 2 });
+    redraw(&mut visual);
+    assert_eq!(buffer.read_with(&visual, |b, _| b.selected_range()), 0..11, "releasing keeps the word selection");
+
+    // Triple-click-and-drag extends by whole lines, forwards and backwards.
+    let pt_line1 = centre(&visual, 8);
+    let pt_line2 = centre(&visual, 20);
+    let pt_line3 = centre(&visual, 32);
+    for click_count in [1, 2] {
+        visual.simulate_event(gpui::MouseDownEvent { position: pt_line2, modifiers: none, button: gpui::MouseButton::Left, click_count, first_mouse: false });
+        visual.simulate_event(gpui::MouseUpEvent { position: pt_line2, modifiers: none, button: gpui::MouseButton::Left, click_count });
     }
+    visual.simulate_event(gpui::MouseDownEvent { position: pt_line2, modifiers: none, button: gpui::MouseButton::Left, click_count: 3, first_mouse: false });
+    redraw(&mut visual);
+    assert_eq!(buffer.read_with(&visual, |b, _| b.selected_range()), 18..29, "triple-click selects line 2");
+    visual.simulate_event(gpui::MouseMoveEvent { position: pt_line3, modifiers: none, pressed_button: Some(gpui::MouseButton::Left) });
+    redraw(&mut visual);
+    assert_eq!(buffer.read_with(&visual, |b, _| b.selected_range()), 18..40, "triple-click-drag forward extends to whole line 3");
+    visual.simulate_event(gpui::MouseMoveEvent { position: pt_line1, modifiers: none, pressed_button: Some(gpui::MouseButton::Left) });
+    redraw(&mut visual);
+    assert_eq!(buffer.read_with(&visual, |b, _| b.selected_range()), 0..29, "triple-click-drag backward extends to whole line 1");
+    visual.simulate_event(gpui::MouseUpEvent { position: pt_line1, modifiers: none, button: gpui::MouseButton::Left, click_count: 3 });
+    redraw(&mut visual);
+    assert_eq!(buffer.read_with(&visual, |b, _| b.selected_range()), 0..29, "releasing keeps the line selection");
     act(&mut cx, &|ws, w, cx| ws.close_live(&id, w, cx));
+}
+
+#[test]
+fn composer_double_click_and_triple_click_drag() {
+    let _dirs = crate::datadir::use_throwaway_folders();
+    let mut cx = TestAppContext::single();
+    cx.update(|app| {
+        gpui_kit::init(app);
+        gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, app);
+    });
+    let (window, ws) = cx
+        .update(|app| gpui_kit::open_window(Default::default(), app, |window, app| app.new(|cx| Workspace::new(window, vec![], cx))))
+        .unwrap();
+    cx.update_window(window, |_, window, _| window.activate_window()).unwrap();
+    let prompt = ws.read_with(&cx, |ws, _| ws.home.prompt.clone());
+    cx.update_window(window, |_, window, app| {
+        prompt.update(app, |p, cx| p.set_value("hello brave world\nsecond line\nthird line", window, cx));
+        window.draw(app).clear(app);
+    }).unwrap();
+    cx.run_until_parked();
+
+    let mut visual = gpui::VisualTestContext::from_window(window, &cx);
+    let redraw = |visual: &mut gpui::VisualTestContext| {
+        visual.update(|window, app| window.draw(app).clear(app));
+        visual.run_until_parked();
+    };
+    redraw(&mut visual);
+    let centre = |visual: &VisualTestContext, offset: usize| {
+        prompt.read_with(visual, |p, _| p.range_to_bounds(&(offset..offset + 1))).unwrap().center()
+    };
+    let none = gpui::Modifiers::default();
+    let (pt_hello, pt_brave, pt_world) = (centre(&visual, 2), centre(&visual, 8), centre(&visual, 14));
+
+    // Exact Windows double-click-and-drag sequence on the composer textarea.
+    visual.simulate_event(gpui::MouseDownEvent { position: pt_brave, modifiers: none, button: gpui::MouseButton::Left, click_count: 1, first_mouse: false });
+    visual.simulate_event(gpui::MouseUpEvent { position: pt_brave, modifiers: none, button: gpui::MouseButton::Left, click_count: 1 });
+    visual.simulate_event(gpui::MouseMoveEvent { position: pt_brave + gpui::point(gpui::px(1.0), gpui::px(0.0)), modifiers: none, pressed_button: None });
+    visual.simulate_event(gpui::MouseDownEvent { position: pt_brave, modifiers: none, button: gpui::MouseButton::Left, click_count: 2, first_mouse: false });
+    redraw(&mut visual);
+    assert_eq!(prompt.read_with(&visual, |p, _| p.selected_range()), 6..11);
+    visual.simulate_event(gpui::MouseMoveEvent { position: pt_world, modifiers: none, pressed_button: Some(gpui::MouseButton::Left) });
+    redraw(&mut visual);
+    assert_eq!(prompt.read_with(&visual, |p, _| p.selected_range()), 6..17);
+    visual.simulate_event(gpui::MouseMoveEvent { position: pt_hello, modifiers: none, pressed_button: Some(gpui::MouseButton::Left) });
+    redraw(&mut visual);
+    assert_eq!(prompt.read_with(&visual, |p, _| p.selected_range()), 0..11);
+    visual.simulate_event(gpui::MouseUpEvent { position: pt_hello, modifiers: none, button: gpui::MouseButton::Left, click_count: 2 });
+    redraw(&mut visual);
+    assert_eq!(prompt.read_with(&visual, |p, _| p.selected_range()), 0..11);
+
+    // Triple-click-and-drag on the composer textarea extends by whole lines.
+    let (pt_line1, pt_line2, pt_line3) = (centre(&visual, 8), centre(&visual, 20), centre(&visual, 32));
+    for click_count in [1, 2] {
+        visual.simulate_event(gpui::MouseDownEvent { position: pt_line2, modifiers: none, button: gpui::MouseButton::Left, click_count, first_mouse: false });
+        visual.simulate_event(gpui::MouseUpEvent { position: pt_line2, modifiers: none, button: gpui::MouseButton::Left, click_count });
+    }
+    visual.simulate_event(gpui::MouseDownEvent { position: pt_line2, modifiers: none, button: gpui::MouseButton::Left, click_count: 3, first_mouse: false });
+    redraw(&mut visual);
+    assert_eq!(prompt.read_with(&visual, |p, _| p.selected_range()), 18..29);
+    visual.simulate_event(gpui::MouseMoveEvent { position: pt_line3, modifiers: none, pressed_button: Some(gpui::MouseButton::Left) });
+    redraw(&mut visual);
+    assert_eq!(prompt.read_with(&visual, |p, _| p.selected_range()), 18..40);
+    visual.simulate_event(gpui::MouseMoveEvent { position: pt_line1, modifiers: none, pressed_button: Some(gpui::MouseButton::Left) });
+    redraw(&mut visual);
+    assert_eq!(prompt.read_with(&visual, |p, _| p.selected_range()), 0..29);
+    visual.simulate_event(gpui::MouseUpEvent { position: pt_line1, modifiers: none, button: gpui::MouseButton::Left, click_count: 3 });
+    redraw(&mut visual);
+    assert_eq!(prompt.read_with(&visual, |p, _| p.selected_range()), 0..29);
 }
 
 #[test]
