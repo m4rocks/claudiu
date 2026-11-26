@@ -1940,7 +1940,7 @@ mod tests {
         draw(cx);
 
         let selected = |cx: &mut gpui::VisualTestContext| {
-            cx.update(|window, app| TextSelection::selected_text(window, app))
+            cx.update(TextSelection::selected_text)
         };
         let none = Modifiers::default();
 

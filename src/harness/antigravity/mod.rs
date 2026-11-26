@@ -1,6 +1,8 @@
 //! Google Antigravity, which speaks ACP itself (`agy acp`). It resumes a session without replaying it, as T3 Code
 //! found, so an old Antigravity conversation opens empty and carries on from where it was.
 
+// Unused while usage polling is paused (see `ANTIGRAVITY` in `harness::subagents`); its tests still run.
+#[allow(dead_code)]
 pub mod limits;
 pub mod read_only;
 
