@@ -6,7 +6,7 @@ use gpui::{App, AppContext, Entity, InteractiveElement, ParentElement, StatefulI
 use gpui_kit::{assets::IconName, base::Button, component::input::{Input, InputState}};
 
 use crate::panels::scale;
-use crate::panels::theme::{self, hsla};
+use crate::panels::theme::theme;
 use crate::panels::widgets::{fade_in, focusable, icon, shortcut};
 
 pub const COMMENT_ICON: IconName = IconName::MessageSquare;
@@ -22,10 +22,10 @@ pub fn comment_trigger(id: impl Into<gpui::SharedString>, shortcut_label: bool) 
         .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(hint.clone()).build(window, cx))
         .size(px(COMMENT_SIZE))
         .rounded(px(4.0))
-        .bg(hsla(theme::SURFACE_ELEVATED))
-        .hover(|s| s.bg(hsla(theme::CONTROL_HOVER)))
+        .bg(theme().card)
+        .hover(|s| s.bg(theme().secondary_hover))
         .cursor_pointer()
-        .text_color(hsla(theme::TEXT))
+        .text_color(theme().foreground)
         .child(icon(COMMENT_ICON, COMMENT_ICON_SIZE))
 }
 
@@ -45,9 +45,9 @@ pub fn comment_box(input: &Entity<InputState>, enter: &str, send: &str) -> impl 
         .p(px(6.0))
         .rounded(px(6.0))
         .border_1()
-        .border_color(hsla(theme::FOCUS_BORDER))
-        .bg(hsla(theme::PANEL_BG))
+        .border_color(theme().ring)
+        .bg(theme().background)
         .child(Input::new(input))
-        .child(div().px(px(2.0)).text_size(scale::px(11.0)).text_color(hsla(theme::TEXT_FAINT)).child(format!("Enter {enter} · {} {send} · Esc cancels", shortcut("Enter"))));
+        .child(div().px(px(2.0)).text_size(scale::px(11.0)).text_color(theme().subtle_foreground).child(format!("Enter {enter} · {} {send} · Esc cancels", shortcut("Enter"))));
     fade_in(panel, format!("comment-input-{:?}", input.entity_id()), 140, 0.8)
 }

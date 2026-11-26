@@ -13,7 +13,7 @@ fn dropdowns_switch_on_one_click_and_load_all_harness_models() {
     let mut cx = TestAppContext::single();
     cx.update(|app| {
         gpui_kit::init(app);
-        gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, app);
+        crate::panels::theme::install(app);
         app.bind_keys(crate::app::line_action_bindings());
     });
     let (window, ws) = cx
@@ -125,7 +125,7 @@ fn dropdowns_answer_the_arrow_keys() {
     let mut cx = TestAppContext::single();
     cx.update(|app| {
         gpui_kit::init(app);
-        gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, app);
+        crate::panels::theme::install(app);
     });
     let dirs = vec![one.path().to_path_buf(), two.path().to_path_buf()];
     let (window, ws) = cx.update(|app| gpui_kit::open_window(Default::default(), app, |window, app| app.new(|cx| Workspace::new(window, dirs, cx)))).unwrap();
@@ -147,7 +147,7 @@ fn dropdowns_answer_the_arrow_keys() {
 fn keyboard_workspace(cx: &mut TestAppContext) -> (gpui::AnyWindowHandle, Entity<Workspace>) {
     cx.update(|app| {
         gpui_kit::init(app);
-        gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, app);
+        crate::panels::theme::install(app);
     });
     let (window, ws) = cx.update(|app| gpui_kit::open_window(Default::default(), app, |window, app| app.new(|cx| Workspace::new(window, vec![], cx)))).unwrap();
     cx.update_window(window, |_, window, _| window.activate_window()).unwrap();

@@ -91,7 +91,7 @@ mod render {
         let mut cx = TestAppContext::single();
         cx.update(|app| {
             gpui_kit::init(app);
-            gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, app);
+            crate::panels::theme::install(app);
         });
         let (window, view) = cx
             .update(|app| {
@@ -246,7 +246,7 @@ mod e2e {
             let cx = TestAppContext::single();
             cx.update(|app| {
                 gpui_kit::init(app);
-                gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, app);
+                crate::panels::theme::install(app);
             });
             let name = name.to_string();
             let (window, view) = cx

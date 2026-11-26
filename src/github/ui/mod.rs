@@ -10,7 +10,7 @@ mod popup;
 
 use popup::sort_name;
 
-use gpui::{
+use gpui::{Hsla, 
     AnyElement, App, ClickEvent, Context, Div, FontWeight, InteractiveElement, IntoElement, KeyDownEvent,
     ParentElement, Render, SharedString, Stateful, StatefulInteractiveElement, Styled, TextAlign, Window, div,
     prelude::FluentBuilder, px, AnimationExt,
@@ -23,18 +23,10 @@ use crate::panels::widgets::Trigger;
 use super::view::*;
 use crate::store::now;
 use crate::platform::monospace_font;
-use crate::panels::theme::{self, hsla};
+use crate::panels::theme::{self, theme};
 use gpui_kit::assets::IconName;
 use crate::panels::widgets::{ago, avatar, button, button_disabled, button_leading, danger_button, fade_in, icon, icon_button, section_label};
 
-const GREEN: u32 = 0x3fb950;
-const PURPLE: u32 = 0xa371f7;
-const RED: u32 = 0xf85149;
-const GRAY: u32 = 0x8b949e;
-const YELLOW: u32 = 0xd29922;
-const CARD_BG: u32 = 0x111112;
-const CARD_HEAD: u32 = 0x161617;
-const CARD_BORDER: u32 = 0x252526;
 /// Pane width from which the list and the detail sit side by side.
 const WIDE: f32 = 860.0;
 const LIST_W: f32 = 380.0;
@@ -57,14 +49,14 @@ fn label_pill(l: &Label) -> Div {
         .items_center()
         .rounded(px(9.0))
         .border_1()
-        .border_color(hsla(l.color).opacity(0.5))
-        .bg(hsla(l.color).opacity(0.16))
+        .border_color(theme::hex(l.color).opacity(0.5))
+        .bg(theme::hex(l.color).opacity(0.16))
         .text_size(crate::panels::scale::px(11.0))
-        .text_color(hsla(lighten(l.color, 0.45)))
+        .text_color(theme::hex(lighten(l.color, 0.45)))
         .child(l.name.clone())
 }
 
-fn pill(text: impl Into<SharedString>, color: u32) -> Div {
+fn pill(text: impl Into<SharedString>, color: Hsla) -> Div {
     div()
         .flex_none()
         .px(px(8.0))
@@ -72,47 +64,49 @@ fn pill(text: impl Into<SharedString>, color: u32) -> Div {
         .flex()
         .items_center()
         .rounded(px(10.0))
-        .bg(hsla(color))
+        .bg(color)
         .text_size(crate::panels::scale::px(11.5))
         .font_weight(FontWeight::SEMIBOLD)
-        .text_color(hsla(theme::PANEL_BG))
+        .text_color(theme().background)
         .child(text.into())
 }
 
 fn faint(text: impl Into<SharedString>) -> Div {
-    div().text_size(crate::panels::scale::px(11.5)).text_color(hsla(theme::TEXT_FAINT)).child(text.into())
+    div().text_size(crate::panels::scale::px(11.5)).text_color(theme().subtle_foreground).child(text.into())
 }
 
 fn dim(text: impl Into<SharedString>) -> Div {
-    div().text_size(crate::panels::scale::px(12.0)).text_color(hsla(theme::TEXT_DIM)).child(text.into())
+    div().text_size(crate::panels::scale::px(12.0)).text_color(theme().muted_foreground).child(text.into())
 }
 
-fn state_style(item: &Item) -> (IconName, u32, &'static str) {
+fn state_style(item: &Item) -> (IconName, Hsla, &'static str) {
     match (item.kind, item.state) {
-        (Kind::Issue, State::Open) => (IconName::CircleDot, GREEN, "Open"),
-        (Kind::Issue, _) if item.not_planned => (IconName::CircleSlash, GRAY, "Not planned"),
-        (Kind::Issue, _) => (IconName::CircleCheck, PURPLE, "Closed"),
-        (Kind::Pull, State::Merged) => (IconName::GitMerge, PURPLE, "Merged"),
-        (Kind::Pull, State::Closed) => (IconName::GitPullRequestClosed, RED, "Closed"),
-        (Kind::Pull, State::Open) if item.draft => (IconName::GitPullRequestDraft, GRAY, "Draft"),
-        (Kind::Pull, State::Open) => (IconName::GitPullRequest, GREEN, "Open"),
+        (Kind::Issue, State::Open) => (IconName::CircleDot, theme().state_open, "Open"),
+        (Kind::Issue, _) if item.not_planned => (IconName::CircleSlash, theme().state_neutral, "Not planned"),
+        (Kind::Issue, _) => (IconName::CircleCheck, theme().state_merged, "Closed"),
+        (Kind::Pull, State::Merged) => (IconName::GitMerge, theme().state_merged, "Merged"),
+        (Kind::Pull, State::Closed) => (IconName::GitPullRequestClosed, theme().state_closed, "Closed"),
+        (Kind::Pull, State::Open) if item.draft => (IconName::GitPullRequestDraft, theme().state_neutral, "Draft"),
+        (Kind::Pull, State::Open) => (IconName::GitPullRequest, theme().state_open, "Open"),
     }
 }
 
 /// Passed, failed or still running, drawn in the color `check_color` picked.
-fn check_icon(color: u32) -> IconName {
-    match color {
-        GREEN => IconName::CircleCheck,
-        RED => IconName::CircleX,
-        _ => IconName::CircleDot,
+fn check_icon(color: Hsla) -> IconName {
+    if color == theme().state_open {
+        IconName::CircleCheck
+    } else if color == theme().state_closed {
+        IconName::CircleX
+    } else {
+        IconName::CircleDot
     }
 }
 
-fn check_color(state: &str) -> u32 {
+fn check_color(state: &str) -> Hsla {
     match state {
-        "SUCCESS" | "NEUTRAL" | "SKIPPED" => GREEN,
-        "FAILURE" | "ERROR" | "TIMED_OUT" | "CANCELLED" | "ACTION_REQUIRED" | "STARTUP_FAILURE" => RED,
-        _ => YELLOW,
+        "SUCCESS" | "NEUTRAL" | "SKIPPED" => theme().state_open,
+        "FAILURE" | "ERROR" | "TIMED_OUT" | "CANCELLED" | "ACTION_REQUIRED" | "STARTUP_FAILURE" => theme().state_closed,
+        _ => theme().state_pending,
     }
 }
 
@@ -195,13 +189,13 @@ fn item(label: impl Into<String>, act: GhAct) -> PopItem {
 
 /// Grey bars where the description and the history will be, pulsing until they arrive.
 fn skeleton() -> AnyElement {
-    let bar = |w: f32, h: f32| div().h(px(h)).w(gpui::relative(w)).rounded(px(4.0)).bg(hsla(theme::SKELETON));
+    let bar = |w: f32, h: f32| div().h(px(h)).w(gpui::relative(w)).rounded(px(4.0)).bg(theme().muted);
     let card = |lines: &[f32]| {
         let mut body = div().flex().flex_col().gap(px(8.0)).p(px(12.0));
         for w in lines {
             body = body.child(bar(*w, 10.0));
         }
-        div().flex().flex_col().rounded(px(8.0)).border_1().border_color(hsla(CARD_BORDER)).bg(hsla(CARD_BG)).child(div().h(px(36.0)).px(px(12.0)).flex().items_center().child(bar(0.3, 10.0))).child(body)
+        div().flex().flex_col().rounded(px(8.0)).border_1().border_color(theme().border).bg(theme().inset).child(div().h(px(36.0)).px(px(12.0)).flex().items_center().child(bar(0.3, 10.0))).child(body)
     };
     div()
         .flex()
@@ -231,8 +225,8 @@ impl Render for GithubView {
             .size_full()
             .flex()
             .flex_col()
-            .bg(hsla(theme::PANEL_BG))
-            .text_color(hsla(theme::TEXT))
+            .bg(theme().background)
+            .text_color(theme().foreground)
             .text_size(crate::panels::scale::px(13.0))
             .on_key_down(cx.listener(|v, ev: &KeyDownEvent, window, cx| {
                 if ev.keystroke.key == "escape" {
@@ -280,7 +274,7 @@ impl GithubView {
             .justify_center()
             .px(px(32.0))
             .child(div().text_size(crate::panels::scale::px(16.0)).font_weight(FontWeight::SEMIBOLD).child(title))
-            .child(div().mt(px(8.0)).max_w(px(460.0)).text_size(crate::panels::scale::px(13.0)).text_color(hsla(theme::TEXT_DIM)).child(text))
+            .child(div().mt(px(8.0)).max_w(px(460.0)).text_size(crate::panels::scale::px(13.0)).text_color(theme().muted_foreground).child(text))
             .child(row)
             .into_any_element()
     }
@@ -325,11 +319,11 @@ impl GithubView {
                 .cursor_pointer()
                 .text_size(crate::panels::scale::px(12.5))
                 .font_weight(if on { FontWeight::SEMIBOLD } else { FontWeight::NORMAL })
-                .bg(if on { hsla(theme::ROW_ACTIVE) } else { hsla(theme::PANEL_BG) })
-                .text_color(hsla(if on { theme::TEXT } else { theme::TEXT_DIM }))
-                .hover(|s| s.bg(hsla(theme::ROW_HOVER)))
+                .bg(if on { theme().row_active } else { theme().background })
+                .text_color(if on { theme().foreground } else { theme().muted_foreground })
+                .hover(|s| s.bg(theme().row_hover))
                 .child(label.to_string())
-                .when(loaded, |d| d.child(div().text_size(crate::panels::scale::px(11.0)).text_color(hsla(theme::TEXT_FAINT)).child(count.to_string())))
+                .when(loaded, |d| d.child(div().text_size(crate::panels::scale::px(11.0)).text_color(theme().subtle_foreground).child(count.to_string())))
                 .on_click(go(cx, GhAct::SetKind(kind)))
         };
         let url = self.repo.as_ref().map(|r| r.url.clone()).unwrap_or_default();
@@ -345,7 +339,7 @@ impl GithubView {
             .h(px(42.0))
             .px(px(12.0))
             .border_b_1()
-            .border_color(hsla(theme::BORDER))
+            .border_color(theme().border)
             .child(
                 div()
                     .flex()
@@ -392,9 +386,9 @@ impl GithubView {
             .rounded(px(12.0))
             .cursor_pointer()
             .text_size(crate::panels::scale::px(12.0))
-            .bg(hsla(if active { theme::CURRENT_TINT } else { 0x161616 }))
-            .text_color(hsla(if active { theme::ACCENT } else { theme::TEXT_DIM }))
-            .hover(|s| s.bg(hsla(theme::CONTROL_HOVER)))
+            .bg(if active { theme().current } else { theme().card_header })
+            .text_color(if active { theme().primary } else { theme().muted_foreground })
+            .hover(|s| s.bg(theme().secondary_hover))
             .flex()
             .items_center()
             .gap(px(4.0))
@@ -418,8 +412,8 @@ impl GithubView {
                 .cursor_pointer()
                 .text_size(crate::panels::scale::px(12.5))
                 .font_weight(if on { FontWeight::SEMIBOLD } else { FontWeight::NORMAL })
-                .text_color(hsla(if on { theme::TEXT } else { theme::TEXT_DIM }))
-                .hover(|s| s.text_color(hsla(theme::TEXT)))
+                .text_color(if on { theme().foreground } else { theme().muted_foreground })
+                .hover(|s| s.text_color(theme().foreground))
                 .child(icon(glyph, 14.0))
                 .child(format!("{name} {count}"))
                 .on_click(go(cx, GhAct::SetState(Some(key))))
@@ -462,8 +456,8 @@ impl GithubView {
                     .items_center()
                     .cursor_pointer()
                     .text_size(crate::panels::scale::px(12.0))
-                    .text_color(hsla(theme::TEXT_FAINT))
-                    .hover(|s| s.text_color(hsla(theme::TEXT)))
+                    .text_color(theme().subtle_foreground)
+                    .hover(|s| s.text_color(theme().foreground))
                     .child("Clear")
                     .on_click(go(cx, GhAct::SetQuery(format!("is:{}", if default_state.is_empty() { "open" } else { &default_state })))),
             );
@@ -476,8 +470,8 @@ impl GithubView {
             .gap(px(8.0))
             .p(px(12.0))
             .border_b_1()
-            .border_color(hsla(theme::BORDER))
-            .child(div().child(Input::new(&self.query_input).h(px(30.0)).text_size(crate::panels::scale::px(12.5)).prefix(div().text_color(hsla(theme::TEXT_FAINT)).child(icon(IconName::Search, 14.0)))))
+            .border_color(theme().border)
+            .child(div().child(Input::new(&self.query_input).h(px(30.0)).text_size(crate::panels::scale::px(12.5)).prefix(div().text_color(theme().subtle_foreground).child(icon(IconName::Search, 14.0)))))
             .child(
                 div()
                     .flex()
@@ -494,7 +488,7 @@ impl GithubView {
         }
         if list.items.is_empty() {
             let msg = if let Some(e) = &list.error {
-                div().text_color(hsla(theme::DANGER)).child(e.clone())
+                div().text_color(theme().destructive).child(e.clone())
             } else if list.loading || !list.loaded {
                 dim("Loading…")
             } else if self.kind == Kind::Issue && self.info.as_ref().is_some_and(|i| !i.issues_enabled) {
@@ -519,7 +513,7 @@ impl GithubView {
             .flex_col()
             .h_full()
             .min_h_0()
-            .when(wide, |d| d.w(px(LIST_W)).flex_none().border_r_1().border_color(hsla(theme::BORDER)))
+            .when(wide, |d| d.w(px(LIST_W)).flex_none().border_r_1().border_color(theme().border))
             .when(!wide, |d| d.flex_1().min_w_0())
             .child(toolbar)
             .child(self.scrolls[0].wire(div().id("gh-list").flex_1().min_h_0(), window).child(rows).children(footer))
@@ -548,16 +542,16 @@ impl GithubView {
         let mut right = div().flex().flex_none().items_center().gap(px(8.0)).text_size(crate::panels::scale::px(11.5));
         if it.kind == Kind::Pull {
             if let Some(c) = &it.checks {
-                right = right.child(div().text_color(hsla(check_color(c))).child(icon(check_icon(check_color(c)), 14.0)));
+                right = right.child(div().text_color(check_color(c)).child(icon(check_icon(check_color(c)), 14.0)));
             }
             match it.review.as_deref() {
-                Some("APPROVED") => right = right.child(div().text_color(hsla(GREEN)).child("approved")),
-                Some("CHANGES_REQUESTED") => right = right.child(div().text_color(hsla(RED)).child("changes")),
+                Some("APPROVED") => right = right.child(div().text_color(theme().state_open).child("approved")),
+                Some("CHANGES_REQUESTED") => right = right.child(div().text_color(theme().state_closed).child("changes")),
                 _ => {}
             }
         }
         if it.comments > 0 {
-            right = right.child(div().flex().items_center().gap(px(3.0)).text_color(hsla(theme::TEXT_FAINT)).child(icon(IconName::MessageSquare, 13.0)).child(it.comments.to_string()));
+            right = right.child(div().flex().items_center().gap(px(3.0)).text_color(theme().subtle_foreground).child(icon(IconName::MessageSquare, 13.0)).child(it.comments.to_string()));
         }
         div()
             .id(SharedString::from(format!("gh-row-{:?}-{}", it.kind, it.number)))
@@ -566,11 +560,11 @@ impl GithubView {
             .px(px(14.0))
             .py(px(9.0))
             .border_b_1()
-            .border_color(hsla(theme::BORDER))
+            .border_color(theme().border)
             .cursor_pointer()
-            .bg(hsla(if selected { theme::ROW_ACTIVE } else { theme::PANEL_BG }))
-            .hover(|s| s.bg(hsla(theme::ROW_HOVER)))
-            .child(div().w(px(14.0)).flex_none().pt(px(1.0)).text_color(hsla(color)).child(icon(glyph, 14.0)))
+            .bg(if selected { theme().row_active } else { theme().background })
+            .hover(|s| s.bg(theme().row_hover))
+            .child(div().w(px(14.0)).flex_none().pt(px(1.0)).text_color(color).child(icon(glyph, 14.0)))
             .child(
                 div()
                     .flex_1()
@@ -602,7 +596,7 @@ impl GithubView {
             .items_center()
             .justify_center()
             .gap(px(6.0))
-            .child(div().text_size(crate::panels::scale::px(14.0)).text_color(hsla(theme::TEXT_DIM)).child("Select an issue or pull request"))
+            .child(div().text_size(crate::panels::scale::px(14.0)).text_color(theme().muted_foreground).child("Select an issue or pull request"))
             .child(faint("Search with GitHub syntax, e.g. is:open label:bug author:@me"))
     }
 }

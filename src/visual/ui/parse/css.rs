@@ -90,41 +90,44 @@ pub struct Css {
 
 /// The sidebar-matching palette a model can name instead of a hex value (`var(--accent)` or just `accent`).
 pub fn token(name: &str) -> Option<u32> {
-    Some(match name {
-        "bg" | "background" | "base" => theme::PANEL_BG,
-        "surface" | "card" => theme::TERMINAL_BG, // cards sit in the terminal and take its background
-        "raised" | "surface2" => theme::ROW_ACTIVE,
-        "border" => theme::BORDER,
-        "text" | "fg" | "foreground" => theme::TEXT,
-        "dim" | "muted" => theme::TEXT_DIM,
-        "faint" => theme::TEXT_FAINT,
-        "accent" | "primary" => theme::ACCENT,
-        "ok" | "success" | "good" => theme::OK,
-        "warn" | "warning" => theme::WARN,
-        "danger" | "error" | "bad" => theme::DANGER,
-        "info" => 0x61afef,
-        "selection" => theme::SELECTION,
+    let t = theme();
+    Some(to_hex(match name {
+        "bg" | "background" | "base" => t.background,
+        "surface" | "card" => t.background, // cards sit in the terminal and take its background
+        "raised" | "surface2" => t.row_active,
+        "border" => t.border,
+        "text" | "fg" | "foreground" => t.foreground,
+        "dim" | "muted" => t.muted_foreground,
+        "faint" => t.subtle_foreground,
+        "accent" | "primary" => t.primary,
+        "ok" | "success" | "good" => t.success,
+        "warn" | "warning" => t.warning,
+        "danger" | "error" | "bad" => t.destructive,
+        "info" => t.info,
+        "selection" => t.selection,
         _ => return None,
-    })
+    }))
 }
 
-/// CSS colour names, pulled onto the app's palette so a plain `red` still looks like m4code.
+/// CSS colour names, pulled onto the app's palette so a plain `red` still looks like m4code. `white` and `black` keep
+/// their CSS meaning.
 fn named(name: &str) -> Option<u32> {
-    Some(match name {
-        "red" => theme::DANGER,
-        "green" | "lime" => theme::OK,
-        "yellow" | "gold" => theme::WARN,
-        "orange" => theme::ACCENT,
-        "blue" => 0x61afef,
-        "purple" | "violet" => 0xc678dd,
-        "cyan" | "teal" | "aqua" => 0x56b6c2,
-        "pink" | "magenta" => 0xff7b86,
-        "white" => 0xffffff,
-        "black" => 0x000000,
-        "gray" | "grey" => theme::TEXT_DIM,
-        "silver" => 0xc8ccd4,
+    let t = theme();
+    Some(to_hex(match name {
+        "red" => t.destructive,
+        "green" | "lime" => t.success,
+        "yellow" | "gold" => t.warning,
+        "orange" => t.primary,
+        "blue" => t.ansi[4],
+        "purple" | "violet" => t.ansi[5],
+        "cyan" | "teal" | "aqua" => t.ansi[6],
+        "pink" | "magenta" => t.ansi[9],
+        "white" => gpui::white(),
+        "black" => gpui::black(),
+        "gray" | "grey" => t.muted_foreground,
+        "silver" => t.ansi[7],
         _ => return None,
-    })
+    }))
 }
 
 fn hex(s: &str) -> Option<Color> {

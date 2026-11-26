@@ -15,7 +15,7 @@ use crate::app::editing::Conflict;
 use crate::files::Change;
 use crate::app::{Act, Ask, AskExplain, AskFix, AskFixProblem, AskTests, EditorCommand, EditorPane, MenuItem, GoBack, GoForward, GoToLine, QuickOpen, SaveFile, Tab, Workspace, CloseTab, LineComment};
 use crate::panels::glide::Follow;
-use crate::panels::theme::{self, hsla};
+use crate::panels::theme::{self, theme};
 use crate::panels::comment_box::{COMMENT_ICON, COMMENT_ICON_SIZE, COMMENT_SIZE, comment_box};
 use crate::panels::widgets::{button, dropdown_card, icon};
 use crate::platform::path_key;
@@ -38,9 +38,9 @@ impl Workspace {
             let folder = entry.is_folder() || empty_folders.contains(entry.item().id.as_ref());
             let change = changed.get(&path_key(&path)).copied();
             let color = match change {
-                Some(Change::Modified) => theme::WARN,
-                Some(Change::Added) => theme::OK,
-                None => theme::TEXT,
+                Some(Change::Modified) => theme().warning,
+                Some(Change::Added) => theme().success,
+                None => theme().foreground,
             };
             let chevron = folder.then(|| icon(if entry.is_expanded() { IconName::ChevronDown } else { IconName::ChevronRight }, 12.0));
             let glyph = match (folder, entry.is_expanded()) {
@@ -61,9 +61,9 @@ impl Workspace {
                 .pl(px(8.0 + 12.0 * entry.depth() as f32 + if folder { 0.0 } else { 17.0 }))
                 .pr(px(10.0))
                 .text_size(crate::panels::scale::px(12.5))
-                .text_color(hsla(color))
+                .text_color(color)
                 .children(chevron)
-                .child(icon(glyph, 13.0).text_color(hsla(color)))
+                .child(icon(glyph, 13.0).text_color(color))
                 .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(entry.item().label.clone()))
                 .children(badge.map(|b| div().flex_none().text_size(crate::panels::scale::px(if folder { 8.0 } else { 11.0 })).child(b)));
             let (menu_ws, menu_id, menu_path) = (ws.clone(), tree_id.clone(), path.clone());
@@ -87,7 +87,7 @@ impl Workspace {
                 .px(px(10.0))
                 .py(px(6.0))
                 .text_size(crate::panels::scale::px(11.0))
-                .text_color(hsla(theme::TEXT_FAINT))
+                .text_color(theme().subtle_foreground)
                 .child("Too many files to list them all here.")
         });
         let body: AnyElement = match pane.shown() {
@@ -120,9 +120,9 @@ impl Workspace {
                         .px(px(12.0))
                         .py(px(3.0))
                         .border_t_1()
-                        .border_color(hsla(theme::BORDER))
+                        .border_color(theme().border)
                         .text_size(crate::panels::scale::px(11.0))
-                        .text_color(hsla(theme::TEXT_FAINT))
+                        .text_color(theme().subtle_foreground)
                         .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(s))
                 }))
                 .into_any_element(),
@@ -154,8 +154,8 @@ impl Workspace {
                 .rounded(px(theme::PANEL_RADIUS))
                 .overflow_hidden()
                 .border_1()
-                .border_color(hsla(theme::PANEL_BORDER))
-                .bg(hsla(theme::PANEL_BG))
+                .border_color(theme().panel_border)
+                .bg(theme().background)
                 .child(
                     div()
                         .flex()
@@ -165,7 +165,7 @@ impl Workspace {
                         .h_full()
                         .py(px(6.0))
                         .border_r_1()
-                        .border_color(hsla(theme::BORDER))
+                        .border_color(theme().border)
                         // Rows don't take the keyboard themselves; the pane does, so its shortcuts work from here.
                         .on_mouse_down(MouseButton::Left, cx.listener(|ws, _: &MouseDownEvent, window, cx| {
                             if let Some(pane) = ws.editor_owner().and_then(|id| ws.panes.get(&id)) {
@@ -302,14 +302,14 @@ fn comment_button(buffer: gpui::Entity<EditorState>, hovered: std::rc::Rc<std::c
             window.set_cursor_style(gpui::CursorStyle::PointingHand, &hitbox);
             let over = button.contains(&window.mouse_position());
             window.with_content_mask(Some(gpui::ContentMask { bounds: viewport }), |window| {
-                let bg = if over { theme::CONTROL_HOVER } else { theme::SURFACE_ELEVATED };
-                window.paint_quad(gpui::fill(button, hsla(bg)).corner_radii(px(4.0)));
+                let bg = if over { theme().secondary_hover } else { theme().card };
+                window.paint_quad(gpui::fill(button, bg).corner_radii(px(4.0)));
                 let inset = px((COMMENT_SIZE - COMMENT_ICON_SIZE) / 2.0);
                 let icon_bounds = gpui::Bounds::new(
                     button.origin + gpui::point(inset, inset),
                     gpui::size(px(COMMENT_ICON_SIZE), px(COMMENT_ICON_SIZE)),
                 );
-                let _ = window.paint_svg(icon_bounds, COMMENT_ICON.path(), None, gpui::TransformationMatrix::default(), hsla(theme::TEXT), cx);
+                let _ = window.paint_svg(icon_bounds, COMMENT_ICON.path(), None, gpui::TransformationMatrix::default(), theme().foreground, cx);
             });
             let ws = ws.clone();
             window.on_mouse_event(move |ev: &MouseDownEvent, phase, window, cx| {
@@ -402,9 +402,9 @@ fn change_marks(buffer: gpui::Entity<EditorState>, marks: std::sync::Arc<Vec<Lin
             window.with_content_mask(Some(gpui::ContentMask { bounds: viewport }), |window| {
                 for mark in marks.iter() {
                     let color = match mark.kind {
-                        Kind::Added => hsla(theme::OK),
-                        Kind::Modified => hsla(0x61afef),
-                        Kind::Deleted => hsla(theme::DANGER),
+                        Kind::Added => theme().success,
+                        Kind::Modified => theme().info,
+                        Kind::Deleted => theme().destructive,
                     };
                     if mark.kind == Kind::Deleted {
                         // A removal has no line of its own: a short bar on the border between the two lines it was between.
@@ -451,21 +451,21 @@ fn render_tabs(id: &crate::store::Id, pane: &EditorPane, window: &mut gpui::Wind
             .pl(px(12.0))
             .pr(px(6.0))
             .border_r_1()
-            .border_color(hsla(theme::BORDER))
+            .border_color(theme().border)
             .text_size(crate::panels::scale::px(12.0))
-            .text_color(hsla(if shown { theme::TEXT } else { theme::TEXT_DIM }))
-            .when(shown, |d| d.bg(hsla(theme::ROW_ACTIVE)))
+            .text_color(if shown { theme().foreground } else { theme().muted_foreground })
+            .when(shown, |d| d.bg(theme().row_active))
             .cursor_pointer()
             .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(rel.clone()).build(window, cx))
             .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.show_tab(&show, i, window, cx)))
             .on_mouse_up(MouseButton::Middle, cx.listener(move |ws, _: &gpui::MouseUpEvent, window, cx| ws.request_close_tab(&middle, i, window, cx)))
             .child(name)
-            .when(tab.dirty, |d| d.child(div().text_color(hsla(theme::ACCENT)).child("●")))
+            .when(tab.dirty, |d| d.child(div().text_color(theme().primary).child("●")))
             .child(
                 div()
                     .id(SharedString::from(format!("tab-close-{i}")))
                     .rounded(px(3.0))
-                    .hover(|s| s.bg(hsla(0x2a2a2a)))
+                    .hover(|s| s.bg(theme().secondary_hover))
                     .invisible()
                     .when(shown, |d| d.visible())
                     .group_hover(SharedString::from(format!("tab-{i}")), |s| s.visible())
@@ -482,7 +482,7 @@ fn render_tabs(id: &crate::store::Id, pane: &EditorPane, window: &mut gpui::Wind
         .h(px(30.0))
         .flex()
         .border_b_1()
-        .border_color(hsla(theme::BORDER))
+        .border_color(theme().border)
         .children(tabs)
         .into_any_element()
 }
@@ -502,11 +502,11 @@ fn render_conflict(id: &crate::store::Id, path: &std::path::Path, conflict: Conf
         .gap(px(8.0))
         .px(px(12.0))
         .py(px(6.0))
-        .bg(hsla(theme::NOTICE_BG))
+        .bg(theme().notice)
         .border_b_1()
-        .border_color(hsla(theme::NOTICE_BORDER))
+        .border_color(theme().notice_border)
         .text_size(crate::panels::scale::px(12.0))
-        .text_color(hsla(theme::WARN))
+        .text_color(theme().warning)
         .child(text)
         .child(
             div()
@@ -538,11 +538,11 @@ fn render_picker(p: &Picker, root: &std::path::Path, cx: &mut Context<Workspace>
             .py(px(4.0))
             .rounded(px(5.0))
             .cursor_pointer()
-            .when(i == p.selected, |d| d.bg(hsla(theme::ROW_ACTIVE)))
-            .hover(|s| s.bg(hsla(theme::ROW_HOVER)))
+            .when(i == p.selected, |d| d.bg(theme().row_active))
+            .hover(|s| s.bg(theme().row_hover))
             .child(div().text_size(crate::panels::scale::px(12.5)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(label))
             .children(detail.map(|d| {
-                div().text_size(crate::panels::scale::px(11.5)).text_color(hsla(theme::TEXT_DIM)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(d)
+                div().text_size(crate::panels::scale::px(11.5)).text_color(theme().muted_foreground).overflow_hidden().whitespace_nowrap().text_ellipsis().child(d)
             }))
             .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
                 ws.pick(i, cx);
@@ -616,7 +616,7 @@ fn centered(text: String) -> AnyElement {
         .justify_center()
         .px(px(24.0))
         .text_size(crate::panels::scale::px(12.5))
-        .text_color(hsla(theme::TEXT_FAINT))
+        .text_color(theme().subtle_foreground)
         .child(text)
         .into_any_element()
 }

@@ -34,7 +34,7 @@ use gpui_kit::component::input;
 use crate::terminal::glyphs;
 use crate::terminal::keys;
 use crate::terminal::{SpawnSpec, Terminal};
-use crate::panels::theme;
+use crate::panels::theme::{self};
 
 pub enum TerminalEvent {
     Exited(Option<i32>),
@@ -240,7 +240,7 @@ impl Render for TerminalView {
             .id("terminal")
             .relative()
             .size_full()
-            .bg(theme::hsla(theme::TERMINAL_BG))
+            .bg(theme::theme().background)
             .key_context("Terminal")
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key_down))

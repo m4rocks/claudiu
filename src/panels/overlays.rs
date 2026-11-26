@@ -4,14 +4,14 @@
 use gpui::{
     AnyElement, ClickEvent, Context, FontWeight, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
     ParentElement, StatefulInteractiveElement, Styled, Window, deferred, div,
-    prelude::FluentBuilder, px, rgba,
+    prelude::FluentBuilder, px,
 };
 
 use crate::app::{
     Act, Modal, Workspace,
 };
 use gpui_kit::component::input::Input;
-use crate::panels::theme::{self, hsla};
+use crate::panels::theme::theme;
 use gpui_kit::assets::IconName;
 use crate::panels::widgets::{
     button, button_colored, button_disabled_leading, danger_button, dialog_card, dropdown_card, fade_in, icon, icon_button,
@@ -64,7 +64,7 @@ impl Workspace {
             let (title, body, confirm_label, danger): (String, gpui::AnyElement, String, bool) = match modal {
                 Modal::Confirm { title, body, confirm, danger, .. } => (
                     title.clone(),
-                    div().text_size(crate::panels::scale::px(13.0)).text_color(hsla(theme::TEXT_DIM)).child(body.clone()).into_any_element(),
+                    div().text_size(crate::panels::scale::px(13.0)).text_color(theme().muted_foreground).child(body.clone()).into_any_element(),
                     confirm.clone(),
                     *danger,
                 ),
@@ -134,7 +134,7 @@ impl Workspace {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .bg(rgba(theme::BACKDROP))
+                    .bg(theme().backdrop)
                     .on_mouse_down(MouseButton::Left, cx.listener(|ws, _: &MouseDownEvent, window, cx| ws.act(Act::Dismiss, window, cx)))
                     .child(card),
             )
@@ -162,7 +162,7 @@ impl Workspace {
                         .px(px(14.0))
                         .py(px(10.0))
                         .text_size(crate::panels::scale::px(12.5))
-                        .text_color(hsla(theme::TEXT))
+                        .text_color(theme().foreground)
                         .child(t.text.clone())
                         .children(action),
                         format!("toast-{}", t.serial),
@@ -206,10 +206,10 @@ impl Workspace {
                 .px(px(10.0))
                 .py(px(7.0))
                 .rounded(px(6.0))
-                .bg(hsla(if primary { theme::ROW_ACTIVE } else { theme::PANEL_BG }))
+                .bg(if primary { theme().row_active } else { theme().background })
                 .border_1()
-                .border_color(hsla(if primary { theme::FOCUS_BORDER } else { theme::PANEL_BORDER }))
-                .hover(|s| s.bg(hsla(theme::SURFACE_HOVER)))
+                .border_color(if primary { theme().ring } else { theme().panel_border })
+                .hover(|s| s.bg(theme().accent))
                 .cursor_pointer()
                 .flex()
                 .items_start()
@@ -222,12 +222,12 @@ impl Workspace {
                             .size(px(14.0))
                             .rounded(px(3.5))
                             .border_1()
-                            .border_color(hsla(if checked { theme::ACCENT } else { theme::PANEL_BORDER }))
-                            .bg(hsla(if checked { theme::ACCENT } else { theme::PANEL_BG }))
+                            .border_color(if checked { theme().primary } else { theme().panel_border })
+                            .bg(if checked { theme().primary } else { theme().background })
                             .flex()
                             .items_center()
                             .justify_center()
-                            .when(checked, |box_el| box_el.child(icon(IconName::Check, 10.0).text_color(hsla(theme::PANEL_BG)))),
+                            .when(checked, |box_el| box_el.child(icon(IconName::Check, 10.0).text_color(theme().background))),
                     )
                 })
                 .child(
@@ -237,8 +237,8 @@ impl Workspace {
                         .flex()
                         .flex_col()
                         .gap(px(2.0))
-                        .child(div().text_size(scaled(12.0)).font_weight(FontWeight::MEDIUM).text_color(hsla(theme::TEXT)).child(opt.name.clone()))
-                        .children(opt.description.clone().map(|desc| div().text_size(scaled(11.0)).text_color(hsla(theme::TEXT_DIM)).child(desc))),
+                        .child(div().text_size(scaled(12.0)).font_weight(FontWeight::MEDIUM).text_color(theme().foreground).child(opt.name.clone()))
+                        .children(opt.description.clone().map(|desc| div().text_size(scaled(11.0)).text_color(theme().muted_foreground).child(desc))),
                 )
                 .on_click(cx.listener(move |ws, _: &ClickEvent, _w, cx| {
                     cx.stop_propagation();
@@ -262,9 +262,9 @@ impl Workspace {
             .w(px(pop_w))
             .p(px(12.0))
             .rounded(px(10.0))
-            .bg(hsla(theme::SURFACE_ELEVATED))
+            .bg(theme().card)
             .border_1()
-            .border_color(hsla(theme::FOCUS_BORDER))
+            .border_color(theme().ring)
             .flex()
             .flex_col()
             .gap(px(8.0))
@@ -284,20 +284,20 @@ impl Workspace {
                     .items_center()
                     .justify_between()
                     .gap(px(8.0))
-                    .child(div().min_w_0().flex_1().truncate().text_size(scaled(11.0)).text_color(hsla(theme::TEXT_DIM)).child(session_title))
+                    .child(div().min_w_0().flex_1().truncate().text_size(scaled(11.0)).text_color(theme().muted_foreground).child(session_title))
                     .child(
                         div()
                             .flex_none()
                             .px(px(6.0))
                             .py(px(1.5))
                             .rounded(px(4.0))
-                            .bg(hsla(theme::ROW_ACTIVE))
+                            .bg(theme().row_active)
                             .text_size(scaled(10.0))
-                            .text_color(hsla(theme::ACCENT))
+                            .text_color(theme().primary)
                             .child("Needs answer"),
                     ),
             )
-            .child(div().text_size(scaled(12.5)).font_weight(FontWeight::SEMIBOLD).text_color(hsla(theme::TEXT)).child(question.title))
+            .child(div().text_size(scaled(12.5)).font_weight(FontWeight::SEMIBOLD).text_color(theme().foreground).child(question.title))
             .child(self.sidebar_question_scroll.wire(div().id("sidebar-q-options").max_h(px(220.0)), window).child(options))
             .child(
                 div()
@@ -306,7 +306,7 @@ impl Workspace {
                     .justify_between()
                     .pt(px(4.0))
                     .border_t_1()
-                    .border_color(hsla(theme::BORDER))
+                    .border_color(theme().border)
                     .child(
                         button("sidebar-q-decline", "Decline", false).h(px(24.0)).on_click(cx.listener(move |ws, _: &ClickEvent, _w, cx| {
                             cx.stop_propagation();
@@ -325,9 +325,9 @@ impl Workspace {
                                         "sidebar-q-submit",
                                         Some(IconName::Check),
                                         &label,
-                                        hsla(theme::ACCENT),
-                                        hsla(theme::PANEL_BG),
-                                        hsla(0xdcdcdc),
+                                        theme().primary,
+                                        theme().background,
+                                        theme().primary_hover,
                                         None,
                                         true,
                                     )

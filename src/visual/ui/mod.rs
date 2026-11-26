@@ -168,7 +168,7 @@ mod tests {
         let mut cx = TestAppContext::single();
         cx.update(|app| {
             gpui_kit::init(app);
-            gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, app);
+            crate::panels::theme::install(app);
         });
         let (window, _) = cx.update(|app| gpui_kit::open_window(Default::default(), app, |_, app| app.new(|cx| Sample(SAMPLE.into(), cx.new(|_| super::CardUi::default()))))).unwrap();
         for _ in 0..3 {
@@ -188,7 +188,7 @@ mod tests {
         let mut cx = TestAppContext::single();
         cx.update(|app| {
             gpui_kit::init(app);
-            gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, app);
+            crate::panels::theme::install(app);
         });
         let ui = cx.update(|app| app.new(|_| super::CardUi::default()));
         let sample = ui.clone();
@@ -224,7 +224,7 @@ mod tests {
         let mut cx = TestAppContext::single();
         cx.update(|app| {
             gpui_kit::init(app);
-            gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, app);
+            crate::panels::theme::install(app);
         });
         let count = Arc::new(Mutex::new(0));
         let recorded = count.clone();

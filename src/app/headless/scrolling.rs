@@ -43,7 +43,7 @@ fn git_change_marks_are_painted() {
     let mut cx = TestAppContext::single();
     cx.update(|app| {
         gpui_kit::init(app);
-        gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, app);
+        crate::panels::theme::install(app);
     });
     let (window, ws) = cx.update(|app| gpui_kit::open_window(Default::default(), app, |window, app| app.new(|cx| Workspace::new(window, vec![], cx)))).unwrap();
     let draw = |cx: &mut TestAppContext| {
@@ -111,7 +111,7 @@ fn git_change_marks_follow_scrolling() {
     let mut cx = TestAppContext::single();
     cx.update(|app| {
         gpui_kit::init(app);
-        gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, app);
+        crate::panels::theme::install(app);
     });
     let (window, ws) = cx.update(|app| gpui_kit::open_window(Default::default(), app, |window, app| app.new(|cx| Workspace::new(window, vec![], cx)))).unwrap();
     let draw = |cx: &mut TestAppContext| {
@@ -179,7 +179,7 @@ fn the_editors_text_eases_to_a_wheel_notch() {
     let mut cx = TestAppContext::single();
     cx.update(|app| {
         gpui_kit::init(app);
-        gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, app);
+        crate::panels::theme::install(app);
     });
     let (window, ws) = cx.update(|app| gpui_kit::open_window(Default::default(), app, |window, app| app.new(|cx| Workspace::new(window, vec![], cx)))).unwrap();
     let draw = |cx: &mut TestAppContext| {
@@ -232,7 +232,7 @@ fn the_session_list_draws_rows_where_scrolling_brings_them() {
     let mut cx = TestAppContext::single();
     cx.update(|app| {
         gpui_kit::init(app);
-        gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, app);
+        crate::panels::theme::install(app);
     });
     let (window, ws) = cx.update(|app| gpui_kit::open_window(Default::default(), app, |window, app| app.new(|cx| Workspace::new(window, vec![], cx)))).unwrap();
     let draw = |cx: &mut TestAppContext| {

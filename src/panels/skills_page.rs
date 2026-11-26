@@ -7,17 +7,17 @@ use gpui_kit::component::input::{Input, InputState};
 
 use crate::app::{Act, SkillScope, SkillsTab, Workspace, WorkspacePicker};
 use crate::panels::settings_pages::{settings_group, toggle_switch};
-use crate::panels::theme::{self, hsla};
+use crate::panels::theme::theme;
 use crate::panels::widgets::{Trigger, button, button_disabled, fade_in, focusable, icon, empty_panel, skeleton_rows};
 use crate::skills::{CatalogStatus, InstalledSkill};
 use crate::skills::registry::{CatalogEntry, format_installs};
 
 fn faint(text: impl Into<SharedString>) -> Div {
-    div().text_size(crate::panels::scale::px(11.0)).text_color(hsla(theme::TEXT_FAINT)).child(text.into())
+    div().text_size(crate::panels::scale::px(11.0)).text_color(theme().subtle_foreground).child(text.into())
 }
 
 fn warn(text: impl Into<SharedString>) -> Div {
-    div().text_size(crate::panels::scale::px(11.0)).text_color(hsla(theme::WARN)).child(text.into())
+    div().text_size(crate::panels::scale::px(11.0)).text_color(theme().warning).child(text.into())
 }
 
 fn empty_state(text: impl Into<SharedString>) -> Div {
@@ -26,9 +26,9 @@ fn empty_state(text: impl Into<SharedString>) -> Div {
 
 fn search_group(input: &gpui::Entity<InputState>, action: Option<AnyElement>) -> Div {
     div().flex().flex_1().min_w_0().items_center().gap(px(6.0)).px(px(8.0)).py(px(3.0))
-        .rounded(px(7.0)).border_1().border_color(hsla(theme::PANEL_BORDER))
-        .bg(hsla(theme::PANEL_BG))
-        .child(div().flex_none().child(icon(IconName::Search, 14.0).text_color(hsla(theme::TEXT_DIM))))
+        .rounded(px(7.0)).border_1().border_color(theme().panel_border)
+        .bg(theme().background)
+        .child(div().flex_none().child(icon(IconName::Search, 14.0).text_color(theme().muted_foreground)))
         .child(div().flex_1().min_w_0().child(Input::new(input).appearance(false)))
         .children(action)
 }
@@ -53,16 +53,16 @@ impl Workspace {
         let harnesses: Vec<_> = self.active_skill_harnesses(None).into_iter().map(|h| h.name()).collect();
         let tabs = Tabs::new("skills-tabs")
             .flex().items_center().gap(px(2.0)).p(px(3.0)).rounded(px(8.0))
-            .bg(hsla(theme::SURFACE_HOVER))
+            .bg(theme().accent)
             .children([
                 ("skills-tab-installed", format!("Installed ({count})"), SkillsTab::Installed),
                 ("skills-tab-browse", "Browse".into(), SkillsTab::Browse),
             ].into_iter().enumerate().map(|(i, (id, label, tab))| {
                 Tab::new(id).set_position(i + 1, 2).selected(state.tab == tab)
                     .cursor_pointer().h(px(28.0)).px(px(10.0)).rounded(px(6.0))
-                    .text_color(hsla(theme::TEXT_DIM)).text_size(crate::panels::scale::px(12.5))
+                    .text_color(theme().muted_foreground).text_size(crate::panels::scale::px(12.5))
                     .font_weight(FontWeight::MEDIUM)
-                    .styles(|styles| styles.selected(|s| s.bg(hsla(theme::PANEL_BG)).text_color(hsla(theme::TEXT))))
+                    .styles(|styles| styles.selected(|s| s.bg(theme().background).text_color(theme().foreground)))
                     .child(label)
                     .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::SetSkillsTab(tab), window, cx)))
             }));
@@ -228,7 +228,7 @@ impl Workspace {
             .p(px(4.0))
             .rounded(px(6.0))
             .cursor_pointer()
-            .hover(|s| s.bg(hsla(theme::SURFACE_HOVER)))
+            .hover(|s| s.bg(theme().accent))
             .child(toggle_switch(on))
             .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::ToggleSkill(toggle_name.clone()), window, cx)));
         skill_row(&skill.name, &description, vec![
@@ -301,10 +301,10 @@ impl Workspace {
             .justify_between()
             .gap(px(12.0))
             .rounded(px(8.0))
-            .bg(hsla(theme::SURFACE_ELEVATED))
+            .bg(theme().card)
             .border_1()
-            .border_color(hsla(if open { theme::ACCENT } else { theme::PANEL_BORDER }))
-            .hover(|s| s.bg(hsla(theme::SURFACE_HOVER)))
+            .border_color(if open { theme().primary } else { theme().panel_border })
+            .hover(|s| s.bg(theme().accent))
             .text_size(crate::panels::scale::px(13.0))
             .cursor_pointer()
             .child(caption)
@@ -314,8 +314,8 @@ impl Workspace {
                     .min_w_0()
                     .items_center()
                     .gap(px(6.0))
-                    .child(div().min_w_0().text_ellipsis().overflow_hidden().whitespace_nowrap().text_color(hsla(theme::ACCENT)).child(label))
-                    .child(div().flex_none().child(icon(IconName::ChevronDown, 11.0).text_color(hsla(theme::TEXT_FAINT)))),
+                    .child(div().min_w_0().text_ellipsis().overflow_hidden().whitespace_nowrap().text_color(theme().primary).child(label))
+                    .child(div().flex_none().child(icon(IconName::ChevronDown, 11.0).text_color(theme().subtle_foreground))),
             )
             .dropdown_right(cx, |ws, at, window, cx| ws.open_skills_scope_picker(at, window, cx))
     }

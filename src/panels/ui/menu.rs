@@ -14,7 +14,7 @@ use gpui::{
 use gpui_kit::assets::IconName;
 
 use super::command::{self, Choices, Nav};
-use super::token;
+use crate::panels::theme::theme;
 use crate::panels::{picker, scale, widgets::{fade_in, icon}};
 
 type Select<V> = Rc<dyn Fn(&mut V, &mut Window, &mut Context<V>)>;
@@ -107,9 +107,9 @@ pub fn content(id: impl Into<ElementId>) -> Stateful<Div> {
         .min_w(px(128.0))
         .p(px(4.0))
         .rounded(px(8.0))
-        .bg(token::popover())
+        .bg(theme().popover)
         .border_1()
-        .border_color(token::border())
+        .border_color(theme().panel_border)
         .shadow_lg()
         .flex()
         .flex_col()
@@ -117,7 +117,7 @@ pub fn content(id: impl Into<ElementId>) -> Stateful<Div> {
 
 /// A rule between groups of rows, edge to edge like shadcn's `-mx-1 my-1`.
 pub fn separator() -> Div {
-    div().flex_none().h(px(1.0)).mx(px(-4.0)).my(px(4.0)).bg(token::separator())
+    div().flex_none().h(px(1.0)).mx(px(-4.0)).my(px(4.0)).bg(theme().border)
 }
 
 /// `entries` on a [`content`] surface `w` wide, keyed by `nav`: Up/Down/Enter move and choose, Esc runs `on_close`.
@@ -144,13 +144,13 @@ pub fn menu<V: 'static>(
         });
         let selector = row_id.clone();
         let color = if e.disabled {
-            token::faint_foreground()
+            theme().subtle_foreground
         } else if e.destructive {
-            token::destructive()
+            theme().destructive
         } else {
-            token::foreground()
+            theme().foreground
         };
-        let icon_color = if e.destructive && !e.disabled { color } else { token::faint_foreground() };
+        let icon_color = if e.destructive && !e.disabled { color } else { theme().subtle_foreground };
         let row = command::item(row_id.clone())
             .group(row_id)
             .debug_selector(move || selector.to_string())
@@ -164,9 +164,9 @@ pub fn menu<V: 'static>(
                     .flex()
                     .flex_col()
                     .child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().child(e.label))
-                    .children(e.detail.map(|d| div().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(scale::px(11.0)).text_color(token::faint_foreground()).child(d))),
+                    .children(e.detail.map(|d| div().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(scale::px(11.0)).text_color(theme().subtle_foreground).child(d))),
             )
-            .children(e.shortcut.map(|s| div().flex_none().pl(px(12.0)).text_size(scale::px(11.0)).text_color(token::faint_foreground()).child(s)))
+            .children(e.shortcut.map(|s| div().flex_none().pl(px(12.0)).text_size(scale::px(11.0)).text_color(theme().subtle_foreground).child(s)))
             .children(e.trailing);
         card = card.child(if e.disabled {
             row.into_any_element()

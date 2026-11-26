@@ -10,13 +10,13 @@ use gpui_kit::base::SelectableText;
 
 use super::parse::{Ax, Color, Css, Dir, Display, El, Len, Node, Svg, TextAlign, Tree, token};
 use super::{CardUi, OpenFile, Scope, SendText};
-use crate::panels::theme;
+use crate::panels::theme::{self, theme};
 
 /// The longest message the mod sends for a button (`PROMPT_MAX` in `mod/hooks/register.js`).
 const SEND_MAX: usize = 20_000;
 
 fn hsla(c: Color) -> Hsla {
-    let mut h = theme::hsla(c.0);
+    let mut h = theme::hex(c.0);
     h.a = c.1;
     h
 }
@@ -35,7 +35,7 @@ fn parse_open_target(target: &str) -> (String, Option<u32>, Option<u32>) {
 }
 
 fn tok(name: &str) -> Hsla {
-    theme::hsla(token(name).unwrap_or(theme::TEXT))
+    token(name).map(theme::hex).unwrap_or(theme().foreground)
 }
 
 fn length(l: Len) -> Length {
@@ -61,7 +61,7 @@ struct Ctx {
 
 impl Ctx {
     fn root() -> Self {
-        Self { color: Color(theme::TEXT, 1.0), weight: 400.0, italic: false, mono: false, underline: false, strike: false, run_bg: None, pre: false }
+        Self { color: Color(theme::to_hex(theme().foreground), 1.0), weight: 400.0, italic: false, mono: false, underline: false, strike: false, run_bg: None, pre: false }
     }
 
     fn with(&self, css: &Css, inline: bool) -> Self {

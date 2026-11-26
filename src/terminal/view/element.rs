@@ -183,7 +183,7 @@ impl Element for TerminalElement {
                 let selected = selection.is_some_and(|s| s.contains(p));
                 let bg_color = if selected {
                     bg_is_default = false;
-                    theme::hsla(theme::SELECTION)
+                    theme::theme().selection
                 } else {
                     theme::rgb_to_hsla(bg)
                 };
@@ -327,7 +327,7 @@ impl Element for TerminalElement {
         }
 
         let preedit = marked.zip(preedit_at).map(|(text, origin)| {
-            let fg = theme::hsla(theme::TEXT);
+            let fg = theme::theme().foreground;
             let run = TextRun {
                 len: text.len(),
                 font: base_font.clone(),
@@ -361,7 +361,7 @@ impl Element for TerminalElement {
         window: &mut Window,
         cx: &mut App,
     ) {
-        window.paint_quad(fill(pre.bounds, theme::hsla(theme::TERMINAL_BG)));
+        window.paint_quad(fill(pre.bounds, theme::theme().background));
         // A shifted view draws a row past the edges; the mask cuts it off.
         window.with_content_mask(Some(ContentMask { bounds: pre.bounds }), |window| {
         for (bounds, color) in pre.backgrounds.drain(..) {
@@ -374,7 +374,7 @@ impl Element for TerminalElement {
             let _ = line.paint(origin, pre.line_h, gpui::TextAlign::Left, None, window, cx);
         }
         if let Some((b, shape, _)) = pre.cursor.take() {
-            let color = theme::hsla(theme::ACCENT);
+            let color = theme::theme().primary;
             match shape {
                 CursorShape::Beam => window.paint_quad(fill(
                     Bounds::new(b.origin, size(px(2.0), b.size.height)),
@@ -391,7 +391,7 @@ impl Element for TerminalElement {
             }
         }
         if let Some((origin, line)) = pre.preedit.take() {
-            window.paint_quad(fill(Bounds::new(origin, size(line.width, pre.line_h)), theme::hsla(theme::TERMINAL_BG)));
+            window.paint_quad(fill(Bounds::new(origin, size(line.width, pre.line_h)), theme::theme().background));
             let _ = line.paint(origin, pre.line_h, gpui::TextAlign::Left, None, window, cx);
         }
         });

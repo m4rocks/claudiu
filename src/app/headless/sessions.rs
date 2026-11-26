@@ -52,7 +52,7 @@ fn run() {
     let mut cx = TestAppContext::single();
     cx.update(|app| {
         gpui_kit::init(app);
-        gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, app);
+        crate::panels::theme::install(app);
     });
     let (window, ws) = cx
         .update(|app| {
@@ -173,7 +173,7 @@ fn sessions_and_shell() {
     let mut cx = TestAppContext::single();
     cx.update(|app| {
         gpui_kit::init(app);
-        gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, app);
+        crate::panels::theme::install(app);
     });
     let (window, ws) = cx
         .update(|app| {

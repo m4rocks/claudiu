@@ -176,10 +176,7 @@ fn open_main_window(initial: Vec<std::path::PathBuf>, cx: &mut App) -> MainWindo
 fn init_ui(cx: &mut App) {
     gpui_kit::init(cx);
     app::register_languages();
-    gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, cx);
-    gpui_kit::component::Theme::update(cx, |theme| {
-        theme.colors.selection = panels::theme::hsla(panels::theme::ACCENT).opacity(0.24);
-    });
+    crate::panels::theme::install(cx);
     cx.bind_keys(app::keymap::bindings());
     // The text-input library binds these globally. A focused terminal must receive them as plain keys.
     cx.bind_keys(
@@ -341,6 +338,48 @@ mod source_tests {
         let mut bad = vec![];
         walk(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut bad);
         assert!(bad.is_empty(), "NUL byte in {bad:?}; write '\0' instead");
+    }
+
+    /// Every color comes from `panels::theme`, so the app can be restyled in one place. A literal color anywhere else
+    /// (`hsla(0x..)`, `rgb(0x..)`, `gpui::hsla(0.0, ..)`, a `u32` color constant) is a hardcoded color.
+    #[test]
+    fn no_color_literals_outside_the_theme() {
+        fn literal(line: &str) -> bool {
+            // Comments and string contents (inline UI's CSS tests) are not code.
+            let code = line.split("//").next().unwrap_or_default();
+            let compact: String = code.split('"').step_by(2).flat_map(str::chars).filter(|c| !c.is_whitespace()).collect();
+            let constructors = ["hsla(", "rgb(", "rgba(", "hex(", "hexa("];
+            let called_with_literal = constructors.iter().any(|f| {
+                compact.match_indices(f).any(|(at, _)| {
+                    let before = compact[..at].chars().next_back();
+                    let arg = compact[at + f.len()..].chars().next();
+                    !before.is_some_and(|c| c.is_alphanumeric() || c == '_') && arg.is_some_and(|c| c.is_ascii_digit())
+                })
+            });
+            let color_const = compact.contains(":u32=0x") && compact.split(":u32=0x").nth(1).is_some_and(|hex| hex.chars().take_while(char::is_ascii_hexdigit).count() >= 6);
+            called_with_literal || color_const
+        }
+        fn walk(dir: &std::path::Path, theme: &std::path::Path, bad: &mut Vec<String>) {
+            for entry in std::fs::read_dir(dir).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, theme, bad);
+                } else if path.extension().is_some_and(|e| e == "rs") && path != theme {
+                    let text = std::fs::read_to_string(&path).unwrap();
+                    for (i, line) in text.lines().enumerate() {
+                        if literal(line) {
+                            bad.push(format!("{}:{}: {}", path.display(), i + 1, line.trim()));
+                        }
+                    }
+                }
+            }
+        }
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut bad = vec![];
+        walk(&src, &src.join("panels").join("theme.rs"), &mut bad);
+        assert!(bad.is_empty(), "add a token to panels::theme::Theme instead of a literal color:
+{}", bad.join("
+"));
     }
 
     /// The unit tests share one environment for the whole run (`M4CODE_DATA_DIR` and the rest), and a headless test

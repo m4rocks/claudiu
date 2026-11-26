@@ -5,7 +5,7 @@ use gpui::{FontWeight, prelude::FluentBuilder, InteractiveElement, ParentElement
 use gpui_kit::assets::IconName;
 use gpui_kit::base::Button;
 
-use super::token;
+use crate::panels::theme::theme;
 use crate::panels::{scale, widgets::icon};
 
 /// How loud a button is.
@@ -59,15 +59,15 @@ pub fn button(id: impl Into<SharedString>, glyph: Option<IconName>, label: impl 
         .text_size(scale::px(text))
         .font_weight(FontWeight::MEDIUM)
         .cursor_pointer()
-        .focus_visible(|s| s.border_color(token::ring()))
+        .focus_visible(|s| s.border_color(theme().ring))
         .styles(|s| s.disabled(|s| s.opacity(0.5).cursor_default()));
     let styled = match variant {
-        Variant::Default => base.bg(token::primary()).text_color(token::primary_foreground()).hover(|s| s.opacity(0.9)),
-        Variant::Secondary => base.bg(token::secondary()).text_color(token::foreground()).hover(|s| s.bg(token::secondary_hover())),
-        Variant::Outline => base.border_color(token::border()).text_color(token::foreground()).hover(|s| s.bg(token::accent())),
-        Variant::Ghost => base.text_color(token::foreground()).hover(|s| s.bg(token::accent())),
-        Variant::Destructive => base.bg(token::destructive().opacity(0.6)).text_color(token::foreground()).hover(|s| s.bg(token::destructive().opacity(0.75))),
-        Variant::Link => base.text_color(token::foreground()).hover(|s| s.underline()),
+        Variant::Default => base.bg(theme().primary).text_color(theme().primary_foreground).hover(|s| s.opacity(0.9)),
+        Variant::Secondary => base.bg(theme().secondary).text_color(theme().foreground).hover(|s| s.bg(theme().secondary_hover)),
+        Variant::Outline => base.border_color(theme().panel_border).text_color(theme().foreground).hover(|s| s.bg(theme().secondary_hover)),
+        Variant::Ghost => base.text_color(theme().foreground).hover(|s| s.bg(theme().secondary_hover)),
+        Variant::Destructive => base.bg(theme().destructive.opacity(0.6)).text_color(theme().foreground).hover(|s| s.bg(theme().destructive.opacity(0.75))),
+        Variant::Link => base.text_color(theme().foreground).hover(|s| s.underline()),
     };
     styled.children(glyph.map(|g| icon(g, glyph_size))).when(!label.is_empty(), |b| b.child(label))
 }

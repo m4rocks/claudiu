@@ -14,7 +14,7 @@ use crate::app::{
 };
 use crate::panels::{logos, picker};
 use crate::panels::ui::command;
-use crate::panels::theme::{self, hsla};
+use crate::panels::theme::theme;
 use gpui_kit::assets::IconName;
 use crate::panels::widgets::{
     effort_slider, icon, icon_button, short_path, spinner,
@@ -27,7 +27,7 @@ impl Workspace {
         let active = self.picker.as_ref()?;
         let at = active.at;
         let scaled = crate::panels::scale::px;
-        let accent = hsla(theme::ACCENT);
+        let accent = theme().primary;
         let priority = if self.modal.is_some() { 25 } else { 22 };
 
         let (id, title, body, choices): (&'static str, &'static str, AnyElement, Option<command::Choices<Self>>) = match &active.kind {
@@ -60,13 +60,13 @@ impl Workspace {
                                 .pb(px(2.0))
                                 .text_size(scaled(10.5))
                                 .font_weight(gpui::FontWeight::MEDIUM)
-                                .text_color(hsla(theme::TEXT_FAINT))
+                                .text_color(theme().subtle_foreground)
                                 .child(m.harness.name()),
                         );
                     }
                     let selected = chosen_model.harness == m.harness && chosen_model.id == m.id;
                     let choice = m.clone();
-                    let logo = logos::draw(logos::for_harness(m.harness), 11.5, if selected { accent } else { hsla(theme::TEXT_FAINT) }).into_any_element();
+                    let logo = logos::draw(logos::for_harness(m.harness), 11.5, if selected { accent } else { theme().subtle_foreground }).into_any_element();
                     let row = command::row(gpui::SharedString::from(format!("home-model-opt-{n}")), Some(logo), m.name.clone(), None, None, selected, false)
                         .role(gpui::Role::ListBoxOption)
                         .aria_selected(selected);
@@ -83,7 +83,7 @@ impl Workspace {
                         ws.act(Act::HomeSetEffort(e), window, cx);
                     }
                 });
-                let effort_trailing = div().text_size(scaled(10.5)).text_color(hsla(theme::TEXT_FAINT)).child("←/→ or drag").into_any_element();
+                let effort_trailing = div().text_size(scaled(10.5)).text_color(theme().subtle_foreground).child("←/→ or drag").into_any_element();
                 let loading = self.model_lookups.any_loading(&self.store.data.settings.enabled_harnesses_list());
                 let body = div()
                     .flex_1()
@@ -101,7 +101,7 @@ impl Workspace {
                                 .items_center()
                                 .gap(px(6.0))
                                 .text_size(scaled(11.0))
-                                .text_color(hsla(theme::TEXT_FAINT))
+                                .text_color(theme().subtle_foreground)
                                 .child(spinner("home-models-loading", 11.0))
                                 .child("Loading models…"),
                         )
@@ -144,7 +144,7 @@ impl Workspace {
                 let mut shown = 0usize;
                 if mode == ProjectPickerMode::SidebarFilter && matches("all projects") {
                     let selected = current_id.is_none();
-                    let lead = icon(IconName::FolderOpen, 12.0).text_color(if selected { accent } else { hsla(theme::TEXT_FAINT) }).into_any_element();
+                    let lead = icon(IconName::FolderOpen, 12.0).text_color(if selected { accent } else { theme().subtle_foreground }).into_any_element();
                     let row = command::row("project-picker-all", Some(lead), "All projects", Some("Show sessions from every project".into()), None, selected, false);
                     list = list.child(choices.add(row, |ws, window, cx| ws.act(Act::FilterProject(None), window, cx), cx));
                     shown += 1;
@@ -155,7 +155,7 @@ impl Workspace {
                         continue;
                     }
                     let selected = current_id.as_ref() == Some(&p.id);
-                    let lead = icon(IconName::FolderOpen, 12.0).text_color(if selected { accent } else { hsla(theme::TEXT_FAINT) }).into_any_element();
+                    let lead = icon(IconName::FolderOpen, 12.0).text_color(if selected { accent } else { theme().subtle_foreground }).into_any_element();
                     let act = match mode {
                         ProjectPickerMode::Home => Act::HomeSelectProject(p.id.clone()),
                         ProjectPickerMode::SidebarFilter => Act::FilterProject(Some(p.id.clone())),
@@ -213,7 +213,7 @@ impl Workspace {
                         .into_any_element();
                     let row = command::row("git-picker-new-worktree", Some(icon(IconName::Plus, 12.0).into_any_element()), new_wt_title, Some(detail.into()), Some(current_pill), false, false)
                         .border_1()
-                        .border_color(hsla(theme::PANEL_BORDER));
+                        .border_color(theme().panel_border);
                     choices.add(row, move |ws, window, cx| ws.act(from_main.clone(), window, cx), cx)
                 };
 
@@ -227,15 +227,15 @@ impl Workspace {
                     let folder = wt.folder.clone();
                     let remove = wt.remove.clone();
                     let row_group = gpui::SharedString::from(format!("gp-wt-row-{i}"));
-                    let lead = icon(IconName::FolderGit2, 12.0).text_color(if current { accent } else { hsla(theme::TEXT_FAINT) }).into_any_element();
+                    let lead = icon(IconName::FolderGit2, 12.0).text_color(if current { accent } else { theme().subtle_foreground }).into_any_element();
                     let trailing = div()
                         .flex_none()
                         .flex()
                         .items_center()
                         .gap(px(6.0))
-                        .when(wt.running, |d| d.child(div().w(px(5.0)).h(px(5.0)).rounded_full().bg(hsla(theme::OK))))
+                        .when(wt.running, |d| d.child(div().w(px(5.0)).h(px(5.0)).rounded_full().bg(theme().success)))
                         .when_some(wt.branch.clone(), |d, b| {
-                            d.child(div().max_w(px(110.0)).overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(scaled(11.0)).text_color(hsla(theme::TEXT_FAINT)).child(b))
+                            d.child(div().max_w(px(110.0)).overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(scaled(11.0)).text_color(theme().subtle_foreground).child(b))
                         })
                         .children(remove.map(|act| {
                             icon_button(gpui::SharedString::from(format!("git-picker-wt-rm-{i}")), IconName::X)
@@ -303,14 +303,14 @@ impl Workspace {
                                 .items_center()
                                 .gap(px(6.0))
                                 .text_size(scaled(11.5))
-                                .text_color(hsla(theme::TEXT_FAINT))
+                                .text_color(theme().subtle_foreground)
                                 .child(spinner("git-picker-br-loading", 12.0))
                                 .child("Loading branches…")
                                 .into_any_element(),
                         );
                     }
                     Some(Err(why)) => {
-                        br_list.push(div().px(px(8.0)).py(px(6.0)).text_size(scaled(11.5)).text_color(hsla(theme::DANGER)).child(why.clone()).into_any_element());
+                        br_list.push(div().px(px(8.0)).py(px(6.0)).text_size(scaled(11.5)).text_color(theme().destructive).child(why.clone()).into_any_element());
                     }
                     Some(Ok(branches)) => {
                         let mut br_shown = 0usize;
@@ -335,7 +335,7 @@ impl Workspace {
                                 },
                                 None => Act::SwitchBranch(dir, name),
                             };
-                            let lead = icon(IconName::GitBranch, 12.0).text_color(if current { accent } else { hsla(theme::TEXT_FAINT) }).into_any_element();
+                            let lead = icon(IconName::GitBranch, 12.0).text_color(if current { accent } else { theme().subtle_foreground }).into_any_element();
                             let trailing = (held.is_some() || remove.is_some()).then(|| {
                                 div()
                                     .flex_none()
@@ -349,7 +349,7 @@ impl Workspace {
                                                 .items_center()
                                                 .gap(px(4.0))
                                                 .text_size(scaled(11.0))
-                                                .text_color(hsla(theme::TEXT_FAINT))
+                                                .text_color(theme().subtle_foreground)
                                                 .child(icon(IconName::FolderGit2, 11.0))
                                                 .child(format!("opens {tree}")),
                                         )
@@ -391,7 +391,7 @@ impl Workspace {
                     .max_h(px(320.0))
                     .child(new_wt_row)
                     .child(div().pt(px(6.0)).child(picker::section_header("WORKTREES", None)))
-                    .when(!can_switch, |d| d.child(div().text_size(scaled(11.0)).text_color(hsla(theme::TEXT_FAINT)).child("Resume the session to switch worktrees.")))
+                    .when(!can_switch, |d| d.child(div().text_size(scaled(11.0)).text_color(theme().subtle_foreground).child("Resume the session to switch worktrees.")))
                     .children(wt_list)
                     .child(div().py(px(4.0)).child(picker::divider()))
                     .child(picker::section_header("BRANCHES", Some(new_branch_btn)))
@@ -437,7 +437,7 @@ impl Workspace {
                                 .pb(px(2.0))
                                 .text_size(scaled(10.5))
                                 .font_weight(gpui::FontWeight::MEDIUM)
-                                .text_color(hsla(theme::TEXT_FAINT))
+                                .text_color(theme().subtle_foreground)
                                 .child(m.harness.name()),
                         );
                     }
@@ -451,7 +451,7 @@ impl Workspace {
                     } else {
                         Act::PickDefaultModel(m.clone())
                     };
-                    let logo = logos::draw(logos::for_harness(m.harness), 11.5, if selected { accent } else { hsla(theme::TEXT_FAINT) }).into_any_element();
+                    let logo = logos::draw(logos::for_harness(m.harness), 11.5, if selected { accent } else { theme().subtle_foreground }).into_any_element();
                     let row = command::row(gpui::SharedString::from(format!("settings-model-opt-{n}")), Some(logo), m.name.clone(), None, None, selected, false)
                         .role(gpui::Role::ListBoxOption)
                         .aria_selected(selected);
@@ -476,7 +476,7 @@ impl Workspace {
                                 .items_center()
                                 .gap(px(6.0))
                                 .text_size(scaled(11.0))
-                                .text_color(hsla(theme::TEXT_FAINT))
+                                .text_color(theme().subtle_foreground)
                                 .child(spinner("settings-models-loading", 11.0))
                                 .child("Loading models…"),
                         )
@@ -512,7 +512,7 @@ impl Workspace {
                 for (i, mode) in Permission::ALL.into_iter().enumerate() {
                     let selected = current.and_then(|p| p.resolve(&offered)) == Some(mode);
                     let available = offered.contains(&mode);
-                    let lead = icon(IconName::Lock, 12.0).text_color(if selected { accent } else { hsla(theme::TEXT_FAINT) }).into_any_element();
+                    let lead = icon(IconName::Lock, 12.0).text_color(if selected { accent } else { theme().subtle_foreground }).into_any_element();
                     let row = command::row(
                         gpui::SharedString::from(format!("{row_id}-{i}")),
                         Some(lead),
@@ -543,7 +543,7 @@ impl Workspace {
                 let mut shown = 0usize;
                 if matches("global all workspaces") {
                     let selected = current == SkillScope::Global;
-                    let lead = icon(IconName::FolderOpen, 12.0).text_color(if selected { accent } else { hsla(theme::TEXT_FAINT) }).into_any_element();
+                    let lead = icon(IconName::FolderOpen, 12.0).text_color(if selected { accent } else { theme().subtle_foreground }).into_any_element();
                     let row = command::row("skills-scope-global", Some(lead), "Global (all workspaces)", Some("Symlink into global harness skills folders".into()), None, selected, false)
                         .role(gpui::Role::ListBoxOption).aria_selected(selected);
                     list = list.child(choices.add(row, |ws, window, cx| ws.act(Act::SetSkillScope(SkillScope::Global), window, cx), cx));
@@ -556,7 +556,7 @@ impl Workspace {
                     }
                     let scope = SkillScope::Project(p.id.clone());
                     let selected = current == scope;
-                    let lead = icon(IconName::FolderOpen, 12.0).text_color(if selected { accent } else { hsla(theme::TEXT_FAINT) }).into_any_element();
+                    let lead = icon(IconName::FolderOpen, 12.0).text_color(if selected { accent } else { theme().subtle_foreground }).into_any_element();
                     let row = command::row(gpui::SharedString::from(format!("skills-scope-{i}")), Some(lead), p.name.clone(), Some(path_str), None, selected, false)
                         .role(gpui::Role::ListBoxOption).aria_selected(selected);
                     list = list.child(choices.add(row, move |ws, window, cx| ws.act(Act::SetSkillScope(scope.clone()), window, cx), cx));
@@ -569,8 +569,8 @@ impl Workspace {
                     .h(px(30.0)).appearance(false).aria_label("Find a project or choose Global");
                 let body = div().flex().flex_col().gap(px(5.0))
                     .child(div().flex().items_center().gap(px(7.0)).px(px(8.0)).rounded(px(6.0))
-                        .bg(hsla(theme::PANEL_BG)).border_1().border_color(hsla(theme::PANEL_BORDER))
-                        .child(icon(IconName::Search, 14.0).text_color(hsla(theme::TEXT_DIM)))
+                        .bg(theme().background).border_1().border_color(theme().panel_border)
+                        .child(icon(IconName::Search, 14.0).text_color(theme().muted_foreground))
                         .child(div().flex_1().min_w_0().child(field)))
                     .child(list);
                 ("skills-scope-dialog", "SKILL SCOPE", body.into_any_element(), Some(choices))
@@ -587,7 +587,7 @@ impl Workspace {
                     }
                     let selected = current == Some(ed);
                     let path = target.clone();
-                    let lead = icon(IconName::ExternalLink, 12.0).text_color(if selected { accent } else { hsla(theme::TEXT_FAINT) }).into_any_element();
+                    let lead = icon(IconName::ExternalLink, 12.0).text_color(if selected { accent } else { theme().subtle_foreground }).into_any_element();
                     let row = command::row(gpui::SharedString::from(format!("editor-picker-{i}")), Some(lead), ed.label(), None, None, selected, false);
                     list = list.child(choices.add(row, move |ws, window, cx| ws.act(Act::OpenEditor(ed, path.clone()), window, cx), cx));
                     shown += 1;

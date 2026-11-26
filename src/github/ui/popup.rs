@@ -238,7 +238,7 @@ impl GithubView {
                 .flex()
                 .items_center()
                 .gap(px(6.0))
-                .children(it.swatch.map(|c| div().size(px(10.0)).rounded_full().bg(hsla(c))))
+                .children(it.swatch.map(|c| div().size(px(10.0)).rounded_full().bg(theme::hex(c))))
                 .into_any_element();
             let trailing = it.hint.map(|hint| faint(hint).into_any_element());
             let row = command::row(SharedString::from(format!("gh-pop-{i}")), Some(lead), it.label, None, trailing, it.checked == Some(true), false);

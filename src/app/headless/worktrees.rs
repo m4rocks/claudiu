@@ -17,7 +17,7 @@ fn switching_between_worktrees_in_the_workspace() {
     let mut cx = TestAppContext::single();
     cx.update(|app| {
         gpui_kit::init(app);
-        gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, app);
+        crate::panels::theme::install(app);
     });
     let initial = vec![repo_dir.clone()];
     let (window, ws) = cx
@@ -236,7 +236,7 @@ fn removing_a_worktree_when_its_session_ends() {
     let mut cx = TestAppContext::single();
     cx.update(|app| {
         gpui_kit::init(app);
-        gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, app);
+        crate::panels::theme::install(app);
     });
     let initial = vec![repo_dir.clone()];
     let (window, ws) = cx

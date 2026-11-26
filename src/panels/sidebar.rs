@@ -11,7 +11,7 @@ use gpui::{
 use gpui_kit::component::input::Input;
 use crate::app::{Act, Activity, MenuItem, SideDrag, Workspace};
 use crate::store::{Id, Project, SessionKind, SessionRecord, now};
-use crate::panels::theme::{self, hsla};
+use crate::panels::theme::{self, theme};
 use gpui_kit::assets::IconName;
 use crate::panels::status_icon::{SessionDot, StatusIcon};
 use crate::panels::logos;
@@ -71,7 +71,7 @@ fn begin_drag(ws: &WeakEntity<Workspace>, id: &Id, cx: &mut gpui::App) -> gpui::
 
 /// Style of the row or header being dragged.
 pub(super) fn lifted<T: Styled>(el: T) -> T {
-    el.bg(hsla(theme::ROW_ACTIVE)).border_1().border_color(hsla(theme::TEXT_FAINT))
+    el.bg(theme().row_active).border_1().border_color(theme().subtle_foreground)
 }
 
 /// Height of a running session's row plus the gap between rows.
@@ -379,8 +379,8 @@ impl Workspace {
         let ws = cx.entity().downgrade();
         let hover_key = key.clone();
         let right_text = if row.archived { "archived".to_string() } else { row.right.clone() };
-        let right_color = hsla(theme::TEXT_FAINT);
-        let title_color = hsla(if row.dim { theme::TEXT_DIM } else { theme::TEXT });
+        let right_color = theme().subtle_foreground;
+        let title_color = if row.dim { theme().muted_foreground } else { theme().foreground };
         let ellipsis = |el: Div| el.min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis();
         let content = if row.running {
             // Harness mark + project and age, then the title with the status icon, then the branch.
@@ -397,8 +397,8 @@ impl Workspace {
                         .gap(px(5.0))
                         .text_size(crate::panels::scale::px(11.0))
                         .line_height(crate::panels::scale::px(14.0))
-                        .text_color(hsla(theme::TEXT_FAINT))
-                        .children(row.harness.map(|h| logos::draw(logos::for_harness(h), 11.0, hsla(theme::TEXT_FAINT))))
+                        .text_color(theme().subtle_foreground)
+                        .children(row.harness.map(|h| logos::draw(logos::for_harness(h), 11.0, theme().subtle_foreground)))
                         .child(ellipsis(div().flex_1()).child(row.project.clone()))
                         .child(div().flex_none().text_color(right_color).child(right_text)),
                 )
@@ -410,7 +410,7 @@ impl Workspace {
                         .child(ellipsis(div().flex_1()).text_size(crate::panels::scale::px(13.0)).line_height(crate::panels::scale::px(17.0)).text_color(title_color).child(row.title.clone()))
                         .child(dot),
                 )
-                .children(row.branch.clone().map(|b| ellipsis(div()).text_size(crate::panels::scale::px(11.0)).line_height(crate::panels::scale::px(14.0)).text_color(hsla(theme::TEXT_FAINT)).child(b)))
+                .children(row.branch.clone().map(|b| ellipsis(div()).text_size(crate::panels::scale::px(11.0)).line_height(crate::panels::scale::px(14.0)).text_color(theme().subtle_foreground).child(b)))
                 .into_any_element()
         } else {
             div()
@@ -470,8 +470,8 @@ impl Workspace {
             .mx(px(5.0))
             .rounded(px(6.0))
             .cursor_pointer()
-            .when(row.active, |d| d.bg(hsla(theme::ROW_ACTIVE)))
-            .hover(|s| s.bg(hsla(theme::ROW_HOVER)))
+            .when(row.active, |d| d.bg(theme().row_active))
+            .hover(|s| s.bg(theme().row_hover))
             .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::Select(click_id.clone()), window, cx)))
             .on_mouse_down(
                 MouseButton::Right,
@@ -649,12 +649,12 @@ impl Workspace {
             .px(px(14.0))
             .h(px(HEADER_H + 8.0))
             .cursor_pointer()
-            .hover(|s| s.bg(gpui::white().opacity(0.035)))
-            .child(div().text_color(hsla(theme::TEXT_FAINT)).child(icon(if open { IconName::ChevronDown } else { IconName::ChevronRight }, 12.0)))
+            .hover(|s| s.bg(theme().row_hover))
+            .child(div().text_color(theme().subtle_foreground).child(icon(if open { IconName::ChevronDown } else { IconName::ChevronRight }, 12.0)))
             .child(section_label("RECENT"))
-            .child(div().text_size(crate::panels::scale::px(10.5)).text_color(hsla(theme::TEXT_FAINT)).child(rows.len().to_string()))
+            .child(div().text_size(crate::panels::scale::px(10.5)).text_color(theme().subtle_foreground).child(rows.len().to_string()))
             .on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::ToggleRecent, window, cx)));
-        let mut section = div().flex().flex_col().flex_none().w_full().border_t_1().border_color(hsla(theme::BORDER)).child(header);
+        let mut section = div().flex().flex_col().flex_none().w_full().border_t_1().border_color(theme().border).child(header);
         if open {
             let me = cx.entity_id();
             let mut list = div().flex().flex_col().w_full().gap(px(LIST_GAP)).pb(px(6.0));
@@ -700,7 +700,7 @@ impl Workspace {
                 .items_center()
                 .px(px(14.0))
                 .text_size(crate::panels::scale::px(12.0))
-                .text_color(hsla(theme::TEXT_FAINT))
+                .text_color(theme().subtle_foreground)
                 .child(text)
                 .into_any_element(),
             Item::Session { row, reorder: true } => {
@@ -727,15 +727,15 @@ impl Workspace {
             .justify_start()
             .gap(px(6.0))
             .rounded(px(6.0))
-            .bg(hsla(if filter_open { theme::ROW_ACTIVE } else { 0x141414 }))
-            .border_color(hsla(if filter_open { theme::ACCENT } else { 0x141414 }))
+            .bg(if filter_open { theme().row_active } else { theme().sidebar })
+            .border_color(if filter_open { theme().primary } else { theme().sidebar })
             .cursor_pointer()
-            .hover(|s| s.bg(hsla(theme::CONTROL)))
+            .hover(|s| s.bg(theme().secondary))
             .text_size(crate::panels::scale::px(12.0))
-            .text_color(hsla(if current.is_some() || filter_open { theme::TEXT } else { theme::TEXT_DIM }))
+            .text_color(if current.is_some() || filter_open { theme().foreground } else { theme().muted_foreground })
             .child(icon(IconName::FolderOpen, 13.0))
             .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(name))
-            .child(div().flex_none().text_color(hsla(theme::TEXT_FAINT)).child(icon(IconName::ChevronDown, 12.0)))
+            .child(div().flex_none().text_color(theme().subtle_foreground).child(icon(IconName::ChevronDown, 12.0)))
             .dropdown(cx, |ws, at, window, cx| {
                 ws.open_project_picker(crate::app::ProjectPickerMode::SidebarFilter, at, window, cx);
             });
@@ -786,8 +786,8 @@ impl Workspace {
                     .w(px(2.0))
                     .h(px(28.0))
                     .rounded_full()
-                    .bg(hsla(theme::RESIZE_HANDLE))
-                    .group_hover("left-resize", |s| s.bg(hsla(theme::RESIZE_HANDLE_HOVER))),
+                    .bg(theme().resize_handle)
+                    .group_hover("left-resize", |s| s.bg(theme().resize_handle_hover)),
             );
         div()
             .id("sidebar")
@@ -803,8 +803,8 @@ impl Workspace {
                     .rounded(px(theme::PANEL_RADIUS))
                     .overflow_hidden()
                     .border_1()
-                    .border_color(hsla(theme::PANEL_BORDER))
-                    .bg(hsla(theme::SIDEBAR_BG))
+                    .border_color(theme().panel_border)
+                    .bg(theme().sidebar)
                     .child(self.render_sidebar_header(cx))
                     .child(list)
                     .children(self.recent_section(window, cx))
@@ -827,7 +827,7 @@ impl Workspace {
                     Input::new(&self.search_input)
                         .h(px(26.0))
                         .text_size(crate::panels::scale::px(12.5))
-                        .prefix(div().text_color(hsla(theme::TEXT_FAINT)).child(icon(IconName::Search, 14.0))),
+                        .prefix(div().text_color(theme().subtle_foreground).child(icon(IconName::Search, 14.0))),
                 ),
             )
     }
@@ -848,10 +848,10 @@ impl Workspace {
             .mx(px(5.0))
             .rounded(px(6.0))
             .cursor_pointer()
-            .text_color(hsla(if shown { theme::TEXT } else { theme::TEXT_DIM }))
-            .when(shown, |d| d.bg(hsla(theme::ROW_ACTIVE)))
-            .hover(|s| s.bg(hsla(theme::ROW_HOVER)).text_color(hsla(theme::TEXT)))
-            .child(icon(IconName::Plus, 13.0).text_color(hsla(theme::TEXT_FAINT)))
+            .text_color(if shown { theme().foreground } else { theme().muted_foreground })
+            .when(shown, |d| d.bg(theme().row_active))
+            .hover(|s| s.bg(theme().row_hover).text_color(theme().foreground))
+            .child(icon(IconName::Plus, 13.0).text_color(theme().subtle_foreground))
             .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(crate::panels::scale::px(13.0)).child(label))
             .on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.open_home(window, cx)))
     }
@@ -870,7 +870,7 @@ impl Workspace {
 
         // A reset time stays true however old the reading is, so it shows whenever it is still ahead, including for a
         // reading saved before launch. Without one, the reading's age says how far to trust it.
-        let limit = |id: String, l: &Option<crate::store::RateLimit>, calm: u32, loading: bool| -> Stateful<Div> {
+        let limit = |id: String, l: &Option<crate::store::RateLimit>, calm: gpui::Hsla, loading: bool| -> Stateful<Div> {
             let (used, right, stale) = match l {
                 Some(l) => {
                     let old = t.saturating_sub(l.seen_at) > STALE_AFTER_SECS;
@@ -893,25 +893,25 @@ impl Workspace {
                 UsageDisplay::Left => (1.0 - f).clamp(0.0, 1.0),
             });
             let left = fill.map(|f| format!("{:.0}%", (f * 100.0).round())).unwrap_or_else(|| "—".into());
-            limit_bar(id, fill, used, left, right, Some(hsla(calm)), stale).flex_1().min_w_0()
+            limit_bar(id, fill, used, left, right, Some(calm), stale).flex_1().min_w_0()
         };
         // Fits the widest marks: two logos, or a logo and a two-letter name, plus an optional error dot.
         let label_w = crate::panels::scale::px(30.0);
         let gap = crate::panels::scale::px(6.0);
-        let source_row = |marks: &[&'static logos::Logo], name: Option<String>, color: u32, errored: bool, five: AnyElement, seven: AnyElement| -> Div {
+        let source_row = |marks: &[&'static logos::Logo], name: Option<String>, color: gpui::Hsla, errored: bool, five: AnyElement, seven: AnyElement| -> Div {
             let mut who = div().flex().flex_none().items_center().gap(crate::panels::scale::px(3.0)).w(label_w).overflow_hidden();
             for logo in marks {
-                who = who.child(logos::draw(logo, 12.0, hsla(color)));
+                who = who.child(logos::draw(logo, 12.0, color));
             }
             if let Some(name) = name {
-                who = who.child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(crate::panels::scale::px(10.5)).text_color(hsla(color)).child(name));
+                who = who.child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(crate::panels::scale::px(10.5)).text_color(color).child(name));
             }
             if errored {
-                who = who.child(div().flex_none().size(px(5.0)).rounded_full().bg(hsla(theme::WARN)));
+                who = who.child(div().flex_none().size(px(5.0)).rounded_full().bg(theme().warning));
             }
             div().flex().items_center().gap(gap).child(who).child(five).child(seven)
         };
-        let divider = || div().h(px(1.0)).w_full().my(px(2.0)).bg(hsla(theme::BORDER));
+        let divider = || div().h(px(1.0)).w_full().my(px(2.0)).bg(theme().border);
         let any_loading = [Harness::Claude, Harness::Codex, Harness::Antigravity]
             .into_iter()
             .any(|h| self.limits_state.get(h).loading);
@@ -923,8 +923,8 @@ impl Workspace {
             .items_center()
             .cursor_pointer()
             .rounded(px(3.0))
-            .text_color(hsla(if any_loading { theme::TEXT_DIM } else { theme::TEXT_FAINT }))
-            .hover(|s| s.text_color(hsla(theme::TEXT)))
+            .text_color(if any_loading { theme().muted_foreground } else { theme().subtle_foreground })
+            .hover(|s| s.text_color(theme().foreground))
             .child(icon(
                 if any_loading { IconName::LoaderCircle } else { IconName::RefreshCw },
                 11.0,
@@ -948,10 +948,10 @@ impl Workspace {
             rows.push(source_row(
                 &[&logos::CLAUDE],
                 None,
-                theme::CLAUDE,
+                theme().claude,
                 state.error.is_some(),
-                limit("meter-5h".into(), &usage.five_hour, theme::CLAUDE, state.loading).into_any_element(),
-                limit("meter-7d".into(), &usage.seven_day, theme::CLAUDE, state.loading).into_any_element(),
+                limit("meter-5h".into(), &usage.five_hour, theme().claude, state.loading).into_any_element(),
+                limit("meter-7d".into(), &usage.seven_day, theme().claude, state.loading).into_any_element(),
             ));
         }
         let subagents = &settings.custom_subagents;
@@ -971,14 +971,14 @@ impl Workspace {
                     for (i, pool) in pools.iter().enumerate() {
                         let source = format!("{}-{i}", provider.key);
                         let cell = |window: &str, l: &Option<crate::store::RateLimit>| match l {
-                            Some(_) => limit(format!("meter-{source}-{window}"), l, provider.color, state.loading).into_any_element(),
+                            Some(_) => limit(format!("meter-{source}-{window}"), l, (provider.color)(theme()), state.loading).into_any_element(),
                             None => div().flex_1().min_w_0().h(crate::panels::scale::px(16.0)).into_any_element(),
                         };
                         let (marks, name) = (provider.marks)(&pool.name);
                         rows.push(source_row(
                             marks,
                             name,
-                            provider.color,
+                            (provider.color)(theme()),
                             i == 0 && state.error.is_some(),
                             cell("5h", &pool.usage.five_hour),
                             cell("7d", &pool.usage.seven_day),
@@ -993,10 +993,10 @@ impl Workspace {
                     rows.push(source_row(
                         marks,
                         name,
-                        provider.color,
+                        (provider.color)(theme()),
                         state.error.is_some(),
-                        limit(format!("meter-{}-5h", provider.key), &None, provider.color, state.loading).into_any_element(),
-                        limit(format!("meter-{}-7d", provider.key), &None, provider.color, state.loading).into_any_element(),
+                        limit(format!("meter-{}-5h", provider.key), &None, (provider.color)(theme()), state.loading).into_any_element(),
+                        limit(format!("meter-{}-7d", provider.key), &None, (provider.color)(theme()), state.loading).into_any_element(),
                     ));
                 }
                 None => {}
@@ -1018,7 +1018,7 @@ impl Workspace {
                 .pt(px(8.0))
                 .pb(px(10.0))
                 .border_t_1()
-                .border_color(hsla(theme::BORDER))
+                .border_color(theme().border)
                 .child(limits),
         )
     }

@@ -17,7 +17,7 @@ use super::{ThreadEvent, ThreadView};
 use crate::git::snapshot::{self, FileChange, Hunk};
 use crate::panels::comment_box::{COMMENT_SIZE, comment_box, comment_input, comment_trigger};
 use crate::panels::scale;
-use crate::panels::theme::{self, hsla};
+use crate::panels::theme::theme;
 use crate::panels::widgets::{button, button_colored, empty_panel, skeleton_rows, spinner};
 
 pub(super) struct ActiveTurn {
@@ -493,7 +493,7 @@ impl ThreadView {
                 .flex()
                 .flex_col()
                 .gap(px(12.0))
-                .child(div().text_color(hsla(theme::TEXT_DIM)).child("Reading changes"))
+                .child(div().text_color(theme().muted_foreground).child("Reading changes"))
                 .child(skeleton_rows(5))
                 .into_any_element(),
             Some(files) if files.is_empty() && review.error.is_none() => div()
@@ -529,8 +529,8 @@ impl ThreadView {
             .gap(px(8.0))
             .items_center()
             .border_t_1()
-            .border_color(hsla(theme::PANEL_BORDER))
-            .child(div().flex_1().text_color(hsla(theme::TEXT_DIM)).child(if review.snapshot.is_some() { "Changes since your last message" } else { "Changes captured at the end of this turn" }))
+            .border_color(theme().panel_border)
+            .child(div().flex_1().text_color(theme().muted_foreground).child(if review.snapshot.is_some() { "Changes since your last message" } else { "Changes captured at the end of this turn" }))
             .when_some(turn, |footer, turn| {
                 let (id, end) = (turn.id, turn.end);
                 footer.when(!review.restoring, |footer| footer.child(
@@ -565,18 +565,18 @@ impl ThreadView {
                         let _ = clear.update(cx, |v, cx| v.cancel_restore(cx));
                     }
                 })
-                .backdrop(div().absolute().inset_0().bg(gpui::black().opacity(0.6)))
+                .backdrop(div().absolute().inset_0().bg(theme().backdrop))
                 .popup(AlertDialogPopup::new().w(px(420.0)).max_w_full().p(px(20.0))
                     .flex().flex_col().gap(px(10.0)).rounded(px(10.0))
-                    .bg(hsla(theme::PANEL_BG)).border_1().border_color(hsla(theme::PANEL_BORDER))
+                    .bg(theme().background).border_1().border_color(theme().panel_border)
                     .child(AlertDialogTitle::new().font_weight(FontWeight::SEMIBOLD).text_size(scale::px(16.0)).child("Restore this checkpoint?"))
-                    .child(AlertDialogDescription::new().text_color(hsla(theme::TEXT_DIM))
+                    .child(AlertDialogDescription::new().text_color(theme().muted_foreground)
                         .child("This puts files changed in this turn back to their earlier state. Restore is blocked if those files have changed since."))
                     .child(div().flex().justify_end().gap(px(8.0)).pt(px(6.0))
                         .child(button("restore-cancel", "Cancel", false).debug_selector(|| "restore-cancel".into())
                             .on_click(cx.listener(|v, _: &ClickEvent, _, cx| v.cancel_restore(cx))))
-                        .child(button_colored("restore-confirm", None, "Restore checkpoint", hsla(theme::DANGER),
-                            hsla(theme::PANEL_BG), hsla(theme::DANGER).opacity(0.8), None, true)
+                        .child(button_colored("restore-confirm", None, "Restore checkpoint", theme().destructive,
+                            theme().background, theme().destructive.opacity(0.8), None, true)
                             .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| {
                                 v.restore_turn(id, cx);
                                 v.cancel_restore(cx);
@@ -598,7 +598,7 @@ impl ThreadView {
         let files = review.files.as_deref().unwrap_or(&[]);
         let wrap = |el: AnyElement| div().w_full().px(px(18.0)).child(el).into_any_element();
         match row {
-            ReviewRow::Error(why) => wrap(div().pb(px(8.0)).text_color(hsla(theme::DANGER)).child(why.clone()).into_any_element()),
+            ReviewRow::Error(why) => wrap(div().pb(px(8.0)).text_color(theme().destructive).child(why.clone()).into_any_element()),
             ReviewRow::FileHeader { file_ix } => {
                 let Some(file) = files.get(*file_ix) else { return div().into_any_element() };
                 wrap(
@@ -610,7 +610,7 @@ impl ThreadView {
                         .into_any_element(),
                 )
             }
-            ReviewRow::NoDiff => wrap(div().pb(px(6.0)).text_color(hsla(theme::TEXT_DIM)).child("No textual diff").into_any_element()),
+            ReviewRow::NoDiff => wrap(div().pb(px(6.0)).text_color(theme().muted_foreground).child("No textual diff").into_any_element()),
             ReviewRow::HunkHeader { file_ix, hunk_ix, kept } => {
                 let Some(hunk) = review.hunk(*file_ix, *hunk_ix) else { return div().into_any_element() };
                 let (file_ix, hunk_ix) = (*file_ix, *hunk_ix);
@@ -619,7 +619,7 @@ impl ThreadView {
                     let review = view.review.as_ref().filter(|r| r.id == review_id && r.rows_generation == generation)?;
                     review.hunk(file_ix, hunk_ix).cloned()
                 };
-                let border_color = hsla(if *kept { theme::OK } else { theme::PANEL_BORDER });
+                let border_color = if *kept { theme().success } else { theme().panel_border };
                 let header = div()
                     .mt(px(if hunk_ix == 0 { 0.0 } else { 6.0 }))
                     .font_family(crate::platform::monospace_font())
@@ -629,18 +629,18 @@ impl ThreadView {
                     .gap(px(6.0))
                     .px(px(8.0))
                     .py(px(3.0))
-                    .bg(hsla(theme::APP_BG))
+                    .bg(theme().window)
                     .border_t_1()
                     .border_l_1()
                     .border_r_1()
                     .when(*kept, |d| d.border_b_1().rounded(px(4.0)))
                     .when(!*kept, |d| d.rounded_t(px(4.0)))
                     .border_color(border_color)
-                    .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(hsla(theme::TEXT_FAINT)).child(hunk.header.clone()))
+                    .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(theme().subtle_foreground).child(hunk.header.clone()))
                     .when(review.snapshot.is_some(), |header| {
                         header
                             .child(if *kept {
-                                div().text_color(hsla(theme::OK)).child("Kept").into_any_element()
+                                div().text_color(theme().success).child("Kept").into_any_element()
                             } else {
                                 button(SharedString::from(format!("review-keep-{file_ix}-{hunk_ix}")), "Keep", false)
                                     .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| {
@@ -665,9 +665,9 @@ impl ThreadView {
                 let Some(file) = files.get(*file_ix) else { return div().into_any_element() };
                 let Some(line) = file.hunks.get(*hunk_ix).and_then(|h| h.lines.get(*line_ix)) else { return div().into_any_element() };
                 let (bg, fg) = match line.origin {
-                    '+' => (theme::DIFF_ADDED_BG, theme::OK),
-                    '-' => (theme::DIFF_REMOVED_BG, theme::DANGER),
-                    _ => (theme::PANEL_BG, theme::TEXT_DIM),
+                    '+' => (theme().diff_added, theme().success),
+                    '-' => (theme().diff_removed, theme().destructive),
+                    _ => (theme().background, theme().muted_foreground),
                 };
                 let number = line.new_line.map_or(String::new(), |n| n.to_string());
                 let comment = review.snapshot.is_some().then(|| {
@@ -683,15 +683,15 @@ impl ThreadView {
                         div().size(px(COMMENT_SIZE)).into_any_element()
                     }
                 });
-                let border_color = hsla(if *kept { theme::OK } else { theme::PANEL_BORDER });
+                let border_color = if *kept { theme().success } else { theme().panel_border };
                 let row = div()
                     .id(SharedString::from(format!("review-line-{file_ix}-{hunk_ix}-{line_ix}")))
                     .group("review-diff-line")
                     .font_family(crate::platform::monospace_font())
                     .text_size(scale::px(12.5))
                     .flex()
-                    .bg(hsla(bg))
-                    .text_color(hsla(fg))
+                    .bg(bg)
+                    .text_color(fg)
                     .whitespace_nowrap()
                     .overflow_hidden()
                     .items_center()
@@ -700,7 +700,7 @@ impl ThreadView {
                     .when(*last_in_hunk, |d| d.border_b_1().rounded_b(px(4.0)))
                     .border_color(border_color)
                     .children(comment)
-                    .child(div().w(px(44.0)).flex_none().pr(px(8.0)).text_right().text_color(hsla(theme::TEXT_FAINT)).child(number))
+                    .child(div().w(px(44.0)).flex_none().pr(px(8.0)).text_right().text_color(theme().subtle_foreground).child(number))
                     .child(div().min_w_0().overflow_hidden().child(format!("{} {}", line.origin, line.text)));
                 wrap(row.into_any_element())
             }
@@ -708,11 +708,11 @@ impl ThreadView {
                 div()
                     .border_l_1()
                     .border_r_1()
-                    .border_color(hsla(theme::PANEL_BORDER))
+                    .border_color(theme().panel_border)
                     .pl(px(44.0 + COMMENT_SIZE))
                     .pr(px(8.0))
                     .py(px(3.0))
-                    .text_color(hsla(theme::ACCENT))
+                    .text_color(theme().primary)
                     .child(text.clone())
                     .into_any_element(),
             ),
@@ -722,7 +722,7 @@ impl ThreadView {
                     div()
                         .border_l_1()
                         .border_r_1()
-                        .border_color(hsla(theme::PANEL_BORDER))
+                        .border_color(theme().panel_border)
                         .pl(px(44.0 + COMMENT_SIZE))
                         .p(px(4.0))
                         .on_key_down(cx.listener(|v, ev: &KeyDownEvent, window, cx| {

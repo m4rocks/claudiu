@@ -14,7 +14,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 
 use gpui::{Image, ImageFormat, SMOOTH_SVG_SCALE_FACTOR};
 
-use crate::panels::theme;
+use crate::panels::theme::{theme, to_hex};
 
 #[derive(Clone)]
 pub struct El {
@@ -366,7 +366,7 @@ pub fn svg_tokens(s: &str) -> String {
         }
     }
     out.push_str(rest);
-    let text = format!("#{:06x}", theme::TEXT);
+    let text = format!("#{:06x}", to_hex(theme().foreground));
     out.replace("currentColor", &text).replace("currentcolor", &text)
 }
 
@@ -494,14 +494,14 @@ mod tests {
     fn css_tokens_and_literals_resolve() {
         let mut c = Css::default();
         c.apply("color: var(--accent); background:#fff8; border:1px solid var(--missing, rgb(10,20,30)); padding:4px 8px; gap:6px 12px; flex:1; width:50%");
-        assert_eq!(c.color, Some(Color(theme::ACCENT, 1.0)));
+        assert_eq!(c.color, Some(Color(to_hex(theme().primary), 1.0)));
         assert_eq!(c.bg.map(|b| b.0), Some(0xffffff));
         assert_eq!(c.border_color, Some(Color(0x0a141e, 1.0)));
         assert_eq!(c.pad, [Some(4.0), Some(8.0), Some(4.0), Some(8.0)]);
         assert_eq!((c.gap_y, c.gap_x), (Some(6.0), Some(12.0)));
         assert_eq!((c.grow, c.shrink), (Some(1.0), Some(1.0)));
         assert_eq!(c.w, Some(Len::Pct(50.0)));
-        assert_eq!(color("red"), Some(Color(theme::DANGER, 1.0)));
+        assert_eq!(color("red"), Some(Color(to_hex(theme().destructive), 1.0)));
         assert_eq!(color("#d9775780").map(|c| (c.0, (c.1 * 255.0).round() as u32)), Some((0xd97757, 128)));
         assert_eq!(color("nonsense"), None);
     }

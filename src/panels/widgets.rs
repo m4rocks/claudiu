@@ -12,7 +12,7 @@ use gpui_kit::assets::IconName;
 use gpui_kit::base::Button;
 use gpui_kit::component::Icon;
 
-use crate::panels::theme::{self, hsla};
+use crate::panels::theme::theme;
 
 /// The `<m4/>` brand mark on a dark rounded tile, matching the app icon.
 pub fn brand_mark(size: f32) -> Div {
@@ -24,17 +24,17 @@ pub fn brand_mark(size: f32) -> Div {
         .flex_none()
         .size(s)
         .rounded(crate::panels::scale::px(size * 0.22))
-        .bg(hsla(theme::PANEL_BG))
+        .bg(theme().background)
         .border_1()
-        .border_color(hsla(theme::BORDER))
-        .child(crate::panels::logos::draw(&crate::panels::logos::M4CODE, size, hsla(theme::ACCENT)))
+        .border_color(theme().border)
+        .child(crate::panels::logos::draw(&crate::panels::logos::M4CODE, size, theme().primary))
 }
 
 pub fn section_label(text: impl Into<SharedString>) -> Div {
     div()
         .text_size(crate::panels::scale::px(10.5))
         .font_weight(FontWeight::SEMIBOLD)
-        .text_color(hsla(theme::TEXT_FAINT))
+        .text_color(theme().subtle_foreground)
         .child(text.into())
 }
 
@@ -53,9 +53,9 @@ pub fn limit_bar(
     stale: bool,
 ) -> Stateful<Div> {
     let color = match severity {
-        Some(f) if f >= 0.9 => hsla(theme::DANGER),
-        Some(f) if f >= METER_WARN_AT => hsla(theme::WARN),
-        _ => tone.unwrap_or_else(|| hsla(theme::ACCENT)),
+        Some(f) if f >= 0.9 => theme().destructive,
+        Some(f) if f >= METER_WARN_AT => theme().warning,
+        _ => tone.unwrap_or_else(|| theme().primary),
     };
     let height = crate::panels::scale::px(16.0);
     let radius = crate::panels::scale::px(3.0);
@@ -69,7 +69,7 @@ pub fn limit_bar(
         .w(gpui::relative(fill.unwrap_or(0.0).clamp(0.0, 1.0)))
         .rounded(radius)
         .bg(color.opacity(fill_opacity));
-    let percent_color = if fill.is_some() && !stale { theme::TEXT } else { theme::TEXT_FAINT };
+    let percent_color = if fill.is_some() && !stale { theme().foreground } else { theme().subtle_foreground };
     let texts = div()
         .absolute()
         .top_0()
@@ -81,7 +81,7 @@ pub fn limit_bar(
         .justify_between()
         .gap(crate::panels::scale::px(4.0))
         .text_size(crate::panels::scale::px(10.5))
-        .child(div().flex_none().text_color(hsla(percent_color)).child(left))
+        .child(div().flex_none().text_color(percent_color).child(left))
         .child(
             div()
                 .min_w_0()
@@ -89,19 +89,19 @@ pub fn limit_bar(
                 .text_ellipsis()
                 .whitespace_nowrap()
                 .text_size(crate::panels::scale::px(10.0))
-                .text_color(hsla(if stale { theme::TEXT_FAINT } else { theme::TEXT_DIM }))
+                .text_color(if stale { theme().subtle_foreground } else { theme().muted_foreground })
                 .child(right),
         );
-    div().id(id.into()).relative().h(height).w_full().rounded(radius).overflow_hidden().bg(hsla(theme::ROW_HOVER)).child(fill_bar).child(texts)
+    div().id(id.into()).relative().h(height).w_full().rounded(radius).overflow_hidden().bg(theme().row_hover).child(fill_bar).child(texts)
 }
 
 /// Progress bar. `fraction == None` renders the neutral "unavailable" state.
 pub fn meter(label: &str, fraction: Option<f32>, caption: String, tone: Option<Hsla>) -> Div {
-    let track = hsla(theme::ROW_HOVER);
+    let track = theme().row_hover;
     let color = tone.unwrap_or_else(|| match fraction {
-        Some(f) if f >= 0.9 => hsla(theme::DANGER),
-        Some(f) if f >= METER_WARN_AT => hsla(theme::WARN),
-        _ => hsla(theme::ACCENT),
+        Some(f) if f >= 0.9 => theme().destructive,
+        Some(f) if f >= METER_WARN_AT => theme().warning,
+        _ => theme().primary,
     });
     let pct = fraction
         .map(|f| format!("{:.0}%", (f * 100.0).round()))
@@ -119,11 +119,11 @@ pub fn meter(label: &str, fraction: Option<f32>, caption: String, tone: Option<H
                 .child(
                     div()
                         .text_size(crate::panels::scale::px(11.5))
-                        .text_color(hsla(if fraction.is_some() {
-                            theme::TEXT
+                        .text_color(if fraction.is_some() {
+                            theme().foreground
                         } else {
-                            theme::TEXT_FAINT
-                        }))
+                            theme().subtle_foreground
+                        })
                         .child(pct),
                 ),
         )
@@ -145,7 +145,7 @@ pub fn meter(label: &str, fraction: Option<f32>, caption: String, tone: Option<H
         .child(
             div()
                 .text_size(crate::panels::scale::px(10.5))
-                .text_color(hsla(theme::TEXT_FAINT))
+                .text_color(theme().subtle_foreground)
                 .child(caption),
         )
 }
@@ -156,7 +156,7 @@ pub fn focusable(id: impl Into<ElementId>) -> Button {
     Button::new(id)
         .border_1()
         .border_color(gpui::transparent_black())
-        .focus_visible(|s| s.border_color(hsla(theme::ACCENT)))
+        .focus_visible(|s| s.border_color(theme().primary))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -208,11 +208,11 @@ fn button_with(
 }
 
 pub fn dialog_card(id: impl Into<gpui::ElementId>) -> Stateful<Div> {
-    div().id(id).occlude().rounded(px(12.0)).bg(hsla(theme::PANEL_BG)).border_1().border_color(hsla(theme::PANEL_BORDER)).shadow_lg()
+    div().id(id).occlude().rounded(px(12.0)).bg(theme().background).border_1().border_color(theme().panel_border).shadow_lg()
 }
 
 pub fn dropdown_card(id: impl Into<gpui::ElementId>) -> Stateful<Div> {
-    div().id(id).occlude().cursor_default().rounded(px(10.0)).bg(hsla(theme::SURFACE_ELEVATED)).border_1().border_color(hsla(theme::PANEL_BORDER)).shadow_lg()
+    div().id(id).occlude().cursor_default().rounded(px(10.0)).bg(theme().card).border_1().border_color(theme().panel_border).shadow_lg()
 }
 
 /// Compact text button. Caller attaches `.on_click`.
@@ -225,18 +225,18 @@ pub fn button(
         button_with(
             id.into(),
             label.into(),
-            hsla(theme::ACCENT),
-            hsla(theme::PANEL_BG),
-            hsla(0xdcdcdc),
+            theme().primary,
+            theme().background,
+            theme().primary_hover,
             true,
         )
     } else {
         button_with(
             id.into(),
             label.into(),
-            hsla(theme::CONTROL),
-            hsla(theme::TEXT),
-            hsla(theme::CONTROL_HOVER),
+            theme().secondary,
+            theme().foreground,
+            theme().secondary_hover,
             false,
         )
     }
@@ -245,9 +245,9 @@ pub fn button(
 /// `button` with a Lucide icon before the label.
 pub fn button_leading(id: impl Into<SharedString>, name: IconName, label: impl Into<SharedString>, primary: bool) -> Button {
     if primary {
-        button_colored(id, Some(name), label, hsla(theme::ACCENT), hsla(theme::PANEL_BG), hsla(0xdcdcdc), None, true)
+        button_colored(id, Some(name), label, theme().primary, theme().background, theme().primary_hover, None, true)
     } else {
-        button_colored(id, Some(name), label, hsla(theme::CONTROL), hsla(theme::TEXT), hsla(theme::CONTROL_HOVER), None, false)
+        button_colored(id, Some(name), label, theme().secondary, theme().foreground, theme().secondary_hover, None, false)
     }
 }
 
@@ -265,10 +265,10 @@ pub fn button_disabled_leading(id: impl Into<SharedString>, glyph: Option<IconNa
         .h(px(26.0))
         .gap(px(5.0))
         .rounded(px(6.0))
-        .bg(hsla(theme::CONTROL))
+        .bg(theme().secondary)
         .border_1()
-        .border_color(hsla(theme::BORDER))
-        .text_color(hsla(theme::TEXT_FAINT))
+        .border_color(theme().border)
+        .text_color(theme().subtle_foreground)
         .text_size(crate::panels::scale::px(12.0))
         .opacity(0.6)
         .cursor_default();
@@ -286,9 +286,9 @@ pub fn danger_button(id: impl Into<SharedString>, label: impl Into<SharedString>
     button_with(
         id.into(),
         label.into(),
-        hsla(0x5a2327),
-        hsla(0xffd9dc),
-        hsla(0x74292e),
+        theme().destructive_solid,
+        theme().destructive_solid_foreground,
+        theme().destructive_solid_hover,
         true,
     )
 }
@@ -346,7 +346,7 @@ pub fn effort_slider<V: 'static>(
             div()
                 .size(px(6.0))
                 .rounded_full()
-                .bg(if active { accent } else { hsla(0x323644) }),
+                .bg(if active { accent } else { theme().track_mark }),
         );
     }
 
@@ -372,7 +372,7 @@ pub fn effort_slider<V: 'static>(
                 .w_full()
                 .h(px(4.0))
                 .rounded_full()
-                .bg(hsla(0x252834))
+                .bg(theme().track)
                 .child(
                     div()
                         .absolute()
@@ -392,7 +392,7 @@ pub fn effort_slider<V: 'static>(
                 .ml(px(-6.0))
                 .size(px(12.0))
                 .rounded_full()
-                .bg(hsla(theme::TEXT))
+                .bg(theme().foreground)
                 .border_2()
                 .border_color(accent)
         }))
@@ -433,8 +433,8 @@ pub fn effort_slider<V: 'static>(
                 .cursor_pointer()
                 .text_size(crate::panels::scale::px(10.5))
                 .font_weight(if is_sel { FontWeight::SEMIBOLD } else { FontWeight::NORMAL })
-                .text_color(if is_sel { accent } else { hsla(theme::TEXT_FAINT) })
-                .hover(|s| s.text_color(hsla(theme::TEXT)))
+                .text_color(if is_sel { accent } else { theme().subtle_foreground })
+                .hover(|s| s.text_color(theme().foreground))
                 .child(label.clone())
                 .on_click(cx.listener(move |v, _: &ClickEvent, window, cx| pick(v, i, window, cx))),
         );
@@ -448,13 +448,13 @@ pub fn effort_slider<V: 'static>(
 pub fn subagent_state_icon(state: crate::app::SubagentState, size: f32) -> Icon {
     use crate::app::SubagentState::*;
     let (name, color) = match state {
-        Starting | Running => (IconName::CircleDotDashed, theme::BUSY),
-        WaitingForUser => (IconName::CircleQuestionMark, theme::WARN),
-        Completed => (IconName::CircleCheck, theme::TEXT_DIM),
-        Failed => (IconName::CircleX, theme::DANGER),
-        Stopped => (IconName::CircleSlash, theme::TEXT_FAINT),
+        Starting | Running => (IconName::CircleDotDashed, theme().busy),
+        WaitingForUser => (IconName::CircleQuestionMark, theme().warning),
+        Completed => (IconName::CircleCheck, theme().muted_foreground),
+        Failed => (IconName::CircleX, theme().destructive),
+        Stopped => (IconName::CircleSlash, theme().subtle_foreground),
     };
-    icon(name, size).text_color(hsla(color))
+    icon(name, size).text_color(color)
 }
 
 /// The "working" icon: Lucide's loader, turning.
@@ -470,9 +470,9 @@ pub fn icon_button(id: impl Into<SharedString>, glyph: IconName) -> Button {
     focusable(id.into())
         .size(px(22.0))
         .rounded(px(5.0))
-        .text_color(hsla(theme::TEXT_DIM))
+        .text_color(theme().muted_foreground)
         .cursor_pointer()
-        .hover(|s| s.bg(hsla(theme::CONTROL_HOVER)).text_color(hsla(theme::TEXT)))
+        .hover(|s| s.bg(theme().secondary_hover).text_color(theme().foreground))
         .child(icon(glyph, 14.0))
 }
 
@@ -482,7 +482,7 @@ pub fn icon_button_disabled(id: impl Into<SharedString>, glyph: IconName) -> But
         .disabled(true)
         .size(px(22.0))
         .rounded(px(5.0))
-        .text_color(hsla(theme::TEXT_FAINT))
+        .text_color(theme().subtle_foreground)
         .cursor_default()
         .child(icon(glyph, 14.0))
 }
@@ -502,16 +502,17 @@ pub fn key_badge(label: impl Into<SharedString>) -> Div {
         .flex_none()
         .px(px(4.0))
         .rounded(px(4.0))
-        .bg(hsla(0x26262a))
+        .bg(theme().secondary_hover)
         .text_size(crate::panels::scale::px(10.5))
-        .text_color(hsla(theme::TEXT_DIM))
+        .text_color(theme().muted_foreground)
         .whitespace_nowrap()
         .child(label.into())
 }
 
 /// Monogram avatar: the first letter of `seed` on a color picked from it, so each account keeps its color.
 pub fn avatar(seed: &str, size: f32) -> Div {
-    const COLORS: [u32; 6] = [theme::ACCENT, 0x61afef, 0x98c379, 0xc678dd, 0xe5c07b, 0x56b6c2];
+    let t = theme();
+    let colors = [t.primary, t.ansi[4], t.ansi[2], t.ansi[5], t.ansi[3], t.ansi[6]];
     let hash = seed.bytes().fold(0u32, |h, b| h.wrapping_mul(31).wrapping_add(b as u32));
     let letter = seed.chars().find(|c| c.is_alphanumeric()).map_or('?', |c| c.to_ascii_uppercase());
     div()
@@ -521,10 +522,10 @@ pub fn avatar(seed: &str, size: f32) -> Div {
         .items_center()
         .justify_center()
         .rounded_full()
-        .bg(hsla(COLORS[hash as usize % COLORS.len()]))
+        .bg(colors[hash as usize % colors.len()])
         .text_size(crate::panels::scale::px(size * 0.55))
         .font_weight(FontWeight::BOLD)
-        .text_color(hsla(0x17100d))
+        .text_color(theme().primary_foreground)
         .child(letter.to_string())
 }
 
@@ -637,15 +638,15 @@ pub fn fade_in<E: gpui::IntoElement + Styled + 'static>(el: E, key: impl Into<Sh
 pub fn empty_panel(glyph: IconName, label: impl Into<SharedString>) -> Div {
     div().flex().flex_col().items_center().justify_center().gap(px(10.0)).p(px(24.0))
         .child(div().flex().items_center().justify_center().size(px(32.0)).rounded(px(8.0))
-            .bg(hsla(theme::SURFACE_HOVER)).child(icon(glyph, 16.0).text_color(hsla(theme::TEXT_DIM))))
-        .child(div().text_center().text_size(crate::panels::scale::px(13.0)).text_color(hsla(theme::TEXT_DIM)).child(label.into()))
+            .bg(theme().accent).child(icon(glyph, 16.0).text_color(theme().muted_foreground)))
+        .child(div().text_center().text_size(crate::panels::scale::px(13.0)).text_color(theme().muted_foreground).child(label.into()))
 }
 
 pub fn skeleton_rows(count: usize) -> Div {
     div().flex().flex_col().gap(px(14.0)).p(px(12.0)).children((0..count).map(|row| {
         div().flex().flex_col().gap(px(6.0))
-            .child(div().h(px(10.0)).w(px(112.0 + (row % 3) as f32 * 22.0)).rounded(px(4.0)).bg(hsla(theme::SKELETON)))
-            .child(div().h(px(8.0)).w(px(76.0)).rounded(px(4.0)).bg(hsla(theme::SKELETON)))
+            .child(div().h(px(10.0)).w(px(112.0 + (row % 3) as f32 * 22.0)).rounded(px(4.0)).bg(theme().muted))
+            .child(div().h(px(8.0)).w(px(76.0)).rounded(px(4.0)).bg(theme().muted))
     }))
 }
 

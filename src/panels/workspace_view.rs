@@ -12,7 +12,7 @@ use crate::app::{
     Act, CloseSession, FocusSearch, GitOp, GitPickerTarget, ImportProject, Main, NewSession, NextSession, OpenGithub, OpenPalette, OpenSettings, PrevSession, SessionView, ShellDrag, SwapFocus, ToggleEditor, ToggleRight, ToggleShell, ToggleSidebar, Workspace, WorkspacePicker, SHELL_HEIGHT,
 };
 use gpui_kit::component::TitleBar;
-use crate::panels::theme::{self, hsla};
+use crate::panels::theme::{self, theme};
 use crate::updater::Status;
 use gpui_kit::assets::IconName;
 use crate::panels::widgets::{
@@ -37,7 +37,7 @@ impl Workspace {
             .on_close_window(|_, window, cx| window.dispatch_action(Box::new(crate::app::Quit), cx))
             .h(px(theme::TOPBAR_HEIGHT))
             .pl(px(left_pad))
-            .bg(hsla(theme::APP_BG))
+            .bg(theme().window)
             .border_b_0()
             // TitleBar's inner row can't shrink below its in-flow content's width, so a long title would push
             // the right-hand buttons out of view. An absolute overlay takes the content out of that sizing.
@@ -73,7 +73,7 @@ impl Workspace {
                                 .whitespace_nowrap()
                                 .text_ellipsis()
                                 .text_size(crate::panels::scale::px(11.5))
-                                .text_color(hsla(theme::TEXT_FAINT))
+                                .text_color(theme().subtle_foreground)
                                 .child(short_path(&p)),
                         )
                     })
@@ -110,10 +110,10 @@ impl Workspace {
                 .flex_none()
                 .px(px(10.0))
                 .rounded(px(6.0))
-                .bg(hsla(theme::NOTICE_BG))
+                .bg(theme().notice)
                 .border_1()
-                .border_color(hsla(theme::NOTICE_BORDER))
-                .child(div().text_size(crate::panels::scale::px(12.0)).text_color(hsla(theme::ACCENT)).child(text))
+                .border_color(theme().notice_border)
+                .child(div().text_size(crate::panels::scale::px(12.0)).text_color(theme().primary).child(text))
                 .when_some(action, |d, (label, act)| {
                     d.child(button("update-action", label, true).h(px(22.0)).on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
                         ws.act(act.clone(), window, cx)
@@ -202,7 +202,7 @@ impl Workspace {
 
     fn render_session(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         self.sync_chat_state(window, cx);
-        let blank = || div().size_full().bg(hsla(theme::TERMINAL_BG)).into_any_element();
+        let blank = || div().size_full().bg(theme().background).into_any_element();
         let Some(id) = self.active.clone() else { return blank() };
         let Some(view) = self.live_view(&id).cloned() else { return blank() };
         let term = match view {
@@ -220,7 +220,7 @@ impl Workspace {
                 .flex_1()
                 .min_w_0()
                 .min_h_0()
-                .bg(hsla(theme::TERMINAL_BG))
+                .bg(theme().background)
                 .children(strip.map(|strip| div().flex_none().px(px(6.0)).pt(px(6.0)).child(strip)))
                 .child(div().flex_1().min_h_0().p(px(6.0)).child(term)),
             format!("pane-in-{id}"),
@@ -249,12 +249,12 @@ impl Workspace {
             .h(px(24.0))
             .px(px(6.0))
             .rounded(px(6.0))
-            .text_color(hsla(theme::TEXT_DIM))
+            .text_color(theme().muted_foreground)
             .child(crate::panels::widgets::icon(IconName::ArrowLeft, 13.0))
             .child(ellipsis(div()).child(parent.clone().unwrap_or_else(|| "Parent session".into())))
             .when(parent.is_some(), |d| {
                 d.cursor_pointer()
-                    .hover(|s| s.bg(hsla(theme::ROW_HOVER)).text_color(hsla(theme::TEXT)))
+                    .hover(|s| s.bg(theme().row_hover).text_color(theme().foreground))
                     .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::Select(parent_id.clone()), window, cx)))
             });
         let failed = state == crate::app::SubagentState::Failed;
@@ -267,13 +267,13 @@ impl Workspace {
                 .px(px(4.0))
                 .rounded(px(theme::PANEL_RADIUS))
                 .border_1()
-                .border_color(hsla(theme::PANEL_BORDER))
-                .bg(hsla(theme::PANEL_BG))
+                .border_color(theme().panel_border)
+                .bg(theme().background)
                 .text_size(crate::panels::scale::px(12.0))
                 .child(back)
-                .child(div().flex_none().text_color(hsla(theme::TEXT_FAINT)).child("/"))
-                .child(crate::panels::logos::draw(crate::panels::logos::for_harness(meta.harness), 12.0, hsla(theme::TEXT_DIM)))
-                .child(ellipsis(div().flex_1()).text_color(hsla(theme::TEXT)).child(record.display_title().to_string()))
+                .child(div().flex_none().text_color(theme().subtle_foreground).child("/"))
+                .child(crate::panels::logos::draw(crate::panels::logos::for_harness(meta.harness), 12.0, theme().muted_foreground))
+                .child(ellipsis(div().flex_1()).text_color(theme().foreground).child(record.display_title().to_string()))
                 .child(
                     div()
                         .flex_none()
@@ -281,7 +281,7 @@ impl Workspace {
                         .items_center()
                         .gap(px(5.0))
                         .pr(px(6.0))
-                        .text_color(hsla(if failed { theme::DANGER } else { theme::TEXT_FAINT }))
+                        .text_color(if failed { theme().destructive } else { theme().subtle_foreground })
                         .child(crate::panels::widgets::subagent_state_icon(state, 12.0))
                         .child(state.label()),
                 )
@@ -323,7 +323,7 @@ impl Workspace {
                     cx.notify();
                 }),
             )
-            .child(div().w(px(28.0)).h(px(2.0)).rounded_full().bg(hsla(theme::RESIZE_HANDLE)).group_hover("shell-resize", |s| s.bg(hsla(theme::RESIZE_HANDLE_HOVER))));
+            .child(div().w(px(28.0)).h(px(2.0)).rounded_full().bg(theme().resize_handle).group_hover("shell-resize", |s| s.bg(theme().resize_handle_hover)));
         Some(
             div()
                 .flex()
@@ -345,8 +345,8 @@ impl Workspace {
                                 .rounded(px(theme::PANEL_RADIUS))
                                 .overflow_hidden()
                                 .border_1()
-                                .border_color(hsla(theme::PANEL_BORDER))
-                                .bg(hsla(theme::TERMINAL_BG))
+                                .border_color(theme().panel_border)
+                                .bg(theme().background)
                                 .p(px(6.0))
                                 .child(view),
                         )
@@ -430,8 +430,8 @@ impl Render for Workspace {
             .size_full()
             .flex()
             .flex_col()
-            .bg(hsla(theme::APP_BG))
-            .text_color(hsla(theme::TEXT))
+            .bg(theme().window)
+            .text_color(theme().foreground)
             .capture_key_down(cx.listener(|ws, ev: &KeyDownEvent, window, cx| {
                 let m = &ev.keystroke.modifiers;
                 let plain = !m.control && !m.alt && !m.platform && !m.shift && !m.function;
@@ -577,8 +577,8 @@ impl Render for Workspace {
                                         .rounded(px(theme::PANEL_RADIUS))
                                         .overflow_hidden()
                                         .border_1()
-                                        .border_color(hsla(theme::PANEL_BORDER))
-                                        .bg(hsla(theme::PANEL_BG))
+                                        .border_color(theme().panel_border)
+                                        .bg(theme().background)
                                         .child(main),
                                 )
                                 .children(shell),

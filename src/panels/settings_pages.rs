@@ -3,7 +3,7 @@
 
 use gpui::{
     AnyElement, ClickEvent, Context, Div, FontWeight, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, ParentElement, SharedString,
-    StatefulInteractiveElement, Styled, Window, deferred, div, prelude::FluentBuilder, px, rgba,
+    StatefulInteractiveElement, Styled, Window, deferred, div, prelude::FluentBuilder, px,
 };
 use gpui_kit::component::input::{Input, InputState};
 
@@ -11,15 +11,15 @@ use crate::app::{Act, Lookup, Modal, Workspace};
 use crate::harness::Harness;
 use crate::harness::subagents::AgentModel;
 use crate::panels::logos;
-use crate::panels::theme::{self, hsla};
+use crate::panels::theme::theme;
 use crate::panels::widgets::{button, button_disabled, section_label};
 
 fn faint(text: impl Into<SharedString>) -> Div {
-    div().text_size(crate::panels::scale::px(11.0)).text_color(hsla(theme::TEXT_FAINT)).child(text.into())
+    div().text_size(crate::panels::scale::px(11.0)).text_color(theme().subtle_foreground).child(text.into())
 }
 
 fn warn(text: impl Into<SharedString>) -> Div {
-    div().text_size(crate::panels::scale::px(11.0)).text_color(hsla(theme::WARN)).child(text.into())
+    div().text_size(crate::panels::scale::px(11.0)).text_color(theme().warning).child(text.into())
 }
 
 /// Compact pill toggle switch shared across all Settings pages and harness popups.
@@ -30,11 +30,11 @@ pub fn toggle_switch(on: bool) -> Div {
         .h(px(18.0))
         .p(px(2.0))
         .rounded(px(999.0))
-        .bg(hsla(if on { theme::ACCENT } else { 0x2c2c2c }))
+        .bg(if on { theme().primary } else { theme().input })
         .flex()
         .items_center()
         .when(on, |d| d.justify_end())
-        .child(div().w(px(14.0)).h(px(14.0)).rounded(px(999.0)).bg(hsla(if on { theme::PANEL_BG } else { 0x9e9e9e })))
+        .child(div().w(px(14.0)).h(px(14.0)).rounded(px(999.0)).bg(if on { theme().primary_foreground } else { theme().knob }))
 }
 
 /// A labelled Settings section: uppercase header (with an optional trailing control) over a single rounded card whose
@@ -52,13 +52,13 @@ pub fn settings_group(title: impl Into<SharedString>, trailing: Option<AnyElemen
         .flex_col()
         .w_full()
         .rounded(px(8.0))
-        .bg(hsla(theme::SURFACE_ELEVATED))
+        .bg(theme().card)
         .border_1()
-        .border_color(hsla(theme::PANEL_BORDER))
+        .border_color(theme().panel_border)
         .overflow_hidden();
     for (i, row) in rows.into_iter().enumerate() {
         if i > 0 {
-            card = card.child(div().h(px(1.0)).w_full().bg(hsla(theme::BORDER)));
+            card = card.child(div().h(px(1.0)).w_full().bg(theme().border));
         }
         card = card.child(row);
     }
@@ -84,12 +84,12 @@ pub fn switch_row(
         .justify_between()
         .gap(px(10.0))
         .rounded(px(7.0))
-        .bg(hsla(theme::SURFACE_ELEVATED))
+        .bg(theme().card)
         .border_1()
-        .border_color(hsla(theme::PANEL_BORDER))
+        .border_color(theme().panel_border)
         .text_size(crate::panels::scale::px(13.0))
         .cursor_pointer()
-        .hover(|s| s.bg(hsla(theme::SURFACE_HOVER)))
+        .hover(|s| s.bg(theme().accent))
         .child(
             div()
                 .flex()
@@ -98,7 +98,7 @@ pub fn switch_row(
                 .items_center()
                 .gap(px(8.0))
                 .child(label.into())
-                .children(tag.map(|tag| div().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().text_size(crate::panels::scale::px(11.0)).text_color(hsla(theme::TEXT_FAINT)).child(tag))),
+                .children(tag.map(|tag| div().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().text_size(crate::panels::scale::px(11.0)).text_color(theme().subtle_foreground).child(tag))),
         )
         .child(toggle_switch(on))
         .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
@@ -152,17 +152,17 @@ fn flip_subagent(ws: &mut Workspace, harness: Harness, cx: &mut Context<Workspac
     ws.load_models(cx);
 }
 
-fn harness_status(harness: Harness, enabled: bool, subagents: &crate::app::HarnessesForm, lookup: &Lookup, model_count: usize) -> (String, u32) {
+fn harness_status(harness: Harness, enabled: bool, subagents: &crate::app::HarnessesForm, lookup: &Lookup, model_count: usize) -> (String, gpui::Hsla) {
     if !enabled {
-        return ("Disabled".into(), theme::TEXT_FAINT);
+        return ("Disabled".into(), theme().subtle_foreground);
     }
     if lookup.loading && model_count == 0 {
-        return (format!("Enabled · loading {} models…", harness.name()), theme::TEXT_DIM);
+        return (format!("Enabled · loading {} models…", harness.name()), theme().muted_foreground);
     }
     if let Some(why) = &lookup.error
         && model_count == 0
     {
-        return (format!("Enabled · couldn't load models ({why})"), theme::WARN);
+        return (format!("Enabled · couldn't load models ({why})"), theme().warning);
     }
     let access = subagents.access(harness);
     let count = if subagents.picked(harness).is_empty() { model_count } else { subagents.picked(harness).len() };
@@ -176,7 +176,7 @@ fn harness_status(harness: Harness, enabled: bool, subagents: &crate::app::Harne
     } else {
         "subagents off"
     };
-    (format!("Enabled{models} · {delegation}"), theme::TEXT_DIM)
+    (format!("Enabled{models} · {delegation}"), theme().muted_foreground)
 }
 
 /// The models to list: those the agent offers, then any switched on that it no longer offers, so they can be
@@ -242,10 +242,10 @@ impl Workspace {
                         .flex()
                         .items_center()
                         .gap(px(8.0))
-                        .child(logos::draw(logos::for_harness(harness), 15.0, hsla(if enabled { theme::ACCENT } else { theme::TEXT_FAINT })))
-                        .child(div().text_size(crate::panels::scale::px(13.0)).font_weight(FontWeight::MEDIUM).text_color(hsla(if enabled { theme::TEXT } else { theme::TEXT_DIM })).child(harness.name())),
+                        .child(logos::draw(logos::for_harness(harness), 15.0, if enabled { theme().primary } else { theme().subtle_foreground }))
+                        .child(div().text_size(crate::panels::scale::px(13.0)).font_weight(FontWeight::MEDIUM).text_color(if enabled { theme().foreground } else { theme().muted_foreground }).child(harness.name())),
                 )
-                .child(div().text_size(crate::panels::scale::px(11.5)).text_color(hsla(tone)).child(status));
+                .child(div().text_size(crate::panels::scale::px(11.5)).text_color(tone).child(status));
             let access = subagents.access(harness);
             let picked = subagents.picked(harness);
             let catalog = self.store.data.settings.harness_models(harness);
@@ -273,13 +273,13 @@ impl Workspace {
                         .h(px(24.0))
                         .rounded(px(5.0))
                         .border_1()
-                        .border_color(hsla(theme::PANEL_BORDER))
-                        .bg(hsla(theme::PANEL_BG))
-                        .hover(|s| s.bg(hsla(theme::SURFACE_HOVER)))
+                        .border_color(theme().panel_border)
+                        .bg(theme().background)
+                        .hover(|s| s.bg(theme().accent))
                         .flex()
                         .items_center()
                         .text_size(crate::panels::scale::px(11.5))
-                        .text_color(hsla(theme::TEXT_DIM))
+                        .text_color(theme().muted_foreground)
                         .child("Configure"),
                 )
                 .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
@@ -304,7 +304,7 @@ impl Workspace {
                     .w_full()
                     .px(px(14.0))
                     .py(px(12.0))
-                    .hover(|s| s.bg(hsla(theme::SURFACE_HOVER)))
+                    .hover(|s| s.bg(theme().accent))
                     .child(open)
                     .child(toggle)
                     .into_any_element(),
@@ -429,7 +429,7 @@ impl Workspace {
                             .flex()
                             .items_center()
                             .gap(px(8.0))
-                            .child(logos::draw(&logos::CLAUDE, 16.0, hsla(theme::ACCENT)))
+                            .child(logos::draw(&logos::CLAUDE, 16.0, theme().primary))
                             .child(div().text_size(scaled(15.0)).font_weight(FontWeight::SEMIBOLD).child("Claude Code")),
                     )
                     .child(faint("Uses your Claude Code configuration and sign-in."))
@@ -481,7 +481,7 @@ impl Workspace {
                             .flex()
                             .items_center()
                             .gap(px(8.0))
-                            .child(logos::draw(logos::for_harness(harness), 16.0, hsla(theme::ACCENT)))
+                            .child(logos::draw(logos::for_harness(harness), 16.0, theme().primary))
                             .child(div().text_size(scaled(15.0)).font_weight(FontWeight::SEMIBOLD).child(provider.name)),
                     )
                     .child(faint(format!("Uses your {} configuration and sign-in.", harness.name())))
@@ -509,9 +509,9 @@ impl Workspace {
             .flex_col()
             .gap(px(12.0))
             .rounded(px(12.0))
-            .bg(hsla(theme::PANEL_BG))
+            .bg(theme().background)
             .border_1()
-            .border_color(hsla(theme::PANEL_BORDER))
+            .border_color(theme().panel_border)
             .shadow_lg()
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_key_down(cx.listener(|ws, ev: &KeyDownEvent, window, cx| {
@@ -538,7 +538,7 @@ impl Workspace {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .bg(rgba(theme::BACKDROP))
+                    .bg(theme().backdrop)
                     .on_mouse_down(MouseButton::Left, cx.listener(|ws, _: &MouseDownEvent, window, cx| {
                         ws.close_harness_dialog(window, cx);
                         cx.notify();
@@ -562,7 +562,7 @@ impl Workspace {
                 .px(px(14.0))
                 .py(px(14.0))
                 .text_size(crate::panels::scale::px(12.0))
-                .text_color(hsla(theme::TEXT_FAINT))
+                .text_color(theme().subtle_foreground)
                 .child("No projects yet. Add a folder to group sessions and switch branches.")
                 .into_any_element();
             return settings_group("PROJECTS", Some(add), vec![empty]);

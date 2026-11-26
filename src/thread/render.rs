@@ -22,7 +22,7 @@ use super::timeline::{self, RunKind};
 use crate::harness::thread::{Entry, SubagentReport, ToolCall, ToolContent, ToolStatus, parse_subagent_report};
 use crate::panels::{attachments, comment_box, composer, logos, picker, scale};
 use crate::panels::ui::{self, command};
-use crate::panels::theme::{self, hsla};
+use crate::panels::theme::theme;
 use crate::panels::widgets::{EffortPick, Trigger, button, button_colored, button_disabled, button_disabled_leading, effort_slider, icon, icon_button, key_badge, spinner};
 use crate::visual::ui::Scope;
 
@@ -38,8 +38,8 @@ impl Render for ThreadView {
             .size_full()
             .flex()
             .flex_col()
-            .bg(hsla(theme::PANEL_BG))
-            .text_color(hsla(theme::TEXT))
+            .bg(theme().background)
+            .text_color(theme().foreground)
             .text_size(scale::px(13.5))
             .on_mouse_down(
                 gpui::MouseButton::Left,
@@ -57,7 +57,7 @@ impl Render for ThreadView {
             .pt(px(14.0));
         // The conversation ends above the message box rather than under it, so everything written before a question
         // can still be scrolled to and read while it waits. A short fade softens the edge.
-        let panel_bg = hsla(theme::PANEL_BG);
+        let panel_bg = theme().background;
         let fade = linear_gradient(180.0, linear_color_stop(panel_bg.opacity(0.0), 0.0), linear_color_stop(panel_bg, 1.0));
         let conversation = div()
             .relative()
@@ -119,7 +119,7 @@ impl Render for ThreadView {
         self.jump_visible.set(show_jump);
         let conversation = conversation.when(show_jump, |view| {
             view.child(div().absolute().bottom(px(22.0)).right(px(24.0)).child(
-                button_colored("jump-to-latest", Some(IconName::ArrowDownToLine), "Jump to latest", hsla(theme::ACCENT), hsla(theme::PANEL_BG), hsla(0xdcdcdc), None, true).debug_selector(|| "jump-to-latest".into()).on_click(cx.listener(|v, _: &ClickEvent, _, cx| {
+                button_colored("jump-to-latest", Some(IconName::ArrowDownToLine), "Jump to latest", theme().primary, theme().background, theme().primary_hover, None, true).debug_selector(|| "jump-to-latest".into()).on_click(cx.listener(|v, _: &ClickEvent, _, cx| {
                     v.chat_glide.cancel();
                     v.list.set_follow_mode(gpui::FollowMode::Tail);
                     v.jump_visible.set(false);
@@ -426,9 +426,9 @@ impl ThreadView {
                     .px(px(14.0))
                     .py(px(10.0))
                     .rounded(px(9.0))
-                    .bg(hsla(theme::ROW_ACTIVE))
+                    .bg(theme().row_active)
                     .border_1()
-                    .border_color(hsla(theme::PANEL_BORDER))
+                    .border_color(theme().panel_border)
                     .child(div().w_full().min_w_0().child(md_view))
                     .into_any_element()
             }
@@ -471,11 +471,11 @@ impl ThreadView {
                 .px(px(10.0))
                 .py(px(6.0))
                 .rounded(px(6.0))
-                .bg(hsla(if *error { 0x251417 } else { 0x131315 }))
+                .bg(if *error { theme().destructive_subtle } else { theme().background })
                 .border_1()
-                .border_color(hsla(if *error { 0x55242a } else { theme::PANEL_BORDER }))
+                .border_color(if *error { theme().destructive_subtle_border } else { theme().panel_border })
                 .text_size(scale::px(12.0))
-                .text_color(hsla(if *error { theme::DANGER } else { theme::TEXT_DIM }))
+                .text_color(if *error { theme().destructive } else { theme().muted_foreground })
                 .child(text.clone())
                 .into_any_element(),
         };
@@ -500,13 +500,13 @@ impl ThreadView {
             .px(px(5.0))
             .py(px(1.0))
             .rounded(px(4.0))
-            .bg(hsla(theme::SURFACE_ELEVATED))
+            .bg(theme().card)
             .border_1()
-            .border_color(hsla(theme::PANEL_BORDER))
+            .border_color(theme().panel_border)
             .text_size(scale::px(11.0))
-            .text_color(hsla(theme::TEXT_DIM))
+            .text_color(theme().muted_foreground)
             .cursor_pointer()
-            .hover(|s| s.bg(hsla(theme::SURFACE_HOVER)).text_color(hsla(theme::TEXT)))
+            .hover(|s| s.bg(theme().accent).text_color(theme().foreground))
             .child("Open")
             .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
                 cx.stop_propagation();
@@ -515,7 +515,7 @@ impl ThreadView {
         let header = elements::trace_line(
             SharedString::from(format!("report-row-{ix}")),
             status,
-            logos::draw(logos::for_harness(harness), 12.0, hsla(theme::TEXT_DIM)).into_any_element(),
+            logos::draw(logos::for_harness(harness), 12.0, theme().muted_foreground).into_any_element(),
             report.title.to_string(),
             None,
             vec![elements::trace_badge(
@@ -524,9 +524,9 @@ impl ThreadView {
                     elements::TraceStatus::Ended => "Interrupted",
                     _ => "Failed",
                 },
-                if status == elements::TraceStatus::Error { theme::DANGER } else { theme::TEXT_DIM },
-                theme::SURFACE_ELEVATED,
-                theme::PANEL_BORDER,
+                if status == elements::TraceStatus::Error { theme().destructive } else { theme().muted_foreground },
+                theme().card,
+                theme().panel_border,
             ), open.into_any_element()],
             true,
             expanded,
@@ -561,7 +561,7 @@ impl ThreadView {
             }
         };
         let stop = stoppable.then(|| div().flex().gap(px(4.0)).items_center().child(key_badge("Esc"))
-            .child(div().text_size(scale::px(11.5)).text_color(hsla(theme::TEXT_FAINT)).child("to stop")).into_any_element());
+            .child(div().text_size(scale::px(11.5)).text_color(theme().subtle_foreground).child("to stop")).into_any_element());
         self.wrap_turn_status(elements::turn_working_line(label, elapsed, stop))
     }
 
@@ -580,7 +580,7 @@ impl ThreadView {
             .flex()
             .justify_center()
             .child(div().w_full().max_w(px(COLUMN_MAX_W))
-                .when(self.find_query_for_row(ix).is_some(), |row| row.rounded(px(5.0)).bg(hsla(theme::SURFACE_ELEVATED)))
+                .when(self.find_query_for_row(ix).is_some(), |row| row.rounded(px(5.0)).bg(theme().card))
                 .child(body))
             .into_any_element()
     }
@@ -644,13 +644,13 @@ impl ThreadView {
                     .px(px(5.0))
                     .py(px(1.0))
                     .rounded(px(4.0))
-                    .bg(hsla(theme::SURFACE_ELEVATED))
+                    .bg(theme().card)
                     .border_1()
-                    .border_color(hsla(theme::PANEL_BORDER))
+                    .border_color(theme().panel_border)
                     .text_size(scale::px(11.0))
-                    .text_color(hsla(theme::TEXT_DIM))
+                    .text_color(theme().muted_foreground)
                     .cursor_pointer()
-                    .hover(|s| s.bg(hsla(theme::SURFACE_HOVER)).text_color(hsla(theme::TEXT)))
+                    .hover(|s| s.bg(theme().accent).text_color(theme().foreground))
                     .child(match (line, end_line) {
                         (Some(start), Some(end)) if end > start => format!("{label}:L{start}-L{end}"),
                         (Some(line), _) => format!("{label}:L{line}"),
@@ -665,12 +665,12 @@ impl ThreadView {
         }
 
         if let Some(ms) = details.elapsed_ms {
-            location_chips.push(div().text_color(hsla(theme::TEXT_FAINT))
+            location_chips.push(div().text_color(theme().subtle_foreground)
                 .child(elements::format_duration(std::time::Duration::from_millis(ms))).into_any_element());
         }
         if let Some(code) = details.exit_code {
-            let color = if code == 0 { theme::OK } else { theme::DANGER };
-            location_chips.push(div().text_color(hsla(color)).child(format!("Exit {code}")).into_any_element());
+            let color = if code == 0 { theme().success } else { theme().destructive };
+            location_chips.push(div().text_color(color).child(format!("Exit {code}")).into_any_element());
         }
         let mut header = elements::tool_header(ix, call, title_in_cwd(call, &self.cwd), location_chips, has_details, expanded);
         if has_details {
@@ -751,7 +751,7 @@ impl ThreadView {
     fn render_screenshot(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let image = self.screenshot.clone()?;
         Some(div().id("thread-screenshot-preview").track_focus(&self.screenshot_focus).absolute().inset_0().occlude()
-            .bg(hsla(theme::APP_BG).opacity(0.95)).flex().flex_col().items_center().p(px(16.0)).gap(px(10.0))
+            .bg(theme().window.opacity(0.95)).flex().flex_col().items_center().p(px(16.0)).gap(px(10.0))
             .child(button("thread-screenshot-close", "Close screenshot", false)
                 .on_click(cx.listener(|v, _: &ClickEvent, window, cx| {
                     v.screenshot = None;
@@ -908,19 +908,19 @@ impl ThreadView {
             .px(px(14.0))
             .py(px(10.0))
             .rounded(px(8.0))
-            .bg(hsla(theme::SURFACE_ELEVATED))
+            .bg(theme().card)
             .border_1()
-            .border_color(hsla(theme::PANEL_BORDER))
+            .border_color(theme().panel_border)
             .flex()
             .flex_col()
             .gap(px(3.0));
         for item in &self.thread.plan {
             let (mark, color) = match item.status.as_str() {
-                "completed" => ("☒", theme::TEXT_FAINT),
-                "in_progress" => ("◼", theme::ACCENT),
-                _ => ("☐", theme::TEXT_DIM),
+                "completed" => ("☒", theme().subtle_foreground),
+                "in_progress" => ("◼", theme().primary),
+                _ => ("☐", theme().muted_foreground),
             };
-            plan = plan.child(div().flex().gap(px(8.0)).text_size(scale::px(12.5)).text_color(hsla(color)).child(mark).child(item.text.clone()));
+            plan = plan.child(div().flex().gap(px(8.0)).text_size(scale::px(12.5)).text_color(color).child(mark).child(item.text.clone()));
         }
         Some(div().w_full().px(px(22.0)).mb(px(8.0)).flex().justify_center().child(plan))
     }
@@ -956,15 +956,15 @@ impl ThreadView {
                     .px(px(7.0))
                     .py(px(2.0))
                     .rounded(px(5.0))
-                    .bg(hsla(theme::PANEL_BG))
+                    .bg(theme().background)
                     .border_1()
-                    .border_color(hsla(if waiting { theme::FOCUS_BORDER } else { theme::PANEL_BORDER }))
-                    .hover(|s| s.bg(hsla(theme::SURFACE_HOVER)))
+                    .border_color(if waiting { theme().ring } else { theme().panel_border })
+                    .hover(|s| s.bg(theme().accent))
                     .cursor_pointer()
                     .text_size(scale::px(11.5))
-                    .text_color(hsla(theme::TEXT))
+                    .text_color(theme().foreground)
                     .child(if waiting {
-                        div().text_color(hsla(theme::ACCENT)).font_weight(FontWeight::SEMIBOLD).child("?").into_any_element()
+                        div().text_color(theme().primary).font_weight(FontWeight::SEMIBOLD).child("?").into_any_element()
                     } else {
                         spinner(format!("thread-bg-spin-{i}"), 10.0).into_any_element()
                     })
@@ -983,11 +983,11 @@ impl ThreadView {
                     .px(px(7.0))
                     .py(px(2.0))
                     .rounded(px(5.0))
-                    .bg(hsla(theme::PANEL_BG))
+                    .bg(theme().background)
                     .border_1()
-                    .border_color(hsla(theme::PANEL_BORDER))
+                    .border_color(theme().panel_border)
                     .text_size(scale::px(11.5))
-                    .text_color(hsla(theme::TEXT_DIM))
+                    .text_color(theme().muted_foreground)
                     .child(spinner(format!("thread-bg-async-task-{i}"), 10.0))
                     .child(div().max_w(px(220.0)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(task.label.clone()))
                     .when(has_log, |pill| {
@@ -1008,11 +1008,11 @@ impl ThreadView {
                     .px(px(7.0))
                     .py(px(2.0))
                     .rounded(px(5.0))
-                    .bg(hsla(theme::PANEL_BG))
+                    .bg(theme().background)
                     .border_1()
-                    .border_color(hsla(theme::PANEL_BORDER))
+                    .border_color(theme().panel_border)
                     .text_size(scale::px(11.5))
-                    .text_color(hsla(theme::TEXT_DIM))
+                    .text_color(theme().muted_foreground)
                     .child(spinner(format!("thread-bg-tool-{i}"), 10.0))
                     .child(div().max_w(px(220.0)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(name))
                     .child(
@@ -1040,11 +1040,11 @@ impl ThreadView {
                     .px(px(7.0))
                     .py(px(2.0))
                     .rounded(px(5.0))
-                    .bg(hsla(theme::PANEL_BG))
+                    .bg(theme().background)
                     .border_1()
-                    .border_color(hsla(theme::PANEL_BORDER))
+                    .border_color(theme().panel_border)
                     .text_size(scale::px(11.5))
-                    .text_color(hsla(theme::TEXT_DIM))
+                    .text_color(theme().muted_foreground)
                     .child(spinner(format!("provider-shell-{}", shell.id), 10.0))
                     .child(div().max_w(px(220.0)).overflow_hidden().text_ellipsis().whitespace_nowrap().child(shell.label.clone()))
                     .child(button(SharedString::from(format!("shell-output-{}", shell.id)), "Output", false)
@@ -1063,17 +1063,17 @@ impl ThreadView {
             .px(px(10.0))
             .py(px(6.0))
             .rounded(px(8.0))
-            .bg(hsla(theme::SURFACE_ELEVATED))
+            .bg(theme().card)
             .border_1()
-            .border_color(hsla(theme::PANEL_BORDER))
+            .border_color(theme().panel_border)
             .flex()
             .items_center()
             .gap(px(8.0))
-            .child(div().flex_none().text_size(scale::px(11.0)).text_color(hsla(theme::TEXT_FAINT)).child("Running in background"))
+            .child(div().flex_none().text_size(scale::px(11.0)).text_color(theme().subtle_foreground).child("Running in background"))
             .child(pills);
         let output = self.shell_output.as_ref().map(|output| {
             self.shell_output_scroll.wire(div().id("thread-shell-output").w_full().max_h(px(180.0)), window)
-                .rounded(px(6.0)).bg(hsla(theme::SURFACE_ELEVATED)).p(px(8.0))
+                .rounded(px(6.0)).bg(theme().card).p(px(8.0))
                 .child(div().flex().justify_end()
                     .child(button("thread-shell-output-close", "Close output", false).on_click(cx.listener(|v, _: &ClickEvent, _, cx| {
                         v.shell_output = None;
@@ -1100,9 +1100,9 @@ impl ThreadView {
                 .px(px(10.0))
                 .py(px(8.0))
                 .rounded(px(7.0))
-                .bg(hsla(if lit || checked { theme::ROW_ACTIVE } else { theme::PANEL_BG }))
+                .bg(if lit || checked { theme().row_active } else { theme().background })
                 .border_1()
-                .border_color(hsla(if lit || checked { theme::FOCUS_BORDER } else { theme::PANEL_BORDER }))
+                .border_color(if lit || checked { theme().ring } else { theme().panel_border })
                 .cursor_pointer()
                 .on_hover(cx.listener(move |v, hovered: &bool, _, cx| {
                     if *hovered {
@@ -1120,12 +1120,12 @@ impl ThreadView {
                             .size(px(15.0))
                             .rounded(px(4.0))
                             .border_1()
-                            .border_color(hsla(if checked { theme::ACCENT } else { theme::PANEL_BORDER }))
-                            .bg(hsla(if checked { theme::ACCENT } else { theme::PANEL_BG }))
+                            .border_color(if checked { theme().primary } else { theme().panel_border })
+                            .bg(if checked { theme().primary } else { theme().background })
                             .flex()
                             .items_center()
                             .justify_center()
-                            .when(checked, |box_el| box_el.child(icon(IconName::Check, 11.0).text_color(hsla(theme::PANEL_BG)))),
+                            .when(checked, |box_el| box_el.child(icon(IconName::Check, 11.0).text_color(theme().background))),
                     )
                 })
                 .child(div().pt(px(1.0)).child(key_badge(format!("{}", i + 1))))
@@ -1140,13 +1140,13 @@ impl ThreadView {
                             div()
                                 .text_size(scale::px(12.5))
                                 .font_weight(FontWeight::MEDIUM)
-                                .text_color(hsla(theme::TEXT))
+                                .text_color(theme().foreground)
                                 .child(opt.name.clone()),
                         )
                         .children(opt.description.clone().map(|desc| {
                             div()
                                 .text_size(scale::px(11.5))
-                                .text_color(hsla(theme::TEXT_DIM))
+                                .text_color(theme().muted_foreground)
                                 .child(desc)
                         })),
                 )
@@ -1167,9 +1167,9 @@ impl ThreadView {
                     "thread-question-submit",
                     Some(IconName::Check),
                     &submit_label,
-                    hsla(theme::ACCENT),
-                    hsla(theme::PANEL_BG),
-                    hsla(0xdcdcdc),
+                    theme().primary,
+                    theme().background,
+                    theme().primary_hover,
                     None,
                     true,
                 )
@@ -1196,7 +1196,7 @@ impl ThreadView {
                         .flex_wrap()
                         .gap(px(6.0))
                         .items_center()
-                        .text_color(hsla(theme::TEXT_FAINT))
+                        .text_color(theme().subtle_foreground)
                         .text_size(scale::px(11.5))
                         .child(key_badge("↑↓"))
                         .child(key_badge("Space"))
@@ -1216,7 +1216,7 @@ impl ThreadView {
                 .flex_wrap()
                 .gap(px(6.0))
                 .items_center()
-                .text_color(hsla(theme::TEXT_FAINT))
+                .text_color(theme().subtle_foreground)
                 .text_size(scale::px(11.5))
                 .child(key_badge("Esc"))
                 .child("to dismiss")
@@ -1227,7 +1227,7 @@ impl ThreadView {
                 .flex_wrap()
                 .gap(px(6.0))
                 .items_center()
-                .text_color(hsla(theme::TEXT_FAINT))
+                .text_color(theme().subtle_foreground)
                 .text_size(scale::px(11.5))
                 .child(key_badge("↑↓"))
                 .child(key_badge("Enter"))
@@ -1246,7 +1246,7 @@ impl ThreadView {
                 .pt(px(10.0))
                 .pb(px(8.0))
                 .border_b_1()
-                .border_color(hsla(theme::BORDER))
+                .border_color(theme().border)
                 .flex()
                 .flex_col()
                 .gap(px(8.0))
@@ -1255,7 +1255,7 @@ impl ThreadView {
                     card.child(
                         div()
                             .text_size(scale::px(11.5))
-                            .text_color(hsla(theme::TEXT_DIM))
+                            .text_color(theme().muted_foreground)
                             .child(format!("{} more requests", pending_count - 1)),
                     )
                 })
@@ -1269,7 +1269,7 @@ impl ThreadView {
     /// Universal floating picker dialog over the chat view: unified model + draggable effort picker, or permission mode selector.
     fn render_picker_overlay(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let active = self.picker?;
-        let accent = hsla(theme::ACCENT);
+        let accent = theme().primary;
 
         let (id, title, body, choices) = match active {
             ThreadPicker::Model => {
@@ -1287,7 +1287,7 @@ impl ThreadView {
                         None => m.harness == self.harness && current_id == Some(m.id.as_str()),
                     };
                     let choice = m.clone();
-                    let logo = logos::draw(logos::for_harness(m.harness), 11.5, hsla(if selected { theme::TEXT } else { theme::TEXT_FAINT })).into_any_element();
+                    let logo = logos::draw(logos::for_harness(m.harness), 11.5, if selected { theme().foreground } else { theme().subtle_foreground }).into_any_element();
                     let row = command::row(SharedString::from(format!("thread-model-{n}")), Some(logo), m.name.clone(), None, None, selected, false)
                         .role(gpui::Role::ListBoxOption)
                         .aria_selected(selected)
@@ -1324,7 +1324,7 @@ impl ThreadView {
                     .gap(px(5.0))
                     .child(picker::section_header(
                         "EFFORT",
-                        Some(div().text_size(scale::px(10.5)).text_color(hsla(theme::TEXT_FAINT)).child("←/→ or drag").into_any_element()),
+                        Some(div().text_size(scale::px(10.5)).text_color(theme().subtle_foreground).child("←/→ or drag").into_any_element()),
                     ))
                     .child(effort_slider(
                         "thread-effort",
@@ -1356,7 +1356,7 @@ impl ThreadView {
                 for (i, mode) in Permission::ALL.into_iter().enumerate() {
                     let available = offered.contains(&mode);
                     let current = self.permission() == Some(mode);
-                    let lead = icon(IconName::Lock, 12.0).text_color(hsla(if current { theme::TEXT } else { theme::TEXT_FAINT })).into_any_element();
+                    let lead = icon(IconName::Lock, 12.0).text_color(if current { theme().foreground } else { theme().subtle_foreground }).into_any_element();
                     let row = command::row(SharedString::from(format!("perm-mode-{i}")), Some(lead), mode.label(), Some(mode.detail(available)), None, current, !available)
                         .debug_selector(move || format!("perm-mode-{i}"));
                     rows = rows.child(if available {
@@ -1400,9 +1400,9 @@ impl ThreadView {
                 .px(px(8.0))
                 .py(px(4.0))
                 .rounded(px(8.0))
-                .bg(hsla(theme::SURFACE_ELEVATED))
+                .bg(theme().card)
                 .border_1()
-                .border_color(hsla(theme::PANEL_BORDER));
+                .border_color(theme().panel_border);
             for (n, c) in commands.into_iter().enumerate() {
                 let name = c.name.clone();
                 menu = menu.child(
@@ -1414,10 +1414,10 @@ impl ThreadView {
                         .py(px(3.0))
                         .rounded(px(5.0))
                         .cursor_pointer()
-                        .when(n == highlight, |d| d.bg(hsla(theme::SURFACE_HOVER)))
-                        .hover(|s| s.bg(hsla(theme::SURFACE_HOVER)))
-                        .child(div().flex_none().text_color(hsla(theme::TEXT)).child(format!("/{}", c.name)))
-                        .child(div().flex_1().truncate().text_color(hsla(theme::TEXT_DIM)).child(c.description.clone()))
+                        .when(n == highlight, |d| d.bg(theme().accent))
+                        .hover(|s| s.bg(theme().accent))
+                        .child(div().flex_none().text_color(theme().foreground).child(format!("/{}", c.name)))
+                        .child(div().flex_1().truncate().text_color(theme().muted_foreground).child(c.description.clone()))
                         .on_click(cx.listener(move |v, _: &ClickEvent, window, cx| {
                             v.replace_active_command(&name, true, window, cx);
                             v.focus_composer(window, cx);
@@ -1437,25 +1437,25 @@ impl ThreadView {
                     .px(px(10.0))
                     .py(px(5.0))
                     .rounded(px(7.0))
-                    .bg(hsla(theme::SURFACE_ELEVATED))
+                    .bg(theme().card)
                     .border_1()
-                    .border_color(hsla(theme::PANEL_BORDER))
+                    .border_color(theme().panel_border)
                     .child(
                         div()
                             .flex()
                             .items_center()
                             .gap(px(6.0))
                             .text_size(scale::px(11.5))
-                            .text_color(hsla(theme::TEXT))
-                            .child(logos::draw(logos::for_harness(target.harness), 11.5, hsla(theme::TEXT_DIM)))
+                            .text_color(theme().foreground)
+                            .child(logos::draw(logos::for_harness(target.harness), 11.5, theme().muted_foreground))
                             .child(format!("Next message switches to {}", target.name)),
                     )
                     .child(
                         div()
                             .id("cancel-handoff-stage")
                             .cursor_pointer()
-                            .text_color(hsla(theme::TEXT_DIM))
-                            .hover(|s| s.text_color(hsla(theme::TEXT)))
+                            .text_color(theme().muted_foreground)
+                            .hover(|s| s.text_color(theme().foreground))
                             .child(icon(IconName::X, 12.0))
                             .on_click(cx.listener(|v, _: &ClickEvent, _, cx| {
                                 v.pending_model = None;
@@ -1517,8 +1517,8 @@ impl ThreadView {
                 .px(px(10.0))
                 .py(px(4.0))
                 .child(spinner(SharedString::from(format!("steering-{i}")), 12.0))
-                .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(scale::px(12.5)).text_color(hsla(theme::TEXT_DIM)).child(line))
-                .child(div().flex_none().text_size(scale::px(11.0)).text_color(hsla(theme::TEXT_FAINT)).child("Read after the current step"))
+                .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(scale::px(12.5)).text_color(theme().muted_foreground).child(line))
+                .child(div().flex_none().text_size(scale::px(11.0)).text_color(theme().subtle_foreground).child("Read after the current step"))
         });
         let waiting_empty = waiting.is_empty();
         let rows = waiting.into_iter().map(|(id, text)| {
@@ -1527,16 +1527,16 @@ impl ThreadView {
             div()
                 .id(SharedString::from(format!("queue-item-{id}")))
                 .rounded(px(6.0))
-                .hover(|style| style.bg(hsla(theme::SURFACE_HOVER)))
+                .hover(|style| style.bg(theme().accent))
                 .w_full()
                 .flex()
                 .items_center()
                 .gap(px(8.0))
                 .px(px(10.0))
                 .py(px(4.0))
-                .when(editing, |row| row.bg(hsla(theme::SURFACE_HOVER)))
-                .child(icon(IconName::Clock, 12.0).text_color(hsla(theme::TEXT_FAINT)))
-                .child(div().flex_1().min_w_0().overflow_hidden().text_size(scale::px(12.5)).text_color(hsla(theme::TEXT_DIM)).child(text.to_string()))
+                .when(editing, |row| row.bg(theme().accent))
+                .child(icon(IconName::Clock, 12.0).text_color(theme().subtle_foreground))
+                .child(div().flex_1().min_w_0().overflow_hidden().text_size(scale::px(12.5)).text_color(theme().muted_foreground).child(text.to_string()))
                 .when(can_act, |row| {
                     row.child(button(SharedString::from(format!("queued-send-{id}")), "Send now", false)
                         .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| v.send_queued_now(id, cx))))
@@ -1567,13 +1567,13 @@ impl ThreadView {
             div().child(self.queue_scroll.wire(div().id("thread-queue").w_full().max_h(px(180.0)), window)
                 .p(px(4.0))
                 .rounded(px(10.0))
-                .bg(hsla(theme::SURFACE_ELEVATED))
+                .bg(theme().card)
                 .border_1()
-                .border_color(hsla(theme::PANEL_BORDER))
+                .border_color(theme().panel_border)
                 .flex()
                 .flex_col()
                 .children(steering_rows)
-                .when(!waiting_empty, |d| d.child(div().px(px(10.0)).pt(px(2.0)).text_size(scale::px(11.0)).text_color(hsla(theme::TEXT_FAINT)).child(if self.queue_held { "Queue paused" } else { "Queued for after this turn" })))
+                .when(!waiting_empty, |d| d.child(div().px(px(10.0)).pt(px(2.0)).text_size(scale::px(11.0)).text_color(theme().subtle_foreground).child(if self.queue_held { "Queue paused" } else { "Queued for after this turn" })))
                 .children(rows)),
         )
     }
@@ -1699,11 +1699,11 @@ impl ThreadView {
         };
         let send = if enabled {
             let (bg, fg, hover, border) = match action {
-                ActionKind::Interrupt => (hsla(0x7a242a), hsla(0xffe4e6), hsla(0x942c33), Some(hsla(theme::DANGER).opacity(0.65))),
-                ActionKind::Steer => (hsla(theme::WARN), hsla(0x16120b), hsla(0xedd092), None),
-                ActionKind::Queue => (hsla(theme::CODEX), hsla(0x0c141c), hsla(0x7cc0f5), None),
-                ActionKind::Resume => (hsla(theme::OK), hsla(0x0e160c), hsla(0x92c27d), None),
-                ActionKind::Save | ActionKind::Answer | ActionKind::Send | ActionKind::Stopping => (hsla(theme::ACCENT), hsla(theme::PANEL_BG), hsla(0xdcdcdc), None),
+                ActionKind::Interrupt => (theme().destructive_solid, theme().destructive_solid_foreground, theme().destructive_solid_hover, Some(theme().destructive.opacity(0.65))),
+                ActionKind::Steer => (theme().warning, theme().warning_foreground, theme().warning_hover, None),
+                ActionKind::Queue => (theme().codex, theme().info_foreground, theme().info_hover, None),
+                ActionKind::Resume => (theme().success, theme().success_foreground, theme().success_hover, None),
+                ActionKind::Save | ActionKind::Answer | ActionKind::Send | ActionKind::Stopping => (theme().primary, theme().background, theme().primary_hover, None),
             };
             button_colored("thread-send", Some(glyph), label, bg, fg, hover, border, true)
                 .on_click(cx.listener(|v, ev: &ClickEvent, window, cx| {

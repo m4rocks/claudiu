@@ -20,7 +20,7 @@ use gpui::{AppContext, DragMoveEvent, prelude::FluentBuilder};
 use crate::platform::Editor;
 use crate::github::model::State;
 use crate::store::{Attached, Id, Project, SessionKind, SessionRecord};
-use crate::panels::theme::{self, hsla};
+use crate::panels::theme::{self, theme};
 use crate::app::SubagentState;
 use crate::panels::logos;
 use crate::panels::widgets::{icon, icon_button, meter, section_label, subagent_state_icon, tick};
@@ -108,7 +108,7 @@ impl Workspace {
                             .h(px(32.0))
                             .px(px(6.0))
                             .border_b_1()
-                            .border_color(hsla(theme::BORDER))
+                            .border_color(theme().border)
                             .child(
                                 icon_button("right-back", IconName::ArrowLeft)
                                     .on_click(cx.listener(|ws, _: &ClickEvent, window, cx| {
@@ -153,8 +153,8 @@ impl Workspace {
                         .w(px(2.0))
                         .h(px(28.0))
                         .rounded_full()
-                        .bg(hsla(theme::RESIZE_HANDLE))
-                        .group_hover("right-resize", |s| s.bg(hsla(theme::RESIZE_HANDLE_HOVER))),
+                        .bg(theme().resize_handle)
+                        .group_hover("right-resize", |s| s.bg(theme().resize_handle_hover)),
                 ),
         );
         Some(
@@ -175,7 +175,7 @@ impl Workspace {
                 .h_full()
                 // The menu's cards sit on the window's background; GitHub is one view, so it keeps the panel around it.
                 .child(div().size_full().when(shown_view != "menu", |d| {
-                    d.rounded(px(theme::PANEL_RADIUS)).overflow_hidden().border_1().border_color(hsla(theme::PANEL_BORDER)).bg(hsla(theme::SIDEBAR_BG))
+                    d.rounded(px(theme::PANEL_RADIUS)).overflow_hidden().border_1().border_color(theme().panel_border).bg(theme().sidebar)
                 }).child(body))
                 .children(handle),
                 )
@@ -473,9 +473,9 @@ impl Workspace {
         let toggle = parent.clone();
         rows = rows.child(
             base_row(format!("subagents-finished-{parent}"), if open { IconName::ChevronDown } else { IconName::ChevronRight }, format!("{} finished", finished.len()))
-                .text_color(hsla(theme::TEXT_FAINT))
+                .text_color(theme().subtle_foreground)
                 .cursor_pointer()
-                .hover(|s| s.bg(hsla(theme::ROW_HOVER)).text_color(hsla(theme::TEXT_DIM)))
+                .hover(|s| s.bg(theme().row_hover).text_color(theme().muted_foreground))
                 .on_click(cx.listener(move |ws, _: &ClickEvent, _, cx| {
                     if !ws.finished_subagents_open.remove(&toggle) {
                         ws.finished_subagents_open.insert(toggle.clone());
@@ -594,10 +594,10 @@ enum SubagentOpen {
 fn subagent_row(parent: &Id, child: SubagentRow, cx: &mut Context<Workspace>) -> Stateful<Div> {
     let parent = parent.clone();
     let SubagentRow { key, harness, title, state, open } = child;
-    lead_row(key, logos::draw(logos::for_harness(harness), 13.0, hsla(theme::TEXT_DIM)).into_any_element(), title)
-        .text_color(hsla(if state.finished() { theme::TEXT_DIM } else { theme::TEXT }))
+    lead_row(key, logos::draw(logos::for_harness(harness), 13.0, theme().muted_foreground).into_any_element(), title)
+        .text_color(if state.finished() { theme().muted_foreground } else { theme().foreground })
         .cursor_pointer()
-        .hover(|s| s.bg(hsla(theme::ROW_HOVER)))
+        .hover(|s| s.bg(theme().row_hover))
         .child(div().flex_none().child(subagent_state_icon(state, 13.0)))
         .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| match &open {
             SubagentOpen::Session(child) => ws.act(Act::Select(child.clone()), window, cx),
@@ -621,8 +621,8 @@ fn card() -> Div {
         .p(px(4.0))
         .rounded(px(theme::PANEL_RADIUS))
         .border_1()
-        .border_color(hsla(theme::PANEL_BORDER))
-        .bg(hsla(theme::PANEL_BG))
+        .border_color(theme().panel_border)
+        .bg(theme().background)
 }
 
 /// One section of the sidebar, as a card: its label, the number of entries for a list, then its rows.
@@ -651,7 +651,7 @@ fn pending_opacity(t: f32) -> f32 {
 
 /// `#12` with a grey bar where the title will be, until GitHub answers.
 fn pending_title(name: &str, key: &str) -> AnyElement {
-    let bar = div().flex_none().h(px(8.0)).w(px(96.0)).rounded(px(4.0)).bg(hsla(theme::SKELETON)).with_animation(
+    let bar = div().flex_none().h(px(8.0)).w(px(96.0)).rounded(px(4.0)).bg(theme().muted).with_animation(
         SharedString::from(format!("pending-{key}")),
         Animation::new(PENDING_PULSE).with_easing(pending_opacity),
         |d, opacity| d.opacity(opacity),
@@ -660,7 +660,7 @@ fn pending_title(name: &str, key: &str) -> AnyElement {
 }
 
 fn base_row(id: impl Into<SharedString>, glyph: IconName, label: impl IntoElement) -> Stateful<Div> {
-    lead_row(id, div().text_color(hsla(theme::TEXT_DIM)).child(icon(glyph, 14.0)).into_any_element(), label)
+    lead_row(id, div().text_color(theme().muted_foreground).child(icon(glyph, 14.0)).into_any_element(), label)
 }
 
 /// A row that starts with `lead`, such as a provider's logo, instead of an icon.
@@ -686,10 +686,10 @@ fn row(id: impl Into<SharedString>, glyph: IconName, label: impl IntoElement) ->
         .gap(px(8.0))
         .rounded(px(6.0))
         .text_size(crate::panels::scale::px(12.5))
-        .text_color(hsla(theme::TEXT))
+        .text_color(theme().foreground)
         .cursor_pointer()
-        .hover(|s| s.bg(hsla(theme::ROW_HOVER)))
-        .child(div().flex_none().text_color(hsla(theme::TEXT_DIM)).child(icon(glyph, 14.0)))
+        .hover(|s| s.bg(theme().row_hover))
+        .child(div().flex_none().text_color(theme().muted_foreground).child(icon(glyph, 14.0)))
         .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().line_height(gpui::relative(1.35)).child(label))
 }
 
@@ -703,9 +703,9 @@ fn dim_row(id: impl Into<SharedString>, glyph: IconName, label: impl IntoElement
         .gap(px(8.0))
         .rounded(px(6.0))
         .text_size(crate::panels::scale::px(12.5))
-        .text_color(hsla(theme::TEXT_FAINT))
+        .text_color(theme().subtle_foreground)
         .cursor_default()
-        .child(div().flex_none().text_color(hsla(theme::TEXT_DIM)).child(icon(glyph, 14.0)))
+        .child(div().flex_none().text_color(theme().muted_foreground).child(icon(glyph, 14.0)))
         .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().line_height(gpui::relative(1.35)).child(label))
 }
 
@@ -766,9 +766,9 @@ fn pick_row(cx: &mut Context<Workspace>, id: &'static str, label: &str, value: S
         .px(px(6.0))
         .rounded(px(5.0))
         .cursor_pointer()
-        .hover(|s| s.bg(hsla(theme::ROW_HOVER)))
+        .hover(|s| s.bg(theme().row_hover))
         .text_size(crate::panels::scale::px(12.0))
-        .child(div().flex_none().text_color(hsla(theme::TEXT_DIM)).child(label.to_string()))
+        .child(div().flex_none().text_color(theme().muted_foreground).child(label.to_string()))
         .child(
             div()
                 .flex()
@@ -776,7 +776,7 @@ fn pick_row(cx: &mut Context<Workspace>, id: &'static str, label: &str, value: S
                 .gap(px(4.0))
                 .min_w_0()
                 .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().line_height(gpui::relative(1.35)).child(value))
-                .child(div().flex_none().text_color(hsla(theme::TEXT_FAINT)).child(icon(IconName::ChevronDown, 12.0))),
+                .child(div().flex_none().text_color(theme().subtle_foreground).child(icon(IconName::ChevronDown, 12.0))),
         )
         .dropdown(cx, move |ws, at, window, cx| ws.open_dropdown(at, menu(), window, cx))
 }
@@ -789,7 +789,7 @@ fn kv(label: &str, value: String) -> Div {
         .gap(px(10.0))
         .h(px(24.0))
         .text_size(crate::panels::scale::px(12.0))
-        .child(div().flex_none().text_color(hsla(theme::TEXT_DIM)).child(label.to_string()))
+        .child(div().flex_none().text_color(theme().muted_foreground).child(label.to_string()))
         .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().line_height(gpui::relative(1.35)).child(value))
 }
 

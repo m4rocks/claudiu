@@ -17,7 +17,7 @@ impl GithubView {
         });
         let Some(d) = &ds.data else {
             let msg = match &ds.error {
-                Some(e) => div().text_color(hsla(theme::DANGER)).child(e.clone()),
+                Some(e) => div().text_color(theme().destructive).child(e.clone()),
                 None => dim("Loading…"),
             };
             return div().size_full().flex().flex_col().children(back).child(div().p(px(18.0)).child(msg)).into_any_element();
@@ -52,7 +52,7 @@ impl GithubView {
                         .text_size(crate::panels::scale::px(18.0))
                         .font_weight(FontWeight::SEMIBOLD)
                         .child(it.title.clone())
-                        .child(div().text_color(hsla(theme::TEXT_FAINT)).font_weight(FontWeight::NORMAL).child(format!("#{}", it.number))),
+                        .child(div().text_color(theme().subtle_foreground).font_weight(FontWeight::NORMAL).child(format!("#{}", it.number))),
                 )
                 .when(d.can_update || d.mine, |r| r.child(icon_button("gh-edit-title", IconName::Pencil).on_click(go(cx, GhAct::EditStart(Edit::Title)))))
         };
@@ -76,8 +76,8 @@ impl GithubView {
                     .px(px(7.0))
                     .py(px(1.0))
                     .rounded(px(5.0))
-                    .bg(hsla(0x1a1a1b))
-                    .text_color(hsla(theme::TEXT_DIM))
+                    .bg(theme().card)
+                    .text_color(theme().muted_foreground)
                     .child(format!("{}{} → {}", if pr.cross_repo { format!("{}:", pr.head_repo.split('/').next().unwrap_or("")) } else { String::new() }, it.head, it.base)),
             );
             status = status.child(
@@ -85,8 +85,8 @@ impl GithubView {
                     .flex()
                     .gap(px(6.0))
                     .text_size(crate::panels::scale::px(12.0))
-                    .child(div().text_color(hsla(GREEN)).child(format!("+{}", pr.additions)))
-                    .child(div().text_color(hsla(RED)).child(format!("−{}", pr.deletions))),
+                    .child(div().text_color(theme().state_open).child(format!("+{}", pr.additions)))
+                    .child(div().text_color(theme().state_closed).child(format!("−{}", pr.deletions))),
             );
         }
 
@@ -110,7 +110,7 @@ impl GithubView {
             .pt(px(12.0))
             .pb(px(10.0))
             .border_b_1()
-            .border_color(hsla(theme::BORDER))
+            .border_color(theme().border)
             .child(title_row)
             .child(status)
             .child(actions);
@@ -124,8 +124,8 @@ impl GithubView {
                     .px(px(6.0))
                     .rounded(px(5.0))
                     .text_size(crate::panels::scale::px(12.0))
-                    .text_color(hsla(theme::TEXT_FAINT))
-                    .hover(|s| s.bg(hsla(theme::CONTROL_HOVER)).text_color(hsla(theme::TEXT)))
+                    .text_color(theme().subtle_foreground)
+                    .hover(|s| s.bg(theme().secondary_hover).text_color(theme().foreground))
                     .child("＋ Edit")
                     .popup(cx, kind)
             })
@@ -171,14 +171,14 @@ impl GithubView {
             let mut rv = div().flex().flex_wrap().gap(px(10.0));
             for (who, state) in &pr.reviews {
                 let (g, c) = match state.as_str() {
-                    "APPROVED" => (IconName::CircleCheck, GREEN),
-                    "CHANGES_REQUESTED" => (IconName::CircleX, RED),
-                    _ => (IconName::CircleDot, GRAY),
+                    "APPROVED" => (IconName::CircleCheck, theme().state_open),
+                    "CHANGES_REQUESTED" => (IconName::CircleX, theme().state_closed),
+                    _ => (IconName::CircleDot, theme().state_neutral),
                 };
-                rv = rv.child(div().flex().items_center().gap(px(4.0)).child(div().text_color(hsla(c)).child(icon(g, 13.0))).child(dim(who.clone())));
+                rv = rv.child(div().flex().items_center().gap(px(4.0)).child(div().text_color(c).child(icon(g, 13.0))).child(dim(who.clone())));
             }
             for who in pr.requested.iter().filter(|w| !pr.reviews.iter().any(|(r, _)| r == *w)) {
-                rv = rv.child(div().flex().items_center().gap(px(4.0)).child(div().text_color(hsla(YELLOW)).child(icon(IconName::Clock, 13.0))).child(dim(who.clone())));
+                rv = rv.child(div().flex().items_center().gap(px(4.0)).child(div().text_color(theme().state_pending).child(icon(IconName::Clock, 13.0))).child(dim(who.clone())));
             }
             if pr.reviews.is_empty() && pr.requested.is_empty() {
                 rv = rv.child(faint("No reviews yet"));
@@ -199,16 +199,16 @@ impl GithubView {
                     .cursor_pointer()
                     .text_size(crate::panels::scale::px(12.5))
                     .border_b_2()
-                    .border_color(if on { hsla(theme::ACCENT) } else { hsla(theme::PANEL_BG) })
-                    .text_color(hsla(if on { theme::TEXT } else { theme::TEXT_DIM }))
-                    .hover(|s| s.text_color(hsla(theme::TEXT)))
+                    .border_color(if on { theme().primary } else { theme().background })
+                    .text_color(if on { theme().foreground } else { theme().muted_foreground })
+                    .hover(|s| s.text_color(theme().foreground))
                     .child(name)
                     .on_click(go(cx, GhAct::Tab(which)))
             };
             div()
                 .flex()
                 .border_b_1()
-                .border_color(hsla(theme::BORDER))
+                .border_color(theme().border)
                 .child(tab("conv", "Conversation".into(), DetailTab::Conversation, cx))
                 .child(tab("commits", format!("Commits {}", pr.commits), DetailTab::Commits, cx))
                 .child(tab("files", format!("Files changed {}", pr.files), DetailTab::Files, cx))
@@ -243,9 +243,9 @@ impl GithubView {
                     .cursor_pointer()
                     .text_size(crate::panels::scale::px(12.0))
                     .border_1()
-                    .border_color(hsla(if r.mine { theme::ACCENT } else { CARD_BORDER }))
-                    .bg(hsla(if r.mine { theme::CURRENT_TINT } else { CARD_HEAD }))
-                    .hover(|s| s.bg(hsla(theme::CONTROL_HOVER)))
+                    .border_color(if r.mine { theme().primary } else { theme().border })
+                    .bg(if r.mine { theme().current } else { theme().card_header })
+                    .hover(|s| s.bg(theme().secondary_hover))
                     .child(format!("{} {}", emoji(&r.content), r.count))
                     .on_click(go(cx, act)),
             );
@@ -261,8 +261,8 @@ impl GithubView {
                     .rounded(px(11.0))
                     .cursor_pointer()
                     .text_size(crate::panels::scale::px(12.0))
-                    .text_color(hsla(theme::TEXT_FAINT))
-                    .hover(|s| s.bg(hsla(theme::CONTROL_HOVER)).text_color(hsla(theme::TEXT)))
+                    .text_color(theme().subtle_foreground)
+                    .hover(|s| s.bg(theme().secondary_hover).text_color(theme().foreground))
                     .child(icon(IconName::HeartPlus, 14.0))
                     .popup(cx, PopKind::React(subject.to_string())),
             );
@@ -295,9 +295,9 @@ impl GithubView {
             .gap(px(8.0))
             .h(px(36.0))
             .px(px(12.0))
-            .bg(hsla(CARD_HEAD))
+            .bg(theme().card_header)
             .border_b_1()
-            .border_color(hsla(CARD_BORDER))
+            .border_color(theme().border)
             .child(
                 div()
                     .flex()
@@ -307,7 +307,7 @@ impl GithubView {
                     .child(avatar(author, 20.0))
                     .child(div().font_weight(FontWeight::SEMIBOLD).child(author.to_string()))
                     .child(dim(format!("{verb} {}{}", ago(when, t), if edited { " · edited" } else { "" })))
-                    .children(assoc_label(assoc).map(|a| div().px(px(6.0)).rounded(px(8.0)).border_1().border_color(hsla(CARD_BORDER)).text_size(crate::panels::scale::px(10.5)).text_color(hsla(theme::TEXT_DIM)).child(a))),
+                    .children(assoc_label(assoc).map(|a| div().px(px(6.0)).rounded(px(8.0)).border_1().border_color(theme().border).text_size(crate::panels::scale::px(10.5)).text_color(theme().muted_foreground).child(a))),
             )
             .children(menu.map(|m| {
                 div()
@@ -315,8 +315,8 @@ impl GithubView {
                     .px(px(6.0))
                     .rounded(px(5.0))
                     .cursor_pointer()
-                    .text_color(hsla(theme::TEXT_DIM))
-                    .hover(|s| s.bg(hsla(theme::CONTROL_HOVER)).text_color(hsla(theme::TEXT)))
+                    .text_color(theme().muted_foreground)
+                    .hover(|s| s.bg(theme().secondary_hover).text_color(theme().foreground))
                     .child("⋯")
                     .popup(cx, m)
             }));
@@ -344,8 +344,8 @@ impl GithubView {
         div()
             .rounded(px(8.0))
             .border_1()
-            .border_color(hsla(CARD_BORDER))
-            .bg(hsla(CARD_BG))
+            .border_color(theme().border)
+            .bg(theme().inset)
             .overflow_hidden()
             .child(head)
             .child(div().p(px(12.0)).flex().flex_col().gap(px(10.0)).child(body_el).children(react))
@@ -397,8 +397,8 @@ impl GithubView {
                             .items_center()
                             .gap(px(6.0))
                             .px(px(4.0))
-                            .child(div().text_color(hsla(theme::TEXT_FAINT)).child("•"))
-                            .child(div().text_size(crate::panels::scale::px(12.0)).font_weight(FontWeight::MEDIUM).text_color(hsla(theme::TEXT_DIM)).child(ev.actor.clone()))
+                            .child(div().text_color(theme().subtle_foreground).child("•"))
+                            .child(div().text_size(crate::panels::scale::px(12.0)).font_weight(FontWeight::MEDIUM).text_color(theme().muted_foreground).child(ev.actor.clone()))
                             .child(dim(ev.what.clone()))
                             .children(ev.label.as_ref().map(label_pill))
                             .child(faint(ago(ev.created, t))),
@@ -422,8 +422,8 @@ impl GithubView {
             .items_center()
             .gap(px(8.0))
             .px(px(4.0))
-            .child(div().text_color(hsla(theme::TEXT_FAINT)).child(icon(IconName::GitCommitHorizontal, 14.0)))
-            .child(div().font_family(monospace_font()).text_size(crate::panels::scale::px(11.5)).text_color(hsla(theme::ACCENT)).child(c.short.clone()))
+            .child(div().text_color(theme().subtle_foreground).child(icon(IconName::GitCommitHorizontal, 14.0)))
+            .child(div().font_family(monospace_font()).text_size(crate::panels::scale::px(11.5)).text_color(theme().primary).child(c.short.clone()))
             .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(c.headline.clone()))
             .child(faint(format!("{} · {}", c.author, ago(c.created, t))))
     }
@@ -445,17 +445,17 @@ impl GithubView {
 
     pub(super) fn render_review(&self, r: &Review, n: usize, t: i64, cx: &mut Context<Self>) -> Div {
         let (verb, color) = match r.state.as_str() {
-            "APPROVED" => ("approved these changes", GREEN),
-            "CHANGES_REQUESTED" => ("requested changes", RED),
-            "DISMISSED" => ("had a review dismissed", GRAY),
-            "PENDING" => ("has a pending review", YELLOW),
-            _ => ("reviewed", GRAY),
+            "APPROVED" => ("approved these changes", theme().state_open),
+            "CHANGES_REQUESTED" => ("requested changes", theme().state_closed),
+            "DISMISSED" => ("had a review dismissed", theme().state_neutral),
+            "PENDING" => ("has a pending review", theme().state_pending),
+            _ => ("reviewed", theme().state_neutral),
         };
         let mut col = div()
             .rounded(px(8.0))
             .border_1()
-            .border_color(hsla(color).opacity(0.5))
-            .bg(hsla(CARD_BG))
+            .border_color(color.opacity(0.5))
+            .bg(theme().inset)
             .overflow_hidden()
             .child(
                 div()
@@ -464,10 +464,10 @@ impl GithubView {
                     .gap(px(8.0))
                     .h(px(36.0))
                     .px(px(12.0))
-                    .bg(hsla(CARD_HEAD))
+                    .bg(theme().card_header)
                     .child(avatar(&r.author, 20.0))
                     .child(div().font_weight(FontWeight::SEMIBOLD).child(r.author.clone()))
-                    .child(div().text_color(hsla(color)).child(verb))
+                    .child(div().text_color(color).child(verb))
                     .child(faint(ago(r.created, t))),
             );
         if !r.body.trim().is_empty() {
@@ -475,22 +475,22 @@ impl GithubView {
         }
         for (k, c) in r.comments.iter().enumerate() {
             let hunk: Vec<&str> = c.hunk.lines().rev().take(6).collect::<Vec<_>>().into_iter().rev().collect();
-            let mut code = div().flex().flex_col().font_family(monospace_font()).text_size(crate::panels::scale::px(11.5)).bg(hsla(0x0e0e0f)).py(px(4.0)).overflow_hidden();
+            let mut code = div().flex().flex_col().font_family(monospace_font()).text_size(crate::panels::scale::px(11.5)).bg(theme().inset).py(px(4.0)).overflow_hidden();
             for l in hunk {
-                let bg = if l.starts_with('+') { Some(GREEN) } else if l.starts_with('-') { Some(RED) } else { None };
-                code = code.child(div().px(px(10.0)).whitespace_nowrap().when_some(bg, |d, c| d.bg(hsla(c).opacity(0.14))).child(if l.is_empty() { " ".to_string() } else { l.to_string() }));
+                let bg = if l.starts_with('+') { Some(theme().state_open) } else if l.starts_with('-') { Some(theme().state_closed) } else { None };
+                code = code.child(div().px(px(10.0)).whitespace_nowrap().when_some(bg, |d, c| d.bg(c.opacity(0.14))).child(if l.is_empty() { " ".to_string() } else { l.to_string() }));
             }
             col = col.child(
                 div()
                     .border_t_1()
-                    .border_color(hsla(CARD_BORDER))
+                    .border_color(theme().border)
                     .child(
                         div()
                             .flex()
                             .gap(px(8.0))
                             .px(px(12.0))
                             .py(px(6.0))
-                            .child(div().font_family(monospace_font()).text_size(crate::panels::scale::px(11.5)).text_color(hsla(theme::TEXT_DIM)).child(format!("{}{}", c.path, c.line.map(|l| format!(":{l}")).unwrap_or_default())))
+                            .child(div().font_family(monospace_font()).text_size(crate::panels::scale::px(11.5)).text_color(theme().muted_foreground).child(format!("{}{}", c.path, c.line.map(|l| format!(":{l}")).unwrap_or_default())))
                             .children(c.outdated.then(|| faint("outdated"))),
                     )
                     .child(code)

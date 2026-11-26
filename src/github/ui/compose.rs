@@ -6,52 +6,52 @@ impl GithubView {
     pub(super) fn render_merge_box(&self, d: &Detail, pr: &Pr, cx: &mut Context<Self>) -> Div {
         let it = &d.item;
         let info = self.info.clone().unwrap_or_default();
-        let line = |glyph: IconName, color: u32, title: String, sub: Option<String>| {
+        let line = |glyph: IconName, color: Hsla, title: String, sub: Option<String>| {
             div()
                 .flex()
                 .items_start()
                 .gap(px(10.0))
-                .child(div().w(px(16.0)).flex_none().text_color(hsla(color)).child(icon(glyph, 16.0)))
+                .child(div().w(px(16.0)).flex_none().text_color(color).child(icon(glyph, 16.0)))
                 .child(div().flex().flex_col().child(div().font_weight(FontWeight::MEDIUM).child(title)).children(sub.map(faint)))
         };
         let mut rows = div().flex().flex_col().gap(px(10.0));
         let mut actions = div().flex().flex_wrap().items_center().gap(px(8.0));
         let outline = match it.state {
-            State::Merged => PURPLE,
-            State::Closed => RED,
-            State::Open => CARD_BORDER,
+            State::Merged => theme().state_merged,
+            State::Closed => theme().state_closed,
+            State::Open => theme().border,
         };
         match it.state {
             State::Merged => {
-                rows = rows.child(line(IconName::GitMerge, PURPLE, "Pull request merged".into(), pr.merged_by.clone().map(|b| format!("Merged by {b}"))));
+                rows = rows.child(line(IconName::GitMerge, theme().state_merged, "Pull request merged".into(), pr.merged_by.clone().map(|b| format!("Merged by {b}"))));
                 let branch_gone = d.timeline.iter().any(|e| matches!(e, Entry::Event(ev) if ev.what.starts_with("deleted the")));
                 if !pr.cross_repo && !branch_gone && !it.head.is_empty() && info.can_write() && !info.delete_branch_on_merge {
                     actions = actions.child(button("gh-del-branch", format!("Delete {}", it.head), false).on_click(go(cx, GhAct::DeleteBranch)));
                 }
             }
             State::Closed => {
-                rows = rows.child(line(IconName::GitPullRequestClosed, RED, "This pull request is closed".into(), None));
+                rows = rows.child(line(IconName::GitPullRequestClosed, theme().state_closed, "This pull request is closed".into(), None));
                 actions = actions.child(button("gh-reopen-pr", "Reopen pull request", false).on_click(go(cx, GhAct::ReopenItem)));
             }
             State::Open => {
                 // reviews
                 match it.review.as_deref() {
-                    Some("APPROVED") => rows = rows.child(line(IconName::CircleCheck, GREEN, "Changes approved".into(), None)),
-                    Some("CHANGES_REQUESTED") => rows = rows.child(line(IconName::CircleX, RED, "Changes requested".into(), Some("A reviewer asked for changes before this can merge.".into()))),
-                    Some("REVIEW_REQUIRED") => rows = rows.child(line(IconName::CircleDot, YELLOW, "Review required".into(), Some("At least one approving review is required.".into()))),
+                    Some("APPROVED") => rows = rows.child(line(IconName::CircleCheck, theme().state_open, "Changes approved".into(), None)),
+                    Some("CHANGES_REQUESTED") => rows = rows.child(line(IconName::CircleX, theme().state_closed, "Changes requested".into(), Some("A reviewer asked for changes before this can merge.".into()))),
+                    Some("REVIEW_REQUIRED") => rows = rows.child(line(IconName::CircleDot, theme().state_pending, "Review required".into(), Some("At least one approving review is required.".into()))),
                     _ => {}
                 }
                 // checks
                 if !pr.checks.is_empty() {
-                    let bad = pr.checks.iter().filter(|c| check_color(&c.result) == RED).count();
-                    let wait = pr.checks.iter().filter(|c| check_color(&c.result) == YELLOW).count();
+                    let bad = pr.checks.iter().filter(|c| check_color(&c.result) == theme().state_closed).count();
+                    let wait = pr.checks.iter().filter(|c| check_color(&c.result) == theme().state_pending).count();
                     let ok = pr.checks.len() - bad - wait;
                     let (g, c, title) = if bad > 0 {
-                        (IconName::CircleX, RED, format!("{bad} failing"))
+                        (IconName::CircleX, theme().state_closed, format!("{bad} failing"))
                     } else if wait > 0 {
-                        (IconName::CircleDot, YELLOW, format!("{wait} pending"))
+                        (IconName::CircleDot, theme().state_pending, format!("{wait} pending"))
                     } else {
-                        (IconName::CircleCheck, GREEN, "All checks have passed".to_string())
+                        (IconName::CircleCheck, theme().state_open, "All checks have passed".to_string())
                     };
                     let mut r = line(g, c, title, Some(format!("{} successful, {} failing, {} pending", ok, bad, wait)));
                     for ck in pr.checks.iter().take(12) {
@@ -64,9 +64,9 @@ impl GithubView {
                                 .gap(px(6.0))
                                 .cursor_pointer()
                                 .text_size(crate::panels::scale::px(12.0))
-                                .hover(|s| s.text_color(hsla(theme::TEXT)))
-                                .text_color(hsla(theme::TEXT_DIM))
-                                .child(div().text_color(hsla(check_color(&ck.result))).child(icon(check_icon(check_color(&ck.result)), 13.0)))
+                                .hover(|s| s.text_color(theme().foreground))
+                                .text_color(theme().muted_foreground)
+                                .child(div().text_color(check_color(&ck.result)).child(icon(check_icon(check_color(&ck.result)), 13.0)))
                                 .child(ck.name.clone())
                                 .on_click(go(cx, GhAct::OpenWeb(url))),
                         );
@@ -75,17 +75,17 @@ impl GithubView {
                 }
                 // conflicts / behind
                 if pr.mergeable == "CONFLICTING" {
-                    rows = rows.child(line(IconName::CircleX, RED, "This branch has conflicts".into(), Some("Resolve them before merging (ask an agent, or check the branch out).".into())));
+                    rows = rows.child(line(IconName::CircleX, theme().state_closed, "This branch has conflicts".into(), Some("Resolve them before merging (ask an agent, or check the branch out).".into())));
                 } else if pr.merge_state == "BEHIND" && info.can_write() {
-                    rows = rows.child(line(IconName::CircleDot, YELLOW, "This branch is out of date with the base branch".into(), None));
+                    rows = rows.child(line(IconName::CircleDot, theme().state_pending, "This branch is out of date with the base branch".into(), None));
                     actions = actions.child(button("gh-update-branch", "Update branch", false).on_click(go(cx, GhAct::UpdateBranch)));
                 }
                 if let Some((who, method)) = &pr.auto_merge {
-                    rows = rows.child(line(IconName::Clock, PURPLE, format!("Auto-merge enabled by {who}"), Some(format!("Will merge automatically ({}) once requirements pass.", method.to_lowercase()))));
+                    rows = rows.child(line(IconName::Clock, theme().state_merged, format!("Auto-merge enabled by {who}"), Some(format!("Will merge automatically ({}) once requirements pass.", method.to_lowercase()))));
                     actions = actions.child(button("gh-auto-off", "Disable auto-merge", false).on_click(go(cx, GhAct::AutoMerge(false))));
                 }
                 if it.draft {
-                    rows = rows.child(line(IconName::GitPullRequestDraft, GRAY, "This pull request is still a work in progress".into(), Some("Draft pull requests cannot be merged.".into())));
+                    rows = rows.child(line(IconName::GitPullRequestDraft, theme().state_neutral, "This pull request is still a work in progress".into(), Some("Draft pull requests cannot be merged.".into())));
                     if info.can_write() || d.mine {
                         actions = actions.child(button("gh-ready", "Ready for review", true).on_click(go(cx, GhAct::Ready)));
                     }
@@ -124,9 +124,9 @@ impl GithubView {
                         actions = actions.child(faint("This repository does not allow merging pull requests."));
                     }
                     if blocked {
-                        rows = rows.child(line(IconName::CircleDot, YELLOW, "Merging is blocked".into(), Some("Required reviews or checks have not been met.".into())));
+                        rows = rows.child(line(IconName::CircleDot, theme().state_pending, "Merging is blocked".into(), Some("Required reviews or checks have not been met.".into())));
                     } else if pr.mergeable == "MERGEABLE" {
-                        rows = rows.child(line(IconName::CircleCheck, GREEN, "No conflicts with the base branch".into(), Some("Merging can be performed automatically.".into())));
+                        rows = rows.child(line(IconName::CircleCheck, theme().state_open, "No conflicts with the base branch".into(), Some("Merging can be performed automatically.".into())));
                     }
                 }
             }
@@ -134,8 +134,8 @@ impl GithubView {
         div()
             .rounded(px(8.0))
             .border_1()
-            .border_color(hsla(outline))
-            .bg(hsla(CARD_BG))
+            .border_color(outline)
+            .bg(theme().inset)
             .p(px(14.0))
             .flex()
             .flex_col()

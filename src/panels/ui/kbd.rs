@@ -2,7 +2,7 @@
 
 use gpui::{Div, FontWeight, ParentElement, SharedString, Styled, div, px};
 
-use super::token;
+use crate::panels::theme::theme;
 use crate::panels::scale;
 
 /// `keys` as one keycap, such as "Esc" or "Ctrl+K".
@@ -16,12 +16,12 @@ pub fn kbd(keys: impl Into<SharedString>) -> Div {
         .items_center()
         .justify_center()
         .rounded(px(4.0))
-        .bg(token::secondary())
+        .bg(theme().secondary)
         .border_1()
-        .border_color(token::border())
+        .border_color(theme().panel_border)
         .whitespace_nowrap()
         .text_size(scale::px(10.5))
         .font_weight(FontWeight::MEDIUM)
-        .text_color(token::muted_foreground())
+        .text_color(theme().muted_foreground)
         .child(keys.into())
 }

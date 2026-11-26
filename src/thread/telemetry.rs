@@ -1,7 +1,7 @@
 use gpui::{ClickEvent, Context, Div, ParentElement, Styled, div, px};
 
 use super::{ThreadEvent, ThreadView};
-use crate::panels::{scale, theme::{self, hsla}, widgets::{button, countdown}};
+use crate::panels::{scale, theme::theme, widgets::{button, countdown}};
 use crate::store::UsageLimits;
 
 pub(crate) fn exhausted_usage(usage: &UsageLimits, now: i64) -> Option<String> {
@@ -23,7 +23,7 @@ impl ThreadView {
             .flex().flex_col().gap(px(4.0)).text_size(scale::px(12.0));
         if let Some(label) = usage_limit {
             let mut row = div().flex().items_center().flex_wrap().gap(px(8.0))
-                .child(div().text_color(hsla(theme::WARN)).child(label.clone()));
+                .child(div().text_color(theme().warning).child(label.clone()));
             if let Some(target) = self.fallback_model.clone() {
                 let btn_label = format!("Continue in {}", target.name);
                 row = row.child(
@@ -41,7 +41,7 @@ impl ThreadView {
             contents = contents.child(row);
         }
         if let Some(error) = error {
-            contents = contents.child(div().text_color(hsla(theme::DANGER)).child(format!("{}: {error}", self.harness.name())));
+            contents = contents.child(div().text_color(theme().destructive).child(format!("{}: {error}", self.harness.name())));
         }
         Some(div().w_full().px(px(22.0)).flex().justify_center().child(contents))
     }

@@ -5,7 +5,7 @@ use gpui_kit::component::input::Input;
 
 use crate::app::Workspace;
 use crate::panels::scale;
-use crate::panels::theme::{self, hsla};
+use crate::panels::theme::theme;
 
 impl Workspace {
     pub(super) fn render_palette(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -17,7 +17,7 @@ impl Workspace {
                     .px(px(10.0))
                     .py(px(14.0))
                     .text_size(scale::px(12.5))
-                    .text_color(hsla(theme::TEXT_DIM))
+                    .text_color(theme().muted_foreground)
                     .child("No matching commands, sessions, or files."),
             );
         } else {
@@ -42,8 +42,8 @@ impl Workspace {
                         .items_center()
                         .gap(px(8.0))
                         .cursor_pointer()
-                        .when(active, |d| d.bg(hsla(theme::SURFACE_HOVER)))
-                        .hover(|s| s.bg(hsla(theme::ROW_HOVER)))
+                        .when(active, |d| d.bg(theme().accent))
+                        .hover(|s| s.bg(theme().row_hover))
                         .on_mouse_move(cx.listener(move |ws, _, _, cx| ws.pick_palette(row_ix, cx)))
                         .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
                             ws.pick_palette(row_ix, cx);
@@ -55,11 +55,11 @@ impl Workspace {
                                 .px(px(6.0))
                                 .py(px(1.5))
                                 .rounded(px(4.0))
-                                .bg(hsla(theme::PANEL_BG))
+                                .bg(theme().background)
                                 .border_1()
-                                .border_color(hsla(theme::PANEL_BORDER))
+                                .border_color(theme().panel_border)
                                 .text_size(scale::px(10.5))
-                                .text_color(hsla(theme::TEXT_DIM))
+                                .text_color(theme().muted_foreground)
                                 .child(item.badge),
                         )
                         .child(
@@ -70,7 +70,7 @@ impl Workspace {
                                 .whitespace_nowrap()
                                 .text_ellipsis()
                                 .text_size(scale::px(13.0))
-                                .text_color(hsla(theme::TEXT))
+                                .text_color(theme().foreground)
                                 .child(item.title.clone()),
                         )
                         .child(
@@ -81,7 +81,7 @@ impl Workspace {
                                 .whitespace_nowrap()
                                 .text_ellipsis()
                                 .text_size(scale::px(11.5))
-                                .text_color(hsla(theme::TEXT_FAINT))
+                                .text_color(theme().subtle_foreground)
                                 .child(item.subtitle.clone()),
                         ),
                 );
@@ -93,9 +93,9 @@ impl Workspace {
             .w(px(580.0))
             .max_w(gpui::relative(0.9))
             .rounded(px(10.0))
-            .bg(hsla(theme::SURFACE_ELEVATED))
+            .bg(theme().card)
             .border_1()
-            .border_color(hsla(theme::FOCUS_BORDER))
+            .border_color(theme().ring)
             .overflow_hidden()
             .flex()
             .flex_col()
@@ -119,7 +119,7 @@ impl Workspace {
                 div()
                     .p(px(8.0))
                     .border_b_1()
-                    .border_color(hsla(theme::PANEL_BORDER))
+                    .border_color(theme().panel_border)
                     .child(Input::new(&palette.input)),
             )
             .child(list);
@@ -133,7 +133,7 @@ impl Workspace {
                 .justify_center()
                 .items_start()
                 .pt(px(84.0))
-                .bg(gpui::hsla(0.0, 0.0, 0.0, 0.45))
+                .bg(theme().backdrop)
                 .on_mouse_down(MouseButton::Left, cx.listener(|ws, _, window, cx| ws.close_palette(window, cx)))
                 .child(box_el)
                 .into_any_element(),

@@ -14,7 +14,7 @@ use gpui_kit::{
     component::{input::TextareaState, tooltip::Tooltip},
 };
 
-use crate::panels::theme::{self, hsla};
+use crate::panels::theme::theme;
 use crate::panels::widgets::{focusable, icon, icon_button};
 
 #[derive(Clone, Default)]
@@ -232,9 +232,9 @@ impl Attachments {
                     .px(px(5.0))
                     .py(px(3.0))
                     .rounded(px(6.0))
-                    .bg(hsla(theme::PANEL_BG))
+                    .bg(theme().background)
                     .text_size(px(12.0))
-                    .text_color(hsla(theme::TEXT_DIM))
+                    .text_color(theme().muted_foreground)
                     .tooltip(move |window, cx| Tooltip::new(name.clone()).build(window, cx))
                     .child(content)
                     .child(
@@ -267,7 +267,7 @@ impl Attachments {
                 d.child(
                     div()
                         .text_size(px(12.0))
-                        .text_color(hsla(theme::DANGER))
+                        .text_color(theme().destructive)
                         .child(error),
                 )
             }))
@@ -290,7 +290,7 @@ pub fn drop_target(
                 });
             }
         })
-        .drag_over::<ExternalPaths>(|style, _, _, _| style.border_color(hsla(theme::FOCUS_BORDER)))
+        .drag_over::<ExternalPaths>(|style, _, _, _| style.border_color(theme().ring))
         .on_drop(drop)
 }
 
@@ -305,8 +305,8 @@ pub fn button<V: 'static>(
         .size(px(26.0))
         .flex_none()
         .rounded(px(5.0))
-        .text_color(hsla(theme::TEXT_DIM))
-        .hover(|s| s.text_color(hsla(theme::TEXT)))
+        .text_color(theme().muted_foreground)
+        .hover(|s| s.text_color(theme().foreground))
         .cursor_pointer()
         .debug_selector(|| "composer-attach".into())
         .child(icon(IconName::Paperclip, 16.0))

@@ -12,7 +12,7 @@ use crate::app::{
 use gpui_kit::component::input::{Paste, Textarea};
 use crate::harness::permission::Permission;
 use crate::panels::{attachments, composer};
-use crate::panels::theme::{self, hsla};
+use crate::panels::theme::theme;
 use gpui_kit::assets::IconName;
 use crate::panels::widgets::{
     Trigger, icon, spinner,
@@ -34,10 +34,10 @@ impl Workspace {
         let project_open = matches!(self.picker_kind(), Some(WorkspacePicker::Project { mode: ProjectPickerMode::Home, .. }));
         let project_label = project.as_ref().map_or_else(|| "Project".to_string(), |p| p.name.clone());
         let project_chip = composer::chip("home-project", project_open)
-            .text_color(hsla(if project.is_some() { theme::TEXT } else { theme::TEXT_DIM }))
-            .child(icon(IconName::FolderOpen, 12.0).text_color(hsla(theme::TEXT_DIM)))
+            .text_color(if project.is_some() { theme().foreground } else { theme().muted_foreground })
+            .child(icon(IconName::FolderOpen, 12.0).text_color(theme().muted_foreground))
             .child(div().max_w(px(150.0)).overflow_hidden().whitespace_nowrap().text_ellipsis().line_height(gpui::relative(1.35)).child(project_label))
-            .child(icon(IconName::ChevronDown, 10.5).text_color(hsla(theme::TEXT_FAINT)))
+            .child(icon(IconName::ChevronDown, 10.5).text_color(theme().subtle_foreground))
             .dropdown(cx, |ws, at, window, cx| {
                 ws.open_project_picker(ProjectPickerMode::Home, at, window, cx);
             });
@@ -137,7 +137,7 @@ impl Workspace {
             .items_center()
             .justify_center()
             .gap(px(20.0))
-            .child(div().text_size(scaled(24.0)).font_weight(FontWeight::MEDIUM).text_color(hsla(theme::TEXT)).child("What are we working on?"))
+            .child(div().text_size(scaled(24.0)).font_weight(FontWeight::MEDIUM).text_color(theme().foreground).child("What are we working on?"))
             .child(composer)
     }
 }

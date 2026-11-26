@@ -16,7 +16,7 @@ use crate::app::{
 use gpui_kit::component::input::Input;
 use crate::panels::logos;
 use crate::panels::ui::toggle_group::toggle_group;
-use crate::panels::theme::{self, hsla};
+use crate::panels::theme::theme;
 use crate::updater::Status;
 use gpui_kit::assets::IconName;
 use crate::panels::settings_pages::{flip, settings_group, toggle_switch};
@@ -38,7 +38,7 @@ pub(super) fn render_settings_card(
     };
     let (updates, scale, follow_up, auto_compact, auto_compact_threshold, usage_display, auto_handoff_on_limit) = (*updates, *scale, *follow_up, *auto_compact, *auto_compact_threshold, *usage_display, *auto_handoff_on_limit);
     let scaled = crate::panels::scale::px;
-    let faint = |text: String| div().text_size(scaled(11.5)).text_color(hsla(theme::TEXT_FAINT)).child(text);
+    let faint = |text: String| div().text_size(scaled(11.5)).text_color(theme().subtle_foreground).child(text);
 
     let content: AnyElement = match page {
         SettingsPage::General => {
@@ -89,7 +89,7 @@ pub(super) fn render_settings_card(
                     .justify_between()
                     .gap(px(12.0))
                     .cursor_pointer()
-                    .hover(|s| s.bg(hsla(theme::SURFACE_HOVER)))
+                    .hover(|s| s.bg(theme().accent))
                     .child(row_labels("Auto-compact", Some("Automatically compact conversation context between turns")))
                     .child(toggle_switch(auto_compact))
                     .on_click(cx.listener(|ws, _: &ClickEvent, _, cx| {
@@ -112,11 +112,11 @@ pub(super) fn render_settings_card(
                             .gap(px(4.0))
                             .p(px(2.0))
                             .rounded(px(6.0))
-                            .bg(hsla(theme::PANEL_BG))
+                            .bg(theme().background)
                             .border_1()
-                            .border_color(hsla(theme::PANEL_BORDER))
+                            .border_color(theme().panel_border)
                             .child(compaction_step("compact-threshold-down", "−", -(crate::harness::compaction::THRESHOLD_STEP as i64), cx))
-                            .child(div().w(px(42.0)).flex().justify_center().text_size(scaled(12.0)).text_color(hsla(theme::TEXT)).child(format!("{auto_compact_threshold}%")))
+                            .child(div().w(px(42.0)).flex().justify_center().text_size(scaled(12.0)).text_color(theme().foreground).child(format!("{auto_compact_threshold}%")))
                             .child(compaction_step("compact-threshold-up", "+", crate::harness::compaction::THRESHOLD_STEP as i64, cx))
                             .into_any_element(),
                     )
@@ -128,9 +128,9 @@ pub(super) fn render_settings_card(
                     div()
                         .px(px(14.0))
                         .py(px(8.0))
-                        .bg(hsla(0x191512))
+                        .bg(theme().notice)
                         .text_size(scaled(11.5))
-                        .text_color(hsla(theme::WARN))
+                        .text_color(theme().warning)
                         .child("Full Access allows commands and edits without asking.")
                         .into_any_element(),
                 );
@@ -147,11 +147,11 @@ pub(super) fn render_settings_card(
                         .gap(px(4.0))
                         .p(px(2.0))
                         .rounded(px(6.0))
-                        .bg(hsla(theme::PANEL_BG))
+                        .bg(theme().background)
                         .border_1()
-                        .border_color(hsla(theme::PANEL_BORDER))
+                        .border_color(theme().panel_border)
                         .child(scale_step("scale-down", "−", -(crate::panels::scale::STEP as i32), cx))
-                        .child(div().w(px(42.0)).flex().justify_center().text_size(scaled(12.0)).text_color(hsla(theme::TEXT)).child(format!("{scale}%")))
+                        .child(div().w(px(42.0)).flex().justify_center().text_size(scaled(12.0)).text_color(theme().foreground).child(format!("{scale}%")))
                         .child(scale_step("scale-up", "+", crate::panels::scale::STEP as i32, cx))
                         .into_any_element(),
                 )
@@ -222,7 +222,7 @@ pub(super) fn render_settings_card(
                 .justify_between()
                 .gap(px(12.0))
                 .cursor_pointer()
-                .hover(|s| s.bg(hsla(theme::SURFACE_HOVER)))
+                .hover(|s| s.bg(theme().accent))
                 .child(row_labels("Automatic updates", Some("Check for new m4code releases in the background")))
                 .child(
                     div()
@@ -266,7 +266,7 @@ pub(super) fn render_settings_card(
                         .justify_between()
                         .gap(px(12.0))
                         .cursor_pointer()
-                        .hover(|s| s.bg(hsla(theme::SURFACE_HOVER)))
+                        .hover(|s| s.bg(theme().accent))
                         .child(row_labels(feature.label(), Some(feature.description())))
                         .child(toggle_switch(on))
                         .on_click(cx.listener(move |ws, _: &ClickEvent, _, cx| {
@@ -312,11 +312,11 @@ pub(super) fn render_settings_card(
                     .rounded(px(6.0))
                     .text_size(scaled(13.0))
                     .font_weight(if selected { FontWeight::MEDIUM } else { FontWeight::NORMAL })
-                    .text_color(hsla(if selected { theme::TEXT } else { theme::TEXT_DIM }))
-                    .when(selected, |d| d.bg(hsla(theme::ROW_ACTIVE)))
+                    .text_color(if selected { theme().foreground } else { theme().muted_foreground })
+                    .when(selected, |d| d.bg(theme().row_active))
                     .cursor_pointer()
-                    .hover(|s| s.bg(hsla(theme::ROW_HOVER)))
-                    .child(icon(p.icon(), 13.5).text_color(hsla(if selected { theme::ACCENT } else { theme::TEXT_FAINT })))
+                    .hover(|s| s.bg(theme().row_hover))
+                    .child(icon(p.icon(), 13.5).text_color(if selected { theme().primary } else { theme().subtle_foreground }))
                     .child(p.label())
                     .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
                         ws.set_settings_page(p, cx);
@@ -330,9 +330,9 @@ pub(super) fn render_settings_card(
         .w(scaled(204.0))
         .flex_none()
         .h_full()
-        .bg(hsla(0x09090a))
+        .bg(theme().inset)
         .border_r_1()
-        .border_color(hsla(theme::BORDER))
+        .border_color(theme().border)
         .p(px(14.0))
         .flex()
         .flex_col()
@@ -342,7 +342,7 @@ pub(super) fn render_settings_card(
                 .flex()
                 .flex_col()
                 .gap(px(10.0))
-                .child(div().px(px(10.0)).pt(px(4.0)).text_size(scaled(14.5)).font_weight(FontWeight::SEMIBOLD).text_color(hsla(theme::TEXT)).child("Settings"))
+                .child(div().px(px(10.0)).pt(px(4.0)).text_size(scaled(14.5)).font_weight(FontWeight::SEMIBOLD).text_color(theme().foreground).child("Settings"))
                 .child(nav),
         )
         .child(
@@ -350,12 +350,12 @@ pub(super) fn render_settings_card(
                 .px(px(10.0))
                 .pt(px(12.0))
                 .border_t_1()
-                .border_color(hsla(theme::BORDER))
+                .border_color(theme().border)
                 .flex()
                 .flex_col()
                 .gap(px(2.0))
-                .child(div().text_size(scaled(11.5)).font_weight(FontWeight::MEDIUM).text_color(hsla(theme::TEXT_DIM)).child(format!("m4code {}", env!("CARGO_PKG_VERSION"))))
-                .child(div().text_size(scaled(10.5)).text_color(hsla(theme::TEXT_FAINT)).child("Independent project")),
+                .child(div().text_size(scaled(11.5)).font_weight(FontWeight::MEDIUM).text_color(theme().muted_foreground).child(format!("m4code {}", env!("CARGO_PKG_VERSION"))))
+                .child(div().text_size(scaled(10.5)).text_color(theme().subtle_foreground).child("Independent project")),
         );
 
     let page_header = div()
@@ -364,17 +364,17 @@ pub(super) fn render_settings_card(
         .gap(px(3.0))
         .pb(px(14.0))
         .border_b_1()
-        .border_color(hsla(theme::BORDER))
-        .child(div().text_size(scaled(17.0)).font_weight(FontWeight::SEMIBOLD).text_color(hsla(theme::TEXT)).child(page.label()))
-        .child(div().text_size(scaled(12.0)).text_color(hsla(theme::TEXT_DIM)).child(page.subtitle()));
+        .border_color(theme().border)
+        .child(div().text_size(scaled(17.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme().foreground).child(page.label()))
+        .child(div().text_size(scaled(12.0)).text_color(theme().muted_foreground).child(page.subtitle()));
 
     let footer = div()
         .flex_none()
         .px(px(24.0))
         .py(px(12.0))
         .border_t_1()
-        .border_color(hsla(theme::BORDER))
-        .bg(hsla(theme::PANEL_BG))
+        .border_color(theme().border)
+        .bg(theme().background)
         .flex()
         .items_center()
         .justify_between()
@@ -384,14 +384,14 @@ pub(super) fn render_settings_card(
                 .items_center()
                 .gap(px(6.0))
                 .text_size(scaled(11.0))
-                .text_color(hsla(theme::TEXT_FAINT))
+                .text_color(theme().subtle_foreground)
                 .child(key_badge("Esc"))
                 .child("close"),
         )
         .child(
             div()
                 .text_size(scaled(11.0))
-                .text_color(hsla(theme::TEXT_FAINT))
+                .text_color(theme().subtle_foreground)
                 .child("Changes save automatically"),
         );
 
@@ -401,7 +401,7 @@ pub(super) fn render_settings_card(
         .h_full()
         .flex()
         .flex_col()
-        .bg(hsla(theme::PANEL_BG))
+        .bg(theme().background)
         .child(
             scroll.wire(div().id("settings-page").flex_1().min_h_0(), window).child(
                 div()
@@ -440,8 +440,8 @@ fn row_labels(title: &str, subtitle: Option<&str>) -> gpui::Div {
         .flex_1()
         .min_w_0()
         .gap(px(2.0))
-        .child(div().text_size(scaled(13.0)).text_color(hsla(theme::TEXT)).child(title.to_string()))
-        .children(subtitle.map(|s| div().text_size(scaled(11.5)).text_color(hsla(theme::TEXT_FAINT)).child(s.to_string())))
+        .child(div().text_size(scaled(13.0)).text_color(theme().foreground).child(title.to_string()))
+        .children(subtitle.map(|s| div().text_size(scaled(11.5)).text_color(theme().subtle_foreground).child(s.to_string())))
 }
 
 
@@ -474,7 +474,7 @@ fn keyboard_page() -> gpui::Div {
 /// The Worktrees section on the Projects page: worktree folders m4code made, grouped by repository.
 fn worktrees_section(page: &crate::app::WorktreesPage, cx: &mut Context<Workspace>) -> gpui::Div {
     let scaled = crate::panels::scale::px;
-    let faint = |text: String| div().text_size(scaled(11.5)).text_color(hsla(theme::TEXT_FAINT)).child(text);
+    let faint = |text: String| div().text_size(scaled(11.5)).text_color(theme().subtle_foreground).child(text);
     let reveal = if cfg!(target_os = "macos") { "Show in Finder" } else { "Show in File Explorer" };
     let empty_card = |msg: &str| {
         settings_group(
@@ -485,7 +485,7 @@ fn worktrees_section(page: &crate::app::WorktreesPage, cx: &mut Context<Workspac
                     .px(px(14.0))
                     .py(px(14.0))
                     .text_size(scaled(12.0))
-                    .text_color(hsla(theme::TEXT_FAINT))
+                    .text_color(theme().subtle_foreground)
                     .child(msg.to_string())
                     .into_any_element(),
             ],
@@ -511,7 +511,7 @@ fn worktrees_section(page: &crate::app::WorktreesPage, cx: &mut Context<Workspac
                 div()
                     .px(px(14.0))
                     .py(px(7.0))
-                    .bg(hsla(0x101012))
+                    .bg(theme().inset)
                     .child(section_label(heading))
                     .into_any_element(),
             );
@@ -587,7 +587,7 @@ fn worktrees_section(page: &crate::app::WorktreesPage, cx: &mut Context<Workspac
 /// Default model row inside the New sessions card; clicking opens the universal model dropdown anchored to its pill.
 fn default_model_row(current: &crate::harness::CatalogModel, open: bool, cx: &mut Context<Workspace>) -> impl IntoElement {
     let scaled = crate::panels::scale::px;
-    let accent = hsla(theme::ACCENT);
+    let accent = theme().primary;
     let row_anchor = Anchor::default();
     let pill_anchor = Anchor::default();
     div()
@@ -600,7 +600,7 @@ fn default_model_row(current: &crate::harness::CatalogModel, open: bool, cx: &mu
         .justify_between()
         .gap(px(12.0))
         .cursor_pointer()
-        .hover(|s| s.bg(hsla(theme::SURFACE_HOVER)))
+        .hover(|s| s.bg(theme().accent))
         .child(row_anchor.probe())
         .child(row_labels("Default model", Some("Model used when starting a new session")))
         .child(
@@ -613,13 +613,13 @@ fn default_model_row(current: &crate::harness::CatalogModel, open: bool, cx: &mu
                 .px(px(9.0))
                 .h(px(26.0))
                 .rounded(px(6.0))
-                .bg(hsla(if open { theme::ROW_ACTIVE } else { theme::PANEL_BG }))
+                .bg(if open { theme().row_active } else { theme().background })
                 .border_1()
-                .border_color(hsla(if open { theme::ACCENT } else { theme::PANEL_BORDER }))
+                .border_color(if open { theme().primary } else { theme().panel_border })
                 .child(pill_anchor.probe())
-                .child(logos::draw(logos::for_harness(current.harness), 11.5, hsla(theme::TEXT_DIM)))
+                .child(logos::draw(logos::for_harness(current.harness), 11.5, theme().muted_foreground))
                 .child(div().max_w(px(220.0)).overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(scaled(12.0)).text_color(accent).child(current.name.clone()))
-                .child(icon(IconName::ChevronDown, 10.5).text_color(hsla(theme::TEXT_FAINT))),
+                .child(icon(IconName::ChevronDown, 10.5).text_color(theme().subtle_foreground)),
         )
         .on_mouse_down(
             MouseButton::Left,
@@ -651,7 +651,7 @@ fn settings_picker_row(
         .justify_between()
         .gap(px(12.0))
         .cursor_pointer()
-        .hover(|s| s.bg(hsla(theme::SURFACE_HOVER)))
+        .hover(|s| s.bg(theme().accent))
         .child(row_anchor.probe())
         .child(row_labels(label, Some(subtitle)))
         .child(
@@ -664,13 +664,13 @@ fn settings_picker_row(
                 .px(px(9.0))
                 .h(px(26.0))
                 .rounded(px(6.0))
-                .bg(hsla(if open { theme::ROW_ACTIVE } else { theme::PANEL_BG }))
+                .bg(if open { theme().row_active } else { theme().background })
                 .border_1()
-                .border_color(hsla(if open { theme::ACCENT } else { theme::PANEL_BORDER }))
+                .border_color(if open { theme().primary } else { theme().panel_border })
                 .text_size(scaled(12.0))
                 .child(pill_anchor.probe())
-                .child(div().max_w(px(220.0)).overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(hsla(theme::ACCENT)).child(current))
-                .child(icon(IconName::ChevronDown, 10.5).text_color(hsla(theme::TEXT_FAINT))),
+                .child(div().max_w(px(220.0)).overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(theme().primary).child(current))
+                .child(icon(IconName::ChevronDown, 10.5).text_color(theme().subtle_foreground)),
         )
         .on_mouse_down(
             MouseButton::Left,
@@ -691,9 +691,9 @@ fn scale_step(id: &'static str, label: &'static str, by: i32, cx: &mut Context<W
         .items_center()
         .justify_center()
         .rounded(px(4.0))
-        .text_color(hsla(theme::TEXT_DIM))
+        .text_color(theme().muted_foreground)
         .cursor_pointer()
-        .hover(|s| s.bg(hsla(theme::SURFACE_HOVER)).text_color(hsla(theme::TEXT)))
+        .hover(|s| s.bg(theme().accent).text_color(theme().foreground))
         .child(label)
         .on_click(cx.listener(move |ws, _: &ClickEvent, _w, cx| {
             if let Some(Modal::Settings { scale, .. }) = ws.modal.as_mut() {
@@ -714,9 +714,9 @@ fn compaction_step(id: &'static str, label: &'static str, by: i64, cx: &mut Cont
         .items_center()
         .justify_center()
         .rounded(px(4.0))
-        .text_color(hsla(theme::TEXT_DIM))
+        .text_color(theme().muted_foreground)
         .cursor_pointer()
-        .hover(|s| s.bg(hsla(theme::SURFACE_HOVER)).text_color(hsla(theme::TEXT)))
+        .hover(|s| s.bg(theme().accent).text_color(theme().foreground))
         .child(label)
         .on_click(cx.listener(move |ws, _: &ClickEvent, _w, cx| {
             if let Some(Modal::Settings { auto_compact_threshold, .. }) = ws.modal.as_mut() {

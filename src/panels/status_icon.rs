@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use gpui::{Animation, AnimationExt, AnyElement, App, Hsla, IntoElement, ParentElement, RenderOnce, SharedString, Styled, Window, div, ease_out_quint, px};
 use gpui_kit::assets::IconName;
 
-use crate::panels::theme::{self, hsla};
+use crate::panels::theme::theme;
 use crate::panels::widgets::icon;
 
 /// What a session row's status icon shows.
@@ -61,12 +61,12 @@ fn morph_frame(t: f32) -> (Look, Look) {
 }
 
 /// One state's icon and color. `None` is the not-running ring, which is drawn rather than loaded.
-fn icon_of(state: SessionDot) -> Option<(IconName, u32)> {
+fn icon_of(state: SessionDot) -> Option<(IconName, gpui::Hsla)> {
     match state {
-        SessionDot::Waiting => Some((IconName::CircleQuestionMark, theme::WARN)),
-        SessionDot::Attention => Some((IconName::CircleCheck, theme::ACCENT)),
-        SessionDot::Working => Some((IconName::CircleDotDashed, theme::BUSY)),
-        SessionDot::Active => Some((IconName::CircleSmall, theme::TEXT_DIM)),
+        SessionDot::Waiting => Some((IconName::CircleQuestionMark, theme().warning)),
+        SessionDot::Attention => Some((IconName::CircleCheck, theme().primary)),
+        SessionDot::Working => Some((IconName::CircleDotDashed, theme().busy)),
+        SessionDot::Active => Some((IconName::CircleSmall, theme().muted_foreground)),
         SessionDot::Inactive => None,
     }
 }
@@ -77,10 +77,10 @@ fn glyph(state: SessionDot, look: Look) -> AnyElement {
     let drawn = match icon_of(state) {
         Some((name, color)) => {
             let spin = if state == SessionDot::Working { spin_angle(START.get_or_init(Instant::now).elapsed()) } else { 0.0 };
-            let color: Hsla = hsla(color).opacity(look.opacity);
+            let color: Hsla = color.opacity(look.opacity);
             icon(name, SLOT * look.scale).text_color(color).rotate(gpui::radians(spin + look.turn)).into_any_element()
         }
-        None => div().size(px(7.0 * look.scale)).rounded_full().border_1().border_color(hsla(0x3d3d43).opacity(look.opacity)).into_any_element(),
+        None => div().size(px(7.0 * look.scale)).rounded_full().border_1().border_color(theme().ring.opacity(look.opacity)).into_any_element(),
     };
     div().absolute().inset_0().flex().items_center().justify_center().child(drawn).into_any_element()
 }

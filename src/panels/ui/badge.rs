@@ -2,7 +2,7 @@
 
 use gpui::{Div, FontWeight, ParentElement, SharedString, Styled, div, px};
 
-use super::token;
+use crate::panels::theme::theme;
 use crate::panels::scale;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -32,10 +32,10 @@ pub fn badge(label: impl Into<SharedString>, variant: Variant) -> Div {
         .text_size(scale::px(11.0))
         .font_weight(FontWeight::MEDIUM);
     let styled = match variant {
-        Variant::Default => base.bg(token::primary()).text_color(token::primary_foreground()),
-        Variant::Secondary => base.bg(token::secondary()).text_color(token::foreground()),
-        Variant::Outline => base.border_color(token::border()).text_color(token::foreground()),
-        Variant::Destructive => base.bg(token::destructive().opacity(0.6)).text_color(token::foreground()),
+        Variant::Default => base.bg(theme().primary).text_color(theme().primary_foreground),
+        Variant::Secondary => base.bg(theme().secondary).text_color(theme().foreground),
+        Variant::Outline => base.border_color(theme().panel_border).text_color(theme().foreground),
+        Variant::Destructive => base.bg(theme().destructive.opacity(0.6)).text_color(theme().foreground),
     };
     styled.child(label.into())
 }

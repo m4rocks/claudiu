@@ -10,7 +10,7 @@ fn home_editor_saves_files_and_adds_comments_without_a_session() {
     let mut cx = TestAppContext::single();
     cx.update(|app| {
         gpui_kit::init(app);
-        gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, app);
+        crate::panels::theme::install(app);
     });
     let (window, ws) = cx.update(|app| gpui_kit::open_window(Default::default(), app, |window, app| app.new(|cx| Workspace::new(window, vec![root.clone()], cx)))).unwrap();
     let step = |cx: &mut TestAppContext, f: &dyn Fn(&mut Workspace, &mut Window, &mut Context<Workspace>)| {
@@ -78,7 +78,7 @@ fn home_editor_follows_the_project_without_starting_a_session() {
     let mut cx = TestAppContext::single();
     cx.update(|app| {
         gpui_kit::init(app);
-        gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, app);
+        crate::panels::theme::install(app);
     });
     let (window, ws) = cx.update(|app| gpui_kit::open_window(Default::default(), app, |window, app| {
         app.new(|cx| Workspace::new(window, vec![first.path().to_path_buf(), second.path().to_path_buf()], cx))
@@ -118,7 +118,7 @@ fn line_comment_into_the_message_box() {
     let mut cx = TestAppContext::single();
     cx.update(|app| {
         gpui_kit::init(app);
-        gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, app);
+        crate::panels::theme::install(app);
     });
     let (window, ws) = cx
         .update(|app| gpui_kit::open_window(Default::default(), app, |window, app| app.new(|cx| Workspace::new(window, vec![], cx))))
@@ -196,7 +196,7 @@ fn file_operations_in_the_tree() {
     let mut cx = TestAppContext::single();
     cx.update(|app| {
         gpui_kit::init(app);
-        gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, app);
+        crate::panels::theme::install(app);
     });
     let (window, ws) = cx
         .update(|app| gpui_kit::open_window(Default::default(), app, |window, app| app.new(|cx| Workspace::new(window, vec![], cx))))
@@ -294,7 +294,7 @@ fn line_actions_on_their_keys() {
     let mut cx = TestAppContext::single();
     cx.update(|app| {
         gpui_kit::init(app);
-        gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, app);
+        crate::panels::theme::install(app);
         app.bind_keys(super::line_action_bindings());
     });
     let (window, ws) = cx
@@ -403,7 +403,7 @@ fn double_click_in_the_editor() {
     let mut cx = TestAppContext::single();
     cx.update(|app| {
         gpui_kit::init(app);
-        gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, app);
+        crate::panels::theme::install(app);
     });
     let (window, ws) = cx
         .update(|app| gpui_kit::open_window(Default::default(), app, |window, app| app.new(|cx| Workspace::new(window, vec![], cx))))

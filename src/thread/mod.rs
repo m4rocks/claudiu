@@ -2781,7 +2781,7 @@ impl ThreadView {
     pub(super) fn sync_command_highlights(&self, cx: &mut Context<Self>) {
         let draft = self.composer.read(cx).value().to_string();
         let commands = self.shown_commands();
-        let accent = crate::panels::theme::hsla(crate::panels::theme::CODEX);
+        let accent = crate::panels::theme::theme().codex;
         let mut decorations = Vec::new();
         for (range, name) in slash_command_spans(&draft) {
             let exact = commands.iter().any(|c| c.name == name);

@@ -5,7 +5,7 @@
 use gpui::{Context, FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString, Styled, Window, px};
 use gpui_kit::base::{Toggle, ToggleGroup};
 
-use super::token;
+use crate::panels::theme::theme;
 use crate::panels::scale;
 
 /// The control for `options`, with `current` raised. Choosing a segment runs `on_pick` with its value; choosing the
@@ -33,11 +33,11 @@ pub fn toggle_group<V: 'static, T: Copy + PartialEq + 'static>(
             .border_color(gpui::transparent_black())
             .text_size(scale::px(12.0))
             .font_weight(FontWeight::MEDIUM)
-            .text_color(token::muted_foreground())
+            .text_color(theme().muted_foreground)
             .cursor_pointer()
-            .hover(|s| s.text_color(token::foreground()))
-            .focus_visible(|s| s.border_color(token::ring()))
-            .styles(|s| s.pressed(|s| s.bg(token::raised()).border_color(token::border()).text_color(token::foreground()).shadow_sm()))
+            .hover(|s| s.text_color(theme().foreground))
+            .focus_visible(|s| s.border_color(theme().ring))
+            .styles(|s| s.pressed(|s| s.bg(theme().secondary_hover).border_color(theme().panel_border).text_color(theme().foreground).shadow_sm()))
             .child(label)
             .on_change(move |_, _, window, cx| {
                 if !on {
@@ -57,8 +57,8 @@ pub fn toggle_group<V: 'static, T: Copy + PartialEq + 'static>(
         .p(px(2.0))
         .gap(px(2.0))
         .rounded(px(6.0))
-        .bg(token::muted())
+        .bg(theme().background)
         .border_1()
-        .border_color(token::border())
+        .border_color(theme().panel_border)
         .children(segments)
 }

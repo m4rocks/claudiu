@@ -9,7 +9,7 @@ use gpui::{
 use gpui_kit::component::input::{Input, InputState};
 
 use crate::panels::scale;
-use crate::panels::theme::{self, hsla};
+use crate::panels::theme::theme;
 use crate::panels::ui::command::Choices;
 use crate::panels::widgets::{Dropdown, dropdown_card, fade_in, key_badge, section_label};
 
@@ -86,7 +86,7 @@ pub fn dropdown_overlay<V: 'static>(
                 .items_center()
                 .gap(px(4.0))
                 .child(key_badge("Esc"))
-                .child(div().text_size(scale::px(10.5)).text_color(hsla(theme::TEXT_FAINT)).child("close")),
+                .child(div().text_size(scale::px(10.5)).text_color(theme().subtle_foreground).child("close")),
         );
 
     let hit = at.hit;
@@ -152,7 +152,7 @@ pub fn search_input(input: &gpui::Entity<InputState>) -> impl IntoElement {
 
 /// Horizontal divider between sections inside a picker dialog.
 pub fn divider() -> Div {
-    div().h(px(1.0)).w_full().bg(hsla(theme::BORDER))
+    div().h(px(1.0)).w_full().bg(theme().border)
 }
 
 /// Sub-section header inside a multi-section picker dialog (e.g. WORKTREES / BRANCHES).
@@ -178,15 +178,15 @@ pub fn action_pill<V: 'static>(
         .px(px(7.0))
         .h(px(20.0))
         .rounded(px(5.0))
-        .bg(hsla(theme::PANEL_BG))
+        .bg(theme().background)
         .border_1()
-        .border_color(hsla(theme::PANEL_BORDER))
-        .hover(|s| s.bg(hsla(theme::SURFACE_HOVER)).text_color(hsla(theme::TEXT)))
+        .border_color(theme().panel_border)
+        .hover(|s| s.bg(theme().accent).text_color(theme().foreground))
         .flex()
         .items_center()
         .cursor_pointer()
         .text_size(scale::px(11.0))
-        .text_color(hsla(theme::TEXT_DIM))
+        .text_color(theme().muted_foreground)
         .child(label.into())
         .on_click(cx.listener(move |v, _: &ClickEvent, window, cx| on_click(v, window, cx)))
 }
@@ -197,6 +197,6 @@ pub fn empty_note(text: impl Into<SharedString>) -> Div {
         .px(px(8.0))
         .py(px(8.0))
         .text_size(scale::px(11.5))
-        .text_color(hsla(theme::TEXT_FAINT))
+        .text_color(theme().subtle_foreground)
         .child(text.into())
 }

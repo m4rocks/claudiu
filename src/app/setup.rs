@@ -13,7 +13,7 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::input::Input;
 
 use crate::github::cli::AuthState;
-use crate::panels::theme::{self, hsla};
+use crate::panels::theme::theme;
 use crate::panels::widgets::{brand_mark, button, button_disabled, icon, section_label, spinner};
 
 const CLAUDE_INSTALL_PAGE: &str = "https://code.agent.com/docs/en/setup";
@@ -191,16 +191,16 @@ impl SetupView {
 }
 
 fn card() -> gpui::Div {
-    div().flex().flex_col().gap(px(10.0)).p(px(14.0)).rounded(px(8.0)).bg(hsla(0x111111)).border_1().border_color(hsla(theme::BORDER))
+    div().flex().flex_col().gap(px(10.0)).p(px(14.0)).rounded(px(8.0)).bg(theme().inset).border_1().border_color(theme().border)
 }
 
-fn status_line(glyph: IconName, color: u32, text: impl Into<SharedString>) -> gpui::Div {
+fn status_line(glyph: IconName, color: gpui::Hsla, text: impl Into<SharedString>) -> gpui::Div {
     div()
         .flex()
         .items_center()
         .gap(px(8.0))
         .text_size(crate::panels::scale::px(13.0))
-        .child(div().flex_none().text_color(hsla(color)).child(icon(glyph, 15.0)))
+        .child(div().flex_none().text_color(color).child(icon(glyph, 15.0)))
         .child(div().min_w_0().child(text.into()))
 }
 
@@ -210,13 +210,13 @@ fn checking_line(id: &'static str) -> gpui::Div {
         .items_center()
         .gap(px(8.0))
         .text_size(crate::panels::scale::px(13.0))
-        .text_color(hsla(theme::TEXT_DIM))
+        .text_color(theme().muted_foreground)
         .child(spinner(id, 15.0))
         .child("Checking…")
 }
 
 fn faint(text: impl Into<SharedString>) -> gpui::Div {
-    div().text_size(crate::panels::scale::px(11.5)).text_color(hsla(theme::TEXT_FAINT)).child(text.into())
+    div().text_size(crate::panels::scale::px(11.5)).text_color(theme().subtle_foreground).child(text.into())
 }
 
 fn tool_title(name: &'static str, tag: &'static str) -> gpui::Div {
@@ -244,7 +244,7 @@ impl SetupView {
                     let detail = executable.as_ref().map(|path| format!("Found at {}", path.display()));
                     body = body.child(status_line(
                         if ok { IconName::CircleCheck } else { IconName::CircleSlash },
-                        if ok { theme::OK } else { theme::TEXT_FAINT },
+                        if ok { theme().success } else { theme().subtle_foreground },
                         match detail {
                             Some(d) => format!("{name} — {d}"),
                             None => format!("{name} — not found"),
@@ -253,7 +253,7 @@ impl SetupView {
                 }
                 if found.enabled_harnesses().is_empty() {
                     body = body
-                        .child(status_line(IconName::CircleX, theme::DANGER, "No coding agent found on PATH. Install at least one to start sessions."))
+                        .child(status_line(IconName::CircleX, theme().destructive, "No coding agent found on PATH. Install at least one to start sessions."))
                         .when(Harness::Claude.is_registered(), |body| body.child(div().flex().child(Self::open_page("setup-get-claude", "Get Claude Code", CLAUDE_INSTALL_PAGE, cx))));
                 }
             }
@@ -265,16 +265,16 @@ impl SetupView {
                 .gap(px(4.0))
                 .child(section_label("CUSTOM CLAUDE PATH (OPTIONAL)"))
                 .child(Input::new(&self.path_input))
-                .children(self.path_error.clone().map(|message| div().text_size(crate::panels::scale::px(12.0)).text_color(hsla(theme::DANGER)).child(message))),
+                .children(self.path_error.clone().map(|message| div().text_size(crate::panels::scale::px(12.0)).text_color(theme().destructive).child(message))),
         ))
     }
 
     fn gh_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let (state, action) = match self.checked.as_ref().map(|found| &found.gh) {
             None => (checking_line("setup-gh-spin"), None),
-            Some(AuthState::Ready) => (status_line(IconName::CircleCheck, theme::OK, "Installed and signed in"), None),
+            Some(AuthState::Ready) => (status_line(IconName::CircleCheck, theme().success, "Installed and signed in"), None),
             Some(AuthState::Missing) => (
-                status_line(IconName::CircleSlash, theme::TEXT_DIM, "Not found. Only the GitHub pane needs it."),
+                status_line(IconName::CircleSlash, theme().muted_foreground, "Not found. Only the GitHub pane needs it."),
                 Some(Self::open_page("setup-get-gh", "Get GitHub CLI", GH_INSTALL_PAGE, cx).into_any_element()),
             ),
             Some(AuthState::SignedOut) => {
@@ -288,11 +288,11 @@ impl SetupView {
                         .child(faint("Sign in from the GitHub pane after you continue."))
                         .into_any_element(),
                 };
-                (status_line(IconName::CircleX, theme::WARN, "Installed, but not signed in."), Some(sign_in))
+                (status_line(IconName::CircleX, theme().warning, "Installed, but not signed in."), Some(sign_in))
             }
             Some(AuthState::Unknown(message)) => {
                 let first_line = message.lines().next().unwrap_or_default().to_string();
-                (status_line(IconName::CircleX, theme::WARN, format!("Could not check: {first_line}")), None)
+                (status_line(IconName::CircleX, theme().warning, format!("Could not check: {first_line}")), None)
             }
         };
         card().child(tool_title("GitHub CLI", "OPTIONAL")).child(state).children(action.map(|a| div().flex().child(a)))
@@ -314,8 +314,8 @@ impl Render for SetupView {
             .flex_col()
             .gap(px(14.0))
             .p(px(28.0))
-            .bg(hsla(theme::APP_BG))
-            .text_color(hsla(theme::TEXT))
+            .bg(theme().window)
+            .text_color(theme().foreground)
             .child(
                 div()
                     .flex()
@@ -326,7 +326,7 @@ impl Render for SetupView {
                     .child(
                         div()
                             .text_size(crate::panels::scale::px(13.0))
-                            .text_color(hsla(theme::TEXT_DIM))
+                            .text_color(theme().muted_foreground)
                             .child("m4code runs your own coding agents (Claude Code, Antigravity, Codex, OpenCode) and reaches GitHub through gh. It installs nothing; this page checks what is installed."),
                     ),
             )
@@ -416,7 +416,7 @@ mod tests {
         let mut cx = TestAppContext::single();
         cx.update(|app| {
             gpui_kit::init(app);
-            gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, app);
+            crate::panels::theme::install(app);
         });
         let given = Some(file.clone());
         let (window, view) = cx

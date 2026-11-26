@@ -3,7 +3,7 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 
 use super::ThreadView;
 use crate::harness::thread::{Entry, ToolContent, parse_subagent_report};
-use crate::panels::theme::{self, hsla};
+use crate::panels::theme::theme;
 use crate::panels::widgets::{button, button_disabled};
 
 pub(super) struct Find {
@@ -140,9 +140,9 @@ impl ThreadView {
             }
         });
         Some(div().flex().items_center().gap(px(6.0)).p(px(8.0))
-            .bg(hsla(theme::PANEL_BG)).border_b_1().border_color(hsla(theme::PANEL_BORDER))
+            .bg(theme().background).border_b_1().border_color(theme().panel_border)
             .child(div().flex_1().child(Input::new(&find.input)))
-            .child(div().text_color(hsla(theme::TEXT_DIM)).child(label))
+            .child(div().text_color(theme().muted_foreground).child(label))
             .children(arrows)
             .child(button("thread-find-close", "Close", false)
                 .on_click(cx.listener(|v, _: &ClickEvent, window, cx| v.close_find(window, cx)))))

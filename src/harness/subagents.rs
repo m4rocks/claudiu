@@ -9,7 +9,8 @@
 use std::time::Duration;
 
 use super::limits::Pool;
-use crate::panels::{logos, theme};
+use crate::panels::{logos, theme::Theme};
+use gpui::Hsla;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -44,7 +45,7 @@ pub struct Provider {
     /// The limits reader and refresh cadence, absent when the provider has no limits to show.
     pub limits: Option<Limits>,
     /// The color of its sidebar limits.
-    pub color: u32,
+    pub color: fn(&Theme) -> Hsla,
     /// The logos and optional short label that identify a pool in the sidebar.
     pub marks: fn(&str) -> (&'static [&'static logos::Logo], Option<String>),
     /// The name the settings page and the subagent's text use.
@@ -91,7 +92,7 @@ const CODEX: Provider = Provider {
         let usage = super::codex::limits::probe()?;
         Ok(vec![Pool { name: "Codex".into(), usage }])
     }, every: super::codex::limits::REFRESH_EVERY }),
-    color: theme::CODEX,
+    color: |t| t.codex,
     marks: logos::codex_marks,
     name: "Codex",
     key: "codex",
@@ -116,7 +117,7 @@ const CODEX: Provider = Provider {
 
 const OPENCODE: Provider = Provider {
     limits: None,
-    color: theme::TEXT,
+    color: |t| t.foreground,
     marks: |name| (&[], Some(name.to_uppercase())),
     name: "OpenCode",
     key: "opencode",
@@ -145,7 +146,7 @@ const ANTIGRAVITY: Provider = Provider {
     //     super::antigravity::limits::read(&agy, &crate::datadir::data_dir())
     // }, every: super::antigravity::limits::REFRESH_EVERY }),
     limits: None,
-    color: theme::ANTIGRAVITY,
+    color: |t| t.antigravity,
     marks: logos::antigravity_marks,
     name: "Antigravity",
     key: "antigravity",
@@ -437,7 +438,7 @@ mod tests {
         for agent in Agent::ALL {
             let provider = agent.provider();
             if provider.limits.is_some() {
-                assert_ne!(provider.color, theme::PANEL_BG, "{}", provider.name);
+                assert_ne!((provider.color)(crate::panels::theme::theme()), crate::panels::theme::theme().background, "{}", provider.name);
                 for pool in ["Codex", "Gemini Models", "Claude and GPT models", "Some New models"] {
                     let (marks, name) = (provider.marks)(pool);
                     assert!(!marks.is_empty() || name.is_some_and(|name| !name.is_empty()), "{}: {pool}", provider.name);

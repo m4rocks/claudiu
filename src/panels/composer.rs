@@ -8,7 +8,7 @@ use gpui_kit::component::input::InputEvent;
 
 use crate::harness::Harness;
 use crate::panels::{logos, scale};
-use crate::panels::theme::{self, hsla};
+use crate::panels::theme::theme;
 use crate::panels::widgets::{Anchor, button_colored, button_disabled_leading, button_leading, focusable, icon};
 
 pub fn can_send(text: &str) -> bool {
@@ -40,16 +40,16 @@ pub fn review_button(id: impl Into<SharedString>, enabled: bool) -> Button {
             id,
             Some(IconName::FileDiff),
             "Review changes",
-            hsla(0x1b2b20),
-            hsla(0xd9f2df),
-            hsla(0x233829),
-            Some(hsla(theme::OK).opacity(0.55)),
+            theme().success_subtle,
+            theme().success_subtle_foreground,
+            theme().success_subtle_hover,
+            Some(theme().success.opacity(0.55)),
             false,
         )
         .font_weight(FontWeight::MEDIUM)
     } else {
         button_disabled_leading(id, Some(IconName::FileDiff), "Review changes")
-            .bg(hsla(theme::PANEL_BG))
+            .bg(theme().background)
             .opacity(0.42)
     };
     button.h(px(26.0)).px(px(12.0))
@@ -97,9 +97,9 @@ pub fn frame(lit: bool, top: Option<AnyElement>, input: AnyElement, chips: Vec<A
     div()
         .w_full()
         .rounded(px(14.0))
-        .bg(hsla(theme::SURFACE_ELEVATED))
+        .bg(theme().card)
         .border_1()
-        .border_color(hsla(if lit { theme::FOCUS_BORDER } else { theme::PANEL_BORDER }))
+        .border_color(if lit { theme().ring } else { theme().panel_border })
         .overflow_hidden()
         .flex()
         .flex_col()
@@ -114,7 +114,7 @@ pub fn frame(lit: bool, top: Option<AnyElement>, input: AnyElement, chips: Vec<A
                 .px(px(10.0))
                 .py(px(8.0))
                 .border_t_1()
-                .border_color(hsla(theme::BORDER))
+                .border_color(theme().border)
                 .child(div().flex_1().min_w_0().flex().flex_wrap().items_center().gap(px(6.0)).children(chips))
                 .child(div().flex_none().flex().items_center().gap(px(6.0)).children(actions)),
         )
@@ -133,9 +133,9 @@ pub fn chip(id: impl Into<ElementId>, open: bool) -> Button {
         .rounded(px(6.0))
         .gap(px(5.0))
         .text_size(scale::px(11.5))
-        .bg(hsla(if open { theme::ROW_ACTIVE } else { theme::PANEL_BG }))
-        .border_color(hsla(if open { theme::FOCUS_BORDER } else { theme::PANEL_BORDER }))
-        .hover(|s| s.bg(hsla(theme::SURFACE_HOVER)))
+        .bg(if open { theme().row_active } else { theme().background })
+        .border_color(if open { theme().ring } else { theme().panel_border })
+        .hover(|s| s.bg(theme().accent))
         .cursor_pointer()
 }
 
@@ -144,35 +144,35 @@ pub fn model_chip(id: impl Into<ElementId>, open: bool, anchor: &Anchor, harness
     chip(id, open)
         .relative()
         .child(anchor.probe())
-        .child(logos::draw(logos::for_harness(harness), 11.0, hsla(theme::TEXT_DIM)))
-        .child(div().max_w(px(165.0)).overflow_hidden().whitespace_nowrap().text_ellipsis().line_height(gpui::relative(1.35)).text_color(hsla(theme::TEXT)).child(label.into()))
+        .child(logos::draw(logos::for_harness(harness), 11.0, theme().muted_foreground))
+        .child(div().max_w(px(165.0)).overflow_hidden().whitespace_nowrap().text_ellipsis().line_height(gpui::relative(1.35)).text_color(theme().foreground).child(label.into()))
         .when_some(effort, |d, badge| {
-            d.child(div().px(px(5.0)).py(px(1.0)).rounded(px(4.0)).bg(hsla(0x1f1f22)).text_size(scale::px(10.0)).line_height(gpui::relative(1.25)).text_color(hsla(theme::TEXT_DIM)).child(badge))
+            d.child(div().px(px(5.0)).py(px(1.0)).rounded(px(4.0)).bg(theme().muted).text_size(scale::px(10.0)).line_height(gpui::relative(1.25)).text_color(theme().muted_foreground).child(badge))
         })
-        .child(icon(IconName::ChevronDown, 10.5).text_color(hsla(theme::TEXT_FAINT)))
+        .child(icon(IconName::ChevronDown, 10.5).text_color(theme().subtle_foreground))
 }
 
 /// Permission mode chip shared by both composers.
 pub fn permission_chip(id: impl Into<ElementId>, open: bool, label: impl Into<SharedString>) -> Button {
     chip(id, open)
-        .child(icon(IconName::Lock, 11.0).text_color(hsla(theme::TEXT_DIM)))
-        .child(div().line_height(gpui::relative(1.35)).text_color(hsla(theme::TEXT)).child(label.into()))
-        .child(icon(IconName::ChevronDown, 10.5).text_color(hsla(theme::TEXT_FAINT)))
+        .child(icon(IconName::Lock, 11.0).text_color(theme().muted_foreground))
+        .child(div().line_height(gpui::relative(1.35)).text_color(theme().foreground).child(label.into()))
+        .child(icon(IconName::ChevronDown, 10.5).text_color(theme().subtle_foreground))
 }
 
 /// What the branch chip shows: the branch (or worktree) and, in a linked worktree, its name; a spinner `tail` while
 /// git works.
 pub fn git_chip(id: impl Into<ElementId>, open: bool, primary: impl Into<SharedString>, linked: Option<String>, tail: Option<AnyElement>) -> Button {
     chip(id, open)
-        .text_color(hsla(theme::TEXT))
-        .child(icon(IconName::GitBranch, 12.0).text_color(hsla(theme::TEXT_DIM)))
+        .text_color(theme().foreground)
+        .child(icon(IconName::GitBranch, 12.0).text_color(theme().muted_foreground))
         .child(div().max_w(px(150.0)).overflow_hidden().whitespace_nowrap().text_ellipsis().line_height(gpui::relative(1.35)).child(primary.into()))
         .when_some(linked, |d, wt| {
-            d.child(div().text_color(hsla(theme::TEXT_FAINT)).child("·"))
-                .child(icon(IconName::FolderGit2, 11.0).text_color(hsla(theme::TEXT_FAINT)))
-                .child(div().max_w(px(100.0)).overflow_hidden().whitespace_nowrap().text_ellipsis().line_height(gpui::relative(1.35)).text_color(hsla(theme::TEXT_DIM)).child(wt))
+            d.child(div().text_color(theme().subtle_foreground).child("·"))
+                .child(icon(IconName::FolderGit2, 11.0).text_color(theme().subtle_foreground))
+                .child(div().max_w(px(100.0)).overflow_hidden().whitespace_nowrap().text_ellipsis().line_height(gpui::relative(1.35)).text_color(theme().muted_foreground).child(wt))
         })
-        .child(tail.unwrap_or_else(|| icon(IconName::ChevronDown, 10.5).text_color(hsla(theme::TEXT_FAINT)).into_any_element()))
+        .child(tail.unwrap_or_else(|| icon(IconName::ChevronDown, 10.5).text_color(theme().subtle_foreground).into_any_element()))
 }
 
 #[cfg(test)]

@@ -1,8 +1,8 @@
 //! The list inside every picker and menu, after shadcn's Command and Combobox (cmdk).
 //!
-//! - The highlighted row, where Up/Down/Enter act, gets the [`token::accent`] background. Pointer hover moves the
+//! - The highlighted row, where Up/Down/Enter act, gets the `secondary_hover` background. Pointer hover moves the
 //!   highlight, so the two never disagree.
-//! - The current value gets a check and a [`token::selected_border`] outline, which stay while another row is
+//! - The current value gets a check and a `ring` outline, which stay while another row is
 //!   highlighted.
 //! - A disabled row is faint and is left out of the keyboard's rows.
 //!
@@ -18,7 +18,7 @@ use gpui::{
 };
 use gpui_kit::assets::IconName;
 
-use super::token;
+use crate::panels::theme::theme;
 use crate::panels::{glide, scale, widgets::icon};
 
 /// Up/Down/Enter for a list, kept by whoever owns the list and passed to [`Choices`] each frame.
@@ -192,18 +192,18 @@ pub fn item(id: impl Into<ElementId>) -> Stateful<Div> {
         .items_center()
         .gap(px(8.0))
         .text_size(scale::px(12.5))
-        .text_color(token::foreground())
+        .text_color(theme().foreground)
 }
 
 /// `el` with the highlighted row's background when `on`. For lists that keep their own highlight; [`Choices::add`]
 /// does this itself.
 pub fn highlighted<E: Styled>(el: E, on: bool) -> E {
-    if on { el.bg(token::accent()) } else { el }
+    if on { el.bg(theme().secondary_hover) } else { el }
 }
 
 /// `el` marked as the current value: its outline. [`row`] adds the check too.
 pub fn current<E: Styled>(el: E, on: bool) -> E {
-    if on { el.border_color(token::selected_border()) } else { el }
+    if on { el.border_color(theme().ring) } else { el }
 }
 
 /// The usual row: an optional leading icon, a label with an optional faint second line, optional trailing content,
@@ -217,7 +217,7 @@ pub fn row(
     selected: bool,
     disabled: bool,
 ) -> Stateful<Div> {
-    let text = if disabled { token::faint_foreground() } else { token::foreground() };
+    let text = if disabled { theme().subtle_foreground } else { theme().foreground };
     let title = div()
         .flex_1()
         .min_w_0()
@@ -232,14 +232,14 @@ pub fn row(
                 .font_weight(if selected { FontWeight::MEDIUM } else { FontWeight::NORMAL })
                 .child(label.into()),
         )
-        .children(detail.map(|d| div().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(scale::px(11.0)).text_color(token::faint_foreground()).child(d)));
+        .children(detail.map(|d| div().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(scale::px(11.0)).text_color(theme().subtle_foreground).child(d)));
     current(item(id), selected)
         .text_color(text)
         .when(!disabled, |d| d.cursor_pointer())
         .children(leading)
         .child(title)
         .children(trailing)
-        .when(selected, |d| d.child(icon(IconName::Check, 12.0).text_color(token::foreground())))
+        .when(selected, |d| d.child(icon(IconName::Check, 12.0).text_color(theme().foreground)))
 }
 
 #[cfg(test)]

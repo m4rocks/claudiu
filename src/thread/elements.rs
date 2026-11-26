@@ -10,7 +10,7 @@
 use std::collections::HashSet;
 use std::time::Duration;
 
-use gpui::{
+use gpui::{Hsla, 
     AnyElement, AppContext, ClickEvent, Context, FontWeight, InteractiveElement, IntoElement, ParentElement, Render, SharedString,
     StatefulInteractiveElement, Styled, Window, div, prelude::FluentBuilder, px, relative,
 };
@@ -19,7 +19,7 @@ use gpui_kit::base::Button;
 
 use crate::harness::thread::{ToolCall, ToolStatus};
 use crate::panels::scale;
-use crate::panels::theme::{self, hsla};
+use crate::panels::theme::theme;
 use crate::panels::widgets::{focusable, icon, spinner};
 
 /// Execution status of a trace step (matches shadcn `TraceLine` status variants).
@@ -58,11 +58,11 @@ pub fn trace_line(
     expanded: bool,
 ) -> Button {
     let title_color = match status {
-        TraceStatus::Error => theme::DANGER,
-        TraceStatus::Running => theme::BUSY,
-        TraceStatus::Done if expanded => theme::TEXT_DIM,
-        TraceStatus::Ended => theme::TEXT_DIM,
-        TraceStatus::Pending | TraceStatus::Done => theme::TEXT_FAINT,
+        TraceStatus::Error => theme().destructive,
+        TraceStatus::Running => theme().busy,
+        TraceStatus::Done if expanded => theme().muted_foreground,
+        TraceStatus::Ended => theme().muted_foreground,
+        TraceStatus::Pending | TraceStatus::Done => theme().subtle_foreground,
     };
     let has_desc = description.as_ref().is_some_and(|d| !d.trim().is_empty());
     let mut row = focusable(id.into())
@@ -77,7 +77,7 @@ pub fn trace_line(
         .gap(px(7.0))
         .text_size(scale::px(12.0))
         .line_height(relative(1.4))
-        .when(collapsible, |d| d.cursor_pointer().hover(|s| s.bg(hsla(theme::SURFACE_HOVER))))
+        .when(collapsible, |d| d.cursor_pointer().hover(|s| s.bg(theme().accent)))
         .child(div().flex_none().w(px(14.0)).flex().items_center().justify_center().child(leading))
         .child(
             div()
@@ -87,7 +87,7 @@ pub fn trace_line(
                 .overflow_hidden()
                 .whitespace_nowrap()
                 .text_ellipsis()
-                .text_color(hsla(title_color))
+                .text_color(title_color)
                 .when(status == TraceStatus::Running, |d| d.font_weight(FontWeight::MEDIUM))
                 .child(one_line(&title)),
         );
@@ -101,7 +101,7 @@ pub fn trace_line(
                 .whitespace_nowrap()
                 .text_ellipsis()
                 .text_size(scale::px(11.5))
-                .text_color(hsla(theme::TEXT_FAINT))
+                .text_color(theme().subtle_foreground)
                 .child(desc),
         );
     }
@@ -114,7 +114,7 @@ pub fn trace_line(
         row = row.child(
             div()
                 .flex_none()
-                .text_color(hsla(theme::TEXT_FAINT))
+                .text_color(theme().subtle_foreground)
                 .child(icon(if expanded { IconName::ChevronDown } else { IconName::ChevronRight }, 12.0)),
         );
     }
@@ -139,8 +139,8 @@ pub fn turn_working_line(label: String, elapsed: Option<Duration>, stop: Option<
         .text_size(scale::px(12.0))
         .line_height(relative(1.4))
         .child(div().flex_none().w(px(14.0)).flex().items_center().justify_center().child(spinner("thread-activity", 12.0)))
-        .child(div().text_color(hsla(theme::TEXT_DIM)).child(label))
-        .children(elapsed.map(|d| div().text_color(hsla(theme::TEXT_FAINT)).child(format_duration(d))))
+        .child(div().text_color(theme().muted_foreground).child(label))
+        .children(elapsed.map(|d| div().text_color(theme().subtle_foreground).child(format_duration(d))))
         .children(stop.map(|stop| div().ml(px(4.0)).child(stop)))
         .debug_selector(|| "turn-working".into())
         .into_any_element()
@@ -153,7 +153,7 @@ pub fn turn_done_line(took: Duration) -> AnyElement {
         .py(px(3.0))
         .text_size(scale::px(12.0))
         .line_height(relative(1.4))
-        .text_color(hsla(theme::TEXT_FAINT))
+        .text_color(theme().subtle_foreground)
         .child(format!("Worked for {}", format_duration(took)))
         .debug_selector(|| "turn-done".into())
         .into_any_element()
@@ -165,36 +165,36 @@ pub fn trace_content(child: AnyElement) -> AnyElement {
         .ml(px(12.0))
         .pl(px(12.0))
         .border_l_1()
-        .border_color(hsla(theme::BORDER))
+        .border_color(theme().border)
         .child(child)
         .into_any_element()
 }
 
 /// Compact pill badge used inside trace lines (e.g. step counts, tool status, duration).
-pub fn trace_badge(label: impl Into<SharedString>, color: u32, bg: u32, border: u32) -> AnyElement {
+pub fn trace_badge(label: impl Into<SharedString>, color: Hsla, bg: Hsla, border: Hsla) -> AnyElement {
     div()
         .flex_none()
         .px(px(5.0))
         .py(px(1.0))
         .rounded(px(4.0))
-        .bg(hsla(bg))
+        .bg(bg)
         .border_1()
-        .border_color(hsla(border))
+        .border_color(border)
         .text_size(scale::px(10.5))
-        .text_color(hsla(color))
+        .text_color(color)
         .child(label.into())
         .into_any_element()
 }
 
 /// Native `CodeBlock` primitive for tool outputs and structured text.
-pub fn code_block(header: Option<String>, lines: &[&str], shown: usize, total: usize, border_color: Option<u32>) -> AnyElement {
+pub fn code_block(header: Option<String>, lines: &[&str], shown: usize, total: usize, border_color: Option<Hsla>) -> AnyElement {
     let mut block = div()
         .font_family(crate::platform::monospace_font())
         .text_size(scale::px(12.0))
         .rounded(px(6.0))
-        .bg(hsla(theme::APP_BG))
+        .bg(theme().window)
         .border_1()
-        .border_color(hsla(border_color.unwrap_or(theme::PANEL_BORDER)))
+        .border_color(border_color.unwrap_or(theme().panel_border))
         .flex()
         .flex_col()
         .overflow_hidden();
@@ -204,16 +204,16 @@ pub fn code_block(header: Option<String>, lines: &[&str], shown: usize, total: u
             div()
                 .px(px(9.0))
                 .py(px(4.0))
-                .bg(hsla(theme::SURFACE_ELEVATED))
+                .bg(theme().card)
                 .border_b_1()
-                .border_color(hsla(theme::BORDER))
+                .border_color(theme().border)
                 .text_size(scale::px(11.0))
-                .text_color(hsla(theme::TEXT_DIM))
+                .text_color(theme().muted_foreground)
                 .child(title),
         );
     }
 
-    let mut body = div().px(px(9.0)).py(px(6.0)).text_color(hsla(theme::TEXT_DIM)).flex().flex_col().gap(px(1.0));
+    let mut body = div().px(px(9.0)).py(px(6.0)).text_color(theme().muted_foreground).flex().flex_col().gap(px(1.0));
     for line in &lines[..shown] {
         body = body.child(div().whitespace_nowrap().overflow_hidden().text_ellipsis().child((*line).to_string()));
     }
@@ -222,7 +222,7 @@ pub fn code_block(header: Option<String>, lines: &[&str], shown: usize, total: u
             div()
                 .pt(px(2.0))
                 .text_size(scale::px(11.0))
-                .text_color(hsla(theme::TEXT_FAINT))
+                .text_color(theme().subtle_foreground)
                 .child(format!("… {} more lines (Ctrl+O)", total - shown)),
         );
     }
@@ -254,14 +254,14 @@ pub fn chain_of_thought_header(
     let leading = if running {
         spinner(SharedString::from(format!("cot-spin-{start}")), 12.0).into_any_element()
     } else if failed {
-        icon(IconName::CircleX, 12.5).text_color(hsla(theme::DANGER)).into_any_element()
+        icon(IconName::CircleX, 12.5).text_color(theme().destructive).into_any_element()
     } else {
-        icon(IconName::CircleCheck, 12.5).text_color(hsla(if open { theme::TEXT_DIM } else { theme::TEXT_FAINT })).into_any_element()
+        icon(IconName::CircleCheck, 12.5).text_color(if open { theme().muted_foreground } else { theme().subtle_foreground }).into_any_element()
     };
     let mut chips = Vec::new();
     if step_count > 1 {
         let step_badge = format!("{step_count} steps");
-        chips.push(trace_badge(step_badge, theme::TEXT_FAINT, theme::SURFACE_ELEVATED, theme::BORDER));
+        chips.push(trace_badge(step_badge, theme().subtle_foreground, theme().card, theme().border));
     }
     let preview = (!open && !latest_preview.is_empty()).then_some(latest_preview);
     trace_line(
@@ -301,7 +301,7 @@ pub fn reasoning_header(ix: usize, preview: String, streaming: bool, duration: O
         spinner(SharedString::from(format!("reasoning-spin-{ix}")), 12.0).into_any_element()
     } else {
         icon(IconName::CircleCheck, 12.5)
-            .text_color(hsla(if expanded { theme::TEXT_DIM } else { theme::TEXT_FAINT }))
+            .text_color(if expanded { theme().muted_foreground } else { theme().subtle_foreground })
             .into_any_element()
     };
     let title = if streaming {
@@ -331,7 +331,7 @@ pub fn reasoning_body(text: &str) -> AnyElement {
             .py(px(2.0))
             .italic()
             .text_size(scale::px(12.0))
-            .text_color(hsla(theme::TEXT_DIM))
+            .text_color(theme().muted_foreground)
             .child(text.trim().to_string())
             .into_any_element(),
     )
@@ -367,17 +367,17 @@ pub fn tool_header(
     let status = TraceStatus::from(call.status);
     let leading = match call.status {
         ToolStatus::Running => spinner(SharedString::from(format!("tool-spin-{ix}")), 12.0).into_any_element(),
-        ToolStatus::Failed => icon(IconName::CircleX, 12.5).text_color(hsla(theme::DANGER)).into_any_element(),
-        ToolStatus::Pending => icon(IconName::CircleDotDashed, 12.5).text_color(hsla(theme::TEXT_FAINT)).into_any_element(),
+        ToolStatus::Failed => icon(IconName::CircleX, 12.5).text_color(theme().destructive).into_any_element(),
+        ToolStatus::Pending => icon(IconName::CircleDotDashed, 12.5).text_color(theme().subtle_foreground).into_any_element(),
         ToolStatus::Done | ToolStatus::Ended => icon(tool_kind_icon(&call.kind), 12.5)
-            .text_color(hsla(if expanded { theme::TEXT_DIM } else { theme::TEXT_FAINT }))
+            .text_color(if expanded { theme().muted_foreground } else { theme().subtle_foreground })
             .into_any_element(),
     };
     let mut chips = Vec::new();
     match call.status {
-        ToolStatus::Running => chips.push(trace_badge("Running", theme::BUSY, theme::SURFACE_ELEVATED, theme::PANEL_BORDER)),
-        ToolStatus::Failed => chips.push(trace_badge("Failed", theme::DANGER, 0x251417, 0x55242a)),
-        ToolStatus::Ended => chips.push(trace_badge("Ended", theme::TEXT_DIM, theme::SURFACE_ELEVATED, theme::PANEL_BORDER)),
+        ToolStatus::Running => chips.push(trace_badge("Running", theme().busy, theme().card, theme().panel_border)),
+        ToolStatus::Failed => chips.push(trace_badge("Failed", theme().destructive, theme().destructive_subtle, theme().destructive_subtle_border)),
+        ToolStatus::Ended => chips.push(trace_badge("Ended", theme().muted_foreground, theme().card, theme().panel_border)),
         _ => {}
     }
     chips.extend(location_chips);
@@ -443,9 +443,9 @@ impl Render for CitationHoverCard {
             .w(px(272.0))
             .p(px(10.0))
             .rounded(px(8.0))
-            .bg(hsla(theme::SURFACE_ELEVATED))
+            .bg(theme().card)
             .border_1()
-            .border_color(hsla(theme::PANEL_BORDER))
+            .border_color(theme().panel_border)
             .shadow_lg()
             .flex()
             .flex_col()
@@ -454,7 +454,7 @@ impl Render for CitationHoverCard {
                 div()
                     .text_size(scale::px(12.5))
                     .font_weight(FontWeight::MEDIUM)
-                    .text_color(hsla(theme::TEXT))
+                    .text_color(theme().foreground)
                     .child(self.citation.title.clone()),
             )
             .child(
@@ -463,7 +463,7 @@ impl Render for CitationHoverCard {
                     .items_center()
                     .gap(px(5.0))
                     .text_size(scale::px(11.0))
-                    .text_color(hsla(theme::TEXT_DIM))
+                    .text_color(theme().muted_foreground)
                     .child(icon(IconName::ExternalLink, 10.5))
                     .child(self.citation.hostname.clone()),
             )
@@ -473,7 +473,7 @@ impl Render for CitationHoverCard {
                     .whitespace_nowrap()
                     .text_ellipsis()
                     .text_size(scale::px(10.5))
-                    .text_color(hsla(theme::TEXT_FAINT))
+                    .text_color(theme().subtle_foreground)
                     .child(self.citation.url.clone()),
             )
     }
@@ -489,14 +489,14 @@ pub fn inline_citation(id: impl Into<SharedString>, citation: Citation) -> AnyEl
         .px(px(6.0))
         .py(px(2.0))
         .rounded(px(5.0))
-        .bg(hsla(theme::SURFACE_ELEVATED))
-        .border_color(hsla(theme::PANEL_BORDER))
+        .bg(theme().card)
+        .border_color(theme().panel_border)
         .gap(px(4.0))
         .text_size(scale::px(11.0))
-        .text_color(hsla(theme::TEXT_DIM))
+        .text_color(theme().muted_foreground)
         .cursor_pointer()
-        .hover(|s| s.bg(hsla(theme::SURFACE_HOVER)).border_color(hsla(theme::FOCUS_BORDER)).text_color(hsla(theme::TEXT)))
-        .child(icon(IconName::Link, 10.5).text_color(hsla(theme::TEXT_FAINT)))
+        .hover(|s| s.bg(theme().accent).border_color(theme().ring).text_color(theme().foreground))
+        .child(icon(IconName::Link, 10.5).text_color(theme().subtle_foreground))
         .child(citation.hostname)
         .tooltip(move |_window, cx| cx.new(|_| CitationHoverCard { citation: hover.clone() }).into())
         .on_click(move |_: &ClickEvent, _, cx| {
