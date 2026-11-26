@@ -21,11 +21,11 @@ fn renderer() -> Result<Option<Box<dyn PlatformHeadlessRenderer>>> {
 #[ignore = "requires an offscreen GPU renderer; run with just screenshot"]
 fn capture() -> Result<()> {
     let scenario = std::env::var("M4CODE_SCREENSHOT_SCENARIO").unwrap_or_else(|_| "home".into());
-    let session_scenario = matches!(scenario.as_str(), "session" | "session-no-compact" | "session-scrolled" | "toast");
+    let session_scenario = matches!(scenario.as_str(), "session" | "session-no-compact" | "session-scrolled" | "toast" | "review" | "review-hover");
     let shortcut = match scenario.as_str() {
-        "home" | "dashboards-disabled" | "picker" | "context-menu" | "github" | "github-wide" | "editor" | "session" | "session-no-compact" | "session-scrolled" | "toast" | "harnesses" => None,
+        "home" | "dashboards-disabled" | "picker" | "context-menu" | "github" | "github-wide" | "editor" | "session" | "session-no-compact" | "session-scrolled" | "toast" | "harnesses" | "review" | "review-hover" => None,
         "settings" => Some(Keystroke::parse("secondary-,").expect("Settings shortcut")),
-        _ => anyhow::bail!("unknown screenshot scenario {scenario:?}; use home, dashboards-disabled, settings, picker, context-menu, github, github-wide, editor, session, session-no-compact, session-scrolled, toast or harnesses"),
+        _ => anyhow::bail!("unknown screenshot scenario {scenario:?}; use home, dashboards-disabled, settings, picker, context-menu, github, github-wide, editor, session, session-no-compact, session-scrolled, toast, harnesses, review or review-hover"),
     };
 
     let fixture = tempfile::tempdir()?;
@@ -141,6 +141,9 @@ fn capture() -> Result<()> {
         cx.update_window(window, |_, _, app| workspace.update(app, |ws, cx| {
             if let Some(view) = ws.active_id().and_then(|id| ws.live_view(id)).and_then(|v| v.thread()).cloned() {
                 view.update(cx, |v, cx| v.screenshot_activity(scenario != "session-no-compact", scenario == "session-scrolled", cx));
+                if matches!(scenario.as_str(), "review" | "review-hover") {
+                    view.update(cx, |v, cx| v.screenshot_review(cx));
+                }
             }
             if scenario == "toast" { ws.toast("Workspace settings saved", cx); }
         }))?;
@@ -181,6 +184,18 @@ fn capture() -> Result<()> {
         }
     }
     cx.update_window(window, |_, window, app| window.draw(app).clear(app))?;
+    if scenario == "review-hover" {
+        cx.update_window(window, |_, window, app| {
+            let view = workspace.read(app).active_id().and_then(|id| workspace.read(app).live_view(id)).and_then(|v| v.thread()).expect("session fixture").clone();
+            let before = view.read(app).screenshot_review_line();
+            // List item bounds exclude the review list's 12px top padding.
+            window.dispatch_event(gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent {
+                position: before.center() + gpui::point(gpui::px(0.0), gpui::px(12.0)), pressed_button: None, modifiers: Default::default(),
+            }), app);
+            window.draw(app).clear(app);
+            assert_eq!(before, view.read(app).screenshot_review_line(), "hover must not shift the diff line");
+        })?;
+    }
     // Opening overlays starts their fade on the first draw. Capture their settled state.
     std::thread::sleep(std::time::Duration::from_millis(250));
     cx.run_until_parked();

@@ -677,7 +677,8 @@ impl ThreadView {
                     if let Some(n) = line.new_line {
                         let path = file.path.clone();
                         comment_trigger(format!("review-comment-{file_ix}-{hunk_ix}-{line_ix}"), false)
-                            .opacity(0.65)
+                            .flex_none()
+                            .opacity(0.0)
                             .group_hover("review-diff-line", |style| style.opacity(1.0))
                             .focus_visible(|style| style.opacity(1.0))
                             .on_click(cx.listener(move |v, _: &ClickEvent, window, cx| v.start_comment(path.clone(), n, window, cx)))
@@ -739,6 +740,21 @@ impl ThreadView {
                 )
             }
         }
+    }
+}
+
+#[cfg(all(test, feature = "screenshots"))]
+impl ThreadView {
+    pub(crate) fn screenshot_review(&mut self, cx: &mut Context<Self>) {
+        let mut review = Review::new(Uuid::new_v4(), Some("offline-fixture".into()));
+        review.files = Some(snapshot::parse("diff --git a/src/main.rs b/src/main.rs\n--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1,4 +1,4 @@\n fn main() {\n-    println!(\"old\");\n+    println!(\"Hello, world!\");\n     // Keep the gutter stable when hovering.\n }\n"));
+        review.rebuild_rows();
+        self.review = Some(review);
+        cx.notify();
+    }
+
+    pub(crate) fn screenshot_review_line(&self) -> gpui::Bounds<gpui::Pixels> {
+        self.review.as_ref().expect("review fixture").list.bounds_for_item(4).expect("added line is visible")
     }
 }
 
