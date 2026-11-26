@@ -47,7 +47,7 @@ fn history_path(record: &str) -> PathBuf {
     crate::datadir::data_dir().join("turn-reviews").join(crate::datadir::safe_file_stem(record))
 }
 
-fn patch_path(record: &str, id: Uuid) -> PathBuf {
+pub(super) fn patch_path(record: &str, id: Uuid) -> PathBuf {
     history_path(record).join(format!("{id}.patch"))
 }
 
@@ -72,6 +72,24 @@ pub(crate) fn clear_turn_reviews(record: &str, executor: &gpui::BackgroundExecut
         for entry in dir.flatten().filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json")) {
             let _ = std::fs::remove_file(entry.path());
         }
+    }
+}
+
+pub(crate) fn prune_turn_reviews_by_ids(record: &str, ids: &[Uuid], executor: &gpui::BackgroundExecutor) {
+    if record.is_empty() || ids.is_empty() {
+        return;
+    }
+    let dropped: Vec<TurnReview> = load_turn_reviews(record).into_iter().filter(|turn| ids.contains(&turn.id)).collect();
+    for turn in &dropped {
+        let _ = std::fs::remove_file(history_path(record).join(format!("{}.json", turn.id)));
+    }
+    if !dropped.is_empty() {
+        let prior_record = record.to_string();
+        executor.spawn(async move {
+            for turn in dropped {
+                discard_turn_patch(&prior_record, turn.id, &turn.cwd);
+            }
+        }).detach();
     }
 }
 
@@ -220,6 +238,7 @@ impl ThreadView {
         let record = self.record_id.clone();
         let session = self.session_id.clone();
         let (cwd, before, patch_record, id) = (active.cwd.clone(), active.before.clone(), record.clone(), active.id);
+        self.capturing_reviews += 1;
         cx.spawn(async move |this, cx| {
             let captured = cx.background_executor().spawn(async move {
                 let patch = snapshot::capture(&cwd, &before)?;
@@ -233,7 +252,9 @@ impl ThreadView {
                 Ok::<_, String>((file_count, checkpoint))
             }).await;
             let saved = this.update(cx, |v, cx| {
+                v.capturing_reviews = v.capturing_reviews.saturating_sub(1);
                 if !v.persist_on_drop || v.phase != super::Phase::Ready || v.session_id != session {
+                    cx.notify();
                     return false;
                 }
                 match &captured {
@@ -247,7 +268,10 @@ impl ThreadView {
                         cx.notify();
                         false
                     }
-                    _ => false,
+                    _ => {
+                        cx.notify();
+                        false
+                    }
                 }
             }).unwrap_or(false);
             if !saved && captured.is_ok_and(|(count, _)| count > 0) {
