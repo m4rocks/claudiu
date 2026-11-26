@@ -66,3 +66,25 @@ mod worktrees;
 mod agents;
 mod pickers;
 mod skills;
+
+/// Start an offline session for visual scenarios through the same ACP path as the headless tests.
+#[cfg(feature = "screenshots")]
+impl Workspace {
+    pub(crate) fn start_screenshot_session(&mut self, cwd: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        self.acp_server = Some(fake_agent(&cwd));
+        self.claude_exe = Some("offline-screenshot-agent".into());
+        self.new_session_from_home(Harness::Claude, None, cwd, None, None, None, window, cx);
+        if let Some(id) = self.active_id().cloned() {
+            if let Some(record) = self.store.session_mut(&id) {
+                record.title = "Workspace review".into();
+                let mut recent = record.clone();
+                recent.id = new_id();
+                recent.title = "Composer shortcut review".into();
+                recent.last_active -= 3600;
+                recent.exit_code = Some(0);
+                self.store.data.sessions.push(recent);
+            }
+            self.store.data.layout.recent_open = true;
+        }
+    }
+}

@@ -3326,6 +3326,37 @@ fn str_of(value: &Value, key: &str) -> String {
     value[key].as_str().unwrap_or_default().to_string()
 }
 
+#[cfg(all(test, feature = "screenshots"))]
+impl ThreadView {
+    /// The ACP fixture is connected; stage a busy conversation without invoking a model.
+    pub(crate) fn screenshot_activity(&mut self, compact: bool, scrolled: bool, cx: &mut Context<Self>) {
+        assert!(self.phase == Phase::Ready, "the offline ACP fixture must be connected");
+        self.thread.context = Some((124_000, 200_000));
+        self.compaction.enabled = compact;
+        self.compaction.threshold_percent = 75;
+        self.thread.entries = vec![
+            Entry::User("Check the workspace layout and session controls.".into()),
+            Entry::Agent("The session is connected. I am checking the inspector, sidebar and composer controls.".into()),
+        ];
+        if scrolled {
+            for i in 1..=20 {
+                self.thread.entries.push(Entry::User(format!("Review step {i}: check the session controls.")));
+                self.thread.entries.push(Entry::Agent(format!("Step {i} is complete. The workspace keeps the composer accessible while the conversation scrolls.")));
+            }
+        }
+        self.remeasure(0);
+        for i in 0..self.thread.entries.len() {
+            self.sync_markdown(i, cx);
+        }
+        if scrolled {
+            self.list.set_follow_mode(gpui::FollowMode::Normal);
+            self.list.scroll_to(gpui::ListOffset { item_ix: 0, offset_in_item: gpui::px(0.0) });
+        }
+        self.working = true;
+        cx.notify();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::with_comment;

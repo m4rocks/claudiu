@@ -73,6 +73,10 @@ When upgrading from a version with multiple Claude accounts, resumed sessions us
 
 ## Development
 
+Toast notifications can be dismissed with their close button.
+
+Visual fixtures include `just screenshot session` and `just screenshot session-no-compact` for the active-session inspector and compaction marker, `just screenshot github-wide` for the side-by-side GitHub pane, `just screenshot harnesses` for harness controls, `just screenshot session-scrolled` for Jump to latest, and `just screenshot toast` for notifications. Session fixtures use an offline ACP stand-in and never send a model prompt.
+
 Prerequisites: stable Rust, Visual Studio Build Tools on Windows (or the system headers GPUI builds against on Linux), and [just](https://just.systems).
 
 ```sh

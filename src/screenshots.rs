@@ -21,10 +21,11 @@ fn renderer() -> Result<Option<Box<dyn PlatformHeadlessRenderer>>> {
 #[ignore = "requires an offscreen GPU renderer; run with just screenshot"]
 fn capture() -> Result<()> {
     let scenario = std::env::var("M4CODE_SCREENSHOT_SCENARIO").unwrap_or_else(|_| "home".into());
+    let session_scenario = matches!(scenario.as_str(), "session" | "session-no-compact" | "session-scrolled" | "toast");
     let shortcut = match scenario.as_str() {
-        "home" | "picker" | "context-menu" | "github" | "editor" => None,
+        "home" | "picker" | "context-menu" | "github" | "github-wide" | "editor" | "session" | "session-no-compact" | "session-scrolled" | "toast" | "harnesses" => None,
         "settings" => Some(Keystroke::parse("secondary-,").expect("Settings shortcut")),
-        _ => anyhow::bail!("unknown screenshot scenario {scenario:?}; use home, settings, picker, context-menu, github or editor"),
+        _ => anyhow::bail!("unknown screenshot scenario {scenario:?}; use home, settings, picker, context-menu, github, github-wide, editor, session, session-no-compact, session-scrolled, toast or harnesses"),
     };
 
     let fixture = tempfile::tempdir()?;
@@ -40,10 +41,15 @@ fn capture() -> Result<()> {
     // Keep the fixture offline and independent of installed CLIs, usage counters, and live model catalogs.
     settings.update_url = Some(String::new());
     settings.enabled_harnesses = Some(Vec::new());
+    settings.auto_compact_threshold = 75;
+    settings.auto_compact = scenario != "session-no-compact";
     settings.custom_subagents = crate::harness::subagents::CustomSubagents(Default::default());
-    if scenario == "github" {
-        // Wide enough for the list and the detail side by side.
+    if matches!(scenario.as_str(), "github" | "github-wide") {
+        // Request a wide pane; github-wide also widens the window to leave it enough room.
         store.data.layout.right_gh_w = Some(900.0);
+    }
+    if scenario == "github-wide" {
+        store.data.layout.window = Some(crate::store::WindowGeom { x: 20.0, y: 20.0, w: 1920.0, h: 1080.0, maximized: false });
     }
     crate::datadir::write_atomic(&path, &serde_json::to_string(&store.data)?)?;
 
@@ -60,24 +66,30 @@ fn capture() -> Result<()> {
         renderer,
     );
     let project = fixture.path().join("demo");
-    if scenario == "editor" {
+    if scenario == "editor" || session_scenario {
         sample_project(&project)?;
     }
-    let projects = if scenario == "editor" { vec![dunce::canonicalize(&project)?] } else { Vec::new() };
+    let projects = if scenario == "editor" || session_scenario { vec![dunce::canonicalize(&project)?] } else { Vec::new() };
     let (window, workspace) = cx.update(|app| {
         crate::init_ui(app);
         crate::open_main_window(projects.clone(), app)
     });
+    workspace.update(&mut cx, |ws, _| {
+        ws.model_lookups.list = |harness, _, _| Ok(crate::harness::HarnessCatalog {
+            models: (harness.adapter().default_models)().into_iter().map(|m| crate::harness::subagents::AgentModel { id: m.id, name: m.name }).collect(),
+            modes: crate::harness::permission::Permission::ALL.into_iter().filter_map(|p| p.native(harness).map(|id| (id.into(), p.label().into()))).collect(),
+        });
+    });
     cx.run_until_parked();
     if let Some(shortcut) = shortcut {
-        let handled = cx.update_window(window.into(), |_, window, app| {
+        let handled = cx.update_window(window, |_, window, app| {
             window.dispatch_keystroke(shortcut, app)
         })?;
         ensure!(handled, "the Settings shortcut was not handled");
         cx.run_until_parked();
     }
     if matches!(scenario.as_str(), "picker" | "context-menu") {
-        cx.update_window(window.into(), |_, window, app| {
+        cx.update_window(window, |_, window, app| {
             workspace.update(app, |ws, cx| {
                 let position = gpui::point(gpui::px(380.0), gpui::px(260.0));
                 if scenario == "picker" {
@@ -93,11 +105,11 @@ fn capture() -> Result<()> {
         })?;
         cx.run_until_parked();
     }
-    if scenario == "github" {
+    if matches!(scenario.as_str(), "github" | "github-wide") {
         let root = fixture.path().to_path_buf();
-        cx.update_window(window.into(), |_, window, app| workspace.update(app, |ws, cx| ws.open_github(root, window, cx)))?;
+        cx.update_window(window, |_, window, app| workspace.update(app, |ws, cx| ws.open_github(root, window, cx)))?;
         cx.run_until_parked();
-        cx.update_window(window.into(), |_, _, app| {
+        cx.update_window(window, |_, _, app| {
             let view = workspace.read(app).right_gh.as_ref().and_then(|id| workspace.read(app).gh_pane(id)).map(|p| p.view.clone());
             if let Some(view) = view {
                 view.update(app, |v, cx| {
@@ -108,9 +120,39 @@ fn capture() -> Result<()> {
         })?;
         cx.run_until_parked();
     }
+    if session_scenario {
+        cx.update_window(window, |_, window, app| workspace.update(app, |ws, cx| {
+            ws.start_screenshot_session(projects[0].clone(), window, cx);
+        }))?;
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            cx.run_until_parked();
+            let ready = cx.update_window(window, |_, _, app| {
+                let ws = workspace.read(app);
+                ws.active_id().and_then(|id| ws.live_view(id)).and_then(|v| v.thread()).is_some_and(|v| !v.read(app).is_loading())
+            })?;
+            if ready { break; }
+            ensure!(std::time::Instant::now() < until, "offline screenshot session did not open");
+            std::thread::yield_now();
+        }
+        cx.update_window(window, |_, _, app| workspace.update(app, |ws, cx| {
+            if let Some(view) = ws.active_id().and_then(|id| ws.live_view(id)).and_then(|v| v.thread()).cloned() {
+                view.update(cx, |v, cx| v.screenshot_activity(scenario != "session-no-compact", scenario == "session-scrolled", cx));
+            }
+            if scenario == "toast" { ws.toast("Workspace settings saved", cx); }
+        }))?;
+        cx.run_until_parked();
+    }
+    if scenario == "harnesses" {
+        cx.update_window(window, |_, window, app| workspace.update(app, |ws, cx| {
+            ws.act(crate::app::Act::OpenSettings, window, cx);
+            ws.settings_page = crate::app::SettingsPage::Harnesses;
+        }))?;
+        cx.run_until_parked();
+    }
     if scenario == "editor" {
         let file = dunce::canonicalize(&project)?.join("src").join("main.rs");
-        cx.update_window(window.into(), |_, window, app| {
+        cx.update_window(window, |_, window, app| {
             workspace.update(app, |ws, cx| {
                 if let Some(id) = ws.store.data.projects.first().map(|p| p.id.clone()) {
                     ws.act(crate::app::Act::HomeSelectProject(id), window, cx);
@@ -124,7 +166,7 @@ fn capture() -> Result<()> {
         let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
             cx.run_until_parked();
-            let open = cx.update_window(window.into(), |_, _, app| {
+            let open = cx.update_window(window, |_, _, app| {
                 let ws = workspace.read(app);
                 ws.editor_owner().and_then(|id| ws.panes.get(&id)).is_some_and(|pane| pane.shown().is_some())
             })?;
@@ -135,12 +177,19 @@ fn capture() -> Result<()> {
             std::thread::yield_now();
         }
     }
-    cx.update_window(window.into(), |_, window, app| window.draw(app).clear(app))?;
+    cx.update_window(window, |_, window, app| window.draw(app).clear(app))?;
     // Opening overlays starts their fade on the first draw. Capture their settled state.
     std::thread::sleep(std::time::Duration::from_millis(250));
     cx.run_until_parked();
-    cx.update_window(window.into(), |_, window, app| window.draw(app).clear(app))?;
-    let frame = cx.capture_screenshot(window.into())?;
+    cx.update_window(window, |_, window, app| window.draw(app).clear(app))?;
+    if scenario == "github-wide" {
+        let width = cx.update_window(window, |_, _, app| {
+            let ws = workspace.read(app);
+            ws.right_gh.as_ref().and_then(|id| ws.gh_pane(id)).map(|p| p.view.read(app).width)
+        })?;
+        ensure!(width.is_some_and(|w| w >= 860.0), "GitHub fixture did not reach the side-by-side breakpoint: {width:?}");
+    }
+    let frame = cx.capture_screenshot(window)?;
     ensure!(
         frame.pixels().any(|pixel| pixel != frame.get_pixel(0, 0)),
         "GPUI rendered a blank frame"
