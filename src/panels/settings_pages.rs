@@ -418,7 +418,6 @@ impl Workspace {
                         cx,
                     ))
                     .child(self.subagent_controls(Harness::Claude, cx))
-                    .child(div().flex().flex_col().gap(px(4.0)).child(section_label("CLAUDE CODE PATH")).child(Input::new(claude)))
                     .child(switch_row(
                         "harness-dialog-claude-chrome",
                         "Claude in Chrome",
@@ -438,7 +437,8 @@ impl Workspace {
                 for found in costly {
                     col = col.child(warn(format!("{} is set in {}. {}", found.name, found.source, found.effect)));
                 }
-                col.child(div().mt(px(4.0)).child(section_label("SKILLS TO TURN OFF IN CLAUDE CODE")))
+                col.child(div().flex().flex_col().mt(px(4.0)).gap(px(4.0)).child(section_label("CLAUDE CODE PATH")).child(Input::new(claude)))
+                    .child(div().mt(px(4.0)).child(section_label("SKILLS TO TURN OFF IN CLAUDE CODE")))
                     .child(faint("Comma-separated skill names to hide from Claude Code. Entries in settings.json take precedence."))
                     .child(Input::new(skills_field))
             }

@@ -60,12 +60,28 @@ pub(super) fn render_settings_card(
             let offered = ws.store.data.settings.permissions_for(default_model.harness);
             let effective_permission = permission.and_then(|p| p.resolve(&offered));
             let perm_display = effective_permission.map_or("Harness default", Permission::label).to_string();
-            let mut session_rows: Vec<AnyElement> = vec![
+            let mut defaults_rows: Vec<AnyElement> = vec![
                 default_model_row(default_model, model_open, cx).into_any_element(),
                 settings_picker_row("settings-effort", ("Effort", "Reasoning depth for new sessions"), effort.label().to_string(), effort_open, |ws, at, window, cx| ws.open_settings_effort_picker(at, window, cx), cx).into_any_element(),
                 settings_picker_row("settings-permission", ("Permission mode", "How tool calls and file edits are approved"), perm_display, perm_open, |ws, at, window, cx| ws.open_settings_permission_picker(at, window, cx), cx).into_any_element(),
             ];
-            session_rows.push(
+            if effective_permission == Some(Permission::FullAccess) {
+                defaults_rows.push(
+                    div()
+                        .px(px(14.0))
+                        .py(px(8.0))
+                        .bg(theme().notice)
+                        .text_size(scaled(11.5))
+                        .text_color(theme().warning)
+                        .child("Full Access allows commands and edits without asking.")
+                        .into_any_element(),
+                );
+            }
+            defaults_rows.push(
+                settings_picker_row("settings-text-generation", ("Text generation model", "Used for generating session titles and commit messages"), generation_label, generation_open, |ws, at, window, cx| ws.open_settings_model_picker(at, crate::app::SettingsModelTarget::TextGeneration, window, cx), cx).into_any_element(),
+            );
+
+            let mut chat_rows: Vec<AnyElement> = vec![
                 row_shell(
                     "While the agent is working",
                     Some("Steer interrupts the current turn; Queue waits until it finishes. Use Cmd/Ctrl+Enter for the other."),
@@ -83,8 +99,6 @@ pub(super) fn render_settings_card(
                     .into_any_element(),
                 )
                 .into_any_element(),
-            );
-            session_rows.push(
                 div()
                     .id("settings-auto-compact")
                     .px(px(14.0))
@@ -104,9 +118,9 @@ pub(super) fn render_settings_card(
                         cx.notify();
                     }))
                     .into_any_element(),
-            );
+            ];
             if auto_compact {
-                session_rows.push(
+                chat_rows.push(
                     row_shell(
                         "Auto-compact threshold",
                         Some("Compact automatically once context usage reaches this level"),
@@ -128,20 +142,40 @@ pub(super) fn render_settings_card(
                     .into_any_element(),
                 );
             }
-            if effective_permission == Some(Permission::FullAccess) {
-                session_rows.push(
-                    div()
-                        .px(px(14.0))
-                        .py(px(8.0))
-                        .bg(theme().notice)
-                        .text_size(scaled(11.5))
-                        .text_color(theme().warning)
-                        .child("Full Access allows commands and edits without asking.")
-                        .into_any_element(),
+            chat_rows.push(
+                row_shell(
+                    "Auto-handoff at usage limit",
+                    Some("Give the model a heads-up at 90% and hand off if it hits the limit"),
+                    toggle_group(
+                        "settings-auto-handoff",
+                        &[(true, "On"), (false, "Off")],
+                        auto_handoff_on_limit,
+                        |ws, on, _, _| {
+                            if let Some(Modal::Settings { auto_handoff_on_limit, .. }) = ws.modal.as_mut() {
+                                *auto_handoff_on_limit = on;
+                            }
+                        },
+                        cx,
+                    )
+                    .into_any_element(),
+                )
+                .into_any_element(),
+            );
+            if auto_handoff_on_limit {
+                chat_rows.push(
+                    settings_picker_row(
+                        "settings-auto-handoff-model",
+                        ("Auto-handoff model", "Model to switch to when your current one hits its limit"),
+                        handoff_label,
+                        handoff_open,
+                        |ws, at, window, cx| ws.open_settings_model_picker(at, crate::app::SettingsModelTarget::AutoHandoff, window, cx),
+                        cx,
+                    )
+                    .into_any_element(),
                 );
             }
-            let mut env_rows: Vec<AnyElement> = vec![
-                settings_picker_row("settings-text-generation", ("Text generation model", "Used for generating session titles and commit messages"), generation_label, generation_open, |ws, at, window, cx| ws.open_settings_model_picker(at, crate::app::SettingsModelTarget::TextGeneration, window, cx), cx).into_any_element(),
+
+            let appearance_rows: Vec<AnyElement> = vec![
                 row_shell(
                     "Interface scale",
                     Some("Adjusts UI text and terminal font size"),
@@ -178,55 +212,7 @@ pub(super) fn render_settings_card(
                     .into_any_element(),
                 )
                 .into_any_element(),
-                row_shell(
-                    "Auto-handoff at usage limit",
-                    Some("Give the model a heads-up at 90% and hand off if it hits the limit"),
-                    toggle_group(
-                        "settings-auto-handoff",
-                        &[(true, "On"), (false, "Off")],
-                        auto_handoff_on_limit,
-                        |ws, on, _, _| {
-                            if let Some(Modal::Settings { auto_handoff_on_limit, .. }) = ws.modal.as_mut() {
-                                *auto_handoff_on_limit = on;
-                            }
-                        },
-                        cx,
-                    )
-                    .into_any_element(),
-                )
-                .into_any_element(),
             ];
-            if auto_handoff_on_limit {
-                env_rows.push(
-                    settings_picker_row(
-                        "settings-auto-handoff-model",
-                        ("Auto-handoff model", "Model to switch to when your current one hits its limit"),
-                        handoff_label,
-                        handoff_open,
-                        |ws, at, window, cx| ws.open_settings_model_picker(at, crate::app::SettingsModelTarget::AutoHandoff, window, cx),
-                        cx,
-                    )
-                    .into_any_element(),
-                );
-            }
-            env_rows.push(
-                row_shell(
-                    "Shell",
-                    Some("Shell executable for the integrated terminal"),
-                    div().w(px(230.0)).flex_none().child(Input::new(shell).h(px(28.0)).text_size(scaled(12.0))).into_any_element(),
-                )
-                .into_any_element(),
-            );
-            env_rows.push(
-                row_shell(
-                    "Environment setup",
-                    Some("Check your installed CLIs, Node.js, and agent bridges"),
-                    button("settings-check-setup", "Check setup", false)
-                        .on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::OpenSetup, window, cx)))
-                        .into_any_element(),
-                )
-                .into_any_element(),
-            );
 
             let check_btn = if ws.update.status == Status::Checking {
                 button_disabled("settings-check-updates", "Checking…").into_any_element()
@@ -263,13 +249,32 @@ pub(super) fn render_settings_card(
                 }))
                 .into_any_element();
 
+            let system_rows: Vec<AnyElement> = vec![
+                row_shell(
+                    "Shell",
+                    Some("Shell executable for the integrated terminal"),
+                    div().w(px(230.0)).flex_none().child(Input::new(shell).h(px(28.0)).text_size(scaled(12.0))).into_any_element(),
+                )
+                .into_any_element(),
+                row_shell(
+                    "Environment setup",
+                    Some("Check your installed CLIs, Node.js, and agent bridges"),
+                    button("settings-check-setup", "Check setup", false)
+                        .on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::OpenSetup, window, cx)))
+                        .into_any_element(),
+                )
+                .into_any_element(),
+                updates_row,
+            ];
+
             div()
                 .flex()
                 .flex_col()
                 .gap(px(18.0))
-                .child(settings_group("NEW SESSIONS", None, session_rows))
-                .child(settings_group("INTERFACE & ENVIRONMENT", None, env_rows))
-                .child(settings_group("UPDATES", None, vec![updates_row]))
+                .child(settings_group("MODELS & DEFAULTS", None, defaults_rows))
+                .child(settings_group("CHAT & AUTOMATION", None, chat_rows))
+                .child(settings_group("APPEARANCE", None, appearance_rows))
+                .child(settings_group("SYSTEM & UPDATES", None, system_rows))
                 .into_any_element()
         }
         SettingsPage::Harnesses => ws.harnesses_page(cx).into_any_element(),

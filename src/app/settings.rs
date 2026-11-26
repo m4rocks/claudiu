@@ -9,14 +9,14 @@ pub enum SettingsPage {
     #[default]
     General,
     Harnesses,
+    Projects,
     Skills,
     M4codeTools,
-    Projects,
     Keyboard,
 }
 
 impl SettingsPage {
-    pub const ALL: [SettingsPage; 6] = [Self::General, Self::Harnesses, Self::Skills, Self::M4codeTools, Self::Projects, Self::Keyboard];
+    pub const ALL: [SettingsPage; 6] = [Self::General, Self::Harnesses, Self::Projects, Self::Skills, Self::M4codeTools, Self::Keyboard];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -43,11 +43,11 @@ impl SettingsPage {
 
     pub fn subtitle(self) -> &'static str {
         match self {
-            Self::General => "Defaults for new sessions, interface scale, shell, and updates.",
-            Self::Harnesses => "Link coding agents to aggregate their models into one picker and show usage limits.",
+            Self::General => "Defaults for models, chat automation, appearance, and system settings.",
+            Self::Harnesses => "Connect coding agents to share their models in one picker and track usage.",
+            Self::Projects => "Manage projects in the sidebar and git worktrees created by m4code.",
             Self::Skills => "Install SKILL.md packages from skills.sh and sync them across active harnesses.",
             Self::M4codeTools => "Built-in MCP tools exposed to sessions. Applies to new sessions and after compaction.",
-            Self::Projects => "Manage projects in the sidebar and git worktrees created by m4code.",
             Self::Keyboard => "Every keyboard shortcut m4code has. They can't be changed yet.",
         }
     }
@@ -303,13 +303,14 @@ mod tests {
     #[test]
     fn next_and_prev_walk_the_list_and_stop_at_the_ends() {
         assert_eq!(General.next(), Harnesses);
-        assert_eq!(Harnesses.next(), Skills);
+        assert_eq!(Harnesses.next(), Projects);
+        assert_eq!(Projects.next(), Skills);
         assert_eq!(Skills.next(), M4codeTools);
-        assert_eq!(M4codeTools.next(), Projects);
-        assert_eq!(Projects.next(), Keyboard);
+        assert_eq!(M4codeTools.next(), Keyboard);
         assert_eq!(Keyboard.next(), Keyboard);
-        assert_eq!(Keyboard.prev(), Projects);
-        assert_eq!(Projects.prev(), M4codeTools);
+        assert_eq!(Keyboard.prev(), M4codeTools);
+        assert_eq!(M4codeTools.prev(), Skills);
+        assert_eq!(Projects.prev(), Harnesses);
         assert_eq!(Harnesses.prev(), General);
         assert_eq!(General.prev(), General);
     }
