@@ -64,7 +64,7 @@ pub fn trace_line(
         TraceStatus::Ended => theme::TEXT_DIM,
         TraceStatus::Pending | TraceStatus::Done => theme::TEXT_FAINT,
     };
-    let has_desc = description.as_ref().is_some_and(|d| !d.is_empty());
+    let has_desc = description.as_ref().is_some_and(|d| !d.trim().is_empty());
     let mut row = focusable(id.into())
         .focusable(collapsible)
         .tab_stop(collapsible)
@@ -89,10 +89,10 @@ pub fn trace_line(
                 .text_ellipsis()
                 .text_color(hsla(title_color))
                 .when(status == TraceStatus::Running, |d| d.font_weight(FontWeight::MEDIUM))
-                .child(title),
+                .child(one_line(&title)),
         );
 
-    if let Some(desc) = description.filter(|d| !d.is_empty()) {
+    if let Some(desc) = description.map(|d| one_line(&d)).filter(|d| !d.is_empty()) {
         row = row.child(
             div()
                 .flex_1()
@@ -120,6 +120,43 @@ pub fn trace_line(
     }
 
     row
+}
+
+/// Fold a step's title or description onto one line: a multi-line shell command or title would otherwise make its
+/// row taller, as if it were expanded.
+pub fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The turn's working row under the last step: spinner in the steps' icon column, label, timer and stop hint.
+pub fn turn_working_line(label: String, elapsed: Option<Duration>, stop: Option<AnyElement>) -> AnyElement {
+    div()
+        .px(px(6.0))
+        .py(px(3.0))
+        .flex()
+        .items_center()
+        .gap(px(7.0))
+        .text_size(scale::px(12.0))
+        .line_height(relative(1.4))
+        .child(div().flex_none().w(px(14.0)).flex().items_center().justify_center().child(spinner("thread-activity", 12.0)))
+        .child(div().text_color(hsla(theme::TEXT_DIM)).child(label))
+        .children(elapsed.map(|d| div().text_color(hsla(theme::TEXT_FAINT)).child(format_duration(d))))
+        .children(stop.map(|stop| div().ml(px(4.0)).child(stop)))
+        .debug_selector(|| "turn-working".into())
+        .into_any_element()
+}
+
+/// What stays under a finished turn: how long it took.
+pub fn turn_done_line(took: Duration) -> AnyElement {
+    div()
+        .px(px(6.0))
+        .py(px(3.0))
+        .text_size(scale::px(12.0))
+        .line_height(relative(1.4))
+        .text_color(hsla(theme::TEXT_FAINT))
+        .child(format!("Worked for {}", format_duration(took)))
+        .debug_selector(|| "turn-done".into())
+        .into_any_element()
 }
 
 /// Base `TraceCollapsibleContent` primitive: indented content block with the vertical rail aligned under `trace_line`'s icon.
@@ -580,6 +617,11 @@ fn push_citation(label: &str, raw_url: &str, seen: &mut HashSet<String>, out: &m
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn step_titles_fold_onto_one_line() {
+        assert_eq!(one_line("cd src &&\n  cargo test \\\n\t--all\r\n"), "cd src && cargo test \\ --all");
+    }
 
     #[test]
     fn extracts_markdown_and_bare_citations_skipping_code_and_duplicates() {

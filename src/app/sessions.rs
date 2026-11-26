@@ -427,10 +427,16 @@ impl Workspace {
                         ws.store.mark_dirty();
                     }
                 }
+                ThreadEvent::PromptSent(text) => {
+                    if !ws.pending_handoffs.contains_key(&sub_id) {
+                        ws.auto_title(&sub_id, text, cx);
+                    }
+                }
                 ThreadEvent::Title(title) => {
                     if ws.pending_handoffs.contains_key(&sub_id) { return; }
                     if let Some(rec) = ws.store.session_mut(&sub_id) {
                         rec.title = title.clone();
+                        rec.auto_title = None;
                         ws.store.mark_dirty();
                         cx.notify();
                     }

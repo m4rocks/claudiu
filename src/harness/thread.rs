@@ -285,6 +285,9 @@ pub struct Thread {
     pub context: Option<(u64, u64)>,
     /// Measured prompt-cache usage across turns in this view.
     pub cache_usage: CacheUsage,
+    /// The agent message being written, by its ACP `messageId`, and its entry. A message the user steers in while it
+    /// streams goes under it, and the rest of the message still joins the entry above.
+    speaking: Option<(String, usize)>,
 }
 
 impl Thread {
@@ -292,7 +295,12 @@ impl Thread {
     /// measures that entry and those after it again. Kinds this client didn't ask for are skipped.
     pub fn apply(&mut self, update: &Value) -> Option<usize> {
         let text = || update.pointer("/content/text").and_then(Value::as_str).unwrap_or_default();
-        match update["sessionUpdate"].as_str().unwrap_or_default() {
+        let kind = update["sessionUpdate"].as_str().unwrap_or_default();
+        if matches!(kind, "user_message_chunk" | "agent_thought_chunk" | "tool_call") {
+            // The agent moved on, so the message it was writing has ended.
+            self.speaking = None;
+        }
+        match kind {
             "user_message_chunk" => {
                 let at = self.append(text(), Entry::User, |e| match e {
                     Entry::User(t) => Some(t),
@@ -311,13 +319,7 @@ impl Thread {
                 }
                 return at;
             }
-            "agent_message_chunk" => {
-                let chunk = text();
-                return self.append(chunk, Entry::Agent, |e| match e {
-                    Entry::Agent(t) => Some(t),
-                    _ => None,
-                });
-            }
+            "agent_message_chunk" => return self.agent_chunk(text(), update["messageId"].as_str()),
             "agent_thought_chunk" => return self.append(text(), Entry::Thought, |e| match e {
                 Entry::Thought(t) => Some(t),
                 _ => None,
@@ -448,6 +450,32 @@ impl Thread {
     }
 
     /// Add a chunk to the last entry when it is of the same kind, or start a new one.
+    /// Add to the agent's message. With a `messageId`, a new id starts a new message even right after another, and
+    /// the message it names keeps growing in its own entry when a steered message was put under it.
+    fn agent_chunk(&mut self, chunk: &str, id: Option<&str>) -> Option<usize> {
+        if chunk.is_empty() {
+            return None;
+        }
+        let Some(id) = id else {
+            self.speaking = None;
+            return self.append(chunk, Entry::Agent, |e| match e {
+                Entry::Agent(t) => Some(t),
+                _ => None,
+            });
+        };
+        if let Some((speaking, at)) = &self.speaking
+            && speaking == id
+            && let Some(Entry::Agent(text)) = self.entries.get_mut(*at)
+        {
+            text.push_str(chunk);
+            return Some(*at);
+        }
+        self.entries.push(Entry::Agent(chunk.to_string()));
+        let at = self.entries.len() - 1;
+        self.speaking = Some((id.to_string(), at));
+        Some(at)
+    }
+
     fn append(&mut self, chunk: &str, make: fn(String) -> Entry, same: fn(&mut Entry) -> Option<&mut String>) -> Option<usize> {
         if chunk.is_empty() {
             return None;
@@ -733,6 +761,22 @@ mod tests {
         assert_eq!(t.entries[1], Entry::Thought("thinking".into()));
         assert_eq!(t.entries[2], Entry::Agent("On it.".into()));
         assert_eq!(t.entries[4], Entry::Agent("Done.".into()));
+    }
+
+    #[test]
+    fn a_message_steered_in_while_the_agent_writes_goes_under_the_whole_message() {
+        let said = |id: &str, text: &str| json!({"sessionUpdate": "agent_message_chunk", "messageId": id, "content": {"type": "text", "text": text}});
+        let mut t = thread(&[said("m1", "If the session")]);
+        assert_eq!(t.sent("our implementation i mean"), Some(1));
+        assert_eq!(t.apply(&said("m1", "'s harness sends a title.")), Some(0), "the rest joins the message above");
+        assert_eq!(t.apply(&said("m2", "Our implementation")), Some(2), "a new message starts under the steer");
+        assert_eq!(t.apply(&said("m3", " now works.")), Some(3), "another id is another message, even right after");
+        assert_eq!(t.entries, [
+            Entry::Agent("If the session's harness sends a title.".into()),
+            Entry::User("our implementation i mean".into()),
+            Entry::Agent("Our implementation".into()),
+            Entry::Agent(" now works.".into()),
+        ]);
     }
 
     #[test]

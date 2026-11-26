@@ -120,6 +120,8 @@ pub enum ThreadEvent {
     /// The agent named the session: a new one learns its id this way.
     SessionId(String),
     Title(String),
+    /// A user prompt is being submitted, including the initial startup prompt.
+    PromptSent(String),
     /// The harness reported its live model catalog `(id, name)`.
     Models(Harness, Vec<(String, String)>),
     /// The harness reported its available permission modes `(id, name)`.
@@ -386,6 +388,10 @@ pub struct ThreadView {
     phase: Phase,
     /// A prompt is out and the turn hasn't ended.
     working: bool,
+    /// When the running turn's prompt went out, for the timer on the chat's working row.
+    turn_started: Option<Instant>,
+    /// How long the last finished turn took, shown as "Worked for …" under it until the next one starts.
+    last_turn: Option<Duration>,
     /// When the last live conversation update arrived (outside replay), so detached/post-turn streaming still shows as working.
     last_update: Option<Instant>,
     /// Messages typed during a turn, sent one at a time after it.
@@ -543,7 +549,8 @@ impl ThreadView {
         subscriptions.push(cx.intercept_keystrokes(move |ev: &KeystrokeEvent, window, cx| {
             let _ = this.update(cx, |v, cx| v.intercept(ev, window, cx));
         }));
-        let mut thread = Thread { entries: start.prior_entries.clone(), ..Default::default() };
+        let mut thread = Thread::default();
+        thread.entries = start.prior_entries.clone();
         // A tool call left `Running` in persisted history belonged to an earlier process (e.g. before a crash or
         // reboot) and cannot still be running in the new session.
         settle_running_tools(&mut thread.entries);
@@ -564,7 +571,8 @@ impl ThreadView {
             queue.push_front(Queued { startup: true, shown, ..Queued::new(prompt, start.prior_entries.is_empty()) });
         }
         let rows = thread.entries.len();
-        let list = ListState::new(rows, ListAlignment::Top, px(600.0));
+        // One row past the entries holds the turn's working or "Worked for" line.
+        let list = ListState::new(rows + 1, ListAlignment::Top, px(600.0));
         list.set_follow_mode(FollowMode::Tail);
         let cached_replay = start.session_id.is_some()
             && !start.prior_entries.is_empty()
@@ -616,6 +624,8 @@ impl ThreadView {
             thread,
             phase: Phase::Starting,
             working: false,
+            turn_started: None,
+            last_turn: None,
             last_update: None,
             queue,
             queue_held,
@@ -1664,6 +1674,8 @@ impl ThreadView {
         }
         self.preparing = Some(next);
         self.working = true;
+        self.turn_started = Some(Instant::now());
+        self.last_turn = None;
         self.changed = None;
         self.queue_changed();
         cx.notify();
@@ -1703,6 +1715,9 @@ impl ThreadView {
                         _ => None,
                     }
                 });
+                if !next.compact && !next.text.starts_with('/') {
+                    cx.emit(ThreadEvent::PromptSent(next.text.clone()));
+                }
                 let request = connection.request("session/prompt", json!({"sessionId": session, "prompt": [{"type": "text", "text": outgoing}]}));
                 v.queue_changed();
                 cx.notify();
@@ -1745,6 +1760,7 @@ impl ThreadView {
             self.remeasure(row);
         }
         self.working = false;
+        self.last_turn = self.turn_started.take().map(|t| t.elapsed());
         self.interrupting = false;
         self.last_update = None;
         self.finish_open_thoughts();
@@ -1885,6 +1901,7 @@ impl ThreadView {
                 self.queue.push_front(item);
             }
             self.working = false;
+            self.turn_started = None;
             self.queue_changed();
             self.cancel_questions();
             cx.notify();
@@ -3945,7 +3962,35 @@ mod tests {
         assert!(cx.debug_bounds("tool-row-1").is_none());
         cx.simulate_click(header.center(), Modifiers::default());
         cx.update(|window, app| window.draw(app).clear(app));
-        assert!(cx.debug_bounds("tool-row-1").is_some(), "expand to see the tool call");
+        let row = cx.debug_bounds("tool-row-1").expect("expand to see the tool call");
+        assert!(row.size.height < gpui::px(32.0), "a multi-line command stays on one line: {row:?}");
+    }
+
+    #[cfg(debug_assertions)]
+    #[gpui::test]
+    fn turn_status_shows_working_under_the_steps_then_how_long_it_took(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_kit::init);
+        let dir = tempfile::tempdir().unwrap();
+        let mut start = test_start(dir.path().into(), Harness::Claude);
+        start.prior_entries = vec![Entry::User("go".into())];
+        let (view, cx) = cx.add_window_view(|window, cx| super::ThreadView::new(start, window, cx));
+        let status_row = |view: &gpui::Entity<super::ThreadView>, cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, app| window.draw(app).clear(app));
+            view.read_with(cx, |v, _| v.list.bounds_for_item(v.thread.entries.len()).expect("status row").size.height)
+        };
+        view.update(cx, |v, _| v.phase = super::Phase::Ready);
+        assert_eq!(status_row(&view, cx), gpui::px(0.0), "nothing under a session that hasn't worked");
+        view.update(cx, |v, cx| {
+            v.working = true;
+            v.turn_started = Some(std::time::Instant::now());
+            cx.notify();
+        });
+        assert!(status_row(&view, cx) > gpui::px(0.0));
+        assert!(cx.debug_bounds("turn-working").is_some());
+        view.update(cx, |v, cx| v.turn_ended(Ok(serde_json::json!({"stopReason": "end_turn"})), cx));
+        assert!(status_row(&view, cx) > gpui::px(0.0));
+        assert!(cx.debug_bounds("turn-working").is_none());
+        assert!(cx.debug_bounds("turn-done").is_some(), "the turn's time stays after it ends");
     }
 
     #[cfg(debug_assertions)]

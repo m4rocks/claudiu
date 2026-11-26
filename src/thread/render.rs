@@ -123,7 +123,7 @@ impl Render for ThreadView {
                 })),
             ))
         });
-        let conversation = div().flex_1().min_h_0().flex().flex_col().child(conversation).children(self.render_activity());
+        let conversation = div().flex_1().min_h_0().flex().flex_col().child(conversation);
         let bottom_dock = div()
             .flex_none()
             .flex()
@@ -411,7 +411,7 @@ impl ThreadView {
     }
 
     fn render_entry(&mut self, ix: usize, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let Some(entry) = self.thread.entries.get(ix) else { return div().into_any_element() };
+        let Some(entry) = self.thread.entries.get(ix) else { return self.render_turn_status() };
         let body = match entry {
             Entry::User(text) if let Some(report) = parse_subagent_report(text) => {
                 let run = self.tool_run(ix);
@@ -562,25 +562,28 @@ impl ThreadView {
         block.into_any_element()
     }
 
-    /// Handoff, compaction, or active working status fixed above the composer for the entire duration of the turn.
-    fn render_activity(&self) -> Option<AnyElement> {
+    /// The row after the last entry: handoff, compaction or working status with the turn's timer while it runs,
+    /// then "Worked for …" until the next turn starts. Its spinner lines up with the step rows above it.
+    fn render_turn_status(&self) -> AnyElement {
+        let elapsed = self.turn_started.map(|t| t.elapsed());
         let (label, stoppable) = match self.starting_label() {
             Some(label) => (label, false),
             None if self.is_working() && self.compaction.running => ("Compacting…".to_string(), true),
             None if self.is_working() || self.has_active_turn() => ("Working…".to_string(), true),
-            None => return None,
+            None => {
+                let Some(took) = self.last_turn else { return div().into_any_element() };
+                return self.wrap_turn_status(elements::turn_done_line(took));
+            }
         };
-        let row = div()
-            .w_full()
-            .max_w(px(COLUMN_MAX_W))
-            .px(px(2.0))
-            .flex()
-            .items_center()
-            .gap(px(8.0))
-            .child(spinner("thread-activity", 12.0))
-            .child(div().text_size(scale::px(12.5)).text_color(hsla(theme::TEXT_DIM)).child(label))
-            .when(stoppable, |d| d.child(div().flex().gap(px(4.0)).items_center().child(key_badge("Esc")).child(div().text_size(scale::px(11.5)).text_color(hsla(theme::TEXT_FAINT)).child("to stop"))));
-        Some(div().flex_none().w_full().px(px(22.0)).pb(px(10.0)).flex().justify_center().child(row).into_any_element())
+        let stop = stoppable.then(|| div().flex().gap(px(4.0)).items_center().child(key_badge("Esc"))
+            .child(div().text_size(scale::px(11.5)).text_color(hsla(theme::TEXT_FAINT)).child("to stop")).into_any_element());
+        self.wrap_turn_status(elements::turn_working_line(label, elapsed, stop))
+    }
+
+    fn wrap_turn_status(&self, line: AnyElement) -> AnyElement {
+        div().w_full().px(px(22.0)).pt(px(2.0)).pb(px(18.0)).flex().justify_center()
+            .child(div().w_full().max_w(px(COLUMN_MAX_W)).child(line))
+            .into_any_element()
     }
 
     fn wrap_entry(&self, ix: usize, body: AnyElement) -> AnyElement {
@@ -1592,7 +1595,7 @@ impl ThreadView {
     }
 
     /// Assemble the shared message box parts: model, permission mode, branch, review and send. What the agent is
-    /// doing shows in the chat (`render_activity`) and what waits shows above the box (`render_waiting`).
+    /// doing shows in the chat (`render_turn_status`) and what waits shows above the box (`render_waiting`).
     fn composer_parts(&self, focused: bool, input: AnyElement, alternate: bool, window: &mut Window, cx: &mut Context<Self>) -> composer::Composer {
         let active_harness = self.pending_model.as_ref().map_or(self.harness, |m| m.harness);
         let (_, effort_labels, effort_ix, _) = self.effort_choices();

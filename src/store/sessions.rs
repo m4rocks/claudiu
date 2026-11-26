@@ -144,8 +144,7 @@ pub struct SessionRecord {
     /// m4code-only display label; wins over `title` when set.
     #[serde(default)]
     pub custom_title: Option<String>,
-    /// Tab title Claude chose through m4code's former `set_tab_title` tool. Nothing sets it any more; a session that
-    /// had one keeps showing it until it is renamed. Beats `title`, loses to `custom_title`.
+    /// Automatically generated title, including legacy MCP titles. Beats `title`, loses to `custom_title`.
     #[serde(default)]
     pub auto_title: Option<String>,
     pub cwd: PathBuf,

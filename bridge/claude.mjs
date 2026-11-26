@@ -500,6 +500,7 @@ async function pump(session) {
         const ev = m.event;
         if (ev.type === "message_start") {
           session.streamed.add(ev.message.id);
+          session.speaking = ev.message.id;
           // After a result the turn stayed open for, what Claude writes next answers the oldest steer it still
           // owed; a later one may still be waiting, so it shows when Claude starts or answers it.
           const turn = session.turn;
@@ -509,7 +510,8 @@ async function pump(session) {
             if (oldest) showSteer(session, oldest);
           }
         }
-        if (ev.type === "content_block_delta" && ev.delta.type === "text_delta") update(session.id, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: ev.delta.text } });
+        // The message id keeps a message whole when a steer shows while Claude is still writing it.
+        if (ev.type === "content_block_delta" && ev.delta.type === "text_delta") update(session.id, { sessionUpdate: "agent_message_chunk", messageId: session.speaking, content: { type: "text", text: ev.delta.text } });
         if (ev.type === "content_block_delta" && ev.delta.type === "thinking_delta") update(session.id, { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: ev.delta.thinking } });
       } else if (m.type === "assistant") {
         // Text already came in pieces when the message streamed; its tools come whole here.
@@ -543,7 +545,7 @@ async function pump(session) {
 async function open(params, resume) {
   const id = resume ?? randomUUID();
   const extra = params._meta?.claudeCode?.options ?? {};
-  const session = { id, cwd: params.cwd, inbox: new Inbox(), tools: new Map(), streamed: new Set(), shells: new BackgroundShells(), turn: null, cancelled: false, interrupted: null, dropping: new Set(), dropInterrupted: false, dropsDone: null, mode: extra.permissionMode ?? "default", model: "", effort: "medium", models: [] };
+  const session = { id, cwd: params.cwd, inbox: new Inbox(), tools: new Map(), streamed: new Set(), speaking: undefined, shells: new BackgroundShells(), turn: null, cancelled: false, interrupted: null, dropping: new Set(), dropInterrupted: false, dropsDone: null, mode: extra.permissionMode ?? "default", model: "", effort: "medium", models: [] };
   session.query = query({
     prompt: session.inbox,
     options: {

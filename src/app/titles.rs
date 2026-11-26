@@ -23,6 +23,45 @@ impl Workspace {
         })))
     }
 
+    pub(super) fn auto_title(&mut self, id: &str, raw: &str, cx: &mut Context<Self>) {
+        let Some(record) = self.store.session(id) else { return };
+        if record.title != "New session" || record.chosen_title().is_some() || record.is_subagent() {
+            return;
+        }
+        let fallback = clean_title(raw);
+        if fallback.is_empty() { return; }
+        // Persist a useful title immediately, and reserve this session so later prompts cannot
+        // start duplicate requests. Generation failures leave this local summary in place.
+        self.store.session_mut(id).unwrap().auto_title = Some(fallback.clone());
+        self.store.mark_dirty();
+        cx.notify();
+        match self.text_generator(cx) {
+            Ok(Some(generate)) => {
+                let id = id.to_string();
+                let prompt: String = raw.chars().take(6000).collect();
+                self.in_background(
+                    move || crate::git::commit::generate(generate.as_ref(), TITLE_PROMPT, &prompt),
+                    move |ws, result, cx| {
+                        if let Ok(title) = result {
+                            let title = clean_title(&title);
+                            if let Some(record) = ws.store.session_mut(&id)
+                                && can_replace_auto_title(record, &fallback)
+                                && !title.is_empty()
+                            {
+                                record.auto_title = Some(title);
+                                ws.store.mark_dirty();
+                                cx.notify();
+                            }
+                        }
+                    },
+                    cx,
+                );
+            }
+            Ok(None) => {}
+            Err(why) => self.toast(why, cx),
+        }
+    }
+
     pub(super) fn regen_title(&mut self, id: &str, cx: &mut Context<Self>) {
         let first_prompt = self
             .live
@@ -60,15 +99,7 @@ impl Workspace {
     }
 
     fn apply_generated_title(&mut self, id: &str, raw: &str, cx: &mut Context<Self>) {
-        let title: String = raw
-            .lines()
-            .find(|l| !l.trim().is_empty())
-            .unwrap_or_default()
-            .trim()
-            .trim_matches(['"', '\'', '`', '.'])
-            .chars()
-            .take(60)
-            .collect();
+        let title = clean_title(raw);
         if title.is_empty() {
             return self.toast("Nothing to title yet.", cx);
         }
@@ -76,5 +107,84 @@ impl Workspace {
             rec.custom_title = Some(title.clone());
             self.toast(format!("Renamed to “{title}”"), cx);
         }
+    }
+}
+
+fn can_replace_auto_title(record: &SessionRecord, fallback: &str) -> bool {
+    record.custom_title.is_none()
+        && record.title == "New session"
+        && record.auto_title.as_deref() == Some(fallback)
+}
+
+fn clean_title(raw: &str) -> String {
+    raw.lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or_default()
+        .trim()
+        .trim_matches(['"', '\'', '`', '.'])
+        .chars()
+        .take(60)
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn record() -> SessionRecord {
+        SessionRecord {
+            id: "session".into(), kind: SessionKind::Agent, title: "New session".into(),
+            custom_title: None, auto_title: Some("Fix login".into()), cwd: PathBuf::new(),
+            project_id: None, created_at: 0, last_active: 0, exit_code: None, hidden: false,
+            agent: None,
+        }
+    }
+
+    #[test]
+    #[ignore = "drives the workspace"]
+    fn new_sessions_receive_a_title_once_for_every_harness() {
+        let _data = crate::datadir::own_folder();
+        let mut cx = gpui::TestAppContext::single();
+        cx.update(gpui_kit::init);
+        let (_, ws) = cx.update(|app| gpui_kit::open_window(Default::default(), app, |window, app| {
+            app.new(|cx| Workspace::new(window, vec![], cx))
+        })).unwrap();
+        ws.update(&mut cx, |ws, cx| {
+            ws.store.data.settings.text_generation_model = None;
+            for harness in [Harness::Claude, Harness::Codex, Harness::OpenCode, Harness::Antigravity] {
+                let mut rec = record();
+                rec.id = harness.name().into();
+                rec.auto_title = None;
+                rec.agent = Some(AgentMeta { harness, ..Default::default() });
+                let id = rec.id.clone();
+                ws.store.data.sessions.push(rec);
+                ws.auto_title(&id, "Fix login", cx);
+                assert_eq!(ws.store.session(&id).unwrap().display_title(), "Fix login");
+                assert_eq!(ws.store.session(&id).unwrap().custom_title, None);
+                ws.auto_title(&id, "Another request", cx);
+                assert_eq!(ws.store.session(&id).unwrap().display_title(), "Fix login");
+            }
+        });
+    }
+
+    #[test]
+    fn late_generation_preserves_manual_native_and_replacement_titles() {
+        let mut record = record();
+        assert!(can_replace_auto_title(&record, "Fix login"));
+        record.custom_title = Some("My name".into());
+        assert!(!can_replace_auto_title(&record, "Fix login"));
+        record.custom_title = None;
+        record.title = "Native title".into();
+        assert!(!can_replace_auto_title(&record, "Fix login"));
+        record.title = "New session".into();
+        record.auto_title = Some("Replacement".into());
+        assert!(!can_replace_auto_title(&record, "Fix login"));
+    }
+
+    #[test]
+    fn local_titles_skip_blank_lines_strip_quotes_and_limit_unicode_characters() {
+        assert_eq!(clean_title("\n  `Fix login`.  \nMore detail"), "Fix login");
+        assert_eq!(clean_title(&"?".repeat(80)), "?".repeat(60));
+        assert_eq!(clean_title("  \n"), "");
     }
 }
