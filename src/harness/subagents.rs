@@ -139,10 +139,12 @@ const OPENCODE: Provider = Provider {
 };
 
 const ANTIGRAVITY: Provider = Provider {
-    limits: Some(Limits { read: || {
-        let agy = super::runner::locate(Agent::Antigravity).ok_or("agy was not found")?;
-        super::antigravity::limits::read(&agy, &crate::datadir::data_dir())
-    }, every: super::antigravity::limits::REFRESH_EVERY }),
+    // Temporarily disabled pending clarification of Google's terms for usage polling.
+    // limits: Some(Limits { read: || {
+    //     let agy = super::runner::locate(Agent::Antigravity).ok_or("agy was not found")?;
+    //     super::antigravity::limits::read(&agy, &crate::datadir::data_dir())
+    // }, every: super::antigravity::limits::REFRESH_EVERY }),
+    limits: None,
     color: theme::ANTIGRAVITY,
     marks: logos::antigravity_marks,
     name: "Antigravity",

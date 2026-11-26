@@ -157,7 +157,8 @@ impl Workspace {
                     ws.serve_requests(requests, window, cx);
                     ws.run_pending_switches(&statuses, window, cx);
                     ws.check_open_files(window, cx);
-                    ws.update_activity(window, cx, &statuses)
+                    ws.claude_statuses = statuses;
+                    ws.update_activity(window, cx)
                 });
                 if update.is_err() {
                     break;
@@ -167,9 +168,12 @@ impl Workspace {
         .detach();
     }
 
-    /// `statuses` is Claude Code's own busy/idle/waiting per session id; sessions it doesn't list (older Claude
-    /// Code, no registry file) fall back to the terminal-output heuristic.
-    fn update_activity(&mut self, window: &mut Window, cx: &mut Context<Self>, statuses: &HashMap<String, String>) {
+    /// Work out each session's row state and alert on a finished turn or a new question. Runs on the activity poll,
+    /// and at once when a thread's turn ends. A terminal session reads Claude Code's own busy/idle/waiting from the
+    /// last poll (`claude_statuses`); one it doesn't list (older Claude Code, no registry file) falls back to the
+    /// terminal-output heuristic.
+    pub(super) fn update_activity(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let statuses = std::mem::take(&mut self.claude_statuses);
         let window_active = window.is_window_active();
         let editing = self.editing();
         let shown = self.active_id().cloned();
@@ -197,7 +201,12 @@ impl Workspace {
             };
             let before = self.activity.get(&l.id).copied();
             let mut idle_since = self.idle_since.get(&l.id).copied();
-            let working = settle_working(working, waiting, before, &mut idle_since, now_instant);
+            // A thread's turn ending is exact, and a follow-up starts before it reports idle. Only a terminal's
+            // guess from its output gets a moment to settle.
+            let working = match &l.view {
+                SessionView::Thread(_) => working,
+                SessionView::Terminal(_) => settle_working(working, waiting, before, &mut idle_since, now_instant),
+            };
             match idle_since {
                 Some(since) => { self.idle_since.insert(l.id.clone(), since); }
                 None => { self.idle_since.remove(&l.id); }
@@ -226,6 +235,7 @@ impl Workspace {
                 next.insert(l.id.clone(), now);
             }
         }
+        self.claude_statuses = statuses;
         self.idle_since.retain(|id, _| next.get(id) == Some(&Activity::Working));
         if next != self.activity {
             self.activity = next;

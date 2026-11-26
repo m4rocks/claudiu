@@ -224,13 +224,14 @@ impl Workspace {
     }
 
     /// The stored usage limits for `harness` (and optional `model_id` for multi-pool providers like Antigravity).
-    pub(crate) fn usage_for_harness_model(&self, harness: Harness, model_id: Option<&str>) -> Option<UsageLimits> {
+    pub(crate) fn usage_for_harness_model(&self, harness: Harness, _model_id: Option<&str>) -> Option<UsageLimits> {
         match harness {
             Harness::Claude => Some(self.store.data.claude_usage.clone()),
             Harness::Codex => self.store.data.subagent_limits.get("codex")?.first().map(|p| p.usage.clone()),
+            /* Temporarily ignore cached Antigravity limits while polling is disabled.
             Harness::Antigravity => {
                 let pools = self.store.data.subagent_limits.get("antigravity")?;
-                if let Some(model) = model_id.map(str::to_ascii_lowercase) {
+                if let Some(model) = _model_id.map(str::to_ascii_lowercase) {
                     let wants_claude = model.contains("claude") || model.contains("gpt") || model.contains("opus") || model.contains("sonnet");
                     if let Some(pool) = pools.iter().find(|p| {
                         let name = p.name.to_ascii_lowercase();
@@ -245,7 +246,8 @@ impl Workspace {
                 }
                 pools.first().map(|p| p.usage.clone())
             }
-            Harness::OpenCode => None,
+            */
+            Harness::OpenCode | Harness::Antigravity => None,
         }
     }
 
@@ -317,7 +319,7 @@ impl Workspace {
 
     /// Request a fresh usage-limits probe for `harness` (e.g. after a turn finishes).
     pub(crate) fn request_limits_refresh(&mut self, harness: Harness, cx: &mut Context<Self>) {
-        if !matches!(harness, Harness::Claude | Harness::Codex | Harness::Antigravity) || !self.limits_harness_active(harness) {
+        if !matches!(harness, Harness::Claude | Harness::Codex) || !self.limits_harness_active(harness) {
             return;
         }
         if self.limits_state.get(harness).loading {
@@ -329,7 +331,7 @@ impl Workspace {
 
     /// Manual refresh triggered from the sidebar usage footer.
     pub(crate) fn refresh_all_limits(&mut self, cx: &mut Context<Self>) {
-        for harness in [Harness::Claude, Harness::Codex, Harness::Antigravity] {
+        for harness in [Harness::Claude, Harness::Codex] {
             if !self.limits_harness_active(harness) {
                 continue;
             }

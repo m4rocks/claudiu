@@ -51,7 +51,7 @@ When upgrading from a version with multiple Claude accounts, resumed sessions us
   - Left sidebar of running and recent sessions (`Cmd/Ctrl+Z` reopens the last closed session), **Pick up a session here** to open terminal-started sessions in a folder, and background notifications when a session finishes or asks a question.
   - Right sidebar with drag-to-reorder cards for session status, subagents, GitHub issues and pull requests, and linked sessions, plus inline visual cards agents draw in chat.
   - **Ask Agent** in the GitHub pane sends the request to the active agent if it is running in the repository. When it starts a new session, it uses the model selected in the Welcome composer.
-  - Usage meters in the sidebar footer for connected harnesses with a limits adapter (Claude Code, Codex 5-hour/7-day limits read from `~/.codex`, and Antigravity model-group limits polled from `agy /usage` every five minutes at no token cost).
+  - Usage meters in the sidebar footer for connected harnesses with a limits adapter (Claude Code and Codex 5-hour/7-day limits).
   - Configurable text generation model (**Settings → General**) for automatic new-session titles, Regenerate title and Commit & Push—pick any enabled model or keep local summary.
 
 ### Cross-agent subagents

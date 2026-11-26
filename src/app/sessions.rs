@@ -497,6 +497,8 @@ impl Workspace {
                         ws.request_limits_refresh(harness, cx);
                     }
                     ws.report_to_parent(&sub_id, outcome, cx);
+                    // The row's check mark and the notification follow the turn's end, not the next poll.
+                    ws.update_activity(window, cx);
                 }
                 ThreadEvent::Select(child) => ws.act(Act::Select(child.clone()), window, cx),
                 ThreadEvent::Handoff { to, model, message, effort, by_agent } => ws.dynamic_handoff(&sub_id, *to, model.clone(), message.clone(), *by_agent, effort.clone(), window, cx),

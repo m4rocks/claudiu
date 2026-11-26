@@ -653,6 +653,8 @@ pub struct Workspace {
     pub activity: HashMap<Id, Activity>,
     /// When each working session last went idle, so a short gap between two turns isn't taken for the end.
     pub(crate) idle_since: HashMap<Id, std::time::Instant>,
+    /// Claude Code's own busy/idle/waiting per session id, from the last activity poll.
+    pub(crate) claude_statuses: HashMap<String, String>,
     pub git_busy: Option<GitOp>,
     /// Sessions currently switching into a target worktree folder; shown as a spinner in the branch switcher chip.
     pub switching_worktree: HashMap<Id, PathBuf>,
@@ -798,6 +800,7 @@ impl Workspace {
             restored: false,
             activity: HashMap::new(),
             idle_since: HashMap::new(),
+            claude_statuses: HashMap::new(),
             git_busy: None,
             switching_worktree: HashMap::new(),
             pending: None,

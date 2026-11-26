@@ -3966,6 +3966,24 @@ mod tests {
         assert!(row.size.height < gpui::px(32.0), "a multi-line command stays on one line: {row:?}");
     }
 
+    #[gpui::test]
+    fn a_turn_ends_before_its_changes_are_captured(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_kit::init);
+        let dir = tempfile::tempdir().unwrap();
+        let mut start = test_start(dir.path().into(), Harness::Claude);
+        start.prior_entries = vec![Entry::User("go".into())];
+        let (view, cx) = cx.add_window_view(|window, cx| super::ThreadView::new(start, window, cx));
+        view.update(cx, |v, cx| {
+            v.phase = super::Phase::Ready;
+            v.working = true;
+            v.active_turn_review = Some(super::review::ActiveTurn {
+                id: uuid::Uuid::new_v4(), row: 0, text: "go".into(), before: String::new(), cwd: dir.path().into(),
+            });
+            v.capture_turn_review(Ok(serde_json::json!({"stopReason": "end_turn"})), cx);
+            assert!(!v.is_working(), "git working out the turn's changes doesn't hold the turn open");
+        });
+    }
+
     #[cfg(debug_assertions)]
     #[gpui::test]
     fn turn_status_shows_working_under_the_steps_then_how_long_it_took(cx: &mut gpui::TestAppContext) {

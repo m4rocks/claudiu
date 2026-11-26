@@ -207,12 +207,13 @@ pub fn comments_message(comments: &[Comment]) -> String {
 }
 
 impl ThreadView {
+    /// End the turn at once, then keep what it changed for review once git has worked that out, which can take a
+    /// few seconds in a large tree.
     pub(super) fn capture_turn_review(&mut self, result: Result<Value, String>, cx: &mut Context<Self>) {
-        let Some(active) = self.active_turn_review.take() else {
-            self.turn_ended(result, cx);
-            return;
-        };
+        let active = self.active_turn_review.take();
         let end = self.thread.entries.len();
+        self.turn_ended(result, cx);
+        let Some(active) = active else { return };
         let record = self.record_id.clone();
         let session = self.session_id.clone();
         let (cwd, before, patch_record, id) = (active.cwd.clone(), active.before.clone(), record.clone(), active.id);
@@ -232,7 +233,7 @@ impl ThreadView {
                 if !v.persist_on_drop || v.phase != super::Phase::Ready || v.session_id != session {
                     return false;
                 }
-                let saved = match &captured {
+                match &captured {
                     Ok((file_count, checkpoint)) if *file_count > 0 => v.remember_turn_review(TurnReview {
                         id, row: active.row, end, text: active.text, file_count: *file_count,
                         before: active.before, checkpoint: *checkpoint, cwd: active.cwd.clone(),
@@ -240,12 +241,11 @@ impl ThreadView {
                     Err(error) => {
                         let at = v.thread.notice(format!("Could not capture turn changes: {error}"), true);
                         v.remeasure(at);
+                        cx.notify();
                         false
                     }
                     _ => false,
-                };
-                v.turn_ended(result, cx);
-                saved
+                }
             }).unwrap_or(false);
             if !saved && captured.is_ok_and(|(count, _)| count > 0) {
                 cx.background_executor().spawn(async move { discard_turn_patch(&record, id, &active.cwd); }).detach();
