@@ -332,6 +332,8 @@ struct ChatMenu {
     at: Point<Pixels>,
     quote: String,
     anchor: Point<Pixels>,
+    /// What had the keyboard before the menu took it.
+    return_focus: Option<FocusHandle>,
 }
 
 struct AgentCache {
@@ -464,12 +466,10 @@ pub struct ThreadView {
     pub picker: Option<ThreadPicker>,
     picker_at: crate::panels::widgets::Dropdown,
     model_anchor: crate::panels::widgets::Anchor,
-    /// Highlighted row index inside the Model picker for Up/Down + Enter keyboard navigation.
-    model_highlight: usize,
-    mode_highlight: usize,
-    /// Follows `model_highlight` so keyboard moves keep the highlighted row in view.
-    pub(super) model_scroll: crate::panels::glide::Smooth,
-    pub(super) model_rows: Rc<std::cell::RefCell<Vec<Bounds<Pixels>>>>,
+    /// Up/Down/Enter in the open Model or Permission picker.
+    pub(super) picker_nav: crate::panels::ui::command::Nav,
+    /// Up/Down/Enter in the chat's right-click menu.
+    pub(super) menu_nav: crate::panels::ui::command::Nav,
     /// Tool call ids manually expanded by clicking their compressed single-line header.
     expanded_tools: HashSet<String>,
     /// Shell calls closed by hand while Ctrl+O is showing tool details.
@@ -496,7 +496,6 @@ pub struct ThreadView {
     /// The slash menu's highlighted row, and its scroll.
     command_highlight: usize,
     command_scroll: crate::panels::glide::Smooth,
-    permission_scroll: crate::panels::glide::Smooth,
     question_scroll: crate::panels::glide::Smooth,
     queue_scroll: crate::panels::glide::Smooth,
     shell_output_scroll: crate::panels::glide::Smooth,
@@ -530,13 +529,6 @@ impl ThreadView {
                     cx.notify();
                 }
                 _ => {}
-            }),
-            cx.subscribe_in(&model_search, window, |v: &mut Self, _, ev: &InputEvent, _, cx| {
-                if matches!(ev, InputEvent::Change) {
-                    v.model_highlight = 0;
-                    v.model_scroll.scroll_to_item(0);
-                    cx.notify();
-                }
             }),
             cx.subscribe_in(&card_ui, window, |v: &mut Self, ui, ev: &SendText, window, cx| {
                 if v.workspace_switching || v.read_only_unconfirmed {
@@ -682,10 +674,8 @@ impl ThreadView {
             picker: None,
             picker_at: crate::panels::widgets::Dropdown::at(gpui::point(px(0.0), px(0.0))),
             model_anchor: crate::panels::widgets::Anchor::default(),
-            model_highlight: 0,
-            mode_highlight: 0,
-            model_scroll: Default::default(),
-            model_rows: Default::default(),
+            picker_nav: crate::panels::ui::command::Nav::new(cx),
+            menu_nav: crate::panels::ui::command::Nav::new(cx),
             expanded_tools: HashSet::new(),
             collapsed_shell_calls: HashSet::new(),
             collapsed_thoughts: HashSet::new(),
@@ -702,7 +692,6 @@ impl ThreadView {
             active_turn_review: None,
             command_highlight: 0,
             command_scroll: Default::default(),
-            permission_scroll: Default::default(),
             question_scroll: Default::default(),
             queue_scroll: Default::default(),
             shell_output_scroll: Default::default(),
@@ -2421,9 +2410,8 @@ impl ThreadView {
 
     fn intercept(&mut self, ev: &KeystrokeEvent, window: &mut Window, cx: &mut Context<Self>) {
         if self.chat_menu.is_some() && ev.keystroke.key == "escape" {
-            self.chat_menu = None;
+            self.close_chat_menu(window, cx);
             cx.stop_propagation();
-            cx.notify();
             return;
         }
         if self.screenshot.is_some() && self.screenshot_focus.contains_focused(window, cx) && ev.keystroke.key == "escape" {
@@ -2448,83 +2436,16 @@ impl ThreadView {
             cx.stop_propagation();
             return;
         }
-        // Keyboard navigation while the Model picker is open (works even when the search input has focus):
-        // Up/Down moves the highlighted model, Left/Right steps effort, Enter confirms, Escape closes.
+        // Left/Right step the Model picker's effort even while its search box has the keyboard. Up, Down and Enter
+        // are the list's own (`ui::command::Choices`).
         if self.picker == Some(ThreadPicker::Model)
-            && !ev.keystroke.modifiers.control
-            && !ev.keystroke.modifiers.alt
-            && !ev.keystroke.modifiers.platform
-            && !ev.keystroke.modifiers.shift
+            && !ev.keystroke.modifiers.modified()
+            && matches!(ev.keystroke.key.as_str(), "left" | "right")
         {
-            match ev.keystroke.key.as_str() {
-                "up" | "down" => {
-                    let count = self.filtered_models(cx).len();
-                    if count > 0 {
-                        let cur = self.model_highlight.min(count - 1);
-                        self.model_highlight = if ev.keystroke.key == "up" {
-                            if cur == 0 { count - 1 } else { cur - 1 }
-                        } else {
-                            (cur + 1) % count
-                        };
-                        crate::panels::picker::reveal_row(&self.model_scroll, &self.model_rows.borrow(), self.model_highlight);
-                    }
-                    cx.stop_propagation();
-                    cx.notify();
-                    return;
-                }
-                "left" | "right" => {
-                    self.step_effort(if ev.keystroke.key == "left" { -1 } else { 1 }, cx);
-                    cx.stop_propagation();
-                    cx.notify();
-                    return;
-                }
-                "enter" => {
-                    let models = self.filtered_models(cx);
-                    if let Some(choice) = models.get(self.model_highlight.min(models.len().saturating_sub(1))).cloned() {
-                        self.pick_model(choice, cx);
-                        self.close_picker(window, cx);
-                    }
-                    cx.stop_propagation();
-                    return;
-                }
-                _ => {}
-            }
-        }
-        // Keyboard navigation while the Permission mode picker is open.
-        if self.picker == Some(ThreadPicker::Permission)
-            && !ev.keystroke.modifiers.control
-            && !ev.keystroke.modifiers.alt
-            && !ev.keystroke.modifiers.platform
-            && !ev.keystroke.modifiers.shift
-        {
-            match ev.keystroke.key.as_str() {
-                "up" | "down" => {
-                    let offered = self.permissions();
-                    let index = (1..=Permission::ALL.len())
-                        .map(|step| if ev.keystroke.key == "up" {
-                            (self.mode_highlight + Permission::ALL.len() - step) % Permission::ALL.len()
-                        } else {
-                            (self.mode_highlight + step) % Permission::ALL.len()
-                        })
-                        .find(|&i| offered.contains(&Permission::ALL[i]));
-                    if let Some(index) = index {
-                        self.mode_highlight = index;
-                    }
-                    cx.stop_propagation();
-                    cx.notify();
-                    return;
-                }
-                "enter" => {
-                    let mode = Permission::ALL[self.mode_highlight];
-                    if self.permissions().contains(&mode) {
-                        self.set_permission(mode, cx);
-                        self.close_picker(window, cx);
-                    }
-                    cx.stop_propagation();
-                    return;
-                }
-                _ => {}
-            }
+            self.step_effort(if ev.keystroke.key == "left" { -1 } else { 1 }, cx);
+            cx.stop_propagation();
+            cx.notify();
+            return;
         }
         // Escape always closes an open composer picker even if focus briefly left the textarea.
         if self.picker.is_some()
@@ -2723,14 +2644,14 @@ impl ThreadView {
             });
             let current_id = self.thread.option("model").map(|m| m.current.as_str());
             let models = self.unified_models();
-            self.model_highlight = models
+            let current = models
                 .iter()
                 .position(|m| match &self.pending_model {
                     Some(p) => p.harness == m.harness && p.id == m.id,
                     None => m.harness == self.harness && current_id == Some(m.id.as_str()),
                 })
                 .unwrap_or(0);
-            self.model_scroll.scroll_to_item(self.model_highlight);
+            self.picker_nav.reset_to(current);
         }
     }
 

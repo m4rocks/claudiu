@@ -22,6 +22,7 @@ mod skills_page;
 pub mod sidebar;
 pub mod status_icon;
 pub mod theme;
+pub mod ui;
 pub mod widgets;
 pub mod workspace_view;
 mod workspace_pickers;

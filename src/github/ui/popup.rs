@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::panels::picker;
+use crate::panels::ui::command;
 use crate::panels::widgets::Dropdown;
 
 impl GithubView {
@@ -225,7 +226,7 @@ impl GithubView {
         let (items, loading) = self.popup_items(&popup.kind);
         let needle = popup.filter.read(cx).value().to_lowercase();
         let searchable = popup.kind.searchable();
-        let mut choices = picker::Choices::new(&popup.nav, &needle);
+        let mut choices = command::Choices::new(&popup.nav, &needle);
         let mut list = choices.list("gh-pop-list", window).max_h(px(320.0));
         let mut shown = 0;
         for (i, it) in items.into_iter().enumerate() {
@@ -240,7 +241,7 @@ impl GithubView {
                 .children(it.swatch.map(|c| div().size(px(10.0)).rounded_full().bg(hsla(c))))
                 .into_any_element();
             let trailing = it.hint.map(|hint| faint(hint).into_any_element());
-            let row = picker::row(SharedString::from(format!("gh-pop-{i}")), Some(lead), it.label, None, trailing, it.checked == Some(true), false);
+            let row = command::row(SharedString::from(format!("gh-pop-{i}")), Some(lead), it.label, None, trailing, it.checked == Some(true), false);
             list = list.child(choices.add(row, move |v, window, cx| v.act(it.act.clone(), window, cx), cx));
         }
         if loading {

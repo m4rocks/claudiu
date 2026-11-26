@@ -413,7 +413,7 @@ impl Render for Workspace {
             Main::Terminals => self.render_session(window, cx),
             Main::Home => self.render_home(window, cx).into_any_element(),
         };
-        let menu = self.render_menu(cx);
+        let menu = self.render_menu(window, cx);
         let picker_dialog = self.render_picker(window, cx);
         let modal = self.render_modal(window, cx);
         let agent_dialog = self.render_harness_dialog(window, cx);
@@ -451,50 +451,13 @@ impl Render for Workspace {
                     cx.stop_propagation();
                     return;
                 }
-                // Keyboard navigation inside the Welcome model picker: Up/Down moves model, Left/Right steps effort, Enter confirms.
-                if plain && let Some(WorkspacePicker::HomeModel { search }) = ws.picker_kind() {
-                    let query = search.read(cx).value().to_lowercase();
-                    let words: Vec<&str> = query.split_whitespace().collect();
-                    let filtered: Vec<crate::harness::CatalogModel> = ws
-                        .store
-                        .data
-                        .settings
-                        .aggregated_models()
-                        .into_iter()
-                        .filter(|m| {
-                            let hay = format!("{} {} {}", m.name, m.id, m.harness.name()).to_lowercase();
-                            words.iter().all(|w| hay.contains(w))
-                        })
-                        .collect();
-                    match ev.keystroke.key.as_str() {
-                        "up" | "down" => {
-                            if !filtered.is_empty() {
-                                let cur = ws.home.model_highlight.min(filtered.len() - 1);
-                                ws.home.model_highlight = if ev.keystroke.key == "up" {
-                                    if cur == 0 { filtered.len() - 1 } else { cur - 1 }
-                                } else {
-                                    (cur + 1) % filtered.len()
-                                };
-                                crate::panels::picker::reveal_row(&ws.home.model_scroll, &ws.home.model_rows.borrow(), ws.home.model_highlight);
-                            }
-                            cx.stop_propagation();
-                            cx.notify();
-                        }
-                        "left" | "right" => {
-                            let cur = Effort::ALL.iter().position(|e| *e == ws.home.effort).unwrap_or(1) as isize;
-                            let delta = if ev.keystroke.key == "left" { -1 } else { 1 };
-                            let next = (cur + delta).clamp(0, Effort::ALL.len() as isize - 1) as usize;
-                            ws.act(Act::HomeSetEffort(Effort::ALL[next]), window, cx);
-                            cx.stop_propagation();
-                        }
-                        "enter" => {
-                            if let Some(choice) = filtered.get(ws.home.model_highlight.min(filtered.len().saturating_sub(1))).cloned() {
-                                ws.act(Act::HomeSelectModel(choice), window, cx);
-                            }
-                            cx.stop_propagation();
-                        }
-                        _ => {}
-                    }
+                // Left/Right step the Welcome model picker's effort; Up, Down and Enter are its list's own.
+                if plain && matches!(ws.picker_kind(), Some(WorkspacePicker::HomeModel { .. })) && matches!(ev.keystroke.key.as_str(), "left" | "right") {
+                    let cur = Effort::ALL.iter().position(|e| *e == ws.home.effort).unwrap_or(1) as isize;
+                    let delta = if ev.keystroke.key == "left" { -1 } else { 1 };
+                    let next = (cur + delta).clamp(0, Effort::ALL.len() as isize - 1) as usize;
+                    ws.act(Act::HomeSetEffort(Effort::ALL[next]), window, cx);
+                    cx.stop_propagation();
                 }
             }))
             .on_action(cx.listener(|ws, _: &NewSession, window, cx| {

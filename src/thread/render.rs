@@ -21,6 +21,7 @@ use crate::harness::permission::Permission;
 use super::timeline::{self, RunKind};
 use crate::harness::thread::{Entry, SubagentReport, ToolCall, ToolContent, ToolStatus, parse_subagent_report};
 use crate::panels::{attachments, comment_box, composer, logos, picker, scale};
+use crate::panels::ui::{self, command};
 use crate::panels::theme::{self, hsla};
 use crate::panels::widgets::{EffortPick, Trigger, button, button_colored, button_disabled, button_disabled_leading, effort_slider, icon, icon_button, key_badge, spinner};
 use crate::visual::ui::Scope;
@@ -76,7 +77,10 @@ impl Render for ThreadView {
                 let anchor = gpui_kit::base::TextSelection::selection_edges(window, cx)
                     .map(|(_, end)| gpui::point(end.right() + px(8.0), end.top()))
                     .unwrap_or(ev.position);
-                v.chat_menu = Some(super::ChatMenu { at: ev.position, quote, anchor });
+                let return_focus = v.chat_menu.take().and_then(|m| m.return_focus).or_else(|| window.focused(cx));
+                v.chat_menu = Some(super::ChatMenu { at: ev.position, quote, anchor, return_focus });
+                v.menu_nav.reset();
+                v.menu_nav.focus(window, cx);
                 cx.notify();
             }))
             .on_scroll_wheel(cx.listener(|v, _: &gpui::ScrollWheelEvent, _, cx| {
@@ -174,65 +178,32 @@ impl ThreadView {
             .with_priority(20).into_any_element())
     }
 
-    fn render_chat_menu(&self, _window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// The chat's right-click menu, on the kit's `menu`.
+    fn render_chat_menu(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let menu_state = self.chat_menu.as_ref()?;
-        let at = menu_state.at;
         let quote = menu_state.quote.clone();
         let has_selection = !quote.is_empty();
         let selection_anchor = menu_state.anchor;
-        let copy_quote = quote.clone();
-        let comment_quote = quote;
-        let menu_item = |id: &'static str, glyph: IconName, label: &'static str, enabled: bool| {
-            crate::panels::widgets::focusable(id)
-                .disabled(!enabled)
-                .w_full()
-                .h(px(28.0))
-                .px(px(10.0))
-                .rounded(px(5.0))
-                .justify_start()
-                .gap(px(8.0))
-                .text_size(scale::px(12.5))
-                .text_color(hsla(if enabled { theme::TEXT } else { theme::TEXT_FAINT }))
-                .when(enabled, |d| d.cursor_pointer().hover(|s| s.bg(hsla(theme::ROW_HOVER))))
-                .child(icon(glyph, 13.0).text_color(hsla(if enabled { theme::TEXT_DIM } else { theme::TEXT_FAINT })))
-                .child(label)
-        };
-        let menu = div()
-            .id("chat-context-menu")
-            .occlude()
-            .w(px(180.0))
-            .p(px(4.0))
-            .rounded(px(8.0))
-            .bg(hsla(theme::SURFACE_ELEVATED))
-            .border_1()
-            .border_color(hsla(theme::PANEL_BORDER))
-            .flex()
-            .flex_col()
-            .gap(px(2.0))
-            .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                gpui_kit::base::GlobalState::suppress_text_selection(cx);
+        let (copy_quote, comment_quote) = (quote.clone(), quote);
+        let entries = vec![
+            ui::menu::Entry::new("Copy", move |v: &mut Self, window, cx| {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(copy_quote.clone()));
+                v.close_chat_menu(window, cx);
             })
-            .on_mouse_down_out(cx.listener(|v, _: &MouseDownEvent, _, cx| {
+            .id("copy")
+            .icon(Some(IconName::Copy))
+            .shortcut(Some(crate::panels::widgets::shortcut("C")))
+            .disabled(!has_selection),
+            ui::menu::Entry::new("Add comment", move |v: &mut Self, window, cx| {
                 v.chat_menu = None;
-                cx.notify();
-            }))
-            .child(menu_item("chat-ctx-copy", IconName::Copy, "Copy", has_selection).when(has_selection, |b| {
-                b.on_click(cx.listener(move |v, _: &ClickEvent, _, cx| {
-                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(copy_quote.clone()));
-                    v.chat_menu = None;
-                    cx.notify();
-                }))
-            }))
-            .child(menu_item("chat-ctx-comment", IconName::MessageSquare, "Add comment", has_selection)
-                .debug_selector(|| "chat-ctx-comment".into())
-                .when(has_selection, |b| {
-                b.on_click(cx.listener(move |v, _: &ClickEvent, window, cx| {
-                    v.chat_menu = None;
-                    v.comment_anchor = Some((selection_anchor, comment_quote.clone()));
-                    v.start_selection_comment(window, cx);
-                }))
-            }))
-            .child(menu_item("chat-ctx-paste", IconName::Clipboard, "Paste", true).on_click(cx.listener(|v, _: &ClickEvent, window, cx| {
+                v.comment_anchor = Some((selection_anchor, comment_quote.clone()));
+                v.start_selection_comment(window, cx);
+            })
+            .id("comment")
+            .icon(Some(IconName::MessageSquare))
+            .shortcut(Some(crate::panels::widgets::shortcut("Shift+M")))
+            .disabled(!has_selection),
+            ui::menu::Entry::new("Paste", |v: &mut Self, window, cx| {
                 v.chat_menu = None;
                 if !(v.attachments_enabled() && v.attachments.paste(cx))
                     && let Some(text) = cx.read_from_clipboard().and_then(|item| item.text())
@@ -242,8 +213,22 @@ impl ThreadView {
                     v.focus_composer(window, cx);
                 }
                 cx.notify();
-            })));
-        Some(deferred(anchored().position(at).snap_to_window_with_margin(px(8.0)).child(menu)).with_priority(25).into_any_element())
+            })
+            .id("paste")
+            .icon(Some(IconName::Clipboard))
+            .shortcut(Some(crate::panels::widgets::shortcut("V"))),
+        ];
+        let menu = ui::menu::menu("chat-ctx", px(200.0), &self.menu_nav, entries, |v, window, cx| v.close_chat_menu(window, cx), window, cx)
+            .on_mouse_down(MouseButton::Left, |_, _, cx| gpui_kit::base::GlobalState::suppress_text_selection(cx));
+        Some(ui::menu::popup(menu_state.at, menu, 25, |v: &mut Self, window, cx| v.close_chat_menu(window, cx), cx))
+    }
+
+    /// Close the chat's right-click menu and give the keyboard back to what had it.
+    pub(super) fn close_chat_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(focus) = self.chat_menu.take().and_then(|m| m.return_focus) {
+            window.focus(&focus, cx);
+        }
+        cx.notify();
     }
 }
 
@@ -1286,13 +1271,13 @@ impl ThreadView {
         let active = self.picker?;
         let accent = hsla(theme::ACCENT);
 
-        let (id, title, body) = match active {
+        let (id, title, body, choices) = match active {
             ThreadPicker::Model => {
                 let current_id = self.thread.option("model").map(|m| m.current.as_str());
                 let models = self.filtered_models(cx);
-                let hi = self.model_highlight.min(models.len().saturating_sub(1));
-                self.model_rows.borrow_mut().truncate(models.len());
-                let mut list = self.model_scroll.wire(div().id("picker-model-list").role(gpui::Role::ListBox).aria_label("Models").flex_1().min_h_0().max_h(px(210.0)), window).flex().flex_col().gap(px(2.0));
+                let query = self.model_search.read(cx).value().to_lowercase();
+                let mut choices = command::Choices::new(&self.picker_nav, &query);
+                let mut list = choices.list("picker-model-list", window).role(gpui::Role::ListBox).aria_label("Models").flex_1().min_h_0().max_h(px(210.0));
                 let mut previous = None;
                 for (n, m) in models.iter().enumerate() {
                     let heading = (previous != Some(m.harness)).then(|| picker::section_header(m.harness.name(), None));
@@ -1301,24 +1286,21 @@ impl ThreadView {
                         Some(p) => p.harness == m.harness && p.id == m.id,
                         None => m.harness == self.harness && current_id == Some(m.id.as_str()),
                     };
-                    let focused = n == hi;
                     let choice = m.clone();
                     let logo = logos::draw(logos::for_harness(m.harness), 11.5, hsla(if selected { theme::TEXT } else { theme::TEXT_FAINT })).into_any_element();
-                    list = list.child(div().flex_none().flex().flex_col().children(heading).child(
-                        picker::row(SharedString::from(format!("thread-model-{n}")), Some(logo), m.name.clone(), None, None, selected, false)
-                            .relative()
-                            .role(gpui::Role::ListBoxOption)
-                            .aria_selected(selected)
-                            .when(focused && !selected, |d| d.bg(hsla(theme::SURFACE_HOVER)))
-                            .border_1()
-                            .border_color(if focused { hsla(theme::FOCUS_BORDER) } else { gpui::transparent_black() })
-                            .debug_selector(move || format!("thread-model-{n}"))
-                            .child(picker::track_row(self.model_rows.clone(), n))
-                            .on_click(cx.listener(move |v, _: &ClickEvent, window, cx| {
-                                v.pick_model(choice.clone(), cx);
-                                v.close_picker(window, cx);
-                            })),
-                    ));
+                    let row = command::row(SharedString::from(format!("thread-model-{n}")), Some(logo), m.name.clone(), None, None, selected, false)
+                        .role(gpui::Role::ListBoxOption)
+                        .aria_selected(selected)
+                        .debug_selector(move || format!("thread-model-{n}"));
+                    let row = choices.add(
+                        row,
+                        move |v, window, cx| {
+                            v.pick_model(choice.clone(), cx);
+                            v.close_picker(window, cx);
+                        },
+                        cx,
+                    );
+                    list = list.child(div().flex_none().flex().flex_col().children(heading).child(row));
                 }
                 if models.is_empty() {
                     list = list.child(crate::panels::widgets::empty_panel(IconName::Search, "No matching models"));
@@ -1365,30 +1347,32 @@ impl ThreadView {
                     .child(list)
                     .child(picker::divider())
                     .child(effort_section);
-                ("thread-model-dialog", "MODEL", body.into_any_element())
+                ("thread-model-dialog", "MODEL", body.into_any_element(), choices)
             }
             ThreadPicker::Permission => {
-                let mut rows = self.permission_scroll.wire(div().id("picker-perm-list").max_h(px(340.0)), window).flex().flex_col().gap(px(2.0));
+                let mut choices = command::Choices::new(&self.picker_nav, "");
+                let mut rows = choices.list("picker-perm-list", window).max_h(px(340.0));
                 let offered = self.permissions();
                 for (i, mode) in Permission::ALL.into_iter().enumerate() {
                     let available = offered.contains(&mode);
                     let current = self.permission() == Some(mode);
-                    let focused = available && i == self.mode_highlight;
                     let lead = icon(IconName::Lock, 12.0).text_color(hsla(if current { theme::TEXT } else { theme::TEXT_FAINT })).into_any_element();
-                    let mut row = picker::row(SharedString::from(format!("perm-mode-{i}")), Some(lead), mode.label(), Some(mode.detail(available)), None, current, !available)
-                        .debug_selector(move || format!("perm-mode-{i}"))
-                        .when(focused && !current, |d| d.bg(hsla(theme::SURFACE_HOVER)))
-                        .border_1()
-                        .border_color(if focused { hsla(theme::FOCUS_BORDER) } else { gpui::transparent_black() });
-                    if available {
-                        row = row.on_click(cx.listener(move |v, _: &ClickEvent, window, cx| {
-                            v.set_permission(mode, cx);
-                            v.close_picker(window, cx);
-                        }));
-                    }
-                    rows = rows.child(row);
+                    let row = command::row(SharedString::from(format!("perm-mode-{i}")), Some(lead), mode.label(), Some(mode.detail(available)), None, current, !available)
+                        .debug_selector(move || format!("perm-mode-{i}"));
+                    rows = rows.child(if available {
+                        choices.add(
+                            row,
+                            move |v, window, cx| {
+                                v.set_permission(mode, cx);
+                                v.close_picker(window, cx);
+                            },
+                            cx,
+                        )
+                    } else {
+                        row.into_any_element()
+                    });
                 }
-                ("thread-permission-dialog", "PERMISSION MODE", rows.into_any_element())
+                ("thread-permission-dialog", "PERMISSION MODE", rows.into_any_element(), choices)
             }
         };
 
@@ -1397,7 +1381,7 @@ impl ThreadView {
             self.picker_at,
             22,
             body,
-            None,
+            Some(choices),
             |v: &mut Self, window, cx| v.close_picker(window, cx),
             window,
             cx,
@@ -1627,9 +1611,10 @@ impl ThreadView {
                 v.picker = Some(ThreadPicker::Permission);
                 v.picker_at = at;
                 let offered = v.permissions();
-                let current = v.permission().filter(|p| offered.contains(p)).or_else(|| offered.first().copied());
-                v.mode_highlight = Permission::ALL.iter().position(|p| Some(*p) == current).unwrap_or(0);
-                v.focus_composer(window, cx);
+                // The list's rows are the offered modes, in `Permission::ALL`'s order.
+                let current = Permission::ALL.iter().filter(|p| offered.contains(p)).position(|p| v.permission() == Some(*p)).unwrap_or(0);
+                v.picker_nav.reset_to(current);
+                v.picker_nav.focus(window, cx);
                 cx.notify();
             })
             .into_any_element());

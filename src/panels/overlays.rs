@@ -3,7 +3,7 @@
 
 use gpui::{
     AnyElement, ClickEvent, Context, FontWeight, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
-    ParentElement, StatefulInteractiveElement, Styled, Window, anchored, deferred, div,
+    ParentElement, StatefulInteractiveElement, Styled, Window, deferred, div,
     prelude::FluentBuilder, px, rgba,
 };
 
@@ -16,79 +16,42 @@ use gpui_kit::assets::IconName;
 use crate::panels::widgets::{
     button, button_colored, button_disabled_leading, danger_button, dialog_card, dropdown_card, fade_in, icon, icon_button,
 };
-use crate::panels::picker;
+use crate::panels::ui;
 use crate::panels::settings_view::render_settings_card;
 
 impl Workspace {
-    pub(super) fn render_menu(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// The open context or dropdown menu, on the kit's `menu`.
+    pub(super) fn render_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let menu = self.menu.as_ref()?;
         let pos = menu.pos;
-        let mut choices = picker::Choices::new(&self.menu_nav, "");
-        let mut card = dropdown_card("menu")
-            .w(px(232.0))
-            .min_w(menu.min_w)
-            .p(px(4.0))
-            .flex()
-            .flex_col();
-        for (i, item) in menu.items.iter().enumerate() {
-            let act = item.act.clone();
-            if item.separator_before {
-                card = card.child(div().h(px(1.0)).my(px(4.0)).bg(hsla(theme::BORDER)));
-            }
-            let color = if item.disabled { theme::TEXT_FAINT } else if item.danger { theme::DANGER } else { theme::TEXT };
-            let row = div()
-                .id(gpui::SharedString::from(format!("menu-{i}")))
-                .h(px(if item.detail.is_some() { 42.0 } else { 28.0 }))
-                .px(px(10.0))
-                .flex()
-                .items_center()
-                .rounded(px(5.0))
-                .text_size(crate::panels::scale::px(12.5))
-                .text_color(hsla(color))
-                .gap(px(8.0))
-                .group(gpui::SharedString::from(format!("menu-row-{i}")))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .flex_col()
-                        .child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().child(item.label.clone()))
-                        .children(item.detail.clone().map(|d| div().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(crate::panels::scale::px(11.0)).text_color(hsla(theme::TEXT_FAINT)).child(d))),
-                )
-                .children(item.icon.map(|name| icon(name, 12.0).text_color(hsla(theme::TEXT_FAINT))))
-                .children(item.hint.clone().map(|h| div().flex_none().text_size(crate::panels::scale::px(11.0)).text_color(hsla(theme::TEXT_FAINT)).child(h)))
-                .children(item.remove.clone().map(|remove| {
+        let entries = menu
+            .items
+            .iter()
+            .enumerate()
+            .map(|(i, item)| {
+                let act = item.act.clone();
+                let remove = item.remove.clone().map(|remove| {
                     icon_button(gpui::SharedString::from(format!("menu-remove-{i}")), IconName::X)
                         .invisible()
-                        .group_hover(gpui::SharedString::from(format!("menu-row-{i}")), |s| s.visible())
+                        .group_hover(gpui::SharedString::from(format!("menu-{i}")), |s| s.visible())
                         .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
                             cx.stop_propagation();
                             ws.act(remove.clone(), window, cx);
                         }))
-                }));
-            card = card.child(if item.disabled {
-                row.into_any_element()
-            } else {
-                choices.add(row.cursor_pointer().hover(|s| s.bg(hsla(theme::SURFACE_HOVER))), move |ws, window, cx| ws.act(act.clone(), window, cx), cx)
-            });
-        }
-        let card = picker::keyboard(card, Some(choices), |ws, window, cx| ws.close_menu(window, cx), cx);
-        let close = |ws: &mut Workspace, _: &MouseDownEvent, window: &mut Window, cx: &mut Context<Workspace>| ws.close_menu(window, cx);
-        Some(
-            deferred(
-                div()
-                    .absolute()
-                    .top_0()
-                    .left_0()
-                    .size_full()
-                    .on_mouse_down(MouseButton::Left, cx.listener(close))
-                    .on_mouse_down(MouseButton::Right, cx.listener(close))
-                    .child(anchored().position(pos).snap_to_window_with_margin(px(8.0)).child(fade_in(card, "menu-in", 110, 0.0))),
-            )
-            .with_priority(25)
-            .into_any_element(),
-        )
+                        .into_any_element()
+                });
+                ui::menu::Entry::new(item.label.clone(), move |ws: &mut Self, window, cx| ws.act(act.clone(), window, cx))
+                    .detail(item.detail.clone())
+                    .icon(item.icon)
+                    .shortcut(item.hint.clone())
+                    .trailing(remove)
+                    .destructive(item.danger)
+                    .disabled(item.disabled)
+                    .separator_before(item.separator_before)
+            })
+            .collect();
+        let card = ui::menu::menu("menu", px(232.0).max(menu.min_w), &self.menu_nav, entries, |ws, window, cx| ws.close_menu(window, cx), window, cx);
+        Some(ui::menu::popup(pos, card, 25, |ws: &mut Self, window, cx| ws.close_menu(window, cx), cx))
     }
 
     /// Active modal overlay (Settings uses its own split-pane layout; other modals share the compact 440px card).

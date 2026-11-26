@@ -344,10 +344,6 @@ pub struct HomeState {
     pub prompt: Entity<TextareaState>,
     pub attachments: crate::panels::attachments::Attachments,
     pub model_anchor: crate::panels::widgets::Anchor,
-    pub model_highlight: usize,
-    /// Follows `model_highlight` so keyboard moves keep the highlighted row in view.
-    pub model_scroll: crate::panels::glide::Smooth,
-    pub model_rows: std::rc::Rc<std::cell::RefCell<Vec<gpui::Bounds<Pixels>>>>,
     pub effort_bounds: std::rc::Rc<std::cell::Cell<gpui::Bounds<Pixels>>>,
     pub effort_dragging: std::rc::Rc<std::cell::Cell<bool>>,
 }
@@ -564,10 +560,10 @@ pub struct Workspace {
     pub palette: Option<palette::CommandPalette>,
     compacting: HashSet<Id>,
     pub root_focus: FocusHandle,
-    /// Up/Down/Enter in the open workspace dropdown (`panels::picker::Choices`).
-    pub picker_nav: crate::panels::picker::Nav,
+    /// Up/Down/Enter in the open workspace dropdown (`panels::command::Choices`).
+    pub picker_nav: crate::panels::ui::command::Nav,
     /// Up/Down/Enter in the open context menu.
-    pub menu_nav: crate::panels::picker::Nav,
+    pub menu_nav: crate::panels::ui::command::Nav,
     pub modal: Option<Modal>,
     pub modal_focus: FocusHandle,
     /// The Settings category last shown. Kept here because opening Settings builds the modal anew; not saved to disk.
@@ -730,9 +726,6 @@ impl Workspace {
                 prompt: home_prompt,
                 attachments: Default::default(),
                 model_anchor: crate::panels::widgets::Anchor::default(),
-                model_highlight: 0,
-                model_scroll: Default::default(),
-                model_rows: Default::default(),
                 creating: None,
                 launch_when_created: false,
                 effort_bounds: std::rc::Rc::new(std::cell::Cell::new(gpui::Bounds::default())),
@@ -743,8 +736,8 @@ impl Workspace {
             search_input,
             palette: None,
             root_focus: cx.focus_handle(),
-            picker_nav: crate::panels::picker::Nav::new(cx),
-            menu_nav: crate::panels::picker::Nav::new(cx),
+            picker_nav: crate::panels::ui::command::Nav::new(cx),
+            menu_nav: crate::panels::ui::command::Nav::new(cx),
             modal: None,
             modal_focus: cx.focus_handle(),
             settings_page: SettingsPage::default(),
@@ -1027,18 +1020,10 @@ impl Workspace {
         self.load_enabled_models(cx);
         let chosen = self.home_selected_model();
         let all = self.store.data.settings.aggregated_models();
-        self.home.model_highlight = all.iter().position(|m| m.harness == chosen.harness && m.id == chosen.id).unwrap_or(0);
-        self.home.model_scroll.scroll_to_item(self.home.model_highlight);
+        let current = all.iter().position(|m| m.harness == chosen.harness && m.id == chosen.id).unwrap_or(0);
         let search = self.picker_search("Filter models…", window, cx);
-        cx.subscribe_in(&search, window, |ws: &mut Self, _, ev: &gpui_kit::component::input::InputEvent, _, cx| {
-            if matches!(ev, gpui_kit::component::input::InputEvent::Change) {
-                ws.home.model_highlight = 0;
-                ws.home.model_scroll.scroll_to_item(0);
-                cx.notify();
-            }
-        })
-        .detach();
         self.show_picker(at, WorkspacePicker::HomeModel { search }, window, cx);
+        self.picker_nav.reset_to(current);
     }
 
     pub fn open_project_picker(&mut self, mode: ProjectPickerMode, at: crate::panels::widgets::Dropdown, window: &mut Window, cx: &mut Context<Self>) {

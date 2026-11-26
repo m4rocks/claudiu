@@ -262,7 +262,7 @@ impl GithubView {
                 cx.notify();
             }
         });
-        let nav = crate::panels::picker::Nav::new(cx);
+        let nav = crate::panels::ui::command::Nav::new(cx);
         if kind.searchable() {
             filter.update(cx, |s, cx| s.focus(window, cx));
         } else {

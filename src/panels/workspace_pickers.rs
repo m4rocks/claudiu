@@ -13,6 +13,7 @@ use crate::app::{
     Act, GitPickerTarget, Modal, ProjectPickerMode, SkillScope, Workspace, WorkspacePicker,
 };
 use crate::panels::{logos, picker};
+use crate::panels::ui::command;
 use crate::panels::theme::{self, hsla};
 use gpui_kit::assets::IconName;
 use crate::panels::widgets::{
@@ -29,7 +30,7 @@ impl Workspace {
         let accent = hsla(theme::ACCENT);
         let priority = if self.modal.is_some() { 25 } else { 22 };
 
-        let (id, title, body, choices): (&'static str, &'static str, AnyElement, Option<picker::Choices<Self>>) = match &active.kind {
+        let (id, title, body, choices): (&'static str, &'static str, AnyElement, Option<command::Choices<Self>>) = match &active.kind {
             WorkspacePicker::HomeModel { search } => {
                 let query = search.read(cx).value().to_lowercase();
                 let words: Vec<&str> = query.split_whitespace().collect();
@@ -45,9 +46,8 @@ impl Workspace {
                         words.iter().all(|w| hay.contains(w))
                     })
                     .collect();
-                let hi = self.home.model_highlight.min(filtered.len().saturating_sub(1));
-                self.home.model_rows.borrow_mut().truncate(filtered.len());
-                let mut list = self.home.model_scroll.wire(div().id("home-model-list").role(gpui::Role::ListBox).aria_label("Models").flex_1().min_h_0().max_h(px(176.0)), window).flex().flex_col().gap(px(2.0));
+                let mut choices = command::Choices::new(&self.picker_nav, &query);
+                let mut list = choices.list("home-model-list", window).role(gpui::Role::ListBox).aria_label("Models").flex_1().min_h_0().max_h(px(176.0));
                 let mut last_harness = None;
                 for (n, m) in filtered.iter().enumerate() {
                     if last_harness != Some(m.harness) {
@@ -65,21 +65,12 @@ impl Workspace {
                         );
                     }
                     let selected = chosen_model.harness == m.harness && chosen_model.id == m.id;
-                    let focused = n == hi;
                     let choice = m.clone();
                     let logo = logos::draw(logos::for_harness(m.harness), 11.5, if selected { accent } else { hsla(theme::TEXT_FAINT) }).into_any_element();
-                    list = list.child(
-                        picker::row(gpui::SharedString::from(format!("home-model-opt-{n}")), Some(logo), m.name.clone(), None, None, selected, false)
-                            .relative()
-                            .flex_none()
-                            .role(gpui::Role::ListBoxOption)
-                            .aria_selected(selected)
-                            .when(focused && !selected, |d| d.bg(hsla(theme::SURFACE_HOVER)))
-                            .border_1()
-                            .border_color(if focused { hsla(theme::FOCUS_BORDER) } else { gpui::transparent_black() })
-                            .child(picker::track_row(self.home.model_rows.clone(), n))
-                            .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::HomeSelectModel(choice.clone()), window, cx))),
-                    );
+                    let row = command::row(gpui::SharedString::from(format!("home-model-opt-{n}")), Some(logo), m.name.clone(), None, None, selected, false)
+                        .role(gpui::Role::ListBoxOption)
+                        .aria_selected(selected);
+                    list = list.child(choices.add(row, move |ws, window, cx| ws.act(Act::HomeSelectModel(choice.clone()), window, cx), cx));
                 }
                 if filtered.is_empty() {
                     list = list.child(picker::empty_note("No models match."));
@@ -134,7 +125,7 @@ impl Workspace {
                                 cx,
                             )),
                     );
-                ("home-model-dialog", "MODEL", body.into_any_element(), None)
+                ("home-model-dialog", "MODEL", body.into_any_element(), Some(choices))
             }
             WorkspacePicker::Project { mode, search } => {
                 let mode = *mode;
@@ -148,13 +139,13 @@ impl Workspace {
                     ProjectPickerMode::Home => self.home_selected_project().map(|p| p.id.clone()),
                     ProjectPickerMode::SidebarFilter => self.project_filter().map(|p| p.id.clone()),
                 };
-                let mut choices = picker::Choices::new(&self.picker_nav, &query);
+                let mut choices = command::Choices::new(&self.picker_nav, &query);
                 let mut list = choices.list("project-picker-list", window).max_h(px(260.0));
                 let mut shown = 0usize;
                 if mode == ProjectPickerMode::SidebarFilter && matches("all projects") {
                     let selected = current_id.is_none();
                     let lead = icon(IconName::FolderOpen, 12.0).text_color(if selected { accent } else { hsla(theme::TEXT_FAINT) }).into_any_element();
-                    let row = picker::row("project-picker-all", Some(lead), "All projects", Some("Show sessions from every project".into()), None, selected, false);
+                    let row = command::row("project-picker-all", Some(lead), "All projects", Some("Show sessions from every project".into()), None, selected, false);
                     list = list.child(choices.add(row, |ws, window, cx| ws.act(Act::FilterProject(None), window, cx), cx));
                     shown += 1;
                 }
@@ -169,7 +160,7 @@ impl Workspace {
                         ProjectPickerMode::Home => Act::HomeSelectProject(p.id.clone()),
                         ProjectPickerMode::SidebarFilter => Act::FilterProject(Some(p.id.clone())),
                     };
-                    let row = picker::row(gpui::SharedString::from(format!("project-picker-{i}")), Some(lead), p.name.clone(), Some(path_str), None, selected, false);
+                    let row = command::row(gpui::SharedString::from(format!("project-picker-{i}")), Some(lead), p.name.clone(), Some(path_str), None, selected, false);
                     list = list.child(choices.add(row, move |ws, window, cx| ws.act(act.clone(), window, cx), cx));
                     shown += 1;
                 }
@@ -200,14 +191,14 @@ impl Workspace {
                 let main_checkout = gp.main_checkout.clone();
                 let cwd = gp.cwd.clone();
 
-                let mut choices = picker::Choices::new(&self.picker_nav, &query);
+                let mut choices = command::Choices::new(&self.picker_nav, &query);
                 // The quickest way to start work: a worktree named after what was typed (or a random name), made at once.
                 let typed = gp.search.read(cx).value().trim().to_string();
                 let quick = |base: crate::git::worktree::Base| Act::QuickWorktree { main_checkout: main_checkout.clone(), name: typed.clone(), base, for_home: target == GitPickerTarget::Home };
                 let new_wt_title = if typed.is_empty() { "New worktree".to_string() } else { format!("New worktree “{typed}”") };
                 let new_wt_row: AnyElement = if new_wt_disabled {
                     let why = gp.new_worktree_reason.clone().unwrap_or_else(|| "Resume the session to create one".into());
-                    picker::row("git-picker-new-worktree", Some(icon(IconName::Plus, 12.0).into_any_element()), new_wt_title, Some(why), None, false, true).into_any_element()
+                    command::row("git-picker-new-worktree", Some(icon(IconName::Plus, 12.0).into_any_element()), new_wt_title, Some(why), None, false, true).into_any_element()
                 } else {
                     let detail = match (typed.is_empty(), target) {
                         (true, GitPickerTarget::Session) => "Random name, from main. The session moves into it; type above to name it",
@@ -220,7 +211,7 @@ impl Workspace {
                     let current_pill = picker::action_pill("git-picker-new-worktree-current", "from current", move |ws, window, cx| ws.act(from_current.clone(), window, cx), cx)
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .into_any_element();
-                    let row = picker::row("git-picker-new-worktree", Some(icon(IconName::Plus, 12.0).into_any_element()), new_wt_title, Some(detail.into()), Some(current_pill), false, false)
+                    let row = command::row("git-picker-new-worktree", Some(icon(IconName::Plus, 12.0).into_any_element()), new_wt_title, Some(detail.into()), Some(current_pill), false, false)
                         .border_1()
                         .border_color(hsla(theme::PANEL_BORDER));
                     choices.add(row, move |ws, window, cx| ws.act(from_main.clone(), window, cx), cx)
@@ -257,7 +248,7 @@ impl Workspace {
                         }))
                         .into_any_element();
                     let detail = if wt.missing { format!("Missing folder: {}", wt.folder.display()) } else { wt.folder.display().to_string() };
-                    let row = picker::row(gpui::SharedString::from(format!("git-picker-wt-{i}")), Some(lead), wt.label.clone(), Some(detail), Some(trailing), current, !can_switch || wt.missing).group(row_group);
+                    let row = command::row(gpui::SharedString::from(format!("git-picker-wt-{i}")), Some(lead), wt.label.clone(), Some(detail), Some(trailing), current, !can_switch || wt.missing).group(row_group);
                     wt_list.push(if can_switch && !wt.missing {
                         choices.add(
                             row,
@@ -290,7 +281,7 @@ impl Workspace {
                 let branch_exists = matches!(&gp.branches, Some(Ok(list)) if list.iter().any(|b| b.name == typed_branch));
                 let create_branch_row = (!typed_branch.is_empty() && !branch_exists).then(|| {
                     let act = Act::CreateBranch(cwd.clone(), typed_branch.clone());
-                    let row = picker::row("git-picker-create-branch", Some(icon(IconName::Plus, 12.0).into_any_element()), format!("Create branch “{typed_branch}”"), Some("Switches this checkout to it".into()), None, false, false);
+                    let row = command::row("git-picker-create-branch", Some(icon(IconName::Plus, 12.0).into_any_element()), format!("Create branch “{typed_branch}”"), Some("Switches this checkout to it".into()), None, false, false);
                     choices.add(
                         row,
                         move |ws, window, cx| {
@@ -374,7 +365,7 @@ impl Workspace {
                                     }))
                                     .into_any_element()
                             });
-                            let row = picker::row(gpui::SharedString::from(format!("git-picker-br-{i}")), Some(lead), br.name.clone(), br.delete_reason.clone(), trailing, current, br.held_missing).group(row_group);
+                            let row = command::row(gpui::SharedString::from(format!("git-picker-br-{i}")), Some(lead), br.name.clone(), br.delete_reason.clone(), trailing, current, br.held_missing).group(row_group);
                             br_list.push(if br.held_missing { row.into_any_element() } else { choices.add(
                                 row,
                                 move |ws, window, cx| {
@@ -421,11 +412,11 @@ impl Workspace {
                 } else if !all.iter().any(|m| m.harness == current.harness && m.id == current.id) {
                     all.insert(0, current.clone());
                 }
-                let mut choices = picker::Choices::new(&self.picker_nav, &query);
+                let mut choices = command::Choices::new(&self.picker_nav, &query);
                 let mut list = choices.list("settings-model-list", window).role(gpui::Role::ListBox).aria_label("Models").max_h(px(260.0));
                 let mut shown = 0usize;
                 if text_generation && words.iter().all(|word| "local summary".contains(word)) {
-                    let row = picker::row("settings-model-local", None, "Local summary", None, None, text_generation_model.is_none(), false)
+                    let row = command::row("settings-model-local", None, "Local summary", None, None, text_generation_model.is_none(), false)
                         .role(gpui::Role::ListBoxOption)
                         .aria_selected(text_generation_model.is_none());
                     list = list.child(choices.add(row, |ws, window, cx| ws.act(Act::PickTextGenerationModel(None), window, cx), cx));
@@ -461,7 +452,7 @@ impl Workspace {
                         Act::PickDefaultModel(m.clone())
                     };
                     let logo = logos::draw(logos::for_harness(m.harness), 11.5, if selected { accent } else { hsla(theme::TEXT_FAINT) }).into_any_element();
-                    let row = picker::row(gpui::SharedString::from(format!("settings-model-opt-{n}")), Some(logo), m.name.clone(), None, None, selected, false)
+                    let row = command::row(gpui::SharedString::from(format!("settings-model-opt-{n}")), Some(logo), m.name.clone(), None, None, selected, false)
                         .role(gpui::Role::ListBoxOption)
                         .aria_selected(selected);
                     list = list.child(choices.add(row, move |ws, window, cx| ws.act(choice.clone(), window, cx), cx));
@@ -495,11 +486,11 @@ impl Workspace {
             WorkspacePicker::SettingsEffort => {
                 let Some(Modal::Settings { effort, .. }) = &self.modal else { return None };
                 let current = *effort;
-                let mut choices = picker::Choices::new(&self.picker_nav, "");
+                let mut choices = command::Choices::new(&self.picker_nav, "");
                 let mut list = choices.list("settings-effort-list", window);
                 for (i, &opt) in Effort::ALL.iter().enumerate() {
                     let selected = current == opt;
-                    let row = picker::row(gpui::SharedString::from(format!("settings-effort-{i}")), None, opt.label(), None, None, selected, false);
+                    let row = command::row(gpui::SharedString::from(format!("settings-effort-{i}")), None, opt.label(), None, None, selected, false);
                     list = list.child(choices.add(row, move |ws, window, cx| ws.act(Act::PickEffort(opt), window, cx), cx));
                 }
                 ("settings-effort-dialog", "EFFORT", list.into_any_element(), Some(choices))
@@ -516,13 +507,13 @@ impl Workspace {
                     }
                 };
                 let offered = self.store.data.settings.permissions_for(harness);
-                let mut choices = picker::Choices::new(&self.picker_nav, "");
+                let mut choices = command::Choices::new(&self.picker_nav, "");
                 let mut list = choices.list(list_id, window).max_h(px(340.0));
                 for (i, mode) in Permission::ALL.into_iter().enumerate() {
                     let selected = current.and_then(|p| p.resolve(&offered)) == Some(mode);
                     let available = offered.contains(&mode);
                     let lead = icon(IconName::Lock, 12.0).text_color(if selected { accent } else { hsla(theme::TEXT_FAINT) }).into_any_element();
-                    let row = picker::row(
+                    let row = command::row(
                         gpui::SharedString::from(format!("{row_id}-{i}")),
                         Some(lead),
                         mode.label(),
@@ -547,13 +538,13 @@ impl Workspace {
                     words.iter().all(|w| low.contains(w))
                 };
                 let current = self.effective_skill_scope();
-                let mut choices = picker::Choices::new(&self.picker_nav, &query);
+                let mut choices = command::Choices::new(&self.picker_nav, &query);
                 let mut list = choices.list("skills-scope-list", window).role(gpui::Role::ListBox).aria_label("Skill scopes").max_h(px(250.0));
                 let mut shown = 0usize;
                 if matches("global all workspaces") {
                     let selected = current == SkillScope::Global;
                     let lead = icon(IconName::FolderOpen, 12.0).text_color(if selected { accent } else { hsla(theme::TEXT_FAINT) }).into_any_element();
-                    let row = picker::row("skills-scope-global", Some(lead), "Global (all workspaces)", Some("Symlink into global harness skills folders".into()), None, selected, false)
+                    let row = command::row("skills-scope-global", Some(lead), "Global (all workspaces)", Some("Symlink into global harness skills folders".into()), None, selected, false)
                         .role(gpui::Role::ListBoxOption).aria_selected(selected);
                     list = list.child(choices.add(row, |ws, window, cx| ws.act(Act::SetSkillScope(SkillScope::Global), window, cx), cx));
                     shown += 1;
@@ -566,7 +557,7 @@ impl Workspace {
                     let scope = SkillScope::Project(p.id.clone());
                     let selected = current == scope;
                     let lead = icon(IconName::FolderOpen, 12.0).text_color(if selected { accent } else { hsla(theme::TEXT_FAINT) }).into_any_element();
-                    let row = picker::row(gpui::SharedString::from(format!("skills-scope-{i}")), Some(lead), p.name.clone(), Some(path_str), None, selected, false)
+                    let row = command::row(gpui::SharedString::from(format!("skills-scope-{i}")), Some(lead), p.name.clone(), Some(path_str), None, selected, false)
                         .role(gpui::Role::ListBoxOption).aria_selected(selected);
                     list = list.child(choices.add(row, move |ws, window, cx| ws.act(Act::SetSkillScope(scope.clone()), window, cx), cx));
                     shown += 1;
@@ -587,7 +578,7 @@ impl Workspace {
             WorkspacePicker::Editor { target } => {
                 let current = self.preferred_editor();
                 let target = target.clone();
-                let mut choices = picker::Choices::new(&self.picker_nav, "");
+                let mut choices = command::Choices::new(&self.picker_nav, "");
                 let mut list = choices.list("editor-picker-list", window);
                 let mut shown = 0usize;
                 for (i, &(ed, found)) in self.editors.iter().enumerate() {
@@ -597,7 +588,7 @@ impl Workspace {
                     let selected = current == Some(ed);
                     let path = target.clone();
                     let lead = icon(IconName::ExternalLink, 12.0).text_color(if selected { accent } else { hsla(theme::TEXT_FAINT) }).into_any_element();
-                    let row = picker::row(gpui::SharedString::from(format!("editor-picker-{i}")), Some(lead), ed.label(), None, None, selected, false);
+                    let row = command::row(gpui::SharedString::from(format!("editor-picker-{i}")), Some(lead), ed.label(), None, None, selected, false);
                     list = list.child(choices.add(row, move |ws, window, cx| ws.act(Act::OpenEditor(ed, path.clone()), window, cx), cx));
                     shown += 1;
                 }
