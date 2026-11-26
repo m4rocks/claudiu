@@ -22,9 +22,9 @@ fn renderer() -> Result<Option<Box<dyn PlatformHeadlessRenderer>>> {
 fn capture() -> Result<()> {
     let scenario = std::env::var("M4CODE_SCREENSHOT_SCENARIO").unwrap_or_else(|_| "home".into());
     let shortcut = match scenario.as_str() {
-        "home" => None,
+        "home" | "picker" | "context-menu" => None,
         "settings" => Some(Keystroke::parse("secondary-,").expect("Settings shortcut")),
-        _ => anyhow::bail!("unknown screenshot scenario {scenario:?}; use home or settings"),
+        _ => anyhow::bail!("unknown screenshot scenario {scenario:?}; use home, settings, picker or context-menu"),
     };
 
     let fixture = tempfile::tempdir()?;
@@ -55,7 +55,7 @@ fn capture() -> Result<()> {
         Arc::new(crate::Assets),
         renderer,
     );
-    let (window, _) = cx.update(|app| {
+    let (window, workspace) = cx.update(|app| {
         crate::init_ui(app);
         crate::open_main_window(Vec::new(), app)
     });
@@ -67,6 +67,27 @@ fn capture() -> Result<()> {
         ensure!(handled, "the Settings shortcut was not handled");
         cx.run_until_parked();
     }
+    if matches!(scenario.as_str(), "picker" | "context-menu") {
+        cx.update_window(window.into(), |_, window, app| {
+            workspace.update(app, |ws, cx| {
+                let position = gpui::point(gpui::px(380.0), gpui::px(260.0));
+                if scenario == "picker" {
+                    ws.open_home_permission_picker(crate::panels::widgets::Dropdown::at(position), window, cx);
+                    ws.picker_nav.reset_to(1);
+                } else {
+                    ws.open_menu(position, vec![
+                        crate::app::MenuItem::new("Settings", crate::app::Act::OpenSettings),
+                        crate::app::MenuItem::new("Dismiss", crate::app::Act::Dismiss),
+                    ], window, cx);
+                }
+            });
+        })?;
+        cx.run_until_parked();
+    }
+    cx.update_window(window.into(), |_, window, app| window.draw(app).clear(app))?;
+    // Opening overlays starts their fade on the first draw. Capture their settled state.
+    std::thread::sleep(std::time::Duration::from_millis(250));
+    cx.run_until_parked();
     cx.update_window(window.into(), |_, window, app| window.draw(app).clear(app))?;
     let frame = cx.capture_screenshot(window.into())?;
     ensure!(

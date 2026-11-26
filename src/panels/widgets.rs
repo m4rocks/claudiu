@@ -196,17 +196,6 @@ pub fn button_colored(
     btn
 }
 
-fn button_with(
-    id: SharedString,
-    label: SharedString,
-    bg: Hsla,
-    fg: Hsla,
-    hover: Hsla,
-    bold: bool,
-) -> Button {
-    button_colored(id, None, label, bg, fg, hover, None, bold)
-}
-
 pub fn dialog_card(id: impl Into<gpui::ElementId>) -> Stateful<Div> {
     div().id(id).occlude().rounded(px(12.0)).bg(theme().background).border_1().border_color(theme().panel_border).shadow_lg()
 }
@@ -221,34 +210,12 @@ pub fn button(
     label: impl Into<SharedString>,
     primary: bool,
 ) -> Button {
-    if primary {
-        button_with(
-            id.into(),
-            label.into(),
-            theme().primary,
-            theme().background,
-            theme().primary_hover,
-            true,
-        )
-    } else {
-        button_with(
-            id.into(),
-            label.into(),
-            theme().secondary,
-            theme().foreground,
-            theme().secondary_hover,
-            false,
-        )
-    }
+    crate::panels::ui::button::button(id, None, label, if primary { crate::panels::ui::button::Variant::Default } else { crate::panels::ui::button::Variant::Secondary }, crate::panels::ui::button::Size::Sm)
 }
 
-/// `button` with a Lucide icon before the label.
+/// A button with a leading icon.
 pub fn button_leading(id: impl Into<SharedString>, name: IconName, label: impl Into<SharedString>, primary: bool) -> Button {
-    if primary {
-        button_colored(id, Some(name), label, theme().primary, theme().background, theme().primary_hover, None, true)
-    } else {
-        button_colored(id, Some(name), label, theme().secondary, theme().foreground, theme().secondary_hover, None, false)
-    }
+    crate::panels::ui::button::button(id, Some(name), label, if primary { crate::panels::ui::button::Variant::Default } else { crate::panels::ui::button::Variant::Secondary }, crate::panels::ui::button::Size::Sm)
 }
 
 /// A button that can't be pressed right now: dimmed, no hover, no click handler attached by the caller.
@@ -258,39 +225,12 @@ pub fn button_disabled(id: impl Into<SharedString>, label: impl Into<SharedStrin
 
 /// A disabled button with an optional leading icon.
 pub fn button_disabled_leading(id: impl Into<SharedString>, glyph: Option<IconName>, label: impl Into<SharedString>) -> Button {
-    let label = label.into();
-    let mut btn = Button::new(id.into())
-        .disabled(true)
-        .px(px(10.0))
-        .h(px(26.0))
-        .gap(px(5.0))
-        .rounded(px(6.0))
-        .bg(theme().secondary)
-        .border_1()
-        .border_color(theme().border)
-        .text_color(theme().subtle_foreground)
-        .text_size(crate::panels::scale::px(12.0))
-        .opacity(0.6)
-        .cursor_default();
-    if let Some(name) = glyph {
-        btn = btn.child(icon(name, 13.0));
-    }
-    if !label.is_empty() {
-        btn = btn.child(label);
-    }
-    btn
+    crate::panels::ui::button::button(id, glyph, label, crate::panels::ui::button::Variant::Secondary, crate::panels::ui::button::Size::Sm).disabled(true)
 }
 
 /// Destructive action (end session, quit).
 pub fn danger_button(id: impl Into<SharedString>, label: impl Into<SharedString>) -> Button {
-    button_with(
-        id.into(),
-        label.into(),
-        theme().destructive_solid,
-        theme().destructive_solid_foreground,
-        theme().destructive_solid_hover,
-        true,
-    )
+    crate::panels::ui::button::button(id, None, label, crate::panels::ui::button::Variant::Destructive, crate::panels::ui::button::Size::Sm)
 }
 
 /// A Lucide icon, `size` px square, in the text color it is drawn under.
@@ -498,35 +438,7 @@ fn shortcut_for(macos: bool, keys: &str) -> String {
 
 /// A small keycap pill drawn as-is (e.g. "Esc", "1-9").
 pub fn key_badge(label: impl Into<SharedString>) -> Div {
-    div()
-        .flex_none()
-        .px(px(4.0))
-        .rounded(px(4.0))
-        .bg(theme().secondary_hover)
-        .text_size(crate::panels::scale::px(10.5))
-        .text_color(theme().muted_foreground)
-        .whitespace_nowrap()
-        .child(label.into())
-}
-
-/// Monogram avatar: the first letter of `seed` on a color picked from it, so each account keeps its color.
-pub fn avatar(seed: &str, size: f32) -> Div {
-    let t = theme();
-    let colors = [t.primary, t.ansi[4], t.ansi[2], t.ansi[5], t.ansi[3], t.ansi[6]];
-    let hash = seed.bytes().fold(0u32, |h, b| h.wrapping_mul(31).wrapping_add(b as u32));
-    let letter = seed.chars().find(|c| c.is_alphanumeric()).map_or('?', |c| c.to_ascii_uppercase());
-    div()
-        .size(px(size))
-        .flex_none()
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded_full()
-        .bg(colors[hash as usize % colors.len()])
-        .text_size(crate::panels::scale::px(size * 0.55))
-        .font_weight(FontWeight::BOLD)
-        .text_color(theme().primary_foreground)
-        .child(letter.to_string())
+    crate::panels::ui::kbd::kbd(label)
 }
 
 /// The marker in front of menu entries, so the current one shows.
@@ -633,21 +545,6 @@ pub fn fade_in<E: gpui::IntoElement + Styled + 'static>(el: E, key: impl Into<Sh
         Animation::new(std::time::Duration::from_millis(ms)).with_easing(gpui::ease_out_quint()),
         move |el, t| el.opacity(from + (1.0 - from) * t),
     )
-}
-
-pub fn empty_panel(glyph: IconName, label: impl Into<SharedString>) -> Div {
-    div().flex().flex_col().items_center().justify_center().gap(px(10.0)).p(px(24.0))
-        .child(div().flex().items_center().justify_center().size(px(32.0)).rounded(px(8.0))
-            .bg(theme().accent).child(icon(glyph, 16.0).text_color(theme().muted_foreground)))
-        .child(div().text_center().text_size(crate::panels::scale::px(13.0)).text_color(theme().muted_foreground).child(label.into()))
-}
-
-pub fn skeleton_rows(count: usize) -> Div {
-    div().flex().flex_col().gap(px(14.0)).p(px(12.0)).children((0..count).map(|row| {
-        div().flex().flex_col().gap(px(6.0))
-            .child(div().h(px(10.0)).w(px(112.0 + (row % 3) as f32 * 22.0)).rounded(px(4.0)).bg(theme().muted))
-            .child(div().h(px(8.0)).w(px(76.0)).rounded(px(4.0)).bg(theme().muted))
-    }))
 }
 
 #[cfg(test)]
@@ -824,3 +721,5 @@ pub trait Trigger: InteractiveElement + ParentElement + Styled + Sized {
 }
 
 impl<T: InteractiveElement + ParentElement + Styled> Trigger for T {}
+
+pub use crate::panels::ui::{avatar::avatar, empty::empty_panel, skeleton::skeleton_rows};

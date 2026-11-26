@@ -58,7 +58,7 @@ pub fn settings_group(title: impl Into<SharedString>, trailing: Option<AnyElemen
         .overflow_hidden();
     for (i, row) in rows.into_iter().enumerate() {
         if i > 0 {
-            card = card.child(div().h(px(1.0)).w_full().bg(theme().border));
+            card = card.child(crate::panels::ui::separator::horizontal());
         }
         card = card.child(row);
     }

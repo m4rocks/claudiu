@@ -20,3 +20,7 @@ pub mod menu;
 #[allow(dead_code)] // Not used yet; the next migration (widgets::button and key_badge) adopts it.
 pub mod separator;
 pub mod toggle_group;
+
+pub mod avatar;
+pub mod empty;
+pub mod skeleton;
