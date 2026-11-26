@@ -45,6 +45,7 @@ r#"        send({"jsonrpc": "2.0", "id": i, "result": {"modes": session_modes()}
         server.1.push(adapter.into());
         server
     };
+    let state = tempfile::tempdir().unwrap();
     let mut cx = TestAppContext::single();
     cx.update(|app| {
         gpui_kit::init(app);
@@ -56,14 +57,16 @@ r#"        send({"jsonrpc": "2.0", "id": i, "result": {"modes": session_modes()}
         cx.run_until_parked();
     };
     step(&mut cx, &|ws, window, cx| {
+        // Other parallel workspace tests persist their open sessions to the shared default store.
+        // Keep deferred restore_open from restoring one of their adapters into this fixture.
+        ws.store = crate::store::Store::load(state.path().join("state.json"));
         ws.acp_server = Some(server_for("claude"));
         ws.claude_exe = Some("unused-by-the-fake-agent".into());
-        ws.new_session_from_home(Harness::Claude, None, work.path().to_path_buf(), Some("initial task".into()), None, Some(Permission::Auto), window, cx);
+        assert!(ws.new_session_from_home(Harness::Claude, None, work.path().to_path_buf(), Some("initial task".into()), None, Some(Permission::Auto), window, cx));
     });
     let id = ws.read_with(&cx, |ws, _| ws.active_id().unwrap().clone());
     let wait = |cx: &mut TestAppContext, harness| {
-        // Shared Windows runners can take longer to start each Python adapter while the suite runs in parallel.
-        let until = std::time::Instant::now() + Duration::from_secs(30);
+        let until = std::time::Instant::now() + Duration::from_secs(10);
         loop {
             cx.run_until_parked();
             if ws.read_with(cx, |ws, app| {
