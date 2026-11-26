@@ -242,20 +242,13 @@ impl Workspace {
                 .cursor_pointer()
                 .child(about)
                 .child(
-                    div()
+                    btn::button(format!("settings-harness-{key}-configure"), None, "Configure", btn::Variant::Outline, btn::Size::Xs)
                         .flex_none()
-                        .px(px(8.0))
-                        .h(px(24.0))
-                        .rounded(px(5.0))
-                        .border_1()
-                        .border_color(theme().panel_border)
-                        .bg(theme().background)
-                        .hover(|s| s.bg(theme().accent))
-                        .flex()
-                        .items_center()
-                        .text_size(crate::panels::scale::px(11.5))
-                        .text_color(theme().muted_foreground)
-                        .child("Configure"),
+                        .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
+                            cx.stop_propagation();
+                            ws.open_harness_dialog(harness, window, cx);
+                            cx.notify();
+                        })),
                 )
                 .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
                     ws.open_harness_dialog(harness, window, cx);

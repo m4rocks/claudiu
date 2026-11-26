@@ -148,25 +148,20 @@ impl Workspace {
     pub(super) fn render_toast(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let t = self.toast.as_ref()?;
         let action = t.action.clone().map(|(label, act)| {
-            div().mt(px(8.0)).flex().child(btn::text("toast-action", label, true).on_click(cx.listener(
-                move |ws, _: &ClickEvent, window, cx| {
-                    ws.toast = None;
-                    ws.act(act.clone(), window, cx);
-                },
-            )))
+            btn::text("toast-action", label, true).on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
+                ws.toast = None;
+                ws.act(act.clone(), window, cx);
+            })).into_any_element()
         });
+        let dismiss = btn::icon_button("toast-dismiss", IconName::X).on_click(cx.listener(|ws, _: &ClickEvent, _, cx| {
+            ws.toast = None;
+            cx.notify();
+        }));
         Some(
             deferred(
                 div().absolute().bottom(px(18.0)).right(px(18.0)).child(
                     fade_in(
-                    popover::content("toast")
-                        .max_w(px(420.0))
-                        .px(px(14.0))
-                        .py(px(10.0))
-                        .text_size(crate::panels::scale::px(12.5))
-                        .text_color(theme().foreground)
-                        .child(t.text.clone())
-                        .children(action),
+                    crate::panels::ui::toast::toast(t.text.clone(), action, dismiss),
                         format!("toast-{}", t.serial),
                         160,
                         0.0,

@@ -769,40 +769,16 @@ fn removable_row(
 
 /// A setting row that opens a menu (built when it is clicked): the value with a chevron, lit on hover.
 fn pick_row(cx: &mut Context<Workspace>, id: &'static str, label: &str, value: String, menu: impl Fn() -> Vec<MenuItem> + 'static) -> gpui_kit::base::Button {
-    crate::panels::ui::button::focusable(id)
-        .justify_between()
-        .gap(px(10.0))
-        // Text lines up with the rows above; the hover background reaches out past it.
-        .h(px(24.0))
-        .mx(px(-6.0))
-        .px(px(6.0))
-        .rounded(px(5.0))
-        .cursor_pointer()
-        .hover(|s| s.bg(theme().row_hover))
-        .text_size(crate::panels::scale::px(12.0))
-        .child(div().flex_none().text_color(theme().muted_foreground).child(label.to_string()))
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(4.0))
-                .min_w_0()
-                .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().line_height(gpui::relative(1.35)).child(value))
-                .child(div().flex_none().text_color(theme().subtle_foreground).child(icon(IconName::ChevronDown, 12.0))),
-        )
+    crate::panels::ui::button::button(id, None, "", crate::panels::ui::button::Variant::Ghost, crate::panels::ui::button::Size::Xs)
+        .w_full().h_auto().mx(px(-6.0)).px(px(6.0))
+        .child(crate::panels::ui::item::setting(label, div().flex().items_center().gap(px(4.0))
+            .child(value)
+            .child(icon(IconName::ChevronDown, 12.0))))
         .dropdown(cx, move |ws, at, window, cx| ws.open_dropdown(at, menu(), window, cx))
 }
 
 fn kv(label: &str, value: String) -> Div {
-    div()
-        .flex()
-        .items_center()
-        .justify_between()
-        .gap(px(10.0))
-        .h(px(24.0))
-        .text_size(crate::panels::scale::px(12.0))
-        .child(div().flex_none().text_color(theme().muted_foreground).child(label.to_string()))
-        .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().line_height(gpui::relative(1.35)).child(value))
+    crate::panels::ui::item::setting(label, value)
 }
 
 fn editor_name(editor: Editor) -> &'static str {

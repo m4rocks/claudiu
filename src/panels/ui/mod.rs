@@ -23,6 +23,8 @@ pub mod command;
 pub mod empty;
 pub mod kbd;
 pub mod label;
+pub mod item;
+pub mod toast;
 pub mod menu;
 pub mod popover;
 pub mod progress;

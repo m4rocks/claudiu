@@ -38,12 +38,26 @@ pub enum Size {
 /// A button showing `label`, with `glyph` before it when given.
 pub fn button(id: impl Into<SharedString>, glyph: Option<IconName>, label: impl Into<SharedString>, variant: Variant, size: Size) -> Button {
     let label = label.into();
-    let (height, pad, text, glyph_size) = match size {
-        Size::Xs => (22.0, 8.0, 11.5, 12.0),
-        Size::Sm => (26.0, 10.0, 12.0, 13.0),
-        Size::Icon => (22.0, 0.0, 12.0, 14.0),
+    let glyph_size = if size == Size::Icon { 14.0 } else if size == Size::Xs { 12.0 } else { 13.0 };
+    let base = foundation(id, size);
+    let styled = match variant {
+        Variant::Default => base.bg(theme().primary).text_color(theme().primary_foreground).hover(|s| s.opacity(0.9)),
+        Variant::Secondary => base.bg(theme().secondary).text_color(theme().foreground).hover(|s| s.bg(theme().secondary_hover)),
+        Variant::Outline => base.border_color(theme().panel_border).text_color(theme().foreground).hover(|s| s.bg(theme().secondary_hover)),
+        Variant::Ghost => base.text_color(theme().foreground).hover(|s| s.bg(theme().secondary_hover)),
+        Variant::Destructive => base.bg(theme().destructive.opacity(0.6)).text_color(theme().foreground).hover(|s| s.bg(theme().destructive.opacity(0.75))),
     };
-    let base = Button::new(id.into())
+    styled.children(glyph.map(|g| icon(g, glyph_size))).when(!label.is_empty(), |b| b.child(label))
+}
+
+/// Common geometry, disabled state and keyboard focus for every button variant.
+fn foundation(id: impl Into<SharedString>, size: Size) -> Button {
+    let (height, pad, text) = match size {
+        Size::Xs => (22.0, 8.0, 11.5),
+        Size::Sm => (26.0, 10.0, 12.0),
+        Size::Icon => (22.0, 0.0, 12.0),
+    };
+    Button::new(id.into())
         .h(px(height))
         .when(size == Size::Icon, |b| b.w(px(height)))
         .px(px(pad))
@@ -55,15 +69,7 @@ pub fn button(id: impl Into<SharedString>, glyph: Option<IconName>, label: impl 
         .font_weight(FontWeight::MEDIUM)
         .cursor_pointer()
         .focus_visible(|s| s.border_color(theme().ring))
-        .styles(|s| s.disabled(|s| s.opacity(0.5).cursor_default()));
-    let styled = match variant {
-        Variant::Default => base.bg(theme().primary).text_color(theme().primary_foreground).hover(|s| s.opacity(0.9)),
-        Variant::Secondary => base.bg(theme().secondary).text_color(theme().foreground).hover(|s| s.bg(theme().secondary_hover)),
-        Variant::Outline => base.border_color(theme().panel_border).text_color(theme().foreground).hover(|s| s.bg(theme().secondary_hover)),
-        Variant::Ghost => base.text_color(theme().foreground).hover(|s| s.bg(theme().secondary_hover)),
-        Variant::Destructive => base.bg(theme().destructive.opacity(0.6)).text_color(theme().foreground).hover(|s| s.bg(theme().destructive.opacity(0.75))),
-    };
-    styled.children(glyph.map(|g| icon(g, glyph_size))).when(!label.is_empty(), |b| b.child(label))
+        .styles(|s| s.disabled(|s| s.opacity(0.5).cursor_default()))
 }
 
 /// The bare focusable button under every kit button: Tab reaches it, Enter or Space presses it, and the keyboard's
@@ -132,11 +138,7 @@ pub fn colored(
     bold: bool,
 ) -> Button {
     let label = label.into();
-    focusable(id.into())
-        .px(px(10.0))
-        .h(px(26.0))
-        .gap(px(5.0))
-        .rounded(px(6.0))
+    foundation(id, Size::Sm)
         .bg(bg)
         .border_color(border.unwrap_or_else(gpui::transparent_black))
         .text_color(fg)

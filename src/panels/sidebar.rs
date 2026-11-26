@@ -16,7 +16,7 @@ use gpui_kit::assets::IconName;
 use crate::panels::status_icon::{SessionDot, StatusIcon};
 use crate::panels::logos;
 use crate::panels::widgets::{Trigger, ago, countdown, icon};
-use crate::panels::ui::button::focusable;
+use crate::panels::ui::button::{self as btn, focusable};
 use crate::panels::ui::button::icon_button;
 use crate::panels::ui::label::section_label;
 use crate::panels::ui::progress::limit_bar;
@@ -385,51 +385,19 @@ impl Workspace {
         let right_text = if row.archived { "archived".to_string() } else { row.right.clone() };
         let right_color = theme().subtle_foreground;
         let title_color = if row.dim { theme().muted_foreground } else { theme().foreground };
-        let ellipsis = |el: Div| el.min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis();
-        let content = if row.running {
-            // Harness mark + project and age, then the title with the status icon, then the branch.
-            div()
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .flex_col()
-                .gap(px(2.0))
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(5.0))
-                        .text_size(crate::panels::scale::px(11.0))
-                        .line_height(crate::panels::scale::px(14.0))
-                        .text_color(theme().subtle_foreground)
-                        .children(row.harness.map(|h| logos::draw(logos::for_harness(h), 11.0, theme().subtle_foreground)))
-                        .child(ellipsis(div().flex_1()).child(row.project.clone()))
-                        .child(div().flex_none().text_color(right_color).child(right_text)),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(7.0))
-                        .child(ellipsis(div().flex_1()).text_size(crate::panels::scale::px(13.0)).line_height(crate::panels::scale::px(17.0)).text_color(title_color).child(row.title.clone()))
-                        .child(dot),
-                )
-                .children(row.branch.clone().map(|b| ellipsis(div()).text_size(crate::panels::scale::px(11.0)).line_height(crate::panels::scale::px(14.0)).text_color(theme().subtle_foreground).child(b)))
-                .into_any_element()
-        } else {
-            div()
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .items_center()
-                .gap(px(7.0))
-                .child(dot)
-                .child(ellipsis(div().flex_1()).text_size(crate::panels::scale::px(13.0)).text_color(title_color).child(row.title.clone()))
-                .child(div().flex_none().max_w(px(96.0)).overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(crate::panels::scale::px(11.0)).text_color(right_color).child(right_text))
-                .into_any_element()
-        };
-        div()
-            .id(key)
+        let metadata = row.running.then(|| div().flex().items_center().gap(px(5.0))
+            .text_size(crate::panels::scale::px(11.0)).text_color(theme().subtle_foreground)
+            .children(row.harness.map(|h| logos::draw(logos::for_harness(h), 11.0, theme().subtle_foreground)))
+            .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(row.project.clone()))
+            .into_any_element());
+        let content = crate::panels::ui::item::content(
+            dot,
+            div().text_color(title_color).child(row.title.clone()),
+            metadata,
+            row.running.then(|| row.branch.clone()).flatten(),
+            div().text_color(right_color).child(right_text),
+        );
+        crate::panels::ui::item::item(key, row.active)
             .relative()
             .group("row")
             .when(waiting && running, |d| d.child(row_anchor.probe()))
@@ -474,8 +442,7 @@ impl Workspace {
             .mx(px(5.0))
             .rounded(px(6.0))
             .cursor_pointer()
-            .when(row.active, |d| d.bg(theme().row_active))
-            .hover(|s| s.bg(theme().row_hover))
+
             .on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| ws.act(Act::Select(click_id.clone()), window, cx)))
             .on_mouse_down(
                 MouseButton::Right,
@@ -723,7 +690,7 @@ impl Workspace {
             self.picker_kind(),
             Some(crate::app::WorkspacePicker::Project { mode: crate::app::ProjectPickerMode::SidebarFilter, .. })
         );
-        let chip = focusable("project-filter")
+        let chip = btn::button("project-filter", None, "", btn::Variant::Ghost, btn::Size::Sm)
             .flex_1()
             .min_w_0()
             .h(px(24.0))
@@ -734,7 +701,6 @@ impl Workspace {
             .bg(if filter_open { theme().row_active } else { theme().sidebar })
             .border_color(if filter_open { theme().primary } else { theme().sidebar })
             .cursor_pointer()
-            .hover(|s| s.bg(theme().secondary))
             .text_size(crate::panels::scale::px(12.0))
             .text_color(if current.is_some() || filter_open { theme().foreground } else { theme().muted_foreground })
             .child(icon(IconName::FolderOpen, 13.0))
