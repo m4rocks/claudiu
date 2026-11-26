@@ -23,9 +23,9 @@ fn capture() -> Result<()> {
     let scenario = std::env::var("M4CODE_SCREENSHOT_SCENARIO").unwrap_or_else(|_| "home".into());
     let session_scenario = matches!(scenario.as_str(), "session" | "session-no-compact" | "session-scrolled" | "toast");
     let shortcut = match scenario.as_str() {
-        "home" | "picker" | "context-menu" | "github" | "github-wide" | "editor" | "session" | "session-no-compact" | "session-scrolled" | "toast" | "harnesses" => None,
+        "home" | "dashboards-disabled" | "picker" | "context-menu" | "github" | "github-wide" | "editor" | "session" | "session-no-compact" | "session-scrolled" | "toast" | "harnesses" => None,
         "settings" => Some(Keystroke::parse("secondary-,").expect("Settings shortcut")),
-        _ => anyhow::bail!("unknown screenshot scenario {scenario:?}; use home, settings, picker, context-menu, github, github-wide, editor, session, session-no-compact, session-scrolled, toast or harnesses"),
+        _ => anyhow::bail!("unknown screenshot scenario {scenario:?}; use home, dashboards-disabled, settings, picker, context-menu, github, github-wide, editor, session, session-no-compact, session-scrolled, toast or harnesses"),
     };
 
     let fixture = tempfile::tempdir()?;
@@ -41,6 +41,9 @@ fn capture() -> Result<()> {
     // Keep the fixture offline and independent of installed CLIs, usage counters, and live model catalogs.
     settings.update_url = Some(String::new());
     settings.enabled_harnesses = Some(Vec::new());
+    if scenario == "dashboards-disabled" {
+        settings.enabled_harnesses = Some(vec![crate::harness::Harness::Claude]);
+    }
     settings.auto_compact_threshold = 75;
     settings.auto_compact = scenario != "session-no-compact";
     settings.custom_subagents = crate::harness::subagents::CustomSubagents(Default::default());
