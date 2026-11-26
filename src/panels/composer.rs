@@ -154,11 +154,22 @@ pub fn model_chip(id: impl Into<ElementId>, open: bool, anchor: &Anchor, harness
         .child(icon(IconName::ChevronDown, 10.5).text_color(theme().subtle_foreground))
 }
 
+/// Permission mode symbols shared by composers and pickers.
+pub fn permission_icon(mode: crate::harness::permission::Permission) -> IconName {
+    use crate::harness::permission::Permission;
+    match mode {
+        Permission::ReadOnly => IconName::Lock,
+        Permission::Auto => IconName::ShieldCheck,
+        Permission::FullAccess => IconName::LockOpen,
+    }
+}
+
 /// Permission mode chip shared by both composers.
-pub fn permission_chip(id: impl Into<ElementId>, open: bool, label: impl Into<SharedString>) -> Button {
+pub fn permission_chip(id: impl Into<ElementId>, open: bool, mode: Option<crate::harness::permission::Permission>) -> Button {
+    let label = mode.map_or("Harness default", crate::harness::permission::Permission::label);
     chip(id, open)
-        .child(icon(IconName::Lock, 11.0).text_color(theme().muted_foreground))
-        .child(div().line_height(gpui::relative(1.35)).text_color(theme().foreground).child(label.into()))
+        .child(icon(mode.map_or(IconName::Lock, permission_icon), 11.0).text_color(theme().muted_foreground))
+        .child(div().line_height(gpui::relative(1.35)).text_color(theme().foreground).child(label))
         .child(icon(IconName::ChevronDown, 10.5).text_color(theme().subtle_foreground))
 }
 

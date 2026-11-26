@@ -2568,6 +2568,11 @@ impl ThreadView {
                 self.set_draft("", window, cx);
             }
             keys::Key::CycleMode => {
+                if self.phase != Phase::Ready || self.workspace_switching || self.permission_changing
+                    || self.has_active_turn() || self.is_waiting() || self.has_background_work()
+                {
+                    return;
+                }
                 if let Some(next) = permission::next(&self.permissions(), self.permission()) {
                     self.set_permission(next, cx);
                 }
@@ -3337,6 +3342,32 @@ mod tests {
             options: vec![], prompt: None, prior_entries: vec![], inline_visuals: true,
             server: Some(("definitely-not-a-real-program-m4code".into(), vec![])),
         }
+    }
+
+    #[gpui::test]
+    fn shift_tab_keeps_busy_antigravity_composer_unchanged(cx: &mut gpui::TestAppContext) {
+        use gpui::Focusable;
+        crate::datadir::use_throwaway_folders();
+        cx.update(gpui_kit::init);
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            super::ThreadView::new(test_start(dir.path().into(), Harness::Antigravity), window, cx)
+        });
+        cx.update(|window, app| view.update(app, |v, cx| {
+            v.phase = super::Phase::Ready;
+            v.working = true;
+            v.thread.modes = vec![("plan".into(), "Plan".into()), ("default".into(), "Default".into())];
+            v.thread.mode = Some("plan".into());
+            v.set_draft("Keep this draft", window, cx);
+            v.focus_composer(window, cx);
+        }));
+        cx.simulate_keystrokes("shift-tab");
+        cx.update(|window, app| view.update(app, |v, cx| {
+            assert_eq!(v.draft(cx), "Keep this draft");
+            assert_eq!(v.thread.mode.as_deref(), Some("plan"));
+            assert!(v.thread.entries.is_empty(), "disabled cycling must not add an error notice");
+            assert!(v.composer.focus_handle(cx).is_focused(window));
+        }));
     }
 
     #[gpui::test]

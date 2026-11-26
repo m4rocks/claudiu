@@ -1424,7 +1424,7 @@ impl ThreadView {
                 for (i, mode) in Permission::ALL.into_iter().enumerate() {
                     let available = offered.contains(&mode);
                     let current = self.permission() == Some(mode);
-                    let lead = icon(IconName::Lock, 12.0).text_color(if current { theme().foreground } else { theme().subtle_foreground }).into_any_element();
+                    let lead = icon(composer::permission_icon(mode), 12.0).text_color(if current { theme().foreground } else { theme().subtle_foreground }).into_any_element();
                     let row = command::row(SharedString::from(format!("perm-mode-{i}")), Some(lead), mode.label(), Some(mode.detail(available)), None, current, !available)
                         .debug_selector(move || format!("perm-mode-{i}"));
                     rows = rows.child(if available {
@@ -1672,8 +1672,8 @@ impl ThreadView {
             }))
             .into_any_element();
 
-        let label = self.initial_permission.or_else(|| self.permission()).map_or("Harness default", Permission::label);
-        let permission = Some(composer::permission_chip("thread-mode", self.picker == Some(ThreadPicker::Permission), label)
+        let mode = self.initial_permission.or_else(|| self.permission());
+        let permission = Some(composer::permission_chip("thread-mode", self.picker == Some(ThreadPicker::Permission), mode)
             .debug_selector(|| "thread-mode".into())
             .dropdown_above(cx, |v, at, window, cx| {
                 v.picker = Some(ThreadPicker::Permission);

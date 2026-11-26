@@ -844,6 +844,10 @@ impl Workspace {
                 ws.take_back_global_trims();
             }
         }
+        cx.observe_window_bounds(window, |ws, window, _| {
+            ws.remember_window(window);
+            ws.store.save_if_dirty();
+        }).detach();
         cx.observe_window_activation(window, |_, _, cx| cx.notify()).detach();
         ws.check_updates(cx);
         window.focus(&ws.root_focus, cx);

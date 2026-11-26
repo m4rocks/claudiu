@@ -535,7 +535,7 @@ impl Workspace {
                 for (i, mode) in Permission::ALL.into_iter().enumerate() {
                     let selected = current.and_then(|p| p.resolve(&offered)) == Some(mode);
                     let available = offered.contains(&mode);
-                    let lead = icon(IconName::Lock, 12.0).text_color(if selected { accent } else { theme().subtle_foreground }).into_any_element();
+                    let lead = icon(crate::panels::composer::permission_icon(mode), 12.0).text_color(if selected { accent } else { theme().subtle_foreground }).into_any_element();
                     let row = command::row(
                         gpui::SharedString::from(format!("{row_id}-{i}")),
                         Some(lead),

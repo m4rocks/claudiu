@@ -25,6 +25,7 @@ When upgrading from a version with multiple Claude accounts, resumed sessions us
 
 ### Chat and model handoff
 
+- **Window layout**: Remembers window position, size, and maximized state between launches.
 - **Unified composer**: Home and chat share the same composer with chips for model (across all enabled harnesses), project, effort level, permission mode, and branch or worktree. Press `Alt+P` (`Option+P` on macOS) in a chat to search models or adjust effort.
 - **Permissions**: Choose **Read-only**, **Auto**, or **Full Access**. A session configured as Read-only starts sending prompts only after the adapter confirms that mode. Auto is disabled when the adapter doesn't offer it. An Auto preference uses Full Access on those adapters and returns to Auto when a handoff reaches an adapter that supports it. Antigravity reconnects the same session when you change to or from Full Access. Wait for the current turn to finish before switching.
 - **File attachments**: Drop files into the composer, select them with the paperclip next to Send, or copy files in your file manager and paste them into the composer. Pasted images and image files show previews alongside removable file chips above the text field. Agents receive local file paths, and pasted images are saved in the app data folder when sent.
@@ -36,7 +37,7 @@ When upgrading from a version with multiple Claude accounts, resumed sessions us
 - **Questions and background shells**: Answer agent questions with the keyboard or mouse, or type your own answer for Claude Code. Codex can ask questions while working without blocking chat. Claude Code background shells appear above the composer with Output and Stop controls.
 - **Chat navigation**: Use the scrollbar or mouse wheel to scroll the chat. Scrolling up pauses follow mode. Use **Jump to latest** to catch up. Search messages and tool output with **Find in session** under Actions or `Cmd/Ctrl+F`. Consecutive read-only tools are grouped into expandable exploration summaries.
 - **Context compaction**: Set the default and context threshold in **Settings → General**. In the right sidebar, choose On, Off, or Use global setting for the current session. While it is on, a tick on the Context meter marks the threshold. Schedules compaction at the next idle boundary once reported context reaches the configured threshold, using the adapter's native compact command while keeping the provider session. Native automatic compaction is disabled for Claude Code and OpenCode; Codex retains a native fallback noted in the status panel.
-- **Keyboard shortcuts**: Supports familiar Claude Code shortcuts (`Esc` to stop, `Esc` twice to edit your last message, `Shift+Tab` for permission mode, `Up` for message history, `Shift+Enter` for a new line). **Settings → Keyboard** lists every shortcut.
+- **Keyboard shortcuts**: Supports familiar Claude Code shortcuts (`Esc` to stop, `Esc` twice to edit your last message, `Shift+Tab` for permission mode when idle, `Up` for message history, `Shift+Enter` for a new line). **Settings → Keyboard** lists every shortcut.
 
 ### Workspace, Git, and editor
 
@@ -51,7 +52,7 @@ When upgrading from a version with multiple Claude accounts, resumed sessions us
   - Left sidebar of running and recent sessions (`Cmd/Ctrl+Z` reopens the last closed session), **Pick up a session here** to open terminal-started sessions in a folder, and background notifications when a session finishes or asks a question.
   - Right sidebar with drag-to-reorder cards for session status, subagents, GitHub issues and pull requests, and linked sessions, plus inline visual cards agents draw in chat.
   - **Ask Agent** in the GitHub pane sends the request to the active agent if it is running in the repository. When it starts a new session, it uses the model selected in the Welcome composer.
-  - Usage meters in the sidebar footer for connected harnesses with a limits adapter (Claude Code and Codex 5-hour/7-day limits).
+  - Usage meters in the sidebar footer for connected harnesses with a limits adapter (Claude Code and Codex 5-hour/7-day limits). Usage dashboard links for OpenCode and Antigravity remain visible when their harnesses are disabled.
   - Configurable text generation model (**Settings → General**) for automatic new-session titles, Regenerate title and Commit & Push—pick any enabled model or keep local summary.
 
 ### Cross-agent subagents

@@ -50,10 +50,11 @@ pub fn saved_window_bounds(cx: &App) -> Option<WindowBounds> {
 }
 
 impl Workspace {
-    /// Keep the window's size and position in the layout so the next start opens it there; saved with the next tick.
+    /// Keep the window's size and position in the layout so the next start opens it there; saved by the bounds observer or the next tick.
     pub fn remember_window(&mut self, window: &Window) {
         let (bounds, maximized) = match window.window_bounds() {
-            WindowBounds::Windowed(b) | WindowBounds::Fullscreen(b) => (b, false),
+            WindowBounds::Fullscreen(_) => return,
+            WindowBounds::Windowed(b) => (b, false),
             WindowBounds::Maximized(b) => (b, true),
         };
         let geom = WindowGeom {

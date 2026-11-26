@@ -150,7 +150,7 @@ const ANTIGRAVITY: Provider = Provider {
     //     super::antigravity::limits::read(&agy, &crate::datadir::data_dir())
     // }, every: super::antigravity::limits::REFRESH_EVERY }),
     limits: None,
-    dashboard_url: Some("https://antigravity.google"),
+    dashboard_url: Some("https://antigravity.google.com/remote?settingsOpen=true&settingsScreen=Models"),
     color: |t| t.antigravity,
     marks: logos::antigravity_marks,
     name: "Antigravity",

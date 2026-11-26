@@ -10,7 +10,6 @@ use crate::app::{
     Act, GitPickerTarget, ProjectPickerMode, Workspace, WorkspacePicker,
 };
 use gpui_kit::component::input::{Paste, Textarea};
-use crate::harness::permission::Permission;
 use crate::panels::{attachments, composer};
 use crate::panels::theme::theme;
 use gpui_kit::assets::IconName;
@@ -82,7 +81,7 @@ impl Workspace {
             .into_any_element();
 
         let perm_open = matches!(self.picker_kind(), Some(WorkspacePicker::HomePermission));
-        let perm_chip = composer::permission_chip("home-mode", perm_open, permission.map_or("Harness default", Permission::label))
+        let perm_chip = composer::permission_chip("home-mode", perm_open, permission)
             .dropdown(cx, |ws, at, window, cx| {
                 ws.open_home_permission_picker(at, window, cx);
             })
