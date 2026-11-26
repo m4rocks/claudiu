@@ -116,6 +116,7 @@ impl Workspace {
             auto_compact,
             auto_compact_threshold,
             usage_display,
+            notify_model_on_limit,
             auto_handoff_on_limit,
             auto_handoff_model,
             m4code_off,
@@ -163,6 +164,7 @@ impl Workspace {
         s.auto_compact = auto_compact;
         s.auto_compact_threshold = auto_compact_threshold;
         s.usage_display = usage_display;
+        s.notify_model_on_limit = notify_model_on_limit;
         s.auto_handoff_on_limit = auto_handoff_on_limit;
         s.auto_handoff_model = auto_handoff_model;
         s.text_generation_model = text_generation_model;

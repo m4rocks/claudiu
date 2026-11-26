@@ -36,10 +36,10 @@ pub(super) fn render_settings_card(
     cx: &mut Context<Workspace>,
 ) -> gpui::Stateful<gpui::Div> {
     let (page, worktrees, scroll) = (ws.settings_page, &ws.worktrees_page, &ws.settings_scroll);
-    let Some(Modal::Settings { shell, default_model, text_generation_model, effort, permission, updates, scale, follow_up, auto_compact, auto_compact_threshold, usage_display, auto_handoff_on_limit, auto_handoff_model, m4code_off, skill_search, skill_filter, list_focus, renaming, .. }) = &ws.modal else {
+    let Some(Modal::Settings { shell, default_model, text_generation_model, effort, permission, updates, scale, follow_up, auto_compact, auto_compact_threshold, usage_display, notify_model_on_limit, auto_handoff_on_limit, auto_handoff_model, m4code_off, skill_search, skill_filter, list_focus, renaming, .. }) = &ws.modal else {
         return div().id("modal-card");
     };
-    let (updates, scale, follow_up, auto_compact, auto_compact_threshold, usage_display, auto_handoff_on_limit) = (*updates, *scale, *follow_up, *auto_compact, *auto_compact_threshold, *usage_display, *auto_handoff_on_limit);
+    let (updates, scale, follow_up, auto_compact, auto_compact_threshold, usage_display, notify_model_on_limit, auto_handoff_on_limit) = (*updates, *scale, *follow_up, *auto_compact, *auto_compact_threshold, *usage_display, *notify_model_on_limit, *auto_handoff_on_limit);
     let scaled = crate::panels::scale::px;
     let faint = |text: String| div().text_size(scaled(11.5)).text_color(theme().subtle_foreground).child(text);
 
@@ -146,23 +146,46 @@ pub(super) fn render_settings_card(
                 );
             }
             chat_rows.push(
-                row_shell(
-                    "Auto-handoff at usage limit",
-                    Some("Give the model a heads-up at 90% and hand off if it hits the limit"),
-                    toggle_group(
-                        "settings-auto-handoff",
-                        &[(true, "On"), (false, "Off")],
-                        auto_handoff_on_limit,
-                        |ws, on, _, _| {
-                            if let Some(Modal::Settings { auto_handoff_on_limit, .. }) = ws.modal.as_mut() {
-                                *auto_handoff_on_limit = on;
-                            }
-                        },
-                        cx,
-                    )
+                div()
+                    .id("settings-notify-model-on-limit")
+                    .px(px(14.0))
+                    .py(px(11.0))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(12.0))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme().accent))
+                    .child(row_labels("Notify model near usage limit", Some("Send a one-time heads-up to the model when usage reaches 90%")))
+                    .child(switch(notify_model_on_limit))
+                    .on_click(cx.listener(|ws, _: &ClickEvent, _, cx| {
+                        if let Some(Modal::Settings { notify_model_on_limit, .. }) = ws.modal.as_mut() {
+                            *notify_model_on_limit = !*notify_model_on_limit;
+                        }
+                        cx.notify();
+                    }))
                     .into_any_element(),
-                )
-                .into_any_element(),
+            );
+            chat_rows.push(
+                div()
+                    .id("settings-auto-handoff")
+                    .px(px(14.0))
+                    .py(px(11.0))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(12.0))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme().accent))
+                    .child(row_labels("Auto-handoff at usage limit", Some("Hand off automatically to another model when the current one hits its limit")))
+                    .child(switch(auto_handoff_on_limit))
+                    .on_click(cx.listener(|ws, _: &ClickEvent, _, cx| {
+                        if let Some(Modal::Settings { auto_handoff_on_limit, .. }) = ws.modal.as_mut() {
+                            *auto_handoff_on_limit = !*auto_handoff_on_limit;
+                        }
+                        cx.notify();
+                    }))
+                    .into_any_element(),
             );
             if auto_handoff_on_limit {
                 chat_rows.push(

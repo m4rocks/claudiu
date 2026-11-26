@@ -332,6 +332,7 @@ impl Workspace {
                 let auto_compact = s.auto_compact;
                 let auto_compact_threshold = crate::harness::compaction::clamp_threshold(s.auto_compact_threshold);
                 let usage_display = s.usage_display;
+                let notify_model_on_limit = s.notify_model_on_limit;
                 let auto_handoff_on_limit = s.auto_handoff_on_limit;
                 let auto_handoff_model = s.auto_handoff_model.clone();
                 let default_model = s.default_model();
@@ -360,7 +361,7 @@ impl Workspace {
                     claude_subagents: self.store.data.settings.claude_subagents,
                     picking: None,
                 });
-                self.modal = Some(Modal::Settings { shell, claude, default_model, text_generation_model, effort: defaults.effort.unwrap_or_default(), permission: defaults.permission_mode, updates, chrome, scale: crate::panels::scale::percent(), follow_up: s_follow_up, auto_compact, auto_compact_threshold, usage_display, auto_handoff_on_limit, auto_handoff_model, m4code_off: self.store.data.settings.m4code_tools_off.clone(), skills_field, skill_search, skill_filter, costly: claude::costly::scan(), list_focus, renaming: None, subagents });
+                self.modal = Some(Modal::Settings { shell, claude, default_model, text_generation_model, effort: defaults.effort.unwrap_or_default(), permission: defaults.permission_mode, updates, chrome, scale: crate::panels::scale::percent(), follow_up: s_follow_up, auto_compact, auto_compact_threshold, usage_display, notify_model_on_limit, auto_handoff_on_limit, auto_handoff_model, m4code_off: self.store.data.settings.m4code_tools_off.clone(), skills_field, skill_search, skill_filter, costly: claude::costly::scan(), list_focus, renaming: None, subagents });
                 // After the modal exists: a page that loads something reads the dialog's fields.
                 self.set_settings_page(self.settings_page, cx);
             }

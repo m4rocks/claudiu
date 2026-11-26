@@ -317,6 +317,7 @@ impl Workspace {
 
     /// Push fresh usage readings into every running thread on `harness` so runway nudges and auto-handoff fire live.
     pub(crate) fn notify_threads_usage(&mut self, harness: Harness, cx: &mut Context<Self>) {
+        let notify_on_limit = self.store.data.settings.notify_model_on_limit;
         let auto_handoff = self.store.data.settings.auto_handoff_on_limit;
         let fallback = self.best_fallback_model(harness);
         let threads: Vec<_> = self
@@ -331,7 +332,7 @@ impl Workspace {
             let fallback = fallback.clone();
             thread.update(cx, |t, cx| {
                 t.fallback_model = fallback;
-                t.observe_usage_limits(&usage, auto_handoff, cx);
+                t.observe_usage_limits(&usage, notify_on_limit, auto_handoff, cx);
             });
         }
     }

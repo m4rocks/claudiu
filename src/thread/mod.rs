@@ -3142,7 +3142,7 @@ impl ThreadView {
         self.workspace_switching
     }
 
-    pub fn observe_usage_limits(&mut self, usage: &crate::store::UsageLimits, auto_handoff: bool, cx: &mut Context<Self>) {
+    pub fn observe_usage_limits(&mut self, usage: &crate::store::UsageLimits, notify_on_limit: bool, auto_handoff: bool, cx: &mut Context<Self>) {
         self.auto_handoff_on_limit = auto_handoff;
         if self.phase != Phase::Ready || self.workspace_switching || self.read_only_unconfirmed {
             return;
@@ -3151,7 +3151,8 @@ impl ThreadView {
         let cumulative_tokens = self.thread.cache_usage.input_tokens
             .saturating_add(self.thread.cache_usage.output_tokens)
             .max(self.thread.context.map(|(used, _)| used).unwrap_or(0));
-        if self.is_working()
+        if notify_on_limit
+            && self.is_working()
             && let Some(nudge) = self.runway.observe(usage, cumulative_tokens, auto_handoff, now)
         {
             let at = self.thread.notice(

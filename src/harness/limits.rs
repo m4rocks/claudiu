@@ -86,6 +86,11 @@ pub fn parse_rfc3339(s: &str) -> Option<i64> {
 /// Utilization threshold (90%) at which m4code nudges a working model about its remaining token runway.
 pub const NUDGE_THRESHOLD: f32 = 0.90;
 
+/// Drift tolerance when comparing `resets_at` timestamps for the same quota window.
+/// Providers like Codex compute `resets_at` from remaining seconds, so consecutive readings
+/// in the same 5-hour or 7-day window can jitter by ±1s (or a few seconds across sources).
+const RESET_WINDOW_TOLERANCE_SECS: i64 = 300;
+
 /// One-time runway warning emitted when a working model approaches its usage limit.
 #[derive(Clone, Debug, PartialEq)]
 pub struct UsageNudge {
@@ -156,7 +161,10 @@ impl RunwayTracker {
 
     fn slot_for<'a>(slot: &'a mut Option<WindowSample>, limit: &crate::store::RateLimit, tokens: u64) -> &'a mut WindowSample {
         let util = limit.utilization.unwrap_or(0.0);
-        let reset_changed = slot.as_ref().is_some_and(|s| s.resets_at != limit.resets_at || util + 0.05 < s.start_util);
+        let reset_changed = slot.as_ref().is_some_and(|s| match (s.resets_at, limit.resets_at) {
+            (Some(prev), Some(next)) => (next - prev).abs() >= RESET_WINDOW_TOLERANCE_SECS,
+            _ => util + 0.10 < s.start_util,
+        });
         if slot.is_none() || reset_changed {
             *slot = Some(WindowSample {
                 resets_at: limit.resets_at,
@@ -165,6 +173,11 @@ impl RunwayTracker {
                 nudged: false,
                 exhausted_handoff_sent: false,
             });
+        } else if let Some(sample) = slot.as_mut()
+            && sample.resets_at.is_none()
+            && limit.resets_at.is_some()
+        {
+            sample.resets_at = limit.resets_at;
         }
         slot.as_mut().unwrap()
     }
@@ -309,6 +322,26 @@ mod tests {
         assert!(!tracker.take_exhausted_handoff(&at(1.0, 1000), 310));
         // New reset window re-arms the tracker.
         assert!(tracker.observe(&at(0.91, 2000), 600_000, false, 1100).is_some());
+    }
+
+    #[test]
+    fn runway_tracker_ignores_resets_at_jitter_within_same_window() {
+        use crate::store::RateLimit;
+        let mut tracker = RunwayTracker::default();
+        let at = |util, reset| UsageLimits {
+            five_hour: Some(RateLimit { utilization: Some(util), resets_at: reset, seen_at: 100 }),
+            seven_day: None,
+        };
+        assert!(tracker.observe(&at(0.89, Some(1_795_743_798)), 100_000, true, 100).is_none());
+        assert!(tracker.observe(&at(0.90, Some(1_795_743_797)), 120_000, true, 110).is_some());
+        // ±1s jitter or missing resets_at in the same window must not re-nudge.
+        assert!(tracker.observe(&at(0.90, Some(1_795_743_798)), 130_000, true, 115).is_none());
+        assert!(tracker.observe(&at(0.91, Some(1_795_743_797)), 140_000, true, 120).is_none());
+        assert!(tracker.observe(&at(0.92, None), 150_000, true, 125).is_none());
+        assert!(tracker.observe(&at(0.92, Some(1_795_743_798)), 160_000, true, 130).is_none());
+        // Exhausted handoff also fires once despite resets_at jitter.
+        assert!(tracker.take_exhausted_handoff(&at(1.0, Some(1_795_743_797)), 200));
+        assert!(!tracker.take_exhausted_handoff(&at(1.0, Some(1_795_743_798)), 205));
     }
 
     #[test]

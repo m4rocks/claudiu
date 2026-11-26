@@ -198,6 +198,7 @@ pub enum Modal {
         auto_compact: bool,
         auto_compact_threshold: u64,
         usage_display: crate::store::UsageDisplay,
+        notify_model_on_limit: bool,
         auto_handoff_on_limit: bool,
         auto_handoff_model: Option<crate::store::TextGenerationModel>,
         /// m4code tools turned off (m4code tools page).
