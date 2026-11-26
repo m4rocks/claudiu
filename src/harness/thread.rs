@@ -430,7 +430,7 @@ impl Thread {
         }).collect()
     }
 
-    #[cfg(test)]
+    /// The tool call with this id.
     pub fn tool(&self, id: &str) -> Option<&ToolCall> {
         self.entries.iter().find_map(|e| match e {
             Entry::Tool(call) if call.id == id => Some(call),

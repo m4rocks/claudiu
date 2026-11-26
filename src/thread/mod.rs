@@ -1023,8 +1023,10 @@ impl ThreadView {
                     self.remeasure(0);
                 }
                 let was_live_bg = self.has_live_background_tasks();
+                // A tool finishing, or a late update to one already settled, is not the agent being busy again.
                 let is_tool_terminal = update["sessionUpdate"] == "tool_call_update"
-                    && matches!(update["status"].as_str(), Some("completed" | "failed"));
+                    && (matches!(update["status"].as_str(), Some("completed" | "failed"))
+                        || update["toolCallId"].as_str().and_then(|id| self.thread.tool(id)).is_some_and(|call| call.status != ToolStatus::Running));
                 if self.phase == Phase::Ready && !self.cached_replay && is_conversation_update(&update)
                     && (self.working || !is_tool_terminal)
                 {
@@ -4823,7 +4825,10 @@ mod tests {
             assert_eq!(v.thread.tool("exec-1").unwrap().status, super::ToolStatus::Done);
             assert!(!v.has_background_work());
             assert!(!v.is_working(), "completing the last background task ends working immediately");
-            assert_eq!(*idles.borrow(), vec!["completed"]);
+        });
+        // Events reach subscribers once the update returns.
+        assert_eq!(*idles.borrow(), vec!["completed"]);
+        view.update(cx, |v, cx| {
 
             // A late terminal update must not flip back to working or emit Idle again.
             v.on_event(update_event(serde_json::json!({
@@ -4833,8 +4838,8 @@ mod tests {
                 "content": [{ "type": "content", "content": { "type": "text", "text": "late flush" } }]
             })), cx);
             assert!(!v.is_working());
-            assert_eq!(*idles.borrow(), vec!["completed"]);
         });
+        assert_eq!(*idles.borrow(), vec!["completed"], "a late update sends no second Idle");
     }
 
     #[gpui::test]
@@ -4908,7 +4913,10 @@ mod tests {
             assert!(v.background_tasks.is_empty());
             assert!(!v.has_background_work());
             assert!(!v.is_working());
-            assert_eq!(*idles.borrow(), vec!["completed"]);
+        });
+        // Events reach subscribers once the update returns.
+        assert_eq!(*idles.borrow(), vec!["completed"]);
+        view.update(cx, |v, cx| {
 
             // Late update for the same session id must not resurrect it.
             v.on_event(update_event(serde_json::json!({
@@ -4918,7 +4926,7 @@ mod tests {
             })), cx);
             assert!(v.background_tasks.is_empty());
             assert!(!v.is_working());
-            assert_eq!(*idles.borrow(), vec!["completed"]);
         });
+        assert_eq!(*idles.borrow(), vec!["completed"], "a late update sends no second Idle");
     }
 }
