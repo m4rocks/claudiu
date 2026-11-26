@@ -197,6 +197,7 @@ pub enum Modal {
         auto_compact_threshold: u64,
         usage_display: crate::store::UsageDisplay,
         auto_handoff_on_limit: bool,
+        auto_handoff_model: Option<crate::store::TextGenerationModel>,
         /// m4code tools turned off (m4code tools page).
         m4code_off: Vec<crate::mcp::Feature>,
         /// Skills to turn off, separated by commas (Claude Code tools page).
@@ -302,6 +303,14 @@ pub struct AnchoredPicker {
 }
 
 /// Which universal picker dropdown is currently open on `Workspace`.
+/// Which model setting the Settings -> General model picker edits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SettingsModelTarget {
+    Default,
+    TextGeneration,
+    AutoHandoff,
+}
+
 pub enum WorkspacePicker {
     /// Model + draggable effort picker on the Welcome screen.
     HomeModel { search: Entity<InputState> },
@@ -311,8 +320,8 @@ pub enum WorkspacePicker {
     Project { mode: ProjectPickerMode, search: Entity<InputState> },
     /// Unified Branch & Worktree picker (top bar and Welcome screen).
     Git(GitPicker),
-    /// Settings -> General: Default model selector.
-    SettingsModel { search: Entity<InputState>, text_generation: bool },
+    /// Settings -> General: Model selector (default, text generation, or auto-handoff).
+    SettingsModel { search: Entity<InputState>, target: SettingsModelTarget },
     /// Settings -> General: Default effort selector.
     SettingsEffort,
     /// Settings -> General: Default permission mode selector.
@@ -887,6 +896,19 @@ impl Workspace {
         }
     }
 
+    pub fn cycle_home_permission(&mut self, cx: &mut Context<Self>) {
+        let offered = self.store.data.settings.permissions_for(self.home_selected_model().harness);
+        if offered.len() < 2 {
+            return;
+        }
+        let current = self.home_selected_permission();
+        let next = current
+            .and_then(|cur| offered.iter().position(|&p| p == cur))
+            .map_or(offered[0], |i| offered[(i + 1) % offered.len()]);
+        self.home.permission_mode = Some(next);
+        cx.notify();
+    }
+
     /// Close the sidebar question popover after a brief grace period so the pointer can cross from the row into it.
     pub fn schedule_close_question_popover(&mut self, cx: &mut Context<Self>) {
         self.question_popover_seq = self.question_popover_seq.wrapping_add(1);
@@ -1032,11 +1054,11 @@ impl Workspace {
         self.show_picker(at, WorkspacePicker::Project { mode, search }, window, cx);
     }
 
-    pub fn open_settings_model_picker(&mut self, at: crate::panels::widgets::Dropdown, text_generation: bool, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn open_settings_model_picker(&mut self, at: crate::panels::widgets::Dropdown, target: SettingsModelTarget, window: &mut Window, cx: &mut Context<Self>) {
         self.menu = None;
         self.load_models(cx);
         let search = self.picker_search("Filter models…", window, cx);
-        self.show_picker(at, WorkspacePicker::SettingsModel { search, text_generation }, window, cx);
+        self.show_picker(at, WorkspacePicker::SettingsModel { search, target }, window, cx);
     }
 
     pub fn open_settings_effort_picker(&mut self, at: crate::panels::widgets::Dropdown, window: &mut Window, cx: &mut Context<Self>) {

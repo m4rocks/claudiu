@@ -958,7 +958,46 @@ impl Workspace {
         for agent in crate::harness::subagents::Agent::ALL {
             let harness = Harness::from_agent(agent);
             let provider = agent.provider();
-            if !harness.is_registered() || provider.limits.is_none() || !(settings.harness_enabled(harness) || subagents.get(agent).on) {
+            if !harness.is_registered() || !(settings.harness_enabled(harness) || subagents.get(agent).on) {
+                continue;
+            }
+            if provider.limits.is_none() {
+                if let Some(url) = provider.dashboard_url {
+                    if !rows.is_empty() {
+                        rows.push(divider());
+                    }
+                    let color = (provider.color)(theme());
+                    let who = div()
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .gap(crate::panels::scale::px(3.0))
+                        .w(label_w)
+                        .overflow_hidden()
+                        .child(logos::draw(logos::for_harness(harness), 12.0, color));
+                    let link = div()
+                        .id(SharedString::from(format!("limits-dashboard-{}", provider.key)))
+                        .flex_1()
+                        .min_w_0()
+                        .h(crate::panels::scale::px(18.0))
+                        .px(px(6.0))
+                        .rounded(px(4.0))
+                        .bg(theme().background)
+                        .border_1()
+                        .border_color(theme().panel_border)
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(4.0))
+                        .cursor_pointer()
+                        .text_size(crate::panels::scale::px(10.5))
+                        .text_color(theme().muted_foreground)
+                        .hover(|s| s.bg(theme().accent).text_color(theme().foreground))
+                        .child("Usage dashboard")
+                        .child(icon(IconName::ExternalLink, 10.5))
+                        .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| cx.open_url(url)));
+                    rows.push(div().flex().items_center().gap(gap).child(who).child(link));
+                }
                 continue;
             }
             let state = self.limits_state.get(harness);

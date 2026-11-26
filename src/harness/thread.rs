@@ -425,7 +425,7 @@ impl Thread {
     /// What the user sent, oldest first: the composer's history.
     pub fn sent_texts(&self) -> Vec<String> {
         self.entries.iter().filter_map(|e| match e {
-            Entry::User(t) if parse_subagent_report(t).is_none() => Some(t.clone()),
+            Entry::User(t) if parse_subagent_report(t).is_none() && !is_hidden_prompt(t) => Some(t.clone()),
             _ => None,
         }).collect()
     }
@@ -515,6 +515,14 @@ impl Thread {
 const HANDOFF_MAX_CHARS: usize = 40_000;
 const HANDOFF_OPENING: &str = "You are taking over work from a ";
 const HANDOFF_NEXT: &str = "\n\nUser's next message:\n";
+const HIDDEN_NOTICE_OPENING: &str = "[m4code notice]";
+const USAGE_NOTICE_OPENING: &str = "[m4code usage notice]";
+
+/// Whether `text` is an internal system prompt m4code injects for the model that should stay invisible in the chat
+/// transcript (the user sees a compact `Entry::Notice` instead).
+pub fn is_hidden_prompt(text: &str) -> bool {
+    text.starts_with(HIDDEN_NOTICE_OPENING) || text.starts_with(USAGE_NOTICE_OPENING)
+}
 
 /// The first message a hand-off sends the new agent: `transcript` of the conversation so far, then `user_message`,
 /// empty when the agent handed over on its own. The chat shows only `user_message` (see `typed_part`).
@@ -533,9 +541,13 @@ pub fn handoff_prompt(from: &str, transcript: &str, user_message: &str) -> Strin
     )
 }
 
-/// What the user typed, from a message that may be a hand-off prompt: the transcript in front of it was already on
-/// screen, and copying it into the chat would also nest it into the next hand-off.
+/// What the user typed, from a message that may be a hand-off prompt or an invisible system notice: the transcript
+/// or system prompt in front of it was already on screen (or represented by a compact notice), and copying it into the
+/// chat would clutter the transcript or nest it into the next hand-off.
 fn typed_part(text: &str) -> Option<&str> {
+    if is_hidden_prompt(text) {
+        return Some("");
+    }
     if !text.starts_with(HANDOFF_OPENING) {
         return None;
     }
@@ -742,6 +754,13 @@ mod tests {
         live.sent(by_agent.clone());
         assert!(live.entries.is_empty());
         assert!(thread(&[chunk("user_message_chunk", &by_agent)]).entries.is_empty());
+
+        let hidden = "[m4code usage notice] You are approaching your 5-hour usage limit (90% used).";
+        let mut live_hidden = Thread::default();
+        assert!(live_hidden.sent(hidden).is_none(), "hidden system prompts never add a user bubble");
+        assert!(live_hidden.entries.is_empty());
+        assert!(thread(&[chunk("user_message_chunk", hidden)]).entries.is_empty(), "replayed hidden system prompts stay invisible");
+        assert!(thread(&[chunk("user_message_chunk", "[m4code notice] internal system prompt")]).entries.is_empty());
 
         let quoted = "What does \"User's next message:\" mean?";
         assert_eq!(thread(&[chunk("user_message_chunk", quoted)]).entries, [Entry::User(quoted.into())], "an ordinary message stays whole");

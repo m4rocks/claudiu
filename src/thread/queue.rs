@@ -19,13 +19,20 @@ pub(super) struct Queued {
     pub compact: bool,
     // Reports and initial prompts have their own owners and are not restored from the user queue.
     pub by_user: bool,
+    /// Invisible system prompt sent to the model (e.g. a usage runway notice): never shown as a user bubble or queued item.
+    #[serde(default)]
+    pub hidden: bool,
     pub ahead: bool,
     pub shown: bool,
 }
 
 impl Queued {
     pub fn new(text: String, by_user: bool) -> Self {
-        Self { id: Uuid::new_v4(), order: next_order(), startup: false, text, compact: false, by_user, ahead: false, shown: false }
+        Self { id: Uuid::new_v4(), order: next_order(), startup: false, text, compact: false, by_user, hidden: false, ahead: false, shown: false }
+    }
+
+    pub fn hidden(text: String) -> Self {
+        Self { hidden: true, shown: true, ..Self::new(text, false) }
     }
 }
 
@@ -90,7 +97,7 @@ impl ThreadView {
     }
 
     pub(super) fn unread_steers(&self) -> impl Iterator<Item = &str> {
-        self.steering.iter().map(|item| item.text.as_str())
+        self.steering.iter().filter(|item| !item.hidden).map(|item| item.text.as_str())
     }
 
     pub(super) fn waiting_messages(&self) -> impl Iterator<Item = (Uuid, &str)> {

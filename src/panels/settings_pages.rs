@@ -171,11 +171,7 @@ fn harness_status(harness: Harness, enabled: bool, subagents: &crate::app::Harne
         1 => " · 1 model".to_string(),
         n => format!(" · {n} models"),
     };
-    let delegation = if access.on {
-        if access.edits { "subagents on · edits allowed" } else { "subagents on · read-only" }
-    } else {
-        "subagents off"
-    };
+    let delegation = if access.on { "subagents on" } else { "subagents off" };
     (format!("Enabled{models} · {delegation}"), theme().muted_foreground)
 }
 
@@ -315,7 +311,7 @@ impl Workspace {
             .flex_col()
             .gap(px(12.0))
             .child(settings_group("CONNECTED HARNESSES", None, rows))
-            .child(faint("Open any harness to configure its tools or subagent delegation."))
+            .child(faint("Click any harness to choose its models and configure how it behaves."))
     }
 
     fn subagent_controls(&self, harness: Harness, cx: &mut Context<Self>) -> Div {
@@ -324,34 +320,14 @@ impl Workspace {
         let key = harness.key();
         let mut controls = div().flex().flex_col().gap(px(8.0)).child(switch_row(
             SharedString::from(format!("agent-dialog-{key}-on")),
-            "Allow use as subagents",
-            Some("Let other m4code sessions delegate tasks to this harness".into()),
+            "Allow subagent delegation",
+            Some("Let other sessions delegate background tasks to this harness".into()),
             access.on,
             move |ws, _, cx| flip_subagent(ws, harness, cx),
             cx,
         ));
         if let Some(warning) = harness.agent().and_then(|agent| agent.provider().warning) {
             controls = controls.child(warn(warning));
-        }
-        if access.on {
-            controls = controls.child(switch_row(
-                SharedString::from(format!("agent-dialog-{key}-edits")),
-                "Allow edits in subagent tasks",
-                None,
-                access.edits,
-                move |ws, _, _| {
-                    if let Some(Modal::Settings { subagents, .. }) = ws.modal.as_mut() {
-                        let mut access = subagents.access(harness);
-                        access.edits = !access.edits;
-                        subagents.set_access(harness, access);
-                    }
-                },
-                cx,
-            )).child(faint(if access.edits {
-                "m4code approves file edits and command requests. The harness's sandbox still applies. This can include network access or writes outside the project when permitted."
-            } else {
-                "Subagents cannot edit files. Commands follow the harness's read-only restrictions."
-            }));
         }
         controls
     }
@@ -365,7 +341,7 @@ impl Workspace {
         let mut list = div().flex().flex_col().gap(px(6.0));
         let mut shown = 0;
         for (model, offered) in model_rows(catalog, picked).into_iter().filter(|(m, _)| model_matches(&query, m)) {
-            let tag = if !offered { Some("no longer offered") } else if subagents_on { Some("Available as a subagent") } else { None };
+            let tag = (!offered).then_some("No longer offered");
             let id = model.id.clone();
             list = list.child(switch_row(
                 gpui::SharedString::from(format!("harness-dialog-model-{}", model.id)),
@@ -394,9 +370,9 @@ impl Workspace {
         }
         let count = if catalog.is_empty() { String::new() } else { on_count(catalog, picked) };
         let about = if subagents_on {
-            "Ticked models appear in the model picker and are available for delegated tasks from other m4code sessions."
+            "Enabled models show up in the model picker and can be used by subagents."
         } else {
-            "Ticked models appear in the model picker. Enable subagents to allow delegated tasks from other m4code sessions."
+            "Enabled models show up in the model picker."
         };
         div()
             .flex()
@@ -432,7 +408,7 @@ impl Workspace {
                             .child(logos::draw(&logos::CLAUDE, 16.0, theme().primary))
                             .child(div().text_size(scaled(15.0)).font_weight(FontWeight::SEMIBOLD).child("Claude Code")),
                     )
-                    .child(faint("Uses your Claude Code configuration and sign-in."))
+                    .child(faint("Uses your existing Claude Code sign-in and configuration."))
                     .child(switch_row(
                         "harness-dialog-claude-on",
                         "Enable Claude Code",
@@ -463,7 +439,7 @@ impl Workspace {
                     col = col.child(warn(format!("{} is set in {}. {}", found.name, found.source, found.effect)));
                 }
                 col.child(div().mt(px(4.0)).child(section_label("SKILLS TO TURN OFF IN CLAUDE CODE")))
-                    .child(faint("Comma-separated skill names to hide from Claude Code's context. Existing entries in settings.json win."))
+                    .child(faint("Comma-separated skill names to hide from Claude Code. Entries in settings.json take precedence."))
                     .child(Input::new(skills_field))
             }
             (harness, search) => {
@@ -484,7 +460,7 @@ impl Workspace {
                             .child(logos::draw(logos::for_harness(harness), 16.0, theme().primary))
                             .child(div().text_size(scaled(15.0)).font_weight(FontWeight::SEMIBOLD).child(provider.name)),
                     )
-                    .child(faint(format!("Uses your {} configuration and sign-in.", harness.name())))
+                    .child(faint(format!("Uses your existing {} sign-in and configuration.", harness.name())))
                     .child(switch_row(
                         gpui::SharedString::from(format!("harness-dialog-{key}-enabled")),
                         format!("Enable {}", provider.name),
@@ -631,7 +607,7 @@ mod tests {
             claude_models: vec![], claude_subagents: Default::default(), picking: None,
         };
         for harness in Harness::registered() {
-            assert_eq!(harness_status(harness, true, &form, &Lookup::default(), 2).0, "Enabled · 2 models · subagents on · edits allowed");
+            assert_eq!(harness_status(harness, true, &form, &Lookup::default(), 2).0, "Enabled · 2 models · subagents on");
         }
     }
     #[test]

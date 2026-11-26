@@ -1582,6 +1582,9 @@ impl ThreadView {
         let at = self.steering.iter().position(|item| item.id == id)?;
         let item = self.steering.remove(at)?;
         self.queue_changed();
+        if item.hidden {
+            return None;
+        }
         self.thread.sent(item.text)
     }
 
@@ -2932,17 +2935,8 @@ impl ThreadView {
             && !self.list.is_scrolled_to_end().unwrap_or_else(|| self.list.max_offset_for_scrollbar().y <= px(1.0))
     }
 
-    fn open_location_at(&mut self, row: usize, path: PathBuf, line: Option<u32>, cx: &mut Context<Self>) {
-        self.open_location_range_at(row, path, line, None, cx);
-    }
-
     fn open_location_range_at(&mut self, row: usize, path: PathBuf, line: Option<u32>, end_line: Option<u32>, cx: &mut Context<Self>) {
-        let normalized = path
-            .to_str()
-            .filter(|s| s.starts_with("file:"))
-            .and_then(|s| url::Url::parse(s).ok())
-            .and_then(|u| u.to_file_path().ok())
-            .unwrap_or(path);
+        let normalized = render::normalize_tool_path(&path);
         let path = if normalized.is_absolute() {
             normalized
         } else {
@@ -2957,15 +2951,17 @@ impl ThreadView {
         self.phase != Phase::Ended
     }
 
-    /// Send an internal runway notice without consuming any user-staged model switch.
+    /// Send an internal runway notice without consuming any user-staged model switch or adding a user bubble.
     fn nudge_model(&mut self, text: String, cx: &mut Context<Self>) {
         if self.workspace_switching || self.read_only_unconfirmed {
             return;
         }
         if self.can_steer(&text, crate::store::FollowUp::Steer) {
-            self.steer(Queued::new(text, false), cx);
+            self.steer(Queued::hidden(text), cx);
         } else {
-            self.deliver(text, cx);
+            self.queue.push_back(Queued::hidden(text));
+            self.send_next(cx);
+            cx.notify();
         }
     }
 

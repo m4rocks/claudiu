@@ -252,7 +252,7 @@ fn text_generation_picker_saves_a_model_independently_of_new_sessions() {
         cx.update_window(window, |_, window, app| {
             ws.update(app, |ws, cx| {
                 let at = crate::panels::widgets::Dropdown::at(gpui::point(gpui::px(20.0), gpui::px(20.0)));
-                ws.open_settings_model_picker(at, true, window, cx);
+                ws.open_settings_model_picker(at, crate::app::SettingsModelTarget::TextGeneration, window, cx);
             });
             window.draw(app).clear(app);
         }).unwrap();

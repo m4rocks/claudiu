@@ -398,6 +398,7 @@ impl ThreadView {
     fn render_entry(&mut self, ix: usize, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let Some(entry) = self.thread.entries.get(ix) else { return self.render_turn_status() };
         let body = match entry {
+            Entry::User(text) if crate::harness::thread::is_hidden_prompt(text) => return div().into_any_element(),
             Entry::User(text) if let Some(report) = parse_subagent_report(text) => {
                 let run = self.tool_run(ix);
                 match &run {
@@ -627,10 +628,11 @@ impl ThreadView {
             || self.expanded_tools.contains(&call.id);
         let toggle_id = call.id.clone();
 
+        let ws_cwd = timeline::workspace_at(&self.thread.entries, ix, &self.cwd);
         let mut location_chips = Vec::new();
         for (n, (path, line)) in call.locations.iter().enumerate().take(2) {
             let (path, line) = (path.clone(), *line);
-            let label = relative_to_cwd(timeline::workspace_at(&self.thread.entries, ix, &self.cwd), &path);
+            let label = relative_to_cwd(ws_cwd, &path);
             let end_line = (n == 0).then_some(details.end_line).flatten();
             location_chips.push(
                 div()
@@ -656,9 +658,10 @@ impl ThreadView {
                         (Some(line), _) => format!("{label}:L{line}"),
                         _ => label,
                     })
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| {
                         cx.stop_propagation();
-                        v.open_location_at(ix, path.clone(), line, cx);
+                        v.open_location_range_at(ix, path.clone(), line, end_line, cx);
                     }))
                     .into_any_element(),
             );
@@ -672,7 +675,7 @@ impl ThreadView {
             let color = if code == 0 { theme().success } else { theme().destructive };
             location_chips.push(div().text_color(color).child(format!("Exit {code}")).into_any_element());
         }
-        let mut header = elements::tool_header(ix, call, title_in_cwd(call, &self.cwd), location_chips, has_details, expanded);
+        let mut header = elements::tool_header(ix, call, title_in_cwd(call, ws_cwd), location_chips, has_details, expanded);
         if has_details {
             header = header.on_click(cx.listener(move |v, _: &ClickEvent, _, cx| {
                 if v.detail {
@@ -750,16 +753,77 @@ impl ThreadView {
 
     fn render_screenshot(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let image = self.screenshot.clone()?;
-        Some(div().id("thread-screenshot-preview").track_focus(&self.screenshot_focus).absolute().inset_0().occlude()
-            .bg(theme().window.opacity(0.95)).flex().flex_col().items_center().p(px(16.0)).gap(px(10.0))
-            .child(button("thread-screenshot-close", "Close screenshot", false)
-                .on_click(cx.listener(|v, _: &ClickEvent, window, cx| {
-                    v.screenshot = None;
-                    v.focus_composer(window, cx);
-                    cx.notify();
-                })))
-            .child(div().flex_1().w_full().min_h_0().child(gpui::img(image).size_full().object_fit(gpui::ObjectFit::Contain)))
-            .into_any_element())
+        let close = div()
+            .id("thread-screenshot-close")
+            .aria_label("Close image")
+            .absolute()
+            .top(px(16.0))
+            .right(px(16.0))
+            .size(px(32.0))
+            .rounded_full()
+            .bg(theme().card)
+            .border_1()
+            .border_color(theme().panel_border)
+            .shadow_md()
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .text_color(theme().muted_foreground)
+            .hover(|s| s.bg(theme().accent).text_color(theme().foreground))
+            .child(icon(IconName::X, 16.0))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(cx.listener(|v, _: &ClickEvent, window, cx| {
+                v.screenshot = None;
+                v.focus_composer(window, cx);
+                cx.notify();
+            }));
+        Some(
+            div()
+                .id("thread-screenshot-preview")
+                .track_focus(&self.screenshot_focus)
+                .absolute()
+                .inset_0()
+                .occlude()
+                .bg(gpui::black().opacity(0.82))
+                .flex()
+                .items_center()
+                .justify_center()
+                .p(px(40.0))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|v, _: &MouseDownEvent, window, cx| {
+                        v.screenshot = None;
+                        v.focus_composer(window, cx);
+                        cx.notify();
+                    }),
+                )
+                .child(
+                    div()
+                        .max_w_full()
+                        .max_h_full()
+                        .size_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(
+                            div()
+                                .id("thread-screenshot-frame")
+                                .size_full()
+                                .rounded(px(10.0))
+                                .overflow_hidden()
+                                .bg(theme().background)
+                                .border_1()
+                                .border_color(theme().panel_border)
+                                .shadow_lg()
+                                .p(px(6.0))
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                .child(gpui::img(image).size_full().object_fit(gpui::ObjectFit::Contain)),
+                        ),
+                )
+                .child(close)
+                .into_any_element(),
+        )
     }
 
     /// The calls in this conversation that run one of the harness's own subagents, oldest first.
@@ -1748,15 +1812,41 @@ pub fn short_effort_label(name: &str) -> String {
     }
 }
 
+/// Normalize a tool location path: decode `file://` URLs, strip leading `/` before Windows drive letters
+/// (e.g. `/C:/Users/...` emitted by some ACP adapters), and drop `\\?\` verbatim prefixes.
+pub(super) fn normalize_tool_path(path: &std::path::Path) -> std::path::PathBuf {
+    let raw = path.to_string_lossy();
+    let decoded = if raw.starts_with("file:") {
+        url::Url::parse(&raw)
+            .ok()
+            .and_then(|u| u.to_file_path().ok())
+            .or_else(|| {
+                let rest = raw.strip_prefix("file:///").or_else(|| raw.strip_prefix("file://"))?;
+                Some(std::path::PathBuf::from(rest))
+            })
+            .unwrap_or_else(|| path.to_path_buf())
+    } else {
+        path.to_path_buf()
+    };
+    let s = decoded.to_string_lossy();
+    let trimmed = if cfg!(windows)
+        && s.len() >= 3
+        && s.starts_with('/')
+        && s.as_bytes()[1].is_ascii_alphabetic()
+        && s.as_bytes()[2] == b':'
+    {
+        std::path::PathBuf::from(&s[1..])
+    } else {
+        decoded
+    };
+    dunce::simplified(&trimmed).to_path_buf()
+}
+
 /// Display `path` relative to `cwd` when inside it, normalizing `file://` URLs, separators, Windows drive-letter casing,
 /// and symlinks/canonicalized forms.
 fn relative_to_cwd(cwd: &std::path::Path, path: &std::path::Path) -> String {
-    let owned = path
-        .to_str()
-        .filter(|s| s.starts_with("file:"))
-        .and_then(|s| url::Url::parse(s).ok())
-        .and_then(|u| u.to_file_path().ok());
-    let path = owned.as_deref().unwrap_or(path);
+    let owned = normalize_tool_path(path);
+    let path = owned.as_path();
     let strip = |base: &std::path::Path, target: &std::path::Path| -> Option<String> {
         let base = dunce::simplified(base);
         let target = dunce::simplified(target);
@@ -1786,28 +1876,41 @@ fn relative_to_cwd(cwd: &std::path::Path, path: &std::path::Path) -> String {
     {
         return rel;
     }
+    if let (Ok(canon_cwd), Some(parent), Some(name)) = (dunce::canonicalize(cwd), path.parent(), path.file_name())
+        && let Ok(canon_parent) = dunce::canonicalize(parent)
+        && let Some(rel) = strip(&canon_cwd, &canon_parent.join(name))
+    {
+        return rel;
+    }
     dunce::simplified(path).display().to_string()
 }
 
 /// A tool's title with any `cwd`-prefixed file path shortened to a relative path.
 fn title_in_cwd(call: &ToolCall, cwd: &std::path::Path) -> String {
-    let raw = title(call);
+    let mut raw = title(call);
     let cwd_norm = dunce::simplified(cwd).to_string_lossy().replace('\\', "/");
     let cwd_trimmed = cwd_norm.trim_end_matches('/');
     if !cwd_trimmed.is_empty() {
-        let raw_norm = raw.replace('\\', "/");
-        let needle = format!("{cwd_trimmed}/");
-        let found = if cfg!(windows) {
-            raw_norm.to_ascii_lowercase().find(&needle.to_ascii_lowercase())
+        let mut needles = Vec::with_capacity(3);
+        if cfg!(windows) {
+            needles.push(format!("file:///{cwd_trimmed}/"));
+            needles.push(format!("/{cwd_trimmed}/"));
         } else {
-            raw_norm.find(&needle)
-        };
-        if let Some(pos) = found {
-            let after = pos + needle.len();
-            let mut out = String::with_capacity(raw.len());
-            out.push_str(&raw[..pos]);
-            out.push_str(&raw_norm[after..]);
-            return out;
+            needles.push(format!("file://{cwd_trimmed}/"));
+        }
+        needles.push(format!("{cwd_trimmed}/"));
+        for needle in needles {
+            let needle_cmp = if cfg!(windows) { needle.to_ascii_lowercase() } else { needle.clone() };
+            loop {
+                let raw_norm = raw.replace('\\', "/");
+                let hay = if cfg!(windows) { raw_norm.to_ascii_lowercase() } else { raw_norm.clone() };
+                let Some(pos) = hay.find(&needle_cmp) else { break };
+                let after = pos + needle.len();
+                let mut out = String::with_capacity(raw.len());
+                out.push_str(&raw[..pos]);
+                out.push_str(&raw_norm[after..]);
+                raw = out;
+            }
         }
     }
     raw

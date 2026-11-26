@@ -137,6 +137,13 @@ impl Workspace {
             .items_center()
             .justify_center()
             .gap(px(20.0))
+            .capture_key_down(cx.listener(|ws, ev: &gpui::KeyDownEvent, _, cx| {
+                let m = &ev.keystroke.modifiers;
+                if ev.keystroke.key == "tab" && m.shift && !m.control && !m.alt && !m.platform && ws.picker.is_none() {
+                    ws.cycle_home_permission(cx);
+                    cx.stop_propagation();
+                }
+            }))
             .child(div().text_size(scaled(24.0)).font_weight(FontWeight::MEDIUM).text_color(theme().foreground).child("What are we working on?"))
             .child(composer)
     }

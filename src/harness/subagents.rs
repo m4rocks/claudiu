@@ -44,6 +44,8 @@ pub struct Limits {
 pub struct Provider {
     /// The limits reader and refresh cadence, absent when the provider has no limits to show.
     pub limits: Option<Limits>,
+    /// External usage dashboard URL shown in the sidebar when live limits polling is unavailable.
+    pub dashboard_url: Option<&'static str>,
     /// The color of its sidebar limits.
     pub color: fn(&Theme) -> Hsla,
     /// The logos and optional short label that identify a pool in the sidebar.
@@ -92,6 +94,7 @@ const CODEX: Provider = Provider {
         let usage = super::codex::limits::probe()?;
         Ok(vec![Pool { name: "Codex".into(), usage }])
     }, every: super::codex::limits::REFRESH_EVERY }),
+    dashboard_url: None,
     color: |t| t.codex,
     marks: logos::codex_marks,
     name: "Codex",
@@ -117,6 +120,7 @@ const CODEX: Provider = Provider {
 
 const OPENCODE: Provider = Provider {
     limits: None,
+    dashboard_url: Some("https://opencode.ai/console"),
     color: |t| t.foreground,
     marks: |name| (&[], Some(name.to_uppercase())),
     name: "OpenCode",
@@ -146,6 +150,7 @@ const ANTIGRAVITY: Provider = Provider {
     //     super::antigravity::limits::read(&agy, &crate::datadir::data_dir())
     // }, every: super::antigravity::limits::REFRESH_EVERY }),
     limits: None,
+    dashboard_url: Some("https://antigravity.google"),
     color: |t| t.antigravity,
     marks: logos::antigravity_marks,
     name: "Antigravity",
@@ -396,7 +401,7 @@ impl CustomSubagents {
                 .iter()
                 .map(|t| json!({ "name": t.name, "model": t.model, "description": agent.description(&t.model), "prompt": agent.stub_prompt() }))
                 .collect();
-            env.insert(agent.key().into(), json!({ "edits": allow_edits && self.get(agent).edits, "name": agent.name(), "types": types }));
+            env.insert(agent.key().into(), json!({ "edits": allow_edits, "name": agent.name(), "types": types }));
         }
         Some(Value::Object(env).to_string())
     }
@@ -531,7 +536,7 @@ mod tests {
         let both = choices(on(&["gpt-6.1-sol", "gpt-5.6-luna"], false), on(&["openai/gpt-6.1-sol"], true));
         let env: Value = serde_json::from_str(&both.env_for(&crate::harness::Harness::ALL).unwrap()).unwrap();
         assert_eq!(env.as_object().unwrap().keys().collect::<Vec<_>>(), ["codex", "opencode"]);
-        assert_eq!((&env["codex"]["edits"], &env["opencode"]["edits"]), (&json!(false), &json!(true)));
+        assert_eq!((&env["codex"]["edits"], &env["opencode"]["edits"]), (&json!(true), &json!(true)));
         let names: Vec<&str> = env["codex"]["types"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert_eq!(names, ["codex-gpt-6-1-sol", "codex-gpt-5-6-luna"]);
         assert_eq!(

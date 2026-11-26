@@ -400,14 +400,14 @@ impl Workspace {
                 let body = div().flex().flex_col().gap(px(8.0)).child(picker::search_input(&gp.search)).child(list);
                 ("git-picker-dialog", "BRANCH & WORKTREE", body.into_any_element(), Some(choices))
             }
-            WorkspacePicker::SettingsModel { search, text_generation } => {
-                let text_generation = *text_generation;
-                let Some(Modal::Settings { default_model, text_generation_model, subagents, .. }) = &self.modal else { return None };
+            WorkspacePicker::SettingsModel { search, target } => {
+                let target = *target;
+                let Some(Modal::Settings { default_model, text_generation_model, auto_handoff_model, subagents, .. }) = &self.modal else { return None };
                 let current = default_model.clone();
                 let query = search.read(cx).value().to_lowercase();
                 let words: Vec<&str> = query.split_whitespace().collect();
                 let mut all = self.store.data.settings.aggregated_models_for(&subagents.enabled);
-                if text_generation {
+                if target != crate::app::SettingsModelTarget::Default {
                     all.retain(|m| !m.id.is_empty() && m.id != "default");
                 } else if !all.iter().any(|m| m.harness == current.harness && m.id == current.id) {
                     all.insert(0, current.clone());
@@ -415,12 +415,22 @@ impl Workspace {
                 let mut choices = command::Choices::new(&self.picker_nav, &query);
                 let mut list = choices.list("settings-model-list", window).role(gpui::Role::ListBox).aria_label("Models").max_h(px(260.0));
                 let mut shown = 0usize;
-                if text_generation && words.iter().all(|word| "local summary".contains(word)) {
-                    let row = command::row("settings-model-local", None, "Local summary", None, None, text_generation_model.is_none(), false)
-                        .role(gpui::Role::ListBoxOption)
-                        .aria_selected(text_generation_model.is_none());
-                    list = list.child(choices.add(row, |ws, window, cx| ws.act(Act::PickTextGenerationModel(None), window, cx), cx));
-                    shown += 1;
+                match target {
+                    crate::app::SettingsModelTarget::TextGeneration if words.iter().all(|word| "local summary".contains(word)) => {
+                        let row = command::row("settings-model-local", None, "Local summary", None, None, text_generation_model.is_none(), false)
+                            .role(gpui::Role::ListBoxOption)
+                            .aria_selected(text_generation_model.is_none());
+                        list = list.child(choices.add(row, |ws, window, cx| ws.act(Act::PickTextGenerationModel(None), window, cx), cx));
+                        shown += 1;
+                    }
+                    crate::app::SettingsModelTarget::AutoHandoff if words.iter().all(|word| "automatic".contains(word)) => {
+                        let row = command::row("settings-model-auto", None, "Automatic", Some("Best available model from another harness".into()), None, auto_handoff_model.is_none(), false)
+                            .role(gpui::Role::ListBoxOption)
+                            .aria_selected(auto_handoff_model.is_none());
+                        list = list.child(choices.add(row, |ws, window, cx| ws.act(Act::PickAutoHandoffModel(None), window, cx), cx));
+                        shown += 1;
+                    }
+                    _ => {}
                 }
                 let mut last_harness = None;
                 for (n, m) in all.into_iter().enumerate() {
@@ -441,15 +451,23 @@ impl Workspace {
                                 .child(m.harness.name()),
                         );
                     }
-                    let selected = if text_generation {
-                        text_generation_model.as_ref().is_some_and(|model| model.harness == m.harness && model.id == m.id)
-                    } else {
-                        m.harness == current.harness && m.id == current.id
+                    let selected = match target {
+                        crate::app::SettingsModelTarget::TextGeneration => {
+                            text_generation_model.as_ref().is_some_and(|model| model.harness == m.harness && model.id == m.id)
+                        }
+                        crate::app::SettingsModelTarget::AutoHandoff => {
+                            auto_handoff_model.as_ref().is_some_and(|model| model.harness == m.harness && model.id == m.id)
+                        }
+                        crate::app::SettingsModelTarget::Default => m.harness == current.harness && m.id == current.id,
                     };
-                    let choice = if text_generation {
-                        Act::PickTextGenerationModel(Some(crate::store::TextGenerationModel { harness: m.harness, id: m.id.clone() }))
-                    } else {
-                        Act::PickDefaultModel(m.clone())
+                    let choice = match target {
+                        crate::app::SettingsModelTarget::TextGeneration => {
+                            Act::PickTextGenerationModel(Some(crate::store::TextGenerationModel { harness: m.harness, id: m.id.clone() }))
+                        }
+                        crate::app::SettingsModelTarget::AutoHandoff => {
+                            Act::PickAutoHandoffModel(Some(crate::store::TextGenerationModel { harness: m.harness, id: m.id.clone() }))
+                        }
+                        crate::app::SettingsModelTarget::Default => Act::PickDefaultModel(m.clone()),
                     };
                     let logo = logos::draw(logos::for_harness(m.harness), 11.5, if selected { accent } else { theme().subtle_foreground }).into_any_element();
                     let row = command::row(gpui::SharedString::from(format!("settings-model-opt-{n}")), Some(logo), m.name.clone(), None, None, selected, false)
@@ -481,7 +499,12 @@ impl Workspace {
                                 .child("Loading models…"),
                         )
                     });
-                ("settings-model-dialog", if text_generation { "TEXT GENERATION MODEL" } else { "DEFAULT MODEL" }, body.into_any_element(), Some(choices))
+                let title = match target {
+                    crate::app::SettingsModelTarget::Default => "DEFAULT MODEL",
+                    crate::app::SettingsModelTarget::TextGeneration => "TEXT GENERATION MODEL",
+                    crate::app::SettingsModelTarget::AutoHandoff => "AUTO-HANDOFF MODEL",
+                };
+                ("settings-model-dialog", title, body.into_any_element(), Some(choices))
             }
             WorkspacePicker::SettingsEffort => {
                 let Some(Modal::Settings { effort, .. }) = &self.modal else { return None };

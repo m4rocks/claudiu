@@ -177,6 +177,9 @@ pub struct Settings {
     /// Whether m4code automatically hands off a working session to another available model when its usage limit is hit.
     #[serde(default = "default_auto_compact")]
     pub auto_handoff_on_limit: bool,
+    /// Optional preferred model for auto-handoff when a harness hits its usage limit; `None` picks automatically.
+    #[serde(default)]
+    pub auto_handoff_model: Option<TextGenerationModel>,
 }
 
 impl Default for Settings {
@@ -207,6 +210,7 @@ impl Default for Settings {
             auto_compact_threshold: default_auto_compact_threshold(),
             usage_display: Default::default(),
             auto_handoff_on_limit: true,
+            auto_handoff_model: None,
         }
     }
 }

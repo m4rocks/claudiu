@@ -33,7 +33,7 @@ pub(super) fn render_settings_card(
     cx: &mut Context<Workspace>,
 ) -> gpui::Stateful<gpui::Div> {
     let (page, worktrees, scroll) = (ws.settings_page, &ws.worktrees_page, &ws.settings_scroll);
-    let Some(Modal::Settings { shell, default_model, text_generation_model, effort, permission, updates, scale, follow_up, auto_compact, auto_compact_threshold, usage_display, auto_handoff_on_limit, m4code_off, skill_search, skill_filter, list_focus, renaming, .. }) = &ws.modal else {
+    let Some(Modal::Settings { shell, default_model, text_generation_model, effort, permission, updates, scale, follow_up, auto_compact, auto_compact_threshold, usage_display, auto_handoff_on_limit, auto_handoff_model, m4code_off, skill_search, skill_filter, list_focus, renaming, .. }) = &ws.modal else {
         return div().id("modal-card");
     };
     let (updates, scale, follow_up, auto_compact, auto_compact_threshold, usage_display, auto_handoff_on_limit) = (*updates, *scale, *follow_up, *auto_compact, *auto_compact_threshold, *usage_display, *auto_handoff_on_limit);
@@ -42,14 +42,19 @@ pub(super) fn render_settings_card(
 
     let content: AnyElement = match page {
         SettingsPage::General => {
-            let model_open = matches!(ws.picker_kind(), Some(WorkspacePicker::SettingsModel { text_generation: false, .. }));
-            let generation_open = matches!(ws.picker_kind(), Some(WorkspacePicker::SettingsModel { text_generation: true, .. }));
-            let generation_label = text_generation_model.as_ref().map_or_else(|| "Local summary".into(), |model| {
-                let name = ws.store.data.settings.harness_models(model.harness).iter()
-                    .find(|item| item.id == model.id)
-                    .map_or(model.id.as_str(), |item| item.name.as_str());
-                format!("{} · {name}", model.harness.name())
-            });
+            let model_open = matches!(ws.picker_kind(), Some(WorkspacePicker::SettingsModel { target: crate::app::SettingsModelTarget::Default, .. }));
+            let generation_open = matches!(ws.picker_kind(), Some(WorkspacePicker::SettingsModel { target: crate::app::SettingsModelTarget::TextGeneration, .. }));
+            let handoff_open = matches!(ws.picker_kind(), Some(WorkspacePicker::SettingsModel { target: crate::app::SettingsModelTarget::AutoHandoff, .. }));
+            let model_choice_label = |choice: &Option<crate::store::TextGenerationModel>, fallback: &str| {
+                choice.as_ref().map_or_else(|| fallback.into(), |model| {
+                    let name = ws.store.data.settings.harness_models(model.harness).iter()
+                        .find(|item| item.id == model.id)
+                        .map_or(model.id.as_str(), |item| item.name.as_str());
+                    format!("{} · {name}", model.harness.name())
+                })
+            };
+            let generation_label = model_choice_label(text_generation_model, "Local summary");
+            let handoff_label = model_choice_label(auto_handoff_model, "Automatic");
             let effort_open = matches!(ws.picker_kind(), Some(WorkspacePicker::SettingsEffort));
             let perm_open = matches!(ws.picker_kind(), Some(WorkspacePicker::SettingsPermission));
             let offered = ws.store.data.settings.permissions_for(default_model.harness);
@@ -58,12 +63,12 @@ pub(super) fn render_settings_card(
             let mut session_rows: Vec<AnyElement> = vec![
                 default_model_row(default_model, model_open, cx).into_any_element(),
                 settings_picker_row("settings-effort", ("Effort", "Reasoning depth for new sessions"), effort.label().to_string(), effort_open, |ws, at, window, cx| ws.open_settings_effort_picker(at, window, cx), cx).into_any_element(),
-                settings_picker_row("settings-permission", ("Permission mode", "Approval policy for tool calls and edits"), perm_display, perm_open, |ws, at, window, cx| ws.open_settings_permission_picker(at, window, cx), cx).into_any_element(),
+                settings_picker_row("settings-permission", ("Permission mode", "How tool calls and file edits are approved"), perm_display, perm_open, |ws, at, window, cx| ws.open_settings_permission_picker(at, window, cx), cx).into_any_element(),
             ];
             session_rows.push(
                 row_shell(
-                    "Messages sent while the agent works",
-                    Some("Steer reaches the agent in its turn; Queue waits for it to end. Cmd/Ctrl+Enter does the other."),
+                    "While the agent is working",
+                    Some("Steer interrupts the current turn; Queue waits until it finishes. Use Cmd/Ctrl+Enter for the other."),
                     toggle_group(
                         "settings-follow-up",
                         &[(crate::store::FollowUp::Queue, "Queue"), (crate::store::FollowUp::Steer, "Steer")],
@@ -90,7 +95,7 @@ pub(super) fn render_settings_card(
                     .gap(px(12.0))
                     .cursor_pointer()
                     .hover(|s| s.bg(theme().accent))
-                    .child(row_labels("Auto-compact", Some("Automatically compact conversation context between turns")))
+                    .child(row_labels("Auto-compact", Some("Keep long conversations trim by compacting context between turns")))
                     .child(toggle_switch(auto_compact))
                     .on_click(cx.listener(|ws, _: &ClickEvent, _, cx| {
                         if let Some(Modal::Settings { auto_compact, .. }) = ws.modal.as_mut() {
@@ -104,7 +109,7 @@ pub(super) fn render_settings_card(
                 session_rows.push(
                     row_shell(
                         "Auto-compact threshold",
-                        Some("Context usage percentage that triggers automatic compaction"),
+                        Some("Compact automatically once context usage reaches this level"),
                         div()
                             .flex_none()
                             .flex()
@@ -135,8 +140,8 @@ pub(super) fn render_settings_card(
                         .into_any_element(),
                 );
             }
-            let env_rows: Vec<AnyElement> = vec![
-                settings_picker_row("settings-text-generation", ("Text generation model", "Writes session titles and commit messages"), generation_label, generation_open, |ws, at, window, cx| ws.open_settings_model_picker(at, true, window, cx), cx).into_any_element(),
+            let mut env_rows: Vec<AnyElement> = vec![
+                settings_picker_row("settings-text-generation", ("Text generation model", "Used for generating session titles and commit messages"), generation_label, generation_open, |ws, at, window, cx| ws.open_settings_model_picker(at, crate::app::SettingsModelTarget::TextGeneration, window, cx), cx).into_any_element(),
                 row_shell(
                     "Interface scale",
                     Some("Adjusts UI text and terminal font size"),
@@ -158,7 +163,7 @@ pub(super) fn render_settings_card(
                 .into_any_element(),
                 row_shell(
                     "Usage limits",
-                    Some("Show sidebar usage limit bars as percentage used or remaining"),
+                    Some("Display sidebar usage meters as percentage used or remaining"),
                     toggle_group(
                         "settings-usage-display",
                         &[(crate::store::UsageDisplay::Used, "Used"), (crate::store::UsageDisplay::Left, "Left")],
@@ -174,8 +179,8 @@ pub(super) fn render_settings_card(
                 )
                 .into_any_element(),
                 row_shell(
-                    "Auto-handoff on usage limit",
-                    Some("Warn a working model at 90% and hand off to another enabled model if it hits 100%"),
+                    "Auto-handoff at usage limit",
+                    Some("Give the model a heads-up at 90% and hand off if it hits the limit"),
                     toggle_group(
                         "settings-auto-handoff",
                         &[(true, "On"), (false, "Off")],
@@ -190,21 +195,38 @@ pub(super) fn render_settings_card(
                     .into_any_element(),
                 )
                 .into_any_element(),
+            ];
+            if auto_handoff_on_limit {
+                env_rows.push(
+                    settings_picker_row(
+                        "settings-auto-handoff-model",
+                        ("Auto-handoff model", "Model to switch to when your current one hits its limit"),
+                        handoff_label,
+                        handoff_open,
+                        |ws, at, window, cx| ws.open_settings_model_picker(at, crate::app::SettingsModelTarget::AutoHandoff, window, cx),
+                        cx,
+                    )
+                    .into_any_element(),
+                );
+            }
+            env_rows.push(
                 row_shell(
                     "Shell",
-                    Some("Program used for the bottom shell panel"),
+                    Some("Shell executable for the integrated terminal"),
                     div().w(px(230.0)).flex_none().child(Input::new(shell).h(px(28.0)).text_size(scaled(12.0))).into_any_element(),
                 )
                 .into_any_element(),
+            );
+            env_rows.push(
                 row_shell(
                     "Environment setup",
-                    Some("Verify installed CLIs, Node, and agent bridges"),
+                    Some("Check your installed CLIs, Node.js, and agent bridges"),
                     button("settings-check-setup", "Check setup", false)
                         .on_click(cx.listener(|ws, _: &ClickEvent, window, cx| ws.act(Act::OpenSetup, window, cx)))
                         .into_any_element(),
                 )
                 .into_any_element(),
-            ];
+            );
 
             let check_btn = if ws.update.status == Status::Checking {
                 button_disabled("settings-check-updates", "Checking…").into_any_element()
@@ -223,7 +245,7 @@ pub(super) fn render_settings_card(
                 .gap(px(12.0))
                 .cursor_pointer()
                 .hover(|s| s.bg(theme().accent))
-                .child(row_labels("Automatic updates", Some("Check for new m4code releases in the background")))
+                .child(row_labels("Automatic updates", Some("Automatically check for new releases in the background")))
                 .child(
                     div()
                         .flex_none()
@@ -283,7 +305,7 @@ pub(super) fn render_settings_card(
                 .flex_col()
                 .gap(px(10.0))
                 .child(settings_group("BUILT-IN MCP TOOLS", None, rows))
-                .child(faint("Running sessions keep their current tools. Resumed sessions pick up changes on their next compaction.".into()))
+                .child(faint("Active sessions keep their current tools. Changes apply to new sessions and after compaction.".into()))
                 .into_any_element()
         }
         SettingsPage::Keyboard => keyboard_page().into_any_element(),
@@ -625,7 +647,7 @@ fn default_model_row(current: &crate::harness::CatalogModel, open: bool, cx: &mu
             MouseButton::Left,
             cx.listener(move |ws, _: &MouseDownEvent, window, cx| {
                 cx.stop_propagation();
-                ws.open_settings_model_picker(pill_anchor.below_right().with_hit(row_anchor.bounds()), false, window, cx);
+                ws.open_settings_model_picker(pill_anchor.below_right().with_hit(row_anchor.bounds()), crate::app::SettingsModelTarget::Default, window, cx);
             }),
         )
 }

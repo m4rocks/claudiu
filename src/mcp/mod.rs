@@ -46,7 +46,7 @@ impl Feature {
 
     pub fn description(self) -> &'static str {
         match self {
-            Self::Visual => "Render ```ui blocks natively as interactive cards, charts, and diagrams in chat",
+            Self::Visual => "Render interactive cards, charts, and diagrams directly in chat",
             Self::Github => "Attach GitHub issues and pull requests to the right sidebar",
             Self::Sessions => "Link and coordinate with other running m4code sessions",
             Self::Model => "Let the agent switch its own model or effort mid-conversation",

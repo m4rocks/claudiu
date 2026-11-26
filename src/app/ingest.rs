@@ -267,10 +267,35 @@ impl Workspace {
     }
 
     /// Pick the best available fallback model from another enabled harness that is not at its usage limit.
+    /// Honors `settings.auto_handoff_model` first when configured, enabled, and below 95% utilization.
     pub(crate) fn best_fallback_model(&self, excluded: Harness) -> Option<crate::harness::CatalogModel> {
         let now = crate::store::now();
         let enabled = self.store.data.settings.enabled_harnesses_list();
         let all = self.store.data.settings.aggregated_models();
+        let max_util = |h: Harness, model_id: Option<&str>| {
+            self.usage_for_harness_model(h, model_id)
+                .and_then(|u| {
+                    [u.five_hour.as_ref(), u.seven_day.as_ref()]
+                        .into_iter()
+                        .flatten()
+                        .filter(|l| l.resets_at.is_none_or(|r| r > now))
+                        .filter_map(|l| l.utilization)
+                        .reduce(f32::max)
+                })
+                .unwrap_or(0.0)
+        };
+        if let Some(pref) = &self.store.data.settings.auto_handoff_model
+            && pref.harness != excluded
+            && enabled.contains(&pref.harness)
+            && self.harness_probably_available(pref.harness)
+            && max_util(pref.harness, (!pref.id.is_empty()).then_some(pref.id.as_str())) < 0.95
+        {
+            let name = all
+                .iter()
+                .find(|m| m.harness == pref.harness && m.id == pref.id)
+                .map_or_else(|| pref.id.clone(), |m| m.name.clone());
+            return Some(crate::harness::CatalogModel { harness: pref.harness, id: pref.id.clone(), name });
+        }
         let mut candidates: Vec<(f32, crate::harness::CatalogModel)> = enabled
             .into_iter()
             .filter(|&h| h != excluded && self.harness_probably_available(h))
@@ -278,17 +303,7 @@ impl Workspace {
                 let model = all.iter().find(|m| m.harness == h).cloned().unwrap_or_else(|| {
                     crate::harness::CatalogModel { harness: h, id: String::new(), name: h.name().into() }
                 });
-                let util = self
-                    .usage_for_harness_model(h, (!model.id.is_empty()).then_some(model.id.as_str()))
-                    .and_then(|u| {
-                        [u.five_hour.as_ref(), u.seven_day.as_ref()]
-                            .into_iter()
-                            .flatten()
-                            .filter(|l| l.resets_at.is_none_or(|r| r > now))
-                            .filter_map(|l| l.utilization)
-                            .reduce(f32::max)
-                    })
-                    .unwrap_or(0.0);
+                let util = max_util(h, (!model.id.is_empty()).then_some(model.id.as_str()));
                 (util < 0.95).then_some((util, model))
             })
             .collect();

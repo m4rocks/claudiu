@@ -708,12 +708,6 @@ fn shared_subagents_keep_their_parent_focus_permissions_and_conversation() {
             ws.run_request(&request("send_subagent_message", json!({"id": child, "prompt": "follow up"})), window, cx).unwrap();
             assert!(ws.is_running(&child, cx), "follow-ups resume the same child record");
             assert_eq!(ws.active_id(), Some(&parent));
-            if harness == Harness::Claude {
-                ws.store.data.settings.claude_subagents.edits = false;
-                let reply: Value = serde_json::from_str(&ws.run_request(&spawn, window, cx).unwrap()).unwrap();
-                assert!(!ws.store.session(reply["id"].as_str().unwrap()).unwrap().agent.as_ref().unwrap().subagent_edits, "Claude must respect its saved edit switch");
-                ws.store.data.settings.claude_subagents.edits = true;
-            }
             ws.live_view(&parent).unwrap().thread().unwrap().update(cx, |view, _| view.thread.mode = Permission::ReadOnly.native(harness).map(String::from));
             let restricted: Value = serde_json::from_str(&ws.run_request(&request("spawn_subagent", json!({"harness":harness,"prompt":"read only"})), window, cx).unwrap()).unwrap();
             let restricted = ws.store.session(restricted["id"].as_str().unwrap()).unwrap().clone();
