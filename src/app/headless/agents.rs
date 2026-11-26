@@ -1193,10 +1193,11 @@ fn a_session_answers_in_its_thread(harness: crate::harness::Harness) {
     };
     let cwd = dunce::canonicalize(work.path()).unwrap();
     ws.update(&mut cx, |ws, _| ws.store.data.settings.harness = harness);
-    cx.update_window(window, |_, window, app| ws.update(app, |ws, cx| ws.new_session(cwd.clone(), window, cx))).unwrap();
+    cx.update_window(window, |_, window, app| ws.update(app, |ws, cx| ws.new_session_with(harness, cwd.clone(), None, vec![], Starter::User, None, window, cx))).unwrap();
     draw(&mut cx);
     let id = ws.read_with(&cx, |ws, _| ws.active.clone().expect("a session is shown"));
     let thread = |ws: &Workspace| ws.live_view(&id).and_then(|v| v.thread()).cloned().expect("a thread view");
+    assert_eq!(ws.read_with(&cx, |ws, app| thread(ws).read(app).harness), harness, "the integration must launch the requested adapter");
     wait(&mut cx, "the session to open", 120, &|ws, app| !thread(ws).read(app).is_loading() || !ws.is_running(&id, app));
     assert!(ws.read_with(&cx, |ws, app| ws.is_running(&id, app)), "the harness stopped: {:?}", ws.read_with(&cx, |ws, app| thread(ws).read(app).start_error()));
     assert!(ws.read_with(&cx, |ws, _| ws.store.session(&id).and_then(|r| r.provider_session_id()).is_some()), "the session's id was kept");
