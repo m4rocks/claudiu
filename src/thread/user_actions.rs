@@ -389,26 +389,35 @@ fn restore_checkpoints_atomic(turns: Vec<(Uuid, PathBuf, String, PathBuf)>) -> R
         let patch = std::fs::read_to_string(&path).map_err(|error| error.to_string())?;
         loaded.push((id, cwd, before, patch));
     }
+    // Read every file any checkpoint touches before changing one, so a failure anywhere puts them all back.
+    let journals = loaded.iter().map(|(_, cwd, _, patch)| snapshot::Journal::capture(cwd, patch)).collect::<Result<Vec<_>, _>>()?;
     let mut restored_ids = Vec::with_capacity(loaded.len());
-    let mut applied: Vec<(PathBuf, String)> = Vec::with_capacity(loaded.len());
     for (id, cwd, before, patch) in loaded {
         if let Err(error) = snapshot::restore(&cwd, &before, &patch) {
-            rollback_applied(&applied);
+            for journal in journals.iter().rev() {
+                journal.put_back();
+            }
             return Err(error);
         }
-        applied.push((cwd, patch));
         restored_ids.push(id);
     }
     Ok(restored_ids)
 }
 
-fn rollback_applied(applied: &[(PathBuf, String)]) {
-    for (cwd, patch) in applied.iter().rev() {
-        let _ = snapshot::apply_forward(cwd, patch);
-    }
-}
-
 impl ThreadView {
+    /// After a rewind whose new session failed to start: save this (the original) conversation and its per-message
+    /// timestamps, notices and queue again, which the rewind had already cut on disk.
+    pub(crate) fn persist_after_failed_rewind(&mut self) {
+        self.persist_entries();
+        self.queue_changed();
+        if self.timestamps_loaded {
+            save_timestamps(&self.record_id, &self.user_timestamps);
+        }
+        if self.notices_loaded {
+            save_notices(&self.record_id, &self.user_notices);
+        }
+    }
+
     pub(super) fn record_user_timestamp(&mut self, row: usize, cx: &mut Context<Self>) {
         let Some(ordinal) = visible_user_ordinal(&self.thread.entries, row) else { return };
         self.user_timestamps.insert(ordinal, now_unix_secs());

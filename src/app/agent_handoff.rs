@@ -318,6 +318,9 @@ impl Workspace {
         self.live.retain(|live| live.id != id);
         if let Some(source) = pending.source.view.thread() {
             source.update(cx, |view, cx| {
+                if matches!(pending.kind, Replacement::Rewind) {
+                    view.persist_after_failed_rewind();
+                }
                 view.restore_queue_after_handoff(cx);
                 if let Some(target) = &target {
                     let composer = target.read(cx).composer_state(cx);
@@ -332,7 +335,12 @@ impl Workspace {
                     Replacement::Permission => "Permission change",
                     Replacement::Rewind => "Rewind",
                 };
-                view.fail_handoff(format!("{action} failed. The original session is still open. {error}"), cx);
+                let files = if matches!(pending.kind, Replacement::Rewind) {
+                    " Files were already restored to before that message."
+                } else {
+                    ""
+                };
+                view.fail_handoff(format!("{action} failed. The original session is still open.{files} {error}"), cx);
             });
         }
         self.live.push(pending.source);

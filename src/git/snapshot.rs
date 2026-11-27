@@ -203,46 +203,156 @@ pub fn forget_checkpoint(cwd: &Path, record: &str, id: uuid::Uuid) {
     let _ = git_with(cwd, &["update-ref", "-d", &checkpoint_ref(record, id)], None, &[]);
 }
 
-/// Split a unified `git diff` into per-file `(relative_path, file_patch)` pairs.
-fn split_file_patches(patch: &str) -> Vec<(PathBuf, String)> {
-    let mut out = Vec::new();
-    let mut current = String::new();
-    let (mut old, mut new) = (None::<String>, None::<String>);
-    let mut in_header = false;
-    let flush = |out: &mut Vec<(PathBuf, String)>, current: &mut String, old: &mut Option<String>, new: &mut Option<String>| {
-        if !current.is_empty()
-            && let Some(path) = new.take().or_else(|| old.take())
-        {
-            out.push((PathBuf::from(path), std::mem::take(current)));
-        } else {
-            current.clear();
-            *old = None;
-            *new = None;
-        }
+/// One file's part of a unified `git diff`: the paths it reads and writes (`None` for `/dev/null`) and its text.
+#[derive(Debug, PartialEq)]
+struct FilePatch {
+    old: Option<PathBuf>,
+    new: Option<PathBuf>,
+    text: String,
+}
+
+impl FilePatch {
+    /// The file a restore puts back: where the turn left it.
+    fn path(&self) -> &Path {
+        self.new.as_deref().or(self.old.as_deref()).expect("parse_file_patches keeps only patches with a path")
+    }
+}
+
+/// Read a path as git writes it in a diff header, plain or in C-style quotes, without its `prefix/` (`a/` or `b/`).
+/// Returns it with the rest of `text` after a quoted path (nothing after a plain one, which runs to the end).
+fn header_path(text: &str, prefix: char) -> Option<(String, &str)> {
+    let Some(quoted) = text.strip_prefix('"') else {
+        let path = text.strip_prefix(prefix)?.strip_prefix('/')?;
+        return Some((path.to_string(), ""));
     };
-    for line in patch.lines() {
-        if line.starts_with("diff --git ") {
-            flush(&mut out, &mut current, &mut old, &mut new);
-            in_header = true;
-        }
-        if in_header {
-            if line.starts_with("@@") {
-                in_header = false;
-            } else if let Some(path) = line.strip_prefix("--- a/") {
-                old = Some(path.trim_end_matches('\t').to_string());
-            } else if let Some(path) = line.strip_prefix("+++ b/") {
-                new = Some(path.trim_end_matches('\t').to_string());
-            } else if let Some(paths) = line.strip_prefix("diff --git a/")
-                && let Some((path, _)) = paths.rsplit_once(" b/")
-            {
-                old = Some(path.to_string());
+    let bytes = quoted.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    loop {
+        match *bytes.get(i)? {
+            b'"' => break,
+            b'\\' => {
+                let e = *bytes.get(i + 1)?;
+                i += 2;
+                match e {
+                    b'n' => out.push(b'\n'),
+                    b't' => out.push(b'\t'),
+                    b'r' => out.push(b'\r'),
+                    b'a' => out.push(7),
+                    b'b' => out.push(8),
+                    b'f' => out.push(12),
+                    b'v' => out.push(11),
+                    b'0'..=b'3' => {
+                        let (d2, d3) = (*bytes.get(i)?, *bytes.get(i + 1)?);
+                        if !(b'0'..=b'7').contains(&d2) || !(b'0'..=b'7').contains(&d3) {
+                            return None;
+                        }
+                        i += 2;
+                        out.push(((e - b'0') << 6) | ((d2 - b'0') << 3) | (d3 - b'0'));
+                    }
+                    other => out.push(other),
+                }
+            }
+            other => {
+                out.push(other);
+                i += 1;
             }
         }
-        current.push_str(line);
-        current.push('\n');
     }
-    flush(&mut out, &mut current, &mut old, &mut new);
-    out
+    let path = String::from_utf8(out).ok()?;
+    let path = path.strip_prefix(prefix)?.strip_prefix('/')?.to_string();
+    Some((path, &quoted[i + 1..]))
+}
+
+/// The path in the value of a `---` or `+++` line: `None` for `/dev/null`.
+fn side_path(value: &str, prefix: char) -> Option<Option<PathBuf>> {
+    let value = value.trim_end_matches('\t');
+    if value == "/dev/null" {
+        return Some(None);
+    }
+    header_path(value, prefix).map(|(path, _)| Some(PathBuf::from(path)))
+}
+
+/// Split a unified `git diff` into one patch per file. Fails when a file's part names no path it can read, so a
+/// restore never touches the wrong file or skips one.
+fn parse_file_patches(patch: &str) -> Result<Vec<FilePatch>, String> {
+    let mut out: Vec<FilePatch> = Vec::new();
+    let mut in_header = false;
+    for line in patch.lines() {
+        if let Some(rest) = line.strip_prefix("diff --git ") {
+            in_header = true;
+            // `diff --git a/x b/x` names the file even without `---`/`+++` lines (mode changes, binary files).
+            let (old, new) = if rest.starts_with('"') {
+                match header_path(rest, 'a') {
+                    Some((old, after)) => (Some(old), header_path(after.trim_start(), 'b').map(|(new, _)| new)),
+                    None => (None, None),
+                }
+            } else {
+                match rest.strip_prefix("a/").and_then(|paths| paths.rsplit_once(" b/")) {
+                    Some((old, new)) => (Some(old.to_string()), Some(new.to_string())),
+                    None => (None, None),
+                }
+            };
+            out.push(FilePatch { old: old.map(PathBuf::from), new: new.map(PathBuf::from), text: String::new() });
+        } else if in_header && let Some(file) = out.last_mut() {
+            if line.starts_with("@@") {
+                in_header = false;
+            } else if let Some(value) = line.strip_prefix("--- ") {
+                file.old = side_path(value, 'a').ok_or_else(|| format!("Cannot read the path in `{line}`."))?;
+            } else if let Some(value) = line.strip_prefix("+++ ") {
+                file.new = side_path(value, 'b').ok_or_else(|| format!("Cannot read the path in `{line}`."))?;
+            }
+        }
+        if let Some(file) = out.last_mut() {
+            file.text.push_str(line);
+            file.text.push('\n');
+        }
+    }
+    if let Some(file) = out.iter().find(|f| f.old.is_none() && f.new.is_none()) {
+        return Err(format!("Cannot tell which file this part of the checkpoint changes: {}", file.text.lines().next().unwrap_or_default()));
+    }
+    Ok(out)
+}
+
+/// The working-tree files some turn patches touch, as they were before a restore, so a failed restore can put every
+/// one of them back (contents, or absence) instead of leaving some restored and some not.
+pub struct Journal(Vec<(PathBuf, Option<Vec<u8>>)>);
+
+impl Journal {
+    /// Read every file `patch` (a turn's diff, relative to the repository of `cwd`) names, before anything changes.
+    pub fn capture(cwd: &Path, patch: &str) -> Result<Journal, String> {
+        let root = root(cwd)?;
+        let mut files = Vec::new();
+        for file in parse_file_patches(patch)? {
+            for path in [file.old, file.new].into_iter().flatten() {
+                let full = root.join(&path);
+                let bytes = match std::fs::read(&full) {
+                    Ok(bytes) => Some(bytes),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                    Err(error) => return Err(format!("{}: {error}", path.display())),
+                };
+                files.push((full, bytes));
+            }
+        }
+        Ok(Journal(files))
+    }
+
+    /// Put every file back as it was captured. Best effort: a file that cannot be written does not stop the rest.
+    pub fn put_back(&self) {
+        for (path, bytes) in &self.0 {
+            match bytes {
+                Some(bytes) => {
+                    if let Some(parent) = path.parent() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                    let _ = std::fs::write(path, bytes);
+                }
+                None => {
+                    let _ = std::fs::remove_file(path);
+                }
+            }
+        }
+    }
 }
 
 /// Restore a single working-tree file directly from the `before` snapshot commit using a temporary index so the
@@ -294,17 +404,17 @@ pub fn restore(cwd: &Path, before: &str, patch: &str) -> Result<Vec<PathBuf>, St
     if git_with(root, &["cat-file", "-e", &rev], None, &[]).is_err() {
         return Err(apply_err);
     }
-    let file_patches = split_file_patches(patch);
+    let file_patches = parse_file_patches(patch)?;
     if file_patches.is_empty() {
         return Err(apply_err);
     }
     let mut fallback_files = Vec::new();
-    for (path, file_patch) in file_patches {
-        if git_with(root, &["apply", "--reverse", "--whitespace=nowarn", "-"], Some(&file_patch), &[]).is_ok() {
+    for file in file_patches {
+        if git_with(root, &["apply", "--reverse", "--whitespace=nowarn", "-"], Some(&file.text), &[]).is_ok() {
             continue;
         }
-        restore_file_from_snapshot(root, before, &path)?;
-        fallback_files.push(path);
+        restore_file_from_snapshot(root, before, file.path())?;
+        fallback_files.push(file.path().to_path_buf());
     }
     Ok(fallback_files)
 }
@@ -313,11 +423,6 @@ pub fn restore(cwd: &Path, before: &str, patch: &str) -> Result<Vec<PathBuf>, St
 /// hunk was read.
 pub fn revert(cwd: &Path, hunk: &Hunk) -> Result<(), String> {
     git_with(&root(cwd)?, &["apply", "--reverse", "--whitespace=nowarn", "-"], Some(&hunk.patch), &[]).map(|_| ())
-}
-
-/// Re-apply a previously reversed turn patch forward (used to roll back a partial multi-turn restore).
-pub fn apply_forward(cwd: &Path, patch: &str) -> Result<(), String> {
-    git_with(&root(cwd)?, &["apply", "--whitespace=nowarn", "-"], Some(patch), &[]).map(|_| ())
 }
 
 #[cfg(test)]
@@ -482,5 +587,44 @@ mod tests {
         std::fs::write(dir.path().join("a.txt"), "three\n").unwrap();
         assert!(revert(dir.path(), &hunk).is_err());
         assert_eq!(std::fs::read_to_string(dir.path().join("a.txt")).unwrap(), "three\n");
+    }
+
+    #[test]
+    fn file_patches_keep_each_files_own_paths_including_quoted_and_deleted_ones() {
+        let patch = "diff --git a/one.txt b/one.txt\n--- a/one.txt\n+++ b/one.txt\n@@ -1 +1 @@\n-a\n+b\n\
+diff --git \"a/say \\\"hi\\\".txt\" \"b/say \\\"hi\\\".txt\"\n--- \"a/say \\\"hi\\\".txt\"\n+++ \"b/say \\\"hi\\\".txt\"\n@@ -1 +1 @@\n-a\n+b\n\
+diff --git a/gone.txt b/gone.txt\ndeleted file mode 100644\n--- a/gone.txt\n+++ /dev/null\n@@ -1 +0,0 @@\n-a\n\
+diff --git a/bin.dat b/bin.dat\nBinary files a/bin.dat and b/bin.dat differ\n";
+        let files = parse_file_patches(patch).unwrap();
+        let paths: Vec<_> = files.iter().map(|f| (f.old.clone(), f.new.clone())).collect();
+        let p = |s: &str| Some(PathBuf::from(s));
+        assert_eq!(paths, [
+            (p("one.txt"), p("one.txt")),
+            (p("say \"hi\".txt"), p("say \"hi\".txt")),
+            (p("gone.txt"), None),
+            (p("bin.dat"), p("bin.dat")),
+        ]);
+        assert_eq!(files[2].path(), Path::new("gone.txt"));
+        assert!(files[1].text.starts_with("diff --git \"a/say") && files[1].text.ends_with("+b\n"));
+    }
+
+    #[test]
+    fn a_file_patch_without_a_readable_path_fails_before_anything_changes() {
+        assert!(parse_file_patches("diff --git weird\n--- what\n+++ ever\n@@ -1 +1 @@\n-a\n+b\n").is_err());
+    }
+
+    #[test]
+    fn the_journal_puts_files_back_and_removes_ones_that_did_not_exist() {
+        let dir = repo();
+        std::fs::write(dir.path().join("kept.txt"), "before\n").unwrap();
+        let patch = "diff --git a/kept.txt b/kept.txt\n--- a/kept.txt\n+++ b/kept.txt\n@@ -1 +1 @@\n-x\n+before\n\
+diff --git a/sub/new.txt b/sub/new.txt\nnew file mode 100644\n--- /dev/null\n+++ b/sub/new.txt\n@@ -0,0 +1 @@\n+n\n";
+        let journal = Journal::capture(dir.path(), patch).unwrap();
+        std::fs::write(dir.path().join("kept.txt"), "changed\n").unwrap();
+        std::fs::create_dir_all(dir.path().join("sub")).unwrap();
+        std::fs::write(dir.path().join("sub/new.txt"), "n\n").unwrap();
+        journal.put_back();
+        assert_eq!(std::fs::read_to_string(dir.path().join("kept.txt")).unwrap(), "before\n");
+        assert!(!dir.path().join("sub/new.txt").exists());
     }
 }

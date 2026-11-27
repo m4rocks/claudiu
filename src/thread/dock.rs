@@ -126,11 +126,20 @@ impl ThreadView {
         }
     }
 
-    /// The tray that shows: the one the user opened, else the queue while it holds more than when it was last folded.
+    /// The tray that shows: the one the user opened while it has something to list, else the queue while it holds
+    /// more than when it was last folded.
     pub(super) fn open_tray(&self, queued: usize) -> Option<Tray> {
         let folded = self.queue_folded.get().min(queued);
         self.queue_folded.set(folded);
-        self.tray.or((queued > folded).then_some(Tray::Queue))
+        self.tray.filter(|tray| self.tray_has_items(*tray)).or((queued > folded).then_some(Tray::Queue))
+    }
+
+    fn tray_has_items(&self, tray: Tray) -> bool {
+        match tray {
+            Tray::Plan => self.plan_shown(),
+            Tray::Background => !self.background_items().is_empty(),
+            Tray::Queue => self.queue_count() > 0,
+        }
     }
 
     /// Ctrl+T and the chips: open `tray`, or fold it when it is the one showing.
@@ -159,11 +168,7 @@ impl ThreadView {
         let background = self.background_items();
         let queued = self.queue_count();
         let plan = self.plan_shown();
-        let open = self.open_tray(queued).filter(|tray| match tray {
-            Tray::Plan => plan,
-            Tray::Background => !background.is_empty(),
-            Tray::Queue => queued > 0,
-        });
+        let open = self.open_tray(queued);
         let mut parts = Vec::new();
         match open {
             Some(Tray::Plan) => parts.push(self.render_plan_tray().into_any_element()),

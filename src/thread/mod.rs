@@ -2827,7 +2827,7 @@ impl ThreadView {
 
     pub(crate) fn can_move_workspace(&self) -> bool {
         self.phase == Phase::Ready && !self.has_active_turn() && !self.is_waiting() && !self.has_background_work()
-            && !self.permission_changing && !self.compaction.running
+            && !self.permission_changing && !self.compaction.running && !self.retrying_turn && !self.restoring_checkpoint()
     }
 
     pub(crate) fn permission_for_relaunch(&self) -> Option<Permission> {
@@ -5837,8 +5837,11 @@ mod tests {
             assert_eq!(shown(v), None, "folding keeps it folded");
             v.queue.push_back(super::Queued::new("second".into(), true));
             assert_eq!(shown(v), Some(Tray::Queue), "a new message opens it again");
+            v.thread.plan = vec![crate::harness::thread::PlanItem { text: "Step".into(), status: "pending".into() }];
             v.toggle_tray(Tray::Plan);
             assert_eq!(shown(v), Some(Tray::Plan), "one tray at a time");
+            v.toggle_tray(Tray::Background);
+            assert_eq!(shown(v), Some(Tray::Queue), "a tray with nothing to list gives way to the queue");
         });
     }
 
