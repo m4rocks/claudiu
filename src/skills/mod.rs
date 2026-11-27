@@ -316,6 +316,17 @@ fn subagent_enabled(harness: Harness, subagents: &CustomSubagents) -> bool {
     harness.agent().is_some_and(|agent| subagents.get(agent).on)
 }
 
+/// Marker file placed inside m4code-managed copied skill directories (used for harnesses whose discovery skips
+/// symlinks/junctions, such as Antigravity). Stores the canonical `store_root` path so user-owned folders are never
+/// mistaken for m4code-managed copies.
+const MANAGED_COPY_MARKER: &str = ".m4code-skill-managed";
+
+/// Whether `harness` discovers skills with a non-symlink-following directory scan (e.g. Go's `os.ReadDir` +
+/// `entry.IsDir()`), requiring real copied directories rather than symlinks/junctions.
+fn uses_copied_skills(harness: Harness) -> bool {
+    harness == Harness::Antigravity
+}
+
 /// Whether `link` is a symlink/junction created by m4code that points inside `store_root`.
 /// Also matches dangling links whose target path lies under `store_root`, so stale links are cleaned up.
 fn is_managed_link(link: &Path, store_root: &Path) -> bool {
@@ -336,6 +347,132 @@ fn is_managed_link(link: &Path, store_root: &Path) -> bool {
         return is_same_or_under(&r, &s);
     }
     false
+}
+
+/// Whether `dir` is a real directory copied and managed by m4code from `store_root`.
+fn is_managed_copy(dir: &Path, store_root: &Path) -> bool {
+    let Ok(meta) = fs::symlink_metadata(dir) else { return false };
+    if !meta.file_type().is_dir() {
+        return false;
+    }
+    let Ok(recorded) = fs::read_to_string(dir.join(MANAGED_COPY_MARKER)) else { return false };
+    let recorded = PathBuf::from(recorded.trim());
+    if is_same_or_under(&recorded, store_root) && is_same_or_under(store_root, &recorded) {
+        return true;
+    }
+    if let (Ok(r), Ok(s)) = (fs::canonicalize(&recorded), fs::canonicalize(store_root)) {
+        return r == s;
+    }
+    false
+}
+
+fn is_managed_entry(path: &Path, store_root: &Path) -> bool {
+    is_managed_link(path, store_root) || is_managed_copy(path, store_root)
+}
+
+fn remove_managed_entry(path: &Path, store_root: &Path) -> io::Result<()> {
+    if is_managed_link(path, store_root) {
+        remove_dir_link(path)
+    } else if is_managed_copy(path, store_root) {
+        fs::remove_dir_all(path)
+    } else {
+        Ok(())
+    }
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) -> io::Result<()> {
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if name == ".git" || name == MANAGED_COPY_MARKER {
+            continue;
+        }
+        let from = entry.path();
+        let to = dst.join(&name);
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            copy_dir_recursive(&from, &to)?;
+        } else if file_type.is_file() {
+            fs::copy(&from, &to)?;
+        }
+    }
+    Ok(())
+}
+
+fn write_managed_copy(src: &Path, dst: &Path, store_root: &Path) -> io::Result<()> {
+    if dst.exists() {
+        fs::remove_dir_all(dst)?;
+    }
+    copy_dir_recursive(src, dst)?;
+    fs::write(dst.join(MANAGED_COPY_MARKER), store_root.to_string_lossy().as_bytes())
+}
+
+/// Reconcile `target_dir` using real copied directories (migrating any legacy managed symlinks/junctions).
+/// User-owned folders without `MANAGED_COPY_MARKER` are never touched.
+pub fn sync_dir_copied(store_root: &Path, target_dir: &Path, enabled: &[String]) -> io::Result<()> {
+    let mut last_err = None;
+    if target_dir.is_dir() {
+        for entry in fs::read_dir(target_dir)?.flatten() {
+            let path = entry.path();
+            if is_managed_link(&path, store_root) {
+                // Migrate legacy symlinks/junctions so they are replaced with real copies if enabled.
+                if let Err(e) = remove_dir_link(&path) {
+                    last_err = Some(e);
+                }
+                continue;
+            }
+            if !is_managed_copy(&path, store_root) {
+                continue;
+            }
+            let name = entry.file_name();
+            let keep = name.to_str().is_some_and(|n| {
+                enabled.iter().any(|e| e == n) && store_root.join(n).join("SKILL.md").is_file()
+            });
+            if !keep && let Err(e) = fs::remove_dir_all(&path) {
+                last_err = Some(e);
+            }
+        }
+    }
+    if enabled.is_empty() {
+        return match last_err {
+            Some(e) => Err(e),
+            None => Ok(()),
+        };
+    }
+    for name in enabled {
+        if !valid_skill_name(name) {
+            continue;
+        }
+        let src = store_root.join(name);
+        if !src.join("SKILL.md").is_file() {
+            continue;
+        }
+        if let Err(e) = fs::create_dir_all(target_dir) {
+            last_err = Some(e);
+            continue;
+        }
+        let dst = target_dir.join(name);
+        if fs::symlink_metadata(&dst).is_ok() && !is_managed_copy(&dst, store_root) {
+            // User-owned entry; never clobber.
+            continue;
+        }
+        if let Err(e) = write_managed_copy(&src, &dst, store_root) {
+            last_err = Some(e);
+        }
+    }
+    match last_err {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
+}
+
+fn sync_dir_for_harness(harness: Harness, store_root: &Path, target_dir: &Path, enabled: &[String]) -> io::Result<()> {
+    if uses_copied_skills(harness) {
+        sync_dir_copied(store_root, target_dir, enabled)
+    } else {
+        sync_dir(store_root, target_dir, enabled)
+    }
 }
 
 /// Reconcile `target_dir` so its m4code-managed symlinks match `enabled` exactly.
@@ -470,7 +607,7 @@ pub fn sync_all(store_root: &Path, home: &Path, active: &[Harness], config: &Ski
     for harness in Harness::registered() {
         let dir = global_skills_dir(harness, home);
         let wanted = if active.contains(&harness) { config.global_enabled.as_slice() } else { &[] };
-        if let Err(e) = sync_dir(store_root, &dir, wanted) {
+        if let Err(e) = sync_dir_for_harness(harness, store_root, &dir, wanted) {
             errors.push(format!("{} global skills: {e}", harness.name()));
         }
     }
@@ -490,7 +627,7 @@ pub fn sync_all(store_root: &Path, home: &Path, active: &[Harness], config: &Ski
                 .flatten()
                 .filter_map(|entry| {
                     let path = entry.path();
-                    if is_managed_link(&path, store_root) || !path.join("SKILL.md").is_file() {
+                    if is_managed_entry(&path, store_root) || !path.join("SKILL.md").is_file() {
                         return None;
                     }
                     entry.file_name().to_str().filter(|n| valid_skill_name(n)).map(str::to_string)
@@ -502,7 +639,7 @@ pub fn sync_all(store_root: &Path, home: &Path, active: &[Harness], config: &Ski
         for harness in Harness::registered() {
             let dir = project_skills_dir(harness, project_path);
             let wanted = if active.contains(&harness) { project_wanted } else { &[] };
-            if let Err(e) = sync_dir(store_root, &dir, wanted) {
+            if let Err(e) = sync_dir_for_harness(harness, store_root, &dir, wanted) {
                 errors.push(format!("{} skills in {}: {e}", harness.name(), project_path.display()));
             }
             if dir != shared_root {
@@ -519,7 +656,7 @@ pub fn sync_all(store_root: &Path, home: &Path, active: &[Harness], config: &Ski
     errors
 }
 
-/// Skills the repository at `project` ships in any harness's project skills folder. m4code's own symlinks into
+/// Skills the repository at `project` ships in any harness's project skills folder. m4code's own symlinks/copies from
 /// `store_root` or `.agents/skills` are left out so each skill appears once.
 pub fn repo_skills(store_root: &Path, project: &Path) -> Vec<RepoSkill> {
     let shared_root = project.join(".agents/skills");
@@ -537,7 +674,7 @@ pub fn repo_skills(store_root: &Path, project: &Path) -> Vec<RepoSkill> {
         let folder = dir.strip_prefix(project).unwrap_or(&dir).to_path_buf();
         for entry in entries.flatten() {
             let path = entry.path();
-            if is_managed_link(&path, store_root) || (dir != shared_root && is_managed_link(&path, &shared_root)) {
+            if is_managed_entry(&path, store_root) || (dir != shared_root && is_managed_link(&path, &shared_root)) {
                 continue;
             }
             let Ok(skill_md) = fs::read_to_string(path.join("SKILL.md")) else { continue };
@@ -557,22 +694,22 @@ pub fn repo_skills(store_root: &Path, project: &Path) -> Vec<RepoSkill> {
     found
 }
 
-/// Remove every m4code-managed symlink for `name` (globally and in `projects`) and delete its folder in `store_root`.
+/// Remove every m4code-managed link or copy for `name` (globally and in `projects`) and delete its folder in `store_root`.
 pub fn uninstall(store_root: &Path, home: &Path, name: &str, projects: &[PathBuf]) -> io::Result<()> {
     if !valid_skill_name(name) {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid skill name"));
     }
     for harness in Harness::registered() {
-        let link = global_skills_dir(harness, home).join(name);
-        if is_managed_link(&link, store_root) {
-            let _ = remove_dir_link(&link);
+        let entry = global_skills_dir(harness, home).join(name);
+        if is_managed_entry(&entry, store_root) {
+            let _ = remove_managed_entry(&entry, store_root);
         }
     }
     for project in projects {
         for harness in Harness::registered() {
-            let link = project_skills_dir(harness, project).join(name);
-            if is_managed_link(&link, store_root) {
-                let _ = remove_dir_link(&link);
+            let entry = project_skills_dir(harness, project).join(name);
+            if is_managed_entry(&entry, store_root) {
+                let _ = remove_managed_entry(&entry, store_root);
             }
         }
     }
@@ -720,6 +857,55 @@ mod tests {
         assert_eq!(config.catalog_status(&entry), CatalogStatus::NameInUse("alice/skills"));
         assert_eq!(config.catalog_status(&registry::CatalogEntry { source: "Alice/Skills".into(), ..entry.clone() }), CatalogStatus::Installed);
         assert_eq!(config.catalog_status(&registry::CatalogEntry { name: "audit".into(), ..entry }), CatalogStatus::Available);
+    }
+
+    #[test]
+    fn antigravity_uses_real_copied_dirs_migrates_legacy_links_and_keeps_user_folders() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = tmp.path().join("store");
+        let home = tmp.path().join("home");
+        let project = tmp.path().join("proj");
+        fs::create_dir_all(&project).unwrap();
+        write_skill(&store, "autonomy");
+
+        // Pre-populate a legacy junction/symlink in Antigravity's global skills folder.
+        let agy_global = global_skills_dir(Harness::Antigravity, &home);
+        fs::create_dir_all(&agy_global).unwrap();
+        let legacy_link = agy_global.join("autonomy");
+        link_dir(&store.join("autonomy"), &legacy_link).unwrap();
+        assert!(fs::symlink_metadata(&legacy_link).unwrap().file_type().is_symlink());
+
+        // Pre-populate a user-owned directory that must never be clobbered.
+        let user_dir = agy_global.join("custom");
+        fs::create_dir_all(&user_dir).unwrap();
+        fs::write(user_dir.join("SKILL.md"), "user-owned").unwrap();
+
+        let mut cfg = SkillsConfig::default();
+        cfg.set_global("autonomy", true);
+        cfg.set_project("p1", "autonomy", true);
+        let errs = sync_all(&store, &home, &[Harness::Antigravity], &cfg, &[("p1".into(), project.clone())]);
+        assert!(errs.is_empty(), "{errs:?}");
+
+        // Legacy link was migrated to a real directory (not a symlink/junction) with the managed marker.
+        let global_meta = fs::symlink_metadata(&legacy_link).unwrap();
+        assert!(global_meta.file_type().is_dir() && !global_meta.file_type().is_symlink());
+        assert!(legacy_link.join("SKILL.md").is_file());
+        assert!(is_managed_copy(&legacy_link, &store));
+
+        // Project copy in .agents/skills is also a real directory and excluded from repo_skills().
+        let proj_copy = project_skills_dir(Harness::Antigravity, &project).join("autonomy");
+        let proj_meta = fs::symlink_metadata(&proj_copy).unwrap();
+        assert!(proj_meta.file_type().is_dir() && !proj_meta.file_type().is_symlink());
+        assert!(repo_skills(&store, &project).is_empty());
+
+        // Updating the canonical skill refreshes the managed copy on next sync.
+        fs::write(store.join("autonomy").join("SKILL.md"), "---\nname: autonomy\ndescription: Updated\n---\n").unwrap();
+        let errs = sync_all(&store, &home, &[Harness::Antigravity], &cfg, &[("p1".into(), project.clone())]);
+        assert!(errs.is_empty(), "{errs:?}");
+        assert!(fs::read_to_string(legacy_link.join("SKILL.md")).unwrap().contains("Updated"));
+
+        // User-owned directory stays untouched.
+        assert_eq!(fs::read_to_string(user_dir.join("SKILL.md")).unwrap(), "user-owned");
     }
 
     #[test]
