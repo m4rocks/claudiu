@@ -214,7 +214,6 @@ impl ThreadView {
             })
             .id("comment")
             .icon(Some(IconName::MessageSquare))
-            .shortcut(Some(crate::panels::widgets::shortcut("Shift+M")))
             .disabled(!has_selection),
             ui::menu::Entry::new("Paste", |v: &mut Self, window, cx| {
                 v.chat_menu = None;
@@ -423,7 +422,7 @@ impl ThreadView {
                 if run.is_some_and(|r| r.len() > 1) { indent_run_step(el) } else { el }
             }
             Entry::User(text) => {
-                let (attached_notes, body_text) = super::user_actions::split_attached_system_notes(text);
+                let body_text = text.as_str();
                 let md_view = (!body_text.is_empty()).then(|| {
                     if self.user_md_len.get(&ix) == Some(&body_text.len())
                         && let Some(state) = self.markdown.get(&ix)
@@ -446,7 +445,6 @@ impl ThreadView {
                     .bg(theme().row_active)
                     .border_1()
                     .border_color(theme().panel_border)
-                    .children(attached_notes.iter().map(super::user_actions::render_attached_system_note))
                     .children(md_view.map(|view| div().w_full().min_w_0().child(view)));
                 div()
                     .w_full()

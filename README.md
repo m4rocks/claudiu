@@ -42,6 +42,7 @@ When upgrading from a version with multiple Claude accounts, resumed sessions us
 ### Workspace, Git, and editor
 
 - **Comments**: Select text in chat and use the comment icon, choose **Add comment** from the context menu, or press Cmd/Ctrl+Shift+M to add context to your next message. The same icon opens comments on lines in Review changes and in the editor.
+- **Quoted context**: Attached file and image paths, Ask question context, and retry instructions appear as ordinary Markdown quote blocks before your message, with a visible left bar.
 
 - **Branches and worktrees**: Create a branch or spin up a new worktree (from `main` or the current checkout) in one click from the branch chip, inspect or remove external worktrees (keeping their branches), or move a session between worktrees. m4code watches git metadata for live worktree changes, follows Claude Code's native `EnterWorktree`/`ExitWorktree` moves at turn end, returns a session to `main` if its worktree is deleted externally, and offers a one-click switch when an agent edits files in another worktree. The editor and shell follow once the replacement session is ready. If it fails to open, the original session stays in its current checkout. When a provider binds a native session to its old checkout, m4code carries the conversation forward into a fresh native session.
 - **Welcome actions**: Open the selected project in the editor or on GitHub, pull changes, or use **Commit & Push** before starting a session.

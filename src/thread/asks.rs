@@ -116,8 +116,7 @@ impl ThreadView {
         cx: &mut Context<Self>,
     ) {
         if let Some(answer) = answer {
-            let quoted = title.lines().map(|line| format!("> {line}")).collect::<Vec<_>>().join("\n");
-            replies.push(format!("{quoted}\n\n{answer}"));
+            replies.push(crate::harness::thread::prepend_quote(&title, &answer));
         }
         if let Some(next) = remaining.pop_front() {
             self.asks.pending.push_front(question_from_async(next, remaining, replies));

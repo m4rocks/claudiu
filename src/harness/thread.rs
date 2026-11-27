@@ -6,6 +6,12 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// Prepend generated context as ordinary Markdown, keeping the user's answer outside the quote.
+pub fn prepend_quote(context: &str, text: &str) -> String {
+    let quoted = context.trim_end().lines().map(|line| format!("> {line}")).collect::<Vec<_>>().join("\n");
+    if text.is_empty() { quoted } else { format!("{quoted}\n\n{text}") }
+}
+
 /// One block of the conversation, in the order it arrived.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Entry {
@@ -687,6 +693,12 @@ pub use persistence::{save_entries, clear_entries, load_entries, flush_entries, 
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn context_keeps_all_lines_inside_the_quote_and_answer_outside_it() {
+        assert_eq!(prepend_quote("Which target?\n\n- Windows\n- Linux\n", "Windows"),
+            "> Which target?\n> \n> - Windows\n> - Linux\n\nWindows");
+    }
 
     fn thread(updates: &[Value]) -> Thread {
         let mut t = Thread::default();

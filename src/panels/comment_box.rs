@@ -34,10 +34,9 @@ pub fn comment_trigger(id: impl Into<gpui::SharedString>, shortcut_label: bool) 
 
 /// Floating pill button shown next to selected chat text so "Add comment" is easy to spot and click.
 pub fn comment_selection_trigger(id: impl Into<gpui::SharedString>) -> Button {
-    let keys = shortcut(COMMENT_SHORTCUT);
     focusable(id.into())
         .accessibility_label("Add comment")
-        .tooltip(crate::panels::ui::tooltip::tooltip(format!("Add comment ({keys})")))
+        .tooltip(crate::panels::ui::tooltip::tooltip("Add comment"))
         .flex()
         .items_center()
         .gap(px(6.0))
@@ -55,7 +54,6 @@ pub fn comment_selection_trigger(id: impl Into<gpui::SharedString>) -> Button {
         .text_color(theme().foreground)
         .child(icon(COMMENT_ICON, 13.0))
         .child("Add comment")
-        .child(kbd(keys))
 }
 
 /// A new, focused input for a comment on what `on` names, such as `line 12`.

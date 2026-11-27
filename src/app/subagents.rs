@@ -198,7 +198,7 @@ impl Workspace {
                 let parent_read_only = self.live_view(&parent.id).and_then(|view| view.thread()).is_some_and(|view| {
                     view.read(cx).permission() == Some(crate::harness::permission::Permission::ReadOnly)
                 });
-                let edits = !parent_read_only
+                let edits = access.edits && !parent_read_only
                     && parent.agent.as_ref().is_none_or(|m| m.parent_session.is_none() || m.subagent_edits);
                 let prompt = message(req)?;
                 let prefix = format!("{}:", harness.key());

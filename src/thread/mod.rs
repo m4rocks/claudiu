@@ -2696,8 +2696,7 @@ impl ThreadView {
     }
 
     fn queue_quoted_answer(&mut self, title: &str, answer: &str, cx: &mut Context<Self>) {
-        let quoted = title.lines().map(|line| format!("> {line}")).collect::<Vec<_>>().join("\n");
-        let mut item = Queued::new(format!("{quoted}\n\n{answer}"), true);
+        let mut item = Queued::new(crate::harness::thread::prepend_quote(title, answer), true);
         item.ahead = true;
         if self.native_steering() && self.can_steer(&item.text, crate::store::FollowUp::Steer) {
             self.steer(item, cx);
@@ -3894,6 +3893,25 @@ fn str_of(value: &Value, key: &str) -> String {
 
 #[cfg(all(test, feature = "screenshots"))]
 impl ThreadView {
+    pub(crate) fn screenshot_quoted_context(&mut self, menu: bool, cx: &mut Context<Self>) {
+        use crate::harness::thread::prepend_quote;
+        self.working = false;
+        self.thread.entries = vec![
+            Entry::User(prepend_quote("Attached local files (open these paths to inspect them):\n- \"C:/demo/screenshot.png\"", "Check this screenshot.")),
+            Entry::Agent("Quoted context uses the same Markdown as the conversation.\n\n> A regular quote, with **bold text** and `inline code`.".into()),
+            Entry::User(prepend_quote("Which part should I check?", "The chat view.")),
+            Entry::User(prepend_quote(user_actions::RETRY_RESTORED_LATEST_PREFIX, "Check this screenshot again.")),
+        ];
+        let at = gpui::point(px(630.0), px(290.0));
+        if menu {
+            self.chat_menu = Some(ChatMenu { at, quote: "> Quoted context".into(), anchor: at, return_focus: None });
+        } else {
+            self.comment_anchor = Some((at, "> Quoted context".into()));
+        }
+        self.remeasure(0);
+        cx.notify();
+    }
+
     pub(crate) fn screenshot_login_failure(&mut self, cx: &mut Context<Self>) {
         self.working = false;
         self.needs_login(cx);
@@ -4108,7 +4126,7 @@ mod tests {
             assert!(!v.attachments.has_files());
             let message = &v.queue.front().unwrap().text;
             let paths = message.lines().skip(1).map(|line| {
-                serde_json::from_str::<std::path::PathBuf>(line.strip_prefix("- ").unwrap()).unwrap()
+                serde_json::from_str::<std::path::PathBuf>(line.strip_prefix("> - ").unwrap()).unwrap()
             }).collect::<Vec<_>>();
             assert_eq!(paths.len(), 4);
             assert_eq!(&paths[..3], &[picked_path, path, dropped_path]);
@@ -4619,9 +4637,16 @@ mod tests {
             assert_eq!(v.pending_effort.as_deref(), Some("high"));
             assert_eq!(v.thread.mode.as_deref(), Some("plan"));
             let front = v.queue.front().expect("retry should be pushed to front of queue");
-            assert_eq!(front.text.as_str(), "Refactor the parser");
+            assert_eq!(front.text.as_str(), "> Please retry this request with higher thinking:\n\nRefactor the parser");
             assert_eq!(front.notice, Some(super::user_actions::UserNotice::ResentHigherThinking { effort: "High".into() }));
         });
+        cx.update(|window, app| view.update(app, |v, cx| {
+            v.queue.clear();
+            v.thread.entries[0] = Entry::User("/review".into());
+            v.thread.config = vec![live_thought_option("medium")];
+            v.request_retry_turn(0, window, cx);
+            assert_eq!(v.queue.front().unwrap().text, "/review", "a retry must preserve native slash command dispatch");
+        }));
     }
 
     #[gpui::test]

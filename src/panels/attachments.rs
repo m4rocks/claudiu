@@ -127,13 +127,7 @@ impl Attachments {
         if self.files.is_empty() {
             return Ok(text.to_owned());
         }
-        let mut message = String::new();
-        // Start ordinary messages with the user's text so Home can use it as the session title.
-        let text_first = !text.is_empty() && !text.starts_with('/');
-        if text_first {
-            let _ = write!(message, "{text}\n\n");
-        }
-        message.push_str(ATTACHED_FILES_HEADER);
+        let mut message = String::from(ATTACHED_FILES_HEADER);
         for file in &self.files {
             if let Some(image) = &file.pasted {
                 std::fs::create_dir_all(file.path.parent().expect("attachment directory"))?;
@@ -147,11 +141,7 @@ impl Attachments {
             let path = serde_json::to_string(&file.path.to_string_lossy())?;
             let _ = writeln!(message, "- {path}");
         }
-        if !text_first && !text.is_empty() {
-            message.push('\n');
-            message.push_str(text);
-        }
-        Ok(message)
+        Ok(crate::harness::thread::prepend_quote(&message, text))
     }
 
     pub fn render<V: 'static>(
@@ -334,4 +324,28 @@ pub fn button<V: 'static>(
             })
             .detach();
         }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn attachments_prepend_quoted_paths_to_text_and_slash_commands() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("screen shot.png");
+        std::fs::write(&file, "image").unwrap();
+        let mut attachments = Attachments::default();
+        attachments.add_paths(std::slice::from_ref(&file));
+        let quoted = format!("> Attached local files (open these paths to inspect them):\n> - {}", serde_json::to_string(&file.to_string_lossy()).unwrap());
+        for text in ["Inspect this image", "/review", ""] {
+            let message = attachments.message(text).unwrap();
+            assert!(message.starts_with(&quoted));
+            if text.is_empty() {
+                assert_eq!(message, quoted);
+            } else {
+                assert_eq!(message, format!("{quoted}\n\n{text}"));
+            }
+        }
+    }
 }

@@ -75,7 +75,7 @@ strip = true
 
 [target."cfg(windows)".dependencies]
 junction = "2.1.0"
-windows-sys = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging", "Win32_Foundation", "Win32_Security", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_System_Registry", "Win32_System_Threading"] }
+windows-sys = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging", "Win32_Foundation", "Win32_Security", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_System_Registry", "Win32_System_Threading", "Win32_System_Time"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -110,6 +110,8 @@ opt-level = 2
 # descenders stay inside it. The selection layer (src/text_selection.rs, src/text/inline.rs) ends mouse drags when
 # motion arrives without the left button, and owns multi-click drags in TextView so double/triple-click-drag extends by
 # word or line.
+# Markdown quote rules use the muted text color so they stay visible on user-message bubbles, whose background
+# matches the theme's ordinary border color.
 [patch.crates-io]
 gpui-base = { path = "vendor/gpui-base" }
 

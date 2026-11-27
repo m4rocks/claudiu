@@ -26,87 +26,27 @@ pub(super) struct RetryConfirm {
     pub later_checkpoints: usize,
 }
 
-/// Synthetic text that m4code attached to a user message (e.g. checkpoint-restore retry context or
-/// local file/image attachments), always prepended inside the user bubble as a dimmed quote block
-/// so the user can tell it apart from what they typed.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct AttachedSystemNote {
-    pub text: String,
-}
-
-const RETRY_RESTORED_LATEST_PREFIX: &str =
+pub(super) const RETRY_RESTORED_LATEST_PREFIX: &str =
     "I restored the files to the checkpoint before my previous message. Please try again:";
 const RETRY_RESTORED_EARLIER_PREFIX: &str =
     "I restored the files to the checkpoint before an earlier message (undoing later file changes). Please retry that request:";
 const RETRY_EARLIER_PREFIX: &str = "Please revisit and retry this earlier request:";
+const RETRY_LATEST_PREFIX: &str = "Please retry this request with higher thinking:";
 
 const RETRY_PREFIXES: &[&str] = &[
     RETRY_RESTORED_LATEST_PREFIX,
     RETRY_RESTORED_EARLIER_PREFIX,
     RETRY_EARLIER_PREFIX,
+    RETRY_LATEST_PREFIX,
 ];
 
-/// Split synthetic m4code-attached text (retry prefixes, local file/image attachments) out of a user
-/// message so the bubble always prepends those parts as dimmed quote blocks above the user's text.
-pub(super) fn split_attached_system_notes(text: &str) -> (Vec<AttachedSystemNote>, &str) {
-    let mut notes = Vec::new();
-    let mut body = text;
-
-    // Leading retry-with-higher-thinking system prefixes.
-    loop {
-        let mut matched = false;
-        for &prefix in RETRY_PREFIXES {
-            if let Some(rest) = body.strip_prefix(prefix).and_then(|s| s.strip_prefix("\n\n")) {
-                notes.push(AttachedSystemNote { text: prefix.to_string() });
-                body = rest;
-                matched = true;
-                break;
-            }
-        }
-        if !matched {
-            break;
-        }
-    }
-
-    let header = crate::panels::attachments::ATTACHED_FILES_HEADER;
-    // Leading attachments block (attachments-only or `/slash` command after attachments).
-    if let Some(after_header) = body.strip_prefix(header) {
-        let mut end = header.len();
-        for line in after_header.split_inclusive('\n') {
-            if line.starts_with("- ") {
-                end += line.len();
-            } else {
-                break;
-            }
-        }
-        if end > header.len() {
-            let block = body[..end].trim_end();
-            notes.push(AttachedSystemNote { text: block.to_string() });
-            body = body[end..].trim_start_matches('\n');
-        }
-    } else if let Some(idx) = body.rfind(&format!("\n\n{header}")) {
-        // Trailing attachments block (ordinary user text followed by attached local files) —
-        // still returned in `notes` so it renders prepended above the user's text.
-        let block_start = idx + 2;
-        let after_header = &body[block_start + header.len()..];
-        let all_list_lines = !after_header.trim().is_empty()
-            && after_header.lines().all(|line| line.starts_with("- ") || line.is_empty());
-        if all_list_lines {
-            let block = body[block_start..].trim_end();
-            notes.push(AttachedSystemNote { text: block.to_string() });
-            body = &body[..idx];
-        }
-    }
-
-    (notes, body)
-}
-
-/// Strip any leading retry system prefix so retrying an already-retried message doesn't stack prefixes.
+/// Strip quoted or legacy retry context so repeated retries do not stack it.
 fn strip_retry_prefixes(mut text: &str) -> &str {
     loop {
         let mut matched = false;
         for &prefix in RETRY_PREFIXES {
-            if let Some(rest) = text.strip_prefix(prefix).and_then(|s| s.strip_prefix("\n\n")) {
+            let unquoted = text.strip_prefix("> ").unwrap_or(text);
+            if let Some(rest) = unquoted.strip_prefix(prefix).and_then(|s| s.strip_prefix("\n\n")) {
                 text = rest;
                 matched = true;
                 break;
@@ -116,19 +56,6 @@ fn strip_retry_prefixes(mut text: &str) -> &str {
             return text;
         }
     }
-}
-
-pub(super) fn render_attached_system_note(note: &AttachedSystemNote) -> AnyElement {
-    div()
-        .w_full()
-        .pl(px(10.0))
-        .py(px(2.0))
-        .border_l_2()
-        .border_color(theme().muted_foreground)
-        .text_size(scale::px(12.0))
-        .text_color(theme().muted_foreground)
-        .child(note.text.clone())
-        .into_any_element()
 }
 
 /// Optional notice shown above a user message on the right side (icon + text).
@@ -276,6 +203,10 @@ struct CalendarParts {
 }
 
 fn local_parts(ts: i64) -> Option<CalendarParts> {
+    #[cfg(windows)]
+    if let Some(parts) = windows_local_parts(ts, None) {
+        return Some(parts);
+    }
     #[cfg(unix)]
     {
         let t = ts as libc::time_t;
@@ -300,6 +231,30 @@ fn local_parts(ts: i64) -> Option<CalendarParts> {
         day: dt.day(),
         hour: dt.hour(),
         minute: dt.minute(),
+    })
+}
+
+#[cfg(windows)]
+fn windows_local_parts(ts: i64, zone: Option<&windows_sys::Win32::System::Time::DYNAMIC_TIME_ZONE_INFORMATION>) -> Option<CalendarParts> {
+    use windows_sys::Win32::{Foundation::SYSTEMTIME, System::Time::SystemTimeToTzSpecificLocalTimeEx};
+    let utc = time::OffsetDateTime::from_unix_timestamp(ts).ok()?;
+    let utc = SYSTEMTIME {
+        wYear: utc.year().try_into().ok()?,
+        wMonth: u8::from(utc.month()).into(),
+        wDay: utc.day().into(),
+        wHour: utc.hour().into(),
+        wMinute: utc.minute().into(),
+        wSecond: utc.second().into(),
+        ..Default::default()
+    };
+    let mut local = SYSTEMTIME::default();
+    // SAFETY: both times and the optional zone live for the call; null selects the system's dynamic time zone.
+    let converted = unsafe {
+        SystemTimeToTzSpecificLocalTimeEx(zone.map_or(std::ptr::null(), std::ptr::from_ref), &utc, &mut local)
+    };
+    (converted != 0).then_some(CalendarParts {
+        year: local.wYear.into(), month: local.wMonth as u8, day: local.wDay as u8,
+        hour: local.wHour as u8, minute: local.wMinute as u8,
     })
 }
 
@@ -623,13 +578,16 @@ impl ThreadView {
         }
         let is_latest = self.latest_visible_user_row() == Some(row);
         let outgoing = if restored_files && is_latest {
-            format!("{RETRY_RESTORED_LATEST_PREFIX}\n\n{prompt}")
+            crate::harness::thread::prepend_quote(RETRY_RESTORED_LATEST_PREFIX, &prompt)
         } else if restored_files {
-            format!("{RETRY_RESTORED_EARLIER_PREFIX}\n\n{prompt}")
-        } else if is_latest {
+            crate::harness::thread::prepend_quote(RETRY_RESTORED_EARLIER_PREFIX, &prompt)
+        } else if is_latest && prompt.starts_with('/') {
+            // A native command must still start the prompt to be recognized by the adapter.
             prompt
+        } else if is_latest {
+            crate::harness::thread::prepend_quote(RETRY_LATEST_PREFIX, &prompt)
         } else {
-            format!("{RETRY_EARLIER_PREFIX}\n\n{prompt}")
+            crate::harness::thread::prepend_quote(RETRY_EARLIER_PREFIX, &prompt)
         };
         let expected_permission = self.handoff_permission();
         let expected_mode = self.thread.mode.clone();
@@ -905,6 +863,26 @@ impl ThreadView {
 mod tests {
     use super::*;
 
+    #[cfg(windows)]
+    #[test]
+    fn windows_timestamps_use_the_time_zone_and_cross_date_boundaries() {
+        use windows_sys::Win32::System::Time::DYNAMIC_TIME_ZONE_INFORMATION;
+        let zone = |name: &str| {
+            let mut zone = DYNAMIC_TIME_ZONE_INFORMATION::default();
+            // The dynamic API looks up historical rules by the Windows time-zone key.
+            for (slot, unit) in zone.TimeZoneKeyName.iter_mut().zip(name.encode_utf16()) { *slot = unit; }
+            zone
+        };
+        let timestamp = time::Date::from_calendar_date(2026, time::Month::November, 27).unwrap()
+            .with_hms(23, 30, 0).unwrap().assume_utc().unix_timestamp();
+        assert_eq!(windows_local_parts(timestamp, Some(&zone("South Africa Standard Time"))), Some(CalendarParts {
+            year: 2026, month: 11, day: 28, hour: 1, minute: 30,
+        }));
+        assert_eq!(windows_local_parts(timestamp, Some(&zone("SA Pacific Standard Time"))), Some(CalendarParts {
+            year: 2026, month: 11, day: 27, hour: 18, minute: 30,
+        }));
+    }
+
     #[test]
     fn clock_formatting_handles_midnight_noon_and_padding() {
         assert_eq!(format_clock(0, 5), "12:05 AM");
@@ -940,37 +918,11 @@ mod tests {
     }
 
     #[test]
-    fn split_attached_system_notes_extracts_retry_and_attachments() {
-        // Plain user text has no attached notes.
-        assert_eq!(split_attached_system_notes("Fix the bug"), (vec![], "Fix the bug"));
-
-        // Retry prefix + user text + trailing local attachments -> both prepended above user text.
-        let combined = format!(
-            "{RETRY_RESTORED_LATEST_PREFIX}\n\nCheck this screenshot\n\n{}- \"/tmp/a.png\"\n- \"/tmp/b.png\"\n",
-            crate::panels::attachments::ATTACHED_FILES_HEADER
-        );
-        let (notes, body) = split_attached_system_notes(&combined);
-        assert_eq!(notes.len(), 2);
-        assert_eq!(notes[0].text, RETRY_RESTORED_LATEST_PREFIX);
-        assert!(notes[1].text.starts_with("Attached local files"));
-        assert!(notes[1].text.contains("/tmp/b.png"));
-        assert_eq!(body, "Check this screenshot");
-
-        // Attachments-only message leaves body empty.
-        let only_attachments = format!("{}- \"/tmp/a.png\"\n", crate::panels::attachments::ATTACHED_FILES_HEADER);
-        let (notes, body) = split_attached_system_notes(&only_attachments);
-        assert_eq!(notes.len(), 1);
-        assert_eq!(body, "");
-
-        // Leading attachments before a slash command.
-        let slash_with_attachments = format!("{}- \"/tmp/a.png\"\n\n/review", crate::panels::attachments::ATTACHED_FILES_HEADER);
-        let (notes, body) = split_attached_system_notes(&slash_with_attachments);
-        assert_eq!(notes.len(), 1);
-        assert_eq!(body, "/review");
-
-        // Stripping retry prefixes avoids stacking them when retrying a retried message.
-        let retried = format!("{RETRY_EARLIER_PREFIX}\n\nOriginal request");
+    fn retry_context_is_quoted_and_does_not_stack() {
+        let retried = crate::harness::thread::prepend_quote(RETRY_EARLIER_PREFIX, "Original request");
+        assert_eq!(retried, "> Please revisit and retry this earlier request:\n\nOriginal request");
         assert_eq!(strip_retry_prefixes(&retried), "Original request");
+        assert_eq!(strip_retry_prefixes(&format!("{RETRY_EARLIER_PREFIX}\n\nOriginal request")), "Original request");
     }
 
     #[test]

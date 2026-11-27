@@ -309,6 +309,10 @@ pub fn remove(main_checkout: &Path, folder: &Path, discard: bool, grace: std::ti
 /// makes it fail with "Permission denied" although the worktree is gone; then only the leftover folder is retried.
 /// Returns whether that folder could not be deleted before the deadline.
 fn delete_worktree(main_checkout: &Path, folder: &Path, discard: bool, deadline: std::time::Instant) -> Result<bool, String> {
+    delete_worktree_with(folder, discard, deadline, |args| git(main_checkout, args, None))
+}
+
+fn delete_worktree_with(folder: &Path, discard: bool, deadline: std::time::Instant, mut run: impl FnMut(&[&str]) -> Result<String, String>) -> Result<bool, String> {
     let folder_arg = folder.to_string_lossy();
     let mut args = vec!["worktree", "remove"];
     if discard {
@@ -316,8 +320,9 @@ fn delete_worktree(main_checkout: &Path, folder: &Path, discard: bool, deadline:
     }
     args.extend(["--", &folder_arg]);
     loop {
-        let Err(failure) = git(main_checkout, &args, None) else { return Ok(false) };
-        let listing = git(main_checkout, &["worktree", "list", "--porcelain"], None).unwrap_or_default();
+        let Err(failure) = run(&args) else { return Ok(false) };
+        // A failed lookup proves nothing about registration and must never authorize deleting files.
+        let listing = run(&["worktree", "list", "--porcelain"]).map_err(|error| format!("{failure}; could not verify worktree removal: {error}"))?;
         if block_of(&listing, folder).is_none() {
             return Ok(!delete_leftover(folder, deadline));
         }
@@ -380,6 +385,23 @@ mod tests {
     use super::*;
 
     const NO_WAIT: std::time::Duration = std::time::Duration::ZERO;
+
+    #[test]
+    fn a_failed_listing_never_authorizes_deleting_a_worktree() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("uncommitted.txt");
+        std::fs::write(&file, "keep my work").unwrap();
+        let result = delete_worktree_with(dir.path(), false, std::time::Instant::now(), |args| {
+            if args[1] == "remove" {
+                assert!(!args.contains(&"--force"));
+                Err("worktree contains modified or untracked files".into())
+            } else {
+                Err("could not read repository".into())
+            }
+        });
+        assert!(result.is_err());
+        assert_eq!(std::fs::read_to_string(file).unwrap(), "keep my work");
+    }
 
     #[test]
     fn names_allow_letters_digits_dash_underscore() {

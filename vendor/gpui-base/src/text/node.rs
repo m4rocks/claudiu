@@ -3497,7 +3497,8 @@ impl BlockNode {
                     .w_full()
                     .text_color(node_cx.style.muted_foreground())
                     .border_l_3()
-                    .border_color(node_cx.style.border())
+                    // A quote can sit on a muted surface whose fill is the theme's border color.
+                    .border_color(node_cx.style.muted_foreground())
                     .px_4()
                     .children({
                         let children_len = children.len();

@@ -23,9 +23,9 @@ fn renderer() -> Result<Option<Box<dyn PlatformHeadlessRenderer>>> {
 #[ignore = "requires an offscreen GPU renderer; run with just screenshot"]
 fn capture() -> Result<()> {
     let scenario = std::env::var("M4CODE_SCREENSHOT_SCENARIO").unwrap_or_else(|_| "home".into());
-    let session_scenario = matches!(scenario.as_str(), "session" | "session-auth" | "session-no-compact" | "session-scrolled" | "toast" | "review" | "review-hover");
+    let session_scenario = matches!(scenario.as_str(), "session" | "session-auth" | "session-no-compact" | "session-scrolled" | "session-quotes" | "session-quotes-menu" | "toast" | "review" | "review-hover");
     let shortcut = match scenario.as_str() {
-        "home" | "dashboards-disabled" | "picker" | "context-menu" | "github" | "github-wide" | "github-issues" | "editor" | "session" | "session-auth" | "session-no-compact" | "session-scrolled" | "toast" | "harnesses" | "review" | "review-hover" => None,
+        "home" | "dashboards-disabled" | "picker" | "context-menu" | "github" | "github-wide" | "github-issues" | "editor" | "session" | "session-auth" | "session-no-compact" | "session-scrolled" | "session-quotes" | "session-quotes-menu" | "toast" | "harnesses" | "review" | "review-hover" => None,
         "settings" => Some(Keystroke::parse("secondary-,").expect("Settings shortcut")),
         _ => anyhow::bail!("unknown screenshot scenario {scenario:?}; use home, dashboards-disabled, settings, picker, context-menu, github, github-wide, editor, session, session-no-compact, session-scrolled, toast, harnesses, review or review-hover"),
     };
@@ -153,6 +153,9 @@ fn capture() -> Result<()> {
         cx.update_window(window, |_, _, app| workspace.update(app, |ws, cx| {
             if let Some(view) = ws.active_id().and_then(|id| ws.live_view(id)).and_then(|v| v.thread()).cloned() {
                 view.update(cx, |v, cx| v.screenshot_activity(scenario != "session-no-compact", scenario == "session-scrolled", cx));
+                if matches!(scenario.as_str(), "session-quotes" | "session-quotes-menu") {
+                    view.update(cx, |v, cx| v.screenshot_quoted_context(scenario == "session-quotes-menu", cx));
+                }
                 if scenario == "session-auth" {
                     view.update(cx, |v, cx| v.screenshot_login_failure(cx));
                     let state = ws.limits_state.get_mut(crate::harness::Harness::Claude);

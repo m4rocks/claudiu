@@ -118,7 +118,8 @@ fn can_replace_auto_title(record: &SessionRecord, fallback: &str) -> bool {
 
 fn clean_title(raw: &str) -> String {
     raw.lines()
-        .find(|l| !l.trim().is_empty())
+        .find(|l| !l.trim().is_empty() && !l.trim_start().starts_with('>'))
+        .or_else(|| raw.lines().find(|l| !l.trim().is_empty()))
         .unwrap_or_default()
         .trim()
         .trim_matches(['"', '\'', '`', '.'])
@@ -183,6 +184,7 @@ mod tests {
 
     #[test]
     fn local_titles_skip_blank_lines_strip_quotes_and_limit_unicode_characters() {
+        assert_eq!(clean_title("> Attached local files (open these paths to inspect them):\n> - \"/tmp/a.png\"\n\nFix login"), "Fix login");
         assert_eq!(clean_title("\n  `Fix login`.  \nMore detail"), "Fix login");
         assert_eq!(clean_title(&"?".repeat(80)), "?".repeat(60));
         assert_eq!(clean_title("  \n"), "");
