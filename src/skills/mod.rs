@@ -327,8 +327,33 @@ fn uses_copied_skills(harness: Harness) -> bool {
     harness == Harness::Antigravity
 }
 
-/// Whether `link` is a symlink/junction created by m4code that points inside `store_root`.
-/// Also matches dangling links whose target path lies under `store_root`, so stale links are cleaned up.
+/// Sibling m4code app folder names under the shared vendor directory (`m4rocks/`) so dev and release builds
+/// (and legacy `Claudiu` builds) recognize and migrate each other's managed skill links and copies.
+const SIBLING_APP_DIRS: &[&str] = &["m4code", "m4code Dev", "Claudiu", "Claudiu Dev"];
+
+/// Candidate canonical `skills/` roots owned by m4code: `store_root` itself, plus sibling dev/release `m4rocks/`
+/// skill roots when `store_root` follows the standard `<vendor>/<app>/data/skills` layout.
+fn managed_store_roots(store_root: &Path) -> Vec<PathBuf> {
+    let mut roots = vec![store_root.to_path_buf()];
+    if store_root.file_name().and_then(|n| n.to_str()) == Some("skills")
+        && let Some(data_dir) = store_root.parent()
+        && data_dir.file_name().and_then(|n| n.to_str()) == Some("data")
+        && let Some(app_dir) = data_dir.parent()
+        && let Some(app_name) = app_dir.file_name().and_then(|n| n.to_str())
+        && SIBLING_APP_DIRS.contains(&app_name)
+        && let Some(vendor_dir) = app_dir.parent()
+    {
+        for sibling in SIBLING_APP_DIRS {
+            if *sibling != app_name {
+                roots.push(vendor_dir.join(sibling).join("data").join("skills"));
+            }
+        }
+    }
+    roots
+}
+
+/// Whether `link` is a symlink/junction created by m4code (including sibling dev/release builds) that points inside
+/// `store_root`. Also matches dangling links whose target path lies under a managed store root.
 fn is_managed_link(link: &Path, store_root: &Path) -> bool {
     let Ok(meta) = fs::symlink_metadata(link) else { return false };
     if !meta.file_type().is_symlink() {
@@ -340,16 +365,21 @@ fn is_managed_link(link: &Path, store_root: &Path) -> bool {
     } else {
         link.parent().unwrap_or(Path::new("")).join(target)
     };
-    if is_same_or_under(&resolved, store_root) {
-        return true;
-    }
-    if let (Ok(r), Ok(s)) = (fs::canonicalize(&resolved), fs::canonicalize(store_root)) {
-        return is_same_or_under(&r, &s);
+    let canon_resolved = fs::canonicalize(&resolved).ok();
+    for root in managed_store_roots(store_root) {
+        if is_same_or_under(&resolved, &root) {
+            return true;
+        }
+        if let (Some(r), Ok(s)) = (&canon_resolved, fs::canonicalize(&root))
+            && is_same_or_under(r, &s)
+        {
+            return true;
+        }
     }
     false
 }
 
-/// Whether `dir` is a real directory copied and managed by m4code from `store_root`.
+/// Whether `dir` is a real directory copied and managed by m4code (including sibling dev/release builds).
 fn is_managed_copy(dir: &Path, store_root: &Path) -> bool {
     let Ok(meta) = fs::symlink_metadata(dir) else { return false };
     if !meta.file_type().is_dir() {
@@ -357,11 +387,16 @@ fn is_managed_copy(dir: &Path, store_root: &Path) -> bool {
     }
     let Ok(recorded) = fs::read_to_string(dir.join(MANAGED_COPY_MARKER)) else { return false };
     let recorded = PathBuf::from(recorded.trim());
-    if is_same_or_under(&recorded, store_root) && is_same_or_under(store_root, &recorded) {
-        return true;
-    }
-    if let (Ok(r), Ok(s)) = (fs::canonicalize(&recorded), fs::canonicalize(store_root)) {
-        return r == s;
+    let canon_recorded = fs::canonicalize(&recorded).ok();
+    for root in managed_store_roots(store_root) {
+        if is_same_or_under(&recorded, &root) && is_same_or_under(&root, &recorded) {
+            return true;
+        }
+        if let (Some(r), Ok(s)) = (&canon_recorded, fs::canonicalize(&root))
+            && r == &s
+        {
+            return true;
+        }
     }
     false
 }
@@ -906,6 +941,33 @@ mod tests {
 
         // User-owned directory stays untouched.
         assert_eq!(fs::read_to_string(user_dir.join("SKILL.md")).unwrap(), "user-owned");
+    }
+
+    #[test]
+    fn dev_build_migrates_release_build_antigravity_junctions_to_copies() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vendor = tmp.path().join("m4rocks");
+        let release_store = vendor.join("m4code").join("data").join("skills");
+        let dev_store = vendor.join("m4code Dev").join("data").join("skills");
+        let home = tmp.path().join("home");
+        write_skill(&release_store, "autonomy");
+        write_skill(&dev_store, "autonomy");
+
+        let agy_global = global_skills_dir(Harness::Antigravity, &home);
+        fs::create_dir_all(&agy_global).unwrap();
+        let legacy_link = agy_global.join("autonomy");
+        link_dir(&release_store.join("autonomy"), &legacy_link).unwrap();
+        assert!(fs::symlink_metadata(&legacy_link).unwrap().file_type().is_symlink());
+
+        let mut cfg = SkillsConfig::default();
+        cfg.set_global("autonomy", true);
+        let errs = sync_all(&dev_store, &home, &[Harness::Antigravity], &cfg, &[]);
+        assert!(errs.is_empty(), "{errs:?}");
+
+        let meta = fs::symlink_metadata(&legacy_link).unwrap();
+        assert!(meta.file_type().is_dir() && !meta.file_type().is_symlink());
+        assert!(is_managed_copy(&legacy_link, &dev_store));
+        assert!(is_managed_copy(&legacy_link, &release_store));
     }
 
     #[test]
