@@ -22,7 +22,7 @@ directories = "6.0.0"
 dunce = "1.0.5"
 futures = "0.3.34"
 # A system notification when a session finishes while the window is in the background (`platform::notify`).
-notify-rust = "4.19.0"
+notify-rust = { version = "4.19.0", features = ["preview-macos-un"] }
 git2 = { version = "0.21.0", default-features = false }
 gpui = { package = "gpui-pre", version = "=0.3.8" }
 gpui-wgpu = { package = "gpui-pre-wgpu", version = "=0.3.8", features = ["test-support"], optional = true }

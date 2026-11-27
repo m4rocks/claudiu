@@ -31,6 +31,32 @@ pub fn comment_trigger(id: impl Into<gpui::SharedString>, shortcut_label: bool) 
         .child(icon(COMMENT_ICON, COMMENT_ICON_SIZE))
 }
 
+/// Floating pill button shown next to selected chat text so "Add comment" is easy to spot and click.
+pub fn comment_selection_trigger(id: impl Into<gpui::SharedString>) -> Button {
+    let keys = shortcut(COMMENT_SHORTCUT);
+    focusable(id.into())
+        .accessibility_label("Add comment")
+        .tooltip(crate::panels::ui::tooltip::tooltip(format!("Add comment ({keys})")))
+        .flex()
+        .items_center()
+        .gap(px(6.0))
+        .px(px(9.0))
+        .py(px(5.0))
+        .rounded(px(6.0))
+        .bg(theme().popover)
+        .border_1()
+        .border_color(theme().ring)
+        .shadow_md()
+        .hover(|s| s.bg(theme().secondary_hover))
+        .cursor_pointer()
+        .text_size(scale::px(12.0))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(theme().foreground)
+        .child(icon(COMMENT_ICON, 13.0))
+        .child("Add comment")
+        .child(kbd(keys))
+}
+
 /// A new, focused input for a comment on what `on` names, such as `line 12`.
 pub fn comment_input(on: &str, window: &mut Window, cx: &mut App) -> Entity<InputState> {
     let input = cx.new(|cx| InputState::new(window, cx).placeholder(format!("Comment on {on}")));

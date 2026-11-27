@@ -496,7 +496,12 @@ impl ThreadView {
                 let Some(review) = v.review.as_mut().filter(|review| review.id == id) else { return };
                 review.restoring = false;
                 match result {
-                    Ok(()) => v.close_review(cx),
+                    Ok(()) => {
+                        v.close_review(cx);
+                        let at = v.thread.notice("Restored files to checkpoint", false);
+                        v.remeasure(at);
+                        v.persist_entries();
+                    }
                     Err(error) => {
                         review.error = Some(error);
                         review.rebuild_rows();

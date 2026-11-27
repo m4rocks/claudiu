@@ -343,21 +343,73 @@ pub fn no_window(cmd: &mut Command) {
     let _ = cmd;
 }
 
+/// Request macOS notification permission once per launch when running from a `.app` bundle.
+/// Called at startup so macOS prompts early instead of silently dropping the first background alert.
+pub fn prepare_notifications() {
+    #[cfg(target_os = "macos")]
+    std::thread::spawn(|| {
+        if notify_rust::check_bundle().is_ok() {
+            ensure_macos_notification_auth();
+        }
+    });
+}
+
+#[cfg(target_os = "macos")]
+fn ensure_macos_notification_auth() {
+    static AUTH_REQUESTED: std::sync::Once = std::sync::Once::new();
+    AUTH_REQUESTED.call_once(|| {
+        if let Err(err) = notify_rust::request_auth_blocking() {
+            eprintln!("m4code: notification authorization failed: {err}");
+        }
+    });
+}
+
 /// A system notification, for when the window is in the background. Shown from another thread: on Linux it waits for
-/// the notification server. A failure (no notification server, notifications turned off) is left silent.
+/// the notification server, and on macOS `UNUserNotificationCenter` waits for XPC delivery.
 pub fn notify(title: String, body: impl Into<String>) {
     let body = body.into();
     std::thread::spawn(move || {
-        // Notification Center files notifications under an app; the installed one is ours, a dev build has none.
         #[cfg(target_os = "macos")]
-        let _ = notify_rust::set_application("com.m4rocks.m4code");
-        let mut notification = notify_rust::Notification::new();
-        notification.appname("m4code").summary(&title).body(&body);
-        #[cfg(target_os = "windows")]
-        if let Some(id) = windows_app_id() {
-            notification.app_id(id);
+        {
+            if notify_rust::check_bundle().is_ok() {
+                ensure_macos_notification_auth();
+                if let Err(err) = notify_rust::Notification::new().appname("m4code").summary(&title).body(&body).show() {
+                    eprintln!("m4code: notification failed: {err}");
+                }
+            } else {
+                // `UNUserNotificationCenter` requires a `.app` bundle; unbundled dev builds fall back to `osascript`.
+                let status = std::process::Command::new("/usr/bin/osascript")
+                    .args([
+                        "-e",
+                        "on run argv",
+                        "-e",
+                        "display notification (item 2 of argv) with title (item 1 of argv)",
+                        "-e",
+                        "end run",
+                        "--",
+                        &title,
+                        &body,
+                    ])
+                    .status();
+                match status {
+                    Ok(s) if s.success() => {}
+                    Ok(s) => eprintln!("m4code: dev notification via osascript exited with {s}"),
+                    Err(err) => eprintln!("m4code: dev notification via osascript failed: {err}"),
+                }
+            }
         }
-        let _ = notification.show();
+        #[cfg(not(target_os = "macos"))]
+        {
+            let mut notification = notify_rust::Notification::new();
+            notification.appname("m4code").summary(&title).body(&body);
+            #[cfg(target_os = "windows")]
+            if let Some(id) = windows_app_id() {
+                notification.app_id(id);
+            }
+            if let Err(err) = notification.show() {
+                eprintln!("m4code: notification failed: {err}");
+            }
+        }
     });
 }
 

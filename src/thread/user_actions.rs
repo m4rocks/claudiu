@@ -26,6 +26,111 @@ pub(super) struct RetryConfirm {
     pub later_checkpoints: usize,
 }
 
+/// Synthetic text that m4code attached to a user message (e.g. checkpoint-restore retry context or
+/// local file/image attachments), always prepended inside the user bubble as a dimmed quote block
+/// so the user can tell it apart from what they typed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct AttachedSystemNote {
+    pub text: String,
+}
+
+const RETRY_RESTORED_LATEST_PREFIX: &str =
+    "I restored the files to the checkpoint before my previous message. Please try again:";
+const RETRY_RESTORED_EARLIER_PREFIX: &str =
+    "I restored the files to the checkpoint before an earlier message (undoing later file changes). Please retry that request:";
+const RETRY_EARLIER_PREFIX: &str = "Please revisit and retry this earlier request:";
+
+const RETRY_PREFIXES: &[&str] = &[
+    RETRY_RESTORED_LATEST_PREFIX,
+    RETRY_RESTORED_EARLIER_PREFIX,
+    RETRY_EARLIER_PREFIX,
+];
+
+/// Split synthetic m4code-attached text (retry prefixes, local file/image attachments) out of a user
+/// message so the bubble always prepends those parts as dimmed quote blocks above the user's text.
+pub(super) fn split_attached_system_notes(text: &str) -> (Vec<AttachedSystemNote>, &str) {
+    let mut notes = Vec::new();
+    let mut body = text;
+
+    // Leading retry-with-higher-thinking system prefixes.
+    loop {
+        let mut matched = false;
+        for &prefix in RETRY_PREFIXES {
+            if let Some(rest) = body.strip_prefix(prefix).and_then(|s| s.strip_prefix("\n\n")) {
+                notes.push(AttachedSystemNote { text: prefix.to_string() });
+                body = rest;
+                matched = true;
+                break;
+            }
+        }
+        if !matched {
+            break;
+        }
+    }
+
+    let header = crate::panels::attachments::ATTACHED_FILES_HEADER;
+    // Leading attachments block (attachments-only or `/slash` command after attachments).
+    if let Some(after_header) = body.strip_prefix(header) {
+        let mut end = header.len();
+        for line in after_header.split_inclusive('\n') {
+            if line.starts_with("- ") {
+                end += line.len();
+            } else {
+                break;
+            }
+        }
+        if end > header.len() {
+            let block = body[..end].trim_end();
+            notes.push(AttachedSystemNote { text: block.to_string() });
+            body = body[end..].trim_start_matches('\n');
+        }
+    } else if let Some(idx) = body.rfind(&format!("\n\n{header}")) {
+        // Trailing attachments block (ordinary user text followed by attached local files) —
+        // still returned in `notes` so it renders prepended above the user's text.
+        let block_start = idx + 2;
+        let after_header = &body[block_start + header.len()..];
+        let all_list_lines = !after_header.trim().is_empty()
+            && after_header.lines().all(|line| line.starts_with("- ") || line.is_empty());
+        if all_list_lines {
+            let block = body[block_start..].trim_end();
+            notes.push(AttachedSystemNote { text: block.to_string() });
+            body = &body[..idx];
+        }
+    }
+
+    (notes, body)
+}
+
+/// Strip any leading retry system prefix so retrying an already-retried message doesn't stack prefixes.
+fn strip_retry_prefixes(mut text: &str) -> &str {
+    loop {
+        let mut matched = false;
+        for &prefix in RETRY_PREFIXES {
+            if let Some(rest) = text.strip_prefix(prefix).and_then(|s| s.strip_prefix("\n\n")) {
+                text = rest;
+                matched = true;
+                break;
+            }
+        }
+        if !matched {
+            return text;
+        }
+    }
+}
+
+pub(super) fn render_attached_system_note(note: &AttachedSystemNote) -> AnyElement {
+    div()
+        .w_full()
+        .pl(px(10.0))
+        .py(px(2.0))
+        .border_l_2()
+        .border_color(theme().muted_foreground)
+        .text_size(scale::px(12.0))
+        .text_color(theme().muted_foreground)
+        .child(note.text.clone())
+        .into_any_element()
+}
+
 /// Optional notice shown above a user message on the right side (icon + text).
 /// Add new variants here as other per-message notices are introduced.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -421,7 +526,7 @@ impl ThreadView {
         }
         let Some(Entry::User(prompt)) = self.thread.entries.get(row) else { return };
         let NextThinking::Higher(option_id, effort, effort_label) = self.next_higher_effort() else { return };
-        let prompt = prompt.clone();
+        let prompt = strip_retry_prefixes(prompt).to_string();
         let checkpoints = self.retry_checkpoints_for(row);
         let has_own_checkpoint = checkpoints.iter().any(|t| t.row == row);
         let later_checkpoints = checkpoints.iter().filter(|t| t.row > row).count();
@@ -500,18 +605,27 @@ impl ThreadView {
     ) {
         let restored_files = !restored_ids.is_empty();
         if restored_files {
+            let count = restored_ids.len();
             self.turn_reviews.retain(|turn| !restored_ids.contains(&turn.id));
             review::prune_turn_reviews_by_ids(&self.record_id, &restored_ids, cx.background_executor());
+            let notice = if count == 1 {
+                "Restored files to checkpoint".to_string()
+            } else {
+                format!("Restored files across {count} checkpoints")
+            };
+            let at = self.thread.notice(notice, false);
+            self.remeasure(at);
+            self.persist_entries();
         }
         let is_latest = self.latest_visible_user_row() == Some(row);
         let outgoing = if restored_files && is_latest {
-            format!("I restored the files to the checkpoint before my previous message. Please try again:\n\n{prompt}")
+            format!("{RETRY_RESTORED_LATEST_PREFIX}\n\n{prompt}")
         } else if restored_files {
-            format!("I restored the files to the checkpoint before an earlier message (undoing later file changes). Please retry that request:\n\n{prompt}")
+            format!("{RETRY_RESTORED_EARLIER_PREFIX}\n\n{prompt}")
         } else if is_latest {
             prompt
         } else {
-            format!("Please revisit and retry this earlier request:\n\n{prompt}")
+            format!("{RETRY_EARLIER_PREFIX}\n\n{prompt}")
         };
         let expected_permission = self.handoff_permission();
         let expected_mode = self.thread.mode.clone();
@@ -819,6 +933,40 @@ mod tests {
 
         clear_notices("user-notice-test");
         assert!(load_notices("user-notice-test").is_empty());
+    }
+
+    #[test]
+    fn split_attached_system_notes_extracts_retry_and_attachments() {
+        // Plain user text has no attached notes.
+        assert_eq!(split_attached_system_notes("Fix the bug"), (vec![], "Fix the bug"));
+
+        // Retry prefix + user text + trailing local attachments -> both prepended above user text.
+        let combined = format!(
+            "{RETRY_RESTORED_LATEST_PREFIX}\n\nCheck this screenshot\n\n{}- \"/tmp/a.png\"\n- \"/tmp/b.png\"\n",
+            crate::panels::attachments::ATTACHED_FILES_HEADER
+        );
+        let (notes, body) = split_attached_system_notes(&combined);
+        assert_eq!(notes.len(), 2);
+        assert_eq!(notes[0].text, RETRY_RESTORED_LATEST_PREFIX);
+        assert!(notes[1].text.starts_with("Attached local files"));
+        assert!(notes[1].text.contains("/tmp/b.png"));
+        assert_eq!(body, "Check this screenshot");
+
+        // Attachments-only message leaves body empty.
+        let only_attachments = format!("{}- \"/tmp/a.png\"\n", crate::panels::attachments::ATTACHED_FILES_HEADER);
+        let (notes, body) = split_attached_system_notes(&only_attachments);
+        assert_eq!(notes.len(), 1);
+        assert_eq!(body, "");
+
+        // Leading attachments before a slash command.
+        let slash_with_attachments = format!("{}- \"/tmp/a.png\"\n\n/review", crate::panels::attachments::ATTACHED_FILES_HEADER);
+        let (notes, body) = split_attached_system_notes(&slash_with_attachments);
+        assert_eq!(notes.len(), 1);
+        assert_eq!(body, "/review");
+
+        // Stripping retry prefixes avoids stacking them when retrying a retried message.
+        let retried = format!("{RETRY_EARLIER_PREFIX}\n\nOriginal request");
+        assert_eq!(strip_retry_prefixes(&retried), "Original request");
     }
 
     #[test]

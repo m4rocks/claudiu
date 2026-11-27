@@ -181,7 +181,7 @@ impl ThreadView {
                 .into_any_element()
         } else {
             div().occlude().child(
-                comment_box::comment_trigger("comment-on-selection", true)
+                comment_box::comment_selection_trigger("comment-on-selection")
                     .debug_selector(|| "comment-on-selection".into())
                     .on_click(cx.listener(|v, _: &ClickEvent, window, cx| v.start_selection_comment(window, cx))),
             )
@@ -423,27 +423,31 @@ impl ThreadView {
                 if run.is_some_and(|r| r.len() > 1) { indent_run_step(el) } else { el }
             }
             Entry::User(text) => {
-                let md_view = if self.user_md_len.get(&ix) == Some(&text.len())
-                    && let Some(state) = self.markdown.get(&ix)
-                {
-                    chat_links(crate::github::ui::styled_markdown(TextView::new(state)), ix, cx)
-                } else {
-                    self.user_md_len.insert(ix, text.len());
-                    let formatted = keep_line_breaks(text);
-                    chat_markdown(&mut self.markdown, ix, &formatted, cx)
-                };
+                let (attached_notes, body_text) = super::user_actions::split_attached_system_notes(text);
+                let md_view = (!body_text.is_empty()).then(|| {
+                    if self.user_md_len.get(&ix) == Some(&body_text.len())
+                        && let Some(state) = self.markdown.get(&ix)
+                    {
+                        chat_links(crate::github::ui::styled_markdown(TextView::new(state)), ix, cx)
+                    } else {
+                        self.user_md_len.insert(ix, body_text.len());
+                        let formatted = keep_line_breaks(body_text);
+                        chat_markdown(&mut self.markdown, ix, &formatted, cx)
+                    }
+                });
                 let bubble = div()
                     .w_full()
                     .flex()
                     .flex_col()
-                    .gap(px(4.0))
+                    .gap(px(6.0))
                     .px(px(14.0))
                     .py(px(10.0))
                     .rounded(px(9.0))
                     .bg(theme().row_active)
                     .border_1()
                     .border_color(theme().panel_border)
-                    .child(div().w_full().min_w_0().child(md_view));
+                    .children(attached_notes.iter().map(super::user_actions::render_attached_system_note))
+                    .children(md_view.map(|view| div().w_full().min_w_0().child(view)));
                 div()
                     .w_full()
                     .flex()

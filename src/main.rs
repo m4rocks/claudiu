@@ -241,6 +241,7 @@ fn main() {
         cx.on_action(|_: &ShowAllApps, cx| cx.unhide_other_apps());
         #[cfg(target_os = "macos")]
         cx.set_menus(menu_bar());
+        platform::prepare_notifications();
 
         cx.on_window_closed(|cx, _| {
             if cx.windows().is_empty() {

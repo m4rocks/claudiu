@@ -4695,6 +4695,10 @@ mod tests {
         view.read_with(cx, |v, _| {
             assert_eq!(v.pending_effort.as_deref(), Some("high"));
             assert!(v.turn_reviews.is_empty(), "restored turn review should be pruned");
+            assert!(
+                v.thread.entries.iter().any(|e| matches!(e, Entry::Notice { text, error: false } if text == "Restored files to checkpoint")),
+                "restoring a checkpoint should add a timeline notice"
+            );
             let queued = v.queue.front().map(|q| q.text.as_str()).unwrap_or_default();
             assert!(queued.contains("Update hello.txt"), "queued retry should contain the original prompt");
             assert!(queued.contains("restored the files"), "queued retry should note that files were restored");

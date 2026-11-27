@@ -19,6 +19,8 @@ use crate::panels::widgets::{icon};
 use crate::panels::ui::button::focusable;
 use crate::panels::ui::button::icon_button;
 
+pub(crate) const ATTACHED_FILES_HEADER: &str = "Attached local files (open these paths to inspect them):\n";
+
 #[derive(Clone, Default)]
 pub struct Attachments {
     files: Vec<Attachment>,
@@ -131,7 +133,7 @@ impl Attachments {
         if text_first {
             let _ = write!(message, "{text}\n\n");
         }
-        message.push_str("Attached local files (open these paths to inspect them):\n");
+        message.push_str(ATTACHED_FILES_HEADER);
         for file in &self.files {
             if let Some(image) = &file.pasted {
                 std::fs::create_dir_all(file.path.parent().expect("attachment directory"))?;
