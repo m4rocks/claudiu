@@ -16,7 +16,7 @@ use crate::files::Change;
 use crate::app::{Act, Ask, AskExplain, AskFix, AskFixProblem, AskTests, EditorCommand, EditorPane, MenuItem, GoBack, GoForward, GoToLine, QuickOpen, SaveFile, Tab, Workspace, CloseTab, LineComment};
 use crate::panels::glide::Follow;
 use crate::panels::theme::{self, theme};
-use crate::panels::comment_box::{COMMENT_ICON, COMMENT_ICON_SIZE, COMMENT_SIZE, comment_box};
+use crate::panels::comment_box::{COMMENT_GUTTER_PAD, COMMENT_ICON, COMMENT_ICON_SIZE, COMMENT_SIZE, comment_box};
 use crate::panels::widgets::icon;
 use crate::platform::path_key;
 use crate::panels::ui::button as btn;
@@ -115,7 +115,10 @@ impl Workspace {
         });
         let body: AnyElement = match pane.shown() {
             Some(Tab { note: Some(note), .. }) => centered(IconName::File, note.clone()),
-            Some(tab) => div()
+            Some(tab) => {
+                let highlight = &gpui_kit::component::Theme::global(cx).highlight_theme.style;
+                let gutter_bg = highlight.editor_gutter_background.or(highlight.editor_background).unwrap_or(theme().background);
+                div()
                 .size_full()
                 .flex()
                 .flex_col()
@@ -125,6 +128,8 @@ impl Workspace {
                         .flex_1()
                         .min_h_0()
                         .relative()
+                        .bg(gutter_bg)
+                        .pl(px(COMMENT_GUTTER_PAD + COMMENT_SIZE))
                         .child(Editor::new(&tab.buffer).appearance(false).h_full().context_menu(move |menu, window, cx| {
                             // The menu is m4code's own: the system's menu keeps the editor's text cursor over it.
                             let at = window.mouse_position();
@@ -149,7 +154,8 @@ impl Workspace {
                         .child(icon(IconName::Brackets, 12.0))
                         .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(s))
                 }))
-                .into_any_element(),
+                .into_any_element()
+            }
             None => centered(IconName::FileCode, "Pick a file on the left, or press Ctrl+P.".into()),
         };
         let picker = pane.picker.as_ref().map(|p| render_picker(p, &pane.root, cx));
@@ -292,24 +298,24 @@ fn render_comment(comment: &LineComment, cx: &mut Context<Workspace>) -> AnyElem
     .into_any_element()
 }
 
-/// The button that opens the comment box: in the gutter beside the selection's first line, or beside the line under the
-/// mouse when nothing is selected. Painted over the editor like `change_marks`, since the editor has no gutter of its
-/// own to put an element in.
+/// The button that opens the comment box: beside the selection's first line, or beside the line under the mouse
+/// anywhere in the row (matching Review changes). Painted over the editor like `change_marks`, since the editor
+/// has no gutter of its own to put an element in.
 fn comment_button(buffer: gpui::Entity<EditorState>, hovered: std::rc::Rc<std::cell::Cell<Option<usize>>>, ws: gpui::WeakEntity<Workspace>) -> impl IntoElement {
     let prepaint_buffer = buffer.clone();
     let prepaint_hovered = hovered.clone();
     gpui::canvas(
         move |viewport, window, cx| {
             let editor = prepaint_buffer.read(cx);
-            let (Some(area), Some(visible)) = (editor.text_bounds(), editor.visible_row_range()) else { return None };
+            let visible = editor.visible_row_range()?;
             let text = editor.text();
             let range = editor.selected_range();
             let line = if range.is_empty() {
                 let mouse = window.mouse_position();
-                viewport.contains(&mouse).then(|| gutter_line_at(editor, area, mouse)).flatten()
+                viewport.contains(&mouse).then(|| line_at(editor, mouse.y)).flatten()
                     .or_else(|| {
                         let cached = prepaint_hovered.get()?;
-                        gutter_contains(editor, area, cached, mouse).then_some(cached)
+                        line_contains_y(editor, cached, mouse.y).then_some(cached)
                     })
             } else {
                 Some(text.offset_to_point(range.start).row)
@@ -318,7 +324,7 @@ fn comment_button(buffer: gpui::Entity<EditorState>, hovered: std::rc::Rc<std::c
             let start = text.line_start_offset(line);
             let row = editor.range_to_bounds(&(start..start))?;
             let top = row.origin.y + (row.size.height - px(COMMENT_SIZE)) / 2.0;
-            let button = gpui::Bounds::new(gpui::point(area.origin.x + px(6.0), top), gpui::size(px(COMMENT_SIZE), px(COMMENT_SIZE)));
+            let button = gpui::Bounds::new(gpui::point(viewport.origin.x + px(COMMENT_GUTTER_PAD), top), gpui::size(px(COMMENT_SIZE), px(COMMENT_SIZE)));
             if !viewport.intersects(&button) {
                 return None;
             }
@@ -334,7 +340,7 @@ fn comment_button(buffer: gpui::Entity<EditorState>, hovered: std::rc::Rc<std::c
                 let editor = move_buffer.read(cx);
                 let line = viewport
                     .contains(&ev.position)
-                    .then(|| editor.text_bounds().and_then(|area| gutter_line_at(editor, area, ev.position)))
+                    .then(|| line_at(editor, ev.position.y))
                     .flatten();
                 if move_hovered.replace(line) != line {
                     cx.notify(view);
@@ -360,7 +366,7 @@ fn comment_button(buffer: gpui::Entity<EditorState>, hovered: std::rc::Rc<std::c
                 }
                 // Taken before the editor sees it, which would otherwise drop the selection the comment is about.
                 cx.stop_propagation();
-                let at = gpui::point(button.right() + px(6.0), button.top());
+                let at = gpui::point(button.right() + px(COMMENT_GUTTER_PAD), button.top());
                 let _ = ws.update(cx, |ws, cx| ws.start_line_comment(line, at, window, cx));
             });
         },
@@ -371,22 +377,16 @@ fn comment_button(buffer: gpui::Entity<EditorState>, hovered: std::rc::Rc<std::c
     .size_full()
 }
 
-/// Whether `pos` lies inside the line-number gutter of `line`.
-fn gutter_contains(editor: &EditorState, area: gpui::Bounds<gpui::Pixels>, line: usize, pos: gpui::Point<gpui::Pixels>) -> bool {
+/// Whether `y` lies within the vertical span of `line`.
+fn line_contains_y(editor: &EditorState, line: usize, y: gpui::Pixels) -> bool {
     let text = editor.text();
     if line >= text.lines_len() {
         return false;
     }
     let start = text.line_start_offset(line);
-    let Some(row) = editor.range_to_bounds(&(start..start)) else { return false };
-    let gutter_right = row.origin.x.max(area.origin.x + px(COMMENT_SIZE + 12.0));
-    pos.x >= area.origin.x && pos.x < gutter_right && pos.y >= row.origin.y && pos.y < row.origin.y + row.size.height
-}
-
-/// The line whose gutter contains `pos`, among those on screen.
-fn gutter_line_at(editor: &EditorState, area: gpui::Bounds<gpui::Pixels>, pos: gpui::Point<gpui::Pixels>) -> Option<usize> {
-    let line = line_at(editor, pos.y)?;
-    gutter_contains(editor, area, line, pos).then_some(line)
+    editor
+        .range_to_bounds(&(start..text.line_end_offset(line)))
+        .is_some_and(|b| b.origin.y <= y && y < b.origin.y + b.size.height)
 }
 
 /// The line drawn at height `y` in the window, among those on screen.
@@ -437,7 +437,7 @@ fn change_marks(buffer: gpui::Entity<EditorState>, marks: std::sync::Arc<Vec<Lin
                 cx.notify(view);
             });
             let editor = buffer.read(cx);
-            let (Some(area), Some(visible)) = (editor.text_bounds(), editor.visible_row_range()) else { return };
+            let Some(visible) = editor.visible_row_range() else { return };
             let text = editor.text();
             let lines = text.lines_len();
             // Clip to what is on screen: the editor's text area is the whole scrolled content, which moves away from the view.
@@ -455,7 +455,7 @@ fn change_marks(buffer: gpui::Entity<EditorState>, marks: std::sync::Arc<Vec<Lin
                             continue;
                         }
                         if let Some(top) = editor.range_to_bounds(&(text.line_start_offset(at)..text.line_start_offset(at))) {
-                            window.paint_quad(gpui::fill(gpui::Bounds::new(gpui::point(area.origin.x, top.origin.y - px(1.0)), gpui::size(px(BAR_WIDTH * 2.0), px(2.0))), color));
+                            window.paint_quad(gpui::fill(gpui::Bounds::new(gpui::point(viewport.origin.x, top.origin.y - px(1.0)), gpui::size(px(BAR_WIDTH * 2.0), px(2.0))), color));
                         }
                         continue;
                     }
@@ -463,7 +463,7 @@ fn change_marks(buffer: gpui::Entity<EditorState>, marks: std::sync::Arc<Vec<Lin
                     for line in (mark.lines.start.max(visible.start)..mark.lines.end).take_while(|&l| l <= visible.end && l < lines) {
                         let (start, end) = (text.line_start_offset(line), text.line_end_offset(line));
                         if let Some(bounds) = editor.range_to_bounds(&(start..end)) {
-                            window.paint_quad(gpui::fill(gpui::Bounds::new(gpui::point(area.origin.x, bounds.origin.y), gpui::size(px(BAR_WIDTH), bounds.size.height)), color));
+                            window.paint_quad(gpui::fill(gpui::Bounds::new(gpui::point(viewport.origin.x, bounds.origin.y), gpui::size(px(BAR_WIDTH), bounds.size.height)), color));
                         }
                     }
                 }

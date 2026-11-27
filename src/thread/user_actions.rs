@@ -528,19 +528,23 @@ impl ThreadView {
         let NextThinking::Higher(option_id, effort, effort_label) = self.next_higher_effort() else { return };
         let prompt = strip_retry_prefixes(prompt).to_string();
         let checkpoints = self.retry_checkpoints_for(row);
-        let has_own_checkpoint = checkpoints.iter().any(|t| t.row == row);
-        let later_checkpoints = checkpoints.iter().filter(|t| t.row > row).count();
-        self.retry_confirm = Some(RetryConfirm {
-            row,
-            prompt,
-            effort,
-            effort_label,
-            option_id,
-            has_own_checkpoint,
-            later_checkpoints,
-        });
-        window.focus(&self.restore_focus, cx);
-        cx.notify();
+        if !checkpoints.is_empty() {
+            let has_own_checkpoint = checkpoints.iter().any(|t| t.row == row);
+            let later_checkpoints = checkpoints.iter().filter(|t| t.row > row).count();
+            self.retry_confirm = Some(RetryConfirm {
+                row,
+                prompt,
+                effort,
+                effort_label,
+                option_id,
+                has_own_checkpoint,
+                later_checkpoints,
+            });
+            window.focus(&self.restore_focus, cx);
+            cx.notify();
+        } else {
+            self.begin_live_retry(row, prompt, option_id, effort, effort_label, Vec::new(), cx);
+        }
     }
 
     pub(super) fn cancel_retry_turn(&mut self, window: &mut Window, cx: &mut Context<Self>) {

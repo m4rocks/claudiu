@@ -12,8 +12,9 @@ use crate::panels::widgets::{fade_in, icon, shortcut};
 use crate::panels::ui::button::focusable;
 
 pub const COMMENT_ICON: IconName = IconName::MessageSquare;
-pub const COMMENT_SIZE: f32 = 22.0;
-pub const COMMENT_ICON_SIZE: f32 = 14.0;
+pub const COMMENT_SIZE: f32 = 18.0;
+pub const COMMENT_ICON_SIZE: f32 = 12.5;
+pub const COMMENT_GUTTER_PAD: f32 = 4.0;
 
 pub const COMMENT_SHORTCUT: &str = "Shift+M";
 

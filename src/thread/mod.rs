@@ -4603,7 +4603,8 @@ mod tests {
             assert!(matches!(v.thread.entries.last(), Some(Entry::Notice { error: true, .. })));
         });
 
-        // Without a checkpoint -> still asks for confirmation, then bumps effort and attaches a resent notice.
+        // Without a checkpoint -> retries immediately without a confirmation dialog, bumps effort,
+        // preserves permission mode, and attaches a resent notice.
         view.update(cx, |v, _| {
             v.turn_reviews.clear();
             v.thread.config = vec![live_thought_option("medium")];
@@ -4614,13 +4615,7 @@ mod tests {
             view.update(app, |v, cx| v.request_retry_turn(0, window, cx));
         });
         view.read_with(cx, |v, _| {
-            assert!(v.retry_confirm.is_some(), "retry should always ask for confirmation");
-        });
-        cx.update(|window, app| {
-            view.update(app, |v, cx| v.confirm_retry_turn(window, cx));
-        });
-        view.read_with(cx, |v, _| {
-            assert!(v.retry_confirm.is_none());
+            assert!(v.retry_confirm.is_none(), "retry without checkpoints should not prompt for confirmation");
             assert_eq!(v.pending_effort.as_deref(), Some("high"));
             assert_eq!(v.thread.mode.as_deref(), Some("plan"));
             let front = v.queue.front().expect("retry should be pushed to front of queue");

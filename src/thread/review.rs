@@ -15,7 +15,7 @@ use uuid::Uuid;
 
 use super::{ThreadEvent, ThreadView};
 use crate::git::snapshot::{self, FileChange, Hunk};
-use crate::panels::comment_box::{COMMENT_SIZE, comment_box, comment_input, comment_trigger};
+use crate::panels::comment_box::{COMMENT_GUTTER_PAD, COMMENT_SIZE, comment_box, comment_input, comment_trigger};
 use crate::panels::scale;
 use crate::panels::theme::theme;
 use crate::panels::ui::button as btn;
@@ -728,12 +728,13 @@ impl ThreadView {
                     .whitespace_nowrap()
                     .overflow_hidden()
                     .items_center()
+                    .pl(px(COMMENT_GUTTER_PAD))
                     .border_l_1()
                     .border_r_1()
                     .when(*last_in_hunk, |d| d.border_b_1().rounded_b(px(4.0)))
                     .border_color(border_color)
                     .children(comment)
-                    .child(div().w(px(44.0)).flex_none().pr(px(8.0)).text_right().text_color(theme().subtle_foreground).child(number))
+                    .child(div().w(px(32.0)).flex_none().pr(px(6.0)).text_right().text_color(theme().subtle_foreground).child(number))
                     .child(div().min_w_0().overflow_hidden().child(format!("{} {}", line.origin, line.text)));
                 wrap(row.into_any_element())
             }
@@ -742,7 +743,7 @@ impl ThreadView {
                     .border_l_1()
                     .border_r_1()
                     .border_color(theme().panel_border)
-                    .pl(px(44.0 + COMMENT_SIZE))
+                    .pl(px(COMMENT_GUTTER_PAD + COMMENT_SIZE + 32.0))
                     .pr(px(8.0))
                     .py(px(3.0))
                     .text_color(theme().primary)
@@ -756,8 +757,8 @@ impl ThreadView {
                         .border_l_1()
                         .border_r_1()
                         .border_color(theme().panel_border)
-                        .pl(px(44.0 + COMMENT_SIZE))
                         .p(px(4.0))
+                        .pl(px(COMMENT_GUTTER_PAD + COMMENT_SIZE + 32.0))
                         .on_key_down(cx.listener(|v, ev: &KeyDownEvent, window, cx| {
                             if ev.keystroke.key == "escape" {
                                 v.finish_comment(String::new(), window, cx);
