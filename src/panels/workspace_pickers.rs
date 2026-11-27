@@ -33,19 +33,8 @@ impl Workspace {
         let (id, title, body, choices): (&'static str, &'static str, AnyElement, Option<command::Choices<Self>>) = match &active.kind {
             WorkspacePicker::HomeModel { search } => {
                 let query = search.read(cx).value().to_lowercase();
-                let words: Vec<&str> = query.split_whitespace().collect();
                 let chosen_model = self.home_selected_model();
-                let filtered: Vec<crate::harness::CatalogModel> = self
-                    .store
-                    .data
-                    .settings
-                    .aggregated_models()
-                    .into_iter()
-                    .filter(|m| {
-                        let hay = format!("{} {} {}", m.name, m.id, m.harness.name()).to_lowercase();
-                        words.iter().all(|w| hay.contains(w))
-                    })
-                    .collect();
+                let filtered = picker::filter_models(self.store.data.settings.aggregated_models(), &query);
                 let mut choices = command::Choices::new(&self.picker_nav, &query);
                 let mut list = choices.list("home-model-list", window).role(gpui::Role::ListBox).aria_label("Models").flex_1().min_h_0().max_h(px(176.0));
                 let mut last_harness = None;

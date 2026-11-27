@@ -1310,38 +1310,28 @@ impl ThreadView {
 
         let (id, title, body, choices) = match active {
             ThreadPicker::Model => {
-                let current_id = self.thread.option("model").map(|m| self.option_value(m));
-                let models = self.filtered_models(cx);
-                let query = self.model_search.read(cx).value().to_lowercase();
-                let mut choices = command::Choices::new(&self.picker_nav, &query);
-                let mut list = choices.list("picker-model-list", window).role(gpui::Role::ListBox).aria_label("Models").flex_1().min_h_0().max_h(px(210.0));
-                let mut previous = None;
-                for (n, m) in models.iter().enumerate() {
-                    let heading = (previous != Some(m.harness)).then(|| picker::section_header(m.harness.name(), None));
-                    previous = Some(m.harness);
-                    let selected = match &self.pending_model {
+                let current_id = self.thread.option("model").map(|m| self.option_value(m).to_string());
+                let current_harness = self.harness;
+                let pending_model = self.pending_model.clone();
+                let (model_list, choices) = picker::model_list_body(
+                    "picker-model-list",
+                    "thread-model",
+                    &self.model_search,
+                    &self.picker_nav,
+                    self.unified_models(),
+                    px(210.0),
+                    move |m| match &pending_model {
                         Some(p) => p.harness == m.harness && p.id == m.id,
-                        None => m.harness == self.harness && current_id == Some(m.id.as_str()),
-                    };
-                    let choice = m.clone();
-                    let logo = logos::draw(logos::for_harness(m.harness), 11.5, if selected { theme().foreground } else { theme().subtle_foreground }).into_any_element();
-                    let row = command::row(SharedString::from(format!("thread-model-{n}")), Some(logo), m.name.clone(), None, None, selected, false)
-                        .role(gpui::Role::ListBoxOption)
-                        .aria_selected(selected)
-                        .debug_selector(move || format!("thread-model-{n}"));
-                    let row = choices.add(
-                        row,
-                        move |v, window, cx| {
-                            v.pick_model(choice.clone(), cx);
-                            v.close_picker(window, cx);
-                        },
-                        cx,
-                    );
-                    list = list.child(div().flex_none().flex().flex_col().children(heading).child(row));
-                }
-                if models.is_empty() {
-                    list = list.child(crate::panels::ui::empty::empty_panel(IconName::Search, "No matching models"));
-                }
+                        None => m.harness == current_harness && current_id.as_deref() == Some(m.id.as_str()),
+                    },
+                    |_| None,
+                    |v, choice, window, cx| {
+                        v.pick_model(choice, cx);
+                        v.close_picker(window, cx);
+                    },
+                    window,
+                    cx,
+                );
 
                 let (effort_values, effort_labels, current_effort_ix, option_id) = self.effort_choices();
                 let values_rc = Rc::new(effort_values);
@@ -1374,14 +1364,7 @@ impl ThreadView {
                         cx,
                     ));
 
-                let body = div()
-                    .flex_1()
-                    .min_h_0()
-                    .flex()
-                    .flex_col()
-                    .gap(px(8.0))
-                    .child(picker::search_input(&self.model_search))
-                    .child(list)
+                let body = model_list
                     .child(picker::divider())
                     .child(effort_section);
                 ("thread-model-dialog", "MODEL", body.into_any_element(), choices)

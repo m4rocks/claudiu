@@ -5,7 +5,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use gpui::{AnyElement, ClickEvent, Context, Div, Entity, FontWeight, InteractiveElement, IntoElement, KeyDownEvent, ListAlignment, ListState, ParentElement, SharedString, StatefulInteractiveElement, Styled, Subscription, Window, div, list, prelude::FluentBuilder, px};
+use gpui::{AnyElement, ClickEvent, Context, Div, Entity, FontWeight, InteractiveElement, IntoElement, KeyDownEvent, ListAlignment, ListState, ParentElement, SharedString, Styled, Subscription, Window, div, list, prelude::FluentBuilder, px};
 use gpui_kit::{assets::IconName, base::{AlertDialog, AlertDialogDescription, AlertDialogPopup, AlertDialogTitle}};
 use gpui_kit::component::input::{InputEvent, InputState};
 
@@ -17,9 +17,9 @@ use super::{ThreadEvent, ThreadView};
 use crate::git::snapshot::{self, FileChange, Hunk};
 use crate::harness::{CatalogModel, Harness};
 use crate::panels::comment_box::{COMMENT_GUTTER_PAD, COMMENT_SIZE, comment_box, comment_input, comment_trigger};
-use crate::panels::{logos, picker, scale};
+use crate::panels::{picker, scale};
 use crate::panels::theme::theme;
-use crate::panels::ui::{button as btn, command};
+use crate::panels::ui::button as btn;
 use crate::panels::ui::empty::empty_panel;
 use crate::panels::ui::skeleton::skeleton_rows;
 use crate::panels::ui::spinner::spinner;
@@ -628,15 +628,22 @@ impl ThreadView {
         }
         if review.model_picker.is_some() {
             review.model_picker = None;
+            cx.notify();
         } else {
             review.model_picker = Some(at);
+            self.picker = None;
+            self.retry_model_picker = None;
             self.picker_nav.reset();
-            self.picker_nav.focus(window, cx);
+            self.focus_model_search(window, cx);
+            cx.notify();
         }
-        cx.notify();
     }
 
-    fn close_review_model_picker(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn has_review_model_picker(&self) -> bool {
+        self.review.as_ref().is_some_and(|r| r.model_picker.is_some())
+    }
+
+    pub(super) fn close_review_model_picker(&mut self, cx: &mut Context<Self>) {
         if let Some(review) = &mut self.review {
             review.model_picker = None;
             cx.notify();
@@ -658,46 +665,18 @@ impl ThreadView {
         let at = self.review.as_ref()?.model_picker?;
         let models = review_model_choices(&self.unified_models(), self.harness);
         let has_other_harness = models.iter().any(|m| m.harness != self.harness);
-        let mut choices = command::Choices::new(&self.picker_nav, "");
-        let mut list = choices
-            .list("review-model-list", window)
-            .role(gpui::Role::ListBox)
-            .aria_label("Review models")
-            .max_h(px(260.0));
-        let mut previous = None;
-        for (n, model) in models.iter().enumerate() {
-            let heading = (previous != Some(model.harness)).then(|| {
-                let badge = (model.harness == self.harness && has_other_harness).then(|| {
-                    div()
-                        .text_size(scale::px(10.5))
-                        .text_color(theme().subtle_foreground)
-                        .child("current")
-                        .into_any_element()
-                });
-                picker::section_header(model.harness.name(), badge)
-            });
-            previous = Some(model.harness);
-            let choice = model.clone();
-            let logo = logos::draw(logos::for_harness(model.harness), 11.5, theme().subtle_foreground).into_any_element();
-            let row = command::row(SharedString::from(format!("review-model-{n}")), Some(logo), model.name.clone(), None, None, false, false)
-                .role(gpui::Role::ListBoxOption)
-                .debug_selector(move || format!("review-model-{n}"));
-            let row = choices.add(
-                row,
-                move |v, _, cx| v.start_cross_model_review(choice.clone(), cx),
-                cx,
-            );
-            list = list.child(div().flex_none().flex().flex_col().children(heading).child(row));
-        }
-        if models.is_empty() {
-            list = list.child(empty_panel(IconName::Search, "No enabled models available"));
-        }
-        Some(picker::dropdown_overlay(
+        let current_harness = self.harness;
+        Some(picker::model_dropdown_overlay(
             ("review-model-picker", "REVIEW WITH"),
+            "review-model-list",
+            "review-model",
             at,
             30,
-            list.into_any_element(),
-            Some(choices),
+            &self.model_search,
+            &self.picker_nav,
+            models,
+            move |h| (h == current_harness && has_other_harness).then_some("current"),
+            |v, choice, _, cx| v.start_cross_model_review(choice, cx),
             |v, _, cx| v.close_review_model_picker(cx),
             window,
             cx,

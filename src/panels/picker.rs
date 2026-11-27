@@ -8,13 +8,16 @@ use gpui::{
 };
 use gpui_kit::component::input::{Input, InputState};
 
-use crate::panels::scale;
+use crate::harness::{CatalogModel, Harness};
+use crate::panels::{logos, scale};
 use crate::panels::theme::theme;
-use crate::panels::ui::command::Choices;
+use crate::panels::ui::command::{self, Choices};
+use crate::panels::ui::empty::empty_panel;
 use crate::panels::widgets::{Dropdown, fade_in};
 use crate::panels::ui::kbd::kbd;
 use crate::panels::ui::label::section_label;
 use crate::panels::ui::popover;
+use gpui_kit::assets::IconName;
 
 /// Default width of every universal picker dropdown.
 pub const WIDTH: f32 = 348.0;
@@ -204,4 +207,130 @@ pub fn empty_note(text: impl Into<SharedString>) -> Div {
         .text_size(scale::px(11.5))
         .text_color(theme().subtle_foreground)
         .child(text.into())
+}
+
+/// Filter models by space-separated case-insensitive words across model name, id, and harness name.
+pub fn filter_models(models: Vec<CatalogModel>, query: &str) -> Vec<CatalogModel> {
+    let lower = query.to_lowercase();
+    let words: Vec<&str> = lower.split_whitespace().collect();
+    if words.is_empty() {
+        return models;
+    }
+    models
+        .into_iter()
+        .filter(|m| {
+            let hay = format!("{} {} {}", m.name, m.id, m.harness.name()).to_lowercase();
+            words.iter().all(|w| hay.contains(w))
+        })
+        .collect()
+}
+
+/// Shared searchable, harness-grouped model list body used by composer, Review With, and Retry With model dropdowns.
+#[allow(clippy::too_many_arguments)]
+pub fn model_list_body<V: 'static>(
+    list_id: &'static str,
+    row_prefix: &'static str,
+    search: &gpui::Entity<InputState>,
+    nav: &command::Nav,
+    models: Vec<CatalogModel>,
+    max_h: Pixels,
+    is_selected: impl Fn(&CatalogModel) -> bool,
+    harness_badge: impl Fn(Harness) -> Option<&'static str>,
+    on_pick: impl Fn(&mut V, CatalogModel, &mut Window, &mut Context<V>) + 'static,
+    window: &mut Window,
+    cx: &mut Context<V>,
+) -> (Div, Choices<V>) {
+    let query = search.read(cx).value().to_lowercase();
+    let filtered = filter_models(models, &query);
+    let on_pick = std::rc::Rc::new(on_pick);
+    let mut choices = command::Choices::new(nav, &query);
+    let mut list = choices
+        .list(list_id, window)
+        .role(gpui::Role::ListBox)
+        .aria_label("Models")
+        .flex_1()
+        .min_h_0()
+        .max_h(max_h);
+    let mut previous = None;
+    for (n, model) in filtered.iter().enumerate() {
+        let heading = (previous != Some(model.harness)).then(|| {
+            let badge = harness_badge(model.harness).map(|text| {
+                div()
+                    .text_size(scale::px(10.5))
+                    .text_color(theme().subtle_foreground)
+                    .child(text)
+                    .into_any_element()
+            });
+            section_header(model.harness.name(), badge)
+        });
+        previous = Some(model.harness);
+        let selected = is_selected(model);
+        let choice = model.clone();
+        let on_pick = on_pick.clone();
+        let logo = logos::draw(
+            logos::for_harness(model.harness),
+            11.5,
+            if selected { theme().foreground } else { theme().subtle_foreground },
+        )
+        .into_any_element();
+        let row = command::row(
+            SharedString::from(format!("{row_prefix}-{n}")),
+            Some(logo),
+            model.name.clone(),
+            None,
+            None,
+            selected,
+            false,
+        )
+        .role(gpui::Role::ListBoxOption)
+        .aria_selected(selected)
+        .debug_selector(move || format!("{row_prefix}-{n}"));
+        let row = choices.add(row, move |v, window, cx| on_pick(v, choice.clone(), window, cx), cx);
+        list = list.child(div().flex_none().flex().flex_col().children(heading).child(row));
+    }
+    if filtered.is_empty() {
+        list = list.child(empty_panel(IconName::Search, "No matching models"));
+    }
+    let body = div()
+        .flex_1()
+        .min_h_0()
+        .flex()
+        .flex_col()
+        .gap(px(8.0))
+        .child(search_input(search))
+        .child(list);
+    (body, choices)
+}
+
+/// Shared searchable model dropdown overlay anchored to its trigger button.
+#[allow(clippy::too_many_arguments)]
+pub fn model_dropdown_overlay<V: 'static>(
+    (id, title): (&'static str, impl Into<SharedString>),
+    list_id: &'static str,
+    row_prefix: &'static str,
+    at: Dropdown,
+    priority: usize,
+    search: &gpui::Entity<InputState>,
+    nav: &command::Nav,
+    models: Vec<CatalogModel>,
+    harness_badge: impl Fn(Harness) -> Option<&'static str>,
+    on_pick: impl Fn(&mut V, CatalogModel, &mut Window, &mut Context<V>) + 'static,
+    on_close: impl Fn(&mut V, &mut Window, &mut Context<V>) + 'static,
+    window: &mut Window,
+    cx: &mut Context<V>,
+) -> AnyElement {
+    let (body, choices) = model_list_body(
+        list_id,
+        row_prefix,
+        search,
+        nav,
+        models,
+        px(260.0),
+        |_| false,
+        harness_badge,
+        on_pick,
+        window,
+        cx,
+    );
+    dropdown_overlay((id, title), at, priority, body.into_any_element(), Some(choices), on_close, window, cx)
 }

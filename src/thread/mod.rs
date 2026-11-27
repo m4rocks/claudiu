@@ -3017,15 +3017,21 @@ impl ThreadView {
             cx.notify();
             return;
         }
-        // Escape always closes an open composer picker even if focus briefly left the textarea.
-        if self.picker.is_some()
+        // Escape always closes an open picker/dropdown even if focus briefly left the textarea.
+        if (self.picker.is_some() || self.retry_model_picker.is_some() || self.has_review_model_picker())
             && ev.keystroke.key == "escape"
             && !ev.keystroke.modifiers.control
             && !ev.keystroke.modifiers.alt
             && !ev.keystroke.modifiers.platform
             && !ev.keystroke.modifiers.shift
         {
-            self.close_picker(window, cx);
+            if self.picker.is_some() {
+                self.close_picker(window, cx);
+            } else if self.retry_model_picker.is_some() {
+                self.close_retry_model_picker(window, cx);
+            } else {
+                self.close_review_model_picker(cx);
+            }
             cx.stop_propagation();
             cx.notify();
             return;
@@ -3207,16 +3213,21 @@ impl ThreadView {
         cx.notify();
     }
 
+    pub(super) fn focus_model_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.model_search.update(cx, |s, cx| {
+            s.set_value("", window, cx);
+            s.focus(window, cx);
+        });
+    }
+
     pub(super) fn toggle_model_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.picker == Some(ThreadPicker::Model) {
             self.close_picker(window, cx);
         } else {
+            self.retry_model_picker = None;
             self.picker = Some(ThreadPicker::Model);
             self.picker_at = self.model_anchor.above();
-            self.model_search.update(cx, |s, cx| {
-                s.set_value("", window, cx);
-                s.focus(window, cx);
-            });
+            self.focus_model_search(window, cx);
             let current_id = self.thread.option("model").map(|m| self.option_value(m));
             let models = self.unified_models();
             let current = models
@@ -3228,18 +3239,6 @@ impl ThreadView {
                 .unwrap_or(0);
             self.picker_nav.reset_to(current);
         }
-    }
-
-    pub(super) fn filtered_models(&self, cx: &App) -> Vec<CatalogModel> {
-        let query = self.model_search.read(cx).value().to_lowercase();
-        let words: Vec<&str> = query.split_whitespace().collect();
-        self.unified_models()
-            .into_iter()
-            .filter(|m| {
-                let hay = format!("{} {} {}", m.name, m.id, m.harness.name()).to_lowercase();
-                words.iter().all(|w| hay.contains(w))
-            })
-            .collect()
     }
 
     /// `(values, short_labels, current_index, live_option_id)` for the effort slider, with no `"default"` step and

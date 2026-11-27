@@ -12,9 +12,9 @@ use uuid::Uuid;
 use super::{Phase, Queued, ThreadEvent, ThreadView, queue, review};
 use crate::git::snapshot;
 use crate::harness::{CatalogModel, thread::Entry};
-use crate::panels::{logos, picker, scale};
+use crate::panels::{picker, scale};
 use crate::panels::theme::theme;
-use crate::panels::ui::{button as btn, command, empty::empty_panel, tooltip::tooltip};
+use crate::panels::ui::{button as btn, tooltip::tooltip};
 use crate::panels::widgets::{Dropdown, Trigger, icon};
 
 pub(super) enum TurnActionKind {
@@ -741,9 +741,10 @@ impl ThreadView {
         if self.other_models_for_retry().is_empty() {
             return;
         }
+        self.picker = None;
         self.retry_model_picker = Some(RetryModelPicker { row, at });
         self.picker_nav.reset();
-        self.picker_nav.focus(window, cx);
+        self.focus_model_search(window, cx);
         cx.notify();
     }
 
@@ -1039,30 +1040,43 @@ impl ThreadView {
         Some(crate::panels::ui::notice::notice(notice.text(), crate::panels::ui::alert::Tone::Default).into_any_element())
     }
 
-    pub(super) fn render_agent_footer(&self, row: usize, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let Some(Entry::Agent(text)) = self.thread.entries.get(row) else { return None };
-        if text.trim().is_empty() {
-            return None;
-        }
-        let copied = self.is_recently_copied(row);
-        let tip = if copied { "Copied" } else { "Copy message" };
-        let copy_btn = div()
-            .id(SharedString::from(format!("agent-copy-{row}")))
+    fn action_icon_button(id: SharedString, glyph: IconName, tip: SharedString, enabled: bool) -> gpui::Stateful<gpui::Div> {
+        let base = div()
+            .id(id)
             .size(px(20.0))
             .rounded(px(5.0))
             .flex()
             .items_center()
             .justify_center()
             .text_color(theme().subtle_foreground)
-            .cursor_pointer()
-            .hover(|s| s.bg(theme().secondary_hover).text_color(theme().foreground))
             .tooltip(tooltip(tip))
-            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| {
-                cx.stop_propagation();
-                v.copy_entry(row, cx);
-            }))
-            .child(icon(if copied { IconName::Check } else { IconName::Copy }, 12.5));
+            .child(icon(glyph, 12.5));
+        if enabled {
+            base.cursor_pointer()
+                .hover(|s| s.bg(theme().secondary_hover).text_color(theme().foreground))
+        } else {
+            base.opacity(0.5).cursor_default()
+        }
+    }
+
+    pub(super) fn render_agent_footer(&self, row: usize, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let Some(Entry::Agent(text)) = self.thread.entries.get(row) else { return None };
+        if text.trim().is_empty() {
+            return None;
+        }
+        let copied = self.is_recently_copied(row);
+        let tip = SharedString::from(if copied { "Copied" } else { "Copy message" });
+        let copy_btn = Self::action_icon_button(
+            SharedString::from(format!("agent-copy-{row}")),
+            if copied { IconName::Check } else { IconName::Copy },
+            tip,
+            true,
+        )
+        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| {
+            cx.stop_propagation();
+            v.copy_entry(row, cx);
+        }));
         Some(
             div()
                 .w_full()
@@ -1096,55 +1110,20 @@ impl ThreadView {
             )
         });
         let buttons = actions.into_iter().map(|action| {
-            let id = action.id;
-            let tip = action.tooltip;
             if let Some(handler) = action.on_dropdown {
-                div()
-                    .id(id)
-                    .size(px(20.0))
-                    .rounded(px(5.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_color(theme().subtle_foreground)
-                    .cursor_pointer()
-                    .hover(|s| s.bg(theme().secondary_hover).text_color(theme().foreground))
-                    .tooltip(tooltip(tip))
+                Self::action_icon_button(action.id, action.icon, action.tooltip, true)
                     .dropdown_right(cx, move |v, at, window, cx| handler(v, at, window, cx))
-                    .child(icon(action.icon, 12.5))
                     .into_any_element()
             } else if let Some(handler) = action.on_click {
-                div()
-                    .id(id)
-                    .size(px(20.0))
-                    .rounded(px(5.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_color(theme().subtle_foreground)
-                    .cursor_pointer()
-                    .hover(|s| s.bg(theme().secondary_hover).text_color(theme().foreground))
-                    .tooltip(tooltip(tip))
+                Self::action_icon_button(action.id, action.icon, action.tooltip, true)
                     .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_click(cx.listener(move |v, _: &ClickEvent, window, cx| {
                         cx.stop_propagation();
                         handler(v, window, cx);
                     }))
-                    .child(icon(action.icon, 12.5))
                     .into_any_element()
             } else {
-                div()
-                    .id(id)
-                    .size(px(20.0))
-                    .rounded(px(5.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_color(theme().subtle_foreground)
-                    .opacity(0.5)
-                    .cursor_default()
-                    .tooltip(tooltip(tip))
-                    .child(icon(action.icon, 12.5))
+                Self::action_icon_button(action.id, action.icon, action.tooltip, false)
                     .into_any_element()
             }
         });
@@ -1269,54 +1248,18 @@ impl ThreadView {
         let row = picker_state.row;
         let at = picker_state.at;
         let models = self.other_models_for_retry();
-        let mut choices = command::Choices::new(&self.picker_nav, "");
-        let mut list = choices
-            .list("retry-model-list", window)
-            .role(gpui::Role::ListBox)
-            .aria_label("Retry with model")
-            .max_h(px(260.0));
-        let mut previous = None;
-        for (ix, model) in models.iter().enumerate() {
-            let heading = (previous != Some(model.harness)).then(|| {
-                let badge = (model.harness != self.harness).then(|| {
-                    div()
-                        .text_size(scale::px(10.5))
-                        .text_color(theme().subtle_foreground)
-                        .child("handoff")
-                        .into_any_element()
-                });
-                picker::section_header(model.harness.name(), badge)
-            });
-            previous = Some(model.harness);
-            let target = model.clone();
-            let logo = logos::draw(logos::for_harness(model.harness), 11.5, theme().subtle_foreground).into_any_element();
-            let item = command::row(
-                SharedString::from(format!("retry-model-opt-{ix}")),
-                Some(logo),
-                model.name.clone(),
-                None,
-                None,
-                false,
-                false,
-            )
-            .role(gpui::Role::ListBoxOption)
-            .debug_selector(move || format!("retry-model-opt-{ix}"));
-            let item = choices.add(
-                item,
-                move |v, window, cx| v.select_retry_model(row, target.clone(), window, cx),
-                cx,
-            );
-            list = list.child(div().flex_none().flex().flex_col().children(heading).child(item));
-        }
-        if models.is_empty() {
-            list = list.child(empty_panel(IconName::Search, "No other models available"));
-        }
-        Some(picker::dropdown_overlay(
+        let current_harness = self.harness;
+        Some(picker::model_dropdown_overlay(
             ("retry-model-picker", "RETRY WITH"),
+            "retry-model-list",
+            "retry-model-opt",
             at,
             30,
-            list.into_any_element(),
-            Some(choices),
+            &self.model_search,
+            &self.picker_nav,
+            models,
+            move |h| (h != current_harness).then_some("handoff"),
+            move |v, target, window, cx| v.select_retry_model(row, target, window, cx),
             |v, window, cx| v.close_retry_model_picker(window, cx),
             window,
             cx,
