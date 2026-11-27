@@ -147,7 +147,7 @@ impl Workspace {
         let Some(child) = self.live_view(id).and_then(|v| v.thread()) else { return };
         let entries = &child.read(cx).thread.entries;
         let mut body = last_reply(entries).unwrap_or_default().to_string();
-        if let Some(Entry::Notice { text, error: true }) = entries.last() {
+        if let Some(Entry::Notice { text, error: true, .. }) = entries.last() {
             body = if body.is_empty() { text.clone() } else { format!("{body}\n\n{text}") };
         }
         let prompt = crate::harness::thread::subagent_report_prompt(id, meta.harness.key(), record.display_title(), outcome, &body);

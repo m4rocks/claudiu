@@ -103,18 +103,8 @@ impl Workspace {
             _ => return None,
         };
         Some(
-            div()
-                .flex()
-                .items_center()
-                .justify_between()
-                .h(px(28.0))
+            crate::panels::ui::notice::notice(text, crate::panels::ui::alert::Tone::Default)
                 .flex_none()
-                .px(px(10.0))
-                .rounded(px(6.0))
-                .bg(theme().notice)
-                .border_1()
-                .border_color(theme().notice_border)
-                .child(div().text_size(crate::panels::scale::px(12.0)).text_color(theme().primary).child(text))
                 .when_some(action, |d, (label, act)| {
                     d.child(btn::text("update-action", label, true).h(px(22.0)).on_click(cx.listener(move |ws, _: &ClickEvent, window, cx| {
                         ws.act(act.clone(), window, cx)

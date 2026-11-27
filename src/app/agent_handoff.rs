@@ -3,7 +3,7 @@
 //! sending the transcript + the user's new message as the first turn.
 
 use super::*;
-use crate::harness::thread::Entry;
+use crate::harness::thread::NoticeKind;
 
 /// Entries read from the end before the cut, so a long session is not turned into text whole.
 const LAST_ENTRIES: usize = 400;
@@ -27,12 +27,20 @@ impl Workspace {
     pub(super) fn dynamic_handoff(&mut self, id: &str, to: Harness, model: Option<String>, message: String, by_agent: bool, effort: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(thread) = self.live_view(id).and_then(|v| v.thread()).cloned() else { return };
         let switching_worktree = self.switching_worktree.contains_key(id);
-        if switching_worktree || self.pending_handoffs.contains_key(id) {
+        if switching_worktree || self.pending_handoffs.contains_key(id) || self.compacting.contains_key(id) {
             if !by_agent {
                 thread.update(cx, |v, cx| v.paste_text(&message, window, cx));
             }
-            let message = if switching_worktree { "Wait for the worktree switch to finish." } else { "A harness handoff is already starting." };
-            self.toast(message, cx);
+            let message = if switching_worktree { "Wait for the worktree switch to finish." }
+                else if self.compacting.contains_key(id) { "Wait for compaction to finish." }
+                else { "A harness handoff is already starting." };
+            if !self.pending_handoffs.contains_key(id)
+                && thread.read(cx).thread.active_notice(NoticeKind::Handoff).is_some()
+            {
+                thread.update(cx, |v, cx| v.fail_handoff(message.into(), cx));
+            } else {
+                self.toast(message, cx);
+            }
             return;
         }
         let Some(mut rec) = self.store.session(id).cloned() else { return };
@@ -40,7 +48,7 @@ impl Workspace {
             if !by_agent {
                 thread.update(cx, |v, cx| v.paste_text(&message, window, cx));
             }
-            self.toast(format!("{} is unavailable for this session.", to.name()), cx);
+            thread.update(cx, |v, cx| v.fail_handoff(format!("{} is unavailable for this session.", to.name()), cx));
             return;
         }
         let cwd = rec.cwd.clone();
@@ -58,10 +66,7 @@ impl Workspace {
             });
         }
         let target_label = model.as_deref().filter(|m| !m.is_empty()).unwrap_or_else(|| to.name());
-        prior_entries.push(Entry::Notice {
-            text: format!("Switched to {target_label}"),
-            error: false,
-        });
+        NoticeKind::Handoff.begin(&mut prior_entries, format!("Handing over to {target_label}…"));
         // An agent's own message goes in as the last thing it said, so the chat shows no message the user didn't type.
         let prompt = if by_agent {
             let said = if transcript.trim().is_empty() { format!("Agent: {message}") } else { format!("{transcript}\n\nAgent: {message}") };
@@ -84,7 +89,13 @@ impl Workspace {
         meta.model = None;
         meta.managed_compaction = true;
         rec.agent = Some(meta.clone());
+        thread.update(cx, |v, cx| {
+            let row = v.thread.begin_notice(NoticeKind::Handoff, format!("Handing over to {target_label}\u{2026}"));
+            v.remeasure(row);
+            cx.notify();
+        });
         let Some(mut start) = self.thread_start(&rec.id, &cwd, &meta, rec.chosen_title().map(String::from), Some(prompt), Starter::Handoff, cx) else {
+            thread.update(cx, |v, cx| v.fail_handoff("Could not start the replacement session.".into(), cx));
             if let Some(draft) = draft {
                 thread.update(cx, |v, cx| v.paste_text(&draft, window, cx));
             }
@@ -157,6 +168,17 @@ impl Workspace {
             if let Some(model) = view.thread.option("model") { pending.meta.chosen_model = Some(model.current.clone()); }
             if let Some(effort) = view.thread.option("thought_level") { pending.meta.chosen_effort = Some(effort.current.clone()); }
         }
+        if matches!(pending.kind, Replacement::Handoff)
+            && let Some(view) = self.live_view(id).and_then(|v| v.thread()).cloned()
+        {
+            let label = pending.meta.chosen_model.as_deref().unwrap_or_else(|| pending.meta.harness.name());
+            view.update(cx, |v, cx| {
+                let row = v.thread.finish_notice(NoticeKind::Handoff, format!("Switched to {label}"), false);
+                v.remeasure(row);
+                v.persist_entries();
+                cx.notify();
+            });
+        }
         if let Some(record) = self.store.session_mut(id) {
             record.agent = Some(pending.meta);
         }
@@ -189,15 +211,12 @@ impl Workspace {
                     view.paste_text(&draft, window, cx);
                 }
                 view.hold_workspace_switch(false, cx);
+                let action = match pending.kind { Replacement::Handoff => "Handoff", Replacement::Permission => "Permission change" };
+                view.fail_handoff(format!("{action} failed. The original session is still open. {error}"), cx);
             });
         }
         self.live.push(pending.source);
         self.switching_worktree.remove(id);
-        let action = match pending.kind {
-            Replacement::Handoff => "Handoff",
-            Replacement::Permission => "Permission change",
-        };
-        self.toast(format!("{action} failed. The original session is still open. {error}"), cx);
         if self.active_id().is_some_and(|active| active == id) {
             self.focus_active(window, cx);
         }
@@ -221,6 +240,7 @@ impl Workspace {
             self.toast(format!("Could not clear the local conversation: {error}"), cx);
             return;
         }
+        self.compacting.remove(id);
         if let Some(thread) = self.live_view(id).and_then(|view| view.thread()).cloned() {
             thread.update(cx, |view, _| view.relinquish_record());
         }
@@ -248,19 +268,20 @@ impl Workspace {
     /// generation (falling back to a condensed tail of the transcript if unavailable) and restart the session in place
     /// seeded with the compacted context.
     pub(super) fn compact_session(&mut self, id: &str, transcript: String, instructions: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
-        if self.compacting.contains(id) || self.pending_handoffs.contains_key(id) || self.switching_worktree.contains_key(id) {
-            return;
-        }
         let Some(thread) = self.live_view(id).and_then(|v| v.thread()).cloned() else { return };
-        if thread.read(cx).has_active_turn() {
-            self.toast("Wait for the current turn to finish before compacting.", cx);
+        if self.compacting.contains_key(id) || self.pending_handoffs.contains_key(id) || self.switching_worktree.contains_key(id)
+            || thread.read(cx).has_active_turn()
+        {
+            thread.update(cx, |v, cx| v.cancel_compaction(cx));
             return;
         }
         let source_entity = thread.entity_id();
         let entry_count = thread.read(cx).thread.entries.len();
-        self.compacting.insert(id.to_string());
+        let request = uuid::Uuid::new_v4();
+        self.compacting.insert(id.to_string(), request);
         let Some(rec) = self.store.session(id).cloned() else {
             self.compacting.remove(id);
+            thread.update(cx, |v, cx| v.cancel_compaction(cx));
             return;
         };
         let meta = rec.agent.clone().unwrap_or_default();
@@ -292,6 +313,8 @@ impl Workspace {
                 fallback
             };
             let _ = this.update_in(cx, |ws, window, cx| {
+                // A stopped operation may already have been replaced by a new request on the same session.
+                if ws.compacting.get(&session_id) != Some(&request) { return; }
                 ws.compacting.remove(&session_id);
                 ws.finish_compact_session(&session_id, source_entity, entry_count, summary, window, cx);
             });
@@ -300,19 +323,23 @@ impl Workspace {
     }
 
     fn finish_compact_session(&mut self, id: &str, source_entity: gpui::EntityId, entry_count: usize, summary: String, window: &mut Window, cx: &mut Context<Self>) {
-        if self.pending_handoffs.contains_key(id) || self.switching_worktree.contains_key(id) {
-            return;
-        }
-        let Some(mut rec) = self.store.session(id).cloned() else { return };
         let Some(thread) = self.live_view(id).and_then(|v| v.thread()).cloned() else { return };
-        if thread.entity_id() != source_entity || thread.read(cx).thread.entries.len() != entry_count || thread.read(cx).has_active_turn() {
+        if thread.entity_id() != source_entity || thread.read(cx).thread.active_notice(NoticeKind::Compaction).is_none() { return; }
+        if self.pending_handoffs.contains_key(id) || self.switching_worktree.contains_key(id)
+            || thread.read(cx).thread.entries.len() != entry_count || thread.read(cx).has_active_turn()
+        {
+            thread.update(cx, |v, cx| v.cancel_compaction(cx));
             return;
         }
-        let (mut prior_entries, permission) = {
+        let Some(mut rec) = self.store.session(id).cloned() else {
+            thread.update(cx, |v, cx| v.cancel_compaction(cx));
+            return;
+        };
+        let (prior_entries, permission) = {
             let t = thread.read(cx);
             (t.thread.entries.clone(), t.permission_for_relaunch())
         };
-        prior_entries.push(Entry::Notice { text: "Context compacted.".into(), error: false });
+
         let mut meta = rec.agent.clone().unwrap_or_default();
         meta.session_id.clear();
         meta.provider_sessions.clear();
@@ -324,11 +351,12 @@ impl Workspace {
         rec.agent = Some(meta.clone());
         let cwd = self.resume_cwd(&rec, cx);
         let prompt = format!(
-            "The previous conversation context was compacted into the summary below. \
-             Acknowledge briefly that you have the compacted context and are ready to continue.\n\n\
+            "[m4code notice] The previous conversation context was compacted into the summary below. \
+             Retain it for the next user request. Do not write an acknowledgement or take further action.\n\n\
              ## Compacted context\n{summary}"
         );
         let Some(mut start) = self.thread_start(&rec.id, &cwd, &meta, rec.chosen_title().map(String::from), Some(prompt), Starter::User, cx) else {
+            thread.update(cx, |v, cx| v.cancel_compaction(cx));
             return;
         };
         if meta.parent_session.is_none() && permission.is_some() {

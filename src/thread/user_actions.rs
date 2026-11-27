@@ -67,12 +67,6 @@ pub(super) enum UserNotice {
 }
 
 impl UserNotice {
-    pub(super) fn icon(&self) -> IconName {
-        match self {
-            Self::ResentHigherThinking { .. } => IconName::Brain,
-        }
-    }
-
     pub(super) fn text(&self) -> String {
         match self {
             Self::ResentHigherThinking { effort } => format!("Resent with {effort} thinking"),
@@ -676,20 +670,7 @@ impl ThreadView {
     pub(super) fn render_user_header(&self, row: usize) -> Option<AnyElement> {
         let ordinal = visible_user_ordinal(&self.thread.entries, row)?;
         let notice = self.user_notices.get(&ordinal)?;
-        Some(
-            div()
-                .w_full()
-                .px(px(4.0))
-                .flex()
-                .items_center()
-                .justify_end()
-                .gap(px(4.0))
-                .text_size(scale::px(11.0))
-                .text_color(theme().subtle_foreground)
-                .child(icon(notice.icon(), 11.5))
-                .child(notice.text())
-                .into_any_element(),
-        )
+        Some(crate::panels::ui::notice::notice(notice.text(), crate::panels::ui::alert::Tone::Default).into_any_element())
     }
 
     pub(super) fn render_user_footer(&self, row: usize, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -929,7 +910,7 @@ mod tests {
     fn visible_user_ordinal_ignores_notices_and_agent_entries() {
         let with_notices = vec![
             Entry::User("first".into()),
-            Entry::Notice { text: "Compacting context…".into(), error: false },
+            Entry::notice("Compacting context…", false),
             Entry::Agent("reply".into()),
             Entry::User("second".into()),
         ];

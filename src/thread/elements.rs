@@ -132,30 +132,16 @@ pub fn one_line(text: &str) -> String {
 
 /// The turn's working row under the last step: spinner in the steps' icon column, label, timer and stop hint.
 pub fn turn_working_line(label: String, elapsed: Option<Duration>, stop: Option<AnyElement>) -> AnyElement {
-    div()
-        .px(px(6.0))
-        .py(px(3.0))
-        .flex()
-        .items_center()
-        .gap(px(7.0))
-        .text_size(scale::px(12.0))
-        .line_height(relative(1.4))
-        .child(div().text_color(theme().muted_foreground).child(label))
+    crate::panels::ui::notice::notice(label, crate::panels::ui::alert::Tone::Default)
         .children(elapsed.map(|d| div().text_color(theme().subtle_foreground).child(format_duration(d))))
-        .children(stop.map(|stop| div().ml(px(4.0)).child(stop)))
+        .children(stop)
         .debug_selector(|| "turn-working".into())
         .into_any_element()
 }
 
 /// What stays under a finished turn: how long it took.
 pub fn turn_done_line(took: Duration) -> AnyElement {
-    div()
-        .px(px(6.0))
-        .py(px(3.0))
-        .text_size(scale::px(12.0))
-        .line_height(relative(1.4))
-        .text_color(theme().subtle_foreground)
-        .child(format!("Worked for {}", format_duration(took)))
+    crate::panels::ui::notice::notice(format!("Worked for {}", format_duration(took)), crate::panels::ui::alert::Tone::Default)
         .debug_selector(|| "turn-done".into())
         .into_any_element()
 }

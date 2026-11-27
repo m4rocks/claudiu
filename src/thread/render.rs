@@ -491,17 +491,16 @@ impl ThreadView {
                 Some(run) if run.len() > 1 => indent_run_step(self.render_tool(ix, call, cx)),
                 _ => self.render_tool(ix, call, cx),
             },
-            Entry::Notice { text, error } => div()
-                .px(px(10.0))
-                .py(px(6.0))
-                .rounded(px(6.0))
-                .bg(if *error { theme().destructive_subtle } else { theme().background })
-                .border_1()
-                .border_color(if *error { theme().destructive_subtle_border } else { theme().panel_border })
-                .text_size(scale::px(12.0))
-                .text_color(if *error { theme().destructive } else { theme().muted_foreground })
-                .child(text.clone())
-                .into_any_element(),
+            Entry::Notice { text, error: true, event: Some(_), .. }
+                if ix + 1 == self.thread.entries.len() && self.error.is_some() => {
+                    self.render_error_notice(format!("{text} {}", self.error.as_deref().unwrap_or_default()), cx).into_any_element()
+                },
+            Entry::Notice { text, .. } if ix + 1 == self.thread.entries.len()
+                && crate::harness::limits::looks_like_usage_limit_error(text) => self.render_usage_notice(text.clone(), cx).into_any_element(),
+            Entry::Notice { text, error, .. } => crate::panels::ui::notice::notice(
+                text.clone(),
+                if *error { crate::panels::ui::alert::Tone::Destructive } else { crate::panels::ui::alert::Tone::Default },
+            ).into_any_element(),
         };
         self.wrap_entry(ix, body)
     }
@@ -575,14 +574,16 @@ impl ThreadView {
     /// then "Worked for …" until the next turn starts.
     fn render_turn_status(&self) -> AnyElement {
         let elapsed = self.turn_started.map(|t| t.elapsed());
-        let (label, stoppable) = match self.starting_label() {
-            Some(label) => (label, false),
-            None if self.is_working() && self.compaction.running => ("Compacting…".to_string(), true),
-            None if self.is_working() || self.has_active_turn() => ("Working…".to_string(), true),
-            None => {
-                let Some(took) = self.last_turn else { return div().into_any_element() };
-                return self.wrap_turn_status(elements::turn_done_line(took));
-            }
+        // Operation notices own the handoff/compaction status; never echo it below the timeline.
+        if self.starting_label().is_some() || self.compaction.running
+            || self.thread.active_notice(super::NoticeKind::Compaction).is_some() {
+            return div().into_any_element();
+        }
+        let (label, stoppable) = if self.is_working() || self.has_active_turn() {
+            ("Working…".to_string(), true)
+        } else {
+            let Some(took) = self.last_turn else { return div().into_any_element() };
+            return self.wrap_turn_status(elements::turn_done_line(took));
         };
         let stop = stoppable.then(|| div().flex().gap(px(4.0)).items_center().child(kbd("Esc"))
             .child(div().text_size(scale::px(11.5)).text_color(theme().subtle_foreground).child("to stop")).into_any_element());
@@ -1524,26 +1525,7 @@ impl ThreadView {
 
         if let Some(target) = &self.pending_model {
             inner = inner.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .px(px(10.0))
-                    .py(px(5.0))
-                    .rounded(px(7.0))
-                    .bg(theme().card)
-                    .border_1()
-                    .border_color(theme().panel_border)
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(6.0))
-                            .text_size(scale::px(11.5))
-                            .text_color(theme().foreground)
-                            .child(logos::draw(logos::for_harness(target.harness), 11.5, theme().muted_foreground))
-                            .child(format!("Next message switches to {}", target.name)),
-                    )
+                crate::panels::ui::notice::notice(format!("Next message switches to {}", target.name), crate::panels::ui::alert::Tone::Default)
                     .child(
                         div()
                             .id("cancel-handoff-stage")

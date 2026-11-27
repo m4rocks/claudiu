@@ -570,7 +570,7 @@ pub struct Workspace {
     pub search: String,
     pub search_input: Entity<InputState>,
     pub palette: Option<palette::CommandPalette>,
-    compacting: HashSet<Id>,
+    compacting: HashMap<Id, uuid::Uuid>,
     pub root_focus: FocusHandle,
     /// Up/Down/Enter in the open workspace dropdown (`panels::command::Choices`).
     pub picker_nav: crate::panels::ui::command::Nav,
@@ -798,7 +798,7 @@ impl Workspace {
             pending_subagent_waits: vec![],
             finished_subagents_open: Default::default(),
             pending_handoffs: HashMap::new(),
-            compacting: HashSet::new(),
+            compacting: HashMap::new(),
             pending_switches: vec![],
             update: UpdateState::default(),
             quitting: false,

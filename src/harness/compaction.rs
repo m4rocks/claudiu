@@ -30,14 +30,19 @@ impl Policy {
         }
     }
 
+    /// Manual and automatic attempts share the same rearm rule while reported usage remains high.
+    pub fn started(&mut self) {
+        self.running = true;
+        self.attempted = true;
+    }
+
     pub fn take_due(&mut self, context: Option<(u64, u64)>, supported: bool) -> bool {
         let threshold = clamp_threshold(self.threshold_percent);
         let full = context.is_some_and(|(used, size)| size > 0 && (used as u128) * 100 >= (size as u128) * u128::from(threshold));
         if !self.enabled || !supported || self.running || self.attempted || !full {
             return false;
         }
-        self.attempted = true;
-        self.running = true;
+        self.started();
         true
     }
 }

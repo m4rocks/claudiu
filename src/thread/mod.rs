@@ -12,6 +12,7 @@ pub(crate) use review::clear_turn_reviews;
 mod timeline;
 mod find;
 mod telemetry;
+mod notices;
 pub(crate) use telemetry::exhausted_usage;
 mod user_actions;
 pub(crate) use user_actions::{clear_notices, clear_timestamps};
@@ -35,7 +36,7 @@ use self::queue::Queued;
 
 use crate::harness::acp::{self, Connection, Event, Launch};
 use crate::harness::defaults::{self, Starter};
-use crate::harness::thread::{Entry, Thread, ToolStatus};
+use crate::harness::thread::{Entry, NoticeKind, Thread, ToolStatus};
 use crate::harness::permission::{self, Permission};
 use crate::harness::{BackgroundTask as ProviderTask, CatalogModel, Harness, Reopen};
 use crate::visual::ui::{CardUi, OpenFile, SendText};
@@ -110,7 +111,7 @@ pub(crate) const FORK_SEED: &str = "Forked thread. Send a message to continue.";
 pub(crate) const WORKTREE_SEED: &str = "Moved to a new checkout. The next message continues this conversation.";
 
 fn needs_history_seed(entry: &Entry) -> bool {
-    matches!(entry, Entry::Notice { text, error: false } if matches!(text.as_str(), FORK_SEED | WORKTREE_SEED))
+    matches!(entry, Entry::Notice { text, error: false, .. } if matches!(text.as_str(), FORK_SEED | WORKTREE_SEED))
 }
 
 pub enum ThreadEvent {
@@ -159,6 +160,7 @@ pub enum ThreadEvent {
     ClearSession,
     /// Built-in `/compact [instructions]` fallback when the harness doesn't provide native compaction.
     Compact { transcript: String, instructions: Option<String> },
+    CancelCompaction,
     /// The underlying harness session moved into `folder` in place without recreating the `ThreadView`.
     WorktreeSwitched { folder: PathBuf, session_id: String },
     /// Switching the underlying harness session to `folder` failed; the original harness session is still active.
@@ -607,7 +609,9 @@ impl ThreadView {
             {
                 user_timestamps.insert(ordinal, user_actions::now_unix_secs());
             }
-            queue.push_front(Queued { startup: true, shown, ..Queued::new(prompt, start.prior_entries.is_empty()) });
+            let compact = thread.active_notice(NoticeKind::Compaction).is_some()
+                && crate::harness::thread::is_hidden_prompt(&prompt);
+            queue.push_front(Queued { startup: true, shown, compact, ..Queued::new(prompt, start.prior_entries.is_empty()) });
         }
         let rows = thread.entries.len();
         // One row past the entries holds the turn's working or "Worked for" line.
@@ -616,7 +620,7 @@ impl ThreadView {
         let cached_replay = start.session_id.is_some()
             && !start.prior_entries.is_empty()
             && start.harness.adapter().reopen == Reopen::Load;
-        let took_over = start.session_id.is_none() && !start.prior_entries.is_empty();
+        let took_over = thread.active_notice(NoticeKind::Handoff).is_some();
         let turn_reviews = Vec::new();
         let canonical_history = !turn_reviews.is_empty()
             || start.prior_entries.iter().any(|entry| needs_history_seed(entry) || matches!(entry, Entry::WorkspaceBoundary(_)));
@@ -778,6 +782,7 @@ impl ThreadView {
             if this.update(cx, |v, cx| {
                 if restore {
                     v.thread.entries = entries;
+                    v.thread.settle_notices();
                     settle_running_tools(&mut v.thread.entries);
                     v.cached_replay = !v.thread.entries.is_empty() && harness.adapter().reopen == Reopen::Load;
                     for item in &mut v.queue {
@@ -1205,7 +1210,7 @@ impl ThreadView {
                         let at = v.thread.entries.len();
                         v.thread.entries.push(Entry::WorkspaceBoundary(old_cwd));
                         if seeded_notice {
-                            v.thread.entries.push(Entry::Notice { text: WORKTREE_SEED.into(), error: false });
+                            v.thread.entries.push(Entry::notice(WORKTREE_SEED, false));
                         }
                         v.canonical_history = true;
                         v.remeasure(at);
@@ -1366,6 +1371,9 @@ impl ThreadView {
                         self.shell_output = None;
                     }
                     cx.notify();
+                    return;
+                }
+                if self.compaction.running && self.working && is_conversation_update(&update) {
                     return;
                 }
                 if self.cached_replay && !self.working && is_conversation_update(&update) {
@@ -1640,6 +1648,7 @@ impl ThreadView {
             return;
         }
         self.phase = Phase::Ended;
+        if self.compaction.running || self.thread.active_notice(NoticeKind::Compaction).is_some() { self.finish_compaction(false, cx); }
         self.settle_running_tools();
         self.background_tasks.clear();
         self.pending_idle = None;
@@ -1875,9 +1884,7 @@ impl ThreadView {
                 true
             }
             "compact" => {
-                if self.compaction.running {
-                    let at = self.thread.notice("Context compaction is already running.", false);
-                    self.remeasure(at);
+                if self.compaction.running || self.queue.iter().any(|item| item.compact) {
                     cx.notify();
                     return true;
                 }
@@ -1887,9 +1894,6 @@ impl ThreadView {
                         Some(extra) => format!("/{native_cmd} {extra}"),
                         None => format!("/{native_cmd}"),
                     };
-                    let at = self.thread.notice("Compacting context…", false);
-                    self.remeasure(at);
-                    self.compaction.running = true;
                     self.queue.push_front(Queued { shown: true, compact: true, ..Queued::new(prompt, true) });
                     self.queue_changed();
                     if self.queue_held && !self.working {
@@ -1900,6 +1904,12 @@ impl ThreadView {
                     cx.notify();
                     return true;
                 }
+                if self.has_active_turn() {
+                    let at = self.thread.notice("Wait for the current turn to finish before compacting.", false);
+                    self.remeasure(at);
+                    cx.notify();
+                    return true;
+                }
                 let transcript = self.thread.transcript_after(0, 400);
                 if transcript.trim().is_empty() {
                     let at = self.thread.notice("Nothing to compact yet.", false);
@@ -1907,9 +1917,7 @@ impl ThreadView {
                     cx.notify();
                     return true;
                 }
-                let at = self.thread.notice("Compacting context…", false);
-                self.remeasure(at);
-                self.compaction.running = true;
+                self.begin_compaction(cx);
                 cx.emit(ThreadEvent::Compact { transcript, instructions: arg.map(String::from) });
                 cx.notify();
                 true
@@ -2030,7 +2038,7 @@ impl ThreadView {
     fn send_as(&mut self, text: String, follow_up: crate::store::FollowUp, cx: &mut Context<Self>) {
         if let Some(target) = self.pending_model.take().filter(|m| m.harness != self.harness) {
             let effort = self.pending_effort.take();
-            if self.working {
+            if self.working || self.compaction.running {
                 let previous = self.handoff_after_turn.take().filter(|(_, _, _, by_agent)| !*by_agent).map(|(_, _, text, _)| text);
                 let text = previous.map_or_else(|| text.clone(), |previous| format!("{previous}\n\n{text}"));
                 self.handoff_after_turn = Some((target, effort, text, false));
@@ -2077,16 +2085,16 @@ impl ThreadView {
     }
 
     fn send_next(&mut self, cx: &mut Context<Self>) {
-        if self.authentication_required || self.working || self.phase != Phase::Ready || self.workspace_switching || self.permission_changing || self.read_only_unconfirmed
+        if (self.compaction.running && !self.queue.front().is_some_and(|item| item.compact))
+            || self.authentication_required || self.working || self.phase != Phase::Ready || self.workspace_switching || self.permission_changing || self.read_only_unconfirmed
             || !self.steering.is_empty() || self.is_waiting() || self.restoring_checkpoint() || self.retrying_turn || !self.options_in_flight.is_empty()
         {
             return;
         }
         let (Some(connection), Some(session), Some(events)) = (self.connection.clone(), self.session_id.clone(), self.events.clone()) else { return };
         let command = self.harness.adapter().compact_command.filter(|name| self.thread.commands.iter().any(|c| c.name == *name));
-        let mut next = if !self.queue_held && self.compaction.take_due(self.thread.context, command.is_some()) {
-            let at = self.thread.notice("Compacting context…", false);
-            self.remeasure(at);
+        let mut next = if !self.queue_held && !self.queue.iter().any(|item| item.compact)
+            && self.compaction.take_due(self.thread.context, command.is_some()) {
             Queued { shown: true, compact: true, ..Queued::new(format!("/{}", command.unwrap()), false) }
         } else {
             let Some(next) = self.queue.front() else { return };
@@ -2097,6 +2105,7 @@ impl ThreadView {
         };
         let id = next.id;
         let compact = next.compact;
+        if compact { self.begin_compaction(cx); }
         let seed_history = (!compact
             && self.thread.entries.last().is_some_and(needs_history_seed))
             .then(|| self.thread.transcript(400));
@@ -2236,10 +2245,10 @@ impl ThreadView {
             cx.emit(ThreadEvent::Usage(turn));
         }
         let compacted = self.compaction.running;
-        if std::mem::take(&mut self.compaction.running) {
+        if compacted { self.last_turn = None; }
+        if self.compaction.running {
             let completed = result.as_ref().is_ok_and(|r| r["stopReason"] == "end_turn");
-            let at = self.thread.notice(if completed { "Context compacted." } else { "Context compaction did not finish." }, !completed);
-            self.remeasure(at);
+            self.finish_compaction(completed, cx);
             if let Some((used, size)) = self.thread.context {
                 self.compaction.observe(used, size);
             }
@@ -2264,24 +2273,32 @@ impl ThreadView {
             Ok(_) if notice.is_none() => "completed",
             _ => "failed",
         };
-        if let Some((text, error)) = &notice {
-            let at = self.thread.notice(text.clone(), *error);
-            self.remeasure(at);
-        }
         let hit_limit_reply = notice.as_ref().is_some_and(|(t, _)| crate::harness::limits::looks_like_usage_limit_error(t))
             || matches!(self.thread.entries.last(), Some(Entry::Agent(text)) if crate::harness::limits::looks_like_usage_limit_error(text));
-        if hit_limit_reply && self.auto_handoff_on_limit && self.phase == Phase::Ready
-            && let Some(target) = self.fallback_model.clone()
+        let handoff = (hit_limit_reply && self.auto_handoff_on_limit && self.phase == Phase::Ready)
+            .then(|| self.fallback_model.clone()).flatten();
+        if !compacted && handoff.is_none() && hit_limit_reply
+            && let Some(Entry::Agent(text)) = self.thread.entries.last()
+            && crate::harness::limits::looks_like_usage_limit_error(text)
         {
-            let at = self.thread.notice(format!("Usage limit reached on {} — handing off to {}…", self.harness.name(), target.name), false);
+            let row = self.thread.entries.len() - 1;
+            self.thread.entries[row] = Entry::notice(text.clone(), true);
+            self.remeasure(row);
+        }
+        let quota_notice_exists = hit_limit_reply && matches!(self.thread.entries.last(), Some(Entry::Notice { text, .. })
+            if crate::harness::limits::looks_like_usage_limit_error(text));
+        if !compacted && handoff.is_none() && !quota_notice_exists && let Some((text, error)) = &notice {
+            let at = if matches!(self.thread.entries.last(), Some(Entry::Agent(reply)) if reply == text) {
+                let row = self.thread.entries.len() - 1;
+                self.thread.entries[row] = Entry::notice(text.clone(), *error);
+                row
+            } else {
+                self.thread.notice(text.clone(), *error)
+            };
             self.remeasure(at);
-            cx.emit(ThreadEvent::Handoff {
-                to: target.harness,
-                model: (!target.id.is_empty()).then_some(target.id),
-                message: String::new(),
-                effort: None,
-                by_agent: true,
-            });
+        }
+        if let Some(target) = handoff {
+            self.request_usage_handoff(target, cx);
         }
         if matches!(outcome, "failed" | "interrupted") {
             self.queue_held = true;
@@ -2367,7 +2384,7 @@ impl ThreadView {
 
     /// `set_model` onto another harness, once the user approved it: hand the conversation over when this turn ends.
     pub fn hand_off_after_turn(&mut self, model: CatalogModel, effort: Option<String>, message: String, cx: &mut Context<Self>) {
-        if self.working {
+        if self.working || self.compaction.running {
             self.handoff_after_turn = Some((model, effort, message, true));
         } else {
             let to = model.harness;
@@ -2382,10 +2399,15 @@ impl ThreadView {
         if !self.interrupting {
             cx.emit(ThreadEvent::AbortChildren);
         }
+        if self.compaction.running && !self.working && self.preparing.is_none() {
+            cx.emit(ThreadEvent::CancelCompaction);
+            self.finish_compaction(false, cx);
+            return;
+        }
         if let Some(mut item) = self.preparing.take() {
             item.startup = false;
             if item.compact {
-                self.compaction.running = false;
+                self.finish_compaction(false, cx);
             } else {
                 if item.shown && matches!(self.thread.entries.last(), Some(Entry::User(text)) if text == &item.text) {
                     let at = self.thread.entries.len() - 1;
@@ -2772,7 +2794,7 @@ impl ThreadView {
 
     pub(crate) fn can_move_workspace(&self) -> bool {
         self.phase == Phase::Ready && !self.has_active_turn() && !self.is_waiting() && !self.has_background_work()
-            && !self.permission_changing
+            && !self.permission_changing && !self.compaction.running
     }
 
     pub(crate) fn permission_for_relaunch(&self) -> Option<Permission> {
@@ -3549,7 +3571,7 @@ impl ThreadView {
 
     pub fn observe_usage_limits(&mut self, usage: &crate::store::UsageLimits, notify_on_limit: bool, auto_handoff: bool, cx: &mut Context<Self>) {
         self.auto_handoff_on_limit = auto_handoff;
-        if self.phase != Phase::Ready || self.workspace_switching || self.read_only_unconfirmed {
+        if self.phase != Phase::Ready || self.workspace_switching || self.read_only_unconfirmed || self.compaction.running {
             return;
         }
         let now = crate::store::now();
@@ -3572,23 +3594,7 @@ impl ThreadView {
             && let Some(target) = self.fallback_model.clone()
             && self.runway.take_exhausted_handoff(usage, now)
         {
-            let at = self.thread.notice(
-                format!("Usage limit reached on {} — handing off to {}…", self.harness.name(), target.name),
-                false,
-            );
-            self.remeasure(at);
-            if self.has_active_turn() {
-                self.schedule_handoff(target, true, cx);
-            } else {
-                cx.emit(ThreadEvent::Handoff {
-                    to: target.harness,
-                    model: (!target.id.is_empty()).then_some(target.id),
-                    message: String::new(),
-                    effort: None,
-                    by_agent: true,
-                });
-            }
-            cx.notify();
+            self.request_usage_handoff(target, cx);
         }
     }
 
@@ -3641,7 +3647,7 @@ impl ThreadView {
     /// Whether the user can interrupt the agent right now: an active turn, an optimistic startup prompt, or a live
     /// continuation streaming updates after a turn ended.
     pub(super) fn can_interrupt(&self) -> bool {
-        self.is_working()
+        self.compaction.running || self.is_working()
     }
 
     pub fn turn_seq(&self) -> u64 {
@@ -3649,7 +3655,7 @@ impl ThreadView {
     }
 
     pub fn is_working(&self) -> bool {
-        self.has_active_turn()
+        self.compaction.running || self.has_active_turn()
             || (self.phase == Phase::Starting && !self.queue.is_empty())
             || (self.phase == Phase::Ready
                 && !self.cached_replay
@@ -3962,6 +3968,118 @@ mod tests {
             options: vec![], prompt: None, prior_entries: vec![], inline_visuals: true,
             server: Some(("definitely-not-a-real-program-m4code".into(), vec![])),
         }
+    }
+
+    #[gpui::test]
+    fn queued_compaction_keeps_current_output_and_takes_priority_over_auto_compaction(cx: &mut gpui::TestAppContext) {
+        crate::datadir::use_throwaway_folders();
+        cx.update(gpui_kit::init);
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = cx.add_window_view(|window, cx| super::ThreadView::new(test_start(dir.path().into(), Harness::Codex), window, cx));
+        let (from_agent, to_client) = std::io::pipe().unwrap();
+        let (from_client, to_agent) = std::io::pipe().unwrap();
+        let (tx, _events) = futures::channel::mpsc::unbounded();
+        let connection = super::Connection::connect(from_agent, to_agent, None::<std::io::PipeReader>, tx.clone());
+        cx.update(|_, app| view.update(app, |v, cx| {
+            v.connection = Some(std::rc::Rc::new(connection));
+            v.events = Some(tx);
+            v.session_id = Some("s".into());
+            v.phase = super::Phase::Ready;
+            v.working = true;
+            v.thread.commands = vec![crate::harness::thread::Command { name: "compact".into(), description: String::new() }];
+            assert!(v.try_run_builtin_command("/compact keep the decisions", cx));
+            assert!(!v.compaction.running, "a queued operation must not hide the current turn");
+            v.on_event(update_event(serde_json::json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Current response"}})), cx);
+            v.thread.context = Some((950, 1000));
+            v.turn_ended(Ok(serde_json::json!({"stopReason":"end_turn"})), cx);
+            assert_eq!(v.preparing.as_ref().unwrap().text, "/compact keep the decisions");
+            assert!(v.queue.is_empty(), "an automatic compact must not run in front of the explicit request");
+            assert!(matches!(&v.thread.entries[0], Entry::Agent(text) if text == "Current response"));
+            assert_eq!(v.thread.entries.iter().filter(|e| matches!(e, Entry::Notice { .. })).count(), 1);
+            let id = v.preparing.as_ref().unwrap().id;
+            v.take_prepared(id);
+            v.turn_ended(Ok(serde_json::json!({"stopReason":"end_turn"})), cx);
+            assert!(!v.compaction.running, "stale usage after a manual compact must not trigger a second automatic attempt");
+            assert_eq!(v.thread.entries.iter().filter(|e| matches!(e, Entry::Notice { .. })).count(), 1);
+        }));
+        drop((to_client, from_client));
+    }
+
+    #[gpui::test]
+    fn fallback_compaction_can_be_cancelled_and_startup_failure_settles_its_notice(cx: &mut gpui::TestAppContext) {
+        crate::datadir::use_throwaway_folders();
+        cx.update(gpui_kit::init);
+        let dir = tempfile::tempdir().unwrap();
+        let mut start = test_start(dir.path().into(), Harness::Codex);
+        crate::harness::thread::NoticeKind::Compaction.begin(&mut start.prior_entries, "Compacting");
+        start.prompt = Some("[m4code notice] Compacted context".into());
+        let (view, cx) = cx.add_window_view(|window, cx| super::ThreadView::new(start, window, cx));
+        view.update(cx, |v, cx| {
+            assert!(v.queue[0].compact);
+            assert_eq!(v.thread.entries.len(), 1, "the seed prompt is invisible");
+            v.ended(Some("Could not start".into()), cx);
+            assert!(v.thread.active_notice(crate::harness::thread::NoticeKind::Compaction).is_none());
+            assert!(matches!(&v.thread.entries[0], Entry::Notice { error: true, .. }));
+            v.phase = super::Phase::Ready;
+            v.queue.clear();
+            v.begin_compaction(cx);
+            assert!(v.can_interrupt());
+            v.interrupt(cx);
+            assert!(!v.compaction.running);
+            assert!(v.thread.active_notice(crate::harness::thread::NoticeKind::Compaction).is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn compaction_has_one_notice_and_never_inserts_provider_chatter(cx: &mut gpui::TestAppContext) {
+        crate::datadir::use_throwaway_folders();
+        cx.update(gpui_kit::init);
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = cx.add_window_view(|window, cx| super::ThreadView::new(test_start(dir.path().into(), Harness::Codex), window, cx));
+        view.update(cx, |v, cx| {
+            v.phase = super::Phase::Ready;
+            v.begin_compaction(cx);
+            v.working = true;
+            for update in [
+                serde_json::json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Context was compacted"}}),
+                serde_json::json!({"sessionUpdate":"tool_call","toolCallId":"compact","title":"Compact conversation","kind":"other","status":"in_progress"}),
+                serde_json::json!({"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"Compaction summary"}}),
+            ] { v.on_event(update_event(update), cx); }
+            v.on_event(update_event(serde_json::json!({"sessionUpdate":"usage_update","used":200,"size":1000})), cx);
+            v.turn_ended(Ok(serde_json::json!({"stopReason":"max_tokens"})), cx);
+            assert_eq!(v.thread.entries.len(), 1, "failure must update the start notice without adding tool, summary or stop-reason rows");
+            assert!(matches!(&v.thread.entries[0], Entry::Notice { text, error: true, .. } if text == "Context compaction did not finish."));
+            assert_eq!(v.thread.context, Some((200, 1000)), "usage telemetry must still be processed");
+            assert!(v.last_turn.is_none(), "compaction must not add a second Worked for notice");
+        });
+    }
+
+    #[gpui::test]
+    fn quota_reading_and_failed_result_request_one_handoff(cx: &mut gpui::TestAppContext) {
+        crate::datadir::use_throwaway_folders();
+        cx.update(gpui_kit::init);
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = cx.add_window_view(|window, cx| super::ThreadView::new(test_start(dir.path().into(), Harness::Claude), window, cx));
+        view.update(cx, |v, cx| {
+            v.phase = super::Phase::Ready;
+            v.working = true;
+            v.auto_handoff_on_limit = true;
+            let target = crate::harness::CatalogModel { harness: Harness::Codex, id: "gpt".into(), name: "Codex".into() };
+            v.fallback_model = Some(target.clone());
+            v.request_usage_handoff(target.clone(), cx);
+            v.request_usage_handoff(target, cx);
+            assert_eq!(v.thread.entries.len(), 1);
+            assert!(v.handoff_after_turn.is_some());
+            v.thread.entries.push(Entry::Agent("Usage limit reached".into()));
+            v.turn_ended(Err("Usage limit reached".into()), cx);
+            assert_eq!(v.thread.entries.len(), 1, "the failed prompt must not add another quota or handoff message");
+            assert!(v.handoff_after_turn.is_none(), "the quota handoff must dispatch even when the failed turn holds the ordinary queue");
+            v.thread.entries = vec![Entry::Agent("Usage limit reached. Please wait.".into())];
+            v.auto_handoff_on_limit = false;
+            v.turn_ended(Err("Usage limit reached".into()), cx);
+            assert_eq!(v.thread.entries.len(), 1, "provider text and a differently worded quota error are one event");
+            assert!(matches!(&v.thread.entries[0], Entry::Notice { error: true, .. }));
+        });
     }
 
     #[gpui::test]
@@ -4716,7 +4834,7 @@ mod tests {
             assert_eq!(v.pending_effort.as_deref(), Some("high"));
             assert!(v.turn_reviews.is_empty(), "restored turn review should be pruned");
             assert!(
-                v.thread.entries.iter().any(|e| matches!(e, Entry::Notice { text, error: false } if text == "Restored files to checkpoint")),
+                v.thread.entries.iter().any(|e| matches!(e, Entry::Notice { text, error: false, .. } if text == "Restored files to checkpoint")),
                 "restoring a checkpoint should add a timeline notice"
             );
             let queued = v.queue.front().map(|q| q.text.as_str()).unwrap_or_default();

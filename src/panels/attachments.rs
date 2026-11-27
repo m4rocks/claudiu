@@ -259,10 +259,7 @@ impl Attachments {
             })
             .when_some(self.error.clone(), |d, error| {
                 d.child(
-                    div()
-                        .text_size(px(12.0))
-                        .text_color(theme().destructive)
-                        .child(error),
+                    crate::panels::ui::notice::notice(error, crate::panels::ui::alert::Tone::Destructive),
                 )
             }))
     }

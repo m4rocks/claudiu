@@ -150,7 +150,9 @@ r#"        send({"jsonrpc": "2.0", "id": i, "result": {"modes": session_modes()}
         let view = ws.live_view(&id).unwrap().thread().unwrap().read(app);
         assert_eq!(view.draft(app), "keep this draft");
         assert!(view.is_running());
-        assert!(ws.toast.as_ref().unwrap().text.contains("handshake failed"));
+        assert_eq!(view.thread.entries.iter().filter(|entry| matches!(entry,
+            Entry::Notice { text, error: true, .. } if text.contains("handshake failed"))).count(), 1);
+        assert!(view.thread.active_notice(crate::harness::thread::NoticeKind::Handoff).is_none());
     });
     step(&mut cx, &|ws, window, cx| {
         ws.acp_server = Some(server_for("antigravity"));
@@ -475,7 +477,9 @@ fn interrupted_handoff_preserves_source_session_and_history() {
         assert_eq!(meta.session_id, "fake-session");
         let view = ws.live_view(&id).unwrap().thread().unwrap().read(app);
         assert_eq!(view.draft(app), "draft after crash");
-        assert!(ws.toast.as_ref().is_some_and(|t| t.text.contains("Handoff failed")));
+        assert!(view.thread.entries.iter().any(|entry| matches!(entry,
+            Entry::Notice { text, error: true, .. } if text.contains("Handoff failed"))));
+        assert!(view.thread.active_notice(crate::harness::thread::NoticeKind::Handoff).is_none());
     });
 
     // 2. Replacement hangs: a concurrent handoff is refused, and ending the session cancels the pending handoff cleanly.
@@ -589,7 +593,7 @@ fn compaction_respects_toggle_does_not_loop_on_failure_and_rearms() {
 
     // Turning auto-compact back on triggers /compact; the first attempt fails and must not loop.
     step(&mut cx, &|ws, window, cx| ws.act(Act::SetAutoCompact(id.clone(), Some(true)), window, cx));
-    wait_idle(&mut cx, &|v| v.thread.entries.iter().any(|e| matches!(e, crate::harness::thread::Entry::Notice { text, error: true } if text == "Context compaction did not finish.")));
+    wait_idle(&mut cx, &|v| v.thread.entries.iter().any(|e| matches!(e, crate::harness::thread::Entry::Notice { text, error: true, .. } if text == "Context compaction did not finish.")));
     assert_eq!(turns(), ["fill context", "/compact"], "failed compaction must not loop");
 
     // Dropping below 90% re-arms compaction; hitting 95% again runs /compact and brings usage down to 20%.
@@ -1524,7 +1528,7 @@ for line in sys.stdin:"#)
     let until = std::time::Instant::now() + Duration::from_secs(10);
     loop {
         cx.run_until_parked();
-        if thread.read_with(&cx, |v, _| v.thread.entries.iter().any(|e| matches!(e, crate::harness::thread::Entry::Notice { text, error: true } if text.contains("model unavailable")))) { break; }
+        if thread.read_with(&cx, |v, _| v.thread.entries.iter().any(|e| matches!(e, crate::harness::thread::Entry::Notice { text, error: true, .. } if text.contains("model unavailable")))) { break; }
         assert!(std::time::Instant::now() < until, "rejection was not surfaced");
         std::thread::yield_now();
     }

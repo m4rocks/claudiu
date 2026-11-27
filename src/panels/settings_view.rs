@@ -70,13 +70,7 @@ pub(super) fn render_settings_card(
             ];
             if effective_permission == Some(Permission::FullAccess) {
                 defaults_rows.push(
-                    div()
-                        .px(px(14.0))
-                        .py(px(8.0))
-                        .bg(theme().notice)
-                        .text_size(scaled(11.5))
-                        .text_color(theme().warning)
-                        .child("Full Access allows commands and edits without asking.")
+                    crate::panels::ui::notice::notice("Full Access allows commands and edits without asking.", crate::panels::ui::alert::Tone::Warning)
                         .into_any_element(),
                 );
             }

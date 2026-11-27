@@ -537,6 +537,7 @@ impl Workspace {
                 ThreadEvent::Fork(end) => ws.fork_thread(&sub_id, *end, window, cx),
                 ThreadEvent::ClearSession => ws.clear_session(&sub_id, window, cx),
                 ThreadEvent::Compact { transcript, instructions } => ws.compact_session(&sub_id, transcript.clone(), instructions.clone(), window, cx),
+                ThreadEvent::CancelCompaction => { ws.compacting.remove(&sub_id); },
                 ThreadEvent::WorktreeSwitched { folder, session_id } => ws.finish_worktree_switch(&sub_id, folder.clone(), session_id.clone(), window, cx),
                 ThreadEvent::WorktreeSwitchFailed { folder, error } => ws.fail_worktree_switch(&sub_id, folder, error, cx),
             }
@@ -553,7 +554,7 @@ impl Workspace {
             return;
         };
         let mut history = entries.to_vec();
-        history.push(crate::harness::thread::Entry::Notice { text: crate::thread::FORK_SEED.into(), error: false });
+        history.push(crate::harness::thread::Entry::notice(crate::thread::FORK_SEED, false));
         let harness = view.harness;
         let permission = view.handoff_permission();
         let options = ["model", "thought_level"].into_iter().filter_map(|category| {
@@ -762,6 +763,7 @@ impl Workspace {
     }
 
     pub(super) fn end_live(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.compacting.remove(id);
         self.switching_worktree.remove(id);
         self.cancel_pending_handoff(id, cx);
         self.end_child_sessions(id, window, cx);

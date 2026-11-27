@@ -630,7 +630,7 @@ impl ThreadView {
         let files = review.files.as_deref().unwrap_or(&[]);
         let wrap = |el: AnyElement| div().w_full().px(px(18.0)).child(el).into_any_element();
         match row {
-            ReviewRow::Error(why) => wrap(div().pb(px(8.0)).text_color(theme().destructive).child(why.clone()).into_any_element()),
+            ReviewRow::Error(why) => wrap(div().pb(px(8.0)).child(crate::panels::ui::notice::notice(why.clone(), crate::panels::ui::alert::Tone::Destructive)).into_any_element()),
             ReviewRow::FileHeader { file_ix } => {
                 let Some(file) = files.get(*file_ix) else { return div().into_any_element() };
                 wrap(

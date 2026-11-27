@@ -26,6 +26,7 @@ pub mod label;
 pub mod item;
 pub mod toast;
 pub mod menu;
+pub mod notice;
 pub mod popover;
 pub mod progress;
 pub mod separator;

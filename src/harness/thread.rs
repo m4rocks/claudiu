@@ -20,9 +20,56 @@ pub enum Entry {
     Thought(String),
     Tool(ToolCall),
     /// Something m4code says about the session itself: a cancelled turn, a failed prompt.
-    Notice { text: String, error: bool },
+    Notice {
+        text: String,
+        error: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        event: Option<NoticeEvent>,
+    },
     /// Marks that the preceding entries were written in another checkout.
     WorkspaceBoundary(PathBuf),
+}
+
+/// An operation owns one notice row from start to completion, even across session replacement.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NoticeKind {
+    Compaction,
+    Handoff,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NoticeEvent {
+    pub kind: NoticeKind,
+    pub active: bool,
+}
+
+impl NoticeKind {
+    pub fn begin(self, entries: &mut Vec<Entry>, text: impl Into<String>) -> usize {
+        self.update(entries, text.into(), false, true)
+    }
+
+    pub fn finish(self, entries: &mut Vec<Entry>, text: impl Into<String>, error: bool) -> usize {
+        self.update(entries, text.into(), error, false)
+    }
+
+    fn update(self, entries: &mut Vec<Entry>, text: String, error: bool, active: bool) -> usize {
+        let at = entries.iter().rposition(|entry| matches!(entry,
+            Entry::Notice { event: Some(event), .. } if event.kind == self && (!active || event.active)))
+            .unwrap_or(entries.len());
+        let entry = Entry::Notice { text, error, event: Some(NoticeEvent { kind: self, active }) };
+        if at == entries.len() {
+            entries.push(entry);
+        } else {
+            entries[at] = entry;
+        }
+        at
+    }
+}
+
+impl Entry {
+    pub fn notice(text: impl Into<String>, error: bool) -> Self {
+        Self::Notice { text: text.into(), error, event: None }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -419,8 +466,39 @@ impl Thread {
 
     /// Add something m4code says, and return where it went.
     pub fn notice(&mut self, text: impl Into<String>, error: bool) -> usize {
-        self.entries.push(Entry::Notice { text: text.into(), error });
+        let entry = Entry::notice(text, error);
+        if self.entries.last() != Some(&entry) { self.entries.push(entry); }
         self.entries.len() - 1
+    }
+
+    pub fn active_notice(&self, kind: NoticeKind) -> Option<usize> {
+        self.entries.iter().rposition(|entry| matches!(entry,
+            Entry::Notice { event: Some(event), .. } if event.kind == kind && event.active))
+    }
+
+    /// Repeated progress signals update the current operation; a later operation gets a new row.
+    pub fn begin_notice(&mut self, kind: NoticeKind, text: impl Into<String>) -> usize {
+        kind.begin(&mut self.entries, text)
+    }
+
+    pub fn finish_notice(&mut self, kind: NoticeKind, text: impl Into<String>, error: bool) -> usize {
+        kind.finish(&mut self.entries, text, error)
+    }
+
+    /// A replayed operation belonged to a process that no longer owns it.
+    pub fn settle_notices(&mut self) {
+        for entry in &mut self.entries {
+            if let Entry::Notice { text, error, event: Some(event) } = entry
+                && event.active
+            {
+                event.active = false;
+                *error = true;
+                *text = match event.kind {
+                    NoticeKind::Compaction => "Context compaction did not finish.",
+                    NoticeKind::Handoff => "Handoff did not finish.",
+                }.into();
+            }
+        }
     }
 
     /// Add what the user sent, and return where it went. Agents don't echo a live prompt back.
@@ -693,6 +771,47 @@ pub use persistence::{save_entries, clear_entries, load_entries, flush_entries, 
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn operation_progress_and_completion_share_one_row_but_new_operations_do_not() {
+        let mut thread = Thread::default();
+        let row = thread.begin_notice(NoticeKind::Compaction, "Compacting");
+        assert_eq!(thread.begin_notice(NoticeKind::Compaction, "Still compacting"), row);
+        thread.entries.push(Entry::Agent("Unrelated text".into()));
+        assert_eq!(thread.finish_notice(NoticeKind::Compaction, "Done", false), row);
+        assert_eq!(thread.finish_notice(NoticeKind::Compaction, "Done", false), row);
+        assert_eq!(thread.entries.len(), 2);
+        assert!(matches!(&thread.entries[row], Entry::Notice { text, error: false, event: Some(event) }
+            if text == "Done" && !event.active));
+        assert_eq!(thread.begin_notice(NoticeKind::Compaction, "Next compaction"), 2);
+        assert_eq!(thread.finish_notice(NoticeKind::Compaction, "Failed", true), 2);
+        assert_eq!(thread.entries.len(), 3);
+    }
+
+    #[test]
+    fn replay_settles_only_unfinished_operations() {
+        let mut thread = Thread::default();
+        thread.begin_notice(NoticeKind::Handoff, "Starting");
+        thread.begin_notice(NoticeKind::Compaction, "Compacting");
+        thread.finish_notice(NoticeKind::Compaction, "Done", false);
+        thread.settle_notices();
+        assert!(matches!(&thread.entries[0], Entry::Notice { text, error: true, event: Some(event) }
+            if text == "Handoff did not finish." && !event.active));
+        assert!(matches!(&thread.entries[1], Entry::Notice { text, error: false, .. } if text == "Done"));
+    }
+
+    #[test]
+    fn operation_identity_survives_persistence_and_old_notices_still_load() {
+        let old: Entry = serde_json::from_str(r#"{"Notice":{"text":"Interrupted","error":false}}"#).unwrap();
+        assert_eq!(old, Entry::notice("Interrupted", false));
+        let mut thread = Thread::default();
+        thread.begin_notice(NoticeKind::Handoff, "Handing over");
+        let mut entries: Vec<Entry> = serde_json::from_str(&serde_json::to_string(&thread.entries).unwrap()).unwrap();
+        NoticeKind::Handoff.finish(&mut entries, "Switched", false);
+        assert_eq!(entries.len(), 1);
+        assert!(matches!(&entries[0], Entry::Notice { text, event: Some(event), .. }
+            if text == "Switched" && !event.active));
+    }
 
     #[test]
     fn context_keeps_all_lines_inside_the_quote_and_answer_outside_it() {

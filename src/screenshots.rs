@@ -23,9 +23,9 @@ fn renderer() -> Result<Option<Box<dyn PlatformHeadlessRenderer>>> {
 #[ignore = "requires an offscreen GPU renderer; run with just screenshot"]
 fn capture() -> Result<()> {
     let scenario = std::env::var("M4CODE_SCREENSHOT_SCENARIO").unwrap_or_else(|_| "home".into());
-    let session_scenario = matches!(scenario.as_str(), "session" | "session-auth" | "session-no-compact" | "session-scrolled" | "session-quotes" | "session-quotes-menu" | "toast" | "review" | "review-hover");
+    let session_scenario = matches!(scenario.as_str(), "session" | "session-auth" | "session-no-compact" | "session-scrolled" | "session-quotes" | "session-quotes-menu" | "session-events" | "toast" | "review" | "review-hover");
     let shortcut = match scenario.as_str() {
-        "home" | "dashboards-disabled" | "picker" | "context-menu" | "github" | "github-wide" | "github-issues" | "editor" | "session" | "session-auth" | "session-no-compact" | "session-scrolled" | "session-quotes" | "session-quotes-menu" | "toast" | "harnesses" | "review" | "review-hover" => None,
+        "home" | "dashboards-disabled" | "picker" | "context-menu" | "github" | "github-wide" | "github-issues" | "editor" | "session" | "session-auth" | "session-no-compact" | "session-scrolled" | "session-quotes" | "session-quotes-menu" | "session-events" | "toast" | "harnesses" | "review" | "review-hover" => None,
         "settings" => Some(Keystroke::parse("secondary-,").expect("Settings shortcut")),
         _ => anyhow::bail!("unknown screenshot scenario {scenario:?}; use home, dashboards-disabled, settings, picker, context-menu, github, github-wide, editor, session, session-no-compact, session-scrolled, toast, harnesses, review or review-hover"),
     };
@@ -156,6 +156,15 @@ fn capture() -> Result<()> {
                 if matches!(scenario.as_str(), "session-quotes" | "session-quotes-menu") {
                     view.update(cx, |v, cx| v.screenshot_quoted_context(scenario == "session-quotes-menu", cx));
                 }
+                if scenario == "session-events" {
+                    let now = crate::store::now();
+                    ws.store.data.claude_usage.seven_day = Some(crate::store::RateLimit { utilization: Some(1.0), resets_at: Some(now + 300), seen_at: now });
+                    ws.store.data.settings.enabled_harnesses = Some(vec![crate::harness::Harness::Codex]);
+                    ws.store.data.settings.set_harness_models(crate::harness::Harness::Codex, vec![crate::harness::subagents::AgentModel { id: "gpt".into(), name: "Codex".into() }]);
+                    ws.store.data.settings.auto_handoff_on_limit = false;
+                    ws.store.data.settings.notify_model_on_limit = false;
+                    view.update(cx, |v, cx| v.screenshot_events(cx));
+                }
                 if scenario == "session-auth" {
                     view.update(cx, |v, cx| v.screenshot_login_failure(cx));
                     let state = ws.limits_state.get_mut(crate::harness::Harness::Claude);
@@ -204,6 +213,13 @@ fn capture() -> Result<()> {
             ensure!(std::time::Instant::now() < until, "the sample file never opened");
             std::thread::yield_now();
         }
+    }
+    if scenario == "session-events" {
+        cx.update_window(window, |_, window, app| {
+            window.resize(gpui::size(gpui::px(1440.0), gpui::px(2600.0)));
+            window.bounds_changed(app);
+        })?;
+        cx.run_until_parked();
     }
     cx.update_window(window, |_, window, app| window.draw(app).clear(app))?;
     if scenario == "review-hover" {
