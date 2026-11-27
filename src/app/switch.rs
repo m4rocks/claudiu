@@ -400,22 +400,20 @@ mod tests {
 
     #[test]
     fn other_worktree_edit_target_picks_another_worktree_with_most_edits() {
+        // Absolute on every platform: a bare `/repo` is relative on Windows, where it has no drive.
+        let base = std::env::temp_dir();
+        let at = |p: &str| base.join(p);
         let git = crate::git::GitInfo {
-            root: "/repo".into(),
-            main: "/repo".into(),
-            worktrees: vec!["/wt/alpha".into(), "/wt/beta".into()],
+            root: at("repo"),
+            main: at("repo"),
+            worktrees: vec![at("wt/alpha"), at("wt/beta")],
             ..Default::default()
         };
-        let cwd = Path::new("/repo");
+        let cwd = at("repo");
         // Edits in current worktree or outside repo produce nothing.
-        assert_eq!(other_worktree_edit_target(&git, cwd, &["/repo/a.rs".into(), "/other/b.rs".into()]), None);
+        assert_eq!(other_worktree_edit_target(&git, &cwd, &[at("repo/a.rs"), at("other/b.rs")]), None);
         // Edits in another worktree pick the one with the most files.
-        let edited = vec![
-            "/repo/a.rs".into(),
-            "/wt/alpha/one.rs".into(),
-            "/wt/beta/one.rs".into(),
-            "/wt/beta/two.rs".into(),
-        ];
-        assert_eq!(other_worktree_edit_target(&git, cwd, &edited), Some((PathBuf::from("/wt/beta"), 2)));
+        let edited = vec![at("repo/a.rs"), at("wt/alpha/one.rs"), at("wt/beta/one.rs"), at("wt/beta/two.rs")];
+        assert_eq!(other_worktree_edit_target(&git, &cwd, &edited), Some((at("wt/beta"), 2)));
     }
 }

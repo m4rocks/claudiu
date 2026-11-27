@@ -162,7 +162,7 @@ fn switching_between_worktrees_in_the_workspace() {
     // whose file the worktree lacks stays where it was and the user is told, and the file tree shows the worktree.
     let (in_worktree, in_main) = (canonical(&worktree), canonical(&repo_dir));
     assert_eq!(ws.read_with(&cx, |ws, _| tab_paths(ws)), [in_worktree.join("same.txt"), in_main.join("dirty.txt"), in_main.join("only_main.txt")], "tabs after the switch");
-    assert!(ws.read_with(&cx, |ws, _| ws.toast.as_ref().is_some_and(|t| t.text.contains("2 open files stay"))), "the toast counts the tabs that stayed");
+    assert!(ws.read_with(&cx, |ws, _| ws.visible_toasts().any(|t| t.text.contains("2 open files stay"))), "the toast counts the tabs that stayed");
     wait(&mut cx, "the file tree at the worktree", &|ws, _| ws.panes[&id].root == in_worktree && ws.panes[&id].nodes.iter().any(|n| n.name == "same.txt"));
     assert_eq!(ws.read_with(&cx, |ws, _| ws.panes[&id].tabs.iter().find(|t| t.path.ends_with("dirty.txt")).map(|t| t.dirty)), Some(true), "the unsaved edit is kept");
 
