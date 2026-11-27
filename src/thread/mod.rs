@@ -3,6 +3,7 @@
 //! included (`keys`); what differs between them is in `harness`.
 
 mod asks;
+mod dock;
 mod elements;
 mod keys;
 mod outline;
@@ -53,7 +54,7 @@ pub enum ThreadPicker {
     Permission,
 }
 
-/// A background task (such as a running child subagent) displayed in the main chat view.
+/// A running child subagent of this session; it keeps the session's background work alive (`has_background_work`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BackgroundTask {
     pub id: String,
@@ -491,8 +492,10 @@ pub struct ThreadView {
     persist_on_drop: bool,
     pub capabilities: Value,
     agent_meta: Value,
-    /// Ctrl+T: the plan.
-    pub plan_open: bool,
+    /// The tray open above the message box (Ctrl+T or a chip); the queue's opens by itself (`dock::open_tray`).
+    tray: Option<dock::Tray>,
+    /// How many queued messages there were when the user folded the queue's tray; more than that opens it again.
+    queue_folded: Cell<usize>,
     /// Active compact picker dropdown above the composer (Alt+P for Model/Provider/Effort, or click Permission).
     pub picker: Option<ThreadPicker>,
     picker_at: crate::panels::widgets::Dropdown,
@@ -743,7 +746,8 @@ impl ThreadView {
             persist_on_drop: true,
             capabilities: Value::Null,
             agent_meta: Value::Null,
-            plan_open: false,
+            tray: None,
+            queue_folded: Cell::new(0),
             picker: None,
             picker_at: crate::panels::widgets::Dropdown::at(gpui::point(px(0.0), px(0.0))),
             model_anchor: crate::panels::widgets::Anchor::default(),
@@ -3196,7 +3200,7 @@ impl ThreadView {
                 self.collapsed_thoughts.clear();
                 self.remeasure(0);
             }
-            keys::Key::TogglePlan => self.plan_open = !self.plan_open,
+            keys::Key::TogglePlan => self.toggle_tray(dock::Tray::Plan),
             keys::Key::PickModel => self.toggle_model_picker(window, cx),
         }
         cx.notify();
@@ -5790,6 +5794,51 @@ mod tests {
             v.interrupt(cx);
             assert!(!v.can_interrupt());
             assert!(!v.interrupting, "interrupting a continuation without an open turn must not stick on Stopping");
+        });
+    }
+
+    #[gpui::test]
+    fn background_shells_and_leftover_tools_share_one_list_with_the_same_actions(cx: &mut gpui::TestAppContext) {
+        use super::dock::{BackgroundKind, Stop};
+        cx.update(gpui_kit::init);
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = cx.add_window_view(|window, cx| super::ThreadView::new(test_start(dir.path().into(), Harness::Claude), window, cx));
+        view.update(cx, |v, cx| {
+            v.phase = super::Phase::Ready;
+            v.on_event(update_event(serde_json::json!({
+                "sessionUpdate": "_m4code/background_shells",
+                "shells": [{ "id": "sh-1", "label": "npm run dev" }]
+            })), cx);
+            v.on_event(update_event(serde_json::json!({
+                "sessionUpdate": "tool_call", "toolCallId": "t-1", "title": "Watch", "kind": "execute", "status": "in_progress"
+            })), cx);
+            v.working = false;
+            let items: Vec<_> = v.background_items().into_iter().map(|i| (i.id, i.kind, i.output, i.stop)).collect();
+            assert_eq!(items, [
+                ("sh-1".to_string(), BackgroundKind::Shell, true, Stop::Ready),
+                ("t-1".to_string(), BackgroundKind::Tool, true, Stop::Ready),
+            ]);
+            v.working = true;
+            assert_eq!(v.background_items().len(), 1, "a running tool belongs to the turn while it is open");
+        });
+    }
+
+    #[gpui::test]
+    fn the_queue_tray_opens_for_new_messages_and_stays_folded_otherwise(cx: &mut gpui::TestAppContext) {
+        use super::dock::Tray;
+        cx.update(gpui_kit::init);
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = cx.add_window_view(|window, cx| super::ThreadView::new(test_start(dir.path().into(), Harness::Claude), window, cx));
+        view.update(cx, |v, _| {
+            let shown = |v: &super::ThreadView| v.open_tray(v.queue_count());
+            v.queue.push_back(super::Queued::new("first".into(), true));
+            assert_eq!(shown(v), Some(Tray::Queue));
+            v.toggle_tray(Tray::Queue);
+            assert_eq!(shown(v), None, "folding keeps it folded");
+            v.queue.push_back(super::Queued::new("second".into(), true));
+            assert_eq!(shown(v), Some(Tray::Queue), "a new message opens it again");
+            v.toggle_tray(Tray::Plan);
+            assert_eq!(shown(v), Some(Tray::Plan), "one tray at a time");
         });
     }
 

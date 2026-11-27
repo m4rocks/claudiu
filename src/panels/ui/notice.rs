@@ -1,5 +1,7 @@
 //! The compact bordered notice used throughout the conversation, including transient state and actions.
 use gpui::{Div, ParentElement, SharedString, Styled, div, px};
+use gpui_kit::assets::IconName;
+use gpui_kit::base::Button;
 
 use super::alert::Tone;
 use crate::panels::{scale, theme::theme};
@@ -22,4 +24,9 @@ pub fn content(body: impl gpui::IntoElement, tone: Tone) -> Div {
         .bg(background).border_1().border_color(border)
         .text_size(scale::px(12.0)).text_color(foreground)
         .child(div().flex_1().min_w_0().child(body))
+}
+
+/// The × that drops a notice the user can dismiss, such as a staged rewind or model switch.
+pub fn dismiss(id: impl Into<SharedString>) -> Button {
+    super::dock::action(id, IconName::X, "Dismiss")
 }

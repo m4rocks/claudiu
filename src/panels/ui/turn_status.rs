@@ -4,7 +4,7 @@ use gpui::{AnyElement, Div, InteractiveElement, IntoElement, ParentElement, Shar
 use crate::panels::{scale, theme::theme};
 
 fn row() -> Div {
-    div().px(px(6.0)).py(px(3.0)).text_size(scale::px(12.0)).line_height(relative(1.4))
+    div().px(px(2.0)).py(px(3.0)).text_size(scale::px(12.0)).line_height(relative(1.4))
 }
 
 pub fn working(label: impl Into<SharedString>, elapsed: Option<String>, stop: Option<AnyElement>) -> AnyElement {

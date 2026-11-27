@@ -118,7 +118,11 @@ impl ThreadView {
         self.authentication_required = true;
         self.stalled = true;
         self.thread.plan = vec![PlanItem { text: "Centralize notice rendering".into(), status: "completed".into() }, PlanItem { text: "Verify the event gallery".into(), status: "in_progress".into() }];
-        self.provider_shells = vec![ProviderShell { id: "gallery-shell".into(), label: "Background build".into(), stopping: false }];
+        self.provider_shells = vec![
+            ProviderShell { id: "gallery-shell".into(), label: "Background build".into(), stopping: false },
+            ProviderShell { id: "gallery-dev".into(), label: "npm run dev".into(), stopping: true },
+        ];
+        self.tray = Some(super::dock::Tray::Background);
         self.queue = VecDeque::from([Queued::new("Follow up after this turn.".into(), true)]);
         self.questions.push_back(Question {
             id: uuid::Uuid::new_v4(), reply: QuestionReply::Bridge("gallery-question".into()),

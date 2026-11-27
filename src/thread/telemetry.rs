@@ -47,8 +47,7 @@ impl ThreadView {
         if usage_limit.is_none() && error.is_none() && self.pending_options.is_empty() && !self.stalled {
             return None;
         }
-        let mut contents = div().w_full().max_w(px(840.0)).px(px(8.0)).py(px(4.0))
-            .flex().flex_col().gap(px(4.0));
+        let mut contents = div().w_full().flex().flex_col().gap(px(crate::panels::ui::dock::GAP));
         if let Some(label) = usage_limit {
             contents = contents.child(self.render_usage_notice(label.clone(), cx));
         }
@@ -63,7 +62,7 @@ impl ThreadView {
         if let Some(error) = error {
             contents = contents.child(self.render_error_notice(format!("{}: {error}", self.harness.name()), cx));
         }
-        Some(div().w_full().px(px(22.0)).flex().justify_center().child(contents))
+        Some(contents)
     }
 }
 

@@ -9,6 +9,7 @@
 //! - [`toggle_group`] and [`tabs`]: segmented controls and tab rows (shadcn ToggleGroup / Tabs).
 //! - [`card`], [`popover`], [`alert`], [`empty`], [`skeleton`]: surfaces and states (Card, Popover/Dialog, Alert,
 //!   Empty, Skeleton).
+//! - [`dock`]: the strip above the message box (notice, chip, tray), so live state there shares one look.
 //! - [`button`], [`badge`], [`kbd`], [`separator`], [`switch`], [`checkbox`], [`label`], [`progress`], [`spinner`], [`avatar`],
 //!   [`breadcrumb`], [`tooltip`]: the small pieces.
 
@@ -20,6 +21,7 @@ pub mod button;
 pub mod card;
 pub mod checkbox;
 pub mod command;
+pub mod dock;
 pub mod empty;
 pub mod kbd;
 pub mod label;

@@ -26,7 +26,6 @@ use crate::panels::theme::theme;
 use crate::panels::widgets::{EffortPick, Trigger, effort_slider, icon};
 use crate::visual::ui::Scope;
 use crate::panels::ui::button as btn;
-use crate::panels::ui::button::icon_button;
 use crate::panels::ui::kbd::kbd;
 use crate::panels::ui::spinner::spinner;
 
@@ -135,7 +134,7 @@ impl Render for ThreadView {
         self.jump_visible.set(show_jump);
         let conversation = conversation.when(show_jump, |view| {
             view.child(div().absolute().bottom(px(22.0)).right(px(24.0)).child(
-                btn::colored("jump-to-latest", Some(IconName::ArrowDownToLine), "Jump to latest", theme().primary, theme().background, theme().primary_hover, None, true).debug_selector(|| "jump-to-latest".into()).on_click(cx.listener(|v, _: &ClickEvent, _, cx| {
+                ui::dock::chip("jump-to-latest", icon(IconName::ArrowDownToLine, 12.0), "Jump to latest", false).debug_selector(|| "jump-to-latest".into()).on_click(cx.listener(|v, _: &ClickEvent, _, cx| {
                     v.chat_glide.cancel();
                     v.list.set_follow_mode(gpui::FollowMode::Tail);
                     v.jump_visible.set(false);
@@ -148,9 +147,6 @@ impl Render for ThreadView {
             .flex_none()
             .flex()
             .flex_col()
-            .children(self.render_session_notices(cx))
-            .children(self.render_plan())
-            .children(self.render_background(window, cx))
             .child(self.render_composer(window, cx));
         root.children(self.render_find(cx))
             .child(conversation)
@@ -353,7 +349,7 @@ fn fence_marker(line: &str) -> Option<(char, usize)> {
 }
 
 /// A message's first line with text, for a one-line row.
-fn first_line(text: &str) -> String {
+pub(super) fn first_line(text: &str) -> String {
     text.lines().find(|l| !l.trim().is_empty()).unwrap_or_default().trim().to_string()
 }
 
@@ -1003,194 +999,6 @@ impl ThreadView {
         div().flex().flex_col().gap(px(4.0)).child(header).child(indent_run_step(first)).into_any_element()
     }
 
-    fn render_plan(&self) -> Option<Div> {
-        let working = self.working && self.thread.plan.iter().any(|p| p.status != "completed");
-        if self.thread.plan.is_empty() || !(self.plan_open || working) {
-            return None;
-        }
-        let mut plan = div()
-            .w_full()
-            .max_w(px(COLUMN_MAX_W))
-            .px(px(14.0))
-            .py(px(10.0))
-            .rounded(px(8.0))
-            .bg(theme().card)
-            .border_1()
-            .border_color(theme().panel_border)
-            .flex()
-            .flex_col()
-            .gap(px(3.0));
-        for item in &self.thread.plan {
-            let (mark, color) = match item.status.as_str() {
-                "completed" => ("☒", theme().subtle_foreground),
-                "in_progress" => ("◼", theme().primary),
-                _ => ("☐", theme().muted_foreground),
-            };
-            plan = plan.child(div().flex().gap(px(8.0)).text_size(scale::px(12.5)).text_color(color).child(mark).child(item.text.clone()));
-        }
-        Some(div().w_full().px(px(22.0)).mb(px(8.0)).flex().justify_center().child(plan))
-    }
-
-    /// Compact bar above the composer showing anything currently running in the background for this session
-    /// (running child subagents, or tool calls still in progress outside an active turn).
-    fn render_background(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<Div> {
-        let bg_tools: Vec<(String, String)> = if self.working {
-            vec![]
-        } else {
-            self.thread
-                .entries
-                .iter()
-                .filter_map(|e| match e {
-                    Entry::Tool(call) if call.status == ToolStatus::Running => Some((call.id.clone(), title(call))),
-                    _ => None,
-                })
-                .collect()
-        };
-        if self.background.is_empty() && self.provider_shells.is_empty() && self.background_tasks.is_empty() && bg_tools.is_empty() {
-            return None;
-        }
-        let mut pills = div().flex().flex_wrap().items_center().gap(px(6.0)).flex_1().min_w_0();
-        for (i, task) in self.background.iter().enumerate() {
-            let child_id = task.id.clone();
-            let waiting = task.waiting;
-            pills = pills.child(
-                div()
-                    .id(SharedString::from(format!("thread-bg-task-{i}")))
-                    .flex()
-                    .items_center()
-                    .gap(px(5.0))
-                    .px(px(7.0))
-                    .py(px(2.0))
-                    .rounded(px(5.0))
-                    .bg(theme().background)
-                    .border_1()
-                    .border_color(if waiting { theme().ring } else { theme().panel_border })
-                    .hover(|s| s.bg(theme().accent))
-                    .cursor_pointer()
-                    .text_size(scale::px(11.5))
-                    .text_color(theme().foreground)
-                    .child(if waiting {
-                        div().text_color(theme().primary).font_weight(FontWeight::SEMIBOLD).child("?").into_any_element()
-                    } else {
-                        spinner(format!("thread-bg-spin-{i}"), 10.0).into_any_element()
-                    })
-                    .child(div().max_w(px(220.0)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(task.label.clone()))
-                    .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| cx.emit(ThreadEvent::Select(child_id.clone())))),
-            );
-        }
-        for (i, task) in self.background_tasks.iter().enumerate() {
-            let task_id = task.id.clone();
-            let has_log = task.log_path.is_some();
-            pills = pills.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(5.0))
-                    .px(px(7.0))
-                    .py(px(2.0))
-                    .rounded(px(5.0))
-                    .bg(theme().background)
-                    .border_1()
-                    .border_color(theme().panel_border)
-                    .text_size(scale::px(11.5))
-                    .text_color(theme().muted_foreground)
-                    .child(spinner(format!("thread-bg-async-task-{i}"), 10.0))
-                    .child(div().max_w(px(220.0)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(task.label.clone()))
-                    .when(has_log, |pill| {
-                        pill.child(
-                            btn::text(SharedString::from(format!("bg-task-output-{i}")), "Output", false)
-                                .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| v.open_background_task_output(&task_id, cx))),
-                        )
-                    }),
-            );
-        }
-        for (i, (call_id, name)) in bg_tools.into_iter().enumerate() {
-            let out_id = call_id.clone();
-            pills = pills.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(5.0))
-                    .px(px(7.0))
-                    .py(px(2.0))
-                    .rounded(px(5.0))
-                    .bg(theme().background)
-                    .border_1()
-                    .border_color(theme().panel_border)
-                    .text_size(scale::px(11.5))
-                    .text_color(theme().muted_foreground)
-                    .child(spinner(format!("thread-bg-tool-{i}"), 10.0))
-                    .child(div().max_w(px(220.0)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(name))
-                    .child(
-                        btn::text(SharedString::from(format!("bg-tool-output-{i}")), "Output", false)
-                            .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| v.open_tool_output(&out_id, cx))),
-                    )
-                    .child(
-                        btn::text(SharedString::from(format!("bg-tool-stop-{i}")), "Interrupt", false)
-                            .on_click(cx.listener(|v, _: &ClickEvent, _, cx| {
-                                v.settle_running_tools();
-                                v.interrupt(cx);
-                            })),
-                    ),
-            );
-        }
-        for shell in &self.provider_shells {
-            let read_id = shell.id.clone();
-            let stop_id = shell.id.clone();
-            let stopping = shell.stopping;
-            pills = pills.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(5.0))
-                    .px(px(7.0))
-                    .py(px(2.0))
-                    .rounded(px(5.0))
-                    .bg(theme().background)
-                    .border_1()
-                    .border_color(theme().panel_border)
-                    .text_size(scale::px(11.5))
-                    .text_color(theme().muted_foreground)
-                    .child(spinner(format!("provider-shell-{}", shell.id), 10.0))
-                    .child(div().max_w(px(220.0)).overflow_hidden().text_ellipsis().whitespace_nowrap().child(shell.label.clone()))
-                    .child(btn::text(SharedString::from(format!("shell-output-{}", shell.id)), "Output", false)
-                        .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| v.background_shell_action(&read_id, false, cx))))
-                    .child(if stopping {
-                        btn::disabled(SharedString::from(format!("shell-stop-{}", shell.id)), "Stopping…")
-                    } else {
-                        btn::text(SharedString::from(format!("shell-stop-{}", shell.id)), "Stop", false)
-                            .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| v.background_shell_action(&stop_id, true, cx)))
-                    }),
-            );
-        }
-        let bar = div()
-            .w_full()
-            .max_w(px(COLUMN_MAX_W))
-            .px(px(10.0))
-            .py(px(6.0))
-            .rounded(px(8.0))
-            .bg(theme().card)
-            .border_1()
-            .border_color(theme().panel_border)
-            .flex()
-            .items_center()
-            .gap(px(8.0))
-            .child(div().flex_none().text_size(scale::px(11.0)).text_color(theme().subtle_foreground).child("Running in background"))
-            .child(pills);
-        let output = self.shell_output.as_ref().map(|output| {
-            self.shell_output_scroll.wire(div().id("thread-shell-output").w_full().max_h(px(180.0)), window)
-                .rounded(px(6.0)).bg(theme().card).p(px(8.0))
-                .child(div().flex().justify_end()
-                    .child(btn::text("thread-shell-output-close", "Close output", false).on_click(cx.listener(|v, _: &ClickEvent, _, cx| {
-                        v.shell_output = None;
-                        cx.notify();
-                    }))))
-                .child(div().font_family(crate::platform::monospace_font()).text_size(scale::px(11.5)).child(output.text.clone()))
-        });
-        Some(div().w_full().px(px(22.0)).mb(px(6.0)).flex().justify_center()
-            .child(div().w_full().max_w(px(COLUMN_MAX_W)).flex().flex_col().gap(px(4.0)).child(bar).children(output)))
-    }
-
     fn render_question(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<Div> {
         let q = self.active_question()?;
         let question_id = q.id;
@@ -1409,33 +1217,36 @@ impl ThreadView {
     }
 
     fn render_composer(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut inner = div().w_full().max_w(px(COLUMN_MAX_W)).flex().flex_col().gap(px(6.0));
+        let mut inner = div().w_full().max_w(px(COLUMN_MAX_W)).flex().flex_col().gap(px(ui::dock::GAP))
+            .children(self.render_session_notices(cx));
 
         let commands = self.matching_commands(cx);
+        let mut command_menu = None;
         if !commands.is_empty() {
             let highlight = self.command_highlight.min(commands.len() - 1);
             let mut menu = self.command_scroll.wire(div().id("thread-commands").max_h(px(240.0)), window)
                 .flex()
                 .flex_col()
-                .px(px(8.0))
-                .py(px(4.0))
-                .rounded(px(8.0))
-                .bg(theme().card)
+                .p(px(4.0))
+                .rounded(px(ui::dock::RADIUS))
+                .bg(theme().background)
                 .border_1()
-                .border_color(theme().panel_border);
+                .border_color(theme().panel_border)
+                .text_size(scale::px(12.5));
             for (n, c) in commands.into_iter().enumerate() {
                 let name = c.name.clone();
                 menu = menu.child(
                     div()
                         .id(SharedString::from(format!("thread-cmd-{n}")))
                         .flex()
+                        .items_center()
                         .gap(px(10.0))
-                        .px(px(6.0))
-                        .py(px(3.0))
-                        .rounded(px(5.0))
+                        .h(px(26.0))
+                        .px(px(8.0))
+                        .rounded(px(ui::dock::RADIUS - 1.0))
                         .cursor_pointer()
                         .when(n == highlight, |d| d.bg(theme().accent))
-                        .hover(|s| s.bg(theme().accent))
+                        .hover(|s| s.bg(theme().row_hover))
                         .child(div().flex_none().text_color(theme().foreground).child(format!("/{}", c.name)))
                         .child(div().flex_1().truncate().text_color(theme().muted_foreground).child(c.description.clone()))
                         .on_click(cx.listener(move |v, _: &ClickEvent, window, cx| {
@@ -1445,7 +1256,26 @@ impl ThreadView {
                         })),
                 );
             }
-            inner = inner.child(menu);
+            command_menu = Some(menu);
+        }
+
+        if let Some(rewind) = &self.pending_rewind {
+            let message = match rewind.checkpoints {
+                0 => "Rewinding to this message will delete later messages".to_string(),
+                1 => "Rewinding to this message will delete later messages and restore 1 file checkpoint".to_string(),
+                n => format!("Rewinding to this message will delete later messages and restore {n} file checkpoints"),
+            };
+            inner = inner.child(
+                crate::panels::ui::notice::notice(message, crate::panels::ui::alert::Tone::Warning)
+                    .child(
+                        crate::panels::ui::notice::dismiss("cancel-rewind-stage")
+                            .on_click(cx.listener(|v, _: &ClickEvent, window, cx| {
+                                v.pending_rewind = None;
+                                v.focus_composer(window, cx);
+                                cx.notify();
+                            })),
+                    ),
+            );
         }
 
         if let Some(rewind) = &self.pending_rewind {
@@ -1476,12 +1306,7 @@ impl ThreadView {
             inner = inner.child(
                 crate::panels::ui::notice::notice(format!("Next message switches to {}", target.name), crate::panels::ui::alert::Tone::Default)
                     .child(
-                        div()
-                            .id("cancel-handoff-stage")
-                            .cursor_pointer()
-                            .text_color(theme().muted_foreground)
-                            .hover(|s| s.text_color(theme().foreground))
-                            .child(icon(IconName::X, 12.0))
+                        crate::panels::ui::notice::dismiss("cancel-handoff-stage")
                             .on_click(cx.listener(|v, _: &ClickEvent, window, cx| {
                                 v.pending_model = None;
                                 v.focus_composer(window, cx);
@@ -1536,85 +1361,7 @@ impl ThreadView {
                 }
             }))
             .on_modifiers_changed(cx.listener(|_, _: &gpui::ModifiersChangedEvent, _, cx| cx.notify()))
-            .child(inner.children(self.render_waiting(window, cx)).child(dock))
-    }
-
-    /// The user's messages waiting for the turn to end, above the message box, each one editable or removable
-    /// before it is sent.
-    fn render_waiting(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<Div> {
-        let waiting = self.waiting_messages().collect::<Vec<_>>();
-        let steering: Vec<String> = self.unread_steers().map(first_line).collect();
-        if waiting.is_empty() && steering.is_empty() {
-            return None;
-        }
-        let steering_rows = steering.into_iter().enumerate().map(|(i, line)| {
-            div()
-                .w_full()
-                .flex()
-                .items_center()
-                .gap(px(8.0))
-                .px(px(10.0))
-                .py(px(4.0))
-                .child(spinner(SharedString::from(format!("steering-{i}")), 12.0))
-                .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(scale::px(12.5)).text_color(theme().muted_foreground).child(line))
-                .child(div().flex_none().text_size(scale::px(11.0)).text_color(theme().subtle_foreground).child("Read after the current step"))
-        });
-        let waiting_empty = waiting.is_empty();
-        let rows = waiting.into_iter().map(|(id, text)| {
-            let editing = self.queue_edit.as_ref().is_some_and(|edit| edit.id == id);
-            let can_act = !editing && !self.interrupting && !self.is_waiting();
-            div()
-                .id(SharedString::from(format!("queue-item-{id}")))
-                .rounded(px(6.0))
-                .hover(|style| style.bg(theme().accent))
-                .w_full()
-                .flex()
-                .items_center()
-                .gap(px(8.0))
-                .px(px(10.0))
-                .py(px(4.0))
-                .when(editing, |row| row.bg(theme().accent))
-                .child(icon(IconName::Clock, 12.0).text_color(theme().subtle_foreground))
-                .child(div().flex_1().min_w_0().overflow_hidden().text_size(scale::px(12.5)).text_color(theme().muted_foreground).child(text.to_string()))
-                .when(can_act, |row| {
-                    row.child(btn::text(SharedString::from(format!("queued-send-{id}")), "Send now", false)
-                        .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| v.send_queued_now(id, cx))))
-                    .when(self.queue_edit.is_none(), |row| row.child(
-                        icon_button(SharedString::from(format!("queued-edit-{id}")), IconName::Pencil)
-                            .accessibility_label("Edit queued message")
-                            .tooltip(crate::panels::ui::tooltip::tooltip("Edit queued message"))
-                            .on_click(cx.listener(move |v, _: &ClickEvent, window, cx| v.edit_queued(id, window, cx))),
-                    ))
-                    .children([(true, "Move up"), (false, "Move down")].into_iter().filter_map(|(earlier, label)| {
-                        self.adjacent_queued(id, earlier)?;
-                        Some(btn::text(SharedString::from(format!("queued-move-{id}-{earlier}")), label, false)
-                            .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| v.move_queued(id, earlier, cx))))
-                    }))
-                    .child(
-                        icon_button(SharedString::from(format!("queued-remove-{id}")), IconName::X)
-                            .accessibility_label("Remove queued message")
-                            .tooltip(crate::panels::ui::tooltip::tooltip("Remove queued message"))
-                            .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| {
-                                if v.unqueue(id, cx).is_some() {
-                                    v.queue_changed();
-                                }
-                            })),
-                    )
-                })
-        });
-        Some(
-            div().child(self.queue_scroll.wire(div().id("thread-queue").w_full().max_h(px(180.0)), window)
-                .p(px(4.0))
-                .rounded(px(10.0))
-                .bg(theme().card)
-                .border_1()
-                .border_color(theme().panel_border)
-                .flex()
-                .flex_col()
-                .children(steering_rows)
-                .when(!waiting_empty, |d| d.child(div().px(px(10.0)).pt(px(2.0)).text_size(scale::px(11.0)).text_color(theme().subtle_foreground).child(if self.queue_held { "Queue paused" } else { "Queued for after this turn" })))
-                .children(rows)),
-        )
+            .child(inner.children(self.render_dock(window, cx)).children(command_menu).child(dock))
     }
 
     /// Assemble the shared message box parts: model, permission mode, branch, review and send. What the agent is
@@ -1892,7 +1639,7 @@ fn title_in_cwd(call: &ToolCall, cwd: &std::path::Path) -> String {
 }
 
 /// A tool's title, or its kind while the agent hasn't named it.
-fn title(call: &ToolCall) -> String {
+pub(super) fn title(call: &ToolCall) -> String {
     if !call.title.is_empty() {
         return call.title.clone();
     }

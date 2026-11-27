@@ -31,10 +31,10 @@ use gpui_kit::component::TitleBar;
 gpui_kit::assets::icon_assets!(
     AppIcons,
     [
-        WindowMinimize, WindowMaximize, WindowRestore, WindowClose, Archive, ArchiveRestore, ArrowDownToLine, ArrowLeft, ArrowUp, Brackets, Brain, Check, ChevronDown, ChevronRight, ChevronUp,
-        CircleAlert, CircleCheck, CircleDot, CircleDotDashed, CircleQuestionMark, CircleSlash, CircleSmall, CircleX, Clipboard, Clock, Copy, CornerDownRight, Ellipsis, Eye, ExternalLink, File, FileDiff, FileText, Folder, FolderGit2, FolderOpen, GitBranch, Link, GitCommitHorizontal, GitMerge, GitPullRequest,
-        GitPullRequestClosed, GitPullRequestDraft, HeartPlus, Info, Keyboard, ListPlus, LoaderCircle, Lock, LockOpen, ShieldCheck, MessageSquare, FileCode, PanelBottom, PanelLeft, PanelRight, Paperclip, Pencil, Play, Plus, RefreshCw, Search, SearchX,
-        Settings, Square, Terminal, TriangleAlert, Undo2, X
+        WindowMinimize, WindowMaximize, WindowRestore, WindowClose, Archive, ArchiveRestore, ArrowDown, ArrowDownToLine, ArrowLeft, ArrowUp, Brackets, Brain, Check, ChevronDown, ChevronRight, ChevronUp,
+        Circle, CircleAlert, CircleCheck, CircleDot, CircleDotDashed, CircleQuestionMark, CircleSlash, CircleSmall, CircleX, Clipboard, Clock, Copy, CornerDownRight, Ellipsis, Eye, ExternalLink, File, FileDiff, FileText, Folder, FolderGit2, FolderOpen, GitBranch, Link, GitCommitHorizontal, GitMerge, GitPullRequest,
+        GitPullRequestClosed, GitPullRequestDraft, HeartPlus, Info, Keyboard, ListChecks, ListPlus, LoaderCircle, Lock, LockOpen, ShieldCheck, MessageSquare, FileCode, PanelBottom, PanelLeft, PanelRight, Paperclip, Pencil, Play, Plus, RefreshCw, Search, SearchX,
+        Send, Settings, Square, Terminal, TriangleAlert, Undo2, Wrench, X
     ]
 );
 
