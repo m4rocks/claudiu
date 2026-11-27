@@ -147,16 +147,22 @@ const LINK_INSTRUCTIONS: &str = " m4code shows related sessions together. When t
 m4code session (the user says so, or you recognise it), find it with search_sessions and call link_session once per pair; \
 call unlink_session when a link no longer fits. Both are silent.";
 
-/// What teaches the model to emit native inline ` ```ui ` generative UI blocks directly in chat.
-const VISUAL_INSTRUCTIONS: &str = " Visual: m4code natively renders closed ```ui fenced blocks directly inside chat as \
-interactive dark-theme UI cards, charts, SVG diagrams, tables, tabs, progress bars, and action buttons (no tool call or preview button needed). \
-m4code does NOT support Mermaid (```mermaid), PlantUML, or similar diagram fences—never emit Mermaid or ASCII art for graphs or diagrams. \
-Whenever the user asks for a chart, graph, diagram, flowchart, architecture view, timeline, comparison, or dashboard (or whenever a visual is clearer than prose), \
-always render it with a closed ```ui block: use <chart type=\"bar|line\" labels=\"..\" values=\"..\"> (or <series name=\"..\" values=\"..\"/> children) for data charts/graphs, \
-inline <svg viewBox=\"...\" width=\"...\" height=\"...\"> for flowcharts, architecture diagrams, and graphs, \
-and HTML with inline CSS and m4code shortcuts (<card>, <badge>, <callout>, <progress value=\"..\">, <row>, <col>, <grid cols=\"3\">, <tabs>, <details>, <check label=\"..\" checked>, <button send=\"..\">, <button submit=\"..\">, <button open=\"path#L10-L20\">) \
-with theme tokens var(--text), var(--dim), var(--faint), var(--accent), var(--ok), var(--warn), var(--danger), var(--info), var(--bg), var(--surface), var(--raised), var(--border) \
-(dark background, no scripts or <style> tags). Keep normal prose and code in text.";
+/// What teaches the model to emit native inline ` ```ui ` generative UI blocks directly in chat. It comes right after
+/// the opening, because some harnesses cut long server instructions short, and it asks for visuals by default rather
+/// than only on request, since models otherwise fall back to Markdown tables and bullet lists.
+const VISUAL_INSTRUCTIONS: &str = " Visual: m4code renders closed ```ui fenced blocks inline in chat as interactive \
+dark-theme cards, charts, SVG diagrams, tables, tabs, progress bars and buttons, with no tool call. The user prefers them: \
+use one by default, without being asked, whenever your answer has structure, such as a plan or steps, options to choose between, \
+a comparison or trade-off, a status or progress summary, findings or changes, numbers, a timeline, or how parts connect. \
+Prefer a ```ui block over a Markdown table, a long bullet list or ASCII art. Mermaid, PlantUML and similar fences do NOT render \
+here: never emit them. Keep prose, code and short answers as text, and put the visual beside them, not instead of them. \
+Dialect: <chart type=\"bar|line\" labels=\"..\" values=\"..\"> (or <series name=\"..\" values=\"..\"/> children) for data; \
+inline <svg viewBox=\"...\" width=\"...\" height=\"...\"> for flowcharts, architecture and graphs; HTML with inline CSS plus \
+m4code shortcuts (<card>, <badge>, <callout>, <progress value=\"..\">, <row>, <col>, <grid cols=\"3\">, <tabs>, <details>, \
+<check label=\"..\" checked>, <button send=\"..\">, <button submit=\"..\">, <button open=\"path#L10-L20\">) and theme tokens \
+var(--text), var(--dim), var(--faint), var(--accent), var(--ok), var(--warn), var(--danger), var(--info), var(--bg), var(--surface), \
+var(--raised), var(--border). No scripts or <style> tags. Example:\n```ui\n<grid cols=\"2\"><card><badge>Option A</badge>Fast, \
+less safe</card><card><badge>Option B</badge>Slower, safe</card></grid>\n```\n";
 
 /// What makes the model call `attach_github`.
 const GITHUB_INSTRUCTIONS: &str = " GitHub: call attach_github (silent, free) for each issue or pull request you work on, \
@@ -182,6 +188,9 @@ switching to another one hands this conversation over. After set_model, end your
 fn instructions(off: &[&str]) -> String {
     let on = |name: &str| !off.contains(&name);
     let mut text = INTRO.to_string();
+    if on("visual") {
+        text += VISUAL_INSTRUCTIONS;
+    }
     if on("model") {
         text += &model_instructions();
     }
@@ -190,9 +199,6 @@ fn instructions(off: &[&str]) -> String {
     }
     if on("sessions") {
         text += LINK_INSTRUCTIONS;
-    }
-    if on("visual") {
-        text += VISUAL_INSTRUCTIONS;
     }
     if on("sessions") {
         text += BRIDGE_INSTRUCTIONS;
