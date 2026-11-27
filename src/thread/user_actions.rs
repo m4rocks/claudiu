@@ -12,10 +12,10 @@ use uuid::Uuid;
 use super::{Phase, Queued, ThreadEvent, ThreadView, queue, review};
 use crate::git::snapshot;
 use crate::harness::{CatalogModel, thread::Entry};
-use crate::panels::{logos, scale};
+use crate::panels::{logos, picker, scale};
 use crate::panels::theme::theme;
-use crate::panels::ui::{button as btn, tooltip::tooltip};
-use crate::panels::widgets::icon;
+use crate::panels::ui::{button as btn, command, empty::empty_panel, tooltip::tooltip};
+use crate::panels::widgets::{Dropdown, Trigger, icon};
 
 pub(super) enum TurnActionKind {
     RetryHigherThinking {
@@ -43,6 +43,7 @@ pub(super) struct RetryConfirm {
 
 pub(super) struct RetryModelPicker {
     pub row: usize,
+    pub at: Dropdown,
 }
 
 pub(super) const RETRY_RESTORED_LATEST_PREFIX: &str =
@@ -110,14 +111,23 @@ pub(super) struct PendingRetry {
 }
 
 type ActionHandler = Box<dyn Fn(&mut ThreadView, &mut Window, &mut Context<ThreadView>) + 'static>;
+type DropdownHandler = Box<dyn Fn(&mut ThreadView, Dropdown, &mut Window, &mut Context<ThreadView>) + 'static>;
 
 /// One icon button in a user message's action bar. New actions only need an entry in `user_actions_for`.
-/// `on_click: None` renders the button disabled while still showing its hover tooltip.
+/// `on_click: None` (and `on_dropdown: None`) renders the button disabled while still showing its hover tooltip.
 pub(super) struct UserAction {
     pub id: SharedString,
     pub icon: IconName,
     pub tooltip: SharedString,
     pub on_click: Option<ActionHandler>,
+    pub on_dropdown: Option<DropdownHandler>,
+}
+
+#[cfg(test)]
+impl UserAction {
+    pub(super) fn is_enabled(&self) -> bool {
+        self.on_click.is_some() || self.on_dropdown.is_some()
+    }
 }
 
 /// Whether `entry` is a visible message typed by the user (not a hidden prompt or subagent report).
@@ -528,6 +538,7 @@ impl ThreadView {
             on_click: Some(Box::new(move |v: &mut ThreadView, _: &mut Window, cx: &mut Context<ThreadView>| {
                 v.copy_entry(row, cx);
             })),
+            on_dropdown: None,
         });
 
         // 2. Edit & rewind from any message
@@ -551,6 +562,7 @@ impl ThreadView {
                     v.request_edit_rewind(row, window, cx);
                 }) as ActionHandler
             }),
+            on_dropdown: None,
         });
 
         // 3. Restore files to before this message (no resend) — shown when checkpoints exist
@@ -573,6 +585,7 @@ impl ThreadView {
                         v.request_restore_only(row, window, cx);
                     }) as ActionHandler
                 }),
+                on_dropdown: None,
             });
         }
 
@@ -607,10 +620,11 @@ impl ThreadView {
                         v.request_retry_turn(row, window, cx);
                     }) as ActionHandler
                 }),
+                on_dropdown: None,
             });
         }
 
-        // 5. Retry with another model / harness
+        // 5. Retry with another model / harness (opens anchored dropdown)
         let other_models = self.other_models_for_retry();
         if !other_models.is_empty() {
             let (model_tip, model_enabled) = if active_row {
@@ -626,10 +640,11 @@ impl ThreadView {
                 id: SharedString::from(format!("user-retry-model-{row}")),
                 icon: IconName::RefreshCw,
                 tooltip: SharedString::from(model_tip),
-                on_click: model_enabled.then(|| {
-                    Box::new(move |v: &mut ThreadView, window: &mut Window, cx: &mut Context<ThreadView>| {
-                        v.open_retry_model_picker(row, window, cx);
-                    }) as ActionHandler
+                on_click: None,
+                on_dropdown: model_enabled.then(|| {
+                    Box::new(move |v: &mut ThreadView, at: Dropdown, window: &mut Window, cx: &mut Context<ThreadView>| {
+                        v.toggle_retry_model_picker(row, at, window, cx);
+                    }) as DropdownHandler
                 }),
             });
         }
@@ -651,6 +666,7 @@ impl ThreadView {
                     v.request_fork_from_row(row, cx);
                 }) as ActionHandler
             }),
+            on_dropdown: None,
         });
 
         actions
@@ -714,15 +730,20 @@ impl ThreadView {
         self.open_confirm_for_checkpoints(row, TurnActionKind::RestoreOnly, window, cx);
     }
 
-    pub(super) fn open_retry_model_picker(&mut self, row: usize, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn toggle_retry_model_picker(&mut self, row: usize, at: Dropdown, window: &mut Window, cx: &mut Context<Self>) {
+        if self.retry_model_picker.as_ref().is_some_and(|p| p.row == row) {
+            self.close_retry_model_picker(window, cx);
+            return;
+        }
         if self.retry_block_reason().is_some() || self.is_active_user_row(row) {
             return;
         }
         if self.other_models_for_retry().is_empty() {
             return;
         }
-        self.retry_model_picker = Some(RetryModelPicker { row });
-        window.focus(&self.restore_focus, cx);
+        self.retry_model_picker = Some(RetryModelPicker { row, at });
+        self.picker_nav.reset();
+        self.picker_nav.focus(window, cx);
         cx.notify();
     }
 
@@ -1077,7 +1098,22 @@ impl ThreadView {
         let buttons = actions.into_iter().map(|action| {
             let id = action.id;
             let tip = action.tooltip;
-            if let Some(handler) = action.on_click {
+            if let Some(handler) = action.on_dropdown {
+                div()
+                    .id(id)
+                    .size(px(20.0))
+                    .rounded(px(5.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_color(theme().subtle_foreground)
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme().secondary_hover).text_color(theme().foreground))
+                    .tooltip(tooltip(tip))
+                    .dropdown_right(cx, move |v, at, window, cx| handler(v, at, window, cx))
+                    .child(icon(action.icon, 12.5))
+                    .into_any_element()
+            } else if let Some(handler) = action.on_click {
                 div()
                     .id(id)
                     .size(px(20.0))
@@ -1228,116 +1264,63 @@ impl ThreadView {
         )
     }
 
-    pub(super) fn render_retry_model_picker(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let picker = self.retry_model_picker.as_ref()?;
-        let row = picker.row;
+    pub(super) fn render_retry_model_picker(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let picker_state = self.retry_model_picker.as_ref()?;
+        let row = picker_state.row;
+        let at = picker_state.at;
         let models = self.other_models_for_retry();
-        let clear = cx.entity().downgrade();
-        let has_checkpoints = !self.retry_checkpoints_for(row).is_empty();
-        let subtitle = if has_checkpoints {
-            "Pick a model to retry this message with. You'll confirm checkpoint restore next."
-        } else {
-            "Pick a model to retry this message with."
-        };
-        let rows: Vec<_> = models.into_iter().enumerate().map(|(ix, model)| {
-            let target = model.clone();
-            let harness_name = model.harness.name();
-            let same_harness = model.harness == self.harness;
-            div()
-                .id(SharedString::from(format!("retry-model-opt-{ix}")))
-                .w_full()
-                .px(px(10.0))
-                .py(px(7.0))
-                .rounded(px(6.0))
-                .flex()
-                .items_center()
-                .justify_between()
-                .gap(px(8.0))
-                .cursor_pointer()
-                .hover(|s| s.bg(theme().secondary_hover))
-                .on_click(cx.listener(move |v, _: &ClickEvent, window, cx| {
-                    v.select_retry_model(row, target.clone(), window, cx);
-                }))
-                .child(
+        let mut choices = command::Choices::new(&self.picker_nav, "");
+        let mut list = choices
+            .list("retry-model-list", window)
+            .role(gpui::Role::ListBox)
+            .aria_label("Retry with model")
+            .max_h(px(260.0));
+        let mut previous = None;
+        for (ix, model) in models.iter().enumerate() {
+            let heading = (previous != Some(model.harness)).then(|| {
+                let badge = (model.harness != self.harness).then(|| {
                     div()
-                        .flex()
-                        .items_center()
-                        .gap(px(8.0))
-                        .min_w_0()
-                        .child(logos::draw(logos::for_harness(model.harness), 13.0, theme().muted_foreground))
-                        .child(
-                            div()
-                                .text_size(scale::px(13.0))
-                                .text_color(theme().foreground)
-                                .overflow_hidden()
-                                .whitespace_nowrap()
-                                .text_ellipsis()
-                                .child(model.name),
-                        ),
-                )
-                .child(
-                    div()
-                        .flex_none()
-                        .px(px(6.0))
-                        .py(px(1.5))
-                        .rounded(px(4.0))
-                        .bg(theme().muted)
                         .text_size(scale::px(10.5))
-                        .text_color(theme().muted_foreground)
-                        .child(if same_harness { harness_name.to_string() } else { format!("{harness_name} · handoff") }),
-                )
-        }).collect();
-        Some(
-            AlertDialog::new(cx)
-                .focus_handle(self.restore_focus.clone())
-                .on_open_change(move |open, _, window, cx| {
-                    if !open {
-                        let _ = clear.update(cx, |v, cx| v.close_retry_model_picker(window, cx));
-                    }
-                })
-                .backdrop(div().absolute().inset_0().bg(theme().backdrop))
-                .popup(
-                    AlertDialogPopup::new()
-                        .w(px(420.0))
-                        .max_w_full()
-                        .p(px(18.0))
-                        .flex()
-                        .flex_col()
-                        .gap(px(10.0))
-                        .rounded(px(10.0))
-                        .bg(theme().background)
-                        .border_1()
-                        .border_color(theme().panel_border)
-                        .child(
-                            AlertDialogTitle::new()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_size(scale::px(15.5))
-                                .child("Retry with another model"),
-                        )
-                        .child(AlertDialogDescription::new().text_color(theme().muted_foreground).child(subtitle))
-                        .child(
-                            div()
-                                .id("retry-model-list")
-                                .max_h(px(280.0))
-                                .overflow_y_scroll()
-                                .flex()
-                                .flex_col()
-                                .gap(px(2.0))
-                                .children(rows),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .justify_end()
-                                .pt(px(4.0))
-                                .child(
-                                    btn::text("retry-model-cancel", "Cancel", false)
-                                        .on_click(cx.listener(|v, _: &ClickEvent, window, cx| v.close_retry_model_picker(window, cx))),
-                                ),
-                        ),
-                )
-                .into_any_element(),
-        )
+                        .text_color(theme().subtle_foreground)
+                        .child("handoff")
+                        .into_any_element()
+                });
+                picker::section_header(model.harness.name(), badge)
+            });
+            previous = Some(model.harness);
+            let target = model.clone();
+            let logo = logos::draw(logos::for_harness(model.harness), 11.5, theme().subtle_foreground).into_any_element();
+            let item = command::row(
+                SharedString::from(format!("retry-model-opt-{ix}")),
+                Some(logo),
+                model.name.clone(),
+                None,
+                None,
+                false,
+                false,
+            )
+            .role(gpui::Role::ListBoxOption)
+            .debug_selector(move || format!("retry-model-opt-{ix}"));
+            let item = choices.add(
+                item,
+                move |v, window, cx| v.select_retry_model(row, target.clone(), window, cx),
+                cx,
+            );
+            list = list.child(div().flex_none().flex().flex_col().children(heading).child(item));
+        }
+        if models.is_empty() {
+            list = list.child(empty_panel(IconName::Search, "No other models available"));
+        }
+        Some(picker::dropdown_overlay(
+            ("retry-model-picker", "RETRY WITH"),
+            at,
+            30,
+            list.into_any_element(),
+            Some(choices),
+            |v, window, cx| v.close_retry_model_picker(window, cx),
+            window,
+            cx,
+        ))
     }
 }
 

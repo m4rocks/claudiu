@@ -4843,7 +4843,7 @@ mod tests {
                 },
             ];
             let actions = v.user_actions_for(0);
-            assert!(find_action(&actions, "user-retry-model-0").unwrap().on_click.is_some());
+            assert!(find_action(&actions, "user-retry-model-0").unwrap().is_enabled());
         });
         cx.update(|window, app| {
             view.update(app, |v, cx| {

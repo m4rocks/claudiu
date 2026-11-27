@@ -159,7 +159,7 @@ impl Render for ThreadView {
             .children(self.render_chat_menu(window, cx))
             .children(self.render_picker_overlay(window, cx))
             .children(self.render_retry_confirm(cx))
-            .children(self.render_retry_model_picker(cx))
+            .children(self.render_retry_model_picker(window, cx))
             .children(self.render_screenshot(cx))
     }
 }
