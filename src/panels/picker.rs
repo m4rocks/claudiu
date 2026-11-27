@@ -236,6 +236,7 @@ pub fn model_list_body<V: 'static>(
     max_h: Pixels,
     is_selected: impl Fn(&CatalogModel) -> bool,
     harness_badge: impl Fn(Harness) -> Option<&'static str>,
+    refusal: impl Fn(Harness) -> Option<&'static str>,
     on_pick: impl Fn(&mut V, CatalogModel, &mut Window, &mut Context<V>) + 'static,
     window: &mut Window,
     cx: &mut Context<V>,
@@ -265,6 +266,7 @@ pub fn model_list_body<V: 'static>(
         });
         previous = Some(model.harness);
         let selected = is_selected(model);
+        let refused = refusal(model.harness);
         let choice = model.clone();
         let on_pick = on_pick.clone();
         let logo = logos::draw(
@@ -277,15 +279,19 @@ pub fn model_list_body<V: 'static>(
             SharedString::from(format!("{row_prefix}-{n}")),
             Some(logo),
             model.name.clone(),
-            None,
+            refused.map(String::from),
             None,
             selected,
-            false,
+            refused.is_some(),
         )
         .role(gpui::Role::ListBoxOption)
         .aria_selected(selected)
         .debug_selector(move || format!("{row_prefix}-{n}"));
-        let row = choices.add(row, move |v, window, cx| on_pick(v, choice.clone(), window, cx), cx);
+        let row = if refused.is_some() {
+            row.into_any_element()
+        } else {
+            choices.add(row, move |v, window, cx| on_pick(v, choice.clone(), window, cx), cx)
+        };
         list = list.child(div().flex_none().flex().flex_col().children(heading).child(row));
     }
     if filtered.is_empty() {
@@ -314,6 +320,7 @@ pub fn model_dropdown_overlay<V: 'static>(
     nav: &command::Nav,
     models: Vec<CatalogModel>,
     harness_badge: impl Fn(Harness) -> Option<&'static str>,
+    refusal: impl Fn(Harness) -> Option<&'static str>,
     on_pick: impl Fn(&mut V, CatalogModel, &mut Window, &mut Context<V>) + 'static,
     on_close: impl Fn(&mut V, &mut Window, &mut Context<V>) + 'static,
     window: &mut Window,
@@ -328,6 +335,7 @@ pub fn model_dropdown_overlay<V: 'static>(
         px(260.0),
         |_| false,
         harness_badge,
+        refusal,
         on_pick,
         window,
         cx,

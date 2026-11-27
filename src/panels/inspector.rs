@@ -322,7 +322,12 @@ impl Workspace {
             actions = actions.child(dim_row("find-in-session", IconName::Search, "Find in session"));
         }
         if let Some(sid) = id.filter(|id| self.live_view(id).and_then(|v| v.thread()).is_some()).cloned() {
-            if self.continuing_fresh.contains_key(&sid) {
+            let refusal = self.live_view(&sid).and_then(|v| v.thread())
+                .and_then(|t| t.read(cx).harness.adapter().capabilities.continue_fresh.refusal());
+            if let Some(refusal) = refusal {
+                actions = actions.child(dim_row("continue-fresh-session", IconName::CornerDownRight, "Continue in fresh session")
+                    .tooltip(crate::panels::ui::tooltip::tooltip(refusal)));
+            } else if self.continuing_fresh.contains_key(&sid) {
                 actions = actions.child(dim_row("continue-fresh-session", IconName::LoaderCircle, "Continuing in fresh session…"));
             } else {
                 actions = actions.child(

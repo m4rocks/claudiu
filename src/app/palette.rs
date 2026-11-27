@@ -105,6 +105,10 @@ impl Workspace {
                     if blocked {
                         return;
                     }
+                    if let Some(refusal) = crate::harness::capabilities::handoff(cur, harness, crate::harness::capabilities::Initiator::User).refusal() {
+                        self.toast(refusal, cx);
+                        return;
+                    }
                     if cur == harness {
                         if let Some(opt_id) = thread.read(cx).thread.option("model").map(|o| o.id.clone()) {
                             thread.update(cx, |t, cx| t.set_option(opt_id, model_id, cx));

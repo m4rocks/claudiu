@@ -615,7 +615,8 @@ pub struct Workspace {
     /// Per-harness usage limits probe state (in-flight flag, last error, backoff, queued refresh).
     pub limits_state: crate::harness::HarnessMap<ingest::LimitsState>,
     /// Last time Codex's fast local rollout-log watcher ran.
-    pub codex_logs_asked: Option<std::time::Instant>,
+    /// When each adapter's cheap local usage reading was last taken.
+    pub live_usage_asked: harness::HarnessMap<Option<std::time::Instant>>,
     pub editors: Vec<(Editor, bool)>,
     pub window_title: String,
     /// The session being dragged in the sidebar (lifted in place while its ghost follows the cursor).
@@ -778,7 +779,7 @@ impl Workspace {
             closed: vec![],
             model_lookups: Default::default(),
             limits_state: Default::default(),
-            codex_logs_asked: None,
+            live_usage_asked: Default::default(),
             editors: Editor::ALL
                 .iter()
                 .map(|e| (*e, e.locate().is_some()))

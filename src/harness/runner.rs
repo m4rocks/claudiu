@@ -179,6 +179,8 @@ fn run_task(request: &Request, emit: &mut impl FnMut(Event)) -> Result<String, S
     if !harness.is_registered() {
         return Err(format!("{} is unavailable in this build.", harness.name()));
     }
+    // Claude Code's mod starts every task this helper runs.
+    super::capabilities::subagent(super::Harness::Claude, harness).refusal().map_or(Ok(()), |refusal| Err(refusal.to_string()))?;
     let provider = request.agent.provider();
     let args = (provider.task_args)(request)?;
     let mut plan = super::SessionPlan::default();
@@ -441,20 +443,11 @@ fn session_with_servers(cwd: &Path, mcp_servers: &[Value]) -> Value {
 }
 
 fn new_model_probe_session(harness: crate::harness::Harness, cwd: &Path) -> Value {
-    if harness == crate::harness::Harness::Claude {
-        json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "session/new",
-            "params": {
-                "cwd": cwd,
-                "mcpServers": [],
-                "_meta": { "claudeCode": { "options": { "persistSession": false } } }
-            }
-        })
-    } else {
-        new_session(cwd)
+    let mut session = new_session(cwd);
+    if let Some(meta) = harness.adapter().probe_session_meta {
+        session["params"]["_meta"] = meta();
     }
+    session
 }
 
 /// Opens a session only to read its model picker (`configOptions[category == "model"]`) and permission modes
@@ -561,10 +554,7 @@ pub(crate) fn permission(options: &Value, edits: bool) -> Value {
 
 fn harness_error_reason(harness: crate::harness::Harness, error: &Value) -> String {
     if error["code"].as_i64() == Some(AUTH_REQUIRED) {
-        return match harness.agent() {
-            Some(agent) => agent.provider().sign_in.into(),
-            None => "Sign in to Claude Code (`claude auth login`) first.".into(),
-        };
+        return harness.adapter().sign_in.run_hint.into();
     }
     let server = harness.adapter().server_name;
     match error["message"].as_str() {

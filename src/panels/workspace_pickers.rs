@@ -462,11 +462,23 @@ impl Workspace {
                         }
                         crate::app::SettingsModelTarget::Default => Act::PickDefaultModel(m.clone()),
                     };
+                    let capabilities = m.harness.adapter().capabilities;
+                    let refusal = match target {
+                        crate::app::SettingsModelTarget::TextGeneration => capabilities.text_generation.refusal(),
+                        crate::app::SettingsModelTarget::AutoHandoff => {
+                            capabilities.handoff_in.allows(crate::harness::capabilities::Initiator::Automatic).refusal()
+                        }
+                        crate::app::SettingsModelTarget::Default => None,
+                    };
                     let logo = logos::draw(logos::for_harness(m.harness), 11.5, if selected { accent } else { theme().subtle_foreground }).into_any_element();
-                    let row = command::row(gpui::SharedString::from(format!("settings-model-opt-{n}")), Some(logo), m.name.clone(), None, None, selected, false)
+                    let row = command::row(gpui::SharedString::from(format!("settings-model-opt-{n}")), Some(logo), m.name.clone(), refusal.map(String::from), None, selected, refusal.is_some())
                         .role(gpui::Role::ListBoxOption)
                         .aria_selected(selected);
-                    list = list.child(choices.add(row, move |ws, window, cx| ws.act(choice.clone(), window, cx), cx));
+                    list = list.child(if refusal.is_some() {
+                        row.into_any_element()
+                    } else {
+                        choices.add(row, move |ws, window, cx| ws.act(choice.clone(), window, cx), cx)
+                    });
                     shown += 1;
                 }
                 if shown == 0 {

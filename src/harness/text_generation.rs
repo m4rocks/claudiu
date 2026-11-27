@@ -1,10 +1,9 @@
-use std::{future::Future, path::Path};
+use std::future::Future;
 
 use futures::{FutureExt, StreamExt, channel::mpsc, pin_mut, select};
 use serde_json::{Value, json};
 
 use super::{
-    Harness,
     acp::{self, Connection, Event, Launch},
     thread::Thread,
 };
@@ -22,7 +21,8 @@ pub async fn complete(
     std::fs::create_dir_all(&cwd).map_err(|e| format!("Could not create the text generation folder: {e}"))?;
     let (program, args) = (model.harness.adapter().server)()?;
     let launch = Launch { program, args, cwd, env };
-    let (launch, meta) = configure(launch, model.harness, &data)?;
+    let mut launch = launch;
+    let meta = (model.harness.adapter().text_generation_launch)(&mut launch, &data)?;
     let (events, incoming) = mpsc::unbounded();
     let connection = Connection::start(&launch, events)?;
     let params = json!({"cwd": launch.cwd, "mcpServers": [], "_meta": meta});
@@ -79,46 +79,8 @@ async fn run(
     }
 }
 
-fn configure(mut launch: Launch, harness: Harness, data: &Path) -> Result<(Launch, Value), String> {
-    let mut meta = Value::Null;
-    match harness {
-        Harness::Claude => {
-            meta = json!({"claudeCode": {"options": {
-                "tools": [],
-                "settingSources": [],
-                "persistSession": false,
-                "permissionMode": "dontAsk",
-                "strictMcpConfig": true
-            }}});
-        }
-        Harness::Codex => {
-            let mut config = inline_config("CODEX_CONFIG")?;
-            config.insert("web_search".into(), json!("disabled"));
-            let features = config.entry("features").or_insert_with(|| json!({}));
-            let features = features.as_object_mut().ok_or("Codex features configuration must be an object.")?;
-            for feature in ["shell_tool", "apps", "hooks", "multi_agent"] {
-                features.insert(feature.into(), json!(false));
-            }
-            launch.env.push(("CODEX_CONFIG".into(), json!(config).to_string()));
-            launch.env.push(("INITIAL_AGENT_MODE".into(), "read-only".into()));
-        }
-        Harness::OpenCode => {
-            let mut config = inline_config("OPENCODE_CONFIG_CONTENT")?;
-            config.insert("default_agent".into(), json!("build"));
-            config.insert("permission".into(), json!({"*": "deny"}));
-            config.insert("agent".into(), json!({"build": {"permission": {"*": "deny"}}}));
-            launch.env.push(("OPENCODE_CONFIG_CONTENT".into(), json!(config).to_string()));
-        }
-        Harness::Antigravity => {
-            let folder = super::antigravity::read_only::prepare_text_generation(data)
-                .map_err(|e| format!("Could not disable Antigravity tools: {e}"))?;
-            launch.args.extend(["--gemini-dir".into(), folder.to_string_lossy().into_owned()]);
-        }
-    }
-    Ok((launch, meta))
-}
-
-fn inline_config(variable: &str) -> Result<serde_json::Map<String, Value>, String> {
+/// The JSON object in environment variable `variable`, for an adapter that adds its text-generation settings to it.
+pub(super) fn inline_config(variable: &str) -> Result<serde_json::Map<String, Value>, String> {
     serde_json::from_str(&std::env::var(variable).unwrap_or_else(|_| "{}".into()))
         .map_err(|e| format!("Invalid {variable}: {e}"))
 }
@@ -174,6 +136,7 @@ fn collect(connection: &Connection, session_id: &str, event: Event, text: &mut S
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::harness::Harness;
     use std::io::{BufRead, BufReader, Write};
 
     fn exchange(tool_call: bool) -> Result<String, String> {

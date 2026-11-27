@@ -168,7 +168,7 @@ r#"        send({"jsonrpc": "2.0", "id": i, "result": {"modes": session_modes()}
         step(&mut cx, &|ws, window, cx| {
             let meta = ws.store.session(&id).unwrap().agent.as_ref().unwrap();
             assert_eq!(meta.session_id, "fake-session");
-            assert_eq!(meta.antigravity_full_access, permission == Permission::FullAccess);
+            assert_eq!(meta.launched_full_access, permission == Permission::FullAccess);
             let view = ws.live_view(&id).unwrap().thread().unwrap().clone();
             assert_eq!(view.read(cx).permission(), Some(permission));
             assert_eq!(view.read(cx).draft(cx), "keep this draft");

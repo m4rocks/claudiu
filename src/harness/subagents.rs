@@ -1,14 +1,11 @@
 //! Custom subagents: agent types that run a task in another coding agent instead of Claude (Settings → Custom
-//! subagents). What differs from one agent to the next lives in its `Provider`.
+//! subagents). What differs from one agent to the next lives in its `Provider`, in the agent's adapter.
 //!
 //! m4code lists the agent types in `M4CODE_SUBAGENTS`, and the mod registers them, so Claude Code names them
 //! `m4code:<type>`. Interactive Claude Code ignores `claude --agents` (only `-p` reads it), so the mod is the one way
 //! to define them per session. The mod answers each turn of those agents through the `m4code --acp` helper
 //! (`harness/runner.rs`).
 
-use std::time::Duration;
-
-use super::limits::Pool;
 use crate::panels::{logos, theme::Theme};
 use gpui::Hsla;
 
@@ -24,7 +21,7 @@ pub const EXE_ENV: &str = "M4CODE_EXE";
 const TYPE_NAME_MAX: usize = 64;
 
 /// A coding agent a custom subagent runs the task in. Its serde name is the key the mod reads in `M4CODE_SUBAGENTS`
-/// and the prefix of its agent types. Adding one takes a variant here, its place in `ALL`, and a `Provider`.
+/// and the prefix of its agent types. Adding one takes a variant here, its place in `ALL`, and a `Provider` in its adapter.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Agent {
@@ -34,16 +31,8 @@ pub enum Agent {
     Antigravity,
 }
 
-/// How a provider reads its limits and how often it asks again.
-pub struct Limits {
-    pub read: fn() -> Result<Vec<Pool>, String>,
-    pub every: Duration,
-}
-
-/// Everything m4code knows about one agent, including its ACP server and usage limits.
+/// How an agent runs as a custom subagent and shows in the sidebar. Each adapter holds its own.
 pub struct Provider {
-    /// The limits reader and refresh cadence, absent when the provider has no limits to show.
-    pub limits: Option<Limits>,
     /// External usage dashboard URL shown in the sidebar when live limits polling is unavailable.
     pub dashboard_url: Option<&'static str>,
     /// The color of its sidebar limits.
@@ -55,9 +44,9 @@ pub struct Provider {
     /// The key in `M4CODE_SUBAGENTS` and in the state file, and the start of every agent type name.
     pub key: &'static str,
     /// The name Claude reads in the agent type's description.
-    task_name: &'static str,
+    pub task_name: &'static str,
     /// What the user asks for, besides the model, when Claude should pick this agent.
-    triggers: &'static str,
+    pub triggers: &'static str,
     /// The ACP server: a program on the PATH and its arguments.
     pub program: &'static str,
     pub args: &'static [&'static str],
@@ -67,8 +56,6 @@ pub struct Provider {
     pub server: &'static str,
     /// The failure when `program` can't be found.
     pub missing: &'static str,
-    /// The failure when the agent answers that it isn't signed in.
-    pub sign_in: &'static str,
     /// A risk the settings page shows before the agent is switched on, such as a sign-in its maker's terms forbid here.
     pub warning: Option<&'static str>,
     /// Arguments after `args` for one task's server, made ready here.
@@ -88,93 +75,6 @@ pub struct Provider {
     /// finishes, with no new prompt and no second stop reason.
     pub resumes_after_background: bool,
 }
-
-const CODEX: Provider = Provider {
-    limits: Some(Limits { read: || {
-        let usage = super::codex::limits::probe()?;
-        Ok(vec![Pool { name: "Codex".into(), usage }])
-    }, every: super::codex::limits::REFRESH_EVERY }),
-    dashboard_url: None,
-    color: |t| t.codex,
-    marks: logos::codex_marks,
-    name: "Codex",
-    key: "codex",
-    task_name: "OpenAI Codex",
-    triggers: "Codex, GPT",
-    program: "npx",
-    // Pinned so an upstream adapter change reaches users only with a m4code release.
-    args: &["-y", "@agentclientprotocol/codex-acp@2.6.0"],
-    windows_fallback: None,
-    server: "codex-acp",
-    missing: "npx was not found on PATH. Codex subagents need Node.js.",
-    sign_in: "Codex isn't signed in. Run `codex login`, then try again.",
-    warning: None,
-    task_args: super::runner::no_args,
-    environment: super::runner::codex_env,
-    config_options: super::runner::no_options,
-    inbox_without_steering: true,
-    steering_prompt_required: true,
-    deferred_tool_target: false,
-    resumes_after_background: false,
-};
-
-const OPENCODE: Provider = Provider {
-    limits: None,
-    dashboard_url: Some("https://opencode.ai/console"),
-    color: |t| t.foreground,
-    marks: |name| (&[], Some(name.to_uppercase())),
-    name: "OpenCode",
-    key: "opencode",
-    task_name: "OpenCode",
-    triggers: "OpenCode",
-    program: "opencode",
-    args: &["acp"],
-    windows_fallback: None,
-    server: "opencode",
-    missing: "opencode was not found on PATH. OpenCode subagents need OpenCode installed.",
-    sign_in: "OpenCode isn't signed in. Run `opencode auth login`, then try again.",
-    warning: None,
-    task_args: super::runner::no_args,
-    environment: super::runner::opencode_env,
-    config_options: super::runner::no_options,
-    inbox_without_steering: false,
-    steering_prompt_required: false,
-    deferred_tool_target: true,
-    resumes_after_background: false,
-};
-
-const ANTIGRAVITY: Provider = Provider {
-    // Temporarily disabled pending clarification of Google's terms for usage polling.
-    // limits: Some(Limits { read: || {
-    //     let agy = super::runner::locate(Agent::Antigravity).ok_or("agy was not found")?;
-    //     super::antigravity::limits::read(&agy, &crate::datadir::data_dir())
-    // }, every: super::antigravity::limits::REFRESH_EVERY }),
-    limits: None,
-    dashboard_url: Some("https://antigravity.google.com/remote?settingsOpen=true&settingsScreen=Models"),
-    color: |t| t.antigravity,
-    marks: logos::antigravity_marks,
-    name: "Antigravity",
-    key: "antigravity",
-    task_name: "Google Antigravity",
-    triggers: "Antigravity, Gemini",
-    program: "agy",
-    args: &["acp"],
-    windows_fallback: Some("agy/bin/agy.exe"),
-    server: "agy",
-    missing: "agy was not found. Antigravity subagents need the Antigravity CLI installed.",
-    sign_in: "Antigravity isn't signed in. Run `agy` and sign in, then try again.",
-    // Google's FAQ names Claude Code among the third-party software barred from Antigravity logins, under Section 6 of
-    // the Antigravity Additional Terms (https://antigravity.google/docs/faq, https://antigravity.google/terms).
-    warning: Some("Google's Antigravity terms forbid using another company's agent, such as Claude Code, with a personal Google sign-in. That covers the Free, AI Plus, Pro and Ultra plans. Google can suspend or terminate the Antigravity and Gemini CLI accounts of anyone who does. Switch this on at your own risk."),
-    task_args: super::runner::antigravity_args,
-    environment: super::runner::no_env,
-    config_options: super::runner::antigravity_options,
-    inbox_without_steering: false,
-    steering_prompt_required: false,
-    deferred_tool_target: false,
-    // agy gives a command about ten seconds, then moves it to the background and ends the turn.
-    resumes_after_background: true,
-};
 
 /// One value per agent, such as each agent's part of the settings.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -206,9 +106,9 @@ impl Agent {
 
     pub fn provider(self) -> &'static Provider {
         match self {
-            Agent::Codex => &CODEX,
-            Agent::OpenCode => &OPENCODE,
-            Agent::Antigravity => &ANTIGRAVITY,
+            Agent::Codex => &super::codex::PROVIDER,
+            Agent::OpenCode => &super::opencode::PROVIDER,
+            Agent::Antigravity => &super::antigravity::PROVIDER,
         }
     }
 
@@ -442,7 +342,7 @@ mod tests {
     fn every_limits_provider_has_visible_marks_and_a_color() {
         for agent in Agent::ALL {
             let provider = agent.provider();
-            if provider.limits.is_some() {
+            if crate::harness::Harness::from_agent(agent).adapter().usage.is_some() {
                 assert_ne!((provider.color)(crate::panels::theme::theme()), crate::panels::theme::theme().background, "{}", provider.name);
                 for pool in ["Codex", "Gemini Models", "Claude and GPT models", "Some New models"] {
                     let (marks, name) = (provider.marks)(pool);

@@ -189,7 +189,7 @@ impl Workspace {
                 (
                     v.thread.option("model").map(|o| o.current.clone()),
                     v.thread.option("thought_level").map(|o| o.current.clone()),
-                    v.antigravity_full_access(),
+                    v.launched_full_access(),
                 )
             })
             .unwrap_or((None, None, false));
@@ -200,7 +200,7 @@ impl Workspace {
                 if let Some(m) = chosen_model { meta.chosen_model = Some(m); }
                 if let Some(e) = chosen_effort { meta.chosen_effort = Some(e); }
                 meta.read_only_pending = false;
-                meta.antigravity_full_access = full_access;
+                meta.launched_full_access = full_access;
             }
         }
         self.store.mark_dirty();
@@ -324,23 +324,12 @@ impl Workspace {
         let Some(rec) = self.store.session(id).cloned() else { return };
         let Some(git) = rec.project_id.as_ref().and_then(|p| self.store.project(p)).and_then(|p| p.git.clone()) else { return };
 
-        if native_changed && rec.agent.as_ref().is_some_and(|m| m.harness == Harness::Claude) {
+        if native_changed && let Some(followed) = rec.harness().and_then(|harness| harness.adapter().worktree.followed) {
             let Some(session_id) = rec.provider_session_id().map(str::to_string) else { return };
             let main = git.main_checkout().to_path_buf();
             let id = id.to_string();
             cx.spawn_in(window, async move |this, cx| {
-                let target = cx
-                    .background_executor()
-                    .spawn(async move {
-                        let home = crate::harness::claude::claude_home()?;
-                        let transcript = crate::harness::claude::find_transcript(&home, &session_id)?;
-                        match crate::harness::claude::worktree_session_state(&transcript).ok()?? {
-                            crate::harness::claude::WorktreeState::Entered(Some(path)) if path.is_dir() => Some(path),
-                            crate::harness::claude::WorktreeState::Exited if main.is_dir() => Some(main),
-                            _ => None,
-                        }
-                    })
-                    .await;
+                let target = cx.background_executor().spawn(async move { followed(&session_id, &main) }).await;
                 if let Some(folder) = target {
                     let _ = this.update_in(cx, |ws, window, cx| ws.follow_native_worktree(&id, folder, window, cx));
                 }

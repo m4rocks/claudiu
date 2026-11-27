@@ -4,12 +4,12 @@
 
 pub mod acp;
 pub mod antigravity;
+pub mod capabilities;
 pub mod claude;
 pub mod codex;
 pub mod compaction;
 pub mod defaults;
 pub mod limits;
-#[cfg(feature = "adapter-opencode")]
 pub mod opencode;
 pub mod permission;
 pub mod runner;
@@ -103,6 +103,45 @@ pub struct Adapter {
     pub hidden_commands: &'static [&'static str],
     pub worktree: WorktreeHooks,
     pub protocol: ProtocolHooks,
+    pub sign_in: SignIn,
+    pub usage: Option<UsageSource>,
+    /// Readies a text-generation run, which answers with no tools: changes to its launch, and its session's `_meta`.
+    pub text_generation_launch: fn(&mut acp::Launch, &Path) -> Result<Value, String>,
+    /// `_meta` for the session opened only to list models and modes.
+    pub probe_session_meta: Option<fn() -> Value>,
+    /// Whether skills are copied into its folders rather than linked, for an agent whose scan skips links.
+    pub copies_skills: bool,
+    /// The actions the core may take with this agent (`capabilities.rs`).
+    pub capabilities: capabilities::Capabilities,
+}
+
+/// Where an agent's 5-hour and weekly limits come from. No reading costs tokens.
+pub struct UsageSource {
+    /// Asks the agent's CLI, given the executable set in Settings.
+    pub read: fn(Option<&Path>) -> Result<Vec<limits::Pool>, String>,
+    pub every: std::time::Duration,
+    /// Whether the end of a turn asks again.
+    pub after_turn: bool,
+    pub live: Option<LiveUsage>,
+}
+
+/// A local reading cheap enough to take every few seconds, such as Codex's rollout logs.
+#[derive(Clone, Copy)]
+pub struct LiveUsage {
+    pub read: fn() -> Option<crate::store::UsageLimits>,
+    pub every: std::time::Duration,
+}
+
+/// How the user signs in to an agent's CLI, and what m4code says when the agent is signed out.
+pub struct SignIn {
+    pub program: &'static str,
+    /// The sign-in CLI, given the executable set in Settings.
+    pub locate: fn(Option<&Path>) -> Option<PathBuf>,
+    pub args: &'static [&'static str],
+    /// When an open session finds the agent signed out.
+    pub session_hint: &'static str,
+    /// When a one-shot run (listing models, a subagent's task) finds it signed out.
+    pub run_hint: &'static str,
 }
 
 pub struct SessionInput<'a> {
@@ -238,6 +277,9 @@ pub struct WorktreeHooks {
     pub inspect: fn(&str) -> (Option<bool>, Option<PathBuf>),
     pub can_resume: fn(&Path) -> Result<bool, String>,
     pub has_history: fn(Option<&str>, bool) -> bool,
+    /// For an agent that moves into worktrees itself: after it did, the folder session `.0` is in now, given the main
+    /// checkout `.1`.
+    pub followed: Option<fn(&str, &Path) -> Option<PathBuf>>,
 }
 
 impl WorktreeHooks {
@@ -245,6 +287,7 @@ impl WorktreeHooks {
         inspect: |_| (None, None),
         can_resume: |_| Ok(true),
         has_history: |id, _| id.is_some(),
+        followed: None,
     };
 }
 
@@ -292,6 +335,18 @@ static UNAVAILABLE_ADAPTER: Adapter = Adapter {
     hidden_commands: &[],
     worktree: WorktreeHooks::DEFAULT,
     protocol: ProtocolHooks::DEFAULT,
+    sign_in: SignIn {
+        program: "unavailable",
+        locate: |_| None,
+        args: &[],
+        session_hint: "This adapter is unavailable in this build.",
+        run_hint: "This adapter is unavailable in this build.",
+    },
+    text_generation_launch: |_, _| Err("This adapter is unavailable in this build.".into()),
+    usage: None,
+    probe_session_meta: None,
+    copies_skills: false,
+    capabilities: capabilities::Capabilities::NONE,
 };
 
 /// Default single placeholder model for an adapter before its ACP server reports a live catalog.

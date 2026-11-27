@@ -893,9 +893,7 @@ impl Workspace {
             div().flex().items_center().gap(gap).child(who).child(five).child(seven)
         };
         let divider = || div().h(px(1.0)).w_full().my(px(2.0)).bg(theme().border);
-        let any_loading = [Harness::Claude, Harness::Codex, Harness::Antigravity]
-            .into_iter()
-            .any(|h| self.limits_state.get(h).loading);
+        let any_loading = Harness::registered().any(|h| self.limits_state.get(h).loading);
         let refresh_btn = div()
             .id("limits-refresh")
             .flex_none()
@@ -945,7 +943,7 @@ impl Workspace {
             if provider.dashboard_url.is_some() && !settings.harness_enabled(harness) {
                 continue;
             }
-            if provider.limits.is_none() {
+            if harness.adapter().usage.is_none() {
                 if let Some(url) = provider.dashboard_url {
                     if !rows.is_empty() {
                         rows.push(divider());
@@ -1025,7 +1023,7 @@ impl Workspace {
                 None => {}
             }
         }
-        for harness in [Harness::Claude, Harness::Codex, Harness::Antigravity] {
+        for harness in Harness::registered() {
             if settings.harness_enabled(harness) && self.limits_state.get(harness).authentication_required {
                 rows.push(div().flex().flex_wrap().items_center().gap(px(6.0))
                     .child(div().text_size(crate::panels::scale::px(11.0)).text_color(theme().warning).child(format!("{} usage is stale.", harness.name())))

@@ -72,8 +72,45 @@ pub const ADAPTER: Adapter = Adapter {
         can_resume: |transcript| worktree_recorded(transcript).map(|recorded| !recorded)
             .map_err(|e| format!("could not read the conversation: {e}")),
         has_history: |_, transcript| transcript,
+        followed: Some(followed_worktree),
     },
+    sign_in: super::SignIn {
+        program: "claude",
+        locate: |configured| configured.map(Path::to_path_buf).or_else(|| super::find("claude")),
+        args: &["auth", "login"],
+        session_hint: "Sign in with `claude auth login`, then retry the session.",
+        run_hint: "Sign in to Claude Code (`claude auth login`) first.",
+    },
+    usage: Some(super::UsageSource {
+        read: |exe| {
+            let exe = exe.ok_or("Could not find the `claude` CLI on PATH.")?;
+            Ok(vec![super::limits::Pool { name: "Claude Code".into(), usage: limits::read(exe)? }])
+        },
+        every: limits::REFRESH_EVERY,
+        after_turn: true,
+        live: None,
+    }),
+    text_generation_launch: |_, _| Ok(serde_json::json!({"claudeCode": {"options": {
+        "tools": [],
+        "settingSources": [],
+        "persistSession": false,
+        "permissionMode": "dontAsk",
+        "strictMcpConfig": true
+    }}})),
+    probe_session_meta: Some(|| serde_json::json!({ "claudeCode": { "options": { "persistSession": false } } })),
+    copies_skills: false,
+    capabilities: super::capabilities::Capabilities::ALL,
 };
+
+/// Where Claude Code's own `EnterWorktree` or `ExitWorktree` took session `session_id`, read from its transcript.
+fn followed_worktree(session_id: &str, main: &Path) -> Option<PathBuf> {
+    let transcript = find_transcript(&claude_home()?, session_id)?;
+    match worktree_session_state(&transcript).ok()?? {
+        WorktreeState::Entered(Some(path)) if path.is_dir() => Some(path),
+        WorktreeState::Exited if main.is_dir() => Some(main.to_path_buf()),
+        _ => None,
+    }
+}
 
 fn prepare_launch(input: &super::SessionInput<'_>, plan: &mut super::SessionPlan) -> Result<(), String> {
     let exe = input.executable_override.ok_or("Could not find the Claude Code CLI. Install it or set its path in Settings.")?;
@@ -186,7 +223,9 @@ pub fn prepare_session(
         env.push((usage::USAGE_DIR_ENV.into(), usage::snapshot_dir().to_string_lossy().into_owned()));
         env.push((usage::CTL_ENV.into(), usage::ctl_file(record_id).to_string_lossy().into_owned()));
         // The mod registers the agent types and answers their turns, so they go only where it loads.
-        if let Some(subagents) = settings.custom_subagents.env_for_edits(&settings.enabled_harnesses_list(), allow_subagent_edits)
+        let targets: Vec<_> = settings.enabled_harnesses_list().into_iter()
+            .filter(|h| super::capabilities::subagent(super::Harness::Claude, *h).allowed()).collect();
+        if let Some(subagents) = settings.custom_subagents.env_for_edits(&targets, allow_subagent_edits)
             && let Ok(exe) = crate::platform::own_exe()
         {
             env.push((super::subagents::ENV.into(), subagents));

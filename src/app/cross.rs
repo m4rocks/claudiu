@@ -347,6 +347,10 @@ impl Workspace {
                 let effort = effort_for(req.args["effort"].as_str(), model.is_some());
                 match model {
                     Some(model) if req.args["cross"].as_bool() == Some(true) => {
+                        let from = thread.read(cx).harness;
+                        if let Some(refusal) = crate::harness::capabilities::handoff(from, model.harness, crate::harness::capabilities::Initiator::Automatic).refusal() {
+                            return Err(refusal.into());
+                        }
                         let message = req.args["message"].as_str().map(str::trim).filter(|m| !m.is_empty()).map_or_else(|| "Carry on with the task from where the conversation left off.".into(), String::from);
                         let name = model.name.clone();
                         thread.update(cx, |t, cx| t.hand_off_after_turn(model, effort, message, cx));

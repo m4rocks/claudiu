@@ -195,6 +195,7 @@ impl Workspace {
                 if !settings.harness_enabled(harness) || !access.on {
                     return Err(format!("{} subagents are disabled in Settings.", harness.name()));
                 }
+                crate::harness::capabilities::subagent(parent.harness(), harness).refusal().map_or(Ok(()), |refusal| Err(refusal.to_string()))?;
                 let parent_read_only = self.live_view(&parent.id).and_then(|view| view.thread()).is_some_and(|view| {
                     view.read(cx).permission() == Some(crate::harness::permission::Permission::ReadOnly)
                 });
@@ -293,6 +294,10 @@ impl Workspace {
         };
         if !self.store.data.settings.harness_enabled(model.harness) {
             self.toast(format!("{} is disabled in Settings.", model.harness.name()), cx);
+            return;
+        }
+        if let Some(refusal) = crate::harness::capabilities::subagent(parent.harness(), model.harness).refusal() {
+            self.toast(refusal, cx);
             return;
         }
         let id = new_id();

@@ -1,5 +1,6 @@
 //! OpenCode, which speaks ACP itself (`opencode acp`), on the providers the user set up in OpenCode.
 
+use super::subagents::Provider;
 use super::subagents::Agent;
 
 use super::{Adapter, Reopen};
@@ -32,6 +33,16 @@ pub fn managed_compaction_config(inherited: Option<&str>, session: Option<&str>)
     }
     Ok(Value::Object(config).to_string())
 }
+/// A text-generation run, with every permission denied.
+fn text_generation_launch(launch: &mut super::acp::Launch, _: &Path) -> Result<Value, String> {
+    let mut config = super::text_generation::inline_config("OPENCODE_CONFIG_CONTENT")?;
+    config.insert("default_agent".into(), json!("build"));
+    config.insert("permission".into(), json!({"*": "deny"}));
+    config.insert("agent".into(), json!({"build": {"permission": {"*": "deny"}}}));
+    launch.env.push(("OPENCODE_CONFIG_CONTENT".into(), json!(config).to_string()));
+    Ok(Value::Null)
+}
+
 
 pub const ADAPTER: Adapter = Adapter {
     name: "OpenCode",
@@ -57,6 +68,18 @@ pub const ADAPTER: Adapter = Adapter {
     hidden_commands: &["models", "connect", "share", "unshare", "sessions"],
     worktree: super::WorktreeHooks::DEFAULT,
     protocol: super::ProtocolHooks::DEFAULT,
+    sign_in: super::SignIn {
+        program: "opencode",
+        locate: |_| super::find("opencode"),
+        args: &["auth", "login"],
+        session_hint: "Sign in with `opencode auth login`, then retry the session.",
+        run_hint: "OpenCode isn't signed in. Run `opencode auth login`, then try again.",
+    },
+    usage: None,
+    text_generation_launch,
+    probe_session_meta: None,
+    copies_skills: false,
+    capabilities: super::capabilities::Capabilities::ALL,
 };
 
 fn prepare_launch(input: &super::SessionInput<'_>, plan: &mut super::SessionPlan) -> Result<(), String> {
@@ -67,6 +90,30 @@ fn prepare_launch(input: &super::SessionInput<'_>, plan: &mut super::SessionPlan
     plan.set_env("OPENCODE_CONFIG_CONTENT", managed_compaction_config(inherited.as_deref(), local)?);
     Ok(())
 }
+
+/// How this agent runs as a custom subagent (`harness/subagents.rs`).
+pub const PROVIDER: Provider = Provider {
+    dashboard_url: Some("https://opencode.ai/console"),
+    color: |t| t.foreground,
+    marks: |name| (&[], Some(name.to_uppercase())),
+    name: "OpenCode",
+    key: "opencode",
+    task_name: "OpenCode",
+    triggers: "OpenCode",
+    program: "opencode",
+    args: &["acp"],
+    windows_fallback: None,
+    server: "opencode",
+    missing: "opencode was not found on PATH. OpenCode subagents need OpenCode installed.",
+    warning: None,
+    task_args: super::runner::no_args,
+    environment: super::runner::opencode_env,
+    config_options: super::runner::no_options,
+    inbox_without_steering: false,
+    steering_prompt_required: false,
+    deferred_tool_target: true,
+    resumes_after_background: false,
+};
 
 #[cfg(test)]
 mod tests {

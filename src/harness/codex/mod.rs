@@ -3,6 +3,9 @@
 
 pub mod limits;
 
+use super::limits::Pool;
+use super::subagents::Provider;
+use crate::panels::logos;
 use super::subagents::Agent;
 
 use super::{Adapter, Reopen};
@@ -111,6 +114,20 @@ fn ignore_update(update: &Value) -> bool {
         && text.contains(" but is resuming with ")
         && text.contains("Consider switching back to ")
 }
+/// A text-generation run: no web search, shell, apps, hooks or subagents, and read-only.
+fn text_generation_launch(launch: &mut super::acp::Launch, _: &std::path::Path) -> Result<Value, String> {
+    let mut config = super::text_generation::inline_config("CODEX_CONFIG")?;
+    config.insert("web_search".into(), json!("disabled"));
+    let features = config.entry("features").or_insert_with(|| json!({}));
+    let features = features.as_object_mut().ok_or("Codex features configuration must be an object.")?;
+    for feature in ["shell_tool", "apps", "hooks", "multi_agent"] {
+        features.insert(feature.into(), json!(false));
+    }
+    launch.env.push(("CODEX_CONFIG".into(), json!(config).to_string()));
+    launch.env.push(("INITIAL_AGENT_MODE".into(), "read-only".into()));
+    Ok(Value::Null)
+}
+
 
 pub const ADAPTER: Adapter = Adapter {
     name: "Codex",
@@ -160,6 +177,27 @@ pub const ADAPTER: Adapter = Adapter {
         ignore_update,
         ..super::ProtocolHooks::DEFAULT
     },
+    sign_in: super::SignIn {
+        program: "codex",
+        locate: |_| super::find("codex"),
+        args: &["login"],
+        session_hint: "Sign in with `codex login`, then retry the session.",
+        run_hint: "Codex isn't signed in. Run `codex login`, then try again.",
+    },
+    usage: Some(super::UsageSource {
+        read: |_| Ok(vec![Pool { name: "Codex".into(), usage: limits::probe()? }]),
+        every: limits::REFRESH_EVERY,
+        after_turn: true,
+        // Rollout logs are read again only after Codex writes to them: no network and no subprocess.
+        live: Some(super::LiveUsage {
+            read: || limits::codex_home().and_then(|home| limits::read(&home)),
+            every: std::time::Duration::from_secs(3),
+        }),
+    }),
+    text_generation_launch,
+    probe_session_meta: None,
+    copies_skills: false,
+    capabilities: super::capabilities::Capabilities::ALL,
 };
 
 /// How Codex (`codex-acp`) reports background work over ACP:
@@ -317,6 +355,31 @@ fn configure_mcp(tools: &crate::mcp::session::SessionTools, plan: &mut super::Se
     plan.set_env(CONFIG_ENV, config);
     Ok(())
 }
+
+/// How this agent runs as a custom subagent (`harness/subagents.rs`).
+pub const PROVIDER: Provider = Provider {
+    dashboard_url: None,
+    color: |t| t.codex,
+    marks: logos::codex_marks,
+    name: "Codex",
+    key: "codex",
+    task_name: "OpenAI Codex",
+    triggers: "Codex, GPT",
+    program: "npx",
+    // Pinned so an upstream adapter change reaches users only with a m4code release.
+    args: &["-y", "@agentclientprotocol/codex-acp@2.6.0"],
+    windows_fallback: None,
+    server: "codex-acp",
+    missing: "npx was not found on PATH. Codex subagents need Node.js.",
+    warning: None,
+    task_args: super::runner::no_args,
+    environment: super::runner::codex_env,
+    config_options: super::runner::no_options,
+    inbox_without_steering: true,
+    steering_prompt_required: true,
+    deferred_tool_target: false,
+    resumes_after_background: false,
+};
 
 #[cfg(test)]
 mod tests {

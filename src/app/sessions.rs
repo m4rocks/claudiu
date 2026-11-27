@@ -148,6 +148,9 @@ impl Workspace {
         if !adapter.fallback_question {
             plan.off.push("ask_user");
         }
+        if !adapter.capabilities.spawns_subagents.allowed() {
+            plan.off.extend(mcp::SUBAGENT_TOOLS);
+        }
         let (mut permission, options) = match session_id {
             None => {
                 // Only inherit the default model id when starting on the harness that serves it.
@@ -163,7 +166,7 @@ impl Workspace {
                 (permission, harness::defaults::config_options(&defaults))
             }
             Some(_) => (
-                meta.permission.or_else(|| (adapter.full_access_relaunch && meta.antigravity_full_access).then_some(Permission::FullAccess)),
+                meta.permission.or_else(|| (adapter.full_access_relaunch && meta.launched_full_access).then_some(Permission::FullAccess)),
                 resume_options(meta),
             ),
         };
@@ -171,7 +174,13 @@ impl Workspace {
             permission = Some(Permission::ReadOnly);
         }
         let child_edits = meta.parent_session.as_ref().map(|_| meta.subagent_edits);
-        if child_edits.is_some() {
+        if let Some(parent) = &meta.parent_session {
+            // A resumed or handed-off subagent asks again, as a new one does.
+            let parent = self.store.session(parent).and_then(SessionRecord::harness);
+            if let Some(refusal) = harness::capabilities::subagent(parent, meta.harness).refusal() {
+                self.toast(refusal, cx);
+                return None;
+            }
             permission = None;
         }
         let input = harness::SessionInput {
@@ -189,7 +198,8 @@ impl Workspace {
             return None;
         }
         let targets: Vec<_> = settings.enabled_harnesses_list().into_iter()
-            .filter(|h| settings.subagent_access(*h).on).map(Harness::key).collect();
+            .filter(|h| settings.subagent_access(*h).on && harness::capabilities::subagent(meta.harness, *h).allowed())
+            .map(Harness::key).collect();
         let project = self.store.project_for_cwd(cwd).and_then(|id| self.store.project(&id)).map(|p| p.path.as_path());
         let tools = match mcp::session::SessionTools::new(record_id, cwd, project, &plan.off, &targets) {
             Ok(tools) => tools,
@@ -386,12 +396,12 @@ impl Workspace {
             match ev {
                 ThreadEvent::Ready(session) => {
                     ws.commit_handoff(&sub_id, session, window, cx);
-                    let full_access = view.read(cx).antigravity_full_access();
+                    let full_access = view.read(cx).launched_full_access();
                     if let Some(meta) = ws.store.session_mut(&sub_id).and_then(|r| r.agent.as_mut())
-                        && (meta.read_only_pending || meta.antigravity_full_access != full_access)
+                        && (meta.read_only_pending || meta.launched_full_access != full_access)
                     {
                         meta.read_only_pending = false;
-                        meta.antigravity_full_access = full_access;
+                        meta.launched_full_access = full_access;
                         ws.store.mark_dirty();
                     }
                 }
@@ -516,7 +526,7 @@ impl Workspace {
                 }
                 ThreadEvent::Select(child) => ws.act(Act::Select(child.clone()), window, cx),
                 ThreadEvent::Handoff { to, model, message, effort, by_agent } => ws.dynamic_handoff(&sub_id, *to, model.clone(), message.clone(), *by_agent, effort.clone(), window, cx),
-                ThreadEvent::ReconnectPermission(permission) => ws.reconnect_antigravity_permission(&sub_id, *permission, window, cx),
+                ThreadEvent::ReconnectPermission(permission) => ws.reconnect_full_access_permission(&sub_id, *permission, window, cx),
                 ThreadEvent::NewSession(prompt) => {
                     let (harness, cwd) = ws
                         .store
@@ -553,6 +563,10 @@ impl Workspace {
         let Some(mut record) = self.store.session(source).cloned() else { return };
         let Some(thread) = self.live_view(source).and_then(|view| view.thread()).cloned() else { return };
         let view = thread.read(cx);
+        if let Some(refusal) = view.harness.adapter().capabilities.fork.refusal() {
+            self.toast(refusal, cx);
+            return;
+        }
         let Some(entries) = view.thread.entries.get(..end) else {
             self.toast("The original turn is unavailable in this transcript.", cx);
             return;

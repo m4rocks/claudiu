@@ -41,14 +41,6 @@ pub fn looks_like_auth_error(message: &str) -> bool {
     ["authentication required", "authentication_error", "invalid api key", "run /login", "not logged in", "not logged into", "not authenticated", "not signed in", "isn't signed in", "please log in", "please login", "please sign in", "token expired", "token has expired", "expired token", "invalid_grant", "refresh token", "unauthorized", "http 401", "status 401"].iter().any(|part| message.contains(part))
 }
 
-pub fn login_hint(harness: super::Harness) -> &'static str {
-    match harness {
-        super::Harness::Claude => "Sign in with `claude auth login`, then retry the session.",
-        super::Harness::Codex => "Sign in with `codex login`, then retry the session.",
-        super::Harness::OpenCode => "Sign in with `opencode auth login`, then retry the session.",
-        super::Harness::Antigravity => "Run `agy` and sign in, then retry the session.",
-    }
-}
 
 /// What the agent sends without being asked.
 #[derive(Debug)]

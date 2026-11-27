@@ -5,9 +5,20 @@ type TextGenerator = Box<dyn Fn(&str, &str) -> Result<String, String> + Send>;
 const TITLE_PROMPT: &str = "Write a short title for the session described by this message. Reply with a single title of at most 60 characters. Use no quotes or preamble.";
 
 impl Workspace {
+    /// The model that writes a summary of a session on `harness` (running `model`): the one picked in Settings, else the
+    /// session's own, when its adapter answers m4code's prompts. `None` means a local summary.
+    pub(super) fn summary_model(&self, harness: Harness, model: Option<String>) -> Option<crate::store::TextGenerationModel> {
+        let chosen = self.store.data.settings.text_generation_model.clone()
+            .unwrap_or(crate::store::TextGenerationModel { harness, id: model.unwrap_or_default() });
+        chosen.harness.adapter().capabilities.text_generation.allowed().then_some(chosen)
+    }
+
     pub(super) fn text_generator(&self, cx: &App) -> Result<Option<TextGenerator>, String> {
         let settings = &self.store.data.settings;
         let Some(model) = settings.text_generation_model.clone() else { return Ok(None) };
+        if let Some(refusal) = model.harness.adapter().capabilities.text_generation.refusal() {
+            return Err(format!("{refusal} Pick another text generation model in Settings → General."));
+        }
         if !settings.harness_enabled(model.harness) {
             return Err(format!("{} is disabled. Pick a text generation model in Settings → General.", model.harness.name()));
         }

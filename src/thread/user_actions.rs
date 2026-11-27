@@ -11,7 +11,8 @@ use uuid::Uuid;
 
 use super::{Phase, Queued, ThreadEvent, ThreadView, queue, review};
 use crate::git::snapshot;
-use crate::harness::{CatalogModel, thread::Entry};
+use crate::harness::capabilities::{Capabilities, Initiator, handoff};
+use crate::harness::{CatalogModel, Harness, thread::Entry};
 use crate::panels::{picker, scale};
 use crate::panels::theme::theme;
 use crate::panels::ui::{button as btn, tooltip::tooltip};
@@ -481,6 +482,15 @@ impl ThreadView {
         self.latest_visible_user_row() == Some(row)
     }
 
+    pub(super) fn capabilities(&self) -> Capabilities {
+        self.harness.adapter().capabilities
+    }
+
+    /// Why the user can't move this conversation to `to`, if they can't.
+    pub(super) fn handoff_refusal(&self, to: Harness) -> Option<&'static str> {
+        handoff(self.harness, to, Initiator::User).refusal()
+    }
+
     /// Shared gate for per-message actions that mutate files or restart the session.
     fn rewind_block_reason(&self) -> Option<&'static str> {
         if self.retrying_turn || self.pending_retry.is_some() {
@@ -596,7 +606,9 @@ impl ThreadView {
 
         // 2. Rewind conversation (and file checkpoints) to this message
         let rewind_block = self.rewind_block_reason();
-        let (rewind_tip, rewind_enabled) = if active_row {
+        let (rewind_tip, rewind_enabled) = if let Some(reason) = self.capabilities().rewind.refusal() {
+            (reason.to_string(), false)
+        } else if active_row {
             ("Wait for the current turn to finish".to_string(), false)
         } else if let Some(reason) = rewind_block {
             (reason.to_string(), false)
@@ -704,7 +716,9 @@ impl ThreadView {
         }
 
         // 6. Fork session from here
-        let (fork_tip, fork_enabled) = if active_row {
+        let (fork_tip, fork_enabled) = if let Some(reason) = self.capabilities().fork.refusal() {
+            (reason.to_string(), false)
+        } else if active_row {
             ("Wait for the current turn to finish".to_string(), false)
         } else if self.phase != Phase::Ready || self.workspace_switching {
             (block.unwrap_or("Session is not ready").to_string(), false)
@@ -762,7 +776,7 @@ impl ThreadView {
     /// Stage a true rewind to `row`: loads the message into the composer and shows a warning banner above it.
     /// Sending the message executes the rewind (restoring checkpoints and deleting everything from `row` onward).
     pub(super) fn stage_rewind(&mut self, row: usize, window: &mut Window, cx: &mut Context<Self>) {
-        if self.rewind_block_reason().is_some() || self.is_active_user_row(row) {
+        if !self.capabilities().rewind.allowed() || self.rewind_block_reason().is_some() || self.is_active_user_row(row) {
             return;
         }
         let Some(Entry::User(prompt)) = self.thread.entries.get(row) else { return };
@@ -791,12 +805,14 @@ impl ThreadView {
         effort: Option<String>,
         cx: &mut Context<Self>,
     ) {
-        if let Some(reason) = self.rewind_block_reason() {
+        let refusal = self.capabilities().rewind.refusal()
+            .or_else(|| target_model.as_ref().and_then(|target| self.handoff_refusal(target.harness)));
+        if let Some(reason) = refusal.or_else(|| self.rewind_block_reason()) {
             self.pending_rewind = Some(rewind);
             self.pending_model = target_model;
             self.pending_effort = effort;
             self.pending_edit_draft = Some(message);
-            let at = self.thread.notice(format!("Could not rewind: {reason}."), true);
+            let at = self.thread.notice(format!("Could not rewind: {}.", reason.trim_end_matches('.')), true);
             self.remeasure(at);
             cx.notify();
             return;
@@ -875,7 +891,7 @@ impl ThreadView {
 
     pub(super) fn select_retry_model(&mut self, row: usize, target: CatalogModel, window: &mut Window, cx: &mut Context<Self>) {
         self.retry_model_picker = None;
-        if self.retry_block_reason().is_some() || self.is_active_user_row(row) {
+        if self.handoff_refusal(target.harness).is_some() || self.retry_block_reason().is_some() || self.is_active_user_row(row) {
             self.focus_composer(window, cx);
             cx.notify();
             return;
@@ -896,7 +912,7 @@ impl ThreadView {
     }
 
     pub(super) fn request_fork_from_row(&mut self, row: usize, cx: &mut Context<Self>) {
-        if self.phase != Phase::Ready || self.workspace_switching || self.is_active_user_row(row) {
+        if !self.capabilities().fork.allowed() || self.phase != Phase::Ready || self.workspace_switching || self.is_active_user_row(row) {
             return;
         }
         if !self.thread.entries.get(row).is_some_and(is_visible_user_entry) {
@@ -1368,6 +1384,7 @@ impl ThreadView {
             &self.picker_nav,
             models,
             move |h| (h != current_harness).then_some("handoff"),
+            move |h| handoff(current_harness, h, Initiator::User).refusal(),
             move |v, target, window, cx| v.select_retry_model(row, target, window, cx),
             |v, window, cx| v.close_retry_model_picker(window, cx),
             window,
